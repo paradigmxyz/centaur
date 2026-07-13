@@ -111,6 +111,7 @@ Store enabled harness credentials the same way:
 |------------|----------|
 | `OPENAI_API_KEY` | Codex default |
 | `OPENROUTER_API_KEY` | OpenRouter via Codex |
+| `META_AI_API_KEY` | Meta AI direct via Codex |
 | `AMP_API_KEY` | Amp |
 | `ANTHROPIC_API_KEY` | Claude Code and pi-mono |
 

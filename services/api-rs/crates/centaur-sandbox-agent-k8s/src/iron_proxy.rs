@@ -41,6 +41,7 @@ const PROXY_TLS_MODE: &str = "mitm";
 const PROXY_TLS_CA_CERT_PATH: &str = "/etc/iron-proxy/ca.crt";
 const PROXY_TLS_CA_KEY_PATH: &str = "/etc/iron-proxy/ca.key";
 const PROXY_UPSTREAM_RESPONSE_HEADER_TIMEOUT: &str = "120s";
+const PROXY_UPSTREAM_DENY_CIDRS_ENV: &str = "IRON_PROXY_UPSTREAM_DENY_CIDRS";
 const PROXY_LOG_LEVEL: &str = "info";
 // iron-control multiplexes every Postgres upstream through a single listener,
 // routing by database name; the control plane owns each upstream DSN/role/
@@ -80,6 +81,7 @@ pub struct IronProxyConfig {
     pub ca_key_secret_name: String,
     pub env_from_secret_names: Vec<String>,
     pub extra_env: BTreeMap<String, String>,
+    pub upstream_deny_cidrs: Vec<String>,
     pub op_connect_app_name: String,
     pub op_connect_port: u16,
     pub api_pod_labels: BTreeMap<String, String>,
@@ -101,6 +103,7 @@ impl IronProxyConfig {
             ca_key_secret_name: ca_key_secret_name.into(),
             env_from_secret_names: Vec::new(),
             extra_env: BTreeMap::new(),
+            upstream_deny_cidrs: Vec::new(),
             op_connect_app_name: "onepassword-connect".to_owned(),
             op_connect_port: 8080,
             api_pod_labels: BTreeMap::from([(
@@ -1093,13 +1096,7 @@ pub(crate) fn apply_proxy_env(spec: &mut SandboxSpec, resolved: &ResolvedIronPro
     // collector; routing them through iron-proxy fails (plain-HTTP forwards
     // are rejected), so the endpoint host always bypasses the proxy.
     no_proxy_extra.extend(otlp_endpoint_hosts(spec));
-    let api_host = env_value(spec, "CENTAUR_API_URL").and_then(host_from_url);
-    for (name, value) in proxy_env(
-        &resolved.proxy_host,
-        resolved.proxy_port,
-        api_host.as_deref(),
-        &no_proxy_extra,
-    ) {
+    for (name, value) in proxy_env(&resolved.proxy_host, resolved.proxy_port, &no_proxy_extra) {
         set_env(spec, &name, &value);
     }
     // Operator-granted replace placeholders: the sandbox sends the proxy_value
@@ -1257,6 +1254,15 @@ fn iron_proxy_env_vars(
         ("IRON_LOG_LEVEL", PROXY_LOG_LEVEL.to_owned()),
     ] {
         env.insert(name.to_owned(), env_var(name, &value));
+    }
+    if !iron_proxy.upstream_deny_cidrs.is_empty() {
+        env.insert(
+            PROXY_UPSTREAM_DENY_CIDRS_ENV.to_owned(),
+            env_var(
+                PROXY_UPSTREAM_DENY_CIDRS_ENV,
+                &iron_proxy.upstream_deny_cidrs.join(","),
+            ),
+        );
     }
     for (name, value) in &iron_proxy.extra_env {
         env.insert(name.clone(), env_var(name, value));
@@ -1518,11 +1524,10 @@ fn control_plane_egress_target(
 fn proxy_env(
     proxy_host: &str,
     proxy_port: u16,
-    api_host: Option<&str>,
     no_proxy_extra: &[String],
 ) -> BTreeMap<String, String> {
     let proxy_url = format!("http://{proxy_host}:{proxy_port}");
-    let no_proxy = no_proxy_value(proxy_host, api_host, no_proxy_extra);
+    let no_proxy = no_proxy_value(proxy_host, no_proxy_extra);
     BTreeMap::from([
         ("FIREWALL_HOST".to_owned(), proxy_host.to_owned()),
         ("FIREWALL_PROXY_PORT".to_owned(), proxy_port.to_string()),
@@ -1552,19 +1557,15 @@ fn proxy_env(
     ])
 }
 
-fn no_proxy_value(proxy_host: &str, api_host: Option<&str>, extra_values: &[String]) -> String {
+fn no_proxy_value(proxy_host: &str, extra_values: &[String]) -> String {
     let mut hosts = BTreeSet::<String>::from([
         "localhost".to_owned(),
         "127.0.0.1".to_owned(),
         "::1".to_owned(),
         proxy_host.to_owned(),
-        "api".to_owned(),
         "victoriametrics".to_owned(),
         "victorialogs".to_owned(),
     ]);
-    if let Some(api_host) = api_host.filter(|value| !value.is_empty()) {
-        hosts.insert(api_host.to_owned());
-    }
     for value in extra_values {
         hosts.extend(
             value
@@ -2062,6 +2063,48 @@ mod tests {
     }
 
     #[test]
+    fn iron_proxy_resources_carry_api_server_capability_label() {
+        let id = SandboxId::new("asbx-test");
+        let iron_proxy = IronProxyConfig::new("proxy:test", "ca-cert", "ca-key");
+        let resolved = resolved();
+        let sync = ProxySyncEnv {
+            proxy_id: "iprx_test".to_owned(),
+            control_url: "http://console:3000".to_owned(),
+            token: "proxy-token".to_owned(),
+        };
+
+        let pod = build_iron_proxy_pod(&id, &iron_proxy, &resolved, &sync);
+        assert_eq!(
+            pod.metadata
+                .labels
+                .as_ref()
+                .and_then(|labels| labels.get(API_SERVER_ENABLED_LABEL))
+                .map(String::as_str),
+            Some("true")
+        );
+
+        let service = build_iron_proxy_service(&id, &resolved);
+        assert_eq!(
+            service
+                .metadata
+                .labels
+                .as_ref()
+                .and_then(|labels| labels.get(API_SERVER_ENABLED_LABEL))
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            service
+                .spec
+                .as_ref()
+                .and_then(|spec| spec.selector.as_ref())
+                .and_then(|selector| selector.get(API_SERVER_ENABLED_LABEL))
+                .map(String::as_str),
+            Some("true")
+        );
+    }
+
+    #[test]
     fn sandbox_egress_policy_does_not_inline_otlp_collector_rule() {
         let id = SandboxId::new("asbx-test");
         let iron_proxy = IronProxyConfig::new("proxy:test", "ca-cert", "ca-key");
@@ -2219,6 +2262,33 @@ mod tests {
             .and_then(|var| var.value.as_deref());
 
         assert_eq!(timeout, Some("120s"));
+    }
+
+    #[test]
+    fn managed_proxy_env_sets_upstream_deny_cidrs() {
+        let mut iron_proxy = IronProxyConfig::new("proxy:test", "ca-cert", "ca-key");
+        iron_proxy.upstream_deny_cidrs = vec![
+            "169.254.169.254/32".to_owned(),
+            "127.0.0.0/8".to_owned(),
+            "10.42.0.0/16".to_owned(),
+            "10.43.0.0/16".to_owned(),
+        ];
+        let sync = ProxySyncEnv {
+            proxy_id: "proxy-id".to_owned(),
+            control_url: "http://iron-control".to_owned(),
+            token: "proxy-token".to_owned(),
+        };
+
+        let env = iron_proxy_env_vars(&iron_proxy, &resolved(), &sync);
+        let deny_cidrs = env
+            .iter()
+            .find(|var| var.name == PROXY_UPSTREAM_DENY_CIDRS_ENV)
+            .and_then(|var| var.value.as_deref());
+
+        assert_eq!(
+            deny_cidrs,
+            Some("169.254.169.254/32,127.0.0.0/8,10.42.0.0/16,10.43.0.0/16")
+        );
     }
 
     #[test]
@@ -2508,6 +2578,32 @@ mod tests {
         .await;
 
         assert_eq!(ack, ProxyAck::ManagementUnavailable);
+    }
+
+    #[test]
+    fn apply_proxy_env_does_not_add_api_host_to_no_proxy() {
+        let mut spec = SandboxSpec::new("centaur-agent:latest")
+            .env("CENTAUR_API_URL", "http://api:8080")
+            .env("NO_PROXY", "custom.internal");
+
+        apply_proxy_env(&mut spec, &resolved());
+
+        for name in ["NO_PROXY", "no_proxy"] {
+            let value = spec
+                .env
+                .iter()
+                .find(|env| env.name == name)
+                .map(|env| env.value.clone())
+                .unwrap();
+            assert!(
+                !value.split(',').any(|host| host == "api"),
+                "{name} should not contain the API host: {value}"
+            );
+            assert!(
+                value.split(',').any(|host| host == "custom.internal"),
+                "{name} should preserve explicit NO_PROXY extras: {value}"
+            );
+        }
     }
 
     #[test]

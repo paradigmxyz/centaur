@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+message_file="${1:?commit message file is required}"
+subject="$(sed -n '1p' "$message_file")"
+
+if ! [[ "$subject" =~ ^(feat|fix|docs|refactor|test|chore)(\([[:alnum:]_.-]+\))?!?:[[:space:]].+ ]]; then
+  cat >&2 <<'EOF'
+Commit message must use a conventional commit subject:
+
+  feat: add new behavior
+  fix(scope): correct existing behavior
+
+Allowed types: feat, fix, docs, refactor, test, chore.
+EOF
+  exit 1
+fi
+
+if rg -i -q \
+  -e 'generated with (claude|codex|amp)' \
+  -e 'co-authored-by:.*(claude|codex|anthropic|openai|amp)' \
+  -e 'co-authored-by:.*(centaur[[:space:]]+ai|ai@centaur\.local)' \
+  "$message_file"; then
+  cat >&2 <<'EOF'
+Commit message contains generated-by or AI co-author attribution.
+
+Remove the generated attribution footer and commit again.
+EOF
+  exit 1
+fi

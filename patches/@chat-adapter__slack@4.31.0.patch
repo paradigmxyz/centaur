@@ -1,5 +1,5 @@
 diff --git a/dist/index.js b/dist/index.js
-index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5ff9dc2682a754202102f80d3178818ff52ce63 100644
+index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f32ccc951 100644
 --- a/dist/index.js
 +++ b/dist/index.js
 @@ -31,6 +31,216 @@ import {
@@ -219,7 +219,41 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5ff9dc2682a754202102f80d3178818
  
  // src/cards.ts
  import {
-@@ -2004,7 +2214,10 @@ var SlackAdapter = class _SlackAdapter {
+@@ -352,6 +562,15 @@ import {
+ } from "chat";
+ var BARE_MENTION_PATTERN = /(?<![<\w/])@(\w+)/g;
+ var URL_PATTERN = /\bhttps?:\/\/[^\s<>]+/g;
++function plainTextPreservingBlocks(node) {
++  if (node.type === "root" || node.type === "blockquote") {
++    return getNodeChildren(node).map(plainTextPreservingBlocks).filter(Boolean).join(node.type === "root" ? "\n\n" : "\n");
++  }
++  if (node.type === "list" || node.type === "listItem") {
++    return getNodeChildren(node).map(plainTextPreservingBlocks).filter(Boolean).join("\n");
++  }
++  return toPlainText(node);
++}
+ var SlackFormatConverter = class extends BaseFormatConverter {
+   /**
+    * Render an AST to standard markdown. Slack accepts this directly via
+@@ -366,6 +585,17 @@ var SlackFormatConverter = class extends BaseFormatConverter {
+   toAst(mrkdwn) {
+     return parseMarkdown(slackMrkdwnToMarkdown(mrkdwn));
+   }
++  /**
++   * Extract plain text for incoming `message` events. The base implementation
++   * flattens the whole AST with mdast-util-to-string, which concatenates
++   * sibling block nodes with NO separator: `--model=fable\n\nexamine ...`
++   * became `--model=fableexamine ...`, gluing every paragraph boundary in the
++   * message. Preserve block boundaries instead — paragraphs join with a blank
++   * line, list items and blockquote lines with a newline.
++   */
++  extractPlainText(mrkdwn) {
++    return plainTextPreservingBlocks(this.toAst(mrkdwn));
++  }
+   /**
+    * Build the Slack API payload fields for a message.
+    *
+@@ -2004,7 +2234,10 @@ var SlackAdapter = class _SlackAdapter {
        channel: event.channel,
        threadTs
      });
@@ -231,7 +265,7 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5ff9dc2682a754202102f80d3178818
      const factory = async () => {
        const msg = await this.parseSlackMessage(event, threadId);
        if (isMention) {
-@@ -2520,10 +2732,10 @@ var SlackAdapter = class _SlackAdapter {
+@@ -2520,10 +2753,10 @@ var SlackAdapter = class _SlackAdapter {
        formatted: this.formatConverter.toAst(text),
        raw: event,
        author: {
@@ -244,7 +278,7 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5ff9dc2682a754202102f80d3178818
          isMe
        },
        metadata: {
-@@ -3452,26 +3664,251 @@ var SlackAdapter = class _SlackAdapter {
+@@ -3452,26 +3685,251 @@ var SlackAdapter = class _SlackAdapter {
      }
      this.logger.debug("Slack: starting stream", { channel, threadTs });
      const token = await this.getToken();
@@ -505,7 +539,7 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5ff9dc2682a754202102f80d3178818
      const sendStructuredChunk = async (chunk) => {
        if (!structuredChunksSupported) {
          return;
-@@ -3481,8 +3918,45 @@ var SlackAdapter = class _SlackAdapter {
+@@ -3481,8 +3939,45 @@ var SlackAdapter = class _SlackAdapter {
        await flushMarkdownDelta(delta);
        lastAppended = committable;
        try {
@@ -552,7 +586,7 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5ff9dc2682a754202102f80d3178818
          structuredChunksSupported = false;
          this.logger.warn(
            "Structured streaming chunk failed, falling back to text-only streaming. Ensure your Slack app manifest includes assistant_view, assistant:write scope, and @slack/web-api >= 7.14.0",
-@@ -3497,31 +3971,91 @@ var SlackAdapter = class _SlackAdapter {
+@@ -3497,31 +3992,91 @@ var SlackAdapter = class _SlackAdapter {
        await flushMarkdownDelta(delta);
        lastAppended = committable;
      };
@@ -663,7 +697,7 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5ff9dc2682a754202102f80d3178818
      };
    }
    /**
-@@ -3798,10 +4332,10 @@ var SlackAdapter = class _SlackAdapter {
+@@ -3798,10 +4353,10 @@ var SlackAdapter = class _SlackAdapter {
        formatted: this.formatConverter.toAst(text),
        raw: event,
        author: {

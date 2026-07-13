@@ -76,6 +76,15 @@ describe("extractMessageOverrides", () => {
     );
   });
 
+  test("--meta selects the Meta provider and codex harness", () => {
+    expect(extractMessageOverrides("--meta fix it")).toEqual({
+      cleanedText: "fix it",
+      harnessType: "codex",
+      model: undefined,
+      provider: "responses",
+    });
+  });
+
   test("--model expands claude aliases to full model ids", () => {
     expect(extractMessageOverrides("--claude --model opus go")).toEqual({
       cleanedText: "go",

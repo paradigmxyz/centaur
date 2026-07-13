@@ -49,15 +49,14 @@ class User < ApplicationRecord
     transaction do
       user =
         if (existing = UserIdentity.find_by(provider: provider, subject: identity[:subject]))
-          existing.update!(email: identity[:email], email_verified: identity[:email_verified])
+          existing.update!(identity_attributes(provider:, identity:))
           existing.user.tap do |u|
             u.update!(name: identity[:name]) if identity[:name].present? && u.name.blank?
           end
         else
           (linkable_user(identity) || create!(provisioned_attributes(identity))).tap do |u|
             u.user_identities.create!(
-              provider: provider, subject: identity[:subject],
-              email: identity[:email], email_verified: identity[:email_verified]
+              identity_attributes(provider:, identity:).merge(provider:, subject: identity[:subject])
             )
           end
         end
@@ -73,6 +72,15 @@ class User < ApplicationRecord
     find_by(email: identity[:email].strip.downcase)
   end
   private_class_method :linkable_user
+
+  def self.identity_attributes(provider:, identity:)
+    attributes = { email: identity[:email], email_verified: identity[:email_verified] }
+    if provider == UserIdentity::SLACK_PROVIDER && identity[:team_id].present?
+      attributes[:team_id] = identity[:team_id]
+    end
+    attributes
+  end
+  private_class_method :identity_attributes
 
   # Attributes for a brand-new SSO user: everyone is provisioned active -- the
   # console is only reachable on the internal network, so a completed SSO login

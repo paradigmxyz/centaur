@@ -30,6 +30,133 @@
   <% end %>
 </div>
 
+<!-- Slack channel permissions -->
+<section class="mb-8">
+  <div class="mb-4">
+    <h2 class="mb-1 text-xs font-semibold uppercase tracking-wider text-zinc-500">Slack Channel Permissions</h2>
+  </div>
+  <div class="console-panel">
+    <% checkbox_class = "mt-1 h-4 w-4 rounded border-ink-500 bg-ink-800 text-centaur-500 focus:ring-centaur-500" %>
+    <% channel_options = @slack_channel_options || [] %>
+    <% permissions = @slack_channel_permissions || [] %>
+    <%= form_with model: @principal,
+                  url: console_principal_slack_channel_permissions_path(@principal.oid),
+                  method: :patch,
+                  data: { turbo: false },
+                  class: "space-y-0" do |form| %>
+      <% if @slack_channel_catalog&.error.present? %>
+        <div class="m-4 rounded border border-amber-500/30 bg-amber-500/[0.08] px-3 py-2 text-sm text-amber-200">
+          <%= @slack_channel_catalog.error %>
+        </div>
+      <% end %>
+
+      <% if permissions.any? %>
+        <div class="overflow-x-auto">
+          <table class="console-table">
+            <thead class="console-table-head">
+              <tr>
+                <th class="console-th">Channel</th>
+                <th class="console-th">Upload</th>
+                <th class="console-th">Download</th>
+                <th class="console-th">History</th>
+                <th class="console-th">Remove</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-ink-700">
+              <% permissions.each do |permission| %>
+                <tr>
+                  <% if permission.channel_id.to_s.start_with?("D") %>
+                    <td class="console-td min-w-80">
+                      <div class="text-sm text-zinc-100">DM <%= permission.channel_name.presence || permission.channel_id %></div>
+                      <div class="mt-1 text-xs text-zinc-500"><%= permission.channel_id %></div>
+                    </td>
+                    <td class="console-td">
+                      <%= check_box_tag nil, "1", permission.upload_enabled, disabled: true, class: checkbox_class, aria: { label: "Upload for #{permission.channel_id}" } %>
+                    </td>
+                    <td class="console-td">
+                      <%= check_box_tag nil, "1", permission.download_enabled, disabled: true, class: checkbox_class, aria: { label: "Download for #{permission.channel_id}" } %>
+                    </td>
+                    <td class="console-td">
+                      <%= check_box_tag nil, "1", permission.history_enabled, disabled: true, class: checkbox_class, aria: { label: "History for #{permission.channel_id}" } %>
+                    </td>
+                    <td class="console-td">
+                      <span class="text-xs text-zinc-500">API-managed</span>
+                    </td>
+                  <% else %>
+                    <%= form.fields_for :slack_channel_permissions, permission do |permission_fields| %>
+                    <td class="console-td min-w-80">
+                      <%= permission_fields.hidden_field :id %>
+                      <%= permission_fields.hidden_field :channel_name, value: nil %>
+                      <% if channel_options.any? %>
+                        <%= permission_fields.select :channel_id,
+                                                     options_for_select(slack_channel_options_for_permission(permission, channel_options), permission.channel_id),
+                                                     {},
+                                                     class: "form-input" %>
+                      <% else %>
+                        <%= permission_fields.text_field :channel_id, class: "form-input", placeholder: "C0123456789" %>
+                      <% end %>
+                    </td>
+                    <td class="console-td">
+                      <%= permission_fields.check_box :upload_enabled, class: checkbox_class, aria: { label: "Upload for #{permission.channel_id}" } %>
+                    </td>
+                    <td class="console-td">
+                      <%= permission_fields.check_box :download_enabled, class: checkbox_class, aria: { label: "Download for #{permission.channel_id}" } %>
+                    </td>
+                    <td class="console-td">
+                      <%= permission_fields.check_box :history_enabled, class: checkbox_class, aria: { label: "History for #{permission.channel_id}" } %>
+                    </td>
+                    <td class="console-td">
+                      <%= permission_fields.check_box :_destroy, class: checkbox_class, aria: { label: "Remove #{permission.channel_id}" } %>
+                    </td>
+                    <% end %>
+                  <% end %>
+                </tr>
+              <% end %>
+            </tbody>
+          </table>
+        </div>
+      <% else %>
+        <div class="p-4">
+          <div class="empty-state">No Slack channels selected.</div>
+        </div>
+      <% end %>
+
+      <% new_permission = SlackChannelPermission.new(upload_enabled: true, download_enabled: true, history_enabled: true) %>
+      <%= form.fields_for :slack_channel_permissions, new_permission do |permission_fields| %>
+        <div class="grid gap-4 border-t border-ink-700 p-5 lg:grid-cols-[minmax(0,1fr)_auto_auto_auto]">
+          <label class="block">
+            <span class="form-label">Add Channel</span>
+            <% if channel_options.any? %>
+              <%= permission_fields.select :channel_id,
+                                           options_for_select([ [ "Select a Slack channel", "" ] ] + channel_options),
+                                           {},
+                                           class: "form-input" %>
+            <% else %>
+              <%= permission_fields.text_field :channel_id, class: "form-input", placeholder: "C0123456789" %>
+            <% end %>
+          </label>
+          <label class="flex items-start gap-3 pt-6">
+            <%= permission_fields.check_box :upload_enabled, class: checkbox_class %>
+            <span class="text-sm font-medium text-zinc-100">Upload</span>
+          </label>
+          <label class="flex items-start gap-3 pt-6">
+            <%= permission_fields.check_box :download_enabled, class: checkbox_class %>
+            <span class="text-sm font-medium text-zinc-100">Download</span>
+          </label>
+          <label class="flex items-start gap-3 pt-6">
+            <%= permission_fields.check_box :history_enabled, class: checkbox_class %>
+            <span class="text-sm font-medium text-zinc-100">History</span>
+          </label>
+        </div>
+      <% end %>
+
+      <div class="px-5 pb-5">
+        <%= submit_tag "Save Slack channel permissions", class: "btn-primary" %>
+      </div>
+    <% end %>
+  </div>
+</section>
+
 <!-- Sandbox access -->
 <section class="mb-8">
   <div class="mb-4">
@@ -41,16 +168,18 @@
                   method: :patch,
                   data: { turbo: false },
                   class: "space-y-4" do %>
-      <label class="flex items-start gap-3">
-        <%= hidden_field_tag :sandbox_repo_cache_enabled, "0" %>
-        <%= check_box_tag :sandbox_repo_cache_enabled,
-                          "1",
-                          @principal.sandbox_repo_cache_enabled,
-                          class: checkbox_class %>
+      <label class="block">
         <span>
           <span class="block text-sm font-medium text-zinc-100">Repo cache</span>
           <span class="block text-xs text-zinc-500">Mount repo-cache backed workspace and tool sources.</span>
         </span>
+        <%= select_tag :sandbox_repo_cache,
+                       options_for_select([
+                         [ "None", "none" ],
+                         [ "Public", "public" ],
+                         [ "All", "all" ]
+                       ], @principal.sandbox_repo_cache),
+                       class: "mt-2 w-full rounded border border-ink-500 bg-ink-900 px-3 py-2 text-sm text-zinc-100" %>
       </label>
       <label class="flex items-start gap-3">
         <%= hidden_field_tag :sandbox_observability_enabled, "0" %>

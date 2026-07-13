@@ -28,6 +28,17 @@ ironProxy:
     # a single listener (routing by database name); NetworkPolicies allow this
     # one port so callers can reach it.
     pgPort: 5432
+  # CIDRs iron-proxy must never dial upstream, even when the host allowlist
+  # matches. Keep the local/IMDS defaults and include the default k3s pod/service
+  # CIDRs so sandboxes cannot proxy back into in-cluster services like
+  # onepassword-connect.
+  upstreamDenyCidrs:
+    - "169.254.169.254/32"
+    - "fd00:ec2::254/128"
+    - "127.0.0.0/8"
+    - "::1/128"
+    - "10.42.0.0/16"
+    - "10.43.0.0/16"
   secretSource: onepassword
   secretTtl: 10m
 
@@ -48,6 +59,9 @@ toolServer:
   # this to the tool set the api-rs image was built with so the creds api-rs
   # grants match the tools the sandbox installs.
   ref: ""
+  # Repo visibility for sandbox repo-cache access. Defaults to private; set to
+  # public only for repos safe to expose to principals with sandbox_repo_cache=public.
+  visibility: private
   # Subdirectory in the repo holding the tools tree (mounted at /app/tools).
   subdir: tools
   # Additional repo/subdir sources copied after the base tools source. Duplicate
@@ -56,6 +70,7 @@ toolServer:
   extraSources: []
   # - repo: tempoxyz/centaur-tempo
   #   ref: ""
+  #   visibility: private
   #   subdir: tools
   # Image the tools-bootstrap init container runs in; empty fields fall back to
   # sandbox.image, which carries git and install-tool-shims.
@@ -193,14 +208,19 @@ overlay:
 # only need `repo`; set `ref` to a branch, tag, or commit when you do not want
 # the repo's default branch. Directories missing from a repo are skipped at
 # runtime. Set a subdir to "" to explicitly disable that surface for a source.
+# Repo visibility defaults to private; set visibility: public only for repos
+# safe to expose to principals with sandbox_repo_cache=public.
 overlays:
   sources: []
   # - repo: paradigmxyz/centaur
   #   ref: ""
+  #   visibility: public
   # - repo: your-org/centaur-overlay
   #   ref: main
+  #   visibility: private
   # - repo: your-org/workflows-only
   #   ref: main
+  #   visibility: private
   #   toolsSubdir: ""
   #   skillsSubdir: ""
 
@@ -262,9 +282,14 @@ repoCache:
         - ReadWriteMany
       storageClassName: ""
       size: 20Gi
-  # Additional repos to cache. toolServer.repo is cached automatically when the
-  # tool server is enabled.
+  # Additional repos to cache. Entries can be strings (visibility defaults to
+  # private) or objects with repo/ref/visibility. toolServer.repo is cached
+  # automatically when the tool server is enabled.
   repositories: []
+  # - paradigmxyz/public-docs
+  # - repo: your-org/public-docs
+  #   ref: main
+  #   visibility: public
   repositoryRefs: {}
   syncIntervalSeconds: 30
   image:
@@ -346,6 +371,7 @@ apiRs:
       syncIntervalSeconds: 3600
       syncBackfillLookbackDays: 30
       syncThreadLookbackDays: 3
+      indexPrivateChannels: false
       excludedChannelPatterns: ""
       attachments:
         enabled: true
@@ -372,6 +398,7 @@ apiRs:
     companyContextDocuments:
       enabled: true
       intervalSeconds: 14400
+      maxWindowSeconds: 21600
   # Reaper: stop sandboxes older than the max lifetime, regardless of whether
   # they are running or suspended. 0 disables the sweep. Interval must be >= 1.
   sandboxMaxLifetimeSecs: 259200 # 3 days
@@ -457,6 +484,48 @@ linearbot:
     tag: latest
     pullPolicy: Always
   userName: centaur
+  extraEnv: {}
+  resources: {}
+
+# Chat SDK GitHub bot — GitHub teammate (PAT) ingress. Receives issue/PR comment
+# webhooks on /api/webhooks/github (the @chat-adapter/github adapter), answers in
+# the comment thread, and runs a review when the bot account is requested as a
+# reviewer. Forwards sessions to the api-rs control plane (:8080). Disabled by
+# default: requires the GITHUBBOT_TOKEN (PAT) and GITHUBBOT_WEBHOOK_SECRET secrets
+# (see contrib/scripts/bootstrap-k8s-secrets.sh). userName must be the bot
+# account's GitHub login so @-mention and review-request matching work.
+githubbot:
+  enabled: false
+  replicaCount: 1
+  image:
+    repository: centaur-githubbot
+    tag: latest
+    pullPolicy: Always
+  userName: ""
+  # v2 PR self-management (only acts on PRs assigned to the bot account).
+  # Auto-merge respects branch protection and is paused per-PR by the hold label
+  # / draft status.
+  autoMerge: true
+  mergeMethod: squash
+  # Fallback @handle (no leading @) the bot tags when it gives up; empty = none.
+  escalationHandle: ""
+  # Optional review / issue-work methodology overrides. When set, the chart writes
+  # each into a ConfigMap, mounts it as a file, and points the bot at it via
+  # GITHUBBOT_REVIEW_PROMPT_FILE / GITHUBBOT_ISSUE_PROMPT_FILE. Empty = the bot's
+  # bundled default is used. Supply the whole methodology; it's used verbatim.
+  reviewPrompt: ""
+  issuePrompt: ""
+  # Extra guidance prepended to owned-PR management turns (CI-fix / conflict /
+  # address-review) — the riskiest autonomous surface. Same delivery as the
+  # review/issue prompts (ConfigMap + mounted file). Empty = built-in preamble only.
+  managementPrompt: ""
+  # GitHub author_association values allowed to drive the comment-mention path.
+  # Empty = the bot's safe default (OWNER, MEMBER, COLLABORATOR). Use "*" to allow
+  # everyone (e.g. a fully-private repo). Comma-separated.
+  allowedAuthorAssociations: ""
+  # How long (seconds) to let in-flight turns finish on shutdown before the pod is
+  # killed, so a deploy doesn't drop running CI fixes / reviews / issue work.
+  terminationGracePeriodSeconds: 120
   extraEnv: {}
   resources: {}
 
@@ -557,10 +626,11 @@ networkPolicy:
   # on clusters whose API server endpoint already listens on 443.
   apiServerPort: 6443
   # Egress to an in-cluster OTLP trace collector (e.g. Laminar) in another
-  # namespace. api-rs needs this to export its own spans; sandboxes get their
-  # equivalent per-sandbox rule from api-rs, derived from the OTLP endpoint in
-  # sandbox.extraEnv. The collector's own namespace must also admit ingress
-  # from this namespace's pods.
+  # namespace. The policy selects only pods labeled
+  # centaur.ai/observability-enabled=true, matching observabilityEgress. api-rs
+  # always receives that label; sandboxes and proxy pods receive it only when
+  # their principal has observability enabled. The collector's own namespace
+  # must also admit ingress from this namespace's pods.
   otlpEgress:
     enabled: false
     # kubernetes.io/metadata.name of the collector's namespace, e.g. "laminar".

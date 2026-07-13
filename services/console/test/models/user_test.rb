@@ -138,6 +138,16 @@ class UserTest < ActiveSupport::TestCase
     assert_equal target, user
   end
 
+  test "link_or_provision preserves the Slack workspace id" do
+    user = User.link_or_provision(
+      provider: "slack",
+      identity: identity(subject: "slack-user", email: "slack-user@example.com", team_id: " T123 ")
+    )
+
+    slack_identity = user.user_identities.find_by!(provider: "slack")
+    assert_equal "T123", slack_identity.team_id
+  end
+
   test "link_or_provision will not let an unverified email adopt an existing account" do
     target = users(:globex_admin)
     assert_raises(ActiveRecord::RecordInvalid) do

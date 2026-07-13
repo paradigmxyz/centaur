@@ -1,0 +1,45 @@
+<% content_for :title, "Integrations · Centaur Console" %>
+
+<%= render "console/page_header",
+           title: "Integrations",
+           subtitle: "Connect your accounts so Centaur can act on your behalf." %>
+
+<% if @oauth_apps.empty? %>
+  <p class="empty-state">No integrations available yet.</p>
+<% else %>
+  <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+    <% @oauth_apps.each do |app| %>
+      <% start_url = "#{public_base_url}/oauth/#{app.slug}/start" %>
+      <div class="console-panel flex flex-col gap-3 p-5">
+        <div class="flex items-center gap-3">
+          <% logo = oauth_provider_logo(app.provider, classes: "size-8 shrink-0") %>
+          <% if logo %>
+            <span class="flex size-10 shrink-0 items-center justify-center rounded-lg bg-ink-700 text-zinc-200"><%= logo %></span>
+          <% else %>
+            <span class="flex size-10 shrink-0 items-center justify-center rounded-lg bg-ink-700 text-xs font-semibold uppercase tracking-wide text-zinc-300"><%= app.provider.first(2) %></span>
+          <% end %>
+          <div class="min-w-0">
+            <div class="truncate font-mono text-sm font-semibold text-zinc-100" title="<%= app.slug %>"><%= app.slug %></div>
+            <div class="text-[11px] uppercase tracking-wide text-zinc-500"><%= app.provider %></div>
+          </div>
+        </div>
+        <% if app.description.present? %>
+          <p class="line-clamp-2 text-xs text-zinc-500" title="<%= app.description %>"><%= app.description %></p>
+        <% end %>
+        <div class="mt-auto flex items-center justify-between gap-3 pt-1">
+          <% credential = @credentials_by_app_id[app.id] %>
+          <% if credential %>
+            <a href="<%= start_url %>" class="btn-secondary inline-block">Reconnect</a>
+            <span class="flex items-center gap-1.5 text-xs <%= credential.dead? ? "text-amber-300" : "text-emerald-300" %>">
+              <span class="size-1.5 rounded-full <%= credential.dead? ? "bg-amber-400" : "bg-emerald-400" %>"></span>
+              <%= credential.dead? ? "Needs reconnecting" : "Connected" %>
+            </span>
+          <% else %>
+            <a href="<%= start_url %>" class="btn-primary inline-block">Connect</a>
+          <% end %>
+        </div>
+      </div>
+    <% end %>
+  </div>
+  <p class="mt-6 text-xs text-zinc-600">Connecting opens the provider's consent screen. Once you approve, Centaur stores and refreshes the credential automatically.</p>
+<% end %>

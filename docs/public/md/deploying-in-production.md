@@ -17,7 +17,7 @@ creates sandbox pods for agent work. [iron-proxy](https://docs.iron.sh) handles 
 need credentials:
 
 <figure className="architecture-figure">
-  <img src="/brand/workflow.svg" alt="Centaur production workflow — Centaur API plus Postgres hands a run to the Kubernetes backend, which attaches a sandbox pod whose outbound HTTP routes through iron-proxy" />
+  <img src="/brand/workflow.svg" alt="Centaur production workflow: Centaur API plus Postgres hands a run to the Kubernetes backend, which attaches a sandbox pod whose outbound HTTP routes through iron-proxy" />
   <figcaption>Slackbot and API ingress → Centaur API (Postgres-backed) → Kubernetes sandbox runtime → outbound traffic through iron-proxy.</figcaption>
 </figure>
 
@@ -62,7 +62,7 @@ Minimum keys:
 | `DATABASE_URL` | API | Postgres connection string. |
 | `IRON_MANAGEMENT_API_KEY` | [iron-proxy](https://docs.iron.sh) management API | Generate with `openssl rand -hex 32`. |
 | `SANDBOX_SIGNING_KEY` | Sandbox API tokens | Generate with `openssl rand -hex 32`; keeps sandbox tokens valid across API restarts. |
-| `SLACK_BOT_TOKEN` | Slackbot | Bot User OAuth Token from the Slack app. |
+| `SLACK_BOT_TOKEN` | Slackbot/API | Bot User OAuth Token from the Slack app. |
 | `SLACK_SIGNING_SECRET` | Slackbot/API | Used to verify Slack webhook signatures. |
 | `SLACKBOT_API_KEY` | Slackbot to API | Static service token; API bootstraps it into Postgres on startup with `agent` scope. |
 | `OP_CONNECT_TOKEN` | [iron-proxy](https://docs.iron.sh) 1Password Connect source (preferred) | Needed when `ironProxy.secretSource` is `onepassword-connect`. |
@@ -81,6 +81,7 @@ Store one secret per enabled harness credential:
 |---------|-----------|----------------|---------------------|----------|
 | Codex default | `codex` | none or `--codex` | `OPENAI_API_KEY` | `api.openai.com` |
 | Codex with OpenRouter provider | `codex` | none or `--codex` | `OPENROUTER_API_KEY` | `openrouter.ai` |
+| Codex with Meta AI direct | `codex` | `--meta` | `META_AI_API_KEY` | `api.ai.meta.com` |
 | Amp | `amp` | `--amp` | `AMP_API_KEY` | `ampcode.com` |
 | Claude Code | `claude-code` | `--claude` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
 | pi-mono | `pi-mono` | `--pi` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
@@ -98,6 +99,10 @@ model slug such as `openrouter/auto`, or set `CODEX_MODEL_PROVIDER=openrouter`
 alongside `CODEX_MODEL`. Per-turn Codex model overrides with provider-style
 slugs such as `--model anthropic/claude-fable-5` also select the OpenRouter
 provider even when `OPENROUTER_MODEL` is unset.
+
+To run Codex through Meta AI direct, store `META_AI_API_KEY` and select the
+provider with `--meta`. Pair it with `--model <model-id>` when choosing a
+provider-specific model for a turn.
 
 Whatever source you pick, the vault is shared across the whole deployment,
 so any thread can use any configured credential. Per-user and per-channel

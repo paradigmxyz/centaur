@@ -31,6 +31,38 @@ SLUG="$2"
 SRC="$HOME/github/$REPO"
 DEST="$HOME/branches/$REPO"
 
+# Match commit authorship to the account that will publish the PR so GitHub does
+# not preserve a separate sandbox identity as a squash-merge co-author.
+configure_git_identity() {
+    local name="${CENTAUR_GIT_USER_NAME:-}"
+    local email="${CENTAUR_GIT_USER_EMAIL:-}"
+    local github_identity_query='[.name // .login,
+        .email // ((.id | tostring) + "+" + .login + "@users.noreply.github.com")
+    ] | @tsv'
+
+    if [ -n "$name" ] || [ -n "$email" ]; then
+        if [ -z "$name" ] || [ -z "$email" ]; then
+            echo "Error: CENTAUR_GIT_USER_NAME and CENTAUR_GIT_USER_EMAIL" \
+                "must be set together" >&2
+            return 1
+        fi
+    elif command -v gh >/dev/null 2>&1 && [ -n "${GITHUB_TOKEN:-}" ]; then
+        local identity
+        identity="$({
+            GH_PROMPT_DISABLED=1 gh api user --jq "$github_identity_query"
+        } 2>/dev/null || true)"
+        IFS=$'\t' read -r name email <<< "$identity"
+    fi
+
+    if [ -n "$name" ] && [ -n "$email" ]; then
+        git -C "$DEST" config user.name "$name"
+        git -C "$DEST" config user.email "$email"
+    elif ! git -C "$DEST" var GIT_AUTHOR_IDENT >/dev/null 2>&1; then
+        echo "Warning: no Git author identity is configured; set" \
+            "CENTAUR_GIT_USER_NAME and CENTAUR_GIT_USER_EMAIL before committing" >&2
+    fi
+}
+
 if [[ ! "$SLUG" =~ ^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$ ]]; then
     usage
     echo "Error: branch slug must be lowercase kebab-case using only a-z, 0-9, and hyphens." >&2
@@ -44,6 +76,7 @@ fi
 
 if [ -d "$DEST/.git" ]; then
     echo "$DEST already exists — reusing" >&2
+    configure_git_identity
     echo "$DEST"
     exit 0
 fi
@@ -65,5 +98,7 @@ fi
 
 BRANCH="centaur/$SLUG-$(date +%s)"
 git -C "$DEST" checkout -q -b "$BRANCH"
+
+configure_git_identity
 
 echo "$DEST"

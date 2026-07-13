@@ -95,6 +95,21 @@ class CentaurApiClient
     post("/api/session/#{escape_path(thread_key)}/execute", payload)
   end
 
+  def list_workflow_schedules
+    get("/api/workflows/schedules")
+  end
+
+  def get_workflow_run(run_id)
+    get("/api/workflows/runs/#{escape_path(run_id)}")
+  end
+
+  def create_workflow_run(workflow_name:, input: nil)
+    payload = { workflow_name: workflow_name }
+    payload[:input] = input unless input.nil?
+
+    post("/api/workflows/runs", payload)
+  end
+
   private
 
   def get(path, params = {})

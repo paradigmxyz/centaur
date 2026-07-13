@@ -22,6 +22,7 @@
 //! republish from repo-cache or fetch the configured ref, then reinstall shims
 //! without restarting the pod.
 
+use centaur_sandbox_core::RepoCacheAccess;
 use serde_json::{Value, json};
 
 const AGENT_UID: i64 = 1001;
@@ -43,6 +44,8 @@ const GITHUB_TOKEN_DIR: &str = "/tools-github-token";
 const GITHUB_TOKEN_FILE: &str = "token";
 const GITHUB_TOKEN_FILE_PATH: &str = "/tools-github-token/token";
 const REPO_CACHE_VOLUME: &str = "tools-repo-cache";
+const PUBLIC_VISIBILITY: &str = "public";
+const PRIVATE_VISIBILITY: &str = "private";
 
 /// Git source for the base tools tree. When set, every sandbox gets a
 /// `tools-bootstrap` init container that clones `repo` at `git_ref` and
@@ -56,6 +59,8 @@ pub struct ToolsConfig {
     pub git_ref: Option<String>,
     /// Subdirectory within the repo holding the tools (published to `/app/tools`).
     pub source_subdir: String,
+    /// Repo visibility. Public sandboxes only publish public sources.
+    pub visibility: String,
     /// Image the clone init container runs. It must include git and
     /// `install-tool-shims` (the default sandbox image does).
     pub image: String,
@@ -71,6 +76,9 @@ pub struct ToolsConfig {
     /// Optional PVC backing for `repo_cache_path`. This lets Autopilot clusters use
     /// repoCache without hostPath volumes.
     pub repo_cache_pvc: Option<String>,
+    /// Optional subdirectory within the repo-cache volume to expose at
+    /// `repo_cache_path`. Used for public-only repo-cache access.
+    pub repo_cache_sub_path: Option<String>,
     /// Whether running sandboxes should watch repo-cache checkouts and refresh
     /// local tool shims when commits change.
     pub auto_reload: bool,
@@ -85,6 +93,13 @@ pub struct ToolSource {
     pub repo: String,
     pub git_ref: Option<String>,
     pub source_subdir: String,
+    pub visibility: String,
+}
+
+impl ToolSource {
+    fn is_public(&self) -> bool {
+        self.visibility == PUBLIC_VISIBILITY
+    }
 }
 
 /// A Kubernetes Secret key holding a GitHub token, fed to `git` via `GIT_ASKPASS`.
@@ -100,11 +115,13 @@ impl ToolsConfig {
             repo: repo.into(),
             git_ref: None,
             source_subdir: "tools".to_owned(),
+            visibility: PRIVATE_VISIBILITY.to_owned(),
             image: image.into(),
             image_pull_policy: None,
             github_token: None,
             repo_cache_path: None,
             repo_cache_pvc: None,
+            repo_cache_sub_path: None,
             auto_reload: true,
             extra_sources: Vec::new(),
         }
@@ -115,9 +132,68 @@ impl ToolsConfig {
             repo: self.repo.clone(),
             git_ref: self.git_ref.clone(),
             source_subdir: self.source_subdir.clone(),
+            visibility: self.visibility.clone(),
         }];
         sources.extend(self.extra_sources.clone());
         sources
+    }
+
+    pub(crate) fn has_sources(&self) -> bool {
+        !self.repo.is_empty()
+    }
+
+    pub fn scoped_for_repo_cache_access(&self, access: &RepoCacheAccess) -> Self {
+        let mut scoped = self.clone();
+        scoped.repo_cache_sub_path = match access {
+            RepoCacheAccess::Public => Some(PUBLIC_VISIBILITY.to_owned()),
+            RepoCacheAccess::None | RepoCacheAccess::All => None,
+        };
+        if matches!(access, RepoCacheAccess::Public) {
+            scoped.extra_sources.retain(ToolSource::is_public);
+            if scoped.visibility != PUBLIC_VISIBILITY {
+                if let Some(first_public) = scoped.extra_sources.first().cloned() {
+                    scoped.repo = first_public.repo;
+                    scoped.git_ref = first_public.git_ref;
+                    scoped.source_subdir = first_public.source_subdir;
+                    scoped.visibility = first_public.visibility;
+                    scoped.extra_sources.remove(0);
+                } else {
+                    scoped.repo.clear();
+                }
+            }
+        }
+        scoped
+    }
+
+    fn repo_cache_source_path(&self) -> Option<String> {
+        let repo_cache_path = self.repo_cache_path.as_ref()?;
+        if self.repo_cache_pvc.is_some() {
+            return Some(repo_cache_path.clone());
+        }
+        Some(match &self.repo_cache_sub_path {
+            Some(sub_path) => format!(
+                "{}/{}",
+                repo_cache_path.trim_end_matches('/'),
+                sub_path.trim_start_matches('/')
+            ),
+            None => repo_cache_path.clone(),
+        })
+    }
+
+    fn repo_cache_volume_mount(&self) -> Option<Value> {
+        let repo_cache_path = self.repo_cache_path.as_ref()?;
+        let mut mount = json!({
+            "name": REPO_CACHE_VOLUME,
+            "mountPath": repo_cache_path,
+            "readOnly": true,
+        });
+        if self.repo_cache_pvc.is_some()
+            && let Some(sub_path) = &self.repo_cache_sub_path
+            && let Some(obj) = mount.as_object_mut()
+        {
+            obj.insert("subPath".to_owned(), json!(sub_path));
+        }
+        Some(mount)
     }
 }
 
@@ -348,12 +424,8 @@ CENTAUR_TOOLS_METADATA"
     if let Some(proxy) = clone_proxy {
         volume_mounts.push(proxy.ca_volume_mount.clone());
     }
-    if let Some(repo_cache_path) = &tools.repo_cache_path {
-        volume_mounts.push(json!({
-            "name": REPO_CACHE_VOLUME,
-            "mountPath": repo_cache_path,
-            "readOnly": true,
-        }));
+    if let Some(mount) = tools.repo_cache_volume_mount() {
+        volume_mounts.push(mount);
     }
 
     let mut container = json!({
@@ -397,7 +469,7 @@ pub(crate) fn volumes_json(tools: Option<&ToolsConfig>) -> Vec<Value> {
                 volumes.push(json!({
                     "name": REPO_CACHE_VOLUME,
                     "hostPath": {
-                        "path": repo_cache_path,
+                        "path": tools.repo_cache_source_path().unwrap_or_else(|| repo_cache_path.clone()),
                         "type": "DirectoryOrCreate",
                     },
                 }));
@@ -422,12 +494,8 @@ pub(crate) fn agent_volume_mounts_json(tools: Option<&ToolsConfig>) -> Vec<Value
             "readOnly": true,
         }));
     }
-    if let Some(repo_cache_path) = &tools.repo_cache_path {
-        mounts.push(json!({
-            "name": REPO_CACHE_VOLUME,
-            "mountPath": repo_cache_path,
-            "readOnly": true,
-        }));
+    if let Some(mount) = tools.repo_cache_volume_mount() {
+        mounts.push(mount);
     }
     mounts
 }
@@ -624,6 +692,95 @@ mod tests {
         );
         assert_eq!(volume["persistentVolumeClaim"]["readOnly"], true);
         assert!(volume.get("hostPath").is_none());
+    }
+
+    #[test]
+    fn public_repo_cache_scopes_host_path_to_public_projection() {
+        let mut tools = ToolsConfig::new("paradigmxyz/centaur", "centaur-agent:test");
+        tools.visibility = "public".to_owned();
+        tools.repo_cache_path = Some("/var/lib/centaur/repos".to_owned());
+
+        let scoped = tools.scoped_for_repo_cache_access(&RepoCacheAccess::Public);
+        let volumes = volumes_json(Some(&scoped));
+        assert!(volumes.iter().any(|volume| {
+            volume["name"] == REPO_CACHE_VOLUME
+                && volume["hostPath"]["path"] == "/var/lib/centaur/repos/public"
+                && volume["hostPath"]["type"] == "DirectoryOrCreate"
+        }));
+        let mounts = agent_volume_mounts_json(Some(&scoped));
+        assert!(mounts.iter().any(|mount| {
+            mount["name"] == REPO_CACHE_VOLUME
+                && mount["mountPath"] == "/var/lib/centaur/repos"
+                && mount.get("subPath").is_none()
+        }));
+    }
+
+    #[test]
+    fn public_repo_cache_uses_pvc_subpath() {
+        let mut tools = ToolsConfig::new("paradigmxyz/centaur", "centaur-agent:test");
+        tools.visibility = "public".to_owned();
+        tools.repo_cache_path = Some("/var/lib/centaur/repos".to_owned());
+        tools.repo_cache_pvc = Some("centaur-repo-cache".to_owned());
+
+        let scoped = tools.scoped_for_repo_cache_access(&RepoCacheAccess::Public);
+        let volumes = volumes_json(Some(&scoped));
+        let volume = volumes
+            .iter()
+            .find(|volume| volume["name"] == REPO_CACHE_VOLUME)
+            .expect("repo-cache volume");
+        assert_eq!(
+            volume["persistentVolumeClaim"]["claimName"],
+            "centaur-repo-cache"
+        );
+        assert!(volume.get("hostPath").is_none());
+
+        for mount in [
+            tools_init_container_json(&scoped, None)["volumeMounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|mount| mount["name"] == REPO_CACHE_VOLUME)
+                .expect("init repo-cache mount")
+                .clone(),
+            agent_volume_mounts_json(Some(&scoped))
+                .into_iter()
+                .find(|mount| mount["name"] == REPO_CACHE_VOLUME)
+                .expect("agent repo-cache mount"),
+        ] {
+            assert_eq!(mount["mountPath"], "/var/lib/centaur/repos");
+            assert_eq!(mount["subPath"], "public");
+        }
+    }
+
+    #[test]
+    fn public_repo_cache_filters_private_tool_sources() {
+        let mut tools = ToolsConfig::new("acme/private-tools", "centaur-agent:test");
+        tools.repo_cache_path = Some("/var/lib/centaur/repos".to_owned());
+        tools.extra_sources.push(ToolSource {
+            repo: "acme/public-tools".to_owned(),
+            git_ref: Some("docs".to_owned()),
+            source_subdir: "tools".to_owned(),
+            visibility: "public".to_owned(),
+        });
+        tools.extra_sources.push(ToolSource {
+            repo: "acme/other-private-tools".to_owned(),
+            git_ref: None,
+            source_subdir: "tools".to_owned(),
+            visibility: "private".to_owned(),
+        });
+
+        let scoped = tools.scoped_for_repo_cache_access(&RepoCacheAccess::Public);
+
+        assert_eq!(scoped.repo, "acme/public-tools");
+        assert_eq!(scoped.git_ref.as_deref(), Some("docs"));
+        assert!(scoped.extra_sources.is_empty());
+        let script = tools_init_container_json(&scoped, None)["command"][2]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(script.contains("cache_repo=\"/var/lib/centaur/repos/acme/public-tools\""));
+        assert!(!script.contains("acme/private-tools"));
+        assert!(!script.contains("acme/other-private-tools"));
     }
 
     #[test]

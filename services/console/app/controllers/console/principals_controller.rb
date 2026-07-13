@@ -19,6 +19,7 @@ module Console
     def create
       @principal = Principal.new(created_by: current_user)
       assign_form(@principal)
+      @principal.apply_default_sandbox_capabilities!
       if @principal.save
         redirect_to console_principal_path(@principal.oid), notice: "Principal created."
       else
@@ -34,11 +35,18 @@ module Console
 
     def update_sandbox_access
       @principal.update!(
-        sandbox_repo_cache_enabled: ActiveModel::Type::Boolean.new.cast(params[:sandbox_repo_cache_enabled]),
+        sandbox_repo_cache: params[:sandbox_repo_cache],
         sandbox_observability_enabled: ActiveModel::Type::Boolean.new.cast(params[:sandbox_observability_enabled]),
         sandbox_api_server_enabled: ActiveModel::Type::Boolean.new.cast(params[:sandbox_api_server_enabled])
       )
       redirect_to console_principal_path(@principal.oid), notice: "Updated sandbox access."
+    rescue ActiveRecord::RecordInvalid => e
+      redirect_to console_principal_path(@principal.oid), alert: e.record.errors.full_messages.to_sentence
+    end
+
+    def update_slack_channel_permissions
+      @principal.update!(slack_channel_permission_params)
+      redirect_to console_principal_path(@principal.oid), notice: "Updated Slack channel permissions."
     rescue ActiveRecord::RecordInvalid => e
       redirect_to console_principal_path(@principal.oid), alert: e.record.errors.full_messages.to_sentence
     end
@@ -96,6 +104,20 @@ module Console
 
     def principal_params
       params.fetch(:principal, ActionController::Parameters.new)
+    end
+
+    def slack_channel_permission_params
+      params.require(:principal).permit(
+        slack_channel_permissions_attributes: %i[
+          id
+          channel_id
+          channel_name
+          upload_enabled
+          download_enabled
+          history_enabled
+          _destroy
+        ]
+      )
     end
 
     # Parse the "<kind>:<oid>" value from the grant dropdown into a secret record.

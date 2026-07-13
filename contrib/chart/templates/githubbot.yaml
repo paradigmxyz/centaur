@@ -1,0 +1,172 @@
+{{- if .Values.githubbot.enabled }}
+{{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") -}}
+{{- if or .Values.githubbot.reviewPrompt .Values.githubbot.issuePrompt .Values.githubbot.managementPrompt }}
+# Optional review / issue-work methodology overrides, delivered as mounted files
+# the bot reads at boot via GITHUBBOT_REVIEW_PROMPT_FILE / _ISSUE_PROMPT_FILE.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "githubbot") }}-prompts
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "githubbot") | nindent 4 }}
+data:
+{{- if .Values.githubbot.reviewPrompt }}
+  review-prompt.md: |-
+{{- .Values.githubbot.reviewPrompt | nindent 4 }}
+{{- end }}
+{{- if .Values.githubbot.issuePrompt }}
+  issue-prompt.md: |-
+{{- .Values.githubbot.issuePrompt | nindent 4 }}
+{{- end }}
+{{- if .Values.githubbot.managementPrompt }}
+  management-prompt.md: |-
+{{- .Values.githubbot.managementPrompt | nindent 4 }}
+{{- end }}
+---
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "githubbot") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "githubbot") | nindent 4 }}
+spec:
+  replicas: {{ .Values.githubbot.replicaCount }}
+  selector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "githubbot") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
+{{- if or .Values.githubbot.reviewPrompt .Values.githubbot.issuePrompt .Values.githubbot.managementPrompt }}
+        checksum/prompts: {{ dict "review" .Values.githubbot.reviewPrompt "issue" .Values.githubbot.issuePrompt "management" .Values.githubbot.managementPrompt | toJson | sha256sum }}
+{{- end }}
+      labels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "githubbot") | nindent 8 }}
+    spec:
+      # Give in-flight agent turns time to finish on a rollout; the bot drains
+      # background work for GITHUBBOT_SHUTDOWN_DRAIN_MS (set below from this) on
+      # SIGTERM so a deploy doesn't drop a running CI fix / review / issue turn.
+      terminationGracePeriodSeconds: {{ .Values.githubbot.terminationGracePeriodSeconds }}
+      automountServiceAccountToken: false
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: githubbot
+          image: {{ printf "%s:%s" .Values.githubbot.image.repository .Values.githubbot.image.tag | quote }}
+          imagePullPolicy: {{ .Values.githubbot.image.pullPolicy }}
+          env:
+            - name: PORT
+              value: "3001"
+            - name: CENTAUR_API_URL
+              value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
+            # New threads without an explicit --claude/--amp/--codex flag run
+            # the deployment's default harness.
+            - name: GITHUBBOT_DEFAULT_HARNESS
+              value: {{ .Values.sandbox.harnessEngine | quote }}
+            # Personal access token for the bot's GitHub teammate account — kept
+            # distinct from the sandbox tool token so the bot acts as its own
+            # GitHub user (requestable as a reviewer, @-mentionable).
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sGITHUBBOT_TOKEN" .Values.secretManager.envPrefix }}
+            # githubbot's own webhook signing secret (the GitHub repo/org webhook).
+            - name: GITHUB_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sGITHUBBOT_WEBHOOK_SECRET" .Values.secretManager.envPrefix }}
+            - name: GITHUBBOT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sGITHUBBOT_API_KEY" .Values.secretManager.envPrefix }}
+            - name: GITHUBBOT_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sDATABASE_URL" .Values.secretManager.envPrefix }}
+            - name: GITHUB_BOT_USERNAME
+              value: {{ required "githubbot.userName is required (the bot account's GitHub login)" .Values.githubbot.userName | quote }}
+            # v2 PR self-management knobs.
+            - name: GITHUBBOT_AUTO_MERGE
+              value: {{ .Values.githubbot.autoMerge | quote }}
+            - name: GITHUBBOT_MERGE_METHOD
+              value: {{ .Values.githubbot.mergeMethod | quote }}
+{{- if .Values.githubbot.escalationHandle }}
+            - name: GITHUBBOT_ESCALATION_HANDLE
+              value: {{ .Values.githubbot.escalationHandle | quote }}
+{{- end }}
+{{- if .Values.githubbot.reviewPrompt }}
+            - name: GITHUBBOT_REVIEW_PROMPT_FILE
+              value: /etc/githubbot/prompts/review-prompt.md
+{{- end }}
+{{- if .Values.githubbot.issuePrompt }}
+            - name: GITHUBBOT_ISSUE_PROMPT_FILE
+              value: /etc/githubbot/prompts/issue-prompt.md
+{{- end }}
+{{- if .Values.githubbot.managementPrompt }}
+            - name: GITHUBBOT_MANAGEMENT_PROMPT_FILE
+              value: /etc/githubbot/prompts/management-prompt.md
+{{- end }}
+{{- if .Values.githubbot.allowedAuthorAssociations }}
+            # author_association allowlist for the comment-mention path; unset =
+            # the bot's safe default (OWNER, MEMBER, COLLABORATOR).
+            - name: GITHUBBOT_ALLOWED_AUTHOR_ASSOCIATIONS
+              value: {{ .Values.githubbot.allowedAuthorAssociations | quote }}
+{{- end }}
+            # Drain budget on shutdown — kept ~10s under the grace period so the
+            # final flush + exit still fit before the pod is force-killed.
+            - name: GITHUBBOT_SHUTDOWN_DRAIN_MS
+              value: {{ mul (sub (int .Values.githubbot.terminationGracePeriodSeconds) 10) 1000 | quote }}
+{{- range $name, $value := .Values.githubbot.extraEnv }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+{{- end }}
+          ports:
+            - containerPort: 3001
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3001
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3001
+            timeoutSeconds: 5
+          securityContext:
+{{ toYaml .Values.containerSecurityContext | nindent 12 }}
+          resources:
+{{ toYaml .Values.githubbot.resources | nindent 12 }}
+{{- if or .Values.githubbot.reviewPrompt .Values.githubbot.issuePrompt .Values.githubbot.managementPrompt }}
+          volumeMounts:
+            - name: prompts
+              mountPath: /etc/githubbot/prompts
+              readOnly: true
+      volumes:
+        - name: prompts
+          configMap:
+            name: {{ include "centaur.componentName" (dict "root" . "component" "githubbot") }}-prompts
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "githubbot") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "githubbot") | nindent 4 }}
+spec:
+  selector:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "githubbot") | nindent 4 }}
+  ports:
+    - name: http
+      port: 3001
+      targetPort: 3001
+{{- end }}

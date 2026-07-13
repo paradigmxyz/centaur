@@ -157,7 +157,18 @@ pub fn derive_principal_with_slack_team(
 
     let (thread_team_id, conversation_id) = parse_slack_segments(thread_key);
     let metadata_team_id = slack_team_id.map(str::trim).filter(|team| !team.is_empty());
-    let team_id = thread_team_id.or(metadata_team_id);
+    // Channel principals must never be scoped by the message-derived metadata
+    // team: in Slack Connect shared channels that team can identify an external
+    // requester's workspace, which would fork a separate principal from the
+    // host channel's. A Slack channel id is globally unique, so an un-teamed
+    // scope is correct and collision-free. DM principals stay team-scoped so
+    // legacy DM keys that omit the team still resolve to the right per-user
+    // identity (see #882).
+    let team_id = if is_direct_message(conversation_id) {
+        thread_team_id.or(metadata_team_id)
+    } else {
+        thread_team_id
+    };
     let mut labels = BTreeMap::new();
     if let Some(team) = team_id {
         labels.insert("slack_team_id".to_owned(), team.to_owned());
@@ -221,6 +232,11 @@ fn parse_slack_segments(thread_key: &str) -> (Option<&str>, Option<&str>) {
     (team, conversation)
 }
 
+/// The first Slack conversation id (``C``/``D``/``G``) in a thread key.
+pub(crate) fn slack_conversation_id(thread_key: &str) -> Option<&str> {
+    parse_slack_segments(thread_key).1
+}
+
 /// The guild and (optional) channel segments of a ``discord:<guild>:<channel>``
 /// thread key, or ``None`` when the key is not a Discord thread. The discordbot
 /// encodes session threads as ``discord:<guild_id>:<channel_id>[:<thread_id>]``,
@@ -273,7 +289,7 @@ fn parse_teams_adapter_segments(thread_key: &str) -> Option<(String, String, Opt
 }
 
 /// Slack direct-message conversation ids start with ``D``.
-fn is_direct_message(conversation_id: Option<&str>) -> bool {
+pub(crate) fn is_direct_message(conversation_id: Option<&str>) -> bool {
     conversation_id
         .and_then(|id| id.chars().next())
         .is_some_and(|first| first.eq_ignore_ascii_case(&'d'))
@@ -356,6 +372,24 @@ mod tests {
         assert_eq!(
             principal.labels.get("slack_user_id").map(String::as_str),
             Some("U07ABC")
+        );
+    }
+
+    #[test]
+    fn metadata_team_id_is_not_folded_into_channel_key() {
+        // A Slack Connect requester's team must not scope a channel principal:
+        // the channel is globally unique and belongs to the host workspace.
+        let principal = derive_principal_with_slack_team(
+            "slack:C456:1780000000.0001",
+            Some("U07ABC"),
+            Some("T_EXTERNAL"),
+            None,
+        );
+        assert_eq!(principal.foreign_id, "slack-channel-c456");
+        assert_eq!(principal.labels.get("slack_team_id"), None);
+        assert_eq!(
+            principal.labels.get("slack_channel_id").map(String::as_str),
+            Some("C456")
         );
     }
 

@@ -346,7 +346,7 @@ fn run_codex_user_turn<W: Write>(
     }
     // Per-turn reasoning effort (codex `turn/start.effort`), parsed from the
     // `-rsn` message flag. Values match codex's ReasoningEffort enum
-    // (none|minimal|low|medium|high|xhigh); validation happens upstream.
+    // (none|minimal|low|medium|high|xhigh|max); validation happens upstream.
     if let Some(reasoning) = reasoning {
         params["effort"] = Value::String(reasoning);
     }

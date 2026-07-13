@@ -1,8 +1,12 @@
 module Api
   module V1
     class PrincipalsController < Api::BaseController
+      InvalidSlackChannelPermissions = Class.new(StandardError)
+
+      rescue_from InvalidSlackChannelPermissions, with: :render_slack_channel_permissions_error
+
       def index
-        records, meta = paginated_label_search(Principal.all)
+        records, meta = paginated_label_search(Principal.includes(:slack_channel_permissions))
         render json: { data: records.map { |p| record_payload(p) }, meta: meta }
       end
 
@@ -24,8 +28,12 @@ module Api
       def create
         principal = Principal.new(namespace: upsert_namespace, foreign_id: data_params[:foreign_id],
                                   created_by: current_user)
-        principal.assign_attributes(principal_params)
-        principal.save!
+        ActiveRecord::Base.transaction do
+          principal.assign_attributes(principal_params)
+          principal.apply_default_sandbox_capabilities!(principal_params)
+          principal.save!
+          replace_slack_channel_permissions!(principal) if data_params.key?(:slack_channel_permissions)
+        end
         render status: :created, json: { data: record_payload(principal) }
       rescue ActiveRecord::RecordInvalid => e
         render_validation_error(e.record)
@@ -37,8 +45,12 @@ module Api
       def update
         principal = resolve_for_upsert(Principal)
         was_new = principal.new_record?
-        principal.assign_attributes(principal_params)
-        principal.save!
+        ActiveRecord::Base.transaction do
+          principal.assign_attributes(principal_params)
+          principal.apply_default_sandbox_capabilities!(principal_params) if was_new
+          principal.save!
+          replace_slack_channel_permissions!(principal) if data_params.key?(:slack_channel_permissions)
+        end
         render status: (was_new ? :created : :ok), json: { data: record_payload(principal) }
       rescue ActiveRecord::RecordInvalid => e
         render_validation_error(e.record)
@@ -65,6 +77,26 @@ module Api
         render json: body
       end
 
+      # POST /api/v1/principals/:id/slack_channel_permissions
+      #
+      # Upserts one Slack channel permission row without replacing the rest of
+      # the principal's operator-managed Slack permissions.
+      def upsert_slack_channel_permission
+        principal = Principal.find_by_oid!(params[:id])
+        attrs = upsert_slack_channel_permission_params
+        attrs[:channel_id] = attrs[:channel_id].to_s.strip.upcase
+        permission, was_new = save_slack_channel_permission!(principal, attrs)
+
+        render status: (was_new ? :created : :ok), json: { data: permission.as_permission_json }
+      rescue ActiveRecord::RecordNotUnique
+        permission = principal.slack_channel_permissions.find_by!(channel_id: attrs[:channel_id])
+        permission.assign_attributes(attrs)
+        permission.save!
+        render status: :ok, json: { data: permission.as_permission_json }
+      rescue ActiveRecord::RecordInvalid => e
+        render_validation_error(e.record)
+      end
+
       private
 
       def record_payload(principal)
@@ -73,8 +105,9 @@ module Api
           namespace: principal.namespace,
           foreign_id: principal.foreign_id,
           name: principal.name,
-          labels: principal.labels,
-          sandbox_repo_cache_enabled: principal.sandbox_repo_cache_enabled,
+          labels: principal.labels_with_sandbox_capabilities,
+          slack_channel_permissions: principal.slack_channel_permissions_payload,
+          sandbox_repo_cache: principal.sandbox_repo_cache,
           sandbox_observability_enabled: principal.sandbox_observability_enabled,
           sandbox_api_server_enabled: principal.sandbox_api_server_enabled,
           created_at: principal.created_at,
@@ -85,11 +118,69 @@ module Api
       def principal_params
         data_params.permit(
           :name,
-          :sandbox_repo_cache_enabled,
+          :sandbox_repo_cache,
           :sandbox_observability_enabled,
           :sandbox_api_server_enabled,
           labels: {}
         )
+      end
+
+      def replace_slack_channel_permissions!(principal)
+        SlackChannelPermission.replace_for_principal!(
+          principal,
+          slack_channel_permission_params
+        )
+      end
+
+      def save_slack_channel_permission!(principal, attrs)
+        permission = principal.slack_channel_permissions.find_or_initialize_by(
+          channel_id: attrs[:channel_id]
+        )
+        was_new = permission.new_record?
+        permission.assign_attributes(attrs)
+        permission.save!
+        [ permission, was_new ]
+      end
+
+      def slack_channel_permission_params
+        raw = data_params[:slack_channel_permissions]
+        unless raw.nil? || raw.is_a?(Array)
+          raise InvalidSlackChannelPermissions, "slack_channel_permissions must be an array"
+        end
+
+        rows = data_params.permit(
+          slack_channel_permissions: %i[
+            channel_id
+            channel_name
+            upload_enabled
+            download_enabled
+            history_enabled
+          ]
+        ).fetch(:slack_channel_permissions, [])
+
+        if raw.present? && rows.length != raw.length
+          raise InvalidSlackChannelPermissions, "slack_channel_permissions rows must be objects"
+        end
+
+        rows
+      end
+
+      def upsert_slack_channel_permission_params
+        @upsert_slack_channel_permission_params ||= data_params.permit(
+          :channel_id,
+          :channel_name,
+          :upload_enabled,
+          :download_enabled,
+          :history_enabled
+        ).tap do |attrs|
+          attrs[:upload_enabled] = true unless attrs.key?(:upload_enabled)
+          attrs[:download_enabled] = true unless attrs.key?(:download_enabled)
+          attrs[:history_enabled] = true unless attrs.key?(:history_enabled)
+        end
+      end
+
+      def render_slack_channel_permissions_error(error)
+        render_error(status: :unprocessable_entity, message: error.message)
       end
     end
   end

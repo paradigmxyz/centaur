@@ -1,0 +1,205 @@
+<% title = @latest_run&.workflow_name_label || @workflow_name %>
+<% content_for :title, "#{title} · Centaur Console" %>
+
+<% if @workflow_db_unavailable %>
+  <div class="mb-8">
+    <a href="<%= console_workflows_path %>" class="back-link">← back to workflows</a>
+  </div>
+  <div class="mb-4 rounded border border-amber-500/30 bg-amber-500/[0.08] px-4 py-3 text-sm text-amber-200">
+    Workflow database is unavailable. Console needs the API workflow read-only views to show runs.
+  </div>
+<% elsif @latest_run.blank? %>
+  <div class="mb-8">
+    <a href="<%= console_workflows_path %>" class="back-link">← back to workflows</a>
+  </div>
+  <div class="empty-state">
+    No workflow runs found for <span class="text-zinc-300"><%= @workflow_name %></span>.
+  </div>
+<% else %>
+  <% status = @latest_run.display_status %>
+  <% schedule = @workflow_schedules&.first %>
+  <% source_path = schedule&.dig("source_path").presence %>
+  <% source_url = workflow_source_url(source_path) %>
+  <div class="mb-8">
+    <a href="<%= console_workflows_path %>" class="back-link">← back to workflows</a>
+    <div class="mt-2 flex flex-wrap items-center gap-3">
+      <h1 class="page-title" title="<%= @latest_run.workflow_name_label %>">
+        <%= truncate_middle(@latest_run.workflow_name_label, max: 72) %>
+      </h1>
+      <span class="inline-flex rounded border px-2 py-0.5 text-xs font-medium <%= workflow_status_classes(status) %>">
+        <%= status.tr("_", " ") %>
+      </span>
+      <div class="ml-auto">
+        <%= button_to "Manually Trigger", run_console_workflow_path(@workflow_name), method: :post,
+              class: "btn-primary",
+              data: { turbo_confirm: "Manually trigger a #{@workflow_name} run?#{schedule ? " It starts with the registered schedule input." : ""}" } %>
+      </div>
+    </div>
+    <div class="mt-2 flex flex-wrap items-center gap-2 text-sm">
+      <span class="text-zinc-400"><%= @latest_run.task_name.presence || "workflow" %></span>
+      <span class="text-zinc-600">·</span>
+      <span class="text-zinc-400"><%= pluralize(number_with_delimiter(@total_runs), "run") %></span>
+      <% if source_url %>
+        <span class="text-zinc-600">·</span>
+        <a href="<%= source_url %>" target="_blank" rel="noopener noreferrer" class="console-link" title="<%= source_path %>">
+          <%= source_path %> ↗
+        </a>
+      <% end %>
+    </div>
+  </div>
+
+  <section class="mb-8">
+    <h2 class="mb-3 text-xs font-semibold uppercase tracking-wider text-zinc-500">Overview</h2>
+    <% schedule_text = nil %>
+    <% if schedule %>
+      <% kind = schedule["kind"].is_a?(Hash) ? schedule["kind"] : {} %>
+      <% schedule_text = [
+           workflow_schedule_label(schedule),
+           (schedule["timezone"].presence if kind["type"] == "cron"),
+           ("disabled" if schedule["enabled"] == false)
+         ].compact.join(" · ") %>
+    <% end %>
+    <dl class="console-panel divide-y divide-ink-700">
+      <% [
+        [ "Queue", @queue_names.map { |queue_name| CentaurWorkflowRun.queue_label_for(queue_name) }.join(", ").presence || @latest_run.queue_label ],
+        [ "Engine", workflow_engine_label(@latest_run.harness_type) ],
+        ([ "Schedule", schedule_text ] if schedule_text.present?),
+        [ "Started", local_time(@latest_run.started_or_created_at) ],
+        [ "Duration", workflow_duration_label(@latest_run) ],
+        [ "Attempts", safe_join([ (@latest_run.attempts || 0).to_s, tag.span(" / #{@latest_run.max_attempts.presence || "unlimited"}", class: "text-zinc-600") ]) ],
+        [ "Runs", pluralize(number_with_delimiter(@total_runs), "run") ]
+      ].compact.each do |label, value| %>
+        <div class="flex flex-col gap-1 px-5 py-3 sm:flex-row sm:gap-4">
+          <dt class="w-48 shrink-0 text-xs uppercase tracking-wider text-zinc-500"><%= label %></dt>
+          <dd class="min-w-0 text-xs text-zinc-200"><%= value.presence || tag.span("—", class: "text-zinc-600") %></dd>
+        </div>
+      <% end %>
+    </dl>
+  </section>
+
+  <% debug_rows = [] %>
+  <% if @latest_run_detail.present? %>
+    <% input = @latest_run_detail["input"] %>
+    <% debug_rows << [ "Input", input, nil ] unless input.nil? || input == {} || input == "" %>
+    <% debug_rows << [ "Result", @latest_run_detail["result"], nil ] unless @latest_run_detail["result"].nil? %>
+    <% debug_rows << [ "Failure", @latest_run_detail["failure"], @latest_run_detail["run_id"] ] unless @latest_run_detail["failure"].nil? %>
+  <% end %>
+  <% if @latest_failure_detail.present? && @latest_failure_detail["failure"].present? %>
+    <% debug_rows << [ "Last failure", @latest_failure_detail["failure"], @latest_failure_detail["run_id"] ] %>
+  <% end %>
+  <% if debug_rows.any? %>
+    <section class="mb-8">
+      <h2 class="mb-3 text-xs font-semibold uppercase tracking-wider text-zinc-500">Debugging</h2>
+      <dl class="console-panel divide-y divide-ink-700">
+        <% debug_rows.each do |label, value, run_id| %>
+          <div class="flex flex-col gap-1 px-5 py-3 sm:flex-row sm:gap-4">
+            <dt class="w-48 shrink-0 text-xs uppercase tracking-wider <%= label.include?("ailure") ? "text-red-400" : "text-zinc-500" %>"><%= label %></dt>
+            <dd class="min-w-0 flex-1 text-xs text-zinc-200">
+              <% if run_id.present? %>
+                <div class="mb-1 text-zinc-500">run <%= run_id %></div>
+              <% end %>
+              <pre class="max-h-64 overflow-auto rounded bg-ink-900/80 p-3 leading-5"><%= workflow_debug_json(value) %></pre>
+            </dd>
+          </div>
+        <% end %>
+      </dl>
+    </section>
+  <% end %>
+
+  <h2 class="mb-3 text-xs font-semibold uppercase tracking-wider text-zinc-500">Historical Runs</h2>
+
+  <%# Filter tabs. Changing a filter resets to page 1; the pager keeps filters. %>
+  <% filter_url = ->(status: @status, queue: @queue) {
+       query = { status: status, queue: queue }.compact
+       query.empty? ? request.path : "#{request.path}?#{query.to_query}"
+     } %>
+  <% status_order = %w[running pending sleeping completed failed cancelled] %>
+  <% status_tabs = (status_order & @status_counts.keys) + (@status_counts.keys - status_order).sort %>
+  <div class="mb-3 flex flex-wrap items-center gap-1.5">
+    <%= link_to filter_url.call(status: nil), class: "chip #{'chip-on' if @status.blank?}" do %>
+      all <span class="ml-1 text-zinc-500"><%= number_with_delimiter(@total_runs) %></span>
+    <% end %>
+    <% status_tabs.each do |status_tab| %>
+      <%= link_to filter_url.call(status: status_tab), class: "chip #{'chip-on' if @status == status_tab}" do %>
+        <%= status_tab.tr("_", " ") %> <span class="ml-1 text-zinc-500"><%= number_with_delimiter(@status_counts[status_tab]) %></span>
+      <% end %>
+    <% end %>
+  </div>
+
+  <% if @queue_names.size > 1 %>
+    <div class="mb-3 flex flex-wrap items-center gap-1.5">
+      <span class="mr-1 text-xs uppercase tracking-wider text-zinc-500">Queue</span>
+      <%= link_to "all", filter_url.call(queue: nil), class: "chip #{'chip-on' if @queue.blank?}" %>
+      <% @queue_names.each do |queue_name| %>
+        <%= link_to CentaurWorkflowRun.queue_label_for(queue_name),
+                    filter_url.call(queue: queue_name),
+                    class: "chip #{'chip-on' if @queue == queue_name}" %>
+      <% end %>
+    </div>
+  <% end %>
+
+  <section class="console-scroll-panel">
+    <table class="console-table">
+      <thead class="console-table-head">
+        <tr>
+          <th class="console-th">Status</th>
+          <th class="console-th">Queue</th>
+          <th class="console-th">Attempts</th>
+          <th class="console-th">Started</th>
+          <th class="console-th">Finished</th>
+          <th class="console-th">Run</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-ink-700">
+        <% if @workflow_runs.empty? %>
+          <tr>
+            <td colspan="6" class="px-5 py-10 text-center text-zinc-600">
+              No runs match the selected filters.
+            </td>
+          </tr>
+        <% end %>
+
+        <% @workflow_runs.each do |run| %>
+          <% run_status = run.display_status %>
+          <tr class="console-row-hover align-top">
+            <td class="console-td-nowrap">
+              <span class="inline-flex rounded border px-2 py-0.5 text-xs font-medium <%= workflow_status_classes(run_status) %>">
+                <%= run_status.tr("_", " ") %>
+              </span>
+            </td>
+
+            <td class="console-td-nowrap text-xs text-zinc-400">
+              <%= run.queue_label %>
+            </td>
+
+            <td class="console-td-nowrap text-xs text-zinc-400">
+              <%= run.attempts || 0 %><span class="text-zinc-600"> / <%= run.max_attempts.presence || "unlimited" %></span>
+            </td>
+
+            <td class="console-td-nowrap text-xs text-zinc-400">
+              <%= local_time(run.started_or_created_at, relative: true) %>
+              <% if run.created_at.present? && run.started_or_created_at != run.created_at %>
+                <div class="mt-1 text-zinc-600">queued <%= local_time(run.created_at, relative: true, format: :compact) %></div>
+              <% end %>
+            </td>
+
+            <td class="console-td-nowrap text-xs text-zinc-400">
+              <%= local_time(run.terminal_at, relative: true) %>
+            </td>
+
+            <td class="console-td text-xs text-zinc-500">
+              <div title="<%= run.run_id %>"><%= truncate_middle(run.run_id, max: 34) %></div>
+              <div class="mt-1 text-zinc-600" title="<%= run.task_id %>"><%= truncate_middle(run.task_id, max: 34) %></div>
+            </td>
+          </tr>
+        <% end %>
+      </tbody>
+    </table>
+
+    <%= render "pagination",
+               page: @page,
+               total_pages: @total_pages,
+               total_count: @filtered_count.to_i,
+               unit: "run" %>
+  </section>
+<% end %>

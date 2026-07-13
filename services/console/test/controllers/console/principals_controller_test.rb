@@ -30,6 +30,12 @@ module Console
     end
 
     test "create persists a principal and redirects to its detail page" do
+      system_settings(:default).update!(
+        default_sandbox_repo_cache: "public",
+        default_sandbox_observability_enabled: false,
+        default_sandbox_api_server_enabled: false
+      )
+
       assert_difference -> { Principal.count }, 1 do
         post console_create_principal_url,
              params: {
@@ -45,7 +51,17 @@ module Console
       assert_redirected_to console_principal_path(principal.oid)
       assert_equal "Principal created.", flash[:notice]
       assert_equal "New console principal", principal.name
-      assert_equal({ "kind" => "slack_channel", "team" => "platform" }, principal.labels)
+      assert_equal(
+        {
+          "kind" => "slack_channel",
+          "team" => "platform",
+          Principal::SANDBOX_REPO_CACHE_LABEL => "public"
+        },
+        principal.labels
+      )
+      assert_equal "public", principal.sandbox_repo_cache
+      assert_equal false, principal.sandbox_observability_enabled
+      assert_equal false, principal.sandbox_api_server_enabled
       assert_equal @operator, principal.created_by
     end
 
@@ -69,7 +85,7 @@ module Console
 
       patch console_principal_sandbox_access_url(principal.oid),
             params: {
-              sandbox_repo_cache_enabled: "0",
+              sandbox_repo_cache: "public",
               sandbox_observability_enabled: "0",
               sandbox_api_server_enabled: "0"
             }
@@ -77,9 +93,88 @@ module Console
       assert_redirected_to console_principal_path(principal.oid)
       assert_equal "Updated sandbox access.", flash[:notice]
       principal.reload
-      assert_equal false, principal.sandbox_repo_cache_enabled
+      assert_equal "public", principal.sandbox_repo_cache
+      assert_equal "public", principal.labels[Principal::SANDBOX_REPO_CACHE_LABEL]
       assert_equal false, principal.sandbox_observability_enabled
       assert_equal false, principal.sandbox_api_server_enabled
+    end
+
+    test "update_slack_channel_permissions stores selected Slack channel permissions" do
+      principal = principals(:acme_user_bob)
+
+      patch console_principal_slack_channel_permissions_url(principal.oid),
+            params: {
+              principal: {
+                slack_channel_permissions_attributes: {
+                  "0" => {
+                    channel_id: "C0123456789",
+                    upload_enabled: "1",
+                    download_enabled: "0",
+                    history_enabled: "1"
+                  },
+                  "1" => {
+                    channel_id: "G9876543210",
+                    upload_enabled: "0",
+                    download_enabled: "1",
+                    history_enabled: "0"
+                  }
+                }
+              }
+            }
+
+      assert_redirected_to console_principal_path(principal.oid)
+      assert_equal(
+        [
+          {
+            "channel_id" => "C0123456789",
+            "channel_name" => nil,
+            "upload_enabled" => true,
+            "download_enabled" => false,
+            "history_enabled" => true
+          },
+          {
+            "channel_id" => "G9876543210",
+            "channel_name" => nil,
+            "upload_enabled" => false,
+            "download_enabled" => true,
+            "history_enabled" => false
+          }
+        ],
+        principal.reload.slack_channel_permissions_payload
+      )
+    end
+
+    test "update_slack_channel_permissions clears stale channel names when changing channels" do
+      principal = principals(:acme_user_bob)
+      permission = SlackChannelPermission.create!(
+        principal: principal,
+        channel_id: "C0123456789",
+        channel_name: "old-channel",
+        upload_enabled: true,
+        download_enabled: true,
+        history_enabled: true
+      )
+
+      patch console_principal_slack_channel_permissions_url(principal.oid),
+            params: {
+              principal: {
+                slack_channel_permissions_attributes: {
+                  "0" => {
+                    id: permission.id,
+                    channel_id: "G9876543210",
+                    channel_name: "",
+                    upload_enabled: "1",
+                    download_enabled: "1",
+                    history_enabled: "1"
+                  }
+                }
+              }
+            }
+
+      assert_redirected_to console_principal_path(principal.oid)
+      permission.reload
+      assert_equal "G9876543210", permission.channel_id
+      assert_nil permission.channel_name
     end
 
     test "destroy deletes the principal and dependent access records" do

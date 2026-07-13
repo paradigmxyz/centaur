@@ -8,8 +8,10 @@ class UserIdentity < ApplicationRecord
   belongs_to :user
 
   PROVIDERS = %w[google slack].freeze
+  SLACK_PROVIDER = "slack".freeze
 
   normalizes :email, with: ->(e) { e.to_s.strip.downcase.presence }
+  normalizes :team_id, with: ->(id) { id.to_s.strip.presence }
 
   validates :provider, presence: true, inclusion: { in: PROVIDERS }
   validates :subject, presence: true, uniqueness: { scope: :provider }

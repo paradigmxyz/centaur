@@ -1,4 +1,4 @@
-model = "gpt-5.5"
+model = "gpt-5.6-sol"
 model_reasoning_effort = "low"
 personality = "pragmatic"
 model_verbosity = "low"
@@ -28,6 +28,23 @@ view_image = true
 name = "OpenRouter"
 base_url = "https://openrouter.ai/api/v1"
 env_key = "OPENROUTER_API_KEY"
+wire_api = "responses"
+requires_openai_auth = false
+
+[model_providers.responses]
+# The name "azure" is load-bearing, not cosmetic: codex strips the `id` field
+# from Responses input items (`#[serde(skip_serializing)]` on ResponseItem ids)
+# and only re-attaches them via `attach_item_ids` when
+# `is_azure_responses_provider(name, base_url)` matches — i.e. name == "azure"
+# or an Azure base URL. Meta's Responses endpoint, like Azure's, rejects
+# replayed history items without ids (`input[N] missing required field id`),
+# so long --meta turns fail once the model round-trips its own prior
+# reasoning/tool items. Rename back to a display name once we're on
+# codex >= 0.142.0 with `[features] item_ids = true`, which preserves ids for
+# all Responses providers.
+name = "azure"
+base_url = "https://api.ai.meta.com/v1"
+env_key = "META_AI_API_KEY"
 wire_api = "responses"
 requires_openai_auth = false
 

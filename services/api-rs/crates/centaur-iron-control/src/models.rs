@@ -475,11 +475,20 @@ pub struct Principal {
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
     #[serde(default = "default_true")]
-    pub sandbox_repo_cache_enabled: bool,
-    #[serde(default = "default_true")]
     pub sandbox_observability_enabled: bool,
     #[serde(default = "default_true")]
     pub sandbox_api_server_enabled: bool,
+}
+
+/// Request body for creating/updating one Slack permission row on a principal.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SlackChannelPermissionInput {
+    pub channel_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_name: Option<String>,
+    pub upload_enabled: bool,
+    pub download_enabled: bool,
+    pub history_enabled: bool,
 }
 
 /// A principal's effective config — the same secrets/postgres the principal's
@@ -699,7 +708,7 @@ pub struct Proxy {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_gcp_id_token_header;
+    use super::{SlackChannelPermissionInput, normalize_gcp_id_token_header};
 
     #[test]
     fn normalizes_supported_gcp_id_token_headers() {
@@ -712,5 +721,21 @@ mod tests {
             Some("x-serverless-authorization")
         );
         assert_eq!(normalize_gcp_id_token_header("x-other"), None);
+    }
+
+    #[test]
+    fn slack_channel_permission_serializes_false_values() {
+        let value = serde_json::to_value(SlackChannelPermissionInput {
+            channel_id: "C0123456789".to_owned(),
+            channel_name: None,
+            upload_enabled: false,
+            download_enabled: true,
+            history_enabled: false,
+        })
+        .unwrap();
+
+        assert_eq!(value["upload_enabled"], false);
+        assert_eq!(value["download_enabled"], true);
+        assert_eq!(value["history_enabled"], false);
     }
 }

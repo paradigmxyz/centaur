@@ -81,7 +81,7 @@ async def _count_or_delete(
 
 
 async def prune_slack_etl(pool, *, retention_days: int, dry_run: bool = False) -> dict[str, int]:
-    """Delete public Slack ETL rows older than the configured retention window."""
+    """Delete Slack ETL rows older than the configured retention window."""
     if retention_days <= 0:
         return {
             "company_context_documents": 0,

@@ -40,6 +40,7 @@ const DEFAULT_MATCH_HEADERS: &[&str] = &[
 #[derive(Clone, Debug, Default)]
 pub struct ToolDiscoveryConfig {
     pub tool_dirs: Option<String>,
+    pub public_tool_dirs: Option<String>,
     pub tools_path: Option<PathBuf>,
     pub tools_overlay_path: Option<PathBuf>,
     pub plugins_dir: Option<PathBuf>,
@@ -124,6 +125,14 @@ impl ToolDiscoveryConfig {
                 .unwrap_or_else(|| PathBuf::from("."))
         });
         Ok(vec![root.join("tools")])
+    }
+
+    pub fn resolve_public_tool_dirs(&self) -> Vec<PathBuf> {
+        self.public_tool_dirs
+            .as_deref()
+            .and_then(|value| clean_optional_str(Some(value)))
+            .map(|value| split_tool_dirs(&value))
+            .unwrap_or_default()
     }
 }
 
@@ -1568,6 +1577,22 @@ mod tests {
         assert_eq!(
             config.resolve_tool_dirs().unwrap(),
             vec![PathBuf::from("/base"), PathBuf::from("/overlay")]
+        );
+    }
+
+    #[test]
+    fn resolves_public_tool_dirs_from_explicit_env_string() {
+        let config = ToolDiscoveryConfig {
+            public_tool_dirs: Some("/public-base:/public-overlay".to_owned()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            config.resolve_public_tool_dirs(),
+            vec![
+                PathBuf::from("/public-base"),
+                PathBuf::from("/public-overlay")
+            ]
         );
     }
 

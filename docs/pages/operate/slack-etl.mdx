@@ -12,7 +12,7 @@ token, channel scope, exclusion patterns, and data boundary they want agents to
 use.
 :::
 
-Slack ETL keeps an indexed, queryable copy of public Slack history in Postgres
+Slack ETL keeps an indexed, queryable copy of Slack channel history in Postgres
 for agent context and operator workflows. It runs as scheduled Centaur
 workflows: one workflow keeps recent channel history fresh, one drains deferred
 historical backfill work, and one turns synced messages into company context
@@ -27,7 +27,7 @@ token and writes durable rows into Postgres.
 
 | Workflow | Default cadence | Role |
 |----------|-----------------|------|
-| `slack_sync` | 1 hour | Lists public channels, refreshes users, syncs recent root messages, advances per-channel checkpoints, and enqueues backfill jobs. |
+| `slack_sync` | 1 hour | Lists channels, refreshes users, syncs recent root messages, advances per-channel checkpoints, and enqueues backfill jobs. |
 | `slack_backfill` | 10 minutes | Claims queued backfill jobs and drains Slack cursors without slowing the incremental sync. |
 | `company_context_documents` | 4 hours | Projects changed Slack rows into `company_context_documents` for retrieval. |
 
@@ -46,15 +46,17 @@ The token must be able to call:
 
 | Slack API | Used for |
 |-----------|----------|
-| `conversations.list` | Discover public channels. |
+| `conversations.list` | Discover public channels, and private channels when explicitly enabled. |
 | `conversations.history` | Read channel root messages. |
 | `conversations.replies` | Refresh thread replies. |
 | `users.list` | Resolve Slack user metadata for documents. |
 | `files:read` / file URL access | Download message attachment bytes from `files.slack.com`. |
 
-Slack ETL currently syncs public channels visible to the configured ETL user
-token. It does not sync private channels, DMs, or Slackbot-only live thread
-events.
+Slack ETL syncs public channels visible to the configured ETL user token.
+Set `SLACK_SYNC_INDEX_PRIVATE_CHANNELS=true` to also sync private channels
+visible to that token. It does not sync DMs or Slackbot-only live thread events.
+Private channel rows are protected by RLS: `centaur_readonly` sees public
+channel data and the channel in `centaur.slack_channel_id`.
 
 ## Enable the schedules
 
@@ -80,15 +82,17 @@ apiRs:
 | `SLACK_BACKFILL_CHANNEL_PAGES_PER_JOB` | `5` | Maximum Slack history pages drained before a job is requeued. |
 | `SLACK_SYNC_BACKFILL_LOOKBACK_DAYS` | `30` | Historical window seeded for first-time channel backfills. |
 | `SLACK_SYNC_THREAD_LOOKBACK_DAYS` | `3` | Recent thread window eligible for reply refresh. |
+| `SLACK_SYNC_INDEX_PRIVATE_CHANNELS` | `false` | Includes private channels visible to the ETL token in Slack sync and backfill. |
 | `SLACK_ETL_ATTACHMENTS_ENABLED` | `true` | Download Slack message attachment bytes into Postgres. Metadata rows are still written when downloads are disabled. |
 | `SLACK_ETL_ATTACHMENT_MAX_BYTES` | `10485760` | Per-file byte cap for Slack attachment downloads. Oversized files keep metadata with `skipped_too_large` status. |
 | `SLACK_ETL_EXCLUDED_CHANNEL_PATTERNS` | empty | Comma-separated channel-name globs to skip, without needing the leading `#`. |
 | `SLACK_RETENTION_ENABLED` | `true` | Allows the `slack_retention` schedule to run when at least one Slack retention TTL is positive. |
 | `SLACK_RETENTION_INTERVAL_MINUTES` | `60` | How often to prune Slack retention-managed rows. |
-| `SLACK_ETL_RETENTION_DAYS` | `0` | Deletes public Slack ETL messages, derived Slack documents, and terminal ETL run/job rows older than this many days. `0` disables public ETL retention. |
+| `SLACK_ETL_RETENTION_DAYS` | `0` | Deletes Slack ETL messages, derived Slack documents, and terminal ETL run/job rows older than this many days. `0` disables ETL retention. |
 | `SLACK_DM_RETENTION_DAYS` | `0` | Deletes Slack DM messages, stale empty DM conversations, and terminal DM run/job rows older than this many days. `0` disables DM retention. |
 | `COMPANY_CONTEXT_DOCUMENTS_ENABLED` | `true` | Enables projection from Slack sync rows into company context documents. |
 | `COMPANY_CONTEXT_DOCUMENTS_INTERVAL_SECONDS` | `14400` | How often to project changed Slack rows into documents. |
+| `COMPANY_CONTEXT_DOCUMENTS_MAX_WINDOW_SECONDS` | `21600` | Maximum source `updated_at` window projected by one company context documents run. |
 
 Example exclusion list:
 
@@ -102,7 +106,7 @@ Slack ETL writes normalized Slack data into dedicated tables:
 
 | Table | Contents |
 |-------|----------|
-| `slack_sync_channels` | Public channels visible to the ETL token and whether they are currently syncable. |
+| `slack_sync_channels` | Channels visible to the ETL token, channel privacy, and whether they are currently syncable. |
 | `slack_sync_users` | Slack user display metadata used when rendering documents. |
 | `slack_sync_runs` | One row per incremental or backfill workflow run, with counts and channel outcomes. |
 | `slack_sync_messages` | Root messages and replies keyed by `(channel_id, message_ts)`. |
@@ -254,7 +258,7 @@ setting alerts.
 |---------|---------------|
 | Schedules are missing | Confirm `WORKFLOW_DIRS` includes `/app/workflows` and the API restarted after the workflow files were deployed. |
 | Schedules exist but are disabled | Confirm Helm values set `apiRs.etl.slack.enabled=true` and the API pod was restarted. |
-| `slack_sync` skips with `no_public_channels` | Confirm the ETL user token can see the expected public channels. |
+| `slack_sync` skips with `no_channels` | Confirm the ETL user token can see the expected public channels, or enable private channel sync when only private channels are in scope. |
 | Channels are all skipped | Check `SLACK_ETL_EXCLUDED_CHANNEL_PATTERNS` for broad globs. |
 | Checkpoints show `missing_scope` or `not_allowed_token_type` | Add the missing Slack OAuth scope or use the expected user-token class. |
 | Backfill jobs keep failing | Inspect `slack_sync_backfill_jobs.last_error` and the corresponding `slack_sync_runs` row. |

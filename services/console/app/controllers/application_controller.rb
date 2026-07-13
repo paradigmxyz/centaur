@@ -9,7 +9,7 @@ class ApplicationController < ActionController::Base
   # controllers don't each hand-roll a rescue. Mirrors Api::BaseController.
   rescue_from ActiveRecord::RecordNotFound, with: :render_not_found
 
-  helper_method :current_user
+  helper_method :current_user, :acting_admin?, :descoped?
   helper_method :public_base_url, :oauth_callback_redirect_uri
 
   # The public origin the console is reached at. Derived from the request by
@@ -65,6 +65,24 @@ class ApplicationController < ActionController::Base
     @current_user ||= User.find_by(id: session[:user_id]) if session[:user_id]
   end
 
+  # Whether this admin has temporarily descoped themselves to operator
+  # permissions ("view as operator"). Self-healing: the flag is dropped if the
+  # user is no longer an admin, so it can never outlive the privileges it pauses.
+  def descoped?
+    return false unless session[:descoped]
+    return true if current_user&.admin?
+
+    session.delete(:descoped)
+    false
+  end
+
+  # The permission check console gates use instead of current_user.admin?: a
+  # real admin who is not currently descoped. Keeping current_user untouched
+  # means audit trails and data displays still see the true account.
+  def acting_admin?
+    current_user&.admin? && !descoped?
+  end
+
   # before_action gate for console pages: bounce anonymous requests to the login
   # form rather than rendering the page.
   def require_login
@@ -84,16 +102,17 @@ class ApplicationController < ActionController::Base
   end
 
   # Guard for admin-only controllers (the Control and Data Sync sections, user
-  # management). Not a global gate. Bounces to the threads view rather than root:
-  # root is the admin-only principals page, so redirecting there would loop.
+  # management). Not a global gate. Bounces non-admins to their only available
+  # section. Keep this redirect silent: direct/admin-default URLs are not
+  # actionable errors for non-admin operators, especially on a fresh visit.
   def require_admin
-    redirect_to console_threads_path, alert: "That page is restricted to admins." unless current_user&.admin?
+    redirect_to console_threads_path unless acting_admin?
   end
 
   # Where a signed-in user lands when no explicit destination applies: admins get
   # the Control section, everyone else the threads view (their only section).
   def default_console_landing_path
-    current_user&.admin? ? console_principals_path : console_threads_path
+    acting_admin? ? console_principals_path : console_threads_path
   end
 
   # Cheap default so every page renders the empty sidebar list without touching

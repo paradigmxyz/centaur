@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_07_02_000000) do
+ActiveRecord::Schema[8.1].define(version: 2026_07_11_190035) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -312,7 +312,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_02_000000) do
     t.string "namespace", default: "default", null: false
     t.boolean "sandbox_api_server_enabled", default: true, null: false
     t.boolean "sandbox_observability_enabled", default: true, null: false
-    t.boolean "sandbox_repo_cache_enabled", default: true, null: false
+    t.string "sandbox_repo_cache", default: "all", null: false
     t.bigint "sync_config_cache_version", default: 0, null: false
     t.datetime "updated_at", null: false
     t.index ["created_by_id"], name: "index_principals_on_created_by_id"
@@ -395,6 +395,19 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_02_000000) do
     t.index ["static_secret_id"], name: "index_secret_sources_on_static_secret_id", unique: true
   end
 
+  create_table "slack_channel_permissions", force: :cascade do |t|
+    t.string "channel_id", null: false
+    t.string "channel_name"
+    t.datetime "created_at", null: false
+    t.boolean "download_enabled", default: false, null: false
+    t.boolean "history_enabled", default: false, null: false
+    t.bigint "principal_id", null: false
+    t.datetime "updated_at", null: false
+    t.boolean "upload_enabled", default: false, null: false
+    t.index ["principal_id", "channel_id"], name: "index_slack_channel_permissions_on_principal_id_and_channel_id", unique: true
+    t.index ["principal_id"], name: "index_slack_channel_permissions_on_principal_id"
+  end
+
   create_table "static_secrets", force: :cascade do |t|
     t.bigint "broker_credential_id"
     t.datetime "created_at", null: false
@@ -413,12 +426,23 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_02_000000) do
     t.index ["namespace", "foreign_id"], name: "index_static_secrets_on_namespace_and_foreign_id", unique: true
   end
 
+  create_table "system_settings", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.boolean "default_sandbox_api_server_enabled", default: true, null: false
+    t.boolean "default_sandbox_observability_enabled", default: true, null: false
+    t.string "default_sandbox_repo_cache", default: "all", null: false
+    t.boolean "singleton", default: true, null: false
+    t.datetime "updated_at", null: false
+    t.index ["singleton"], name: "index_system_settings_on_singleton", unique: true
+  end
+
   create_table "user_identities", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.string "email"
     t.boolean "email_verified", default: false, null: false
     t.string "provider", null: false
     t.string "subject", null: false
+    t.string "team_id"
     t.datetime "updated_at", null: false
     t.bigint "user_id", null: false
     t.index ["provider", "subject"], name: "index_user_identities_on_provider_and_subject", unique: true
@@ -484,6 +508,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_02_000000) do
   add_foreign_key "secret_sources", "oauth_token_secrets"
   add_foreign_key "secret_sources", "pg_dsn_secrets"
   add_foreign_key "secret_sources", "static_secrets"
+  add_foreign_key "slack_channel_permissions", "principals"
   add_foreign_key "static_secrets", "broker_credentials"
   add_foreign_key "static_secrets", "users", column: "created_by_id"
   add_foreign_key "user_identities", "users"

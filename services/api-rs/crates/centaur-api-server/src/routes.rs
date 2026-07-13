@@ -54,7 +54,9 @@ use uuid::Uuid;
 
 use crate::{
     ApiError,
+    api_jwt::{bearer_jwt_from_headers, decode_jwt_payload, verify_console_jwt},
     mcp::{mcp_get, mcp_post, mcp_protected_resource_metadata},
+    slack_proxy::slack_proxy_router,
     types::{
         AppendMessagesRequest, AppendMessagesResponse, CreateSessionRequest, CreateSessionResponse,
         EmitWorkflowEventRequest, EventsQuery, ExecuteSessionRequest, ExecuteSessionResponse,
@@ -226,6 +228,7 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         )
         .route("/api/session/{thread_key}/events", get(stream_events))
         .route("/api/sandboxes/drain", post(drain_sandboxes))
+        .merge(slack_proxy_router())
         .route("/api/workflows/schedules", get(list_workflow_schedules))
         .route(
             "/api/workflows/runs",
@@ -334,8 +337,30 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn healthz() -> Json<Value> {
-    Json(json!({"ok": true}))
+async fn healthz(headers: HeaderMap) -> Json<Value> {
+    let mut body = json!({"ok": true});
+    if let Some(token) = bearer_jwt_from_headers(&headers) {
+        body["slack_client_jwt"] = match decode_jwt_payload(token) {
+            Ok(claims) => {
+                let mut jwt = json!({ "claims": claims });
+                match verify_console_jwt::<Value>(token) {
+                    Ok(_) => {
+                        jwt["valid"] = json!(true);
+                    }
+                    Err(error) => {
+                        jwt["valid"] = json!(false);
+                        jwt["error"] = json!(error.to_string());
+                    }
+                }
+                jwt
+            }
+            Err(error) => json!({
+                "valid": false,
+                "error": error,
+            }),
+        };
+    }
+    Json(body)
 }
 
 async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
@@ -2329,14 +2354,14 @@ fn slack_archive_upload_config() -> Result<SlackArchiveUploadConfig, ApiError> {
     })
 }
 
-fn non_empty_env(name: &str) -> Option<String> {
+pub(crate) fn non_empty_env(name: &str) -> Option<String> {
     env::var(name)
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
 }
 
-fn positive_env_u64(name: &str, default: u64) -> u64 {
+pub(crate) fn positive_env_u64(name: &str, default: u64) -> u64 {
     env::var(name)
         .ok()
         .and_then(|value| value.parse::<u64>().ok())

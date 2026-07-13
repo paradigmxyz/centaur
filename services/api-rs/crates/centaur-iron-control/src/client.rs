@@ -16,7 +16,7 @@ use crate::models::{
     AwsAuthSecretInput, BrokerCredentialInput, BrokerCredentialRecord, DataEnvelope,
     EffectiveConfig, GcpAuthSecretInput, GcpIdTokenSecretInput, Grant, GrantSecret, Grantee,
     HmacSecretInput, IdentityInput, OAuthTokenSecretInput, PgDsnSecretInput, Principal, Proxy,
-    ProxyInput, Role, SecretRecord, StaticSecretInput,
+    ProxyInput, Role, SecretRecord, SlackChannelPermissionInput, StaticSecretInput,
 };
 
 const API_PREFIX: &str = "/api/v1";
@@ -177,6 +177,20 @@ impl IronControlClient {
         );
         self.write_unit(Method::POST, &path, &json!({ "role_id": role_id }))
             .await
+    }
+
+    /// Create or update one Slack channel permission row on a principal without
+    /// replacing that principal's other Slack permissions.
+    pub async fn upsert_slack_channel_permission(
+        &self,
+        principal_id: &str,
+        input: &SlackChannelPermissionInput,
+    ) -> Result<()> {
+        let path = format!(
+            "{API_PREFIX}/principals/{}/slack_channel_permissions",
+            urlencoding::encode(principal_id)
+        );
+        self.write_unit(Method::POST, &path, input).await
     }
 
     /// List the roles assigned to a principal (by OID; this sub-resource route

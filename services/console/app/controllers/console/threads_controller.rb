@@ -1,6 +1,9 @@
 class Console::ThreadsController < ApplicationController
   layout "console"
 
+  # Injectable for tests, mirroring Console::WorkflowsController.
+  class_attribute :client_factory, default: -> { CentaurApiClient.new }
+
   THREAD_LIMIT = 250
   MESSAGE_LIMIT = 80
   EXECUTION_LIMIT = 8
@@ -59,8 +62,6 @@ class Console::ThreadsController < ApplicationController
   CONSOLE_THREAD_OWNER_METADATA_KEYS = %w[actor_email user_email].freeze
   SLACK_USER_ID_PATTERN = /\A[UW][A-Z0-9]+\z/.freeze
   SLACK_MENTION_PATTERN = /<@([UW][A-Z0-9]+)(?:\|([^>]+))?>|@([UW][A-Z0-9]+)/.freeze
-  READ_ONLY_REASON =
-    "Chats are read-only while browsing a mirrored production snapshot.".freeze
   # Deploy-time default-model overrides: the same env vars deployers set in
   # sandbox.extraEnv to change the harness model, mirrored onto the Console by
   # the chart. Amp has no fixed default model, so it is intentionally absent.
@@ -80,6 +81,46 @@ class Console::ThreadsController < ApplicationController
 
   SlackThreadOwner = Struct.new(:user_id, :team_id, keyword_init: true)
 
+  # Pseudo thread key that opens a new-chat composer pane in the split view.
+  NEW_PANE_KEY = "new".freeze
+
+  # The composer's model selector, in display order. Each entry pins the
+  # harness the choice runs on (wire values match api-rs's HarnessType enum,
+  # serde lowercase); the model ids are the ones the bots' --model flags
+  # expand to (services/slackbotv2/src/overrides.ts). Amp appears as a plain
+  # entry with no model: it picks its own model per turn. `efforts` are the
+  # per-turn reasoning efforts the harness accepts for the model (codex only —
+  # harness-server discards `reasoning` for claude/amp; enum per
+  # crates/harness-server/src/codex.rs, `max` being 5.6-specific).
+  ComposerAgent = Struct.new(:value, :label, :harness, :model, :efforts, keyword_init: true)
+  CODEX_EFFORTS = [
+    %w[minimal Minimal],
+    %w[low Low],
+    %w[medium Medium],
+    %w[high High],
+    [ "xhigh", "Extra High" ]
+  ].freeze
+  # First entry doubles as the default pick (unless the deploy's default-model
+  # resolution for its harness names another listed model).
+  COMPOSER_AGENTS = [
+    ComposerAgent.new(value: "gpt-5.6-sol", label: "GPT-5.6 Sol",
+                      harness: "codex", model: "gpt-5.6-sol",
+                      efforts: CODEX_EFFORTS + [ %w[max Max] ]),
+    ComposerAgent.new(value: "gpt-5.5", label: "GPT-5.5",
+                      harness: "codex", model: "gpt-5.5",
+                      efforts: CODEX_EFFORTS),
+    ComposerAgent.new(value: "claude-opus-4-8", label: "Claude Opus 4.8",
+                      harness: "claudecode", model: "claude-opus-4-8", efforts: []),
+    ComposerAgent.new(value: "claude-sonnet-4-6", label: "Claude Sonnet 4.6",
+                      harness: "claudecode", model: "claude-sonnet-4-6", efforts: []),
+    ComposerAgent.new(value: "claude-haiku-4-5", label: "Claude Haiku 4.5",
+                      harness: "claudecode", model: "claude-haiku-4-5", efforts: []),
+    ComposerAgent.new(value: "claude-fable-5", label: "Claude Fable 5",
+                      harness: "claudecode", model: "claude-fable-5", efforts: []),
+    ComposerAgent.new(value: "amp", label: "Amp",
+                      harness: "amp", model: nil, efforts: [])
+  ].freeze
+
   helper_method :thread_title,
                 :thread_source_icon,
                 :thread_source_label,
@@ -88,14 +129,23 @@ class Console::ThreadsController < ApplicationController
                 :thread_user_label,
                 :thread_message_text,
                 :thread_text_preview,
-                :thread_status_classes
+                :thread_status_classes,
+                :composer_agent_choices,
+                :composer_default_agent_value,
+                :composer_agents_json,
+                :thread_execution_active?
 
   def index
     @query = params[:q].to_s.strip
     requested_keys = requested_thread_keys
-    @selected_thread_key = requested_keys.first.to_s
-    @pane_thread_keys = requested_keys.drop(1)
-    @starting_new_thread = params[:new].present?
+    # "new" is a sentinel pane key: Cmd-clicking the sidebar's New chat adds a
+    # composer pane to the split view the same way thread keys add threads. On
+    # its own it is just the full-page new-chat screen.
+    @new_chat_pane_index = requested_keys.index(NEW_PANE_KEY) if requested_keys.size > 1
+    thread_keys = requested_keys - [ NEW_PANE_KEY ]
+    @selected_thread_key = thread_keys.first.to_s
+    @pane_thread_keys = thread_keys.drop(1)
+    @starting_new_thread = params[:new].present? || requested_keys == [ NEW_PANE_KEY ]
     @thread_db_unavailable = false
     @thread_not_found = false
 
@@ -111,11 +161,23 @@ class Console::ThreadsController < ApplicationController
     @thread_db_unavailable = true
   end
 
+  # Composer submit: no thread_key starts a new chat (create session + first
+  # message + execute), a thread_key sends a follow-up into an existing chat.
+  # Both paths talk to api-rs through CentaurApiClient; the transcript itself
+  # is still read from the sessions DB by #index after the redirect.
   def create
-    redirect_to(
-      console_threads_path(thread: params[:thread_key].presence),
-      alert: READ_ONLY_REASON
-    )
+    thread_key = params[:thread_key].to_s.strip.presence
+
+    prompt = params[:prompt].to_s.strip
+    if prompt.blank?
+      redirect_to(
+        thread_key ? console_threads_path(thread: reply_redirect_keys(thread_key)) : console_threads_path(new: 1),
+        alert: "Type a message first."
+      )
+      return
+    end
+
+    thread_key ? reply_to_thread(thread_key, prompt) : start_thread(prompt)
   end
 
   # Lazily-loaded sidebar thread list, requested by the Turbo Frame in
@@ -128,6 +190,178 @@ class Console::ThreadsController < ApplicationController
   end
 
   private
+
+  def api_client
+    @api_client ||= client_factory.call
+  end
+
+  # Whether the thread's newest execution is still running — drives the
+  # transcript's thinking indicator and the while-running auto-refresh.
+  def thread_execution_active?(thread_key)
+    execution = @latest_executions&.[](thread_key)
+    execution.present? && %w[queued running executing].include?(execution.status.to_s)
+  end
+
+  # Selector options as [label, value] pairs, the deploy's default model
+  # first (pre-checked in the menu). The default comes from the same
+  # env/config resolution the thread header uses, so the composer never
+  # claims a default the sandbox would not actually run.
+  def composer_agent_choices
+    default_value = composer_default_agent_value
+    COMPOSER_AGENTS
+      .sort_by.with_index { |agent, index| agent.value == default_value ? -1 : index }
+      .map { |agent| [ agent.label, agent.value ] }
+  end
+
+  def composer_default_agent_value
+    default = default_model_for_harness(COMPOSER_AGENTS.first.harness)
+    COMPOSER_AGENTS.find { |agent| agent.value == default }&.value ||
+      COMPOSER_AGENTS.first.value
+  end
+
+  # Per-agent metadata the picker script needs to rebuild the effort submenu
+  # when the model changes: { value => { label:, efforts: [[value, label]] } }.
+  def composer_agents_json
+    COMPOSER_AGENTS.to_h do |agent|
+      [ agent.value, { label: agent.label, efforts: agent.efforts } ]
+    end.to_json
+  end
+
+  def composer_effort_param(agent)
+    effort = params[:effort].to_s.strip
+    return nil if effort.blank?
+
+    agent.efforts.map(&:first).include?(effort) ? effort : nil
+  end
+
+  def composer_agent_for(raw)
+    value = raw.to_s.strip
+    value = composer_default_agent_value if value.blank?
+    COMPOSER_AGENTS.find { |agent| agent.value == value }
+  end
+
+  def start_thread(prompt)
+    agent = composer_agent_for(params[:model])
+    if agent.nil?
+      redirect_to console_threads_path(new: 1),
+                  alert: "Unknown model #{params[:model].to_s.inspect}."
+      return
+    end
+
+    thread_key = "console:#{SecureRandom.uuid}"
+    api_client.create_session(
+      thread_key: thread_key,
+      harness_type: agent.harness,
+      metadata: console_actor_metadata.merge(agent.model.present? ? { model: agent.model } : {})
+    )
+    send_prompt(thread_key, prompt, model: agent.model, effort: composer_effort_param(agent))
+    # A new-chat pane in a split view swaps the sentinel for the created
+    # thread so the other panes stay open.
+    open_keys = params[:open_threads].to_s.split(",").map(&:strip).reject(&:blank?)
+    redirect_keys = open_keys.include?(NEW_PANE_KEY) ?
+      open_keys.map { |key| key == NEW_PANE_KEY ? thread_key : key } : [ thread_key ]
+    redirect_to console_threads_path(thread: redirect_keys.uniq.first(PANEL_LIMIT).join(","))
+  rescue CentaurApiClient::Error => e
+    redirect_to console_threads_path(new: 1), alert: "Could not start the chat: #{e.message}"
+  end
+
+  def reply_to_thread(thread_key, prompt)
+    # Resolve through the owner scope so a crafted thread_key cannot post into
+    # another user's chat — same rule the read side applies to ?thread=.
+    session = visible_thread_scope.where(thread_key: thread_key).first
+    if session.nil?
+      redirect_to console_threads_path, alert: "Chat not found."
+      return
+    end
+
+    send_prompt(session.thread_key, prompt, model: reply_model_for(session))
+    redirect_to console_threads_path(thread: reply_redirect_keys(session.thread_key))
+  rescue CentaurApiClient::Error => e
+    redirect_to console_threads_path(thread: reply_redirect_keys(thread_key)),
+                alert: "Could not send the message: #{e.message}"
+  rescue ActiveRecord::ActiveRecordError, PG::Error => e
+    Rails.logger.warn("console_threads_reply_lookup_failed error=#{e.class}: #{e.message}")
+    redirect_to console_threads_path, alert: "Chat database is unavailable."
+  end
+
+  # Append persists the turn in conversation history; execute runs it. The
+  # shared client_message_id lets api-rs dedupe the copy of the message the
+  # harness echoes back.
+  def send_prompt(thread_key, prompt, model: nil, effort: nil)
+    message_id = SecureRandom.uuid
+
+    api_client.append_session_messages(
+      thread_key: thread_key,
+      messages: [
+        {
+          client_message_id: message_id,
+          role: "user",
+          parts: [ { type: "text", text: prompt } ],
+          metadata: console_actor_metadata
+        }
+      ]
+    )
+
+    execute_metadata = console_actor_metadata.merge(action: "execute")
+    execute_metadata[:model] = model if model.present?
+    execute_metadata[:reasoning] = effort if effort.present?
+    api_client.execute_session(
+      thread_key: thread_key,
+      idempotency_key: SecureRandom.uuid,
+      metadata: execute_metadata,
+      input_lines: [
+        composer_input_line(
+          thread_key, prompt,
+          model: model, effort: effort, client_message_id: message_id
+        )
+      ]
+    )
+  end
+
+  # One blocks-protocol user line, the shape harness-server parses from
+  # execute's input_lines. `model` is honored by every harness; omitted (e.g.
+  # for Amp) the harness runs its own default. `reasoning` is the per-turn
+  # codex effort; other harnesses discard it, and validation upstream only
+  # accepts it for codex models anyway.
+  def composer_input_line(thread_key, prompt, model:, effort:, client_message_id:)
+    line = {
+      type: "user",
+      thread_key: thread_key,
+      client_user_message_id: client_message_id,
+      trace_metadata: { action: "execute", source: "console" },
+      message: { role: "user", content: [ { type: "text", text: prompt } ] }
+    }
+    line[:model] = model if model.present?
+    line[:reasoning] = effort if effort.present?
+    line.to_json
+  end
+
+  # Follow-ups reuse the model the chat has been running on (mirrors the
+  # display resolution in thread_model_label, minus the upcasing): last
+  # execution's recorded model, session metadata, then the deploy default.
+  def reply_model_for(session)
+    recorded_model(latest_executions_for([ session.thread_key ])[session.thread_key]&.metadata) ||
+      recorded_model(session.metadata_hash) ||
+      default_model_for_harness(session.harness_type.to_s)
+  end
+
+  # Keeps split-view panes open across a composer submit: the form carries the
+  # page's full ?thread= list, and the redirect re-orders it so the posted
+  # thread stays primary. Unowned keys are filtered again by #index on render.
+  def reply_redirect_keys(thread_key)
+    open_keys = params[:open_threads].to_s.split(",").map(&:strip).reject(&:blank?)
+    ([ thread_key ] + open_keys).uniq.first(PANEL_LIMIT).join(",")
+  end
+
+  def console_actor_metadata
+    email = current_user&.email.to_s
+    {
+      platform: "console",
+      source: "console",
+      user_email: email,
+      actor_email: email
+    }
+  end
 
   def load_threads
     session_scope = visible_thread_scope
@@ -230,12 +464,23 @@ class Console::ThreadsController < ApplicationController
     sessions = ([ @selected_session ] + Array(@pane_sessions)).compact
       .uniq(&:thread_key)
       .first(PANEL_LIMIT)
-    return [] if sessions.empty?
+    panels = if sessions.empty?
+      []
+    else
+      # Build the primary panel last so the @selected_* thread state (used by
+      # the page header and mention-resolution memos) ends on the primary
+      # thread.
+      extra_panels = sessions.drop(1).map { |session| thread_panel_for(session) }
+      [ thread_panel_for(sessions.first) ] + extra_panels
+    end
 
-    # Build the primary panel last so the @selected_* thread state (used by the
-    # page header and mention-resolution memos) ends on the primary thread.
-    extra_panels = sessions.drop(1).map { |session| thread_panel_for(session) }
-    [ thread_panel_for(sessions.first) ] + extra_panels
+    if @new_chat_pane_index && panels.any?
+      panels.insert(
+        [ @new_chat_pane_index, panels.size ].min,
+        { new_chat: true, thread_key: NEW_PANE_KEY, session: nil, transcript_items: [] }
+      )
+    end
+    panels
   end
 
   def thread_panel_for(session)

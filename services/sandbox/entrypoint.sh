@@ -201,7 +201,7 @@ else:
 # config default stands) rather than written.
 effort = (os.environ.get("CODEX_MODEL_REASONING_EFFORT") or "").strip().lower()
 if effort:
-    valid = {"none", "minimal", "low", "medium", "high", "xhigh"}
+    valid = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
     if effort not in valid:
         print(
             f"ignoring invalid CODEX_MODEL_REASONING_EFFORT={effort!r}; "

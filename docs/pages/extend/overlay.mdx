@@ -48,9 +48,11 @@ overlays:
   sources:
     - repo: paradigmxyz/centaur
       ref: main
+      visibility: public
 
     - repo: your-org/centaur-overlay
       ref: main
+      visibility: private
 ```
 
 `repo` is `owner/name` on GitHub. `ref` can be a branch, tag, or commit SHA;
@@ -59,6 +61,11 @@ branch. Pinning a SHA is recommended when you need a fully reproducible
 production rollout, but many overlay repos intentionally track `main` so a
 reviewed merge is enough for new sandboxes to pick up the change after
 repo-cache refreshes.
+
+`visibility` controls which sandboxes may receive the repo-cache checkout.
+It defaults to `private`. Set `visibility: public` only for repos whose full
+contents are safe to expose to principals configured with
+`sandbox_repo_cache=public`; invalid or missing values are treated as `private`.
 
 Each source defaults to the conventional layout — `toolsSubdir: tools`,
 `workflowsSubdir: workflows`, `skillsSubdir: .agents/skills` — and directories

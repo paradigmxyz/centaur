@@ -79,10 +79,42 @@ class FakeWatermarkPool:
         self.args = args
         return {
             "completed_payload": {
-                "status": "completed",
-                "watermark": "2026-06-18T22:59:36+00:00",
+                "steps": ["python_host"],
+                "output": {
+                    "status": "completed",
+                    "watermark": "2026-06-18T22:59:36+00:00",
+                },
+                "workflow_name": "company_context_documents",
             }
         }
+
+
+class FakeChangedRowsPool:
+    def __init__(self) -> None:
+        self.fetch_calls: list[tuple[str, tuple]] = []
+        self.fetchrow_calls: list[tuple[str, tuple]] = []
+
+    async def fetch(self, query, *args):
+        self.fetch_calls.append((query, args))
+        return []
+
+    async def fetchrow(self, query, *args):
+        self.fetchrow_calls.append((query, args))
+        return {
+            "changed_messages": 0,
+            "changed_attachments": 0,
+            "max_updated_at": None,
+        }
+
+
+class FakeWorkflowContext:
+    def __init__(self) -> None:
+        self.run_id = "run_123"
+        self._pool = object()
+        self.logs: list[tuple[str, dict]] = []
+
+    def log(self, message, **fields):
+        self.logs.append((message, fields))
 
 
 def test_latest_successful_watermark_reads_absurd_etl_queue():
@@ -108,6 +140,87 @@ def test_latest_successful_watermark_reads_absurd_etl_queue():
     )
 
 
+def test_load_changed_message_keys_applies_upper_batch_bound():
+    pool = FakeChangedRowsPool()
+    since = dt.datetime(2026, 6, 18, 22, 58, 36, tzinfo=dt.UTC)
+    until = dt.datetime(2026, 6, 19, 4, 58, 36, tzinfo=dt.UTC)
+
+    result = asyncio.run(projection._load_changed_message_keys(pool, since, until))
+
+    assert result["changed_messages"] == 0
+    assert pool.fetch_calls
+    assert pool.fetchrow_calls
+    queries = [query for query, _args in (*pool.fetch_calls, *pool.fetchrow_calls)]
+    assert any("updated_at > $1" in query for query in queries)
+    assert any("updated_at <= $2" in query for query in queries)
+    assert any("a.updated_at > $1" in query for query in queries)
+    assert any("a.updated_at <= $2" in query for query in queries)
+    for _query, args in (*pool.fetch_calls, *pool.fetchrow_calls):
+        assert args == (since, until)
+
+
+def test_handler_advances_empty_bounded_window(monkeypatch):
+    last_watermark = dt.datetime(2026, 6, 18, 22, 59, 36, tzinfo=dt.UTC)
+    seen_bounds: dict[str, dt.datetime | None] = {}
+
+    async def latest_watermark(_pool, _run_id):
+        return last_watermark
+
+    async def load_slack_lookup_maps(_pool):
+        return {}, {}
+
+    async def load_changed_message_keys(_pool, since, until=None):
+        seen_bounds["since"] = since
+        seen_bounds["until"] = until
+        return {
+            "channel_days": [],
+            "threads": [],
+            "attachments": [],
+            "changed_messages": 0,
+            "changed_attachments": 0,
+            "max_updated_at": None,
+        }
+
+    async def noop_async(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setenv("SLACK_ETL_ENABLED", "true")
+    monkeypatch.setenv("GOOGLE_DRIVE_ETL_ENABLED", "false")
+    monkeypatch.setenv("GOOGLE_CALENDAR_ETL_ENABLED", "false")
+    monkeypatch.setenv("LINEAR_ETL_ENABLED", "false")
+    monkeypatch.setenv("COMPANY_CONTEXT_DOCUMENTS_ENABLED", "true")
+    monkeypatch.setattr(projection, "_latest_successful_watermark", latest_watermark)
+    monkeypatch.setattr(projection, "_load_slack_lookup_maps", load_slack_lookup_maps)
+    monkeypatch.setattr(
+        projection,
+        "_load_changed_message_keys",
+        load_changed_message_keys,
+    )
+    monkeypatch.setattr(
+        projection,
+        "_emit_company_context_document_size_snapshot",
+        noop_async,
+    )
+    monkeypatch.setattr(projection, "_emit_etl_scope_metrics", noop_async)
+
+    ctx = FakeWorkflowContext()
+    result = asyncio.run(
+        projection.handler(
+            projection.Input(max_window_seconds=3600),
+            ctx,
+        )
+    )
+
+    expected_since = dt.datetime(2026, 6, 18, 22, 58, 36, tzinfo=dt.UTC)
+    expected_until = dt.datetime(2026, 6, 18, 23, 58, 36, tzinfo=dt.UTC)
+    assert seen_bounds == {"since": expected_since, "until": expected_until}
+    assert result["changed_messages"] == 0
+    assert result["batch_until"] == expected_until.isoformat()
+    assert result["watermark"] == expected_until.isoformat()
+    assert result["remaining_lag_seconds"] is not None
+    assert ctx.logs[-1][0] == "company_context_documents_completed"
+
+
 def test_etl_scope_metrics_no_longer_emit_slack_scope_gauges(monkeypatch):
     calls: list[tuple] = []
     monkeypatch.setattr(
@@ -127,9 +240,7 @@ def test_etl_scope_metrics_no_longer_emit_slack_scope_gauges(monkeypatch):
     )
     pool = FakeScopeMetricsPool()
 
-    asyncio.run(
-        projection._emit_etl_scope_metrics(pool, ["slack", "google_drive"])
-    )
+    asyncio.run(projection._emit_etl_scope_metrics(pool, ["slack", "google_drive"]))
 
     assert len(pool.fetchrow_calls) == 1
     assert "google_drive_sync_checkpoints" in pool.fetchrow_calls[0]
@@ -188,3 +299,43 @@ def test_slack_attachment_document_indexes_metadata_without_private_url():
     assert "files-pri" not in document["body"]
     assert "url_private" not in document["metadata"]
     assert document["metadata"]["message_permalink"].endswith("p1770000000000100")
+
+
+def test_attio_meeting_document_indexes_description_and_transcript():
+    row = {
+        "meeting_id": "mtg_123",
+        "title": "Acme renewal call",
+        "description": "Customer renewal discussion.",
+        "url": "https://app.attio.com/meetings/mtg_123",
+        "linked_records": [{"target_object": "companies", "target_record_id": "rec_1"}],
+        "participants": [{"name": "Dana"}, {"email": "buyer@example.com"}],
+        "organizer_id": "mem_1",
+        "organizer_name": "Eli",
+        "organizer_email": "eli@example.com",
+        "call_recording_ids": ["rec_1"],
+        "transcript_text": "Dana: Budget approved\nEli: Next step is legal",
+        "transcript_payload": [{"text": "Budget approved"}],
+        "content_text": "",
+        "content_hash": "",
+        "started_at": dt.datetime(2026, 6, 21, 16, 0, tzinfo=dt.UTC),
+        "ended_at": dt.datetime(2026, 6, 21, 16, 30, tzinfo=dt.UTC),
+        "source_created_at": dt.datetime(2026, 6, 21, 15, 59, tzinfo=dt.UTC),
+        "source_updated_at": dt.datetime(2026, 6, 21, 16, 31, tzinfo=dt.UTC),
+        "raw_payload": {"id": {"meeting_id": "mtg_123"}},
+        "updated_at": dt.datetime(2026, 6, 21, 16, 32, tzinfo=dt.UTC),
+    }
+
+    document = projection._attio_meeting_document(row)
+
+    assert document is not None
+    assert document["document_id"] == "attio:meeting:mtg_123"
+    assert document["source"] == "attio"
+    assert document["source_type"] == "attio_meeting"
+    assert document["title"] == "Acme renewal call"
+    assert "- Organizer: Eli" in document["body"]
+    assert "- Participants: Dana, buyer@example.com" in document["body"]
+    assert "Customer renewal discussion." in document["body"]
+    assert "Dana: Budget approved" in document["body"]
+    assert document["author_id"] == "mem_1"
+    assert document["metadata"]["has_transcript"] is True
+    assert document["metadata"]["meeting_id"] == "mtg_123"

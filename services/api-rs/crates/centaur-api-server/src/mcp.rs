@@ -22,6 +22,7 @@ use time::OffsetDateTime;
 
 use crate::{
     ApiError,
+    api_jwt::jwt_signing_secret,
     routes::{AppState, header_value},
     tool_discovery::{DiscoveredTool, ToolDiscoveryConfig, discover_tool_catalog},
 };
@@ -301,6 +302,7 @@ fn mcp_centaur_tool_catalog() -> Result<Vec<DiscoveredTool>, ApiError> {
 
     let dirs = ToolDiscoveryConfig {
         tool_dirs: env::var("TOOL_DIRS").ok(),
+        public_tool_dirs: env::var("KUBERNETES_PUBLIC_TOOL_DIRS").ok(),
         tools_path: env::var("TOOLS_PATH").ok().map(PathBuf::from),
         tools_overlay_path: env::var("TOOLS_OVERLAY_PATH").ok().map(PathBuf::from),
         plugins_dir: env::var("PLUGINS_DIR").ok().map(PathBuf::from),
@@ -748,11 +750,6 @@ fn static_env(cell: &'static OnceLock<Option<String>>, name: &str) -> Option<Str
         return env::var(name).ok();
     }
     cell.get_or_init(|| env::var(name).ok()).clone()
-}
-
-fn jwt_signing_secret() -> Option<String> {
-    static CELL: OnceLock<Option<String>> = OnceLock::new();
-    static_env(&CELL, "CENTAUR_JWT_SIGNING_SECRET")
 }
 
 fn mcp_public_url_env() -> Option<String> {

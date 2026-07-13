@@ -1,0 +1,64 @@
+<% content_for :title, "Settings · Centaur Console" %>
+<% checkbox_class = "mt-1 h-4 w-4 rounded border-ink-500 bg-ink-800 text-centaur-500 focus:ring-centaur-500" %>
+
+<%= render "console/control_tabs" %>
+
+<%= render "console/page_header",
+           title: "Settings",
+           subtitle: "Deployment-wide defaults for new control-plane records." %>
+
+<%= form_with model: @system_setting,
+              url: console_system_settings_path,
+              method: :patch,
+              data: { turbo: false },
+              class: "space-y-6" do |form| %>
+  <% if @system_setting.errors.any? %>
+    <div class="alert-error">
+      <div class="font-semibold">Settings could not be saved.</div>
+      <ul class="mt-2 list-disc pl-5">
+        <% @system_setting.errors.full_messages.each do |message| %>
+          <li><%= message %></li>
+        <% end %>
+      </ul>
+    </div>
+  <% end %>
+
+  <section class="form-section">
+    <h2 class="form-section-heading">Default Sandbox Capabilities</h2>
+    <div class="grid gap-5 md:grid-cols-3">
+      <label class="block">
+        <span class="form-label">Repo cache</span>
+        <%= form.select :default_sandbox_repo_cache,
+                        options_for_select([
+                          [ "None", "none" ],
+                          [ "Public", "public" ],
+                          [ "All", "all" ]
+                        ], @system_setting.default_sandbox_repo_cache),
+                        {},
+                        class: "form-input" %>
+        <span class="form-hint">Initial repo-cache access for new principals.</span>
+      </label>
+
+      <label class="flex items-start gap-3 rounded border border-ink-700 bg-ink-850/60 p-4">
+        <%= form.check_box :default_sandbox_observability_enabled, class: checkbox_class %>
+        <span>
+          <span class="block text-sm font-medium text-zinc-100">Observability</span>
+          <span class="block text-xs text-zinc-500">Allow new sandboxes to reach logs and metrics surfaces.</span>
+        </span>
+      </label>
+
+      <label class="flex items-start gap-3 rounded border border-ink-700 bg-ink-850/60 p-4">
+        <%= form.check_box :default_sandbox_api_server_enabled, class: checkbox_class %>
+        <span>
+          <span class="block text-sm font-medium text-zinc-100">API server</span>
+          <span class="block text-xs text-zinc-500">Allow new sandboxes to call the api-rs control plane.</span>
+        </span>
+      </label>
+    </div>
+  </section>
+
+  <div class="flex items-center gap-3">
+    <%= form.submit "Save settings", class: "btn-primary" %>
+    <a href="<%= console_principals_path %>" class="btn-secondary">Cancel</a>
+  </div>
+<% end %>

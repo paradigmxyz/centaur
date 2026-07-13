@@ -183,13 +183,15 @@ def test_retry_on_ratelimit_records_failed_fast_by_workflow(monkeypatch):
 def test_list_etl_channels_preserves_slack_created_timestamp():
     client = object.__new__(shared.SlackEtlClient)
     client._workflow_name = "slack_sync"
+    retry_calls = []
 
     def fake_conversations_list(**_kwargs):
         raise AssertionError("wrapped Slack client call should not be used directly")
 
     client._client = types.SimpleNamespace(conversations_list=fake_conversations_list)
 
-    def fake_retry(_func, **_kwargs):
+    def fake_retry(_func, **kwargs):
+        retry_calls.append(kwargs)
         return {
             "channels": [
                 {
@@ -217,6 +219,7 @@ def test_list_etl_channels_preserves_slack_created_timestamp():
 
     channels = client._list_etl_channels()
 
+    assert retry_calls[0]["types"] == "public_channel"
     assert channels == [
         {
             "id": "C123",
@@ -228,6 +231,186 @@ def test_list_etl_channels_preserves_slack_created_timestamp():
             "is_archived": False,
             "is_private": False,
             "is_member": True,
+        }
+    ]
+
+
+def test_list_etl_channels_can_include_private_channels():
+    client = object.__new__(shared.SlackEtlClient)
+    client._workflow_name = "slack_sync"
+    retry_calls = []
+
+    def fake_conversations_list(**_kwargs):
+        raise AssertionError("wrapped Slack client call should not be used directly")
+
+    client._client = types.SimpleNamespace(conversations_list=fake_conversations_list)
+
+    def fake_retry(_func, **kwargs):
+        retry_calls.append(kwargs)
+        return {
+            "channels": [
+                {
+                    "id": "C123",
+                    "name": "eng-infra",
+                    "is_archived": False,
+                    "is_private": False,
+                },
+                {
+                    "id": "G123",
+                    "name": "private-room",
+                    "is_archived": False,
+                    "is_private": True,
+                    "is_member": True,
+                },
+            ],
+            "response_metadata": {},
+        }
+
+    client._retry_on_ratelimit = fake_retry
+
+    channels = client._list_etl_channels(include_private_channels=True)
+
+    assert retry_calls[0]["types"] == "public_channel,private_channel"
+    assert [channel["id"] for channel in channels] == ["C123", "G123"]
+    assert channels[1]["is_private"] is True
+
+
+def test_etl_channel_history_uses_direct_slack_client():
+    client = object.__new__(shared.SlackEtlClient)
+    client._workflow_name = "slack_sync"
+    client._user_cache = {"U123": "alice"}
+    direct_history = object()
+    client._client = types.SimpleNamespace(conversations_history=direct_history)
+    retry_calls = []
+
+    def fake_retry(func, **kwargs):
+        retry_calls.append((func, kwargs))
+        return {
+            "messages": [
+                {
+                    "user": "U123",
+                    "text": "hello",
+                    "ts": "1770000000.000100",
+                }
+            ],
+            "response_metadata": {},
+        }
+
+    client._retry_on_ratelimit = fake_retry
+
+    page = client._get_etl_channel_history_page("C123", limit=25)
+
+    assert page["messages"][0]["text"] == "hello"
+    assert retry_calls == [
+        (
+            direct_history,
+            {
+                "method_key": "etl.conversations.history",
+                "channel": "C123",
+                "limit": 25,
+            },
+        )
+    ]
+
+
+def test_etl_thread_replies_use_direct_slack_client():
+    client = object.__new__(shared.SlackEtlClient)
+    client._workflow_name = "slack_backfill"
+    client._user_cache = {"U123": "alice"}
+    direct_replies = object()
+    client._client = types.SimpleNamespace(conversations_replies=direct_replies)
+    retry_calls = []
+
+    def fake_retry(func, **kwargs):
+        retry_calls.append((func, kwargs))
+        return {
+            "messages": [
+                {
+                    "user": "U123",
+                    "text": "root",
+                    "ts": "1770000000.000100",
+                },
+                {
+                    "user": "U123",
+                    "text": "reply",
+                    "ts": "1770000001.000100",
+                    "thread_ts": "1770000000.000100",
+                },
+            ],
+            "response_metadata": {},
+        }
+
+    client._retry_on_ratelimit = fake_retry
+
+    page = client._get_etl_thread_replies_page(
+        "C123",
+        "1770000000.000100",
+        limit=25,
+    )
+
+    assert [message["text"] for message in page["messages"]] == ["root", "reply"]
+    assert retry_calls == [
+        (
+            direct_replies,
+            {
+                "method_key": "etl.conversations.replies",
+                "channel": "C123",
+                "ts": "1770000000.000100",
+                "limit": 25,
+                "inclusive": True,
+            },
+        )
+    ]
+
+
+def test_etl_file_download_uses_direct_slack_file_url(monkeypatch):
+    client = object.__new__(shared.SlackEtlClient)
+    client.token = "xoxp-etl"
+    requests = []
+
+    class FakeHeaders:
+        def get_content_type(self):
+            return "text/plain"
+
+    class FakeResponse:
+        headers = FakeHeaders()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _limit):
+            return b"hello"
+
+    def fake_urlopen(request, *, timeout):
+        requests.append(
+            {
+                "url": request.full_url,
+                "authorization": request.get_header("Authorization"),
+                "method": request.get_method(),
+                "timeout": timeout,
+            }
+        )
+        return FakeResponse()
+
+    monkeypatch.setattr(shared.urllib_request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(client, "_api_timeout_seconds", lambda: 8)
+
+    mime_type, body = client._download_slack_file_bytes(
+        "https://files.slack.com/files-pri/T/F123/report.txt",
+        max_bytes=100,
+    )
+
+    assert mime_type == "text/plain"
+    assert body == b"hello"
+    assert requests == [
+        {
+            "url": "https://files.slack.com/files-pri/T/F123/report.txt",
+            "authorization": "Bearer xoxp-etl",
+            "method": "GET",
+            "timeout": 8,
         }
     ]
 

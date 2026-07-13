@@ -5,7 +5,10 @@
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <meta charset="utf-8">
     <%= csrf_meta_tags %>
+    <%= tag.link rel: "manifest", href: pwa_manifest_path(format: :json) %>
+    <meta name="theme-color" content="#050506">
     <link rel="icon" href="/icon-dark.svg" type="image/svg+xml" data-console-favicon>
+    <link rel="apple-touch-icon" href="/pwa-icon-192.png">
     <script>
       (() => {
         const storageKey = "centaur-console-theme";
@@ -95,6 +98,47 @@
         height: 100%;
         overflow: hidden;
         background: #050506;
+      }
+
+      /* While descoped, the body becomes a column: banner on top, shell
+         filling the rest. Scoped so the normal layout is untouched. */
+      .console-descoped {
+        display: flex;
+        flex-direction: column;
+      }
+
+      .console-descoped .console-shell {
+        flex: 1 1 auto;
+        min-height: 0;
+        height: auto;
+      }
+
+      .console-descope-banner {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 1rem;
+        padding: 0.5rem 1rem;
+        font-size: 0.75rem;
+        font-weight: 700;
+        color: #1c1205;
+        background: #f59e0b;
+      }
+
+      .console-descope-restore {
+        cursor: pointer;
+        border-radius: 0.25rem;
+        border: 1px solid #1c1205;
+        padding: 0.125rem 0.625rem;
+        font-weight: 700;
+        color: #fbbf24;
+        background: #1c1205;
+        transition: opacity 120ms ease;
+      }
+
+      .console-descope-restore:hover {
+        opacity: 0.85;
       }
 
       .console-sidebar {
@@ -194,6 +238,12 @@
         white-space: nowrap;
         font-size: 0.875rem;
         font-weight: 500;
+      }
+
+      /* Keep stacked group tabs (Workflows / New chat / Chats) on the same
+         0.125rem rhythm as the nav rows above them. */
+      .console-thread-group + .console-thread-group {
+        margin-top: 0.125rem;
       }
 
       .console-thread-group-title {
@@ -663,6 +713,13 @@
         color: #f4f4f5;
       }
 
+      /* The install item is hidden until beforeinstallprompt fires; the
+         explicit rule is needed because display: flex above would otherwise
+         override the hidden attribute. */
+      .console-account-menu-button[hidden] {
+        display: none;
+      }
+
       .console-main {
         display: flex;
         height: 100%;
@@ -767,6 +824,202 @@
         opacity: 1;
       }
 
+      /* Chat composer — the full-page New-chat card and the dock pinned under
+         open transcripts share one box; the dock only adds placement. No
+         separator rule: the rounded box already reads as the boundary, and a
+         full-bleed hairline over the narrower transcript column looks off. */
+      .console-composer-dock {
+        flex: 0 0 auto;
+        padding: 0.25rem 0 1rem;
+      }
+
+      .console-composer-dock--panel {
+        padding: 0.6rem 0.75rem 0.75rem;
+      }
+
+      .console-composer-box {
+        display: flex;
+        flex-direction: column;
+        gap: 0.4rem;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 1.25rem;
+        background: rgba(255, 255, 255, 0.035);
+        padding: 0.75rem 0.875rem 0.625rem;
+        transition: border-color 120ms ease;
+      }
+
+      .console-composer-box:focus-within {
+        border-color: rgba(255, 255, 255, 0.22);
+      }
+
+      .console-composer-input {
+        width: 100%;
+        resize: none;
+        border: 0;
+        background: transparent;
+        color: #f4f4f5;
+        font-size: 0.875rem;
+        line-height: 1.5;
+        outline: none;
+      }
+
+      .console-composer-input::placeholder {
+        color: #71717a;
+      }
+
+      .console-composer-controls {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        min-width: 0;
+      }
+
+      .console-composer-spacer {
+        flex: 1;
+      }
+
+      /* Model picker: a pill trigger opening a popover that reuses the
+         account-menu panel/item classes, so both dropdowns share one design. */
+      .console-composer-model {
+        position: relative;
+        min-width: 0;
+      }
+
+      .console-composer-model-trigger {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        max-width: 16rem;
+        border-radius: 999px;
+        background: transparent;
+        padding: 0.3rem 0.75rem;
+        color: #a1a1aa;
+        font-size: 0.8125rem;
+        font-weight: 500;
+        transition: background 120ms ease, color 120ms ease;
+      }
+
+      .console-composer-model-trigger:hover,
+      .console-composer-model-trigger[aria-expanded="true"] {
+        background: rgba(255, 255, 255, 0.09);
+        color: #f4f4f5;
+      }
+
+      .console-composer-model-chevron {
+        display: grid;
+        place-items: center;
+        transform: rotate(90deg);
+        transition: transform 120ms ease;
+      }
+
+      .console-composer-model-trigger[aria-expanded="true"] .console-composer-model-chevron {
+        transform: rotate(-90deg);
+      }
+
+      /* The picker sits just left of the send button, so the popover hangs
+         from its right edge. */
+      .console-composer-model-menu {
+        top: calc(100% + 0.4rem);
+        right: 0;
+        bottom: auto;
+        left: auto;
+        width: 15rem;
+      }
+
+      /* Root rows of the picker menu: setting name left, current value and a
+         chevron on the right (codex-app style). */
+      .console-composer-menu-value {
+        margin-left: auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: #71717a;
+        font-weight: 400;
+      }
+
+      .console-composer-menu-chevron {
+        display: grid;
+        flex: 0 0 auto;
+        place-items: center;
+        color: #71717a;
+      }
+
+      .console-composer-model-option-label {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        flex: 1;
+        text-align: left;
+      }
+
+      .console-composer-model-check {
+        display: grid;
+        place-items: center;
+        color: #3ace79;
+      }
+
+      /* "Thinking…" placeholder while a turn is executing, painted both by
+         the server (_thinking_indicator) and the composer's optimistic JS. */
+      .console-thinking-pending {
+        color: #8b8b94;
+        font-size: 0.875rem;
+        line-height: 1.5;
+        animation: console-thinking-pulse 1.6s ease-in-out infinite;
+      }
+
+      @keyframes console-thinking-pulse {
+        0%, 100% { opacity: 0.45; }
+        50% { opacity: 1; }
+      }
+
+      .console-composer-send {
+        display: grid;
+        height: 2rem;
+        width: 2rem;
+        flex: 0 0 auto;
+        place-items: center;
+        border-radius: 999px;
+        background: #28c26a;
+        color: #0b0b0d;
+        transition: background 120ms ease;
+      }
+
+      .console-composer-send:hover {
+        background: #3ace79;
+      }
+
+      /* Full-page New-chat composer. Its resting state sits a bit above
+         vertical center (the claude.ai-style resting height) and matches the
+         transcript column width so it reads as an empty chat, not a separate
+         page. Once submitted, it fills the available transcript height and
+         bottom-aligns the optimistic turn like an opened conversation. */
+      .console-new-chat {
+        width: 100%;
+        max-width: 48rem;
+        margin-top: 28vh;
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+      }
+
+      .console-new-chat--optimistic {
+        align-self: stretch;
+        max-width: 52rem;
+        margin-top: 0;
+        padding: 1.5rem 0;
+        justify-content: flex-end;
+      }
+
+      .console-new-chat-title {
+        color: #f4f4f5;
+        font-size: 1.25rem;
+        font-weight: 600;
+        text-align: center;
+      }
+
+
       .console-control-tabs {
         display: flex;
         gap: 0.25rem;
@@ -837,6 +1090,16 @@
       html[data-console-theme="light"] .console-sidebar {
         border-right-color: #deded7;
         background: #fbfbf8;
+      }
+
+      /* Amber notice boxes (thread-DB unavailable, managed secret) keep their
+         translucent amber-on-dark look in dark mode, but that washes out on the
+         light background; match the solid descope-banner treatment instead. */
+      html[data-console-theme="light"] .console-amber-note {
+        background: #f59e0b;
+        border-color: #b45309;
+        color: #1c1205;
+        font-weight: 600;
       }
 
       html[data-console-theme="light"] .console-sidebar-account {
@@ -1085,6 +1348,35 @@
         color: #5f656c;
       }
 
+      html[data-console-theme="light"] .page-title {
+        color: #303438;
+      }
+
+      html[data-console-theme="light"] .page-subtitle {
+        color: #6f757c;
+      }
+
+      /* Toggle chips (filter tabs, HTTP methods): the component's @apply'd
+         ink colors compile to raw values, so the utility-class remaps above
+         don't reach them -- restyle the component classes directly. */
+      html[data-console-theme="light"] .chip {
+        border-color: #d2d3cc;
+        background: #ffffff;
+        color: #5f656c;
+      }
+
+      html[data-console-theme="light"] .chip:hover {
+        border-color: #168f4a80;
+        color: #303438;
+      }
+
+      html[data-console-theme="light"] .chip-on,
+      html[data-console-theme="light"] .chip-on:hover {
+        border-color: #168f4a;
+        background: rgba(22, 143, 74, 0.08);
+        color: #168f4a;
+      }
+
       html[data-console-theme="light"] .empty-state {
         border-color: #d8d8d0;
         background: #f0f0eb;
@@ -1138,8 +1430,11 @@
         --tw-ring-color: #d8d8d0;
       }
 
-      html[data-console-theme="light"] .divide-ink-600 > :not([hidden]) ~ :not([hidden]),
-      html[data-console-theme="light"] .divide-ink-700 > :not([hidden]) ~ :not([hidden]) {
+      /* Tailwind v4 puts divide-y borders on `> :not(:last-child)` (border-bottom),
+         not on the v3 `~` sibling selector — the first child carries a divider too,
+         so the recolor must cover it or the first row's border stays ink-dark. */
+      html[data-console-theme="light"] .divide-ink-600 > :not(:last-child),
+      html[data-console-theme="light"] .divide-ink-700 > :not(:last-child) {
         border-block-color: #deded7;
         border-color: #deded7;
       }
@@ -1161,6 +1456,57 @@
 
       html[data-console-theme="light"] .text-zinc-600 {
         color: #8c9198;
+      }
+
+      /* Composer: plain-CSS component classes, so the utility-class remaps
+         above never reach them — they need their own light overrides. */
+      html[data-console-theme="light"] .console-composer-box {
+        border-color: rgba(15, 18, 20, 0.14);
+        background: #ffffff;
+      }
+
+      html[data-console-theme="light"] .console-composer-box:focus-within {
+        border-color: rgba(15, 18, 20, 0.3);
+      }
+
+      html[data-console-theme="light"] .console-composer-input {
+        color: #1c1f23;
+      }
+
+      html[data-console-theme="light"] .console-composer-input::placeholder {
+        color: #8c9198;
+      }
+
+      html[data-console-theme="light"] .console-composer-model-trigger {
+        background: transparent;
+        color: #565c63;
+      }
+
+      html[data-console-theme="light"] .console-composer-model-trigger:hover,
+      html[data-console-theme="light"] .console-composer-model-trigger[aria-expanded="true"] {
+        background: rgba(15, 18, 20, 0.1);
+        color: #1c1f23;
+      }
+
+      html[data-console-theme="light"] .console-composer-model-check {
+        color: #1f9d55;
+      }
+
+      html[data-console-theme="light"] .console-composer-menu-value,
+      html[data-console-theme="light"] .console-composer-menu-chevron {
+        color: #8c9198;
+      }
+
+      html[data-console-theme="light"] .console-thinking-pending {
+        color: #6f757c;
+      }
+
+      html[data-console-theme="light"] .console-composer-send {
+        color: #ffffff;
+      }
+
+      html[data-console-theme="light"] .console-new-chat-title {
+        color: #1c1f23;
       }
 
       @media (max-width: 760px) {
@@ -1195,18 +1541,28 @@
   </head>
 
   <% threads_view = request.path.start_with?("/console/threads") %>
+  <% workflows_view = request.path.start_with?("/console/workflows") %>
   <%# The Control and Data Sync sections are admin-only (each controller enforces
-      require_admin server-side); non-admins only get the Chats view below. %>
+      require_admin server-side); Integrations is for everyone -- it lists the
+      public consent start links any team member can use. %>
   <% nav_items = [] %>
-  <% if current_user&.admin? %>
+  <% if acting_admin? %>
     <% control_matches = [ "/console/principals", "/console/roles", "/console/secrets", "/console/credentials", "/console/oauth_apps", "/console/users" ] %>
     <% nav_items = [
       { label: "Control", icon: "shield-check", path: console_principals_path, matches: control_matches, root_active: true },
       { label: "Data Sync", icon: "database", path: console_etls_path, matches: [ "/console/etls" ] }
     ] %>
   <% end %>
+  <% nav_items << { label: "Integrations", icon: "link", path: console_integrations_path, matches: [ "/console/integrations" ] } %>
 
-  <body class="h-full overflow-hidden bg-ink-900 text-zinc-300 font-mono antialiased">
+  <body class="h-full overflow-hidden bg-ink-900 text-zinc-300 font-mono antialiased <%= "console-descoped" if descoped? %>">
+    <% if descoped? %>
+      <div class="console-descope-banner" role="status">
+        <span>Admin permissions paused — viewing the console as an operator</span>
+        <%= button_to "Restore admin", console_descope_path, method: :delete,
+              class: "console-descope-restore" %>
+      </div>
+    <% end %>
     <div id="console-shell" class="console-shell">
       <aside class="console-sidebar" aria-label="Console navigation">
         <div class="console-sidebar-top">
@@ -1234,6 +1590,33 @@
               </a>
             <% end %>
           </nav>
+
+          <% if acting_admin? %>
+            <div class="console-thread-group">
+              <a href="<%= console_workflows_path %>"
+                 class="console-thread-group-title <%= "console-thread-group-title-active" if workflows_view %>"
+                 title="Workflows">
+                <span class="console-nav-icon"><%= console_icon("workflow", classes: "size-4") %></span>
+                <span class="console-nav-label">Workflows</span>
+              </a>
+            </div>
+          <% end %>
+
+          <%# New chat rides the thread-link machinery with the "new" sentinel
+              key: plain click opens the full-page composer, Cmd/Ctrl-click
+              adds a composer pane to the split view (and re-clicking an open
+              one closes it). %>
+          <div class="console-thread-group">
+            <a href="<%= console_threads_path(thread: Console::ThreadsController::NEW_PANE_KEY) %>"
+               class="console-thread-group-title"
+               aria-label="New chat"
+               title="New chat"
+               data-console-thread-link
+               data-console-new-chat>
+              <span class="console-nav-icon"><%= console_icon("plus", classes: "size-4") %></span>
+              <span class="console-nav-label">New chat</span>
+            </a>
+          </div>
 
           <div class="console-thread-group">
             <a href="<%= console_threads_path %>"
@@ -1288,6 +1671,22 @@
               <div class="console-account-menu-line" title="<%= current_user.email %>"><%= current_user.email %></div>
               <div class="console-account-menu-line console-account-menu-muted">Centaur Console</div>
               <div class="console-account-menu-separator"></div>
+              <%# PWA install entry point. Hidden unless the browser reports
+                  the console is installable (beforeinstallprompt); installing
+                  keeps the standalone window plus the manifest's file_handlers
+                  registration. %>
+              <button type="button"
+                      class="console-account-menu-button"
+                      data-controller="pwa-install"
+                      data-pwa-install-target="banner"
+                      data-action="pwa-install#install"
+                      hidden
+                      role="menuitem"
+                      title="Install Centaur Console as a standalone app"
+                      aria-label="Install app">
+                <%= console_icon("computer", classes: "size-4") %>
+                <span>Install app</span>
+              </button>
               <button type="button"
                       class="console-account-menu-button"
                       data-console-theme-toggle
@@ -1297,6 +1696,18 @@
                 <span data-console-theme-action-icon="dark" hidden><%= console_icon("moon", classes: "size-4") %></span>
                 <span data-console-theme-label>Light mode</span>
               </button>
+              <% if acting_admin? %>
+                <%= button_to console_descope_path,
+                      method: :post,
+                      class: "console-signout-button",
+                      form: { class: "console-signout-form" },
+                      role: "menuitem",
+                      title: "Temporarily pause your admin permissions",
+                      aria: { label: "View as operator" } do %>
+                  <%= console_icon("user-circle", classes: "size-4") %>
+                  <span class="console-signout-label">View as operator</span>
+                <% end %>
+              <% end %>
               <%= button_to logout_path,
                     method: :delete,
                     class: "console-signout-button",
@@ -1442,6 +1853,9 @@
             : [];
 
           document.querySelectorAll("[data-console-thread-link]").forEach((link) => {
+            // The New chat tab participates in open/close clicks but is not a
+            // thread row: no open-dot or pane-number decoration.
+            if (link.dataset.consoleNewChat !== undefined) return;
             const key = new URL(link.href, window.location.origin).searchParams.get("thread");
             const paneIndex = openKeys.indexOf(key);
             const open = paneIndex !== -1;
@@ -1460,7 +1874,57 @@
           });
         };
 
-        document.addEventListener("turbo:load", syncSidebarActiveThreads);
+        // A chat the turbo-permanent list has never seen (just started from
+        // the composer, or older than the list window) appears immediately as
+        // an optimistic row, then the frame refetches so the server's row,
+        // title, and ordering replace it.
+        const SIDEBAR_THREADS_PATH = "<%= console_sidebar_threads_path %>";
+
+        const ensureActiveThreadRow = () => {
+          const url = new URL(window.location.href);
+          if (!url.pathname.startsWith(THREADS_PATH)) return;
+          const openKeys = (url.searchParams.get("thread") || "").split(",").filter(Boolean);
+          const primary = openKeys[0];
+          // "new" is the composer-pane sentinel, not a thread.
+          if (!primary || primary === "new") return;
+
+          const frame = document.getElementById("console_sidebar_threads");
+          if (!frame) return;
+          // Still on the lazy-load placeholder: the initial fetch carries the
+          // thread param and will include this chat on its own.
+          if (!frame.querySelector("[data-console-thread-link], .console-thread-empty")) return;
+
+          const known = Array.from(frame.querySelectorAll("[data-console-thread-link]")).some((link) =>
+            new URL(link.href, window.location.origin).searchParams.get("thread") === primary
+          );
+          if (known) return;
+
+          frame.querySelector(".console-thread-empty")?.remove();
+          const title = document.querySelector(".console-thread-detail-header h1")?.textContent?.trim() || primary;
+          const link = document.createElement("a");
+          link.href = `${THREADS_PATH}?thread=${encodeURIComponent(primary)}`;
+          link.className = "console-thread-link";
+          link.setAttribute("data-console-thread-link", "true");
+          link.title = title;
+          const titleSpan = document.createElement("span");
+          titleSpan.className = "console-thread-title";
+          titleSpan.textContent = title;
+          const timeSpan = document.createElement("span");
+          timeSpan.className = "console-thread-time";
+          timeSpan.textContent = "now";
+          link.append(titleSpan, timeSpan);
+          frame.prepend(link);
+          syncSidebarActiveThreads();
+
+          const src = new URL(SIDEBAR_THREADS_PATH, window.location.origin);
+          src.searchParams.set("thread", openKeys.join(","));
+          frame.setAttribute("src", src.toString());
+        };
+
+        document.addEventListener("turbo:load", () => {
+          syncSidebarActiveThreads();
+          ensureActiveThreadRow();
+        });
         document.addEventListener("turbo:frame-load", (event) => {
           if (event.target && event.target.id === "console_sidebar_threads") syncSidebarActiveThreads();
         });

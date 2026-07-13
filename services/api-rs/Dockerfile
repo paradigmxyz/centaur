@@ -16,7 +16,6 @@ COPY services/api-rs/ ./
 ARG RUST_BUILD_PROFILE=release
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,target=/build/target,sharing=locked \
     case "$RUST_BUILD_PROFILE" in \
       release) cargo build --release -p centaur-api-server && cp target/release/centaur-api-server /usr/local/bin/centaur-api-server ;; \
       debug|dev) cargo build -p centaur-api-server && cp target/debug/centaur-api-server /usr/local/bin/centaur-api-server ;; \
@@ -29,9 +28,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends ca-certificates curl python3 python3-pip
 COPY --from=builder /usr/local/bin/centaur-api-server /usr/local/bin/centaur-api-server
 WORKDIR /app
+COPY centaur_sdk/ /app/centaur_sdk/
 COPY services/workflow-python/ /app/workflow-python/
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
-    pip3 install --break-system-packages --no-compile /app/workflow-python \
+    pip3 install --break-system-packages --no-compile /app/centaur_sdk /app/workflow-python \
     && python3 -c "import boto3, botocore" \
     && rm -rf /usr/share/doc /usr/share/man /usr/share/info
 # api-rs discovers tool secret metadata from pyproject.toml at startup so it can

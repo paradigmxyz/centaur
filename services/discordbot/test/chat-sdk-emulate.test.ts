@@ -180,17 +180,15 @@ describe("discordbot", () => {
       JSON.stringify(JSON.parse(secondExecute.body.input_lines[0]!)),
     ).toContain("now execute with the latest");
 
-    // Append-only narration: reasoning blurbs as `-# ` subtext messages.
-    // Thoughts that complete close together may merge into one blurb, so
-    // assert the contents and the per-line subtext prefix, not boundaries.
-    const blurbText = blurbPostsIn(threadId).join("\n");
-    expect(blurbText).toContain("Checking the command output");
-    expect(blurbText).toContain("Inspecting the event stream");
-    for (const blurb of blurbPostsIn(threadId)) {
-      for (const line of blurb.split("\n")) {
-        if (line.trim()) expect(line.startsWith("-# ")).toBe(true);
-      }
-    }
+    // Reasoning synthesis moved server-side (live activity summaries): raw
+    // commentary/reasoning deltas no longer render as blurbs or anywhere
+    // else. Summaries arrive as session.activity_summary events instead —
+    // covered by the dedicated activity-summary test below.
+    expect(blurbPostsIn(threadId)).toEqual([]);
+    const allPosts = botPostsIn(threadId).join("\n");
+    expect(allPosts).not.toContain("Checking the command output");
+    expect(allPosts).not.toContain("Inspecting the event stream");
+    expect(allPosts).not.toContain("Thinking");
 
     // The final answers land as their own lazily-created messages.
     const answers = answerPostsIn(threadId);
@@ -635,7 +633,7 @@ describe("discordbot", () => {
       thread: { id: threadId, parentId: CHANNEL_ID },
     });
     await waitFor(() => codexApi.executes.length === 1);
-    await waitFor(() => codexApi.streamCount === 1);
+    await waitFor(() => codexApi.hasStream(key));
 
     codexApi.emitOutputLine(
       key,
@@ -656,6 +654,12 @@ describe("discordbot", () => {
         itemId: "answer-1",
         delta: "partial answer ",
       }),
+    );
+    // Wait for the first message post so the tail must land as an edit —
+    // emitting both deltas back to back can coalesce into the initial post,
+    // which would never exercise the failing-edit path under test.
+    await waitFor(() =>
+      botPostsIn(threadId).some((content) => content.includes("partial answer")),
     );
     codexApi.emitOutputLine(
       key,
@@ -684,6 +688,88 @@ describe("discordbot", () => {
       ),
     ).toBe(true);
     expect(hasReaction(threadId, mentionId, "PUT", "❌")).toBe(false);
+  });
+
+  it("posts session activity summaries as subtext blurbs", async () => {
+    codexApi.autoRespond = false;
+
+    const threadId = discordApi.nextId();
+    discordApi.seedThreadChannel(threadId, CHANNEL_ID);
+    const key = threadKey(threadId);
+    const mentionId = await dispatchMessage({
+      channelId: threadId,
+      content: `<@${APP_ID}> summarize activity`,
+      mention: true,
+      thread: { id: threadId, parentId: CHANNEL_ID },
+    });
+    await waitFor(() => codexApi.executes.length === 1);
+    await waitFor(() => codexApi.eventRequests.length === 1);
+    await waitFor(() => codexApi.hasStream(key));
+
+    const firstSummary = "Checking the benchmark page and related logs.";
+    const secondSummary = "Comparing the chart against the raw data.";
+    codexApi.emitSessionEvent(key, "session.activity_summary", {
+      execution_id: "exe-activity-summary",
+      summary: firstSummary,
+    });
+    // A consecutive repeat is dropped instead of posting a duplicate blurb.
+    codexApi.emitSessionEvent(key, "session.activity_summary", {
+      execution_id: "exe-activity-summary",
+      summary: firstSummary,
+    });
+    await waitFor(() =>
+      blurbPostsIn(threadId).some((content) => content.includes(firstSummary)),
+    );
+    codexApi.emitSessionEvent(key, "session.activity_summary", {
+      execution_id: "exe-activity-summary",
+      summary: secondSummary,
+    });
+    codexApi.emitOutputLine(
+      key,
+      JSON.stringify({
+        type: "item.started",
+        item: {
+          id: "answer-1",
+          type: "agentMessage",
+          text: "",
+          phase: "final_answer",
+        },
+      }),
+    );
+    codexApi.emitOutputLine(
+      key,
+      JSON.stringify({
+        type: "item.agentMessage.delta",
+        itemId: "answer-1",
+        delta: "Done with status.",
+      }),
+    );
+    codexApi.emitOutputLine(
+      key,
+      JSON.stringify({
+        type: "turn.completed",
+        turn: { id: "turn-1", items: [] },
+      }),
+    );
+
+    await waitForSettle(threadId, mentionId);
+    // finish() flushes the second summary even inside the min-post-gap window.
+    const blurbs = blurbPostsIn(threadId);
+    expect(blurbs.join("\n")).toContain(firstSummary);
+    expect(blurbs.join("\n")).toContain(secondSummary);
+    expect(
+      blurbs.join("\n").split(`-# ${firstSummary}`),
+    ).toHaveLength(2);
+    for (const blurb of blurbs) {
+      for (const line of blurb.split("\n")) {
+        if (line.trim()) expect(line.startsWith("-# ")).toBe(true);
+      }
+    }
+    // Summaries stay in the subtext lane; the answer stays summary-free.
+    const answers = answerPostsIn(threadId);
+    expect(answers.join("\n")).toContain("Done with status.");
+    expect(answers.join("\n")).not.toContain(firstSummary);
+    expect(hasReaction(threadId, mentionId, "PUT", "✅")).toBe(true);
   });
 
   // Regression (g) — transient create/append failure is retried in place.
@@ -2016,6 +2102,7 @@ type MockSessionApi = {
   failNextEvents: boolean;
   failNextExecute: boolean;
   failNextExecuteAfterAccept: boolean;
+  hasStream(threadKey: string): boolean;
   holdNextExecute(): () => void;
   reset(): void;
   streamCount: number;
@@ -2030,6 +2117,7 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
   const executes: MockSessionRequest<DiscordbotExecuteSessionRequest>[] = [];
   const idempotentExecutions = new Map<string, string>();
   const streams = new Set<ServerResponse>();
+  const streamThreadKeys = new Map<ServerResponse, string>();
   let autoRespond = true;
   let executeHold: Promise<void> | null = null;
   let executeHoldRelease: (() => void) | null = null;
@@ -2043,6 +2131,7 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
   const closeStreams = () => {
     for (const stream of streams) stream.end();
     streams.clear();
+    streamThreadKeys.clear();
   };
   const server = createServer((req, res) => {
     void handleMockCodexRequest(req, res, {
@@ -2091,6 +2180,7 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
         failNextExecuteAfterAccept = value;
       },
       streams,
+      streamThreadKeys,
     }).catch((error) => {
       res.writeHead(500, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: String(error) }));
@@ -2175,6 +2265,12 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
     get streamCount() {
       return streams.size;
     },
+    // streamCount counts LIVE streams across all threads; a stream from the
+    // previous test that has not closed yet can satisfy a bare count wait.
+    // Order-sensitive tests wait for THEIR thread's stream instead.
+    hasStream(threadKey: string) {
+      return Array.from(streamThreadKeys.values()).includes(threadKey);
+    },
     emitOutputLine(threadKey: string, line: string, executionId?: string) {
       emitMockSessionEvent({
         data: line,
@@ -2238,6 +2334,7 @@ async function handleMockCodexRequest(
     setFailNextExecute(value: boolean): void;
     setFailNextExecuteAfterAccept(value: boolean): void;
     streams: Set<ServerResponse>;
+    streamThreadKeys: Map<ServerResponse, string>;
   },
 ): Promise<void> {
   const url = new URL(req.url ?? "/", `http://127.0.0.1:${input.port}`);
@@ -2302,6 +2399,7 @@ async function handleMockCodexRequest(
       "content-type": "text/event-stream",
     });
     input.streams.add(res);
+    input.streamThreadKeys.set(res, threadKey);
     for (const event of input.events) {
       if (
         event.threadKey === threadKey &&
@@ -2315,6 +2413,7 @@ async function handleMockCodexRequest(
     }
     req.once("close", () => {
       input.streams.delete(res);
+      input.streamThreadKeys.delete(res);
     });
     return;
   }

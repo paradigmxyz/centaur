@@ -26,6 +26,7 @@ WORKFLOW_NAME = "company_context_documents"
 
 DEFAULT_SYNC_INTERVAL_SECONDS = 4 * 60 * 60
 DEFAULT_WATERMARK_OVERLAP_SECONDS = 60
+DEFAULT_MAX_WINDOW_SECONDS = 6 * 60 * 60
 MIN_THREAD_MESSAGES = 5
 FALSE_ENV_VALUES = {"0", "false", "no", "off"}
 SLACK_MENTION_RE = re.compile(r"<@([A-Z0-9]+)>")
@@ -35,12 +36,14 @@ COMPANY_CONTEXT_SOURCE_TYPES = {
     "google_drive": ("google_doc",),
     "google_calendar": ("calendar_event",),
     "linear": ("linear_issue",),
+    "attio": ("attio_meeting",),
 }
 COMPANY_CONTEXT_DOCUMENT_ACTIONS = ("inserted", "updated", "deleted", "noop")
 ETL_CHECKPOINT_TABLES = {
     "google_drive": "google_drive_sync_checkpoints",
     "google_calendar": "google_calendar_sync_checkpoints",
     "linear": "linear_sync_checkpoints",
+    "attio": "attio_sync_checkpoints",
 }
 
 
@@ -82,6 +85,7 @@ SCHEDULE = {
             or _env_flag_enabled("GOOGLE_DRIVE_ETL_ENABLED")
             or _env_flag_enabled("GOOGLE_CALENDAR_ETL_ENABLED")
             or _env_flag_enabled("LINEAR_ETL_ENABLED")
+            or _env_flag_enabled("ATTIO_ETL_ENABLED")
         )
         and _env_flag_enabled("COMPANY_CONTEXT_DOCUMENTS_ENABLED", default=True)
     ),
@@ -95,6 +99,7 @@ class Input:
 
     since: str | None = None
     watermark_overlap_seconds: int = DEFAULT_WATERMARK_OVERLAP_SECONDS
+    max_window_seconds: int | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -110,6 +115,58 @@ def _parse_datetime(value: str | None) -> dt.datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=dt.timezone.utc)
     return parsed.astimezone(dt.timezone.utc)
+
+
+def _updated_at_bounds_clause(
+    column: str,
+    since: dt.datetime | None,
+    until: dt.datetime | None,
+) -> tuple[str, list[Any]]:
+    args: list[Any] = []
+    clauses: list[str] = []
+    if since is not None:
+        args.append(since)
+        clauses.append(f"{column} > ${len(args)}")
+    if until is not None:
+        args.append(until)
+        clauses.append(f"{column} <= ${len(args)}")
+    return " AND ".join(clauses), args
+
+
+def _updated_at_where(
+    column: str,
+    since: dt.datetime | None,
+    until: dt.datetime | None,
+    *,
+    base_clauses: tuple[str, ...] = (),
+) -> tuple[str, list[Any]]:
+    bounds_clause, args = _updated_at_bounds_clause(column, since, until)
+    clauses = [*base_clauses]
+    if bounds_clause:
+        clauses.append(bounds_clause)
+    return (f"WHERE {' AND '.join(clauses)}" if clauses else ""), args
+
+
+def _max_window_seconds(value: int | str | None = None) -> int:
+    configured = (
+        value
+        if value is not None
+        else os.getenv("COMPANY_CONTEXT_DOCUMENTS_MAX_WINDOW_SECONDS")
+    )
+    return _positive_int(configured, DEFAULT_MAX_WINDOW_SECONDS)
+
+
+def _batch_until(
+    since: dt.datetime | None,
+    now: dt.datetime,
+    max_window_seconds: int,
+) -> dt.datetime | None:
+    if since is None:
+        return None
+    return min(
+        now.astimezone(dt.timezone.utc),
+        since + dt.timedelta(seconds=max_window_seconds),
+    )
 
 
 def _format_time(value: dt.datetime | None) -> str:
@@ -168,6 +225,7 @@ def _source_enabled() -> bool:
         or _env_flag_enabled("GOOGLE_DRIVE_ETL_ENABLED")
         or _env_flag_enabled("GOOGLE_CALENDAR_ETL_ENABLED")
         or _env_flag_enabled("LINEAR_ETL_ENABLED")
+        or _env_flag_enabled("ATTIO_ETL_ENABLED")
     )
 
 
@@ -191,6 +249,8 @@ async def _latest_successful_watermark(pool, current_run_id: str) -> dt.datetime
     if not row:
         return None
     output = decode_jsonb(row["completed_payload"], {})
+    if isinstance(output, dict) and isinstance(output.get("output"), dict):
+        output = output["output"]
     return _parse_datetime(str(output.get("watermark") or ""))
 
 
@@ -299,16 +359,14 @@ async def _load_slack_lookup_maps(pool) -> tuple[dict[str, str], dict[str, str]]
     return users_by_id, channels_by_id
 
 
-async def _load_changed_message_keys(pool, since: dt.datetime | None) -> dict[str, Any]:
+async def _load_changed_message_keys(
+    pool,
+    since: dt.datetime | None,
+    until: dt.datetime | None = None,
+) -> dict[str, Any]:
     """Find channel/day and thread aggregates affected by changed Slack rows."""
-    if since is None:
-        where_sql = ""
-        args: list[Any] = []
-        attachment_where_sql = ""
-    else:
-        where_sql = "WHERE updated_at > $1"
-        attachment_where_sql = "WHERE a.updated_at > $1"
-        args = [since]
+    where_sql, args = _updated_at_where("updated_at", since, until)
+    attachment_where_sql, _ = _updated_at_where("a.updated_at", since, until)
 
     channel_day_rows = await pool.fetch(
         "SELECT DISTINCT channel_id, (occurred_at AT TIME ZONE 'UTC')::date AS day "
@@ -378,14 +436,18 @@ async def _load_changed_message_keys(pool, since: dt.datetime | None) -> dict[st
     }
 
 
-async def _load_changed_drive_files(pool, since: dt.datetime | None) -> dict[str, Any]:
+async def _load_changed_drive_files(
+    pool,
+    since: dt.datetime | None,
+    until: dt.datetime | None = None,
+) -> dict[str, Any]:
     """Find Google Drive files whose synced content changed."""
-    if since is None:
-        where_sql = "WHERE last_error = '' AND trashed = FALSE"
-        args: list[Any] = []
-    else:
-        where_sql = "WHERE last_error = '' AND trashed = FALSE AND updated_at > $1"
-        args = [since]
+    where_sql, args = _updated_at_where(
+        "updated_at",
+        since,
+        until,
+        base_clauses=("last_error = ''", "trashed = FALSE"),
+    )
 
     rows = await pool.fetch(
         "SELECT file_id, name, mime_type, web_view_link, drive_id, parent_ids, owners, "
@@ -413,14 +475,15 @@ async def _load_changed_drive_files(pool, since: dt.datetime | None) -> dict[str
 async def _load_changed_calendar_events(
     pool,
     since: dt.datetime | None,
+    until: dt.datetime | None = None,
 ) -> dict[str, Any]:
     """Find Google Calendar events whose synced content changed."""
-    if since is None:
-        where_sql = "WHERE e.last_error = ''"
-        args: list[Any] = []
-    else:
-        where_sql = "WHERE e.last_error = '' AND e.updated_at > $1"
-        args = [since]
+    where_sql, args = _updated_at_where(
+        "e.updated_at",
+        since,
+        until,
+        base_clauses=("e.last_error = ''",),
+    )
 
     rows = await pool.fetch(
         "SELECT e.calendar_id, c.summary AS calendar_summary, c.time_zone, "
@@ -455,24 +518,30 @@ async def _load_changed_calendar_events(
 async def _load_changed_linear_issues(
     pool,
     since: dt.datetime | None,
+    until: dt.datetime | None = None,
 ) -> dict[str, Any]:
     """Find Linear issues whose issue row or embedded comments changed."""
-    if since is None:
+    bounds_clause, args = _updated_at_bounds_clause("i.updated_at", since, until)
+    comment_bounds_clause, _ = _updated_at_bounds_clause(
+        "c.updated_at",
+        since,
+        until,
+    )
+    if not bounds_clause:
         args: list[Any] = []
         where_sql = "WHERE i.last_error = ''"
         comment_where_sql = ""
     else:
-        args = [since]
         where_sql = (
             "WHERE i.last_error = '' "
-            "AND (i.updated_at > $1 OR EXISTS ("
+            f"AND ({bounds_clause} OR EXISTS ("
             "  SELECT 1 FROM linear_sync_comments c "
             "  WHERE c.issue_id = i.issue_id "
             "    AND c.last_error = '' "
-            "    AND c.updated_at > $1"
+            f"    AND {comment_bounds_clause}"
             "))"
         )
-        comment_where_sql = "WHERE c.last_error = '' AND c.updated_at > $1"
+        comment_where_sql = f"WHERE c.last_error = '' AND {comment_bounds_clause}"
 
     rows = await pool.fetch(
         "SELECT i.issue_id, i.identifier, i.issue_number, i.title, i.description, "
@@ -521,6 +590,43 @@ async def _load_changed_linear_issues(
         "max_updated_at": max(max_updated_candidates)
         if max_updated_candidates
         else None,
+    }
+
+
+async def _load_changed_attio_meetings(
+    pool,
+    since: dt.datetime | None,
+    until: dt.datetime | None = None,
+) -> dict[str, Any]:
+    """Find Attio meetings whose synced content changed."""
+    where_sql, args = _updated_at_where(
+        "updated_at",
+        since,
+        until,
+        base_clauses=("last_error = ''",),
+    )
+
+    rows = await pool.fetch(
+        "SELECT meeting_id, title, description, url, linked_records, participants, "
+        "organizer_id, organizer_name, organizer_email, call_recording_ids, "
+        "transcript_text, transcript_payload, content_text, content_hash, started_at, "
+        "ended_at, source_created_at, source_updated_at, raw_payload, updated_at "
+        f"FROM attio_sync_meetings {where_sql} "
+        "ORDER BY source_updated_at NULLS LAST, started_at NULLS LAST, meeting_id",
+        *args,
+    )
+    stats = await pool.fetchrow(
+        f"SELECT COUNT(*) AS changed_meetings, MAX(updated_at) AS max_updated_at "
+        f"FROM attio_sync_meetings {where_sql}",
+        *args,
+    )
+    max_updated_at = stats["max_updated_at"] if stats else None
+    if isinstance(max_updated_at, dt.datetime):
+        max_updated_at = max_updated_at.astimezone(dt.timezone.utc)
+    return {
+        "meetings": list(rows),
+        "changed_meetings": int(stats["changed_meetings"] or 0) if stats else 0,
+        "max_updated_at": max_updated_at,
     }
 
 
@@ -1204,6 +1310,94 @@ def _linear_issue_document(row: Any, comments: list[Any]) -> dict[str, Any] | No
     }
 
 
+def _named_entries(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    names: list[str] = []
+    for entry in value:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or entry.get("email") or "").strip()
+        if name:
+            names.append(name)
+    return names
+
+
+def _attio_meeting_document(row: Any) -> dict[str, Any] | None:
+    """Render one synced Attio meeting into a context document."""
+    meeting_id = str(row["meeting_id"] or "").strip()
+    if not meeting_id:
+        return None
+
+    title = str(row["title"] or "Untitled Attio meeting").strip()
+    description = str(row["description"] or "").strip()
+    transcript = str(row["transcript_text"] or "").strip()
+    url = str(row["url"] or "").strip()
+    participants = _jsonb_value(row, "participants", [])
+    participant_names = _named_entries(participants)
+    linked_records = _jsonb_value(row, "linked_records", [])
+    call_recording_ids = _jsonb_value(row, "call_recording_ids", [])
+    raw_payload = _jsonb_value(row, "raw_payload", {})
+    started_at = row["started_at"]
+    ended_at = row["ended_at"]
+    source_created_at = row["source_created_at"]
+    source_updated_at = row["source_updated_at"] or row["updated_at"]
+    organizer_name = str(row["organizer_name"] or row["organizer_email"] or "").strip()
+
+    lines = [
+        f"# {title}",
+        "",
+        "- Source: Attio",
+    ]
+    if organizer_name:
+        lines.append(f"- Organizer: {organizer_name}")
+    if participant_names:
+        lines.append(f"- Participants: {', '.join(participant_names)}")
+    if started_at:
+        lines.append(f"- Started: {_format_time(started_at)}")
+    if ended_at:
+        lines.append(f"- Ended: {_format_time(ended_at)}")
+    if url:
+        lines.append(f"- URL: {url}")
+    if description:
+        lines.extend(["", "---", "", "## Description", "", description])
+    if transcript:
+        lines.extend(["", "## Transcript", "", transcript])
+    body = "\n".join(lines).strip()
+    metadata = {
+        "meeting_id": meeting_id,
+        "linked_records": linked_records if isinstance(linked_records, list) else [],
+        "participants": participants if isinstance(participants, list) else [],
+        "organizer_id": str(row["organizer_id"] or ""),
+        "organizer_name": str(row["organizer_name"] or ""),
+        "organizer_email": str(row["organizer_email"] or ""),
+        "call_recording_ids": (
+            call_recording_ids if isinstance(call_recording_ids, list) else []
+        ),
+        "has_description": bool(description),
+        "has_transcript": bool(transcript),
+        "raw_payload": raw_payload if isinstance(raw_payload, dict) else {},
+    }
+    return {
+        "document_id": f"attio:meeting:{meeting_id}",
+        "source": "attio",
+        "source_type": "attio_meeting",
+        "source_document_id": meeting_id,
+        "source_chunk_id": "",
+        "parent_document_id": None,
+        "title": title,
+        "body": body,
+        "url": url,
+        "author_id": str(row["organizer_id"] or ""),
+        "author_name": organizer_name,
+        "access_scope": "company",
+        "occurred_at": started_at or source_created_at or source_updated_at,
+        "source_updated_at": source_updated_at,
+        "content_hash": _content_hash(title, body, url, metadata),
+        "metadata": metadata,
+    }
+
+
 def _calendar_event_document_id(row: Any) -> str:
     calendar_id = str(row["calendar_id"] or "")
     event_id = str(row["event_id"] or "")
@@ -1298,11 +1492,15 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         if last_watermark is not None
         else None
     )
+    now = dt.datetime.now(dt.timezone.utc)
+    max_window_seconds = _max_window_seconds(inp.max_window_seconds)
+    batch_until = _batch_until(since, now, max_window_seconds)
 
     slack_enabled = _env_flag_enabled("SLACK_ETL_ENABLED")
     google_drive_enabled = _env_flag_enabled("GOOGLE_DRIVE_ETL_ENABLED")
     google_calendar_enabled = _env_flag_enabled("GOOGLE_CALENDAR_ETL_ENABLED")
     linear_enabled = _env_flag_enabled("LINEAR_ETL_ENABLED")
+    attio_enabled = _env_flag_enabled("ATTIO_ETL_ENABLED")
     enabled_sources = [
         source
         for source, enabled in (
@@ -1310,6 +1508,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             ("google_drive", google_drive_enabled),
             ("google_calendar", google_calendar_enabled),
             ("linear", linear_enabled),
+            ("attio", attio_enabled),
         )
         if enabled
     ]
@@ -1326,28 +1525,41 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     channels_by_id: dict[str, str] = {}
     if slack_enabled:
         users_by_id, channels_by_id = await _load_slack_lookup_maps(ctx._pool)
-        changed = await _load_changed_message_keys(ctx._pool, since)
+        changed = await _load_changed_message_keys(ctx._pool, since, batch_until)
     drive_changed = {
         "files": [],
         "changed_files": 0,
         "max_updated_at": None,
     }
     if google_drive_enabled:
-        drive_changed = await _load_changed_drive_files(ctx._pool, since)
+        drive_changed = await _load_changed_drive_files(ctx._pool, since, batch_until)
     calendar_changed = {
         "events": [],
         "changed_events": 0,
         "max_updated_at": None,
     }
     if google_calendar_enabled:
-        calendar_changed = await _load_changed_calendar_events(ctx._pool, since)
+        calendar_changed = await _load_changed_calendar_events(
+            ctx._pool, since, batch_until
+        )
     linear_changed = {
         "issues": [],
         "changed_issues": 0,
         "max_updated_at": None,
     }
     if linear_enabled:
-        linear_changed = await _load_changed_linear_issues(ctx._pool, since)
+        linear_changed = await _load_changed_linear_issues(
+            ctx._pool, since, batch_until
+        )
+    attio_changed = {
+        "meetings": [],
+        "changed_meetings": 0,
+        "max_updated_at": None,
+    }
+    if attio_enabled:
+        attio_changed = await _load_changed_attio_meetings(
+            ctx._pool, since, batch_until
+        )
 
     documents_upserted = 0
     documents_deleted = 0
@@ -1506,24 +1718,60 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         if action in {"inserted", "updated"}:
             documents_upserted += 1
 
-    watermark_candidates = [
-        value
-        for value in (
-            changed["max_updated_at"],
-            drive_changed["max_updated_at"],
-            calendar_changed["max_updated_at"],
-            linear_changed["max_updated_at"],
-            last_watermark,
+    for row in attio_changed["meetings"]:
+        document = _attio_meeting_document(row)
+        if document is None:
+            continue
+        observe_company_context_document_size(
+            "attio",
+            str(document["source_type"]),
+            len(str(document["body"] or "")),
         )
-        if value is not None
-    ]
-    watermark = max(watermark_candidates) if watermark_candidates else None
+        action = await _upsert_document(ctx._pool, document)
+        record_company_context_documents_changed(
+            "attio",
+            str(document["source_type"]),
+            action,
+        )
+        if action in {"inserted", "updated"}:
+            documents_upserted += 1
+
+    if batch_until is not None:
+        watermark = batch_until
+    else:
+        watermark_candidates = [
+            value
+            for value in (
+                changed["max_updated_at"],
+                drive_changed["max_updated_at"],
+                calendar_changed["max_updated_at"],
+                linear_changed["max_updated_at"],
+                attio_changed["max_updated_at"],
+                last_watermark,
+            )
+            if value is not None
+        ]
+        watermark = max(watermark_candidates) if watermark_candidates else None
     source_watermarks = {
-        "slack": changed["max_updated_at"] or last_watermark,
-        "google_drive": drive_changed["max_updated_at"] or last_watermark,
-        "google_calendar": calendar_changed["max_updated_at"] or last_watermark,
-        "linear": linear_changed["max_updated_at"] or last_watermark,
+        "slack": watermark
+        if batch_until is not None
+        else changed["max_updated_at"] or last_watermark,
+        "google_drive": watermark
+        if batch_until is not None
+        else drive_changed["max_updated_at"] or last_watermark,
+        "google_calendar": watermark
+        if batch_until is not None
+        else calendar_changed["max_updated_at"] or last_watermark,
+        "linear": watermark
+        if batch_until is not None
+        else linear_changed["max_updated_at"] or last_watermark,
+        "attio": watermark
+        if batch_until is not None
+        else attio_changed["max_updated_at"] or last_watermark,
     }
+    remaining_lag_seconds = (
+        max((now - watermark).total_seconds(), 0.0) if watermark is not None else None
+    )
     _emit_company_context_projection_lag(enabled_sources, source_watermarks)
     await _emit_etl_scope_metrics(ctx._pool, enabled_sources)
     await _emit_company_context_document_size_snapshot(ctx._pool, enabled_sources)
@@ -1534,14 +1782,20 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         "changed_drive_files": drive_changed["changed_files"],
         "changed_calendar_events": calendar_changed["changed_events"],
         "changed_linear_issues": linear_changed["changed_issues"],
+        "changed_attio_meetings": attio_changed["changed_meetings"],
         "channel_day_documents": len(changed["channel_days"]),
         "thread_candidates": len(changed["threads"]),
         "slack_attachment_documents": len(changed["attachments"]),
         "drive_documents": len(drive_changed["files"]),
         "calendar_event_documents": len(calendar_changed["events"]),
         "linear_issue_documents": len(linear_changed["issues"]),
+        "attio_meeting_documents": len(attio_changed["meetings"]),
         "documents_upserted": documents_upserted,
         "documents_deleted": documents_deleted,
+        "since": since.isoformat() if since else None,
+        "batch_until": batch_until.isoformat() if batch_until else None,
+        "max_window_seconds": max_window_seconds,
+        "remaining_lag_seconds": remaining_lag_seconds,
         "watermark": watermark.isoformat() if watermark else None,
     }
     ctx.log("company_context_documents_completed", **result)

@@ -27,6 +27,7 @@ eventsource-stream.workspace = true
 futures-util.workspace = true
 hmac.workspace = true
 hex.workspace = true
+jsonwebtoken.workspace = true
 kube.workspace = true
 reqwest.workspace = true
 rustls.workspace = true

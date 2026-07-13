@@ -295,7 +295,7 @@ def latest_date(
     ),
     source_type: str | None = typer.Option(None, "--source-type", help="Filter by source type."),
 ) -> None:
-    """Show the latest indexed timestamp."""
+    """Show the latest indexed timestamp as JSON."""
     result = CompanyContextClient().latest_date(source=source, source_type=source_type)
     _require_ok(result)
     _print_json(result)

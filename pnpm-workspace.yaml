@@ -4,6 +4,7 @@ packages:
   - services/slackbotv2
   - services/discordbot
   - services/teamsbot
+  - services/githubbot
 
 patchedDependencies:
   '@chat-adapter/linear@4.31.0': patches/@chat-adapter__linear@4.31.0.patch

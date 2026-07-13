@@ -138,7 +138,7 @@ These tools ship in the base repo because many Centaur users need onchain or mar
 | `kalshi` | Prediction market events, markets, trades, and candlesticks | None |
 | `karma` | DAO delegate reputation, activity, scores, and governance analytics | None |
 | `messari` | Crypto asset prices, metrics, profiles, markets, news, and timeseries | `MESSARI_API_KEY` |
-| `mpp` | Paid market-data and web-search requests through Machine Payments Protocol | None |
+| `mpp` | Paid MPP requests | None |
 | `nansen` | Wallet labels, smart-money activity, token flows, holders, and PnL | `NANSEN_API_KEY` |
 | `polymarket` | Prediction market events, markets, prices, books, and trades | None |
 | `snapshot` | Offchain governance spaces, proposals, votes, and voting power | `SNAPSHOT_API_KEY` |
