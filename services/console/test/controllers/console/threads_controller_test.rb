@@ -720,7 +720,7 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     )
     test_case = self
     with_singleton_method(SlackRequesterIdentity, :resolve, ->(user_ids:) {
-      test_case.assert_includes user_ids, "UADA"
+      test_case.assert_includes user_ids, "uada"
       identity
     }) do
       with_composer(client: client) do
