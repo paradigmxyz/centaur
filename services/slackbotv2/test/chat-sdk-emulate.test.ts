@@ -4275,6 +4275,78 @@ describe('slackbotv2', () => {
         recipient_user_id: 'UOTHERBOT'
       })
     )
+
+    bot = createTestBot({ triggerBotAllowlist: ['UOTHERBOT'] })
+    codexApi.reset()
+    slackApi.reset()
+    const richBotMessage = await postUserMessage('')
+    const richBotWaits: Promise<unknown>[] = []
+    const richBotResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-bot-attachment-mention-allowed',
+        event: {
+          type: 'message',
+          app_id: 'AOTHERBOT',
+          attachments: [
+            {
+              pretext: `<@${BOT_USER_ID}> investigate`,
+              title: ':red_circle: Validator stalled',
+              text: '*Cluster:* stg-na\n*Tenant:* luganodes'
+            }
+          ],
+          bot_id: 'BOTHERBOT',
+          bot_profile: {
+            app_id: 'AOTHERBOT',
+            id: 'BOTHERBOT',
+            user_id: 'UOTHERBOT'
+          },
+          channel: CHANNEL_ID,
+          subtype: 'bot_message',
+          team: TEAM_ID,
+          text: '',
+          ts: richBotMessage.ts,
+          username: 'otherbot'
+        }
+      }),
+      {},
+      waitUntilContext(richBotWaits)
+    )
+    expect(richBotResponse.status).toBe(200)
+    await Promise.all(richBotWaits)
+    expect(codexApi.appends).toHaveLength(1)
+    expect(codexApi.executes).toHaveLength(1)
+    expect(sessionMessageTexts(codexApi.appends[0]!.body.messages).join('\n')).toContain(
+      'Validator stalled'
+    )
+
+    bot = createTestBot()
+    codexApi.reset()
+    const deniedRichBotMessage = await postUserMessage('')
+    const deniedRichBotWaits: Promise<unknown>[] = []
+    const deniedRichBotResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-bot-attachment-mention-denied',
+        event: {
+          type: 'message',
+          attachments: [{ pretext: `<@${BOT_USER_ID}> investigate` }],
+          bot_id: 'BOTHERBOT',
+          channel: CHANNEL_ID,
+          subtype: 'bot_message',
+          team: TEAM_ID,
+          text: '',
+          ts: deniedRichBotMessage.ts,
+          username: 'otherbot'
+        }
+      }),
+      {},
+      waitUntilContext(deniedRichBotWaits)
+    )
+    expect(deniedRichBotResponse.status).toBe(200)
+    await Promise.all(deniedRichBotWaits)
+    expect(codexApi.appends).toHaveLength(0)
+    expect(codexApi.executes).toHaveLength(0)
   })
 })
 

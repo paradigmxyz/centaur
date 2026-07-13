@@ -25,7 +25,11 @@ import {
 } from '@centaur/rendering'
 import { conflateChatSdkStream } from './conflate'
 import { observeSeconds, slackbotMetrics } from './metrics'
-import { renderSlackDisplayText, slackMessagePromptText } from './slack-display-text'
+import {
+  renderSlackDisplayText,
+  slackMessagePromptText,
+  slackRichTextMentionsUser
+} from './slack-display-text'
 import { slackUserIdForMessage } from './slack-user'
 import {
   collectInitialContext,
@@ -219,8 +223,26 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     })
   })
 
+  // Slack does not classify mentions inside Block Kit or legacy attachments as
+  // app_mention events. Alertmanager uses attachment.pretext, so inspect rich
+  // payloads after Chat SDK has verified the webhook and before executing.
+  chat.onNewMessage(/^.*$/s, async (thread, message) => {
+    if (!slackRichTextMentionsUser(message.raw, options.botUserId)) return
+    if (!(await isAllowedSlackMessage(message, options, logger))) return
+    message.isMention = true
+    await handleSlackMessageHandoff(thread, message, {
+      assistantStatusRequested: true,
+      mode: 'execute',
+      options,
+      state,
+      subscribe: true,
+      trigger: 'new_mention'
+    })
+  })
+
   chat.onSubscribedMessage(async (thread, message) => {
     if (!(await isAllowedSlackMessage(message, options, logger))) return
+    if (slackRichTextMentionsUser(message.raw, options.botUserId)) message.isMention = true
     lateSlackFiles.rememberFilelessMention(thread, message)
     await handleSlackMessageHandoff(thread, message, {
       assistantStatusRequested: message.isMention === true,
