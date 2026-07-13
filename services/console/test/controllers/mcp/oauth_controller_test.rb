@@ -57,12 +57,28 @@ module Mcp
       assert_equal "mcp:tools", body.fetch("scope")
     end
 
-    test "dynamic client registration rejects non-loopback redirect URIs" do
+    test "dynamic client registration creates a hosted HTTPS client" do
+      assert_difference -> { McpOauthClient.count }, 1 do
+        post "/mcp/oauth/register",
+             params: {
+               client_name: "Claude",
+               redirect_uris: [ "https://claude.ai/api/mcp/auth_callback" ],
+               scope: "mcp:tools"
+             },
+             as: :json
+      end
+
+      assert_response :created
+      body = JSON.parse(response.body)
+      assert_equal [ "https://claude.ai/api/mcp/auth_callback" ], body.fetch("redirect_uris")
+    end
+
+    test "dynamic client registration rejects non-loopback plain HTTP redirect URIs" do
       assert_no_difference -> { McpOauthClient.count } do
         post "/mcp/oauth/register",
              params: {
                client_name: "Attacker",
-               redirect_uris: [ "https://evil.example/callback" ],
+               redirect_uris: [ "http://evil.example/callback" ],
                scope: "mcp:tools"
              },
              as: :json
