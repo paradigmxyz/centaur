@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import json
 import sys
 from pathlib import Path
 
 import httpx
+import pytest
+from typer.testing import CliRunner
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(REPO_ROOT / "tools" / "productivity"))
 
 from centaur_sdk import ToolContext, reset_tool_context, set_tool_context  # noqa: E402
 
@@ -22,6 +26,12 @@ def _load_airtable_module():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _load_airtable_cli_module():
+    for module_name in ("airtable.cli", "airtable.client", "airtable"):
+        sys.modules.pop(module_name, None)
+    return importlib.import_module("airtable.cli")
 
 
 def _mock_client(client, handler) -> None:
@@ -47,6 +57,115 @@ def test_client_factory_loads_without_secret_and_preflight_reports_missing_secre
     assert result["status"] == "missing_secret"
     assert result["auth"]["attempted"] is False
     assert result["probe"]["attempted"] is False
+
+
+def test_health_raises_missing_secret_without_network_call() -> None:
+    module = _load_airtable_module()
+    token = set_tool_context(ToolContext(name="airtable", secrets={"AIRTABLE_API_KEY": ""}))
+    try:
+        client = module._client()
+        with pytest.raises(RuntimeError, match="AIRTABLE_API_KEY not set"):
+            client.health()
+    finally:
+        client.close()
+        reset_tool_context(token)
+
+
+def test_health_reports_current_user_from_whoami() -> None:
+    module = _load_airtable_module()
+    client = module.AirtableClient(api_key="test-key")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/v0/meta/whoami"
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "usr123",
+                "email": "ada@example.com",
+                "scopes": ["schema.bases:read", "data.records:read"],
+            },
+        )
+
+    _mock_client(client, handler)
+    try:
+        result = client.health()
+    finally:
+        client.close()
+
+    assert result == {"current_user": {"id": "usr123"}}
+    assert "email" not in result["current_user"]
+
+
+def test_health_raises_invalid_token_from_whoami() -> None:
+    module = _load_airtable_module()
+    client = module.AirtableClient(api_key="test-key")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/v0/meta/whoami"
+        return httpx.Response(
+            401,
+            request=request,
+            json={
+                "error": {
+                    "type": "AUTHENTICATION_REQUIRED",
+                    "message": "Authentication required",
+                }
+            },
+        )
+
+    _mock_client(client, handler)
+    try:
+        with pytest.raises(RuntimeError, match="AIRTABLE_API_KEY is missing or invalid"):
+            client.health()
+    finally:
+        client.close()
+
+
+def test_cli_health_command_reports_current_user(monkeypatch) -> None:
+    cli = _load_airtable_cli_module()
+
+    class FakeClient:
+        def health(self) -> dict:
+            return {"current_user": {"id": "usr123"}}
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(sys.modules["airtable.client"], "_client", lambda: FakeClient())
+
+    result = CliRunner().invoke(cli.app, ["health"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["ok"] is True
+    assert payload["tool"] == "airtable"
+    assert payload["details"]["current_user"] == {"id": "usr123"}
+
+
+def test_cli_whoami_command_reports_current_user(monkeypatch) -> None:
+    cli = _load_airtable_cli_module()
+
+    class FakeClient:
+        def whoami(self) -> dict:
+            return {
+                "id": "usr123",
+                "email": "ada@example.com",
+                "scopes": ["schema.bases:read"],
+            }
+
+    monkeypatch.setattr(cli, "AirtableClient", FakeClient)
+
+    whoami = CliRunner().invoke(cli.app, ["whoami"])
+
+    assert whoami.exit_code == 0, whoami.output
+    assert json.loads(whoami.output) == {
+        "id": "usr123",
+        "email": "ada@example.com",
+        "scopes": ["schema.bases:read"],
+    }
 
 
 def test_preflight_access_reports_invalid_token_from_whoami() -> None:

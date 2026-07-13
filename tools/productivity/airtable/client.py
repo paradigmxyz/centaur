@@ -301,6 +301,15 @@ class AirtableClient:
         """Return the Airtable user/workspace identity for this API key."""
         return self._request("GET", f"{META_URL}/whoami")
 
+    def current_user(self) -> dict[str, Any]:
+        """Return a privacy-minimized identity for the current Airtable API key."""
+        return _minimal_identity(self.whoami())
+
+    def health(self) -> dict[str, Any]:
+        """Check Airtable authentication and report the current API key identity."""
+        whoami = self.whoami()
+        return {"current_user": {"id": whoami.get("id")}}
+
     def preflight_access(
         self,
         url: str | None = None,

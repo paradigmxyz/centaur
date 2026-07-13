@@ -20,7 +20,7 @@ def health():
 
     client = _client()
     try:
-        details = client.preflight_access()
+        details = client.health()
         payload = {"ok": True, "tool": "airtable", "error": None, "details": details}
     except Exception as exc:
         payload = {"ok": False, "tool": "airtable", "error": str(exc), "details": {}}
@@ -56,6 +56,12 @@ def _json_object_list(value: str) -> list[dict]:
 
 def _comma_list(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+@app.command()
+def whoami() -> None:
+    """Show the current Airtable API key identity."""
+    _print(AirtableClient().whoami())
 
 
 @app.command()
