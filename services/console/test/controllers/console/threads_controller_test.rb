@@ -712,10 +712,20 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
   end
 
   test "starting a chat creates a session, appends the prompt, and executes it" do
+    @operator.update!(name: "Ada Admin")
+    UserIdentity.create!(user: @operator, provider: "slack", subject: "UADA")
     client = RecordingApiClient.new
-    with_composer(client: client) do
-      post console_threads_url,
-           params: { prompt: "Reply with PONG.", model: "claude-opus-4-8" }
+    identity = SlackRequesterIdentity::Result.new(
+      handle: "@ada", source: 'Slack profile custom field "GitHub"', reason: nil
+    )
+    SlackRequesterIdentity.stub(:resolve, ->(user_ids:) {
+      assert_includes user_ids, "UADA"
+      identity
+    }) do
+      with_composer(client: client) do
+        post console_threads_url,
+             params: { prompt: "Reply with PONG.", model: "claude-opus-4-8" }
+      end
     end
 
     assert_equal %i[create_session append_session_messages execute_session], client.calls.map(&:first)
@@ -744,7 +754,12 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_equal create[:thread_key], line["thread_key"]
     assert_equal "claude-opus-4-8", line["model"]
     assert_equal message[:client_message_id], line["client_user_message_id"]
-    assert_equal "Reply with PONG.", line.dig("message", "content", 0, "text")
+    requester_context = line.dig("message", "content", 0, "text")
+    assert_includes requester_context, "# Requester Context"
+    assert_includes requester_context, "Prompted by: @ada"
+    assert_includes requester_context, 'GitHub handle source: Slack profile custom field "GitHub"'
+    assert_includes requester_context, "GitHub handle verified: yes"
+    assert_equal "Reply with PONG.", line.dig("message", "content", 1, "text")
 
     assert_redirected_to console_threads_path(thread: create[:thread_key])
   end

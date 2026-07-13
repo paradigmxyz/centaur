@@ -329,11 +329,46 @@ class Console::ThreadsController < ApplicationController
       thread_key: thread_key,
       client_user_message_id: client_message_id,
       trace_metadata: { action: "execute", source: "console" },
-      message: { role: "user", content: [ { type: "text", text: prompt } ] }
+      message: {
+        role: "user",
+        content: [
+          { type: "text", text: console_requester_context },
+          { type: "text", text: prompt }
+        ]
+      }
     }
     line[:model] = model if model.present?
     line[:reasoning] = effort if effort.present?
     line.to_json
+  end
+
+  # Resolve the signed-in human through the same Slack profile custom-field
+  # path as slackbotv2, falling back to their Console display name/email. Keep
+  # this separate from the persisted prompt: it is harness execution context.
+  def console_requester_context
+    github_identity = SlackRequesterIdentity.resolve(
+      user_ids: slack_thread_owners_for_current_user.map(&:user_id)
+    )
+    prompted_by = github_identity.handle.presence ||
+      (current_user&.name.to_s.strip.presence || current_user&.email.to_s)
+    github_status = github_identity.handle.present? ?
+      "GitHub handle source: #{github_identity.source}\nGitHub handle verified: yes" :
+      "GitHub handle verified: no\nGitHub handle unavailable reason: #{github_identity.reason}"
+    <<~CONTEXT.strip
+      # Requester Context
+
+      The Console user who prompted this turn is #{prompted_by}.
+
+      ## GitHub PR Attribution
+
+      If you create a GitHub PR for this request, the PR body MUST contain this standalone line:
+      Prompted by: #{prompted_by}
+
+      #{github_status}
+
+      The user message follows in the next content block.
+      ---
+    CONTEXT
   end
 
   # Follow-ups reuse the model the chat has been running on (mirrors the
