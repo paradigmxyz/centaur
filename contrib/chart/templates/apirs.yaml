@@ -403,8 +403,8 @@ spec:
 {{- end }}
 {{- if $console.enabled }}
             # console control plane: principals/roles/grants + per-sandbox
-            # proxy sync. When unset, the api-rs falls back to the rendered
-            # static proxy config.
+            # proxy sync. Required when iron-proxy is configured; api-rs
+            # fails fast at startup if this is unset while iron-proxy is on.
             - name: IRON_CONTROL_URL
               value: {{ include "centaur.consoleUrl" . | quote }}
             - name: IRON_CONTROL_API_KEY

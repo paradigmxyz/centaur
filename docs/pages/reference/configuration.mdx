@@ -36,9 +36,7 @@ These must exist for the normal Helm deployment. For local development,
 | `SLACK_SIGNING_SECRET` | `secretManager.existingSecretName`; local bootstrap reads shell env. | Slack request signature verification. |
 | `SLACKBOT_API_KEY` | `secretManager.existingSecretName`; local bootstrap reads shell env. | Static API key bootstrapped for Slackbot. |
 | `SLACK_BOT_TOKEN` | `secretManager.existingSecretName`; local bootstrap reads shell env. | Slack Web API access for Slackbot and api-rs Slack helpers. |
-| `SANDBOX_SIGNING_KEY` | `secretManager.existingSecretName`; local bootstrap generates it. | Signing key for short-lived sandbox API tokens. |
 | `IRON_MANAGEMENT_API_KEY` | `secretManager.existingSecretName`; local bootstrap generates it. | Management key for API-created iron-proxy pods. |
-| `IRON_BROKER_TOKEN` | `secretManager.existingSecretName`; required when `tokenBroker.enabled=true`. | Bearer token iron-proxy presents to iron-token-broker and the broker enforces on its HTTP API. |
 | `OP_SERVICE_ACCOUNT_TOKEN` | Local shell, then `centaur-infra-env`; production Secret. | 1Password service-account auth when using `onepassword` secret source. |
 | `OP_VAULT` | Local shell, then `centaur-infra-env`; defaults to `ai-agents` in code. | 1Password vault used for `op://...` secret refs. |
 
@@ -48,7 +46,6 @@ Optional required-by-mode variables:
 | --- | --- | --- |
 | `OP_CONNECT_CREDENTIALS_FILE` | Local shell before `just deploy`. | Enables the 1Password Connect subchart and creates its credentials Secret. |
 | `OP_CONNECT_TOKEN` | Secret or local bootstrap shell env. | Token used by iron-proxy when `ironProxy.secretSource=onepassword-connect`. |
-| `LOCAL_DEV_API_KEY` | API env. | Static local admin/dev key bootstrapped into Postgres. |
 | `TEAMS_BOT_APP_ID`, `TEAMS_BOT_APP_PASSWORD`, `TEAMS_BOT_APP_TENANT_ID` | Local shell before `just bootstrap-secrets`; production Secret. | Required by Teamsbot when `teamsbot.enabled=true`. |
 | `TEAMSBOT_API_KEY` | `secretManager.existingSecretName`; local bootstrap generates it when Teams credentials are present and it is omitted. | Static API key used by Teamsbot. |
 
