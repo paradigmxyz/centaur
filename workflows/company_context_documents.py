@@ -11,7 +11,6 @@ from typing import Any
 
 from api.runtime_control import canonical_json, decode_jsonb
 from workflows.company_context_metrics import (
-    observe_company_context_document_size,
     record_company_context_documents_changed,
     set_company_context_projection_lag,
 )
@@ -270,39 +269,6 @@ def _emit_company_context_counter_baselines(enabled_sources: list[str]) -> None:
                     action,
                     0,
                 )
-
-
-async def _emit_company_context_document_size_snapshot(
-    pool,
-    enabled_sources: list[str],
-) -> None:
-    """Observe current projected document sizes so the corpus p95 panel has data."""
-    if not enabled_sources:
-        return
-    rows = await pool.fetch(
-        "SELECT source, source_type, LENGTH(COALESCE(body, '')) AS body_chars "
-        "FROM company_context_documents "
-        "WHERE source = ANY($1::text[]) "
-        "ORDER BY source, source_type, document_id",
-        enabled_sources,
-    )
-    seen_source_types: set[tuple[str, str]] = set()
-    for row in rows:
-        source = str(row["source"] or "")
-        source_type = str(row["source_type"] or "")
-        if not source or not source_type:
-            continue
-        seen_source_types.add((source, source_type))
-        observe_company_context_document_size(
-            source,
-            source_type,
-            int(row["body_chars"] or 0),
-        )
-
-    for source in enabled_sources:
-        for source_type in COMPANY_CONTEXT_SOURCE_TYPES.get(source, ()):
-            if (source, source_type) not in seen_source_types:
-                observe_company_context_document_size(source, source_type, 0)
 
 
 async def _emit_etl_scope_metrics(pool, enabled_sources: list[str]) -> None:
@@ -1754,9 +1720,6 @@ async def _project_scope_page(
         nonlocal upserted
         if document is None:
             return
-        observe_company_context_document_size(
-            source, source_type, len(str(document["body"] or ""))
-        )
         action = await _upsert_document(pool, document)
         record_company_context_documents_changed(source, source_type, action)
         if action in {"inserted", "updated"}:
@@ -2068,7 +2031,6 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     _emit_company_context_counter_baselines(enabled_sources)
     await _emit_projection_lag_from_checkpoints(ctx._pool, enabled_scopes)
     await _emit_etl_scope_metrics(ctx._pool, enabled_sources)
-    await _emit_company_context_document_size_snapshot(ctx._pool, enabled_sources)
     result = {
         "status": "completed",
         "started_scopes": started,

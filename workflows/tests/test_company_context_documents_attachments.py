@@ -25,7 +25,6 @@ def _load_projection_module():
 
     company_context_metrics = types.ModuleType("workflows.company_context_metrics")
     for name in (
-        "observe_company_context_document_size",
         "record_company_context_documents_changed",
         "set_company_context_projection_lag",
     ):
@@ -189,11 +188,6 @@ def test_coordinator_starts_one_child_per_enabled_scope(monkeypatch):
     monkeypatch.setenv("COMPANY_CONTEXT_DOCUMENTS_ENABLED", "true")
     monkeypatch.setattr(projection, "_latest_successful_watermark", latest_watermark)
     monkeypatch.setattr(projection, "_claim_scope", claim_scope)
-    monkeypatch.setattr(
-        projection,
-        "_emit_company_context_document_size_snapshot",
-        noop_async,
-    )
     monkeypatch.setattr(projection, "_emit_projection_lag_from_checkpoints", noop_async)
     monkeypatch.setattr(projection, "_emit_etl_scope_metrics", noop_async)
 
