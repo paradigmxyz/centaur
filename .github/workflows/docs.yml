@@ -61,6 +61,13 @@ jobs:
       - name: Build docs
         run: npm run build
 
+      - name: Verify markdown mirrors are current
+        run: |
+          if ! git diff --exit-code -- public/md; then
+            echo "::error::docs/public/md is out of date. Run 'cd docs && bash scripts/build-md.sh' and commit the regenerated markdown mirrors."
+            exit 1
+          fi
+
       - name: Skip Cloudflare deploy
         if: ${{ env.CLOUDFLARE_ACCOUNT_ID == '' || env.CLOUDFLARE_API_TOKEN == '' }}
         run: echo "Cloudflare credentials are not configured; docs build completed without deployment."
