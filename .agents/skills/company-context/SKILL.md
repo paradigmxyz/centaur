@@ -42,11 +42,13 @@ Use the source-specific tools that match the question. For broad cross-source qu
 4. For time-sensitive or "latest" asks, check index freshness:
 
 ```bash
-company_context latest-date --json
-company_context latest-date --source slack --json
-company_context latest-date --source docs --source-type google_doc --json
-company_context latest-date --source linear --json
+company_context latest-date
+company_context latest-date --source slack
+company_context latest-date --source docs --source-type google_doc
+company_context latest-date --source linear
 ```
+
+`latest-date` always outputs JSON, so it does not accept a `--json` flag.
 
 5. If results are weak, broaden or target source filters:
 
