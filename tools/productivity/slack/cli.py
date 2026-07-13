@@ -1701,5 +1701,35 @@ def user_info(
         raise typer.Exit(1)
 
 
+@app.command("huddle-transcript")
+def huddle_transcript(
+    file_id: str = typer.Argument(..., help="The huddle_transcript file id (F...)"),
+    as_json: bool = typer.Option(False, "--json", help="Emit the raw payload"),
+):
+    """Read the verbatim transcript of a recorded huddle.
+
+    Needs a Slack user web session (SLACK_WEB_TOKEN + SLACK_WEB_COOKIE): Slack exposes no bot-token
+    API for huddle transcripts, so this replays the web client's own files.info call.
+    """
+    from .client import _client
+
+    try:
+        result = _client().get_huddle_transcript(file_id)
+    except Exception as exc:
+        payload = getattr(exc, "payload", {"error": str(exc)})
+        console.print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        # A lapsed session is not a bug in this command — say which it is, so a caller (or an agent)
+        # can tell "sign in again" apart from "this is broken".
+        if payload.get("needs_reauth"):
+            console.print("[yellow]The Slack web session needs refreshing.[/]")
+        raise typer.Exit(1) from exc
+
+    if as_json:
+        console.print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+        return
+    console.print(f"[bold]{result['turns']}[/] turns, {len(result['speakers'])} speakers")
+    console.print(result["text"])
+
+
 if __name__ == "__main__":
     app()

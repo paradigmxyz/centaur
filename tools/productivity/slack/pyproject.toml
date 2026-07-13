@@ -33,4 +33,10 @@ secrets = [
 optional_secrets = [
     {type = "http", name = "SLACK_SEARCH_TOKEN", match_headers = ["Authorization"], hosts = ["slack.com"]},
     {type = "http", name = "SLACK_ETL_TOKEN", match_headers = ["Authorization"], hosts = ["slack.com", "files.slack.com"]},
+    # The user web session that unlocks huddle transcripts. Slack serves them ONLY from the
+    # workspace host (`<workspace>.slack.com`), never `slack.com`, so these are scoped there and
+    # nowhere else — a wildcard is what lets one leaked credential ride to every Slack endpoint.
+    # Both are injected as headers, so the sandbox holds placeholders and never the real session.
+    {type = "http", name = "SLACK_WEB_TOKEN", match_headers = ["Authorization"], hosts = ["*.slack.com"]},
+    {type = "http", name = "SLACK_WEB_COOKIE", match_headers = ["Cookie"], hosts = ["*.slack.com"]},
 ]

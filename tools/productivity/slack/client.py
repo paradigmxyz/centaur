@@ -23,6 +23,8 @@ from slack_sdk.errors import SlackApiError
 
 from centaur_sdk.tool_sdk import secret
 
+from . import huddle_transcript
+
 # structlog so these lines render as JSON through the tool-server's
 # configure_structlog() pipeline, like the rest of the service's logs.
 logger = structlog.get_logger()
@@ -115,6 +117,8 @@ class SlackClient:
         self,
         bot_token: str | None = None,
         search_token: str | None = None,
+        web_token: str | None = None,
+        web_cookie: str | None = None,
     ):
         token = (bot_token or secret("SLACK_BOT_TOKEN", default="")).strip()
         if not token:
@@ -124,6 +128,11 @@ class SlackClient:
             )
         self.token = token
         self.search_token = (search_token or secret("SLACK_SEARCH_TOKEN", default="")).strip()
+        # The user web session that unlocks huddle transcripts. Optional: without it every other
+        # method works exactly as before and only `get_huddle_transcript` reports that it is missing.
+        self.web_token = (web_token or secret("SLACK_WEB_TOKEN", default="")).strip()
+        self.web_cookie = (web_cookie or secret("SLACK_WEB_COOKIE", default="")).strip()
+        self._workspace_host_cache: str | None = None
         timeout = self._api_timeout_seconds()
         self._client = WebClient(token=token, timeout=timeout)
         self._search_client = (
@@ -137,6 +146,66 @@ class SlackClient:
     def __getattr__(self, name: str):
         """Proxy raw Slack SDK methods when the higher-level wrapper does not define them."""
         return getattr(self._client, name)
+
+    def _workspace_host(self) -> str:
+        """The workspace's own Slack host, e.g. ``acme.slack.com``.
+
+        Huddle transcripts are served only from the workspace host, never from ``slack.com``. Rather
+        than ask a deployment to configure that, derive it from the bot token we already hold:
+        ``auth.test`` returns the workspace URL. Cached, because it cannot change within a process.
+        """
+        if self._workspace_host_cache is None:
+            url = (self._client.auth_test().data or {}).get("url", "")
+            host = urlparse(url).hostname
+            if not host:
+                raise huddle_transcript.HuddleTranscriptError(
+                    "could not determine the workspace host from auth.test"
+                )
+            self._workspace_host_cache = host
+        return self._workspace_host_cache
+
+    def get_huddle_transcript(self, file_id: str) -> dict:
+        """The verbatim, speaker-attributed transcript of one recorded huddle.
+
+        Slack saves a recorded huddle's transcript as a ``huddle_transcript`` file that is never
+        shared into a channel, so **a bot token cannot read it and no public API exposes it** — this
+        is deliberate on Slack's side. The web client reads it through ``files.info`` with
+        ``include_transcription=true`` on the workspace host, authenticated by a user web session.
+        This replays that call, so it returns exactly what the signed-in user could already read by
+        scrolling the huddle themselves. It is not a scope escalation.
+
+        Needs ``SLACK_WEB_TOKEN`` (an ``xoxc`` token) and ``SLACK_WEB_COOKIE`` (the ``d`` cookie).
+        Both are optional secrets: without them the rest of this tool is unaffected and this method
+        says plainly what is missing.
+
+        When the session lapses the failure is **loud** — ``needs_reauth`` — never an empty
+        transcript. An agent that quietly believes a meeting was silent is worse than one that admits
+        it cannot see.
+
+        Find a ``file_id`` from the huddle's message in ``conversations.history`` (the huddle's room
+        object references its transcript file), or from the huddle's AI-notes canvas, which names it.
+        """
+        if not self.web_token or not self.web_cookie:
+            missing = [
+                name
+                for name, value in (
+                    ("SLACK_WEB_TOKEN", self.web_token),
+                    ("SLACK_WEB_COOKIE", self.web_cookie),
+                )
+                if not value
+            ]
+            raise huddle_transcript.HuddleTranscriptError(
+                "huddle transcripts need a Slack user web session; Slack exposes no bot-token API "
+                "for them",
+                missing=missing,
+                needs_reauth=True,
+            )
+        return huddle_transcript.fetch(
+            file_id,
+            host=self._workspace_host(),
+            token=self.web_token,
+            cookie=self.web_cookie,
+        )
 
     def _is_ratelimit_error(self, error: SlackApiError) -> bool:
         """Detect Slack rate limit responses from either payload or status code."""
@@ -2717,3 +2786,7 @@ def search_users(*args, **kwargs):
 
 def get_user_profile(*args, **kwargs):
     return _client().get_user_profile(*args, **kwargs)
+
+
+def get_huddle_transcript(*args, **kwargs):
+    return _client().get_huddle_transcript(*args, **kwargs)
