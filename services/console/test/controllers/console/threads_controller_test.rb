@@ -718,8 +718,9 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     identity = SlackRequesterIdentity::Result.new(
       handle: "@ada", source: 'Slack profile custom field "GitHub"', reason: nil
     )
+    test_case = self
     with_singleton_method(SlackRequesterIdentity, :resolve, ->(user_ids:) {
-      assert_includes user_ids, "UADA"
+      test_case.assert_includes user_ids, "UADA"
       identity
     }) do
       with_composer(client: client) do
