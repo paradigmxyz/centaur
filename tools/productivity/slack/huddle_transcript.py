@@ -130,12 +130,18 @@ def speakers(segments: list[dict]) -> list[str]:
 def _call(host: str, token: str, cookie: str, **params: str) -> dict:
     """One ``files.info`` call against the workspace host.
 
-    The token rides in the ``Authorization`` header and the session in ``Cookie``. Both are places
-    iron-proxy is allowed to look (``match_headers``), so in a sandbox the tool holds only
-    placeholders and the real session never leaves the proxy. That is the reason this does not simply
-    post the token as a form field the way the browser does: a request body is the one place the
-    firewall cannot reach, and a user session token sitting in a sandbox is exactly the exposure the
-    injection model exists to prevent.
+    The token rides in the ``Authorization`` header and the session in ``Cookie``, and that choice is
+    the whole security story. Slack's web client posts the token as a **form field**, and it would be
+    the obvious thing to copy — but a request body is the one place iron-proxy cannot look
+    (``match_headers`` / ``match_query`` / ``match_path``, and there is no ``match_body``). Copying
+    the browser would therefore force a real user web session to sit inside the sandbox, which is
+    precisely the exposure the injection model exists to prevent.
+
+    Verified against the live API before choosing: Slack accepts this token in the form body, in the
+    query string, **and** in the ``Authorization`` header — all three authenticate. Since they are
+    equivalent to Slack, take the one the firewall can reach. Both credentials are then declared as
+    header-injected secrets, the sandbox holds only placeholders, and the real session never leaves
+    the proxy.
     """
     url = f"https://{host}/api/files.info?" + urllib.parse.urlencode(params)
     request = urllib.request.Request(
