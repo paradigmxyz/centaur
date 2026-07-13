@@ -88,14 +88,14 @@ module Mcp
       assert_equal "invalid_client_metadata", JSON.parse(response.body).fetch("error")
     end
 
-    test "authorize rejects non-loopback redirect URIs even when already stored" do
+    test "authorize rejects non-loopback plain HTTP redirect URIs even when already stored" do
       client = create_client
-      client.update_column(:redirect_uris, [ "https://evil.example/callback" ])
+      client.update_column(:redirect_uris, [ "http://evil.example/callback" ])
       post login_url, params: { email: @operator.email, password: "password123456" }
 
       assert_no_difference -> { McpOauthAuthorizationCode.count } do
         get "/mcp/oauth/authorize",
-            params: authorize_params(client).merge(redirect_uri: "https://evil.example/callback")
+            params: authorize_params(client).merge(redirect_uri: "http://evil.example/callback")
       end
 
       assert_response :bad_request
