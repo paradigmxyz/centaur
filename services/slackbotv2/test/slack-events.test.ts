@@ -48,6 +48,34 @@ describe('Slack trigger bot allowlist', () => {
     expect(requests).toBe(1)
   })
 
+  it('allows a webhook bot belonging to the same app as an allowlisted bot user', async () => {
+    const requests = new Map<string, number>()
+    const config = options(async input => {
+      const url = String(input)
+      requests.set(url, (requests.get(url) ?? 0) + 1)
+      if (url.includes('/bots.info')) {
+        return Response.json({
+          ok: true,
+          bot: { id: 'BWEBHOOK', app_id: 'AALERTS' }
+        })
+      }
+      return Response.json({
+        ok: true,
+        user: {
+          id: 'UALLOWED',
+          profile: { api_app_id: 'AALERTS', bot_id: 'BAPPUSER' }
+        }
+      })
+    })
+
+    expect(await isAllowedSlackMessage(botMessage('BWEBHOOK'), config, logger)).toBe(true)
+    expect(await isAllowedSlackMessage(botMessage('BWEBHOOK'), config, logger)).toBe(true)
+    expect(requests).toEqual(new Map([
+      ['http://slack.test/api/bots.info?bot=BWEBHOOK', 1],
+      ['http://slack.test/api/users.info?user=UALLOWED', 1]
+    ]))
+  })
+
   it('stays fail-closed when a bot-only event cannot be mapped to an allowlisted identity', async () => {
     const config = options(async () =>
       Response.json({

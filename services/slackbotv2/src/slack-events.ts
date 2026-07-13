@@ -37,6 +37,10 @@ const triggerBotIdentityCaches = new WeakMap<
   SlackbotV2Options,
   Map<string, Promise<TriggerBotIdentity | null>>
 >()
+const triggerBotUserAppCaches = new WeakMap<
+  SlackbotV2Options,
+  Map<string, Promise<string | null>>
+>()
 
 export function isAllowedSlackWebhookBody(
   rawBody: string,
@@ -163,9 +167,22 @@ async function isAllowedTriggerBotMessage(
       ) {
         return true
       }
+      if (
+        identity.appId &&
+        isUserAllowlistEntry(parsed) &&
+        identity.appId === await resolveTriggerBotUserAppId(parsed.value, options, logger)
+      ) {
+        return true
+      }
     }
   }
   return false
+}
+
+function isUserAllowlistEntry(
+  entry: { kind: 'app' | 'bot' | 'user' | 'any'; value: string }
+): boolean {
+  return entry.kind === 'user' || (entry.kind === 'any' && /^[UW][A-Z0-9]+$/i.test(entry.value))
 }
 
 async function resolveTriggerBotIdentity(
@@ -214,6 +231,61 @@ async function fetchTriggerBotIdentity(
   } catch (error) {
     logger.warn('slackbotv2_trigger_bot_identity_lookup_failed', {
       bot_id: botId,
+      error: error instanceof Error ? error.message : String(error)
+    })
+    return null
+  }
+}
+
+async function resolveTriggerBotUserAppId(
+  userId: string,
+  options: SlackbotV2Options,
+  logger: Logger
+): Promise<string | null> {
+  let cache = triggerBotUserAppCaches.get(options)
+  if (!cache) {
+    cache = new Map()
+    triggerBotUserAppCaches.set(options, cache)
+  }
+  const cached = cache.get(userId)
+  if (cached) return cached
+
+  const lookup = fetchTriggerBotUserAppId(userId, options, logger)
+  cache.set(userId, lookup)
+  void lookup.then(appId => {
+    if (!appId && cache.get(userId) === lookup) cache.delete(userId)
+  })
+  return lookup
+}
+
+async function fetchTriggerBotUserAppId(
+  userId: string,
+  options: SlackbotV2Options,
+  logger: Logger
+): Promise<string | null> {
+  try {
+    const url = new URL('users.info', options.slackApiUrl ?? 'https://slack.com/api/')
+    url.searchParams.set('user', userId)
+    return await withSlackApiTimeout(options, 'Slack API users.info', async () => {
+      const response = await (options.fetch ?? fetch)(url, {
+        method: 'GET',
+        headers: { authorization: `Bearer ${options.botToken}` }
+      })
+      const payload: unknown = await response.json()
+      if (
+        !response.ok ||
+        !isJsonObject(payload) ||
+        payload.ok === false ||
+        !isJsonObject(payload.user) ||
+        !isJsonObject(payload.user.profile)
+      ) {
+        return null
+      }
+      return stringValue(payload.user.profile.api_app_id) ?? null
+    })
+  } catch (error) {
+    logger.warn('slackbotv2_trigger_bot_user_identity_lookup_failed', {
+      user_id: userId,
       error: error instanceof Error ? error.message : String(error)
     })
     return null
