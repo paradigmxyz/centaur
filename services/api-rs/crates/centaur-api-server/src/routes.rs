@@ -811,7 +811,7 @@ async fn ingest_granola_sync_batch(
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join("\n");
-        let access_emails = granola_access_emails(&run.source_user_email, &owner_email, &attendees);
+        let access_emails = granola_access_emails(&run.source_user_email, &owner_email, attendees);
         let content_hash = hex::encode(Sha256::digest(content_text.as_bytes()));
 
         sqlx::query(
@@ -3441,7 +3441,7 @@ mod granola_sync_tests {
         let emails = granola_access_emails(
             "Owner@example.com",
             "ada@example.com",
-            &batch().notes[0].attendees.as_array().unwrap(),
+            batch().notes[0].attendees.as_array().unwrap(),
         );
         assert_eq!(
             emails,
