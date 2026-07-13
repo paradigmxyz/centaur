@@ -181,10 +181,41 @@
       try { return JSON.parse(picker.dataset.agents || "{}"); } catch { return {}; }
     };
 
+    // Keep the popover inside the window: it normally hangs below the pill,
+    // but docked composers sit near the bottom of the viewport, so flip it
+    // above when the space below can't fit it — and cap its height (the
+    // menu scrolls) when neither side can. Runs on every level switch since
+    // the levels differ in height.
+    const positionMenu = (picker) => {
+      const menu = picker.querySelector("[role=menu]");
+      const trigger = picker.querySelector("[aria-haspopup=menu]");
+      if (!menu || !trigger || menu.hidden) return;
+      const margin = 8;
+      menu.classList.remove("console-composer-model-menu--above");
+      menu.style.maxHeight = "";
+      const pill = trigger.getBoundingClientRect();
+      const rect = menu.getBoundingClientRect();
+      const gap = rect.top - pill.bottom;
+      const below = window.innerHeight - rect.top - margin;
+      const above = pill.top - gap - margin;
+      if (rect.height <= below) return;
+      if (above > below) {
+        menu.classList.add("console-composer-model-menu--above");
+        if (rect.height > above) menu.style.maxHeight = `${Math.max(above, 0)}px`;
+      } else {
+        menu.style.maxHeight = `${Math.max(below, 0)}px`;
+      }
+    };
+
+    window.addEventListener("resize", () => {
+      document.querySelectorAll("[data-console-model-picker]").forEach(positionMenu);
+    });
+
     const showLevel = (picker, name) => {
       picker.querySelectorAll("[data-picker-level]").forEach((level) => {
         level.hidden = level.dataset.pickerLevel !== name;
       });
+      positionMenu(picker);
     };
 
     function closePicker(picker) {

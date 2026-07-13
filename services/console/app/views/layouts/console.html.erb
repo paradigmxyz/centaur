@@ -917,13 +917,22 @@
       }
 
       /* The picker sits just left of the send button, so the popover hangs
-         from its right edge. */
+         from its right edge. It scrolls when the composer script caps its
+         height to keep it inside the viewport. */
       .console-composer-model-menu {
         top: calc(100% + 0.4rem);
         right: 0;
         bottom: auto;
         left: auto;
         width: 15rem;
+        overflow-y: auto;
+      }
+
+      /* Flipped by the composer script when the space below the pill can't
+         fit the menu (docked composers sit at the bottom of the window). */
+      .console-composer-model-menu--above {
+        top: auto;
+        bottom: calc(100% + 0.4rem);
       }
 
       /* Root rows of the picker menu: setting name left, current value and a
