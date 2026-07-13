@@ -75,7 +75,7 @@ These are broadly useful across most deployments and are good candidates to conf
 
 | Tool | Use | API key / credential |
 |---|---|---|
-| `airtable` | Bases, schemas, tables, records, views, and URL parsing | `AIRTABLE_API_KEY` |
+| `airtable` | Bases, schemas, tables, views, record reads, record writes, and URL parsing | `AIRTABLE_API_KEY` |
 | `company_context` | Search indexed company history, Slack DMs, and Google Docs | None |
 | `composio` | Execute tools from third-party services exposed through Composio | `COMPOSIO_API_KEY` |
 | `figma` | Extract Figma files, nodes, components, styles, and variables | `FIGMA_ACCESS_TOKEN` |

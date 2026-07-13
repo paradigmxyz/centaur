@@ -1,4 +1,4 @@
-"""Airtable API client for bases, schemas, views, and records."""
+"""Airtable API client for bases, schemas, views, and record writes."""
 
 from __future__ import annotations
 
@@ -57,6 +57,12 @@ def _compact_record(record: dict[str, Any], fields: list[str] | None = None) -> 
     }
 
 
+def _compact_records(
+    records: list[dict[str, Any]], fields: list[str] | None = None
+) -> list[dict[str, Any]]:
+    return [_compact_record(record, fields) for record in records]
+
+
 def _match_text(value: Any, query: str) -> bool:
     if value is None:
         return False
@@ -71,6 +77,47 @@ def _match_text(value: Any, query: str) -> bool:
 
 def _path_part(value: str) -> str:
     return quote(value, safe="")
+
+
+def _clamp_batch_size(value: int) -> int:
+    return max(1, min(value, 10))
+
+
+def _record_batch(
+    records: list[dict[str, Any]], batch_size: int = 10
+) -> list[list[dict[str, Any]]]:
+    size = _clamp_batch_size(batch_size)
+    return [records[index : index + size] for index in range(0, len(records), size)]
+
+
+def _record_id_batch(record_ids: list[str], batch_size: int = 10) -> list[list[str]]:
+    size = _clamp_batch_size(batch_size)
+    return [record_ids[index : index + size] for index in range(0, len(record_ids), size)]
+
+
+def _normalize_create_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for record in records:
+        fields = record.get("fields") if "fields" in record else record
+        if not isinstance(fields, dict):
+            raise ValueError(
+                "Each record must be a field mapping or an object with a 'fields' mapping."
+            )
+        normalized.append({"fields": fields})
+    return normalized
+
+
+def _normalize_update_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for record in records:
+        record_id = record.get("id")
+        fields = record.get("fields")
+        if not isinstance(record_id, str) or not record_id:
+            raise ValueError("Each record update must include a non-empty 'id'.")
+        if not isinstance(fields, dict):
+            raise ValueError("Each record update must include a 'fields' mapping.")
+        normalized.append({"id": record_id, "fields": fields})
+    return normalized
 
 
 def _airtable_host(host: str | None) -> str:
@@ -174,7 +221,9 @@ class AirtableClient:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             detail = error_message or exc.response.text
-            raise RuntimeError(f"Airtable API error: {exc.response.status_code} - {detail}") from exc
+            raise RuntimeError(
+                f"Airtable API error: {exc.response.status_code} - {detail}"
+            ) from exc
 
     def _request(
         self,
@@ -382,7 +431,8 @@ class AirtableClient:
             return {
                 "ok": False,
                 "status": "bad_url" if url else "bad_target",
-                "message": probe_error_message or "Airtable could not resolve the requested base, table, or view.",
+                "message": probe_error_message
+                or "Airtable could not resolve the requested base, table, or view.",
                 "target": target,
                 "auth": {
                     "attempted": True,
@@ -514,9 +564,10 @@ class AirtableClient:
         needle = query.lower()
         matches: list[dict[str, Any]] = []
         for table in self.list_tables(base_id):
-            table_hit = needle in str(table.get("name", "")).lower() or needle in str(
-                table.get("id", "")
-            ).lower()
+            table_hit = (
+                needle in str(table.get("name", "")).lower()
+                or needle in str(table.get("id", "")).lower()
+            )
             view_hits = [
                 view
                 for view in table.get("views", [])
@@ -627,6 +678,163 @@ class AirtableClient:
             "searched": data["count"],
             "count": len(matches),
             "records": matches,
+        }
+
+    def create_record(
+        self,
+        base_id: str,
+        table: str,
+        fields: dict[str, Any],
+        typecast: bool = False,
+    ) -> dict[str, Any]:
+        """Create one Airtable record.
+
+        `table` may be a table ID or table name. `fields` maps Airtable field names to values.
+        The API key needs Airtable's `data.records:write` scope for the target base.
+        """
+        data = self._request(
+            "POST",
+            f"{BASE_URL}/{_path_part(base_id)}/{_path_part(table)}",
+            json={"fields": fields, "typecast": typecast},
+        )
+        return _compact_record(data)
+
+    def create_records(
+        self,
+        base_id: str,
+        table: str,
+        records: list[dict[str, Any]],
+        typecast: bool = False,
+    ) -> dict[str, Any]:
+        """Create Airtable records in batches of up to 10 records per request."""
+        normalized = _normalize_create_records(records)
+        created: list[dict[str, Any]] = []
+        for batch in _record_batch(normalized):
+            data = self._request(
+                "POST",
+                f"{BASE_URL}/{_path_part(base_id)}/{_path_part(table)}",
+                json={"records": batch, "typecast": typecast},
+            )
+            created.extend(data.get("records", []))
+        return {
+            "base_id": base_id,
+            "table": table,
+            "count": len(created),
+            "records": _compact_records(created),
+        }
+
+    def update_record(
+        self,
+        base_id: str,
+        table: str,
+        record_id: str,
+        fields: dict[str, Any],
+        typecast: bool = False,
+        replace: bool = False,
+    ) -> dict[str, Any]:
+        """Update one Airtable record.
+
+        By default this partially updates fields with PATCH. Set `replace=True` to use PUT.
+        """
+        method = "PUT" if replace else "PATCH"
+        data = self._request(
+            method,
+            f"{BASE_URL}/{_path_part(base_id)}/{_path_part(table)}/{_path_part(record_id)}",
+            json={"fields": fields, "typecast": typecast},
+        )
+        return _compact_record(data)
+
+    def update_records(
+        self,
+        base_id: str,
+        table: str,
+        records: list[dict[str, Any]],
+        typecast: bool = False,
+        replace: bool = False,
+    ) -> dict[str, Any]:
+        """Update Airtable records in batches of up to 10 records per request."""
+        normalized = _normalize_update_records(records)
+        method = "PUT" if replace else "PATCH"
+        updated: list[dict[str, Any]] = []
+        for batch in _record_batch(normalized):
+            data = self._request(
+                method,
+                f"{BASE_URL}/{_path_part(base_id)}/{_path_part(table)}",
+                json={"records": batch, "typecast": typecast},
+            )
+            updated.extend(data.get("records", []))
+        return {
+            "base_id": base_id,
+            "table": table,
+            "count": len(updated),
+            "records": _compact_records(updated),
+        }
+
+    def upsert_records(
+        self,
+        base_id: str,
+        table: str,
+        records: list[dict[str, Any]],
+        fields_to_merge_on: list[str],
+        typecast: bool = False,
+    ) -> dict[str, Any]:
+        """Create or update records using Airtable's `performUpsert` merge fields."""
+        if not fields_to_merge_on:
+            raise ValueError("fields_to_merge_on must include at least one field name.")
+        normalized = _normalize_create_records(records)
+        upserted: list[dict[str, Any]] = []
+        created_record_ids: list[str] = []
+        updated_record_ids: list[str] = []
+        for batch in _record_batch(normalized):
+            data = self._request(
+                "PATCH",
+                f"{BASE_URL}/{_path_part(base_id)}/{_path_part(table)}",
+                json={
+                    "records": batch,
+                    "typecast": typecast,
+                    "performUpsert": {"fieldsToMergeOn": fields_to_merge_on},
+                },
+            )
+            upserted.extend(data.get("records", []))
+            created_record_ids.extend(data.get("createdRecords", []))
+            updated_record_ids.extend(data.get("updatedRecords", []))
+        return {
+            "base_id": base_id,
+            "table": table,
+            "count": len(upserted),
+            "records": _compact_records(upserted),
+            "createdRecords": created_record_ids,
+            "updatedRecords": updated_record_ids,
+        }
+
+    def delete_record(self, base_id: str, table: str, record_id: str) -> dict[str, Any]:
+        """Delete one Airtable record."""
+        return self._request(
+            "DELETE",
+            f"{BASE_URL}/{_path_part(base_id)}/{_path_part(table)}/{_path_part(record_id)}",
+        )
+
+    def delete_records(
+        self,
+        base_id: str,
+        table: str,
+        record_ids: list[str],
+    ) -> dict[str, Any]:
+        """Delete Airtable records in batches of up to 10 record IDs per request."""
+        deleted: list[dict[str, Any]] = []
+        for batch in _record_id_batch(record_ids):
+            params = [("records[]", record_id) for record_id in batch]
+            data = self._request(
+                "DELETE",
+                f"{BASE_URL}/{_path_part(base_id)}/{_path_part(table)}",
+                params=params,
+            )
+            deleted.extend(data.get("records", []))
+        return {
+            "base_id": base_id,
+            "table": table,
+            "count": len(deleted),
+            "records": deleted,
         }
 
     def snapshot_from_url(self, url: str, max_records: int = 50) -> dict[str, Any]:
