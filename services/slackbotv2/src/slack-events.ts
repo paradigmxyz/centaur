@@ -133,56 +133,29 @@ async function isAllowedTriggerBotMessage(
   logger: Logger
 ): Promise<boolean> {
   if (!allowlist?.length) return false
-  const appIds = normalizedIdentifierSet(
-    stringValue(event.app_id),
-    stringValue(event.bot_profile?.app_id)
-  )
   const botIds = normalizedIdentifierSet(stringValue(event.bot_id), stringValue(event.bot_profile?.id))
   const botUserIds = normalizedIdentifierSet(
     stringValue(event.user),
     stringValue(event.bot_profile?.user_id)
   )
-  const anyIds = new Set([...appIds, ...botIds, ...botUserIds])
-
-  for (const entry of allowlist) {
-    const parsed = parseTriggerBotAllowlistEntry(entry)
-    if (!parsed) continue
-    if (parsed.kind === 'app' && appIds.has(parsed.value)) return true
-    if (parsed.kind === 'bot' && botIds.has(parsed.value)) return true
-    if (parsed.kind === 'user' && botUserIds.has(parsed.value)) return true
-    if (parsed.kind === 'any' && anyIds.has(parsed.value)) return true
-  }
+  const allowedUserIds = new Set(allowlist.map(entry => entry.trim()).filter(isSlackMemberId))
+  if (!allowedUserIds.size) return false
+  if ([...botUserIds].some(userId => allowedUserIds.has(userId))) return true
 
   for (const botId of botIds) {
     const identity = await resolveTriggerBotIdentity(botId, options, logger)
     if (!identity) continue
-    for (const entry of allowlist) {
-      const parsed = parseTriggerBotAllowlistEntry(entry)
-      if (!parsed) continue
-      if (parsed.kind === 'app' && parsed.value === identity.appId) return true
-      if (parsed.kind === 'user' && parsed.value === identity.userId) return true
-      if (
-        parsed.kind === 'any' &&
-        (parsed.value === identity.appId || parsed.value === identity.userId)
-      ) {
-        return true
-      }
-      if (
-        identity.appId &&
-        isUserAllowlistEntry(parsed) &&
-        identity.appId === await resolveTriggerBotUserAppId(parsed.value, options, logger)
-      ) {
-        return true
-      }
+    if (identity.userId && allowedUserIds.has(identity.userId)) return true
+    if (!identity.appId) continue
+    for (const userId of allowedUserIds) {
+      if (identity.appId === await resolveTriggerBotUserAppId(userId, options, logger)) return true
     }
   }
   return false
 }
 
-function isUserAllowlistEntry(
-  entry: { kind: 'app' | 'bot' | 'user' | 'any'; value: string }
-): boolean {
-  return entry.kind === 'user' || (entry.kind === 'any' && /^[UW][A-Z0-9]+$/i.test(entry.value))
+function isSlackMemberId(value: string): boolean {
+  return /^[UW][A-Z0-9]+$/i.test(value)
 }
 
 async function resolveTriggerBotIdentity(
@@ -294,19 +267,6 @@ async function fetchTriggerBotUserAppId(
 
 function normalizedIdentifierSet(...values: Array<string | undefined>): Set<string> {
   return new Set(values.map(value => value?.trim()).filter((value): value is string => Boolean(value)))
-}
-
-function parseTriggerBotAllowlistEntry(
-  entry: string
-): { kind: 'app' | 'bot' | 'user' | 'any'; value: string } | null {
-  const trimmed = entry.trim()
-  if (!trimmed) return null
-  const prefixed = /^(app|bot|user):(.+)$/i.exec(trimmed)
-  if (!prefixed) return { kind: 'any', value: trimmed }
-  const kind = prefixed[1]
-  const value = prefixed[2]?.trim()
-  if (!kind || !value) return null
-  return { kind: kind.toLowerCase() as 'app' | 'bot' | 'user', value }
 }
 
 function splitEnvList(value: string | undefined): string[] {
