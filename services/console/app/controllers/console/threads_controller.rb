@@ -210,8 +210,7 @@ class Console::ThreadsController < ApplicationController
     share_url = console_threads_url(thread: session.thread_key)
     respond_to do |format|
       format.html do
-        redirect_to console_threads_path(thread: session.thread_key),
-                    notice: "Chat shared. Anyone with access to Centaur Console who has this link can view it."
+        redirect_to console_threads_path(thread: session.thread_key)
       end
       format.json { render json: { url: share_url } }
     end

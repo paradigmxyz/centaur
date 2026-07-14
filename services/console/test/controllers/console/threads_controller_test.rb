@@ -171,6 +171,7 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     post console_thread_share_url, params: { thread_key: thread_key }
 
     assert_redirected_to console_threads_path(thread: thread_key)
+    assert_nil flash[:notice]
     assert_equal 1, ThreadShare.where(thread_key: thread_key).count
 
     delete logout_url
