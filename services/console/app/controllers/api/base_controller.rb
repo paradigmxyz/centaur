@@ -17,9 +17,12 @@ module Api
     def authenticate_api_key!
       token = bearer_token
       @current_api_key = ApiKey.find_by_token(token) if token.present?
-      return if @current_api_key
+      unless current_api_key&.user&.active?
+        return render_error(status: :unauthorized, message: "invalid or missing API key")
+      end
+      return if current_api_key.user.admin?
 
-      render_error(status: :unauthorized, message: "invalid or missing API key")
+      render_error(status: :forbidden, message: "API key owner is not an admin")
     end
 
     def render_not_found(e)

@@ -12,3 +12,13 @@ globex_ci_key:
   user: globex_admin
   name: ci
   token_hash: <%= Digest::SHA256.hexdigest("iak_globex-ci-token") %>
+
+member_key:
+  user: member_user
+  name: member
+  token_hash: <%= Digest::SHA256.hexdigest("iak_member-token") %>
+
+disabled_key:
+  user: disabled_user
+  name: disabled
+  token_hash: <%= Digest::SHA256.hexdigest("iak_disabled-token") %>
