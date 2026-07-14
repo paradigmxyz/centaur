@@ -60,6 +60,7 @@ These are broadly useful across most deployments and are good candidates to conf
 
 | Tool | Use | API key / credential |
 |---|---|---|
+| `centaur-console` | Inspect the current sandbox's redacted permissions and capabilities | None |
 | `chart` | Render charts as PNG images for Slack or reports | None |
 | `demo` | Test tool hot-reload and basic tool plumbing | None |
 | `grafana` | Grafana dashboards, alerts, VictoriaMetrics, VictoriaLogs, and annotations | `GRAFANA_URL`, `GRAFANA_API_KEY` |
