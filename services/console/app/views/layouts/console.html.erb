@@ -240,6 +240,12 @@
         font-weight: 500;
       }
 
+      /* Keep stacked group tabs (Workflows / New chat / Chats) on the same
+         0.125rem rhythm as the nav rows above them. */
+      .console-thread-group + .console-thread-group {
+        margin-top: 0.125rem;
+      }
+
       .console-thread-group-title {
         display: flex;
         height: 2.35rem;
@@ -818,6 +824,211 @@
         opacity: 1;
       }
 
+      /* Chat composer — the full-page New-chat card and the dock pinned under
+         open transcripts share one box; the dock only adds placement. No
+         separator rule: the rounded box already reads as the boundary, and a
+         full-bleed hairline over the narrower transcript column looks off. */
+      .console-composer-dock {
+        flex: 0 0 auto;
+        padding: 0.25rem 0 1rem;
+      }
+
+      .console-composer-dock--panel {
+        padding: 0.6rem 0.75rem 0.75rem;
+      }
+
+      .console-composer-box {
+        display: flex;
+        flex-direction: column;
+        gap: 0.4rem;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 1.25rem;
+        background: rgba(255, 255, 255, 0.035);
+        padding: 0.75rem 0.875rem 0.625rem;
+        transition: border-color 120ms ease;
+      }
+
+      .console-composer-box:focus-within {
+        border-color: rgba(255, 255, 255, 0.22);
+      }
+
+      .console-composer-input {
+        width: 100%;
+        resize: none;
+        border: 0;
+        background: transparent;
+        color: #f4f4f5;
+        font-size: 0.875rem;
+        line-height: 1.5;
+        outline: none;
+      }
+
+      .console-composer-input::placeholder {
+        color: #71717a;
+      }
+
+      .console-composer-controls {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        min-width: 0;
+      }
+
+      .console-composer-spacer {
+        flex: 1;
+      }
+
+      /* Model picker: a pill trigger opening a popover that reuses the
+         account-menu panel/item classes, so both dropdowns share one design. */
+      .console-composer-model {
+        position: relative;
+        min-width: 0;
+      }
+
+      .console-composer-model-trigger {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        max-width: 16rem;
+        border-radius: 999px;
+        background: transparent;
+        padding: 0.3rem 0.75rem;
+        color: #a1a1aa;
+        font-size: 0.8125rem;
+        font-weight: 500;
+        transition: background 120ms ease, color 120ms ease;
+      }
+
+      .console-composer-model-trigger:hover,
+      .console-composer-model-trigger[aria-expanded="true"] {
+        background: rgba(255, 255, 255, 0.09);
+        color: #f4f4f5;
+      }
+
+      .console-composer-model-chevron {
+        display: grid;
+        place-items: center;
+        transform: rotate(90deg);
+        transition: transform 120ms ease;
+      }
+
+      .console-composer-model-trigger[aria-expanded="true"] .console-composer-model-chevron {
+        transform: rotate(-90deg);
+      }
+
+      /* The picker sits just left of the send button, so the popover hangs
+         from its right edge. It scrolls when the composer script caps its
+         height to keep it inside the viewport. */
+      .console-composer-model-menu {
+        top: calc(100% + 0.4rem);
+        right: 0;
+        bottom: auto;
+        left: auto;
+        width: 15rem;
+        overflow-y: auto;
+      }
+
+      /* Flipped by the composer script when the space below the pill can't
+         fit the menu (docked composers sit at the bottom of the window). */
+      .console-composer-model-menu--above {
+        top: auto;
+        bottom: calc(100% + 0.4rem);
+      }
+
+      /* Root rows of the picker menu: setting name left, current value and a
+         chevron on the right (codex-app style). */
+      .console-composer-menu-value {
+        margin-left: auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: #71717a;
+        font-weight: 400;
+      }
+
+      .console-composer-menu-chevron {
+        display: grid;
+        flex: 0 0 auto;
+        place-items: center;
+        color: #71717a;
+      }
+
+      .console-composer-model-option-label {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        flex: 1;
+        text-align: left;
+      }
+
+      .console-composer-model-check {
+        display: grid;
+        place-items: center;
+        color: #3ace79;
+      }
+
+      /* "Thinking…" placeholder while a turn is executing, painted both by
+         the server (_thinking_indicator) and the composer's optimistic JS. */
+      .console-thinking-pending {
+        color: #8b8b94;
+        font-size: 0.875rem;
+        line-height: 1.5;
+        animation: console-thinking-pulse 1.6s ease-in-out infinite;
+      }
+
+      @keyframes console-thinking-pulse {
+        0%, 100% { opacity: 0.45; }
+        50% { opacity: 1; }
+      }
+
+      .console-composer-send {
+        display: grid;
+        height: 2rem;
+        width: 2rem;
+        flex: 0 0 auto;
+        place-items: center;
+        border-radius: 999px;
+        background: #28c26a;
+        color: #0b0b0d;
+        transition: background 120ms ease;
+      }
+
+      .console-composer-send:hover {
+        background: #3ace79;
+      }
+
+      /* Full-page New-chat composer. Its resting state sits a bit above
+         vertical center (the claude.ai-style resting height) and matches the
+         transcript column width so it reads as an empty chat, not a separate
+         page. Once submitted, it fills the available transcript height and
+         bottom-aligns the optimistic turn like an opened conversation. */
+      .console-new-chat {
+        width: 100%;
+        max-width: 48rem;
+        margin-top: 28vh;
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+      }
+
+      .console-new-chat--optimistic {
+        align-self: stretch;
+        max-width: 52rem;
+        margin-top: 0;
+        padding: 1.5rem 0;
+        justify-content: flex-end;
+      }
+
+      .console-new-chat-title {
+        color: #f4f4f5;
+        font-size: 1.25rem;
+        font-weight: 600;
+        text-align: center;
+      }
+
+
       .console-control-tabs {
         display: flex;
         gap: 0.25rem;
@@ -1256,6 +1467,57 @@
         color: #8c9198;
       }
 
+      /* Composer: plain-CSS component classes, so the utility-class remaps
+         above never reach them — they need their own light overrides. */
+      html[data-console-theme="light"] .console-composer-box {
+        border-color: rgba(15, 18, 20, 0.14);
+        background: #ffffff;
+      }
+
+      html[data-console-theme="light"] .console-composer-box:focus-within {
+        border-color: rgba(15, 18, 20, 0.3);
+      }
+
+      html[data-console-theme="light"] .console-composer-input {
+        color: #1c1f23;
+      }
+
+      html[data-console-theme="light"] .console-composer-input::placeholder {
+        color: #8c9198;
+      }
+
+      html[data-console-theme="light"] .console-composer-model-trigger {
+        background: transparent;
+        color: #565c63;
+      }
+
+      html[data-console-theme="light"] .console-composer-model-trigger:hover,
+      html[data-console-theme="light"] .console-composer-model-trigger[aria-expanded="true"] {
+        background: rgba(15, 18, 20, 0.1);
+        color: #1c1f23;
+      }
+
+      html[data-console-theme="light"] .console-composer-model-check {
+        color: #1f9d55;
+      }
+
+      html[data-console-theme="light"] .console-composer-menu-value,
+      html[data-console-theme="light"] .console-composer-menu-chevron {
+        color: #8c9198;
+      }
+
+      html[data-console-theme="light"] .console-thinking-pending {
+        color: #6f757c;
+      }
+
+      html[data-console-theme="light"] .console-composer-send {
+        color: #ffffff;
+      }
+
+      html[data-console-theme="light"] .console-new-chat-title {
+        color: #1c1f23;
+      }
+
       @media (max-width: 760px) {
         .console-sidebar {
           width: 11rem;
@@ -1348,6 +1610,22 @@
               </a>
             </div>
           <% end %>
+
+          <%# New chat rides the thread-link machinery with the "new" sentinel
+              key: plain click opens the full-page composer, Cmd/Ctrl-click
+              adds a composer pane to the split view (and re-clicking an open
+              one closes it). %>
+          <div class="console-thread-group">
+            <a href="<%= console_threads_path(thread: Console::ThreadsController::NEW_PANE_KEY) %>"
+               class="console-thread-group-title"
+               aria-label="New chat"
+               title="New chat"
+               data-console-thread-link
+               data-console-new-chat>
+              <span class="console-nav-icon"><%= console_icon("plus", classes: "size-4") %></span>
+              <span class="console-nav-label">New chat</span>
+            </a>
+          </div>
 
           <div class="console-thread-group">
             <a href="<%= console_threads_path %>"
@@ -1584,6 +1862,9 @@
             : [];
 
           document.querySelectorAll("[data-console-thread-link]").forEach((link) => {
+            // The New chat tab participates in open/close clicks but is not a
+            // thread row: no open-dot or pane-number decoration.
+            if (link.dataset.consoleNewChat !== undefined) return;
             const key = new URL(link.href, window.location.origin).searchParams.get("thread");
             const paneIndex = openKeys.indexOf(key);
             const open = paneIndex !== -1;
@@ -1602,7 +1883,57 @@
           });
         };
 
-        document.addEventListener("turbo:load", syncSidebarActiveThreads);
+        // A chat the turbo-permanent list has never seen (just started from
+        // the composer, or older than the list window) appears immediately as
+        // an optimistic row, then the frame refetches so the server's row,
+        // title, and ordering replace it.
+        const SIDEBAR_THREADS_PATH = "<%= console_sidebar_threads_path %>";
+
+        const ensureActiveThreadRow = () => {
+          const url = new URL(window.location.href);
+          if (!url.pathname.startsWith(THREADS_PATH)) return;
+          const openKeys = (url.searchParams.get("thread") || "").split(",").filter(Boolean);
+          const primary = openKeys[0];
+          // "new" is the composer-pane sentinel, not a thread.
+          if (!primary || primary === "new") return;
+
+          const frame = document.getElementById("console_sidebar_threads");
+          if (!frame) return;
+          // Still on the lazy-load placeholder: the initial fetch carries the
+          // thread param and will include this chat on its own.
+          if (!frame.querySelector("[data-console-thread-link], .console-thread-empty")) return;
+
+          const known = Array.from(frame.querySelectorAll("[data-console-thread-link]")).some((link) =>
+            new URL(link.href, window.location.origin).searchParams.get("thread") === primary
+          );
+          if (known) return;
+
+          frame.querySelector(".console-thread-empty")?.remove();
+          const title = document.querySelector(".console-thread-detail-header h1")?.textContent?.trim() || primary;
+          const link = document.createElement("a");
+          link.href = `${THREADS_PATH}?thread=${encodeURIComponent(primary)}`;
+          link.className = "console-thread-link";
+          link.setAttribute("data-console-thread-link", "true");
+          link.title = title;
+          const titleSpan = document.createElement("span");
+          titleSpan.className = "console-thread-title";
+          titleSpan.textContent = title;
+          const timeSpan = document.createElement("span");
+          timeSpan.className = "console-thread-time";
+          timeSpan.textContent = "now";
+          link.append(titleSpan, timeSpan);
+          frame.prepend(link);
+          syncSidebarActiveThreads();
+
+          const src = new URL(SIDEBAR_THREADS_PATH, window.location.origin);
+          src.searchParams.set("thread", openKeys.join(","));
+          frame.setAttribute("src", src.toString());
+        };
+
+        document.addEventListener("turbo:load", () => {
+          syncSidebarActiveThreads();
+          ensureActiveThreadRow();
+        });
         document.addEventListener("turbo:frame-load", (event) => {
           if (event.target && event.target.id === "console_sidebar_threads") syncSidebarActiveThreads();
         });

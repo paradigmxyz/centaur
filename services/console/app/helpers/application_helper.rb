@@ -179,6 +179,8 @@ module ApplicationHelper
       outline_icon(classes, "M12 4.5v15m7.5-7.5h-15")
     when "chevron-right"
       outline_icon(classes, "m8.25 4.5 7.5 7.5-7.5 7.5")
+    when "check"
+      outline_icon(classes, "m4.5 12.75 6 6 9-13.5")
     when "x-mark"
       outline_icon(classes, "M6 18 18 6M6 6l12 12")
     when "shield-check"

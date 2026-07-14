@@ -362,7 +362,7 @@ def thread(
     """
     import sys
 
-    from .client import get_thread_replies_proxy
+    from .client import get_thread_replies_page, get_thread_replies_proxy
 
     channel_id, thread_ts = _parse_thread_ref(permalink)
 
@@ -376,9 +376,20 @@ def thread(
             latest=latest,
             inclusive=inclusive,
         )
-    except (RuntimeError, ValueError) as e:
-        stderr_console.print(f"[red]Error: {e}[/]")
-        raise typer.Exit(1) from e
+    except (RuntimeError, ValueError):
+        try:
+            page = get_thread_replies_page(
+                channel_id,
+                thread_ts,
+                limit=limit,
+                cursor=cursor,
+                oldest=oldest,
+                latest=latest,
+                inclusive=inclusive,
+            )
+        except (RuntimeError, ValueError) as direct_error:
+            stderr_console.print(f"[red]Error: {direct_error}[/]")
+            raise typer.Exit(1) from direct_error
 
     messages = page.get("messages", [])
 

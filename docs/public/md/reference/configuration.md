@@ -239,6 +239,7 @@ Slack ETL workflows:
 | `SLACK_RETENTION_ENABLED`, `SLACK_RETENTION_INTERVAL_MINUTES`, `SLACK_ETL_RETENTION_DAYS`, `SLACK_DM_RETENTION_DAYS` | `apiRs.etl.slack.retention.*`. | Slack retention enablement, cadence, and separate public ETL/DM TTLs. |
 | `COMPANY_CONTEXT_DOCUMENTS_ENABLED` | `apiRs.etl.companyContextDocuments.enabled`. | Enables company-context projection when any ETL is on. |
 | `COMPANY_CONTEXT_DOCUMENTS_MAX_WINDOW_SECONDS` | `apiRs.etl.companyContextDocuments.maxWindowSeconds`. | Maximum source `updated_at` window projected by one company-context documents run. |
+| `COMPANY_CONTEXT_DOCUMENTS_BATCH_SIZE` | `apiRs.etl.companyContextDocuments.batchSize`. | Maximum changed source rows handled by one per-scope company-context child workflow. |
 
 Google Workspace ETL workflows:
 

@@ -51,12 +51,24 @@
       </div>
       <% end %>
 
+      <%# An empty selection IS the new-chat screen — both the explicit ?new=1
+          entry point and the nothing-selected / no-chats-yet cases. An
+          unresolvable ?thread= still renders as not-found. %>
+      <% if (@starting_new_thread || @selected_session.nil?) && !@thread_not_found %>
+        <div class="flex min-h-0 flex-1 items-start justify-center overflow-y-auto px-6">
+          <div class="console-new-chat">
+            <h1 class="console-new-chat-title">Start a new chat</h1>
+            <%= render "console/threads/composer", mode: :new %>
+          </div>
+        </div>
+      <% else %>
       <div id="thread-transcript-scroll" class="console-transcript-scroll min-h-0 flex-1 overflow-y-auto py-6">
         <% if @selected_session %>
           <div class="console-thread-content flex flex-col gap-6">
             <%= render "console/threads/transcript", items: @selected_transcript_items %>
+            <%= render "console/threads/thinking_indicator" if thread_execution_active?(@selected_session.thread_key) %>
           </div>
-        <% elsif @thread_not_found %>
+        <% else %>
           <div class="flex h-full items-center justify-center px-6">
             <div class="flex max-w-sm flex-col items-center gap-3 text-center">
               <div class="flex size-12 items-center justify-center rounded-full border border-ink-700 bg-ink-850/60 text-zinc-500">
@@ -65,29 +77,41 @@
               <div class="text-sm font-semibold text-zinc-200">Chat not found</div>
             </div>
           </div>
-        <% elsif @sessions.empty? %>
-          <div class="flex h-full items-center justify-center px-6">
-            <div class="flex max-w-sm flex-col items-center gap-3 text-center">
-              <div class="flex size-12 items-center justify-center rounded-full border border-ink-700 bg-ink-850/60 text-zinc-500">
-                <%= console_icon("message-square", classes: "size-5") %>
-              </div>
-              <div class="text-sm font-semibold text-zinc-200">No chats yet</div>
-              <p class="text-sm leading-6 text-zinc-500">
-                Chats you start — from Slack or the Console — will show up here.
-              </p>
-            </div>
-          </div>
-        <% else %>
-          <div class="flex h-full items-center justify-center px-6">
-            <div class="flex max-w-sm flex-col items-center gap-3 text-center">
-              <div class="flex size-12 items-center justify-center rounded-full border border-ink-700 bg-ink-850/60 text-zinc-500">
-                <%= console_icon("message-square", classes: "size-5") %>
-              </div>
-              <div class="text-sm font-semibold text-zinc-200">Select a chat from the sidebar</div>
-            </div>
-          </div>
         <% end %>
       </div>
+
+      <% if @selected_session %>
+        <div class="console-composer-dock">
+          <div class="console-thread-content">
+            <%= render "console/threads/composer", mode: :thread, session: @selected_session %>
+          </div>
+        </div>
+      <% end %>
+      <% end %>
     </section>
+  <% end %>
+
+  <% if @thread_panels.any? { |panel| thread_execution_active?(panel[:thread_key]) } %>
+    <%# The console has no event stream; while a turn is running in any open
+        pane, refresh the transcript every few seconds. Skipped whenever a
+        composer holds a draft so a reload never eats typed text. %>
+    <script>
+      (() => {
+        const refresh = () => {
+          const drafting = Array.from(document.querySelectorAll("[data-console-composer-input]"))
+            .some((input) => input.value.trim() !== "" || document.activeElement === input);
+          if (drafting) {
+            setTimeout(refresh, 4000);
+            return;
+          }
+          if (window.Turbo) {
+            window.Turbo.visit(window.location.href, { action: "replace" });
+          } else {
+            window.location.reload();
+          }
+        };
+        setTimeout(refresh, 4000);
+      })();
+    </script>
   <% end %>
 </div>

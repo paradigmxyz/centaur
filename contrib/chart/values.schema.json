@@ -332,7 +332,8 @@
               "properties": {
                 "enabled": { "type": "boolean" },
                 "intervalSeconds": { "type": "integer" },
-                "maxWindowSeconds": { "type": "integer" }
+                "maxWindowSeconds": { "type": "integer" },
+                "batchSize": { "type": "integer", "minimum": 1 }
               }
             }
           }

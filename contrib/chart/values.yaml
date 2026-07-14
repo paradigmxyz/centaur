@@ -399,6 +399,7 @@ apiRs:
       enabled: true
       intervalSeconds: 14400
       maxWindowSeconds: 21600
+      batchSize: 50
   # Reaper: stop sandboxes older than the max lifetime, regardless of whether
   # they are running or suspended. 0 disables the sweep. Interval must be >= 1.
   sandboxMaxLifetimeSecs: 259200 # 3 days

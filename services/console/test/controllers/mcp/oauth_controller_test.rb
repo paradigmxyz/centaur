@@ -57,12 +57,28 @@ module Mcp
       assert_equal "mcp:tools", body.fetch("scope")
     end
 
-    test "dynamic client registration rejects non-loopback redirect URIs" do
+    test "dynamic client registration creates a hosted HTTPS client" do
+      assert_difference -> { McpOauthClient.count }, 1 do
+        post "/mcp/oauth/register",
+             params: {
+               client_name: "Claude",
+               redirect_uris: [ "https://claude.ai/api/mcp/auth_callback" ],
+               scope: "mcp:tools"
+             },
+             as: :json
+      end
+
+      assert_response :created
+      body = JSON.parse(response.body)
+      assert_equal [ "https://claude.ai/api/mcp/auth_callback" ], body.fetch("redirect_uris")
+    end
+
+    test "dynamic client registration rejects non-loopback plain HTTP redirect URIs" do
       assert_no_difference -> { McpOauthClient.count } do
         post "/mcp/oauth/register",
              params: {
                client_name: "Attacker",
-               redirect_uris: [ "https://evil.example/callback" ],
+               redirect_uris: [ "http://evil.example/callback" ],
                scope: "mcp:tools"
              },
              as: :json
@@ -72,14 +88,14 @@ module Mcp
       assert_equal "invalid_client_metadata", JSON.parse(response.body).fetch("error")
     end
 
-    test "authorize rejects non-loopback redirect URIs even when already stored" do
+    test "authorize rejects non-loopback plain HTTP redirect URIs even when already stored" do
       client = create_client
-      client.update_column(:redirect_uris, [ "https://evil.example/callback" ])
+      client.update_column(:redirect_uris, [ "http://evil.example/callback" ])
       post login_url, params: { email: @operator.email, password: "password123456" }
 
       assert_no_difference -> { McpOauthAuthorizationCode.count } do
         get "/mcp/oauth/authorize",
-            params: authorize_params(client).merge(redirect_uri: "https://evil.example/callback")
+            params: authorize_params(client).merge(redirect_uri: "http://evil.example/callback")
       end
 
       assert_response :bad_request

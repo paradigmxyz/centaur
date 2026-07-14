@@ -1,7 +1,7 @@
+require "cgi"
 require "json"
 require "net/http"
 require "uri"
-require "cgi"
 
 class CentaurApiClient
   Response = Struct.new(:status, :body, keyword_init: true)
@@ -67,6 +67,14 @@ class CentaurApiClient
 
   def ingest_google_docs_sync_batch(payload)
     post("/api/admin/google/docs-sync/batch", payload)
+  end
+
+  def get_granola_sync_checkpoint(scope_id:)
+    get("/api/admin/granola/sync/checkpoint", scope_id: scope_id)
+  end
+
+  def ingest_granola_sync_batch(payload)
+    post("/api/admin/granola/sync/batch", payload)
   end
 
   def create_session(thread_key:, harness_type:, metadata: {}, persona_id: nil,
@@ -145,6 +153,7 @@ class CentaurApiClient
 
   def parse_body(body)
     return {} if body.blank?
+
     JSON.parse(body)
   rescue JSON::ParserError
     { "raw" => body.to_s }
@@ -165,8 +174,8 @@ class CentaurApiClient
     http.use_ssl = uri.scheme == "https"
     http.open_timeout = timeout
     http.read_timeout = timeout
-    res = http.request(request)
-    Response.new(status: res.code.to_i, body: res.body.to_s)
+    response = http.request(request)
+    Response.new(status: response.code.to_i, body: response.body.to_s)
   end
 
   def escape_path(value)

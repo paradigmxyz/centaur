@@ -66,7 +66,11 @@ class McpOauthClient < ApplicationRecord
 
   def self.allowed_redirect_uri?(value)
     uri = URI.parse(value.to_s)
-    uri.scheme == "http" && loopback_host?(uri.host)
+    return false unless uri.host.present?
+    return false if uri.fragment.present?
+    return false if value.to_s.include?("*")
+
+    uri.scheme == "https" || (uri.scheme == "http" && loopback_host?(uri.host))
   rescue URI::InvalidURIError
     false
   end

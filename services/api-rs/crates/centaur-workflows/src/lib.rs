@@ -464,6 +464,12 @@ impl WorkflowRuntime {
         schedule_client
             .create_queue(Some(WORKFLOW_SCHEDULE_QUEUE), CreateQueueOptions::default())
             .await?;
+        let workflow_clients = WorkflowQueueClients {
+            standard: client.clone(),
+            slack_live: slack_live_client.clone(),
+            etl: etl_client.clone(),
+            etl_backfill: etl_backfill_client.clone(),
+        };
 
         let discovery = discover_python_workflow_metadata()
             .await
@@ -483,44 +489,81 @@ impl WorkflowRuntime {
 
         let task_session_runtime = session_runtime.clone();
         let task_workflow_host_sandbox = workflow_host_sandbox.clone();
+        let task_workflow_clients = workflow_clients.clone();
         client.register_task(WORKFLOW_TASK, move |input: WorkflowTaskInput, ctx| {
             let session_runtime = task_session_runtime.clone();
             let workflow_host_sandbox = task_workflow_host_sandbox.clone();
-            async move { run_centaur_workflow(input, ctx, session_runtime, workflow_host_sandbox).await }
+            let workflow_clients = task_workflow_clients.clone();
+            async move {
+                run_centaur_workflow(
+                    input,
+                    ctx,
+                    session_runtime,
+                    workflow_host_sandbox,
+                    workflow_clients,
+                )
+                .await
+            }
         })?;
         let slack_live_session_runtime = session_runtime.clone();
         let slack_live_workflow_host_sandbox = workflow_host_sandbox.clone();
+        let slack_live_workflow_clients = workflow_clients.clone();
         slack_live_client.register_task(WORKFLOW_TASK, move |input: WorkflowTaskInput, ctx| {
             let session_runtime = slack_live_session_runtime.clone();
             let workflow_host_sandbox = slack_live_workflow_host_sandbox.clone();
-            async move { run_centaur_workflow(input, ctx, session_runtime, workflow_host_sandbox).await }
+            let workflow_clients = slack_live_workflow_clients.clone();
+            async move {
+                run_centaur_workflow(
+                    input,
+                    ctx,
+                    session_runtime,
+                    workflow_host_sandbox,
+                    workflow_clients,
+                )
+                .await
+            }
         })?;
         let etl_session_runtime = session_runtime.clone();
         let etl_workflow_host_sandbox = workflow_host_sandbox.clone();
+        let etl_workflow_clients = workflow_clients.clone();
         etl_client.register_task(WORKFLOW_TASK, move |input: WorkflowTaskInput, ctx| {
             let session_runtime = etl_session_runtime.clone();
             let workflow_host_sandbox = etl_workflow_host_sandbox.clone();
-            async move { run_centaur_workflow(input, ctx, session_runtime, workflow_host_sandbox).await }
+            let workflow_clients = etl_workflow_clients.clone();
+            async move {
+                run_centaur_workflow(
+                    input,
+                    ctx,
+                    session_runtime,
+                    workflow_host_sandbox,
+                    workflow_clients,
+                )
+                .await
+            }
         })?;
         let etl_backfill_session_runtime = session_runtime.clone();
         let etl_backfill_workflow_host_sandbox = workflow_host_sandbox.clone();
+        let etl_backfill_workflow_clients = workflow_clients.clone();
         etl_backfill_client.register_task(
             WORKFLOW_TASK,
             move |input: WorkflowTaskInput, ctx| {
                 let session_runtime = etl_backfill_session_runtime.clone();
                 let workflow_host_sandbox = etl_backfill_workflow_host_sandbox.clone();
+                let workflow_clients = etl_backfill_workflow_clients.clone();
                 async move {
-                    run_centaur_workflow(input, ctx, session_runtime, workflow_host_sandbox).await
+                    run_centaur_workflow(
+                        input,
+                        ctx,
+                        session_runtime,
+                        workflow_host_sandbox,
+                        workflow_clients,
+                    )
+                    .await
                 }
             },
         )?;
         let schedule_tick_client = schedule_client.clone();
-        let workflow_clients_for_schedule = WorkflowQueueClients {
-            standard: client.clone(),
-            slack_live: slack_live_client.clone(),
-            etl: etl_client.clone(),
-            etl_backfill: etl_backfill_client.clone(),
-        };
+        let workflow_clients_for_schedule = workflow_clients.clone();
         let schedule_registry_for_task = schedule_registry.clone();
         schedule_client.register_task_with(
             TaskRegistrationOptions::new(WORKFLOW_SCHEDULE_TASK),
@@ -621,12 +664,7 @@ impl WorkflowRuntime {
         if let Some(interval) = workflow_reconcile_interval() {
             spawn_workflow_metadata_reconciler(
                 schedule_client.clone(),
-                WorkflowQueueClients {
-                    standard: client.clone(),
-                    slack_live: slack_live_client.clone(),
-                    etl: etl_client.clone(),
-                    etl_backfill: etl_backfill_client.clone(),
-                },
+                workflow_clients,
                 webhook_registry.clone(),
                 schedule_registry.clone(),
                 interval,
@@ -2310,11 +2348,18 @@ async fn run_centaur_workflow(
     ctx: TaskContext,
     session_runtime: SessionRuntime,
     workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
+    workflow_clients: WorkflowQueueClients,
 ) -> absurd::Result<WorkflowResult> {
     let mut cleanup_guard =
         WorkflowSandboxCleanupGuard::new(session_runtime.clone(), ctx.run_id().to_owned());
-    let result =
-        run_centaur_workflow_inner(input, ctx, session_runtime, workflow_host_sandbox).await;
+    let result = run_centaur_workflow_inner(
+        input,
+        ctx,
+        session_runtime,
+        workflow_host_sandbox,
+        workflow_clients,
+    )
+    .await;
     if let Some(reason) = workflow_cleanup_reason(&result) {
         cleanup_guard.cleanup(reason).await;
     } else {
@@ -2337,6 +2382,7 @@ async fn run_centaur_workflow_inner(
     ctx: TaskContext,
     session_runtime: SessionRuntime,
     workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
+    workflow_clients: WorkflowQueueClients,
 ) -> absurd::Result<WorkflowResult> {
     let _heartbeat_guard = start_workflow_task_heartbeat(ctx.clone())
         .await
@@ -2494,6 +2540,7 @@ async fn run_centaur_workflow_inner(
                 ctx.clone(),
                 session_runtime,
                 workflow_host_sandbox,
+                workflow_clients,
             )
             .await
             .map_err(absurd_error)?;
@@ -2571,11 +2618,19 @@ async fn run_python_workflow_host(
     ctx: TaskContext,
     session_runtime: SessionRuntime,
     workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
+    workflow_clients: WorkflowQueueClients,
 ) -> Result<Value, WorkflowRuntimeError> {
     if let Some(sandbox) = workflow_host_sandbox {
-        return run_python_workflow_host_in_sandbox(input, ctx, session_runtime, sandbox).await;
+        return run_python_workflow_host_in_sandbox(
+            input,
+            ctx,
+            session_runtime,
+            sandbox,
+            workflow_clients,
+        )
+        .await;
     }
-    run_python_workflow_host_local(input, ctx, session_runtime).await
+    run_python_workflow_host_local(input, ctx, session_runtime, workflow_clients).await
 }
 
 async fn start_workflow_task_heartbeat(
@@ -2597,6 +2652,7 @@ async fn run_python_workflow_host_local(
     input: WorkflowTaskInput,
     ctx: TaskContext,
     session_runtime: SessionRuntime,
+    workflow_clients: WorkflowQueueClients,
 ) -> Result<Value, WorkflowRuntimeError> {
     let host_path = python_workflow_host_path();
     let mut command = Command::new(
@@ -2691,18 +2747,23 @@ async fn run_python_workflow_host_local(
                 record_python_workflow_metric(&message);
             }
             Some(message_type) if message_type.starts_with("ctx.") => {
-                let response =
-                    match handle_python_context_request(&message, &ctx, &session_runtime, &input)
-                        .await
-                    {
-                        Ok(response) => response,
-                        Err(error) => {
-                            drop(stdin);
-                            let _ = child.start_kill();
-                            let _ = child.wait().await;
-                            return Err(error);
-                        }
-                    };
+                let response = match handle_python_context_request(
+                    &message,
+                    &ctx,
+                    &session_runtime,
+                    &input,
+                    &workflow_clients,
+                )
+                .await
+                {
+                    Ok(response) => response,
+                    Err(error) => {
+                        drop(stdin);
+                        let _ = child.start_kill();
+                        let _ = child.wait().await;
+                        return Err(error);
+                    }
+                };
                 write_host_message(&mut stdin, &response).await?;
             }
             other => {
@@ -2725,6 +2786,7 @@ async fn run_python_workflow_host_in_sandbox(
     ctx: TaskContext,
     session_runtime: SessionRuntime,
     sandbox: WorkflowHostSandboxRuntime,
+    workflow_clients: WorkflowQueueClients,
 ) -> Result<Value, WorkflowRuntimeError> {
     let mut spec = sandbox.spec.clone();
     spec = spec
@@ -2754,6 +2816,7 @@ async fn run_python_workflow_host_in_sandbox(
         input,
         ctx,
         session_runtime,
+        workflow_clients,
         &mut stdin,
         io.stdout,
         stderr_task,
@@ -2774,6 +2837,7 @@ async fn run_python_workflow_host_protocol<W, R>(
     input: WorkflowTaskInput,
     ctx: TaskContext,
     session_runtime: SessionRuntime,
+    workflow_clients: WorkflowQueueClients,
     stdin: &mut W,
     stdout: R,
     stderr_task: JoinHandle<String>,
@@ -2833,8 +2897,14 @@ where
                 record_python_workflow_metric(&message);
             }
             Some(message_type) if message_type.starts_with("ctx.") => {
-                let response =
-                    handle_python_context_request(&message, &ctx, &session_runtime, &input).await?;
+                let response = handle_python_context_request(
+                    &message,
+                    &ctx,
+                    &session_runtime,
+                    &input,
+                    &workflow_clients,
+                )
+                .await?;
                 write_host_message(stdin, &response).await?;
             }
             other => {
@@ -2964,6 +3034,7 @@ async fn handle_python_context_request(
     ctx: &TaskContext,
     session_runtime: &SessionRuntime,
     input: &WorkflowTaskInput,
+    workflow_clients: &WorkflowQueueClients,
 ) -> Result<Value, WorkflowRuntimeError> {
     let request_id = message
         .get("request_id")
@@ -3048,6 +3119,12 @@ async fn handle_python_context_request(
                 Err(error) => Err(error.to_string()),
             }
         }
+        Some("ctx.workflow.start") => {
+            match start_python_child_workflow(message, input, workflow_clients).await {
+                Ok(value) => Ok(value),
+                Err(error) => Err(error.to_string()),
+            }
+        }
         Some("ctx.call_tool") => match call_python_workflow_tool(message).await {
             Ok(value) => Ok(value),
             Err(error) => Err(error.to_string()),
@@ -3074,6 +3151,62 @@ async fn handle_python_context_request(
             "error": error,
         }),
     })
+}
+
+async fn start_python_child_workflow(
+    message: &Value,
+    parent: &WorkflowTaskInput,
+    workflow_clients: &WorkflowQueueClients,
+) -> Result<Value, WorkflowRuntimeError> {
+    let workflow_name = message
+        .get("workflow_name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| {
+            WorkflowRuntimeError::BadRequest(
+                "ctx.workflow.start requires a non-empty workflow_name".to_owned(),
+            )
+        })?;
+    WorkflowEnablement::from_env()?.ensure_enabled(workflow_name)?;
+    let child_input = message.get("input").cloned().unwrap_or_else(|| json!({}));
+    if !child_input.is_object() {
+        return Err(WorkflowRuntimeError::BadRequest(
+            "ctx.workflow.start input must be an object".to_owned(),
+        ));
+    }
+    let idempotency_key = message
+        .get("idempotency_key")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(ToOwned::to_owned);
+    let target_client = match workflow_queue_class(workflow_name) {
+        WorkflowQueueClass::Standard => &workflow_clients.standard,
+        WorkflowQueueClass::SlackLive => &workflow_clients.slack_live,
+        WorkflowQueueClass::Etl => &workflow_clients.etl,
+        WorkflowQueueClass::EtlBackfill => &workflow_clients.etl_backfill,
+    };
+    let spawn = target_client
+        .spawn(
+            WORKFLOW_TASK,
+            WorkflowTaskInput {
+                workflow_name: workflow_name.to_owned(),
+                input: child_input,
+                harness_type: parent.harness_type.clone(),
+            },
+            SpawnOptions {
+                idempotency_key,
+                ..SpawnOptions::default()
+            },
+        )
+        .await?;
+    Ok(json!({
+        "workflow_name": workflow_name,
+        "task_id": spawn.task_id,
+        "run_id": spawn.run_id,
+        "created": spawn.created,
+    }))
 }
 
 fn parse_python_duration_seconds(message: &Value) -> Result<Duration, String> {

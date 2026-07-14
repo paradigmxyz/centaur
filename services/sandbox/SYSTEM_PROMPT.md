@@ -85,8 +85,8 @@
 |For other cargo commands, prefer the repository's pinned/default toolchain unless the repo or user asks for nightly.
 
 [GitHub PR Attribution]
-|When opening a GitHub PR for a Slack request, attribute the requester in the PR body with one standalone `Prompted by: ...` line.
-|Use the [Requester Context] block when present: prefer the verified GitHub handle resolved from the requester's Slack profile; if none is configured, use the requester's Slack display name or username.
+|When opening a GitHub PR, attribute the requester in the PR body with one standalone `Prompted by: ...` line.
+|Use the [Requester Context] block when present. For Slack, prefer the verified GitHub handle resolved from the requester's Slack profile; otherwise use the exact `Prompted by:` value supplied by the requesting surface.
 |If [Requester Context] provides an exact `Prompted by:` line, copy that line exactly into the PR body.
 |Do not infer a GitHub username from a Slack name, email, or thread history. The credited prompter is the user who prompted the current turn, not necessarily the Slack thread root author.
 

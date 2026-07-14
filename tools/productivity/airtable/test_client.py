@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import importlib
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
 import httpx
+import pytest
+from typer.testing import CliRunner
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(REPO_ROOT / "tools" / "productivity"))
 
-from centaur_sdk import ToolContext, reset_tool_context, set_tool_context
+from centaur_sdk import ToolContext, reset_tool_context, set_tool_context  # noqa: E402
 
 CLIENT_PATH = REPO_ROOT / "tools" / "productivity" / "airtable" / "client.py"
 
@@ -21,6 +26,12 @@ def _load_airtable_module():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _load_airtable_cli_module():
+    for module_name in ("airtable.cli", "airtable.client", "airtable"):
+        sys.modules.pop(module_name, None)
+    return importlib.import_module("airtable.cli")
 
 
 def _mock_client(client, handler) -> None:
@@ -36,7 +47,9 @@ def test_client_factory_loads_without_secret_and_preflight_reports_missing_secre
     token = set_tool_context(ToolContext(name="airtable", secrets={"AIRTABLE_API_KEY": ""}))
     try:
         client = module._client()
-        result = client.preflight_access(url="https://airtable.com/appBase123/tblTable456/viwView789")
+        result = client.preflight_access(
+            url="https://airtable.com/appBase123/tblTable456/viwView789"
+        )
         client.close()
     finally:
         reset_tool_context(token)
@@ -44,6 +57,115 @@ def test_client_factory_loads_without_secret_and_preflight_reports_missing_secre
     assert result["status"] == "missing_secret"
     assert result["auth"]["attempted"] is False
     assert result["probe"]["attempted"] is False
+
+
+def test_health_raises_missing_secret_without_network_call() -> None:
+    module = _load_airtable_module()
+    token = set_tool_context(ToolContext(name="airtable", secrets={"AIRTABLE_API_KEY": ""}))
+    try:
+        client = module._client()
+        with pytest.raises(RuntimeError, match="AIRTABLE_API_KEY not set"):
+            client.health()
+    finally:
+        client.close()
+        reset_tool_context(token)
+
+
+def test_health_reports_current_user_from_whoami() -> None:
+    module = _load_airtable_module()
+    client = module.AirtableClient(api_key="test-key")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/v0/meta/whoami"
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "usr123",
+                "email": "ada@example.com",
+                "scopes": ["schema.bases:read", "data.records:read"],
+            },
+        )
+
+    _mock_client(client, handler)
+    try:
+        result = client.health()
+    finally:
+        client.close()
+
+    assert result == {"current_user": {"id": "usr123"}}
+    assert "email" not in result["current_user"]
+
+
+def test_health_raises_invalid_token_from_whoami() -> None:
+    module = _load_airtable_module()
+    client = module.AirtableClient(api_key="test-key")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/v0/meta/whoami"
+        return httpx.Response(
+            401,
+            request=request,
+            json={
+                "error": {
+                    "type": "AUTHENTICATION_REQUIRED",
+                    "message": "Authentication required",
+                }
+            },
+        )
+
+    _mock_client(client, handler)
+    try:
+        with pytest.raises(RuntimeError, match="AIRTABLE_API_KEY is missing or invalid"):
+            client.health()
+    finally:
+        client.close()
+
+
+def test_cli_health_command_reports_current_user(monkeypatch) -> None:
+    cli = _load_airtable_cli_module()
+
+    class FakeClient:
+        def health(self) -> dict:
+            return {"current_user": {"id": "usr123"}}
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(sys.modules["airtable.client"], "_client", lambda: FakeClient())
+
+    result = CliRunner().invoke(cli.app, ["health"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["ok"] is True
+    assert payload["tool"] == "airtable"
+    assert payload["details"]["current_user"] == {"id": "usr123"}
+
+
+def test_cli_whoami_command_reports_current_user(monkeypatch) -> None:
+    cli = _load_airtable_cli_module()
+
+    class FakeClient:
+        def whoami(self) -> dict:
+            return {
+                "id": "usr123",
+                "email": "ada@example.com",
+                "scopes": ["schema.bases:read"],
+            }
+
+    monkeypatch.setattr(cli, "AirtableClient", FakeClient)
+
+    whoami = CliRunner().invoke(cli.app, ["whoami"])
+
+    assert whoami.exit_code == 0, whoami.output
+    assert json.loads(whoami.output) == {
+        "id": "usr123",
+        "email": "ada@example.com",
+        "scopes": ["schema.bases:read"],
+    }
 
 
 def test_preflight_access_reports_invalid_token_from_whoami() -> None:
@@ -81,7 +203,9 @@ def test_preflight_access_reports_missing_base_scope_from_probe() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "GET" and request.url.path == "/v0/meta/whoami":
-            return httpx.Response(200, request=request, json={"id": "usr123", "scopes": ["data.records:read"]})
+            return httpx.Response(
+                200, request=request, json={"id": "usr123", "scopes": ["data.records:read"]}
+            )
         if request.method == "GET" and request.url.path == "/v0/appBase123/tblTable456":
             assert request.url.params.get("pageSize") == "1"
             return httpx.Response(
@@ -148,7 +272,9 @@ def test_preflight_access_returns_ok_when_auth_and_read_probe_succeed() -> None:
 
     _mock_client(client, handler)
     try:
-        result = client.preflight_access(url="https://airtable.com/appBase123/tblTable456/viwView789")
+        result = client.preflight_access(
+            url="https://airtable.com/appBase123/tblTable456/viwView789"
+        )
     finally:
         client.close()
 
@@ -156,3 +282,140 @@ def test_preflight_access_returns_ok_when_auth_and_read_probe_succeed() -> None:
     assert result["status"] == "ok"
     assert result["probe"]["type"] == "records"
     assert result["probe"]["details"] == {"record_count": 1, "has_more": True}
+
+
+def test_create_record_posts_fields_and_compacts_response() -> None:
+    module = _load_airtable_module()
+    client = module.AirtableClient(api_key="test-key")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/v0/appBase123/tblTable456"
+        assert json.loads(request.content) == {
+            "fields": {"Name": "Ada", "Done": True},
+            "typecast": True,
+        }
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "rec1",
+                "createdTime": "2026-07-13T00:00:00.000Z",
+                "fields": {"Name": "Ada", "Done": True},
+            },
+        )
+
+    _mock_client(client, handler)
+    try:
+        result = client.create_record(
+            "appBase123",
+            "tblTable456",
+            {"Name": "Ada", "Done": True},
+            typecast=True,
+        )
+    finally:
+        client.close()
+
+    assert result == {
+        "id": "rec1",
+        "createdTime": "2026-07-13T00:00:00.000Z",
+        "fields": {"Name": "Ada", "Done": True},
+    }
+
+
+def test_update_records_batches_and_uses_patch() -> None:
+    module = _load_airtable_module()
+    client = module.AirtableClient(api_key="test-key")
+    calls: list[list[dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "PATCH"
+        assert request.url.path == "/v0/appBase123/tblTable456"
+        body = json.loads(request.content)
+        calls.append(body["records"])
+        assert body["typecast"] is False
+        return httpx.Response(200, request=request, json={"records": body["records"]})
+
+    records = [{"id": f"rec{index}", "fields": {"Index": index}} for index in range(11)]
+    _mock_client(client, handler)
+    try:
+        result = client.update_records("appBase123", "tblTable456", records)
+    finally:
+        client.close()
+
+    assert [len(call) for call in calls] == [10, 1]
+    assert result["count"] == 11
+    assert result["records"][0] == {
+        "id": "rec0",
+        "createdTime": None,
+        "fields": {"Index": 0},
+    }
+
+
+def test_upsert_records_sends_perform_upsert() -> None:
+    module = _load_airtable_module()
+    client = module.AirtableClient(api_key="test-key")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "PATCH"
+        assert request.url.path == "/v0/appBase123/Table Name"
+        assert json.loads(request.content) == {
+            "records": [{"fields": {"External ID": "ext-1", "Name": "Ada"}}],
+            "typecast": False,
+            "performUpsert": {"fieldsToMergeOn": ["External ID"]},
+        }
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "records": [{"id": "rec1", "fields": {"External ID": "ext-1", "Name": "Ada"}}],
+                "createdRecords": ["rec1"],
+                "updatedRecords": [],
+            },
+        )
+
+    _mock_client(client, handler)
+    try:
+        result = client.upsert_records(
+            "appBase123",
+            "Table Name",
+            [{"External ID": "ext-1", "Name": "Ada"}],
+            fields_to_merge_on=["External ID"],
+        )
+    finally:
+        client.close()
+
+    assert result["createdRecords"] == ["rec1"]
+    assert result["updatedRecords"] == []
+    assert result["records"][0]["id"] == "rec1"
+
+
+def test_delete_records_batches_query_params() -> None:
+    module = _load_airtable_module()
+    client = module.AirtableClient(api_key="test-key")
+    calls: list[list[str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "DELETE"
+        assert request.url.path == "/v0/appBase123/tblTable456"
+        record_ids = request.url.params.get_list("records[]")
+        calls.append(record_ids)
+        return httpx.Response(
+            200,
+            request=request,
+            json={"records": [{"id": record_id, "deleted": True} for record_id in record_ids]},
+        )
+
+    _mock_client(client, handler)
+    try:
+        result = client.delete_records(
+            "appBase123",
+            "tblTable456",
+            [f"rec{index}" for index in range(12)],
+        )
+    finally:
+        client.close()
+
+    assert [len(call) for call in calls] == [10, 2]
+    assert result["count"] == 12
+    assert result["records"][-1] == {"id": "rec11", "deleted": True}

@@ -462,7 +462,13 @@ def test_thread_calls_api_server_client(monkeypatch) -> None:
             "has_more": False,
         }
 
-    fake_client = types.SimpleNamespace(get_thread_replies_proxy=fake_get_thread_replies_proxy)
+    def fake_get_thread_replies_page(*args, **kwargs):
+        raise AssertionError("direct thread fallback should not be used")
+
+    fake_client = types.SimpleNamespace(
+        get_thread_replies_page=fake_get_thread_replies_page,
+        get_thread_replies_proxy=fake_get_thread_replies_proxy,
+    )
     monkeypatch.setitem(sys.modules, "slack.client", fake_client)
 
     result = CliRunner().invoke(
@@ -490,6 +496,53 @@ def test_thread_calls_api_server_client(monkeypatch) -> None:
             },
         )
     ]
+
+
+def test_thread_falls_back_to_direct_client_when_api_server_fails(monkeypatch) -> None:
+    proxy_calls = []
+    direct_calls = []
+
+    def fake_get_thread_replies_proxy(*args, **kwargs):
+        proxy_calls.append((args, kwargs))
+        raise RuntimeError("proxy unavailable")
+
+    def fake_get_thread_replies_page(*args, **kwargs):
+        direct_calls.append((args, kwargs))
+        return {
+            "messages": [{"user": "alice", "text": "root"}],
+            "has_more": False,
+            "window": {"oldest": None, "latest": None, "inclusive": True},
+        }
+
+    fake_client = types.SimpleNamespace(
+        get_thread_replies_page=fake_get_thread_replies_page,
+        get_thread_replies_proxy=fake_get_thread_replies_proxy,
+    )
+    monkeypatch.setitem(sys.modules, "slack.client", fake_client)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "thread",
+            "C1234567890:1780000000.000000",
+            "--limit",
+            "10",
+        ],
+    )
+
+    expected_call = (
+        ("C1234567890", "1780000000.000000"),
+        {
+            "limit": 10,
+            "cursor": None,
+            "oldest": None,
+            "latest": None,
+            "inclusive": True,
+        },
+    )
+    assert result.exit_code == 0
+    assert proxy_calls == [expected_call]
+    assert direct_calls == [expected_call]
 
 
 def test_thread_direct_calls_direct_client(monkeypatch) -> None:

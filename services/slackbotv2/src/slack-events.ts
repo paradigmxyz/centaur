@@ -1,4 +1,5 @@
 import type { Logger, Message } from 'chat'
+import { withSlackApiTimeout } from './session-api'
 import type { JsonValue, SlackbotV2Options } from './types'
 import { isJsonObject, stringValue } from './utils'
 
@@ -26,6 +27,20 @@ type RawSlackEnvelope = {
   team_id?: JsonValue
   type?: JsonValue
 }
+
+type TriggerBotIdentity = {
+  appId?: string
+  userId?: string
+}
+
+const triggerBotIdentityCaches = new WeakMap<
+  SlackbotV2Options,
+  Map<string, Promise<TriggerBotIdentity | null>>
+>()
+const triggerBotUserAppCaches = new WeakMap<
+  SlackbotV2Options,
+  Map<string, Promise<string | null>>
+>()
 
 export function isAllowedSlackWebhookBody(
   rawBody: string,
@@ -56,11 +71,11 @@ export function isAllowedSlackWebhookBody(
   return true
 }
 
-export function isAllowedSlackMessage(
+export async function isAllowedSlackMessage(
   message: Message,
   options: SlackbotV2Options,
   logger: Logger
-): boolean {
+): Promise<boolean> {
   const raw = isRawSlackEvent(message.raw) ? message.raw : undefined
   const allowedExternalTeamIds =
     options.allowedExternalTeamIds ?? splitEnvList(process.env.SLACKBOT_EXTERNAL_ORG_ALLOWLIST)
@@ -77,7 +92,10 @@ export function isAllowedSlackMessage(
   const triggerBotAllowlist =
     options.triggerBotAllowlist ?? splitEnvList(process.env.SLACKBOT_TRIGGER_BOT_ALLOWLIST)
   const botAuthored = message.author.isBot === true || (raw ? isBotAuthoredSlackEvent(raw) : false)
-  if (botAuthored && !(raw && isAllowedTriggerBotMessage(raw, triggerBotAllowlist))) {
+  if (
+    botAuthored &&
+    !(raw && (await isAllowedTriggerBotMessage(raw, triggerBotAllowlist, options, logger)))
+  ) {
     logger.warn('slackbotv2_event_ignored_bot_not_allowlisted', {
       message_id: message.id,
       thread_id: message.threadId
@@ -108,45 +126,160 @@ function isBotAuthoredSlackEvent(event: RawSlackEvent): boolean {
   return Boolean(event.bot_id || event.bot_profile || event.subtype === 'bot_message')
 }
 
-function isAllowedTriggerBotMessage(
+async function isAllowedTriggerBotMessage(
   event: RawSlackEvent,
-  allowlist: readonly string[] | undefined
-): boolean {
+  allowlist: readonly string[] | undefined,
+  options: SlackbotV2Options,
+  logger: Logger
+): Promise<boolean> {
   if (!allowlist?.length) return false
-  const appIds = normalizedIdentifierSet(stringValue(event.app_id), stringValue(event.bot_profile?.app_id))
   const botIds = normalizedIdentifierSet(stringValue(event.bot_id), stringValue(event.bot_profile?.id))
   const botUserIds = normalizedIdentifierSet(
     stringValue(event.user),
     stringValue(event.bot_profile?.user_id)
   )
-  const anyIds = new Set([...appIds, ...botIds, ...botUserIds])
+  const allowedBotIds = new Set(
+    allowlist
+      .map(entry => entry.trim())
+      .filter(entry => entry.startsWith('bot:'))
+      .map(entry => entry.slice('bot:'.length))
+      .filter(isSlackBotId)
+  )
+  if ([...botIds].some(botId => allowedBotIds.has(botId))) return true
 
-  for (const entry of allowlist) {
-    const parsed = parseTriggerBotAllowlistEntry(entry)
-    if (!parsed) continue
-    if (parsed.kind === 'app' && appIds.has(parsed.value)) return true
-    if (parsed.kind === 'bot' && botIds.has(parsed.value)) return true
-    if (parsed.kind === 'user' && botUserIds.has(parsed.value)) return true
-    if (parsed.kind === 'any' && anyIds.has(parsed.value)) return true
+  const allowedUserIds = new Set(allowlist.map(entry => entry.trim()).filter(isSlackMemberId))
+  if (!allowedUserIds.size) return false
+  if ([...botUserIds].some(userId => allowedUserIds.has(userId))) return true
+
+  for (const botId of botIds) {
+    const identity = await resolveTriggerBotIdentity(botId, options, logger)
+    if (!identity) continue
+    if (identity.userId && allowedUserIds.has(identity.userId)) return true
+    if (!identity.appId) continue
+    for (const userId of allowedUserIds) {
+      if (identity.appId === await resolveTriggerBotUserAppId(userId, options, logger)) return true
+    }
   }
   return false
 }
 
-function normalizedIdentifierSet(...values: Array<string | undefined>): Set<string> {
-  return new Set(values.map(value => value?.trim()).filter((value): value is string => Boolean(value)))
+function isSlackMemberId(value: string): boolean {
+  return /^[UW][A-Z0-9]+$/i.test(value)
 }
 
-function parseTriggerBotAllowlistEntry(
-  entry: string
-): { kind: 'app' | 'bot' | 'user' | 'any'; value: string } | null {
-  const trimmed = entry.trim()
-  if (!trimmed) return null
-  const prefixed = /^(app|bot|user):(.+)$/i.exec(trimmed)
-  if (!prefixed) return { kind: 'any', value: trimmed }
-  const kind = prefixed[1]
-  const value = prefixed[2]?.trim()
-  if (!kind || !value) return null
-  return { kind: kind.toLowerCase() as 'app' | 'bot' | 'user', value }
+function isSlackBotId(value: string): boolean {
+  return /^B[A-Z0-9]+$/i.test(value)
+}
+
+async function resolveTriggerBotIdentity(
+  botId: string,
+  options: SlackbotV2Options,
+  logger: Logger
+): Promise<TriggerBotIdentity | null> {
+  let cache = triggerBotIdentityCaches.get(options)
+  if (!cache) {
+    cache = new Map()
+    triggerBotIdentityCaches.set(options, cache)
+  }
+  const cached = cache.get(botId)
+  if (cached) return cached
+
+  const lookup = fetchTriggerBotIdentity(botId, options, logger)
+  cache.set(botId, lookup)
+  void lookup.then(identity => {
+    if (!identity && cache.get(botId) === lookup) cache.delete(botId)
+  })
+  return lookup
+}
+
+async function fetchTriggerBotIdentity(
+  botId: string,
+  options: SlackbotV2Options,
+  logger: Logger
+): Promise<TriggerBotIdentity | null> {
+  try {
+    const url = new URL('bots.info', options.slackApiUrl ?? 'https://slack.com/api/')
+    url.searchParams.set('bot', botId)
+    return await withSlackApiTimeout(options, 'Slack API bots.info', async () => {
+      const response = await (options.fetch ?? fetch)(url, {
+        method: 'GET',
+        headers: { authorization: `Bearer ${options.botToken}` }
+      })
+      const payload: unknown = await response.json()
+      if (!response.ok || !isJsonObject(payload) || payload.ok === false || !isJsonObject(payload.bot)) {
+        return null
+      }
+      return {
+        appId: stringValue(payload.bot.app_id),
+        userId: stringValue(payload.bot.user_id)
+      }
+    })
+  } catch (error) {
+    logger.warn('slackbotv2_trigger_bot_identity_lookup_failed', {
+      bot_id: botId,
+      error: error instanceof Error ? error.message : String(error)
+    })
+    return null
+  }
+}
+
+async function resolveTriggerBotUserAppId(
+  userId: string,
+  options: SlackbotV2Options,
+  logger: Logger
+): Promise<string | null> {
+  let cache = triggerBotUserAppCaches.get(options)
+  if (!cache) {
+    cache = new Map()
+    triggerBotUserAppCaches.set(options, cache)
+  }
+  const cached = cache.get(userId)
+  if (cached) return cached
+
+  const lookup = fetchTriggerBotUserAppId(userId, options, logger)
+  cache.set(userId, lookup)
+  void lookup.then(appId => {
+    if (!appId && cache.get(userId) === lookup) cache.delete(userId)
+  })
+  return lookup
+}
+
+async function fetchTriggerBotUserAppId(
+  userId: string,
+  options: SlackbotV2Options,
+  logger: Logger
+): Promise<string | null> {
+  try {
+    const url = new URL('users.info', options.slackApiUrl ?? 'https://slack.com/api/')
+    url.searchParams.set('user', userId)
+    return await withSlackApiTimeout(options, 'Slack API users.info', async () => {
+      const response = await (options.fetch ?? fetch)(url, {
+        method: 'GET',
+        headers: { authorization: `Bearer ${options.botToken}` }
+      })
+      const payload: unknown = await response.json()
+      if (
+        !response.ok ||
+        !isJsonObject(payload) ||
+        payload.ok === false ||
+        !isJsonObject(payload.user) ||
+        !isJsonObject(payload.user.profile)
+      ) {
+        return null
+      }
+      return stringValue(payload.user.profile.api_app_id) ?? null
+    })
+  } catch (error) {
+    logger.warn('slackbotv2_trigger_bot_user_identity_lookup_failed', {
+      user_id: userId,
+      error: error instanceof Error ? error.message : String(error)
+    })
+    return null
+  }
+}
+
+function normalizedIdentifierSet(...values: Array<string | undefined>): Set<string> {
+  return new Set(values.map(value => value?.trim()).filter((value): value is string => Boolean(value)))
 }
 
 function splitEnvList(value: string | undefined): string[] {

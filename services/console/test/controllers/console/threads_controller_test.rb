@@ -36,51 +36,18 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_select ".console-thread-group-title", text: /Chats/
   end
 
-  test "threads page does not render composer when session database is unavailable" do
+  test "threads page falls back to the new chat screen when session database is unavailable" do
     with_recent_first_error do
       get console_threads_url
     end
 
     assert_response :ok
-    assert_select "input[name=q]", count: 0
-    assert_select ".console-main-thread-frame aside", count: 0
-    # No chat selected: like the not-found state, the page renders only the
-    # centered empty state — no detail header.
+    # No chat selected: the new-chat composer renders (posting goes through
+    # the API, not the sessions DB), alongside the unavailability note.
     assert_select ".console-thread-detail-header", count: 0
-    assert_select "a[aria-label=?]", "New chat", count: 0
-    assert_select "span[aria-label=?]", "New chat disabled", count: 0
-    assert_select "textarea[name=prompt]", count: 0
-    assert_select "select[name=harness_type]", count: 0
-    assert_select "form[action=?]", console_threads_path, count: 0
-    assert_select "body", text: /No chats yet/
+    assert_select "a[aria-label=?]", "New chat", count: 1
+    assert_select "textarea[name=prompt]", count: 1
     assert_select "body", text: /Chat database is unavailable/
-  end
-
-  test "blank prompt is blocked by read only mode" do
-    post console_threads_url, params: { prompt: " " }
-
-    assert_redirected_to console_threads_path
-    assert_equal "Chats are read-only while browsing a mirrored production snapshot.", flash[:alert]
-  end
-
-  test "threads page hides composer controls" do
-    with_recent_first_error do
-      get console_threads_url
-    end
-
-    assert_response :ok
-    assert_select "textarea[name=prompt]", count: 0
-    assert_select "form[action=?]", console_threads_path, count: 0
-    assert_select "body", text: /Read-only snapshot/, count: 0
-    assert_select "span[aria-label=?]", "New chat disabled", count: 0
-    assert_select "a[aria-label=?]", "New chat", count: 0
-  end
-
-  test "posts are blocked without calling the session api" do
-    post console_threads_url, params: { prompt: "Do not run this." }
-
-    assert_redirected_to console_threads_path
-    assert_equal "Chats are read-only while browsing a mirrored production snapshot.", flash[:alert]
   end
 
   test "plain threads page redirects to first visible thread" do
@@ -625,23 +592,299 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_nil controller.send(:selected_session, scoped_relation, [])
   end
 
-  test "starting a thread is blocked without calling the session api" do
-    post console_threads_url, params: { prompt: "Reply with PONG.", harness_type: "amp" }
+  test "renders the sidebar New chat link and the full-page composer" do
+    with_composer do
+      with_recent_first_error do
+        get console_threads_url(new: 1)
+      end
+    end
 
-    assert_redirected_to console_threads_path
-    assert_equal "Chats are read-only while browsing a mirrored production snapshot.", flash[:alert]
+    assert_response :ok
+    assert_select "a[aria-label=?]", "New chat", count: 1
+    assert_select "form[action=?]", console_threads_path do
+      assert_select "textarea[name=prompt]", count: 1
+      # The model picker is a custom menu (account-dropdown style) posting
+      # through a hidden field, not a native select.
+      assert_select "input[type=hidden][name=model]", count: 1
+      assert_select "[data-console-model-option][data-value=?]", "amp"
+      assert_select "select", count: 0
+    end
+    # Submitting replaces the centered empty state with a full-height,
+    # bottom-aligned optimistic transcript while the request is in flight.
+    assert_includes response.body, 'container.classList.add("console-new-chat--optimistic")'
+    assert_includes response.body, ".console-new-chat--optimistic"
   end
 
-  test "posting to an existing thread is blocked without calling the session api" do
-    post console_threads_url,
-         params: {
-           prompt: "Continue from here.",
-           thread_key: "console:existing",
-           harness_type: "codex"
-         }
+  test "shows the new chat screen when nothing is selected" do
+    with_composer do
+      with_recent_first_error do
+        get console_threads_url
+      end
+    end
 
-    assert_redirected_to console_threads_path(thread: "console:existing")
-    assert_equal "Chats are read-only while browsing a mirrored production snapshot.", flash[:alert]
+    assert_response :ok
+    assert_select "textarea[name=prompt]", count: 1
+    assert_select "body", text: /No chats yet/, count: 0
+  end
+
+  test "an active execution renders a thinking indicator" do
+    skip_unless_session_table
+    insert_console_session("console:thinking-active")
+    insert_session_execution("console:thinking-active", status: "running")
+
+    get console_threads_url(thread: "console:thinking-active")
+
+    assert_response :ok
+    assert_select "[data-console-thinking-indicator]", count: 1
+  end
+
+  test "a completed execution renders no thinking indicator" do
+    skip_unless_session_table
+    insert_console_session("console:thinking-done")
+    insert_session_execution("console:thinking-done", status: "completed")
+
+    get console_threads_url(thread: "console:thinking-done")
+
+    assert_response :ok
+    assert_select "[data-console-thinking-indicator]", count: 0
+  end
+
+  test "a new sentinel pane opens a composer panel alongside a thread" do
+    skip_unless_session_table
+    insert_console_session("console:with-new-pane")
+
+    with_composer do
+      get console_threads_url(thread: "console:with-new-pane,new")
+    end
+
+    assert_response :ok
+    assert_select "[data-thread-panel]", count: 2
+    assert_select "[data-thread-panel=new]", count: 1
+    assert_select "[data-thread-panel=new] textarea[name=prompt]", count: 1
+    assert_select "[data-thread-panel=new] [data-console-model-picker]", count: 1
+  end
+
+  test "the new sentinel alone renders the full-page new chat screen" do
+    with_composer do
+      with_recent_first_error do
+        get console_threads_url(thread: "new")
+      end
+    end
+
+    assert_response :ok
+    assert_select "[data-thread-panel]", count: 0
+    assert_select "textarea[name=prompt]", count: 1
+  end
+
+  test "starting a chat from a pane swaps the sentinel for the created thread" do
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      post console_threads_url,
+           params: {
+             prompt: "Reply with PONG.",
+             model: "gpt-5.5",
+             open_threads: "console:other,new"
+           }
+    end
+
+    thread_key = client.calls[0].last[:thread_key]
+    assert_redirected_to console_threads_path(thread: "console:other,#{thread_key}")
+  end
+
+  test "renders a follow-up composer on an open chat" do
+    skip_unless_session_table
+    insert_console_session("console:composer-open")
+
+    with_composer do
+      get console_threads_url(thread: "console:composer-open")
+    end
+
+    assert_response :ok
+    assert_select "form[action=?]", console_threads_path do
+      assert_select "input[type=hidden][name=thread_key][value=?]", "console:composer-open"
+      assert_select "textarea[name=prompt]", count: 1
+      # Follow-ups stay on the chat's existing harness/model: no picker.
+      assert_select "[data-console-model-picker]", count: 0
+    end
+    # Optimistic rendering must not clear the textarea until Turbo has copied
+    # its value into FormData, or the controller receives a blank prompt.
+    assert_includes response.body, 'form.addEventListener("formdata"'
+  end
+
+  test "starting a chat creates a session, appends the prompt, and executes it" do
+    @operator.update!(name: "Ada Admin")
+    UserIdentity.create!(user: @operator, provider: "slack", subject: "UADA")
+    client = RecordingApiClient.new
+    identity = SlackRequesterIdentity::Result.new(
+      handle: "@ada", source: 'Slack profile custom field "GitHub"', reason: nil
+    )
+    test_case = self
+    with_singleton_method(SlackRequesterIdentity, :resolve, ->(user_ids:) {
+      test_case.assert_includes user_ids, "uada"
+      identity
+    }) do
+      with_composer(client: client) do
+        post console_threads_url,
+             params: { prompt: "Reply with PONG.", model: "claude-opus-4-8" }
+      end
+    end
+
+    assert_equal %i[create_session append_session_messages execute_session], client.calls.map(&:first)
+
+    create = client.calls[0].last
+    assert create[:thread_key].start_with?("console:"), "expected a console:-namespaced thread key"
+    assert_equal "claudecode", create[:harness_type]
+    assert_equal "console", create[:metadata][:platform]
+    assert_equal "console", create[:metadata][:source]
+    assert_equal @operator.email, create[:metadata][:actor_email]
+    assert_equal "claude-opus-4-8", create[:metadata][:model]
+
+    append = client.calls[1].last
+    assert_equal create[:thread_key], append[:thread_key]
+    message = append[:messages].first
+    assert_equal "user", message[:role]
+    assert_equal "Reply with PONG.", message[:parts].first[:text]
+    assert_equal @operator.email, message[:metadata][:user_email]
+
+    execute = client.calls[2].last
+    assert_equal create[:thread_key], execute[:thread_key]
+    assert execute[:idempotency_key].present?
+    assert_equal "claude-opus-4-8", execute[:metadata][:model]
+    line = JSON.parse(execute[:input_lines].first)
+    assert_equal "user", line["type"]
+    assert_equal create[:thread_key], line["thread_key"]
+    assert_equal "claude-opus-4-8", line["model"]
+    assert_equal message[:client_message_id], line["client_user_message_id"]
+    requester_context = line.dig("message", "content", 0, "text")
+    assert_includes requester_context, "# Requester Context"
+    assert_includes requester_context, "Prompted by: @ada"
+    assert_includes requester_context, 'GitHub handle source: Slack profile custom field "GitHub"'
+    assert_includes requester_context, "GitHub handle verified: yes"
+    assert_equal "Reply with PONG.", line.dig("message", "content", 1, "text")
+
+    assert_redirected_to console_threads_path(thread: create[:thread_key])
+  end
+
+  test "picking Amp starts an amp chat and sends no model" do
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      post console_threads_url, params: { prompt: "Reply with PONG.", model: "amp" }
+    end
+
+    create = client.calls[0].last
+    assert_equal "amp", create[:harness_type]
+    assert_not create[:metadata].key?(:model)
+
+    execute = client.calls[2].last
+    assert_not execute[:metadata].key?(:model)
+    line = JSON.parse(execute[:input_lines].first)
+    assert_not line.key?("model")
+  end
+
+  test "starting a chat with an unknown model is rejected" do
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      post console_threads_url, params: { prompt: "Reply with PONG.", model: "hal9000" }
+    end
+
+    assert_empty client.calls
+    assert_redirected_to console_threads_path(new: 1)
+    assert_match(/Unknown model/, flash[:alert])
+  end
+
+  test "a gpt model pick starts a codex chat" do
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      post console_threads_url, params: { prompt: "Reply with PONG.", model: "gpt-5.5" }
+    end
+
+    create = client.calls[0].last
+    assert_equal "codex", create[:harness_type]
+    assert_equal "gpt-5.5", create[:metadata][:model]
+  end
+
+  test "a codex chat carries the picked reasoning effort" do
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      post console_threads_url,
+           params: { prompt: "Reply with PONG.", model: "gpt-5.6-sol", effort: "max" }
+    end
+
+    execute = client.calls[2].last
+    assert_equal "max", execute[:metadata][:reasoning]
+    line = JSON.parse(execute[:input_lines].first)
+    assert_equal "max", line["reasoning"]
+  end
+
+  test "an effort the model does not offer is dropped" do
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      # max is 5.6-only; claude models take no effort at all.
+      post console_threads_url,
+           params: { prompt: "Reply with PONG.", model: "gpt-5.5", effort: "max" }
+      post console_threads_url,
+           params: { prompt: "Reply with PONG.", model: "claude-opus-4-8", effort: "high" }
+    end
+
+    [ 2, 5 ].each do |index|
+      execute = client.calls[index].last
+      assert_not execute[:metadata].key?(:reasoning)
+      assert_not JSON.parse(execute[:input_lines].first).key?("reasoning")
+    end
+  end
+
+  test "a blank prompt asks for a message" do
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      post console_threads_url, params: { prompt: "   " }
+    end
+
+    assert_empty client.calls
+    assert_redirected_to console_threads_path(new: 1)
+    assert_equal "Type a message first.", flash[:alert]
+  end
+
+  test "replying appends and executes on an owned chat without creating a session" do
+    skip_unless_session_table
+    insert_console_session("console:composer-reply")
+
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      post console_threads_url,
+           params: {
+             prompt: "Continue from here.",
+             thread_key: "console:composer-reply",
+             open_threads: "console:composer-reply,console:other"
+           }
+    end
+
+    assert_equal %i[append_session_messages execute_session], client.calls.map(&:first)
+    assert_equal "console:composer-reply", client.calls[0].last[:thread_key]
+    assert_redirected_to console_threads_path(thread: "console:composer-reply,console:other")
+  end
+
+  test "replying into a chat outside the owner scope is rejected" do
+    skip_unless_session_table
+
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      post console_threads_url,
+           params: { prompt: "Continue from here.", thread_key: "console:not-mine" }
+    end
+
+    assert_empty client.calls
+    assert_redirected_to console_threads_path
+    assert_equal "Chat not found.", flash[:alert]
+  end
+
+  test "a session api error surfaces as a flash alert" do
+    client = RecordingApiClient.new(error: CentaurApiClient::Error.new("boom"))
+    with_composer(client: client) do
+      post console_threads_url, params: { prompt: "Reply with PONG.", harness_type: "codex" }
+    end
+
+    assert_redirected_to console_threads_path(new: 1)
+    assert_match(/boom/, flash[:alert])
   end
 
   # Fix 6: the sidebar thread list is loaded lazily via a Turbo Frame so the
@@ -1153,6 +1396,39 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
 
   private
 
+  # Fake CentaurApiClient recording every composer call; raises `error` from
+  # each method instead when given, to exercise the failure paths.
+  class RecordingApiClient
+    attr_reader :calls
+
+    def initialize(error: nil)
+      @calls = []
+      @error = error
+    end
+
+    def create_session(**kwargs) = record(:create_session, kwargs)
+    def append_session_messages(**kwargs) = record(:append_session_messages, kwargs)
+    def execute_session(**kwargs) = record(:execute_session, kwargs)
+
+    private
+
+    def record(name, kwargs)
+      raise @error if @error
+
+      @calls << [ name, kwargs ]
+      {}
+    end
+  end
+
+  # Runs the block with the injected fake session client.
+  def with_composer(client: RecordingApiClient.new)
+    original_factory = Console::ThreadsController.client_factory
+    Console::ThreadsController.client_factory = -> { client }
+    yield client
+  ensure
+    Console::ThreadsController.client_factory = original_factory
+  end
+
   # Sets each env var for the block (nil deletes) and restores the previous
   # values afterwards.
   def with_env(overrides)
@@ -1213,6 +1489,21 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
       slack_user_name: slack_user_name
     }.to_json
     insert_session(thread_key, metadata)
+  end
+
+  def insert_session_execution(thread_key, status:)
+    connection = CentaurSession.connection
+    connection.execute(<<~SQL.squish)
+      insert into session_executions (execution_id, thread_key, status, metadata, created_at, updated_at)
+      values (
+        #{connection.quote("#{thread_key}-exec")},
+        #{connection.quote(thread_key)},
+        #{connection.quote(status)},
+        '{}'::jsonb,
+        now(),
+        now()
+      )
+    SQL
   end
 
   def insert_session_message(thread_key, index:)
@@ -1301,5 +1592,14 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
         now() + interval '1 day'
       )
     SQL
+  end
+
+  def with_singleton_method(object, method_name, replacement)
+    singleton = object.singleton_class
+    original = singleton.instance_method(method_name)
+    singleton.define_method(method_name, replacement)
+    yield
+  ensure
+    singleton.define_method(method_name, original)
   end
 end

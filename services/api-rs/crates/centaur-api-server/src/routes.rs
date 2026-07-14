@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     convert::Infallible,
     convert::TryFrom,
     env,
@@ -283,6 +283,14 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         .route(
             "/api/admin/google/docs-sync/batch",
             post(ingest_google_docs_sync_batch).layer(DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/api/admin/granola/sync/checkpoint",
+            get(get_granola_sync_checkpoint),
+        )
+        .route(
+            "/api/admin/granola/sync/batch",
+            post(ingest_granola_sync_batch).layer(DefaultBodyLimit::disable()),
         )
         .route("/api/webhooks/{slug}", any(invoke_workflow_webhook))
         .layer(
@@ -617,6 +625,357 @@ async fn stream_events(
         Ok(sse)
     });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+#[derive(Debug, Deserialize)]
+struct GranolaSyncCheckpointQuery {
+    scope_id: String,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+struct GranolaSyncCheckpointResponse {
+    scope_id: String,
+    #[serde(with = "time::serde::rfc3339::option")]
+    watermark_time: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    last_success_at: Option<OffsetDateTime>,
+    last_error: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GranolaSyncBatchRequest {
+    run: GranolaSyncRunPayload,
+    #[serde(default)]
+    notes: Vec<GranolaSyncNotePayload>,
+    #[serde(default)]
+    checkpoint: Option<GranolaSyncCheckpointPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GranolaSyncRunPayload {
+    run_id: String,
+    #[serde(default = "default_granola_sync_mode")]
+    mode: String,
+    status: String,
+    scope_id: String,
+    broker_credential_id: String,
+    source_user_email: String,
+    #[serde(default)]
+    notes_seen: i32,
+    #[serde(default)]
+    notes_upserted: i32,
+    #[serde(default)]
+    transcripts_seen: i32,
+    #[serde(default)]
+    transcripts_upserted: i32,
+    #[serde(default)]
+    error_text: String,
+    #[serde(default)]
+    metadata: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct GranolaSyncNotePayload {
+    note_id: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    owner: Value,
+    #[serde(default)]
+    attendees: Value,
+    #[serde(default)]
+    calendar_event: Value,
+    #[serde(default)]
+    summary_markdown: String,
+    #[serde(default)]
+    summary_text: String,
+    #[serde(default)]
+    transcript: Value,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    source_created_at: Option<String>,
+    #[serde(default)]
+    source_updated_at: Option<String>,
+    #[serde(default)]
+    raw_payload: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct GranolaSyncCheckpointPayload {
+    scope_id: String,
+    #[serde(default)]
+    watermark_time: Option<String>,
+}
+
+async fn get_granola_sync_checkpoint(
+    State(state): State<AppState>,
+    Query(query): Query<GranolaSyncCheckpointQuery>,
+) -> Result<Json<Value>, ApiError> {
+    require_non_empty("scope_id", &query.scope_id)?;
+    let checkpoint = sqlx::query_as::<_, GranolaSyncCheckpointResponse>(
+        "SELECT scope_id, watermark_time, last_success_at, last_error \
+         FROM granola_sync_checkpoints WHERE scope_id = $1",
+    )
+    .bind(&query.scope_id)
+    .fetch_optional(&db_pool(&state)?)
+    .await?;
+
+    Ok(Json(json!({ "ok": true, "checkpoint": checkpoint })))
+}
+
+async fn ingest_granola_sync_batch(
+    State(state): State<AppState>,
+    Json(request): Json<GranolaSyncBatchRequest>,
+) -> Result<Json<Value>, ApiError> {
+    validate_granola_sync_batch(&request)?;
+    let mut tx = db_pool(&state)?.begin().await?;
+    let run = &request.run;
+    let scope = json!({
+        "scope_id": run.scope_id,
+        "broker_credential_id": run.broker_credential_id,
+        "source_user_email": run.source_user_email,
+    });
+    let completed = run.status == "completed";
+    let scopes_synced = if completed {
+        json!([scope.clone()])
+    } else {
+        json!([])
+    };
+    let scopes_failed = if completed {
+        json!([])
+    } else {
+        json!([{ "scope_id": run.scope_id, "reason": run.error_text }])
+    };
+    let finished_at = Some(OffsetDateTime::now_utc());
+    let metadata = json!({
+        "broker_credential_id": run.broker_credential_id,
+        "source_user_email": run.source_user_email,
+        "console_metadata": run.metadata.clone(),
+    });
+
+    sqlx::query(
+        "INSERT INTO granola_sync_runs (\
+         run_id, mode, status, scopes_requested, scopes_synced, scopes_failed, \
+         notes_seen, notes_upserted, transcripts_seen, transcripts_upserted, \
+         finished_at, error_text, metadata\
+         ) VALUES (\
+         $1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7, $8, $9, $10, $11, $12, $13::jsonb\
+         ) ON CONFLICT (run_id) DO UPDATE SET \
+         mode = EXCLUDED.mode, status = EXCLUDED.status, \
+         scopes_requested = EXCLUDED.scopes_requested, scopes_synced = EXCLUDED.scopes_synced, \
+         scopes_failed = EXCLUDED.scopes_failed, notes_seen = EXCLUDED.notes_seen, \
+         notes_upserted = EXCLUDED.notes_upserted, transcripts_seen = EXCLUDED.transcripts_seen, \
+         transcripts_upserted = EXCLUDED.transcripts_upserted, \
+         finished_at = COALESCE(EXCLUDED.finished_at, granola_sync_runs.finished_at), \
+         error_text = EXCLUDED.error_text, metadata = EXCLUDED.metadata",
+    )
+    .bind(&run.run_id)
+    .bind(&run.mode)
+    .bind(&run.status)
+    .bind(json!([scope.clone()]))
+    .bind(scopes_synced)
+    .bind(scopes_failed)
+    .bind(run.notes_seen)
+    .bind(run.notes_upserted)
+    .bind(run.transcripts_seen)
+    .bind(run.transcripts_upserted)
+    .bind(finished_at)
+    .bind(&run.error_text)
+    .bind(metadata)
+    .execute(&mut *tx)
+    .await?;
+
+    for note in &request.notes {
+        let owner_id = json_text(&note.owner, "id").or_else(|| json_text(&note.owner, "user_id"));
+        let owner_email = json_text(&note.owner, "email").unwrap_or_default();
+        let owner_name = json_text(&note.owner, "name")
+            .or_else(|| json_text(&note.owner, "display_name"))
+            .unwrap_or_default();
+        let attendees = ensure_json_array("note.attendees", &note.attendees)?;
+        let transcript = ensure_json_array("note.transcript", &note.transcript)?;
+        ensure_json_object("note.calendar_event", &note.calendar_event)?;
+        let transcript_text = transcript
+            .iter()
+            .filter_map(|entry| json_text(entry, "text"))
+            .filter(|text| !text.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let content_text = [
+            note.title.trim(),
+            note.summary_markdown.trim(),
+            note.summary_text.trim(),
+            transcript_text.trim(),
+        ]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+        let access_emails = granola_access_emails(&run.source_user_email, &owner_email, attendees);
+        let content_hash = hex::encode(Sha256::digest(content_text.as_bytes()));
+
+        sqlx::query(
+            "INSERT INTO granola_sync_notes (\
+             note_id, title, owner_id, owner_email, owner_name, attendees, access_emails, \
+             calendar_event, summary_markdown, summary_text, transcript_text, transcript_payload, \
+             url, content_text, content_hash, source_created_at, source_updated_at, raw_payload, \
+             source_run_id, last_seen_at, last_error, updated_at\
+             ) VALUES (\
+             $1, $2, $3, $4, $5, $6::jsonb, $7::text[], $8::jsonb, $9, $10, $11, $12::jsonb, \
+             $13, $14, $15, $16::timestamptz, $17::timestamptz, $18::jsonb, $19, NOW(), '', NOW()\
+             ) ON CONFLICT (note_id) DO UPDATE SET \
+             title = EXCLUDED.title, owner_id = EXCLUDED.owner_id, owner_email = EXCLUDED.owner_email, \
+             owner_name = EXCLUDED.owner_name, attendees = EXCLUDED.attendees, \
+             access_emails = (SELECT COALESCE(array_agg(DISTINCT email ORDER BY email), ARRAY[]::text[]) \
+                              FROM unnest(granola_sync_notes.access_emails || EXCLUDED.access_emails) AS emails(email) \
+                              WHERE email <> ''), \
+             calendar_event = EXCLUDED.calendar_event, summary_markdown = EXCLUDED.summary_markdown, \
+             summary_text = EXCLUDED.summary_text, transcript_text = EXCLUDED.transcript_text, \
+             transcript_payload = EXCLUDED.transcript_payload, url = EXCLUDED.url, \
+             content_text = EXCLUDED.content_text, content_hash = EXCLUDED.content_hash, \
+             source_created_at = COALESCE(EXCLUDED.source_created_at, granola_sync_notes.source_created_at), \
+             source_updated_at = COALESCE(EXCLUDED.source_updated_at, granola_sync_notes.source_updated_at), \
+             raw_payload = EXCLUDED.raw_payload, source_run_id = EXCLUDED.source_run_id, \
+             last_seen_at = NOW(), last_error = '', updated_at = NOW()",
+        )
+        .bind(&note.note_id)
+        .bind(&note.title)
+        .bind(owner_id.unwrap_or_default())
+        .bind(&owner_email)
+        .bind(&owner_name)
+        .bind(&note.attendees)
+        .bind(access_emails)
+        .bind(&note.calendar_event)
+        .bind(&note.summary_markdown)
+        .bind(&note.summary_text)
+        .bind(transcript_text)
+        .bind(&note.transcript)
+        .bind(&note.url)
+        .bind(content_text)
+        .bind(content_hash)
+        .bind(&note.source_created_at)
+        .bind(&note.source_updated_at)
+        .bind(&note.raw_payload)
+        .bind(&run.run_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    if let Some(checkpoint) = &request.checkpoint {
+        let successful_at = completed.then(OffsetDateTime::now_utc);
+        sqlx::query(
+            "INSERT INTO granola_sync_checkpoints (\
+             scope_id, watermark_time, last_run_id, last_success_at, last_error, updated_at\
+             ) VALUES ($1, $2::timestamptz, $3, $4, $5, NOW()) \
+             ON CONFLICT (scope_id) DO UPDATE SET \
+             watermark_time = COALESCE(EXCLUDED.watermark_time, granola_sync_checkpoints.watermark_time), \
+             last_run_id = EXCLUDED.last_run_id, \
+             last_success_at = COALESCE(EXCLUDED.last_success_at, granola_sync_checkpoints.last_success_at), \
+             last_error = EXCLUDED.last_error, updated_at = NOW()",
+        )
+        .bind(&checkpoint.scope_id)
+        .bind(&checkpoint.watermark_time)
+        .bind(&run.run_id)
+        .bind(successful_at)
+        .bind(&run.error_text)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(Json(json!({
+        "ok": true,
+        "run_id": run.run_id,
+        "notes_ingested": request.notes.len(),
+    })))
+}
+
+fn default_granola_sync_mode() -> String {
+    "incremental".to_owned()
+}
+
+fn validate_granola_sync_batch(request: &GranolaSyncBatchRequest) -> Result<(), ApiError> {
+    let run = &request.run;
+    require_non_empty("run.run_id", &run.run_id)?;
+    require_non_empty("run.status", &run.status)?;
+    require_non_empty("run.scope_id", &run.scope_id)?;
+    require_non_empty("run.broker_credential_id", &run.broker_credential_id)?;
+    require_non_empty("run.source_user_email", &run.source_user_email)?;
+    if run.scope_id != format!("oauth:{}", run.broker_credential_id) {
+        return Err(ApiError::BadRequest(
+            "run.scope_id must be the OAuth credential scope".to_owned(),
+        ));
+    }
+    if !matches!(run.status.as_str(), "completed" | "failed") {
+        return Err(ApiError::BadRequest(
+            "run.status must be completed or failed".to_owned(),
+        ));
+    }
+    ensure_json_object("run.metadata", &run.metadata)?;
+    for note in &request.notes {
+        require_non_empty("note.note_id", &note.note_id)?;
+        ensure_json_object("note.owner", &note.owner)?;
+        ensure_json_array("note.attendees", &note.attendees)?;
+        ensure_json_object("note.calendar_event", &note.calendar_event)?;
+        ensure_json_array("note.transcript", &note.transcript)?;
+        ensure_json_object("note.raw_payload", &note.raw_payload)?;
+    }
+    if let Some(checkpoint) = &request.checkpoint {
+        require_non_empty("checkpoint.scope_id", &checkpoint.scope_id)?;
+        if checkpoint.scope_id != run.scope_id {
+            return Err(ApiError::BadRequest(
+                "checkpoint.scope_id must match run.scope_id".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_json_object<'a>(field: &str, value: &'a Value) -> Result<&'a Value, ApiError> {
+    if value.is_object() {
+        Ok(value)
+    } else {
+        Err(ApiError::BadRequest(format!(
+            "{field} must be a JSON object"
+        )))
+    }
+}
+
+fn ensure_json_array<'a>(field: &str, value: &'a Value) -> Result<&'a Vec<Value>, ApiError> {
+    value
+        .as_array()
+        .ok_or_else(|| ApiError::BadRequest(format!("{field} must be a JSON array")))
+}
+
+fn json_text(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn granola_access_emails(
+    source_user_email: &str,
+    owner_email: &str,
+    attendees: &[Value],
+) -> Vec<String> {
+    let mut emails = BTreeSet::new();
+    for candidate in std::iter::once(source_user_email)
+        .chain(std::iter::once(owner_email))
+        .chain(
+            attendees
+                .iter()
+                .filter_map(|attendee| attendee.get("email").and_then(Value::as_str)),
+        )
+    {
+        let normalized = candidate.trim().to_ascii_lowercase();
+        if !normalized.is_empty() {
+            emails.insert(normalized);
+        }
+    }
+    emails.into_iter().collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -3008,6 +3367,90 @@ fn webhook_filter_matches(filter: &WebhookFilter, headers: &HeaderMap, body: &Va
             .as_deref()
             .is_some_and(|prefix| actual.trim_start().starts_with(prefix)),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod granola_sync_tests {
+    use super::*;
+
+    fn batch() -> GranolaSyncBatchRequest {
+        GranolaSyncBatchRequest {
+            run: GranolaSyncRunPayload {
+                run_id: "granola_test".to_owned(),
+                mode: "incremental".to_owned(),
+                status: "completed".to_owned(),
+                scope_id: "oauth:bcr_123".to_owned(),
+                broker_credential_id: "bcr_123".to_owned(),
+                source_user_email: "owner@example.com".to_owned(),
+                notes_seen: 1,
+                notes_upserted: 1,
+                transcripts_seen: 1,
+                transcripts_upserted: 1,
+                error_text: String::new(),
+                metadata: json!({"source": "console"}),
+            },
+            notes: vec![GranolaSyncNotePayload {
+                note_id: "meeting-1".to_owned(),
+                title: "Planning".to_owned(),
+                owner: json!({"email": "ada@example.com"}),
+                attendees: json!([
+                    {"email": "bob@example.com"},
+                    {"email": "OWNER@example.com"}
+                ]),
+                calendar_event: json!({}),
+                summary_markdown: "Ship it".to_owned(),
+                summary_text: "Ship it".to_owned(),
+                transcript: json!([{ "text": "Ada: ship it" }]),
+                url: String::new(),
+                source_created_at: None,
+                source_updated_at: None,
+                raw_payload: json!({"source": "granola_mcp"}),
+            }],
+            checkpoint: Some(GranolaSyncCheckpointPayload {
+                scope_id: "oauth:bcr_123".to_owned(),
+                watermark_time: Some("2026-07-08T12:00:00Z".to_owned()),
+            }),
+        }
+    }
+
+    #[test]
+    fn validates_a_credential_scoped_granola_batch() {
+        validate_granola_sync_batch(&batch()).unwrap();
+    }
+
+    #[test]
+    fn rejects_a_checkpoint_for_another_credential() {
+        let mut request = batch();
+        request.checkpoint.as_mut().unwrap().scope_id = "oauth:bcr_other".to_owned();
+        let error = validate_granola_sync_batch(&request).unwrap_err();
+        assert!(matches!(error, ApiError::BadRequest(_)));
+    }
+
+    #[test]
+    fn rejects_a_scope_that_does_not_belong_to_the_credential() {
+        let mut request = batch();
+        request.run.scope_id = "oauth:bcr_other".to_owned();
+        request.checkpoint.as_mut().unwrap().scope_id = "oauth:bcr_other".to_owned();
+        let error = validate_granola_sync_batch(&request).unwrap_err();
+        assert!(matches!(error, ApiError::BadRequest(_)));
+    }
+
+    #[test]
+    fn access_is_granted_to_source_owner_and_attendees() {
+        let emails = granola_access_emails(
+            "Owner@example.com",
+            "ada@example.com",
+            batch().notes[0].attendees.as_array().unwrap(),
+        );
+        assert_eq!(
+            emails,
+            vec![
+                "ada@example.com".to_owned(),
+                "bob@example.com".to_owned(),
+                "owner@example.com".to_owned(),
+            ]
+        );
     }
 }
 

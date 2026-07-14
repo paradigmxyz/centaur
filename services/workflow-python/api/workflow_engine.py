@@ -112,6 +112,23 @@ class WorkflowContext:
     async def start_agent(self, *args: Any, text: str | None = None, **kwargs: Any) -> Any:
         return await self.run_agent(*args, text=text, **kwargs)
 
+    async def start_workflow(
+        self,
+        workflow_name: str,
+        input: dict[str, Any] | None = None,
+        *,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Queue another workflow and return its durable task identifiers."""
+        request: dict[str, Any] = {
+            "type": "ctx.workflow.start",
+            "workflow_name": workflow_name,
+            "input": input or {},
+        }
+        if idempotency_key:
+            request["idempotency_key"] = idempotency_key
+        return await self._rpc.request(request)
+
     async def call_tool(self, tool: str, method: str, args: dict[str, Any] | None = None) -> Any:
         return await WorkflowToolManager(self._rpc).call_tool_raw(tool, method, args or {})
 

@@ -59,6 +59,13 @@ class RequestRpc(FakeRpc):
             }
         if message_type == "ctx.agent_turn":
             return payload["args"]
+        if message_type == "ctx.workflow.start":
+            return {
+                "workflow_name": payload["workflow_name"],
+                "task_id": "task-child",
+                "run_id": "run-child",
+                "created": True,
+            }
         if message_type == "ctx.sleep":
             return {"slept": True}
         raise AssertionError(f"unexpected request {payload}")
@@ -161,6 +168,37 @@ class WorkflowHostTests(unittest.TestCase):
         result = asyncio.run(ctx.run_agent("draft_summary", text="summarize this"))
 
         self.assertEqual(result, {"name": "draft_summary", "text": "summarize this"})
+
+    def test_start_workflow_enqueues_durable_child_with_idempotency_key(self) -> None:
+        host = load_workflow_host()
+        rpc = RequestRpc()
+        ctx = host.WorkflowContext(
+            rpc,
+            run_id="run-123",
+            task_id="task-456",
+            workflow_name="sample",
+        )
+
+        result = asyncio.run(
+            ctx.start_workflow(
+                "company_context_documents",
+                {"scope": "slack_thread"},
+                idempotency_key="company-context:slack-thread:42",
+            )
+        )
+
+        self.assertEqual(result["task_id"], "task-child")
+        self.assertEqual(
+            rpc.requests,
+            [
+                {
+                    "type": "ctx.workflow.start",
+                    "workflow_name": "company_context_documents",
+                    "input": {"scope": "slack_thread"},
+                    "idempotency_key": "company-context:slack-thread:42",
+                }
+            ],
+        )
 
     def test_create_pool_retries_transient_connection_failure(self) -> None:
         host = load_workflow_host()
