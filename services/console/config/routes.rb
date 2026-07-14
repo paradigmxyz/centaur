@@ -211,9 +211,8 @@ Rails.application.routes.draw do
     end
   end
 
-  # Public OAuth consent flow, keyed by the app's well-known slug
-  # (/oauth/google/start). Deliberately unauthenticated: a team member clicks the
-  # link to connect an integration; the provider is derived from the app.
+  # OAuth consent flow, keyed by the app's well-known slug (/oauth/google/start).
+  # Requires an active console session; the provider is derived from the app.
   get "oauth/:slug/start", to: "oauth/flows#start", as: :oauth_start
   get "oauth/:slug/callback", to: "oauth/flows#callback", as: :oauth_callback
 

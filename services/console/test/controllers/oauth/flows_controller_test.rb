@@ -3,7 +3,7 @@ require "test_helper"
 module Oauth
   # Covers the consent flow end to end: /oauth/:slug/start builds the IdP redirect
   # and binds the browser; /oauth/:slug/callback exchanges the code, upserts a
-  # BrokerCredential, and renders an iron-control result page. The IdP is faked by
+  # BrokerCredential, and renders a console result page. The IdP is faked by
   # swapping the controller's exchange_client_factory for a client wrapped around
   # an HTTP double returning a canned token response.
   class FlowsControllerTest < ActionDispatch::IntegrationTest
@@ -22,6 +22,8 @@ module Oauth
       oauth_apps(:acme_github).update!(client_secret: "github-secret")
       oauth_apps(:acme_attio).update!(client_secret: "attio-secret")
       oauth_apps(:acme_linear).update!(client_secret: "linear-secret")
+      @user = users(:member_user)
+      sign_in @user
       clear_enqueued_jobs
     end
 
@@ -102,6 +104,10 @@ module Oauth
 
     def sign_in(user)
       post login_url, params: { email: user.email, password: "password123456" }
+    end
+
+    def sign_out
+      delete logout_url
     end
 
     # Runs /start and returns the state extracted from the IdP redirect (the flow
@@ -210,19 +216,23 @@ module Oauth
       assert_includes scopes, "write"
     end
 
-    test "start works without any session" do
+    test "start redirects signed-out users to login" do
+      sign_out
+
       get oauth_start_url(slug: "google")
+
       assert_response :redirect
+      assert_redirected_to login_path
       assert_nil session[:user_id]
     end
 
-    test "start works with a pending console session" do
+    test "start redirects pending console users to the pending page" do
       sign_in users(:pending_user)
 
       get oauth_start_url(slug: "google")
 
       assert_response :redirect
-      assert_equal "accounts.google.com", URI.parse(response.location).host
+      assert_redirected_to pending_path
     end
 
     test "start 404s an unknown slug" do
@@ -273,7 +283,7 @@ module Oauth
       assert_equal "AT", cred.access_token
       assert_equal "RT", cred.refresh_token
       assert cred.next_attempt_at.present?
-      assert_nil cred.created_by
+      assert_equal @user, cred.created_by
     end
 
     test "callback happy path supports Slack user tokens" do
@@ -400,7 +410,7 @@ module Oauth
       assert_equal cred, secret.broker_credential # first-class link to the credential
       assert_equal cred.namespace, secret.namespace
       assert_nil secret.foreign_id # found by association, so no collidable foreign_id
-      assert_nil secret.created_by # the unauthenticated flow has no operator
+      assert_nil secret.created_by # the wrapping secret is not owned by an operator
       assert_equal({ "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" }, secret.inject_config)
       assert_equal "token_broker", secret.source.source_type
       assert_equal cred.oid, secret.source.config["credential_id"]
@@ -463,20 +473,31 @@ module Oauth
       assert_select "a.btn-secondary[href=?]", "http://www.example.com/oauth/slack/start", text: "Reconnect"
     end
 
-    test "callback works with a disabled console session" do
+    test "callback redirects signed-out users to login and mints nothing" do
+      state = start_flow
+      sign_out
+      stub_exchange(status: 200, body: token_body)
+
+      assert_no_difference -> { BrokerCredential.count } do
+        get oauth_callback_url(slug: "google"), params: { state: state, code: "auth-code" }
+      end
+
+      assert_redirected_to login_path
+      assert_nil session[:user_id]
+    end
+
+    test "callback rejects a disabled console session before minting" do
       user = users(:member_user)
-      sign_in user
       state = start_flow
       user.update!(status: :disabled)
       stub_exchange(status: 200, body: token_body)
 
-      assert_difference -> { BrokerCredential.count }, 1 do
+      assert_no_difference -> { BrokerCredential.count } do
         get oauth_callback_url(slug: "google"), params: { state: state, code: "auth-code" }
       end
 
-      assert_redirected_to console_integrations_path
-      assert_match(/connected/, flash[:notice])
-      assert_equal user.id, session[:user_id]
+      assert_redirected_to login_path
+      assert_nil session[:user_id]
     end
 
     test "re-consent for the same account updates the existing credential and revives a dead one" do
