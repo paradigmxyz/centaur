@@ -106,6 +106,12 @@ console:
   # When set, the slackbotv2 deployment also links the first assistant message
   # in a Slack thread to the Console session view; leave empty to omit the link.
   publicUrl: ""
+  # Break-glass email/password login. Disable when console is reachable from
+  # the public internet and SSO is configured.
+  passwordLoginEnabled: true
+  # Optional SSO admission policy. When non-empty, only identities whose email
+  # domain matches this list can sign in through Google or Slack.
+  ssoEmailDomains: []
   image:
     repository: centaur-console
     tag: latest

@@ -9,7 +9,7 @@ class ApplicationController < ActionController::Base
   # controllers don't each hand-roll a rescue. Mirrors Api::BaseController.
   rescue_from ActiveRecord::RecordNotFound, with: :render_not_found
 
-  helper_method :current_user, :acting_admin?, :descoped?
+  helper_method :current_user, :acting_admin?, :descoped?, :password_login_enabled?
   helper_method :public_base_url, :oauth_callback_redirect_uri
 
   # The public origin the console is reached at. Derived from the request by
@@ -74,6 +74,10 @@ class ApplicationController < ActionController::Base
 
     session.delete(:descoped)
     false
+  end
+
+  def password_login_enabled?
+    ConsoleAuth.password_login_enabled?
   end
 
   # The permission check console gates use instead of current_user.admin?: a

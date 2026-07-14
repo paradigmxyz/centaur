@@ -9,10 +9,30 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
     assert_select "form[action=?]", login_path
   end
 
+  test "GET new hides the password form when password login is disabled" do
+    ENV["CENTAUR_CONSOLE_PASSWORD_LOGIN_ENABLED"] = "false"
+    get login_url
+    assert_response :ok
+    assert_select "form[action=?]", login_path, count: 0
+    assert_select "input[name=?]", "email", count: 0
+  ensure
+    ENV.delete("CENTAUR_CONSOLE_PASSWORD_LOGIN_ENABLED")
+  end
+
   test "valid credentials sign in and redirect to the console" do
     post login_url, params: { email: @operator.email, password: "password123456" }
     assert_redirected_to console_principals_path
     assert_equal @operator.id, session[:user_id]
+  end
+
+  test "password login rejects credentials when disabled" do
+    ENV["CENTAUR_CONSOLE_PASSWORD_LOGIN_ENABLED"] = "false"
+    post login_url, params: { email: @operator.email, password: "password123456" }
+    assert_response :not_found
+    assert_nil session[:user_id]
+    assert_select "div", /Email and password sign in is disabled/
+  ensure
+    ENV.delete("CENTAUR_CONSOLE_PASSWORD_LOGIN_ENABLED")
   end
 
   test "a non-admin lands on the threads view after login" do

@@ -71,6 +71,9 @@ class SessionOauthController < ApplicationController
   rescue Broker::ExchangeError => e
     Rails.logger.error { "console login exchange failed (#{@key}): #{e.reason}" }
     redirect_to login_path, alert: "Sign in failed. Please try again."
+  rescue User::SsoEmailDomainNotAllowed
+    Rails.logger.warn { "console login rejected by SSO email domain allowlist (#{@key})" }
+    redirect_to login_path, alert: "That email domain is not allowed to access the console."
   rescue ActiveRecord::RecordInvalid => e
     Rails.logger.error { "console login provisioning failed: #{e.record.errors.full_messages.to_sentence}" }
     redirect_to login_path, alert: "Sign in failed while setting up your account."

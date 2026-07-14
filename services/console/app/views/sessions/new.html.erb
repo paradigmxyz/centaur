@@ -28,27 +28,31 @@
       <% end %>
     </div>
 
-    <div class="my-6 flex items-center gap-3 text-xs uppercase tracking-wider text-zinc-600">
-      <span class="h-px flex-1 bg-ink-600"></span>
-      or sign in with email
-      <span class="h-px flex-1 bg-ink-600"></span>
-    </div>
+    <% if password_login_enabled? %>
+      <div class="my-6 flex items-center gap-3 text-xs uppercase tracking-wider text-zinc-600">
+        <span class="h-px flex-1 bg-ink-600"></span>
+        or sign in with email
+        <span class="h-px flex-1 bg-ink-600"></span>
+      </div>
+    <% end %>
   <% end %>
 
-  <%= form_with url: login_path, method: :post do |f| %>
-    <div class="space-y-5">
-      <div>
-        <%= f.label :email, class: label %>
-        <%= f.email_field :email, class: input, placeholder: "you@example.com", autocomplete: "username", autofocus: true %>
+  <% if password_login_enabled? %>
+    <%= form_with url: login_path, method: :post do |f| %>
+      <div class="space-y-5">
+        <div>
+          <%= f.label :email, class: label %>
+          <%= f.email_field :email, class: input, placeholder: "you@example.com", autocomplete: "username", autofocus: true %>
+        </div>
+        <div>
+          <%= f.label :password, class: label %>
+          <%= f.password_field :password, class: input, autocomplete: "current-password" %>
+        </div>
       </div>
-      <div>
-        <%= f.label :password, class: label %>
-        <%= f.password_field :password, class: input, autocomplete: "current-password" %>
-      </div>
-    </div>
 
-    <div class="mt-6">
-      <%= f.submit "Sign in", class: "w-full cursor-pointer rounded border border-centaur-500/40 bg-centaur-500/10 px-4 py-2 text-sm text-centaur-300 transition-colors hover:bg-centaur-500/20 hover:text-centaur-200" %>
-    </div>
+      <div class="mt-6">
+        <%= f.submit "Sign in", class: "w-full cursor-pointer rounded border border-centaur-500/40 bg-centaur-500/10 px-4 py-2 text-sm text-centaur-300 transition-colors hover:bg-centaur-500/20 hover:text-centaur-200" %>
+      </div>
+    <% end %>
   <% end %>
 </div>

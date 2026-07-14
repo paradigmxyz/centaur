@@ -1,7 +1,8 @@
 # Quick session-cookie login for the operator console. Authenticates an existing
 # User (has_secure_password) by email + password and stores their id in the
-# session. No registration, password reset, or rate limiting: this is an internal
-# gate, not a public auth system.
+# session. No registration, password reset, or rate limiting: deployments that
+# expose the console publicly should disable this break-glass path with
+# CENTAUR_CONSOLE_PASSWORD_LOGIN_ENABLED=false.
 class SessionsController < ApplicationController
   layout "auth"
 
@@ -24,6 +25,11 @@ class SessionsController < ApplicationController
   end
 
   def create
+    unless password_login_enabled?
+      flash.now[:alert] = "Email and password sign in is disabled."
+      return render :new, status: :not_found
+    end
+
     user = User.find_by(email: params[:email].to_s.strip.downcase)
     unless user&.authenticate(params[:password])
       flash.now[:alert] = "Invalid email or password."

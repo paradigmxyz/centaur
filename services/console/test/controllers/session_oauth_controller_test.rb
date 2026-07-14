@@ -8,7 +8,8 @@ require "test_helper"
 class SessionOauthControllerTest < ActionDispatch::IntegrationTest
   GOOGLE_CLIENT_ID = "google-login-client-id".freeze
   ENV_KEYS = %w[
-    CENTAUR_CONSOLE_GOOGLE_CLIENT_ID CENTAUR_CONSOLE_GOOGLE_CLIENT_SECRET CENTAUR_CONSOLE_BOOTSTRAP_ADMINS
+    CENTAUR_CONSOLE_GOOGLE_CLIENT_ID CENTAUR_CONSOLE_GOOGLE_CLIENT_SECRET
+    CENTAUR_CONSOLE_BOOTSTRAP_ADMINS CENTAUR_CONSOLE_SSO_EMAIL_DOMAINS
   ].freeze
 
   setup do
@@ -112,6 +113,27 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
     assert_equal "Test User", user.name
     assert_equal user.id, session[:user_id]
     assert_equal [ [ "google", "new-sub" ] ], user.user_identities.pluck(:provider, :subject)
+  end
+
+  test "callback provisions a user inside the configured SSO domain allowlist" do
+    ENV["CENTAUR_CONSOLE_SSO_EMAIL_DOMAINS"] = "example.com acme.example"
+    assert_difference -> { User.count }, 1 do
+      run_callback(sub: "allowed-sub", email: "newcomer@example.com")
+    end
+    assert_redirected_to console_threads_path
+    assert_equal User.find_by!(email: "newcomer@example.com").id, session[:user_id]
+  end
+
+  test "callback rejects a user outside the configured SSO domain allowlist" do
+    ENV["CENTAUR_CONSOLE_SSO_EMAIL_DOMAINS"] = "acme.example"
+    assert_no_difference -> { User.count } do
+      assert_no_difference -> { UserIdentity.count } do
+        run_callback(sub: "outside-sub", email: "newcomer@example.com")
+      end
+    end
+    assert_redirected_to login_path
+    assert_equal "That email domain is not allowed to access the console.", flash[:alert]
+    assert_nil session[:user_id]
   end
 
   test "callback makes a bootstrap-allowlisted email active and admin" do

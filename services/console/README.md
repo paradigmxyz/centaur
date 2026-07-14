@@ -96,7 +96,9 @@ The operator console always supports email and password sign-in. To add Google o
 | `CENTAUR_CONSOLE_GOOGLE_CLIENT_SECRET`   | for Google | Google OAuth client secret for console login.                                                |
 | `CENTAUR_CONSOLE_SLACK_CLIENT_ID`        | for Slack | Slack OpenID Connect client ID for console login.                                            |
 | `CENTAUR_CONSOLE_SLACK_CLIENT_SECRET`    | for Slack | Slack OpenID Connect client secret for console login.                                        |
-| `CENTAUR_CONSOLE_BOOTSTRAP_ADMINS`       | no       | Comma- or whitespace-separated email allowlist. Matching users become active admins on first SSO login. Other SSO users become active non-admin operators and land on the console directly -- the deployment's network boundary is the access control, there is no approval queue. |
+| `CENTAUR_CONSOLE_SSO_EMAIL_DOMAINS`      | recommended for public exposure | Comma- or whitespace-separated domain allowlist for SSO users, for example `acme.com example.org`. Empty allows any IdP-authenticated email. |
+| `CENTAUR_CONSOLE_PASSWORD_LOGIN_ENABLED` | no       | Set to `false` to disable email and password sign-in. Defaults to enabled.                    |
+| `CENTAUR_CONSOLE_BOOTSTRAP_ADMINS`       | no       | Comma- or whitespace-separated email allowlist. Matching users become active admins on first SSO login. Other accepted SSO users become active non-admin operators and land on the console directly. |
 
 Register these callback URLs with the provider:
 
