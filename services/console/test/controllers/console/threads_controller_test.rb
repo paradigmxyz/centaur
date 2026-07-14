@@ -149,8 +149,11 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     get console_threads_url(thread: thread_key)
 
     assert_response :ok
-    assert_select "button[aria-label=?]", "Chat actions", count: 1
-    assert_select "button[data-action*=?]", "thread-share#open", text: "Share"
+    assert_select "button.console-thread-share-trigger[aria-label=?][data-action=?]",
+                  "Share chat", "thread-share#open", count: 1 do
+      assert_select "svg", count: 1
+    end
+    assert_select ".console-thread-menu", count: 0
     assert_select "button[data-turbo-confirm]", count: 0
     assert_select "dialog.console-share-dialog[data-thread-share-target=dialog]" do
       assert_select "h2", text: "Share chat"

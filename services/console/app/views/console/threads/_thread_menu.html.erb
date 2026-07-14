@@ -1,20 +1,13 @@
-<div class="console-thread-menu-wrap"
-     data-controller="dropdown thread-share"
+<div class="console-thread-share-wrap"
+     data-controller="thread-share"
      data-thread-share-url-value="<%= console_threads_url(thread: session.thread_key) %>">
   <button type="button"
-          class="console-thread-menu-trigger"
-          data-action="dropdown#toggle"
-          aria-label="Chat actions"
-          title="Chat actions">
-    <%= console_icon("ellipsis-horizontal", classes: "size-4") %>
+          class="console-thread-share-trigger"
+          data-action="thread-share#open"
+          aria-label="Share chat"
+          title="Share chat">
+    <%= console_icon("share", classes: "size-4") %>
   </button>
-  <div class="console-thread-menu" data-dropdown-target="menu" hidden>
-    <button type="button"
-            class="console-thread-menu-action"
-            data-action="dropdown#hide thread-share#open">
-      Share
-    </button>
-  </div>
 
   <dialog class="console-share-dialog"
           aria-label="Share chat"
