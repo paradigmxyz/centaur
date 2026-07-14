@@ -288,7 +288,7 @@ class Principal < ApplicationRecord
   def api_server_hosts
     configured = ENV["CENTAUR_API_SERVER_PROXY_HOSTS"].to_s.split(",")
     from_url = self.class.host_from_url(ENV["CENTAUR_API_URL"])
-    self.class.normalize_hosts(configured + [ from_url, "centaur-api-rs", "api" ])
+    self.class.normalize_hosts(configured + [ from_url ])
   end
 
   def proxy_transforms_for(served)

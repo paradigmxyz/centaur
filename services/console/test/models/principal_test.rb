@@ -170,7 +170,7 @@ class PrincipalTest < ActiveSupport::TestCase
 
       refute_nil entry
       assert_equal "Bearer {{ .Value }}", entry.dig("inject", "formatter")
-      assert_includes entry.fetch("rules"), { "host" => "api.internal" }
+      assert_equal [ { "host" => "api.internal" } ], entry.fetch("rules")
 
       claims = jwt_payload(entry.dig("source", "value"))
       assert_equal "centaur-console", claims.fetch("iss")
