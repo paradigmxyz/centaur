@@ -133,6 +133,14 @@ class Principal < ApplicationRecord
       "transforms" => proxy_transforms_for(served),
       "postgres" => sync_postgres
     }
+    # Omitted entirely -- not sent empty -- when the allowlist is off, so an
+    # existing deployment's config_hash is unchanged and its proxies never
+    # re-apply. An empty `rules` array would NOT mean "no allowlist": iron-proxy
+    # would build an allowlist transform matching nothing and 403 every request.
+    rules = egress_rules
+    config["rules"] = rules if rules
+    config["allowlist_warn"] = true if rules && SystemSetting.current.egress_allowlist_warn?
+
     redact_secrets ? self.class.redact_live_secrets(config) : config
   end
 
@@ -292,6 +300,44 @@ class Principal < ApplicationRecord
       .map { |host| host.to_s.strip.downcase.delete_suffix(".") }
       .reject(&:blank?)
       .uniq
+  end
+
+  # The sandbox's egress allowlist: the destinations it may reach at all. Returns
+  # nil when the allowlist is off, which is the signal to omit `rules` from the
+  # payload entirely.
+  #
+  # Two sources, because neither is sufficient alone:
+  #
+  #   derived -- every host a granted credential is already scoped to. This is
+  #     what makes the allowlist self-maintaining: grant a tool its secret and
+  #     its host is allowed, with no second list to forget to update.
+  #   base    -- the hosts that carry no credential and so appear in no rule:
+  #     the model provider, package registries, the git host. Derivation is blind
+  #     to them, and a sandbox that cannot reach them cannot run.
+  #
+  # Note these are *destination* rules. A credential's rules serve double duty:
+  # they scope where that secret may be injected, and (here) they attest that the
+  # host is one we deliberately talk to.
+  #
+  # Derived from *granted* credentials, deliberately not from the served subset.
+  # `served_credentials` drops any secret whose source cannot currently be
+  # delivered; deriving from it would mean a vault blip silently rewrites the
+  # egress boundary and 403s a host that is still perfectly well authorized. The
+  # grant is the authorization. Delivery is a separate concern, and a failure in
+  # it should cost the request its credential, never its destination.
+  def egress_rules
+    setting = SystemSetting.current
+    return nil unless setting.egress_allowlist_on?
+
+    granted = granted_static_secrets +
+      granted_gcp_auth_secrets +
+      granted_gcp_id_token_secrets +
+      granted_aws_auth_secrets +
+      granted_hmac_secrets +
+      granted_oauth_token_secrets
+
+    derived = granted.flat_map { |credential| credential.rules.map(&:to_proxy_rule) }
+    (setting.egress_allowlist_base_rules + derived).uniq
   end
 
   def proxy_transforms_for(served)

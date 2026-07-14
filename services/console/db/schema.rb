@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_07_11_190035) do
+ActiveRecord::Schema[8.1].define(version: 2026_07_14_060000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -431,6 +431,8 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_11_190035) do
     t.boolean "default_sandbox_api_server_enabled", default: true, null: false
     t.boolean "default_sandbox_observability_enabled", default: true, null: false
     t.string "default_sandbox_repo_cache", default: "all", null: false
+    t.jsonb "egress_allowlist_base_rules", default: [], null: false
+    t.string "egress_allowlist_mode", default: "off", null: false
     t.boolean "singleton", default: true, null: false
     t.datetime "updated_at", null: false
     t.index ["singleton"], name: "index_system_settings_on_singleton", unique: true
