@@ -53,7 +53,10 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
   end
 
   test "sync includes a scoped sandbox entitlements token when signing is configured" do
-    with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
+    with_env(
+      "CENTAUR_JWT_SIGNING_SECRET" => "test-secret",
+      "CENTAUR_CONSOLE_URL" => "http://centaur-console:3000"
+    ) do
       post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
     end
     assert_response :ok
@@ -66,7 +69,7 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
     refute_nil entry
     assert_equal "Bearer {{ .Value }}", entry.dig("inject", "formatter")
     assert_equal(
-      { "host" => "www.example.com", "methods" => [ "GET" ], "paths" => [ Proxy::SANDBOX_ENTITLEMENTS_PATH ] },
+      { "host" => "centaur-console", "methods" => [ "GET" ], "paths" => [ Proxy::SANDBOX_ENTITLEMENTS_PATH ] },
       entry.fetch("rules").first
     )
 
@@ -78,11 +81,8 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
     assert_equal SandboxEntitlements::Jwt::DEFAULT_TTL_SECONDS, claims.fetch("exp") - claims.fetch("iat")
   end
 
-  test "the entitlement rule host comes from the configured console URL, not the request" do
-    with_env(
-      "CENTAUR_JWT_SIGNING_SECRET" => "test-secret",
-      "CENTAUR_CONSOLE_URL" => "http://centaur-console:3000"
-    ) do
+  test "sync omits the sandbox entitlements token when the console URL is not configured" do
+    with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret", "CENTAUR_CONSOLE_URL" => nil) do
       post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
     end
     assert_response :ok
@@ -91,8 +91,7 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
       secret.fetch("rules", []).any? { |rule| rule["paths"] == [ Proxy::SANDBOX_ENTITLEMENTS_PATH ] }
     end
 
-    refute_nil entry
-    assert_equal [ "centaur-console" ], entry.fetch("rules").map { |rule| rule["host"] }
+    assert_nil entry
   end
 
   test "cold sync stores an encrypted principal snapshot" do

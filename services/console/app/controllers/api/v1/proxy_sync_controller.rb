@@ -48,10 +48,8 @@ module Api
       # host sandboxes dial, and that comes from the control URL: api-rs gets
       # it as IRON_CONTROL_URL and the chart wires the same value here as
       # CENTAUR_CONSOLE_URL, so both sides share one source of truth.
-      # request.host is a fallback for dev/test, where the syncing proxy
-      # dials console directly and the two are the same by construction.
       def sandbox_entitlements_hosts
-        [ Principal.host_from_url(ENV["CENTAUR_CONSOLE_URL"]) || request.host ]
+        [ Principal.host_from_url(ENV["CENTAUR_CONSOLE_URL"]) ]
       end
     end
   end
