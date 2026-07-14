@@ -367,6 +367,68 @@
         color: #f4f4f5;
       }
 
+      .console-thread-menu-wrap {
+        position: relative;
+        flex: 0 0 auto;
+      }
+
+      .console-thread-menu-trigger {
+        display: grid;
+        height: 1.75rem;
+        width: 1.75rem;
+        cursor: pointer;
+        place-items: center;
+        border-radius: 0.5rem;
+        color: #71717a;
+        transition: background 120ms ease, color 120ms ease;
+      }
+
+      .console-thread-menu-trigger:hover {
+        background: rgba(255, 255, 255, 0.08);
+        color: #f4f4f5;
+      }
+
+      .console-thread-menu {
+        position: absolute;
+        top: calc(100% + 0.375rem);
+        right: 0;
+        z-index: 40;
+        width: 10rem;
+        overflow: hidden;
+        border: 1px solid rgba(255, 255, 255, 0.11);
+        border-radius: 0.75rem;
+        background: #101012;
+        padding: 0.375rem;
+        box-shadow: 0 18px 45px rgba(0, 0, 0, 0.4);
+      }
+
+      .console-thread-menu[hidden] {
+        display: none;
+      }
+
+      .console-thread-menu form {
+        margin: 0;
+      }
+
+      .console-thread-menu-action {
+        display: flex;
+        height: 2.25rem;
+        width: 100%;
+        cursor: pointer;
+        align-items: center;
+        border-radius: 0.5rem;
+        padding: 0 0.625rem;
+        color: #d4d4d8;
+        font: inherit;
+        font-size: 0.875rem;
+        transition: background 120ms ease, color 120ms ease;
+      }
+
+      .console-thread-menu-action:hover {
+        background: rgba(255, 255, 255, 0.055);
+        color: #f4f4f5;
+      }
+
       .console-thinking {
         min-width: 0;
         padding: 0.125rem 0;
@@ -1183,6 +1245,30 @@
       }
 
       html[data-console-theme="light"] .console-panel-close:hover {
+        background: #e8e9e3;
+        color: #24272b;
+      }
+
+      html[data-console-theme="light"] .console-thread-menu-trigger {
+        color: #7a7f86;
+      }
+
+      html[data-console-theme="light"] .console-thread-menu-trigger:hover {
+        background: #e8e9e3;
+        color: #24272b;
+      }
+
+      html[data-console-theme="light"] .console-thread-menu {
+        border-color: #d8d8d0;
+        background: #ffffff;
+        box-shadow: 0 18px 45px rgba(31, 36, 40, 0.12);
+      }
+
+      html[data-console-theme="light"] .console-thread-menu-action {
+        color: #565c63;
+      }
+
+      html[data-console-theme="light"] .console-thread-menu-action:hover {
         background: #e8e9e3;
         color: #24272b;
       }

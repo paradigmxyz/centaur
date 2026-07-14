@@ -26,6 +26,11 @@
       <div class="console-thread-detail-header">
         <div class="console-thread-content">
           <% selected_thread_title = thread_title(@selected_session) %>
+          <% if thread_owned?(@selected_session) %>
+            <% thread_actions = capture do %>
+              <%= render "console/threads/thread_menu", session: @selected_session %>
+            <% end %>
+          <% end %>
           <% thread_meta = capture do %>
             <div class="flex min-w-0 items-center gap-2">
               <span class="truncate"><%= thread_source_label(@selected_session) %></span>
@@ -44,6 +49,7 @@
                      title: selected_thread_title,
                      title_attr: selected_thread_title,
                      subtitle: thread_meta,
+                     actions: thread_actions,
                      title_class: "truncate text-base font-semibold text-zinc-100",
                      subtitle_class: "mt-0.5 text-xs text-zinc-500",
                      class: "mb-0 min-h-16 items-center" %>
@@ -80,7 +86,7 @@
         <% end %>
       </div>
 
-      <% if @selected_session %>
+      <% if @selected_session && thread_owned?(@selected_session) %>
         <div class="console-composer-dock">
           <div class="console-thread-content">
             <%= render "console/threads/composer", mode: :thread, session: @selected_session %>

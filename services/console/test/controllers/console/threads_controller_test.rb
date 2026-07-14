@@ -101,6 +101,112 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_select "body", text: /Chat not found/
   end
 
+  test "public Slack channel threads are readable by every console user only when enabled" do
+    skip_unless_session_table
+    skip_unless_slack_channel_table
+
+    public_channel_id = "C#{SecureRandom.hex(6).upcase}"
+    private_channel_id = "C#{SecureRandom.hex(6).upcase}"
+    removed_channel_id = "C#{SecureRandom.hex(6).upcase}"
+    public_thread_key = "slack:#{public_channel_id}:#{SecureRandom.hex(6)}"
+    private_thread_key = "slack:#{private_channel_id}:#{SecureRandom.hex(6)}"
+    removed_thread_key = "slack:#{removed_channel_id}:#{SecureRandom.hex(6)}"
+    insert_slack_sync_channel(public_channel_id, is_private: false)
+    insert_slack_sync_channel(private_channel_id, is_private: true)
+    insert_slack_sync_channel(removed_channel_id, is_private: false, is_syncable: false)
+    insert_slack_session(public_thread_key, slack_user_id: "U_OTHER", slack_user_name: "someone-else")
+    insert_slack_session(private_thread_key, slack_user_id: "U_OTHER", slack_user_name: "someone-else")
+    insert_slack_session(removed_thread_key, slack_user_id: "U_OTHER", slack_user_name: "someone-else")
+
+    with_env(
+      "CENTAUR_CONSOLE_PUBLIC_SLACK_THREADS_ENABLED" => nil,
+      "IRON_CONTROL_PUBLIC_SLACK_THREADS_ENABLED" => nil
+    ) do
+      get console_threads_url(thread: public_thread_key)
+      assert_response :not_found
+    end
+
+    with_env("CENTAUR_CONSOLE_PUBLIC_SLACK_THREADS_ENABLED" => "true") do
+      get console_threads_url(thread: public_thread_key)
+      assert_response :ok
+      assert_select ".console-thread-detail-header", count: 1
+      assert_select "textarea[name=prompt]", count: 0
+
+      get console_threads_url(thread: private_thread_key)
+      assert_response :not_found
+
+      get console_threads_url(thread: removed_thread_key)
+      assert_response :not_found
+    end
+  end
+
+  test "sharing publishes a direct read-only link with a confirmation warning" do
+    skip_unless_session_table
+
+    thread_key = "console:shared-#{SecureRandom.hex(6)}"
+    insert_console_session(thread_key)
+
+    get console_threads_url(thread: thread_key)
+
+    assert_response :ok
+    assert_select "button[aria-label=?]", "Chat actions", count: 1
+    assert_select "form[action=?]", console_thread_share_path do
+      assert_select "input[name=thread_key][value=?]", thread_key
+      assert_select "button[data-turbo-confirm]", text: "Share" do |buttons|
+        assert_includes buttons.first["data-turbo-confirm"], "Sharing makes the chat public"
+      end
+    end
+
+    post console_thread_share_url, params: { thread_key: thread_key }
+
+    assert_redirected_to console_threads_path(thread: thread_key)
+    assert_equal @operator, ThreadShare.find_by!(thread_key: thread_key).created_by
+
+    post console_thread_share_url, params: { thread_key: thread_key }
+
+    assert_redirected_to console_threads_path(thread: thread_key)
+    assert_equal 1, ThreadShare.where(thread_key: thread_key).count
+
+    delete logout_url
+    post login_url, params: { email: users(:member_user).email, password: "password123456" }
+    get console_threads_url(thread: thread_key)
+
+    assert_response :ok
+    assert_select ".console-thread-detail-header", count: 1
+    assert_select "textarea[name=prompt]", count: 0
+  end
+
+  test "a user cannot share a chat they cannot read" do
+    skip_unless_session_table
+
+    thread_key = "slack:G0PRIVATE12:#{SecureRandom.hex(6)}"
+    insert_slack_session(thread_key, slack_user_id: "U_OTHER", slack_user_name: "someone-else")
+
+    post console_thread_share_url, params: { thread_key: thread_key }
+
+    assert_redirected_to console_threads_path
+    assert_equal "Chat not found.", flash[:alert]
+    assert_not ThreadShare.exists?(thread_key: thread_key)
+  end
+
+  test "a non-owner cannot persistently share a deployment-public Slack thread" do
+    skip_unless_session_table
+    skip_unless_slack_channel_table
+
+    channel_id = "C#{SecureRandom.hex(6).upcase}"
+    thread_key = "slack:#{channel_id}:#{SecureRandom.hex(6)}"
+    insert_slack_sync_channel(channel_id, is_private: false)
+    insert_slack_session(thread_key, slack_user_id: "U_OTHER", slack_user_name: "someone-else")
+
+    with_env("CENTAUR_CONSOLE_PUBLIC_SLACK_THREADS_ENABLED" => "true") do
+      post console_thread_share_url, params: { thread_key: thread_key }
+    end
+
+    assert_redirected_to console_threads_path
+    assert_equal "Chat not found.", flash[:alert]
+    assert_not ThreadShare.exists?(thread_key: thread_key)
+  end
+
   test "slack assistant-role messages from the current Slack user render as user authored" do
     controller = Console::ThreadsController.new
     controller.define_singleton_method(:current_slack_user_ids) { [ "u123" ] }
@@ -495,6 +601,33 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     refute_includes sql, "slack_user_id"
   end
 
+  test "public Slack thread visibility defaults off and never expands the owner scope" do
+    controller = threads_controller_for(@operator)
+
+    with_env(
+      "CENTAUR_CONSOLE_PUBLIC_SLACK_THREADS_ENABLED" => nil,
+      "IRON_CONTROL_PUBLIC_SLACK_THREADS_ENABLED" => nil
+    ) do
+      refute_includes controller.send(:visible_thread_scope).to_sql, "slack_sync_channels"
+    end
+
+    with_env("CENTAUR_CONSOLE_PUBLIC_SLACK_THREADS_ENABLED" => "true") do
+      if slack_channel_privacy_catalog_available?
+        assert_includes controller.send(:visible_thread_scope).to_sql, "slack_sync_channels"
+      end
+      refute_includes controller.send(:owned_thread_scope).to_sql, "slack_sync_channels"
+    end
+  end
+
+  test "public Slack visibility fails closed without the synchronized channel catalog" do
+    connection = CentaurSession.connection
+    replacement = ->(_table, _column) { false }
+
+    with_singleton_method(connection, :column_exists?, replacement) do
+      assert_nil CentaurSession.public_slack_channel_sql
+    end
+  end
+
   test "visible thread scope matches Slack threads by user id when the credential has no team" do
     app = oauth_apps(:acme_slack)
     app.update!(client_secret: "slack-secret", labels: {})
@@ -571,6 +704,18 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_includes sql, "thread_key LIKE 'slack:%'"
     assert_includes sql, "metadata ->> 'slack_user_id'"
     assert_includes sql, "ussoonly"
+  end
+
+  test "sidebar includes public Slack threads only when the deploy setting is enabled" do
+    controller = threads_controller_for(@operator)
+
+    with_env("CENTAUR_CONSOLE_PUBLIC_SLACK_THREADS_ENABLED" => "true") do
+      sql = controller.send(:console_sidebar_visible_thread_scope).to_sql
+
+      if slack_channel_privacy_catalog_available?
+        assert_includes sql, "slack_sync_channels"
+      end
+    end
   end
 
   test "selected session resolves a directly linked thread only within the owner scope" do
@@ -1478,6 +1623,34 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
 
   def skip_unless_session_table
     skip("api-rs session tables are unavailable") unless CentaurSession.connection.data_source_exists?("sessions")
+  end
+
+  def skip_unless_slack_channel_table
+    return if slack_channel_privacy_catalog_available?
+
+    skip("Slack channel privacy catalog is unavailable")
+  end
+
+  def slack_channel_privacy_catalog_available?
+    %i[is_private is_syncable].all? do |column|
+      CentaurSession.connection.column_exists?(:slack_sync_channels, column)
+    end
+  end
+
+  def insert_slack_sync_channel(channel_id, is_private:, is_syncable: true)
+    connection = CentaurSession.connection
+    connection.execute(<<~SQL.squish)
+      insert into slack_sync_channels (channel_id, channel_name, is_private, is_syncable)
+      values (
+        #{connection.quote(channel_id)},
+        #{connection.quote(channel_id.downcase)},
+        #{connection.quote(is_private)},
+        #{connection.quote(is_syncable)}
+      )
+      on conflict (channel_id) do update set
+        is_private = excluded.is_private,
+        is_syncable = excluded.is_syncable
+    SQL
   end
 
   def insert_slack_session(thread_key, slack_user_id:, slack_user_name:)

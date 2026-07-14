@@ -53,6 +53,7 @@
         <%= local_time(session.updated_at || session.created_at, relative: true, format: :compact) %>
       </div>
     </div>
+    <%= render "console/threads/thread_menu", session: session if panel[:writable] %>
     <a href="<%= close_path %>"
        class="console-panel-close"
        aria-label="Close panel"
@@ -66,8 +67,10 @@
       <%= render "console/threads/thinking_indicator" if thread_execution_active?(session.thread_key) %>
     </div>
   </div>
-  <div class="console-composer-dock console-composer-dock--panel">
-    <%= render "console/threads/composer", mode: :thread, session: session %>
-  </div>
+  <% if panel[:writable] %>
+    <div class="console-composer-dock console-composer-dock--panel">
+      <%= render "console/threads/composer", mode: :thread, session: session %>
+    </div>
+  <% end %>
 </section>
 <% end %>

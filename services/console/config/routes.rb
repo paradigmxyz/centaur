@@ -47,6 +47,7 @@ Rails.application.routes.draw do
   get "console/principals/:id", to: "console#principal", as: :console_principal
   namespace :console do
     resources :threads, only: %i[index create]
+    post "threads/share", to: "threads#share", as: :thread_share
     resources :workflows, only: %i[index show] do
       member do
         post :run, action: :force_start

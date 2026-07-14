@@ -1,0 +1,19 @@
+<div class="console-thread-menu-wrap" data-controller="dropdown">
+  <button type="button"
+          class="console-thread-menu-trigger"
+          data-action="dropdown#toggle"
+          aria-label="Chat actions"
+          title="Chat actions">
+    <%= console_icon("ellipsis-horizontal", classes: "size-4") %>
+  </button>
+  <div class="console-thread-menu" data-dropdown-target="menu" hidden>
+    <%= button_to "Share",
+                  console_thread_share_path,
+                  method: :post,
+                  params: { thread_key: session.thread_key },
+                  class: "console-thread-menu-action",
+                  data: {
+                    turbo_confirm: "Anyone with access to Centaur Console who has this link will be able to view this chat. Sharing makes the chat public. Continue?"
+                  } %>
+  </div>
+</div>

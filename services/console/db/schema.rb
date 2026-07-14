@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_07_11_190035) do
+ActiveRecord::Schema[8.1].define(version: 2026_07_14_175437) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -436,6 +436,15 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_11_190035) do
     t.index ["singleton"], name: "index_system_settings_on_singleton", unique: true
   end
 
+  create_table "thread_shares", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.bigint "created_by_id", null: false
+    t.string "thread_key", limit: 512, null: false
+    t.datetime "updated_at", null: false
+    t.index ["created_by_id"], name: "index_thread_shares_on_created_by_id"
+    t.index ["thread_key"], name: "index_thread_shares_on_thread_key", unique: true
+  end
+
   create_table "user_identities", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.string "email"
@@ -511,6 +520,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_11_190035) do
   add_foreign_key "slack_channel_permissions", "principals"
   add_foreign_key "static_secrets", "broker_credentials"
   add_foreign_key "static_secrets", "users", column: "created_by_id"
+  add_foreign_key "thread_shares", "users", column: "created_by_id"
   add_foreign_key "user_identities", "users"
   add_foreign_key "users", "users", column: "approved_by_id"
 end

@@ -133,7 +133,8 @@ class Console::ThreadsController < ApplicationController
                 :composer_agent_choices,
                 :composer_default_agent_value,
                 :composer_agents_json,
-                :thread_execution_active?
+                :thread_execution_active?,
+                :thread_owned?
 
   def index
     @query = params[:q].to_s.strip
@@ -189,6 +190,27 @@ class Console::ThreadsController < ApplicationController
     render partial: "console/threads/sidebar_threads", layout: false
   end
 
+  # Publishes a chat inside the authenticated Console boundary. Publication is
+  # stored in Console's own database rather than mutating api-rs session data;
+  # the Threads surface remains an observer of the durable transcript.
+  def share
+    thread_key = params[:thread_key].to_s.strip
+    session = owned_thread_scope.where(thread_key: thread_key).first
+    if session.nil?
+      redirect_to console_threads_path, alert: "Chat not found."
+      return
+    end
+
+    ThreadShare.create_or_find_by!(thread_key: session.thread_key) do |share|
+      share.created_by = current_user
+    end
+    redirect_to console_threads_path(thread: session.thread_key),
+                notice: "Chat shared. Anyone with access to Centaur Console who has this link can view it."
+  rescue ActiveRecord::ActiveRecordError, PG::Error => e
+    Rails.logger.warn("console_thread_share_failed error=#{e.class}: #{e.message}")
+    redirect_to console_threads_path, alert: "Could not share the chat."
+  end
+
   private
 
   def api_client
@@ -200,6 +222,15 @@ class Console::ThreadsController < ApplicationController
   def thread_execution_active?(thread_key)
     execution = @latest_executions&.[](thread_key)
     execution.present? && %w[queued running executing].include?(execution.status.to_s)
+  end
+
+  # Public and explicitly shared chats are read-only for non-owners. Keep the
+  # composer and write endpoint tied to the original owner scope.
+  def thread_owned?(session)
+    @thread_owned ||= {}
+    @thread_owned.fetch(session.thread_key) do |thread_key|
+      @thread_owned[thread_key] = owned_thread_scope.where(thread_key: thread_key).exists?
+    end
   end
 
   # Selector options as [label, value] pairs, the deploy's default model
@@ -267,8 +298,8 @@ class Console::ThreadsController < ApplicationController
 
   def reply_to_thread(thread_key, prompt)
     # Resolve through the owner scope so a crafted thread_key cannot post into
-    # another user's chat — same rule the read side applies to ?thread=.
-    session = visible_thread_scope.where(thread_key: thread_key).first
+    # another user's chat, even when public or shared read access is allowed.
+    session = owned_thread_scope.where(thread_key: thread_key).first
     if session.nil?
       redirect_to console_threads_path, alert: "Chat not found."
       return
@@ -460,11 +491,12 @@ class Console::ThreadsController < ApplicationController
 
     if @selected_thread_key.present?
       selected = base_sessions.find { |session| session.thread_key == @selected_thread_key }
-      # Resolve the key through the owner scope so a directly linked chat only
-      # loads when the current user started it. base_sessions is capped at
-      # THREAD_LIMIT, so this also recovers an owned thread beyond that window.
+      # Resolve the key through the readable scope so a directly linked chat only
+      # loads when it is visible to the current user. base_sessions is capped at
+      # THREAD_LIMIT, so this also recovers a visible thread beyond that window.
       selected ||= session_scope.where(thread_key: @selected_thread_key).first
-      # A directly requested key outside the owner scope renders as 404 rather
+      selected ||= explicitly_shared_thread(@selected_thread_key)
+      # A directly requested key outside the readable scope renders as 404 rather
       # than silently falling back to another chat, so nonexistent and
       # inaccessible chats are indistinguishable to the viewer.
       @thread_not_found = selected.nil?
@@ -484,14 +516,14 @@ class Console::ThreadsController < ApplicationController
     params[:thread].to_s.split(",").map(&:strip).reject(&:blank?).uniq.first(PANEL_LIMIT)
   end
 
-  # Extra split-view panes resolve through the same owner scope as the primary
-  # thread, so a crafted ?thread= list cannot surface another user's thread.
-  # Unowned keys are dropped silently.
+  # Extra split-view panes resolve through the same readable scope as the
+  # primary thread. Inaccessible keys are dropped silently.
   def resolve_pane_sessions(session_scope, base_sessions)
     keys = @pane_thread_keys - [ @selected_session&.thread_key ]
     keys.filter_map do |key|
       base_sessions.find { |session| session.thread_key == key } ||
-        session_scope.where(thread_key: key).first
+        session_scope.where(thread_key: key).first ||
+        explicitly_shared_thread(key)
     end
   end
 
@@ -528,6 +560,7 @@ class Console::ThreadsController < ApplicationController
     {
       session: session,
       thread_key: session.thread_key,
+      writable: thread_owned?(session),
       transcript_items: selected_transcript_items
     }
   end
@@ -557,15 +590,39 @@ class Console::ThreadsController < ApplicationController
   end
 
   def visible_thread_scope
+    thread_scope(include_public_slack: true)
+  end
+
+  def owned_thread_scope
+    thread_scope(include_public_slack: false)
+  end
+
+  def thread_scope(include_public_slack:)
     slack_owners = slack_thread_owners_for_current_user
     conditions = [
       console_thread_owner_sql,
       (slack_thread_owner_sql(slack_owners) if slack_owners.any?)
     ].compact
+    if include_public_slack && CentaurSession.public_slack_threads_enabled?
+      public_slack_sql = CentaurSession.public_slack_channel_sql
+      conditions << public_slack_sql if public_slack_sql
+    end
 
     return CentaurSession.where("1=0") if conditions.empty?
 
     CentaurSession.where(conditions.map { |condition| "(#{condition})" }.join(" OR "))
+  end
+
+  def readable_thread(thread_key)
+    return if thread_key.blank?
+
+    visible_thread_scope.where(thread_key: thread_key).first || explicitly_shared_thread(thread_key)
+  end
+
+  def explicitly_shared_thread(thread_key)
+    return unless ThreadShare.exists?(thread_key: thread_key)
+
+    CentaurSession.where(thread_key: thread_key).first
   end
 
   def console_thread_owner_sql

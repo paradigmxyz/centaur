@@ -109,6 +109,12 @@ console:
   # Break-glass email/password login. Disable when console is reachable from
   # the public internet and SSO is configured.
   passwordLoginEnabled: true
+  # When enabled, every authenticated Console user can browse conversations
+  # originating in public Slack channels. Private channels and DMs remain
+  # owner-only. Requires apiRs.etl.slack.enabled so channel privacy is synced;
+  # visibility fails closed without that catalog. Individual chats can still
+  # be shared by their owner from the Threads UI.
+  publicSlackThreadsEnabled: false
   # Optional SSO admission policy. When non-empty, only identities whose email
   # domain matches this list can sign in through Google or Slack.
   ssoEmailDomains: []

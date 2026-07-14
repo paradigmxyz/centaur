@@ -193,6 +193,8 @@ spec:
 {{- end }}
             - name: CENTAUR_CONSOLE_PASSWORD_LOGIN_ENABLED
               value: {{ $console.passwordLoginEnabled | quote }}
+            - name: CENTAUR_CONSOLE_PUBLIC_SLACK_THREADS_ENABLED
+              value: {{ $console.publicSlackThreadsEnabled | quote }}
 {{- with $console.ssoEmailDomains }}
             - name: CENTAUR_CONSOLE_SSO_EMAIL_DOMAINS
               value: {{ join "," . | quote }}
