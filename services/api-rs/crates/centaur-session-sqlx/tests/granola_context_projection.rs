@@ -242,6 +242,18 @@ async fn create_roles(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
 async fn create_slack_identity_helpers(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
     sqlx::raw_sql(
         r#"
+        -- The Granola RLS helper intentionally pins its security-definer search
+        -- path to public, matching production. CI's disposable Postgres starts
+        -- without this source table, so provide the minimal public relation it
+        -- resolves. Local development already has the real table and is left
+        -- untouched by IF NOT EXISTS.
+        create table if not exists public.slack_sync_users (
+            team_id text not null,
+            user_id text not null,
+            raw_payload jsonb not null default '{}'::jsonb,
+            primary key (team_id, user_id)
+        );
+
         create table slack_sync_users (
             team_id text not null,
             user_id text not null,
