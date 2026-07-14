@@ -2832,9 +2832,12 @@ fn validate_slack_dm_sync_batch(request: &SlackDmSyncBatchRequest) -> Result<(),
             "conversation.conversation_id",
             &conversation.conversation_id,
         )?;
-        if !matches!(conversation.conversation_type.as_str(), "im" | "mpim") {
+        if !matches!(
+            conversation.conversation_type.as_str(),
+            "im" | "mpim" | "private_channel"
+        ) {
             return Err(ApiError::BadRequest(
-                "conversation.conversation_type must be im or mpim".to_owned(),
+                "conversation.conversation_type must be im, mpim, or private_channel".to_owned(),
             ));
         }
         validate_json_shape("conversation.raw_payload", &conversation.raw_payload, true)?;
@@ -2869,6 +2872,42 @@ fn validate_slack_dm_sync_batch(request: &SlackDmSyncBatchRequest) -> Result<(),
         require_non_empty("checkpoint.conversation_id", &checkpoint.conversation_id)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod slack_user_sync_tests {
+    use super::*;
+
+    fn request_with_conversation_type(conversation_type: &str) -> SlackDmSyncBatchRequest {
+        SlackDmSyncBatchRequest {
+            run: None,
+            replace_memberships: false,
+            conversations: vec![SlackDmSyncConversationPayload {
+                home_team_id: "T123".to_owned(),
+                conversation_id: "G123".to_owned(),
+                conversation_type: conversation_type.to_owned(),
+                is_archived: false,
+                is_ext_shared: false,
+                raw_payload: json!({"name": "leadership"}),
+            }],
+            members: vec![],
+            messages: vec![],
+            attachments: vec![],
+            checkpoints: vec![],
+        }
+    }
+
+    #[test]
+    fn accepts_private_channel_conversations() {
+        validate_slack_dm_sync_batch(&request_with_conversation_type("private_channel")).unwrap();
+    }
+
+    #[test]
+    fn rejects_public_channel_conversations() {
+        let error = validate_slack_dm_sync_batch(&request_with_conversation_type("public_channel"))
+            .unwrap_err();
+        assert!(matches!(error, ApiError::BadRequest(_)));
+    }
 }
 
 fn validate_google_docs_sync_batch(request: &GoogleDocsSyncBatchRequest) -> Result<(), ApiError> {

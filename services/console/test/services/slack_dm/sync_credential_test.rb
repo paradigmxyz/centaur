@@ -83,6 +83,7 @@ module SlackDm
         when SlackDm::SyncCredential::AUTH_TEST_ENDPOINT
           { "ok" => true, "team_id" => "T123", "user_id" => "U_ME" }
         when SlackDm::SyncCredential::CONVERSATIONS_LIST_ENDPOINT
+          assert_equal "im,mpim,private_channel", params["types"]
           {
             "ok" => true,
             "channels" => [
@@ -175,6 +176,105 @@ module SlackDm
       assert_equal "1700000000.000002", batch[:messages].last[:parent_message_ts]
       assert_equal "F123", batch[:attachments].first[:slack_file_id]
       assert_equal "1700000000.000002", batch[:checkpoints].first[:watermark_ts]
+    end
+
+    test "sync ingests private channels and their complete member list" do
+      api_client = FakeApiClient.new
+      slack_http = lambda do |endpoint:, params:, access_token:|
+        assert_equal "xoxp-live", access_token
+        case endpoint
+        when SlackDm::SyncCredential::AUTH_TEST_ENDPOINT
+          { "ok" => true, "team_id" => "T123", "user_id" => "U_ME" }
+        when SlackDm::SyncCredential::CONVERSATIONS_LIST_ENDPOINT
+          assert_equal "im,mpim,private_channel", params["types"]
+          {
+            "ok" => true,
+            "channels" => [
+              {
+                "id" => "G123",
+                "name" => "leadership",
+                "is_private" => true,
+                "is_archived" => false
+              }
+            ],
+            "response_metadata" => { "next_cursor" => "" }
+          }
+        when SlackDm::SyncCredential::CONVERSATIONS_MEMBERS_ENDPOINT
+          assert_equal "G123", params["channel"]
+          {
+            "ok" => true,
+            "members" => %w[U_ME U_OTHER],
+            "response_metadata" => { "next_cursor" => "" }
+          }
+        when SlackDm::SyncCredential::CONVERSATIONS_HISTORY_ENDPOINT
+          {
+            "ok" => true,
+            "messages" => [
+              {
+                "type" => "message",
+                "ts" => "1700000001.000001",
+                "user" => "U_OTHER",
+                "text" => "private roadmap"
+              }
+            ],
+            "response_metadata" => { "next_cursor" => "" }
+          }
+        else
+          flunk "unexpected Slack endpoint #{endpoint}"
+        end
+      end
+
+      SlackDm::SyncCredential.new(
+        credential,
+        api_client: api_client,
+        slack_api_http: slack_http
+      ).call
+
+      batch = api_client.batch
+      assert_equal "private_channel", batch[:conversations].first[:conversation_type]
+      assert_equal "leadership", batch[:conversations].first[:raw_payload]["name"]
+      assert_equal %w[U_ME U_OTHER], batch[:members].map { |member| member[:user_id] }
+      assert_equal "private roadmap", batch[:messages].first[:text]
+    end
+
+    test "sync never replaces membership from truncated pagination" do
+      env_key = "CENTAUR_CONSOLE_SLACK_DM_SYNC_MEMBERS_MAX_PAGES"
+      previous = ENV[env_key]
+      ENV[env_key] = "1"
+      api_client = FakeApiClient.new
+      slack_http = lambda do |endpoint:, params:, access_token:|
+        assert_equal "xoxp-live", access_token
+        case endpoint
+        when SlackDm::SyncCredential::AUTH_TEST_ENDPOINT
+          { "ok" => true, "team_id" => "T123", "user_id" => "U_ME" }
+        when SlackDm::SyncCredential::CONVERSATIONS_LIST_ENDPOINT
+          {
+            "ok" => true,
+            "channels" => [ { "id" => "G123", "is_private" => true } ],
+            "response_metadata" => { "next_cursor" => "" }
+          }
+        when SlackDm::SyncCredential::CONVERSATIONS_MEMBERS_ENDPOINT
+          {
+            "ok" => true,
+            "members" => [ "U_ME" ],
+            "response_metadata" => { "next_cursor" => "more" }
+          }
+        else
+          flunk "unexpected Slack endpoint #{endpoint} with #{params}"
+        end
+      end
+
+      error = assert_raises(SlackDm::SyncCredential::SlackApiError) do
+        SlackDm::SyncCredential.new(
+          credential,
+          api_client: api_client,
+          slack_api_http: slack_http
+        ).call
+      end
+      assert_match "membership pagination truncated", error.message
+      assert_nil api_client.batch
+    ensure
+      previous.nil? ? ENV.delete(env_key) : ENV[env_key] = previous
     end
   end
 end

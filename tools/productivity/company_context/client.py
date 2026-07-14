@@ -456,7 +456,7 @@ def _granola_doc_summary(row: Any) -> dict[str, Any]:
 
 
 def _dm_document_summary(row: Any) -> dict[str, Any]:
-    """Return the common metadata we expose for Slack DM context records."""
+    """Return metadata for user-scoped Slack conversation context records."""
     metadata = _as_dict(_row_value(row, "metadata", {}))
     conversation_type = str(_row_value(row, "conversation_type", ""))
     conversation_id = str(_row_value(row, "conversation_id", ""))
@@ -473,7 +473,11 @@ def _dm_document_summary(row: Any) -> dict[str, Any]:
         "title": str(_row_value(row, "title", "")),
         "url": str(_row_value(row, "permalink", "")),
         "author_name": user_id or bot_id,
-        "access_scope": "slack_dm",
+        "access_scope": (
+            "slack_private_channel"
+            if conversation_type == "private_channel"
+            else "slack_dm"
+        ),
         "occurred_at": _isoformat(_row_value(row, "occurred_at")),
         "source_updated_at": _isoformat(_row_value(row, "source_updated_at")),
         "conversation_id": conversation_id,
@@ -521,6 +525,7 @@ def _include_slack_dms_source(source: str | None, source_type: str | None) -> bo
         SLACK_DM_SOURCE,
         "slack_im",
         "slack_mpim",
+        "slack_private_channel",
         "slack_dm_conversation",
     )
 
@@ -925,8 +930,14 @@ class CompanyContextClient:
             return self._empty_latest_date_result(source=source, source_type=source_type)
 
         message_conversation_type = None
-        include_messages = source_type in (None, SLACK_DM_SOURCE, "slack_im", "slack_mpim")
-        if source_type in ("slack_im", "slack_mpim"):
+        include_messages = source_type in (
+            None,
+            SLACK_DM_SOURCE,
+            "slack_im",
+            "slack_mpim",
+            "slack_private_channel",
+        )
+        if source_type in ("slack_im", "slack_mpim", "slack_private_channel"):
             message_conversation_type = source_type.removeprefix("slack_")
         include_conversations = source_type in (None, SLACK_DM_SOURCE, "slack_dm_conversation")
 
@@ -1271,7 +1282,7 @@ class CompanyContextClient:
         occurred_after: str | datetime | None = None,
         occurred_before: str | datetime | None = None,
     ) -> dict:
-        """Search Slack DM and group DM context visible to the current Slack user."""
+        """Search private Slack context visible to the current Slack user."""
         normalized_query = query.strip()
         if not normalized_query:
             return {"status": "error", "error": "query cannot be empty"}

@@ -845,6 +845,22 @@ def test_search_dms_queries_bm25_and_returns_compact_results(monkeypatch):
     assert fake.closed is True
 
 
+def test_private_channel_documents_use_private_access_scope():
+    summary = company_context_client._dm_document_summary(
+        {
+            "document_id": "slack_dm:T_HOME:G123:1770000000.000000",
+            "conversation_id": "G123",
+            "conversation_type": "private_channel",
+            "message_ts": "1770000000.000000",
+            "title": "Slack private channel: #leadership",
+            "metadata": {"channel_name": "leadership"},
+        }
+    )
+
+    assert summary["source_type"] == "slack_private_channel"
+    assert summary["access_scope"] == "slack_private_channel"
+
+
 def test_search_dms_applies_occurred_at_filters(monkeypatch):
     fake = _FakeConnection(rows=[])
 
@@ -1104,6 +1120,35 @@ def test_latest_date_can_filter_slack_dm_messages_by_conversation_type(monkeypat
     query, args = fake.fetchrow_calls[0]
     assert "FROM slack_dm_context_documents" in query
     assert args == ("im",)
+    assert fake.closed is True
+
+
+def test_latest_date_can_filter_private_channel_messages(monkeypatch):
+    fake = _FakeConnection(
+        fetchrow_rows=[
+            {
+                "latest_date": dt.datetime(2026, 5, 9, 15, 30, tzinfo=dt.UTC),
+                "latest_source_updated_at": dt.datetime(2026, 5, 9, 15, 30, tzinfo=dt.UTC),
+                "latest_occurred_at": dt.datetime(2026, 5, 8, 14, 0, tzinfo=dt.UTC),
+                "document_count": 12,
+            },
+        ]
+    )
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+
+    result = CompanyContextClient("postgresql://example").latest_date(
+        source="slack_dm",
+        source_type="slack_private_channel",
+    )
+
+    assert result["document_count"] == 12
+    query, args = fake.fetchrow_calls[0]
+    assert "FROM slack_dm_context_documents" in query
+    assert args == ("private_channel",)
     assert fake.closed is True
 
 
