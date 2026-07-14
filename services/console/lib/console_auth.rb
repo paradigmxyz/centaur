@@ -54,8 +54,7 @@ module ConsoleAuth
 
   def sso_email_domains
     raw = ConsoleEnv["SSO_EMAIL_DOMAINS"].presence
-    list = raw.is_a?(Array) ? raw : raw.to_s.split(/[,\s]+/)
-    list.map { |domain| domain.to_s.strip.downcase }.reject(&:empty?).uniq
+    raw.to_s.split(/[,\s]+/).map { |domain| domain.strip.downcase }.reject(&:empty?).uniq
   end
 
   def bootstrap_admin?(email)
