@@ -35,6 +35,7 @@ class CentaurSession < CentaurSessionRecord
   # public allowlist, and fail closed until that catalog is available.
   def self.public_slack_channel_sql
     required_columns = %i[is_private is_syncable]
+    return unless connection.data_source_exists?(:slack_sync_channels)
     return unless required_columns.all? { |column| connection.column_exists?(:slack_sync_channels, column) }
 
     <<~SQL.squish

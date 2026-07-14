@@ -628,9 +628,9 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
 
   test "public Slack visibility fails closed without the synchronized channel catalog" do
     connection = CentaurSession.connection
-    replacement = ->(_table, _column) { false }
+    replacement = ->(_table) { false }
 
-    with_singleton_method(connection, :column_exists?, replacement) do
+    with_singleton_method(connection, :data_source_exists?, replacement) do
       assert_nil CentaurSession.public_slack_channel_sql
     end
   end
@@ -1639,6 +1639,8 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
   end
 
   def slack_channel_privacy_catalog_available?
+    return false unless CentaurSession.connection.data_source_exists?(:slack_sync_channels)
+
     %i[is_private is_syncable].all? do |column|
       CentaurSession.connection.column_exists?(:slack_sync_channels, column)
     end
