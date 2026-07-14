@@ -72,8 +72,8 @@ reads channel history, and fetches the complete `conversations.members` list.
 Messages are deduplicated by Slack conversation and message timestamp when
 multiple credentials can see the same channel.
 
-User-scoped private channels are stored in the separate `slack_dm_sync_*` and
-`slack_dm_context_documents` private-conversation tables rather than
+User-scoped private channels are stored with DMs and MPIMs in the neutral
+`slack_private_sync_*` and `slack_private_*_context_documents` tables rather than
 `company_context_documents`. RLS checks `(team_id, channel_id, user_id)` against
 the reconciled membership list. A successful sync marks members omitted from
 Slack's complete member list inactive; a partial or truncated member list is

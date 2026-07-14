@@ -953,7 +953,7 @@ class CompanyContextClient:
                         MAX(source_updated_at) AS latest_source_updated_at,
                         MAX(occurred_at) AS latest_occurred_at,
                         COUNT(*)::bigint AS document_count
-                    FROM slack_dm_context_documents
+                    FROM slack_private_context_documents
                     WHERE ($1::text IS NULL OR conversation_type = $1)
                     """,
                     message_conversation_type,
@@ -973,7 +973,7 @@ class CompanyContextClient:
                         MAX(source_updated_at) AS latest_source_updated_at,
                         MAX(last_seen_at) AS latest_occurred_at,
                         COUNT(*)::bigint AS document_count
-                    FROM slack_dm_conversation_context_documents
+                    FROM slack_private_conversation_context_documents
                     """,
                 )
                 conversations = self._latest_date_result_from_row(
@@ -1135,7 +1135,7 @@ class CompanyContextClient:
                     participant_count,
                     metadata,
                     paradedb.score(document_id) AS score
-                FROM slack_dm_conversation_context_documents
+                FROM slack_private_conversation_context_documents
                 WHERE {_search_where_clause(len(terms))}
                 ORDER BY paradedb.score(document_id) DESC,
                          last_seen_at DESC NULLS LAST,
@@ -1230,7 +1230,7 @@ class CompanyContextClient:
                     source_updated_at,
                     metadata,
                     paradedb.score(document_id) AS score
-                FROM slack_dm_context_documents
+                FROM slack_private_context_documents
                 WHERE {_search_where_clause(len(terms))}
                   AND (${conversation_id_param}::text IS NULL
                        OR conversation_id = ${conversation_id_param})
