@@ -32,6 +32,7 @@ const options: SlackbotV2Options = {
   botToken,
   botUserId: optionalEnv('SLACK_BOT_USER_ID'),
   consolePublicUrl: optionalEnv('CENTAUR_CONSOLE_PUBLIC_URL'),
+  codexDefaultReasoningEffort: optionalEnv('CODEX_MODEL_REASONING_EFFORT'),
   defaultHarnessType: optionalEnv('SLACKBOTV2_DEFAULT_HARNESS'),
   // Same env vars deployers use to override the sandbox harness model
   // (sandbox.extraEnv); the chart mirrors them here so displayed defaults
