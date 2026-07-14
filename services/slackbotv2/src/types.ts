@@ -119,6 +119,8 @@ export type SlackbotV2Options = {
    * the block entirely.
    */
   consolePublicUrl?: string
+  /** Codex effort displayed in Slack when no per-turn `-rsn` override is set. */
+  codexDefaultReasoningEffort?: string
   /**
    * Harness for new threads when no --claude/--amp/--codex flag is given
    * (HarnessType wire value: codex | amp | claudecode). Defaults to codex.
