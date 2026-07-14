@@ -140,7 +140,7 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     end
   end
 
-  test "sharing publishes a direct read-only link with a confirmation warning" do
+  test "sharing publishes a direct read-only link from an in-page copy dialog" do
     skip_unless_session_table
 
     thread_key = "console:shared-#{SecureRandom.hex(6)}"
@@ -150,16 +150,22 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :ok
     assert_select "button[aria-label=?]", "Chat actions", count: 1
-    assert_select "form[action=?]", console_thread_share_path do
-      assert_select "input[name=thread_key][value=?]", thread_key
-      assert_select "button[data-turbo-confirm]", text: "Share" do |buttons|
-        assert_includes buttons.first["data-turbo-confirm"], "Sharing makes the chat public"
+    assert_select "button[data-action*=?]", "thread-share#open", text: "Share"
+    assert_select "button[data-turbo-confirm]", count: 0
+    assert_select "dialog.console-share-dialog[data-thread-share-target=dialog]" do
+      assert_select "h2", text: "Share chat"
+      assert_select "p", text: /Sharing makes the chat public/
+      assert_select "form[action=?][data-action*=?]", console_thread_share_path, "thread-share#copyLink" do
+        assert_select "input[name=thread_key][value=?]", thread_key
+        assert_select "button.btn-secondary[type=button]", text: "Cancel"
+        assert_select "button.btn-primary[type=submit]", text: "Copy link"
       end
     end
 
-    post console_thread_share_url, params: { thread_key: thread_key }
+    post console_thread_share_url, params: { thread_key: thread_key }, as: :json
 
-    assert_redirected_to console_threads_path(thread: thread_key)
+    assert_response :ok
+    assert_equal console_threads_url(thread: thread_key), response.parsed_body.fetch("url")
     assert_equal @operator, ThreadShare.find_by!(thread_key: thread_key).created_by
 
     post console_thread_share_url, params: { thread_key: thread_key }

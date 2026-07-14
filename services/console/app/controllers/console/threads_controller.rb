@@ -197,18 +197,30 @@ class Console::ThreadsController < ApplicationController
     thread_key = params[:thread_key].to_s.strip
     session = owned_thread_scope.where(thread_key: thread_key).first
     if session.nil?
-      redirect_to console_threads_path, alert: "Chat not found."
+      respond_to do |format|
+        format.html { redirect_to console_threads_path, alert: "Chat not found." }
+        format.json { render json: { error: "Chat not found." }, status: :not_found }
+      end
       return
     end
 
     ThreadShare.create_or_find_by!(thread_key: session.thread_key) do |share|
       share.created_by = current_user
     end
-    redirect_to console_threads_path(thread: session.thread_key),
-                notice: "Chat shared. Anyone with access to Centaur Console who has this link can view it."
+    share_url = console_threads_url(thread: session.thread_key)
+    respond_to do |format|
+      format.html do
+        redirect_to console_threads_path(thread: session.thread_key),
+                    notice: "Chat shared. Anyone with access to Centaur Console who has this link can view it."
+      end
+      format.json { render json: { url: share_url } }
+    end
   rescue ActiveRecord::ActiveRecordError, PG::Error => e
     Rails.logger.warn("console_thread_share_failed error=#{e.class}: #{e.message}")
-    redirect_to console_threads_path, alert: "Could not share the chat."
+    respond_to do |format|
+      format.html { redirect_to console_threads_path, alert: "Could not share the chat." }
+      format.json { render json: { error: "Could not share the chat." }, status: :service_unavailable }
+    end
   end
 
   private

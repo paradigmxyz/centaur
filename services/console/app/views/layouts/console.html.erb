@@ -429,6 +429,66 @@
         color: #f4f4f5;
       }
 
+      .console-share-dialog {
+        width: min(28rem, calc(100vw - 2rem));
+        margin: auto;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 0.875rem;
+        background: #101012;
+        color: #d4d4d8;
+        padding: 0;
+        box-shadow: 0 24px 70px rgba(0, 0, 0, 0.58);
+      }
+
+      .console-share-dialog::backdrop {
+        background: rgba(0, 0, 0, 0.66);
+        backdrop-filter: blur(2px);
+      }
+
+      .console-share-dialog-copy {
+        padding: 1.5rem 1.5rem 1.25rem;
+      }
+
+      .console-share-dialog-copy h2 {
+        color: #f4f4f5;
+        font-size: 1rem;
+        font-weight: 600;
+      }
+
+      .console-share-dialog-copy > p:not(.console-share-dialog-error) {
+        margin-top: 0.75rem;
+        color: #a1a1aa;
+        font-size: 0.875rem;
+        line-height: 1.5;
+      }
+
+      .console-share-dialog-error {
+        margin-top: 0.75rem;
+        color: #fca5a5;
+        font-size: 0.75rem;
+      }
+
+      .console-share-dialog-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 0.75rem;
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+        padding: 1rem 1.5rem;
+      }
+
+      .console-share-dialog-actions .btn-primary,
+      .console-share-dialog-actions .btn-secondary {
+        min-width: 6.5rem;
+        padding-top: 0.5rem;
+        padding-bottom: 0.5rem;
+        text-align: center;
+      }
+
+      .console-share-dialog-actions .btn-primary:disabled {
+        cursor: wait;
+        opacity: 0.6;
+      }
+
       .console-thinking {
         min-width: 0;
         padding: 0.125rem 0;
@@ -1271,6 +1331,33 @@
       html[data-console-theme="light"] .console-thread-menu-action:hover {
         background: #e8e9e3;
         color: #24272b;
+      }
+
+      html[data-console-theme="light"] .console-share-dialog {
+        border-color: #d8d8d0;
+        background: #ffffff;
+        color: #565c63;
+        box-shadow: 0 24px 70px rgba(31, 36, 40, 0.2);
+      }
+
+      html[data-console-theme="light"] .console-share-dialog::backdrop {
+        background: rgba(36, 39, 43, 0.38);
+      }
+
+      html[data-console-theme="light"] .console-share-dialog-copy h2 {
+        color: #24272b;
+      }
+
+      html[data-console-theme="light"] .console-share-dialog-copy > p:not(.console-share-dialog-error) {
+        color: #6f757c;
+      }
+
+      html[data-console-theme="light"] .console-share-dialog-actions {
+        border-top-color: #e5e5de;
+      }
+
+      html[data-console-theme="light"] .console-share-dialog-error {
+        color: #b42318;
       }
 
       html[data-console-theme="light"] .console-thinking-summary {
