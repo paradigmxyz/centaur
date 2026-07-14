@@ -337,6 +337,25 @@ class Principal < ApplicationRecord
       granted_oauth_token_secrets
 
     derived = granted.flat_map { |credential| credential.rules.map(&:to_proxy_rule) }
+
+    # The sandbox's own control plane. Since #1002 sandbox->api traffic rides the
+    # proxy, so the API host must be allowed or the sandbox cannot reach api-rs at
+    # all and EVERY TURN DIES -- the allowlist would take the whole bot down rather
+    # than bound it.
+    #
+    # Its credential is GENERATED, not granted (the JWT is minted per principal, so
+    # no Grant row exists to derive from), which is exactly why deriving only from
+    # granted credentials misses it. The rules it already carries are the same shape.
+    derived += generated_proxy_secrets.flat_map { |secret| secret["rules"] || [] }
+
+    # The sandbox's own control plane. Since #1002 sandbox->api traffic rides the
+    # proxy, so the API host must be allowed or the sandbox cannot reach api-rs at
+    # all and EVERY TURN DIES -- the allowlist would take the whole bot down rather
+    # than bound it.
+    #
+    # Its credential is GENERATED, not granted (the JWT is minted per principal, so
+    # no Grant row exists to derive from), which is exactly why deriving only from
+    # granted credentials misses it. The rules it already carries are the same shape.
     (setting.egress_allowlist_base_rules + derived).uniq
   end
 

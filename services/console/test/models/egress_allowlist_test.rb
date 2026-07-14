@@ -93,6 +93,28 @@ class EgressAllowlistTest < ActiveSupport::TestCase
     }
   end
 
+  test "the sandbox's own control plane is allowed, or the allowlist kills every turn" do
+    # Since #1002 sandbox->api traffic rides the proxy. If the API host is not in the
+    # allowlist the sandbox cannot reach api-rs at all -- the allowlist takes the bot
+    # DOWN rather than bounding it. The api-server JWT is a GENERATED secret, not a
+    # granted one, so deriving only from grants misses it. That is the whole bug.
+    with_env(
+      "CENTAUR_JWT_SIGNING_SECRET" => "test-secret",
+      "CENTAUR_API_URL" => "http://api.internal:8080",
+      "CENTAUR_API_SERVER_PROXY_HOSTS" => nil
+    ) do
+      SlackChannelPermission.create!(
+        principal: @principal, channel_id: "C0123456789", channel_name: "general",
+        upload_enabled: true, download_enabled: false, history_enabled: true
+      )
+      enable!(mode: "enforce", base: [ { "host" => "api.anthropic.com" } ])
+
+      rules = @principal.effective_config(redact_secrets: false).fetch("rules")
+      assert_includes rules, { "host" => "api.internal" },
+        "the control-plane host must survive into the allowlist"
+    end
+  end
+
   # -- warn (the audit pass before enforcing) ---------------------------------
 
   test "warn serves the same rules but tells the proxy not to enforce them" do
@@ -145,5 +167,17 @@ class EgressAllowlistTest < ActiveSupport::TestCase
 
   def enable!(mode:, base:)
     @setting.update!(egress_allowlist_mode: mode, egress_allowlist_base_rules: base)
+  end
+
+  def with_env(values)
+    previous = values.keys.to_h { |key| [ key, ENV[key] ] }
+    values.each do |key, value|
+      value.nil? ? ENV.delete(key) : ENV[key] = value
+    end
+    yield
+  ensure
+    previous.each do |key, value|
+      value.nil? ? ENV.delete(key) : ENV[key] = value
+    end
   end
 end
