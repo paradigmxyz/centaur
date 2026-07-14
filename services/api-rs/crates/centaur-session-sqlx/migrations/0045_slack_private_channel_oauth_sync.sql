@@ -9,9 +9,9 @@ alter table slack_dm_sync_conversations
     add constraint slack_dm_sync_conversations_conversation_type_check
     check (conversation_type in ('im', 'mpim', 'private_channel'));
 
--- Private-channel access fails closed when no successful membership
--- reconciliation has refreshed the user's row recently. DMs and MPIMs retain
--- their existing behavior because Slack exposes their participants directly.
+-- Centralize access checks for every user-scoped Slack conversation. A user
+-- retains access until a successful membership reconciliation marks the row
+-- inactive; incomplete membership responses are rejected by the console sync.
 create or replace function centaur_can_read_slack_user_conversation(
     p_home_team_id text,
     p_conversation_id text
@@ -25,18 +25,11 @@ as $$
     select exists (
         select 1
         from public.slack_dm_sync_conversation_members members
-        join public.slack_dm_sync_conversations conversations
-          on conversations.home_team_id = members.home_team_id
-         and conversations.conversation_id = members.conversation_id
         where members.home_team_id = p_home_team_id
           and members.conversation_id = p_conversation_id
           and members.home_team_id = public.centaur_current_slack_team_id()
           and members.user_id = public.centaur_current_slack_user_id()
           and members.is_current_member
-          and (
-              conversations.conversation_type <> 'private_channel'
-              or members.last_seen_at >= now() - interval '30 minutes'
-          )
     )
 $$;
 

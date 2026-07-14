@@ -75,9 +75,9 @@ multiple credentials can see the same channel.
 User-scoped private channels are stored in the separate `slack_dm_sync_*` and
 `slack_dm_context_documents` private-conversation tables rather than
 `company_context_documents`. RLS checks `(team_id, channel_id, user_id)` against
-the reconciled membership list. Private-channel membership expires closed when
-it has not been refreshed for 30 minutes; a partial or truncated Slack member
-list is never applied.
+the reconciled membership list. A successful sync marks members omitted from
+Slack's complete member list inactive; a partial or truncated member list is
+never applied.
 
 ## Enable the schedules
 
