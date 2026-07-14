@@ -244,9 +244,9 @@ async fn create_slack_identity_helpers(conn: &mut PgConnection) -> Result<(), sq
         r#"
         -- The Granola RLS helper intentionally pins its security-definer search
         -- path to public, matching production. CI's disposable Postgres starts
-        -- without this source table, so provide the minimal public relation it
-        -- resolves. Local development already has the real table and is left
-        -- untouched by IF NOT EXISTS.
+        -- without its source table and identity functions, so provide their
+        -- minimal public definitions. Local development already has the real
+        -- objects and is left untouched by the conditional setup below.
         create table if not exists public.slack_sync_users (
             team_id text not null,
             user_id text not null,
@@ -260,6 +260,27 @@ async fn create_slack_identity_helpers(conn: &mut PgConnection) -> Result<(), sq
             raw_payload jsonb not null default '{}'::jsonb,
             primary key (team_id, user_id)
         );
+
+        do $$
+        begin
+            if to_regprocedure('public.centaur_current_slack_team_id()') is null then
+                execute $function$
+                    create function public.centaur_current_slack_team_id()
+                    returns text language sql stable as $body$
+                        select nullif(current_setting('centaur.slack_team_id', true), '')
+                    $body$
+                $function$;
+            end if;
+            if to_regprocedure('public.centaur_current_slack_user_id()') is null then
+                execute $function$
+                    create function public.centaur_current_slack_user_id()
+                    returns text language sql stable as $body$
+                        select nullif(current_setting('centaur.slack_user_id', true), '')
+                    $body$
+                $function$;
+            end if;
+        end
+        $$;
 
         create function centaur_current_slack_team_id()
         returns text language sql stable as $$
