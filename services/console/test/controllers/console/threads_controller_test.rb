@@ -157,7 +157,7 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_select "button[data-turbo-confirm]", count: 0
     assert_select "dialog.console-share-dialog[data-thread-share-target=dialog]" do
       assert_select "h2", text: "Share chat"
-      assert_select "p", text: /Sharing makes the chat public/
+      assert_select "p", text: "Anyone with access to Centaur Console will be able to view this chat."
       assert_select "form[action=?][data-action*=?]", console_thread_share_path, "thread-share#copyLink" do
         assert_select "input[name=thread_key][value=?]", thread_key
         assert_select "button.btn-secondary[type=button]", text: "Cancel"
