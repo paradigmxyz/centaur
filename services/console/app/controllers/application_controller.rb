@@ -177,7 +177,7 @@ class ApplicationController < ActionController::Base
   end
 
   def store_return_to_for_login
-    return unless request.get?
+    return unless request.request_method == "GET"
 
     session[:return_to] = request.fullpath
   end
