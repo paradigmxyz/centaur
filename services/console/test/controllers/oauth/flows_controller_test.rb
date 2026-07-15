@@ -354,6 +354,7 @@ module Oauth
       assert_equal %w[chat:write], cred.scopes
       assert_equal "xoxp-non-rotating-user", cred.access_token
       assert_nil cred.refresh_token
+      assert_nil cred.expires_at
       assert_nil cred.next_attempt_at
       refute_includes BrokerCredential.refreshable, cred
     end
@@ -377,6 +378,7 @@ module Oauth
       assert_equal %w[commands chat:write], cred.scopes
       assert_equal "xoxb-non-rotating-bot", cred.access_token
       assert_nil cred.refresh_token
+      assert_nil cred.expires_at
       assert_nil cred.next_attempt_at
       assert_equal "TACME", cred.labels["slack_team_id"]
       assert_equal [ "slack.com" ], cred.static_secret.rules.map(&:host)

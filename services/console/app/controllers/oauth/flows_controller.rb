@@ -83,6 +83,7 @@ module Oauth
       end
 
       result = exchange_code(params[:code], flow["code_verifier"])
+      validate_provider_result!(result)
       identity = @provider.identity_from(result, client_id: @app.client_id)
       @credential = upsert_credential(state, result, identity)
       enqueue_identity_enrichment(@credential)
@@ -173,7 +174,7 @@ module Oauth
         end
 
         now = Time.current
-        expires_in = result.expires_in&.positive? ? result.expires_in : BrokerCredential::DEFAULT_EXPIRES_IN_SECONDS
+        refreshable_result = provider_refreshable_result?(result)
         credential.assign_attributes(
           provider_email: identity[:email],
           # Store exactly what the IdP granted, so the refresh POST re-requests it.
@@ -181,15 +182,19 @@ module Oauth
           labels: credential_labels(credential, identity),
           refresh_token: result.refresh_token,
           access_token: result.access_token,
-          expires_at: now + expires_in,
+          expires_at: credential_expires_at(result, now: now, refreshable_result: refreshable_result),
           last_refresh: now,
           failure_count: 0, dead: false, dead_reason: nil
         )
-        credential.next_attempt_at = provider_refreshable_result?(result) ? credential.compute_next_attempt_at(now: now) : nil
+        credential.next_attempt_at = refreshable_result ? credential.compute_next_attempt_at(now: now) : nil
         credential.save!
         ensure_wrapping_secret(credential)
         credential
       end
+    end
+
+    def validate_provider_result!(result)
+      @provider.validate_result!(result) if @provider.respond_to?(:validate_result!)
     end
 
     def provider_requires_refresh_token?
@@ -202,6 +207,13 @@ module Oauth
       return @provider.refreshable_result?(result) if @provider.respond_to?(:refreshable_result?)
 
       @provider.refreshable?
+    end
+
+    def credential_expires_at(result, now:, refreshable_result:)
+      return now + result.expires_in if result.expires_in&.positive?
+      return nil unless refreshable_result
+
+      now + BrokerCredential::DEFAULT_EXPIRES_IN_SECONDS
     end
 
     def granted_scopes(result, state)

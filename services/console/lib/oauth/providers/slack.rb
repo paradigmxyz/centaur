@@ -30,6 +30,16 @@ module Oauth
       def require_refresh_token? = false
       def refreshable_result?(result) = result.refresh_token.present?
 
+      def validate_result!(result)
+        return unless result.refresh_token.blank? && result.expires_in.present?
+
+        raise Broker::ExchangeError.new(
+          "token endpoint returned expiring Slack token without refresh_token",
+          stage: "oauth",
+          code: "missing_refresh_token"
+        )
+      end
+
       def parse_granted_scopes(scope)
         scope.to_s.split(/[,\s]+/).reject(&:blank?)
       end

@@ -80,6 +80,13 @@ module Oauth
         refute strategy.refreshable_result?(static)
       end
 
+      test "rejects expiring Slack responses without a refresh token" do
+        result = result_with(claims: valid_claims, refresh_token: nil, expires_in: 43_200)
+
+        err = assert_raises(Broker::ExchangeError) { strategy.validate_result!(result) }
+        assert_equal "missing_refresh_token", err.code
+      end
+
       test "aud mismatch raises an oauth exchange error" do
         result = result_with(claims: valid_claims("aud" => "someone-else"))
         err = assert_raises(Broker::ExchangeError) { strategy.identity_from(result, client_id: CLIENT_ID) }
