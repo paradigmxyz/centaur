@@ -120,8 +120,6 @@ export type SlackbotV2Options = {
    * the block entirely.
    */
   consolePublicUrl?: string
-  /** Codex effort displayed in Slack when no per-turn `-rsn` override is set. */
-  codexDefaultReasoningEffort?: string
   /**
    * Per-channel default harness/model/provider/reasoning, keyed by Slack
    * conversation id (SLACKBOTV2_CHANNEL_DEFAULTS). See channel-defaults.ts.

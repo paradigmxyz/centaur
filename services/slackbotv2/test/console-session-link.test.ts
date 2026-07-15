@@ -2,8 +2,6 @@ import { describe, expect, test } from 'bun:test'
 import {
   buildConsoleSessionContextBlock,
   consoleSessionUrl,
-  defaultCodexEffort,
-  defaultCodexSpeed,
   defaultModelForHarness,
   harnessDisplayName
 } from '../src/console-session-link'
@@ -87,14 +85,12 @@ describe('consoleSessionUrl', () => {
 })
 
 describe('buildConsoleSessionContextBlock', () => {
-  test('builds a context block with model, harness, effort, and speed', () => {
+  test('builds a context block with uppercased model then harness, middot separated', () => {
     const block = buildConsoleSessionContextBlock({
       consoleBaseUrl: 'https://console.centaur.dev',
       threadKey: 'slack:C123:1700000000.000100',
       harnessType: 'codex',
-      model: 'gpt-5.2',
-      effort: 'xhigh',
-      speed: 'fast'
+      model: 'gpt-5.2'
     })
     expect(block).toEqual({
       type: 'context',
@@ -102,7 +98,7 @@ describe('buildConsoleSessionContextBlock', () => {
         {
           type: 'mrkdwn',
           text:
-            '<https://console.centaur.dev/console/threads?thread=slack%3AC123%3A1700000000.000100|Open chat in Console> · GPT-5.2 · Codex · Effort: Xhigh · Speed: Fast'
+            '<https://console.centaur.dev/console/threads?thread=slack%3AC123%3A1700000000.000100|Open chat in Console> · GPT-5.2 · Codex'
         }
       ]
     })
@@ -128,17 +124,5 @@ describe('buildConsoleSessionContextBlock', () => {
         model: 'gpt-5.2'
       })
     ).toBeUndefined()
-  })
-})
-
-describe('Codex display defaults', () => {
-  test('reads effort and speed from the baked Codex config', () => {
-    expect(defaultCodexEffort()).toBe('low')
-    expect(defaultCodexSpeed()).toBe('fast')
-  })
-
-  test('allows deployment-configured defaults to override baked values', () => {
-    expect(defaultCodexEffort('high')).toBe('high')
-    expect(defaultCodexSpeed('flex')).toBe('flex')
   })
 })

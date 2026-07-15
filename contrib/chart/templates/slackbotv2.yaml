@@ -99,11 +99,12 @@ spec:
             - name: SLACKBOTV2_CHANNEL_DEFAULTS
               value: {{ .Values.slackbotv2.channelDefaults | toJson | quote }}
 {{- end }}
-{{- range $name := tuple "CLAUDE_MODEL" "CODEX_MODEL" "CODEX_MODEL_REASONING_EFFORT" }}
+{{- range $name := tuple "CLAUDE_MODEL" "CODEX_MODEL" }}
 {{- if and (hasKey $.Values.sandbox.extraEnv $name) (not (hasKey $.Values.slackbotv2.extraEnv $name)) }}
-            # Mirror deployer harness display settings (sandbox.extraEnv) so
-            # the Slack Console-link line names the model/effort sandboxes
-            # actually run. slackbotv2.extraEnv wins when explicitly set.
+            # Mirror the deployer's harness default-model override
+            # (sandbox.extraEnv) so the Slack Console-link line names the model
+            # sandboxes actually run. slackbotv2.extraEnv wins if it sets the
+            # same variable.
             - name: {{ $name }}
               value: {{ index $.Values.sandbox.extraEnv $name | toString | quote }}
 {{- end }}

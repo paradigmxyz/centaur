@@ -46,8 +46,6 @@ import {
 } from './session-api'
 import {
   buildConsoleSessionContextBlock,
-  defaultCodexEffort,
-  defaultCodexSpeed,
   defaultModelForHarness,
   type SlackContextBlock
 } from './console-session-link'
@@ -797,19 +795,12 @@ async function syncThreadMessageToSession(
   const effectiveModel =
     resolvedModel ??
     defaultModelForHarness(effectiveHarnessType, input.options.harnessDefaultModels)
-  const effectiveEffort =
-    effectiveHarnessType === 'codex'
-      ? overrides.reasoning ?? defaultCodexEffort(input.options.codexDefaultReasoningEffort)
-      : undefined
-  const effectiveSpeed = effectiveHarnessType === 'codex' ? defaultCodexSpeed() : undefined
   const consoleSessionBlock = isFirstAssistantMessage
     ? buildConsoleSessionContextBlock({
         consoleBaseUrl: input.options.consolePublicUrl,
         threadKey: thread.id,
         harnessType: effectiveHarnessType,
-        model: effectiveModel,
-        effort: effectiveEffort,
-        speed: effectiveSpeed
+        model: effectiveModel
       })
     : undefined
   if (overrides.harnessType || overrides.model || overrides.provider || overrides.reasoning) {

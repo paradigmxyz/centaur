@@ -35,16 +35,6 @@ const BAKED_DEFAULT_MODELS: Record<string, string | undefined> = {
       : undefined
 }
 
-const BAKED_CODEX_EFFORT =
-  typeof (codexConfig as { model_reasoning_effort?: unknown }).model_reasoning_effort === 'string'
-    ? (codexConfig as { model_reasoning_effort: string }).model_reasoning_effort
-    : undefined
-
-const BAKED_CODEX_SPEED =
-  typeof (codexConfig as { service_tier?: unknown }).service_tier === 'string'
-    ? (codexConfig as { service_tier: string }).service_tier
-    : undefined
-
 /** Slack mrkdwn requires `&`, `<`, `>` to be escaped in free text. */
 function escapeSlackMrkdwn(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -86,14 +76,6 @@ export function defaultModelForHarness(
   return configured?.[key]?.trim() || BAKED_DEFAULT_MODELS[key]
 }
 
-export function defaultCodexEffort(configured?: string): string | undefined {
-  return configured?.trim() || BAKED_CODEX_EFFORT
-}
-
-export function defaultCodexSpeed(configured?: string): string | undefined {
-  return configured?.trim() || BAKED_CODEX_SPEED
-}
-
 /**
  * Builds the Console session URL for a Slack thread key, or undefined when no
  * Console base URL is configured (in which case no link/block should render).
@@ -116,7 +98,7 @@ export type SlackContextBlock = {
 }
 
 /**
- * Builds the Slack context block with model, harness, effort, and speed, or
+ * Builds the "Open chat in Console · {MODEL} · {Harness}" context block, or
  * undefined when no Console base URL is configured (a bare "Open chat in
  * Console" with no link is pointless, so the whole block is skipped). The
  * model id is uppercased for display.
@@ -126,8 +108,6 @@ export function buildConsoleSessionContextBlock(params: {
   threadKey: string
   harnessType?: string | null
   model?: string | null
-  effort?: string | null
-  speed?: string | null
 }): SlackContextBlock | undefined {
   const url = consoleSessionUrl(params.consoleBaseUrl, params.threadKey)
   if (!url) return undefined
@@ -136,10 +116,6 @@ export function buildConsoleSessionContextBlock(params: {
   if (model) segments.push(escapeSlackMrkdwn(model.toUpperCase()))
   const harness = harnessDisplayName(params.harnessType)
   if (harness) segments.push(escapeSlackMrkdwn(harness))
-  const effort = params.effort?.trim()
-  if (effort) segments.push(`Effort: ${escapeSlackMrkdwn(titleCase(effort))}`)
-  const speed = params.speed?.trim()
-  if (speed) segments.push(`Speed: ${escapeSlackMrkdwn(titleCase(speed))}`)
   // Middot (U+00B7) with a space on each side, matching the bot's other
   // context lines.
   return {
