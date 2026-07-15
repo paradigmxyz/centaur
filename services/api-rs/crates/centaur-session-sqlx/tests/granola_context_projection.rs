@@ -37,6 +37,13 @@ async fn run_assertions(conn: &mut PgConnection, schema: &str) -> Result<(), Box
             'note_backfilled', 'Existing note', 'alice@example.com',
             array['alice@example.com'], 'Existing source data', '2026-07-13T09:00:00Z'
         );
+
+        insert into granola_context_documents (
+            document_id, note_id, title, body, content_hash
+        ) values (
+            'granola:note:note_backfilled', 'note_backfilled',
+            'Stale title', 'Stale body', 'stale-hash'
+        );
         "#,
     )
     .execute(&mut *conn)
@@ -44,12 +51,21 @@ async fn run_assertions(conn: &mut PgConnection, schema: &str) -> Result<(), Box
     execute_migration(conn, GRANOLA_CONTEXT_PROJECTION_SQL).await?;
     grant_schema_usage(conn, schema).await?;
 
-    let backfilled_document_id: String = sqlx::query_scalar(
-        "select document_id from granola_context_documents where note_id = 'note_backfilled'",
+    let backfilled = sqlx::query(
+        "select document_id, title, body from granola_context_documents \
+         where note_id = 'note_backfilled'",
     )
     .fetch_one(&mut *conn)
     .await?;
-    assert_eq!(backfilled_document_id, "granola:note_backfilled");
+    assert_eq!(
+        backfilled.try_get::<String, _>("document_id")?,
+        "granola:note:note_backfilled"
+    );
+    assert_eq!(backfilled.try_get::<String, _>("title")?, "Existing note");
+    assert_eq!(
+        backfilled.try_get::<String, _>("body")?,
+        "Existing source data"
+    );
 
     sqlx::raw_sql(
         r#"
@@ -87,7 +103,7 @@ async fn run_assertions(conn: &mut PgConnection, schema: &str) -> Result<(), Box
     .await?;
     assert_eq!(
         projection.try_get::<String, _>("document_id")?,
-        "granola:note_alice"
+        "granola:note:note_alice"
     );
     assert_eq!(projection.try_get::<String, _>("title")?, "Launch review");
     assert_eq!(
@@ -133,10 +149,10 @@ async fn run_assertions(conn: &mut PgConnection, schema: &str) -> Result<(), Box
         conn,
         schema,
         "U_ALICE",
-        &["granola:note_alice", "granola:note_backfilled"],
+        &["granola:note:note_alice", "granola:note:note_backfilled"],
     )
     .await?;
-    assert_visible_documents(conn, schema, "U_BOB", &["granola:note_bob"]).await?;
+    assert_visible_documents(conn, schema, "U_BOB", &["granola:note:note_bob"]).await?;
     Ok(())
 }
 

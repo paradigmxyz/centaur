@@ -22,7 +22,7 @@ as $$
     ),
     projected as (
         select
-            concat_ws(':', 'granola', notes.note_id) as document_id,
+            concat_ws(':', 'granola', 'note', notes.note_id) as document_id,
             notes.note_id,
             coalesce(nullif(notes.title, ''), 'Granola note') as title,
             notes.content_text as body,
