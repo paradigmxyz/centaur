@@ -20,6 +20,31 @@ module Api
       end
 
       test "returns redacted sandbox permissions for a valid sandbox token" do
+        credential = BrokerCredential.create!(
+          namespace: @proxy.principal.namespace,
+          foreign_id: "google-personal",
+          name: "Google - Personal User",
+          token_endpoint: "https://oauth2.googleapis.com/token",
+          oauth_app: oauth_apps(:acme_google),
+          provider_email: "person@example.com",
+          provider_subject: "google-sub-1",
+          scopes: [ "https://www.googleapis.com/auth/gmail.readonly" ],
+          refresh_token: "refresh-token",
+          access_token: "access-token",
+          expires_at: 1.hour.from_now,
+          last_refresh: Time.current
+        )
+        secret = StaticSecret.new(
+          namespace: @proxy.principal.namespace,
+          name: "Google - Personal User token",
+          broker_credential: credential,
+          inject_config: { "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" }
+        )
+        secret.build_source(source_type: "token_broker", config: { "credential_id" => credential.oid })
+        secret.rules.build(host: "www.googleapis.com", position: 0)
+        secret.save!
+        Grant.create!(principal: @proxy.principal, static_secret: secret, created_by: users(:acme_admin))
+
         with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
           get "/api/v1/sandbox/permissions", headers: auth_headers(token_for(@proxy))
         end
@@ -32,6 +57,18 @@ module Api
         assert_equal @proxy.principal.namespace, data.dig("principal", "namespace")
         assert_equal @proxy.principal.sandbox_repo_cache, data.dig("capabilities", "sandbox_repo_cache")
         assert_equal 1, data.fetch("slack_channel_permissions").length
+        assert_equal [
+          {
+            "id" => credential.oid,
+            "oauth_app_id" => oauth_apps(:acme_google).oid,
+            "slug" => "google",
+            "provider" => "google",
+            "provider_email" => "person@example.com",
+            "provider_subject" => "google-sub-1",
+            "status" => "live",
+            "scopes" => [ "https://www.googleapis.com/auth/gmail.readonly" ]
+          }
+        ], data.fetch("oauth_credentials")
 
         entry = data.dig("permissions", "secrets").find { |secret| secret.dig("source", "type") == "control_plane" }
         refute_nil entry

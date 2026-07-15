@@ -211,8 +211,9 @@ Rails.application.routes.draw do
       post "proxy/sync", to: "proxy_sync#create"
 
       # Called from inside sandboxes through their assigned iron-proxy. The
-      # proxy injects a short-lived sandbox entitlement JWT scoped to this path.
+      # proxy injects a short-lived sandbox entitlement JWT scoped to these paths.
       get "sandbox/permissions", to: "sandbox_permissions#show"
+      get "sandbox/oauth_apps", to: "sandbox_oauth_apps#index"
     end
   end
 

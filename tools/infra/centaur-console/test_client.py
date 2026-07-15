@@ -1,6 +1,6 @@
 import httpx
 import pytest
-from client import SANDBOX_PERMISSIONS_PATH, ConsoleClient
+from client import SANDBOX_OAUTH_APPS_PATH, SANDBOX_PERMISSIONS_PATH, ConsoleClient
 
 
 def json_response(payload, status_code=200):
@@ -51,6 +51,42 @@ def test_sandbox_permissions_wraps_http_errors():
 
     with pytest.raises(RuntimeError, match="HTTP 401"):
         make_client(handler).sandbox_permissions()
+
+
+def test_sandbox_oauth_apps_fetches_and_unwraps_data():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == SANDBOX_OAUTH_APPS_PATH
+        assert request.headers["Accept"] == "application/json"
+        return json_response(
+            {
+                "data": [
+                    {
+                        "slug": "google",
+                        "provider": "google",
+                        "start_url": "https://console.example/oauth/google/start",
+                    }
+                ]
+            }
+        )
+
+    result = make_client(handler).sandbox_oauth_apps()
+
+    assert result == [
+        {
+            "slug": "google",
+            "provider": "google",
+            "start_url": "https://console.example/oauth/google/start",
+        }
+    ]
+
+
+def test_sandbox_oauth_apps_wraps_http_errors():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return json_response({"error": {"message": "invalid sandbox token"}}, status_code=401)
+
+    with pytest.raises(RuntimeError, match="HTTP 401"):
+        make_client(handler).sandbox_oauth_apps()
 
 
 def test_health_returns_identity_details():

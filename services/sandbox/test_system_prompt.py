@@ -41,5 +41,18 @@ class SystemPromptTest(unittest.TestCase):
         self.assertIn("`--bedrock` selects Codex with the Bedrock provider", prompt)
         self.assertIn("`-rsn <effort>` sets Codex reasoning effort", prompt)
 
+    def test_personal_oauth_app_connection_guidance_is_present(self) -> None:
+        prompt = SYSTEM_PROMPT.read_text()
+
+        self.assertIn("[Personal OAuth app connections]", prompt)
+        self.assertIn("centaur-console oauth-apps", prompt)
+        self.assertIn("Google, Granola, Attio, Linear, Slack, and GitHub", prompt)
+        self.assertIn("Use the returned `start_url`", prompt)
+        self.assertIn("Do not invent OAuth links", prompt)
+        self.assertIn("validate the connection with `centaur-console permissions`", prompt)
+        self.assertIn("look in `oauth_credentials`", prompt)
+        self.assertIn("personal `provider_email`", prompt)
+        self.assertIn("Centaur can use their personal connected account", prompt)
+
 if __name__ == "__main__":
     unittest.main()

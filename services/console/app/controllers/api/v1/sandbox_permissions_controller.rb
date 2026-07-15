@@ -26,6 +26,7 @@ module Api
             principal: principal_payload(principal),
             capabilities: capabilities_payload(principal),
             slack_channel_permissions: principal.slack_channel_permissions_payload,
+            oauth_credentials: oauth_credentials_payload(principal),
             permissions: permissions
           }
         }.to_json
@@ -75,6 +76,26 @@ module Api
           sandbox_observability_enabled: principal.sandbox_observability_enabled,
           sandbox_api_server_enabled: principal.sandbox_api_server_enabled
         }
+      end
+
+      def oauth_credentials_payload(principal)
+        principal.granted_static_secrets
+          .includes(broker_credential: :oauth_app)
+          .filter_map(&:broker_credential)
+          .select(&:oauth_app)
+          .sort_by { |credential| [ credential.oauth_app.slug, credential.provider_email.to_s, credential.id ] }
+          .map do |credential|
+            {
+              id: credential.oid,
+              oauth_app_id: credential.oauth_app.oid,
+              slug: credential.oauth_app.slug,
+              provider: credential.oauth_app.provider,
+              provider_email: credential.provider_email,
+              provider_subject: credential.provider_subject,
+              status: credential.status,
+              scopes: credential.scopes
+            }
+          end
       end
     end
   end

@@ -63,13 +63,13 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
 
     entry = json_body.fetch("secrets").find do |secret|
       secret.dig("inject", "header") == "Authorization" &&
-        secret.fetch("rules").any? { |rule| rule["paths"] == [ Proxy::SANDBOX_ENTITLEMENTS_PATH ] }
+        secret.fetch("rules").any? { |rule| rule["paths"] == [ Proxy::SANDBOX_ENTITLEMENTS_PATH_PATTERN ] }
     end
 
     refute_nil entry
     assert_equal "Bearer {{ .Value }}", entry.dig("inject", "formatter")
     assert_equal(
-      { "host" => "centaur-console", "methods" => [ "GET" ], "paths" => [ Proxy::SANDBOX_ENTITLEMENTS_PATH ] },
+      { "host" => "centaur-console", "methods" => [ "GET" ], "paths" => [ Proxy::SANDBOX_ENTITLEMENTS_PATH_PATTERN ] },
       entry.fetch("rules").first
     )
 
@@ -88,7 +88,7 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
     assert_response :ok
 
     entry = json_body.fetch("secrets").find do |secret|
-      secret.fetch("rules", []).any? { |rule| rule["paths"] == [ Proxy::SANDBOX_ENTITLEMENTS_PATH ] }
+      secret.fetch("rules", []).any? { |rule| rule["paths"] == [ Proxy::SANDBOX_ENTITLEMENTS_PATH_PATTERN ] }
     end
 
     assert_nil entry

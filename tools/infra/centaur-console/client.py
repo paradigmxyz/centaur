@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 
 SANDBOX_PERMISSIONS_PATH = "/api/v1/sandbox/permissions"
+SANDBOX_OAUTH_APPS_PATH = "/api/v1/sandbox/oauth_apps"
 
 
 class ConsoleClient:
@@ -72,6 +73,25 @@ class ConsoleClient:
     def permissions(self) -> dict[str, Any]:
         """Alias for tool bridge calls."""
         return self.sandbox_permissions()
+
+    def sandbox_oauth_apps(self) -> list[dict[str, Any]]:
+        """Return enabled OAuth apps with user-facing consent start URLs."""
+        response = self.client.get(SANDBOX_OAUTH_APPS_PATH)
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            detail = _response_error_detail(exc.response)
+            raise RuntimeError(f"centaur-console OAuth apps request failed: {detail}") from exc
+
+        payload = response.json()
+        data = payload.get("data")
+        if not isinstance(data, list):
+            raise RuntimeError("centaur-console OAuth apps response did not include a data array")
+        return data
+
+    def oauth_apps(self) -> list[dict[str, Any]]:
+        """Alias for tool bridge calls."""
+        return self.sandbox_oauth_apps()
 
     def health(self) -> dict[str, Any]:
         """Assert the sandbox permissions endpoint is reachable and authorized."""
