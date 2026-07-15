@@ -920,6 +920,34 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_redirected_to console_threads_path(thread: create[:thread_key])
   end
 
+  test "starting a chat prefers the Console user's connected GitHub login" do
+    @operator.update!(name: "Goksu Toprak")
+    client = RecordingApiClient.new
+    identity = GithubRequesterIdentity::Result.new(
+      handle: "@goksu", source: "connected GitHub account", reason: nil
+    )
+    test_case = self
+    operator = @operator
+    with_singleton_method(GithubRequesterIdentity, :resolve, ->(user:) {
+      test_case.assert_equal operator, user
+      identity
+    }) do
+      with_singleton_method(SlackRequesterIdentity, :resolve, ->(**) {
+        flunk("Slack fallback should not run when GitHub is connected")
+      }) do
+        with_composer(client: client) do
+          post console_threads_url, params: { prompt: "Open the PR.", model: "gpt-5.5" }
+        end
+      end
+    end
+
+    line = JSON.parse(client.calls[2].last[:input_lines].first)
+    requester_context = line.dig("message", "content", 0, "text")
+    assert_includes requester_context, "Prompted by: @goksu"
+    assert_includes requester_context, "GitHub handle source: connected GitHub account"
+    refute_includes requester_context, "Prompted by: Goksu Toprak"
+  end
+
   test "picking Amp starts an amp chat and sends no model" do
     client = RecordingApiClient.new
     with_composer(client: client) do
