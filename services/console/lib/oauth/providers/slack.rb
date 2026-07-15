@@ -23,6 +23,12 @@ module Oauth
       def scope_separator = ","
       def extra_authorization_params = {}
       def refreshable? = true
+      # Slack app token rotation is deployment-specific. When token rotation is
+      # enabled Slack returns a refresh_token and the broker loop keeps it fresh;
+      # when it is disabled Slack returns long-lived xoxp/xoxb tokens without a
+      # refresh_token, which should be stored without scheduling refresh.
+      def require_refresh_token? = false
+      def refreshable_result?(result) = result.refresh_token.present?
 
       def parse_granted_scopes(scope)
         scope.to_s.split(/[,\s]+/).reject(&:blank?)
@@ -37,6 +43,16 @@ module Oauth
             subject: user_id,
             email: result.response.dig("authed_user", "email"),
             name: slack_user_name(result.response),
+            team_id: slack_team_id(result.response)
+          }
+        end
+
+        bot_user_id = result.response&.dig("bot_user_id")
+        if bot_user_id.present?
+          return {
+            subject: bot_user_id,
+            email: nil,
+            name: slack_bot_name(result.response),
             team_id: slack_team_id(result.response)
           }
         end
@@ -56,6 +72,10 @@ module Oauth
       def slack_team_id(response)
         response.dig("team", "id").presence ||
           response.dig("authed_user", "team_id").presence
+      end
+
+      def slack_bot_name(response)
+        response.dig("team", "name").presence || response["bot_user_id"].presence
       end
     end
   end

@@ -1154,7 +1154,7 @@ A tampered, expired, or missing flow state or cookie renders an error page with 
 | Google   | `google`         |
 | Slack    | `slack`          |
 
-Slack OAuth apps should have token rotation enabled so the callback receives a refresh token for the broker refresh loop.
+Slack OAuth apps may use token rotation or long-lived tokens. When token rotation is enabled, the callback stores the returned refresh token and the broker refresh loop keeps the access token fresh. When Slack returns a long-lived token without a refresh token, the credential is stored without scheduling broker refresh.
 Slack OAuth apps should use normal Slack API scopes such as `channels:history`, not Sign in with Slack scopes such as `openid`, `email`, or `profile`.
 
 ## Principals

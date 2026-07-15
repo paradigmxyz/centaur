@@ -55,6 +55,31 @@ module Oauth
         assert_equal "ada", identity[:name]
       end
 
+      test "uses Slack bot user id when no authed user token or id token is returned" do
+        result = result_with(
+          claims: valid_claims,
+          id_token: nil,
+          response: {
+            "team" => { "id" => "T12345", "name" => "Acme" },
+            "bot_user_id" => "U0BOTUSER"
+          }
+        )
+
+        identity = strategy.identity_from(result, client_id: CLIENT_ID)
+        assert_equal "U0BOTUSER", identity[:subject]
+        assert_equal "Acme", identity[:name]
+        assert_equal "T12345", identity[:team_id]
+      end
+
+      test "only schedules refresh when Slack returned a refresh token" do
+        rotating = result_with(claims: valid_claims, refresh_token: "RT")
+        static = result_with(claims: valid_claims, refresh_token: nil)
+
+        refute strategy.require_refresh_token?
+        assert strategy.refreshable_result?(rotating)
+        refute strategy.refreshable_result?(static)
+      end
+
       test "aud mismatch raises an oauth exchange error" do
         result = result_with(claims: valid_claims("aud" => "someone-else"))
         err = assert_raises(Broker::ExchangeError) { strategy.identity_from(result, client_id: CLIENT_ID) }

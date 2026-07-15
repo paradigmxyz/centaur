@@ -147,7 +147,7 @@ module Oauth
         code: code.to_s,
         redirect_uri: oauth_callback_redirect_uri(@app.slug),
         code_verifier: code_verifier.to_s,
-        require_refresh_token: @provider.refreshable?
+        require_refresh_token: provider_requires_refresh_token?
       )
     end
 
@@ -185,11 +185,23 @@ module Oauth
           last_refresh: now,
           failure_count: 0, dead: false, dead_reason: nil
         )
-        credential.next_attempt_at = @provider.refreshable? ? credential.compute_next_attempt_at(now: now) : nil
+        credential.next_attempt_at = provider_refreshable_result?(result) ? credential.compute_next_attempt_at(now: now) : nil
         credential.save!
         ensure_wrapping_secret(credential)
         credential
       end
+    end
+
+    def provider_requires_refresh_token?
+      return @provider.require_refresh_token? if @provider.respond_to?(:require_refresh_token?)
+
+      @provider.refreshable?
+    end
+
+    def provider_refreshable_result?(result)
+      return @provider.refreshable_result?(result) if @provider.respond_to?(:refreshable_result?)
+
+      @provider.refreshable?
     end
 
     def granted_scopes(result, state)

@@ -77,6 +77,33 @@ module Oauth
       }.merge(overrides).to_json
     end
 
+    def slack_bot_token_body(**overrides)
+      {
+        ok: true,
+        access_token: "xoxb-non-rotating-bot",
+        token_type: "bot",
+        scope: "commands,chat:write",
+        bot_user_id: "U0BOTUSER",
+        app_id: "A0APP",
+        team: { id: "TACME", name: "Acme" }
+      }.merge(overrides).to_json
+    end
+
+    def slack_static_user_token_body
+      slack_token_body(
+        access_token: "xoxb-non-rotating-bot",
+        refresh_token: nil,
+        expires_in: nil,
+        authed_user: {
+          id: "USTATIC",
+          user: "static-grace",
+          access_token: "xoxp-non-rotating-user",
+          scope: "chat:write",
+          token_type: "user"
+        }
+      )
+    end
+
     def github_token_body(scope: "repo,read:user", **overrides)
       {
         access_token: "gho-user-token",
@@ -306,9 +333,54 @@ module Oauth
       assert_equal %w[chat:write], cred.scopes
       assert_equal "xoxe.xoxp-1-user", cred.access_token
       assert_equal "xoxe-1-refresh", cred.refresh_token
+      assert cred.next_attempt_at.present?
       assert_equal "TACME", cred.labels["slack_team_id"]
       assert_equal [ "slack.com" ], cred.static_secret.rules.map(&:host)
       assert_equal "Slack – grace token", cred.static_secret.name
+    end
+
+    test "callback happy path supports non-rotating Slack user tokens" do
+      state = start_flow(slug: "slack", scopes: "chat:write")
+      stub_exchange(status: 200, body: slack_static_user_token_body)
+
+      assert_difference -> { BrokerCredential.count } => 1 do
+        get oauth_callback_url(slug: "slack"), params: { state: state, code: "auth-code" }
+      end
+      assert_redirected_to console_integrations_path
+
+      app = oauth_apps(:acme_slack)
+      cred = BrokerCredential.find_by(oauth_app: app, provider_subject: "USTATIC")
+      assert_equal "Slack – static-grace", cred.name
+      assert_equal %w[chat:write], cred.scopes
+      assert_equal "xoxp-non-rotating-user", cred.access_token
+      assert_nil cred.refresh_token
+      assert_nil cred.next_attempt_at
+      refute_includes BrokerCredential.refreshable, cred
+    end
+
+    test "callback happy path supports non-rotating Slack bot tokens" do
+      state = start_flow(slug: "slack", scopes: "chat:write")
+      stub_exchange(status: 200, body: slack_bot_token_body)
+
+      assert_difference -> { BrokerCredential.count } => 1 do
+        get oauth_callback_url(slug: "slack"), params: { state: state, code: "auth-code" }
+      end
+      assert_redirected_to console_integrations_path
+
+      app = oauth_apps(:acme_slack)
+      cred = BrokerCredential.find_by(oauth_app: app, provider_subject: "U0BOTUSER")
+      assert_equal "acme", cred.namespace
+      assert_equal "slack-slack-u0botuser", cred.foreign_id
+      assert_equal "Slack – Acme", cred.name
+      assert_equal "https://slack.com/api/oauth.v2.access", cred.token_endpoint
+      assert_nil cred.provider_email
+      assert_equal %w[commands chat:write], cred.scopes
+      assert_equal "xoxb-non-rotating-bot", cred.access_token
+      assert_nil cred.refresh_token
+      assert_nil cred.next_attempt_at
+      assert_equal "TACME", cred.labels["slack_team_id"]
+      assert_equal [ "slack.com" ], cred.static_secret.rules.map(&:host)
+      refute_includes BrokerCredential.refreshable, cred
     end
 
     test "callback happy path supports Attio workspace tokens" do
