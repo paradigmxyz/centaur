@@ -815,6 +815,7 @@ describe('session principal display name', () => {
     metadata?: {
       slack_conversation_name?: string
       slack_team_id?: string
+      slack_user_email?: string
       slack_user_id?: string
     }
   } {
@@ -822,6 +823,7 @@ describe('session principal display name', () => {
       metadata?: {
         slack_conversation_name?: string
         slack_team_id?: string
+        slack_user_email?: string
         slack_user_id?: string
       }
     }
@@ -964,16 +966,25 @@ describe('session principal display name', () => {
     dm.threadId = 'slack:D9:1700000000.000100'
     dm.raw = { channel: 'D9' }
     await withSlackStub(
-      url =>
-        url.includes('users.info')
-          ? Response.json({ ok: true, user: { profile: { display_name: 'Ada Lovelace' } } })
-          : Response.json({ ok: true }),
+      url => {
+        if (url.includes('users.info')) {
+          return Response.json({
+            ok: true,
+            user: { profile: { display_name: 'Ada Lovelace', email: 'ada@example.com' } }
+          })
+        }
+        return Response.json({
+          ok: true,
+          profile: { display_name: 'Ada Lovelace' }
+        })
+      },
       async () => {
         await forwardToSessionApi(slackOptions(fetchFn), forwardInput(dm))
       }
     )
     expect(createBody(requests).metadata?.slack_conversation_name).toBe('Ada Lovelace')
     expect(createBody(requests).metadata?.slack_team_id).toBe('T1')
+    expect(createBody(requests).metadata?.slack_user_email).toBe('ada@example.com')
     expect(createBody(requests).metadata?.slack_user_id).toBe('U1')
   })
 

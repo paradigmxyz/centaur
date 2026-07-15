@@ -684,6 +684,7 @@ type RequesterIdentity = {
   githubHandleSource?: string
   githubUnavailableReason?: string
   slackDisplayName?: string
+  slackEmail?: string
   slackMention?: string
   slackTeamId?: string
   slackUserId?: string
@@ -778,13 +779,17 @@ async function postCreateSession(
   // iron-control; resolve it here so it rides the create-session metadata that
   // api-rs reads when it registers the principal.
   const conversationName = message ? await resolveConversationName(options, message) : undefined
+  const requesterIdentity =
+    message && slackConversationKind(slackConversationId(message)) === 'dm'
+      ? await resolveRequesterIdentity(options, message)
+      : undefined
   const body: SlackbotV2CreateSessionRequest = {
     harness_type: harnessType,
     metadata: {
       source: 'slackbotv2',
       platform: 'slack',
       thread_id: threadId,
-      ...sessionRequesterMetadata(message),
+      ...sessionRequesterMetadata(message, requesterIdentity),
       ...(conversationName ? { slack_conversation_name: conversationName } : {})
     },
     ...(onHarnessConflict ? { on_harness_conflict: onHarnessConflict } : {})
@@ -836,11 +841,13 @@ function sessionRequesterMetadata(
   const slackTeamId = identity?.slackTeamId ?? messageSlackTeamId(message)
   const slackUserName = identity?.slackUserName ?? message?.author.userName
   const slackDisplayName = identity?.slackDisplayName ?? message?.author.fullName
+  const slackEmail = identity?.slackEmail
   return {
     ...(slackUserId ? { slack_user_id: slackUserId } : {}),
     ...(slackTeamId ? { slack_team_id: slackTeamId } : {}),
     ...(slackUserName ? { slack_user_name: slackUserName } : {}),
     ...(slackDisplayName ? { slack_display_name: slackDisplayName } : {}),
+    ...(slackEmail ? { slack_user_email: slackEmail } : {}),
     ...(identity?.githubHandle ? { github_handle: identity.githubHandle } : {})
   }
 }
@@ -887,6 +894,7 @@ async function resolveRequesterIdentity(
     ?? stringValue(profile.real_name)
     ?? stringValue(profile.name)
     ?? identity.slackDisplayName
+  identity.slackEmail = stringValue(profile.email) ?? identity.slackEmail
   identity.slackUserName = stringValue(profile.name) ?? identity.slackUserName
 
   const github = extractGithubHandleFromSlackProfile(profile)
@@ -937,6 +945,7 @@ function mergeRequesterIdentity(
     ...fallback,
     ...cached,
     slackDisplayName: cached.slackDisplayName ?? fallback.slackDisplayName,
+    slackEmail: cached.slackEmail ?? fallback.slackEmail,
     slackMention: fallback.slackMention ?? cached.slackMention,
     slackTeamId: fallback.slackTeamId ?? cached.slackTeamId,
     slackUserId: fallback.slackUserId ?? cached.slackUserId,
@@ -962,6 +971,7 @@ async function fetchSlackUserProfile(
     if (!user && !profile) return null
     return {
       ...(user ?? {}),
+      ...(userProfile ?? {}),
       ...(profile ?? {}),
       ...(profile?.fields ? { fields: profile.fields } : {}),
       ...(profile?.custom_fields ? { custom_fields: profile.custom_fields } : {})

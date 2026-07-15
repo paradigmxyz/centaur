@@ -21,6 +21,7 @@ use crate::principal::{
 struct SessionPrincipalMetadata<'a> {
     actor_user_id: Option<&'a str>,
     slack_team_id: Option<&'a str>,
+    slack_user_email: Option<&'a str>,
     conversation_name: Option<&'a str>,
 }
 
@@ -36,6 +37,7 @@ impl<'a> SessionPrincipalMetadata<'a> {
                 .or_else(|| metadata.get("user_id"))
                 .and_then(Value::as_str),
             slack_team_id: metadata.get("slack_team_id").and_then(Value::as_str),
+            slack_user_email: metadata.get("slack_user_email").and_then(Value::as_str),
             conversation_name: metadata
                 .get("slack_conversation_name")
                 .or_else(|| metadata.get("discord_conversation_name"))
@@ -94,6 +96,7 @@ impl SessionRegistrar {
             metadata.conversation_name,
         );
         let mut input = principal.to_identity_input(&self.namespace);
+        apply_slack_dm_email_label(thread_key, metadata.slack_user_email, &mut input.labels);
         let existing = match self
             .client
             .get_principal(&self.namespace, &input.foreign_id)
@@ -155,6 +158,25 @@ fn slack_permission_for_thread(
             Some(user_id.trim().to_owned()).filter(|value| !value.is_empty()),
         )
     })
+}
+
+fn apply_slack_dm_email_label(
+    thread_key: &str,
+    slack_user_email: Option<&str>,
+    labels: &mut BTreeMap<String, String>,
+) {
+    let Some(email) = slack_user_email
+        .map(str::trim)
+        .filter(|email| !email.is_empty())
+    else {
+        return;
+    };
+    let Some(conversation_id) = slack_conversation_id(thread_key) else {
+        return;
+    };
+    if is_direct_message(Some(conversation_id)) && labels.contains_key("slack_user_id") {
+        labels.insert("slack_email".to_owned(), email.to_owned());
+    }
 }
 
 fn slack_permission(
@@ -231,6 +253,41 @@ mod tests {
             .slack_team_id,
             Some("T123")
         );
+    }
+
+    #[test]
+    fn session_principal_metadata_carries_slack_user_email() {
+        assert_eq!(
+            SessionPrincipalMetadata::from_session_metadata(Some(&json!({
+                "slack_user_email": "ada@example.com"
+            })))
+            .slack_user_email,
+            Some("ada@example.com")
+        );
+    }
+
+    #[test]
+    fn slack_dm_email_label_applies_only_to_dm_user_principals() {
+        let mut dm_labels = BTreeMap::new();
+        dm_labels.insert("slack_user_id".to_owned(), "U123".to_owned());
+        apply_slack_dm_email_label(
+            "slack:T123:D123:1773364194.179929",
+            Some(" ada@example.com "),
+            &mut dm_labels,
+        );
+        assert_eq!(
+            dm_labels.get("slack_email").map(String::as_str),
+            Some("ada@example.com")
+        );
+
+        let mut channel_labels = BTreeMap::new();
+        channel_labels.insert("slack_channel_id".to_owned(), "C123".to_owned());
+        apply_slack_dm_email_label(
+            "slack:T123:C123:1773364194.179929",
+            Some("ada@example.com"),
+            &mut channel_labels,
+        );
+        assert_eq!(channel_labels.get("slack_email"), None);
     }
 
     #[tokio::test]
