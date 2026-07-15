@@ -115,6 +115,17 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
     assert_equal [ [ "google", "new-sub" ] ], user.user_identities.pluck(:provider, :subject)
   end
 
+  test "callback redirects to the protected console URL the user first requested" do
+    get console_credentials_url(kind: "oauth")
+    assert_redirected_to login_path
+    assert_equal "/console/credentials?kind=oauth", session[:return_to]
+
+    run_callback(sub: "returning-sub", email: "returning@example.com")
+    assert_redirected_to "/console/credentials?kind=oauth"
+    assert_equal User.find_by!(email: "returning@example.com").id, session[:user_id]
+    assert_nil session[:return_to]
+  end
+
   test "callback provisions a user inside the configured SSO domain allowlist" do
     ENV["CENTAUR_CONSOLE_SSO_EMAIL_DOMAINS"] = "example.com acme.example"
     assert_difference -> { User.count }, 1 do

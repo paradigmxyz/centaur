@@ -25,6 +25,26 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
     assert_equal @operator.id, session[:user_id]
   end
 
+  test "login redirects to the protected console URL the user first requested" do
+    get console_credentials_url(kind: "oauth")
+    assert_redirected_to login_path
+    assert_equal "/console/credentials?kind=oauth", session[:return_to]
+
+    post login_url, params: { email: @operator.email, password: "password123456" }
+    assert_redirected_to "/console/credentials?kind=oauth"
+    assert_equal @operator.id, session[:user_id]
+    assert_nil session[:return_to]
+  end
+
+  test "unsafe methods do not replace the remembered login destination" do
+    get console_credentials_url(kind: "oauth")
+    assert_equal "/console/credentials?kind=oauth", session[:return_to]
+
+    post console_roles_url, params: { role: { foreign_id: "new-role", namespace: "default" } }
+    assert_redirected_to login_path
+    assert_equal "/console/credentials?kind=oauth", session[:return_to]
+  end
+
   test "password login rejects credentials when disabled" do
     ENV["CENTAUR_CONSOLE_PASSWORD_LOGIN_ENABLED"] = "false"
     post login_url, params: { email: @operator.email, password: "password123456" }

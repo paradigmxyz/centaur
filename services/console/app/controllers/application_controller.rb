@@ -90,7 +90,10 @@ class ApplicationController < ActionController::Base
   # before_action gate for console pages: bounce anonymous requests to the login
   # form rather than rendering the page.
   def require_login
-    redirect_to login_path unless current_user
+    return if current_user
+
+    store_return_to_for_login
+    redirect_to login_path
   end
 
   # Second gate, after require_login: a disabled user is signed out; a pending
@@ -171,6 +174,12 @@ class ApplicationController < ActionController::Base
     path = session.delete(:return_to).to_s
     return default_console_landing_path unless path.start_with?("/") && !path.start_with?("//")
     path
+  end
+
+  def store_return_to_for_login
+    return unless request.get?
+
+    session[:return_to] = request.fullpath
   end
 
   def safe_console_return_path(default: default_console_landing_path)
