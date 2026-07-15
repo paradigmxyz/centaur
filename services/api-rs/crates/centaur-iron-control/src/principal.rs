@@ -25,6 +25,10 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use crate::models::IdentityInput;
 use crate::util::{managed_labels, slugify};
 
+const KIND_LABEL: &str = "kind";
+const SLACK_DM_KIND: &str = "slack_dm";
+const SLACK_CHANNEL_KIND: &str = "slack_channel";
+
 /// The principal a session resolves to, as a stable upsert key plus a label.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrincipalRef {
@@ -183,6 +187,7 @@ pub fn derive_principal_with_slack_team(
     if is_direct_message(conversation_id)
         && let Some(user) = actor_user_id.map(str::trim).filter(|user| !user.is_empty())
     {
+        labels.insert(KIND_LABEL.to_owned(), SLACK_DM_KIND.to_owned());
         labels.insert("slack_user_id".to_owned(), user.to_owned());
         return PrincipalRef {
             foreign_id: format!("slack-user-{scope}{}", slugify(user)),
@@ -194,6 +199,12 @@ pub fn derive_principal_with_slack_team(
     }
 
     if let Some(conversation_id) = conversation_id {
+        let principal_kind = if is_direct_message(Some(conversation_id)) {
+            SLACK_DM_KIND
+        } else {
+            SLACK_CHANNEL_KIND
+        };
+        labels.insert(KIND_LABEL.to_owned(), principal_kind.to_owned());
         labels.insert("slack_channel_id".to_owned(), conversation_id.to_owned());
         return PrincipalRef {
             foreign_id: format!("slack-channel-{scope}{}", slugify(conversation_id)),
@@ -308,12 +319,20 @@ mod tests {
             principal.labels.get("slack_user_id").map(String::as_str),
             Some("U07ABC")
         );
+        assert_eq!(
+            principal.labels.get("kind").map(String::as_str),
+            Some("slack_dm")
+        );
     }
 
     #[test]
     fn dm_without_user_falls_back_to_the_conversation() {
         let principal = derive_principal("slack:D0420:1780000000.0001", None, None);
         assert_eq!(principal.foreign_id, "slack-channel-d0420");
+        assert_eq!(
+            principal.labels.get("kind").map(String::as_str),
+            Some("slack_dm")
+        );
     }
 
     #[test]
@@ -324,6 +343,10 @@ mod tests {
         assert_eq!(
             principal.labels.get("slack_channel_id").map(String::as_str),
             Some("C123")
+        );
+        assert_eq!(
+            principal.labels.get("kind").map(String::as_str),
+            Some("slack_channel")
         );
     }
 
@@ -579,6 +602,10 @@ mod tests {
         assert_eq!(
             input.labels.get("slack_channel_id").map(String::as_str),
             Some("C1")
+        );
+        assert_eq!(
+            input.labels.get("kind").map(String::as_str),
+            Some("slack_channel")
         );
     }
 }
