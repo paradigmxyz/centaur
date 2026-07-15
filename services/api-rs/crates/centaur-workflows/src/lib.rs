@@ -2334,6 +2334,10 @@ fn next_schedule_time(
     }
 }
 
+/// Prepends a seconds field so five-field crontab-style expressions parse with the
+/// `cron` crate. Note the crate's day-of-week numbering is Quartz-style (1 = Sunday,
+/// 7 = Saturday; 0 rejected), NOT Unix crontab — schedules should use day names
+/// (`MON-FRI`) to avoid firing on the wrong days.
 fn normalize_cron_expression(expr: &str) -> String {
     let fields = expr.split_whitespace().collect::<Vec<_>>();
     if fields.len() == 5 {
@@ -3976,6 +3980,36 @@ mod tests {
                 .with_ymd_and_hms(2026, 6, 8, 7, 45, 0)
                 .unwrap()
                 .with_timezone(&Utc)
+        );
+    }
+
+    #[test]
+    fn cron_schedule_day_names_avoid_quartz_numbering() {
+        let named_days = normalize_schedule(json!({
+            "workflow_name": "weekday_report",
+            "schedule_id": "named_weekdays",
+            "cron": "0 9 * * MON-FRI",
+            "timezone": "UTC",
+            "enabled": true,
+        }))
+        .unwrap();
+        let numeric_days = normalize_schedule(json!({
+            "workflow_name": "weekday_report",
+            "schedule_id": "numeric_days",
+            "cron": "0 9 * * 1-5",
+            "timezone": "UTC",
+            "enabled": true,
+        }))
+        .unwrap();
+        let after_thursday = Utc.with_ymd_and_hms(2026, 7, 16, 10, 0, 0).unwrap();
+
+        assert_eq!(
+            next_schedule_time(&named_days, after_thursday).unwrap(),
+            Utc.with_ymd_and_hms(2026, 7, 17, 9, 0, 0).unwrap()
+        );
+        assert_eq!(
+            next_schedule_time(&numeric_days, after_thursday).unwrap(),
+            Utc.with_ymd_and_hms(2026, 7, 19, 9, 0, 0).unwrap()
         );
     }
 

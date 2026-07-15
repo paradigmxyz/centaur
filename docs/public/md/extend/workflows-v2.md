@@ -181,11 +181,15 @@ Schedules can live beside the handler:
 ```python
 SCHEDULE = {
     "type": "cron",
-    "cron": "0 9 * * 1-5",
+    "cron": "0 9 * * MON-FRI",
     "timezone": "America/New_York",
     "input": {"profile": "default"},
 }
 ```
+
+Write day-of-week as names (`MON-FRI`), not numbers: the parser is Quartz-style
+(1 = Sunday), so a Unix-style `1-5` fires Sunday–Thursday. See
+[Schedule a workflow](/extend/workflows#schedule-a-workflow) for details.
 
 `api-rs` reconciles enabled schedule metadata into Absurd schedule tasks. ETL
 workflows can be routed to a separate queue so long-running sync jobs do not
