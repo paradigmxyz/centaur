@@ -79,21 +79,46 @@ where
     validation.set_audience(&[expected_audience]);
     validation.set_issuer(&[expected_issuer]);
     validation.set_required_spec_claims(&["exp", "iss", "sub", "aud"]);
-    let token_data = decode::<T>(token, &DecodingKey::from_secret(secret), &validation)
-        .map_err(|_| ApiError::Unauthorized("invalid JWT".to_owned()))?;
-    let payload =
-        decode_jwt_payload(token).map_err(|_| ApiError::Unauthorized("invalid JWT".to_owned()))?;
+    let token_data =
+        decode::<T>(token, &DecodingKey::from_secret(secret), &validation).map_err(|error| {
+            tracing::warn!(
+                jwt_validation_stage = "decode",
+                jwt_error = ?error.kind(),
+                expected_audience,
+                expected_issuer,
+                "console JWT rejected"
+            );
+            ApiError::Unauthorized("invalid JWT".to_owned())
+        })?;
+    let payload = decode_jwt_payload(token).map_err(|error| {
+        tracing::warn!(
+            jwt_validation_stage = "payload_decode",
+            jwt_error = %error,
+            "console JWT rejected"
+        );
+        ApiError::Unauthorized("invalid JWT".to_owned())
+    })?;
     validate_standard_claims(&payload)?;
     Ok(token_data.claims)
 }
 
 fn validate_standard_claims(claims: &Value) -> Result<(), ApiError> {
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
-    let iat = claims
-        .get("iat")
-        .and_then(Value::as_i64)
-        .ok_or_else(|| ApiError::Unauthorized("JWT issued-at is required".to_owned()))?;
+    let iat = claims.get("iat").and_then(Value::as_i64).ok_or_else(|| {
+        tracing::warn!(
+            jwt_validation_stage = "standard_claims",
+            jwt_error = "missing_or_invalid_iat",
+            "console JWT rejected"
+        );
+        ApiError::Unauthorized("JWT issued-at is required".to_owned())
+    })?;
     if iat > now + JWT_CLOCK_SKEW_SECONDS {
+        tracing::warn!(
+            jwt_validation_stage = "standard_claims",
+            jwt_error = "iat_in_future",
+            jwt_clock_skew_seconds = iat - now,
+            "console JWT rejected"
+        );
         return Err(ApiError::Unauthorized(
             "JWT issued-at is in the future".to_owned(),
         ));
@@ -105,6 +130,11 @@ fn validate_standard_claims(claims: &Value) -> Result<(), ApiError> {
         .trim()
         .is_empty()
     {
+        tracing::warn!(
+            jwt_validation_stage = "standard_claims",
+            jwt_error = "missing_or_empty_sub",
+            "console JWT rejected"
+        );
         return Err(ApiError::Unauthorized("JWT subject is required".to_owned()));
     }
     Ok(())
