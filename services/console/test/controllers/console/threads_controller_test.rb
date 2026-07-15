@@ -892,6 +892,7 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_equal "console", create[:metadata][:platform]
     assert_equal "console", create[:metadata][:source]
     assert_equal @operator.email, create[:metadata][:actor_email]
+    assert_equal "@ada", create[:metadata][:github_handle]
     assert_equal "claude-opus-4-8", create[:metadata][:model]
 
     append = client.calls[1].last
@@ -900,11 +901,13 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_equal "user", message[:role]
     assert_equal "Reply with PONG.", message[:parts].first[:text]
     assert_equal @operator.email, message[:metadata][:user_email]
+    assert_equal "@ada", message[:metadata][:github_handle]
 
     execute = client.calls[2].last
     assert_equal create[:thread_key], execute[:thread_key]
     assert execute[:idempotency_key].present?
     assert_equal "claude-opus-4-8", execute[:metadata][:model]
+    assert_equal "@ada", execute[:metadata][:github_handle]
     line = JSON.parse(execute[:input_lines].first)
     assert_equal "user", line["type"]
     assert_equal create[:thread_key], line["thread_key"]

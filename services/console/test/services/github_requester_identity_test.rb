@@ -1,17 +1,8 @@
 require "test_helper"
 
 class GithubRequesterIdentityTest < ActiveSupport::TestCase
-  setup do
-    GithubRequesterIdentity.github_api_http = nil
-  end
-
-  teardown do
-    GithubRequesterIdentity.github_api_http = nil
-  end
-
   test "resolves the login stored on the Console user's connected GitHub account" do
     credential = github_credential(labels: { "github_login" => "goksu" })
-    GithubRequesterIdentity.github_api_http = ->(**) { flunk("GitHub API should not be called") }
 
     result = GithubRequesterIdentity.resolve(user: credential.created_by)
 
@@ -19,18 +10,13 @@ class GithubRequesterIdentityTest < ActiveSupport::TestCase
     assert_equal "connected GitHub account", result.source
   end
 
-  test "resolves older connected credentials through the GitHub API" do
+  test "leaves older connected credentials for background enrichment" do
     credential = github_credential(labels: {})
-    GithubRequesterIdentity.github_api_http = ->(url:, access_token:) {
-      assert_equal GithubRequesterIdentity::USER_ENDPOINT, url
-      assert_equal "gho-requester", access_token
-      { "login" => "goksu" }
-    }
 
     result = GithubRequesterIdentity.resolve(user: credential.created_by)
 
-    assert_equal "@goksu", result.handle
-    assert_equal "connected GitHub account (GitHub API)", result.source
+    assert_nil result.handle
+    assert_equal "connected GitHub account is awaiting login enrichment", result.reason
   end
 
   test "does not adopt another user's connected GitHub account" do
