@@ -48,6 +48,10 @@ Rails.application.routes.draw do
   namespace :console do
     resources :threads, only: %i[index create]
     post "threads/share", to: "threads#share", as: :thread_share
+    # Single-panel transcript refresh polled by thread_poller_controller.js
+    # while a turn is running. thread_key rides as a query param: keys carry
+    # colons and dots a path segment would mangle.
+    get "threads/panel", to: "threads#panel", as: :thread_panel
     resources :workflows, only: %i[index show] do
       member do
         post :run, action: :force_start

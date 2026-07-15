@@ -190,6 +190,33 @@ class Console::ThreadsController < ApplicationController
     render partial: "console/threads/sidebar_threads", layout: false
   end
 
+  # Single-panel transcript refresh, polled by thread_poller_controller.js
+  # while a turn is running in that panel. Renders only the panel's transcript
+  # stream (no layout) so an active thread never drags the rest of the console
+  # — other panes, composers, drafts — through a full Turbo visit. Resolves the
+  # key through the same readable scope as the page render.
+  def panel
+    thread_key = params[:thread_key].to_s.strip
+    session = readable_thread(thread_key)
+    if session.nil?
+      head :not_found
+      return
+    end
+
+    @latest_executions = latest_executions_for([ session.thread_key ])
+    panel = thread_panel_for(session)
+    active = thread_execution_active?(session.thread_key)
+    # The poller stops rescheduling once this header reports the turn is done,
+    # after swapping in the final transcript below.
+    response.set_header("X-Console-Execution-Active", active.to_s)
+    render partial: "console/threads/panel_transcript",
+           locals: { items: panel[:transcript_items], active: active },
+           layout: false
+  rescue ActiveRecord::ActiveRecordError, PG::Error => e
+    Rails.logger.warn("console_threads_panel_refresh_failed error=#{e.class}: #{e.message}")
+    head :service_unavailable
+  end
+
   # Publishes a chat inside the authenticated Console boundary. Publication is
   # stored in Console's own database rather than mutating api-rs session data;
   # the Threads surface remains an observer of the durable transcript.

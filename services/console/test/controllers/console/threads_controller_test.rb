@@ -804,6 +804,65 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_select "[data-console-thinking-indicator]", count: 0
   end
 
+  test "an active thread wires a per-panel poller instead of a full-page refresh" do
+    skip_unless_session_table
+    thread_key = "console:poller-active-#{SecureRandom.hex(6)}"
+    insert_console_session(thread_key)
+    insert_session_execution(thread_key, status: "running")
+
+    get console_threads_url(thread: thread_key)
+
+    assert_response :ok
+    assert_select "[data-controller=thread-poller][data-thread-poller-active-value=true]", count: 1
+    assert_select "[data-thread-poller-url-value=?]",
+                  console_thread_panel_path(thread_key: thread_key),
+                  count: 1
+    # The old behavior re-rendered the whole console with a Turbo visit while
+    # any pane was executing; that script must stay gone.
+    assert_no_match "Turbo.visit(window.location.href", response.body
+  end
+
+  test "panel poll renders one thread's transcript with the active header" do
+    skip_unless_session_table
+    thread_key = "console:poller-panel-#{SecureRandom.hex(6)}"
+    insert_console_session(thread_key)
+    insert_session_message(thread_key, index: 1)
+    insert_session_execution(thread_key, status: "running")
+
+    get console_thread_panel_url(thread_key: thread_key)
+
+    assert_response :ok
+    assert_equal "true", response.headers["X-Console-Execution-Active"]
+    assert_select "[data-console-thinking-indicator]", count: 1
+    assert_match "message 1", response.body
+    # Transcript stream only: no layout, no composer, no panel chrome.
+    assert_select "textarea[name=prompt]", count: 0
+    assert_select "[data-thread-panel]", count: 0
+  end
+
+  test "panel poll reports inactive once the execution completes" do
+    skip_unless_session_table
+    thread_key = "console:poller-done-#{SecureRandom.hex(6)}"
+    insert_console_session(thread_key)
+    insert_session_execution(thread_key, status: "completed")
+
+    get console_thread_panel_url(thread_key: thread_key)
+
+    assert_response :ok
+    assert_equal "false", response.headers["X-Console-Execution-Active"]
+    assert_select "[data-console-thinking-indicator]", count: 0
+  end
+
+  test "panel poll is scoped to threads the current user can read" do
+    skip_unless_session_table
+    thread_key = "slack:C0POLL:#{SecureRandom.hex(6)}"
+    insert_slack_session(thread_key, slack_user_id: "U_OTHER", slack_user_name: "someone-else")
+
+    get console_thread_panel_url(thread_key: thread_key)
+
+    assert_response :not_found
+  end
+
   test "a new sentinel pane opens a composer panel alongside a thread" do
     skip_unless_session_table
     insert_console_session("console:with-new-pane")

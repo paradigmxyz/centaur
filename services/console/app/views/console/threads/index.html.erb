@@ -68,11 +68,17 @@
           </div>
         </div>
       <% else %>
-      <div id="thread-transcript-scroll" class="console-transcript-scroll min-h-0 flex-1 overflow-y-auto py-6">
+      <div id="thread-transcript-scroll" class="console-transcript-scroll min-h-0 flex-1 overflow-y-auto py-6"
+           <% if @selected_session %>
+           data-controller="thread-poller"
+           data-thread-poller-url-value="<%= console_thread_panel_path(thread_key: @selected_session.thread_key) %>"
+           data-thread-poller-active-value="<%= thread_execution_active?(@selected_session.thread_key) %>"
+           <% end %>>
         <% if @selected_session %>
-          <div class="console-thread-content flex flex-col gap-6">
-            <%= render "console/threads/transcript", items: @selected_transcript_items %>
-            <%= render "console/threads/thinking_indicator" if thread_execution_active?(@selected_session.thread_key) %>
+          <div class="console-thread-content flex flex-col gap-6" data-thread-poller-target="transcript">
+            <%= render "console/threads/panel_transcript",
+                       items: @selected_transcript_items,
+                       active: thread_execution_active?(@selected_session.thread_key) %>
           </div>
         <% else %>
           <div class="flex h-full items-center justify-center px-6">
@@ -97,27 +103,8 @@
     </section>
   <% end %>
 
-  <% if @thread_panels.any? { |panel| thread_execution_active?(panel[:thread_key]) } %>
-    <%# The console has no event stream; while a turn is running in any open
-        pane, refresh the transcript every few seconds. Skipped whenever a
-        composer holds a draft so a reload never eats typed text. %>
-    <script>
-      (() => {
-        const refresh = () => {
-          const drafting = Array.from(document.querySelectorAll("[data-console-composer-input]"))
-            .some((input) => input.value.trim() !== "" || document.activeElement === input);
-          if (drafting) {
-            setTimeout(refresh, 4000);
-            return;
-          }
-          if (window.Turbo) {
-            window.Turbo.visit(window.location.href, { action: "replace" });
-          } else {
-            window.location.reload();
-          }
-        };
-        setTimeout(refresh, 4000);
-      })();
-    </script>
-  <% end %>
+  <%# Live updates while a turn runs are per-panel: each transcript scroll
+      container carries a thread-poller Stimulus controller that polls
+      ThreadsController#panel and swaps only its own transcript, so activity
+      in one pane never re-renders the others (or eats composer drafts). %>
 </div>

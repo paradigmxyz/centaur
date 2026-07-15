@@ -61,10 +61,14 @@
       <%= console_icon("x-mark", classes: "size-4") %>
     </a>
   </header>
-  <div class="console-transcript-scroll min-h-0 flex-1 overflow-y-auto px-4 py-4">
-    <div class="flex flex-col gap-5">
-      <%= render "console/threads/transcript", items: panel[:transcript_items] %>
-      <%= render "console/threads/thinking_indicator" if thread_execution_active?(session.thread_key) %>
+  <div class="console-transcript-scroll min-h-0 flex-1 overflow-y-auto px-4 py-4"
+       data-controller="thread-poller"
+       data-thread-poller-url-value="<%= console_thread_panel_path(thread_key: session.thread_key) %>"
+       data-thread-poller-active-value="<%= thread_execution_active?(session.thread_key) %>">
+    <div class="flex flex-col gap-5" data-thread-poller-target="transcript">
+      <%= render "console/threads/panel_transcript",
+                 items: panel[:transcript_items],
+                 active: thread_execution_active?(session.thread_key) %>
     </div>
   </div>
   <% if panel[:writable] %>
