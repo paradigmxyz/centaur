@@ -7,8 +7,10 @@ require "test_helper"
 # HTTP double returning a canned token response (mirrors the broker flow test).
 class SessionOauthControllerTest < ActionDispatch::IntegrationTest
   GOOGLE_CLIENT_ID = "google-login-client-id".freeze
+  SLACK_CLIENT_ID = "slack-login-client-id".freeze
   ENV_KEYS = %w[
     CENTAUR_CONSOLE_GOOGLE_CLIENT_ID CENTAUR_CONSOLE_GOOGLE_CLIENT_SECRET
+    CENTAUR_CONSOLE_SLACK_CLIENT_ID CENTAUR_CONSOLE_SLACK_CLIENT_SECRET
     CENTAUR_CONSOLE_BOOTSTRAP_ADMINS CENTAUR_CONSOLE_SSO_EMAIL_DOMAINS
   ].freeze
 
@@ -26,18 +28,23 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
   end
 
   class StubHTTP
+    attr_reader :captured
+
     def initialize(status:, body:)
       @status = status
       @body = body
     end
 
     def call(url:, form:, headers:, timeout:)
+      @captured = { url: url, form: form, headers: headers, timeout: timeout }
       Broker::AuthorizationCodeClient::Response.new(status: @status, body: @body)
     end
   end
 
   def stub_exchange(status:, body:)
-    SessionOauthController.exchange_client_factory = -> { Broker::AuthorizationCodeClient.new(http: StubHTTP.new(status: status, body: body)) }
+    http = StubHTTP.new(status: status, body: body)
+    SessionOauthController.exchange_client_factory = -> { Broker::AuthorizationCodeClient.new(http: http) }
+    http
   end
 
   def id_token(claims)
@@ -98,6 +105,44 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
     get auth_start_url(provider: "slack") # no slack creds set
     assert_redirected_to login_path
     assert_equal "That sign-in method is not available.", flash[:alert]
+  end
+
+  test "Slack PKCE exchange omits client secret and accepts a rotating token response" do
+    ENV["CENTAUR_CONSOLE_SLACK_CLIENT_ID"] = SLACK_CLIENT_ID
+    ENV["CENTAUR_CONSOLE_SLACK_CLIENT_SECRET"] = "slack-login-secret"
+
+    state = start_flow(provider: "slack")
+    query = URI.decode_www_form(URI.parse(response.location).query).to_h
+    assert_equal "slack.com", URI.parse(response.location).host
+    assert_equal "openid email profile", query["scope"]
+
+    claims = {
+      "aud" => SLACK_CLIENT_ID,
+      "iss" => "https://slack.com",
+      "sub" => "U123ROTATING",
+      "email" => "rotating@example.com",
+      "email_verified" => true,
+      "name" => "Rotating User"
+    }
+    exchange = stub_exchange(
+      status: 200,
+      body: {
+        ok: true,
+        access_token: "xoxe.xoxp-1-access",
+        refresh_token: "xoxe-1-refresh",
+        expires_in: 43_200,
+        id_token: id_token(claims)
+      }.to_json
+    )
+
+    get auth_callback_url(provider: "slack"), params: { code: "the-code", state: state }
+
+    assert_redirected_to console_threads_path
+    assert_nil exchange.captured.dig(:form, "client_secret")
+    assert exchange.captured.dig(:form, "code_verifier").present?
+    user = User.find_by!(email: "rotating@example.com")
+    assert_equal "Rotating User", user.name
+    assert_equal [ [ "slack", "U123ROTATING" ] ], user.user_identities.pluck(:provider, :subject)
   end
 
   # --- callback: provisioning ------------------------------------------------

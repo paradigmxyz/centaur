@@ -110,7 +110,7 @@ class SessionOauthController < ApplicationController
     exchange_client_factory.call.exchange(
       token_endpoint: @provider.token_endpoint,
       client_id: ConsoleAuth.client_id(@key),
-      client_secret: ConsoleAuth.client_secret(@key),
+      client_secret: @provider.token_exchange_client_secret(ConsoleAuth.client_secret(@key)),
       code: code.to_s,
       redirect_uri: callback_redirect_uri,
       code_verifier: code_verifier.to_s,

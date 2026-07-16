@@ -17,6 +17,11 @@ module Login
       def scopes = SCOPES
       def extra_authorization_params = {}
 
+      # PKCE-enabled Slack apps are public clients. Slack binds the authorization
+      # code to code_verifier, so the token exchange must not authenticate with
+      # client_secret as well.
+      def token_exchange_client_secret(_secret) = nil
+
       def identity_from(result, client_id:)
         identity = Login::IdToken.identity(result.id_token, client_id: client_id, valid_issuers: VALID_ISSUERS)
         claims = Login::IdToken.decode_claims(result.id_token)
