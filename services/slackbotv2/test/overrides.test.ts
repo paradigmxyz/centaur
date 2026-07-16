@@ -6,6 +6,7 @@ import {
   validateStrategyOverrides
 } from '../src/overrides'
 import { messageOverridesForText } from '../src/index'
+import { createOpenAiMessageOverridesStrategy } from '../src/message-overrides-strategy'
 import type { SlackbotV2Options, SlackbotV2Trace } from '../src/types'
 
 describe('extractMessageOverrides', () => {
@@ -458,6 +459,34 @@ describe('messageOverridesForText strategy invocation', () => {
         reasoning: 'max'
       }
     })
+  })
+
+  test('logs OpenAI strategy request failures before falling back', async () => {
+    const logs: Array<{ event: string; fields: Record<string, unknown> }> = []
+    await expect(
+      messageOverridesForText(
+        slackOptions({
+          messageOverridesStrategy: createOpenAiMessageOverridesStrategy({
+            apiKey: 'test-key',
+            fetch: (async () =>
+              new Response('upstream unavailable', {
+                status: 503,
+                statusText: 'Service Unavailable'
+              })) as unknown as typeof fetch,
+            logger: (event, fields) => logs.push({ event, fields }),
+            model: 'gpt-5.4-nano'
+          })
+        }),
+        'use sol',
+        trace
+      )
+    ).resolves.toEqual({ overrides: {} })
+
+    expect(logs).toHaveLength(1)
+    expect(logs[0]?.event).toBe('slackbotv2_message_overrides_strategy_request_failed')
+    expect(logs[0]?.fields.error).toContain('HTTP 503 Service Unavailable')
+    expect(logs[0]?.fields.error).toContain('upstream unavailable')
+    expect(logs[0]?.fields.model).toBe('gpt-5.4-nano')
   })
 })
 

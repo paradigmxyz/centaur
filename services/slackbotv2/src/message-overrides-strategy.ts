@@ -1,10 +1,9 @@
 import {
   extractMessageOverrides,
-  validateStrategyOverrides,
-  type HarnessOverrides
+  validateStrategyOverrides
 } from './overrides'
-import type { MessageOverridesStrategy } from './types'
-import { isJsonObject } from './utils'
+import type { JsonObject, MessageOverridesStrategy } from './types'
+import { errorMessage, isJsonObject } from './utils'
 
 const DEFAULT_TIMEOUT_MS = 1_500
 const DEFAULT_MAX_OUTPUT_TOKENS = 300
@@ -72,6 +71,7 @@ export type OpenAiMessageOverridesStrategyOptions = {
   apiKey: string
   baseUrl?: string
   fetch?: typeof fetch
+  logger?: (event: string, fields: JsonObject) => void
   maxOutputTokens?: number
   model: string
   timeoutMs?: number
@@ -128,26 +128,33 @@ export function createOpenAiMessageOverridesStrategy(
         method: 'POST',
         signal: controller.signal
       })
-      if (!response.ok) return emptyMessageOverrides()
+      if (!response.ok) {
+        throw new Error(
+          `message overrides strategy request failed with HTTP ${response.status} ${response.statusText}: ${await responseErrorText(response)}`
+        )
+      }
       const value = await response.json()
       const outputText = responseOutputText(value)
-      if (!outputText) return emptyMessageOverrides()
+      if (!outputText) {
+        throw new Error('message overrides strategy response did not include output text')
+      }
       const parsed = JSON.parse(outputText)
       return {
         overrides: validateStrategyOverrides(
           isJsonObject(parsed) ? (parsed as OpenAiMessageOverridesStrategyOutput) : null
         )
       }
-    } catch {
-      return emptyMessageOverrides()
+    } catch (error) {
+      options.logger?.('slackbotv2_message_overrides_strategy_request_failed', {
+        error: errorMessage(error),
+        model: options.model,
+        timeout_ms: timeoutMs
+      })
+      return { overrides: {} }
     } finally {
       clearTimeout(timeout)
     }
   }
-}
-
-function emptyMessageOverrides(): { overrides: HarnessOverrides } {
-  return { overrides: {} }
 }
 
 function responseOutputText(value: unknown): string | undefined {
@@ -161,4 +168,13 @@ function responseOutputText(value: unknown): string | undefined {
 
 function arrayValue(value: unknown): unknown[] {
   return Array.isArray(value) ? value : []
+}
+
+async function responseErrorText(response: Response): Promise<string> {
+  try {
+    const body = await response.text()
+    return body.trim().slice(0, 500) || '<empty body>'
+  } catch {
+    return '<unavailable body>'
+  }
 }
