@@ -130,7 +130,7 @@ export function createOpenAiMessageOverridesStrategy(
       })
       if (!response.ok) {
         throw new Error(
-          `message overrides strategy request failed with HTTP ${response.status} ${response.statusText}: ${await responseErrorText(response)}`
+          `message overrides strategy request failed with HTTP ${response.status} ${response.statusText}`
         )
       }
       const value = await response.json()
@@ -168,13 +168,4 @@ function responseOutputText(value: unknown): string | undefined {
 
 function arrayValue(value: unknown): unknown[] {
   return Array.isArray(value) ? value : []
-}
-
-async function responseErrorText(response: Response): Promise<string> {
-  try {
-    const body = await response.text()
-    return body.trim().slice(0, 500) || '<empty body>'
-  } catch {
-    return '<unavailable body>'
-  }
 }

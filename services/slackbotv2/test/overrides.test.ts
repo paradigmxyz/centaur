@@ -469,7 +469,7 @@ describe('messageOverridesForText strategy invocation', () => {
           messageOverridesStrategy: createOpenAiMessageOverridesStrategy({
             apiKey: 'test-key',
             fetch: (async () =>
-              new Response('upstream unavailable', {
+              new Response('secret-token=do-not-log', {
                 status: 503,
                 statusText: 'Service Unavailable'
               })) as unknown as typeof fetch,
@@ -485,7 +485,7 @@ describe('messageOverridesForText strategy invocation', () => {
     expect(logs).toHaveLength(1)
     expect(logs[0]?.event).toBe('slackbotv2_message_overrides_strategy_request_failed')
     expect(logs[0]?.fields.error).toContain('HTTP 503 Service Unavailable')
-    expect(logs[0]?.fields.error).toContain('upstream unavailable')
+    expect(logs[0]?.fields.error).not.toContain('secret-token')
     expect(logs[0]?.fields.model).toBe('gpt-5.4-nano')
   })
 })
