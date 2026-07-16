@@ -606,6 +606,16 @@ fn thread_trace_root_export_request(
                     start_time_unix_nano,
                     end_time_unix_nano,
                     attributes: vec![
+                        proto_kv_string("lmnr.span.type", "DEFAULT"),
+                        proto_kv_string(
+                            "lmnr.span.input",
+                            &serde_json::json!({ "thread_key": thread_key }).to_string(),
+                        ),
+                        proto_kv_string("lmnr.association.properties.session_id", thread_key),
+                        proto_kv_string(
+                            "lmnr.association.properties.metadata.thread_key",
+                            thread_key,
+                        ),
                         proto_kv_string(FIELD_COMPONENT, "session_runtime"),
                         proto_kv_string(FIELD_EVENT, "thread_trace_root"),
                         proto_kv_string("centaur.thread_key", thread_key),
