@@ -73,7 +73,7 @@ export type OpenAiMessageOverridesStrategyOptions = {
   apiKey: string
   baseUrl?: string
   fetch?: typeof fetch
-  logger?: Pick<Logger, 'info' | 'warn'>
+  logger?: Logger
   maxOutputTokens?: number
   model: string
   timeoutMs?: number
