@@ -363,11 +363,16 @@ describe('validateStrategyOverrides', () => {
       provider: undefined,
       reasoning: undefined
     })
+    expect(validateStrategyOverrides({ model: 'claude-sonnet-5' })).toEqual({
+      harnessType: 'claudecode',
+      model: 'claude-sonnet-5',
+      provider: undefined,
+      reasoning: undefined
+    })
   })
 
   test('rejects aliases and arbitrary model ids from the strategy path', () => {
     expect(validateStrategyOverrides({ model: 'terra' })).toEqual({})
-    expect(validateStrategyOverrides({ model: 'claude-sonnet-5' })).toEqual({})
     expect(validateStrategyOverrides({ model: 'anthropic/claude-fable-5' })).toEqual({})
     expect(validateStrategyOverrides({ model: 'not real model id' })).toEqual({})
   })
