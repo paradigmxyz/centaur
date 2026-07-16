@@ -86,7 +86,7 @@ const STRATEGY_MODEL_HARNESSES: Record<string, string> = {
   'claude-fable-5': 'claudecode',
   'claude-haiku-4-5': 'claudecode',
   'claude-opus-4-8': 'claudecode',
-  'claude-sonnet-5': 'claudecode',
+  'claude-sonnet-4-6': 'claudecode',
   deep: 'amp',
   fast: 'amp',
   'gpt-5.4': 'codex',
