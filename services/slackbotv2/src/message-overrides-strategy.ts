@@ -2,7 +2,7 @@ import {
   extractMessageOverrides,
   validateStrategyOverrides
 } from './overrides'
-import type { JsonObject, MessageOverridesStrategy } from './types'
+import type { JsonObject, JsonValue, MessageOverridesStrategy } from './types'
 import { errorMessage, isJsonObject } from './utils'
 
 const DEFAULT_TIMEOUT_MS = 1_500
@@ -135,6 +135,10 @@ export function createOpenAiMessageOverridesStrategy(
         )
       }
       const value = await response.json()
+      options.logger?.('slackbotv2_message_overrides_strategy_response_received', {
+        model: options.model,
+        response_body: value as JsonValue
+      })
       const outputText = responseOutputText(value)
       if (!outputText) {
         throw new Error('message overrides strategy response did not include output text')
