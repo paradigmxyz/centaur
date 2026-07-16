@@ -819,28 +819,22 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     end
   end
 
-  test "selected session resolves a directly linked thread only within the owner scope" do
-    controller = Console::ThreadsController.new
-    owned_thread = SelectedSession.new(thread_key: "slack:C123:1782339173.755169")
-    scoped_relation = Object.new
-    scoped_relation.define_singleton_method(:where) do |thread_key:|
-      thread_key == owned_thread.thread_key ? [ owned_thread ] : []
+  test "opening a direct thread skips recent chat discovery" do
+    skip_unless_session_table
+    thread_key = "console:direct-load-#{SecureRandom.hex(6)}"
+    insert_console_session(thread_key)
+
+    without_session_list_query do
+      get console_threads_url(thread: thread_key)
     end
-    controller.instance_variable_set(:@starting_new_thread, false)
-    controller.instance_variable_set(:@sessions, [])
 
-    # An owned key outside the base window is recovered through the scope.
-    controller.instance_variable_set(:@selected_thread_key, owned_thread.thread_key)
-    assert_equal owned_thread, controller.send(:selected_session, scoped_relation, [])
-
-    # A key the scope does not own has no unscoped fallback, so it stays hidden.
-    controller.instance_variable_set(:@selected_thread_key, "slack:C999:1782339173.999999")
-    assert_nil controller.send(:selected_session, scoped_relation, [])
+    assert_response :ok
+    assert_select ".console-thread-detail-header", count: 1
   end
 
-  test "renders the sidebar New chat link and the full-page composer" do
-    with_composer do
-      with_recent_first_error do
+  test "renders the full-page composer without loading sessions" do
+    without_session_list_query do
+      with_composer do
         get console_threads_url(new: 1)
       end
     end
@@ -970,8 +964,8 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
   end
 
   test "the new sentinel alone renders the full-page new chat screen" do
-    with_composer do
-      with_recent_first_error do
+    without_session_list_query do
+      with_composer do
         get console_threads_url(thread: "new")
       end
     end
@@ -1824,6 +1818,16 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     yield
   ensure
     singleton.define_method(:recent_first, original)
+  end
+
+  def without_session_list_query
+    calls = 0
+    replacement = -> {
+      calls += 1
+      raise ActiveRecord::ConnectionNotEstablished
+    }
+    with_singleton_method(CentaurSession, :recent_first, replacement) { yield }
+    assert_equal 0, calls, "explicit chat loads must not query the recent session list"
   end
 
   def threads_controller_for(user)

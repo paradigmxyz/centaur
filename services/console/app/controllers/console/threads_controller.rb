@@ -159,7 +159,11 @@ class Console::ThreadsController < ApplicationController
     @thread_db_unavailable = false
     @thread_not_found = false
 
-    load_threads
+    # A standalone composer does not use session discovery, summaries, counts,
+    # or transcripts. Skip those cross-database queries so opening New chat is
+    # independent of the size and health of the api-rs session tables. The
+    # sidebar keeps loading its small thread list through its lazy Turbo Frame.
+    @starting_new_thread ? empty_thread_state : load_threads
     if @thread_not_found
       render status: :not_found
       return
@@ -212,8 +216,7 @@ class Console::ThreadsController < ApplicationController
       return
     end
 
-    @latest_executions = latest_executions_for([ session.thread_key ])
-    panel = thread_panel_for(session)
+    panel = thread_panel_for(session, include_access: false)
     active = thread_execution_active?(session.thread_key)
     # The poller stops rescheduling once this header reports the turn is done,
     # after swapping in the final transcript below.
@@ -499,34 +502,69 @@ class Console::ThreadsController < ApplicationController
   end
 
   def load_threads
-    # Keep discovery personal even when deployment-wide read access is enabled.
-    # Public and explicitly shared chats are resolved only when directly linked.
+    # Direct navigation already tells us exactly which (at most PANEL_LIMIT)
+    # sessions the page needs. Avoid running the recent-chat discovery query and
+    # its per-list summaries before loading those sessions by primary key.
+    if @selected_thread_key.present?
+      load_requested_threads
+      return
+    end
+
+    # The bare Chats route only needs a destination. Do not build a transcript
+    # that will be thrown away by #redirect_to_first_thread, or load the whole
+    # discovery window when the permanent sidebar owns recent-chat navigation.
+    if @query.blank?
+      empty_thread_state
+      @selected_session = owned_thread_scope.recent_first.first
+      return
+    end
+
+    # The query path still needs a bounded discovery window to match titles,
+    # metadata, and latest-message previews. Keep discovery personal even when
+    # deployment-wide read access is enabled.
     owned_scope = owned_thread_scope
-    readable_scope = visible_thread_scope
     base_sessions = owned_scope.recent_first.limit(THREAD_LIMIT).to_a
     keys = base_sessions.map(&:thread_key).uniq
 
     @latest_messages = latest_messages_for(keys)
-    @latest_executions = latest_executions_for(keys)
-    @message_counts = count_records(CentaurSessionMessage, keys)
-    @execution_counts = count_records(CentaurSessionExecution, keys)
+    @latest_executions = {}
 
     @sessions = base_sessions.select { |session| matches_query?(session) }
-    @selected_session = selected_session(readable_scope, base_sessions)
-    if @thread_not_found
-      @pane_sessions = []
-      @thread_panels = []
-      @selected_messages = []
-      @selected_executions = []
-      @selected_events = []
-      @selected_transcript_items = []
+    @selected_session = @sessions.first
+    @pane_sessions = []
+    loaded_sessions = ([ @selected_session ] + Array(@pane_sessions)).compact
+    cache_thread_access(loaded_sessions, owned_keys: loaded_sessions.map(&:thread_key))
+    finalize_thread_panels
+  end
+
+  def load_requested_threads
+    empty_thread_state
+    requested_keys = ([ @selected_thread_key ] + @pane_thread_keys).uniq
+    owned_sessions = owned_thread_scope
+      .where(thread_key: requested_keys)
+      .to_a
+    sessions_by_key = owned_sessions.index_by(&:thread_key)
+
+    missing_keys = requested_keys - sessions_by_key.keys
+    if missing_keys.any?
+      visible_sessions = visible_thread_scope
+        .where(thread_key: missing_keys)
+        .to_a
+      sessions_by_key.merge!(visible_sessions.index_by(&:thread_key))
+      missing_keys -= visible_sessions.map(&:thread_key)
+    end
+    sessions_by_key.merge!(explicitly_shared_threads(missing_keys))
+
+    @selected_session = sessions_by_key[@selected_thread_key]
+    if @selected_session.nil?
+      @thread_not_found = true
       return
     end
-    @pane_sessions = resolve_pane_sessions(readable_scope, base_sessions)
-    load_selected_session_summaries(keys)
-    @selected_thread_key = @selected_session&.thread_key.to_s
-    @thread_panels = build_thread_panels
-    @selected_transcript_items = @thread_panels.first&.dig(:transcript_items) || []
+
+    @pane_sessions = @pane_thread_keys.filter_map { |key| sessions_by_key[key] }
+    loaded_sessions = ([ @selected_session ] + @pane_sessions).uniq(&:thread_key)
+    cache_thread_access(loaded_sessions, owned_keys: owned_sessions.map(&:thread_key))
+    finalize_thread_panels
   end
 
   def empty_thread_state
@@ -541,8 +579,6 @@ class Console::ThreadsController < ApplicationController
     @selected_transcript_items = []
     @latest_messages = {}
     @latest_executions = {}
-    @message_counts = {}
-    @execution_counts = {}
   end
 
   def matches_query?(session)
@@ -558,25 +594,6 @@ class Console::ThreadsController < ApplicationController
     ].any? { |value| value.to_s.downcase.include?(needle) }
   end
 
-  def selected_session(session_scope, base_sessions)
-    return nil if @starting_new_thread
-
-    if @selected_thread_key.present?
-      selected = base_sessions.find { |session| session.thread_key == @selected_thread_key }
-      # Resolve the key through the readable scope so a directly linked chat only
-      # loads when it is visible to the current user. base_sessions is capped at
-      # THREAD_LIMIT, so this also recovers a visible thread beyond that window.
-      selected ||= session_scope.where(thread_key: @selected_thread_key).first
-      selected ||= explicitly_shared_thread(@selected_thread_key)
-      # A directly requested key outside the readable scope renders as 404 rather
-      # than silently falling back to another chat, so nonexistent and
-      # inaccessible chats are indistinguishable to the viewer.
-      @thread_not_found = selected.nil?
-      return selected
-    end
-    @sessions.first
-  end
-
   def auto_select_first_thread?
     params[:thread].blank? && !@starting_new_thread && @query.blank? && @selected_session.present?
   end
@@ -586,17 +603,6 @@ class Console::ThreadsController < ApplicationController
   # (Cmd/Ctrl-click on a sidebar thread appends its key).
   def requested_thread_keys
     params[:thread].to_s.split(",").map(&:strip).reject(&:blank?).uniq.first(PANEL_LIMIT)
-  end
-
-  # Extra split-view panes resolve through the same readable scope as the
-  # primary thread. Inaccessible keys are dropped silently.
-  def resolve_pane_sessions(session_scope, base_sessions)
-    keys = @pane_thread_keys - [ @selected_session&.thread_key ]
-    keys.filter_map do |key|
-      base_sessions.find { |session| session.thread_key == key } ||
-        session_scope.where(thread_key: key).first ||
-        explicitly_shared_thread(key)
-    end
   end
 
   def build_thread_panels
@@ -622,18 +628,22 @@ class Console::ThreadsController < ApplicationController
     panels
   end
 
-  def thread_panel_for(session)
+  def thread_panel_for(session, include_access: true)
     @selected_session = session
     @selected_messages = selected_messages
     @selected_executions = selected_executions
     @selected_events = selected_events
+    @latest_messages ||= {}
+    @latest_executions ||= {}
+    @latest_messages[session.thread_key] ||= @selected_messages.last
+    @latest_executions[session.thread_key] ||= @selected_executions.first
     reset_selected_thread_memos
 
     {
       session: session,
       thread_key: session.thread_key,
-      owned: thread_owned?(session),
-      writable: thread_writable?(session),
+      owned: include_access && thread_owned?(session),
+      writable: include_access && thread_writable?(session),
       transcript_items: selected_transcript_items
     }
   end
@@ -649,17 +659,17 @@ class Console::ThreadsController < ApplicationController
     redirect_to console_threads_path(thread: @selected_session.thread_key)
   end
 
-  def load_selected_session_summaries(loaded_keys)
-    missing_keys = ([ @selected_session ] + Array(@pane_sessions)).compact
-      .map(&:thread_key)
-      .uniq
-      .reject { |key| loaded_keys.include?(key) }
-    return if missing_keys.empty?
+  def finalize_thread_panels
+    @selected_thread_key = @selected_session&.thread_key.to_s
+    @thread_panels = build_thread_panels
+    @selected_transcript_items = @thread_panels.first&.dig(:transcript_items) || []
+  end
 
-    @latest_messages.merge!(latest_messages_for(missing_keys))
-    @latest_executions.merge!(latest_executions_for(missing_keys))
-    @message_counts.merge!(count_records(CentaurSessionMessage, missing_keys))
-    @execution_counts.merge!(count_records(CentaurSessionExecution, missing_keys))
+  def cache_thread_access(sessions, owned_keys:)
+    @thread_owned = sessions.to_h do |session|
+      [ session.thread_key, owned_keys.include?(session.thread_key) ]
+    end
+    @thread_writable = sessions.to_h { |session| [ session.thread_key, true ] }
   end
 
   def visible_thread_scope
@@ -696,6 +706,15 @@ class Console::ThreadsController < ApplicationController
     return unless ThreadShare.exists?(thread_key: thread_key)
 
     CentaurSession.where(thread_key: thread_key).first
+  end
+
+  def explicitly_shared_threads(thread_keys)
+    return {} if thread_keys.empty?
+
+    shared_keys = ThreadShare.where(thread_key: thread_keys).pluck(:thread_key)
+    return {} if shared_keys.empty?
+
+    CentaurSession.where(thread_key: shared_keys).index_by(&:thread_key)
   end
 
   def console_thread_owner_sql
@@ -1368,12 +1387,6 @@ class Console::ThreadsController < ApplicationController
   def positive_image_dimension(value)
     dimension = Integer(value, exception: false)
     dimension if dimension&.positive? && dimension <= 100_000
-  end
-
-  def count_records(model, keys)
-    return {} if keys.empty?
-
-    model.where(thread_key: keys).group(:thread_key).count
   end
 
   def thread_title(session)
