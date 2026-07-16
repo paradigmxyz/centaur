@@ -1285,6 +1285,23 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_includes item[:text], "```text\nok\n```"
   end
 
+  test "thinking extraction omits file change status events" do
+    controller = Console::ThreadsController.new
+    line = {
+      method: "item/completed",
+      params: {
+        item: {
+          type: "fileChange",
+          status: "completed",
+          changes: [ { path: "app/models/thread.rb", kind: "update" } ]
+        }
+      }
+    }.to_json
+    event = OutputLineEvent.new(payload: line, created_at: Time.zone.now)
+
+    assert_nil controller.send(:thinking_transcript_item, event)
+  end
+
   test "compact trace grouping combines adjacent command executions for one run" do
     controller = Console::ThreadsController.new
     now = Time.zone.now

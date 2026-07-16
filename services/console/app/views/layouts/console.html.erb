@@ -506,6 +506,7 @@
       }
 
       .console-thinking-preview {
+        flex: 1 1 auto;
         min-width: 0;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -517,6 +518,7 @@
         flex: 0 0 auto;
         color: #d4d4d8;
         font-weight: 500;
+        white-space: nowrap;
       }
 
       .console-thinking-failed,
@@ -527,7 +529,9 @@
       /* The comma hugs the group title: pull the label back across the flex
          gap so it reads "Ran 2 commands, 1 failed". */
       .console-thinking-failed {
+        flex: 0 0 auto;
         margin-left: -0.4rem;
+        white-space: nowrap;
       }
 
       .console-thinking-failed::before {
