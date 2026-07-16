@@ -143,8 +143,9 @@ cargo run -p centaur-perms -- \
 
 The principal id is always `workflow-` plus the slugged `WORKFLOW_NAME`.
 Workflow code cannot choose another principal id, display name, or labels.
-`WORKFLOW_PRINCIPAL = True` requires `WORKFLOW_HOST_SANDBOX=true`; startup fails
-if a workflow declares a principal while workflow-host sandboxing is disabled.
+`WORKFLOW_PRINCIPAL = True` requires `apiRs.workflowHostSandbox=true`, which
+renders `WORKFLOW_HOST_SANDBOX=true`; startup fails if a workflow declares a
+principal while workflow-host sandboxing is disabled.
 
 #### Pick the model and reasoning effort
 

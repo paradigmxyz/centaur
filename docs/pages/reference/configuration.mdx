@@ -81,6 +81,7 @@ Optional required-by-mode variables:
 | `CENTAUR_ENVIRONMENT`, `DEPLOY_ENV`, `ENVIRONMENT` | `apiRs.extraEnv` or deployment env. | Deployment environment resource attribute for telemetry. |
 | `OTEL_TRACES_EXPORTER` | `apiRs.extraEnv`. | Set to `otlp` to force OTLP trace export, or `none`/`off` to disable it. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | `apiRs.extraEnv`. | Enables OTLP trace export to Tempo, Jaeger, or another OTLP collector. |
+| `apiRs.workflowHostSandbox`, `WORKFLOW_HOST_SANDBOX` | Helm value, default `true`; override with `apiRs.extraEnv`. | Runs workflow hosts in Kubernetes sandboxes instead of the api-rs process. Required for workflow-scoped principals. |
 | `apiRs.metrics.scrapeAnnotations` | Helm value, default `true`. | Adds Prometheus scrape annotations to the API-RS Pod template and Service. |
 | `apiRs.metrics.path` | Helm value, default `/metrics`. | Metrics scrape path for annotation-based discovery. |
 | `apiRs.metrics.annotations` | Helm value. | Additional scrape annotations for Prometheus-compatible collectors. |

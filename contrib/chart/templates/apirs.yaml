@@ -249,6 +249,10 @@ spec:
             - name: KUBERNETES_WORKFLOW_DIRS
               value: {{ $sandboxWorkflowDirs | quote }}
 {{- end }}
+{{- if not (hasKey .Values.apiRs.extraEnv "WORKFLOW_HOST_SANDBOX") }}
+            - name: WORKFLOW_HOST_SANDBOX
+              value: {{ .Values.apiRs.workflowHostSandbox | quote }}
+{{- end }}
 {{- if not (hasKey .Values.apiRs.extraEnv "WORKFLOW_ENABLE_MODE") }}
             - name: WORKFLOW_ENABLE_MODE
               value: {{ .Values.apiRs.workflowEnableMode | quote }}

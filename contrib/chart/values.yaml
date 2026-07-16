@@ -372,6 +372,7 @@ apiRs:
   # Workflow enablement policy. Production defaults to all workflows enabled.
   # Set workflowEnableMode: allowlist in staging and list allowed workflow names
   # in workflowAllowedNames as a comma/whitespace-separated string.
+  workflowHostSandbox: true
   workflowEnableMode: all
   workflowAllowedNames: ""
   # Scheduled ETL workflow configuration. The chart renders these into api-rs
