@@ -4,6 +4,7 @@ import { renderSlackDisplayText, slackMessagePromptText } from './slack-display-
 import type {
   ForwardSessionInput,
   JsonObject,
+  SlackbotV2BlockActionPayload,
   JsonValue,
   SlackbotV2ApiAttachment,
   SlackbotV2ApiMessageLink,
@@ -532,6 +533,34 @@ export async function forwardToSessionApi(
   if (!input.openStream) return null
 
   return openSessionEventStream(options, input)
+}
+
+export async function dispatchSlackBlockAction(
+  options: SlackbotV2Options,
+  payload: SlackbotV2BlockActionPayload
+): Promise<void> {
+  const action = `dispatch Slack block action ${payload.action_id}`
+  const response = await recordSessionApiOperation(
+    'emit_workflow_event',
+    () =>
+      fetchWithTimeout(
+        options.fetch ?? globalThis.fetch,
+        new URL('/api/workflows/events', ensureTrailingSlash(options.apiUrl)),
+        {
+          body: JSON.stringify({
+            event_name: `slack.block_action.${payload.action_id}`,
+            payload
+          }),
+          headers: apiHeaders(options),
+          method: 'POST'
+        },
+        sessionApiTimeoutMs(options),
+        action
+      ),
+    sessionApiTimeoutMs(options),
+    action
+  )
+  await ensureApiOk(response, action)
 }
 
 export async function openSessionEventStream(

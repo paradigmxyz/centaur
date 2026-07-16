@@ -102,6 +102,22 @@ export type SlackbotV2InterruptSessionResponse = {
 
 export type SlackbotV2Fetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 
+export type SlackbotV2BlockActionPayload = {
+  action_id: string
+  action_ts?: string
+  block_id?: string
+  channel_id?: string
+  message_id: string
+  message_ts?: string
+  team_id?: string
+  thread_id: string
+  thread_ts?: string
+  type: 'block_actions'
+  user_id: string
+  user_name: string
+  value?: string
+}
+
 export type SlackbotV2Options = {
   allowedExternalTeamIds?: readonly string[]
   apiKey?: string

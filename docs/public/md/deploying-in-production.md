@@ -213,10 +213,13 @@ Use the app page to install the bot, copy the Bot User OAuth Token for
 6. Set the Request URL to `https://<your-host>/api/webhooks/slack`.
 7. Subscribe to `app_mention` and to the message events you want Centaur to see:
    `message.channels`, `message.groups`, and `message.im`.
+8. Enable Interactivity and set its Request URL to the same
+   `https://<your-host>/api/webhooks/slack` URL. Block Kit actions are emitted
+   to the workflow engine as `slack.block_action.<action_id>` events.
 
-The Slackbot currently normalizes Slack `app_mention` and `message` events.
-Do not rely on assistant-specific Slack event types unless the Slackbot code has
-explicit support for them.
+The Slackbot normalizes Slack `app_mention` and `message` events plus
+`block_actions` interactions. Do not rely on assistant-specific Slack event
+types unless the Slackbot code has explicit support for them.
 
 Do not put Centaur API-key auth in front of `/api/webhooks/slack`; the Slackbot
 validates Slack's signature and then calls the Centaur API separately.

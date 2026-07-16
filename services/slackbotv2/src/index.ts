@@ -6,6 +6,7 @@ import {
   Message as ChatSdkMessage,
   parseMarkdown,
   type Adapter,
+  type ActionEvent,
   type Attachment,
   type Logger,
   type Message as ChatMessage,
@@ -33,6 +34,7 @@ import {
 import { slackUserIdForMessage } from './slack-user'
 import {
   collectInitialContext,
+  dispatchSlackBlockAction,
   forwardToSessionApi,
   harnessRestartPreamble,
   interruptSessionExecution,
@@ -52,13 +54,18 @@ import {
 import { resolveChannelDefault } from './channel-defaults'
 import { type HarnessOverrides } from './overrides'
 import { createFlagMessageOverridesStrategy } from './message-overrides-strategy'
-import { isAllowedSlackMessage, isAllowedSlackWebhookBody } from './slack-events'
+import {
+  isAllowedSlackMessage,
+  isAllowedSlackWebhookBody,
+  parseSlackWebhookPayload
+} from './slack-events'
 import { isSlackStopCommand } from './stop-command'
 import type {
   ForwardSessionInput,
   JsonObject,
   SlackbotV2,
   SlackbotV2ApiAttachment,
+  SlackbotV2BlockActionPayload,
   SlackbotV2ApiMessage,
   SlackbotV2ExecuteSessionResponse,
   SlackbotV2MessageMode,
@@ -84,6 +91,7 @@ export type {
   SlackbotV2,
   SlackbotV2ApiAttachment,
   SlackbotV2ApiAuthor,
+  SlackbotV2BlockActionPayload,
   SlackbotV2ApiMessage,
   SlackbotV2AppendMessagesRequest,
   SlackbotV2CreateSessionRequest,
@@ -138,6 +146,8 @@ const LATE_SLACK_FILE_CONSUMED_TTL_MS = 5 * 60_000
 const LATE_SLACK_FILE_IDLE_WAIT_MS = 90_000
 const LATE_SLACK_FILE_IDLE_POLL_MS = 500
 const LATE_SLACK_FILE_MESSAGE_TEXT = 'Late Slack file attachment for the previous message.'
+const SLACK_BLOCK_ACTION_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000
+const SLACK_BLOCK_ACTION_LEASE_TTL_MS = 60 * 1000
 
 type PendingLateSlackFileMention = {
   channel: string
@@ -239,6 +249,68 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     logger
   })
   const lateSlackFiles = createLateSlackFileRepair(options, state)
+
+  chat.onAction(async event => {
+    const payload = slackBlockActionPayload(event)
+    const dedupeKey = slackBlockActionDedupeKey(payload)
+    const leaseToken = randomUUID()
+    if (
+      dedupeKey
+      && !(await state.setIfNotExists(dedupeKey, leaseToken, SLACK_BLOCK_ACTION_LEASE_TTL_MS))
+    ) {
+      traceLog(options, 'slackbotv2_block_action_duplicate_ignored', undefined, {
+        action_id: payload.action_id,
+        action_ts: payload.action_ts,
+        channel_id: payload.channel_id,
+        message_ts: payload.message_ts,
+        team_id: payload.team_id
+      })
+      return
+    }
+    try {
+      await dispatchSlackBlockAction(options, payload)
+    } catch (error) {
+      try {
+        if (dedupeKey && (await state.get(dedupeKey)) === leaseToken) {
+          await state.delete(dedupeKey)
+        }
+      } catch (cleanupError) {
+        traceWarn(options, 'slackbotv2_block_action_dedupe_cleanup_failed', undefined, {
+          action_id: payload.action_id,
+          action_ts: payload.action_ts,
+          error: errorMessage(cleanupError)
+        })
+      }
+      traceWarn(options, 'slackbotv2_block_action_dispatch_failed', undefined, {
+        action_id: payload.action_id,
+        channel_id: payload.channel_id,
+        error: errorMessage(error),
+        message_ts: payload.message_ts,
+        team_id: payload.team_id,
+        thread_ts: payload.thread_ts
+      })
+      throw error
+    }
+    if (dedupeKey) {
+      try {
+        await state.set(dedupeKey, true, SLACK_BLOCK_ACTION_DEDUPE_TTL_MS)
+      } catch (error) {
+        traceWarn(options, 'slackbotv2_block_action_dedupe_persist_failed', undefined, {
+          action_id: payload.action_id,
+          action_ts: payload.action_ts,
+          error: errorMessage(error)
+        })
+      }
+    }
+    traceLog(options, 'slackbotv2_block_action_dispatched', undefined, {
+      action_id: payload.action_id,
+      channel_id: payload.channel_id,
+      message_ts: payload.message_ts,
+      team_id: payload.team_id,
+      thread_ts: payload.thread_ts,
+      workflow_event_name: `slack.block_action.${payload.action_id}`
+    })
+  })
 
   chat.onNewMention(async (thread, message) => {
     if (!(await isAllowedSlackMessage(message, options, logger))) return
@@ -367,6 +439,9 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   }
   app.post('/api/webhooks/slack', handleSlackWebhook)
   app.post('/api/slack/events', handleSlackWebhook)
+  app.post('/api/slack/actions', handleSlackWebhook)
+  app.post('/api/slack/options', handleSlackWebhook)
+  app.post('/api/slack/commands', handleSlackWebhook)
 
   if (options.recoverRenderObligationsOnStart !== false) {
     scheduleRenderObligationRecovery(chat, state, options)
@@ -529,15 +604,60 @@ function createHandoffTrace(
 }
 
 function slackWebhookEventType(rawBody: string): string {
-  try {
-    const payload = JSON.parse(rawBody)
-    if (!isJsonObject(payload)) return 'unknown'
-    const event = payload.event
-    if (isJsonObject(event)) return stringValue(event.type) ?? 'unknown'
-    return stringValue(payload.type) ?? 'unknown'
-  } catch {
-    return 'invalid_json'
-  }
+  const payload = parseSlackWebhookPayload(rawBody)
+  if (!payload) return 'invalid_payload'
+  const event = payload.event
+  if (isJsonObject(event)) return stringValue(event.type) ?? 'unknown'
+  return stringValue(payload.type) ?? 'unknown'
+}
+
+function slackBlockActionPayload(event: ActionEvent): SlackbotV2BlockActionPayload {
+  const raw = isJsonObject(event.raw) ? event.raw : {}
+  const action = Array.isArray(raw.actions)
+    ? raw.actions.find(value => isJsonObject(value) && value.action_id === event.actionId)
+    : undefined
+  const rawAction = isJsonObject(action) ? action : {}
+  const team = isJsonObject(raw.team) ? raw.team : {}
+  const user = isJsonObject(raw.user) ? raw.user : {}
+  const channel = isJsonObject(raw.channel) ? raw.channel : {}
+  const message = isJsonObject(raw.message) ? raw.message : {}
+  const container = isJsonObject(raw.container) ? raw.container : {}
+  const messageTs = stringValue(message.ts) ?? stringValue(container.message_ts)
+  const messageId = event.messageId.startsWith('ephemeral:') ? (messageTs ?? '') : event.messageId
+  return removeUndefinedValues({
+    action_id: event.actionId,
+    action_ts: stringValue(rawAction.action_ts),
+    block_id: stringValue(rawAction.block_id),
+    channel_id: stringValue(channel.id) ?? stringValue(container.channel_id),
+    message_id: messageId,
+    message_ts: messageTs,
+    team_id: stringValue(team.id) ?? stringValue(user.team_id),
+    thread_id: event.threadId,
+    thread_ts: stringValue(message.thread_ts) ?? stringValue(container.thread_ts) ?? messageTs,
+    type: 'block_actions',
+    user_id: event.user.userId,
+    user_name: event.user.userName,
+    value: event.value
+  }) as SlackbotV2BlockActionPayload
+}
+
+function slackBlockActionDedupeKey(payload: SlackbotV2BlockActionPayload): string | undefined {
+  if (!payload.action_ts) return undefined
+  return [
+    'slackbotv2:block-action',
+    payload.team_id,
+    payload.channel_id,
+    payload.message_ts,
+    payload.user_id,
+    payload.action_id,
+    payload.action_ts
+  ].join(':')
+}
+
+function removeUndefinedValues<T extends Record<string, unknown>>(value: T): Partial<T> {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, item]) => item !== undefined)
+  ) as Partial<T>
 }
 
 function recordForward(
@@ -2621,12 +2741,7 @@ function isLateSlackFileEvent(
 }
 
 function slackWebhookPayload(rawBody: string): Record<string, unknown> | null {
-  try {
-    const payload = JSON.parse(rawBody)
-    return isJsonObject(payload) ? (payload as Record<string, unknown>) : null
-  } catch {
-    return null
-  }
+  return parseSlackWebhookPayload(rawBody)
 }
 
 function slackWebhookEvent(payload: Record<string, unknown>): Record<string, unknown> | null {
@@ -2671,34 +2786,34 @@ function slackTsToMs(ts: string): number {
 }
 
 function shouldAwaitSlackHandoff(rawBody: string): boolean {
-  try {
-    const payload = JSON.parse(rawBody) as { event?: { type?: unknown }; type?: unknown }
-    const eventType = payload.event?.type
-    return payload.type === 'event_callback' && (eventType === 'message' || eventType === 'app_mention')
-  } catch {
-    return false
-  }
+  const payload = parseSlackWebhookPayload(rawBody)
+  const event = payload && isJsonObject(payload.event) ? payload.event : undefined
+  const eventType = stringValue(event?.type)
+  return payload?.type === 'event_callback' && (eventType === 'message' || eventType === 'app_mention')
 }
 
 function slackWebhookLogFields(rawBody: string): JsonObject {
-  try {
-    const payload = JSON.parse(rawBody) as Record<string, unknown>
-    const rawEvent = payload.event
-    const event =
-      rawEvent && typeof rawEvent === 'object' && !Array.isArray(rawEvent)
-        ? (rawEvent as Record<string, unknown>)
-        : {}
-    const fields: JsonObject = {}
-    setStringField(fields, 'slack_event_id', payload.event_id)
-    setStringField(fields, 'slack_event_type', event.type)
-    setStringField(fields, 'slack_channel', event.channel)
-    setStringField(fields, 'slack_message_ts', event.ts)
-    setStringField(fields, 'slack_thread_ts', event.thread_ts)
-    setStringField(fields, 'slack_team_id', payload.team_id || event.team)
-    return fields
-  } catch {
-    return { slack_payload_parse_error: true }
-  }
+  const payload = parseSlackWebhookPayload(rawBody)
+  if (!payload) return { slack_payload_parse_error: true }
+  const event = isJsonObject(payload.event) ? payload.event : {}
+  const team = isJsonObject(payload.team) ? payload.team : {}
+  const channel = isJsonObject(payload.channel) ? payload.channel : {}
+  const message = isJsonObject(payload.message) ? payload.message : {}
+  const container = isJsonObject(payload.container) ? payload.container : {}
+  const action = Array.isArray(payload.actions) ? payload.actions.find(isJsonObject) : undefined
+  const fields: JsonObject = {}
+  setStringField(fields, 'slack_event_id', payload.event_id)
+  setStringField(fields, 'slack_event_type', event.type ?? payload.type)
+  setStringField(fields, 'slack_action_id', action?.action_id)
+  setStringField(fields, 'slack_channel', event.channel ?? channel.id ?? container.channel_id)
+  setStringField(fields, 'slack_message_ts', event.ts ?? message.ts ?? container.message_ts)
+  setStringField(
+    fields,
+    'slack_thread_ts',
+    event.thread_ts ?? message.thread_ts ?? container.thread_ts
+  )
+  setStringField(fields, 'slack_team_id', payload.team_id ?? event.team ?? team.id)
+  return fields
 }
 
 function setStringField(fields: JsonObject, key: string, value: unknown): void {
