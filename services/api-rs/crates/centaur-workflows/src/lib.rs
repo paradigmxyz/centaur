@@ -307,11 +307,7 @@ impl WorkflowPrincipalRegistrar {
                     namespace: self.namespace.clone(),
                     foreign_id,
                     name: format!("Workflow {workflow_name}"),
-                    labels: BTreeMap::from([
-                        ("managed-by".to_owned(), "centaur".to_owned()),
-                        ("purpose".to_owned(), "workflow".to_owned()),
-                        ("workflow_name".to_owned(), workflow_name.clone()),
-                    ]),
+                    labels: workflow_principal_labels(workflow_name),
                 })
                 .await?;
             registered.insert(workflow_name.clone(), record.id);
@@ -322,6 +318,15 @@ impl WorkflowPrincipalRegistrar {
 
 fn canonical_workflow_principal_foreign_id(workflow_name: &str) -> String {
     format!("workflow-{}", slugify(workflow_name))
+}
+
+fn workflow_principal_labels(workflow_name: &str) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("kind".to_owned(), "workflow".to_owned()),
+        ("managed-by".to_owned(), "centaur".to_owned()),
+        ("purpose".to_owned(), "workflow".to_owned()),
+        ("workflow_name".to_owned(), workflow_name.to_owned()),
+    ])
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -4437,6 +4442,18 @@ mod tests {
         assert_eq!(
             canonical_workflow_principal_foreign_id("Managing Partner Daily Briefing"),
             "workflow-managing-partner-daily-briefing"
+        );
+    }
+
+    #[test]
+    fn workflow_principal_labels_identify_workflow_kind() {
+        let labels = workflow_principal_labels("nightly_report");
+
+        assert_eq!(labels.get("kind").map(String::as_str), Some("workflow"));
+        assert_eq!(labels.get("purpose").map(String::as_str), Some("workflow"));
+        assert_eq!(
+            labels.get("workflow_name").map(String::as_str),
+            Some("nightly_report")
         );
     }
 
