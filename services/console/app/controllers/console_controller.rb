@@ -28,7 +28,7 @@ class ConsoleController < ApplicationController
     @slack_channel_catalog = SlackChannelCatalog.fetch
     @slack_channel_permissions = @principal.slack_channel_permissions.ordered
     @slack_channel_options = @slack_channel_catalog.channels.map do |channel|
-      label = "#{channel.private ? "Private" : "Public"} ##{channel.name} (#{channel.id})"
+      label = "##{channel.name} (#{channel.id}) #{channel.private ? "Private" : "Public"}"
       [ label, channel.id ]
     end
     @roles = @principal.roles.order(:id)

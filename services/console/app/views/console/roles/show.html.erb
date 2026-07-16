@@ -40,7 +40,7 @@
             <% next if secrets.empty? %>
             <optgroup label="<%= secret_kind_label(kind) %>">
               <% secrets.each do |secret| %>
-                <option value="<%= kind %>:<%= secret.oid %>"><%= secret.try(:name).presence || secret.foreign_id.presence || secret.oid %></option>
+                <option value="<%= kind %>:<%= secret.oid %>"><%= secret_option_label(secret) %></option>
               <% end %>
             </optgroup>
           <% end %>

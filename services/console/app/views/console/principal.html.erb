@@ -313,7 +313,7 @@
           <% next if secrets.empty? %>
           <optgroup label="<%= secret_kind_label(kind) %>">
             <% secrets.each do |s| %>
-              <option value="<%= kind %>:<%= s.oid %>"><%= s.try(:name).presence || s.foreign_id.presence || s.oid %> (<%= s.namespace %>)</option>
+              <option value="<%= kind %>:<%= s.oid %>"><%= secret_option_label(s) %></option>
             <% end %>
           </optgroup>
         <% end %>

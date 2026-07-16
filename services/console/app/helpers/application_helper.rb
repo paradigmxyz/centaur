@@ -102,6 +102,14 @@ module ApplicationHelper
     distance_of_time_in_words(started_at, finished_at)
   end
 
+  def secret_option_label(secret)
+    primary = secret.try(:name).presence || secret.foreign_id.presence || secret.oid
+    identifier = secret.foreign_id.presence || secret.oid
+    details = [ (identifier unless identifier == primary), secret.namespace ].compact_blank
+
+    details.any? ? "#{primary} (#{details.join(", ")})" : primary
+  end
+
   def console_icon(name, classes: "size-4")
     case name
     when "arrow-up"
