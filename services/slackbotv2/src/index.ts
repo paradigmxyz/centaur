@@ -50,7 +50,8 @@ import {
   type SlackContextBlock
 } from './console-session-link'
 import { resolveChannelDefault } from './channel-defaults'
-import { extractMessageOverrides } from './overrides'
+import { type HarnessOverrides } from './overrides'
+import { createFlagMessageOverridesStrategy } from './message-overrides-strategy'
 import { isAllowedSlackMessage, isAllowedSlackWebhookBody } from './slack-events'
 import { isSlackStopCommand } from './stop-command'
 import type {
@@ -148,6 +149,23 @@ type PendingLateSlackFileMention = {
 }
 
 type StickyThreadOverrides = Pick<SlackbotV2ThreadState, 'harnessType' | 'model' | 'provider'>
+const DEFAULT_MESSAGE_OVERRIDES_STRATEGY = createFlagMessageOverridesStrategy()
+
+export async function messageOverridesForText(
+  options: SlackbotV2Options,
+  text: string,
+  trace: SlackbotV2Trace
+): Promise<{ cleanedText?: string; overrides: HarnessOverrides }> {
+  const strategy = options.messageOverridesStrategy ?? DEFAULT_MESSAGE_OVERRIDES_STRATEGY
+  try {
+    return await strategy({ text })
+  } catch (error) {
+    traceWarn(options, 'slackbotv2_message_overrides_strategy_failed', trace, {
+      error: errorMessage(error)
+    })
+    return { overrides: {} }
+  }
+}
 
 function stickyThreadOverrideUpdate(
   overrides: StickyThreadOverrides
@@ -760,8 +778,11 @@ async function syncThreadMessageToSession(
 
   const serializeStartedAtMs = nowMs()
   const serializedMessage = await serializeMessage(message, input.options)
-  const overrides = extractMessageOverrides(serializedMessage.text)
-  setMessageText(serializedMessage, overrides.cleanedText)
+  const messageOverrides = await messageOverridesForText(input.options, serializedMessage.text, trace)
+  if (messageOverrides.cleanedText !== undefined) {
+    setMessageText(serializedMessage, messageOverrides.cleanedText)
+  }
+  const overrides = messageOverrides.overrides
   const stickyOverridesUpdate = stickyThreadOverrideUpdate(overrides)
   const effectiveOverrides = resolveStickyThreadOverrides(state, stickyOverridesUpdate)
   // Slack-only "Open chat in Console" link on the FIRST assistant message in

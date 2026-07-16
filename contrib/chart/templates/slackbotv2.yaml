@@ -70,6 +70,16 @@ spec:
               value: {{ .Values.slackbotv2.userName | quote }}
             - name: SLACKBOTV2_ACTIVITY_SUMMARY_STATUS_ENABLED
               value: {{ .Values.apiRs.activitySummary.enabled | quote }}
+            - name: SLACKBOTV2_MESSAGE_OVERRIDES_STRATEGY
+              value: {{ .Values.slackbotv2.messageOverridesStrategy.mode | quote }}
+            - name: SLACKBOTV2_MESSAGE_OVERRIDES_MODEL
+              value: {{ .Values.slackbotv2.messageOverridesStrategy.model | quote }}
+            - name: SLACKBOTV2_MESSAGE_OVERRIDES_OPENAI_BASE_URL
+              value: {{ .Values.slackbotv2.messageOverridesStrategy.openaiBaseUrl | quote }}
+            - name: SLACKBOTV2_MESSAGE_OVERRIDES_TIMEOUT_MS
+              value: {{ .Values.slackbotv2.messageOverridesStrategy.timeoutMs | quote }}
+            - name: SLACKBOTV2_MESSAGE_OVERRIDES_MAX_OUTPUT_TOKENS
+              value: {{ .Values.slackbotv2.messageOverridesStrategy.maxOutputTokens | quote }}
 {{- if $console.publicUrl }}
             # Public origin of the Console UI (matches the Console's own
             # CENTAUR_CONSOLE_PUBLIC_URL). When set, the first assistant message

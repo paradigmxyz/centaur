@@ -489,6 +489,18 @@ slackbotv2:
   #     C0ENG: { harness: claude, model: opus, reasoning: high }
   #     C0TRIAGE: { reasoning: low }
   channelDefaults: {}
+  # Message overrides strategy for Slack message text. "flags" keeps the legacy
+  # deterministic --model/--claude/-rsn strategy. "llm" asks a small model for
+  # normalized overrides, allowing natural language requests such as
+  # "use max effort and the sol model". In llm mode,
+  # set OPENAI_API_KEY in the shared secret or provide
+  # SLACKBOTV2_MESSAGE_OVERRIDES_OPENAI_API_KEY via extraEnv.
+  messageOverridesStrategy:
+    mode: flags
+    model: gpt-5.4-nano
+    openaiBaseUrl: https://api.openai.com/v1
+    timeoutMs: 1500
+    maxOutputTokens: 300
   metrics:
     # slackbotv2 serves Prometheus text metrics at /metrics. This flag only
     # controls scrape annotations for Prometheus/VictoriaMetrics-style discovery.

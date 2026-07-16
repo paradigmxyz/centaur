@@ -70,6 +70,36 @@ const MODEL_SHORTCUTS: Record<string, { harnessType: string; model: string }> =
     ])
   )
 
+const STRATEGY_HARNESSES = new Set(['amp', 'claudecode', 'codex'])
+const STRATEGY_PROVIDERS = new Set(['amazon-bedrock', 'openrouter', 'responses'])
+const STRATEGY_REASONING_EFFORTS = new Set([
+  'none',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max'
+])
+
+const STRATEGY_MODEL_HARNESSES: Record<string, string> = {
+  'claude-fable-5': 'claudecode',
+  'claude-haiku-4-5': 'claudecode',
+  'claude-opus-4-8': 'claudecode',
+  'claude-sonnet-5': 'claudecode',
+  deep: 'amp',
+  fast: 'amp',
+  'gpt-5.4': 'codex',
+  'gpt-5.4-mini': 'codex',
+  'gpt-5.4-nano': 'codex',
+  'gpt-5.4-pro': 'codex',
+  'gpt-5.5': 'codex',
+  'gpt-5.5-pro': 'codex',
+  'gpt-5.6-luna': 'codex',
+  'gpt-5.6-sol': 'codex',
+  'gpt-5.6-terra': 'codex'
+}
+
 // Values are one horizontal-whitespace-delimited token; a newline after the
 // value starts the user's prompt, not part of the model/reasoning value.
 const MODEL_VALUE_SEPARATOR = String.raw`(?:[^\S\r\n]*=[^\S\r\n]*|[^\S\r\n]+)`
@@ -156,6 +186,55 @@ export function extractMessageOverrides(text: string): MessageOverrides {
     provider,
     reasoning
   }
+}
+
+export function validateStrategyOverrides(
+  raw: {
+    harness?: unknown
+    model?: unknown
+    provider?: unknown
+    reasoning?: unknown
+  } | null | undefined
+): HarnessOverrides {
+  if (!raw || typeof raw !== 'object') return {}
+  let harnessType: string | undefined
+  let model: string | undefined
+  let provider: string | undefined
+  let reasoning: string | undefined
+
+  const harnessRaw = cleanString(raw.harness)
+  if (harnessRaw) {
+    const normalized = harnessRaw.toLowerCase()
+    if (!STRATEGY_HARNESSES.has(normalized)) return {}
+    harnessType = normalized
+  }
+
+  const providerRaw = cleanString(raw.provider)
+  if (providerRaw) {
+    const normalized = providerRaw.toLowerCase()
+    if (!STRATEGY_PROVIDERS.has(normalized)) return {}
+    provider = normalized
+    if (harnessType && harnessType !== 'codex') return {}
+    harnessType = 'codex'
+  }
+
+  const modelRaw = cleanString(raw.model)
+  if (modelRaw) {
+    const modelHarness = STRATEGY_MODEL_HARNESSES[modelRaw.toLowerCase()]
+    if (!modelHarness) return {}
+    if (harnessType && harnessType !== modelHarness) return {}
+    model = modelRaw.toLowerCase()
+    harnessType = modelHarness
+  }
+
+  const reasoningRaw = cleanString(raw.reasoning)
+  if (reasoningRaw) {
+    const normalized = reasoningRaw.toLowerCase()
+    if (!STRATEGY_REASONING_EFFORTS.has(normalized)) return {}
+    reasoning = harnessType === undefined || harnessType === 'codex' ? normalized : undefined
+  }
+
+  return { harnessType, model, provider, reasoning }
 }
 
 /**

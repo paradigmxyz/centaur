@@ -1,6 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 import { SlackFormatConverter } from '@chat-adapter/slack'
-import { extractMessageOverrides, normalizeHarnessOverrides } from '../src/overrides'
+import {
+  extractMessageOverrides,
+  normalizeHarnessOverrides,
+  validateStrategyOverrides
+} from '../src/overrides'
+import { messageOverridesForText } from '../src/index'
+import type { SlackbotV2Options, SlackbotV2Trace } from '../src/types'
 
 describe('extractMessageOverrides', () => {
   test('returns text untouched without flags', () => {
@@ -302,6 +308,167 @@ describe('normalizeHarnessOverrides', () => {
     expect(errors.some(e => e.includes('unknown reasoning effort'))).toBe(true)
   })
 })
+
+describe('validateStrategyOverrides', () => {
+  test('accepts canonical strategy model ids', () => {
+    expect(
+      validateStrategyOverrides({
+        model: 'gpt-5.6-sol',
+        reasoning: 'max'
+      })
+    ).toEqual({
+      harnessType: 'codex',
+      model: 'gpt-5.6-sol',
+      provider: undefined,
+      reasoning: 'max'
+    })
+  })
+
+  test('accepts canonical OpenAI model ids from the model catalog', () => {
+    expect(validateStrategyOverrides({ model: 'gpt-5.6-terra' })).toEqual({
+      harnessType: 'codex',
+      model: 'gpt-5.6-terra',
+      provider: undefined,
+      reasoning: undefined
+    })
+    expect(validateStrategyOverrides({ model: 'gpt-5.6-luna' })).toEqual({
+      harnessType: 'codex',
+      model: 'gpt-5.6-luna',
+      provider: undefined,
+      reasoning: undefined
+    })
+    expect(validateStrategyOverrides({ model: 'gpt-5.5-pro' })).toEqual({
+      harnessType: 'codex',
+      model: 'gpt-5.5-pro',
+      provider: undefined,
+      reasoning: undefined
+    })
+  })
+
+  test('canonical strategy model ids imply their compatible harness', () => {
+    expect(
+      validateStrategyOverrides({
+        model: 'claude-opus-4-8'
+      })
+    ).toEqual({
+      harnessType: 'claudecode',
+      model: 'claude-opus-4-8',
+      provider: undefined,
+      reasoning: undefined
+    })
+  })
+
+  test('rejects aliases and arbitrary model ids from the strategy path', () => {
+    expect(validateStrategyOverrides({ model: 'terra' })).toEqual({})
+    expect(validateStrategyOverrides({ model: 'anthropic/claude-fable-5' })).toEqual({})
+    expect(validateStrategyOverrides({ model: 'not real model id' })).toEqual({})
+  })
+
+  test('rejects incompatible canonical strategy fields', () => {
+    expect(validateStrategyOverrides({ harness: 'codex', model: 'claude-opus-4-8' })).toEqual({})
+    expect(validateStrategyOverrides({ harness: 'amp', provider: 'responses' })).toEqual({})
+    expect(validateStrategyOverrides({ reasoning: 'turbo' })).toEqual({})
+  })
+
+  test('drops reasoning when the resolved strategy harness cannot use it', () => {
+    expect(validateStrategyOverrides({ reasoning: 'max' })).toEqual({
+      harnessType: undefined,
+      model: undefined,
+      provider: undefined,
+      reasoning: 'max'
+    })
+    expect(validateStrategyOverrides({ model: 'claude-opus-4-8', reasoning: 'max' })).toEqual({
+      harnessType: 'claudecode',
+      model: 'claude-opus-4-8',
+      provider: undefined,
+      reasoning: undefined
+    })
+    expect(validateStrategyOverrides({ harness: 'amp', reasoning: 'max' })).toEqual({
+      harnessType: 'amp',
+      model: undefined,
+      provider: undefined,
+      reasoning: undefined
+    })
+    expect(validateStrategyOverrides({ model: 'gpt-5.6-sol', reasoning: 'max' })).toEqual({
+      harnessType: 'codex',
+      model: 'gpt-5.6-sol',
+      provider: undefined,
+      reasoning: 'max'
+    })
+  })
+})
+
+describe('messageOverridesForText strategy invocation', () => {
+  const trace: SlackbotV2Trace = {
+    includeContext: false,
+    messageId: 'm1',
+    mode: 'execute',
+    openStream: false,
+    startedAtMs: 0,
+    threadId: 'slack:C1:1'
+  }
+
+  test('uses the flags strategy by default', async () => {
+    await expect(
+      messageOverridesForText(slackOptions({}), '--opus fix it', trace)
+    ).resolves.toEqual({
+      cleanedText: 'fix it',
+      overrides: {
+        harnessType: 'claudecode',
+        model: 'claude-opus-4-8',
+        provider: undefined,
+        reasoning: undefined
+      }
+    })
+  })
+
+  test('uses the configured strategy instead of the legacy flag parser', async () => {
+    await expect(
+      messageOverridesForText(
+        slackOptions({
+          messageOverridesStrategy: async () => ({ overrides: {} })
+        }),
+        '--opus fix it',
+        trace
+      )
+    ).resolves.toEqual({ overrides: {} })
+  })
+
+  test('returns configured strategy overrides without cleaning prompt text', async () => {
+    await expect(
+      messageOverridesForText(
+        slackOptions({
+          messageOverridesStrategy: async () => ({
+            overrides: {
+              harnessType: 'codex',
+              model: 'gpt-5.6-sol',
+              provider: undefined,
+              reasoning: 'max'
+            }
+          })
+        }),
+        'do the work. use max effort and the sol model.',
+        trace
+      )
+    ).resolves.toEqual({
+      overrides: {
+        harnessType: 'codex',
+        model: 'gpt-5.6-sol',
+        provider: undefined,
+        reasoning: 'max'
+      }
+    })
+  })
+})
+
+function slackOptions(overrides: Partial<SlackbotV2Options>): SlackbotV2Options {
+  return {
+    apiUrl: 'http://api.example.test',
+    botToken: 'xoxb-test',
+    signingSecret: 'secret',
+    ...overrides
+  }
+}
 
 // The adapter's plain-text extraction feeds extractMessageOverrides. The
 // unpatched @chat-adapter/slack flattened the parsed AST with
