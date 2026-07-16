@@ -134,7 +134,8 @@ class Console::ThreadsController < ApplicationController
                 :composer_default_agent_value,
                 :composer_agents_json,
                 :thread_execution_active?,
-                :thread_owned?
+                :thread_owned?,
+                :thread_writable?
 
   def index
     @query = params[:q].to_s.strip
@@ -262,12 +263,20 @@ class Console::ThreadsController < ApplicationController
     execution.present? && %w[queued running executing].include?(execution.status.to_s)
   end
 
-  # Public and explicitly shared chats are read-only for non-owners. Keep the
-  # composer and write endpoint tied to the original owner scope.
+  # Ownership still controls publication. Access controls whether a user can
+  # continue a chat, and includes deployment-public and explicitly shared
+  # threads in addition to chats they started themselves.
   def thread_owned?(session)
     @thread_owned ||= {}
     @thread_owned.fetch(session.thread_key) do |thread_key|
       @thread_owned[thread_key] = owned_thread_scope.where(thread_key: thread_key).exists?
+    end
+  end
+
+  def thread_writable?(session)
+    @thread_writable ||= {}
+    @thread_writable.fetch(session.thread_key) do |thread_key|
+      @thread_writable[thread_key] = readable_thread(thread_key).present?
     end
   end
 
@@ -335,9 +344,10 @@ class Console::ThreadsController < ApplicationController
   end
 
   def reply_to_thread(thread_key, prompt)
-    # Resolve through the owner scope so a crafted thread_key cannot post into
-    # another user's chat, even when public or shared read access is allowed.
-    session = owned_thread_scope.where(thread_key: thread_key).first
+    # Resolve through the same access policy as the transcript. This lets users
+    # continue deployment-public and explicitly shared chats while still
+    # rejecting a crafted key for a private, inaccessible thread.
+    session = readable_thread(thread_key)
     if session.nil?
       redirect_to console_threads_path, alert: "Chat not found."
       return
@@ -481,8 +491,11 @@ class Console::ThreadsController < ApplicationController
   end
 
   def load_threads
-    session_scope = visible_thread_scope
-    base_sessions = session_scope.recent_first.limit(THREAD_LIMIT).to_a
+    # Keep discovery personal even when deployment-wide read access is enabled.
+    # Public and explicitly shared chats are resolved only when directly linked.
+    owned_scope = owned_thread_scope
+    readable_scope = visible_thread_scope
+    base_sessions = owned_scope.recent_first.limit(THREAD_LIMIT).to_a
     keys = base_sessions.map(&:thread_key).uniq
 
     @latest_messages = latest_messages_for(keys)
@@ -491,7 +504,7 @@ class Console::ThreadsController < ApplicationController
     @execution_counts = count_records(CentaurSessionExecution, keys)
 
     @sessions = base_sessions.select { |session| matches_query?(session) }
-    @selected_session = selected_session(session_scope, base_sessions)
+    @selected_session = selected_session(readable_scope, base_sessions)
     if @thread_not_found
       @pane_sessions = []
       @thread_panels = []
@@ -501,7 +514,7 @@ class Console::ThreadsController < ApplicationController
       @selected_transcript_items = []
       return
     end
-    @pane_sessions = resolve_pane_sessions(session_scope, base_sessions)
+    @pane_sessions = resolve_pane_sessions(readable_scope, base_sessions)
     load_selected_session_summaries(keys)
     @selected_thread_key = @selected_session&.thread_key.to_s
     @thread_panels = build_thread_panels
@@ -611,7 +624,8 @@ class Console::ThreadsController < ApplicationController
     {
       session: session,
       thread_key: session.thread_key,
-      writable: thread_owned?(session),
+      owned: thread_owned?(session),
+      writable: thread_writable?(session),
       transcript_items: selected_transcript_items
     }
   end

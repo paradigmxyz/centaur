@@ -130,7 +130,7 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
       get console_threads_url(thread: public_thread_key)
       assert_response :ok
       assert_select ".console-thread-detail-header", count: 1
-      assert_select "textarea[name=prompt]", count: 0
+      assert_select "textarea[name=prompt]", count: 1
 
       get console_threads_url(thread: private_thread_key)
       assert_response :not_found
@@ -140,7 +140,43 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     end
   end
 
-  test "sharing publishes a direct read-only link from an in-page copy dialog" do
+  test "public Slack channel threads stay out of the personal chat list" do
+    skip_unless_session_table
+    skip_unless_slack_channel_table
+
+    owned_thread_key = "console:owned-list-#{SecureRandom.hex(6)}"
+    public_channel_id = "C#{SecureRandom.hex(6).upcase}"
+    public_thread_key = "slack:#{public_channel_id}:#{SecureRandom.hex(6)}"
+    insert_console_session(owned_thread_key)
+    insert_slack_sync_channel(public_channel_id, is_private: false)
+    insert_slack_session(public_thread_key, slack_user_id: "U_OTHER", slack_user_name: "someone-else")
+
+    with_env("CENTAUR_CONSOLE_PUBLIC_SLACK_THREADS_ENABLED" => "true") do
+      get console_sidebar_threads_url
+      assert_response :ok
+      assert_select "a[href=?]", console_threads_path(thread: owned_thread_key), count: 1
+      assert_select "a[href=?]", console_threads_path(thread: public_thread_key), count: 0
+
+      # Even an active globally readable chat must not be injected into the
+      # user's personal sidebar.
+      get console_sidebar_threads_url(thread: public_thread_key)
+      assert_response :ok
+      assert_select "a[href=?]", console_threads_path(thread: public_thread_key), count: 0
+
+      # The default Chats landing also discovers only owned chats.
+      get console_threads_url
+      assert_redirected_to console_threads_path(thread: owned_thread_key)
+
+      # Global access itself is unchanged: a direct link remains readable and
+      # can be continued by a non-owner.
+      get console_threads_url(thread: public_thread_key)
+      assert_response :ok
+      assert_select ".console-thread-detail-header", count: 1
+      assert_select "textarea[name=prompt]", count: 1
+    end
+  end
+
+  test "sharing publishes a direct writable link from an in-page copy dialog" do
     skip_unless_session_table
 
     thread_key = "console:shared-#{SecureRandom.hex(6)}"
@@ -157,7 +193,7 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_select "button[data-turbo-confirm]", count: 0
     assert_select "dialog.console-share-dialog[data-thread-share-target=dialog]" do
       assert_select "h2", text: "Share chat"
-      assert_select "p", text: "Anyone with access to Centaur Console will be able to view this chat."
+      assert_select "p", text: "Anyone with access to Centaur Console will be able to view and continue this chat."
       assert_select "form[action=?][data-action*=?]", console_thread_share_path, "thread-share#copyLink" do
         assert_select "input[name=thread_key][value=?]", thread_key
         assert_select "button.btn-secondary[type=button]", text: "Cancel"
@@ -183,7 +219,7 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :ok
     assert_select ".console-thread-detail-header", count: 1
-    assert_select "textarea[name=prompt]", count: 0
+    assert_select "textarea[name=prompt]", count: 1
   end
 
   test "a user cannot share a chat they cannot read" do
@@ -716,15 +752,13 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_includes sql, "ussoonly"
   end
 
-  test "sidebar includes public Slack threads only when the deploy setting is enabled" do
+  test "sidebar scope never expands to public Slack threads" do
     controller = threads_controller_for(@operator)
 
     with_env("CENTAUR_CONSOLE_PUBLIC_SLACK_THREADS_ENABLED" => "true") do
       sql = controller.send(:console_sidebar_visible_thread_scope).to_sql
 
-      if slack_channel_privacy_catalog_available?
-        assert_includes sql, "slack_sync_channels"
-      end
+      refute_includes sql, "slack_sync_channels"
     end
   end
 
@@ -1108,7 +1142,49 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_redirected_to console_threads_path(thread: "console:composer-reply,console:other")
   end
 
-  test "replying into a chat outside the owner scope is rejected" do
+  test "replying appends and executes on a deployment-public chat" do
+    skip_unless_session_table
+    skip_unless_slack_channel_table
+
+    channel_id = "C#{SecureRandom.hex(6).upcase}"
+    thread_key = "slack:#{channel_id}:#{SecureRandom.hex(6)}"
+    insert_slack_sync_channel(channel_id, is_private: false)
+    insert_slack_session(thread_key, slack_user_id: "U_OTHER", slack_user_name: "someone-else")
+
+    client = RecordingApiClient.new
+    with_env("CENTAUR_CONSOLE_PUBLIC_SLACK_THREADS_ENABLED" => "true") do
+      with_composer(client: client) do
+        post console_threads_url,
+             params: { prompt: "Continue from here.", thread_key: thread_key }
+      end
+    end
+
+    assert_equal %i[append_session_messages execute_session], client.calls.map(&:first)
+    assert_equal thread_key, client.calls[0].last[:thread_key]
+    assert_redirected_to console_threads_path(thread: thread_key)
+  end
+
+  test "replying appends and executes on an explicitly shared chat" do
+    skip_unless_session_table
+
+    thread_key = "console:shared-reply-#{SecureRandom.hex(6)}"
+    insert_console_session(thread_key)
+    ThreadShare.create!(thread_key: thread_key, created_by: @operator)
+    delete logout_url
+    post login_url, params: { email: users(:member_user).email, password: "password123456" }
+
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      post console_threads_url,
+           params: { prompt: "Continue from here.", thread_key: thread_key }
+    end
+
+    assert_equal %i[append_session_messages execute_session], client.calls.map(&:first)
+    assert_equal thread_key, client.calls[0].last[:thread_key]
+    assert_redirected_to console_threads_path(thread: thread_key)
+  end
+
+  test "replying into a chat outside the readable scope is rejected" do
     skip_unless_session_table
 
     client = RecordingApiClient.new

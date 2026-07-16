@@ -53,7 +53,7 @@
         <%= local_time(session.updated_at || session.created_at, relative: true, format: :compact) %>
       </div>
     </div>
-    <%= render "console/threads/thread_menu", session: session if panel[:writable] %>
+    <%= render "console/threads/thread_menu", session: session if panel[:owned] %>
     <a href="<%= close_path %>"
        class="console-panel-close"
        aria-label="Close panel"
