@@ -278,7 +278,7 @@ impl AgentSandboxBackend {
         let Some(principal_id) = principal_id else {
             return Ok(None);
         };
-        let pg = self.resolved_pg();
+        let pg = self.resolved_pg_for_recreation(Some(&sandbox));
         let replace_placeholders = self.effective_replace_placeholders(&principal_id).await?;
         let observability_enabled = sandbox_observability_enabled(&sandbox, &self.config.container_name)
             .unwrap_or_else(|| {
@@ -595,7 +595,7 @@ impl AgentSandboxBackend {
             Err(err) if is_not_found(&err) => None,
             Err(err) => return Err(map_kube_error("get sandbox for iron-proxy repair", err)),
         };
-        let pg = self.resolved_pg_for_repair(sandbox.as_ref());
+        let pg = self.resolved_pg_for_recreation(sandbox.as_ref());
         let principal_id = principal_id.to_owned();
         let replace_placeholders = self.effective_replace_placeholders(&principal_id).await?;
         let observability_enabled = sandbox
@@ -652,7 +652,12 @@ impl AgentSandboxBackend {
             })
     }
 
-    fn resolved_pg_for_repair(&self, sandbox: Option<&crate::crd::Sandbox>) -> Option<ResolvedPg> {
+    /// Reuse the Postgres client credential already stored on an existing
+    /// sandbox: recreating only its proxy does not update the sandbox pod spec.
+    fn resolved_pg_for_recreation(
+        &self,
+        sandbox: Option<&crate::crd::Sandbox>,
+    ) -> Option<ResolvedPg> {
         let fallback = self.resolved_pg()?;
         sandbox
             .and_then(|sandbox| {
@@ -2304,9 +2309,18 @@ mod tests {
     }
 
     #[test]
-    fn pg_repair_reuses_credentials_from_existing_sandbox_dsn() {
-        let pg = pg_from_sandbox_dsn(
-            "postgresql://pg-user-original:pg-password-original@asbx-test-iron-proxy:5432",
+    fn pg_recreation_reuses_credentials_from_existing_sandbox_dsn() {
+        let dsn = "postgresql://pg-user-original:pg-password-original@asbx-test-iron-proxy:5432";
+        let sandbox = crate::build_agent_sandbox(
+            &SandboxId::new("asbx-test"),
+            &SandboxSpec::new("agent:test").env(CENTAUR_POSTGRES_DSN_ENV, dsn),
+            &crate::AgentSandboxConfig::new("test"),
+        )
+        .unwrap();
+
+        let pg = pg_from_sandbox_env(
+            &sandbox,
+            crate::DEFAULT_CONTAINER_NAME,
             "0.0.0.0:5432",
             5432,
         )
@@ -2319,7 +2333,7 @@ mod tests {
     }
 
     #[test]
-    fn pg_repair_ignores_unparseable_sandbox_dsn() {
+    fn pg_recreation_ignores_unparseable_sandbox_dsn() {
         assert!(pg_from_sandbox_dsn("not-a-postgres-dsn", "0.0.0.0:5432", 5432).is_none());
         assert!(pg_from_sandbox_dsn("postgresql://@host:5432", "0.0.0.0:5432", 5432).is_none());
     }
