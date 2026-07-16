@@ -137,7 +137,7 @@ function createMessageOverridesStrategy(): SlackbotV2Options['messageOverridesSt
   return createOpenAiMessageOverridesStrategy({
     apiKey: messageOverridesStrategyApiKey,
     baseUrl: optionalEnv('SLACKBOTV2_MESSAGE_OVERRIDES_OPENAI_BASE_URL'),
-    logger: (event, fields) => consoleLogger.warn(event, fields),
+    logger: consoleLogger,
     maxOutputTokens: optionalNumberEnv('SLACKBOTV2_MESSAGE_OVERRIDES_MAX_OUTPUT_TOKENS'),
     model: stringEnv('SLACKBOTV2_MESSAGE_OVERRIDES_MODEL', 'gpt-5.4-nano'),
     timeoutMs: optionalNumberEnv('SLACKBOTV2_MESSAGE_OVERRIDES_TIMEOUT_MS')

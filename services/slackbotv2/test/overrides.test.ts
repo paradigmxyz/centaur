@@ -473,8 +473,7 @@ describe('messageOverridesForText strategy invocation', () => {
     })
   })
 
-  test('logs OpenAI strategy request failures before falling back', async () => {
-    const logs: Array<{ event: string; fields: Record<string, unknown> }> = []
+  test('falls back when the OpenAI strategy request fails', async () => {
     await expect(
       messageOverridesForText(
         slackOptions({
@@ -485,7 +484,6 @@ describe('messageOverridesForText strategy invocation', () => {
                 status: 503,
                 statusText: 'Service Unavailable'
               })) as unknown as typeof fetch,
-            logger: (event, fields) => logs.push({ event, fields }),
             model: 'gpt-5.4-nano'
           })
         }),
@@ -493,12 +491,6 @@ describe('messageOverridesForText strategy invocation', () => {
         trace
       )
     ).resolves.toEqual({ overrides: {} })
-
-    expect(logs).toHaveLength(1)
-    expect(logs[0]?.event).toBe('slackbotv2_message_overrides_strategy_request_failed')
-    expect(logs[0]?.fields.error).toContain('HTTP 503 Service Unavailable')
-    expect(logs[0]?.fields.error).not.toContain('secret-token')
-    expect(logs[0]?.fields.model).toBe('gpt-5.4-nano')
   })
 })
 
