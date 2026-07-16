@@ -16,6 +16,7 @@ module Login
       def token_endpoint = TOKEN_ENDPOINT
       def scopes = SCOPES
       def extra_authorization_params = {}
+      def pkce? = true
       def token_exchange_client_secret(secret) = secret
 
       def identity_from(result, client_id:)

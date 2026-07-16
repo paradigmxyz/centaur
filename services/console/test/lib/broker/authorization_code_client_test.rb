@@ -98,6 +98,12 @@ module Broker
       assert_nil result.refresh_token
     end
 
+    test "omits code_verifier when the caller does not use PKCE" do
+      client, http = client_with(status: 200, body: success_body)
+      client.exchange(**base_args(code_verifier: nil))
+      assert_nil http.captured[:form]["code_verifier"]
+    end
+
     test "parses Slack nested authed_user token payload" do
       body = {
         ok: true,
@@ -137,7 +143,6 @@ module Broker
     test "validates required inputs" do
       client, _ = client_with(status: 200, body: success_body)
       assert_raises(ArgumentError) { client.exchange(**base_args(code: "")) }
-      assert_raises(ArgumentError) { client.exchange(**base_args(code_verifier: "")) }
       assert_raises(ArgumentError) { client.exchange(**base_args(redirect_uri: "")) }
     end
   end

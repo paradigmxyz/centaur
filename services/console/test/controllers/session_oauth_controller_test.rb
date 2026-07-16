@@ -107,7 +107,7 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
     assert_equal "That sign-in method is not available.", flash[:alert]
   end
 
-  test "Slack PKCE exchange omits client secret and accepts a rotating token response" do
+  test "Slack HTTPS login uses client secret without PKCE and accepts a rotating token response" do
     ENV["CENTAUR_CONSOLE_SLACK_CLIENT_ID"] = SLACK_CLIENT_ID
     ENV["CENTAUR_CONSOLE_SLACK_CLIENT_SECRET"] = "slack-login-secret"
 
@@ -115,6 +115,8 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
     query = URI.decode_www_form(URI.parse(response.location).query).to_h
     assert_equal "slack.com", URI.parse(response.location).host
     assert_equal "openid email profile", query["scope"]
+    assert_nil query["code_challenge"]
+    assert_nil query["code_challenge_method"]
 
     claims = {
       "aud" => SLACK_CLIENT_ID,
@@ -138,8 +140,8 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
     get auth_callback_url(provider: "slack"), params: { code: "the-code", state: state }
 
     assert_redirected_to console_threads_path
-    assert_nil exchange.captured.dig(:form, "client_secret")
-    assert exchange.captured.dig(:form, "code_verifier").present?
+    assert_equal "slack-login-secret", exchange.captured.dig(:form, "client_secret")
+    assert_nil exchange.captured.dig(:form, "code_verifier")
     user = User.find_by!(email: "rotating@example.com")
     assert_equal "Rotating User", user.name
     assert_equal [ [ "slack", "U123ROTATING" ] ], user.user_identities.pluck(:provider, :subject)

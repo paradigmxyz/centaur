@@ -3,7 +3,7 @@ require "json"
 require "uri"
 
 module Broker
-  # Performs the RFC 6749 4.1.3 authorization_code grant POST (with PKCE) and
+  # Performs the RFC 6749 4.1.3 authorization_code grant POST (optionally with PKCE) and
   # returns the parsed response. Used once per consent flow; it owns no
   # retry/backoff state -- a consent flow is synchronous and any failure surfaces
   # to the end user as a redirect. Provider-agnostic: the caller supplies the
@@ -47,16 +47,14 @@ module Broker
       raise ArgumentError, "client_id is required" if client_id.blank?
       raise ArgumentError, "code is required" if code.blank?
       raise ArgumentError, "redirect_uri is required" if redirect_uri.blank?
-      raise ArgumentError, "code_verifier is required" if code_verifier.blank?
-
       form = {
         "grant_type" => "authorization_code",
         "code" => code,
         "client_id" => client_id,
-        "redirect_uri" => redirect_uri,
-        "code_verifier" => code_verifier
+        "redirect_uri" => redirect_uri
       }
       form["client_secret"] = client_secret if client_secret.present?
+      form["code_verifier"] = code_verifier if code_verifier.present?
 
       response = perform(token_endpoint, form, timeout)
 

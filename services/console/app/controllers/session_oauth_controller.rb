@@ -4,7 +4,7 @@ require "uri"
 
 # Console SSO login, keyed by provider: /auth/:provider/start sends an operator to
 # the IdP, and /auth/:provider/callback turns the returned code into a signed-in
-# User. Structurally mirrors Oauth::FlowsController (signed state, PKCE, an
+# User. Structurally mirrors Oauth::FlowsController (signed state, optional PKCE, an
 # encrypted flow cookie binding the callback to the browser that started it), but
 # it produces a console session instead of a BrokerCredential.
 #
@@ -36,7 +36,7 @@ class SessionOauthController < ApplicationController
   # GET /auth/:provider/start
   def start
     nonce = SecureRandom.urlsafe_base64(32)
-    code_verifier = SecureRandom.urlsafe_base64(64)
+    code_verifier = SecureRandom.urlsafe_base64(64) if @provider.pkce?
 
     state = Rails.application.message_verifier(STATE_PURPOSE).generate(
       { "provider" => @key, "nonce" => nonce },
@@ -90,16 +90,20 @@ class SessionOauthController < ApplicationController
   end
 
   def authorization_url(state, code_verifier)
-    challenge = Base64.urlsafe_encode64(Digest::SHA256.digest(code_verifier), padding: false)
     query = {
       "client_id" => ConsoleAuth.client_id(@key),
       "redirect_uri" => callback_redirect_uri,
       "response_type" => "code",
       "scope" => @provider.scopes.join(" "),
-      "state" => state,
-      "code_challenge" => challenge,
-      "code_challenge_method" => "S256"
+      "state" => state
     }.merge(@provider.extra_authorization_params)
+
+    if code_verifier.present?
+      query["code_challenge"] = Base64.urlsafe_encode64(
+        Digest::SHA256.digest(code_verifier), padding: false
+      )
+      query["code_challenge_method"] = "S256"
+    end
 
     uri = URI.parse(@provider.authorization_endpoint)
     uri.query = URI.encode_www_form(query)
