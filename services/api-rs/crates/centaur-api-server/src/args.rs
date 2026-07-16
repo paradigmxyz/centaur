@@ -33,7 +33,7 @@ use centaur_session_core::HarnessType;
 use centaur_session_runtime::{
     PersonaRegistry, SandboxCapacityConfig, SandboxWorkloadMode, SessionSandboxCleanupConfig,
 };
-use centaur_workflows::WorkflowHostSandboxRuntime;
+use centaur_workflows::{WorkflowHostSandboxRuntime, WorkflowPrincipalRegistrar};
 use clap::{Args as ClapArgs, Parser, ValueEnum};
 use tracing::{info, warn};
 
@@ -123,6 +123,7 @@ pub(crate) struct IronControlRuntime {
     pub(crate) registrar: SessionRegistrar,
     pub(crate) warm_pool_bootstrap_principal: String,
     pub(crate) workflow_host_principal: String,
+    pub(crate) workflow_principal_registrar: WorkflowPrincipalRegistrar,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -723,9 +724,10 @@ impl SandboxArgs {
             client.assign_role(&workflow_host.id, role_id).await?;
         }
         Ok(Some(IronControlRuntime {
-            registrar: SessionRegistrar::new(client, namespace, role_ids),
+            registrar: SessionRegistrar::new(client.clone(), namespace.clone(), role_ids),
             warm_pool_bootstrap_principal: bootstrap.id,
             workflow_host_principal: workflow_host.id,
+            workflow_principal_registrar: WorkflowPrincipalRegistrar::new(client, namespace),
         }))
     }
 

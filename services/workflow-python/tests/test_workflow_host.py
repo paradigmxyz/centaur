@@ -386,6 +386,21 @@ class WorkflowHostTests(unittest.TestCase):
             {"model": "claude-opus-4-8", "reasoning": "high"},
         )
 
+    def test_load_workflow_file_reads_workflow_principal(self) -> None:
+        host = load_workflow_host()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "principal_workflow.py"
+            path.write_text(
+                "WORKFLOW_NAME = 'principal_workflow'\n"
+                "WORKFLOW_PRINCIPAL = True\n"
+                "def handler(inp, ctx):\n"
+                "    return None\n"
+            )
+            registered = host.load_workflow_file(path)
+
+        assert registered is not None
+        self.assertEqual(host.normalize_principal(registered), True)
+
 
 if __name__ == "__main__":
     unittest.main()
