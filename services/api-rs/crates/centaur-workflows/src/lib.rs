@@ -324,7 +324,6 @@ fn workflow_principal_labels(workflow_name: &str) -> BTreeMap<String, String> {
     BTreeMap::from([
         ("kind".to_owned(), "workflow".to_owned()),
         ("managed-by".to_owned(), "centaur".to_owned()),
-        ("purpose".to_owned(), "workflow".to_owned()),
         ("workflow_name".to_owned(), workflow_name.to_owned()),
     ])
 }
@@ -4450,7 +4449,7 @@ mod tests {
         let labels = workflow_principal_labels("nightly_report");
 
         assert_eq!(labels.get("kind").map(String::as_str), Some("workflow"));
-        assert_eq!(labels.get("purpose").map(String::as_str), Some("workflow"));
+        assert!(!labels.contains_key("purpose"));
         assert_eq!(
             labels.get("workflow_name").map(String::as_str),
             Some("nightly_report")
