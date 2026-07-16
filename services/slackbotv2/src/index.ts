@@ -778,7 +778,11 @@ async function syncThreadMessageToSession(
 
   const serializeStartedAtMs = nowMs()
   const serializedMessage = await serializeMessage(message, input.options)
-  const messageOverrides = await messageOverridesForText(input.options, serializedMessage.text, trace)
+  const messageOverrides = await messageOverridesForText(
+    input.options,
+    slackMessagePromptText(serializedMessage),
+    trace
+  )
   if (messageOverrides.cleanedText !== undefined) {
     setMessageText(serializedMessage, messageOverrides.cleanedText)
   }
