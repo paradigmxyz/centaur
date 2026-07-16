@@ -66,6 +66,11 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sDATABASE_URL" .Values.secretManager.envPrefix }}
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sOPENAI_API_KEY" .Values.secretManager.envPrefix }}
             - name: SLACKBOTV2_USER_NAME
               value: {{ .Values.slackbotv2.userName | quote }}
             - name: SLACKBOTV2_ACTIVITY_SUMMARY_STATUS_ENABLED
