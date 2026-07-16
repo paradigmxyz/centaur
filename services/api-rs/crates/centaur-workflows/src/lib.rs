@@ -205,7 +205,39 @@ struct WorkflowQueueClients {
 pub struct WorkflowHostSandboxRuntime {
     runtime: SandboxRuntime,
     spec: SandboxSpec,
-    workflow_principals: Arc<RwLock<BTreeMap<String, String>>>,
+    workflow_principals: Arc<RwLock<WorkflowPrincipalAssignments>>,
+}
+
+#[derive(Clone, Default)]
+struct WorkflowPrincipalAssignments {
+    required: BTreeSet<String>,
+    registered: BTreeMap<String, String>,
+}
+
+impl WorkflowPrincipalAssignments {
+    fn principal_for_workflow(
+        &self,
+        workflow_name: &str,
+    ) -> Result<Option<String>, WorkflowRuntimeError> {
+        if let Some(principal) = self.registered.get(workflow_name) {
+            return Ok(Some(principal.clone()));
+        }
+        if self.required.contains(workflow_name) {
+            return Err(WorkflowRuntimeError::Internal(format!(
+                "workflow {workflow_name} declares WORKFLOW_PRINCIPAL but no scoped principal is registered"
+            )));
+        }
+        Ok(None)
+    }
+}
+
+fn workflow_principals_require_iron_control_error(
+    principals: &BTreeSet<String>,
+) -> WorkflowRuntimeError {
+    let workflow_names = principals.iter().cloned().collect::<Vec<_>>().join(", ");
+    WorkflowRuntimeError::BadRequest(format!(
+        "WORKFLOW_PRINCIPAL requires Iron Control, but Iron Control is disabled for workflows: {workflow_names}"
+    ))
 }
 
 impl WorkflowHostSandboxRuntime {
@@ -213,30 +245,38 @@ impl WorkflowHostSandboxRuntime {
         Self {
             runtime,
             spec,
-            workflow_principals: Arc::new(RwLock::new(BTreeMap::new())),
+            workflow_principals: Arc::new(RwLock::new(WorkflowPrincipalAssignments::default())),
         }
     }
 
-    fn update_workflow_principals(&self, principals: BTreeMap<String, String>) {
+    fn update_workflow_principals(
+        &self,
+        registered: BTreeMap<String, String>,
+        required: BTreeSet<String>,
+    ) {
         let mut current = self
             .workflow_principals
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *current = principals;
+        *current = WorkflowPrincipalAssignments {
+            required,
+            registered,
+        };
     }
 
-    fn spec_for_workflow(&self, workflow_name: &str) -> SandboxSpec {
+    fn spec_for_workflow(&self, workflow_name: &str) -> Result<SandboxSpec, WorkflowRuntimeError> {
         let mut spec = self.spec.clone();
-        let principal = self
-            .workflow_principals
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(workflow_name)
-            .cloned();
+        let principal = {
+            let assignments = self
+                .workflow_principals
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            assignments.principal_for_workflow(workflow_name)?
+        };
         if let Some(principal) = principal {
             spec.iron_control_principal = Some(principal);
         }
-        spec
+        Ok(spec)
     }
 }
 
@@ -561,12 +601,7 @@ impl WorkflowRuntime {
             etl_backfill: etl_backfill_client.clone(),
         };
 
-        let discovery = discover_python_workflow_metadata()
-            .await
-            .unwrap_or_else(|error| {
-                warn!(%error, "python workflow discovery failed");
-                PythonWorkflowMetadata::default()
-            });
+        let discovery = discover_python_workflow_metadata().await?;
         let enablement = WorkflowEnablement::from_env()?;
         let workflow_host_sandbox = prepare_workflow_host_sandbox(
             workflow_host_sandbox,
@@ -1693,20 +1728,24 @@ async fn reconcile_workflow_principals(
     discovery: &PythonWorkflowMetadata,
     enablement: &WorkflowEnablement,
 ) -> Result<(), WorkflowRuntimeError> {
-    let Some(registrar) = registrar else {
-        if !discovery.principals.is_empty() {
-            warn!(
-                principal_count = discovery.principals.len(),
-                "workflow principals declared but iron-control is disabled"
-            );
-        }
-        sandbox.update_workflow_principals(BTreeMap::new());
-        return Ok(());
-    };
     let mut principals = discovery.principals.clone();
     principals.retain(|workflow_name| enablement.is_enabled(workflow_name));
-    let registered = registrar.register_workflow_principals(&principals).await?;
-    sandbox.update_workflow_principals(registered);
+    let Some(registrar) = registrar else {
+        if !principals.is_empty() {
+            sandbox.update_workflow_principals(BTreeMap::new(), principals.clone());
+            return Err(workflow_principals_require_iron_control_error(&principals));
+        }
+        sandbox.update_workflow_principals(BTreeMap::new(), BTreeSet::new());
+        return Ok(());
+    };
+    let registered = match registrar.register_workflow_principals(&principals).await {
+        Ok(registered) => registered,
+        Err(error) => {
+            sandbox.update_workflow_principals(BTreeMap::new(), principals);
+            return Err(error);
+        }
+    };
+    sandbox.update_workflow_principals(registered, principals);
     Ok(())
 }
 
@@ -2968,7 +3007,7 @@ async fn run_python_workflow_host_in_sandbox(
     sandbox: WorkflowHostSandboxRuntime,
     workflow_clients: WorkflowQueueClients,
 ) -> Result<Value, WorkflowRuntimeError> {
-    let mut spec = sandbox.spec_for_workflow(&input.workflow_name);
+    let mut spec = sandbox.spec_for_workflow(&input.workflow_name)?;
     spec = spec
         .env("WORKFLOW_RUN_ID", ctx.run_id())
         .env("WORKFLOW_TASK_ID", ctx.task_id())
@@ -4399,6 +4438,45 @@ mod tests {
             canonical_workflow_principal_foreign_id("Managing Partner Daily Briefing"),
             "workflow-managing-partner-daily-briefing"
         );
+    }
+
+    #[test]
+    fn required_workflow_principal_fails_closed_when_unregistered() {
+        let assignments = WorkflowPrincipalAssignments {
+            required: BTreeSet::from(["nightly_report".to_owned()]),
+            registered: BTreeMap::new(),
+        };
+
+        let error = assignments
+            .principal_for_workflow("nightly_report")
+            .expect_err("required workflow principal should not fall back");
+
+        assert!(matches!(error, WorkflowRuntimeError::Internal(_)));
+        assert!(error.to_string().contains("nightly_report"));
+        assert!(error.to_string().contains("WORKFLOW_PRINCIPAL"));
+    }
+
+    #[test]
+    fn optional_workflow_principal_uses_shared_principal() {
+        let assignments = WorkflowPrincipalAssignments::default();
+
+        assert_eq!(
+            assignments
+                .principal_for_workflow("nightly_report")
+                .expect("optional workflow should be allowed"),
+            None
+        );
+    }
+
+    #[test]
+    fn workflow_principal_requires_iron_control() {
+        let error = workflow_principals_require_iron_control_error(&BTreeSet::from([
+            "nightly_report".to_owned(),
+        ]));
+
+        assert!(matches!(error, WorkflowRuntimeError::BadRequest(_)));
+        assert!(error.to_string().contains("Iron Control"));
+        assert!(error.to_string().contains("nightly_report"));
     }
 
     #[tokio::test]
