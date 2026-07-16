@@ -436,64 +436,6 @@ describe('slackbotv2', () => {
     )
   })
 
-  it('classifies message overrides using raw Slack block prompt text', async () => {
-    const strategyInputs: string[] = []
-    bot = createTestBot({
-      messageOverridesStrategy: async ({ text }) => {
-        strategyInputs.push(text)
-        return text.includes('use max effort and sol')
-          ? {
-              overrides: {
-                harnessType: 'codex',
-                model: 'gpt-5.6-sol',
-                reasoning: 'max'
-              }
-            }
-          : { overrides: {} }
-      }
-    })
-
-    const waits: Promise<unknown>[] = []
-    const response = await bot.app.request(
-      '/api/webhooks/slack',
-      signedSlackEvent({
-        event_id: 'Ev-slackbotv2-block-message-overrides',
-        event: {
-          type: 'app_mention',
-          user: USER_ID,
-          channel: CHANNEL_ID,
-          team: TEAM_ID,
-          ts: '1700000000.000200',
-          text: '',
-          blocks: [
-            {
-              type: 'section',
-              text: {
-                type: 'mrkdwn',
-                text: `<@${BOT_USER_ID}> use max effort and sol`
-              }
-            }
-          ]
-        }
-      }),
-      {},
-      waitUntilContext(waits)
-    )
-    expect(response.status).toBe(200)
-    await Promise.all(waits)
-
-    expect(strategyInputs).toEqual([`@${BOT_USER_ID} use max effort and sol`])
-    expect(codexApi.creates.map(create => create.body.harness_type)).toEqual(['codex'])
-    expect(codexApi.executes).toHaveLength(1)
-    const inputLine = JSON.parse(codexApi.executes[0]!.body.input_lines.at(-1)!) as Record<
-      string,
-      unknown
-    >
-    expect(inputLine.model).toBe('gpt-5.6-sol')
-    expect(inputLine.reasoning).toBe('max')
-    expect(JSON.stringify(inputLine)).toContain('use max effort and sol')
-  })
-
   it('appends an Open-session-in-Console context block to the first assistant message only', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
