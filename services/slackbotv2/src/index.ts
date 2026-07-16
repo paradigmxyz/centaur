@@ -665,6 +665,8 @@ type SyncThreadMessageInput = {
   options: SlackbotV2Options
   /** Number of in-process retries already spent on this message's handoff. */
   retryAttempt?: number
+  /** Resolved once per local handoff chain so retryable failures stay idempotent. */
+  resolvedMessageOverrides?: Awaited<ReturnType<typeof messageOverridesForText>>
   state: StateAdapter
 }
 
@@ -778,7 +780,13 @@ async function syncThreadMessageToSession(
 
   const serializeStartedAtMs = nowMs()
   const serializedMessage = await serializeMessage(message, input.options)
-  const messageOverrides = await messageOverridesForText(input.options, serializedMessage.text, trace)
+  const messageOverrides =
+    input.resolvedMessageOverrides ??
+    (input.resolvedMessageOverrides = await messageOverridesForText(
+      input.options,
+      serializedMessage.text,
+      trace
+    ))
   if (messageOverrides.cleanedText !== undefined) {
     setMessageText(serializedMessage, messageOverrides.cleanedText)
   }
