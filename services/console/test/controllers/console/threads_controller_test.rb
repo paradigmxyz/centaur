@@ -286,6 +286,63 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_equal "Root Slack bot post", item[:text]
   end
 
+  test "transcript messages expose stored image attachments as bounded inline data" do
+    controller = Console::ThreadsController.new
+    controller.define_singleton_method(:current_slack_user_ids) { [] }
+    controller.instance_variable_set(:@selected_session, TranscriptSession.new(metadata_hash: {}))
+    image_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    message = TranscriptMessage.new(
+      role: "user",
+      parts_array: [
+        { "type" => "text", "text" => "See attached." },
+        {
+          "type" => "attachment",
+          "attachment_type" => "image",
+          "dataBase64" => image_data,
+          "mimeType" => "image/png",
+          "name" => "screenshot.png",
+          "width" => 1440,
+          "height" => 900
+        }
+      ],
+      metadata_hash: {},
+      created_at: Time.zone.parse("2026-06-26 17:15:58 UTC")
+    )
+
+    item = controller.send(:transcript_item_for_message, message)
+
+    assert_equal "See attached.", item[:text]
+    assert_equal [
+      {
+        src: "data:image/png;base64,#{image_data}",
+        alt: "screenshot.png",
+        width: 1440,
+        height: 900
+      }
+    ], item[:images]
+  end
+
+  test "transcript images reject remote, unsafe, malformed, and oversized image data" do
+    controller = Console::ThreadsController.new
+    message = TranscriptMessage.new(
+      role: "user",
+      parts_array: [
+        { "type" => "attachment", "attachment_type" => "image", "mimeType" => "image/png",
+          "url" => "https://files.example.test/private.png" },
+        { "type" => "attachment", "attachment_type" => "image", "mimeType" => "image/svg+xml",
+          "dataBase64" => "PHN2Zz4=" },
+        { "type" => "attachment", "attachment_type" => "image", "mimeType" => "image/png",
+          "dataBase64" => "not base64" },
+        { "type" => "attachment", "attachment_type" => "image", "mimeType" => "image/png",
+          "dataBase64" => "A" * (Console::ThreadsController::MAX_INLINE_IMAGE_BASE64_CHARS + 1) }
+      ],
+      metadata_hash: {},
+      created_at: Time.zone.now
+    )
+
+    assert_empty controller.send(:transcript_message_images, message)
+  end
+
   test "slack message text resolves mentions from bot identity and selected actor metadata" do
     controller = Console::ThreadsController.new
     controller.define_singleton_method(:current_slack_user_ids) { [ "u123" ] }

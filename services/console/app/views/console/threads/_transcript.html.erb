@@ -63,7 +63,24 @@
           <% unless user_message %>
             <div class="mb-1 text-xs font-medium text-zinc-500"><%= item[:label] || item[:role] %></div>
           <% end %>
-          <div class="console-markdown text-sm leading-6"><%= console_markdown(item[:text].presence || "No text content.") %></div>
+          <% if item[:text].present? %>
+            <div class="console-markdown text-sm leading-6"><%= console_markdown(item[:text]) %></div>
+          <% elsif item[:images].blank? %>
+            <div class="console-markdown text-sm leading-6"><%= console_markdown("No text content.") %></div>
+          <% end %>
+          <% if item[:images].present? %>
+            <div class="console-message-images <%= "mt-3" if item[:text].present? %>">
+              <% item[:images].each do |image| %>
+                <% dimensions = { width: image[:width], height: image[:height] }.compact %>
+                <%= image_tag image[:src],
+                              alt: image[:alt],
+                              class: "console-message-image",
+                              loading: "lazy",
+                              decoding: "async",
+                              **dimensions %>
+              <% end %>
+            </div>
+          <% end %>
         </div>
         <div class="console-message-timestamp <%= "text-right" if user_message %>">
           <%= local_time(item[:created_at]) if item[:created_at] %>

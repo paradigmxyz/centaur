@@ -9,6 +9,14 @@ class Console::ThreadsController < ApplicationController
   EXECUTION_LIMIT = 8
   TRANSCRIPT_EVENT_LIMIT = 80
   PANEL_LIMIT = 4
+  MAX_INLINE_IMAGE_BASE64_CHARS = 1_000_000
+  INLINE_IMAGE_MIME_TYPES = %w[
+    image/avif
+    image/gif
+    image/jpeg
+    image/png
+    image/webp
+  ].freeze
   THINKING_EVENT_LIMIT = 200
   ACTIVITY_SUMMARY_EVENT_LIMIT = 200
   RAW_TRACE_OUTPUT_LINE_PATTERNS = %w[
@@ -1325,9 +1333,41 @@ class Console::ThreadsController < ApplicationController
       label: transcript_message_label(message.role, metadata),
       align: transcript_message_align(message.role, metadata),
       text: resolve_slack_mentions(thread_message_text(message)),
+      images: transcript_message_images(message),
       created_at: message.created_at,
       source: :message
     }
+  end
+
+  def transcript_message_images(message)
+    message.parts_array.filter_map do |part|
+      next unless inline_image_part?(part)
+
+      mime_type = part["mimeType"].to_s.downcase
+      data = part["dataBase64"].to_s
+      next unless INLINE_IMAGE_MIME_TYPES.include?(mime_type)
+      next if data.blank? || data.bytesize > MAX_INLINE_IMAGE_BASE64_CHARS
+      next unless data.bytesize.modulo(4).zero? && data.match?(/\A[A-Za-z0-9+\/]*={0,2}\z/)
+
+      {
+        src: "data:#{mime_type};base64,#{data}",
+        alt: part["name"].presence || "Attached image",
+        width: positive_image_dimension(part["width"]),
+        height: positive_image_dimension(part["height"])
+      }
+    end
+  end
+
+  def inline_image_part?(part)
+    return false unless part.is_a?(Hash)
+
+    part["type"] == "image" ||
+      (part["type"] == "attachment" && part["attachment_type"] == "image")
+  end
+
+  def positive_image_dimension(value)
+    dimension = Integer(value, exception: false)
+    dimension if dimension&.positive? && dimension <= 100_000
   end
 
   def count_records(model, keys)

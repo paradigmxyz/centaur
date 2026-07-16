@@ -890,6 +890,25 @@
         min-width: 0;
       }
 
+      .console-message-images {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.75rem;
+        max-width: 100%;
+      }
+
+      .console-message-image {
+        display: block;
+        width: auto;
+        height: auto;
+        max-width: 100%;
+        max-height: min(28rem, 60vh);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 0.75rem;
+        object-fit: contain;
+      }
+
       .console-message-timestamp {
         min-height: 1.25rem;
         padding-top: 0.375rem;
