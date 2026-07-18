@@ -115,6 +115,34 @@ module Granola
       assert_includes failed[:run][:error_text], "rate limited"
     end
 
+    test "includes MCP tool error content in the raised error" do
+      sync = SyncCredential.new(credential, api_client: FakeApiClient.new)
+      sync.instance_variable_set(:@mcp_initialized, true)
+      sync.define_singleton_method(:mcp_request) do |*|
+        Struct.new(:body) do
+          def [](header)
+            "application/json" if header == "content-type"
+          end
+        end.new(
+          {
+            result: {
+              isError: true,
+              content: [ { type: "text", text: "Invalid meeting_ids: maximum 10" } ]
+            }
+          }.to_json
+        )
+      end
+
+      error = assert_raises(SyncCredential::GranolaApiError) do
+        sync.send(:mcp_tool, "get_meetings", "meeting_ids" => %w[meeting-1 meeting-2])
+      end
+
+      assert_equal(
+        "Granola MCP tool get_meetings failed: Invalid meeting_ids: maximum 10",
+        error.message
+      )
+    end
+
     private
 
     def meeting_xml

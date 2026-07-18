@@ -274,11 +274,16 @@ module Granola
       raise GranolaApiError, "Granola MCP returned #{payload['error']}" if payload["error"]
 
       result = payload.fetch("result", {})
-      raise GranolaApiError, "Granola MCP tool #{name} failed" if result["isError"]
-
-      Array(result["content"])
+      content_text = Array(result["content"])
         .filter_map { |content| content["text"] if content["type"] == "text" }
         .join("\n")
+      if result["isError"]
+        detail = content_text.squish.truncate(1_000)
+        suffix = detail.present? ? ": #{detail}" : ""
+        raise GranolaApiError, "Granola MCP tool #{name} failed#{suffix}"
+      end
+
+      content_text
     end
 
     def initialize_mcp_session
