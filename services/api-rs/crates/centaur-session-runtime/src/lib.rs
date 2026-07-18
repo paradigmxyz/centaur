@@ -6375,7 +6375,7 @@ fn redact_prefixed_tokens(input: &str) -> String {
     while index < input.len() {
         if let Some(prefix) = PREFIXES
             .iter()
-            .find(|prefix| input[index..].starts_with(**prefix))
+            .find(|prefix| should_redact_prefixed_token(input, index, prefix))
         {
             let token_end = consume_sensitive_token(input, index + prefix.len());
             out.push_str("[REDACTED_TOKEN]");
@@ -6389,6 +6389,35 @@ fn redact_prefixed_tokens(input: &str) -> String {
     }
 
     out
+}
+
+fn should_redact_prefixed_token(input: &str, index: usize, prefix: &str) -> bool {
+    if !input[index..].starts_with(prefix) || !has_token_boundary_before(input, index) {
+        return false;
+    }
+
+    let token_start = index + prefix.len();
+    let token_end = consume_sensitive_token(input, token_start);
+    if token_end == token_start {
+        return false;
+    }
+
+    if prefix.starts_with("sk-") {
+        return token_end.saturating_sub(token_start) >= 16;
+    }
+
+    true
+}
+
+fn has_token_boundary_before(input: &str, index: usize) -> bool {
+    if index == 0 {
+        return true;
+    }
+
+    input[..index]
+        .chars()
+        .next_back()
+        .is_none_or(|ch| !is_sensitive_token_char(ch))
 }
 
 fn consume_sensitive_token(input: &str, start: usize) -> usize {
@@ -7159,6 +7188,17 @@ mod tests {
         assert!(redacted.contains("Authorization: Bearer [REDACTED_TOKEN]"));
         assert!(redacted.contains("SANDBOX_TOKEN=[REDACTED_TOKEN]"));
         assert!(redacted.contains("SLACK_BOT_TOKEN=[REDACTED_TOKEN]"));
+    }
+
+    #[test]
+    fn prefixed_token_redaction_preserves_ordinary_hyphenated_words() {
+        let line = "risk-adjusted PnL improved while sk-proj-abcdefghijklmnopqrstuvwxyz123456 stayed hidden";
+
+        let redacted = redact_sensitive_text(line);
+
+        assert!(redacted.contains("risk-adjusted PnL improved"));
+        assert!(!redacted.contains("sk-proj-abcdefghijklmnopqrstuvwxyz123456"));
+        assert!(redacted.contains("[REDACTED_TOKEN] stayed hidden"));
     }
 
     #[test]
