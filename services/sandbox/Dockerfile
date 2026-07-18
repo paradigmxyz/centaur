@@ -35,10 +35,12 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     google-api-python-client>=2.100.0 \
     google-auth-httplib2>=0.2.0 \
     google-auth-oauthlib>=1.2.0 \
+    "google-cloud-bigquery>=3.25.0" \
     feedparser>=6.0.0 \
     httplib2>=0.20.0 \
     httpx>=0.28.0 \
     opentelemetry-proto==1.42.1 \
+    "psycopg[binary]>=3.2.0" \
     pysocks>=1.7.1 \
     rich>=13.0.0 \
     slack-sdk==3.39.0 \
