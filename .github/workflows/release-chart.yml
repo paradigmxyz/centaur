@@ -7,12 +7,14 @@ name: Release Chart
     paths:
       - "contrib/chart/**"
       - ".github/workflows/release-chart.yml"
+      - ".github/scripts/check-chart-archive.py"
   push:
     branches:
       - main
     paths:
       - "contrib/chart/**"
       - ".github/workflows/release-chart.yml"
+      - ".github/scripts/check-chart-archive.py"
 
 permissions: {}
 
@@ -97,11 +99,40 @@ jobs:
           echo "::error file=${CHART_YAML}::contrib/chart changed but chart version stayed at ${CURRENT_VERSION}. Bump .version in the PR."
           exit 1
 
+      - name: Package and verify chart archive
+        run: |
+          set -euo pipefail
+
+          staged_chart="$RUNNER_TEMP/centaur-chart"
+          rm -rf "$staged_chart" .cr-release-packages
+          mkdir -p "$staged_chart" .cr-release-packages
+          cp -a contrib/chart/. "$staged_chart/"
+
+          # `helm dependency build` writes a packaged copy alongside the
+          # checked-in local dependency. Package only the immutable .tgz copy
+          # so Helm does not serialize both charts to the same member paths.
+          shopt -s nullglob
+          agent_sandbox_packages=("$staged_chart"/charts/agent-sandbox-*.tgz)
+          if [ "${#agent_sandbox_packages[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one packaged agent-sandbox dependency"
+            exit 1
+          fi
+          rm -rf "$staged_chart/charts/agent-sandbox"
+
+          helm package "$staged_chart" --destination .cr-release-packages
+          chart_packages=(.cr-release-packages/centaur-*.tgz)
+          if [ "${#chart_packages[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one packaged Centaur chart"
+            exit 1
+          fi
+          python3 .github/scripts/check-chart-archive.py "${chart_packages[0]}"
+
       - name: Run chart-releaser
         if: github.event_name == 'push'
         uses: helm/chart-releaser-action@cae68fefc6b5f367a0275617c9f83181ba54714f # v1.7.0
         with:
           skip_existing: true
+          skip_packaging: true
           charts_dir: contrib
         env:
           CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
