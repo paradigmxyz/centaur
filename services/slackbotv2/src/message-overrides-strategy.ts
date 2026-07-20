@@ -6,7 +6,7 @@ import {
 import type { JsonObject, MessageOverridesStrategy } from './types'
 import { errorMessage, isJsonObject } from './utils'
 
-const DEFAULT_TIMEOUT_MS = 1_500
+const DEFAULT_TIMEOUT_MS = 2_000
 const DEFAULT_MAX_OUTPUT_TOKENS = 300
 
 const SYSTEM_PROMPT = [
