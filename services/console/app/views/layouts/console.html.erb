@@ -29,6 +29,7 @@
             return null;
           }
         };
+        const preference = () => storedTheme() || "system";
         const resolveTheme = () => storedTheme() || systemTheme();
         const applyTheme = (theme) => {
           const nextTheme = validTheme(theme) ? theme : systemTheme();
@@ -45,6 +46,16 @@
         window.ConsoleTheme = {
           apply: applyTheme,
           persist: (theme) => {
+            if (theme === "system") {
+              try {
+                localStorage.removeItem(storageKey);
+                localStorage.removeItem(storageSourceKey);
+              } catch (_error) {
+                // Theme still follows the system for this page load when storage is unavailable.
+              }
+              return applyTheme(systemTheme());
+            }
+
             const nextTheme = applyTheme(theme);
             try {
               localStorage.setItem(storageKey, nextTheme);
@@ -54,6 +65,7 @@
             }
             return nextTheme;
           },
+          preference: preference,
           resolve: resolveTheme
         };
 
@@ -1949,6 +1961,7 @@
                       aria-label="Switch to light mode">
                 <span data-console-theme-action-icon="light"><%= console_icon("sun", classes: "size-4") %></span>
                 <span data-console-theme-action-icon="dark" hidden><%= console_icon("moon", classes: "size-4") %></span>
+                <span data-console-theme-action-icon="system" hidden><%= console_icon("computer", classes: "size-4") %></span>
                 <span data-console-theme-label>Light mode</span>
               </button>
               <% if acting_admin? %>
@@ -2103,33 +2116,45 @@
         const label = themeToggle.querySelector("[data-console-theme-label]");
         const lightIcon = themeToggle.querySelector("[data-console-theme-action-icon='light']");
         const darkIcon = themeToggle.querySelector("[data-console-theme-action-icon='dark']");
+        const systemIcon = themeToggle.querySelector("[data-console-theme-action-icon='system']");
+        const themePreferences = ["system", "light", "dark"];
 
-        const syncThemeControl = (theme) => {
-          const nextTheme = theme === "light" ? "light" : "dark";
-          const isLight = nextTheme === "light";
-          if (label) label.textContent = isLight ? "Dark mode" : "Light mode";
+        const nextThemePreference = (preference) => {
+          const currentIndex = themePreferences.indexOf(preference);
+          return themePreferences[(currentIndex + 1) % themePreferences.length];
+        };
+
+        const syncThemeControl = (preference) => {
+          const nextPreference = nextThemePreference(preference);
+          const nextLabel = `${nextPreference[0].toUpperCase()}${nextPreference.slice(1)} mode`;
+          if (label) label.textContent = nextLabel;
           themeToggle.setAttribute(
             "aria-label",
-            isLight ? "Switch to dark mode" : "Switch to light mode"
+            `Switch to ${nextPreference} mode`
           );
-          if (lightIcon) lightIcon.hidden = isLight;
-          if (darkIcon) darkIcon.hidden = !isLight;
+          themeToggle.dataset.consoleThemePreference = preference;
+          if (lightIcon) lightIcon.hidden = nextPreference !== "light";
+          if (darkIcon) darkIcon.hidden = nextPreference !== "dark";
+          if (systemIcon) systemIcon.hidden = nextPreference !== "system";
         };
 
-        const applyTheme = (theme, persist = false) => {
-          let nextTheme;
+        const applyTheme = (preference, persist = false) => {
           if (window.ConsoleTheme) {
-            nextTheme = persist ? window.ConsoleTheme.persist(theme) : window.ConsoleTheme.apply(theme);
+            if (persist) window.ConsoleTheme.persist(preference);
+            else window.ConsoleTheme.apply(preference);
           } else {
-            nextTheme = theme === "light" ? "light" : "dark";
+            const useLightTheme = preference === "light" ||
+              (preference === "system" && window.matchMedia?.("(prefers-color-scheme: light)").matches);
+            const nextTheme = useLightTheme ? "light" : "dark";
             root.dataset.consoleTheme = nextTheme;
           }
-          syncThemeControl(nextTheme);
+          syncThemeControl(preference);
         };
 
-        applyTheme(root.dataset.consoleTheme || window.ConsoleTheme?.resolve?.() || "dark");
+        applyTheme(window.ConsoleTheme?.preference?.() || root.dataset.consoleTheme || "dark");
         themeToggle.addEventListener("click", () => {
-          applyTheme(root.dataset.consoleTheme === "light" ? "dark" : "light", true);
+          const currentPreference = themeToggle.dataset.consoleThemePreference || "system";
+          applyTheme(nextThemePreference(currentPreference), true);
         });
       })();
 
