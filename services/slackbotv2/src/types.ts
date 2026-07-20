@@ -143,8 +143,9 @@ export type SlackbotV2Options = {
    */
   channelDefaults?: ChannelDefaults
   /**
-   * Harness for new threads when no --claude/--amp/--codex flag is given
-   * (HarnessType wire value: codex | amp | claudecode). Defaults to codex.
+   * Harness for new threads when no --claude/--amp/--codex/--nanocodex flag is
+   * given (HarnessType wire value: codex | amp | claudecode | nanocodex).
+   * Defaults to codex.
    */
   defaultHarnessType?: string
   fetch?: SlackbotV2Fetch
@@ -255,7 +256,7 @@ export type ForwardSessionInput = {
   contextPreamble?: string
   executionId?: string
   executeMessage?: SlackbotV2ApiMessage
-  /** Effective harness selected by sticky thread flags (--claude/--amp/--codex). */
+  /** Effective harness selected by sticky thread flags (including --nanocodex). */
   harnessType?: string
   messages: SlackbotV2ApiMessage[]
   /** Effective model selected by sticky thread flags (--model/--opus/...). */

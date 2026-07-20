@@ -1,6 +1,7 @@
 /**
  * Inline message directives, restored from the v1 slackbot:
- *   --claude | --claude-code | --amp | --codex   pick the harness for the thread
+ *   --claude | --claude-code | --amp | --codex | --nanocodex
+ *                                                  pick the harness for the thread
  *   --bedrock                                    codex via the AWS Bedrock provider
  *   --meta                                       codex via Meta AI direct
  *   --model <name> (or --model=<name>)           pick the model within that harness
