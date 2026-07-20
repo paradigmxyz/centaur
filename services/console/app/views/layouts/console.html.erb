@@ -1958,11 +1958,11 @@
                       class="console-account-menu-button"
                       data-console-theme-toggle
                       role="menuitem"
-                      aria-label="Switch to light mode">
-                <span data-console-theme-action-icon="light"><%= console_icon("sun", classes: "size-4") %></span>
-                <span data-console-theme-action-icon="dark" hidden><%= console_icon("moon", classes: "size-4") %></span>
-                <span data-console-theme-action-icon="system" hidden><%= console_icon("computer", classes: "size-4") %></span>
-                <span data-console-theme-label>Light mode</span>
+                      aria-label="Current theme: system. Switch to light mode">
+                <span data-console-theme-icon="light" hidden><%= console_icon("sun", classes: "size-4") %></span>
+                <span data-console-theme-icon="dark" hidden><%= console_icon("moon", classes: "size-4") %></span>
+                <span data-console-theme-icon="system"><%= console_icon("computer", classes: "size-4") %></span>
+                <span data-console-theme-label>System mode</span>
               </button>
               <% if acting_admin? %>
                 <%= button_to console_descope_path,
@@ -2114,10 +2114,15 @@
 
         const root = document.documentElement;
         const label = themeToggle.querySelector("[data-console-theme-label]");
-        const lightIcon = themeToggle.querySelector("[data-console-theme-action-icon='light']");
-        const darkIcon = themeToggle.querySelector("[data-console-theme-action-icon='dark']");
-        const systemIcon = themeToggle.querySelector("[data-console-theme-action-icon='system']");
+        const lightIcon = themeToggle.querySelector("[data-console-theme-icon='light']");
+        const darkIcon = themeToggle.querySelector("[data-console-theme-icon='dark']");
+        const systemIcon = themeToggle.querySelector("[data-console-theme-icon='system']");
         const themePreferences = ["system", "light", "dark"];
+        const themeLabels = {
+          system: "System mode",
+          light: "Light mode",
+          dark: "Dark mode"
+        };
 
         const nextThemePreference = (preference) => {
           const currentIndex = themePreferences.indexOf(preference);
@@ -2126,16 +2131,15 @@
 
         const syncThemeControl = (preference) => {
           const nextPreference = nextThemePreference(preference);
-          const nextLabel = `${nextPreference[0].toUpperCase()}${nextPreference.slice(1)} mode`;
-          if (label) label.textContent = nextLabel;
+          if (label) label.textContent = themeLabels[preference];
           themeToggle.setAttribute(
             "aria-label",
-            `Switch to ${nextPreference} mode`
+            `Current theme: ${preference}. Switch to ${nextPreference} mode`
           );
           themeToggle.dataset.consoleThemePreference = preference;
-          if (lightIcon) lightIcon.hidden = nextPreference !== "light";
-          if (darkIcon) darkIcon.hidden = nextPreference !== "dark";
-          if (systemIcon) systemIcon.hidden = nextPreference !== "system";
+          if (lightIcon) lightIcon.hidden = preference !== "light";
+          if (darkIcon) darkIcon.hidden = preference !== "dark";
+          if (systemIcon) systemIcon.hidden = preference !== "system";
         };
 
         const applyTheme = (preference, persist = false) => {
