@@ -3,15 +3,17 @@ use std::env;
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use nanocodex::{AgentEvent, AgentEvents, Nanocodex, Prompt, Turn, UserInput};
+use nanocodex::{AgentEvent, AgentEvents, Nanocodex, Prompt, Tools, Turn, UserInput};
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::nanocodex_subagents::{ChildAgents, with_subagents};
 use crate::{HarnessServerError, Result};
 
 /// Runs the Centaur blocks adapter while preserving Nanocodex's native event
@@ -31,9 +33,13 @@ async fn run() -> Result<()> {
         })?;
     let cwd = env::current_dir()?;
     let session_id = format!("nanocodex-{}", Uuid::new_v4().simple());
+    let child_agents = Arc::new(ChildAgents::default());
+    let tools_agents = Arc::downgrade(&child_agents);
+    let tools = Tools::default();
     let (agent, mut events) = Nanocodex::builder(api_key)
         .workspace(&cwd)
         .session_id(session_id)
+        .tools_factory(move |agent| with_subagents(tools.clone(), agent, tools_agents.clone()))
         .build()
         .map_err(nanocodex_error)?;
 
@@ -73,6 +79,7 @@ async fn run() -> Result<()> {
             }
         }
     }
+    child_agents.shutdown().await;
     Ok(())
 }
 

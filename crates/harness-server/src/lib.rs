@@ -4,6 +4,7 @@ pub mod claude;
 pub mod codex;
 mod error;
 mod nanocodex;
+mod nanocodex_subagents;
 mod otel;
 mod server;
 mod traits;
