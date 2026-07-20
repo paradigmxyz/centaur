@@ -32,6 +32,44 @@ describe('NanocodexRendererEventMapper', () => {
     ])
   })
 
+  test('suppresses commentary and streams only the final-answer item', () => {
+    const mapper = new NanocodexRendererEventMapper()
+    expect(
+      mapper.process(
+        native('assistant.delta', {
+          item_id: 'commentary-1',
+          phase: 'commentary',
+          text: 'I’ll verify.'
+        })
+      )
+    ).toEqual([])
+    expect(
+      mapper.process(
+        native('assistant.delta', {
+          item_id: 'answer-1',
+          phase: 'final_answer',
+          text: 'Done.'
+        }, 2)
+      )
+    ).toEqual([{ type: 'renderer.message.delta', delta: 'Done.' }])
+    expect(
+      mapper.process(
+        native('assistant.message', {
+          phase: 'final_answer',
+          text: 'Done.'
+        }, 3)
+      )
+    ).toEqual([])
+    expect(mapper.process(native('run.completed', {}, 4))).toEqual([
+      {
+        type: 'renderer.done',
+        answerMarkdown: 'Done.',
+        streamFinalUpdates: true,
+        threadId: 'nano-session'
+      }
+    ])
+  })
+
   test('renders native tool lifecycle without an app-server conversion', () => {
     const mapper = new NanocodexRendererEventMapper()
     expect(

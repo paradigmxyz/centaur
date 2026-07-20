@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use nanocodex::{AgentEvent, AgentEvents, Nanocodex, Prompt, Tools, Turn, UserInput};
+use nanocodex::{AgentEvent, AgentEvents, Nanocodex, Prompt, Thinking, Tools, Turn, UserInput};
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -34,14 +34,6 @@ async fn run() -> Result<()> {
     let cwd = env::current_dir()?;
     let session_id = format!("nanocodex-{}", Uuid::new_v4().simple());
     let child_agents = Arc::new(ChildAgents::default());
-    let tools_agents = Arc::downgrade(&child_agents);
-    let tools = Tools::default();
-    let (agent, mut events) = Nanocodex::builder(api_key)
-        .workspace(&cwd)
-        .session_id(session_id)
-        .tools_factory(move |agent| with_subagents(tools.clone(), agent, tools_agents.clone()))
-        .build()
-        .map_err(nanocodex_error)?;
 
     let (sender, mut receiver) = mpsc::unbounded_channel();
     std::thread::spawn(move || {
@@ -55,15 +47,41 @@ async fn run() -> Result<()> {
 
     let mut stdout = io::stdout().lock();
     let mut staged = HashMap::new();
+    let mut agent = None;
+    let mut events = None;
+    let mut subagents_enabled = false;
     while let Some(line) = receiver.recv().await {
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
         match parse_blocks_line(&line, &mut staged)? {
-            BlocksCommand::User(prompt) => {
+            BlocksCommand::User { prompt, subagents } => {
+                if agent.is_none() {
+                    let (new_agent, new_events) =
+                        build_agent(&api_key, &cwd, &session_id, &child_agents, subagents)?;
+                    agent = Some(new_agent);
+                    events = Some(new_events);
+                    subagents_enabled = subagents;
+                } else if subagents && !subagents_enabled {
+                    eprintln!("nanocodex --subagents only applies to the first session message");
+                }
+                let agent = agent.as_ref().ok_or_else(|| {
+                    HarnessServerError::Nanocodex("agent was not initialized".to_owned())
+                })?;
                 let turn = agent.prompt(prompt).await.map_err(nanocodex_error)?;
-                run_turn(&mut events, turn, &mut receiver, &mut staged, &mut stdout).await?;
+                let events = events.as_mut().ok_or_else(|| {
+                    HarnessServerError::Nanocodex("event stream was not initialized".to_owned())
+                })?;
+                run_turn(
+                    events,
+                    turn,
+                    &mut receiver,
+                    &mut staged,
+                    &mut stdout,
+                    subagents_enabled,
+                )
+                .await?;
             }
             BlocksCommand::AttachmentChunk => {}
             BlocksCommand::Interrupt => {
@@ -75,12 +93,36 @@ async fn run() -> Result<()> {
     Ok(())
 }
 
+fn build_agent(
+    api_key: &str,
+    cwd: &std::path::Path,
+    session_id: &str,
+    child_agents: &Arc<ChildAgents>,
+    subagents: bool,
+) -> Result<(Nanocodex, AgentEvents)> {
+    let builder = Nanocodex::builder(api_key)
+        .thinking(Thinking::Low)
+        .workspace(cwd)
+        .session_id(session_id);
+    let result = if subagents {
+        let tools_agents = Arc::downgrade(child_agents);
+        let tools = Tools::default();
+        builder
+            .tools_factory(move |agent| with_subagents(tools.clone(), agent, tools_agents.clone()))
+            .build()
+    } else {
+        builder.build()
+    };
+    result.map_err(nanocodex_error)
+}
+
 async fn run_turn(
     events: &mut AgentEvents,
     turn: Turn,
     receiver: &mut mpsc::UnboundedReceiver<io::Result<String>>,
     staged: &mut HashMap<String, PathBuf>,
     stdout: &mut impl Write,
+    subagents_enabled: bool,
 ) -> Result<()> {
     let mut input_open = true;
     loop {
@@ -105,7 +147,10 @@ async fn run_turn(
                     continue;
                 }
                 match parse_blocks_line(&line, staged)? {
-                    BlocksCommand::User(prompt) => {
+                    BlocksCommand::User { prompt, subagents } => {
+                        if subagents && !subagents_enabled {
+                            eprintln!("nanocodex --subagents only applies to the first session message");
+                        }
                         turn.steer(prompt).await.map_err(nanocodex_error)?;
                     }
                     BlocksCommand::AttachmentChunk => {}
@@ -136,7 +181,7 @@ fn nanocodex_error(error: nanocodex::NanocodexError) -> HarnessServerError {
 }
 
 enum BlocksCommand {
-    User(Prompt),
+    User { prompt: Prompt, subagents: bool },
     AttachmentChunk,
     Interrupt,
 }
@@ -195,7 +240,11 @@ fn parse_blocks_line(line: &str, staged: &mut HashMap<String, PathBuf>) -> Resul
                     text: "continue".to_owned(),
                 });
             }
-            Ok(BlocksCommand::User(Prompt::content(inputs)))
+            let subagents = take_subagents_flag(&mut inputs);
+            Ok(BlocksCommand::User {
+                prompt: Prompt::content(inputs),
+                subagents,
+            })
         }
         "attachment.chunk" => {
             let id = required_string(parsed.attachment_id, "attachmentId")?;
@@ -230,6 +279,44 @@ fn parse_blocks_line(line: &str, staged: &mut HashMap<String, PathBuf>) -> Resul
             message: format!("unsupported blocks input type `{kind}`"),
         }),
     }
+}
+
+fn take_subagents_flag(inputs: &mut [UserInput]) -> bool {
+    let mut enabled = false;
+    for input in inputs {
+        let UserInput::Text { text } = input else {
+            continue;
+        };
+        enabled |= strip_standalone_flag(text, "--subagents");
+    }
+    enabled
+}
+
+fn strip_standalone_flag(text: &mut String, flag: &str) -> bool {
+    let mut found = false;
+    let mut search_from = 0;
+    while let Some(relative_start) = text[search_from..].find(flag) {
+        let start = search_from + relative_start;
+        let end = start + flag.len();
+        let starts_token = start == 0
+            || text[..start]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace);
+        let ends_token =
+            end == text.len() || text[end..].chars().next().is_some_and(char::is_whitespace);
+        if starts_token && ends_token {
+            text.replace_range(start..end, "");
+            found = true;
+            search_from = start;
+        } else {
+            search_from = end;
+        }
+    }
+    if found {
+        *text = text.trim().to_owned();
+    }
+    found
 }
 
 fn parse_content(value: &Value, staged: &HashMap<String, PathBuf>) -> Result<Vec<UserInput>> {
@@ -380,9 +467,10 @@ mod tests {
             &mut HashMap::new(),
         )
         .unwrap();
-        let BlocksCommand::User(prompt) = command else {
+        let BlocksCommand::User { prompt, subagents } = command else {
             panic!("expected user prompt");
         };
+        assert!(!subagents);
         assert_eq!(
             serde_json::to_value(prompt).unwrap()["instruction"][0]["text"],
             "hello"
@@ -396,9 +484,10 @@ mod tests {
             &mut HashMap::new(),
         )
         .unwrap();
-        let BlocksCommand::User(prompt) = command else {
+        let BlocksCommand::User { prompt, subagents } = command else {
             panic!("expected user prompt");
         };
+        assert!(!subagents);
         let text = serde_json::to_value(prompt).unwrap()["instruction"][0]["text"]
             .as_str()
             .unwrap()
@@ -410,5 +499,39 @@ mod tests {
             .unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"hello");
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn subagents_are_opt_in_on_the_first_prompt() {
+        let command = parse_blocks_line(
+            r#"{"type":"user","message":{"content":[{"type":"text","text":"--subagents inspect the repo"}]}}"#,
+            &mut HashMap::new(),
+        )
+        .unwrap();
+        let BlocksCommand::User { prompt, subagents } = command else {
+            panic!("expected user prompt");
+        };
+        assert!(subagents);
+        assert_eq!(
+            serde_json::to_value(prompt).unwrap()["instruction"][0]["text"],
+            "inspect the repo"
+        );
+    }
+
+    #[test]
+    fn subagent_flag_requires_a_standalone_token() {
+        let command = parse_blocks_line(
+            r#"{"type":"user","text":"keep --subagents=false literal"}"#,
+            &mut HashMap::new(),
+        )
+        .unwrap();
+        let BlocksCommand::User { prompt, subagents } = command else {
+            panic!("expected user prompt");
+        };
+        assert!(!subagents);
+        assert_eq!(
+            serde_json::to_value(prompt).unwrap()["instruction"][0]["text"],
+            "keep --subagents=false literal"
+        );
     }
 }

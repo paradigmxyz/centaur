@@ -644,7 +644,7 @@ describe('slackbotv2', () => {
 
     const nanocodexRoot = await sendMention(
       undefined,
-      '--nanocodex start with the native harness',
+      '--nanocodex --subagents start with the native harness',
       'Ev-slackbotv2-nanocodex-opt-in'
     )
     await sendMention(
@@ -670,6 +670,7 @@ describe('slackbotv2', () => {
     // unflagged messages consult it.
     expect(strategyRequestCount).toBe(2)
     expect(JSON.stringify(codexApi.executes[0]!.body)).not.toContain('--nanocodex')
+    expect(JSON.stringify(codexApi.executes[0]!.body)).toContain('--subagents')
     expect(JSON.stringify(codexApi.executes[0]!.body)).toContain(
       'start with the native harness'
     )

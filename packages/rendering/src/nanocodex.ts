@@ -38,12 +38,14 @@ export class NanocodexRendererEventMapper
 
     switch (event.type) {
       case 'assistant.delta': {
+        if (stringField(event.payload, 'phase') === 'commentary') return []
         const delta = stringField(event.payload, 'text')
         if (!delta) return []
         this.answer += delta
         return [{ type: 'renderer.message.delta', delta }]
       }
       case 'assistant.message': {
+        if (stringField(event.payload, 'phase') === 'commentary') return []
         const markdown = stringField(event.payload, 'text')
         if (!markdown || markdown === this.answer) return []
         if (markdown.startsWith(this.answer)) {
