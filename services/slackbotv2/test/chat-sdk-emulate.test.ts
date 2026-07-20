@@ -583,7 +583,7 @@ describe('slackbotv2', () => {
     )
   })
 
-  it('opts one Slack thread into nanocodex without changing the configured default', async () => {
+  it('keeps a top-level harness flag pinned when the LLM strategy guesses another harness', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
     let strategyRequestCount = 0
@@ -599,10 +599,12 @@ describe('slackbotv2', () => {
                 content: [
                   {
                     text: JSON.stringify({
-                      harness: null,
-                      model: null,
-                      provider: null,
-                      reasoning: null
+                      // Model the production false positive: an ordinary
+                      // follow-up is classified as a different harness.
+                      harness: strategyRequestCount === 1 ? 'codex' : null,
+                      model: strategyRequestCount === 1 ? 'gpt-5.6-sol' : null,
+                      provider: strategyRequestCount === 1 ? 'responses' : null,
+                      reasoning: strategyRequestCount === 1 ? 'high' : null
                     })
                   }
                 ]
@@ -615,8 +617,8 @@ describe('slackbotv2', () => {
       state: sharedState
     })
 
-    const sendMention = async (parentTs: string, text: string, eventId: string) => {
-      const mention = await postUserMessage(`<@${BOT_USER_ID}> ${text}`, parentTs)
+    const sendMention = async (threadTs: string | undefined, text: string, eventId: string) => {
+      const mention = await postUserMessage(`<@${BOT_USER_ID}> ${text}`, threadTs)
       const waits: Promise<unknown>[] = []
       const response = await bot.app.request(
         '/api/webhooks/slack',
@@ -628,7 +630,7 @@ describe('slackbotv2', () => {
             channel: CHANNEL_ID,
             team: TEAM_ID,
             ts: mention.ts,
-            thread_ts: parentTs,
+            thread_ts: threadTs,
             text: `<@${BOT_USER_ID}> ${text}`
           }
         }),
@@ -637,23 +639,22 @@ describe('slackbotv2', () => {
       )
       expect(response.status).toBe(200)
       await Promise.all(waits)
+      return mention
     }
 
-    const nanocodexParent = await postUserMessage('Nanocodex thread context.')
-    await sendMention(
-      nanocodexParent.ts,
+    const nanocodexRoot = await sendMention(
+      undefined,
       '--nanocodex start with the native harness',
       'Ev-slackbotv2-nanocodex-opt-in'
     )
     await sendMention(
-      nanocodexParent.ts,
+      nanocodexRoot.ts,
       'continue without another flag',
       'Ev-slackbotv2-nanocodex-sticky'
     )
 
-    const defaultParent = await postUserMessage('Default harness thread context.')
-    await sendMention(
-      defaultParent.ts,
+    const defaultRoot = await sendMention(
+      undefined,
       'use the configured default',
       'Ev-slackbotv2-default-after-nanocodex'
     )
@@ -672,12 +673,20 @@ describe('slackbotv2', () => {
     expect(JSON.stringify(codexApi.executes[0]!.body)).toContain(
       'start with the native harness'
     )
+    const followUpInput = JSON.parse(
+      codexApi.executes[1]!.body.input_lines.at(-1)!
+    ) as Record<string, unknown>
+    expect(followUpInput.model).toBeUndefined()
+    expect(followUpInput.provider).toBeUndefined()
+    // Reasoning remains a per-turn setting; only the sticky harness/model/
+    // provider selection is protected by the root flag.
+    expect(followUpInput.reasoning).toBe('high')
 
     const nanocodexState = await sharedState.get<Record<string, unknown>>(
-      `thread-state:${threadKey(nanocodexParent.ts)}`
+      `thread-state:${threadKey(nanocodexRoot.ts)}`
     )
     const defaultState = await sharedState.get<Record<string, unknown>>(
-      `thread-state:${threadKey(defaultParent.ts)}`
+      `thread-state:${threadKey(defaultRoot.ts)}`
     )
     expect(nanocodexState?.harnessType).toBe('nanocodex')
     expect(defaultState?.harnessType).toBeUndefined()
