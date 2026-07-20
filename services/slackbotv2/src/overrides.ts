@@ -85,6 +85,7 @@ const STRATEGY_REASONING_EFFORTS = new Set([
 const STRATEGY_MODEL_HARNESSES: Record<string, string> = {
   'claude-fable-5': 'claudecode',
   'claude-haiku-4-5': 'claudecode',
+  'claude-opus-4-7': 'claudecode',
   'claude-opus-4-8': 'claudecode',
   'claude-sonnet-4-6': 'claudecode',
   'claude-sonnet-5': 'claudecode',

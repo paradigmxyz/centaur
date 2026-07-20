@@ -347,6 +347,12 @@ describe('validateStrategyOverrides', () => {
   })
 
   test('canonical strategy model ids imply their compatible harness', () => {
+    expect(validateStrategyOverrides({ model: 'claude-opus-4-7' })).toEqual({
+      harnessType: 'claudecode',
+      model: 'claude-opus-4-7',
+      provider: undefined,
+      reasoning: undefined
+    })
     expect(
       validateStrategyOverrides({
         model: 'claude-opus-4-8'
