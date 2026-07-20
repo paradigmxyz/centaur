@@ -86,6 +86,9 @@ export class NanocodexRendererEventMapper
       case 'run.completed':
         return this.complete()
       case 'run.failed':
+        if (['cancelled', 'canceled'].includes(stringField(event.payload, 'status'))) {
+          return this.interrupt()
+        }
         return this.fail(this.error || 'Nanocodex run failed')
       default:
         return []
@@ -119,8 +122,14 @@ export class NanocodexRendererEventMapper
     ) {
       return this.fail(String(data.error ?? 'Execution failed'))
     }
+    if (kind === 'session.execution_cancelled') return this.interrupt()
     if (kind === 'session.execution_completed') return this.complete()
     return []
+  }
+
+  private interrupt(): RendererEvent[] {
+    if (!this.answer) this.answer = 'Execution interrupted'
+    return this.complete()
   }
 
   private complete(): RendererEvent[] {

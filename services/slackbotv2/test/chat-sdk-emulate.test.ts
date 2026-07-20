@@ -24,6 +24,7 @@ import {
 } from '../src/index'
 import { clearRequesterIdentityCacheForTests } from '../src/session-api'
 import { slackbotMetrics } from '../src/metrics'
+import { createOpenAiMessageOverridesStrategy } from '../src/message-overrides-strategy'
 import claudeSettings from '../../../harness/claude/settings.json'
 
 const BOT_TOKEN = 'xoxb-slackbotv2-emulate'
@@ -585,7 +586,34 @@ describe('slackbotv2', () => {
   it('opts one Slack thread into nanocodex without changing the configured default', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
-    bot = createTestBot({ defaultHarnessType: 'claudecode', state: sharedState })
+    let strategyRequestCount = 0
+    bot = createTestBot({
+      defaultHarnessType: 'claudecode',
+      messageOverridesStrategy: createOpenAiMessageOverridesStrategy({
+        apiKey: 'test-key',
+        fetch: (async () => {
+          strategyRequestCount += 1
+          return Response.json({
+            output: [
+              {
+                content: [
+                  {
+                    text: JSON.stringify({
+                      harness: null,
+                      model: null,
+                      provider: null,
+                      reasoning: null
+                    })
+                  }
+                ]
+              }
+            ]
+          })
+        }) as unknown as typeof fetch,
+        model: 'gpt-5.4-nano'
+      }),
+      state: sharedState
+    })
 
     const sendMention = async (parentTs: string, text: string, eventId: string) => {
       const mention = await postUserMessage(`<@${BOT_USER_ID}> ${text}`, parentTs)
@@ -637,6 +665,9 @@ describe('slackbotv2', () => {
     ])
     expect(codexApi.creates[0]!.body.on_harness_conflict).toBe('restart')
     expect(codexApi.creates[2]!.body.on_harness_conflict).toBeUndefined()
+    // The explicit flag bypasses the deployed LLM strategy. Only the two
+    // unflagged messages consult it.
+    expect(strategyRequestCount).toBe(2)
     expect(JSON.stringify(codexApi.executes[0]!.body)).not.toContain('--nanocodex')
     expect(JSON.stringify(codexApi.executes[0]!.body)).toContain(
       'start with the native harness'

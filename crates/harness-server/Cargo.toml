@@ -23,7 +23,7 @@ codex-utils-absolute-path = { git = "https://github.com/openai/codex", rev = "e9
 # provider's per-image caps (Bedrock/mantle rejects images past ~5 MB / 8000 px).
 # Scoped to the formats chat clients actually paste to keep the build lean.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
-nanocodex = { git = "https://github.com/gakonst/nanocodex", rev = "bd670d7c749fd1cdcb5ff925c36a5f2bbc95dbfe" }
+nanocodex = { git = "https://github.com/gakonst/nanocodex", rev = "d2df7bfe25d05efc235f464aae38117708befe0e" }
 opentelemetry-proto = { version = "0.32.0", default-features = false, features = ["trace", "gen-tonic-messages"] }
 prost = "0.14"
 serde = { version = "1.0", features = ["derive"] }

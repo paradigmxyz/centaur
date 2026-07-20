@@ -13,7 +13,7 @@ const SYSTEM_PROMPT = [
   'Decide whether the Slack message asks to use a specific AI harness, model, provider, or reasoning effort.',
   'Return only canonical override values from the schema.',
   'Use null for every field when the message does not ask to change model selection.',
-  'Allowed harness values: codex, claudecode, amp.',
+  'Allowed harness values: codex, claudecode, amp, nanocodex.',
   'Allowed provider values: responses, amazon-bedrock, openrouter.',
   'Allowed reasoning values: none, minimal, low, medium, high, xhigh, max.',
   'Map fuzzy effort words to the nearest reasoning value by magnitude. Examples: tiny/cheap/fast -> low or minimal; normal/default -> medium; deep/strong/intense -> high or xhigh; maximum/superduper/biggest -> max.',
@@ -49,7 +49,7 @@ const MESSAGE_OVERRIDES_SCHEMA = {
   additionalProperties: false,
   properties: {
     harness: {
-      enum: ['codex', 'claudecode', 'amp', null],
+      enum: ['codex', 'claudecode', 'amp', 'nanocodex', null],
       type: ['string', 'null']
     },
     model: {
@@ -103,6 +103,15 @@ export function createOpenAiMessageOverridesStrategy(
   const fetchFn = options.fetch ?? fetch
 
   return async ({ text }) => {
+    // Explicit flags are a deterministic user command, even when the deployment
+    // enables the LLM strategy for natural-language model requests. Handle them
+    // first so a strict strategy schema or model failure cannot discard the
+    // selection, and so flags never leak into the harness prompt.
+    const { cleanedText, ...explicitOverrides } = extractMessageOverrides(text)
+    if (Object.values(explicitOverrides).some(value => value !== undefined)) {
+      return { cleanedText, overrides: explicitOverrides }
+    }
+
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), timeoutMs)
     try {

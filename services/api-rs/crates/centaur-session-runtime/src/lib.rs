@@ -5733,11 +5733,19 @@ fn terminal_output(value: &Value, prior_final_answer_text: &str) -> Option<Termi
     let method = value.get("method").and_then(Value::as_str);
     let event_type = value.get("type").and_then(Value::as_str);
 
-    if matches!(method, Some("error" | "turn/failed"))
-        || matches!(
-            event_type,
-            Some("error" | "turn.failed" | "run.error" | "run.failed")
+    if event_type == Some("run.failed")
+        && matches!(
+            value.pointer("/payload/status").and_then(Value::as_str),
+            Some("cancelled" | "canceled")
         )
+    {
+        return Some(TerminalOutput::Cancelled {
+            reason: "turn_interrupted",
+        });
+    }
+
+    if matches!(method, Some("error" | "turn/failed"))
+        || matches!(event_type, Some("error" | "turn.failed" | "run.failed"))
     {
         return Some(TerminalOutput::Failed {
             error: terminal_error_text(value),
@@ -7031,7 +7039,7 @@ mod tests {
     }
 
     #[test]
-    fn nanocodex_run_error_is_terminal_with_native_message() {
+    fn nanocodex_run_error_waits_for_run_failed() {
         let event = json!({
             "protocol_version": 1,
             "request_id": "nano-1",
@@ -7039,10 +7047,36 @@ mod tests {
             "type": "run.error",
             "payload": {"message": "proxy refused"},
         });
+        assert_eq!(terminal_output(&event, ""), None);
+
+        let terminal = json!({
+            "protocol_version": 1,
+            "request_id": "nano-1",
+            "seq": 3,
+            "type": "run.failed",
+            "payload": {"status": "failed"},
+        });
         assert_eq!(
-            terminal_output(&event, ""),
+            terminal_output(&terminal, ""),
             Some(TerminalOutput::Failed {
-                error: "proxy refused".to_owned()
+                error: "terminal harness output reported failure".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn nanocodex_cancelled_run_uses_the_existing_cancellation_path() {
+        let terminal = json!({
+            "protocol_version": 1,
+            "request_id": "nano-1",
+            "seq": 2,
+            "type": "run.failed",
+            "payload": {"status": "cancelled"},
+        });
+        assert_eq!(
+            terminal_output(&terminal, ""),
+            Some(TerminalOutput::Cancelled {
+                reason: "turn_interrupted"
             })
         );
     }

@@ -63,15 +63,7 @@ async fn run() -> Result<()> {
         match parse_blocks_line(&line, &mut staged)? {
             BlocksCommand::User(prompt) => {
                 let turn = agent.prompt(prompt).await.map_err(nanocodex_error)?;
-                run_turn(
-                    &agent,
-                    &mut events,
-                    turn,
-                    &mut receiver,
-                    &mut staged,
-                    &mut stdout,
-                )
-                .await?;
+                run_turn(&mut events, turn, &mut receiver, &mut staged, &mut stdout).await?;
             }
             BlocksCommand::AttachmentChunk => {}
             BlocksCommand::Interrupt => {
@@ -84,7 +76,6 @@ async fn run() -> Result<()> {
 }
 
 async fn run_turn(
-    agent: &Nanocodex,
     events: &mut AgentEvents,
     turn: Turn,
     receiver: &mut mpsc::UnboundedReceiver<io::Result<String>>,
@@ -115,13 +106,12 @@ async fn run_turn(
                 }
                 match parse_blocks_line(&line, staged)? {
                     BlocksCommand::User(prompt) => {
-                        agent.steer(prompt).await.map_err(nanocodex_error)?;
+                        turn.steer(prompt).await.map_err(nanocodex_error)?;
                     }
                     BlocksCommand::AttachmentChunk => {}
                     BlocksCommand::Interrupt => {
-                        return Err(HarnessServerError::Nanocodex(
-                            "turn interrupted; Nanocodex does not expose cancellation yet".to_owned()
-                        ));
+                        turn.cancel().await.map_err(nanocodex_error)?;
+                        input_open = false;
                     }
                 }
             }
@@ -216,17 +206,7 @@ fn parse_blocks_line(line: &str, staged: &mut HashMap<String, PathBuf>) -> Resul
             let path = if let Some(path) = staged.get(&id) {
                 path.clone()
             } else {
-                let name = parsed.name.as_deref().unwrap_or("attachment");
-                let suffix = PathBuf::from(name)
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    .map(|extension| format!(".{extension}"))
-                    .unwrap_or_default();
-                let path = env::temp_dir().join(format!(
-                    "centaur-nanocodex-{}{}",
-                    Uuid::new_v4().simple(),
-                    suffix
-                ));
+                let path = temporary_attachment_path(parsed.name.as_deref());
                 staged.insert(id.clone(), path.clone());
                 path
             };
@@ -307,10 +287,17 @@ fn attachment_input(value: &Value, staged: &HashMap<String, PathBuf>) -> Result<
                 .get("stagedAttachmentId")
                 .and_then(Value::as_str)
                 .and_then(|id| staged.get(id).cloned())
-        })
-        .ok_or_else(|| HarnessServerError::InvalidBlocksInput {
-            message: "Nanocodex attachment requires localPath or stagedAttachmentId".to_owned(),
-        })?;
+        });
+    let path = match path {
+        Some(path) => path,
+        None => inline_attachment_path(value)?.ok_or_else(|| {
+            HarnessServerError::InvalidBlocksInput {
+                message:
+                    "Nanocodex attachment requires localPath, stagedAttachmentId, or dataBase64"
+                        .to_owned(),
+            }
+        })?,
+    };
     let mime = value
         .get("mimeType")
         .or_else(|| value.get("mime_type"))
@@ -325,6 +312,38 @@ fn attachment_input(value: &Value, staged: &HashMap<String, PathBuf>) -> Result<
             text: format!("[Attached file saved to {}]", path.display()),
         })
     }
+}
+
+fn inline_attachment_path(value: &Value) -> Result<Option<PathBuf>> {
+    let Some(data) = value
+        .get("dataBase64")
+        .and_then(Value::as_str)
+        .filter(|data| !data.is_empty())
+    else {
+        return Ok(None);
+    };
+    let bytes =
+        BASE64_STANDARD
+            .decode(data)
+            .map_err(|source| HarnessServerError::InvalidBlocksInput {
+                message: format!("invalid attachment dataBase64: {source}"),
+            })?;
+    let path = temporary_attachment_path(value.get("name").and_then(Value::as_str));
+    std::fs::write(&path, bytes)?;
+    Ok(Some(path))
+}
+
+fn temporary_attachment_path(name: Option<&str>) -> PathBuf {
+    let suffix = PathBuf::from(name.unwrap_or("attachment"))
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| format!(".{extension}"))
+        .unwrap_or_default();
+    env::temp_dir().join(format!(
+        "centaur-nanocodex-{}{}",
+        Uuid::new_v4().simple(),
+        suffix
+    ))
 }
 
 fn required_string(value: Option<String>, name: &str) -> Result<String> {
@@ -368,5 +387,28 @@ mod tests {
             serde_json::to_value(prompt).unwrap()["instruction"][0]["text"],
             "hello"
         );
+    }
+
+    #[test]
+    fn materializes_inline_attachment_without_codex_protocol_types() {
+        let command = parse_blocks_line(
+            r#"{"type":"user","message":{"content":[{"type":"attachment","attachment_type":"document","dataBase64":"aGVsbG8=","name":"notes.txt","mimeType":"text/plain"}]}}"#,
+            &mut HashMap::new(),
+        )
+        .unwrap();
+        let BlocksCommand::User(prompt) = command else {
+            panic!("expected user prompt");
+        };
+        let text = serde_json::to_value(prompt).unwrap()["instruction"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let path = text
+            .strip_prefix("[Attached file saved to ")
+            .and_then(|text| text.strip_suffix(']'))
+            .map(PathBuf::from)
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello");
+        std::fs::remove_file(path).unwrap();
     }
 }

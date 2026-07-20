@@ -65,4 +65,17 @@ describe('NanocodexRendererEventMapper', () => {
       }
     ])
   })
+
+  test('renders a cancelled run through the stock interruption path', () => {
+    const mapper = new NanocodexRendererEventMapper()
+    expect(mapper.process(native('run.error', { message: 'turn cancelled' }))).toEqual([])
+    expect(mapper.process(native('run.failed', { status: 'cancelled' }, 2))).toEqual([
+      {
+        type: 'renderer.done',
+        answerMarkdown: 'Execution interrupted',
+        streamFinalUpdates: true,
+        threadId: 'nano-session'
+      }
+    ])
+  })
 })

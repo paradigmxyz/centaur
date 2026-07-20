@@ -1188,7 +1188,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1360,7 +1360,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1775,30 +1775,6 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
-
-[[package]]
-name = "headers"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3314d5adb5d94bcdf56771f2e50dbbc80bb4bdf88967526706205ac9eff24eb"
-dependencies = [
- "base64",
- "bytes",
- "headers-core",
- "http",
- "httpdate",
- "mime",
- "sha1 0.10.6",
-]
-
-[[package]]
-name = "headers-core"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54b4a22553d4242c49fddb9ba998a99962b5cc6f22cb5a3482bec22522403ce4"
-dependencies = [
- "http",
-]
 
 [[package]]
 name = "heck"
@@ -2319,7 +2295,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2740,7 +2716,7 @@ dependencies = [
 [[package]]
 name = "nanocodex"
 version = "0.1.0"
-source = "git+https://github.com/gakonst/nanocodex?rev=bd670d7c749fd1cdcb5ff925c36a5f2bbc95dbfe#bd670d7c749fd1cdcb5ff925c36a5f2bbc95dbfe"
+source = "git+https://github.com/gakonst/nanocodex?rev=d2df7bfe25d05efc235f464aae38117708befe0e#d2df7bfe25d05efc235f464aae38117708befe0e"
 dependencies = [
  "async-trait",
  "base64",
@@ -2769,7 +2745,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-core"
 version = "0.1.0"
-source = "git+https://github.com/gakonst/nanocodex?rev=bd670d7c749fd1cdcb5ff925c36a5f2bbc95dbfe#bd670d7c749fd1cdcb5ff925c36a5f2bbc95dbfe"
+source = "git+https://github.com/gakonst/nanocodex?rev=d2df7bfe25d05efc235f464aae38117708befe0e#d2df7bfe25d05efc235f464aae38117708befe0e"
 dependencies = [
  "serde",
  "serde_json",
@@ -2781,7 +2757,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-macros"
 version = "0.1.0"
-source = "git+https://github.com/gakonst/nanocodex?rev=bd670d7c749fd1cdcb5ff925c36a5f2bbc95dbfe#bd670d7c749fd1cdcb5ff925c36a5f2bbc95dbfe"
+source = "git+https://github.com/gakonst/nanocodex?rev=d2df7bfe25d05efc235f464aae38117708befe0e#d2df7bfe25d05efc235f464aae38117708befe0e"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2792,7 +2768,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-mcp"
 version = "0.1.0"
-source = "git+https://github.com/gakonst/nanocodex?rev=bd670d7c749fd1cdcb5ff925c36a5f2bbc95dbfe#bd670d7c749fd1cdcb5ff925c36a5f2bbc95dbfe"
+source = "git+https://github.com/gakonst/nanocodex?rev=d2df7bfe25d05efc235f464aae38117708befe0e#d2df7bfe25d05efc235f464aae38117708befe0e"
 dependencies = [
  "async-trait",
  "bm25",
@@ -2811,9 +2787,11 @@ dependencies = [
 [[package]]
 name = "nanocodex-service"
 version = "0.1.0"
-source = "git+https://github.com/gakonst/nanocodex?rev=bd670d7c749fd1cdcb5ff925c36a5f2bbc95dbfe#bd670d7c749fd1cdcb5ff925c36a5f2bbc95dbfe"
+source = "git+https://github.com/gakonst/nanocodex?rev=d2df7bfe25d05efc235f464aae38117708befe0e#d2df7bfe25d05efc235f464aae38117708befe0e"
 dependencies = [
+ "base64",
  "futures-util",
+ "http",
  "js-sys",
  "nanocodex-core",
  "rustls",
@@ -2833,7 +2811,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-tools"
 version = "0.1.0"
-source = "git+https://github.com/gakonst/nanocodex?rev=bd670d7c749fd1cdcb5ff925c36a5f2bbc95dbfe#bd670d7c749fd1cdcb5ff925c36a5f2bbc95dbfe"
+source = "git+https://github.com/gakonst/nanocodex?rev=d2df7bfe25d05efc235f464aae38117708befe0e#d2df7bfe25d05efc235f464aae38117708befe0e"
 dependencies = [
  "async-trait",
  "base64",
@@ -2948,7 +2926,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3424,7 +3402,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4128,7 +4106,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4187,7 +4165,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4966,7 +4944,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5198,8 +5176,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-tungstenite"
-version = "0.28.0"
-source = "git+https://github.com/openai-oss-forks/tokio-tungstenite?rev=0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186#0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17a073bfed563fa236697a068031408a93cd9522e08abf9933ead3e73411bd71"
 dependencies = [
  "futures-util",
  "log",
@@ -5424,21 +5403,20 @@ dependencies = [
 
 [[package]]
 name = "tungstenite"
-version = "0.27.0"
-source = "git+https://github.com/openai-oss-forks/tungstenite-rs?rev=4fffad30fe373adbdcffab9545e9e9bf4f2fc19f#4fffad30fe373adbdcffab9545e9e9bf4f2fc19f"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e48ac77174b19c110a50ab2128b24215ac9cb40e0e12e093fb602d175c569d22"
 dependencies = [
  "bytes",
  "data-encoding",
- "headers",
  "http",
  "httparse",
  "log",
- "rand 0.9.4",
+ "rand 0.10.2",
  "rustls",
  "rustls-pki-types",
- "sha1 0.10.6",
+ "sha1 0.11.0",
  "thiserror 2.0.18",
- "utf-8",
 ]
 
 [[package]]
@@ -5501,12 +5479,6 @@ dependencies = [
  "serde",
  "serde_derive",
 ]
-
-[[package]]
-name = "utf-8"
-version = "0.7.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09cc8ee72d2a9becf2f2febe0205bbed8fc6615b7cb429ad062dc7b7ddd036a9"
 
 [[package]]
 name = "utf8_iter"
@@ -5791,7 +5763,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
