@@ -16,6 +16,8 @@ const SYSTEM_PROMPT = [
   'Allowed harness values: codex, claudecode, amp.',
   'Allowed provider values: responses, amazon-bedrock, openrouter.',
   'Allowed reasoning values: none, minimal, low, medium, high, xhigh, max.',
+  'Treat inline flags such as "--claude", "--claude --model=fable", and "--fable" as model selection requests.',
+  'In this Slackbot, a request to use Claude without another named Claude model means harness claudecode and model claude-opus-4-8. Examples: "--claude what model are you?" and "using claude:" select harness claudecode and model claude-opus-4-8. Explicit Fable requests such as "--claude --model=fable" and "using claude fable:" select harness claudecode and model claude-fable-5.',
   'Map fuzzy effort words to the nearest reasoning value by magnitude. Examples: tiny/cheap/fast -> low or minimal; normal/default -> medium; deep/strong/intense -> high or xhigh; maximum/superduper/biggest -> max.',
   'Return reasoning even when the requested model is not Codex; validation will ignore reasoning that cannot apply.',
   'Map OpenAI model aliases to canonical IDs: sol -> gpt-5.6-sol, terra -> gpt-5.6-terra, luna -> gpt-5.6-luna, 5.5 -> gpt-5.5, 5.5 pro -> gpt-5.5-pro, 5.4 -> gpt-5.4, 5.4 pro -> gpt-5.4-pro, 5.4 mini -> gpt-5.4-mini, 5.4 nano -> gpt-5.4-nano.',
