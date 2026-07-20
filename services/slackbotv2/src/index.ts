@@ -18,7 +18,7 @@ import { fetchSlackThreadReplies } from '@chat-adapter/slack/api'
 import { createPostgresState } from '@chat-adapter/state-pg'
 import pg from 'pg'
 import {
-  codexAppServerToChatSdkStream,
+  harnessToChatSdkStream,
   EMPTY_FINAL_ANSWER_TEXT,
   type CodexAppServerToChatStreamOptions,
   type ChatSDKStreamChunk,
@@ -1520,7 +1520,7 @@ async function renderFallbackFinalAnswer(
     const fallback = new SlackRenderFallback()
     const chatStream = fallback.collectChatSdk(
       slackSafeChatSdkStream(
-        codexAppServerToChatSdkStream(
+        harnessToChatSdkStream(
           fallback.collectSource(stream),
           fallbackRendererOptions(options)
         )
@@ -2146,7 +2146,7 @@ async function renderExecutionStream(
       conflateChatSdkStream(
         slackSafeChatSdkStream(
           slackVisibleChatSdkStream(
-            codexAppServerToChatSdkStream(
+            harnessToChatSdkStream(
               stream,
               rendererOptions(thread, options, capture, trace)
             ),
@@ -2201,7 +2201,7 @@ async function renderRecoveredExecutionStream(
       conflateChatSdkStream(
         slackSafeChatSdkStream(
           slackVisibleChatSdkStream(
-            codexAppServerToChatSdkStream(
+            harnessToChatSdkStream(
               stream,
               rendererOptions(thread, options, capture, trace)
             ),
@@ -2252,7 +2252,7 @@ async function renderPlainTextExecutionStream(
   try {
     const chatStream = fallback.collectChatSdk(
       slackSafeChatSdkStream(
-        codexAppServerToChatSdkStream(
+        harnessToChatSdkStream(
           fallback.collectSource(stream),
           rendererOptions(thread, options, undefined, trace)
         )

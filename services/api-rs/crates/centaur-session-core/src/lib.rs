@@ -360,6 +360,7 @@ pub enum HarnessType {
     Codex,
     Amp,
     ClaudeCode,
+    Nanocodex,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, AsRefStr, Display, EnumString)]
@@ -855,6 +856,10 @@ mod tests {
     fn harness_type_accepts_supported_values() {
         assert_eq!(HarnessType::from_str("codex").unwrap(), HarnessType::Codex);
         assert_eq!(HarnessType::from_str("amp").unwrap(), HarnessType::Amp);
+        assert_eq!(
+            HarnessType::from_str("nanocodex").unwrap(),
+            HarnessType::Nanocodex
+        );
         assert_eq!(
             HarnessType::from_str("claudecode").unwrap(),
             HarnessType::ClaudeCode

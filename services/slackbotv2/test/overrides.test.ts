@@ -30,6 +30,7 @@ describe('extractMessageOverrides', () => {
     expect(extractMessageOverrides('--claude-code review this').harnessType).toBe('claudecode')
     expect(extractMessageOverrides('--amp review this').harnessType).toBe('amp')
     expect(extractMessageOverrides('--codex review this').harnessType).toBe('codex')
+    expect(extractMessageOverrides('--nanocodex review this').harnessType).toBe('nanocodex')
   })
 
   test('parses harness flag anywhere in the message', () => {

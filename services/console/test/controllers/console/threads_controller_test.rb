@@ -601,6 +601,8 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_equal "Slack", controller.send(:thread_source_label, session)
     assert_equal "slack", controller.send(:thread_source_icon, session)
     assert_equal "Codex", controller.send(:thread_harness_label, session)
+    session.harness_type = "nanocodex"
+    assert_equal "Nanocodex", controller.send(:thread_harness_label, session)
   end
 
   test "thread model label prefers the latest execution's recorded model override" do
@@ -1340,6 +1342,61 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
   end
 
   OutputLineEvent = Struct.new(:payload, :created_at, :execution_id, :event_id, keyword_init: true)
+
+  test "thinking transcript item consumes native nanocodex events" do
+    controller = Console::ThreadsController.new
+    now = Time.zone.now
+    reasoning = OutputLineEvent.new(
+      payload: {
+        protocol_version: 1,
+        request_id: "nano-1",
+        seq: 2,
+        type: "reasoning.summary.delta",
+        payload: { text: "Checking the runtime." }
+      }.to_json,
+      created_at: now
+    )
+    tool = OutputLineEvent.new(
+      payload: {
+        protocol_version: 1,
+        request_id: "nano-1",
+        seq: 3,
+        type: "tool.call",
+        payload: { call_id: "call-1", tool: "shell", arguments: { cmd: "pwd" } }
+      }.to_json,
+      created_at: now
+    )
+
+    assert_equal "Checking the runtime.", controller.send(:thinking_transcript_item, reasoning)[:text]
+    tool_item = controller.send(:thinking_transcript_item, tool)
+    assert_equal "Tool call", tool_item[:label]
+    assert_includes tool_item[:text], "shell"
+    assert_includes tool_item[:text], '"cmd": "pwd"'
+  end
+
+  test "compact trace grouping joins native nanocodex reasoning deltas" do
+    controller = Console::ThreadsController.new
+    now = Time.zone.now
+    items = [ "Checking ", "the ", "runtime." ].map.with_index do |text, index|
+      event = OutputLineEvent.new(
+        payload: {
+          protocol_version: 1,
+          request_id: "nano-1",
+          seq: index + 1,
+          type: "reasoning.summary.delta",
+          payload: { text: text }
+        }.to_json,
+        execution_id: "exe-1",
+        event_id: index + 1,
+        created_at: now
+      )
+      controller.send(:thinking_transcript_item, event)
+    end
+
+    grouped = controller.send(:compact_trace_items, items)
+    assert_equal 1, grouped.length
+    assert_equal "Checking the runtime.", grouped.first[:text]
+  end
 
   test "thinking transcript item is extracted from a completed reasoning output line" do
     controller = Console::ThreadsController.new

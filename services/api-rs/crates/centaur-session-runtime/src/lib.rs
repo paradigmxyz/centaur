@@ -3700,6 +3700,7 @@ fn harness_server_subcommand(harness: &HarnessType) -> &'static str {
         HarnessType::Codex => "codex",
         HarnessType::ClaudeCode => "claude-code",
         HarnessType::Amp => "amp",
+        HarnessType::Nanocodex => "nanocodex",
     }
 }
 
@@ -5733,7 +5734,10 @@ fn terminal_output(value: &Value, prior_final_answer_text: &str) -> Option<Termi
     let event_type = value.get("type").and_then(Value::as_str);
 
     if matches!(method, Some("error" | "turn/failed"))
-        || matches!(event_type, Some("error" | "turn.failed"))
+        || matches!(
+            event_type,
+            Some("error" | "turn.failed" | "run.error" | "run.failed")
+        )
     {
         return Some(TerminalOutput::Failed {
             error: terminal_error_text(value),
@@ -5748,6 +5752,11 @@ fn terminal_output(value: &Value, prior_final_answer_text: &str) -> Option<Termi
     }
 
     match event_type {
+        Some("run.completed") => Some(completed_terminal_output_with_fallback(
+            value,
+            "run_completed",
+            prior_final_answer_text,
+        )),
         Some("turn.completed") => Some(completed_turn_terminal_output(
             value,
             prior_final_answer_text,
@@ -5834,6 +5843,24 @@ enum FinalAnswerTextUpdate {
 fn output_line_final_answer_text(value: &Value) -> Option<FinalAnswerTextUpdate> {
     let method = value.get("method").and_then(Value::as_str);
     let event_type = value.get("type").and_then(Value::as_str);
+    if event_type == Some("assistant.delta") {
+        let text = value
+            .get("payload")
+            .and_then(|payload| payload.get("text"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        return (!text.is_empty()).then_some(FinalAnswerTextUpdate::Append(text));
+    }
+    if event_type == Some("assistant.message") {
+        let text = value
+            .get("payload")
+            .and_then(|payload| payload.get("text"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        return (!text.is_empty()).then_some(FinalAnswerTextUpdate::Replace(text));
+    }
     if matches!(method, Some("item/agentMessage/delta"))
         || matches!(event_type, Some("item.agentMessage.delta"))
     {
@@ -5939,6 +5966,7 @@ fn terminal_payload_text(value: &Value) -> String {
                 "delta",
                 "content",
                 "params",
+                "payload",
             ] {
                 if let Some(text) = object.get(key).map(terminal_payload_text)
                     && !text.trim().is_empty()
@@ -6448,6 +6476,14 @@ fn is_transient_steering_startup_error(error: &SessionRuntimeError) -> bool {
 fn harness_thread_id_from_output_line(line: &str) -> Option<String> {
     let value: Value = serde_json::from_str(line).ok()?;
     let event_type = value.get("type").and_then(Value::as_str);
+    if event_type == Some("run.started") {
+        return value
+            .get("request_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|request_id| !request_id.is_empty())
+            .map(ToOwned::to_owned);
+    }
     if event_type != Some("thread.started") {
         return None;
     }
@@ -6960,6 +6996,53 @@ mod tests {
             Some(TerminalOutput::Completed {
                 reason: "turn_completed",
                 result_text: Some("Final answer".to_owned())
+            })
+        );
+    }
+
+    #[test]
+    fn nanocodex_native_events_supply_answer_and_terminal_output() {
+        let delta = json!({
+            "protocol_version": 1,
+            "request_id": "nano-1",
+            "seq": 2,
+            "type": "assistant.delta",
+            "payload": {"text": "Final answer"},
+        });
+        let terminal = json!({
+            "protocol_version": 1,
+            "request_id": "nano-1",
+            "seq": 3,
+            "type": "run.completed",
+            "payload": {"status": "completed"},
+        });
+
+        let Some(FinalAnswerTextUpdate::Append(answer)) = output_line_final_answer_text(&delta)
+        else {
+            panic!("Nanocodex delta should append final-answer text")
+        };
+        assert_eq!(
+            terminal_output(&terminal, &answer),
+            Some(TerminalOutput::Completed {
+                reason: "run_completed",
+                result_text: Some("Final answer".to_owned())
+            })
+        );
+    }
+
+    #[test]
+    fn nanocodex_run_error_is_terminal_with_native_message() {
+        let event = json!({
+            "protocol_version": 1,
+            "request_id": "nano-1",
+            "seq": 2,
+            "type": "run.error",
+            "payload": {"message": "proxy refused"},
+        });
+        assert_eq!(
+            terminal_output(&event, ""),
+            Some(TerminalOutput::Failed {
+                error: "proxy refused".to_owned()
             })
         );
     }

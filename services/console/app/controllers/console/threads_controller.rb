@@ -26,6 +26,8 @@ class Console::ThreadsController < ApplicationController
     tool_use
     toolresult
     tool_result
+    tool.call
+    tool.result
   ].freeze
   COMPLETED_TRACE_METHOD_PATTERNS = %w[
     item/completed
@@ -110,6 +112,8 @@ class Console::ThreadsController < ApplicationController
     ComposerAgent.new(value: "gpt-5.6-sol", label: "GPT-5.6 Sol",
                       harness: "codex", model: "gpt-5.6-sol",
                       efforts: CODEX_EFFORTS + [ %w[max Max] ]),
+    ComposerAgent.new(value: "nanocodex", label: "Nanocodex (GPT-5.6 Sol)",
+                      harness: "nanocodex", model: nil, efforts: []),
     ComposerAgent.new(value: "gpt-5.5", label: "GPT-5.5",
                       harness: "codex", model: "gpt-5.5",
                       efforts: CODEX_EFFORTS),
@@ -1003,6 +1007,16 @@ class Console::ThreadsController < ApplicationController
   end
 
   def compact_trace_items(items)
+    items = items.each_with_object([]) do |item, compacted|
+      previous = compacted.last
+      if item[:trace_kind] == "reasoning_delta" &&
+          previous&.dig(:trace_kind) == "reasoning_delta" && same_trace_group?(previous, item)
+        previous[:text] += item[:text]
+      else
+        compacted << item.dup
+      end
+    end
+
     grouped = []
     command_group = []
 
@@ -1095,13 +1109,18 @@ class Console::ThreadsController < ApplicationController
 
   def reasoning_trace(value)
     text = reasoning_event_text(value)
-    return nil if text.blank?
+    kind = value["type"].to_s == "reasoning.summary.delta" ? "reasoning_delta" : nil
+    return nil if text.nil? || (kind.nil? && text.blank?)
 
-    { label: "Thinking", text: text }
+    { label: "Thinking", text: text, kind: kind }
   end
 
   def reasoning_event_text(value)
     method = (value["method"] || value["type"]).to_s.tr("/", ".")
+    if method == "reasoning.summary.delta"
+      text = value.dig("payload", "text").to_s
+      return text.empty? ? nil : text
+    end
     return nil unless method == "item.completed"
 
     item = value.dig("params", "item") || value["item"]
@@ -1137,7 +1156,24 @@ class Console::ThreadsController < ApplicationController
   end
 
   def tool_trace(value)
-    completed_item_trace(value) || claude_tool_use_trace(value) || claude_tool_result_trace(value)
+    nanocodex_tool_trace(value) || completed_item_trace(value) ||
+      claude_tool_use_trace(value) || claude_tool_result_trace(value)
+  end
+
+  def nanocodex_tool_trace(value)
+    type = value["type"].to_s
+    return nil unless %w[tool.call tool.result].include?(type)
+
+    payload = value["payload"]
+    return nil unless payload.is_a?(Hash)
+
+    item = {
+      "name" => payload["tool"],
+      "status" => type == "tool.call" ? "in_progress" : payload["status"],
+      "arguments" => payload["arguments"],
+      "result" => payload["result"]
+    }
+    generic_tool_item_trace(item)
   end
 
   def completed_item_trace(value)
@@ -1420,6 +1456,7 @@ class Console::ThreadsController < ApplicationController
     when "codex" then "Codex"
     when "claudecode" then "Claude Code"
     when "amp" then "Amp"
+    when "nanocodex" then "Nanocodex"
     else source_label(session.harness_type)
     end
   end

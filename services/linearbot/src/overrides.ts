@@ -27,6 +27,7 @@ const HARNESS_FLAGS: Record<string, string> = {
   "claude-code": "claudecode",
   claudecode: "claudecode",
   codex: "codex",
+  nanocodex: "nanocodex",
 };
 
 const PROVIDER_FLAGS: Record<string, { provider: string; harnessType: string }> = {
