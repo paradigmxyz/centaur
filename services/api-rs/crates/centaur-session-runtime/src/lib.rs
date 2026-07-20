@@ -5852,6 +5852,9 @@ fn output_line_final_answer_text(value: &Value) -> Option<FinalAnswerTextUpdate>
     let method = value.get("method").and_then(Value::as_str);
     let event_type = value.get("type").and_then(Value::as_str);
     if event_type == Some("assistant.delta") {
+        if nanocodex_message_phase(value) == Some("commentary") {
+            return None;
+        }
         let text = value
             .get("payload")
             .and_then(|payload| payload.get("text"))
@@ -5861,6 +5864,9 @@ fn output_line_final_answer_text(value: &Value) -> Option<FinalAnswerTextUpdate>
         return (!text.is_empty()).then_some(FinalAnswerTextUpdate::Append(text));
     }
     if event_type == Some("assistant.message") {
+        if nanocodex_message_phase(value) == Some("commentary") {
+            return None;
+        }
         let text = value
             .get("payload")
             .and_then(|payload| payload.get("text"))
@@ -5898,6 +5904,13 @@ fn output_line_final_answer_text(value: &Value) -> Option<FinalAnswerTextUpdate>
         }
     }
     None
+}
+
+fn nanocodex_message_phase(value: &Value) -> Option<&str> {
+    value
+        .get("payload")
+        .and_then(|payload| payload.get("phase"))
+        .and_then(Value::as_str)
 }
 
 fn turn_ids(value: &Value) -> Vec<String> {
@@ -7065,6 +7078,42 @@ mod tests {
                 result_text: Some("Final answer".to_owned())
             })
         );
+    }
+
+    #[test]
+    fn nanocodex_commentary_is_not_terminal_answer_text() {
+        for event_type in ["assistant.delta", "assistant.message"] {
+            let commentary = json!({
+                "protocol_version": 1,
+                "request_id": "nano-1",
+                "seq": 2,
+                "type": event_type,
+                "payload": {
+                    "item_id": "commentary-1",
+                    "phase": "commentary",
+                    "text": "I’ll verify."
+                },
+            });
+            assert!(output_line_final_answer_text(&commentary).is_none());
+        }
+
+        let final_answer = json!({
+            "protocol_version": 1,
+            "request_id": "nano-1",
+            "seq": 3,
+            "type": "assistant.message",
+            "payload": {
+                "item_id": "answer-1",
+                "phase": "final_answer",
+                "text": "Done."
+            },
+        });
+        let Some(FinalAnswerTextUpdate::Replace(text)) =
+            output_line_final_answer_text(&final_answer)
+        else {
+            panic!("final Nanocodex message should replace terminal answer text")
+        };
+        assert_eq!(text, "Done.");
     }
 
     #[test]

@@ -1,5 +1,10 @@
 import { describe, expect, test } from 'bun:test'
-import { NanocodexRendererEventMapper, isNanocodexEvent } from './nanocodex'
+import type { ChatSDKStreamChunk } from './chat-sdk'
+import {
+  NanocodexRendererEventMapper,
+  harnessToChatSdkStream,
+  isNanocodexEvent
+} from './nanocodex'
 
 const native = (type: string, payload: Record<string, unknown>, seq = 1) => ({
   eventKind: 'session.output.line',
@@ -32,7 +37,7 @@ describe('NanocodexRendererEventMapper', () => {
     ])
   })
 
-  test('suppresses commentary and streams only the final-answer item', () => {
+  test('renders completed commentary as progress before streaming the final answer', () => {
     const mapper = new NanocodexRendererEventMapper()
     expect(
       mapper.process(
@@ -45,11 +50,30 @@ describe('NanocodexRendererEventMapper', () => {
     ).toEqual([])
     expect(
       mapper.process(
+        native('assistant.message', {
+          item_id: 'commentary-1',
+          phase: 'commentary',
+          text: 'I’ll verify.'
+        }, 2)
+      )
+    ).toEqual([
+      {
+        type: 'renderer.task.update',
+        task: {
+          id: 'commentary-1',
+          title: 'Thinking',
+          status: 'complete',
+          details: [{ type: 'text', text: 'I’ll verify.' }]
+        }
+      }
+    ])
+    expect(
+      mapper.process(
         native('assistant.delta', {
           item_id: 'answer-1',
           phase: 'final_answer',
           text: 'Done.'
-        }, 2)
+        }, 3)
       )
     ).toEqual([{ type: 'renderer.message.delta', delta: 'Done.' }])
     expect(
@@ -57,10 +81,10 @@ describe('NanocodexRendererEventMapper', () => {
         native('assistant.message', {
           phase: 'final_answer',
           text: 'Done.'
-        }, 3)
+        }, 4)
       )
     ).toEqual([])
-    expect(mapper.process(native('run.completed', {}, 4))).toEqual([
+    expect(mapper.process(native('run.completed', {}, 5))).toEqual([
       {
         type: 'renderer.done',
         answerMarkdown: 'Done.',
@@ -88,6 +112,47 @@ describe('NanocodexRendererEventMapper', () => {
       type: 'renderer.task.update',
       task: { id: 'call-1', title: 'shell', status: 'complete' }
     })
+  })
+
+  test('keeps commentary and tools interleaved ahead of the final answer', async () => {
+    async function* events() {
+      yield native('assistant.delta', {
+        item_id: 'commentary-1', phase: 'commentary', text: 'Checking.'
+      }, 1)
+      yield native('assistant.message', {
+        item_id: 'commentary-1', phase: 'commentary', text: 'Checking.'
+      }, 2)
+      yield native('tool.call', { call_id: 'call-1', tool: 'shell', arguments: 'pwd' }, 3)
+      yield native('tool.result', {
+        call_id: 'call-1', tool: 'shell', status: 'completed', result: '/workspace'
+      }, 4)
+      yield native('assistant.delta', {
+        item_id: 'commentary-2', phase: 'commentary', text: 'Found it.'
+      }, 5)
+      yield native('assistant.message', {
+        item_id: 'commentary-2', phase: 'commentary', text: 'Found it.'
+      }, 6)
+      yield native('assistant.delta', {
+        item_id: 'answer-1', phase: 'final_answer', text: 'Done.'
+      }, 7)
+      yield native('assistant.message', {
+        item_id: 'answer-1', phase: 'final_answer', text: 'Done.'
+      }, 8)
+      yield native('run.completed', {}, 9)
+    }
+
+    const chunks: ChatSDKStreamChunk[] = []
+    for await (const chunk of harnessToChatSdkStream(events())) chunks.push(chunk)
+    expect(chunks.map(chunk => chunk.type === 'task_update'
+      ? `${chunk.id}:${chunk.status}`
+      : `${chunk.type}:${chunk.type === 'markdown_text' ? chunk.text : chunk.title}`
+    )).toEqual([
+      'commentary-1:complete',
+      'call-1:in_progress',
+      'call-1:complete',
+      'commentary-2:complete',
+      'markdown_text:Done.'
+    ])
   })
 
   test('carries run.error into the terminal failure', () => {
