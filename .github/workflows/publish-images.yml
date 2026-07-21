@@ -25,6 +25,7 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
+  attestations: write
   contents: read
   id-token: write
   packages: write
@@ -130,6 +131,7 @@ jobs:
           labels: |
             org.opencontainers.image.title=${{ matrix.image }}
             org.opencontainers.image.source=${{ env.IMAGE_SOURCE }}
+            org.opencontainers.image.revision=${{ github.sha }}
         env:
           DOCKER_METADATA_PR_HEAD_SHA: true
 
@@ -179,9 +181,11 @@ jobs:
       matrix:
         include:
           - image: centaur-api-rs
+            attest: true
           - image: centaur-slackbotv2
           - image: centaur-linearbot
           - image: centaur-agent
+            attest: true
           - image: centaur-iron-proxy
           - image: centaur-console
           - image: centaur-discordbot
@@ -224,16 +228,143 @@ jobs:
           labels: |
             org.opencontainers.image.title=${{ matrix.image }}
             org.opencontainers.image.source=${{ env.IMAGE_SOURCE }}
+            org.opencontainers.image.revision=${{ github.sha }}
         env:
           DOCKER_METADATA_PR_HEAD_SHA: true
 
       - name: Create multi-arch manifest for ${{ matrix.image }}
+        id: manifest
         working-directory: ${{ runner.temp }}/digests
+        env:
+          IMAGE_NAME: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}
+          SOURCE_SHA: ${{ github.sha }}
         run: |
+          set -euo pipefail
+          mapfile -t tags < <(jq -er '.tags[]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          mapfile -t digest_files < <(printf '%s\n' * | sort)
+          ((${#tags[@]} > 0))
+          ((${#digest_files[@]} > 0))
+
+          tag_args=()
+          for tag in "${tags[@]}"; do
+            tag_args+=(--tag "$tag")
+          done
+
+          sources=()
+          for digest_file in "${digest_files[@]}"; do
+            [[ "$digest_file" =~ ^[0-9a-f]{64}$ ]]
+            sources+=("${IMAGE_NAME}@sha256:${digest_file}")
+          done
+
           docker buildx imagetools create \
-            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}@sha256:%s ' *)
+            --annotation "index:org.opencontainers.image.revision=${SOURCE_SHA}" \
+            "${tag_args[@]}" \
+            "${sources[@]}"
+
+          manifest_json="$(
+            docker buildx imagetools inspect \
+              "${IMAGE_NAME}:${{ steps.meta.outputs.version }}" \
+              --format '{{json .Manifest}}'
+          )"
+          digest="$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' <<< "$manifest_json")"
+          jq -e --arg source_sha "$SOURCE_SHA" \
+            '.annotations["org.opencontainers.image.revision"] == $source_sha' \
+            <<< "$manifest_json" >/dev/null
+
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            expected_platforms='["linux/amd64", "linux/arm64"]'
+          else
+            expected_platforms='["linux/amd64"]'
+          fi
+          jq -e --argjson expected "$expected_platforms" '
+            [
+              .manifests[]
+              | select(.platform.os == "linux")
+              | {name: "\(.platform.os)/\(.platform.architecture)", digest}
+            ] as $runtime
+            | ([$runtime[].name] | sort) == ($expected | sort)
+              and all(.manifests[];
+                . as $descriptor
+                | if $descriptor.platform.os == "linux" then
+                  any($runtime[]; .digest == $descriptor.digest)
+                else
+                  $descriptor.platform.os == "unknown"
+                  and $descriptor.platform.architecture == "unknown"
+                  and $descriptor.annotations["vnd.docker.reference.type"] == "attestation-manifest"
+                  and any($runtime[];
+                    .digest == $descriptor.annotations["vnd.docker.reference.digest"])
+                end
+              )
+          ' <<< "$manifest_json" >/dev/null
+
+          image_json="$(
+            docker buildx imagetools inspect \
+              "${IMAGE_NAME}@${digest}" \
+              --format '{{json .Image}}'
+          )"
+          jq -e --arg source_sha "$SOURCE_SHA" '
+            to_entries
+            | length > 0 and all(
+                .value.config.Labels["org.opencontainers.image.revision"] == $source_sha
+              )
+          ' <<< "$image_json" >/dev/null
+
+          echo "image=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "Published ${IMAGE_NAME}@${digest} from ${SOURCE_SHA}"
 
       - name: Inspect manifest
         run: |
-          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}:${{ steps.meta.outputs.version }}
+          docker buildx imagetools inspect \
+            "${{ steps.manifest.outputs.image }}@${{ steps.manifest.outputs.digest }}"
+
+      - name: Set up Syft
+        if: ${{ matrix.attest }}
+        id: syft
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          syft-version: v1.48.0
+
+      - name: Generate platform SBOMs
+        if: ${{ matrix.attest }}
+        env:
+          IMAGE_REF: ${{ steps.manifest.outputs.image }}@${{ steps.manifest.outputs.digest }}
+          SBOM_DIR: ${{ runner.temp }}/sboms
+          SYFT_CMD: ${{ steps.syft.outputs.cmd }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$SBOM_DIR"
+          "$SYFT_CMD" scan "$IMAGE_REF" \
+            --platform linux/amd64 \
+            --output "spdx-json=${SBOM_DIR}/linux-amd64.spdx.json"
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            "$SYFT_CMD" scan "$IMAGE_REF" \
+              --platform linux/arm64 \
+              --output "spdx-json=${SBOM_DIR}/linux-arm64.spdx.json"
+          fi
+
+      - name: Attest SLSA build provenance
+        if: ${{ matrix.attest }}
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-name: ${{ steps.manifest.outputs.image }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          push-to-registry: true
+
+      - name: Attest linux/amd64 SBOM
+        if: ${{ matrix.attest }}
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ${{ steps.manifest.outputs.image }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          sbom-path: ${{ runner.temp }}/sboms/linux-amd64.spdx.json
+          push-to-registry: true
+
+      - name: Attest linux/arm64 SBOM
+        if: ${{ matrix.attest && github.event_name == 'push' }}
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ${{ steps.manifest.outputs.image }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          sbom-path: ${{ runner.temp }}/sboms/linux-arm64.spdx.json
+          push-to-registry: true
