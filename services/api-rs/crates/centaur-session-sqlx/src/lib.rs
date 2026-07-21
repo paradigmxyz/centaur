@@ -1950,11 +1950,14 @@ mod tests {
     use centaur_session_core::{HarnessType, SandboxCapabilities, ThreadKey};
     use serde_json::json;
     use time::{Duration as TimeDuration, OffsetDateTime};
+    use tokio::sync::Mutex;
     use uuid::Uuid;
 
     use super::{
         IdleSandboxCandidateRow, PgSessionStore, SessionEventNotification, SessionStoreError,
     };
+
+    static MIGRATION_LOCK: Mutex<()> = Mutex::const_new(());
 
     async fn test_store() -> Option<PgSessionStore> {
         let url = std::env::var("SESSION_RUNTIME_TEST_DATABASE_URL")
@@ -1973,7 +1976,9 @@ mod tests {
         let store = PgSessionStore::connect(&url)
             .await
             .expect("connect test db");
+        let migration_guard = MIGRATION_LOCK.lock().await;
         store.run_migrations().await.expect("run migrations");
+        drop(migration_guard);
         Some(store)
     }
 
