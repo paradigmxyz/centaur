@@ -48,6 +48,19 @@ class FakeClient:
     def labels(self, team_key: str | None = None) -> list[dict[str, Any]]:
         return self._labels
 
+    def create_project(
+        self, name: str, team_key: str, description: str | None = None
+    ) -> dict[str, Any]:
+        return {
+            "success": True,
+            "created": True,
+            "reused": False,
+            "id": "project-1",
+            "name": name,
+            "url": "https://linear/project-1",
+            "team": {"key": team_key},
+        }
+
 
 def _run_labels(monkeypatch, labels: list[dict[str, Any]]):
     from typer.testing import CliRunner
@@ -78,3 +91,14 @@ def test_labels_handles_missing_team_key(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert ("org", "loose") in RECORDED_ROWS
+
+
+def test_create_project_command_outputs_structured_result(monkeypatch):
+    from typer.testing import CliRunner
+
+    monkeypatch.setattr(cli, "get_client", lambda: FakeClient([]))
+    result = CliRunner().invoke(cli.app, ["create-project", "Upshift", "--team", "INT", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert '"created": true' in result.output
+    assert '"key": "INT"' in result.output

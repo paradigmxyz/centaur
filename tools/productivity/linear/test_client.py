@@ -39,9 +39,23 @@ LinearClient = module.LinearClient
 class RecordingLinearClient(LinearClient):
     """Returns canned mutation payloads keyed by substring, records calls."""
 
-    def __init__(self, responses: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        responses: dict[str, Any],
+        *,
+        teams: list[dict[str, Any]] | None = None,
+        projects: list[dict[str, Any]] | None = None,
+    ) -> None:
         self.responses = responses
         self.calls: list[dict[str, Any]] = []
+        self._teams = teams or []
+        self._projects = projects or []
+
+    def teams(self, limit: int = 50) -> list[dict[str, Any]]:
+        return self._teams[:limit]
+
+    def projects(self, limit: int = 50) -> list[dict[str, Any]]:
+        return self._projects[:limit]
 
     def _query(self, query: str, variables: dict | None = None) -> dict:
         self.calls.append({"query": query, "variables": variables})
@@ -70,6 +84,77 @@ def test_create_issue_merges_success_into_issue_fields():
         "teamId": "team-1",
         "priority": 2,
     }
+
+
+def test_create_project_creates_in_resolved_team():
+    client = RecordingLinearClient(
+        {
+            "projectCreate": {
+                "success": True,
+                "project": {"id": "project-1", "name": "Upshift", "url": "https://linear/Upshift"},
+            }
+        },
+        teams=[{"id": "team-1", "key": "INT", "name": "Integrations"}],
+    )
+
+    result = client.create_project("Upshift", team_key="INT", description="Vault integration")
+
+    assert result["created"] is True
+    assert result["reused"] is False
+    assert result["team"]["key"] == "INT"
+    assert client.calls[0]["variables"]["input"] == {
+        "name": "Upshift",
+        "teamIds": ["team-1"],
+        "description": "Vault integration",
+    }
+
+
+def test_create_project_reuses_exact_project_without_mutation():
+    existing = {
+        "id": "project-1",
+        "name": "Upshift",
+        "url": "https://linear/Upshift",
+        "teams": {"nodes": [{"id": "team-1", "key": "INT"}]},
+    }
+    client = RecordingLinearClient(
+        {},
+        teams=[{"id": "team-1", "key": "INT", "name": "Integrations"}],
+        projects=[existing],
+    )
+
+    result = client.create_project("upshift", team_key="int")
+
+    assert result["created"] is False
+    assert result["reused"] is True
+    assert result["id"] == "project-1"
+    assert client.calls == []
+
+
+def test_create_project_rejects_missing_team_and_duplicate_projects():
+    missing_team = RecordingLinearClient({})
+    try:
+        missing_team.create_project("Upshift", team_key="INT")
+    except ValueError as exc:
+        assert "found 0" in str(exc)
+    else:
+        raise AssertionError("missing team should fail")
+
+    duplicate = {
+        "name": "Upshift",
+        "teams": {"nodes": [{"id": "team-1", "key": "INT"}]},
+    }
+    ambiguous = RecordingLinearClient(
+        {},
+        teams=[{"id": "team-1", "key": "INT"}],
+        projects=[{"id": "project-1", **duplicate}, {"id": "project-2", **duplicate}],
+    )
+    try:
+        ambiguous.create_project("Upshift", team_key="INT")
+    except ValueError as exc:
+        assert "Multiple projects" in str(exc)
+    else:
+        raise AssertionError("duplicate projects should fail")
+    assert ambiguous.calls == []
 
 
 def test_update_issue_merges_success_into_issue_fields():

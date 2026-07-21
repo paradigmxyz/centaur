@@ -137,6 +137,82 @@ class LinearClient(LinearReadonlyClient):
         result = self._query(mutation, {"input": input_data})
         return self._mutation_result(result, "issueCreate")
 
+    def create_project(
+        self,
+        name: str,
+        team_key: str,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """Create or reuse an exact-name project in a Linear team.
+
+        The preflight makes retries idempotent. Ambiguous team or project
+        matches fail before any mutation is attempted.
+        """
+        normalized_team = team_key.strip().casefold()
+        team_matches = [
+            team
+            for team in self.teams(limit=250)
+            if team.get("key", "").casefold() == normalized_team
+        ]
+        if len(team_matches) != 1:
+            raise ValueError(
+                f"Expected exactly one Linear team with key {team_key!r}; found {len(team_matches)}"
+            )
+        team = team_matches[0]
+
+        normalized_name = name.strip().casefold()
+        project_matches = [
+            project
+            for project in self.projects(limit=10_000)
+            if project.get("name", "").strip().casefold() == normalized_name
+            and any(
+                project_team.get("id") == team["id"]
+                for project_team in (project.get("teams", {}).get("nodes") or [])
+            )
+        ]
+        if len(project_matches) > 1:
+            raise ValueError(
+                f"Multiple projects named {name!r} exist in Linear team {team['key']}; refusing to choose"
+            )
+        if project_matches:
+            return {
+                "success": True,
+                "created": False,
+                "reused": True,
+                "team": team,
+                **project_matches[0],
+            }
+
+        mutation = """
+        mutation ProjectCreate($input: ProjectCreateInput!) {
+            projectCreate(input: $input) {
+                success
+                project {
+                    id
+                    name
+                    description
+                    teams { nodes { id name key } }
+                    url
+                }
+            }
+        }
+        """
+        input_data: dict[str, Any] = {"name": name.strip(), "teamIds": [team["id"]]}
+        if description:
+            input_data["description"] = description
+
+        result = self._mutation_result(
+            self._query(mutation, {"input": input_data}),
+            "projectCreate",
+            "project",
+        )
+        return {
+            **result,
+            "created": result.get("success", False),
+            "reused": False,
+            "team": team,
+        }
+
     def update_issue(
         self,
         issue_id: str,

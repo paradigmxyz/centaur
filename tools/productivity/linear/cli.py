@@ -437,6 +437,40 @@ def projects(
     console.print(table)
 
 
+@app.command("create-project")
+def create_project(
+    name: str = typer.Argument(..., help="Project name"),
+    team: str = typer.Option(..., "--team", "-t", help="Owning team key (e.g., INT)"),
+    description: str = typer.Option(None, "--description", "-d", help="Project description"),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
+    """Create a project, or reuse an exact-name project in the same team.
+
+    Examples:
+        linear create-project "Customer Integration" --team INT
+        linear create-project "Customer Integration" --team INT --json
+    """
+    client = get_client()
+    try:
+        result = client.create_project(name=name, team_key=team, description=description)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(1) from exc
+
+    require_mutation_success(result, "project creation")
+    if json_output:
+        print(json.dumps(result, indent=2, default=str), file=sys.stdout)
+        raise typer.Exit()
+
+    action = "Created" if result.get("created") else "Reused"
+    console.print(
+        f"[green]{action} project {result.get('name')} in team "
+        f"{result.get('team', {}).get('key')}[/]"
+    )
+    if result.get("url"):
+        console.print(f"[dim]{result['url']}[/]")
+
+
 @app.command("project")
 def project_detail(
     project_name: str = typer.Argument(..., help="Project name (partial match supported)"),
