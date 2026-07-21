@@ -45,6 +45,8 @@ from api.workflow_engine import WorkflowContext
 
 WORKFLOW_NAME = "nightly_report"
 
+WORKFLOW_PRINCIPAL = True
+
 
 @dataclass
 class Input:
@@ -62,20 +64,53 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     return {"channel": inp.channel, "report": result}
 ```
 
+`WORKFLOW_PRINCIPAL` is optional. Use it when the workflow host calls tools
+directly with `ctx.call_tool(...)` and should have its own credential boundary.
+The API derives and registers the `workflow-nightly-report` principal from
+`WORKFLOW_NAME` and runs that workflow-host sandbox under it. Workflow code
+cannot choose another principal id, display name, or labels. Grant the required
+tool roles or secrets to the derived principal for both workflow-host direct
+calls and workflow-owned child agents. The child still receives only the tools
+declared for that turn; principal grants do not widen its turn-scoped tool
+allowlist. `WORKFLOW_PRINCIPAL = True`
+requires `apiRs.workflowHostSandbox=true`, which renders
+`WORKFLOW_HOST_SANDBOX=true`; startup fails if workflow-host sandboxing is
+disabled. Auto-registered workflow principals are always reconciled with
+`sandbox_api_server_enabled=false`. Their sandbox receives neither
+`CENTAUR_API_URL` nor the NetworkPolicy label that permits api-rs egress;
+`ctx.call_tool(...)` remains available because the durable workflow protocol
+returns the request to api-rs, which performs the tool call outside the
+sandbox. Every agent turn started by a principal-scoped workflow inherits this
+same principal and its API-disabled sandbox capabilities, including turns that
+supply an explicit `thread_key`. An existing session with a different or
+missing principal is rejected rather than rebound. Workflows without
+`WORKFLOW_PRINCIPAL` keep the normal session-principal behavior. A principal
+that genuinely needs
+`sandbox_api_server_enabled=true`
+must first have route-scoped api-rs authorization at every exposed resource
+boundary. A shared east-west credential is not sufficient authorization to
+enable broad API access.
+
 ## Durable primitives
 
 | Primitive | Use it for |
 |-----------|------------|
-| `ctx.step(name, fn)` | Run a side effect once and cache its result. |
+| `ctx.step(name, fn)` | Run a named function and cache its completed result. |
 | `ctx.sleep(name, duration)` | Suspend and resume later. |
 | `ctx.sleep_until(name, when)` | Resume at a specific time. |
 | `ctx.wait_for_event(name, event_type, correlation_id)` | Wait for an external event. |
-| `ctx.start_workflow(workflow_name, input, idempotency_key=...)` | Queue a child workflow and continue immediately; returns its durable task/run identifiers. |
+| `ctx.start_workflow(...)` | Start a child workflow and continue immediately. |
+| `ctx.wait_for_workflow(...)` | Wait for a child workflow to finish. |
+| `ctx.run_workflow(...)` | Start and wait in one call. |
 | `ctx.start_agent(...)` | Start an agent turn. |
 | `ctx.run_agent(...)` | Start an agent turn and wait for the result. |
 
 The handler may re-execute after a restart. Put external side effects behind
-`ctx.step(...)` so completed work is not repeated.
+`ctx.step(...)` so a successfully persisted checkpoint returns its cached
+result on replay. This is not an exactly-once guarantee for external systems:
+if the effect succeeds and the worker fails before the checkpoint is persisted,
+the step can run again. Mutating operations must use a stable idempotency key or
+another destination-owned deduplication boundary.
 
 These primitives compose into larger automations:
 

@@ -1038,17 +1038,15 @@ impl SessionRuntime {
             .clone()
             .unwrap_or(HarnessType::Codex);
         let metadata = tool_host_session_metadata(principal_id);
-        let session = self
-            .store
-            .create_or_get_session(thread_key, &harness, None, metadata)
+        self.store
+            .create_or_get_session_claiming_principal(
+                thread_key,
+                &harness,
+                None,
+                metadata,
+                Some(principal_id),
+            )
             .await?;
-        if self.iron_control.is_some()
-            && session.iron_control_principal.as_deref() != Some(principal_id)
-        {
-            self.store
-                .set_iron_control_principal(thread_key, Some(principal_id))
-                .await?;
-        }
         Ok(())
     }
 
@@ -1328,6 +1326,54 @@ impl SessionRuntime {
         metadata: Option<Value>,
         on_harness_conflict: HarnessConflictPolicy,
     ) -> Result<CreateOrGetSessionOutcome, SessionRuntimeError> {
+        self.create_or_get_session_inner(
+            thread_key,
+            harness_type,
+            persona_id,
+            metadata,
+            on_harness_conflict,
+            None,
+        )
+        .await
+    }
+
+    /// Create a workflow-owned agent session under an already-registered,
+    /// API-disabled workflow principal. The principal id comes from trusted
+    /// workflow discovery/reconciliation, never from workflow input.
+    pub async fn create_or_get_restricted_session(
+        &self,
+        thread_key: &ThreadKey,
+        harness_type: &HarnessType,
+        persona_id: Option<&str>,
+        metadata: Option<Value>,
+        principal_id: &str,
+    ) -> Result<CreateOrGetSessionOutcome, SessionRuntimeError> {
+        let principal_id = principal_id.trim();
+        if principal_id.is_empty() {
+            return Err(SessionRuntimeError::BadRequest(
+                "restricted session principal id is required".to_owned(),
+            ));
+        }
+        self.create_or_get_session_inner(
+            thread_key,
+            harness_type,
+            persona_id,
+            metadata,
+            HarnessConflictPolicy::Reject,
+            Some(principal_id),
+        )
+        .await
+    }
+
+    async fn create_or_get_session_inner(
+        &self,
+        thread_key: &ThreadKey,
+        harness_type: &HarnessType,
+        persona_id: Option<&str>,
+        metadata: Option<Value>,
+        on_harness_conflict: HarnessConflictPolicy,
+        restricted_principal_id: Option<&str>,
+    ) -> Result<CreateOrGetSessionOutcome, SessionRuntimeError> {
         let span = info_span!(
             "centaur.api_rs.session.create_or_get",
             component = COMPONENT_SESSION_RUNTIME,
@@ -1337,6 +1383,7 @@ impl SessionRuntime {
             thread_key = %thread_key,
             harness_type = %harness_type,
             iron_control_enabled = self.iron_control.is_some(),
+            restricted_principal = restricted_principal_id.is_some(),
         );
         set_span_parent_trace(
             &span,
@@ -1355,41 +1402,56 @@ impl SessionRuntime {
             );
             let mut harness_switched = false;
             let mut session_metadata = default_metadata(metadata);
-            let (registered_principal, desired_capabilities) =
-                if let Some(registrar) = &self.iron_control {
-                    let principal = registrar
-                        .register_session(thread_key.as_str(), Some(&session_metadata))
-                        .await?;
-                    let desired_capabilities = sandbox_capabilities_from_principal(&principal);
-                    (Some(principal), desired_capabilities)
-                } else {
-                    (None, SessionSandboxCapabilities::default_enabled())
-                };
+            let (registered_principal, desired_capabilities) = if let Some(principal_id) =
+                restricted_principal_id
+            {
+                let registrar = self.iron_control.as_ref().ok_or_else(|| {
+                    SessionRuntimeError::BadRequest(
+                        "restricted workflow-owned sessions require Iron Control".to_owned(),
+                    )
+                })?;
+                let principal = registrar.get_principal(principal_id).await?;
+                let desired_capabilities = restricted_workflow_session_capabilities(&principal)?;
+                (Some(principal), desired_capabilities)
+            } else if let Some(registrar) = &self.iron_control {
+                let principal = registrar
+                    .register_session(thread_key.as_str(), Some(&session_metadata))
+                    .await?;
+                let desired_capabilities = sandbox_capabilities_from_principal(&principal);
+                (Some(principal), desired_capabilities)
+            } else {
+                (None, SessionSandboxCapabilities::default_enabled())
+            };
             let persona_resolution =
                 self.resolve_persona_for_create(persona_id, &desired_capabilities)?;
             if let Some(context) = persona_resolution.context.as_ref() {
                 add_persona_metadata(&mut session_metadata, context);
             }
-            let session = match self
+            let principal_claim = registered_principal
+                .as_ref()
+                .map(|principal| principal.id.as_str());
+            let (session, _) = match self
                 .store
-                .create_or_get_session(
+                .create_or_get_session_claiming_principal(
                     thread_key,
                     harness_type,
                     persona_resolution.persona_id.as_deref(),
                     session_metadata.clone(),
+                    principal_claim,
                 )
                 .await
             {
-                Ok(session) => session,
+                Ok(outcome) => outcome,
                 Err(SessionStoreError::PersonaConflict { existing, .. })
                     if persona_id.is_none() && persona_resolution.defaulted =>
                 {
                     self.store
-                        .create_or_get_session(
+                        .create_or_get_session_claiming_principal(
                             thread_key,
                             harness_type,
                             existing.as_deref(),
                             default_metadata(None),
+                            principal_claim,
                         )
                         .await?
                 }
@@ -1400,7 +1462,7 @@ impl SessionRuntime {
                         .restart_session_on_harness(thread_key, harness_type, &existing)
                         .await?;
                     harness_switched = true;
-                    session
+                    (session, false)
                 }
                 Err(error) => return Err(error.into()),
             };
@@ -1422,13 +1484,7 @@ impl SessionRuntime {
                     )
                     .await?;
             }
-            if let Some(principal) = registered_principal {
-                // Persist the principal OID on the session row so a resumed session
-                // can recreate its sandbox after a restart without re-deriving it.
-                let session = self
-                    .store
-                    .set_iron_control_principal(thread_key, Some(&principal.id))
-                    .await?;
+            if registered_principal.is_some() {
                 info!(
                     component = COMPONENT_SESSION_RUNTIME,
                     event = "session_create_or_get_completed",
@@ -5496,6 +5552,19 @@ fn sandbox_capabilities_from_principal(
     }
 }
 
+fn restricted_workflow_session_capabilities(
+    principal: &centaur_iron_control::Principal,
+) -> Result<SessionSandboxCapabilities, SessionRuntimeError> {
+    let capabilities = sandbox_capabilities_from_principal(principal);
+    if capabilities.api_server_enabled {
+        return Err(SessionRuntimeError::BadRequest(format!(
+            "restricted workflow-owned session principal {} has sandbox API server access enabled",
+            principal.id
+        )));
+    }
+    Ok(capabilities)
+}
+
 fn apply_sandbox_capabilities(spec: &mut SandboxSpec, capabilities: &SessionSandboxCapabilities) {
     spec.capabilities = BackendSandboxCapabilities {
         repo_cache: match capabilities.repo_cache {
@@ -6785,6 +6854,42 @@ mod tests {
             )),
             SessionRepoCacheAccess::All
         );
+    }
+
+    #[test]
+    fn workflow_owned_session_spec_inherits_restricted_principal_capabilities() {
+        let mut principal = test_principal(std::collections::BTreeMap::from([(
+            SANDBOX_REPO_CACHE_LABEL.to_owned(),
+            "public".to_owned(),
+        )]));
+        principal.sandbox_observability_enabled = false;
+        principal.sandbox_api_server_enabled = false;
+
+        let capabilities = restricted_workflow_session_capabilities(&principal).unwrap();
+        let mut spec = SandboxSpec::new("workflow-agent:test");
+        spec.iron_control_principal = Some(principal.id.clone());
+        apply_sandbox_capabilities(&mut spec, &capabilities);
+
+        assert_eq!(spec.iron_control_principal.as_deref(), Some("prn_test"));
+        assert_eq!(spec.capabilities.repo_cache, RepoCacheAccess::Public);
+        assert!(!spec.capabilities.observability_enabled);
+        assert!(!spec.capabilities.api_server_enabled);
+        assert_eq!(
+            env_value(&spec, "CENTAUR_SANDBOX_API_SERVER_ENABLED"),
+            Some("false")
+        );
+    }
+
+    #[test]
+    fn workflow_owned_session_rejects_api_enabled_principal() {
+        let principal = test_principal(std::collections::BTreeMap::new());
+
+        let error = restricted_workflow_session_capabilities(&principal)
+            .expect_err("API-enabled workflow principal must fail closed");
+
+        assert!(matches!(error, SessionRuntimeError::BadRequest(_)));
+        assert!(error.to_string().contains("prn_test"));
+        assert!(error.to_string().contains("API server access enabled"));
     }
 
     #[test]

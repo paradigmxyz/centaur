@@ -13,6 +13,9 @@ from typing import Any, Awaitable, Callable
 _ACTIVE_RPC: ContextVar[Any | None] = ContextVar(
     "centaur_workflow_active_rpc", default=None
 )
+_TOOL_CALL_TIMEOUT_SECONDS = 120.0
+_TOOL_CALL_MAX_OUTPUT_BYTES = 1024 * 1024
+_TOOL_CALL_READ_CHUNK_BYTES = 64 * 1024
 
 
 def bind_context_rpc(rpc: Any) -> Token[Any | None]:
@@ -44,6 +47,57 @@ def resolve_tool_shim() -> str | None:
     return None
 
 
+async def _read_bounded_tool_output(
+    stream: asyncio.StreamReader,
+    *,
+    stream_name: str,
+) -> bytes:
+    output = bytearray()
+    while chunk := await stream.read(_TOOL_CALL_READ_CHUNK_BYTES):
+        if len(output) + len(chunk) > _TOOL_CALL_MAX_OUTPUT_BYTES:
+            raise RuntimeError(
+                f"centaur-tools {stream_name} exceeded "
+                f"{_TOOL_CALL_MAX_OUTPUT_BYTES} bytes"
+            )
+        output.extend(chunk)
+    return bytes(output)
+
+
+async def _terminate_and_reap_tool_process(
+    proc: asyncio.subprocess.Process,
+) -> None:
+    if proc.returncode is None:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+    await proc.wait()
+
+
+async def _collect_tool_process_output(
+    proc: asyncio.subprocess.Process,
+) -> tuple[bytes, bytes]:
+    assert proc.stdout is not None
+    assert proc.stderr is not None
+    tasks = [
+        asyncio.create_task(
+            _read_bounded_tool_output(proc.stdout, stream_name="stdout")
+        ),
+        asyncio.create_task(
+            _read_bounded_tool_output(proc.stderr, stream_name="stderr")
+        ),
+        asyncio.create_task(proc.wait()),
+    ]
+    try:
+        stdout, stderr, _ = await asyncio.gather(*tasks)
+        return stdout, stderr
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 async def call_tool_shim(
     tool_shim: str,
     tool: str,
@@ -59,12 +113,26 @@ async def call_tool_shim(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await proc.communicate()
+    try:
+        stdout, _stderr = await asyncio.wait_for(
+            _collect_tool_process_output(proc),
+            timeout=_TOOL_CALL_TIMEOUT_SECONDS,
+        )
+    except TimeoutError as exc:
+        await _terminate_and_reap_tool_process(proc)
+        raise RuntimeError(
+            f"centaur-tools call {tool}.{method} exceeded "
+            f"{_TOOL_CALL_TIMEOUT_SECONDS:g} seconds"
+        ) from exc
+    except BaseException:
+        await _terminate_and_reap_tool_process(proc)
+        raise
     text = stdout.decode(errors="replace").strip()
-    err = stderr.decode(errors="replace").strip()
     if proc.returncode != 0:
-        detail = err or text or f"exit code {proc.returncode}"
-        raise RuntimeError(f"centaur-tools call {tool}.{method} failed: {detail}")
+        raise RuntimeError(
+            f"centaur-tools call {tool}.{method} failed with exit code "
+            f"{proc.returncode}"
+        )
     if not text:
         return None
     return json.loads(text)

@@ -134,6 +134,10 @@ jobs:
         uses: depot/build-push-action@98e78adca7817480b8185f474a400b451d74e287 # v1.18.0
         with:
           project: d8qqlh1bmq
+          # Depot's public-fork OIDC may be unavailable even when the source is
+          # valid. Fork PRs never push, so fall back to the local Buildx builder
+          # instead of turning external Depot auth into a code-review failure.
+          buildx-fallback: ${{ github.event.pull_request.head.repo.fork }}
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
           target: ${{ matrix.target }}

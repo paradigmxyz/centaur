@@ -23,7 +23,7 @@ use centaur_session_sqlx::PgSessionStore;
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use cron::Schedule;
-use futures_util::{TryStreamExt, pin_mut};
+use futures_util::{StreamExt, TryStreamExt, pin_mut};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -47,6 +47,8 @@ pub const WORKFLOW_SCHEDULE_TASK: &str = "centaur.workflow.schedule_tick";
 const PYTHON_HOST_ENV: &str = "PYTHON_WORKFLOW_HOST_PATH";
 const PYTHON_HOST_INTERPRETER_ENV: &str = "PYTHON_WORKFLOW_HOST_PYTHON";
 const WORKFLOW_TOOL_API_URL_ENV: &str = "WORKFLOW_TOOL_API_URL";
+const WORKFLOW_TOOL_CALL_TIMEOUT: Duration = Duration::from_secs(120);
+const WORKFLOW_TOOL_MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const DEFAULT_AGENT_IDLE_TIMEOUT_MS: u64 = 60_000;
 const DEFAULT_AGENT_MAX_DURATION_MS: u64 = 30 * 60 * 1_000;
 const WORKFLOW_HOST_CLAIM_EXTENSION: Duration = Duration::from_secs(5 * 60);
@@ -266,8 +268,10 @@ impl WorkflowHostSandboxRuntime {
         };
     }
 
-    fn spec_for_workflow(&self, workflow_name: &str) -> Result<SandboxSpec, WorkflowRuntimeError> {
-        let mut spec = self.spec.clone();
+    fn spec_and_principal_for_workflow(
+        &self,
+        workflow_name: &str,
+    ) -> Result<(SandboxSpec, Option<String>), WorkflowRuntimeError> {
         let principal = {
             let assignments = self
                 .workflow_principals
@@ -275,12 +279,20 @@ impl WorkflowHostSandboxRuntime {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             assignments.principal_for_workflow(workflow_name)?
         };
-        if let Some(principal) = principal {
-            restrict_workflow_principal_sandbox(&mut spec);
-            spec.iron_control_principal = Some(principal);
-        }
-        Ok(spec)
+        Ok(apply_workflow_principal(&self.spec, principal))
     }
+}
+
+fn apply_workflow_principal(
+    base_spec: &SandboxSpec,
+    principal: Option<String>,
+) -> (SandboxSpec, Option<String>) {
+    let mut spec = base_spec.clone();
+    if let Some(principal) = principal.as_deref() {
+        restrict_workflow_principal_sandbox(&mut spec);
+        spec.iron_control_principal = Some(principal.to_owned());
+    }
+    (spec, principal)
 }
 
 fn restrict_workflow_principal_sandbox(spec: &mut SandboxSpec) {
@@ -2738,6 +2750,7 @@ async fn run_centaur_workflow_inner(
                                     "absurd-workflow-agent-turn:{client_message_id}"
                                 ),
                                 workflow_owned_thread: true,
+                                workflow_principal: None,
                                 idle_timeout_ms,
                                 max_duration_ms,
                                 model: None,
@@ -3028,6 +3041,7 @@ async fn run_python_workflow_host_local(
                     &session_runtime,
                     &input,
                     &workflow_clients,
+                    None,
                 )
                 .await
                 {
@@ -3063,7 +3077,8 @@ async fn run_python_workflow_host_in_sandbox(
     sandbox: WorkflowHostSandboxRuntime,
     workflow_clients: WorkflowQueueClients,
 ) -> Result<Value, WorkflowRuntimeError> {
-    let mut spec = sandbox.spec_for_workflow(&input.workflow_name)?;
+    let (mut spec, workflow_principal) =
+        sandbox.spec_and_principal_for_workflow(&input.workflow_name)?;
     spec = spec
         .env("WORKFLOW_RUN_ID", ctx.run_id())
         .env("WORKFLOW_TASK_ID", ctx.task_id())
@@ -3090,11 +3105,14 @@ async fn run_python_workflow_host_in_sandbox(
     let result = run_python_workflow_host_protocol(
         input,
         ctx,
-        session_runtime,
-        workflow_clients,
         &mut stdin,
         io.stdout,
         stderr_task,
+        PythonWorkflowHostProtocolServices {
+            session_runtime,
+            workflow_clients,
+            workflow_principal,
+        },
     )
     .await;
     drop(stdin);
@@ -3108,14 +3126,19 @@ fn sandbox_spec_has_env(spec: &SandboxSpec, name: &str) -> bool {
     spec.env.iter().any(|entry| entry.name == name)
 }
 
+struct PythonWorkflowHostProtocolServices {
+    session_runtime: SessionRuntime,
+    workflow_clients: WorkflowQueueClients,
+    workflow_principal: Option<String>,
+}
+
 async fn run_python_workflow_host_protocol<W, R>(
     input: WorkflowTaskInput,
     ctx: TaskContext,
-    session_runtime: SessionRuntime,
-    workflow_clients: WorkflowQueueClients,
     stdin: &mut W,
     stdout: R,
     stderr_task: JoinHandle<String>,
+    services: PythonWorkflowHostProtocolServices,
 ) -> Result<Value, WorkflowRuntimeError>
 where
     W: AsyncWrite + Unpin,
@@ -3169,9 +3192,10 @@ where
                 let response = handle_python_context_request(
                     &message,
                     &ctx,
-                    &session_runtime,
+                    &services.session_runtime,
                     &input,
-                    &workflow_clients,
+                    &services.workflow_clients,
+                    services.workflow_principal.as_deref(),
                 )
                 .await?;
                 write_host_message(stdin, &response).await?;
@@ -3304,6 +3328,7 @@ async fn handle_python_context_request(
     session_runtime: &SessionRuntime,
     input: &WorkflowTaskInput,
     workflow_clients: &WorkflowQueueClients,
+    workflow_principal: Option<&str>,
 ) -> Result<Value, WorkflowRuntimeError> {
     let request_id = message
         .get("request_id")
@@ -3381,8 +3406,15 @@ async fn handle_python_context_request(
         }
         Some("ctx.agent_turn") => {
             let args = message.get("args").cloned().unwrap_or_else(|| json!({}));
-            match run_python_agent_turn(session_runtime.clone(), ctx, input, args, &request_id)
-                .await
+            match run_python_agent_turn(
+                session_runtime.clone(),
+                ctx,
+                input,
+                args,
+                &request_id,
+                workflow_principal,
+            )
+            .await
             {
                 Ok(value) => Ok(value),
                 Err(error) => Err(error.to_string()),
@@ -3505,6 +3537,7 @@ async fn run_python_agent_turn(
     input: &WorkflowTaskInput,
     args: Value,
     request_id: &str,
+    workflow_principal: Option<&str>,
 ) -> Result<Value, WorkflowRuntimeError> {
     let text = args
         .get("text")
@@ -3614,6 +3647,7 @@ async fn run_python_agent_turn(
             execution_metadata,
             execution_idempotency_key,
             workflow_owned_thread,
+            workflow_principal: workflow_principal.map(ToOwned::to_owned),
             idle_timeout_ms,
             max_duration_ms,
             model,
@@ -3813,15 +3847,59 @@ async fn execute_python_workflow_tool(
             "{WORKFLOW_TOOL_API_URL_ENV} must be set for ctx.call_tool({tool}.{method})"
         ))
     })?;
+    execute_python_workflow_tool_http(
+        tool,
+        method,
+        args,
+        &base_url,
+        WORKFLOW_TOOL_CALL_TIMEOUT,
+        WORKFLOW_TOOL_MAX_RESPONSE_BYTES,
+    )
+    .await
+}
+
+async fn execute_python_workflow_tool_http(
+    tool: String,
+    method: String,
+    args: Value,
+    base_url: &str,
+    timeout: Duration,
+    max_response_bytes: usize,
+) -> Result<Value, WorkflowRuntimeError> {
     let base_url = base_url.trim_end_matches('/');
     let url = format!("{base_url}/tools/{tool}/{method}");
-    let request = reqwest::Client::new().post(&url).json(&args);
+    let client = reqwest::Client::builder().timeout(timeout).build()?;
+    let request = client.post(&url).json(&args);
     let response = request.send().await?;
     let status = response.status();
-    let body: Value = response.json().await.unwrap_or_else(|_| json!({}));
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_response_bytes as u64)
+    {
+        return Err(WorkflowRuntimeError::Upstream(format!(
+            "ctx.call_tool({tool}.{method}) response exceeded {max_response_bytes} bytes"
+        )));
+    }
+    let mut body_bytes = Vec::new();
+    let mut response_bytes = response.bytes_stream();
+    while let Some(chunk) = response_bytes.next().await {
+        let chunk = chunk?;
+        let new_length = body_bytes.len().checked_add(chunk.len()).ok_or_else(|| {
+            WorkflowRuntimeError::Upstream(format!(
+                "ctx.call_tool({tool}.{method}) response exceeded {max_response_bytes} bytes"
+            ))
+        })?;
+        if new_length > max_response_bytes {
+            return Err(WorkflowRuntimeError::Upstream(format!(
+                "ctx.call_tool({tool}.{method}) response exceeded {max_response_bytes} bytes"
+            )));
+        }
+        body_bytes.extend_from_slice(&chunk);
+    }
+    let body: Value = serde_json::from_slice(&body_bytes).unwrap_or_else(|_| json!({}));
     if !status.is_success() {
         return Err(WorkflowRuntimeError::BadRequest(format!(
-            "ctx.call_tool({tool}.{method}) failed with status {status}: {body}"
+            "ctx.call_tool({tool}.{method}) failed with status {status}"
         )));
     }
     Ok(body)
@@ -4009,6 +4087,7 @@ struct AgentTurnRequest {
     execution_metadata: Value,
     execution_idempotency_key: String,
     workflow_owned_thread: bool,
+    workflow_principal: Option<String>,
     idle_timeout_ms: u64,
     max_duration_ms: u64,
     // Optional per-turn model / provider / reasoning-effort overrides. When set
@@ -4064,6 +4143,7 @@ async fn run_agent_session_turn(
         execution_metadata,
         execution_idempotency_key,
         workflow_owned_thread,
+        workflow_principal,
         idle_timeout_ms,
         max_duration_ms,
         model,
@@ -4075,15 +4155,29 @@ async fn run_agent_session_turn(
     if workflow_owned_thread {
         object_insert(&mut session_metadata, "workflow_owned_thread", json!(true));
     }
-    session_runtime
-        .create_or_get_session(
-            &thread_key,
-            &harness_type,
-            persona_id.as_deref(),
-            Some(session_metadata),
-            HarnessConflictPolicy::Reject,
-        )
-        .await?;
+    if let Some(principal_id) =
+        workflow_agent_principal(workflow_principal.as_deref(), workflow_owned_thread)
+    {
+        session_runtime
+            .create_or_get_restricted_session(
+                &thread_key,
+                &harness_type,
+                persona_id.as_deref(),
+                Some(session_metadata),
+                principal_id,
+            )
+            .await?;
+    } else {
+        session_runtime
+            .create_or_get_session(
+                &thread_key,
+                &harness_type,
+                persona_id.as_deref(),
+                Some(session_metadata),
+                HarnessConflictPolicy::Reject,
+            )
+            .await?;
+    }
     session_runtime
         .append_messages(
             &thread_key,
@@ -4157,6 +4251,13 @@ async fn run_agent_session_turn(
     Err(WorkflowRuntimeError::Upstream(
         "session event stream ended before terminal execution event".to_owned(),
     ))
+}
+
+fn workflow_agent_principal(
+    workflow_principal: Option<&str>,
+    _workflow_owned_thread: bool,
+) -> Option<&str> {
+    workflow_principal
 }
 
 fn result_text_from_output_lines(lines: &[String]) -> String {
@@ -4251,12 +4352,31 @@ mod tests {
     use chrono::TimeZone;
     use sqlx::postgres::PgPoolOptions;
     use std::{
+        io::{Read, Write},
+        net::TcpListener,
         sync::{
             Mutex,
             atomic::{AtomicUsize, Ordering},
         },
+        thread,
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    fn one_shot_http_response(
+        response: Vec<u8>,
+        delay: Duration,
+    ) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test HTTP server");
+        let address = listener.local_addr().expect("read test HTTP address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept test HTTP request");
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request);
+            thread::sleep(delay);
+            let _ = stream.write_all(&response);
+        });
+        (format!("http://{address}"), server)
+    }
 
     async fn optional_absurd_test_pool() -> Result<Option<sqlx::PgPool>, WorkflowRuntimeError> {
         let Ok(database_url) = env::var("ABSURD_TEST_DATABASE_URL") else {
@@ -4594,6 +4714,97 @@ mod tests {
         assert!(value.pointer("/output/utc").is_some());
     }
 
+    #[tokio::test]
+    async fn ctx_call_tool_http_has_a_fixed_wall_clock_deadline() {
+        let response =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}"
+                .to_vec();
+        let (base_url, server) = one_shot_http_response(response, Duration::from_millis(200));
+
+        let error = execute_python_workflow_tool_http(
+            "demo".to_owned(),
+            "hang".to_owned(),
+            json!({}),
+            &base_url,
+            Duration::from_millis(25),
+            1024,
+        )
+        .await
+        .expect_err("slow tool call must time out");
+
+        assert!(matches!(error, WorkflowRuntimeError::Http(ref error) if error.is_timeout()));
+        server.join().expect("test HTTP server should exit");
+    }
+
+    #[tokio::test]
+    async fn ctx_call_tool_http_rejects_unbounded_streaming_response() {
+        let body = vec![b'x'; 128];
+        let mut response =
+            b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\n\r\n"
+                .to_vec();
+        response.extend_from_slice(&body);
+        let (base_url, server) = one_shot_http_response(response, Duration::ZERO);
+
+        let error = execute_python_workflow_tool_http(
+            "demo".to_owned(),
+            "large".to_owned(),
+            json!({}),
+            &base_url,
+            Duration::from_secs(1),
+            32,
+        )
+        .await
+        .expect_err("oversized tool response must fail");
+
+        assert!(matches!(error, WorkflowRuntimeError::Upstream(_)));
+        assert!(error.to_string().contains("exceeded 32 bytes"));
+        server.join().expect("test HTTP server should exit");
+    }
+
+    #[tokio::test]
+    async fn ctx_call_tool_http_non_success_does_not_expose_response_body() {
+        let body = br#"{"secret":"must-not-escape"}"#;
+        let response = format!(
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            String::from_utf8_lossy(body)
+        )
+        .into_bytes();
+        let (base_url, server) = one_shot_http_response(response, Duration::ZERO);
+
+        let error = execute_python_workflow_tool_http(
+            "demo".to_owned(),
+            "fails".to_owned(),
+            json!({}),
+            &base_url,
+            Duration::from_secs(1),
+            1024,
+        )
+        .await
+        .expect_err("non-success tool response must fail");
+
+        let message = error.to_string();
+        assert!(message.contains("500 Internal Server Error"));
+        assert!(!message.contains("must-not-escape"));
+        assert!(!message.contains("secret"));
+        server.join().expect("test HTTP server should exit");
+    }
+
+    #[test]
+    fn principal_scoped_agent_session_inherits_principal_for_every_thread_kind() {
+        assert_eq!(
+            workflow_agent_principal(Some("prn_workflow"), true),
+            Some("prn_workflow")
+        );
+        assert_eq!(
+            workflow_agent_principal(Some("prn_workflow"), false),
+            Some("prn_workflow"),
+            "an explicit run-scoped thread must still use the workflow principal"
+        );
+        assert_eq!(workflow_agent_principal(None, true), None);
+        assert_eq!(workflow_agent_principal(None, false), None);
+    }
+
     #[test]
     fn ctx_call_tool_checkpoint_identity_is_canonical_and_argument_bound() {
         let first = PythonWorkflowToolCall::from_message(&json!({
@@ -4929,6 +5140,34 @@ mod tests {
                 .expect("optional workflow should be allowed"),
             None
         );
+    }
+
+    #[test]
+    fn optional_workflow_does_not_apply_bootstrap_principal_to_child_agent() {
+        let base =
+            SandboxSpec::new("workflow-host:test").iron_control_principal("prn_workflow_host");
+        let (spec, child_principal) = apply_workflow_principal(&base, None);
+
+        assert_eq!(
+            spec.iron_control_principal.as_deref(),
+            Some("prn_workflow_host")
+        );
+        assert_eq!(child_principal, None);
+    }
+
+    #[test]
+    fn declared_workflow_principal_replaces_bootstrap_and_restricts_child_agent() {
+        let base =
+            SandboxSpec::new("workflow-host:test").iron_control_principal("prn_workflow_host");
+        let (spec, child_principal) =
+            apply_workflow_principal(&base, Some("prn_nightly_report".to_owned()));
+
+        assert_eq!(
+            spec.iron_control_principal.as_deref(),
+            Some("prn_nightly_report")
+        );
+        assert!(!spec.capabilities.api_server_enabled);
+        assert_eq!(child_principal.as_deref(), Some("prn_nightly_report"));
     }
 
     #[test]

@@ -59,11 +59,12 @@ Supported v2 primitives:
 | `handler(inp, ctx)` | Supported |
 | `ctx.step(name, fn)` | Supported |
 | `ctx.agent_turn(...)` / `ctx.run_agent(...)` | Supported |
-| `ctx.call_tool(...)` | Durable, replay-safe after checkpointing, and supported through the generated `centaur-tools call` bridge in the workflow-host sandbox |
+| `ctx.call_tool(...)` | Checkpointed so completed results replay, and supported through the generated `centaur-tools call` bridge in the workflow-host sandbox |
 | `ctx.post_to_slack(...)` | Supported |
 | `ctx._pool` | Supported when the workflow-host sandbox receives `DATABASE_URL` |
 | `WEBHOOKS` | Supported |
 | `SCHEDULE` | Supported |
+| `WORKFLOW_PRINCIPAL` | Supported for workflow-host sandbox tool permissions |
 
 ## Required migrations
 
@@ -89,9 +90,9 @@ module, or a supported workflow-host API module.
 
 ### Put side effects behind steps
 
-The handler may be replayed after a crash or retry. External writes that are not
-already durable context primitives should be wrapped in `ctx.step(...)` so the
-result is checkpointed:
+The handler may be replayed after a crash or retry. Any external write that is
+not already a durable context primitive should be wrapped in `ctx.step(...)`
+so a completed result is checkpointed:
 
 ```python
 async def handler(inp: dict, ctx: WorkflowContext) -> dict:
@@ -102,11 +103,15 @@ async def handler(inp: dict, ctx: WorkflowContext) -> dict:
     return {"posted": posted}
 ```
 
+A completed checkpoint is returned without rerunning the function. It does not
+make an external effect exactly once: a crash after the destination accepts the
+effect but before Centaur persists the checkpoint can cause a retry. Use a
+stable idempotency key or destination-owned deduplication for mutating calls.
+
 `ctx.call_tool(...)` and `ctx.tools.<tool>.<method>(...)` are already
 checkpointed by Centaur. Do not wrap either in another `ctx.step`; a replay
-returns the stored JSON result. Mutating tools should still implement
-idempotency for the narrow failure window between accepting an external effect
-and persisting its result.
+returns the stored JSON result. Mutating tools still need idempotency for the
+failure window between accepting an external effect and persisting its result.
 
 `ctx.attempt` is the positive, one-based Absurd task attempt for the current
 handler invocation. Use it when an external protocol needs the authoritative
@@ -130,6 +135,47 @@ result = await ctx.agent_turn(
 The workflow host sandbox is separate from the agent sandbox. The workflow
 handler coordinates the run; the agent turn runs through the normal Centaur
 session runtime.
+
+#### Declare Workflow-Host Permissions
+
+When a workflow calls tools directly from the workflow host with
+`ctx.call_tool(...)`, declare the principal that should own those permissions:
+
+```python
+WORKFLOW_NAME = "nightly_report"
+WORKFLOW_PRINCIPAL = True
+```
+
+The API derives and registers the `workflow-nightly-report` principal in the
+Centaur Console and runs that workflow's host sandbox under it. Grant only the
+roles or secrets that workflow needs for both workflow-host direct calls and
+workflow-owned child agents. The child still receives only the tools declared
+for that turn; principal grants do not widen its turn-scoped tool allowlist:
+
+```bash
+cargo run -p centaur-perms -- \
+  principals grant workflow-nightly-report \
+  --tool slack
+```
+
+The principal id is always `workflow-` plus the slugged `WORKFLOW_NAME`.
+Workflow code cannot choose another principal id, display name, or labels.
+`WORKFLOW_PRINCIPAL = True` requires `apiRs.workflowHostSandbox=true`, which
+renders `WORKFLOW_HOST_SANDBOX=true`; startup fails if a workflow declares a
+principal while workflow-host sandboxing is disabled. Auto-registered workflow
+principals are always reconciled with `sandbox_api_server_enabled=false`. Their
+sandbox receives neither `CENTAUR_API_URL` nor the NetworkPolicy label that
+permits api-rs egress; `ctx.call_tool(...)` remains available because the
+durable workflow protocol returns the request to api-rs, which performs the
+tool call outside the sandbox. Every agent turn started by a principal-scoped
+workflow inherits this same principal and its API-disabled sandbox
+capabilities, including turns that supply an explicit `thread_key`. An existing
+session with a different or missing principal is rejected rather than rebound.
+Workflows without `WORKFLOW_PRINCIPAL` keep the normal session-principal
+behavior. A principal that genuinely needs
+`sandbox_api_server_enabled=true` must first have route-scoped api-rs
+authorization at every exposed resource boundary. A shared east-west
+credential is not sufficient authorization to enable broad API access.
 
 #### Pick the model and reasoning effort
 
@@ -226,8 +272,9 @@ For each existing workflow:
 3. Confirm third-party Python packages are installed in the workflow-host
    sandbox image.
 4. Wrap Slack posts, database writes, and external HTTP calls in `ctx.step(...)`
-   when they must not repeat. Do not double-wrap `ctx.call_tool(...)` or
-   `ctx.tools.*`; Centaur checkpoints them internally.
+   to cache completed results, and give mutating destinations a stable
+   idempotency key for the crash-before-checkpoint window. Do not double-wrap
+   `ctx.call_tool(...)` or `ctx.tools.*`; Centaur checkpoints them internally.
 5. Replace direct agent-control-plane calls with `ctx.agent_turn(...)`.
 6. If the workflow uses `ctx._pool`, confirm the workflow-host sandbox receives
    `DATABASE_URL`.

@@ -115,6 +115,13 @@ class CheckpointRpc(FakeRpc):
 
 
 class WorkflowHostTests(unittest.TestCase):
+    @staticmethod
+    def _write_tool_shim(directory: str, body: str) -> Path:
+        path = Path(directory) / "centaur-tools-test-shim"
+        path.write_text("#!/usr/bin/env python3\n" + body)
+        path.chmod(0o755)
+        return path
+
     def test_workflow_api_modules_are_importable(self) -> None:
         load_workflow_host()
 
@@ -311,6 +318,126 @@ class WorkflowHostTests(unittest.TestCase):
         self.assertFalse(
             any(request["type"] == "ctx.call_tool" for request in rpc.requests)
         )
+
+    def test_tool_shim_timeout_terminates_and_reaps_process(self) -> None:
+        load_workflow_host()
+        from api import app as workflow_app
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_path = Path(tmp) / "shim.pid"
+            shim = self._write_tool_shim(
+                tmp,
+                "import json, os, sys, time\n"
+                "args = json.loads(sys.argv[-1])\n"
+                "with open(args['pid_path'], 'w') as handle:\n"
+                "    handle.write(str(os.getpid()))\n"
+                "time.sleep(60)\n",
+            )
+
+            with (
+                patch.object(workflow_app, "_TOOL_CALL_TIMEOUT_SECONDS", 0.5),
+                self.assertRaisesRegex(RuntimeError, "exceeded 0.5 seconds"),
+            ):
+                asyncio.run(
+                    workflow_app.call_tool_shim(
+                        str(shim), "demo", "hang", {"pid_path": str(pid_path)}
+                    )
+                )
+
+            pid = int(pid_path.read_text())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
+
+    def test_tool_shim_cancellation_terminates_and_reaps_process(self) -> None:
+        load_workflow_host()
+        from api import app as workflow_app
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_path = Path(tmp) / "shim.pid"
+            shim = self._write_tool_shim(
+                tmp,
+                "import json, os, sys, time\n"
+                "args = json.loads(sys.argv[-1])\n"
+                "with open(args['pid_path'], 'w') as handle:\n"
+                "    handle.write(str(os.getpid()))\n"
+                "time.sleep(60)\n",
+            )
+
+            async def cancel_call() -> int:
+                task = asyncio.create_task(
+                    workflow_app.call_tool_shim(
+                        str(shim), "demo", "hang", {"pid_path": str(pid_path)}
+                    )
+                )
+                for _ in range(100):
+                    if pid_path.exists():
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertTrue(pid_path.exists(), "tool shim did not start")
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                return int(pid_path.read_text())
+
+            pid = asyncio.run(cancel_call())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
+
+    def test_tool_shim_output_is_bounded(self) -> None:
+        load_workflow_host()
+        from api import app as workflow_app
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_path = Path(tmp) / "shim.pid"
+            shim = self._write_tool_shim(
+                tmp,
+                "import json, os, sys, time\n"
+                "args = json.loads(sys.argv[-1])\n"
+                "with open(args['pid_path'], 'w') as handle:\n"
+                "    handle.write(str(os.getpid()))\n"
+                "sys.stdout.write('x' * 128)\n"
+                "sys.stdout.flush()\n"
+                "time.sleep(60)\n",
+            )
+
+            with (
+                patch.object(workflow_app, "_TOOL_CALL_MAX_OUTPUT_BYTES", 32),
+                self.assertRaisesRegex(RuntimeError, "stdout exceeded 32 bytes"),
+            ):
+                asyncio.run(
+                    workflow_app.call_tool_shim(
+                        str(shim), "demo", "large", {"pid_path": str(pid_path)}
+                    )
+                )
+
+            pid = int(pid_path.read_text())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
+
+    def test_tool_shim_nonzero_exit_does_not_expose_output(self) -> None:
+        load_workflow_host()
+        from api import app as workflow_app
+
+        with tempfile.TemporaryDirectory() as tmp:
+            shim = self._write_tool_shim(
+                tmp,
+                "import sys\n"
+                "sys.stdout.write('stdout-secret-marker')\n"
+                "sys.stderr.write('stderr-secret-marker')\n"
+                "raise SystemExit(7)\n",
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"centaur-tools call demo\.fails failed with exit code 7$",
+            ) as raised:
+                asyncio.run(
+                    workflow_app.call_tool_shim(str(shim), "demo", "fails", {})
+                )
+
+            message = str(raised.exception)
+            self.assertNotIn("stdout-secret-marker", message)
+            self.assertNotIn("stderr-secret-marker", message)
 
     def test_repeated_identical_tool_calls_keep_distinct_replay_checkpoints(
         self,

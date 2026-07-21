@@ -122,10 +122,41 @@ impl PgSessionStore {
         persona_id: Option<&str>,
         metadata: Value,
     ) -> Result<Session, SessionStoreError> {
-        sqlx::query(
+        self.create_or_get_session_claiming_principal(
+            thread_key,
+            harness_type,
+            persona_id,
+            metadata,
+            None,
+        )
+        .await
+        .map(|(session, _)| session)
+    }
+
+    /// Atomically create a session with `principal_claim`, or verify that an
+    /// existing session already has that exact principal. A claimed principal
+    /// is immutable through this boundary: missing and different bindings are
+    /// conflicts, never invitations to repair or overwrite the row.
+    pub async fn create_or_get_session_claiming_principal(
+        &self,
+        thread_key: &ThreadKey,
+        harness_type: &HarnessType,
+        persona_id: Option<&str>,
+        metadata: Value,
+        principal_claim: Option<&str>,
+    ) -> Result<(Session, bool), SessionStoreError> {
+        let mut tx = self.pool.begin().await?;
+        let inserted = sqlx::query(
             r#"
-            insert into sessions (thread_key, harness_type, persona_id, status, metadata)
-            values ($1, $2, $3, $4, $5)
+            insert into sessions (
+                thread_key,
+                harness_type,
+                persona_id,
+                status,
+                metadata,
+                iron_control_principal
+            )
+            values ($1, $2, $3, $4, $5, $6)
             on conflict (thread_key) do nothing
             "#,
         )
@@ -134,10 +165,34 @@ impl PgSessionStore {
         .bind(persona_id)
         .bind(SessionStatus::Idle.as_ref())
         .bind(metadata)
-        .execute(&self.pool)
-        .await?;
+        .bind(principal_claim)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            == 1;
 
-        let session = self.get_session(thread_key).await?;
+        let row = sqlx::query_as::<_, SessionRow>(
+            r#"
+            select thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, sandbox_last_active_at, created_at, updated_at
+            from sessions
+            where thread_key = $1
+            for update
+            "#,
+        )
+        .bind(thread_key.as_str())
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| SessionStoreError::NotFound {
+            thread_key: thread_key.as_str().to_owned(),
+        })?;
+        let session: Session = row.try_into()?;
+        if session.iron_control_principal.as_deref() != principal_claim {
+            return Err(SessionStoreError::PrincipalConflict {
+                thread_key: thread_key.as_str().to_owned(),
+                existing: session.iron_control_principal,
+                requested: principal_claim.map(str::to_owned),
+            });
+        }
         if session.harness_type != *harness_type {
             return Err(SessionStoreError::HarnessConflict {
                 thread_key: thread_key.as_str().to_owned(),
@@ -152,7 +207,8 @@ impl PgSessionStore {
                 requested: persona_id.map(str::to_owned),
             });
         }
-        Ok(session)
+        tx.commit().await?;
+        Ok((session, inserted))
     }
 
     pub async fn get_session(&self, thread_key: &ThreadKey) -> Result<Session, SessionStoreError> {
@@ -1275,27 +1331,6 @@ impl PgSessionStore {
         row.try_into()
     }
 
-    pub async fn set_iron_control_principal(
-        &self,
-        thread_key: &ThreadKey,
-        iron_control_principal: Option<&str>,
-    ) -> Result<Session, SessionStoreError> {
-        let row = sqlx::query_as::<_, SessionRow>(
-            r#"
-            update sessions
-            set iron_control_principal = $2, updated_at = now()
-            where thread_key = $1
-            returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, sandbox_last_active_at, created_at, updated_at
-            "#,
-        )
-        .bind(thread_key.as_str())
-        .bind(iron_control_principal)
-        .fetch_one(&self.pool)
-        .await?;
-
-        row.try_into()
-    }
-
     pub async fn insert_ready_warm_sandbox(
         &self,
         sandbox_id: &str,
@@ -1570,6 +1605,14 @@ pub enum SessionStoreError {
         "session {thread_key} already exists with persona_id {existing:?}, requested {requested:?}"
     )]
     PersonaConflict {
+        thread_key: String,
+        existing: Option<String>,
+        requested: Option<String>,
+    },
+    #[error(
+        "session {thread_key} already exists with iron_control_principal {existing:?}, requested {requested:?}"
+    )]
+    PrincipalConflict {
         thread_key: String,
         existing: Option<String>,
         requested: Option<String>,
@@ -1902,7 +1945,9 @@ mod tests {
     use time::{Duration as TimeDuration, OffsetDateTime};
     use uuid::Uuid;
 
-    use super::{IdleSandboxCandidateRow, PgSessionStore, SessionEventNotification};
+    use super::{
+        IdleSandboxCandidateRow, PgSessionStore, SessionEventNotification, SessionStoreError,
+    };
 
     async fn test_store() -> Option<PgSessionStore> {
         let Ok(url) = std::env::var("SESSION_RUNTIME_TEST_DATABASE_URL") else {
@@ -1928,6 +1973,100 @@ mod tests {
                 event_id: 42,
             }
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_principal_claims_never_rebind_a_session() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let thread_key =
+            ThreadKey::parse(format!("test:principal-claim-{}", Uuid::new_v4())).unwrap();
+
+        let first = store.create_or_get_session_claiming_principal(
+            &thread_key,
+            &HarnessType::Codex,
+            None,
+            json!({}),
+            Some("prn_first"),
+        );
+        let second = store.create_or_get_session_claiming_principal(
+            &thread_key,
+            &HarnessType::Codex,
+            None,
+            json!({}),
+            Some("prn_second"),
+        );
+        let (first, second) = tokio::join!(first, second);
+
+        let (winner, loser_error) = match (&first, &second) {
+            (Ok((session, true)), Err(error)) => {
+                (session.iron_control_principal.as_deref().unwrap(), error)
+            }
+            (Err(error), Ok((session, true))) => {
+                (session.iron_control_principal.as_deref().unwrap(), error)
+            }
+            outcome => panic!("exactly one principal claim must win: {outcome:?}"),
+        };
+        assert!(matches!(
+            loser_error,
+            SessionStoreError::PrincipalConflict { .. }
+        ));
+
+        let stored = store.get_session(&thread_key).await.expect("load session");
+        assert_eq!(stored.iron_control_principal.as_deref(), Some(winner));
+
+        store
+            .create_or_get_session_claiming_principal(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Some(winner),
+            )
+            .await
+            .expect("the winning principal can reuse its session");
+        let unclaimed_error = store
+            .create_or_get_session(&thread_key, &HarnessType::Codex, None, json!({}))
+            .await
+            .expect_err("an unclaimed create/get cannot reuse a principal-bound session");
+        assert!(matches!(
+            unclaimed_error,
+            SessionStoreError::PrincipalConflict {
+                requested: None,
+                ..
+            }
+        ));
+        assert_eq!(
+            store
+                .get_session(&thread_key)
+                .await
+                .expect("reload session")
+                .iron_control_principal
+                .as_deref(),
+            Some(winner)
+        );
+
+        let unbound_thread =
+            ThreadKey::parse(format!("test:principal-unbound-{}", Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(&unbound_thread, &HarnessType::Codex, None, json!({}))
+            .await
+            .expect("create an unbound session");
+        let error = store
+            .create_or_get_session_claiming_principal(
+                &unbound_thread,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Some("prn_late_claim"),
+            )
+            .await
+            .expect_err("an existing unbound session must not be rebound");
+        assert!(matches!(
+            error,
+            SessionStoreError::PrincipalConflict { existing: None, .. }
+        ));
     }
 
     fn idle_row(
