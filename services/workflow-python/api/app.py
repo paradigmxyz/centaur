@@ -7,10 +7,12 @@ import subprocess
 import sys
 from contextvars import ContextVar, Token
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 
-_ACTIVE_RPC: ContextVar[Any | None] = ContextVar("centaur_workflow_active_rpc", default=None)
+_ACTIVE_RPC: ContextVar[Any | None] = ContextVar(
+    "centaur_workflow_active_rpc", default=None
+)
 
 
 def bind_context_rpc(rpc: Any) -> Token[Any | None]:
@@ -69,8 +71,15 @@ async def call_tool_shim(
 
 
 class WorkflowToolManager:
-    def __init__(self, rpc: Any | None = None) -> None:
+    def __init__(
+        self,
+        rpc: Any | None = None,
+        *,
+        durable_call: Callable[[str, str, dict[str, Any]], Awaitable[Any]]
+        | None = None,
+    ) -> None:
         self._rpc = rpc
+        self._durable_call = durable_call
 
     async def call_tool_raw(
         self,
@@ -100,6 +109,8 @@ class WorkflowToolManager:
         method: str,
         args: dict[str, Any] | None = None,
     ) -> Any:
+        if self._durable_call is not None:
+            return await self._durable_call(tool, method, args or {})
         return await self.call_tool_raw(tool, method, args)
 
 
@@ -115,14 +126,16 @@ class WorkflowToolMethod:
 
     async def __call__(self, *args: Any, **kwargs: Any) -> Any:
         if args and kwargs:
-            raise TypeError("tool method calls accept either one dict positional arg or keywords")
+            raise TypeError(
+                "tool method calls accept either one dict positional arg or keywords"
+            )
         if not args:
             payload = kwargs
         elif len(args) == 1 and isinstance(args[0], dict):
             payload = args[0]
         else:
             raise TypeError("tool method calls accept at most one positional dict arg")
-        return await self._manager.call_tool_raw(self._tool, self._method, payload)
+        return await self._manager.call_tool(self._tool, self._method, payload)
 
 
 class WorkflowToolProxy:

@@ -93,7 +93,8 @@ Workflows are Python handlers run by `services/workflow-python` under the
 api-rs Absurd workflow runtime. When a worker restarts, the handler runs again,
 but `ctx.step(...)` returns cached results for completed work. Workflow
 `ctx.call_tool(...)` remains available through the generated `centaur-tools`
-compatibility bridge.
+compatibility bridge and is checkpointed internally, so completed tool calls
+also return their stored result after a replay.
 
 Use workflows for scheduled digests, monitoring loops, approval gates, jobs that
 sleep for minutes or days, and parent/child workflow trees.

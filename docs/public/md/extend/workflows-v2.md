@@ -59,7 +59,7 @@ Supported v2 primitives:
 | `handler(inp, ctx)` | Supported |
 | `ctx.step(name, fn)` | Supported |
 | `ctx.agent_turn(...)` / `ctx.run_agent(...)` | Supported |
-| `ctx.call_tool(...)` | Supported through the generated `centaur-tools call` bridge in the workflow-host sandbox |
+| `ctx.call_tool(...)` | Durable, replay-safe after checkpointing, and supported through the generated `centaur-tools call` bridge in the workflow-host sandbox |
 | `ctx.post_to_slack(...)` | Supported |
 | `ctx._pool` | Supported when the workflow-host sandbox receives `DATABASE_URL` |
 | `WEBHOOKS` | Supported |
@@ -89,8 +89,9 @@ module, or a supported workflow-host API module.
 
 ### Put side effects behind steps
 
-The handler may be replayed after a crash or retry. Any external write should
-be wrapped in `ctx.step(...)` so the result is checkpointed:
+The handler may be replayed after a crash or retry. External writes that are not
+already durable context primitives should be wrapped in `ctx.step(...)` so the
+result is checkpointed:
 
 ```python
 async def handler(inp: dict, ctx: WorkflowContext) -> dict:
@@ -100,6 +101,12 @@ async def handler(inp: dict, ctx: WorkflowContext) -> dict:
     )
     return {"posted": posted}
 ```
+
+`ctx.call_tool(...)` and `ctx.tools.<tool>.<method>(...)` are already
+checkpointed by Centaur. Do not wrap either in another `ctx.step`; a replay
+returns the stored JSON result. Mutating tools should still implement
+idempotency for the narrow failure window between accepting an external effect
+and persisting its result.
 
 ### Make agent turns explicit
 
@@ -214,8 +221,9 @@ For each existing workflow:
    `api.workflow_engine.WorkflowContext`.
 3. Confirm third-party Python packages are installed in the workflow-host
    sandbox image.
-4. Wrap Slack posts, database writes, external HTTP calls, and tool calls in
-   `ctx.step(...)` when they must not repeat.
+4. Wrap Slack posts, database writes, and external HTTP calls in `ctx.step(...)`
+   when they must not repeat. Do not double-wrap `ctx.call_tool(...)` or
+   `ctx.tools.*`; Centaur checkpoints them internally.
 5. Replace direct agent-control-plane calls with `ctx.agent_turn(...)`.
 6. If the workflow uses `ctx._pool`, confirm the workflow-host sandbox receives
    `DATABASE_URL`.
@@ -233,8 +241,8 @@ domain before they are v2-ready.
 
 `ctx.call_tool(...)` is a compatibility surface in the Python workflow host. It
 uses the generated `centaur-tools call` bridge against the installed tool
-package; agent sandboxes should use direct tool CLIs instead of deprecated
-`/tools/...` HTTP routes.
+package and checkpoints successful JSON results through Absurd; agent sandboxes
+should use direct tool CLIs instead of deprecated `/tools/...` HTTP routes.
 
 ## Verify a migration
 

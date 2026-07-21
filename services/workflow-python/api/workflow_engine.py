@@ -2,10 +2,17 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import hashlib
 import inspect
+import json
 from typing import Any
 
-from api.app import WorkflowToolManager, WorkflowTools, bind_context_rpc, reset_context_rpc
+from api.app import (
+    WorkflowToolManager,
+    WorkflowTools,
+    bind_context_rpc,
+    reset_context_rpc,
+)
 
 
 @dataclasses.dataclass
@@ -36,7 +43,9 @@ class WorkflowContext:
         # applied to every ctx.agent_turn as a per-workflow default; explicit
         # per-call kwargs always win. See agent_turn().
         self._agent_defaults = dict(agent_defaults or {})
-        self.tools = WorkflowTools(WorkflowToolManager(self._rpc))
+        self.tools = WorkflowTools(
+            WorkflowToolManager(self._rpc, durable_call=self.call_tool)
+        )
 
     def log(self, event: str, **fields: Any) -> None:
         self._rpc.notify(
@@ -109,14 +118,20 @@ class WorkflowContext:
             args.setdefault("text", text)
         return await self._rpc.request({"type": "ctx.agent_turn", "args": args})
 
-    async def run_agent(self, *args: Any, text: str | None = None, **kwargs: Any) -> Any:
+    async def run_agent(
+        self, *args: Any, text: str | None = None, **kwargs: Any
+    ) -> Any:
         if args:
             kwargs.setdefault("name", args[0])
             if len(args) > 1:
-                raise TypeError("run_agent accepts at most one positional name argument")
+                raise TypeError(
+                    "run_agent accepts at most one positional name argument"
+                )
         return await self.agent_turn(text, **kwargs)
 
-    async def start_agent(self, *args: Any, text: str | None = None, **kwargs: Any) -> Any:
+    async def start_agent(
+        self, *args: Any, text: str | None = None, **kwargs: Any
+    ) -> Any:
         return await self.run_agent(*args, text=text, **kwargs)
 
     async def start_workflow(
@@ -136,8 +151,18 @@ class WorkflowContext:
             request["idempotency_key"] = idempotency_key
         return await self._rpc.request(request)
 
-    async def call_tool(self, tool: str, method: str, args: dict[str, Any] | None = None) -> Any:
-        return await WorkflowToolManager(self._rpc).call_tool_raw(tool, method, args or {})
+    async def call_tool(
+        self, tool: str, method: str, args: dict[str, Any] | None = None
+    ) -> Any:
+        payload = args or {}
+        step_name = durable_tool_step_name(tool, method, payload)
+
+        async def execute() -> Any:
+            return await WorkflowToolManager(self._rpc).call_tool_raw(
+                tool, method, payload
+            )
+
+        return await self.step(step_name, execute, step_kind="tool_call")
 
     async def post_to_slack(self, channel: str, text: str, **kwargs: Any) -> Any:
         return await self._rpc.request(
@@ -154,3 +179,28 @@ def duration_seconds(value: dt.timedelta | int | float) -> float:
     if isinstance(value, dt.timedelta):
         return max(value.total_seconds(), 0.0)
     return max(float(value), 0.0)
+
+
+def durable_tool_step_name(tool: str, method: str, args: dict[str, Any]) -> str:
+    normalized_tool = tool.strip()
+    normalized_method = method.strip()
+    if not normalized_tool or not normalized_method:
+        raise ValueError("tool and method must be non-empty")
+    canonical = json.dumps(
+        {"args": args, "method": normalized_method, "tool": normalized_tool},
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode()
+    digest = hashlib.sha256(canonical).hexdigest()[:24]
+    return f"$ctx.call_tool:{_checkpoint_label(normalized_tool)}.{_checkpoint_label(normalized_method)}:{digest}"
+
+
+def _checkpoint_label(value: str) -> str:
+    label = "".join(
+        character
+        if character.isascii() and (character.isalnum() or character in "._-")
+        else "_"
+        for character in value
+    )
+    return label[:64] or "tool"

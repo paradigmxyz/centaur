@@ -277,9 +277,19 @@ Rules:
 
 ### `ctx.call_tool`
 
-api-rs should call the tool runtime and return JSON output. If api-rs tool
-runtime is incomplete during the POC, this can temporarily proxy to the existing
-Python API, but the target design is api-rs-owned tool routing.
+`ctx.call_tool` is a durable context primitive. The compatibility context wraps
+in-sandbox shim execution in an Absurd checkpoint, and api-rs independently
+checkpoints raw `ctx.call_tool` protocol requests before calling the tool
+runtime. The checkpoint name is derived from the normalized tool and method plus
+a canonical argument digest; Absurd's occurrence counter distinguishes repeated
+identical calls. A replay returns the checkpointed JSON result without executing
+the tool again, so workflow callers must not add a second `ctx.step` wrapper.
+
+As with any checkpointed external effect, a process failure after the tool
+accepts the request but before the result is persisted can retry the call. Tools
+that mutate external state still need a stable idempotency boundary. If api-rs
+tool runtime is incomplete during the POC, execution can temporarily proxy to
+the existing Python API, but checkpoint ownership remains in Centaur.
 
 ### `ctx.post_to_slack`
 
@@ -505,6 +515,7 @@ should become native api-rs Slack/session adapter logic:
 - Unit test dataclass input hydration.
 - Unit test webhook auth, redaction, and idempotency.
 - Unit test `ctx.step` checkpoint replay.
+- Unit test `ctx.call_tool` checkpoint identity and replay without re-execution.
 - Integration test direct `ctx._pool` access against local Postgres.
 - Local sandbox smoke for Python host.
 - Kind smoke for workflow-python sandbox.
@@ -517,7 +528,8 @@ should become native api-rs Slack/session adapter logic:
 - Replay test:
   - run workflow once
   - replay/retry
-  - verify checkpointed step does not duplicate Slack/tool side effects
+  - verify checkpointed step does not duplicate Slack side effects
+  - verify `ctx.call_tool` does not repeat a completed tool execution
 
 ## Open Questions
 

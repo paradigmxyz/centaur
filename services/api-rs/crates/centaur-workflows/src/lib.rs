@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     env,
+    future::Future,
     path::PathBuf,
     str::FromStr,
     sync::{Arc, RwLock},
@@ -25,6 +26,7 @@ use cron::Schedule;
 use futures_util::{TryStreamExt, pin_mut};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use sqlx::Row;
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -3348,7 +3350,7 @@ async fn handle_python_context_request(
                 Err(error) => Err(error.to_string()),
             }
         }
-        Some("ctx.call_tool") => match call_python_workflow_tool(message).await {
+        Some("ctx.call_tool") => match call_python_workflow_tool_durably(message, ctx).await {
             Ok(value) => Ok(value),
             Err(error) => Err(error.to_string()),
         },
@@ -3670,25 +3672,95 @@ fn run_time_now_tool() -> ToolResult {
     }
 }
 
+#[cfg(test)]
 async fn call_python_workflow_tool(message: &Value) -> Result<Value, WorkflowRuntimeError> {
-    let tool = message
-        .get("tool")
-        .and_then(Value::as_str)
-        .ok_or_else(|| WorkflowRuntimeError::BadRequest("ctx.call_tool requires tool".to_owned()))?
-        .trim();
-    let method = message
-        .get("method")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            WorkflowRuntimeError::BadRequest("ctx.call_tool requires method".to_owned())
-        })?
-        .trim();
-    if tool.is_empty() || method.is_empty() {
-        return Err(WorkflowRuntimeError::BadRequest(
-            "ctx.call_tool requires non-empty tool and method".to_owned(),
-        ));
+    execute_python_workflow_tool(PythonWorkflowToolCall::from_message(message)?).await
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PythonWorkflowToolCall {
+    tool: String,
+    method: String,
+    args: Value,
+}
+
+impl PythonWorkflowToolCall {
+    fn from_message(message: &Value) -> Result<Self, WorkflowRuntimeError> {
+        let tool = message
+            .get("tool")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                WorkflowRuntimeError::BadRequest("ctx.call_tool requires tool".to_owned())
+            })?
+            .trim();
+        let method = message
+            .get("method")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                WorkflowRuntimeError::BadRequest("ctx.call_tool requires method".to_owned())
+            })?
+            .trim();
+        if tool.is_empty() || method.is_empty() {
+            return Err(WorkflowRuntimeError::BadRequest(
+                "ctx.call_tool requires non-empty tool and method".to_owned(),
+            ));
+        }
+        Ok(Self {
+            tool: tool.to_owned(),
+            method: method.to_owned(),
+            args: message.get("args").cloned().unwrap_or_else(|| json!({})),
+        })
     }
-    if tool == "time" && matches!(method, "now" | "time_now") {
+
+    fn checkpoint_name(&self) -> Result<String, WorkflowRuntimeError> {
+        let identity = canonical_json_value(&json!({
+            "args": self.args,
+            "method": self.method,
+            "tool": self.tool,
+        }));
+        let digest = Sha256::digest(serde_json::to_vec(&identity)?);
+        Ok(format!(
+            "$ctx.call_tool.protocol:{}.{}:{}",
+            checkpoint_label(&self.tool),
+            checkpoint_label(&self.method),
+            &hex::encode(digest)[..24],
+        ))
+    }
+}
+
+async fn call_python_workflow_tool_durably(
+    message: &Value,
+    ctx: &TaskContext,
+) -> Result<Value, WorkflowRuntimeError> {
+    let call = PythonWorkflowToolCall::from_message(message)?;
+    checkpoint_python_workflow_tool_call(call, ctx, |call| async move {
+        execute_python_workflow_tool(call).await
+    })
+    .await
+}
+
+async fn checkpoint_python_workflow_tool_call<F, Fut>(
+    call: PythonWorkflowToolCall,
+    ctx: &TaskContext,
+    execute: F,
+) -> Result<Value, WorkflowRuntimeError>
+where
+    F: FnOnce(PythonWorkflowToolCall) -> Fut + Send,
+    Fut: Future<Output = Result<Value, WorkflowRuntimeError>> + Send,
+{
+    let checkpoint_name = call.checkpoint_name()?;
+    ctx.step(&checkpoint_name, || async move {
+        execute(call).await.map_err(absurd_error)
+    })
+    .await
+    .map_err(WorkflowRuntimeError::from)
+}
+
+async fn execute_python_workflow_tool(
+    call: PythonWorkflowToolCall,
+) -> Result<Value, WorkflowRuntimeError> {
+    let PythonWorkflowToolCall { tool, method, args } = call;
+    if tool == "time" && matches!(method.as_str(), "now" | "time_now") {
         return serde_json::to_value(run_time_now_tool()).map_err(WorkflowRuntimeError::from);
     }
 
@@ -3699,7 +3771,6 @@ async fn call_python_workflow_tool(message: &Value) -> Result<Value, WorkflowRun
     })?;
     let base_url = base_url.trim_end_matches('/');
     let url = format!("{base_url}/tools/{tool}/{method}");
-    let args = message.get("args").cloned().unwrap_or_else(|| json!({}));
     let request = reqwest::Client::new().post(&url).json(&args);
     let response = request.send().await?;
     let status = response.status();
@@ -3710,6 +3781,40 @@ async fn call_python_workflow_tool(message: &Value) -> Result<Value, WorkflowRun
         )));
     }
     Ok(body)
+}
+
+fn checkpoint_label(value: &str) -> String {
+    let label = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .take(64)
+        .collect::<String>();
+    if label.is_empty() {
+        "tool".to_owned()
+    } else {
+        label
+    }
+}
+
+fn canonical_json_value(value: &Value) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(values.iter().map(canonical_json_value).collect()),
+        Value::Object(values) => Value::Object(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), canonical_json_value(value)))
+                .collect::<BTreeMap<_, _>>()
+                .into_iter()
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
 }
 
 async fn post_tool_result_to_slack(
@@ -4100,6 +4205,52 @@ pub enum WorkflowRuntimeError {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use sqlx::postgres::PgPoolOptions;
+    use std::{
+        sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    async fn optional_absurd_test_pool() -> Result<Option<sqlx::PgPool>, WorkflowRuntimeError> {
+        let Ok(database_url) = env::var("ABSURD_TEST_DATABASE_URL") else {
+            return Ok(None);
+        };
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&database_url)
+            .await?;
+        let mut connection = pool.acquire().await?;
+        sqlx::query("SELECT pg_advisory_lock(677148372)")
+            .execute(&mut *connection)
+            .await?;
+        let has_schema: Option<i32> =
+            sqlx::query_scalar("SELECT 1 FROM pg_namespace WHERE nspname = 'absurd'")
+                .fetch_optional(&mut *connection)
+                .await?;
+        if has_schema.is_none() {
+            sqlx::raw_sql(include_str!(
+                "../../centaur-session-sqlx/migrations/0007_absurd_workflows.sql"
+            ))
+            .execute(&mut *connection)
+            .await?;
+        }
+        sqlx::query("SELECT pg_advisory_unlock(677148372)")
+            .execute(&mut *connection)
+            .await?;
+        drop(connection);
+        Ok(Some(pool))
+    }
+
+    fn unique_test_queue(prefix: &str) -> String {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_nanos();
+        format!("{prefix}_{suffix}")
+    }
 
     #[test]
     fn agent_turn_input_line_omits_unset_harness_knobs() {
@@ -4376,6 +4527,155 @@ mod tests {
         assert_eq!(value["tool"], json!("time"));
         assert_eq!(value["method"], json!("now"));
         assert!(value.pointer("/output/utc").is_some());
+    }
+
+    #[test]
+    fn ctx_call_tool_checkpoint_identity_is_canonical_and_argument_bound() {
+        let first = PythonWorkflowToolCall::from_message(&json!({
+            "type": "ctx.call_tool",
+            "tool": "demo",
+            "method": "lookup",
+            "args": {"b": 2, "a": 1},
+        }))
+        .unwrap()
+        .checkpoint_name()
+        .unwrap();
+        let reordered = PythonWorkflowToolCall::from_message(&json!({
+            "type": "ctx.call_tool",
+            "tool": "demo",
+            "method": "lookup",
+            "args": {"a": 1, "b": 2},
+        }))
+        .unwrap()
+        .checkpoint_name()
+        .unwrap();
+        let changed = PythonWorkflowToolCall::from_message(&json!({
+            "type": "ctx.call_tool",
+            "tool": "demo",
+            "method": "lookup",
+            "args": {"a": 2, "b": 2},
+        }))
+        .unwrap()
+        .checkpoint_name()
+        .unwrap();
+
+        assert_eq!(first, reordered);
+        assert_ne!(first, changed);
+        assert!(first.starts_with("$ctx.call_tool.protocol:demo.lookup:"));
+        assert!(!first.contains('"'));
+    }
+
+    #[tokio::test]
+    async fn ctx_call_tool_reuses_checkpoint_after_task_retry_when_database_url_is_set()
+    -> Result<(), WorkflowRuntimeError> {
+        let Some(pool) = optional_absurd_test_pool().await? else {
+            return Ok(());
+        };
+        let queue = unique_test_queue("durable_tool");
+        let app = Client::from_pool_with_options(
+            pool,
+            ClientOptions {
+                queue_name: queue.clone(),
+                ..ClientOptions::default()
+            },
+        )?;
+        app.create_queue(None, CreateQueueOptions::default())
+            .await?;
+
+        let executions = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::new(Mutex::new(Vec::<Value>::new()));
+        app.register_task("durable_tool", {
+            let executions = executions.clone();
+            let observed = observed.clone();
+            move |_params: Value, ctx| {
+                let executions = executions.clone();
+                let observed = observed.clone();
+                async move {
+                    let call = PythonWorkflowToolCall::from_message(&json!({
+                        "type": "ctx.call_tool",
+                        "tool": "demo",
+                        "method": "lookup",
+                        "args": {"address": "0x1234"},
+                    }))
+                    .map_err(absurd_error)?;
+                    let mut values = Vec::new();
+                    for _ in 0..2 {
+                        let executions = executions.clone();
+                        values.push(
+                            checkpoint_python_workflow_tool_call(
+                                call.clone(),
+                                &ctx,
+                                move |_call| async move {
+                                    let execution = executions.fetch_add(1, Ordering::SeqCst) + 1;
+                                    Ok(json!({"execution": execution}))
+                                },
+                            )
+                            .await
+                            .map_err(absurd_error)?,
+                        );
+                    }
+                    observed
+                        .lock()
+                        .expect("observed results lock")
+                        .push(json!(values));
+                    if ctx.attempt() == 1 {
+                        return Err(absurd::Error::InvalidOptions(
+                            "fail after checkpoint to force replay".to_owned(),
+                        ));
+                    }
+                    Ok(json!(values))
+                }
+            }
+        })?;
+
+        let spawned = app
+            .spawn(
+                "durable_tool",
+                json!({}),
+                SpawnOptions {
+                    max_attempts: Some(2),
+                    retry_strategy: Some(RetryStrategy {
+                        kind: RetryKind::Fixed,
+                        base_seconds: Some(0.0),
+                        factor: None,
+                        max_seconds: None,
+                    }),
+                    ..SpawnOptions::default()
+                },
+            )
+            .await?;
+        app.work_batch(absurd::WorkBatchOptions {
+            worker_id: "durable-tool-first-attempt".to_owned(),
+            ..absurd::WorkBatchOptions::default()
+        })
+        .await?;
+        assert_eq!(executions.load(Ordering::SeqCst), 2);
+
+        app.work_batch(absurd::WorkBatchOptions {
+            worker_id: "durable-tool-replay".to_owned(),
+            ..absurd::WorkBatchOptions::default()
+        })
+        .await?;
+        let snapshot = app
+            .fetch_task_result(&spawned.task_id, None)
+            .await?
+            .expect("durable tool task result");
+        assert_eq!(
+            snapshot,
+            absurd::TaskResultSnapshot::Completed {
+                result: json!([{"execution": 1}, {"execution": 2}]),
+            }
+        );
+        assert_eq!(executions.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            *observed.lock().expect("observed results lock"),
+            vec![
+                json!([{"execution": 1}, {"execution": 2}]),
+                json!([{"execution": 1}, {"execution": 2}]),
+            ]
+        );
+
+        Ok(())
     }
 
     #[test]

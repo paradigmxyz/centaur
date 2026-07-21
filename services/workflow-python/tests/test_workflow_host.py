@@ -14,7 +14,9 @@ from unittest.mock import patch
 def load_workflow_host():
     module_path = Path(__file__).resolve().parents[1] / "workflow_host.py"
     sys.path.insert(0, str(module_path.parent))
-    spec = importlib.util.spec_from_file_location("workflow_host_under_test", module_path)
+    spec = importlib.util.spec_from_file_location(
+        "workflow_host_under_test", module_path
+    )
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -69,6 +71,46 @@ class RequestRpc(FakeRpc):
             }
         if message_type == "ctx.sleep":
             return {"slept": True}
+        raise AssertionError(f"unexpected request {payload}")
+
+
+class CheckpointRpc(FakeRpc):
+    def __init__(self) -> None:
+        super().__init__()
+        self.requests = []
+        self.checkpoints = {}
+        self.step_counts = {}
+        self.tool_executions = 0
+
+    def begin_attempt(self) -> None:
+        self.step_counts = {}
+
+    async def request(self, payload):
+        self.requests.append(payload)
+        message_type = payload["type"]
+        if message_type == "ctx.step.get":
+            step = payload["step"]
+            occurrence = self.step_counts.get(step, 0) + 1
+            self.step_counts[step] = occurrence
+            checkpoint_name = step if occurrence == 1 else f"{step}#{occurrence}"
+            if checkpoint_name in self.checkpoints:
+                return {
+                    "done": True,
+                    "checkpoint_name": checkpoint_name,
+                    "value": self.checkpoints[checkpoint_name],
+                }
+            return {"done": False, "checkpoint_name": checkpoint_name}
+        if message_type == "ctx.step.put":
+            self.checkpoints[payload["checkpoint_name"]] = payload["value"]
+            return payload["value"]
+        if message_type == "ctx.call_tool":
+            self.tool_executions += 1
+            return {
+                "execution": self.tool_executions,
+                "tool": payload["tool"],
+                "method": payload["method"],
+                "args": payload["args"],
+            }
         raise AssertionError(f"unexpected request {payload}")
 
 
@@ -155,6 +197,140 @@ class WorkflowHostTests(unittest.TestCase):
             result,
             {"tool": "demo", "method": "method", "args": {"x": 1}, "via": "rpc"},
         )
+
+    def test_call_tool_replays_checkpoint_without_repeating_execution(self) -> None:
+        host = load_workflow_host()
+        rpc = CheckpointRpc()
+
+        async def run_once():
+            rpc.begin_attempt()
+            ctx = host.WorkflowContext(
+                rpc,
+                run_id="run-123",
+                task_id="task-456",
+                workflow_name="sample",
+            )
+            return await ctx.call_tool("demo", "lookup", {"b": 2, "a": 1})
+
+        from api import app as workflow_app
+
+        with patch.object(workflow_app, "resolve_tool_shim", return_value=None):
+            first = asyncio.run(run_once())
+            replayed = asyncio.run(run_once())
+
+        self.assertEqual(first, replayed)
+        self.assertEqual(rpc.tool_executions, 1)
+        step_requests = [
+            request for request in rpc.requests if request["type"] == "ctx.step.get"
+        ]
+        self.assertEqual(len(step_requests), 2)
+        self.assertEqual(step_requests[0]["step"], step_requests[1]["step"])
+        self.assertTrue(
+            step_requests[0]["step"].startswith("$ctx.call_tool:demo.lookup:")
+        )
+        self.assertNotIn('"a"', step_requests[0]["step"])
+
+    def test_tools_proxy_uses_durable_call_boundary(self) -> None:
+        host = load_workflow_host()
+        rpc = CheckpointRpc()
+
+        async def run_once():
+            rpc.begin_attempt()
+            ctx = host.WorkflowContext(
+                rpc,
+                run_id="run-123",
+                task_id="task-456",
+                workflow_name="sample",
+            )
+            return await ctx.tools.demo.lookup(a=1)
+
+        from api import app as workflow_app
+
+        with patch.object(workflow_app, "resolve_tool_shim", return_value=None):
+            first = asyncio.run(run_once())
+            replayed = asyncio.run(run_once())
+
+        self.assertEqual(first, replayed)
+        self.assertEqual(rpc.tool_executions, 1)
+
+    def test_in_sandbox_tool_shim_is_checkpointed_before_replay(self) -> None:
+        host = load_workflow_host()
+        rpc = CheckpointRpc()
+        shim_executions = []
+
+        async def call_tool_shim(tool_shim, tool, method, args):
+            shim_executions.append((tool_shim, tool, method, args))
+            return {"execution": len(shim_executions)}
+
+        async def run_once():
+            rpc.begin_attempt()
+            ctx = host.WorkflowContext(
+                rpc,
+                run_id="run-123",
+                task_id="task-456",
+                workflow_name="sample",
+            )
+            return await ctx.call_tool("demo", "lookup", {"a": 1})
+
+        from api import app as workflow_app
+
+        with (
+            patch.object(
+                workflow_app, "resolve_tool_shim", return_value="/bin/tool-shim"
+            ),
+            patch.object(workflow_app, "call_tool_shim", call_tool_shim),
+        ):
+            first = asyncio.run(run_once())
+            replayed = asyncio.run(run_once())
+
+        self.assertEqual(first, replayed)
+        self.assertEqual(
+            shim_executions,
+            [("/bin/tool-shim", "demo", "lookup", {"a": 1})],
+        )
+        self.assertFalse(
+            any(request["type"] == "ctx.call_tool" for request in rpc.requests)
+        )
+
+    def test_repeated_identical_tool_calls_keep_distinct_replay_checkpoints(
+        self,
+    ) -> None:
+        host = load_workflow_host()
+        rpc = CheckpointRpc()
+
+        async def run_once():
+            rpc.begin_attempt()
+            ctx = host.WorkflowContext(
+                rpc,
+                run_id="run-123",
+                task_id="task-456",
+                workflow_name="sample",
+            )
+            first = await ctx.call_tool("demo", "lookup", {"a": 1})
+            second = await ctx.call_tool("demo", "lookup", {"a": 1})
+            return first, second
+
+        from api import app as workflow_app
+
+        with patch.object(workflow_app, "resolve_tool_shim", return_value=None):
+            first_run = asyncio.run(run_once())
+            replayed = asyncio.run(run_once())
+
+        self.assertEqual(first_run, replayed)
+        self.assertEqual(first_run[0]["execution"], 1)
+        self.assertEqual(first_run[1]["execution"], 2)
+        self.assertEqual(rpc.tool_executions, 2)
+
+    def test_tool_step_identity_is_canonical_and_argument_bound(self) -> None:
+        load_workflow_host()
+        from api.workflow_engine import durable_tool_step_name
+
+        first = durable_tool_step_name("demo", "lookup", {"b": 2, "a": 1})
+        reordered = durable_tool_step_name("demo", "lookup", {"a": 1, "b": 2})
+        changed = durable_tool_step_name("demo", "lookup", {"a": 2, "b": 2})
+
+        self.assertEqual(first, reordered)
+        self.assertNotEqual(first, changed)
 
     def test_run_agent_accepts_positional_step_name_with_text(self) -> None:
         host = load_workflow_host()
@@ -255,7 +431,9 @@ class WorkflowHostTests(unittest.TestCase):
         fake_asyncpg = types.SimpleNamespace(create_pool=create_pool)
 
         with (
-            patch.dict(os.environ, {"DATABASE_URL": "postgresql://example/db"}, clear=False),
+            patch.dict(
+                os.environ, {"DATABASE_URL": "postgresql://example/db"}, clear=False
+            ),
             patch.dict(sys.modules, {"asyncpg": fake_asyncpg}),
             patch.object(host.asyncio, "sleep", sleep),
         ):

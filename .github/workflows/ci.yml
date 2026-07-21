@@ -152,6 +152,7 @@ jobs:
       - name: Test
         working-directory: services/api-rs
         env:
+          ABSURD_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
           SESSION_SQLX_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: cargo test --workspace
 
