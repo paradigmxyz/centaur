@@ -2858,6 +2858,22 @@ async fn run_python_workflow_host(
     run_python_workflow_host_local(input, ctx, session_runtime, workflow_clients).await
 }
 
+fn python_workflow_start_message(
+    input: &WorkflowTaskInput,
+    run_id: &str,
+    task_id: &str,
+    attempt: i32,
+) -> Value {
+    json!({
+        "type": "workflow.start",
+        "run_id": run_id,
+        "task_id": task_id,
+        "attempt": attempt,
+        "workflow_name": input.workflow_name,
+        "input": input.input,
+    })
+}
+
 async fn start_workflow_task_heartbeat(
     ctx: TaskContext,
 ) -> Result<WorkflowTaskHeartbeatGuard, WorkflowRuntimeError> {
@@ -2921,13 +2937,7 @@ async fn run_python_workflow_host_local(
 
     write_host_message(
         &mut stdin,
-        &json!({
-            "type": "workflow.start",
-            "run_id": ctx.run_id(),
-            "task_id": ctx.task_id(),
-            "workflow_name": input.workflow_name,
-            "input": input.input,
-        }),
+        &python_workflow_start_message(&input, ctx.run_id(), ctx.task_id(), ctx.attempt()),
     )
     .await?;
 
@@ -3073,13 +3083,7 @@ where
 {
     write_host_message(
         stdin,
-        &json!({
-            "type": "workflow.start",
-            "run_id": ctx.run_id(),
-            "task_id": ctx.task_id(),
-            "workflow_name": input.workflow_name,
-            "input": input.input,
-        }),
+        &python_workflow_start_message(&input, ctx.run_id(), ctx.task_id(), ctx.attempt()),
     )
     .await?;
 
@@ -4280,6 +4284,27 @@ mod tests {
         assert_eq!(value.get("provider"), Some(&json!("amazon-bedrock")));
         assert_eq!(value.get("reasoning"), Some(&json!("high")));
         assert_eq!(value.pointer("/message/content"), Some(&json!(parts)));
+    }
+
+    #[test]
+    fn python_workflow_start_message_includes_task_attempt() {
+        let message = python_workflow_start_message(
+            &WorkflowTaskInput {
+                workflow_name: "sample_workflow".to_owned(),
+                input: json!({"value": 1}),
+                harness_type: HarnessType::Codex,
+            },
+            "run-123",
+            "task-456",
+            3,
+        );
+
+        assert_eq!(message["type"], json!("workflow.start"));
+        assert_eq!(message["run_id"], json!("run-123"));
+        assert_eq!(message["task_id"], json!("task-456"));
+        assert_eq!(message["attempt"], json!(3));
+        assert_eq!(message["workflow_name"], json!("sample_workflow"));
+        assert_eq!(message["input"], json!({"value": 1}));
     }
 
     #[test]

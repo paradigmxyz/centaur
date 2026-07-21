@@ -140,7 +140,9 @@ class WorkflowHostTests(unittest.TestCase):
             run_id="run-123",
             task_id="task-456",
             workflow_name="sample",
+            attempt=3,
         )
+        self.assertEqual(ctx.attempt, 3)
 
         async def run_step():
             async def call_tool():
@@ -157,6 +159,24 @@ class WorkflowHostTests(unittest.TestCase):
         self.assertEqual(rpc.requests[0]["step_kind"], "tool_call")
         self.assertEqual(rpc.requests[-1]["type"], "ctx.step.put")
         self.assertEqual(rpc.requests[-1]["step_kind"], "tool_call")
+
+    def test_workflow_context_rejects_invalid_attempt(self) -> None:
+        host = load_workflow_host()
+
+        for attempt in (0, -1, True, "2"):
+            with (
+                self.subTest(attempt=attempt),
+                self.assertRaisesRegex(
+                    ValueError, "attempt must be a positive integer"
+                ),
+            ):
+                host.WorkflowContext(
+                    RequestRpc(),
+                    run_id="run-123",
+                    task_id="task-456",
+                    workflow_name="sample",
+                    attempt=attempt,
+                )
 
     def test_sleep_sends_duration_seconds(self) -> None:
         host = load_workflow_host()
@@ -450,7 +470,11 @@ class WorkflowHostTests(unittest.TestCase):
 
         async def handler(inp, ctx):
             self.assertEqual(inp, {"input": "value"})
-            return {"ok": True, "seen_run_id": ctx.run_id}
+            return {
+                "ok": True,
+                "seen_run_id": ctx.run_id,
+                "seen_attempt": ctx.attempt,
+            }
 
         registered = host.RegisteredWorkflow(
             workflow_name="sample_workflow",
@@ -479,6 +503,7 @@ class WorkflowHostTests(unittest.TestCase):
                         "workflow_name": "sample_workflow",
                         "run_id": "run-123",
                         "task_id": "task-456",
+                        "attempt": 3,
                         "input": {"input": "value"},
                     },
                     rpc,
@@ -494,7 +519,11 @@ class WorkflowHostTests(unittest.TestCase):
                 "workflow_task_id": "task-456",
                 "task_id": "task-456",
                 "workflow_name": "sample_workflow",
-                "result": {"ok": True, "seen_run_id": "run-123"},
+                "result": {
+                    "ok": True,
+                    "seen_run_id": "run-123",
+                    "seen_attempt": 3,
+                },
             },
         )
         self.assertTrue(rpc.drained)
@@ -535,6 +564,7 @@ class WorkflowHostTests(unittest.TestCase):
                         "workflow_name": "sample_workflow",
                         "run_id": "run-123",
                         "task_id": "task-456",
+                        "attempt": 1,
                         "input": {},
                     },
                     rpc,

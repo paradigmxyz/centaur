@@ -108,6 +108,10 @@ returns the stored JSON result. Mutating tools should still implement
 idempotency for the narrow failure window between accepting an external effect
 and persisting its result.
 
+`ctx.attempt` is the positive, one-based Absurd task attempt for the current
+handler invocation. Use it when an external protocol needs the authoritative
+workflow retry number; do not infer retries from process-local state.
+
 ### Make agent turns explicit
 
 Use `ctx.agent_turn(...)` when the workflow needs an agent sandbox:

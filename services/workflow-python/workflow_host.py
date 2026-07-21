@@ -340,12 +340,14 @@ async def run_workflow(message: dict[str, Any], rpc: RpcClient) -> dict[str, Any
     if registered is None:
         raise RuntimeError(f"unknown workflow_name {workflow_name!r}")
 
+    attempt = _workflow_attempt(message)
     pool = await create_pool()
     ctx = WorkflowContext(
         rpc,
         run_id=str(message.get("run_id") or ""),
         task_id=str(message.get("task_id") or ""),
         workflow_name=workflow_name,
+        attempt=attempt,
         pool=pool,
         agent_defaults=registered.agent_defaults,
     )
@@ -370,6 +372,13 @@ async def run_workflow(message: dict[str, Any], rpc: RpcClient) -> dict[str, Any
         metrics.set_metric_rpc(previous_metric_rpc)
         if pool is not None:
             await pool.close()
+
+
+def _workflow_attempt(message: dict[str, Any]) -> int:
+    attempt = message.get("attempt")
+    if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
+        raise RuntimeError("workflow.start attempt must be a positive integer")
+    return attempt
 
 
 def discovery_payload() -> dict[str, Any]:

@@ -31,13 +31,17 @@ class WorkflowContext:
         run_id: str,
         task_id: str,
         workflow_name: str,
+        attempt: int = 1,
         pool: Any = None,
         agent_defaults: dict[str, Any] | None = None,
     ) -> None:
+        if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
+            raise ValueError("attempt must be a positive integer")
         self._rpc = rpc
         self.run_id = run_id
         self.task_id = task_id
         self.workflow_name = workflow_name
+        self.attempt = attempt
         self._pool = pool
         # Module-level `AGENT_DEFAULTS` (e.g. {"model": ..., "reasoning": ...})
         # applied to every ctx.agent_turn as a per-workflow default; explicit

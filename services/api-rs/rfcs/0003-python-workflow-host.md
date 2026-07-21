@@ -162,6 +162,7 @@ api-rs sends:
   "type": "workflow.start",
   "run_id": "019...",
   "task_id": "019...",
+  "attempt": 2,
   "workflow_name": "github_issue_triage",
   "input": {
     "webhook": {
@@ -225,6 +226,7 @@ The Python host provides a compatibility context:
 class WorkflowContext:
     run_id: str
     task_id: str
+    attempt: int
     _pool: asyncpg.Pool
 
     async def step(self, name, fn, *, retry=None, timeout=None): ...
