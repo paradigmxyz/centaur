@@ -693,6 +693,7 @@ impl SandboxArgs {
                         foreign_id: spec.foreign_id,
                         name: spec.name,
                         labels: BTreeMap::from([("managed-by".to_owned(), "centaur".to_owned())]),
+                        sandbox_api_server_enabled: None,
                     })
                     .await?
                     .id,
@@ -707,6 +708,7 @@ impl SandboxArgs {
                     ("managed-by".to_owned(), "centaur".to_owned()),
                     ("purpose".to_owned(), "warm-pool-bootstrap".to_owned()),
                 ]),
+                sandbox_api_server_enabled: None,
             })
             .await?;
         let workflow_host = client
@@ -718,6 +720,7 @@ impl SandboxArgs {
                     ("managed-by".to_owned(), "centaur".to_owned()),
                     ("purpose".to_owned(), "workflow-host".to_owned()),
                 ]),
+                sandbox_api_server_enabled: None,
             })
             .await?;
         for role_id in &role_ids {

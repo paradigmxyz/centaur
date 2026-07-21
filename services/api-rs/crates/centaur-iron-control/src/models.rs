@@ -453,8 +453,9 @@ pub struct BrokerCredentialRecord {
 // Principals and roles
 // ---------------------------------------------------------------------------
 
-/// Request body for ``POST``/``PUT /api/v1/principals`` and ``/roles`` — both
-/// take the same ``namespace``/``foreign_id``/``name``/``labels`` shape.
+/// Request body for ``POST``/``PUT /api/v1/principals`` and ``/roles``. Both
+/// take the same identity fields; principal upserts may additionally constrain
+/// sandbox capabilities.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct IdentityInput {
     pub namespace: String,
@@ -462,6 +463,11 @@ pub struct IdentityInput {
     pub name: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
+    /// Optional principal-only capability override. Roles omit this field.
+    /// Callers that create a restricted principal must set it explicitly so
+    /// the Console's deployment default cannot silently grant API access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_api_server_enabled: Option<bool>,
 }
 
 /// A principal as returned by iron-control. Unknown fields are ignored, so this

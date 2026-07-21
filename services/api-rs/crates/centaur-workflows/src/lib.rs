@@ -276,10 +276,24 @@ impl WorkflowHostSandboxRuntime {
             assignments.principal_for_workflow(workflow_name)?
         };
         if let Some(principal) = principal {
+            restrict_workflow_principal_sandbox(&mut spec);
             spec.iron_control_principal = Some(principal);
         }
         Ok(spec)
     }
+}
+
+fn restrict_workflow_principal_sandbox(spec: &mut SandboxSpec) {
+    spec.capabilities.api_server_enabled = false;
+    spec.env.retain(|entry| {
+        !matches!(
+            entry.name.as_str(),
+            "CENTAUR_API_URL"
+                | "CENTAUR_API_KEY"
+                | "SESSION_SANDBOX_CENTAUR_API_URL"
+                | WORKFLOW_TOOL_API_URL_ENV
+        )
+    });
 }
 
 #[derive(Clone)]
@@ -305,17 +319,43 @@ impl WorkflowPrincipalRegistrar {
             let foreign_id = canonical_workflow_principal_foreign_id(workflow_name);
             let record = self
                 .client
-                .upsert_principal(&IdentityInput {
-                    namespace: self.namespace.clone(),
+                .upsert_principal(&workflow_principal_identity_input(
+                    &self.namespace,
+                    workflow_name,
                     foreign_id,
-                    name: format!("Workflow {workflow_name}"),
-                    labels: workflow_principal_labels(workflow_name),
-                })
+                ))
                 .await?;
+            ensure_workflow_principal_api_disabled(workflow_name, &record)?;
             registered.insert(workflow_name.clone(), record.id);
         }
         Ok(registered)
     }
+}
+
+fn workflow_principal_identity_input(
+    namespace: &str,
+    workflow_name: &str,
+    foreign_id: String,
+) -> IdentityInput {
+    IdentityInput {
+        namespace: namespace.to_owned(),
+        foreign_id,
+        name: format!("Workflow {workflow_name}"),
+        labels: workflow_principal_labels(workflow_name),
+        sandbox_api_server_enabled: Some(false),
+    }
+}
+
+fn ensure_workflow_principal_api_disabled(
+    workflow_name: &str,
+    principal: &centaur_iron_control::Principal,
+) -> Result<(), WorkflowRuntimeError> {
+    if principal.sandbox_api_server_enabled {
+        return Err(WorkflowRuntimeError::Internal(format!(
+            "workflow principal for {workflow_name} was registered with sandbox API server access enabled"
+        )));
+    }
+    Ok(())
 }
 
 fn canonical_workflow_principal_foreign_id(workflow_name: &str) -> String {
@@ -4591,8 +4631,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ctx_call_tool_reuses_checkpoint_after_task_retry_when_database_url_is_set()
+    async fn restricted_workflow_principal_ctx_call_tool_reuses_checkpoint_after_task_retry_when_database_url_is_set()
     -> Result<(), WorkflowRuntimeError> {
+        let mut spec = SandboxSpec::new("workflow-host:test")
+            .env("CENTAUR_API_URL", "http://centaur-api-rs:8080");
+        restrict_workflow_principal_sandbox(&mut spec);
+        assert!(!spec.capabilities.api_server_enabled);
+        assert!(!sandbox_spec_has_env(&spec, "CENTAUR_API_URL"));
+
         let Some(pool) = optional_absurd_test_pool().await? else {
             return Ok(());
         };
@@ -4779,6 +4825,82 @@ mod tests {
             labels.get("workflow_name").map(String::as_str),
             Some("nightly_report")
         );
+    }
+
+    #[test]
+    fn workflow_principal_registration_explicitly_disables_api_server_access() {
+        let input = workflow_principal_identity_input(
+            "production",
+            "nightly_report",
+            canonical_workflow_principal_foreign_id("nightly_report"),
+        );
+        let payload = serde_json::to_value(input).unwrap();
+
+        assert_eq!(payload["namespace"], json!("production"));
+        assert_eq!(payload["foreign_id"], json!("workflow-nightly-report"));
+        assert_eq!(payload["sandbox_api_server_enabled"], json!(false));
+    }
+
+    #[test]
+    fn workflow_principal_registration_fails_if_effective_api_access_is_enabled() {
+        let mut principal = centaur_iron_control::Principal {
+            id: "prn_workflow".to_owned(),
+            namespace: "production".to_owned(),
+            foreign_id: Some("workflow-nightly-report".to_owned()),
+            name: "Workflow nightly_report".to_owned(),
+            labels: BTreeMap::new(),
+            sandbox_observability_enabled: true,
+            sandbox_api_server_enabled: false,
+        };
+
+        ensure_workflow_principal_api_disabled("nightly_report", &principal).unwrap();
+        principal.sandbox_api_server_enabled = true;
+        let error = ensure_workflow_principal_api_disabled("nightly_report", &principal)
+            .expect_err("enabled API access must fail principal reconciliation");
+        assert!(matches!(error, WorkflowRuntimeError::Internal(_)));
+        assert!(error.to_string().contains("nightly_report"));
+        assert!(error.to_string().contains("API server access enabled"));
+    }
+
+    #[tokio::test]
+    async fn workflow_principal_sandbox_omits_direct_api_access_without_disabling_durable_tools() {
+        let mut spec = SandboxSpec::new("workflow-host:test")
+            .env("CENTAUR_API_URL", "http://centaur-api-rs:8080")
+            .env("CENTAUR_API_KEY", "shared-east-west-token")
+            .env(
+                "SESSION_SANDBOX_CENTAUR_API_URL",
+                "http://centaur-api-rs:8080",
+            )
+            .env(WORKFLOW_TOOL_API_URL_ENV, "http://centaur-api-rs:8080")
+            .env("WORKFLOW_DIRS", "/opt/centaur/workflows");
+
+        restrict_workflow_principal_sandbox(&mut spec);
+
+        assert!(!spec.capabilities.api_server_enabled);
+        assert!(!sandbox_spec_has_env(&spec, "CENTAUR_API_URL"));
+        assert!(!sandbox_spec_has_env(&spec, "CENTAUR_API_KEY"));
+        assert!(!sandbox_spec_has_env(
+            &spec,
+            "SESSION_SANDBOX_CENTAUR_API_URL"
+        ));
+        assert!(!sandbox_spec_has_env(&spec, WORKFLOW_TOOL_API_URL_ENV));
+        assert!(sandbox_spec_has_env(&spec, "WORKFLOW_DIRS"));
+
+        let call = PythonWorkflowToolCall::from_message(&json!({
+            "type": "ctx.call_tool",
+            "tool": "time",
+            "method": "now",
+            "args": {},
+        }))
+        .unwrap();
+        assert!(
+            call.checkpoint_name()
+                .unwrap()
+                .starts_with("$ctx.call_tool.protocol:time.now:")
+        );
+        let value = execute_python_workflow_tool(call).await.unwrap();
+        assert_eq!(value["tool"], json!("time"));
+        assert!(value.pointer("/output/utc").is_some());
     }
 
     #[test]

@@ -145,7 +145,15 @@ The principal id is always `workflow-` plus the slugged `WORKFLOW_NAME`.
 Workflow code cannot choose another principal id, display name, or labels.
 `WORKFLOW_PRINCIPAL = True` requires `apiRs.workflowHostSandbox=true`, which
 renders `WORKFLOW_HOST_SANDBOX=true`; startup fails if a workflow declares a
-principal while workflow-host sandboxing is disabled.
+principal while workflow-host sandboxing is disabled. Auto-registered workflow
+principals are always reconciled with `sandbox_api_server_enabled=false`. Their
+sandbox receives neither `CENTAUR_API_URL` nor the NetworkPolicy label that
+permits api-rs egress; `ctx.call_tool(...)` remains available because the
+durable workflow protocol returns the request to api-rs, which performs the
+tool call outside the sandbox. A principal that genuinely needs
+`sandbox_api_server_enabled=true` must first have route-scoped api-rs
+authorization at every exposed resource boundary. A shared east-west
+credential is not sufficient authorization to enable broad API access.
 
 #### Pick the model and reasoning effort
 
