@@ -111,6 +111,10 @@ jobs:
       - name: Set up Depot
         uses: depot/setup-action@15c09a5f77a0840ad4bce955686522a257853461 # v1.7.1
 
+      - name: Set up Docker Buildx for fork fallback
+        if: ${{ github.event.pull_request.head.repo.fork }}
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
       - name: Log in to GHCR
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
