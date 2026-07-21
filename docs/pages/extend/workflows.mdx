@@ -60,6 +60,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     result = await ctx.run_agent(
         "summarize",
         text=f"Write a short report about {data['topic']}",
+        allowed_tools=[],
     )
     return {"channel": inp.channel, "report": result}
 ```
@@ -68,11 +69,12 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
 directly with `ctx.call_tool(...)` and should have its own credential boundary.
 The API derives and registers the `workflow-nightly-report` principal from
 `WORKFLOW_NAME` and runs that workflow-host sandbox under it. Workflow code
-cannot choose another principal id, display name, or labels. Grant the required
-tool roles or secrets to the derived principal for both workflow-host direct
-calls and workflow-owned child agents. The child still receives only the tools
-declared for that turn; principal grants do not widen its turn-scoped tool
-allowlist. `WORKFLOW_PRINCIPAL = True`
+cannot choose another principal id, display name, or labels. Direct secret
+grants remain workflow-host-only. Every child-agent turn must pass an explicit
+`allowed_tools=[...]`; Centaur derives a separate API-disabled principal,
+intersects that list with the parent's tool roles, and physically removes other
+tool packages from the child sandbox before the harness starts. Use
+`allowed_tools=[]` for a turn that needs no tools. `WORKFLOW_PRINCIPAL = True`
 requires `apiRs.workflowHostSandbox=true`, which renders
 `WORKFLOW_HOST_SANDBOX=true`; startup fails if workflow-host sandboxing is
 disabled. Auto-registered workflow principals are always reconciled with
@@ -80,10 +82,11 @@ disabled. Auto-registered workflow principals are always reconciled with
 `CENTAUR_API_URL` nor the NetworkPolicy label that permits api-rs egress;
 `ctx.call_tool(...)` remains available because the durable workflow protocol
 returns the request to api-rs, which performs the tool call outside the
-sandbox. Every agent turn started by a principal-scoped workflow inherits this
-same principal and its API-disabled sandbox capabilities, including turns that
-supply an explicit `thread_key`. An existing session with a different or
-missing principal is rejected rather than rebound. Workflows without
+sandbox. Every agent turn started by a principal-scoped workflow uses its
+derived child principal and exact durable tool scope, including turns that
+supply an explicit `thread_key`. Parent-role revocation blocks future execution
+even if an older child assignment or sandbox still exists. An existing session
+with a different or missing principal is rejected rather than rebound. Workflows without
 `WORKFLOW_PRINCIPAL` keep the normal session-principal behavior. A principal
 that genuinely needs
 `sandbox_api_server_enabled=true`

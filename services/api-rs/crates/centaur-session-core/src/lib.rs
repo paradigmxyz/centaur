@@ -416,6 +416,11 @@ pub struct SandboxCapabilities {
     pub repo_cache: SandboxRepoCacheAccess,
     pub observability_enabled: bool,
     pub api_server_enabled: bool,
+    /// Canonical sorted tool package names installed in the assigned sandbox.
+    /// `None` preserves the historical unrestricted tool catalog; `Some([])`
+    /// is an explicitly empty catalog and must not compare equal to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_allowlist: Option<Vec<String>>,
 }
 
 impl SandboxCapabilities {
@@ -424,6 +429,7 @@ impl SandboxCapabilities {
             repo_cache: SandboxRepoCacheAccess::All,
             observability_enabled: true,
             api_server_enabled: true,
+            tool_allowlist: None,
         }
     }
 
@@ -431,6 +437,7 @@ impl SandboxCapabilities {
         matches!(self.repo_cache, SandboxRepoCacheAccess::All)
             && self.observability_enabled
             && self.api_server_enabled
+            && self.tool_allowlist.is_none()
     }
 
     pub const fn repo_cache_enabled(&self) -> bool {

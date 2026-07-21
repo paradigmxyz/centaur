@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 use crate::IronControlClient;
 use crate::error::{IronControlError, Result};
-use crate::models::{Principal, SlackChannelPermissionInput};
+use crate::models::{Grant, Principal, Role, SlackChannelPermissionInput};
 use crate::principal::{
     derive_principal_with_slack_team, is_direct_message, slack_conversation_id,
 };
@@ -137,6 +137,19 @@ impl SessionRegistrar {
 
     pub async fn get_principal(&self, principal: &str) -> Result<Principal> {
         self.client.get_principal(&self.namespace, principal).await
+    }
+
+    /// Read the effective role assignments for a persisted session principal.
+    /// Restricted workflow-agent sessions use this on every execution so a
+    /// parent-role revocation cannot be bypassed by a stale child assignment.
+    pub async fn list_principal_roles(&self, principal: &str) -> Result<Vec<Role>> {
+        self.client.list_principal_roles(principal).await
+    }
+
+    /// Read direct grants for a persisted session principal. Workflow-agent
+    /// children must never acquire direct grants outside their parent roles.
+    pub async fn list_principal_grants(&self, principal: &str) -> Result<Vec<Grant>> {
+        self.client.list_principal_grants(principal).await
     }
 }
 

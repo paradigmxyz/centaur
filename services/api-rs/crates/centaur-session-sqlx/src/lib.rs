@@ -173,7 +173,7 @@ impl PgSessionStore {
 
         let row = sqlx::query_as::<_, SessionRow>(
             r#"
-            select thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, sandbox_last_active_at, created_at, updated_at
+            select thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, sandbox_tool_allowlist, harness_type, harness_thread_id, persona_id, status, iron_control_principal, sandbox_last_active_at, created_at, updated_at
             from sessions
             where thread_key = $1
             for update
@@ -214,7 +214,7 @@ impl PgSessionStore {
     pub async fn get_session(&self, thread_key: &ThreadKey) -> Result<Session, SessionStoreError> {
         let row = sqlx::query_as::<_, SessionRow>(
             r#"
-            select thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, sandbox_last_active_at, created_at, updated_at
+            select thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, sandbox_tool_allowlist, harness_type, harness_thread_id, persona_id, status, iron_control_principal, sandbox_last_active_at, created_at, updated_at
             from sessions
             where thread_key = $1
             "#,
@@ -1217,13 +1217,14 @@ impl PgSessionStore {
                 sandbox_repo_cache_access = null,
                 sandbox_observability_enabled = null,
                 sandbox_api_server_enabled = null,
+                sandbox_tool_allowlist = null,
                 sandbox_last_active_at = case
                     when $2::text is null then null
                     else now()
                 end,
                 updated_at = now()
             where thread_key = $1
-            returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, sandbox_last_active_at, created_at, updated_at
+            returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, sandbox_tool_allowlist, harness_type, harness_thread_id, persona_id, status, iron_control_principal, sandbox_last_active_at, created_at, updated_at
             "#,
         )
         .bind(thread_key.as_str())
@@ -1249,10 +1250,11 @@ impl PgSessionStore {
                 sandbox_repo_cache_access = $4,
                 sandbox_observability_enabled = $5,
                 sandbox_api_server_enabled = $6,
+                sandbox_tool_allowlist = $7,
                 sandbox_last_active_at = now(),
                 updated_at = now()
             where thread_key = $1
-            returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, sandbox_last_active_at, created_at, updated_at
+            returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, sandbox_tool_allowlist, harness_type, harness_thread_id, persona_id, status, iron_control_principal, sandbox_last_active_at, created_at, updated_at
             "#,
         )
         .bind(thread_key.as_str())
@@ -1261,6 +1263,7 @@ impl PgSessionStore {
         .bind(capabilities.repo_cache.as_str())
         .bind(capabilities.observability_enabled)
         .bind(capabilities.api_server_enabled)
+        .bind(capabilities.tool_allowlist.as_ref().map(sqlx::types::Json))
         .fetch_one(&self.pool)
         .await?;
 
@@ -1281,6 +1284,7 @@ impl PgSessionStore {
                 sandbox_repo_cache_access = null,
                 sandbox_observability_enabled = null,
                 sandbox_api_server_enabled = null,
+                sandbox_tool_allowlist = null,
                 sandbox_last_active_at = null,
                 updated_at = now()
             where thread_key = $1 and sandbox_id = $2
@@ -1312,11 +1316,12 @@ impl PgSessionStore {
                 sandbox_repo_cache_access = null,
                 sandbox_observability_enabled = null,
                 sandbox_api_server_enabled = null,
+                sandbox_tool_allowlist = null,
                 sandbox_last_active_at = null,
                 status = $3,
                 updated_at = now()
             where thread_key = $1
-            returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, sandbox_last_active_at, created_at, updated_at
+            returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, sandbox_tool_allowlist, harness_type, harness_thread_id, persona_id, status, iron_control_principal, sandbox_last_active_at, created_at, updated_at
             "#,
         )
         .bind(thread_key.as_str())
@@ -1490,7 +1495,7 @@ impl PgSessionStore {
             update sessions
             set harness_thread_id = $2, updated_at = now()
             where thread_key = $1
-            returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, sandbox_last_active_at, created_at, updated_at
+            returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, sandbox_tool_allowlist, harness_type, harness_thread_id, persona_id, status, iron_control_principal, sandbox_last_active_at, created_at, updated_at
             "#,
         )
         .bind(thread_key.as_str())
@@ -1640,6 +1645,7 @@ struct SessionRow {
     sandbox_repo_cache_access: Option<String>,
     sandbox_observability_enabled: Option<bool>,
     sandbox_api_server_enabled: Option<bool>,
+    sandbox_tool_allowlist: Option<sqlx::types::Json<Vec<String>>>,
     harness_type: String,
     harness_thread_id: Option<String>,
     persona_id: Option<String>,
@@ -1678,6 +1684,7 @@ impl TryFrom<SessionRow> for Session {
                         }),
                     observability_enabled,
                     api_server_enabled,
+                    tool_allowlist: row.sandbox_tool_allowlist.map(|value| value.0),
                 }),
                 _ => None,
             },
@@ -1940,7 +1947,7 @@ fn stdout_lease_expires_at(lease: Duration) -> OffsetDateTime {
 mod tests {
     use std::time::Duration;
 
-    use centaur_session_core::{HarnessType, ThreadKey};
+    use centaur_session_core::{HarnessType, SandboxCapabilities, ThreadKey};
     use serde_json::json;
     use time::{Duration as TimeDuration, OffsetDateTime};
     use uuid::Uuid;
@@ -1950,8 +1957,17 @@ mod tests {
     };
 
     async fn test_store() -> Option<PgSessionStore> {
-        let Ok(url) = std::env::var("SESSION_RUNTIME_TEST_DATABASE_URL") else {
-            eprintln!("skipping: SESSION_RUNTIME_TEST_DATABASE_URL not set");
+        let url = std::env::var("SESSION_RUNTIME_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("SESSION_SQLX_TEST_DATABASE_URL"));
+        let Ok(url) = url else {
+            if std::env::var("CI").is_ok_and(|value| !value.trim().is_empty()) {
+                panic!(
+                    "SESSION_SQLX_TEST_DATABASE_URL or SESSION_RUNTIME_TEST_DATABASE_URL must be set in CI"
+                );
+            }
+            eprintln!(
+                "skipping: SESSION_SQLX_TEST_DATABASE_URL and SESSION_RUNTIME_TEST_DATABASE_URL not set"
+            );
             return None;
         };
         let store = PgSessionStore::connect(&url)
@@ -2067,6 +2083,47 @@ mod tests {
             error,
             SessionStoreError::PrincipalConflict { existing: None, .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn sandbox_tool_allowlist_round_trips_empty_and_scoped_values() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let thread_key = ThreadKey::parse(format!("test:tool-scope-{}", Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(&thread_key, &HarnessType::Codex, None, json!({}))
+            .await
+            .expect("create session");
+
+        for (sandbox_id, tool_allowlist) in [
+            ("sbx-empty", Some(Vec::new())),
+            (
+                "sbx-scoped",
+                Some(vec![
+                    "get_verified_source".to_owned(),
+                    "read_contract".to_owned(),
+                ]),
+            ),
+        ] {
+            let mut capabilities = SandboxCapabilities::default_enabled();
+            capabilities.tool_allowlist = tool_allowlist.clone();
+            store
+                .update_sandbox_assignment(&thread_key, sandbox_id, &capabilities)
+                .await
+                .expect("persist sandbox tool scope");
+            let session = store
+                .get_session(&thread_key)
+                .await
+                .expect("reload session");
+            assert_eq!(
+                session
+                    .sandbox_capabilities
+                    .expect("persisted capabilities")
+                    .tool_allowlist,
+                tool_allowlist
+            );
+        }
     }
 
     fn idle_row(

@@ -29,6 +29,14 @@ const KIND_LABEL: &str = "kind";
 const SLACK_DM_KIND: &str = "slack_dm";
 const SLACK_CHANNEL_KIND: &str = "slack_channel";
 
+/// JSON-encoded, sorted tool names that a workflow-owned child principal may
+/// expose. Presence of this label distinguishes a role-scoped child principal
+/// from its broader workflow-host parent.
+pub const WORKFLOW_ALLOWED_TOOLS_LABEL: &str = "workflow_allowed_tools";
+
+/// Parent workflow principal OID used to derive a role-scoped child principal.
+pub const WORKFLOW_PARENT_PRINCIPAL_LABEL: &str = "workflow_parent_principal";
+
 /// The principal a session resolves to, as a stable upsert key plus a label.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrincipalRef {

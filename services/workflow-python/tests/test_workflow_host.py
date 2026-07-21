@@ -529,6 +529,31 @@ class WorkflowHostTests(unittest.TestCase):
             {"model": "claude-opus-4-8", "reasoning": "low", "text": "cheap step"},
         )
 
+    def test_agent_turn_forwards_explicit_tool_scope(self) -> None:
+        host = load_workflow_host()
+        rpc = RequestRpc()
+        ctx = host.WorkflowContext(
+            rpc,
+            run_id="run-123",
+            task_id="task-456",
+            workflow_name="sample",
+        )
+
+        result = asyncio.run(
+            ctx.agent_turn(
+                "inspect the contract",
+                allowed_tools=["read_contract", "get_verified_source"],
+            )
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "allowed_tools": ["read_contract", "get_verified_source"],
+                "text": "inspect the contract",
+            },
+        )
+
     def test_start_workflow_enqueues_durable_child_with_idempotency_key(self) -> None:
         host = load_workflow_host()
         rpc = RequestRpc()

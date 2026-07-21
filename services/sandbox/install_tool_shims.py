@@ -29,15 +29,28 @@ def _split_paths(value: str) -> list[Path]:
 def _tool_allowlist() -> set[str] | None:
     """Tool package names to install, from ``TOOL_ALLOWLIST``.
 
-    Returns ``None`` when unset/empty -> install every mounted tool (backward
-    compatible). When set, only tools whose package name is listed are installed,
-    so the sandbox catalog is exactly the configured tools and the agent neither
-    sees nor wastes context on unconfigured ones (which also lack credentials).
+    Returns ``None`` when unset/empty unless ``CENTAUR_TOOL_ALLOWLIST_ENFORCED``
+    is true, preserving the historical install-all default while allowing a
+    workflow turn to declare an explicitly empty tool scope. When set, only
+    listed packages are installed, so the sandbox catalog is exactly the
+    configured tools and the agent neither sees nor wastes context on
+    unconfigured ones (which also lack credentials).
     """
     raw = os.environ.get("TOOL_ALLOWLIST", "").strip()
     if not raw:
-        return None
+        return set() if _tool_allowlist_enforced() else None
     return {name.strip() for name in raw.split(",") if name.strip()}
+
+
+def _tool_allowlist_enforced() -> bool:
+    raw = os.environ.get("CENTAUR_TOOL_ALLOWLIST_ENFORCED", "").strip().lower()
+    if raw in {"", "0", "false", "no"}:
+        return False
+    if raw in {"1", "true", "yes"}:
+        return True
+    raise RuntimeError(
+        "CENTAUR_TOOL_ALLOWLIST_ENFORCED must be a boolean when configured"
+    )
 
 
 def _tool_blocklist() -> set[str]:
@@ -183,6 +196,42 @@ def _tool_package_dirs(published: Path) -> list[Path]:
             if (grandchild / "pyproject.toml").is_file():
                 package_dirs.append(grandchild)
     return package_dirs
+
+
+def _prune_disallowed_tool_sources(
+    tool_dirs: list[Path], allowlist: set[str]
+) -> None:
+    """Physically remove packages outside an enforced sandbox tool scope.
+
+    Hiding command shims is not an authorization boundary because an agent can
+    execute a mounted ``client.py`` directly. Restricted sandboxes therefore
+    destructively narrow their container-local baked tools tree before the
+    harness starts. The allowlist must resolve to a real package directory or
+    project name; a stale deployment/tool-role mismatch fails bootstrap.
+    """
+    matched: set[str] = set()
+    for tool_dir in tool_dirs:
+        for package_dir in _tool_package_dirs(tool_dir):
+            project_name = ""
+            try:
+                data = tomllib.loads((package_dir / "pyproject.toml").read_text())
+                project_name = str((data.get("project") or {}).get("name") or "")
+            except (OSError, tomllib.TOMLDecodeError):
+                # Discovery will surface malformed metadata for retained paths.
+                pass
+            identities = {package_dir.name}
+            if project_name:
+                identities.add(project_name)
+            selected = identities & allowlist
+            if selected:
+                matched.update(selected)
+            else:
+                _remove_path(package_dir)
+
+    missing = allowlist - matched
+    if missing:
+        names = ", ".join(sorted(missing))
+        raise RuntimeError(f"enforced TOOL_ALLOWLIST packages are missing: {names}")
 
 
 def _visible_dirs(path: Path) -> list[Path]:
@@ -837,6 +886,10 @@ def _install_tool_shims(tool_dirs: list[Path], bin_dir: Path, *, refresh: bool) 
             print(f"refreshed {refreshed} Centaur tool source dirs", file=sys.stderr)
             copied = _refresh_skill_dirs(_workspace_dir())
             print(f"reloaded {copied} Centaur skill entries", file=sys.stderr)
+
+        allowlist = _tool_allowlist()
+        if _tool_allowlist_enforced():
+            _prune_disallowed_tool_sources(tool_dirs, allowlist or set())
 
         scripts = _discover_scripts(tool_dirs)
         pythonpath_parts = [

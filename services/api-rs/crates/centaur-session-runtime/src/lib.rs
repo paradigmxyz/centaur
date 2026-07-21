@@ -11,7 +11,10 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use centaur_iron_control::SessionRegistrar;
+use centaur_iron_control::{
+    RoleSpec, SessionRegistrar, WORKFLOW_ALLOWED_TOOLS_LABEL, WORKFLOW_PARENT_PRINCIPAL_LABEL,
+    slugify,
+};
 use centaur_sandbox_core::{
     Mount, RepoCacheAccess, SandboxBackend, SandboxCapabilities as BackendSandboxCapabilities,
     SandboxError, SandboxId, SandboxIoGuard, SandboxRead, SandboxSpec, SandboxStatus, SandboxWrite,
@@ -80,6 +83,7 @@ const CENTAUR_PUBLIC_SKILL_DIRS_ENV: &str = "CENTAUR_PUBLIC_SKILL_DIRS";
 const SANDBOX_REPO_CACHE_LABEL: &str = "centaur.sandbox_repo_cache";
 const OBSERVABILITY_TOOL_BLOCKLIST: &str =
     "vlogs,vmetrics,grafana,centaur_investigator,centaur-investigator";
+const TOOL_ALLOWLIST_ENFORCED_ENV: &str = "CENTAUR_TOOL_ALLOWLIST_ENFORCED";
 
 type SandboxSpecFactory = Arc<
     dyn Fn(&ThreadKey, &str, &HarnessType, Option<&PersonaContext>) -> SandboxSpec + Send + Sync,
@@ -761,7 +765,14 @@ struct EnsureSessionSandboxRequest<'a> {
     existing_sandbox_capabilities: Option<&'a SessionSandboxCapabilities>,
     iron_control_principal: Option<&'a str>,
     desired_capabilities: &'a SessionSandboxCapabilities,
+    tool_allowlist: Option<&'a BTreeSet<String>>,
     execution_id: &'a str,
+}
+
+#[derive(Debug)]
+struct ResolvedSandboxPolicy {
+    capabilities: SessionSandboxCapabilities,
+    tool_allowlist: Option<BTreeSet<String>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1338,8 +1349,8 @@ impl SessionRuntime {
     }
 
     /// Create a workflow-owned agent session under an already-registered,
-    /// API-disabled workflow principal. The principal id comes from trusted
-    /// workflow discovery/reconciliation, never from workflow input.
+    /// API-disabled, turn-scoped child principal. The principal id comes from
+    /// trusted workflow reconciliation, never from workflow input.
     pub async fn create_or_get_restricted_session(
         &self,
         thread_key: &ThreadKey,
@@ -1402,26 +1413,25 @@ impl SessionRuntime {
             );
             let mut harness_switched = false;
             let mut session_metadata = default_metadata(metadata);
-            let (registered_principal, desired_capabilities) = if let Some(principal_id) =
-                restricted_principal_id
-            {
-                let registrar = self.iron_control.as_ref().ok_or_else(|| {
-                    SessionRuntimeError::BadRequest(
-                        "restricted workflow-owned sessions require Iron Control".to_owned(),
-                    )
-                })?;
-                let principal = registrar.get_principal(principal_id).await?;
-                let desired_capabilities = restricted_workflow_session_capabilities(&principal)?;
-                (Some(principal), desired_capabilities)
-            } else if let Some(registrar) = &self.iron_control {
-                let principal = registrar
-                    .register_session(thread_key.as_str(), Some(&session_metadata))
-                    .await?;
-                let desired_capabilities = sandbox_capabilities_from_principal(&principal);
-                (Some(principal), desired_capabilities)
-            } else {
-                (None, SessionSandboxCapabilities::default_enabled())
-            };
+            let (registered_principal, desired_capabilities) =
+                if let Some(principal_id) = restricted_principal_id {
+                    let registrar = self.iron_control.as_ref().ok_or_else(|| {
+                        SessionRuntimeError::BadRequest(
+                            "restricted workflow-owned sessions require Iron Control".to_owned(),
+                        )
+                    })?;
+                    let principal = registrar.get_principal(principal_id).await?;
+                    let policy = restricted_workflow_session_policy(registrar, &principal).await?;
+                    (Some(principal), policy.capabilities)
+                } else if let Some(registrar) = &self.iron_control {
+                    let principal = registrar
+                        .register_session(thread_key.as_str(), Some(&session_metadata))
+                        .await?;
+                    let desired_capabilities = sandbox_capabilities_from_principal(&principal);
+                    (Some(principal), desired_capabilities)
+                } else {
+                    (None, SessionSandboxCapabilities::default_enabled())
+                };
             let persona_resolution =
                 self.resolve_persona_for_create(persona_id, &desired_capabilities)?;
             if let Some(context) = persona_resolution.context.as_ref() {
@@ -1983,8 +1993,8 @@ impl SessionRuntime {
                     }),
                 )
                 .await?;
-            let desired_capabilities = self
-                .resolve_sandbox_capabilities(session.iron_control_principal.as_deref())
+            let sandbox_policy = self
+                .resolve_sandbox_policy(session.iron_control_principal.as_deref())
                 .await?;
 
             let sandbox_id = match self
@@ -1995,7 +2005,8 @@ impl SessionRuntime {
                     existing_sandbox_id: session.sandbox_id.as_deref(),
                     existing_sandbox_capabilities: session.sandbox_capabilities.as_ref(),
                     iron_control_principal: session.iron_control_principal.as_deref(),
-                    desired_capabilities: &desired_capabilities,
+                    desired_capabilities: &sandbox_policy.capabilities,
+                    tool_allowlist: sandbox_policy.tool_allowlist.as_ref(),
                     execution_id: &execution.execution_id,
                 })
                 .instrument(execution_trace_span.clone())
@@ -2385,6 +2396,7 @@ impl SessionRuntime {
             existing_sandbox_capabilities,
             iron_control_principal,
             desired_capabilities,
+            tool_allowlist,
             execution_id,
         } = request;
         let boot_mode = sandbox_boot_mode_for_thread(thread_key, iron_control_principal);
@@ -2693,6 +2705,7 @@ impl SessionRuntime {
             }
             apply_sandbox_boot_mode(&mut spec, &boot_mode);
             apply_sandbox_capabilities(&mut spec, desired_capabilities);
+            apply_tool_allowlist(&mut spec, tool_allowlist);
             let create_started = Instant::now();
             let handle = self
                 .run_with_running_capacity(thread_key, execution_id, "cold_create", || async {
@@ -2751,18 +2764,27 @@ impl SessionRuntime {
         result
     }
 
-    async fn resolve_sandbox_capabilities(
+    async fn resolve_sandbox_policy(
         &self,
         iron_control_principal: Option<&str>,
-    ) -> Result<SessionSandboxCapabilities, SessionRuntimeError> {
+    ) -> Result<ResolvedSandboxPolicy, SessionRuntimeError> {
         let Some(principal_id) = iron_control_principal else {
-            return Ok(SessionSandboxCapabilities::default_enabled());
+            return Ok(ResolvedSandboxPolicy {
+                capabilities: SessionSandboxCapabilities::default_enabled(),
+                tool_allowlist: None,
+            });
         };
         let Some(registrar) = &self.iron_control else {
-            return Ok(SessionSandboxCapabilities::default_enabled());
+            return Err(SessionRuntimeError::BadRequest(format!(
+                "session principal {principal_id} requires Iron Control"
+            )));
         };
         let principal = registrar.get_principal(principal_id).await?;
-        Ok(sandbox_capabilities_from_principal(&principal))
+        if looks_like_workflow_agent_principal(&principal) {
+            restricted_workflow_session_policy(registrar, &principal).await
+        } else {
+            sandbox_policy_from_principal(&principal)
+        }
     }
 
     async fn record_sandbox_ready(&self, observation: SandboxReadyObservation<'_>) {
@@ -5549,20 +5571,241 @@ fn sandbox_capabilities_from_principal(
         repo_cache: sandbox_repo_cache_access_from_principal(principal),
         observability_enabled: principal.sandbox_observability_enabled,
         api_server_enabled: principal.sandbox_api_server_enabled,
+        tool_allowlist: None,
     }
 }
 
-fn restricted_workflow_session_capabilities(
+fn sandbox_policy_from_principal(
     principal: &centaur_iron_control::Principal,
-) -> Result<SessionSandboxCapabilities, SessionRuntimeError> {
-    let capabilities = sandbox_capabilities_from_principal(principal);
-    if capabilities.api_server_enabled {
+) -> Result<ResolvedSandboxPolicy, SessionRuntimeError> {
+    let tool_allowlist = principal
+        .labels
+        .get(WORKFLOW_ALLOWED_TOOLS_LABEL)
+        .map(|raw| parse_workflow_tool_allowlist(&principal.id, raw))
+        .transpose()?;
+    let mut capabilities = sandbox_capabilities_from_principal(principal);
+    capabilities.tool_allowlist = tool_allowlist
+        .as_ref()
+        .map(|tools| tools.iter().cloned().collect());
+    Ok(ResolvedSandboxPolicy {
+        capabilities,
+        tool_allowlist,
+    })
+}
+
+fn looks_like_workflow_agent_principal(principal: &centaur_iron_control::Principal) -> bool {
+    principal
+        .foreign_id
+        .as_deref()
+        .is_some_and(|foreign_id| foreign_id.starts_with("workflow-agent-"))
+        || principal.labels.get("kind").map(String::as_str) == Some("workflow_agent")
+        || principal
+            .labels
+            .contains_key(WORKFLOW_PARENT_PRINCIPAL_LABEL)
+        || principal.labels.contains_key(WORKFLOW_ALLOWED_TOOLS_LABEL)
+}
+
+async fn restricted_workflow_session_policy(
+    registrar: &SessionRegistrar,
+    principal: &centaur_iron_control::Principal,
+) -> Result<ResolvedSandboxPolicy, SessionRuntimeError> {
+    let policy = restricted_workflow_principal_policy(principal)?;
+    let workflow_name = principal
+        .labels
+        .get("workflow_name")
+        .expect("validated workflow name");
+    let parent_principal_id = principal
+        .labels
+        .get(WORKFLOW_PARENT_PRINCIPAL_LABEL)
+        .expect("validated parent principal");
+
+    let parent = registrar.get_principal(parent_principal_id).await?;
+    let expected_parent_foreign_id = format!("workflow-{}", slugify(workflow_name));
+    if parent.namespace != principal.namespace
+        || parent.foreign_id.as_deref() != Some(expected_parent_foreign_id.as_str())
+        || parent.labels.get("kind").map(String::as_str) != Some("workflow")
+        || parent.labels.get("managed-by").map(String::as_str) != Some("centaur")
+        || parent.labels.get("workflow_name").map(String::as_str) != Some(workflow_name)
+        || parent.sandbox_api_server_enabled
+    {
+        return Err(SessionRuntimeError::BadRequest(format!(
+            "workflow agent principal {} has an invalid parent principal",
+            principal.id
+        )));
+    }
+
+    let allowed_tools = policy
+        .tool_allowlist
+        .as_ref()
+        .expect("scoped workflow policy always has an allowlist");
+    let allowed_tools_json = serde_json::to_string(allowed_tools).map_err(|error| {
+        SessionRuntimeError::BadRequest(format!(
+            "workflow agent principal {} has an unserializable tool scope: {error}",
+            principal.id
+        ))
+    })?;
+    let parent_foreign_id = parent
+        .foreign_id
+        .as_deref()
+        .expect("validated parent foreign id");
+    let mut child_identity_hasher = Sha256::new();
+    child_identity_hasher.update(parent_foreign_id.as_bytes());
+    child_identity_hasher.update([0]);
+    child_identity_hasher.update(allowed_tools_json.as_bytes());
+    let child_identity_digest = format!("{:x}", child_identity_hasher.finalize());
+    let expected_child_foreign_id = format!("workflow-agent-{}", &child_identity_digest[..32]);
+    if principal.foreign_id.as_deref() != Some(expected_child_foreign_id.as_str()) {
+        return Err(SessionRuntimeError::BadRequest(format!(
+            "workflow agent principal {} does not match its parent and tool scope",
+            principal.id
+        )));
+    }
+
+    let parent_roles = registrar.list_principal_roles(&parent.id).await?;
+    let desired_role_ids = workflow_agent_desired_role_ids(
+        &principal.id,
+        &parent.namespace,
+        allowed_tools,
+        &parent_roles,
+    )?;
+    let child_role_ids = registrar
+        .list_principal_roles(&principal.id)
+        .await?
+        .into_iter()
+        .map(|role| role.id)
+        .collect::<BTreeSet<_>>();
+    if child_role_ids != desired_role_ids
+        || !registrar
+            .list_principal_grants(&principal.id)
+            .await?
+            .is_empty()
+    {
+        return Err(SessionRuntimeError::BadRequest(format!(
+            "workflow agent principal {} no longer matches its exact parent-intersected tool roles",
+            principal.id
+        )));
+    }
+    Ok(policy)
+}
+
+fn restricted_workflow_principal_policy(
+    principal: &centaur_iron_control::Principal,
+) -> Result<ResolvedSandboxPolicy, SessionRuntimeError> {
+    let workflow_name = principal
+        .labels
+        .get("workflow_name")
+        .filter(|value| !value.is_empty());
+    let parent_principal_id = principal
+        .labels
+        .get(WORKFLOW_PARENT_PRINCIPAL_LABEL)
+        .filter(|value| !value.is_empty());
+    if principal.labels.get("kind").map(String::as_str) != Some("workflow_agent")
+        || principal.labels.get("managed-by").map(String::as_str) != Some("centaur")
+        || workflow_name.is_none()
+        || parent_principal_id.is_none()
+        || !principal.labels.contains_key(WORKFLOW_ALLOWED_TOOLS_LABEL)
+    {
+        return Err(SessionRuntimeError::BadRequest(format!(
+            "restricted workflow-owned session principal {} is not a scoped workflow agent principal",
+            principal.id
+        )));
+    }
+    let policy = sandbox_policy_from_principal(principal)?;
+    if policy.capabilities.api_server_enabled {
         return Err(SessionRuntimeError::BadRequest(format!(
             "restricted workflow-owned session principal {} has sandbox API server access enabled",
             principal.id
         )));
     }
-    Ok(capabilities)
+    Ok(policy)
+}
+
+fn workflow_agent_desired_role_ids(
+    principal_id: &str,
+    parent_namespace: &str,
+    allowed_tools: &BTreeSet<String>,
+    parent_roles: &[centaur_iron_control::Role],
+) -> Result<BTreeSet<String>, SessionRuntimeError> {
+    let mut parent_role_ids_by_foreign_id = BTreeMap::new();
+    for role in parent_roles {
+        if role.namespace != parent_namespace {
+            return Err(SessionRuntimeError::BadRequest(format!(
+                "workflow parent principal {} has a role in an unexpected namespace",
+                principal_id
+            )));
+        }
+        if let Some(foreign_id) = role.foreign_id.as_ref() {
+            parent_role_ids_by_foreign_id.insert(foreign_id.clone(), role.id.clone());
+        }
+    }
+    let mut role_foreign_ids = BTreeMap::new();
+    let mut desired_role_ids = BTreeSet::new();
+    for tool_name in allowed_tools {
+        let role_foreign_id = RoleSpec::tool(tool_name).foreign_id;
+        if role_foreign_ids
+            .insert(role_foreign_id.clone(), tool_name)
+            .is_some()
+        {
+            return Err(SessionRuntimeError::BadRequest(format!(
+                "workflow agent principal {} has ambiguous tool role names",
+                principal_id
+            )));
+        }
+        let role_id = parent_role_ids_by_foreign_id
+            .get(&role_foreign_id)
+            .ok_or_else(|| {
+                SessionRuntimeError::BadRequest(format!(
+                    "workflow agent principal {} requests a tool no longer granted to its parent",
+                    principal_id
+                ))
+            })?;
+        desired_role_ids.insert(role_id.clone());
+    }
+    Ok(desired_role_ids)
+}
+
+fn parse_workflow_tool_allowlist(
+    principal_id: &str,
+    raw: &str,
+) -> Result<BTreeSet<String>, SessionRuntimeError> {
+    let tools = serde_json::from_str::<Vec<String>>(raw).map_err(|_| {
+        SessionRuntimeError::BadRequest(format!(
+            "workflow agent principal {principal_id} has malformed {WORKFLOW_ALLOWED_TOOLS_LABEL}"
+        ))
+    })?;
+    let mut normalized = BTreeSet::new();
+    for tool in &tools {
+        if tool.is_empty()
+            || tool.trim() != tool
+            || tool.contains(',')
+            || tool.chars().any(char::is_control)
+            || !normalized.insert(tool.clone())
+        {
+            return Err(SessionRuntimeError::BadRequest(format!(
+                "workflow agent principal {principal_id} has invalid {WORKFLOW_ALLOWED_TOOLS_LABEL}"
+            )));
+        }
+    }
+    if tools.iter().ne(normalized.iter())
+        || serde_json::to_string(&tools).ok().as_deref() != Some(raw)
+    {
+        return Err(SessionRuntimeError::BadRequest(format!(
+            "workflow agent principal {principal_id} has non-canonical {WORKFLOW_ALLOWED_TOOLS_LABEL}"
+        )));
+    }
+    Ok(normalized)
+}
+
+fn apply_tool_allowlist(spec: &mut SandboxSpec, tool_allowlist: Option<&BTreeSet<String>>) {
+    let Some(tool_allowlist) = tool_allowlist else {
+        return;
+    };
+    upsert_spec_env(spec, TOOL_ALLOWLIST_ENFORCED_ENV, "true".to_owned());
+    upsert_spec_env(
+        spec,
+        "TOOL_ALLOWLIST",
+        tool_allowlist.iter().cloned().collect::<Vec<_>>().join(","),
+    );
 }
 
 fn apply_sandbox_capabilities(spec: &mut SandboxSpec, capabilities: &SessionSandboxCapabilities) {
@@ -6858,17 +7101,17 @@ mod tests {
 
     #[test]
     fn workflow_owned_session_spec_inherits_restricted_principal_capabilities() {
-        let mut principal = test_principal(std::collections::BTreeMap::from([(
-            SANDBOX_REPO_CACHE_LABEL.to_owned(),
-            "public".to_owned(),
-        )]));
+        let mut labels = test_workflow_agent_labels(r#"["read_contract","websearch"]"#);
+        labels.insert(SANDBOX_REPO_CACHE_LABEL.to_owned(), "public".to_owned());
+        let mut principal = test_principal(labels);
         principal.sandbox_observability_enabled = false;
         principal.sandbox_api_server_enabled = false;
 
-        let capabilities = restricted_workflow_session_capabilities(&principal).unwrap();
+        let policy = restricted_workflow_principal_policy(&principal).unwrap();
         let mut spec = SandboxSpec::new("workflow-agent:test");
         spec.iron_control_principal = Some(principal.id.clone());
-        apply_sandbox_capabilities(&mut spec, &capabilities);
+        apply_sandbox_capabilities(&mut spec, &policy.capabilities);
+        apply_tool_allowlist(&mut spec, policy.tool_allowlist.as_ref());
 
         assert_eq!(spec.iron_control_principal.as_deref(), Some("prn_test"));
         assert_eq!(spec.capabilities.repo_cache, RepoCacheAccess::Public);
@@ -6878,18 +7121,86 @@ mod tests {
             env_value(&spec, "CENTAUR_SANDBOX_API_SERVER_ENABLED"),
             Some("false")
         );
+        assert_eq!(
+            env_value(&spec, "TOOL_ALLOWLIST"),
+            Some("read_contract,websearch")
+        );
+    }
+
+    #[test]
+    fn workflow_owned_session_empty_scope_exposes_no_tools() {
+        let mut principal = test_principal(test_workflow_agent_labels("[]"));
+        principal.sandbox_api_server_enabled = false;
+
+        let policy = restricted_workflow_principal_policy(&principal).unwrap();
+        let mut spec = SandboxSpec::new("workflow-agent:test");
+        apply_tool_allowlist(&mut spec, policy.tool_allowlist.as_ref());
+
+        assert_eq!(env_value(&spec, "TOOL_ALLOWLIST"), Some(""));
+        assert_eq!(env_value(&spec, TOOL_ALLOWLIST_ENFORCED_ENV), Some("true"));
     }
 
     #[test]
     fn workflow_owned_session_rejects_api_enabled_principal() {
-        let principal = test_principal(std::collections::BTreeMap::new());
+        let principal = test_principal(test_workflow_agent_labels("[]"));
 
-        let error = restricted_workflow_session_capabilities(&principal)
+        let error = restricted_workflow_principal_policy(&principal)
             .expect_err("API-enabled workflow principal must fail closed");
 
         assert!(matches!(error, SessionRuntimeError::BadRequest(_)));
         assert!(error.to_string().contains("prn_test"));
         assert!(error.to_string().contains("API server access enabled"));
+    }
+
+    #[test]
+    fn workflow_owned_session_rejects_malformed_tool_scope() {
+        let mut principal = test_principal(test_workflow_agent_labels("not-json"));
+        principal.sandbox_api_server_enabled = false;
+
+        let error = restricted_workflow_principal_policy(&principal)
+            .expect_err("malformed tool scope must fail closed");
+
+        assert!(matches!(error, SessionRuntimeError::BadRequest(_)));
+        assert!(error.to_string().contains("malformed"));
+        assert!(error.to_string().contains(WORKFLOW_ALLOWED_TOOLS_LABEL));
+    }
+
+    #[test]
+    fn workflow_owned_session_rejects_removed_scope_labels_on_recovery() {
+        let mut principal = test_principal(test_workflow_agent_labels("[]"));
+        principal.foreign_id = Some("workflow-agent-0123456789abcdef".to_owned());
+        principal.sandbox_api_server_enabled = false;
+        principal.labels.remove(WORKFLOW_ALLOWED_TOOLS_LABEL);
+
+        assert!(looks_like_workflow_agent_principal(&principal));
+        let error = restricted_workflow_principal_policy(&principal)
+            .expect_err("a persisted scoped principal must not become unrestricted");
+
+        assert!(matches!(error, SessionRuntimeError::BadRequest(_)));
+        assert!(error.to_string().contains("not a scoped workflow agent"));
+    }
+
+    #[test]
+    fn workflow_tool_allowlist_change_replaces_assigned_sandbox() {
+        let unrestricted = SessionSandboxCapabilities::default_enabled();
+        let mut read_only = unrestricted.clone();
+        read_only.tool_allowlist = Some(vec!["read_contract".to_owned()]);
+        let mut empty = unrestricted.clone();
+        empty.tool_allowlist = Some(Vec::new());
+
+        assert!(!sandbox_capabilities_match(Some(&unrestricted), &read_only));
+        assert!(!sandbox_capabilities_match(Some(&read_only), &empty));
+        assert!(sandbox_capabilities_match(Some(&read_only), &read_only));
+    }
+
+    #[test]
+    fn workflow_parent_role_revocation_fails_execution_revalidation() {
+        let allowed_tools = BTreeSet::from(["read_contract".to_owned()]);
+        let error = workflow_agent_desired_role_ids("prn_child", "default", &allowed_tools, &[])
+            .expect_err("revoked parent tool role must block child execution");
+
+        assert!(matches!(error, SessionRuntimeError::BadRequest(_)));
+        assert!(error.to_string().contains("no longer granted"));
     }
 
     #[test]
@@ -6904,6 +7215,7 @@ mod tests {
             repo_cache: SessionRepoCacheAccess::Public,
             observability_enabled: true,
             api_server_enabled: true,
+            tool_allowlist: None,
         };
 
         apply_sandbox_capabilities(&mut spec, &capabilities);
@@ -6932,6 +7244,7 @@ mod tests {
             repo_cache: SessionRepoCacheAccess::Public,
             observability_enabled: true,
             api_server_enabled: true,
+            tool_allowlist: None,
         };
 
         apply_sandbox_capabilities(&mut spec, &capabilities);
@@ -6959,6 +7272,7 @@ mod tests {
             repo_cache: SessionRepoCacheAccess::Public,
             observability_enabled: true,
             api_server_enabled: true,
+            tool_allowlist: None,
         };
 
         apply_sandbox_capabilities(&mut spec, &capabilities);
@@ -6992,6 +7306,7 @@ mod tests {
             repo_cache: SessionRepoCacheAccess::None,
             observability_enabled: true,
             api_server_enabled: true,
+            tool_allowlist: None,
         };
 
         apply_sandbox_capabilities(&mut spec, &capabilities);
@@ -7015,6 +7330,24 @@ mod tests {
             sandbox_observability_enabled: true,
             sandbox_api_server_enabled: true,
         }
+    }
+
+    fn test_workflow_agent_labels(
+        allowed_tools: &str,
+    ) -> std::collections::BTreeMap<String, String> {
+        std::collections::BTreeMap::from([
+            ("kind".to_owned(), "workflow_agent".to_owned()),
+            ("managed-by".to_owned(), "centaur".to_owned()),
+            ("workflow_name".to_owned(), "op_risk".to_owned()),
+            (
+                WORKFLOW_PARENT_PRINCIPAL_LABEL.to_owned(),
+                "prn_parent".to_owned(),
+            ),
+            (
+                WORKFLOW_ALLOWED_TOOLS_LABEL.to_owned(),
+                allowed_tools.to_owned(),
+            ),
+        ])
     }
 
     #[test]
@@ -8879,6 +9212,7 @@ mod adoption_tests {
             repo_cache: SessionRepoCacheAccess::None,
             observability_enabled: false,
             api_server_enabled: false,
+            tool_allowlist: None,
         }
     }
 
@@ -8958,6 +9292,7 @@ mod adoption_tests {
                 existing_sandbox_capabilities: session.sandbox_capabilities.as_ref(),
                 iron_control_principal: None,
                 desired_capabilities: &restricted_capabilities(),
+                tool_allowlist: None,
                 execution_id: &execution_id,
             })
             .await
@@ -9042,6 +9377,7 @@ mod adoption_tests {
                 existing_sandbox_capabilities: None,
                 iron_control_principal: None,
                 desired_capabilities: &restricted_capabilities(),
+                tool_allowlist: None,
                 execution_id: &execution_id,
             })
             .await
@@ -9096,6 +9432,7 @@ mod adoption_tests {
                 existing_sandbox_capabilities: None,
                 iron_control_principal: Some("principal-existing"),
                 desired_capabilities: &SessionSandboxCapabilities::default_enabled(),
+                tool_allowlist: None,
                 execution_id: &execution_id,
             })
             .await
@@ -9439,6 +9776,7 @@ mod adoption_tests {
                 existing_sandbox_capabilities: None,
                 iron_control_principal: None,
                 desired_capabilities: &SessionSandboxCapabilities::default_enabled(),
+                tool_allowlist: None,
                 execution_id: &execution_id,
             })
             .await

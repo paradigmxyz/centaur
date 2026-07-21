@@ -12,7 +12,10 @@ use absurd::{
     Client, ClientOptions, CreateQueueOptions, RetryKind, RetryStrategy, SpawnOptions, StepHandle,
     TaskContext, TaskRegistrationOptions, Worker, WorkerOptions,
 };
-use centaur_iron_control::{IdentityInput, IronControlClient, IronControlError, slugify};
+use centaur_iron_control::{
+    IdentityInput, IronControlClient, IronControlError, Principal, Role, RoleSpec,
+    WORKFLOW_ALLOWED_TOOLS_LABEL, WORKFLOW_PARENT_PRINCIPAL_LABEL, slugify,
+};
 use centaur_sandbox_core::SandboxSpec;
 use centaur_session_core::{HarnessType, MessageRole, SessionMessageInput, ThreadKey};
 use centaur_session_runtime::{
@@ -210,6 +213,7 @@ pub struct WorkflowHostSandboxRuntime {
     runtime: SandboxRuntime,
     spec: SandboxSpec,
     workflow_principals: Arc<RwLock<WorkflowPrincipalAssignments>>,
+    workflow_principal_registrar: Arc<RwLock<Option<WorkflowPrincipalRegistrar>>>,
 }
 
 #[derive(Clone, Default)]
@@ -250,7 +254,22 @@ impl WorkflowHostSandboxRuntime {
             runtime,
             spec,
             workflow_principals: Arc::new(RwLock::new(WorkflowPrincipalAssignments::default())),
+            workflow_principal_registrar: Arc::new(RwLock::new(None)),
         }
+    }
+
+    fn update_workflow_principal_registrar(&self, registrar: Option<WorkflowPrincipalRegistrar>) {
+        *self
+            .workflow_principal_registrar
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = registrar;
+    }
+
+    fn workflow_principal_registrar(&self) -> Option<WorkflowPrincipalRegistrar> {
+        self.workflow_principal_registrar
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     fn update_workflow_principals(
@@ -326,9 +345,13 @@ impl WorkflowPrincipalRegistrar {
         &self,
         principals: &BTreeSet<String>,
     ) -> Result<BTreeMap<String, String>, WorkflowRuntimeError> {
+        let foreign_ids = workflow_principal_foreign_ids(principals)?;
         let mut registered = BTreeMap::new();
         for workflow_name in principals {
-            let foreign_id = canonical_workflow_principal_foreign_id(workflow_name);
+            let foreign_id = foreign_ids
+                .get(workflow_name)
+                .expect("preflighted workflow principal foreign id")
+                .clone();
             let record = self
                 .client
                 .upsert_principal(&workflow_principal_identity_input(
@@ -342,6 +365,286 @@ impl WorkflowPrincipalRegistrar {
         }
         Ok(registered)
     }
+
+    async fn register_scoped_agent_principal(
+        &self,
+        workflow_name: &str,
+        workflow_principal_id: &str,
+        allowed_tools: &BTreeSet<String>,
+    ) -> Result<String, WorkflowRuntimeError> {
+        let workflow_principal = self
+            .client
+            .get_principal(&self.namespace, workflow_principal_id)
+            .await?;
+        ensure_workflow_principal_matches(workflow_name, &self.namespace, &workflow_principal)?;
+        let identity = scoped_workflow_agent_identity(
+            &self.namespace,
+            workflow_name,
+            &workflow_principal,
+            allowed_tools,
+        )?;
+        let agent_principal = self.client.upsert_principal(&identity).await?;
+        ensure_scoped_workflow_agent_principal(&identity, &agent_principal)?;
+
+        for grant in self
+            .client
+            .list_principal_grants(&agent_principal.id)
+            .await?
+        {
+            match self.client.delete_grant(&grant.id).await {
+                Ok(()) | Err(IronControlError::Status { status: 404, .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+
+        let assigned_roles = self
+            .client
+            .list_principal_roles(&agent_principal.id)
+            .await?;
+        let workflow_roles = self
+            .client
+            .list_principal_roles(&workflow_principal.id)
+            .await?;
+        let desired_role_ids = match scoped_workflow_agent_desired_role_ids(
+            &self.namespace,
+            workflow_name,
+            &workflow_roles,
+            allowed_tools,
+        ) {
+            Ok(desired_role_ids) => desired_role_ids,
+            Err(error) => {
+                for role in &assigned_roles {
+                    match self
+                        .client
+                        .unassign_role(&agent_principal.id, &role.id)
+                        .await
+                    {
+                        Ok(()) | Err(IronControlError::Status { status: 404, .. }) => {}
+                        Err(cleanup_error) => return Err(cleanup_error.into()),
+                    }
+                }
+                return Err(error);
+            }
+        };
+        let assigned_role_ids = assigned_roles
+            .iter()
+            .map(|role| role.id.as_str())
+            .collect::<BTreeSet<_>>();
+        for role in &assigned_roles {
+            if !desired_role_ids.contains(&role.id) {
+                match self
+                    .client
+                    .unassign_role(&agent_principal.id, &role.id)
+                    .await
+                {
+                    Ok(()) | Err(IronControlError::Status { status: 404, .. }) => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+        for role_id in &desired_role_ids {
+            if !assigned_role_ids.contains(role_id.as_str()) {
+                match self.client.assign_role(&agent_principal.id, role_id).await {
+                    Ok(()) => {}
+                    Err(IronControlError::Status {
+                        status: 409 | 422, ..
+                    }) => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+
+        let current_parent_role_ids = self
+            .client
+            .list_principal_roles(&workflow_principal.id)
+            .await?
+            .into_iter()
+            .map(|role| role.id)
+            .collect::<BTreeSet<_>>();
+        if !desired_role_ids.is_subset(&current_parent_role_ids) {
+            for role_id in &desired_role_ids {
+                match self
+                    .client
+                    .unassign_role(&agent_principal.id, role_id)
+                    .await
+                {
+                    Ok(()) | Err(IronControlError::Status { status: 404, .. }) => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            return Err(WorkflowRuntimeError::BadRequest(format!(
+                "workflow {workflow_name:?} tool grants changed while reconciling ctx.agent_turn allowed_tools"
+            )));
+        }
+
+        let effective_role_ids = self
+            .client
+            .list_principal_roles(&agent_principal.id)
+            .await?
+            .into_iter()
+            .map(|role| role.id)
+            .collect::<BTreeSet<_>>();
+        let effective_grants = self
+            .client
+            .list_principal_grants(&agent_principal.id)
+            .await?;
+        if effective_role_ids != desired_role_ids || !effective_grants.is_empty() {
+            return Err(WorkflowRuntimeError::Internal(format!(
+                "scoped workflow agent principal {:?} did not converge to its exact parent-intersected tool roles",
+                identity.foreign_id
+            )));
+        }
+        Ok(agent_principal.id)
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct ScopedWorkflowAgentPlan {
+    identity: IdentityInput,
+    desired_role_ids: BTreeSet<String>,
+}
+
+#[cfg(test)]
+fn scoped_workflow_agent_plan(
+    namespace: &str,
+    workflow_name: &str,
+    workflow_principal: &Principal,
+    workflow_roles: &[Role],
+    allowed_tools: &BTreeSet<String>,
+) -> Result<ScopedWorkflowAgentPlan, WorkflowRuntimeError> {
+    ensure_workflow_principal_matches(workflow_name, namespace, workflow_principal)?;
+    Ok(ScopedWorkflowAgentPlan {
+        identity: scoped_workflow_agent_identity(
+            namespace,
+            workflow_name,
+            workflow_principal,
+            allowed_tools,
+        )?,
+        desired_role_ids: scoped_workflow_agent_desired_role_ids(
+            namespace,
+            workflow_name,
+            workflow_roles,
+            allowed_tools,
+        )?,
+    })
+}
+
+fn scoped_workflow_agent_desired_role_ids(
+    namespace: &str,
+    workflow_name: &str,
+    workflow_roles: &[Role],
+    allowed_tools: &BTreeSet<String>,
+) -> Result<BTreeSet<String>, WorkflowRuntimeError> {
+    let mut available_roles = BTreeMap::new();
+    for role in workflow_roles {
+        if role.namespace != namespace {
+            return Err(WorkflowRuntimeError::Internal(format!(
+                "workflow principal {workflow_name:?} has role {} in unexpected namespace {:?}",
+                role.id, role.namespace
+            )));
+        }
+        if let Some(foreign_id) = role.foreign_id.as_deref() {
+            available_roles.insert(foreign_id, role.id.clone());
+        }
+    }
+
+    let mut role_foreign_ids = BTreeMap::new();
+    let mut desired_role_ids = BTreeSet::new();
+    for tool_name in allowed_tools {
+        let role_foreign_id = RoleSpec::tool(tool_name).foreign_id;
+        if let Some(previous_tool) = role_foreign_ids.insert(role_foreign_id.clone(), tool_name) {
+            return Err(WorkflowRuntimeError::BadRequest(format!(
+                "ctx.agent_turn allowed_tools entries {previous_tool:?} and {tool_name:?} map to the same tool role {role_foreign_id:?}"
+            )));
+        }
+        let role_id = available_roles
+            .get(role_foreign_id.as_str())
+            .ok_or_else(|| {
+                WorkflowRuntimeError::BadRequest(format!(
+                    "ctx.agent_turn tool {tool_name:?} is not granted to workflow {workflow_name:?}"
+                ))
+            })?;
+        desired_role_ids.insert(role_id.clone());
+    }
+    Ok(desired_role_ids)
+}
+
+fn scoped_workflow_agent_identity(
+    namespace: &str,
+    workflow_name: &str,
+    workflow_principal: &Principal,
+    allowed_tools: &BTreeSet<String>,
+) -> Result<IdentityInput, WorkflowRuntimeError> {
+    let allowed_tools_json = serde_json::to_string(allowed_tools)?;
+    let scope_digest = hex::encode(Sha256::digest(allowed_tools_json.as_bytes()));
+    let workflow_foreign_id = workflow_principal
+        .foreign_id
+        .as_deref()
+        .expect("validated workflow principal foreign id");
+    let mut child_identity_hasher = Sha256::new();
+    child_identity_hasher.update(workflow_foreign_id.as_bytes());
+    child_identity_hasher.update([0]);
+    child_identity_hasher.update(allowed_tools_json.as_bytes());
+    let child_identity_digest = hex::encode(child_identity_hasher.finalize());
+    let foreign_id = format!("workflow-agent-{}", &child_identity_digest[..32]);
+    let labels = BTreeMap::from([
+        ("kind".to_owned(), "workflow_agent".to_owned()),
+        ("managed-by".to_owned(), "centaur".to_owned()),
+        ("workflow_name".to_owned(), workflow_name.to_owned()),
+        (
+            WORKFLOW_PARENT_PRINCIPAL_LABEL.to_owned(),
+            workflow_principal.id.clone(),
+        ),
+        (WORKFLOW_ALLOWED_TOOLS_LABEL.to_owned(), allowed_tools_json),
+    ]);
+    Ok(IdentityInput {
+        namespace: namespace.to_owned(),
+        foreign_id,
+        name: format!(
+            "Workflow {workflow_name} agent scope {}",
+            &scope_digest[..12]
+        ),
+        labels,
+        sandbox_api_server_enabled: Some(false),
+    })
+}
+
+fn ensure_workflow_principal_matches(
+    workflow_name: &str,
+    namespace: &str,
+    principal: &Principal,
+) -> Result<(), WorkflowRuntimeError> {
+    let expected_foreign_id = canonical_workflow_principal_foreign_id(workflow_name);
+    let valid = principal.namespace == namespace
+        && principal.foreign_id.as_deref() == Some(expected_foreign_id.as_str())
+        && principal.labels.get("kind").map(String::as_str) == Some("workflow")
+        && principal.labels.get("managed-by").map(String::as_str) == Some("centaur")
+        && principal.labels.get("workflow_name").map(String::as_str) == Some(workflow_name)
+        && !principal.sandbox_api_server_enabled;
+    if !valid {
+        return Err(WorkflowRuntimeError::Internal(format!(
+            "workflow principal for {workflow_name:?} does not match its registered restricted identity"
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_scoped_workflow_agent_principal(
+    identity: &IdentityInput,
+    principal: &Principal,
+) -> Result<(), WorkflowRuntimeError> {
+    if principal.namespace != identity.namespace
+        || principal.foreign_id.as_deref() != Some(identity.foreign_id.as_str())
+        || principal.labels != identity.labels
+        || principal.sandbox_api_server_enabled
+    {
+        return Err(WorkflowRuntimeError::Internal(format!(
+            "scoped workflow agent principal {:?} does not match the requested restricted identity",
+            identity.foreign_id
+        )));
+    }
+    Ok(())
 }
 
 fn workflow_principal_identity_input(
@@ -372,6 +675,23 @@ fn ensure_workflow_principal_api_disabled(
 
 fn canonical_workflow_principal_foreign_id(workflow_name: &str) -> String {
     format!("workflow-{}", slugify(workflow_name))
+}
+
+fn workflow_principal_foreign_ids(
+    principals: &BTreeSet<String>,
+) -> Result<BTreeMap<String, String>, WorkflowRuntimeError> {
+    let mut owners = BTreeMap::new();
+    let mut foreign_ids = BTreeMap::new();
+    for workflow_name in principals {
+        let foreign_id = canonical_workflow_principal_foreign_id(workflow_name);
+        if let Some(previous) = owners.insert(foreign_id.clone(), workflow_name.clone()) {
+            return Err(WorkflowRuntimeError::BadRequest(format!(
+                "workflow principal names {previous:?} and {workflow_name:?} collide on derived foreign_id {foreign_id:?}"
+            )));
+        }
+        foreign_ids.insert(workflow_name.clone(), foreign_id);
+    }
+    Ok(foreign_ids)
 }
 
 fn workflow_principal_labels(workflow_name: &str) -> BTreeMap<String, String> {
@@ -1770,6 +2090,7 @@ async fn prepare_workflow_host_sandbox(
         }
         return Ok(None);
     };
+    sandbox.update_workflow_principal_registrar(workflow_principal_registrar.clone());
     reconcile_workflow_principals(
         &sandbox,
         workflow_principal_registrar.as_ref(),
@@ -3042,6 +3363,7 @@ async fn run_python_workflow_host_local(
                     &input,
                     &workflow_clients,
                     None,
+                    None,
                 )
                 .await
                 {
@@ -3079,6 +3401,7 @@ async fn run_python_workflow_host_in_sandbox(
 ) -> Result<Value, WorkflowRuntimeError> {
     let (mut spec, workflow_principal) =
         sandbox.spec_and_principal_for_workflow(&input.workflow_name)?;
+    let workflow_principal_registrar = sandbox.workflow_principal_registrar();
     spec = spec
         .env("WORKFLOW_RUN_ID", ctx.run_id())
         .env("WORKFLOW_TASK_ID", ctx.task_id())
@@ -3112,6 +3435,7 @@ async fn run_python_workflow_host_in_sandbox(
             session_runtime,
             workflow_clients,
             workflow_principal,
+            workflow_principal_registrar,
         },
     )
     .await;
@@ -3130,6 +3454,7 @@ struct PythonWorkflowHostProtocolServices {
     session_runtime: SessionRuntime,
     workflow_clients: WorkflowQueueClients,
     workflow_principal: Option<String>,
+    workflow_principal_registrar: Option<WorkflowPrincipalRegistrar>,
 }
 
 async fn run_python_workflow_host_protocol<W, R>(
@@ -3196,6 +3521,7 @@ where
                     &input,
                     &services.workflow_clients,
                     services.workflow_principal.as_deref(),
+                    services.workflow_principal_registrar.as_ref(),
                 )
                 .await?;
                 write_host_message(stdin, &response).await?;
@@ -3329,6 +3655,7 @@ async fn handle_python_context_request(
     input: &WorkflowTaskInput,
     workflow_clients: &WorkflowQueueClients,
     workflow_principal: Option<&str>,
+    workflow_principal_registrar: Option<&WorkflowPrincipalRegistrar>,
 ) -> Result<Value, WorkflowRuntimeError> {
     let request_id = message
         .get("request_id")
@@ -3413,6 +3740,7 @@ async fn handle_python_context_request(
                 args,
                 &request_id,
                 workflow_principal,
+                workflow_principal_registrar,
             )
             .await
             {
@@ -3538,6 +3866,7 @@ async fn run_python_agent_turn(
     args: Value,
     request_id: &str,
     workflow_principal: Option<&str>,
+    workflow_principal_registrar: Option<&WorkflowPrincipalRegistrar>,
 ) -> Result<Value, WorkflowRuntimeError> {
     let text = args
         .get("text")
@@ -3634,6 +3963,39 @@ async fn run_python_agent_turn(
     if let Some(model) = model.as_deref() {
         object_insert(&mut execution_metadata, "model", json!(model));
     }
+    let scoped_agent_principal = match workflow_principal {
+        Some(workflow_principal_id) => {
+            let allowed_tools = parse_agent_allowed_tools(&args)?.ok_or_else(|| {
+                WorkflowRuntimeError::BadRequest(
+                    "ctx.agent_turn for a workflow principal requires explicit allowed_tools"
+                        .to_owned(),
+                )
+            })?;
+            let registrar = workflow_principal_registrar.ok_or_else(|| {
+                WorkflowRuntimeError::Internal(
+                    "workflow principal agent turn is missing its Iron Control registrar"
+                        .to_owned(),
+                )
+            })?;
+            Some(
+                registrar
+                    .register_scoped_agent_principal(
+                        &input.workflow_name,
+                        workflow_principal_id,
+                        &allowed_tools,
+                    )
+                    .await?,
+            )
+        }
+        None => {
+            if args.get("allowed_tools").is_some() {
+                return Err(WorkflowRuntimeError::BadRequest(
+                    "ctx.agent_turn allowed_tools requires a workflow principal".to_owned(),
+                ));
+            }
+            None
+        }
+    };
     let result = run_agent_session_turn(
         session_runtime,
         AgentTurnRequest {
@@ -3647,7 +4009,7 @@ async fn run_python_agent_turn(
             execution_metadata,
             execution_idempotency_key,
             workflow_owned_thread,
-            workflow_principal: workflow_principal.map(ToOwned::to_owned),
+            workflow_principal: scoped_agent_principal,
             idle_timeout_ms,
             max_duration_ms,
             model,
@@ -3657,6 +4019,42 @@ async fn run_python_agent_turn(
     )
     .await?;
     serde_json::to_value(result).map_err(WorkflowRuntimeError::from)
+}
+
+fn parse_agent_allowed_tools(
+    args: &Value,
+) -> Result<Option<BTreeSet<String>>, WorkflowRuntimeError> {
+    let Some(value) = args.get("allowed_tools") else {
+        return Ok(None);
+    };
+    let entries = value.as_array().ok_or_else(|| {
+        WorkflowRuntimeError::BadRequest(
+            "ctx.agent_turn allowed_tools must be an array of tool names".to_owned(),
+        )
+    })?;
+    let mut tools = BTreeSet::new();
+    for entry in entries {
+        let tool = entry.as_str().ok_or_else(|| {
+            WorkflowRuntimeError::BadRequest(
+                "ctx.agent_turn allowed_tools must contain only strings".to_owned(),
+            )
+        })?;
+        if tool.is_empty()
+            || tool.trim() != tool
+            || tool.contains(',')
+            || tool.chars().any(char::is_control)
+        {
+            return Err(WorkflowRuntimeError::BadRequest(format!(
+                "ctx.agent_turn allowed_tools contains invalid tool name {tool:?}"
+            )));
+        }
+        if !tools.insert(tool.to_owned()) {
+            return Err(WorkflowRuntimeError::BadRequest(format!(
+                "ctx.agent_turn allowed_tools contains duplicate tool {tool:?}"
+            )));
+        }
+    }
+    Ok(Some(tools))
 }
 
 /// Returns the first arg key that holds a non-empty (trimmed) string, owned.
@@ -3896,12 +4294,16 @@ async fn execute_python_workflow_tool_http(
         }
         body_bytes.extend_from_slice(&chunk);
     }
-    let body: Value = serde_json::from_slice(&body_bytes).unwrap_or_else(|_| json!({}));
     if !status.is_success() {
         return Err(WorkflowRuntimeError::BadRequest(format!(
             "ctx.call_tool({tool}.{method}) failed with status {status}"
         )));
     }
+    let body: Value = serde_json::from_slice(&body_bytes).map_err(|_| {
+        WorkflowRuntimeError::Upstream(format!(
+            "ctx.call_tool({tool}.{method}) returned a malformed JSON response"
+        ))
+    })?;
     Ok(body)
 }
 
@@ -4155,9 +4557,7 @@ async fn run_agent_session_turn(
     if workflow_owned_thread {
         object_insert(&mut session_metadata, "workflow_owned_thread", json!(true));
     }
-    if let Some(principal_id) =
-        workflow_agent_principal(workflow_principal.as_deref(), workflow_owned_thread)
-    {
+    if let Some(principal_id) = workflow_principal.as_deref() {
         session_runtime
             .create_or_get_restricted_session(
                 &thread_key,
@@ -4251,13 +4651,6 @@ async fn run_agent_session_turn(
     Err(WorkflowRuntimeError::Upstream(
         "session event stream ended before terminal execution event".to_owned(),
     ))
-}
-
-fn workflow_agent_principal(
-    workflow_principal: Option<&str>,
-    _workflow_owned_thread: bool,
-) -> Option<&str> {
-    workflow_principal
 }
 
 fn result_text_from_output_lines(lines: &[String]) -> String {
@@ -4790,19 +5183,159 @@ mod tests {
         server.join().expect("test HTTP server should exit");
     }
 
+    #[tokio::test]
+    async fn ctx_call_tool_http_rejects_empty_or_malformed_json_success() {
+        for body in [b"".as_slice(), b"not-json".as_slice()] {
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                String::from_utf8_lossy(body)
+            )
+            .into_bytes();
+            let (base_url, server) = one_shot_http_response(response, Duration::ZERO);
+
+            let error = execute_python_workflow_tool_http(
+                "demo".to_owned(),
+                "malformed".to_owned(),
+                json!({}),
+                &base_url,
+                Duration::from_secs(1),
+                1024,
+            )
+            .await
+            .expect_err("malformed successful response must fail before checkpoint");
+
+            assert!(matches!(error, WorkflowRuntimeError::Upstream(_)));
+            assert!(error.to_string().contains("malformed JSON response"));
+            server.join().expect("test HTTP server should exit");
+        }
+    }
+
     #[test]
-    fn principal_scoped_agent_session_inherits_principal_for_every_thread_kind() {
+    fn agent_allowed_tools_requires_a_canonical_explicit_array() {
+        assert_eq!(parse_agent_allowed_tools(&json!({})).unwrap(), None);
         assert_eq!(
-            workflow_agent_principal(Some("prn_workflow"), true),
-            Some("prn_workflow")
+            parse_agent_allowed_tools(&json!({"allowed_tools": []})).unwrap(),
+            Some(BTreeSet::new())
         );
         assert_eq!(
-            workflow_agent_principal(Some("prn_workflow"), false),
-            Some("prn_workflow"),
-            "an explicit run-scoped thread must still use the workflow principal"
+            parse_agent_allowed_tools(&json!({"allowed_tools": ["websearch", "github"]})).unwrap(),
+            Some(BTreeSet::from([
+                "github".to_owned(),
+                "websearch".to_owned()
+            ]))
         );
-        assert_eq!(workflow_agent_principal(None, true), None);
-        assert_eq!(workflow_agent_principal(None, false), None);
+        for args in [
+            json!({"allowed_tools": "websearch"}),
+            json!({"allowed_tools": ["websearch", "websearch"]}),
+            json!({"allowed_tools": [" websearch"]}),
+            json!({"allowed_tools": [""]}),
+        ] {
+            assert!(parse_agent_allowed_tools(&args).is_err());
+        }
+    }
+
+    fn test_workflow_parent_principal() -> Principal {
+        Principal {
+            id: "prn_workflow".to_owned(),
+            namespace: "production".to_owned(),
+            foreign_id: Some("workflow-op-risk".to_owned()),
+            name: "Workflow op_risk".to_owned(),
+            labels: workflow_principal_labels("op_risk"),
+            sandbox_observability_enabled: true,
+            sandbox_api_server_enabled: false,
+        }
+    }
+
+    fn test_tool_role(tool: &str, id: &str) -> Role {
+        Role {
+            id: id.to_owned(),
+            namespace: "production".to_owned(),
+            foreign_id: Some(RoleSpec::tool(tool).foreign_id),
+            name: format!("Tool {tool}"),
+            labels: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn scoped_agent_principal_intersects_declared_tools_with_parent_roles() {
+        let parent = test_workflow_parent_principal();
+        let roles = [
+            test_tool_role("read_contract", "role_read"),
+            test_tool_role("get_verified_source", "role_source"),
+        ];
+
+        let plan = scoped_workflow_agent_plan(
+            "production",
+            "op_risk",
+            &parent,
+            &roles,
+            &BTreeSet::from(["read_contract".to_owned()]),
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.desired_role_ids,
+            BTreeSet::from(["role_read".to_owned()])
+        );
+        assert_eq!(
+            plan.identity.labels.get(WORKFLOW_PARENT_PRINCIPAL_LABEL),
+            Some(&"prn_workflow".to_owned())
+        );
+        assert_eq!(
+            plan.identity.labels.get(WORKFLOW_ALLOWED_TOOLS_LABEL),
+            Some(&r#"["read_contract"]"#.to_owned())
+        );
+        assert_eq!(plan.identity.sandbox_api_server_enabled, Some(false));
+    }
+
+    #[test]
+    fn scoped_agent_principal_empty_scope_has_no_roles() {
+        let plan = scoped_workflow_agent_plan(
+            "production",
+            "op_risk",
+            &test_workflow_parent_principal(),
+            &[test_tool_role("read_contract", "role_read")],
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert!(plan.desired_role_ids.is_empty());
+        assert_eq!(
+            plan.identity.labels.get(WORKFLOW_ALLOWED_TOOLS_LABEL),
+            Some(&"[]".to_owned())
+        );
+    }
+
+    #[test]
+    fn scoped_agent_principal_rejects_tool_not_granted_to_parent() {
+        let error = scoped_workflow_agent_plan(
+            "production",
+            "op_risk",
+            &test_workflow_parent_principal(),
+            &[test_tool_role("read_contract", "role_read")],
+            &BTreeSet::from(["get_verified_source".to_owned()]),
+        )
+        .expect_err("undelegated tool must fail before creating a child principal");
+
+        assert!(matches!(error, WorkflowRuntimeError::BadRequest(_)));
+        assert!(error.to_string().contains("not granted"));
+        assert!(error.to_string().contains("get_verified_source"));
+    }
+
+    #[test]
+    fn scoped_agent_principal_rejects_tool_role_slug_collisions() {
+        let error = scoped_workflow_agent_plan(
+            "production",
+            "op_risk",
+            &test_workflow_parent_principal(),
+            &[test_tool_role("read_contract", "role_read")],
+            &BTreeSet::from(["read-contract".to_owned(), "read_contract".to_owned()]),
+        )
+        .expect_err("ambiguous tool role derivation must fail closed");
+
+        assert!(matches!(error, WorkflowRuntimeError::BadRequest(_)));
+        assert!(error.to_string().contains("same tool role"));
     }
 
     #[test]
@@ -4960,6 +5493,94 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn failed_tool_call_is_not_durably_checkpointed_when_database_url_is_set()
+    -> Result<(), WorkflowRuntimeError> {
+        let Some(pool) = optional_absurd_test_pool().await? else {
+            return Ok(());
+        };
+        let queue = unique_test_queue("failed_tool_not_checkpointed");
+        let app = Client::from_pool_with_options(
+            pool,
+            ClientOptions {
+                queue_name: queue.clone(),
+                ..ClientOptions::default()
+            },
+        )?;
+        app.create_queue(None, CreateQueueOptions::default())
+            .await?;
+
+        let executions = Arc::new(AtomicUsize::new(0));
+        app.register_task("failed_tool_not_checkpointed", {
+            let executions = executions.clone();
+            move |_params: Value, ctx| {
+                let executions = executions.clone();
+                async move {
+                    let call = PythonWorkflowToolCall::from_message(&json!({
+                        "type": "ctx.call_tool",
+                        "tool": "demo",
+                        "method": "lookup",
+                        "args": {"address": "0x1234"},
+                    }))
+                    .map_err(absurd_error)?;
+                    checkpoint_python_workflow_tool_call(call, &ctx, move |_call| async move {
+                        let execution = executions.fetch_add(1, Ordering::SeqCst) + 1;
+                        if execution == 1 {
+                            return Err(WorkflowRuntimeError::Upstream(
+                                "malformed JSON response".to_owned(),
+                            ));
+                        }
+                        Ok(json!({"execution": execution}))
+                    })
+                    .await
+                    .map_err(absurd_error)
+                }
+            }
+        })?;
+
+        let spawned = app
+            .spawn(
+                "failed_tool_not_checkpointed",
+                json!({}),
+                SpawnOptions {
+                    max_attempts: Some(2),
+                    retry_strategy: Some(RetryStrategy {
+                        kind: RetryKind::Fixed,
+                        base_seconds: Some(0.0),
+                        factor: None,
+                        max_seconds: None,
+                    }),
+                    ..SpawnOptions::default()
+                },
+            )
+            .await?;
+        app.work_batch(absurd::WorkBatchOptions {
+            worker_id: "failed-tool-first-attempt".to_owned(),
+            ..absurd::WorkBatchOptions::default()
+        })
+        .await?;
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+
+        app.work_batch(absurd::WorkBatchOptions {
+            worker_id: "failed-tool-retry".to_owned(),
+            ..absurd::WorkBatchOptions::default()
+        })
+        .await?;
+        let snapshot = app
+            .fetch_task_result(&spawned.task_id, None)
+            .await?
+            .expect("failed tool retry result");
+        assert_eq!(
+            snapshot,
+            absurd::TaskResultSnapshot::Completed {
+                result: json!({"execution": 2}),
+            }
+        );
+        assert_eq!(executions.load(Ordering::SeqCst), 2);
+
+        Ok(())
+    }
+
     #[test]
     fn workflow_run_timestamps_serialize_as_rfc3339() {
         let at = OffsetDateTime::from_unix_timestamp(1_781_012_105).unwrap()
@@ -5024,6 +5645,19 @@ mod tests {
             canonical_workflow_principal_foreign_id("Managing Partner Daily Briefing"),
             "workflow-managing-partner-daily-briefing"
         );
+    }
+
+    #[test]
+    fn workflow_principal_inventory_rejects_slug_collisions_before_registration() {
+        let principals = BTreeSet::from(["audit-drift".to_owned(), "audit_drift".to_owned()]);
+
+        let error = workflow_principal_foreign_ids(&principals)
+            .expect_err("colliding workflow names must fail before any upsert");
+
+        assert!(matches!(error, WorkflowRuntimeError::BadRequest(_)));
+        assert!(error.to_string().contains("audit-drift"));
+        assert!(error.to_string().contains("audit_drift"));
+        assert!(error.to_string().contains("workflow-audit-drift"));
     }
 
     #[test]

@@ -46,7 +46,20 @@ export CENTAUR_TOOL_PYTHONPATH="${PYTHONPATH:-}"
 unset -f _add_pythonpath_entry
 
 if [ -n "${TOOL_DIRS:-}" ]; then
-    install-tool-shims || echo "warning: failed to install Centaur tool CLI shims" >&2
+    case "${CENTAUR_TOOL_ALLOWLIST_ENFORCED,,}" in
+        1|true|yes)
+            # A scoped workflow sandbox must never start with stale or
+            # unfiltered tool sources when bootstrap fails.
+            install-tool-shims
+            ;;
+        ""|0|false|no)
+            install-tool-shims || echo "warning: failed to install Centaur tool CLI shims" >&2
+            ;;
+        *)
+            echo "invalid CENTAUR_TOOL_ALLOWLIST_ENFORCED boolean" >&2
+            exit 1
+            ;;
+    esac
 fi
 
 if [ -d "$STATE_DIR" ] && [ -w "$STATE_DIR" ]; then

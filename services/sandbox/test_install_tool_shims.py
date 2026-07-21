@@ -76,11 +76,100 @@ class CopyPublishedToolsTest(unittest.TestCase):
                 (published / category / name).mkdir(parents=True)
                 (published / category / name / "pyproject.toml").write_text(f"{name}\n")
 
-            with mock.patch.dict("os.environ", {"TOOL_ALLOWLIST": ""}):
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "TOOL_ALLOWLIST": "",
+                    "CENTAUR_TOOL_ALLOWLIST_ENFORCED": "",
+                },
+            ):
                 install_tool_shims._copy_published_tools(target, published)
 
             self.assertTrue((target / "research" / "websearch" / "pyproject.toml").exists())
             self.assertTrue((target / "productivity" / "linear" / "pyproject.toml").exists())
+
+    def test_explicit_empty_allowlist_installs_no_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            published = root / "published"
+            target = root / "target"
+
+            for category, name in (("research", "websearch"), ("productivity", "linear")):
+                (published / category / name).mkdir(parents=True)
+                (published / category / name / "pyproject.toml").write_text(f"{name}\n")
+
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "TOOL_ALLOWLIST": "",
+                    "CENTAUR_TOOL_ALLOWLIST_ENFORCED": "true",
+                },
+            ):
+                install_tool_shims._copy_published_tools(target, published)
+
+            self.assertFalse((target / "research" / "websearch").exists())
+            self.assertFalse((target / "productivity" / "linear").exists())
+
+    def test_enforced_allowlist_physically_removes_disallowed_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tool_dir = root / "tools"
+            bin_dir = root / "bin"
+            for category, name in (
+                ("research", "websearch"),
+                ("productivity", "linear"),
+            ):
+                package = tool_dir / category / name
+                package.mkdir(parents=True)
+                (package / "client.py").write_text("raise SystemExit(0)\n")
+                (package / "pyproject.toml").write_text(
+                    f'[project]\nname = "{name}"\n\n'
+                    f'[project.scripts]\n{name} = "client:main"\n'
+                )
+
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "TOOL_ALLOWLIST": "websearch",
+                    "CENTAUR_TOOL_ALLOWLIST_ENFORCED": "true",
+                },
+            ):
+                install_tool_shims._install_tool_shims(
+                    [tool_dir], bin_dir, refresh=False
+                )
+
+            self.assertTrue((tool_dir / "research" / "websearch" / "client.py").exists())
+            self.assertFalse((tool_dir / "productivity" / "linear").exists())
+            self.assertTrue((bin_dir / "websearch").exists())
+            self.assertFalse((bin_dir / "linear").exists())
+
+    def test_enforced_allowlist_rejects_missing_package(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tool_dir = Path(tmp) / "tools"
+            tool_dir.mkdir()
+
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "TOOL_ALLOWLIST": "missing",
+                    "CENTAUR_TOOL_ALLOWLIST_ENFORCED": "true",
+                },
+            ):
+                with self.assertRaisesRegex(RuntimeError, "packages are missing: missing"):
+                    install_tool_shims._install_tool_shims(
+                        [tool_dir], Path(tmp) / "bin", refresh=False
+                    )
+
+    def test_invalid_enforcement_flag_fails_closed(self) -> None:
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "TOOL_ALLOWLIST": "",
+                "CENTAUR_TOOL_ALLOWLIST_ENFORCED": "sometimes",
+            },
+        ):
+            with self.assertRaisesRegex(RuntimeError, "must be a boolean"):
+                install_tool_shims._tool_allowlist()
 
     def test_tool_blocklist_skips_published_tools(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -114,7 +203,13 @@ class CopyPublishedToolsTest(unittest.TestCase):
             self.assertIn("websearch", scripts)
             self.assertNotIn("linear", scripts)
 
-            with mock.patch.dict("os.environ", {"TOOL_ALLOWLIST": ""}):
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "TOOL_ALLOWLIST": "",
+                    "CENTAUR_TOOL_ALLOWLIST_ENFORCED": "",
+                },
+            ):
                 scripts_all = install_tool_shims._discover_scripts([root])
             self.assertIn("websearch", scripts_all)
             self.assertIn("linear", scripts_all)
