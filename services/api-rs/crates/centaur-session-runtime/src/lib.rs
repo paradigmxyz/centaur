@@ -2566,6 +2566,12 @@ impl SessionRuntime {
                 .as_ref()
                 .is_none_or(|warm| warm == harness_type);
             let warm_persona_matches = persona_context.is_none();
+            // A warm agent container has already started, so its environment
+            // cannot gain the placeholders resolved for a session principal
+            // after the proxy is rebound. Principal-scoped sessions must cold
+            // start with that principal's resolved sandbox spec.
+            let warm_principal_matches =
+                warm_pool_can_serve_principal(iron_control_principal);
             if !warm_harness_matches && self.warm_pool.is_some() {
                 record_sandbox_warm_pool_claim("harness_mismatch");
             }
@@ -2575,6 +2581,9 @@ impl SessionRuntime {
             if !desired_capabilities.is_default_enabled() && self.warm_pool.is_some() {
                 record_sandbox_warm_pool_claim("capabilities_non_default");
             }
+            if !warm_principal_matches && self.warm_pool.is_some() {
+                record_sandbox_warm_pool_claim("principal_scoped");
+            }
             if let Some(warm_pool) = self
                 .warm_pool
                 .as_ref()
@@ -2582,6 +2591,7 @@ impl SessionRuntime {
                     boot_mode.uses_warm_pool()
                         && warm_harness_matches
                         && warm_persona_matches
+                        && warm_principal_matches
                         && desired_capabilities.is_default_enabled()
                 })
             {
@@ -5743,6 +5753,10 @@ fn existing_sandbox_action(status: &SandboxStatus) -> ExistingSandboxAction {
     }
 }
 
+fn warm_pool_can_serve_principal(iron_control_principal: Option<&str>) -> bool {
+    iron_control_principal.is_none()
+}
+
 fn is_event_stream_attach_race(error: &SessionRuntimeError) -> bool {
     matches!(
         error,
@@ -7676,6 +7690,12 @@ mod tests {
     }
 
     #[test]
+    fn warm_pool_rejects_principal_scoped_sessions() {
+        assert!(warm_pool_can_serve_principal(None));
+        assert!(!warm_pool_can_serve_principal(Some("prn-scoped")));
+    }
+
+    #[test]
     fn event_stream_tolerates_not_ready_attach_race() {
         let not_ready =
             SessionRuntimeError::Sandbox(SandboxError::NotReady("sandbox paused".to_owned()));
@@ -9102,6 +9122,71 @@ mod adoption_tests {
         assert!(!spec.capabilities.repo_cache.enabled());
         assert!(!spec.capabilities.observability_enabled);
         assert!(!spec.capabilities.api_server_enabled);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn principal_scoped_session_skips_warm_pool() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:principal-warm-skip-{}", uuid::Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+        let execution_id = store
+            .create_execution(&thread_key, None, json!({}))
+            .await
+            .expect("create execution")
+            .execution
+            .execution_id;
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime = runtime_with_warm_pool(&store, backend.clone(), thread_key.as_str());
+        let workload_key = runtime
+            .warm_pool
+            .as_ref()
+            .unwrap()
+            .workload_key()
+            .to_owned();
+        let warm_sandbox_id = format!("warm-sbx-{}", uuid::Uuid::new_v4());
+        store
+            .insert_ready_warm_sandbox(&warm_sandbox_id, &workload_key)
+            .await
+            .expect("insert warm sandbox");
+
+        let sandbox_id = runtime
+            .ensure_session_sandbox(EnsureSessionSandboxRequest {
+                thread_key: &thread_key,
+                harness_type: &HarnessType::Codex,
+                persona_id: None,
+                existing_sandbox_id: None,
+                existing_sandbox_capabilities: None,
+                iron_control_principal: Some("prn-scoped"),
+                proxy_labels: &BTreeMap::new(),
+                desired_capabilities: &default_capabilities(),
+                execution_id: &execution_id,
+            })
+            .await
+            .expect("ensure sandbox");
+
+        assert_eq!(sandbox_id, "mock-sbx");
+        assert_eq!(
+            store
+                .claim_ready_warm_sandbox(&workload_key, thread_key.as_str())
+                .await
+                .expect("warm row should remain ready"),
+            Some(warm_sandbox_id)
+        );
+        assert!(backend.created_specs().pop().is_some());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
