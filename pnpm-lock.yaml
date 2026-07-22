@@ -90,8 +90,8 @@ importers:
         specifier: ^14.25.1
         version: 14.26.4
       hono:
-        specifier: ^4.12.18
-        version: 4.12.25
+        specifier: ^4.12.27
+        version: 4.12.31
       pg:
         specifier: ^8.21.0
         version: 8.21.0
@@ -139,8 +139,8 @@ importers:
         specifier: ^4.31.0
         version: 4.31.0(zod@4.4.3)
       hono:
-        specifier: ^4.12.18
-        version: 4.12.25
+        specifier: ^4.12.27
+        version: 4.12.31
       pg:
         specifier: ^8.21.0
         version: 8.21.0
@@ -185,8 +185,8 @@ importers:
         specifier: ^4.31.0
         version: 4.31.0(zod@4.4.3)
       hono:
-        specifier: ^4.12.18
-        version: 4.12.25
+        specifier: ^4.12.27
+        version: 4.12.31
       pg:
         specifier: ^8.21.0
         version: 8.21.0
@@ -228,8 +228,8 @@ importers:
         specifier: ^4.31.0
         version: 4.31.0(zod@4.4.3)
       hono:
-        specifier: ^4.12.18
-        version: 4.12.25
+        specifier: ^4.12.27
+        version: 4.12.31
       pg:
         specifier: ^8.21.0
         version: 8.21.0
@@ -254,7 +254,7 @@ importers:
         version: 7.0.0-dev.20260616.1
       emulate:
         specifier: ^0.5.0
-        version: 0.5.0(hono@4.12.25)
+        version: 0.5.0(hono@4.12.31)
       typescript:
         specifier: ^6.0.3
         version: 6.0.3
@@ -1178,8 +1178,8 @@ packages:
     resolution: {integrity: sha512-T2UbfbBEF32wiepXIsMlTW9+dDYC6wMh/t/vYA4tuOMKqWz/n3vr1NFSxQiyP+zk2mXsoMA/i/7qV6LKut1t1A==}
     engines: {node: '>= 0.4'}
 
-  hono@4.12.25:
-    resolution: {integrity: sha512-2NFaIyNVgJmBs/ecmtGzlmluTFs5cHEWGTdu0t1HBwYzoGXOL5nUQBRMXsXWla5i4KkG//QMzVP88m1+I3fdAQ==}
+  hono@4.12.31:
+    resolution: {integrity: sha512-zJIHFrl6bq3RDd2YusFNCDlM8qUprxKswyi/OPzPyzKDdyBXDqWx8bZlZ7R+saTdSTatUmb3O7K4SspGPaEOQg==}
     engines: {node: '>=16.9.0'}
 
   http-errors@2.0.1:
@@ -2113,9 +2113,9 @@ snapshots:
     dependencies:
       graphql: 17.0.0
 
-  '@hono/node-server@1.19.14(hono@4.12.25)':
+  '@hono/node-server@1.19.14(hono@4.12.31)':
     dependencies:
-      hono: 4.12.25
+      hono: 4.12.31
 
   '@jridgewell/sourcemap-codec@1.5.5': {}
 
@@ -2830,9 +2830,9 @@ snapshots:
 
   ee-first@1.1.1: {}
 
-  emulate@0.5.0(hono@4.12.25):
+  emulate@0.5.0(hono@4.12.31):
     dependencies:
-      '@hono/node-server': 1.19.14(hono@4.12.25)
+      '@hono/node-server': 1.19.14(hono@4.12.31)
       commander: 14.0.3
       picocolors: 1.1.1
       yaml: 2.9.0
@@ -2979,7 +2979,7 @@ snapshots:
     dependencies:
       function-bind: 1.1.2
 
-  hono@4.12.25: {}
+  hono@4.12.31: {}
 
   http-errors@2.0.1:
     dependencies:
