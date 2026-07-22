@@ -116,6 +116,141 @@ afterAll(async () => {
 })
 
 describe('slackbotv2', () => {
+  it('includes a recent same-user file message for a root channel mention', async () => {
+    const recording = await postUserMessage('Recording for the incident review')
+    const fileUrl = `${slackApi.url}/files/captured.png`
+    slackApi.addFileToMessage(CHANNEL_ID, recording.ts, {
+      id: 'F-root-context-recording',
+      mimetype: 'image/png',
+      name: 'incident-recording.png',
+      size: 14,
+      url_private: fileUrl,
+      url_private_download: fileUrl
+    })
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> summarize the recording above`)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-root-mention-file-context',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          text: `<@${BOT_USER_ID}> summarize the recording above`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+    expect(codexApi.appends[0]?.body.messages.map(message => message.client_message_id)).toEqual([
+      recording.ts,
+      mention.ts
+    ])
+    const executeInput = codexApi.executes[0]?.body.input_lines.at(-1) ?? ''
+    expect(executeInput).toContain('Recording for the incident review')
+    expect(executeInput).toContain('incident-recording.png')
+    expect(executeInput).toContain('summarize the recording above')
+  })
+
+  it('excludes stale, other-user, and text-only root channel history', async () => {
+    const textOnly = await postUserMessage('Same user but no file')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> inspect only relevant files`)
+    const file = {
+      id: 'F-excluded-root-context',
+      mimetype: 'image/png',
+      name: 'excluded.png',
+      size: 14,
+      url_private: `${slackApi.url}/files/captured.png`
+    }
+    slackApi.addHistoryMessage({
+      files: [file],
+      text: 'Too old',
+      ts: incrementSlackTs(mention.ts, -601),
+      user: USER_ID
+    })
+    slackApi.addHistoryMessage({
+      files: [file],
+      text: 'Another user',
+      ts: incrementSlackTs(mention.ts, -1),
+      user: USER_B_ID
+    })
+
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-root-mention-file-context-exclusions',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          text: `<@${BOT_USER_ID}> inspect only relevant files`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+    expect(codexApi.appends[0]?.body.messages.map(message => message.client_message_id)).toEqual([
+      mention.ts
+    ])
+    expect(codexApi.appends[0]?.body.messages.map(message => message.client_message_id)).not
+      .toContain(textOnly.ts)
+    expect(
+      slackApi.calls.find(call => call.method === 'conversations.history')?.body
+    ).toEqual(expect.objectContaining({ inclusive: 'true', latest: mention.ts, limit: '10' }))
+  })
+
+  it('caps root channel context at five messages including the mention', async () => {
+    const fileMessages: Array<{ ts: string }> = []
+    for (let index = 0; index < 6; index += 1) {
+      const message = await postUserMessage(`File context ${index}`)
+      fileMessages.push(message)
+      slackApi.addFileToMessage(CHANNEL_ID, message.ts, {
+        id: `F-root-context-${index}`,
+        mimetype: 'image/png',
+        name: `context-${index}.png`,
+        size: 14,
+        url_private: `${slackApi.url}/files/captured.png`
+      })
+    }
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> inspect recent files`)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-root-mention-file-context-cap',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          text: `<@${BOT_USER_ID}> inspect recent files`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+    expect(codexApi.appends[0]?.body.messages.map(message => message.client_message_id)).toEqual([
+      ...fileMessages.slice(-4).map(message => message.ts),
+      mention.ts
+    ])
+  })
+
   it('accepts Slack events on the legacy route', async () => {
     const parent = await postUserMessage('Legacy route context.')
     const mention = await postUserMessage(`<@${BOT_USER_ID}> use the legacy route`, parent.ts)
@@ -5549,6 +5684,7 @@ function writeMockSseEvent(stream: ServerResponse, event: MockSessionEvent): voi
 
 type PatchedSlackApi = {
   addFileToMessage(channel: string, ts: string, file: Record<string, unknown>): void
+  addHistoryMessage(message: Record<string, unknown>): void
   calls: StreamCall[]
   close(): Promise<void>
   failRepliesWithThreadNotFound(channel: string, ts: string): void
@@ -5572,6 +5708,7 @@ type StreamCall = {
     | 'chat.startStream'
     | 'chat.appendStream'
     | 'chat.stopStream'
+    | 'conversations.history'
   streamTs?: string
 }
 
@@ -5596,6 +5733,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
   const calls: StreamCall[] = []
   const fileInfo = new Map<string, Record<string, unknown>>()
   const fileInfoRequests = new Map<string, number>()
+  const historyMessages: Record<string, unknown>[] = []
   const threadMessageFiles = new Map<string, Record<string, unknown>[]>()
   const userProfiles = new Map<string, Record<string, unknown>>()
   const userProfileRequests = new Map<string, number>()
@@ -5619,6 +5757,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
       calls,
       fileInfo,
       fileInfoRequests,
+      historyMessages,
       maxStreamStopChars,
       port,
       streams,
@@ -5637,6 +5776,9 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
     addFileToMessage(channel: string, ts: string, file: Record<string, unknown>) {
       const key = slackReplyKey(channel, ts)
       threadMessageFiles.set(key, [...(threadMessageFiles.get(key) ?? []), file])
+    },
+    addHistoryMessage(message: Record<string, unknown>) {
+      historyMessages.push(message)
     },
     calls,
     url: `http://127.0.0.1:${port}`,
@@ -5670,6 +5812,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
       threadMessageFiles.clear()
       fileInfo.clear()
       fileInfoRequests.clear()
+      historyMessages.length = 0
       streams.clear()
       userProfiles.clear()
       userProfileRequests.clear()
@@ -5699,6 +5842,7 @@ async function handlePatchedSlackRequest(
     calls: StreamCall[]
     fileInfo: Map<string, Record<string, unknown>>
     fileInfoRequests: Map<string, number>
+    historyMessages: Record<string, unknown>[]
     maxStreamStopChars: number | null
     port: number
     streams: Map<string, StreamRecord>
@@ -5818,9 +5962,10 @@ async function handlePatchedSlackRequest(
     )
     return
   }
-  if (path === '/api/conversations.replies') {
+  if (path === '/api/conversations.replies' || path === '/api/conversations.history') {
     const body = await requestBody(request.clone())
     if (
+      path === '/api/conversations.replies' &&
       input.threadNotFoundReplies.has(
         slackReplyKey(stringField(body.channel), stringField(body.ts))
       )
@@ -5828,7 +5973,10 @@ async function handlePatchedSlackRequest(
       await sendWebResponse(res, Response.json({ ok: false, error: 'thread_not_found' }))
       return
     }
-    if (input.threadMessageFiles.size > 0) {
+    if (input.threadMessageFiles.size > 0 || input.historyMessages.length > 0) {
+      if (path === '/api/conversations.history') {
+        input.calls.push({ method: 'conversations.history', body })
+      }
       const rawBody = await request.arrayBuffer()
       const proxied = await fetch(new URL(`${path}${url.search}`, input.upstreamUrl), {
         method: request.method,
@@ -5837,7 +5985,11 @@ async function handlePatchedSlackRequest(
       })
       const payload = await proxied.json() as Record<string, unknown>
       if (Array.isArray(payload.messages)) {
-        payload.messages = payload.messages.map(message => {
+        let messages = payload.messages
+        if (path === '/api/conversations.history') {
+          messages = [...messages, ...input.historyMessages]
+        }
+        payload.messages = messages.map(message => {
           if (!message || typeof message !== 'object' || Array.isArray(message)) return message
           const item = message as Record<string, unknown>
           const files = input.threadMessageFiles.get(

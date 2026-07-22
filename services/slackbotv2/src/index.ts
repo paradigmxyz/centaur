@@ -14,7 +14,7 @@ import {
   type Thread
 } from 'chat'
 import { createSlackAdapter } from '@chat-adapter/slack'
-import { fetchSlackThreadReplies } from '@chat-adapter/slack/api'
+import { assertSlackOk, callSlackApi, fetchSlackThreadReplies } from '@chat-adapter/slack/api'
 import { createPostgresState } from '@chat-adapter/state-pg'
 import pg from 'pg'
 import {
@@ -86,6 +86,10 @@ import {
   traceLog,
   traceWarn
 } from './utils'
+
+const ROOT_SLACK_CHANNEL_CONTEXT_HISTORY_LIMIT = 10
+const ROOT_SLACK_CHANNEL_CONTEXT_MAX_AGE_MS = 10 * 60 * 1000
+const ROOT_SLACK_CHANNEL_CONTEXT_MAX_MESSAGES = 5
 
 export type {
   SlackbotV2,
@@ -1001,8 +1005,8 @@ async function syncThreadMessageToSession(
         ? await withSlackApiTimeout(input.options, 'collect Slack thread context', () =>
             collectSlackThreadContext(input.options, message)
           )
-        : await withSlackApiTimeout(input.options, 'collect initial thread context', () =>
-            collectInitialContext(thread, message, input.options)
+        : await withSlackApiTimeout(input.options, 'collect initial Slack context', () =>
+            collectInitialSlackContext(thread, message, input.options)
           )
     } catch (error) {
       contextDegraded = true
@@ -2851,6 +2855,77 @@ function isSlackThreadReply(message: ChatMessage): boolean {
   const threadTs = typeof item.thread_ts === 'string' ? item.thread_ts : ''
   const ts = typeof item.ts === 'string' ? item.ts : message.id
   return Boolean(threadTs && ts && threadTs !== ts)
+}
+
+async function collectInitialSlackContext(
+  thread: Thread<SlackbotV2ThreadState>,
+  currentMessage: ChatMessage,
+  options: SlackbotV2Options
+): Promise<SlackbotV2ApiMessage[]> {
+  if (!isRootSlackChannelMention(currentMessage)) {
+    return collectInitialContext(thread, currentMessage, options)
+  }
+
+  const raw = slackRawRecord(currentMessage)
+  const channel = stringField(raw.channel)
+  const currentTs = stringField(raw.ts) || currentMessage.id
+  const currentUser = stringField(raw.user)
+  if (!channel || !currentTs || !currentUser) {
+    return [await serializeMessage(currentMessage, options)]
+  }
+
+  const response = await callSlackApi<{
+    error?: string
+    messages?: unknown[]
+    ok: boolean
+  }>(
+    'conversations.history',
+    {
+      channel,
+      inclusive: true,
+      latest: currentTs,
+      limit: ROOT_SLACK_CHANNEL_CONTEXT_HISTORY_LIMIT
+    },
+    { apiUrl: options.slackApiUrl, token: options.botToken }
+  )
+  assertSlackOk('conversations.history', response)
+
+  const minimumTsMs = Math.max(
+    0,
+    slackTsToMs(currentTs) - ROOT_SLACK_CHANNEL_CONTEXT_MAX_AGE_MS
+  )
+  const selected = (Array.isArray(response.messages) ? response.messages : [])
+    .filter(isJsonObject)
+    .filter(message => {
+      const messageTs = stringField(message.ts)
+      if (!messageTs || compareSlackTs(messageTs, currentTs) > 0) return false
+      if (isSelfSlackBotMessage(options, message)) return false
+      return messageTs !== currentTs
+        && slackActorId(message) === currentUser
+        && slackFiles(message).length > 0
+        && slackTsToMs(messageTs) >= minimumTsMs
+    })
+    .sort((left, right) => compareSlackTs(stringField(left.ts), stringField(right.ts)))
+    .slice(-(ROOT_SLACK_CHANNEL_CONTEXT_MAX_MESSAGES - 1))
+
+  const messages: SlackbotV2ApiMessage[] = []
+  for (const message of selected) {
+    messages.push(await slackApiMessageFromSlack(options, message, currentMessage))
+  }
+
+  messages.push(await serializeMessage(currentMessage, options))
+  return messages
+}
+
+function isRootSlackChannelMention(message: ChatMessage): boolean {
+  if (message.isMention !== true) return false
+  const raw = slackRawRecord(message)
+  if (stringField(raw.type) !== 'app_mention') return false
+  const channel = stringField(raw.channel)
+  if (!channel.startsWith('C') && !channel.startsWith('G')) return false
+  const threadTs = stringField(raw.thread_ts)
+  const ts = stringField(raw.ts) || message.id
+  return Boolean(ts && (!threadTs || threadTs === ts))
 }
 
 async function collectSlackThreadContext(
