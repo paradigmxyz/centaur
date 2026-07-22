@@ -6656,10 +6656,10 @@ fn proxy_labels_from_session_metadata(
         "centaur.slack_channel_id",
         metadata.get("slack_channel_id"),
     );
-    if !labels.contains_key("centaur.slack_channel_id") {
-        if let Some(channel_id) = slack_conversation_id(thread_key.as_str()) {
-            labels.insert("centaur.slack_channel_id".to_owned(), channel_id.to_owned());
-        }
+    if !labels.contains_key("centaur.slack_channel_id")
+        && let Some(channel_id) = slack_conversation_id(thread_key.as_str())
+    {
+        labels.insert("centaur.slack_channel_id".to_owned(), channel_id.to_owned());
     }
     labels
 }
@@ -8332,6 +8332,8 @@ mod adoption_tests {
     /// fully terminalizes its own executions before releasing the lock.
     static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
+    type ProxyEnsure = (String, String, BTreeMap<String, String>);
+
     struct MockBackend {
         ios: Mutex<VecDeque<SandboxIo>>,
         recorded_output: std::sync::Mutex<Vec<String>>,
@@ -8342,7 +8344,7 @@ mod adoption_tests {
         created_specs: std::sync::Mutex<Vec<SandboxSpec>>,
         resume_fails: AtomicBool,
         stopped: std::sync::Mutex<Vec<String>>,
-        proxy_ensures: std::sync::Mutex<Vec<(String, String, BTreeMap<String, String>)>>,
+        proxy_ensures: std::sync::Mutex<Vec<ProxyEnsure>>,
         missing_on_stop: std::sync::Mutex<BTreeSet<String>>,
     }
 
@@ -8409,7 +8411,7 @@ mod adoption_tests {
             self.stopped.lock().unwrap().clone()
         }
 
-        fn proxy_ensures(&self) -> Vec<(String, String, BTreeMap<String, String>)> {
+        fn proxy_ensures(&self) -> Vec<ProxyEnsure> {
             self.proxy_ensures.lock().unwrap().clone()
         }
 

@@ -148,6 +148,13 @@ pub(crate) struct ResolvedIronProxy {
     api_server_enabled: bool,
 }
 
+struct ResolvedIronProxyRuntime {
+    pg: Option<ResolvedPg>,
+    replace_placeholders: BTreeMap<String, String>,
+    observability_enabled: bool,
+    api_server_enabled: bool,
+}
+
 /// The single Postgres listener the proxy multiplexes every upstream through.
 /// iron-control owns each upstream DSN/role/database and routes by database
 /// name; api-rs only assigns the local listen port and the shared client
@@ -209,10 +216,12 @@ impl AgentSandboxBackend {
             id,
             principal_id,
             labels,
-            pg,
-            replace_placeholders,
-            spec.capabilities.observability_enabled,
-            spec.capabilities.api_server_enabled,
+            ResolvedIronProxyRuntime {
+                pg,
+                replace_placeholders,
+                observability_enabled: spec.capabilities.observability_enabled,
+                api_server_enabled: spec.capabilities.api_server_enabled,
+            },
         )))
     }
 
@@ -307,10 +316,12 @@ impl AgentSandboxBackend {
             id,
             principal_id,
             BTreeMap::new(),
-            pg,
-            replace_placeholders,
-            observability_enabled,
-            api_server_enabled,
+            ResolvedIronProxyRuntime {
+                pg,
+                replace_placeholders,
+                observability_enabled,
+                api_server_enabled,
+            },
         )))
     }
 
@@ -319,10 +330,7 @@ impl AgentSandboxBackend {
         id: &SandboxId,
         principal_id: String,
         labels: BTreeMap<String, String>,
-        pg: Option<ResolvedPg>,
-        replace_placeholders: BTreeMap<String, String>,
-        observability_enabled: bool,
-        api_server_enabled: bool,
+        runtime: ResolvedIronProxyRuntime,
     ) -> ResolvedIronProxy {
         ResolvedIronProxy {
             proxy_host: iron_proxy_service_name(id),
@@ -336,11 +344,11 @@ impl AgentSandboxBackend {
                 .unwrap_or_default(),
             principal_id,
             labels,
-            pg,
-            replace_placeholders,
+            pg: runtime.pg,
+            replace_placeholders: runtime.replace_placeholders,
             management_api_key: new_proxy_management_api_key(),
-            observability_enabled,
-            api_server_enabled,
+            observability_enabled: runtime.observability_enabled,
+            api_server_enabled: runtime.api_server_enabled,
         }
     }
 
@@ -573,11 +581,12 @@ impl AgentSandboxBackend {
             });
         }
         let proxy_id = self.proxy_id_for_sandbox(id).await?;
-        if proxy_id.is_some() && self.has_usable_iron_proxy_resources(id).await? {
+        if let Some(proxy_id) = proxy_id
+            && self.has_usable_iron_proxy_resources(id).await?
+        {
             let iron_control = self.config.iron_control.as_ref().ok_or_else(|| {
                 SandboxError::backend("iron-proxy requires iron-control to be configured")
             })?;
-            let proxy_id = proxy_id.expect("proxy_id checked as Some above");
             iron_control
                 .client
                 .assign_proxy_principal(&proxy_id, principal_id, labels)
@@ -646,10 +655,12 @@ impl AgentSandboxBackend {
             id,
             principal_id,
             labels.clone(),
-            pg,
-            replace_placeholders,
-            observability_enabled,
-            api_server_enabled,
+            ResolvedIronProxyRuntime {
+                pg,
+                replace_placeholders,
+                observability_enabled,
+                api_server_enabled,
+            },
         );
         self.create_iron_proxy_resources(id, Some(&resolved))
             .await?;
@@ -1980,6 +1991,7 @@ mod tests {
             proxy_port: 8080,
             console_url: "http://console:3000".to_owned(),
             principal_id: "principal".to_owned(),
+            labels: BTreeMap::new(),
             pg: None,
             replace_placeholders: BTreeMap::new(),
             management_api_key: "test-management-key".to_owned(),
