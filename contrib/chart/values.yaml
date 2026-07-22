@@ -16,6 +16,9 @@ firewall:
     keyPem: ""
 
 ironProxy:
+  # Optional narrow Secret imported by per-sandbox proxies. Empty preserves the
+  # legacy shared secretManager.existingSecretName behavior.
+  secretEnvName: ""
   image:
     repository: centaur-iron-proxy
     tag: latest

@@ -591,6 +591,14 @@ fn build_agent_sandbox(
         "stdin": true,
         "stdinOnce": false,
         "tty": false,
+        "securityContext": {
+            "allowPrivilegeEscalation": false,
+            "runAsNonRoot": true,
+            "runAsUser": 1001,
+            "runAsGroup": 1001,
+            "capabilities": { "drop": ["ALL"] },
+            "seccompProfile": { "type": "RuntimeDefault" },
+        },
     });
     insert_optional(
         &mut container,
@@ -914,6 +922,19 @@ mod tests {
         );
         assert_eq!(container.image.as_deref(), Some("centaur-agent:latest"));
         assert_eq!(container.stdin, Some(true));
+        let security = container.security_context.as_ref().unwrap();
+        assert_eq!(security.allow_privilege_escalation, Some(false));
+        assert_eq!(security.run_as_non_root, Some(true));
+        assert_eq!(security.run_as_user, Some(1001));
+        assert_eq!(security.run_as_group, Some(1001));
+        assert_eq!(
+            security.capabilities.as_ref().unwrap().drop.as_deref(),
+            Some(["ALL".to_owned()].as_slice())
+        );
+        assert_eq!(
+            security.seccomp_profile.as_ref().unwrap().type_,
+            "RuntimeDefault"
+        );
         assert_eq!(container.volume_mounts.as_ref().unwrap().len(), 2);
         assert!(container.resources.as_ref().unwrap().limits.is_some());
     }

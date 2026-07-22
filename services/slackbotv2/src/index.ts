@@ -369,7 +369,14 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   const handleSlackWebhook = async (c: Context) => {
     const webhookStartedAtMs = nowMs()
     const route = c.req.path
+    const declaredLength = Number.parseInt(c.req.header('content-length') ?? '0', 10)
+    if (Number.isFinite(declaredLength) && declaredLength > 1_048_576) {
+      return new globalThis.Response('payload too large', { status: 413 })
+    }
     const rawBody = await c.req.raw.clone().text()
+    if (new TextEncoder().encode(rawBody).byteLength > 1_048_576) {
+      return new globalThis.Response('payload too large', { status: 413 })
+    }
     const eventType = slackWebhookEventType(rawBody)
     let outcome = 'success'
     try {

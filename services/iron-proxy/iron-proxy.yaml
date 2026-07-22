@@ -22,7 +22,20 @@ transforms:
   - name: allowlist
     config:
       domains:
-        - "*"
+        - "api.ai.meta.com"
+        - "api.anthropic.com"
+        - "api.github.com"
+        - "api.openai.com"
+        - "codeload.github.com"
+        - "files.pythonhosted.org"
+        - "github.com"
+        - "objects.githubusercontent.com"
+        - "openrouter.ai"
+        - "pypi.org"
+        - "raw.githubusercontent.com"
+        - "registry.npmjs.org"
+        - "release-assets.githubusercontent.com"
+        - "static.crates.io"
   - name: header_allowlist
     config:
       headers:

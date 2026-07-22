@@ -352,7 +352,7 @@ spec:
             - name: KUBERNETES_FIREWALL_CA_KEY_SECRET_NAME
               value: {{ include "centaur.trustedCaKeySecretName" . | quote }}
             - name: KUBERNETES_SECRET_ENV_NAME
-              value: {{ include "centaur.secretEnvName" . | quote }}
+              value: {{ default (include "centaur.secretEnvName" .) .Values.ironProxy.secretEnvName | quote }}
 {{- if .Values.secrets.bootstrapSecretName }}
             - name: KUBERNETES_BOOTSTRAP_SECRET_NAME
               value: {{ .Values.secrets.bootstrapSecretName | quote }}

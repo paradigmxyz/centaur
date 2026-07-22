@@ -116,6 +116,19 @@ afterAll(async () => {
 })
 
 describe('slackbotv2', () => {
+  it('rejects oversized webhook bodies before signature processing', async () => {
+    const response = await bot.app.request('/api/webhooks/slack', {
+      method: 'POST',
+      headers: {
+        'content-length': '1048577',
+        'content-type': 'application/json'
+      },
+      body: '{}'
+    })
+
+    expect(response.status).toBe(413)
+  })
+
   it('accepts Slack events on the legacy route', async () => {
     const parent = await postUserMessage('Legacy route context.')
     const mention = await postUserMessage(`<@${BOT_USER_ID}> use the legacy route`, parent.ts)
