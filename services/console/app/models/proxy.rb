@@ -48,11 +48,15 @@ class Proxy < ApplicationRecord
     proxy_specific_config(principal&.effective_config(redact_secrets: false) || Principal::EMPTY_CONFIG)
   end
 
-  def sync_config_snapshot(sandbox_entitlements_hosts: [])
+  def sync_config_snapshot(sandbox_entitlements_hosts: [], include_config: true)
     config = principal ? PrincipalSyncConfigSnapshot.fetch_for(principal).payload : Principal::EMPTY_CONFIG
+    hash_config = with_sandbox_entitlements_secret(config, sandbox_entitlements_hosts: sandbox_entitlements_hosts)
+    snapshot = { config_hash: config_hash_for(hash_config) }
+    return snapshot unless include_config
+
     config = proxy_specific_config(config)
     config = with_sandbox_entitlements_secret(config, sandbox_entitlements_hosts: sandbox_entitlements_hosts)
-    { config_hash: config_hash_for(config), config: config }
+    snapshot.merge(config: config)
   end
 
   # Opaque, deterministic fingerprint of the base (principal-derived) config.

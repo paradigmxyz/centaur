@@ -459,12 +459,8 @@ impl IronControlClient {
         labels: &std::collections::BTreeMap<String, String>,
     ) -> Result<Proxy> {
         let path = format!("{API_PREFIX}/proxies/{}", urlencoding::encode(id));
-        self.write(
-            Method::PATCH,
-            &path,
-            &json!({ "principal_id": principal_id, "labels": labels }),
-        )
-        .await
+        let body = proxy_assignment_payload(principal_id, labels);
+        self.write(Method::PATCH, &path, &body).await
     }
 
     /// Deregister a proxy by OID.
@@ -518,6 +514,20 @@ impl IronControlClient {
                 source,
             })
     }
+}
+
+fn proxy_assignment_payload(
+    principal_id: &str,
+    labels: &std::collections::BTreeMap<String, String>,
+) -> Value {
+    let mut body = serde_json::Map::from_iter([(
+        "principal_id".to_owned(),
+        Value::String(principal_id.to_owned()),
+    )]);
+    if !labels.is_empty() {
+        body.insert("labels".to_owned(), json!(labels));
+    }
+    Value::Object(body)
 }
 
 fn grant_body(grantee: &Grantee, secret: &GrantSecret) -> Value {
@@ -860,6 +870,30 @@ mod tests {
             serde_json::to_value(input).unwrap(),
             json!({
                 "name": "edge",
+                "principal_id": "prn_1",
+                "labels": { "centaur.slack_user_id": "U1" }
+            })
+        );
+    }
+
+    #[test]
+    fn proxy_assignment_payload_omits_empty_labels() {
+        assert_eq!(
+            proxy_assignment_payload("prn_1", &std::collections::BTreeMap::new()),
+            json!({ "principal_id": "prn_1" })
+        );
+    }
+
+    #[test]
+    fn proxy_assignment_payload_includes_non_empty_labels() {
+        let labels = std::collections::BTreeMap::from([(
+            "centaur.slack_user_id".to_owned(),
+            "U1".to_owned(),
+        )]);
+
+        assert_eq!(
+            proxy_assignment_payload("prn_1", &labels),
+            json!({
                 "principal_id": "prn_1",
                 "labels": { "centaur.slack_user_id": "U1" }
             })

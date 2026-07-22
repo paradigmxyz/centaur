@@ -20,13 +20,18 @@ module Api
     class ProxySyncController < Api::ProxyBaseController
       def create
         snapshot = current_proxy.sync_config_snapshot(
-          sandbox_entitlements_hosts: sandbox_entitlements_hosts
+          sandbox_entitlements_hosts: sandbox_entitlements_hosts,
+          include_config: false
         )
         current_hash = snapshot[:config_hash]
 
         if params[:config_hash].presence == current_hash
           render json: { config_hash: current_hash }
         else
+          snapshot = current_proxy.sync_config_snapshot(
+            sandbox_entitlements_hosts: sandbox_entitlements_hosts
+          )
+          current_hash = snapshot[:config_hash]
           # The config is assembled from the proxy's principal (empty when
           # unassigned). status and principal_id let an unassigned proxy tell "no
           # config yet" apart from "config is genuinely empty", and detect a swap.

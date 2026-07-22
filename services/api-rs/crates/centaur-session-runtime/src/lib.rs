@@ -6657,7 +6657,7 @@ fn proxy_labels_from_session_metadata(
         metadata.get("slack_channel_id"),
     );
     if !labels.contains_key("centaur.slack_channel_id")
-        && let Some(channel_id) = slack_conversation_id(thread_key.as_str())
+        && let Some(channel_id) = slack_conversation_id(thread_key)
     {
         labels.insert("centaur.slack_channel_id".to_owned(), channel_id.to_owned());
     }
@@ -6677,11 +6677,9 @@ fn insert_metadata_string_label(
     }
 }
 
-fn slack_conversation_id(thread_key: &str) -> Option<&str> {
-    for segment in thread_key.split(':').skip(1) {
-        if matches!(segment.as_bytes().first(), Some(b'C' | b'D' | b'G')) {
-            return Some(segment);
-        }
+fn slack_conversation_id(thread_key: &ThreadKey) -> Option<String> {
+    if let Some(ChatDestination::Slack { channel_id, .. }) = thread_key.chat_destination() {
+        return Some(channel_id);
     }
     None
 }
@@ -8245,6 +8243,26 @@ mod tests {
             labels,
             BTreeMap::from([
                 ("centaur.slack_channel_id".to_owned(), "C456".to_owned()),
+                ("centaur.slack_team_id".to_owned(), "T123".to_owned()),
+                ("centaur.slack_user_id".to_owned(), "U123".to_owned()),
+            ])
+        );
+    }
+
+    #[test]
+    fn proxy_labels_from_session_metadata_does_not_infer_slack_channel_for_linear_keys() {
+        let thread_key = ThreadKey::parse("linear:CEN-123:s:agent-session").unwrap();
+        let labels = proxy_labels_from_session_metadata(
+            &thread_key,
+            &json!({
+                "slack_user_id": "U123",
+                "slack_team_id": "T123",
+            }),
+        );
+
+        assert_eq!(
+            labels,
+            BTreeMap::from([
                 ("centaur.slack_team_id".to_owned(), "T123".to_owned()),
                 ("centaur.slack_user_id".to_owned(), "U123".to_owned()),
             ])

@@ -584,6 +584,20 @@ impl AgentSandboxBackend {
         if let Some(proxy_id) = proxy_id
             && self.has_usable_iron_proxy_resources(id).await?
         {
+            let sandbox = self
+                .sandboxes()
+                .get(id.as_str())
+                .await
+                .map_err(|err| map_kube_error("get sandbox for proxy principal check", err))?;
+            let assigned_principal = sandbox
+                .metadata
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.get(crate::IRON_CONTROL_PRINCIPAL_ANNOTATION));
+            if assigned_principal.map(String::as_str) == Some(principal_id) {
+                return Ok(());
+            }
+
             let iron_control = self.config.iron_control.as_ref().ok_or_else(|| {
                 SandboxError::backend("iron-proxy requires iron-control to be configured")
             })?;
