@@ -221,6 +221,24 @@ module Console
       )
     end
 
+    test "POST create captures proxy label settings via the kind select" do
+      post console_pg_dsn_secrets_url, params: {
+        secret: { namespace: "acme", foreign_id: "ui-proxy-label", database: "proxylabeldb" },
+        settings: {
+          "0" => { name: "centaur.slack_user_id", kind: "proxy_label", value: "centaur.slack_user_id" }
+        },
+        source: { source_type: "env", reference: "PROXY_LABEL_DSN" }
+      }
+      secret = PgDsnSecret.find_by!(namespace: "acme", foreign_id: "ui-proxy-label")
+      assert_redirected_to console_secret_path("pg_dsn", secret.oid)
+      assert_equal(
+        [
+          { "name" => "centaur.slack_user_id", "value_from" => { "proxy_label" => "centaur.slack_user_id" } }
+        ],
+        secret.settings
+      )
+    end
+
     test "POST create rejects an unknown principal_field from the console form" do
       assert_no_difference "PgDsnSecret.count" do
         post console_pg_dsn_secrets_url, params: {
