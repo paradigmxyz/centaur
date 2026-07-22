@@ -111,13 +111,13 @@ class Principal < ApplicationRecord
   # proxy can't dial an upstream without one. When several granted PG DSNs route
   # the same database, existing grant priority ordering decides the winner:
   # higher-priority grants appear later and overwrite lower-priority routes.
-  def sync_postgres
+  def sync_postgres(proxy: nil)
     winners = {}
     granted_pg_dsn_secrets.each do |pg|
       next unless pg.dsn_source
       winners[pg.database] = pg
     end
-    winners.values.map { |pg| pg.to_proxy_dsn(principal: self) }
+    winners.values.map { |pg| pg.to_proxy_dsn(principal: self, proxy: proxy) }
   end
 
   # The config this principal resolves to, in the same shape iron-proxy receives

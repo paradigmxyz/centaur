@@ -64,6 +64,8 @@ pub struct PgDsnSettingValueFrom {
     pub principal_label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principal_field: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_label: Option<String>,
 }
 
 /// The iron-control `pg_dsn` secret foreign_id for a listener name. Shared so

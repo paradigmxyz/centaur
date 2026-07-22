@@ -319,6 +319,26 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
     )
   end
 
+  test "postgres entries resolve value_from settings against proxy labels" do
+    @proxy.update!(labels: { "centaur.slack_user_id" => "U0123456789" })
+    pg = pg_dsn_secrets(:acme_analytics_pg)
+    pg.update!(settings: [
+      {
+        "name" => "centaur.slack_user_id",
+        "value_from" => { "proxy_label" => "centaur.slack_user_id" }
+      }
+    ])
+
+    post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
+    assert_response :ok
+
+    entry = json_body.fetch("postgres").find { |e| e["foreign_id"] == pg.foreign_id }
+    assert_equal(
+      [ { "name" => "centaur.slack_user_id", "value" => "U0123456789" } ],
+      entry["settings"]
+    )
+  end
+
   test "directly-granted secrets are emitted after role-granted ones" do
     # acme_channel holds github_token_inject and db_password_replace directly
     # (priority 100) and resolves acme_prod_api_key through the acme_infra role

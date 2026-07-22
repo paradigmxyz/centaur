@@ -14,8 +14,10 @@ class Proxy < ApplicationRecord
 
   validates :name, presence: true
   validates :bearer_token_hash, presence: true, uniqueness: true
+  validate :labels_are_string_map
   validate :token_matches_format, on: :create
 
+  before_validation :normalize_labels
   before_validation :issue_token, on: :create
   before_save :stamp_principal_assignment, if: :will_save_change_to_principal_id?
 
@@ -43,11 +45,12 @@ class Proxy < ApplicationRecord
   # proxy carries no authority and resolves to the empty config. Live secret
   # values are kept inline here because the proxy needs them to resolve.
   def sync_config
-    principal&.effective_config(redact_secrets: false) || Principal::EMPTY_CONFIG
+    proxy_specific_config(principal&.effective_config(redact_secrets: false) || Principal::EMPTY_CONFIG)
   end
 
   def sync_config_snapshot(sandbox_entitlements_hosts: [])
     config = principal ? PrincipalSyncConfigSnapshot.fetch_for(principal).payload : Principal::EMPTY_CONFIG
+    config = proxy_specific_config(config)
     config = with_sandbox_entitlements_secret(config, sandbox_entitlements_hosts: sandbox_entitlements_hosts)
     { config_hash: config_hash_for(config), config: config }
   end
@@ -67,7 +70,8 @@ class Proxy < ApplicationRecord
   def config_hash_for(config)
     payload = config.merge(
       "principal" => principal&.oid,
-      "principal_assigned_at" => principal_assigned_at&.utc&.iso8601
+      "principal_assigned_at" => principal_assigned_at&.utc&.iso8601,
+      "proxy_labels" => labels || {}
     )
     "sha256:#{Digest::SHA256.hexdigest(self.class.canonical_json(payload))}"
   end
@@ -111,6 +115,25 @@ class Proxy < ApplicationRecord
   end
 
   private
+
+  def normalize_labels
+    self.labels = {} if labels.nil?
+  end
+
+  def labels_are_string_map
+    return errors.add(:labels, "must be a hash") unless labels.is_a?(Hash)
+
+    labels.each do |key, value|
+      errors.add(:labels, "keys must be strings") unless key.is_a?(String)
+      errors.add(:labels, "values must be strings") unless value.is_a?(String)
+    end
+  end
+
+  def proxy_specific_config(config)
+    copy = config.deep_dup
+    copy["postgres"] = principal ? principal.sync_postgres(proxy: self) : []
+    copy
+  end
 
   def with_sandbox_entitlements_secret(config, sandbox_entitlements_hosts:)
     secret = sandbox_entitlements_secret(hosts: sandbox_entitlements_hosts)

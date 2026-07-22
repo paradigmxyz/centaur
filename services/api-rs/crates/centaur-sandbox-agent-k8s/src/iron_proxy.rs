@@ -127,6 +127,9 @@ pub(crate) struct ResolvedIronProxy {
     console_url: String,
     // iron-control principal OID this sandbox's proxy binds to.
     principal_id: String,
+    // Labels applied to the iron-control proxy row and used by proxy-specific
+    // config rendering in the control plane.
+    labels: BTreeMap<String, String>,
     // The single Postgres listener the proxy multiplexes all upstreams through,
     // derived from the principal's effective config. `None` when the principal
     // resolves to no Postgres upstreams. The upstream DSN/role/database are
@@ -200,10 +203,12 @@ impl AgentSandboxBackend {
         })?;
         let pg = self.resolved_pg();
         let replace_placeholders = self.effective_replace_placeholders(&principal_id).await?;
+        let labels = spec.iron_control_proxy_labels.clone();
 
         Ok(Some(self.resolved_iron_proxy_for_principal(
             id,
             principal_id,
+            labels,
             pg,
             replace_placeholders,
             spec.capabilities.observability_enabled,
@@ -301,6 +306,7 @@ impl AgentSandboxBackend {
         Ok(Some(self.resolved_iron_proxy_for_principal(
             id,
             principal_id,
+            BTreeMap::new(),
             pg,
             replace_placeholders,
             observability_enabled,
@@ -312,6 +318,7 @@ impl AgentSandboxBackend {
         &self,
         id: &SandboxId,
         principal_id: String,
+        labels: BTreeMap<String, String>,
         pg: Option<ResolvedPg>,
         replace_placeholders: BTreeMap<String, String>,
         observability_enabled: bool,
@@ -328,6 +335,7 @@ impl AgentSandboxBackend {
                 .map(|settings| settings.control_url.clone())
                 .unwrap_or_default(),
             principal_id,
+            labels,
             pg,
             replace_placeholders,
             management_api_key: new_proxy_management_api_key(),
@@ -397,7 +405,7 @@ impl AgentSandboxBackend {
         })?;
         let proxy = iron_control
             .client
-            .create_proxy(id.as_str(), &resolved.principal_id)
+            .create_proxy(id.as_str(), &resolved.principal_id, resolved.labels.clone())
             .await
             .map_err(|err| SandboxError::backend_source("iron-control create proxy", err))?;
         let token = proxy
@@ -505,6 +513,7 @@ impl AgentSandboxBackend {
         &self,
         id: &SandboxId,
         principal_id: &str,
+        labels: &BTreeMap<String, String>,
     ) -> SandboxResult<()> {
         let iron_control = self
             .config
@@ -522,7 +531,7 @@ impl AgentSandboxBackend {
                 "iron-proxy resources are missing or not running; recreating before assignment"
             );
             proxy_id = Some(
-                self.recreate_iron_proxy_resources_for_principal(id, principal_id)
+                self.recreate_iron_proxy_resources_for_principal(id, principal_id, labels)
                     .await?,
             );
         }
@@ -534,7 +543,7 @@ impl AgentSandboxBackend {
         })?;
         let proxy = iron_control
             .client
-            .assign_proxy_principal(&proxy_id, principal_id)
+            .assign_proxy_principal(&proxy_id, principal_id, labels)
             .await
             .map_err(|err| SandboxError::backend_source("iron-control assign proxy", err))?;
         self.proxy_ids
@@ -552,6 +561,7 @@ impl AgentSandboxBackend {
         &self,
         id: &SandboxId,
         principal_id: &str,
+        labels: &BTreeMap<String, String>,
     ) -> SandboxResult<()> {
         if self.config.iron_proxy.is_none() {
             return Ok(());
@@ -564,6 +574,17 @@ impl AgentSandboxBackend {
         }
         let proxy_id = self.proxy_id_for_sandbox(id).await?;
         if proxy_id.is_some() && self.has_usable_iron_proxy_resources(id).await? {
+            let iron_control = self.config.iron_control.as_ref().ok_or_else(|| {
+                SandboxError::backend("iron-proxy requires iron-control to be configured")
+            })?;
+            let proxy_id = proxy_id.expect("proxy_id checked as Some above");
+            iron_control
+                .client
+                .assign_proxy_principal(&proxy_id, principal_id, labels)
+                .await
+                .map_err(|err| SandboxError::backend_source("iron-control assign proxy", err))?;
+            self.wait_for_proxy_principal_applied(id, principal_id)
+                .await;
             return Ok(());
         }
 
@@ -572,7 +593,7 @@ impl AgentSandboxBackend {
             principal_id,
             "iron-proxy resources are missing or not running; recreating before reuse"
         );
-        self.recreate_iron_proxy_resources_for_principal(id, principal_id)
+        self.recreate_iron_proxy_resources_for_principal(id, principal_id, labels)
             .await?;
         self.patch_iron_control_principal_annotation(id, principal_id)
             .await?;
@@ -583,6 +604,7 @@ impl AgentSandboxBackend {
         &self,
         id: &SandboxId,
         principal_id: &str,
+        labels: &BTreeMap<String, String>,
     ) -> SandboxResult<String> {
         if self.config.iron_proxy.is_none() {
             return Err(SandboxError::Unsupported {
@@ -623,6 +645,7 @@ impl AgentSandboxBackend {
         let resolved = self.resolved_iron_proxy_for_principal(
             id,
             principal_id,
+            labels.clone(),
             pg,
             replace_placeholders,
             observability_enabled,

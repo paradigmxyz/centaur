@@ -1,6 +1,6 @@
 //! SQLx-backed session repository.
 
-use std::{str::FromStr, time::Duration};
+use std::{collections::BTreeMap, str::FromStr, time::Duration};
 
 use centaur_session_core::{
     ExecutionStatus, HarnessType, MessageRole, SandboxCapabilities, SandboxRepoCacheAccess,
@@ -12,6 +12,7 @@ use serde_json::Value;
 use sqlx::{
     FromRow, PgPool,
     postgres::{PgListener, PgPoolOptions},
+    types::Json,
 };
 use thiserror::Error;
 use time::{Duration as TimeDuration, OffsetDateTime};
@@ -121,11 +122,12 @@ impl PgSessionStore {
         harness_type: &HarnessType,
         persona_id: Option<&str>,
         metadata: Value,
+        proxy_labels: BTreeMap<String, String>,
     ) -> Result<Session, SessionStoreError> {
         sqlx::query(
             r#"
-            insert into sessions (thread_key, harness_type, persona_id, status, metadata)
-            values ($1, $2, $3, $4, $5)
+            insert into sessions (thread_key, harness_type, persona_id, status, metadata, proxy_labels)
+            values ($1, $2, $3, $4, $5, $6)
             on conflict (thread_key) do nothing
             "#,
         )
@@ -134,8 +136,23 @@ impl PgSessionStore {
         .bind(persona_id)
         .bind(SessionStatus::Idle.as_ref())
         .bind(metadata)
+        .bind(Json(proxy_labels.clone()))
         .execute(&self.pool)
         .await?;
+
+        if !proxy_labels.is_empty() {
+            sqlx::query(
+                r#"
+                update sessions
+                set proxy_labels = $2, updated_at = now()
+                where thread_key = $1 and proxy_labels = '{}'::jsonb
+                "#,
+            )
+            .bind(thread_key.as_str())
+            .bind(Json(proxy_labels))
+            .execute(&self.pool)
+            .await?;
+        }
 
         let session = self.get_session(thread_key).await?;
         if session.harness_type != *harness_type {
@@ -158,7 +175,7 @@ impl PgSessionStore {
     pub async fn get_session(&self, thread_key: &ThreadKey) -> Result<Session, SessionStoreError> {
         let row = sqlx::query_as::<_, SessionRow>(
             r#"
-            select thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, sandbox_last_active_at, created_at, updated_at
+            select thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, proxy_labels, sandbox_last_active_at, created_at, updated_at
             from sessions
             where thread_key = $1
             "#,
@@ -1167,7 +1184,7 @@ impl PgSessionStore {
                 end,
                 updated_at = now()
             where thread_key = $1
-            returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, sandbox_last_active_at, created_at, updated_at
+            returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, proxy_labels, sandbox_last_active_at, created_at, updated_at
             "#,
         )
         .bind(thread_key.as_str())
@@ -1196,7 +1213,7 @@ impl PgSessionStore {
                 sandbox_last_active_at = now(),
                 updated_at = now()
             where thread_key = $1
-            returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, sandbox_last_active_at, created_at, updated_at
+            returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, proxy_labels, sandbox_last_active_at, created_at, updated_at
             "#,
         )
         .bind(thread_key.as_str())
@@ -1260,7 +1277,7 @@ impl PgSessionStore {
                 status = $3,
                 updated_at = now()
             where thread_key = $1
-            returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, sandbox_last_active_at, created_at, updated_at
+            returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, proxy_labels, sandbox_last_active_at, created_at, updated_at
             "#,
         )
         .bind(thread_key.as_str())
@@ -1285,7 +1302,7 @@ impl PgSessionStore {
             update sessions
             set iron_control_principal = $2, updated_at = now()
             where thread_key = $1
-            returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, sandbox_last_active_at, created_at, updated_at
+            returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, proxy_labels, sandbox_last_active_at, created_at, updated_at
             "#,
         )
         .bind(thread_key.as_str())
@@ -1455,7 +1472,7 @@ impl PgSessionStore {
             update sessions
             set harness_thread_id = $2, updated_at = now()
             where thread_key = $1
-            returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, sandbox_last_active_at, created_at, updated_at
+            returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, proxy_labels, sandbox_last_active_at, created_at, updated_at
             "#,
         )
         .bind(thread_key.as_str())
@@ -1602,6 +1619,7 @@ struct SessionRow {
     persona_id: Option<String>,
     status: String,
     iron_control_principal: Option<String>,
+    proxy_labels: Json<BTreeMap<String, String>>,
     sandbox_last_active_at: Option<OffsetDateTime>,
     created_at: OffsetDateTime,
     updated_at: OffsetDateTime,
@@ -1643,6 +1661,7 @@ impl TryFrom<SessionRow> for Session {
             persona_id: row.persona_id,
             status: parse_persisted(row.status)?,
             iron_control_principal: row.iron_control_principal,
+            proxy_labels: row.proxy_labels.0,
             sandbox_last_active_at: row.sandbox_last_active_at,
             created_at: row.created_at,
             updated_at: row.updated_at,
@@ -1895,7 +1914,7 @@ fn stdout_lease_expires_at(lease: Duration) -> OffsetDateTime {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{collections::BTreeMap, time::Duration};
 
     use centaur_session_core::{HarnessType, ThreadKey};
     use serde_json::json;
@@ -1994,6 +2013,40 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sessions_round_trip_proxy_labels() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let thread_key = ThreadKey::parse(format!("test:proxy-labels-{}", Uuid::new_v4())).unwrap();
+        let labels = BTreeMap::from([
+            ("centaur.slack_user_id".to_owned(), "U123".to_owned()),
+            ("centaur.slack_team_id".to_owned(), "T123".to_owned()),
+            ("centaur.slack_channel_id".to_owned(), "C123".to_owned()),
+        ]);
+
+        let created = store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                labels.clone(),
+            )
+            .await
+            .expect("create session");
+
+        assert_eq!(created.proxy_labels, labels);
+        assert_eq!(
+            store
+                .get_session(&thread_key)
+                .await
+                .expect("get session")
+                .proxy_labels,
+            labels
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn idle_candidates_use_persisted_execution_idle_timeout() {
         let Some(store) = test_store().await else {
             return;
@@ -2001,7 +2054,13 @@ mod tests {
         let thread_key = ThreadKey::parse(format!("test:idle-cleanup-{}", Uuid::new_v4())).unwrap();
         let sandbox_id = format!("sbx-idle-{}", Uuid::new_v4());
         store
-            .create_or_get_session(&thread_key, &HarnessType::Codex, None, json!({}))
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
             .await
             .expect("create session");
         store
@@ -2051,7 +2110,13 @@ mod tests {
         };
         let thread_key = ThreadKey::parse(format!("test:stdout-owner-{}", Uuid::new_v4())).unwrap();
         store
-            .create_or_get_session(&thread_key, &HarnessType::Codex, None, json!({}))
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
             .await
             .expect("create session");
         let execution_id = store
@@ -2151,7 +2216,13 @@ mod tests {
             let thread_key =
                 ThreadKey::parse(format!("test:handoff-{label}-{}", Uuid::new_v4())).unwrap();
             store
-                .create_or_get_session(&thread_key, &HarnessType::Codex, None, json!({}))
+                .create_or_get_session(
+                    &thread_key,
+                    &HarnessType::Codex,
+                    None,
+                    json!({}),
+                    Default::default(),
+                )
                 .await
                 .expect("create session");
             let execution_id = store
@@ -2176,7 +2247,13 @@ mod tests {
         let bystander_thread =
             ThreadKey::parse(format!("test:handoff-bystander-{}", Uuid::new_v4())).unwrap();
         store
-            .create_or_get_session(&bystander_thread, &HarnessType::Codex, None, json!({}))
+            .create_or_get_session(
+                &bystander_thread,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
             .await
             .expect("create bystander session");
         let bystander_execution = store

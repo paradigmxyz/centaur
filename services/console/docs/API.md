@@ -630,7 +630,7 @@ Listener and client knobs (bind address, client auth) are deliberately not model
 | `labels`      | optional    | Object; defaults to `{}`. |
 | `database`    | required    | Database name clients connect to through the proxy. Must match the upstream DSN's database. If several granted secrets use the same database, grant priority selects the effective route. |
 | `role`        | optional    | Upstream `SET ROLE` applied to the session. |
-| `settings`    | optional    | Ordered array of session variables (GUCs) the proxy SETs at session start, before the `SET ROLE`, and pins so clients cannot override them. Each entry is `{ "name", "value" }` for a literal value, or `{ "name", "value_from" }` to resolve the value from the assigned proxy principal at sync time (see [principal-derived values](#principal-derived-setting-values)). Names must be a bare or dotted identifier; `role` and `session_authorization` are reserved. Replaced wholesale on update. |
+| `settings`    | optional    | Ordered array of session variables (GUCs) the proxy SETs at session start, before the `SET ROLE`, and pins so clients cannot override them. Each entry is `{ "name", "value" }` for a literal value, or `{ "name", "value_from" }` to resolve the value from the assigned proxy principal or proxy labels at sync time (see [derived setting values](#derived-setting-values)). Names must be a bare or dotted identifier; `role` and `session_authorization` are reserved. Replaced wholesale on update. |
 | `dsn`         | required    | A [secret source](#secret-sources) resolving to the connection string. Replaced wholesale on update. |
 
 ### Create
@@ -676,10 +676,10 @@ Returns `201` with the created resource. Response shape:
 
 The `dsn` in responses never includes a `control_plane` `secret` value.
 
-### Principal-derived setting values
+### Derived setting values
 
-A setting may take its value from the proxy's assigned principal instead of
-storing a literal, by replacing `value` with `value_from`:
+A setting may take its value from the proxy's assigned principal or proxy
+labels instead of storing a literal, by replacing `value` with `value_from`:
 
 ```json
 { "name": "centaur.slack_channel_id", "value_from": { "principal_label": "slack_channel_id" } }
@@ -691,9 +691,10 @@ storing a literal, by replacing `value` with `value_from`:
 | ----------------- | ----------- |
 | `principal_label` | The named label on the assigned principal. A label the principal does not carry resolves to an empty string, so RLS-style policies fail closed. |
 | `principal_field` | One of the principal's identity fields: `id` (the opaque `prn_...` id), `namespace`, `foreign_id`, or `name`. |
+| `proxy_label`     | The named label on the proxy. A label the proxy does not carry resolves to an empty string, so RLS-style policies fail closed. |
 
 A setting has either `value` or `value_from`, never both; unknown
-`principal_field` names and blank `principal_label` keys are rejected at create
+`principal_field` names and blank label keys are rejected at create
 and update time. References are resolved only in the proxy sync and
 effective-config payloads; create, update, show, and list responses echo the
 stored reference.
@@ -1429,7 +1430,17 @@ A proxy's `status` is `assigned` when it currently holds a principal and `unassi
 `POST /api/v1/proxies`
 
 ```json
-{ "data": { "name": "Edge Proxy - US", "principal_id": "prn_..." } }
+{
+  "data": {
+    "name": "Edge Proxy - US",
+    "principal_id": "prn_...",
+    "labels": {
+      "centaur.slack_user_id": "U0123456789",
+      "centaur.slack_team_id": "T0123456789",
+      "centaur.slack_channel_id": "C0123456789"
+    }
+  }
+}
 ```
 
 Returns `201`. The plaintext proxy `token` (`iprx_...`) is included **only** in this create response: save it immediately. The proxy uses it to authenticate to [proxy sync](#proxy-sync).
@@ -1441,6 +1452,11 @@ Returns `201`. The plaintext proxy `token` (`iprx_...`) is included **only** in 
     "name": "Edge Proxy - US",
     "principal_id": "prn_...",
     "status": "assigned",
+    "labels": {
+      "centaur.slack_user_id": "U0123456789",
+      "centaur.slack_team_id": "T0123456789",
+      "centaur.slack_channel_id": "C0123456789"
+    },
     "principal_assigned_at": "2026-06-01T10:00:00Z",
     "created_at": "2026-06-01T10:00:00Z",
     "updated_at": "2026-06-01T10:00:00Z"
@@ -1448,7 +1464,7 @@ Returns `201`. The plaintext proxy `token` (`iprx_...`) is included **only** in 
 }
 ```
 
-`name` is required. `principal_id` is optional: omit it to create an unassigned proxy (`status` is then `unassigned`, `principal_id` and `principal_assigned_at` are `null`). When supplied, a missing principal returns `404`.
+`name` is required. `principal_id` is optional: omit it to create an unassigned proxy (`status` is then `unassigned`, `principal_id` and `principal_assigned_at` are `null`). `labels` is optional and defaults to `{}`; keys and values must be strings. Labels initialized by Centaur's Slack API path use the `centaur.` prefix. When supplied, a missing principal returns `404`.
 
 ### Assign, swap, or clear the principal
 
@@ -1458,13 +1474,13 @@ Returns `201`. The plaintext proxy `token` (`iprx_...`) is included **only** in 
 { "data": { "principal_id": "prn_..." } }
 ```
 
-Assigns the principal when the proxy is unassigned, or swaps it when already assigned. The token is unchanged; the proxy picks up the new config on its next [sync](#proxy-sync). Send `"principal_id": null` to unassign. Omitting `principal_id` leaves the assignment unchanged; `name` may also be updated. A missing principal returns `404`. Returns `200` with the updated proxy.
+Assigns the principal when the proxy is unassigned, or swaps it when already assigned. The token is unchanged; the proxy picks up the new config on its next [sync](#proxy-sync). Send `"principal_id": null` to unassign. Omitting `principal_id` leaves the assignment unchanged; `name` and `labels` may also be updated. Omitting `labels` leaves labels unchanged, `"labels": null` clears labels, and an object replaces labels. A missing principal returns `404`. Returns `200` with the updated proxy.
 
 ### Other operations
 
 | Method   | Path | Notes |
 | -------- | ---- | ----- |
-| `GET`    | `/api/v1/proxies` | List. Optional `principal_id` filter; paginated. Tokens are never returned. |
+| `GET`    | `/api/v1/proxies` | List. Optional `principal_id` and `labels[k]=v` filters; paginated. Tokens are never returned. |
 | `GET`    | `/api/v1/proxies/:id` | Fetch one (no token). |
 | `DELETE` | `/api/v1/proxies/:id` | Deregister. Returns `204`. |
 

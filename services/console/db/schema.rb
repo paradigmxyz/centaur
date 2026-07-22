@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_07_14_175437) do
+ActiveRecord::Schema[8.1].define(version: 2026_07_21_213228) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -323,10 +323,12 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_14_175437) do
   create_table "proxies", force: :cascade do |t|
     t.string "bearer_token_hash", null: false
     t.datetime "created_at", null: false
+    t.jsonb "labels", default: {}, null: false
     t.string "name", null: false
     t.datetime "principal_assigned_at"
     t.bigint "principal_id"
     t.datetime "updated_at", null: false
+    t.index ["labels"], name: "index_proxies_on_labels", using: :gin
     t.index ["principal_id"], name: "index_proxies_on_principal_id"
   end
 
@@ -401,10 +403,12 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_14_175437) do
     t.datetime "created_at", null: false
     t.boolean "download_enabled", default: false, null: false
     t.boolean "history_enabled", default: false, null: false
+    t.string "managed_by"
     t.bigint "principal_id", null: false
     t.datetime "updated_at", null: false
     t.boolean "upload_enabled", default: false, null: false
     t.index ["principal_id", "channel_id"], name: "index_slack_channel_permissions_on_principal_id_and_channel_id", unique: true
+    t.index ["principal_id", "managed_by"], name: "index_slack_channel_permissions_on_principal_id_and_managed_by"
     t.index ["principal_id"], name: "index_slack_channel_permissions_on_principal_id"
   end
 

@@ -32,6 +32,18 @@ class ProxiesControllerTest < ActionDispatch::IntegrationTest
     refute_includes ids, proxies(:globex_proxy).oid
   end
 
+  test "GET index filters by labels" do
+    proxies(:acme_proxy).update!(labels: { "centaur.slack_user_id" => "U123" })
+    get api_v1_proxies_url,
+        params: { labels: { "centaur.slack_user_id" => "U123" } },
+        headers: auth_headers
+    assert_response :ok
+
+    ids = json_body.fetch("data").map { |d| d["id"] }
+    assert_includes ids, proxies(:acme_proxy).oid
+    refute_includes ids, proxies(:globex_proxy).oid
+  end
+
   test "GET show returns a proxy" do
     proxy = proxies(:acme_proxy)
     get api_v1_proxy_url(id: proxy.oid), headers: auth_headers
@@ -39,11 +51,18 @@ class ProxiesControllerTest < ActionDispatch::IntegrationTest
     data = json_body.fetch("data")
     assert_equal proxy.oid, data["id"]
     assert_equal proxy.principal.oid, data["principal_id"]
+    assert_equal proxy.labels, data["labels"]
     refute data.key?("token")
   end
 
   test "POST creates a proxy and returns the plaintext token once" do
-    body = { data: { name: "edge-proxy", principal_id: principals(:acme_channel).oid } }
+    body = {
+      data: {
+        name: "edge-proxy",
+        principal_id: principals(:acme_channel).oid,
+        labels: { "centaur.slack_user_id" => "U123" }
+      }
+    }
     assert_difference -> { Proxy.count }, 1 do
       post api_v1_proxies_url, params: body.to_json, headers: auth_headers
     end
@@ -53,6 +72,15 @@ class ProxiesControllerTest < ActionDispatch::IntegrationTest
     token = data.fetch("token")
     assert_match Proxy::TOKEN_FORMAT, token
     assert_equal Proxy.find_by_token(token).oid, data["id"]
+    assert_equal({ "centaur.slack_user_id" => "U123" }, data["labels"])
+  end
+
+  test "POST with invalid labels returns a validation error" do
+    body = { data: { name: "bad-labels", labels: { "slack_user_id" => 123 } } }
+    post api_v1_proxies_url, params: body.to_json, headers: auth_headers
+    assert_response :unprocessable_entity
+    assert_equal "validation failed", json_body.dig("error", "message")
+    assert_includes json_body.dig("error", "details", "labels"), "values must be strings"
   end
 
   test "POST with a missing name returns a validation error" do
@@ -99,6 +127,28 @@ class ProxiesControllerTest < ActionDispatch::IntegrationTest
     assert_response :ok
     assert_equal principals(:globex_user).oid, json_body.dig("data", "principal_id")
     assert_equal principals(:globex_user), proxy.reload.principal
+  end
+
+  test "PATCH replaces labels" do
+    proxy = proxies(:acme_proxy)
+    proxy.update!(labels: { "centaur.slack_user_id" => "U1" })
+    body = { data: { labels: { "centaur.slack_user_id" => "U2" } } }
+
+    patch api_v1_proxy_url(id: proxy.oid), params: body.to_json, headers: auth_headers
+    assert_response :ok
+    assert_equal({ "centaur.slack_user_id" => "U2" }, json_body.dig("data", "labels"))
+    assert_equal({ "centaur.slack_user_id" => "U2" }, proxy.reload.labels)
+  end
+
+  test "PATCH with null labels clears labels" do
+    proxy = proxies(:acme_proxy)
+    proxy.update!(labels: { "centaur.slack_user_id" => "U1" })
+    body = { data: { labels: nil } }
+
+    patch api_v1_proxy_url(id: proxy.oid), params: body.to_json, headers: auth_headers
+    assert_response :ok
+    assert_equal({}, json_body.dig("data", "labels"))
+    assert_equal({}, proxy.reload.labels)
   end
 
   test "PATCH with a null principal_id unassigns the proxy" do

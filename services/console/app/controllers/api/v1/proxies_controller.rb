@@ -4,6 +4,8 @@ module Api
       def index
         scope = ::Proxy.all
         scope = scope.where(principal: principal_filter) if params[:principal_id].present?
+        labels = label_filter_params
+        scope = scope.where("labels @> ?", labels.to_json) if labels.any?
         scope = scope.order(created_at: :asc, id: :asc)
 
         limit = pagination_limit
@@ -23,10 +25,10 @@ module Api
       end
 
       def create
-        attrs = data_params.permit(:name, :principal_id)
+        attrs = data_params.permit(:name, :principal_id, labels: {})
         # principal_id is optional: a proxy may boot unassigned and be assigned later.
         principal = attrs[:principal_id].present? ? Principal.find_by_oid!(attrs[:principal_id]) : nil
-        proxy = ::Proxy.new(name: attrs[:name], principal: principal)
+        proxy = ::Proxy.new(name: attrs[:name], principal: principal, labels: attrs[:labels] || {})
         proxy.save!
         render status: :created, json: { data: record_payload(proxy).merge(token: proxy.token) }
       rescue ActiveRecord::RecordInvalid => e
@@ -43,6 +45,7 @@ module Api
           proxy.principal = oid.present? ? Principal.find_by_oid!(oid) : nil
         end
         proxy.name = data_params[:name] if data_params.key?(:name)
+        proxy.labels = permitted_labels if data_params.key?(:labels)
         proxy.save!
         render json: { data: record_payload(proxy) }
       rescue ActiveRecord::RecordInvalid => e
@@ -61,12 +64,19 @@ module Api
         Principal.find_by_oid!(params[:principal_id])
       end
 
+      def permitted_labels
+        return {} if data_params[:labels].nil?
+
+        data_params.permit(labels: {})[:labels] || {}
+      end
+
       def record_payload(proxy)
         {
           id: proxy.oid,
           name: proxy.name,
           principal_id: proxy.principal&.oid,
           status: proxy.status,
+          labels: proxy.labels,
           principal_assigned_at: proxy.principal_assigned_at,
           created_at: proxy.created_at,
           updated_at: proxy.updated_at
