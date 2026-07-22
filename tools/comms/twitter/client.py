@@ -140,6 +140,7 @@ class XClient:
         params: dict[str, Any] | None = None,
         max_page_size: int = 100,
         min_page_size: int = 1,
+        token_param: str = "pagination_token",
     ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
         params = dict(params or {})
         results: list[dict[str, Any]] = []
@@ -148,7 +149,7 @@ class XClient:
         token: str | None = None
         while len(results) < limit:
             page_size = self._limit(limit - len(results), minimum=min_page_size, maximum=max_page_size)
-            request_params = {**params, "max_results": page_size, "pagination_token": token}
+            request_params = {**params, "max_results": page_size, token_param: token}
             data = self._request(endpoint, request_params)
             meta = data.get("meta") or {}
             for key, value in (data.get("includes") or {}).items():
@@ -227,7 +228,13 @@ class XClient:
             "sort_order": "relevancy" if search_type == "top" else "recency",
         }
         tweets, meta, includes = self._paged(
-            endpoint, "data", limit, params, max_page_size=100, min_page_size=10
+            endpoint,
+            "data",
+            limit,
+            params,
+            max_page_size=100,
+            min_page_size=10,
+            token_param="next_token",
         )
         return [self._normalize_tweet(tweet, includes) for tweet in tweets[:limit]], meta
 
@@ -243,7 +250,7 @@ class XClient:
         tweet = data.get("data")
         return self._normalize_tweet(tweet, data.get("includes")) if tweet else None
 
-    def get_timeline(
+    def get_user_posts(
         self, handle: str, limit: int = 20
     ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], dict[str, Any] | None]:
         """Get a user's recent posts by handle."""
@@ -253,6 +260,12 @@ class XClient:
         params = {**self._tweet_params(), "exclude": "retweets"}
         tweets, meta, includes = self._paged(f"/users/{user['user_id']}/tweets", "data", limit, params)
         return user, [self._normalize_tweet(tweet, includes) for tweet in tweets], meta
+
+    def get_timeline(
+        self, handle: str, limit: int = 20
+    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], dict[str, Any] | None]:
+        """Get a specific user's authored posts timeline by handle."""
+        return self.get_user_posts(handle, limit=limit)
 
     def get_mentions(self, handle: str, limit: int = 20) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Get recent mentions for a user."""
