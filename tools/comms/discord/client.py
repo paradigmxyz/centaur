@@ -1,9 +1,12 @@
 """Discord self-token client."""
 
+import json
+import os
 import re
 import time
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -32,6 +35,14 @@ PRIVATE_THREAD_TYPE = 12
 
 class DiscordClient:
     """High-level Discord client using a regular user token."""
+
+    # Hosts a Discord attachment ``url`` can point at. ``download_url`` refuses
+    # anything else so it can never be aimed at an internal service or metadata
+    # endpoint (it shares the cluster network with the API control plane).
+    _CDN_HOSTS = frozenset({"cdn.discordapp.com", "media.discordapp.net"})
+    # Direct-URL downloads stream to disk, but still cap the total so a hostile
+    # or accidental large URL can't fill the sandbox disk.
+    _MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
 
     def __init__(self, token: str | None = None, timeout: float = 30.0):
         self._token = token
@@ -207,6 +218,117 @@ class DiscordClient:
         msg = self._request("POST", f"/channels/{resolved['id']}/messages", json=payload)
         return self._format_message(msg, resolved.get("name"))
 
+    def upload_file(
+        self,
+        channel: str,
+        file_path: str,
+        content: str = "",
+        reply_to_message_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Upload a local file to a channel by name or ID, with optional message text."""
+        if not os.path.isfile(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
+        resolved = self._find_channel(channel)
+        payload: dict[str, Any] = {}
+        if content:
+            payload["content"] = content
+        if reply_to_message_id:
+            payload["message_reference"] = {"message_id": reply_to_message_id}
+        # Multipart upload: the JSON body rides in ``payload_json`` and the file in
+        # ``files[0]``. The shared ``_request`` always sends a JSON content type, so
+        # this request is issued directly, letting httpx set the multipart boundary.
+        headers = {
+            "Authorization": self._get_token(),
+            "User-Agent": USER_AGENT,
+        }
+        with open(file_path, "rb") as handle:
+            files = {"files[0]": (os.path.basename(file_path), handle)}
+            with httpx.Client(timeout=self.timeout) as client:
+                response = client.post(
+                    f"{BASE_URL}/channels/{resolved['id']}/messages",
+                    headers=headers,
+                    data={"payload_json": json.dumps(payload)},
+                    files=files,
+                )
+        if response.status_code >= 400:
+            try:
+                message = response.json().get("message", response.text)
+            except Exception:
+                message = response.text
+            raise RuntimeError(f"Discord API error ({response.status_code}): {message}")
+        return self._format_message(response.json(), resolved.get("name"))
+
+    def download_message_attachments(
+        self,
+        channel: str,
+        message_id: str,
+        output_dir: str = ".",
+    ) -> list[dict[str, Any]]:
+        """Download every attachment on a specific message into output_dir."""
+        resolved = self._find_channel(channel)
+        target = self._request("GET", f"/channels/{resolved['id']}/messages/{message_id}")
+        os.makedirs(output_dir, exist_ok=True)
+        saved = []
+        for attachment in target.get("attachments") or []:
+            url = attachment.get("url")
+            if not url:
+                continue
+            filename = attachment.get("filename") or "attachment"
+            # Never let a Discord-supplied filename escape output_dir.
+            safe_name = os.path.basename(filename) or "attachment"
+            result = self.download_url(url, output_dir=output_dir, filename=safe_name)
+            saved.append(
+                {
+                    "filename": filename,
+                    "path": result["path"],
+                    "size": result.get("size"),
+                    "url": url,
+                }
+            )
+        return saved
+
+    def download_url(
+        self,
+        url: str,
+        output_dir: str = ".",
+        filename: str | None = None,
+    ) -> dict[str, Any]:
+        """Download a direct attachment/CDN URL into output_dir.
+
+        Useful when a message listing already surfaced an attachment ``url`` and a
+        gateway round-trip is unnecessary. Discord CDN links are pre-signed, so no
+        Authorization header is sent. Only ``https`` Discord CDN hosts are
+        accepted, and the response is streamed to disk with a size cap so the URL
+        can't be aimed at an internal endpoint or exhaust sandbox storage.
+        """
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or (parsed.hostname or "").lower() not in self._CDN_HOSTS:
+            raise ValueError(
+                "Discord downloads only accept https Discord CDN URLs "
+                f"(cdn.discordapp.com / media.discordapp.net); refusing {url!r}"
+            )
+        os.makedirs(output_dir, exist_ok=True)
+        name = filename or os.path.basename(parsed.path) or "download"
+        dest = os.path.join(output_dir, name)
+        total = 0
+        with httpx.Client(timeout=self.timeout) as client, client.stream("GET", url) as response:
+            if response.status_code >= 400:
+                raise RuntimeError(f"Discord download failed ({response.status_code}) for {url}")
+            try:
+                with open(dest, "wb") as handle:
+                    for chunk in response.iter_bytes():
+                        total += len(chunk)
+                        if total > self._MAX_DOWNLOAD_BYTES:
+                            raise ValueError(
+                                f"file exceeds the {self._MAX_DOWNLOAD_BYTES}-byte download limit"
+                            )
+                        handle.write(chunk)
+            except ValueError:
+                if os.path.exists(dest):
+                    os.unlink(dest)
+                raise
+        return {"path": dest, "size": total, "url": url}
+
     def create_thread(
         self,
         channel: str,
@@ -301,6 +423,16 @@ class DiscordClient:
             "timestamp": _format_timestamp(msg),
             "content": msg.get("content") or "",
             "reply_to": ((msg.get("message_reference") or {}).get("message_id")),
+            "attachments": [
+                {
+                    "id": str(attachment.get("id", "")),
+                    "filename": attachment.get("filename"),
+                    "url": attachment.get("url"),
+                    "size": attachment.get("size"),
+                    "content_type": attachment.get("content_type"),
+                }
+                for attachment in (msg.get("attachments") or [])
+            ],
         }
 
     def _format_thread(self, thread: dict[str, Any]) -> dict[str, Any]:

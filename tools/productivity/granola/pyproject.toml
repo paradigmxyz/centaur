@@ -25,6 +25,9 @@ build-backend = "hatchling.build"
 
 [tool.centaur]
 module = "client.py"
+# MCP backend: the Bearer token for mcp.granola.ai is injected by the proxy
+# from the console OAuth consent flow grant, not declared here.
+hosts = ["mcp.granola.ai"]
 secrets = [
     {type = "http", name = "GRANOLA_API_KEY", mode = "inject", inject_header = "Authorization", inject_formatter = "Bearer {{ .Value }}", hosts = ["public-api.granola.ai"]},
 ]

@@ -3,7 +3,7 @@ require "test_helper"
 module Oauth
   # Covers the consent flow end to end: /oauth/:slug/start builds the IdP redirect
   # and binds the browser; /oauth/:slug/callback exchanges the code, upserts a
-  # BrokerCredential, and renders an iron-control result page. The IdP is faked by
+  # BrokerCredential, and renders a console result page. The IdP is faked by
   # swapping the controller's exchange_client_factory for a client wrapped around
   # an HTTP double returning a canned token response.
   class FlowsControllerTest < ActionDispatch::IntegrationTest
@@ -12,12 +12,18 @@ module Oauth
     CLIENT_ID = "acme-google-client-id".freeze
     SLACK_CLIENT_ID = "acme-slack-client-id".freeze
     GITHUB_CLIENT_ID = "acme-github-client-id".freeze
+    ATTIO_CLIENT_ID = "acme-attio-client-id".freeze
+    LINEAR_CLIENT_ID = "acme-linear-client-id".freeze
 
     setup do
       @app = oauth_apps(:acme_google) # slug "google"
       @app.update!(client_secret: "app-secret")
       oauth_apps(:acme_slack).update!(client_secret: "slack-secret")
       oauth_apps(:acme_github).update!(client_secret: "github-secret")
+      oauth_apps(:acme_attio).update!(client_secret: "attio-secret")
+      oauth_apps(:acme_linear).update!(client_secret: "linear-secret")
+      @user = users(:member_user)
+      sign_in @user
       clear_enqueued_jobs
     end
 
@@ -58,6 +64,7 @@ module Oauth
         ok: true, access_token: "xoxe.xoxb-1-bot", refresh_token: "xoxe-1-bot-refresh",
         expires_in: 43_200, token_type: "bot", scope: "commands",
         id_token: id_token_value,
+        team: { id: "TACME", name: "Acme" },
         authed_user: {
           id: sub,
           user: "grace",
@@ -70,6 +77,33 @@ module Oauth
       }.merge(overrides).to_json
     end
 
+    def slack_bot_token_body(**overrides)
+      {
+        ok: true,
+        access_token: "xoxb-non-rotating-bot",
+        token_type: "bot",
+        scope: "commands,chat:write",
+        bot_user_id: "U0BOTUSER",
+        app_id: "A0APP",
+        team: { id: "TACME", name: "Acme" }
+      }.merge(overrides).to_json
+    end
+
+    def slack_static_user_token_body
+      slack_token_body(
+        access_token: "xoxb-non-rotating-bot",
+        refresh_token: nil,
+        expires_in: nil,
+        authed_user: {
+          id: "USTATIC",
+          user: "static-grace",
+          access_token: "xoxp-non-rotating-user",
+          scope: "chat:write",
+          token_type: "user"
+        }
+      )
+    end
+
     def github_token_body(scope: "repo,read:user", **overrides)
       {
         access_token: "gho-user-token",
@@ -78,8 +112,29 @@ module Oauth
       }.merge(overrides).to_json
     end
 
+    def attio_token_body(**overrides)
+      {
+        access_token: "attio-user-token",
+        token_type: "Bearer"
+      }.merge(overrides).to_json
+    end
+
+    def linear_token_body(scope: "read write", **overrides)
+      {
+        access_token: "lin-user-token",
+        refresh_token: "lin-refresh-token",
+        token_type: "Bearer",
+        expires_in: 86_399,
+        scope: scope
+      }.merge(overrides).to_json
+    end
+
     def sign_in(user)
       post login_url, params: { email: user.email, password: "password123456" }
+    end
+
+    def sign_out
+      delete logout_url
     end
 
     # Runs /start and returns the state extracted from the IdP redirect (the flow
@@ -92,6 +147,23 @@ module Oauth
     end
 
     # --- start ----------------------------------------------------------------
+
+    test "start redirects to Attio with dashboard-configured scopes" do
+      get oauth_start_url(slug: "attio")
+      assert_response :redirect
+      uri = URI.parse(response.location)
+      assert_equal "app.attio.com", uri.host
+      assert_equal "/authorize", uri.path
+      q = URI.decode_www_form(uri.query).to_h
+      assert_equal ATTIO_CLIENT_ID, q["client_id"]
+      assert_equal "http://www.example.com/oauth/attio/callback", q["redirect_uri"]
+      assert_equal "code", q["response_type"]
+      assert_equal "S256", q["code_challenge_method"]
+      assert q["code_challenge"].present?
+      # The Attio developer dashboard owns the effective scopes; the generic
+      # flow still sends the sample app allowlist as a harmless scope param.
+      assert_equal "record_permission:read object_configuration:read", q["scope"]
+    end
 
     test "start redirects to Google with the right params and sets the flow cookie" do
       get oauth_start_url(slug: "google")
@@ -153,19 +225,41 @@ module Oauth
       assert_includes scopes, "read:user"
     end
 
-    test "start works without any session" do
-      get oauth_start_url(slug: "google")
+    test "start redirects to Linear with comma separated scopes" do
+      get oauth_start_url(slug: "linear")
       assert_response :redirect
+      uri = URI.parse(response.location)
+      assert_equal "linear.app", uri.host
+      assert_equal "/oauth/authorize", uri.path
+      q = URI.decode_www_form(uri.query).to_h
+      assert_equal LINEAR_CLIENT_ID, q["client_id"]
+      assert_equal "http://www.example.com/oauth/linear/callback", q["redirect_uri"]
+      assert_equal "code", q["response_type"]
+      assert_equal "S256", q["code_challenge_method"]
+      assert_nil q["user_scope"]
+      assert_nil q["prompt"]
+      scopes = q["scope"].split(",")
+      assert_includes scopes, "read"
+      assert_includes scopes, "write"
+    end
+
+    test "start redirects signed-out users to login" do
+      sign_out
+
+      get oauth_start_url(slug: "google")
+
+      assert_response :redirect
+      assert_redirected_to login_path
       assert_nil session[:user_id]
     end
 
-    test "start works with a pending console session" do
+    test "start redirects pending console users to the pending page" do
       sign_in users(:pending_user)
 
       get oauth_start_url(slug: "google")
 
       assert_response :redirect
-      assert_equal "accounts.google.com", URI.parse(response.location).host
+      assert_redirected_to pending_path
     end
 
     test "start 404s an unknown slug" do
@@ -195,16 +289,15 @@ module Oauth
 
     # --- callback -------------------------------------------------------------
 
-    test "callback happy path mints a live credential and renders a success page" do
+    test "callback happy path mints a live credential and redirects to the Integrations page" do
       state = start_flow
       stub_exchange(status: 200, body: token_body)
 
       assert_difference -> { BrokerCredential.count } => 1 do
         get oauth_callback_url(slug: "google"), params: { state: state, code: "auth-code" }
       end
-      assert_response :ok
-      assert_match "Connected", response.body
-      assert_match "user@example.com", response.body
+      assert_redirected_to console_integrations_path
+      assert_equal "google connected as user@example.com.", flash[:notice]
 
       cred = BrokerCredential.find_by(oauth_app: @app, provider_subject: "google-sub-1")
       assert_equal "acme", cred.namespace
@@ -217,8 +310,7 @@ module Oauth
       assert_equal "AT", cred.access_token
       assert_equal "RT", cred.refresh_token
       assert cred.next_attempt_at.present?
-      assert_nil cred.created_by
-      assert_includes response.body, cred.oid
+      assert_equal @user, cred.created_by
     end
 
     test "callback happy path supports Slack user tokens" do
@@ -228,8 +320,8 @@ module Oauth
       assert_difference -> { BrokerCredential.count } => 1 do
         get oauth_callback_url(slug: "slack"), params: { state: state, code: "auth-code" }
       end
-      assert_response :ok
-      assert_match "Connected", response.body
+      assert_redirected_to console_integrations_path
+      assert_match(/\Aslack connected/, flash[:notice])
 
       app = oauth_apps(:acme_slack)
       cred = BrokerCredential.find_by(oauth_app: app, provider_subject: "U0R7MFMJM")
@@ -241,8 +333,85 @@ module Oauth
       assert_equal %w[chat:write], cred.scopes
       assert_equal "xoxe.xoxp-1-user", cred.access_token
       assert_equal "xoxe-1-refresh", cred.refresh_token
+      assert cred.next_attempt_at.present?
+      assert_equal "TACME", cred.labels["slack_team_id"]
       assert_equal [ "slack.com" ], cred.static_secret.rules.map(&:host)
       assert_equal "Slack – grace token", cred.static_secret.name
+    end
+
+    test "callback happy path supports non-rotating Slack user tokens" do
+      state = start_flow(slug: "slack", scopes: "chat:write")
+      stub_exchange(status: 200, body: slack_static_user_token_body)
+
+      assert_difference -> { BrokerCredential.count } => 1 do
+        get oauth_callback_url(slug: "slack"), params: { state: state, code: "auth-code" }
+      end
+      assert_redirected_to console_integrations_path
+
+      app = oauth_apps(:acme_slack)
+      cred = BrokerCredential.find_by(oauth_app: app, provider_subject: "USTATIC")
+      assert_equal "Slack – static-grace", cred.name
+      assert_equal %w[chat:write], cred.scopes
+      assert_equal "xoxp-non-rotating-user", cred.access_token
+      assert_nil cred.refresh_token
+      assert_nil cred.expires_at
+      assert_nil cred.next_attempt_at
+      refute_includes BrokerCredential.refreshable, cred
+    end
+
+    test "callback happy path supports non-rotating Slack bot tokens" do
+      state = start_flow(slug: "slack", scopes: "chat:write")
+      stub_exchange(status: 200, body: slack_bot_token_body)
+
+      assert_difference -> { BrokerCredential.count } => 1 do
+        get oauth_callback_url(slug: "slack"), params: { state: state, code: "auth-code" }
+      end
+      assert_redirected_to console_integrations_path
+
+      app = oauth_apps(:acme_slack)
+      cred = BrokerCredential.find_by(oauth_app: app, provider_subject: "U0BOTUSER")
+      assert_equal "acme", cred.namespace
+      assert_equal "slack-slack-u0botuser", cred.foreign_id
+      assert_equal "Slack – Acme", cred.name
+      assert_equal "https://slack.com/api/oauth.v2.access", cred.token_endpoint
+      assert_nil cred.provider_email
+      assert_equal %w[commands chat:write], cred.scopes
+      assert_equal "xoxb-non-rotating-bot", cred.access_token
+      assert_nil cred.refresh_token
+      assert_nil cred.expires_at
+      assert_nil cred.next_attempt_at
+      assert_equal "TACME", cred.labels["slack_team_id"]
+      assert_equal [ "slack.com" ], cred.static_secret.rules.map(&:host)
+      refute_includes BrokerCredential.refreshable, cred
+    end
+
+    test "callback happy path supports Attio workspace tokens" do
+      state = start_flow(slug: "attio", scopes: "record_permission:read")
+      stub_exchange(status: 200, body: attio_token_body)
+
+      assert_enqueued_with(job: Oauth::EnrichAttioCredentialIdentityJob) do
+        assert_difference -> { BrokerCredential.count } => 1 do
+          get oauth_callback_url(slug: "attio"), params: { state: state, code: "auth-code" }
+        end
+      end
+      assert_redirected_to console_integrations_path
+      assert_match(/\Aattio connected/, flash[:notice])
+
+      app = oauth_apps(:acme_attio)
+      cred = BrokerCredential.find_by(oauth_app: app)
+      assert_equal "acme", cred.namespace
+      assert_match(/\Aattio-attio-pending-[a-f0-9]{32}\z/, cred.foreign_id)
+      assert_match(/\Apending-[a-f0-9]{32}\z/, cred.provider_subject)
+      assert_equal "Attio – Pending Attio workspace", cred.name
+      assert_equal "https://app.attio.com/oauth/token", cred.token_endpoint
+      assert_nil cred.provider_email
+      assert_equal %w[record_permission:read], cred.scopes
+      assert_equal "attio-user-token", cred.access_token
+      assert_nil cred.refresh_token
+      assert_nil cred.next_attempt_at
+      assert_equal [ "api.attio.com" ], cred.static_secret.rules.map(&:host)
+      assert_equal "Attio – Pending Attio workspace token", cred.static_secret.name
+      refute_includes BrokerCredential.refreshable, cred
     end
 
     test "callback happy path supports GitHub OAuth app tokens" do
@@ -254,8 +423,8 @@ module Oauth
           get oauth_callback_url(slug: "github"), params: { state: state, code: "auth-code" }
         end
       end
-      assert_response :ok
-      assert_match "Connected", response.body
+      assert_redirected_to console_integrations_path
+      assert_match(/\Agithub connected/, flash[:notice])
 
       app = oauth_apps(:acme_github)
       cred = BrokerCredential.find_by(oauth_app: app)
@@ -274,6 +443,34 @@ module Oauth
       refute_includes BrokerCredential.refreshable, cred
     end
 
+    test "callback happy path supports Linear OAuth app tokens" do
+      state = start_flow(slug: "linear", scopes: "read write")
+      stub_exchange(status: 200, body: linear_token_body)
+
+      assert_enqueued_with(job: Oauth::EnrichLinearCredentialIdentityJob) do
+        assert_difference -> { BrokerCredential.count } => 1 do
+          get oauth_callback_url(slug: "linear"), params: { state: state, code: "auth-code" }
+        end
+      end
+      assert_redirected_to console_integrations_path
+      assert_match(/\Alinear connected/, flash[:notice])
+
+      app = oauth_apps(:acme_linear)
+      cred = BrokerCredential.find_by(oauth_app: app)
+      assert_equal "acme", cred.namespace
+      assert_match(/\Alinear-linear-pending-[a-f0-9]{32}\z/, cred.foreign_id)
+      assert_match(/\Apending-[a-f0-9]{32}\z/, cred.provider_subject)
+      assert_equal "Linear – Pending Linear account", cred.name
+      assert_equal "https://api.linear.app/oauth/token", cred.token_endpoint
+      assert_nil cred.provider_email
+      assert_equal %w[read write], cred.scopes
+      assert_equal "lin-user-token", cred.access_token
+      assert_equal "lin-refresh-token", cred.refresh_token
+      assert cred.next_attempt_at.present?
+      assert_equal [ "api.linear.app" ], cred.static_secret.rules.map(&:host)
+      assert_equal "Linear – Pending Linear account token", cred.static_secret.name
+    end
+
     test "callback wraps the minted credential in a grantable static secret" do
       state = start_flow
       stub_exchange(status: 200, body: token_body)
@@ -287,7 +484,7 @@ module Oauth
       assert_equal cred, secret.broker_credential # first-class link to the credential
       assert_equal cred.namespace, secret.namespace
       assert_nil secret.foreign_id # found by association, so no collidable foreign_id
-      assert_nil secret.created_by # the unauthenticated flow has no operator
+      assert_nil secret.created_by # the wrapping secret is not owned by an operator
       assert_equal({ "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" }, secret.inject_config)
       assert_equal "token_broker", secret.source.source_type
       assert_equal cred.oid, secret.source.config["credential_id"]
@@ -313,20 +510,68 @@ module Oauth
       assert_equal "operator-renamed", secret.reload.name
     end
 
-    test "callback works with a disabled console session" do
+    test "callback records the signed-in user on the credential and keeps the original owner on re-consent" do
       user = users(:member_user)
       sign_in user
+      state = start_flow
+      stub_exchange(status: 200, body: token_body)
+      get oauth_callback_url(slug: "google"), params: { state: state, code: "auth-code" }
+
+      cred = BrokerCredential.find_by(oauth_app: @app, provider_subject: "google-sub-1")
+      assert_equal user, cred.created_by
+
+      # Someone else re-consenting for the same provider account does not steal
+      # the credential.
+      sign_in users(:acme_admin)
+      state = start_flow
+      stub_exchange(status: 200, body: token_body)
+      get oauth_callback_url(slug: "google"), params: { state: state, code: "auth-code" }
+      assert_equal user, cred.reload.created_by
+    end
+
+    test "a Slack consent with no email in the token response still shows connected on Integrations" do
+      user = users(:member_user)
+      sign_in user
+      state = start_flow(slug: "slack", scopes: "chat:write")
+      stub_exchange(status: 200, body: slack_token_body)
+      get oauth_callback_url(slug: "slack"), params: { state: state, code: "auth-code" }
+      assert_redirected_to console_integrations_path
+
+      # Slack's token response carries no email (enrichment fills it in later),
+      # so the connected state must come from the created_by link.
+      cred = BrokerCredential.find_by(oauth_app: oauth_apps(:acme_slack), provider_subject: "U0R7MFMJM")
+      assert_nil cred.provider_email
+      assert_equal user, cred.created_by
+
+      get console_integrations_url
+      assert_select "a.btn-secondary[href=?]", "http://www.example.com/oauth/slack/start", text: "Reconnect"
+    end
+
+    test "callback redirects signed-out users to login and mints nothing" do
+      state = start_flow
+      sign_out
+      stub_exchange(status: 200, body: token_body)
+
+      assert_no_difference -> { BrokerCredential.count } do
+        get oauth_callback_url(slug: "google"), params: { state: state, code: "auth-code" }
+      end
+
+      assert_redirected_to login_path
+      assert_nil session[:user_id]
+    end
+
+    test "callback rejects a disabled console session before minting" do
+      user = users(:member_user)
       state = start_flow
       user.update!(status: :disabled)
       stub_exchange(status: 200, body: token_body)
 
-      assert_difference -> { BrokerCredential.count }, 1 do
+      assert_no_difference -> { BrokerCredential.count } do
         get oauth_callback_url(slug: "google"), params: { state: state, code: "auth-code" }
       end
 
-      assert_response :ok
-      assert_match "Connected", response.body
-      assert_equal user.id, session[:user_id]
+      assert_redirected_to login_path
+      assert_nil session[:user_id]
     end
 
     test "re-consent for the same account updates the existing credential and revives a dead one" do

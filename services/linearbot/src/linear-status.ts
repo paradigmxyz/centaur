@@ -24,6 +24,7 @@ export type LinearWorkflowState = {
 export type LinearIssueStatus = {
   delegateId?: string;
   stateId?: string;
+  stateName?: string;
   stateType?: string;
   states: LinearWorkflowState[];
 };
@@ -33,7 +34,7 @@ const ISSUE_STATUS_QUERY = `
     issue(id: $issueId) {
       id
       delegate { id }
-      state { id type }
+      state { id name type }
       team {
         states {
           nodes { id name position type }
@@ -54,7 +55,7 @@ const ISSUE_STATE_UPDATE_MUTATION = `
 type IssueStatusQueryData = {
   issue?: {
     delegate?: { id?: unknown } | null;
-    state?: { id?: unknown; type?: unknown } | null;
+    state?: { id?: unknown; name?: unknown; type?: unknown } | null;
     team?: { states?: { nodes?: unknown } | null } | null;
   } | null;
 };
@@ -78,6 +79,7 @@ export async function fetchIssueStatus(
   return {
     delegateId: stringValue(issue.delegate?.id),
     stateId: stringValue(issue.state?.id),
+    stateName: stringValue(issue.state?.name),
     stateType: stringValue(issue.state?.type),
     states: workflowStates(issue.team?.states?.nodes),
   };
@@ -119,6 +121,8 @@ const MARKER_TARGET_TYPES: Record<LinearStatusMarker, string> = {
   todo: "unstarted",
 };
 
+const REVIEW_STATE_NAME_PATTERN = /\breview\b/i;
+
 // State types it is safe to move OUT of when kicking off work. Started,
 // completed, and canceled issues are never touched: a human (or the agent
 // itself) put them there deliberately.
@@ -156,9 +160,14 @@ export function markerTargetState(
   status: LinearIssueStatus,
   marker: LinearStatusMarker,
 ): LinearWorkflowState | undefined {
+  if (marker === "done" && isReviewState(status)) return undefined;
   const targetType = MARKER_TARGET_TYPES[marker];
   if (status.stateType === targetType) return undefined;
   return pickWorkflowState(status.states, targetType);
+}
+
+function isReviewState(status: LinearIssueStatus): boolean {
+  return REVIEW_STATE_NAME_PATTERN.test(status.stateName ?? "");
 }
 
 const STATUS_MARKER_PATTERN =

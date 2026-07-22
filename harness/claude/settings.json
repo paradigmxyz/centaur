@@ -1,5 +1,6 @@
 {
   "model": "claude-opus-4-8",
+  "alwaysThinkingEnabled": true,
   "permissions": {
     "defaultMode": "bypassPermissions",
     "additionalDirectories": [

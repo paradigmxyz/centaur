@@ -1,0 +1,20 @@
+<% control_tabs = [
+  { label: "Principals", path: console_principals_path, match: "/console/principals", root_active: true },
+  { label: "Roles", path: console_roles_path, match: "/console/roles" },
+  { label: "Secrets", path: console_secrets_path, match: "/console/secrets" },
+  { label: "Credentials", path: console_credentials_path, match: "/console/credentials" },
+  { label: "Apps", path: console_oauth_apps_path, match: "/console/oauth_apps" }
+] %>
+<% control_tabs << { label: "Users", path: console_users_path, match: "/console/users" } if acting_admin? %>
+<% control_tabs << { label: "Settings", path: edit_console_system_settings_path, match: "/console/settings" } if acting_admin? %>
+
+<nav class="console-control-tabs" aria-label="Control sections">
+  <% control_tabs.each do |tab| %>
+    <% active = request.path.start_with?(tab[:match]) || (tab[:root_active] && request.path == root_path) %>
+    <a href="<%= tab[:path] %>"
+       class="console-control-tab <%= "console-control-tab-active" if active %>"
+       aria-current="<%= "page" if active %>">
+      <%= tab[:label] %>
+    </a>
+  <% end %>
+</nav>

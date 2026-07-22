@@ -1,6 +1,6 @@
 # iron-control API
 
-`iron-control` exposes a JSON API under `/api/v1`. Every resource endpoint requires API key authentication. The single exception is `POST /api/v1/proxy/sync`, which `iron-proxy` instances call with a proxy bearer token.
+`iron-control` exposes a JSON API under `/api/v1`. Resource endpoints require API key authentication. `POST /api/v1/proxy/sync` uses proxy bearer authentication, and sandbox read endpoints use the sandbox entitlement JWT injected by `iron-proxy`.
 
 - [Authentication](#authentication)
 - [Conventions](#conventions)
@@ -1062,6 +1062,53 @@ Returns `201`. The `client_secret` is never echoed back:
 | `PUT`/`PATCH` | `/api/v1/oauth_apps/:id` | [Upsert](#upsert-put--patch) by OID or slug. Omitted fields are preserved; `client_secret` is only changed when supplied. |
 | `DELETE` | `/api/v1/oauth_apps/:id` | Delete. Returns `204`; `404` if missing. Returns `409` while the app still has minted credentials (delete or unlink them first). |
 
+### Sandbox Start URLs
+
+`GET /api/v1/sandbox/oauth_apps`
+
+Returns enabled OAuth apps and the console URLs a sandbox user can open to start consent. Authenticate with the same sandbox entitlement JWT as `GET /api/v1/sandbox/permissions`. The token signature, issuer, audience, and expiry are verified. Proxy and principal claims are not checked because these URLs are not sensitive.
+
+```json
+{
+  "data": [
+    {
+      "id": "oap_...",
+      "slug": "google",
+      "description": "Gmail",
+      "labels": {},
+      "provider": "google",
+      "allowed_scopes": ["https://www.googleapis.com/auth/gmail.readonly"],
+      "start_url": "https://<iron-control>/oauth/google/start"
+    }
+  ]
+}
+```
+
+### Sandbox OAuth Credential Metadata
+
+`GET /api/v1/sandbox/permissions`
+
+The sandbox permissions response includes an `oauth_credentials` array with non-secret metadata for OAuth-flow credentials currently granted to the sandbox principal. Use it to confirm that a user completed consent for the expected app and personal email.
+
+```json
+{
+  "data": {
+    "oauth_credentials": [
+      {
+        "id": "bcr_...",
+        "oauth_app_id": "oap_...",
+        "slug": "google",
+        "provider": "google",
+        "provider_email": "person@example.com",
+        "provider_subject": "google-subject",
+        "status": "live",
+        "scopes": ["https://www.googleapis.com/auth/gmail.readonly"]
+      }
+    ]
+  }
+}
+```
+
 ## OAuth consent flow
 
 The consent flow turns a team member's OAuth consent into a managed broker credential. It runs on iron-control's own domain and is deliberately unauthenticated: the member reaches it with a single well-known link keyed by the app's `slug`. There is no external app to integrate with, so the start endpoint takes no `user` or `return_to`: after consent the member lands on an iron-control result page, and the credential's `external_user_key` is generated automatically. Safety comes from the consent itself (a credential is only created after a successful code exchange) and upsert-on-reconsent (re-consenting for the same provider account updates the existing credential instead of creating a new one).
@@ -1107,7 +1154,7 @@ A tampered, expired, or missing flow state or cookie renders an error page with 
 | Google   | `google`         |
 | Slack    | `slack`          |
 
-Slack OAuth apps should have token rotation enabled so the callback receives a refresh token for the broker refresh loop.
+Slack OAuth apps may use token rotation or long-lived tokens. When token rotation is enabled, the callback stores the returned refresh token and the broker refresh loop keeps the access token fresh. When Slack returns a long-lived token without a refresh token or expiry, the credential is stored without scheduling broker refresh.
 Slack OAuth apps should use normal Slack API scopes such as `channels:history`, not Sign in with Slack scopes such as `openid`, `email`, or `profile`.
 
 ## Principals

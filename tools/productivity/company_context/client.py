@@ -6,6 +6,10 @@ import asyncio
 import json
 import os
 import re
+import time
+import urllib.request
+from collections import Counter
+from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse, urlunparse
@@ -24,9 +28,22 @@ CHANNEL_DAY_SCORE_MULTIPLIER = 0.75
 DEFAULT_PREVIEW_CHARS = 280
 MAX_RELATED_CHILDREN = 25
 SLACK_DM_SOURCE = "slack_dm"
+GRANOLA_SOURCE = "granola"
+GRANOLA_SOURCE_TYPE = "granola_note"
+DOCS_SOURCE = "docs"
+LEGACY_GOOGLE_DRIVE_SOURCE = "google_drive"
+GOOGLE_DOCS_SOURCE_TYPE = "google_doc"
 COMPANY_CONTEXT_DSN_ENV = "CENTAUR_POSTGRES_DSN"
 COMPANY_CONTEXT_DATABASE_ENV = "COMPANY_CONTEXT_POSTGRES_DATABASE"
 DEFAULT_POSTGRES_DATABASE = "ai_v2"
+COMPANY_CONTEXT_LOOKUP_METRICS_ENABLED_ENV = "COMPANY_CONTEXT_LOOKUP_METRICS_ENABLED"
+VICTORIAMETRICS_PUSH_ENABLED_ENV = "VICTORIAMETRICS_PUSH_ENABLED"
+VICTORIAMETRICS_URL_ENV = "VICTORIAMETRICS_URL"
+DEFAULT_VICTORIAMETRICS_URL = "http://victoriametrics:8428"
+METRICS_PUSH_TIMEOUT_SECONDS = 1.0
+LOOKUP_REQUEST_METRIC = "company_context_lookup_requests"
+LOOKUP_RESULT_METRIC = "company_context_lookup_results"
+LOOKUP_ZERO_RESULT_METRIC = "company_context_lookup_zero_results"
 
 _SEARCH_TERM_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/-]*")
 _STOP_WORDS = {
@@ -122,6 +139,139 @@ def _isoformat(value: Any) -> str | None:
     return None
 
 
+def _env_flag_enabled(name: str, *, default: bool) -> bool:
+    value = os.getenv(name)  # noqa: TID251
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _first_nonempty_env(names: list[str]) -> str | None:
+    for name in names:
+        value = os.getenv(name, "").strip()  # noqa: TID251
+        if value:
+            return value
+    return None
+
+
+def _metric_runtime_labels() -> dict[str, str]:
+    labels: dict[str, str] = {}
+    environment = _first_nonempty_env(
+        ["METRICS_ENVIRONMENT", "CENTAUR_ENVIRONMENT", "DEPLOY_ENV", "ENVIRONMENT"]
+    )
+    namespace = _first_nonempty_env(
+        ["METRICS_NAMESPACE", "CENTAUR_NAMESPACE", "POD_NAMESPACE", "NAMESPACE"]
+    )
+    if environment:
+        labels["environment"] = environment
+    if namespace:
+        labels["namespace"] = namespace
+    return labels
+
+
+def _metric_label_value(value: str | None, *, empty: str = "all") -> str:
+    normalized = str(value or "").strip()
+    return normalized if normalized else empty
+
+
+def _format_metric_labels(labels: dict[str, str]) -> str:
+    if not labels:
+        return ""
+    parts = []
+    for key in sorted(labels):
+        value = labels[key].replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
+        parts.append(f'{key}="{value}"')
+    return "{" + ",".join(parts) + "}"
+
+
+def _format_metric_sample(
+    metric: str,
+    value: int | float,
+    labels: dict[str, str],
+    timestamp_ms: int,
+) -> str:
+    return f"{metric}{_format_metric_labels(labels)} {value} {timestamp_ms}"
+
+
+def _company_context_lookup_metrics_enabled() -> bool:
+    return _env_flag_enabled(COMPANY_CONTEXT_LOOKUP_METRICS_ENABLED_ENV, default=True) and (
+        _env_flag_enabled(VICTORIAMETRICS_PUSH_ENABLED_ENV, default=True)
+    )
+
+
+def _victoria_metrics_import_url() -> str:
+    base_url = os.getenv(VICTORIAMETRICS_URL_ENV, DEFAULT_VICTORIAMETRICS_URL).strip()  # noqa: TID251
+    if base_url and not base_url.startswith(("http://", "https://")):
+        base_url = f"http://{base_url}"
+    return f"{(base_url or DEFAULT_VICTORIAMETRICS_URL).rstrip('/')}/api/v1/import/prometheus"
+
+
+def _push_company_context_lookup_metric_lines(lines: list[str]) -> None:
+    if not lines or not _company_context_lookup_metrics_enabled():
+        return
+    try:
+        body = ("\n".join(lines) + "\n").encode()
+        request = urllib.request.Request(
+            _victoria_metrics_import_url(),
+            data=body,
+            headers={"Content-Type": "text/plain; version=0.0.4"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=METRICS_PUSH_TIMEOUT_SECONDS):
+            pass
+    except Exception:
+        return
+
+
+def _emit_company_context_lookup_metrics(
+    *,
+    status: str,
+    requested_source: str | None,
+    requested_source_type: str | None,
+    occurred_after: datetime | None,
+    occurred_before: datetime | None,
+    results: list[dict[str, Any]],
+) -> None:
+    """Emit event-style lookup samples; dashboards should sum them over a range."""
+    labels = {
+        **_metric_runtime_labels(),
+        "status": _metric_label_value(status, empty="unknown"),
+        "requested_source": _metric_label_value(requested_source),
+        "requested_source_type": _metric_label_value(requested_source_type),
+        "time_window": str(occurred_after is not None or occurred_before is not None).lower(),
+    }
+    timestamp_ms = int(time.time() * 1000)
+    lines = [_format_metric_sample(LOOKUP_REQUEST_METRIC, 1, labels, timestamp_ms)]
+
+    if status == "ok" and not results:
+        lines.append(_format_metric_sample(LOOKUP_ZERO_RESULT_METRIC, 1, labels, timestamp_ms))
+
+    grouped_results = Counter(
+        (
+            _metric_label_value(str(result.get("source") or "")),
+            _metric_label_value(str(result.get("source_type") or "")),
+            _metric_label_value(str(result.get("lane") or "indexed"), empty="indexed"),
+        )
+        for result in results
+    )
+    for (source, source_type, lane), count in sorted(grouped_results.items()):
+        lines.append(
+            _format_metric_sample(
+                LOOKUP_RESULT_METRIC,
+                count,
+                {
+                    **_metric_runtime_labels(),
+                    "source": source,
+                    "source_type": source_type,
+                    "lane": lane,
+                },
+                timestamp_ms,
+            )
+        )
+
+    _push_company_context_lookup_metric_lines(lines)
+
+
 def _parse_datetime_filter(value: str | datetime | None, *, name: str) -> datetime | None:
     """Parse optional date filters for tool calls."""
     if value is None:
@@ -183,8 +333,7 @@ def _search_where_clause(term_count: int) -> str:
     ]
     for index in range(2, term_count + 2):
         clauses.append(
-            f"(title ||| ${index}::text::pdb.boost({TITLE_MATCH_BOOST}) "
-            f"OR body ||| ${index}::text)"
+            f"(title ||| ${index}::text::pdb.boost({TITLE_MATCH_BOOST}) OR body ||| ${index}::text)"
         )
     return " OR ".join(clauses)
 
@@ -243,8 +392,71 @@ def _document_summary(row: Any) -> dict[str, Any]:
     }
 
 
+def _google_doc_summary(row: Any) -> dict[str, Any]:
+    """Return the common result shape for OAuth Google Docs context chunks."""
+    metadata = _as_dict(_row_value(row, "metadata", {}))
+    metadata.update(
+        {
+            "file_id": str(_row_value(row, "file_id", "")),
+            "chunk_id": str(_row_value(row, "chunk_id", "")),
+            "drive_id": str(_row_value(row, "drive_id", "")),
+            "mime_type": str(_row_value(row, "mime_type", "")),
+            "provider_author_id": str(_row_value(row, "provider_author_id", "")),
+        }
+    )
+    return {
+        "document_id": str(_row_value(row, "document_id", "")),
+        "source": DOCS_SOURCE,
+        "source_type": GOOGLE_DOCS_SOURCE_TYPE,
+        "source_document_id": str(_row_value(row, "file_id", "")),
+        "source_chunk_id": str(_row_value(row, "chunk_id", "")),
+        "parent_document_id": None,
+        "title": str(_row_value(row, "title", "")),
+        "url": str(_row_value(row, "url", "")),
+        "author_name": str(_row_value(row, "provider_author_name", "")),
+        "access_scope": "",
+        "occurred_at": _isoformat(
+            _row_value(row, "source_created_at") or _row_value(row, "source_modified_at")
+        ),
+        "source_updated_at": _isoformat(_row_value(row, "source_modified_at")),
+        "metadata": metadata,
+    }
+
+
+def _granola_doc_summary(row: Any) -> dict[str, Any]:
+    """Return the common result shape for user-visible Granola notes."""
+    metadata = _as_dict(_row_value(row, "metadata", {}))
+    metadata.update(
+        {
+            "note_id": str(_row_value(row, "note_id", "")),
+            "owner_id": str(_row_value(row, "owner_id", "")),
+            "owner_email": str(_row_value(row, "owner_email", "")),
+            "attendee_labels": list(_row_value(row, "attendee_labels", []) or []),
+        }
+    )
+    return {
+        "document_id": str(_row_value(row, "document_id", "")),
+        "source": GRANOLA_SOURCE,
+        "source_type": GRANOLA_SOURCE_TYPE,
+        "source_document_id": str(_row_value(row, "note_id", "")),
+        "source_chunk_id": "",
+        "parent_document_id": None,
+        "title": str(_row_value(row, "title", "")),
+        "url": str(_row_value(row, "url", "")),
+        "author_name": str(
+            _row_value(row, "owner_name", "")
+            or _row_value(row, "owner_email", "")
+            or _row_value(row, "owner_id", "")
+        ),
+        "access_scope": "granola_note",
+        "occurred_at": _isoformat(_row_value(row, "occurred_at")),
+        "source_updated_at": _isoformat(_row_value(row, "source_updated_at")),
+        "metadata": metadata,
+    }
+
+
 def _dm_document_summary(row: Any) -> dict[str, Any]:
-    """Return the common metadata we expose for Slack DM context records."""
+    """Return metadata for user-scoped Slack conversation context records."""
     metadata = _as_dict(_row_value(row, "metadata", {}))
     conversation_type = str(_row_value(row, "conversation_type", ""))
     conversation_id = str(_row_value(row, "conversation_id", ""))
@@ -261,7 +473,11 @@ def _dm_document_summary(row: Any) -> dict[str, Any]:
         "title": str(_row_value(row, "title", "")),
         "url": str(_row_value(row, "permalink", "")),
         "author_name": user_id or bot_id,
-        "access_scope": "slack_dm",
+        "access_scope": (
+            "slack_private_channel"
+            if conversation_type == "private_channel"
+            else "slack_dm"
+        ),
         "occurred_at": _isoformat(_row_value(row, "occurred_at")),
         "source_updated_at": _isoformat(_row_value(row, "source_updated_at")),
         "conversation_id": conversation_id,
@@ -296,6 +512,42 @@ def _dm_conversation_summary(row: Any) -> dict[str, Any]:
     }
 
 
+def _include_google_docs_source(source: str | None, source_type: str | None) -> bool:
+    return (source is None or source == DOCS_SOURCE) and source_type in (
+        None,
+        GOOGLE_DOCS_SOURCE_TYPE,
+    )
+
+
+def _include_slack_dms_source(source: str | None, source_type: str | None) -> bool:
+    return (source is None or source == SLACK_DM_SOURCE) and source_type in (
+        None,
+        SLACK_DM_SOURCE,
+        "slack_im",
+        "slack_mpim",
+        "slack_private_channel",
+        "slack_dm_conversation",
+    )
+
+
+def _include_granola_source(source: str | None, source_type: str | None) -> bool:
+    return (source is None or source == GRANOLA_SOURCE) and source_type in (
+        None,
+        GRANOLA_SOURCE,
+        GRANOLA_SOURCE_TYPE,
+    )
+
+
+def _company_context_filters_for_source(
+    source: str | None,
+    source_type: str | None,
+) -> tuple[str | None, str | None]:
+    """Map the public docs source to the legacy projected Google Drive rows."""
+    if source == DOCS_SOURCE:
+        return LEGACY_GOOGLE_DRIVE_SOURCE, source_type or GOOGLE_DOCS_SOURCE_TYPE
+    return source, source_type
+
+
 class CompanyContextClient:
     """Query the shared company context document table."""
 
@@ -327,6 +579,13 @@ class CompanyContextClient:
         try:
             terms = _search_terms(query)
             search_terms = [query, *terms]
+            results = []
+            google_docs_error = None
+            granola_error = None
+            company_source, company_source_type = _company_context_filters_for_source(
+                source,
+                source_type,
+            )
             source_param = len(search_terms) + 1
             source_type_param = len(search_terms) + 2
             occurred_after_param = len(search_terms) + 3
@@ -369,13 +628,12 @@ class CompanyContextClient:
                 LIMIT ${limit_param}
                 """,
                 *search_terms,
-                source,
-                source_type,
+                company_source,
+                company_source_type,
                 occurred_after,
                 occurred_before,
                 limit,
             )
-            results = []
             for row in rows:
                 result = _document_summary(row)
                 result["score"] = float(_row_value(row, "score", 0.0) or 0.0)
@@ -387,7 +645,71 @@ class CompanyContextClient:
                 result["result_type"] = str(result["source_type"] or "indexed_document")
                 results.append(result)
 
-            return {
+            if _include_google_docs_source(source, source_type):
+                try:
+                    google_rows = await self._search_google_docs_async(
+                        conn,
+                        search_terms=search_terms,
+                        term_count=len(terms),
+                        limit=limit,
+                        modified_after=occurred_after,
+                        modified_before=occurred_before,
+                    )
+                    for row in google_rows:
+                        result = _google_doc_summary(row)
+                        result["score"] = float(_row_value(row, "score", 0.0) or 0.0)
+                        result["preview"] = _body_preview(
+                            str(_row_value(row, "body", "") or ""),
+                            query=query,
+                        )
+                        result["lane"] = "indexed"
+                        result["result_type"] = GOOGLE_DOCS_SOURCE_TYPE
+                        results.append(result)
+                except asyncpg.UndefinedTableError as exc:
+                    google_docs_error = str(exc)
+
+            if _include_granola_source(source, source_type):
+                try:
+                    granola_rows = await self._search_granola_async(
+                        conn,
+                        search_terms=search_terms,
+                        term_count=len(terms),
+                        limit=limit,
+                        occurred_after=occurred_after,
+                        occurred_before=occurred_before,
+                    )
+                    for row in granola_rows:
+                        result = _granola_doc_summary(row)
+                        result["score"] = float(_row_value(row, "score", 0.0) or 0.0)
+                        result["preview"] = _body_preview(
+                            str(_row_value(row, "body", "") or ""),
+                            query=query,
+                        )
+                        result["lane"] = "indexed"
+                        result["result_type"] = GRANOLA_SOURCE_TYPE
+                        results.append(result)
+                except asyncpg.UndefinedTableError as exc:
+                    granola_error = str(exc)
+
+            results.sort(
+                key=lambda item: (
+                    float(item.get("score") or 0.0),
+                    str(item.get("source_updated_at") or ""),
+                ),
+                reverse=True,
+            )
+            results = results[:limit]
+
+            _emit_company_context_lookup_metrics(
+                status="ok",
+                requested_source=source,
+                requested_source_type=source_type,
+                occurred_after=occurred_after,
+                occurred_before=occurred_before,
+                results=results,
+            )
+
+            response = {
                 "status": "ok",
                 "query": query,
                 "source": source,
@@ -398,8 +720,108 @@ class CompanyContextClient:
                 "indexed_count": len(results),
                 "results": results,
             }
+            if google_docs_error:
+                response["google_docs_error"] = google_docs_error
+            if granola_error:
+                response["granola_error"] = granola_error
+            return response
         finally:
             await conn.close()
+
+    async def _search_google_docs_async(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        search_terms: list[str],
+        term_count: int,
+        limit: int,
+        modified_after: datetime | None,
+        modified_before: datetime | None,
+    ) -> list[Any]:
+        modified_after_param = len(search_terms) + 1
+        modified_before_param = len(search_terms) + 2
+        limit_param = len(search_terms) + 3
+        return await conn.fetch(
+            f"""
+            SELECT
+                document_id,
+                file_id,
+                chunk_id,
+                title,
+                body,
+                url,
+                provider_author_id,
+                provider_author_name,
+                mime_type,
+                drive_id,
+                source_created_at,
+                source_modified_at,
+                metadata,
+                paradedb.score(document_id) AS score
+            FROM google_docs_context_documents
+            WHERE {_search_where_clause(term_count)}
+              AND (${modified_after_param}::timestamptz IS NULL
+                   OR source_modified_at >= ${modified_after_param})
+              AND (${modified_before_param}::timestamptz IS NULL
+                   OR source_modified_at < ${modified_before_param})
+            ORDER BY paradedb.score(document_id) DESC,
+                     source_modified_at DESC NULLS LAST,
+                     document_id ASC
+            LIMIT ${limit_param}
+            """,
+            *search_terms,
+            modified_after,
+            modified_before,
+            limit,
+        )
+
+    async def _search_granola_async(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        search_terms: list[str],
+        term_count: int,
+        limit: int,
+        occurred_after: datetime | None,
+        occurred_before: datetime | None,
+    ) -> list[Any]:
+        occurred_after_param = len(search_terms) + 1
+        occurred_before_param = len(search_terms) + 2
+        limit_param = len(search_terms) + 3
+        return await conn.fetch(
+            f"""
+            SELECT
+                document_id,
+                note_id,
+                title,
+                body,
+                url,
+                owner_id,
+                owner_email,
+                owner_name,
+                access_emails,
+                attendee_labels,
+                occurred_at,
+                source_updated_at,
+                metadata,
+                paradedb.score(document_id) AS score
+            FROM granola_context_documents
+            WHERE {_search_where_clause(term_count)}
+              AND (${occurred_after_param}::timestamptz IS NULL
+                   OR occurred_at >= ${occurred_after_param})
+              AND (${occurred_before_param}::timestamptz IS NULL
+                   OR occurred_at < ${occurred_before_param})
+            ORDER BY paradedb.score(document_id) DESC,
+                     occurred_at DESC NULLS LAST,
+                     source_updated_at DESC NULLS LAST,
+                     document_id ASC
+            LIMIT ${limit_param}
+            """,
+            *search_terms,
+            occurred_after,
+            occurred_before,
+            limit,
+        )
 
     async def _latest_date_for_connection(
         self,
@@ -409,6 +831,12 @@ class CompanyContextClient:
         source_type: str | None,
     ) -> dict[str, Any]:
         """Return latest indexed date using an existing DB connection."""
+        if source == SLACK_DM_SOURCE:
+            return self._empty_latest_date_result(source=source, source_type=source_type)
+        company_source, company_source_type = _company_context_filters_for_source(
+            source,
+            source_type,
+        )
         row = await conn.fetchrow(
             """
             SELECT
@@ -420,19 +848,11 @@ class CompanyContextClient:
             WHERE ($1::text IS NULL OR source = $1)
               AND ($2::text IS NULL OR source_type = $2)
             """,
-            source,
-            source_type,
+            company_source,
+            company_source_type,
         )
         if not row or int(row["document_count"] or 0) == 0:
-            return {
-                "status": "ok",
-                "source": source,
-                "source_type": source_type,
-                "document_count": 0,
-                "latest_date": None,
-                "latest_source_updated_at": None,
-                "latest_occurred_at": None,
-            }
+            return self._empty_latest_date_result(source=source, source_type=source_type)
         return {
             "status": "ok",
             "source": source,
@@ -441,6 +861,203 @@ class CompanyContextClient:
             "latest_date": _isoformat(row["latest_date"]),
             "latest_source_updated_at": _isoformat(row["latest_source_updated_at"]),
             "latest_occurred_at": _isoformat(row["latest_occurred_at"]),
+        }
+
+    async def _latest_google_docs_for_connection(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        source: str | None,
+        source_type: str | None,
+    ) -> dict[str, Any]:
+        if not _include_google_docs_source(source, source_type):
+            return self._empty_latest_date_result(source=source, source_type=source_type)
+        row = await conn.fetchrow(
+            """
+            SELECT
+                MAX(COALESCE(source_modified_at, source_created_at)) AS latest_date,
+                MAX(source_modified_at) AS latest_source_updated_at,
+                MAX(source_created_at) AS latest_occurred_at,
+                COUNT(*)::bigint AS document_count
+            FROM google_docs_context_documents
+            """
+        )
+        if not row or int(row["document_count"] or 0) == 0:
+            return self._empty_latest_date_result(source=source, source_type=source_type)
+        return {
+            "status": "ok",
+            "source": source,
+            "source_type": source_type,
+            "document_count": int(row["document_count"] or 0),
+            "latest_date": _isoformat(row["latest_date"]),
+            "latest_source_updated_at": _isoformat(row["latest_source_updated_at"]),
+            "latest_occurred_at": _isoformat(row["latest_occurred_at"]),
+        }
+
+    async def _latest_granola_for_connection(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        source: str | None,
+        source_type: str | None,
+    ) -> dict[str, Any]:
+        if not _include_granola_source(source, source_type):
+            return self._empty_latest_date_result(source=source, source_type=source_type)
+        row = await conn.fetchrow(
+            """
+            SELECT
+                MAX(COALESCE(source_updated_at, occurred_at)) AS latest_date,
+                MAX(source_updated_at) AS latest_source_updated_at,
+                MAX(occurred_at) AS latest_occurred_at,
+                COUNT(*)::bigint AS document_count
+            FROM granola_context_documents
+            """
+        )
+        return self._latest_date_result_from_row(
+            row,
+            source=source,
+            source_type=source_type,
+        )
+
+    async def _latest_slack_dms_for_connection(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        source: str | None,
+        source_type: str | None,
+    ) -> dict[str, Any]:
+        if not _include_slack_dms_source(source, source_type):
+            return self._empty_latest_date_result(source=source, source_type=source_type)
+
+        message_conversation_type = None
+        include_messages = source_type in (
+            None,
+            SLACK_DM_SOURCE,
+            "slack_im",
+            "slack_mpim",
+            "slack_private_channel",
+        )
+        if source_type in ("slack_im", "slack_mpim", "slack_private_channel"):
+            message_conversation_type = source_type.removeprefix("slack_")
+        include_conversations = source_type in (None, SLACK_DM_SOURCE, "slack_dm_conversation")
+
+        messages = self._empty_latest_date_result(source=source, source_type=source_type)
+        conversations = self._empty_latest_date_result(source=source, source_type=source_type)
+
+        if include_messages:
+            with suppress(asyncpg.UndefinedTableError):
+                row = await conn.fetchrow(
+                    """
+                    SELECT
+                        MAX(COALESCE(source_updated_at, occurred_at)) AS latest_date,
+                        MAX(source_updated_at) AS latest_source_updated_at,
+                        MAX(occurred_at) AS latest_occurred_at,
+                        COUNT(*)::bigint AS document_count
+                    FROM slack_private_context_documents
+                    WHERE ($1::text IS NULL OR conversation_type = $1)
+                    """,
+                    message_conversation_type,
+                )
+                messages = self._latest_date_result_from_row(
+                    row,
+                    source=source,
+                    source_type=source_type,
+                )
+
+        if include_conversations:
+            with suppress(asyncpg.UndefinedTableError):
+                row = await conn.fetchrow(
+                    """
+                    SELECT
+                        MAX(COALESCE(source_updated_at, last_seen_at)) AS latest_date,
+                        MAX(source_updated_at) AS latest_source_updated_at,
+                        MAX(last_seen_at) AS latest_occurred_at,
+                        COUNT(*)::bigint AS document_count
+                    FROM slack_private_conversation_context_documents
+                    """,
+                )
+                conversations = self._latest_date_result_from_row(
+                    row,
+                    source=source,
+                    source_type=source_type,
+                )
+
+        return self._merge_latest_dates(
+            source=source,
+            source_type=source_type,
+            indexed=messages,
+            google_docs=conversations,
+        )
+
+    def _empty_latest_date_result(
+        self,
+        *,
+        source: str | None,
+        source_type: str | None,
+    ) -> dict[str, Any]:
+        return {
+            "status": "ok",
+            "source": source,
+            "source_type": source_type,
+            "document_count": 0,
+            "latest_date": None,
+            "latest_source_updated_at": None,
+            "latest_occurred_at": None,
+        }
+
+    def _latest_date_result_from_row(
+        self,
+        row: Any,
+        *,
+        source: str | None,
+        source_type: str | None,
+    ) -> dict[str, Any]:
+        if not row or int(row["document_count"] or 0) == 0:
+            return self._empty_latest_date_result(source=source, source_type=source_type)
+        return {
+            "status": "ok",
+            "source": source,
+            "source_type": source_type,
+            "document_count": int(row["document_count"] or 0),
+            "latest_date": _isoformat(row["latest_date"]),
+            "latest_source_updated_at": _isoformat(row["latest_source_updated_at"]),
+            "latest_occurred_at": _isoformat(row["latest_occurred_at"]),
+        }
+
+    def _merge_latest_dates(
+        self,
+        *,
+        source: str | None,
+        source_type: str | None,
+        indexed: dict[str, Any],
+        google_docs: dict[str, Any],
+        slack_dms: dict[str, Any] | None = None,
+        granola: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        def latest(values: list[str | None]) -> str | None:
+            present = [value for value in values if value]
+            return max(present) if present else None
+
+        latest_results = [indexed, google_docs]
+        if slack_dms is not None:
+            latest_results.append(slack_dms)
+        if granola is not None:
+            latest_results.append(granola)
+
+        return {
+            "status": "ok",
+            "source": source,
+            "source_type": source_type,
+            "document_count": sum(
+                int(result.get("document_count") or 0) for result in latest_results
+            ),
+            "latest_date": latest([result.get("latest_date") for result in latest_results]),
+            "latest_source_updated_at": latest(
+                [result.get("latest_source_updated_at") for result in latest_results]
+            ),
+            "latest_occurred_at": latest(
+                [result.get("latest_occurred_at") for result in latest_results]
+            ),
         }
 
     def search(
@@ -457,6 +1074,8 @@ class CompanyContextClient:
         if not normalized_query:
             return {"status": "error", "error": "query cannot be empty"}
 
+        normalized_source = source.strip() if source else None
+        normalized_source_type = source_type.strip() if source_type else None
         try:
             parsed_occurred_after = _parse_datetime_filter(
                 occurred_after,
@@ -471,13 +1090,21 @@ class CompanyContextClient:
                 self._search_async(
                     query=normalized_query,
                     limit=_clamp(limit, minimum=1, maximum=MAX_SEARCH_LIMIT),
-                    source=source.strip() if source else None,
-                    source_type=source_type.strip() if source_type else None,
+                    source=normalized_source,
+                    source_type=normalized_source_type,
                     occurred_after=parsed_occurred_after,
                     occurred_before=parsed_occurred_before,
                 )
             )
         except Exception as exc:
+            _emit_company_context_lookup_metrics(
+                status="error",
+                requested_source=normalized_source,
+                requested_source_type=normalized_source_type,
+                occurred_after=None,
+                occurred_before=None,
+                results=[],
+            )
             return {"status": "error", "error": str(exc)}
 
     async def _search_dm_conversations_async(
@@ -508,7 +1135,7 @@ class CompanyContextClient:
                     participant_count,
                     metadata,
                     paradedb.score(document_id) AS score
-                FROM slack_dm_conversation_context_documents
+                FROM slack_private_conversation_context_documents
                 WHERE {_search_where_clause(len(terms))}
                 ORDER BY paradedb.score(document_id) DESC,
                          last_seen_at DESC NULLS LAST,
@@ -603,7 +1230,7 @@ class CompanyContextClient:
                     source_updated_at,
                     metadata,
                     paradedb.score(document_id) AS score
-                FROM slack_dm_context_documents
+                FROM slack_private_context_documents
                 WHERE {_search_where_clause(len(terms))}
                   AND (${conversation_id_param}::text IS NULL
                        OR conversation_id = ${conversation_id_param})
@@ -655,7 +1282,7 @@ class CompanyContextClient:
         occurred_after: str | datetime | None = None,
         occurred_before: str | datetime | None = None,
     ) -> dict:
-        """Search Slack DM and group DM context visible to the current Slack user."""
+        """Search private Slack context visible to the current Slack user."""
         normalized_query = query.strip()
         if not normalized_query:
             return {"status": "error", "error": "query cannot be empty"}
@@ -693,6 +1320,13 @@ class CompanyContextClient:
     ) -> dict[str, Any]:
         conn = await self._connect()
         try:
+            results = []
+            google_docs_error = None
+            granola_error = None
+            company_source, company_source_type = _company_context_filters_for_source(
+                source,
+                source_type,
+            )
             rows = await conn.fetch(
                 """
                 SELECT
@@ -719,18 +1353,62 @@ class CompanyContextClient:
                          document_id ASC
                 LIMIT $5
                 """,
-                source,
-                source_type,
+                company_source,
+                company_source_type,
                 occurred_after,
                 occurred_before,
                 limit,
             )
-            results = []
             for row in rows:
                 result = _document_summary(row)
-                result["preview"] = _body_preview(str(_row_value(row, "body", "") or ""), query="")
+                result["preview"] = _body_preview(
+                    str(_row_value(row, "body", "") or ""),
+                    query="",
+                )
                 results.append(result)
-            return {
+            if _include_google_docs_source(source, source_type):
+                try:
+                    google_rows = await self._list_google_docs_async(
+                        conn,
+                        limit=limit,
+                        modified_after=occurred_after,
+                        modified_before=occurred_before,
+                    )
+                    for row in google_rows:
+                        result = _google_doc_summary(row)
+                        result["preview"] = _body_preview(
+                            str(_row_value(row, "body", "") or ""),
+                            query="",
+                        )
+                        results.append(result)
+                except asyncpg.UndefinedTableError as exc:
+                    google_docs_error = str(exc)
+            if _include_granola_source(source, source_type):
+                try:
+                    granola_rows = await self._list_granola_async(
+                        conn,
+                        limit=limit,
+                        occurred_after=occurred_after,
+                        occurred_before=occurred_before,
+                    )
+                    for row in granola_rows:
+                        result = _granola_doc_summary(row)
+                        result["preview"] = _body_preview(
+                            str(_row_value(row, "body", "") or ""),
+                            query="",
+                        )
+                        results.append(result)
+                except asyncpg.UndefinedTableError as exc:
+                    granola_error = str(exc)
+            results.sort(
+                key=lambda item: (
+                    str(item.get("occurred_at") or ""),
+                    str(item.get("source_updated_at") or ""),
+                    str(item.get("document_id") or ""),
+                )
+            )
+            results = results[:limit]
+            response = {
                 "status": "ok",
                 "source": source,
                 "source_type": source_type,
@@ -739,8 +1417,85 @@ class CompanyContextClient:
                 "count": len(results),
                 "results": results,
             }
+            if google_docs_error:
+                response["google_docs_error"] = google_docs_error
+            if granola_error:
+                response["granola_error"] = granola_error
+            return response
         finally:
             await conn.close()
+
+    async def _list_google_docs_async(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        limit: int,
+        modified_after: datetime | None,
+        modified_before: datetime | None,
+    ) -> list[Any]:
+        return await conn.fetch(
+            """
+            SELECT
+                document_id,
+                file_id,
+                chunk_id,
+                title,
+                body,
+                url,
+                provider_author_id,
+                provider_author_name,
+                mime_type,
+                drive_id,
+                source_created_at,
+                source_modified_at,
+                metadata
+            FROM google_docs_context_documents
+            WHERE ($1::timestamptz IS NULL OR source_modified_at >= $1)
+              AND ($2::timestamptz IS NULL OR source_modified_at < $2)
+            ORDER BY source_modified_at DESC NULLS LAST, source_created_at DESC NULLS LAST,
+                     document_id ASC
+            LIMIT $3
+            """,
+            modified_after,
+            modified_before,
+            limit,
+        )
+
+    async def _list_granola_async(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        limit: int,
+        occurred_after: datetime | None,
+        occurred_before: datetime | None,
+    ) -> list[Any]:
+        return await conn.fetch(
+            """
+            SELECT
+                document_id,
+                note_id,
+                title,
+                body,
+                url,
+                owner_id,
+                owner_email,
+                owner_name,
+                access_emails,
+                attendee_labels,
+                occurred_at,
+                source_updated_at,
+                metadata
+            FROM granola_context_documents
+            WHERE ($1::timestamptz IS NULL OR occurred_at >= $1)
+              AND ($2::timestamptz IS NULL OR occurred_at < $2)
+            ORDER BY occurred_at DESC NULLS LAST, source_updated_at DESC NULLS LAST,
+                     document_id ASC
+            LIMIT $3
+            """,
+            occurred_after,
+            occurred_before,
+            limit,
+        )
 
     def list_documents(
         self,
@@ -781,10 +1536,38 @@ class CompanyContextClient:
     ) -> dict[str, Any]:
         conn = await self._connect()
         try:
-            return await self._latest_date_for_connection(
+            indexed = await self._latest_date_for_connection(
                 conn,
                 source=source,
                 source_type=source_type,
+            )
+            google_docs = self._empty_latest_date_result(source=source, source_type=source_type)
+            with suppress(asyncpg.UndefinedTableError):
+                google_docs = await self._latest_google_docs_for_connection(
+                    conn,
+                    source=source,
+                    source_type=source_type,
+                )
+            slack_dms = self._empty_latest_date_result(source=source, source_type=source_type)
+            slack_dms = await self._latest_slack_dms_for_connection(
+                conn,
+                source=source,
+                source_type=source_type,
+            )
+            granola = self._empty_latest_date_result(source=source, source_type=source_type)
+            with suppress(asyncpg.UndefinedTableError):
+                granola = await self._latest_granola_for_connection(
+                    conn,
+                    source=source,
+                    source_type=source_type,
+                )
+            return self._merge_latest_dates(
+                source=source,
+                source_type=source_type,
+                indexed=indexed,
+                google_docs=google_docs,
+                slack_dms=slack_dms,
+                granola=granola,
             )
         finally:
             await conn.close()
@@ -898,6 +1681,22 @@ class CompanyContextClient:
                 document_id,
             )
             if not row:
+                try:
+                    google_doc = await self._read_google_doc_async(conn, document_id, max_chars)
+                except asyncpg.UndefinedTableError:
+                    google_doc = None
+                if google_doc is not None:
+                    return google_doc
+                try:
+                    granola_doc = await self._read_granola_doc_async(
+                        conn,
+                        document_id,
+                        max_chars,
+                    )
+                except asyncpg.UndefinedTableError:
+                    granola_doc = None
+                if granola_doc is not None:
+                    return granola_doc
                 return {
                     "status": "error",
                     "error": f"document not found: {document_id}",
@@ -923,6 +1722,90 @@ class CompanyContextClient:
             return result
         finally:
             await conn.close()
+
+    async def _read_google_doc_async(
+        self,
+        conn: asyncpg.Connection,
+        document_id: str,
+        max_chars: int | None,
+    ) -> dict[str, Any] | None:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                document_id,
+                file_id,
+                chunk_id,
+                title,
+                body,
+                url,
+                provider_author_id,
+                provider_author_name,
+                mime_type,
+                drive_id,
+                source_created_at,
+                source_modified_at,
+                metadata
+            FROM google_docs_context_documents
+            WHERE document_id = $1
+            """,
+            document_id,
+        )
+        if not row:
+            return None
+
+        body = str(row["body"] or "")
+        content = body if max_chars is None else body[:max_chars]
+        truncated = max_chars is not None and len(body) > max_chars
+        return {
+            "status": "ok",
+            **_google_doc_summary(row),
+            "chars": len(content),
+            "total_chars": len(body),
+            "truncated": truncated,
+            "content": content,
+        }
+
+    async def _read_granola_doc_async(
+        self,
+        conn: asyncpg.Connection,
+        document_id: str,
+        max_chars: int | None,
+    ) -> dict[str, Any] | None:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                document_id,
+                note_id,
+                title,
+                body,
+                url,
+                owner_id,
+                owner_email,
+                owner_name,
+                access_emails,
+                attendee_labels,
+                occurred_at,
+                source_updated_at,
+                metadata
+            FROM granola_context_documents
+            WHERE document_id = $1
+            """,
+            document_id,
+        )
+        if not row:
+            return None
+
+        body = str(row["body"] or "")
+        content = body if max_chars is None else body[:max_chars]
+        truncated = max_chars is not None and len(body) > max_chars
+        return {
+            "status": "ok",
+            **_granola_doc_summary(row),
+            "chars": len(content),
+            "total_chars": len(body),
+            "truncated": truncated,
+            "content": content,
+        }
 
     def read_document(
         self,

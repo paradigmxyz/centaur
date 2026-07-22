@@ -3,6 +3,7 @@
 {{- $secretEnv := include "centaur.secretEnvName" . }}
 {{- $prefix := .Values.secretManager.envPrefix }}
 {{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") }}
+{{- $mcpPublicUrl := default .Values.slackbotv2.mcpPublicUrl .Values.apiRs.mcpPublicUrl }}
 # console background job worker — runs Solid Queue (`bin/jobs`) so
 # console's enqueued jobs actually execute. The most important of these is
 # the broker-credential OAuth refresh loop, which mints and refreshes the access
@@ -85,6 +86,11 @@ spec:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sIRON_CONTROL_DATABASE_URL" $prefix }}
+            - name: CENTAUR_CONSOLE_CENTAUR_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sDATABASE_URL" $prefix }}
             - name: IRON_CONTROL_INITIAL_USER_EMAIL
               valueFrom:
                 secretKeyRef:
@@ -120,6 +126,19 @@ spec:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sIRON_CONTROL_SECRET_KEY_BASE" $prefix }}
+            - name: CENTAUR_JWT_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sCENTAUR_JWT_SIGNING_SECRET" $prefix }}
+{{- if $console.publicUrl }}
+            - name: CENTAUR_CONSOLE_PUBLIC_URL
+              value: {{ $console.publicUrl | quote }}
+{{- end }}
+{{- if $mcpPublicUrl }}
+            - name: CENTAUR_MCP_PUBLIC_URL
+              value: {{ $mcpPublicUrl | quote }}
+{{- end }}
 {{- if $console.googleOauth.enabled }}
             # Google OAuth app credentials, needed by the broker-credential
             # OAuth refresh loop. Gated on console.googleOauth.enabled.
@@ -143,6 +162,10 @@ spec:
             - name: RAILS_LOG_TO_STDOUT
               value: "1"
 {{- if .Values.apiRs.enabled }}
+            - name: CENTAUR_API_URL
+              value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
+            # Console OAuth sync workers submit normalized provider data to the
+            # in-cluster API; credentials themselves never leave this pod.
             - name: CENTAUR_CONSOLE_CENTAUR_API_URL
               value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
 {{- end }}

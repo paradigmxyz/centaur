@@ -179,4 +179,55 @@ describe("parseIssueAssignmentWebhook", () => {
       ),
     ).toBeNull();
   });
+
+  it("does NOT fire when the bot assigned the issue to itself", () => {
+    expect(
+      parseIssueAssignmentWebhook(
+        assignmentPayload({
+          actor: { id: BOT_USER_ID, name: "centaur", type: "user" },
+          updatedFrom: { assigneeId: null },
+        }),
+        BOT_USER_ID,
+      ),
+    ).toBeNull();
+  });
+
+  it("does NOT fire when the bot delegated the issue to itself", () => {
+    expect(
+      parseIssueAssignmentWebhook(
+        assignmentPayload(
+          {
+            actor: { id: BOT_USER_ID, name: "centaur", type: "user" },
+            updatedFrom: { delegateId: null },
+          },
+          { assigneeId: null, delegateId: BOT_USER_ID },
+        ),
+        BOT_USER_ID,
+      ),
+    ).toBeNull();
+  });
+
+  it("does NOT fire when the bot creates an issue pre-assigned to itself", () => {
+    expect(
+      parseIssueAssignmentWebhook(
+        assignmentPayload({
+          action: "create",
+          actor: { id: BOT_USER_ID, name: "centaur", type: "user" },
+        }),
+        BOT_USER_ID,
+      ),
+    ).toBeNull();
+  });
+
+  it("still fires when someone ELSE'S actor hands the issue to the bot", () => {
+    expect(
+      parseIssueAssignmentWebhook(
+        assignmentPayload({
+          actor: { id: "user-9", name: "Ada Lovelace", type: "user" },
+          updatedFrom: { assigneeId: null },
+        }),
+        BOT_USER_ID,
+      ),
+    ).not.toBeNull();
+  });
 });

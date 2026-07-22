@@ -1,7 +1,7 @@
+require "cgi"
 require "json"
 require "net/http"
 require "uri"
-require "cgi"
 
 class CentaurApiClient
   Response = Struct.new(:status, :body, keyword_init: true)
@@ -69,6 +69,55 @@ class CentaurApiClient
     post("/api/admin/google/docs-sync/batch", payload)
   end
 
+  def get_granola_sync_checkpoint(scope_id:)
+    get("/api/admin/granola/sync/checkpoint", scope_id: scope_id)
+  end
+
+  def ingest_granola_sync_batch(payload)
+    post("/api/admin/granola/sync/batch", payload)
+  end
+
+  def create_session(thread_key:, harness_type:, metadata: {}, persona_id: nil,
+                     on_harness_conflict: "reject")
+    payload = {
+      harness_type: harness_type,
+      metadata: metadata,
+      on_harness_conflict: on_harness_conflict
+    }
+    payload[:persona_id] = persona_id if persona_id.present?
+
+    post("/api/session/#{escape_path(thread_key)}", payload)
+  end
+
+  def append_session_messages(thread_key:, messages:)
+    post("/api/session/#{escape_path(thread_key)}/messages", { messages: messages })
+  end
+
+  def execute_session(thread_key:, input_lines:, idempotency_key: nil, metadata: {})
+    payload = {
+      input_lines: input_lines,
+      metadata: metadata
+    }
+    payload[:idempotency_key] = idempotency_key if idempotency_key.present?
+
+    post("/api/session/#{escape_path(thread_key)}/execute", payload)
+  end
+
+  def list_workflow_schedules
+    get("/api/workflows/schedules")
+  end
+
+  def get_workflow_run(run_id)
+    get("/api/workflows/runs/#{escape_path(run_id)}")
+  end
+
+  def create_workflow_run(workflow_name:, input: nil)
+    payload = { workflow_name: workflow_name }
+    payload[:input] = input unless input.nil?
+
+    post("/api/workflows/runs", payload)
+  end
+
   private
 
   def get(path, params = {})
@@ -104,6 +153,7 @@ class CentaurApiClient
 
   def parse_body(body)
     return {} if body.blank?
+
     JSON.parse(body)
   rescue JSON::ParserError
     { "raw" => body.to_s }
@@ -124,8 +174,8 @@ class CentaurApiClient
     http.use_ssl = uri.scheme == "https"
     http.open_timeout = timeout
     http.read_timeout = timeout
-    res = http.request(request)
-    Response.new(status: res.code.to_i, body: res.body.to_s)
+    response = http.request(request)
+    Response.new(status: response.code.to_i, body: response.body.to_s)
   end
 
   def escape_path(value)

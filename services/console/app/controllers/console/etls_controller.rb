@@ -1,6 +1,8 @@
 class Console::EtlsController < ApplicationController
   layout "console"
 
+  before_action :require_admin
+
   class_attribute :client_factory, default: -> { CentaurApiClient.new }
 
   def index

@@ -72,15 +72,15 @@ const BACKEND_NAME: &str = "agent-sandbox-k8s";
 const DEFAULT_CONTAINER_NAME: &str = "agent";
 const MANAGED_BY_LABEL: &str = "centaur.ai/managed-by";
 const SANDBOX_ID_LABEL: &str = "centaur.ai/sandbox-id";
+const OBSERVABILITY_ENABLED_LABEL: &str = "centaur.ai/observability-enabled";
+const API_SERVER_ENABLED_LABEL: &str = "centaur.ai/api-server-enabled";
 const MANAGED_BY_VALUE: &str = "api-rs";
 // iron-control principal OID the sandbox's proxy binds to, stamped at create
 // so resume (which has only the sandbox id) can rebind without the spec or any
 // in-memory state. Survives pause and api-rs restarts.
 const IRON_CONTROL_PRINCIPAL_ANNOTATION: &str = "centaur.ai/iron-control-principal";
-// RFC 3339 instant stamped when the sandbox is paused for idleness and
-// cleared on resume. The reaper uses it to stop sandboxes whose pause
-// outlived the idle TTL, surviving api-rs restarts (the pause timer is
-// otherwise in-memory only).
+// RFC 3339 instant stamped when the sandbox is paused for idleness and cleared
+// on resume. This keeps suspended status observable across api-rs restarts.
 const PAUSED_AT_ANNOTATION: &str = "centaur.ai/paused-at";
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -101,10 +101,9 @@ pub struct AgentSandboxConfig {
     /// git-clones the tools repo into the agent's `/app/tools`, and `TOOL_DIRS`
     /// is set so the agent's shim installer finds them.
     pub tools: Option<ToolsConfig>,
-    /// In-cluster OTLP collector (e.g. Laminar) the sandbox exports harness
-    /// traces to directly. The per-sandbox egress NetworkPolicy denies all
-    /// destinations except the proxy/control plane, so without this rule the
-    /// harness's usage/cost spans never leave the pod.
+    /// In-cluster OTLP collector (e.g. Laminar) used for observability-capable
+    /// sandboxes. Sandbox pod egress is granted by chart-level label policy;
+    /// the per-sandbox proxy uses this target for its own explicit egress.
     pub otlp_egress: Option<OtlpEgressTarget>,
     /// nodeSelector applied to every spawned sandbox Pod and its paired
     /// per-sandbox iron-proxy Pod, so agent workloads land on a dedicated node
@@ -623,6 +622,12 @@ fn build_agent_sandbox(
     labels.extend(spec.labels.clone());
     labels.insert(MANAGED_BY_LABEL.to_owned(), MANAGED_BY_VALUE.to_owned());
     labels.insert(SANDBOX_ID_LABEL.to_owned(), id.as_str().to_owned());
+    if spec.capabilities.observability_enabled {
+        labels.insert(OBSERVABILITY_ENABLED_LABEL.to_owned(), "true".to_owned());
+    }
+    if spec.capabilities.api_server_enabled {
+        labels.insert(API_SERVER_ENABLED_LABEL.to_owned(), "true".to_owned());
+    }
 
     let mut pod_labels = labels.clone();
     pod_labels.insert(
@@ -656,11 +661,14 @@ fn build_agent_sandbox(
         .iter()
         .map(|env| (env.name.clone(), env.value.clone()))
         .collect();
-    let repo_cache_tools = config
+    let repo_cache_enabled = spec.capabilities.repo_cache.enabled();
+    let scoped_tools = config
         .tools
         .as_ref()
-        .filter(|_| spec.capabilities.repo_cache_enabled);
-    let baked_base_tools = config.tools.is_some() && !spec.capabilities.repo_cache_enabled;
+        .filter(|_| repo_cache_enabled)
+        .map(|tools| tools.scoped_for_repo_cache_access(&spec.capabilities.repo_cache));
+    let repo_cache_tools = scoped_tools.as_ref().filter(|tools| tools.has_sources());
+    let baked_base_tools = config.tools.is_some() && repo_cache_tools.is_none();
 
     if repo_cache_tools.is_some() {
         for (name, value) in tools::agent_env(repo_cache_tools) {
@@ -824,6 +832,11 @@ fn mount_json(spec: &SandboxSpec) -> (Vec<Value>, Vec<Value>) {
             "mountPath": mount.target_path,
             "readOnly": mount.read_only,
         }));
+        if let Some(sub_path) = &mount.sub_path
+            && let Some(mount_obj) = mounts.last_mut().and_then(Value::as_object_mut)
+        {
+            mount_obj.insert("subPath".to_owned(), json!(sub_path));
+        }
         volumes.push(match &mount.kind {
             MountKind::EmptyDir => json!({
                 "name": name,
@@ -927,7 +940,7 @@ fn map_kube_error(operation: &str, err: Error) -> SandboxError {
 
 #[cfg(test)]
 mod tests {
-    use centaur_sandbox_core::{ResourceLimits, SandboxCapabilities, SandboxSpec};
+    use centaur_sandbox_core::{RepoCacheAccess, ResourceLimits, SandboxCapabilities, SandboxSpec};
     use k8s_openapi::api::core::v1::{PodCondition, PodStatus};
 
     use super::*;
@@ -1031,6 +1044,59 @@ mod tests {
             Some(&IntOrString::String("4Gi".to_owned()))
         );
     }
+    
+    #[test]
+    fn labels_observability_enabled_sandboxes_for_chart_policy() {
+        let spec = SandboxSpec::new("centaur-agent:latest").capabilities(SandboxCapabilities {
+            repo_cache: RepoCacheAccess::All,
+            observability_enabled: true,
+            api_server_enabled: true,
+        });
+        let config = AgentSandboxConfig::new("centaur");
+
+        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+
+        assert_eq!(
+            sandbox
+                .metadata
+                .labels
+                .as_ref()
+                .and_then(|labels| labels.get(OBSERVABILITY_ENABLED_LABEL))
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            sandbox
+                .spec
+                .pod_template
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.labels.as_ref())
+                .and_then(|labels| labels.get(OBSERVABILITY_ENABLED_LABEL))
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            sandbox
+                .metadata
+                .labels
+                .as_ref()
+                .and_then(|labels| labels.get(API_SERVER_ENABLED_LABEL))
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            sandbox
+                .spec
+                .pod_template
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.labels.as_ref())
+                .and_then(|labels| labels.get(API_SERVER_ENABLED_LABEL))
+                .map(String::as_str),
+            Some("true")
+        );
+    }
 
     #[test]
     fn omits_node_placement_and_resources_when_unset() {
@@ -1090,6 +1156,51 @@ mod tests {
         assert_eq!(req.limits.as_ref().unwrap()["memory"].0, "256Mi");
         assert!(!req.requests.as_ref().unwrap().contains_key("memory"));
     }
+  
+    #[test]
+    fn omits_api_server_label_for_restricted_sandboxes() {
+        let spec = SandboxSpec::new("centaur-agent:latest").capabilities(SandboxCapabilities {
+            repo_cache: RepoCacheAccess::All,
+            observability_enabled: false,
+            api_server_enabled: false,
+        });
+        let config = AgentSandboxConfig::new("centaur");
+
+        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+
+        assert!(
+            sandbox
+                .metadata
+                .labels
+                .as_ref()
+                .is_none_or(|labels| !labels.contains_key(OBSERVABILITY_ENABLED_LABEL))
+        );
+        assert!(
+            sandbox
+                .spec
+                .pod_template
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.labels.as_ref())
+                .is_none_or(|labels| !labels.contains_key(OBSERVABILITY_ENABLED_LABEL))
+        );
+        assert!(
+            sandbox
+                .metadata
+                .labels
+                .as_ref()
+                .is_none_or(|labels| !labels.contains_key(API_SERVER_ENABLED_LABEL))
+        );
+        assert!(
+            sandbox
+                .spec
+                .pod_template
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.labels.as_ref())
+                .is_none_or(|labels| !labels.contains_key(API_SERVER_ENABLED_LABEL))
+        );
+    }
 
     #[test]
     fn tools_clone_rides_iron_proxy_when_enabled() {
@@ -1144,8 +1255,9 @@ mod tests {
     #[test]
     fn disabled_repo_cache_uses_baked_base_tools_without_bootstrap() {
         let spec = SandboxSpec::new("centaur-agent:latest").capabilities(SandboxCapabilities {
-            repo_cache_enabled: false,
+            repo_cache: RepoCacheAccess::None,
             observability_enabled: true,
+            api_server_enabled: true,
         });
         let mut tools = ToolsConfig::new("paradigmxyz/centaur", "api:test");
         tools.repo_cache_path = Some("/var/lib/centaur/repos".to_owned());

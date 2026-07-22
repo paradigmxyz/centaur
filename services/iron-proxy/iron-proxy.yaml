@@ -82,6 +82,13 @@ transforms:
         - "addepar-firm"
         - "clientid"
         - "x-as-user-email"
+        # Datadog static-key auth for the agent-facing Datadog tool/CLI: it
+        # authenticates to api.datadoghq.com with these two headers (Datadog does
+        # not accept Authorization: Bearer for static API/app keys). Neither is
+        # matched by the x-* catch-all below, so both must be listed to survive
+        # egress filtering — same per-integration pattern as the headers above.
+        - "dd-api-key"
+        - "dd-application-key"
         - "/^x-codex-.*$/"
         - "/^x-openai-.*$/"
         # AWS SigV4 request headers (x-amz-target, x-amz-date,

@@ -1,0 +1,39 @@
+<%# Sidebar thread list, rendered inside the lazy console_sidebar_threads Turbo
+    Frame. The turbo-frame id must match the one in layouts/console.html.erb so
+    the deferred fetch replaces the loading placeholder. Cmd/Ctrl-click on a
+    thread link adds it to the split-view grid (wired in the console layout). %>
+<%= turbo_frame_tag "console_sidebar_threads" do %>
+  <% open_thread_keys = params[:thread].to_s.split(",").map(&:strip).reject(&:blank?) %>
+  <% if @console_sidebar_threads.blank? %>
+    <div class="console-thread-empty">No recent chats</div>
+  <% else %>
+    <% @console_sidebar_threads.each_with_index do |thread, index| %>
+      <%# Open threads carry their 1-based pane number, rendered as a small
+          numeral in the indent gutter (matches the grid order). No filled
+          pill on thread rows; the Threads group title keeps its own. %>
+      <% pane_index = open_thread_keys.index(thread.thread_key) %>
+      <% open_thread = !pane_index.nil? %>
+      <% latest_message = @console_sidebar_latest_messages[thread.thread_key] %>
+      <% title = console_sidebar_thread_title(thread, latest_message) %>
+      <%= link_to console_threads_path(thread: thread.thread_key),
+                  class: "console-thread-link #{open_thread ? "console-thread-link-open" : ""} #{index >= 5 && !open_thread ? "console-thread-link-hidden" : ""}",
+                  data: {
+                    console_thread_link: true,
+                    turbo_frame: "_top",
+                    console_pane_index: (pane_index + 1 if open_thread && open_thread_keys.size > 1)
+                  }.compact,
+                  title: title do %>
+        <span class="console-thread-title"><%= title %></span>
+        <span class="console-thread-time"><%= local_time(thread.updated_at || thread.created_at, relative: true, format: :compact) %></span>
+      <% end %>
+    <% end %>
+    <% if @console_sidebar_threads.size > 5 %>
+      <button type="button"
+              class="console-thread-show-all"
+              data-console-thread-show-more
+              data-page-size="5">
+        Show more
+      </button>
+    <% end %>
+  <% end %>
+<% end %>

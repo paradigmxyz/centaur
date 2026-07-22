@@ -1,10 +1,13 @@
 # Operator console: a lightweight, server-rendered HTML view over principals,
 # their effective grants, and secrets. Read-only; gated behind a console session
-# via ApplicationController#require_login. Distinct from the JSON API.
+# (ApplicationController#require_login) and restricted to admins (require_admin),
+# like every Control/Data Sync page. Distinct from the JSON API.
 class ConsoleController < ApplicationController
   include SecretKinds
 
   layout "console"
+
+  before_action :require_admin
 
   # Friendly labels for the source backend (and the gcp_auth credentials_provider
   # type). The secrets table shows only this -- the full reference lives on the
@@ -22,6 +25,12 @@ class ConsoleController < ApplicationController
 
   def principal
     @principal = Principal.find_by_oid!(params[:id])
+    @slack_channel_catalog = SlackChannelCatalog.fetch
+    @slack_channel_permissions = @principal.slack_channel_permissions.ordered
+    @slack_channel_options = @slack_channel_catalog.channels.map do |channel|
+      label = "##{channel.name} (#{channel.id}) #{channel.private ? "Private" : "Public"}"
+      [ label, channel.id ]
+    end
     @roles = @principal.roles.order(:id)
     @granted = {
       "static" => @principal.granted_static_secrets,

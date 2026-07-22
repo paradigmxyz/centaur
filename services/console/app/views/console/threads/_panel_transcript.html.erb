@@ -1,0 +1,5 @@
+<%# Poll payload for one thread panel: the transcript stream plus the thinking
+    indicator while the turn is still running. Swapped into the panel's scroll
+    container by thread_poller_controller.js — see ThreadsController#panel. %>
+<%= render "console/threads/transcript", items: items %>
+<%= render "console/threads/thinking_indicator" if active %>

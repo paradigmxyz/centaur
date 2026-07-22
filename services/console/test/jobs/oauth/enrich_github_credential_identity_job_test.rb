@@ -50,6 +50,7 @@ module Oauth
       assert_equal "99123", credential.provider_subject
       assert_equal "octo@example.com", credential.provider_email
       assert_equal "github-github-99123", credential.foreign_id
+      assert_equal "octocat", credential.labels["github_login"]
       assert_equal "GitHub – Octo Cat token", secret.reload.name
     end
 

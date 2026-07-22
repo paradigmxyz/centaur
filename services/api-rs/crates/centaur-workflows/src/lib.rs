@@ -11,6 +11,7 @@ use absurd::{
     Client, ClientOptions, CreateQueueOptions, RetryKind, RetryStrategy, SpawnOptions, StepHandle,
     TaskContext, TaskRegistrationOptions, Worker, WorkerOptions,
 };
+use centaur_iron_control::{IdentityInput, IronControlClient, IronControlError, slugify};
 use centaur_sandbox_core::SandboxSpec;
 use centaur_session_core::{HarnessType, MessageRole, SessionMessageInput, ThreadKey};
 use centaur_session_runtime::{
@@ -177,6 +178,9 @@ impl WorkflowEnablement {
                 .and_then(Value::as_str)
                 .is_some_and(|workflow_name| self.is_enabled(workflow_name))
         });
+        metadata
+            .principals
+            .retain(|workflow_name| self.is_enabled(workflow_name));
     }
 }
 
@@ -201,12 +205,127 @@ struct WorkflowQueueClients {
 pub struct WorkflowHostSandboxRuntime {
     runtime: SandboxRuntime,
     spec: SandboxSpec,
+    workflow_principals: Arc<RwLock<WorkflowPrincipalAssignments>>,
+}
+
+#[derive(Clone, Default)]
+struct WorkflowPrincipalAssignments {
+    required: BTreeSet<String>,
+    registered: BTreeMap<String, String>,
+}
+
+impl WorkflowPrincipalAssignments {
+    fn principal_for_workflow(
+        &self,
+        workflow_name: &str,
+    ) -> Result<Option<String>, WorkflowRuntimeError> {
+        if let Some(principal) = self.registered.get(workflow_name) {
+            return Ok(Some(principal.clone()));
+        }
+        if self.required.contains(workflow_name) {
+            return Err(WorkflowRuntimeError::Internal(format!(
+                "workflow {workflow_name} declares WORKFLOW_PRINCIPAL but no scoped principal is registered"
+            )));
+        }
+        Ok(None)
+    }
+}
+
+fn workflow_principals_require_iron_control_error(
+    principals: &BTreeSet<String>,
+) -> WorkflowRuntimeError {
+    let workflow_names = principals.iter().cloned().collect::<Vec<_>>().join(", ");
+    WorkflowRuntimeError::BadRequest(format!(
+        "WORKFLOW_PRINCIPAL requires Iron Control, but Iron Control is disabled for workflows: {workflow_names}"
+    ))
 }
 
 impl WorkflowHostSandboxRuntime {
     pub fn new(runtime: SandboxRuntime, spec: SandboxSpec) -> Self {
-        Self { runtime, spec }
+        Self {
+            runtime,
+            spec,
+            workflow_principals: Arc::new(RwLock::new(WorkflowPrincipalAssignments::default())),
+        }
     }
+
+    fn update_workflow_principals(
+        &self,
+        registered: BTreeMap<String, String>,
+        required: BTreeSet<String>,
+    ) {
+        let mut current = self
+            .workflow_principals
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *current = WorkflowPrincipalAssignments {
+            required,
+            registered,
+        };
+    }
+
+    fn spec_for_workflow(&self, workflow_name: &str) -> Result<SandboxSpec, WorkflowRuntimeError> {
+        let mut spec = self.spec.clone();
+        let principal = {
+            let assignments = self
+                .workflow_principals
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            assignments.principal_for_workflow(workflow_name)?
+        };
+        if let Some(principal) = principal {
+            spec.iron_control_principal = Some(principal);
+        }
+        Ok(spec)
+    }
+}
+
+#[derive(Clone)]
+pub struct WorkflowPrincipalRegistrar {
+    client: IronControlClient,
+    namespace: String,
+}
+
+impl WorkflowPrincipalRegistrar {
+    pub fn new(client: IronControlClient, namespace: impl Into<String>) -> Self {
+        Self {
+            client,
+            namespace: namespace.into(),
+        }
+    }
+
+    async fn register_workflow_principals(
+        &self,
+        principals: &BTreeSet<String>,
+    ) -> Result<BTreeMap<String, String>, WorkflowRuntimeError> {
+        let mut registered = BTreeMap::new();
+        for workflow_name in principals {
+            let foreign_id = canonical_workflow_principal_foreign_id(workflow_name);
+            let record = self
+                .client
+                .upsert_principal(&IdentityInput {
+                    namespace: self.namespace.clone(),
+                    foreign_id,
+                    name: format!("Workflow {workflow_name}"),
+                    labels: workflow_principal_labels(workflow_name),
+                })
+                .await?;
+            registered.insert(workflow_name.clone(), record.id);
+        }
+        Ok(registered)
+    }
+}
+
+fn canonical_workflow_principal_foreign_id(workflow_name: &str) -> String {
+    format!("workflow-{}", slugify(workflow_name))
+}
+
+fn workflow_principal_labels(workflow_name: &str) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("kind".to_owned(), "workflow".to_owned()),
+        ("managed-by".to_owned(), "centaur".to_owned()),
+        ("workflow_name".to_owned(), workflow_name.to_owned()),
+    ])
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -408,6 +527,21 @@ impl WorkflowRuntime {
         session_runtime: SessionRuntime,
         workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
     ) -> Result<Self, WorkflowRuntimeError> {
+        Self::new_with_workflow_host_sandbox_and_principal_registrar(
+            store,
+            session_runtime,
+            workflow_host_sandbox,
+            None,
+        )
+        .await
+    }
+
+    pub async fn new_with_workflow_host_sandbox_and_principal_registrar(
+        store: PgSessionStore,
+        session_runtime: SessionRuntime,
+        workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
+        workflow_principal_registrar: Option<WorkflowPrincipalRegistrar>,
+    ) -> Result<Self, WorkflowRuntimeError> {
         let client = Client::from_pool_with_options(
             store.pool().clone(),
             ClientOptions {
@@ -464,14 +598,22 @@ impl WorkflowRuntime {
         schedule_client
             .create_queue(Some(WORKFLOW_SCHEDULE_QUEUE), CreateQueueOptions::default())
             .await?;
+        let workflow_clients = WorkflowQueueClients {
+            standard: client.clone(),
+            slack_live: slack_live_client.clone(),
+            etl: etl_client.clone(),
+            etl_backfill: etl_backfill_client.clone(),
+        };
 
-        let discovery = discover_python_workflow_metadata()
-            .await
-            .unwrap_or_else(|error| {
-                warn!(%error, "python workflow discovery failed");
-                PythonWorkflowMetadata::default()
-            });
+        let discovery = discover_python_workflow_metadata().await?;
         let enablement = WorkflowEnablement::from_env()?;
+        let workflow_host_sandbox = prepare_workflow_host_sandbox(
+            workflow_host_sandbox,
+            workflow_principal_registrar.clone(),
+            &discovery,
+            &enablement,
+        )
+        .await?;
         let schedule_registry = Arc::new(RwLock::new(build_schedule_registry(
             &discovery,
             &enablement,
@@ -483,44 +625,81 @@ impl WorkflowRuntime {
 
         let task_session_runtime = session_runtime.clone();
         let task_workflow_host_sandbox = workflow_host_sandbox.clone();
+        let task_workflow_clients = workflow_clients.clone();
         client.register_task(WORKFLOW_TASK, move |input: WorkflowTaskInput, ctx| {
             let session_runtime = task_session_runtime.clone();
             let workflow_host_sandbox = task_workflow_host_sandbox.clone();
-            async move { run_centaur_workflow(input, ctx, session_runtime, workflow_host_sandbox).await }
+            let workflow_clients = task_workflow_clients.clone();
+            async move {
+                run_centaur_workflow(
+                    input,
+                    ctx,
+                    session_runtime,
+                    workflow_host_sandbox,
+                    workflow_clients,
+                )
+                .await
+            }
         })?;
         let slack_live_session_runtime = session_runtime.clone();
         let slack_live_workflow_host_sandbox = workflow_host_sandbox.clone();
+        let slack_live_workflow_clients = workflow_clients.clone();
         slack_live_client.register_task(WORKFLOW_TASK, move |input: WorkflowTaskInput, ctx| {
             let session_runtime = slack_live_session_runtime.clone();
             let workflow_host_sandbox = slack_live_workflow_host_sandbox.clone();
-            async move { run_centaur_workflow(input, ctx, session_runtime, workflow_host_sandbox).await }
+            let workflow_clients = slack_live_workflow_clients.clone();
+            async move {
+                run_centaur_workflow(
+                    input,
+                    ctx,
+                    session_runtime,
+                    workflow_host_sandbox,
+                    workflow_clients,
+                )
+                .await
+            }
         })?;
         let etl_session_runtime = session_runtime.clone();
         let etl_workflow_host_sandbox = workflow_host_sandbox.clone();
+        let etl_workflow_clients = workflow_clients.clone();
         etl_client.register_task(WORKFLOW_TASK, move |input: WorkflowTaskInput, ctx| {
             let session_runtime = etl_session_runtime.clone();
             let workflow_host_sandbox = etl_workflow_host_sandbox.clone();
-            async move { run_centaur_workflow(input, ctx, session_runtime, workflow_host_sandbox).await }
+            let workflow_clients = etl_workflow_clients.clone();
+            async move {
+                run_centaur_workflow(
+                    input,
+                    ctx,
+                    session_runtime,
+                    workflow_host_sandbox,
+                    workflow_clients,
+                )
+                .await
+            }
         })?;
         let etl_backfill_session_runtime = session_runtime.clone();
         let etl_backfill_workflow_host_sandbox = workflow_host_sandbox.clone();
+        let etl_backfill_workflow_clients = workflow_clients.clone();
         etl_backfill_client.register_task(
             WORKFLOW_TASK,
             move |input: WorkflowTaskInput, ctx| {
                 let session_runtime = etl_backfill_session_runtime.clone();
                 let workflow_host_sandbox = etl_backfill_workflow_host_sandbox.clone();
+                let workflow_clients = etl_backfill_workflow_clients.clone();
                 async move {
-                    run_centaur_workflow(input, ctx, session_runtime, workflow_host_sandbox).await
+                    run_centaur_workflow(
+                        input,
+                        ctx,
+                        session_runtime,
+                        workflow_host_sandbox,
+                        workflow_clients,
+                    )
+                    .await
                 }
             },
         )?;
         let schedule_tick_client = schedule_client.clone();
-        let workflow_clients_for_schedule = WorkflowQueueClients {
-            standard: client.clone(),
-            slack_live: slack_live_client.clone(),
-            etl: etl_client.clone(),
-            etl_backfill: etl_backfill_client.clone(),
-        };
+        let workflow_clients_for_schedule = workflow_clients.clone();
         let schedule_registry_for_task = schedule_registry.clone();
         schedule_client.register_task_with(
             TaskRegistrationOptions::new(WORKFLOW_SCHEDULE_TASK),
@@ -621,14 +800,11 @@ impl WorkflowRuntime {
         if let Some(interval) = workflow_reconcile_interval() {
             spawn_workflow_metadata_reconciler(
                 schedule_client.clone(),
-                WorkflowQueueClients {
-                    standard: client.clone(),
-                    slack_live: slack_live_client.clone(),
-                    etl: etl_client.clone(),
-                    etl_backfill: etl_backfill_client.clone(),
-                },
+                workflow_clients,
                 webhook_registry.clone(),
                 schedule_registry.clone(),
+                workflow_host_sandbox.clone(),
+                workflow_principal_registrar,
                 interval,
             );
         }
@@ -1476,6 +1652,8 @@ struct PythonWorkflowDiscovery {
     webhooks: Vec<RegisteredWorkflowWebhook>,
     #[serde(default)]
     schedule: Option<Value>,
+    #[serde(default)]
+    principal: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1488,6 +1666,7 @@ struct PythonWorkflowMetadata {
     webhooks: Vec<RegisteredWorkflowWebhook>,
     schedules: Vec<Value>,
     workflow_names: BTreeSet<String>,
+    principals: BTreeSet<String>,
 }
 
 fn metadata_from_discovery_payload(
@@ -1510,8 +1689,68 @@ fn metadata_from_discovery_payload(
             }
             metadata.schedules.push(schedule);
         }
+        if workflow.principal.unwrap_or(false) {
+            metadata.principals.insert(workflow.workflow_name);
+        }
     }
     metadata
+}
+
+async fn prepare_workflow_host_sandbox(
+    workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
+    workflow_principal_registrar: Option<WorkflowPrincipalRegistrar>,
+    discovery: &PythonWorkflowMetadata,
+    enablement: &WorkflowEnablement,
+) -> Result<Option<WorkflowHostSandboxRuntime>, WorkflowRuntimeError> {
+    let Some(sandbox) = workflow_host_sandbox else {
+        if !discovery.principals.is_empty() {
+            let workflow_names = discovery
+                .principals
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(WorkflowRuntimeError::BadRequest(format!(
+                "WORKFLOW_PRINCIPAL requires workflow-host sandboxing, but WORKFLOW_HOST_SANDBOX is disabled for workflows: {workflow_names}"
+            )));
+        }
+        return Ok(None);
+    };
+    reconcile_workflow_principals(
+        &sandbox,
+        workflow_principal_registrar.as_ref(),
+        discovery,
+        enablement,
+    )
+    .await?;
+    Ok(Some(sandbox))
+}
+
+async fn reconcile_workflow_principals(
+    sandbox: &WorkflowHostSandboxRuntime,
+    registrar: Option<&WorkflowPrincipalRegistrar>,
+    discovery: &PythonWorkflowMetadata,
+    enablement: &WorkflowEnablement,
+) -> Result<(), WorkflowRuntimeError> {
+    let mut principals = discovery.principals.clone();
+    principals.retain(|workflow_name| enablement.is_enabled(workflow_name));
+    let Some(registrar) = registrar else {
+        if !principals.is_empty() {
+            sandbox.update_workflow_principals(BTreeMap::new(), principals.clone());
+            return Err(workflow_principals_require_iron_control_error(&principals));
+        }
+        sandbox.update_workflow_principals(BTreeMap::new(), BTreeSet::new());
+        return Ok(());
+    };
+    let registered = match registrar.register_workflow_principals(&principals).await {
+        Ok(registered) => registered,
+        Err(error) => {
+            sandbox.update_workflow_principals(BTreeMap::new(), principals);
+            return Err(error);
+        }
+    };
+    sandbox.update_workflow_principals(registered, principals);
+    Ok(())
 }
 
 async fn discover_python_workflow_metadata() -> Result<PythonWorkflowMetadata, WorkflowRuntimeError>
@@ -1645,6 +1884,8 @@ fn spawn_workflow_metadata_reconciler(
     workflow_clients: WorkflowQueueClients,
     webhook_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
     schedule_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
+    workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
+    workflow_principal_registrar: Option<WorkflowPrincipalRegistrar>,
     interval: Duration,
 ) {
     tokio::spawn(async move {
@@ -1659,6 +1900,8 @@ fn spawn_workflow_metadata_reconciler(
                 &schedule_client,
                 &webhook_registry,
                 &schedule_registry,
+                workflow_host_sandbox.as_ref(),
+                workflow_principal_registrar.as_ref(),
             )
             .await
             {
@@ -1694,6 +1937,8 @@ async fn reconcile_workflow_metadata_once(
     schedule_client: &Client,
     webhook_registry: &Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
     schedule_registry: &Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
+    workflow_host_sandbox: Option<&WorkflowHostSandboxRuntime>,
+    workflow_principal_registrar: Option<&WorkflowPrincipalRegistrar>,
 ) -> Result<
     (
         PythonWorkflowMetadata,
@@ -1705,6 +1950,15 @@ async fn reconcile_workflow_metadata_once(
     let discovery = discover_python_workflow_metadata().await?;
     let next_webhooks = build_webhook_registry(&discovery, &enablement)?;
     let next_schedules = build_schedule_registry(&discovery, &enablement)?;
+    if let Some(sandbox) = workflow_host_sandbox {
+        reconcile_workflow_principals(
+            sandbox,
+            workflow_principal_registrar,
+            &discovery,
+            &enablement,
+        )
+        .await?;
+    }
     {
         let mut webhooks = webhook_registry
             .write()
@@ -2296,6 +2550,10 @@ fn next_schedule_time(
     }
 }
 
+/// Prepends a seconds field so five-field crontab-style expressions parse with the
+/// `cron` crate. Note the crate's day-of-week numbering is Quartz-style (1 = Sunday,
+/// 7 = Saturday; 0 rejected), NOT Unix crontab — schedules should use day names
+/// (`MON-FRI`) to avoid firing on the wrong days.
 fn normalize_cron_expression(expr: &str) -> String {
     let fields = expr.split_whitespace().collect::<Vec<_>>();
     if fields.len() == 5 {
@@ -2310,11 +2568,18 @@ async fn run_centaur_workflow(
     ctx: TaskContext,
     session_runtime: SessionRuntime,
     workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
+    workflow_clients: WorkflowQueueClients,
 ) -> absurd::Result<WorkflowResult> {
     let mut cleanup_guard =
         WorkflowSandboxCleanupGuard::new(session_runtime.clone(), ctx.run_id().to_owned());
-    let result =
-        run_centaur_workflow_inner(input, ctx, session_runtime, workflow_host_sandbox).await;
+    let result = run_centaur_workflow_inner(
+        input,
+        ctx,
+        session_runtime,
+        workflow_host_sandbox,
+        workflow_clients,
+    )
+    .await;
     if let Some(reason) = workflow_cleanup_reason(&result) {
         cleanup_guard.cleanup(reason).await;
     } else {
@@ -2337,6 +2602,7 @@ async fn run_centaur_workflow_inner(
     ctx: TaskContext,
     session_runtime: SessionRuntime,
     workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
+    workflow_clients: WorkflowQueueClients,
 ) -> absurd::Result<WorkflowResult> {
     let _heartbeat_guard = start_workflow_task_heartbeat(ctx.clone())
         .await
@@ -2432,6 +2698,9 @@ async fn run_centaur_workflow_inner(
                                 workflow_owned_thread: true,
                                 idle_timeout_ms,
                                 max_duration_ms,
+                                model: None,
+                                provider: None,
+                                reasoning: None,
                             },
                         )
                         .await
@@ -2494,6 +2763,7 @@ async fn run_centaur_workflow_inner(
                 ctx.clone(),
                 session_runtime,
                 workflow_host_sandbox,
+                workflow_clients,
             )
             .await
             .map_err(absurd_error)?;
@@ -2571,11 +2841,19 @@ async fn run_python_workflow_host(
     ctx: TaskContext,
     session_runtime: SessionRuntime,
     workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
+    workflow_clients: WorkflowQueueClients,
 ) -> Result<Value, WorkflowRuntimeError> {
     if let Some(sandbox) = workflow_host_sandbox {
-        return run_python_workflow_host_in_sandbox(input, ctx, session_runtime, sandbox).await;
+        return run_python_workflow_host_in_sandbox(
+            input,
+            ctx,
+            session_runtime,
+            sandbox,
+            workflow_clients,
+        )
+        .await;
     }
-    run_python_workflow_host_local(input, ctx, session_runtime).await
+    run_python_workflow_host_local(input, ctx, session_runtime, workflow_clients).await
 }
 
 async fn start_workflow_task_heartbeat(
@@ -2597,6 +2875,7 @@ async fn run_python_workflow_host_local(
     input: WorkflowTaskInput,
     ctx: TaskContext,
     session_runtime: SessionRuntime,
+    workflow_clients: WorkflowQueueClients,
 ) -> Result<Value, WorkflowRuntimeError> {
     let host_path = python_workflow_host_path();
     let mut command = Command::new(
@@ -2691,18 +2970,23 @@ async fn run_python_workflow_host_local(
                 record_python_workflow_metric(&message);
             }
             Some(message_type) if message_type.starts_with("ctx.") => {
-                let response =
-                    match handle_python_context_request(&message, &ctx, &session_runtime, &input)
-                        .await
-                    {
-                        Ok(response) => response,
-                        Err(error) => {
-                            drop(stdin);
-                            let _ = child.start_kill();
-                            let _ = child.wait().await;
-                            return Err(error);
-                        }
-                    };
+                let response = match handle_python_context_request(
+                    &message,
+                    &ctx,
+                    &session_runtime,
+                    &input,
+                    &workflow_clients,
+                )
+                .await
+                {
+                    Ok(response) => response,
+                    Err(error) => {
+                        drop(stdin);
+                        let _ = child.start_kill();
+                        let _ = child.wait().await;
+                        return Err(error);
+                    }
+                };
                 write_host_message(&mut stdin, &response).await?;
             }
             other => {
@@ -2725,8 +3009,9 @@ async fn run_python_workflow_host_in_sandbox(
     ctx: TaskContext,
     session_runtime: SessionRuntime,
     sandbox: WorkflowHostSandboxRuntime,
+    workflow_clients: WorkflowQueueClients,
 ) -> Result<Value, WorkflowRuntimeError> {
-    let mut spec = sandbox.spec.clone();
+    let mut spec = sandbox.spec_for_workflow(&input.workflow_name)?;
     spec = spec
         .env("WORKFLOW_RUN_ID", ctx.run_id())
         .env("WORKFLOW_TASK_ID", ctx.task_id())
@@ -2754,6 +3039,7 @@ async fn run_python_workflow_host_in_sandbox(
         input,
         ctx,
         session_runtime,
+        workflow_clients,
         &mut stdin,
         io.stdout,
         stderr_task,
@@ -2774,6 +3060,7 @@ async fn run_python_workflow_host_protocol<W, R>(
     input: WorkflowTaskInput,
     ctx: TaskContext,
     session_runtime: SessionRuntime,
+    workflow_clients: WorkflowQueueClients,
     stdin: &mut W,
     stdout: R,
     stderr_task: JoinHandle<String>,
@@ -2833,8 +3120,14 @@ where
                 record_python_workflow_metric(&message);
             }
             Some(message_type) if message_type.starts_with("ctx.") => {
-                let response =
-                    handle_python_context_request(&message, &ctx, &session_runtime, &input).await?;
+                let response = handle_python_context_request(
+                    &message,
+                    &ctx,
+                    &session_runtime,
+                    &input,
+                    &workflow_clients,
+                )
+                .await?;
                 write_host_message(stdin, &response).await?;
             }
             other => {
@@ -2964,6 +3257,7 @@ async fn handle_python_context_request(
     ctx: &TaskContext,
     session_runtime: &SessionRuntime,
     input: &WorkflowTaskInput,
+    workflow_clients: &WorkflowQueueClients,
 ) -> Result<Value, WorkflowRuntimeError> {
     let request_id = message
         .get("request_id")
@@ -3048,6 +3342,12 @@ async fn handle_python_context_request(
                 Err(error) => Err(error.to_string()),
             }
         }
+        Some("ctx.workflow.start") => {
+            match start_python_child_workflow(message, input, workflow_clients).await {
+                Ok(value) => Ok(value),
+                Err(error) => Err(error.to_string()),
+            }
+        }
         Some("ctx.call_tool") => match call_python_workflow_tool(message).await {
             Ok(value) => Ok(value),
             Err(error) => Err(error.to_string()),
@@ -3074,6 +3374,62 @@ async fn handle_python_context_request(
             "error": error,
         }),
     })
+}
+
+async fn start_python_child_workflow(
+    message: &Value,
+    parent: &WorkflowTaskInput,
+    workflow_clients: &WorkflowQueueClients,
+) -> Result<Value, WorkflowRuntimeError> {
+    let workflow_name = message
+        .get("workflow_name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| {
+            WorkflowRuntimeError::BadRequest(
+                "ctx.workflow.start requires a non-empty workflow_name".to_owned(),
+            )
+        })?;
+    WorkflowEnablement::from_env()?.ensure_enabled(workflow_name)?;
+    let child_input = message.get("input").cloned().unwrap_or_else(|| json!({}));
+    if !child_input.is_object() {
+        return Err(WorkflowRuntimeError::BadRequest(
+            "ctx.workflow.start input must be an object".to_owned(),
+        ));
+    }
+    let idempotency_key = message
+        .get("idempotency_key")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(ToOwned::to_owned);
+    let target_client = match workflow_queue_class(workflow_name) {
+        WorkflowQueueClass::Standard => &workflow_clients.standard,
+        WorkflowQueueClass::SlackLive => &workflow_clients.slack_live,
+        WorkflowQueueClass::Etl => &workflow_clients.etl,
+        WorkflowQueueClass::EtlBackfill => &workflow_clients.etl_backfill,
+    };
+    let spawn = target_client
+        .spawn(
+            WORKFLOW_TASK,
+            WorkflowTaskInput {
+                workflow_name: workflow_name.to_owned(),
+                input: child_input,
+                harness_type: parent.harness_type.clone(),
+            },
+            SpawnOptions {
+                idempotency_key,
+                ..SpawnOptions::default()
+            },
+        )
+        .await?;
+    Ok(json!({
+        "workflow_name": workflow_name,
+        "task_id": spawn.task_id,
+        "run_id": spawn.run_id,
+        "created": spawn.created,
+    }))
 }
 
 fn parse_python_duration_seconds(message: &Value) -> Result<Duration, String> {
@@ -3188,6 +3544,17 @@ async fn run_python_agent_turn(
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| format!("absurd-workflow-agent-turn:{client_message_id}"));
+    // Optional per-turn harness knobs, mirroring the slackbot's `--model` /
+    // `--bedrock` / `-rsn` flags. `reasoning` accepts `reasoning_effort` and
+    // `effort` aliases so Python callers can use whichever reads best.
+    let model = first_str_arg(&args, &["model"]);
+    let provider = first_str_arg(&args, &["provider"]);
+    let reasoning = first_str_arg(&args, &["reasoning", "reasoning_effort", "effort"]);
+    // Record the model on the execution like the slackbot does, so Console
+    // readers can show what a workflow-dispatched turn ran on.
+    if let Some(model) = model.as_deref() {
+        object_insert(&mut execution_metadata, "model", json!(model));
+    }
     let result = run_agent_session_turn(
         session_runtime,
         AgentTurnRequest {
@@ -3203,10 +3570,22 @@ async fn run_python_agent_turn(
             workflow_owned_thread,
             idle_timeout_ms,
             max_duration_ms,
+            model,
+            provider,
+            reasoning,
         },
     )
     .await?;
     serde_json::to_value(result).map_err(WorkflowRuntimeError::from)
+}
+
+/// Returns the first arg key that holds a non-empty (trimmed) string, owned.
+fn first_str_arg(args: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .filter_map(|key| args.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn parse_agent_harness(args: &Value) -> Result<Option<HarnessType>, WorkflowRuntimeError> {
@@ -3313,13 +3692,11 @@ async fn call_python_workflow_tool(message: &Value) -> Result<Value, WorkflowRun
         return serde_json::to_value(run_time_now_tool()).map_err(WorkflowRuntimeError::from);
     }
 
-    let base_url = env::var(WORKFLOW_TOOL_API_URL_ENV)
-        .or_else(|_| env::var("CENTAUR_PYTHON_API_URL"))
-        .map_err(|_| {
-            WorkflowRuntimeError::BadRequest(format!(
-                "{WORKFLOW_TOOL_API_URL_ENV} must be set for ctx.call_tool({tool}.{method})"
-            ))
-        })?;
+    let base_url = env::var(WORKFLOW_TOOL_API_URL_ENV).map_err(|_| {
+        WorkflowRuntimeError::BadRequest(format!(
+            "{WORKFLOW_TOOL_API_URL_ENV} must be set for ctx.call_tool({tool}.{method})"
+        ))
+    })?;
     let base_url = base_url.trim_end_matches('/');
     let url = format!("{base_url}/tools/{tool}/{method}");
     let args = message.get("args").cloned().unwrap_or_else(|| json!({}));
@@ -3485,6 +3862,42 @@ struct AgentTurnRequest {
     workflow_owned_thread: bool,
     idle_timeout_ms: u64,
     max_duration_ms: u64,
+    // Optional per-turn model / provider / reasoning-effort overrides. When set
+    // they ride the execute input line exactly like the slackbot's per-turn
+    // `--model` / `--bedrock` / `-rsn` flags do (see slackbotv2's
+    // `toCodexInputLineWithStaged`), so the harness applies them to this turn;
+    // when `None` the deployment/baked harness default stands. `provider` and
+    // `reasoning` only affect the codex harness (claude/amp ignore them).
+    model: Option<String>,
+    provider: Option<String>,
+    reasoning: Option<String>,
+}
+
+/// Builds the single `type: "user"` execute input line for a workflow agent
+/// turn, mirroring the blocks-protocol shape the harness parses
+/// (`BlocksLine` in `harness-server`): optional top-level `model` / `provider`
+/// / `reasoning` keys, then the `message.content` parts. api-rs enriches the
+/// line with session/trace context before forwarding, so those keys are omitted
+/// here.
+fn agent_turn_input_line(
+    parts: &[Value],
+    model: Option<&str>,
+    provider: Option<&str>,
+    reasoning: Option<&str>,
+) -> Result<String, serde_json::Error> {
+    let mut line = serde_json::Map::new();
+    line.insert("type".to_owned(), json!("user"));
+    if let Some(model) = model {
+        line.insert("model".to_owned(), json!(model));
+    }
+    if let Some(provider) = provider {
+        line.insert("provider".to_owned(), json!(provider));
+    }
+    if let Some(reasoning) = reasoning {
+        line.insert("reasoning".to_owned(), json!(reasoning));
+    }
+    line.insert("message".to_owned(), json!({ "content": parts }));
+    serde_json::to_string(&Value::Object(line))
 }
 
 async fn run_agent_session_turn(
@@ -3504,6 +3917,9 @@ async fn run_agent_session_turn(
         workflow_owned_thread,
         idle_timeout_ms,
         max_duration_ms,
+        model,
+        provider,
+        reasoning,
     } = turn;
     let thread_key = ThreadKey::parse(thread_key)?;
     let mut session_metadata = session_metadata;
@@ -3536,12 +3952,12 @@ async fn run_agent_session_turn(
             ExecuteSessionInput {
                 idempotency_key: Some(execution_idempotency_key),
                 metadata: Some(execution_metadata),
-                input_lines: vec![serde_json::to_string(&json!({
-                    "type": "user",
-                    "message": {
-                        "content": parts,
-                    },
-                }))?],
+                input_lines: vec![agent_turn_input_line(
+                    &parts,
+                    model.as_deref(),
+                    provider.as_deref(),
+                    reasoning.as_deref(),
+                )?],
                 idle_timeout_ms: Some(idle_timeout_ms),
                 max_duration_ms: Some(max_duration_ms),
             },
@@ -3675,6 +4091,8 @@ pub enum WorkflowRuntimeError {
     #[error(transparent)]
     Http(#[from] reqwest::Error),
     #[error(transparent)]
+    IronControl(#[from] IronControlError),
+    #[error(transparent)]
     Io(#[from] std::io::Error),
 }
 
@@ -3682,6 +4100,47 @@ pub enum WorkflowRuntimeError {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn agent_turn_input_line_omits_unset_harness_knobs() {
+        let parts = vec![json!({"type": "text", "text": "hi"})];
+        let line = agent_turn_input_line(&parts, None, None, None).unwrap();
+        let value: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value.get("type"), Some(&json!("user")));
+        assert_eq!(value.pointer("/message/content"), Some(&json!(parts)));
+        assert!(value.get("model").is_none());
+        assert!(value.get("provider").is_none());
+        assert!(value.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn agent_turn_input_line_forwards_model_provider_reasoning() {
+        let parts = vec![json!({"type": "text", "text": "hi"})];
+        let line = agent_turn_input_line(
+            &parts,
+            Some("claude-opus-4-8"),
+            Some("amazon-bedrock"),
+            Some("high"),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&line).unwrap();
+        // Keys match the blocks-protocol shape the harness parses (BlocksLine).
+        assert_eq!(value.get("model"), Some(&json!("claude-opus-4-8")));
+        assert_eq!(value.get("provider"), Some(&json!("amazon-bedrock")));
+        assert_eq!(value.get("reasoning"), Some(&json!("high")));
+        assert_eq!(value.pointer("/message/content"), Some(&json!(parts)));
+    }
+
+    #[test]
+    fn first_str_arg_picks_first_non_empty_alias() {
+        let args = json!({"reasoning": "  ", "reasoning_effort": " high ", "effort": "low"});
+        assert_eq!(
+            first_str_arg(&args, &["reasoning", "reasoning_effort", "effort"]),
+            Some("high".to_owned())
+        );
+        assert_eq!(first_str_arg(&json!({}), &["model"]), None);
+        assert_eq!(first_str_arg(&json!({"model": "   "}), &["model"]), None);
+    }
 
     #[test]
     fn parse_worker_concurrency_uses_override_or_default() {
@@ -3739,6 +4198,36 @@ mod tests {
                 .with_ymd_and_hms(2026, 6, 8, 7, 45, 0)
                 .unwrap()
                 .with_timezone(&Utc)
+        );
+    }
+
+    #[test]
+    fn cron_schedule_day_names_avoid_quartz_numbering() {
+        let named_days = normalize_schedule(json!({
+            "workflow_name": "weekday_report",
+            "schedule_id": "named_weekdays",
+            "cron": "0 9 * * MON-FRI",
+            "timezone": "UTC",
+            "enabled": true,
+        }))
+        .unwrap();
+        let numeric_days = normalize_schedule(json!({
+            "workflow_name": "weekday_report",
+            "schedule_id": "numeric_days",
+            "cron": "0 9 * * 1-5",
+            "timezone": "UTC",
+            "enabled": true,
+        }))
+        .unwrap();
+        let after_thursday = Utc.with_ymd_and_hms(2026, 7, 16, 10, 0, 0).unwrap();
+
+        assert_eq!(
+            next_schedule_time(&named_days, after_thursday).unwrap(),
+            Utc.with_ymd_and_hms(2026, 7, 17, 9, 0, 0).unwrap()
+        );
+        assert_eq!(
+            next_schedule_time(&numeric_days, after_thursday).unwrap(),
+            Utc.with_ymd_and_hms(2026, 7, 19, 9, 0, 0).unwrap()
         );
     }
 
@@ -3918,6 +4407,7 @@ mod tests {
                     "workflow_name": "scheduled_workflow",
                     "source_path": "workflows/scheduled_workflow.py",
                     "schedule": {"schedule_id": "scheduled_workflow", "cron": "*/5 * * * *"},
+                    "principal": true,
                 },
                 {
                     "workflow_name": "manual_workflow",
@@ -3939,6 +4429,91 @@ mod tests {
             metadata.schedules[0].get("workflow_name"),
             Some(&json!("scheduled_workflow"))
         );
+        assert!(metadata.principals.contains("scheduled_workflow"));
+    }
+
+    #[test]
+    fn workflow_principal_foreign_id_is_derived_from_workflow_name() {
+        assert_eq!(
+            canonical_workflow_principal_foreign_id("nightly_report"),
+            "workflow-nightly-report"
+        );
+        assert_eq!(
+            canonical_workflow_principal_foreign_id("Managing Partner Daily Briefing"),
+            "workflow-managing-partner-daily-briefing"
+        );
+    }
+
+    #[test]
+    fn workflow_principal_labels_identify_workflow_kind() {
+        let labels = workflow_principal_labels("nightly_report");
+
+        assert_eq!(labels.get("kind").map(String::as_str), Some("workflow"));
+        assert!(!labels.contains_key("purpose"));
+        assert_eq!(
+            labels.get("workflow_name").map(String::as_str),
+            Some("nightly_report")
+        );
+    }
+
+    #[test]
+    fn required_workflow_principal_fails_closed_when_unregistered() {
+        let assignments = WorkflowPrincipalAssignments {
+            required: BTreeSet::from(["nightly_report".to_owned()]),
+            registered: BTreeMap::new(),
+        };
+
+        let error = assignments
+            .principal_for_workflow("nightly_report")
+            .expect_err("required workflow principal should not fall back");
+
+        assert!(matches!(error, WorkflowRuntimeError::Internal(_)));
+        assert!(error.to_string().contains("nightly_report"));
+        assert!(error.to_string().contains("WORKFLOW_PRINCIPAL"));
+    }
+
+    #[test]
+    fn optional_workflow_principal_uses_shared_principal() {
+        let assignments = WorkflowPrincipalAssignments::default();
+
+        assert_eq!(
+            assignments
+                .principal_for_workflow("nightly_report")
+                .expect("optional workflow should be allowed"),
+            None
+        );
+    }
+
+    #[test]
+    fn workflow_principal_requires_iron_control() {
+        let error = workflow_principals_require_iron_control_error(&BTreeSet::from([
+            "nightly_report".to_owned(),
+        ]));
+
+        assert!(matches!(error, WorkflowRuntimeError::BadRequest(_)));
+        assert!(error.to_string().contains("Iron Control"));
+        assert!(error.to_string().contains("nightly_report"));
+    }
+
+    #[tokio::test]
+    async fn workflow_principal_requires_workflow_host_sandbox() {
+        let discovery = PythonWorkflowMetadata {
+            principals: BTreeSet::from(["nightly_report".to_owned()]),
+            workflow_names: BTreeSet::from(["nightly_report".to_owned()]),
+            ..PythonWorkflowMetadata::default()
+        };
+
+        let error =
+            match prepare_workflow_host_sandbox(None, None, &discovery, &WorkflowEnablement::all())
+                .await
+            {
+                Ok(_) => panic!("workflow principal should require workflow-host sandboxing"),
+                Err(error) => error,
+            };
+
+        assert!(matches!(error, WorkflowRuntimeError::BadRequest(_)));
+        assert!(error.to_string().contains("WORKFLOW_HOST_SANDBOX"));
+        assert!(error.to_string().contains("nightly_report"));
     }
 
     #[test]
@@ -4085,6 +4660,7 @@ mod tests {
                     "workflow_name": "allowed_workflow",
                     "source_path": "workflows/allowed_workflow.py",
                     "schedule": {"schedule_id": "allowed", "cron": "*/5 * * * *"},
+                    "principal": true,
                     "webhooks": [{
                         "workflow_name": "allowed_workflow",
                         "source_path": "workflows/allowed_workflow.py",
@@ -4098,6 +4674,7 @@ mod tests {
                     "workflow_name": "blocked_workflow",
                     "source_path": "workflows/blocked_workflow.py",
                     "schedule": {"schedule_id": "blocked", "cron": "*/10 * * * *"},
+                    "principal": true,
                     "webhooks": [{
                         "workflow_name": "blocked_workflow",
                         "source_path": "workflows/blocked_workflow.py",
@@ -4124,6 +4701,10 @@ mod tests {
         );
         assert_eq!(metadata.webhooks.len(), 1);
         assert_eq!(metadata.webhooks[0].workflow_name, "allowed_workflow");
+        assert_eq!(
+            metadata.principals.iter().cloned().collect::<Vec<_>>(),
+            vec!["allowed_workflow".to_owned()]
+        );
     }
 
     #[test]

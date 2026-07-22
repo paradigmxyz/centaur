@@ -36,14 +36,53 @@ pub struct CreateSessionResponse {
 #[derive(Clone, Debug, Serialize)]
 pub struct SessionContextResponse {
     pub thread_key: ThreadKey,
+    /// The chat surface the agent is operating on: `slack`, `discord`, `linear`,
+    /// `github`, or `unknown` for threads that are not platform-addressable.
+    pub platform: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slack: Option<SlackThreadContext>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discord: Option<DiscordThreadContext>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub linear: Option<LinearThreadContext>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub github: Option<GithubThreadContext>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct SlackThreadContext {
     pub channel_id: String,
     pub thread_ts: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DiscordThreadContext {
+    pub guild_id: String,
+    pub channel_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct LinearThreadContext {
+    pub issue_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_session_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct GithubThreadContext {
+    pub owner: String,
+    pub repo: String,
+    pub number: u64,
+    /// `issue` or `pr`.
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_comment_id: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -73,6 +112,19 @@ pub struct ExecuteSessionResponse {
     pub execution_id: String,
     pub thread_key: ThreadKey,
     pub status: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct InterruptSessionExecutionRequest {
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct InterruptSessionExecutionResponse {
+    pub ok: bool,
+    pub interrupted: bool,
+    pub execution_id: Option<String>,
+    pub thread_key: ThreadKey,
 }
 
 #[derive(Clone, Debug, Deserialize)]

@@ -73,7 +73,6 @@ pub const ETL_ITEMS_FAILED_TOTAL: &str = "etl_items_failed_total";
 pub const ETL_BACKFILL_JOBS: &str = "etl_backfill_jobs";
 pub const ETL_BACKFILL_JOB_AGE_SECONDS: &str = "etl_backfill_job_age_seconds";
 pub const COMPANY_CONTEXT_DOCUMENTS_CHANGED_TOTAL: &str = "company_context_documents_changed_total";
-pub const COMPANY_CONTEXT_DOCUMENT_SIZE_CHARS: &str = "company_context_document_size_chars";
 pub const COMPANY_CONTEXT_PROJECTION_LAG_SECONDS: &str = "company_context_projection_lag_seconds";
 pub const WORKFLOW_QUEUE_TASKS: &str = "workflow_queue_tasks";
 pub const WORKFLOW_QUEUE_TASKS_BY_WORKFLOW: &str = "workflow_queue_tasks_by_workflow";
@@ -127,9 +126,6 @@ const SESSION_FIRST_TOKEN_LATENCY_BUCKETS: &[f64] = &[
 ];
 const SANDBOX_STARTUP_DURATION_BUCKETS: &[f64] =
     &[0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0];
-const COMPANY_CONTEXT_DOCUMENT_SIZE_BUCKETS: &[f64] = &[
-    100.0, 500.0, 1_000.0, 5_000.0, 10_000.0, 25_000.0, 50_000.0, 100_000.0, 250_000.0, 500_000.0,
-];
 const SLACK_ARCHIVE_IMPORT_DURATION_BUCKETS: &[f64] = &[
     1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1_200.0, 3_600.0,
 ];
@@ -265,10 +261,6 @@ pub fn prometheus_handle() -> Result<PrometheusHandle, TelemetryError> {
         .set_buckets_for_metric(
             Matcher::Full(SANDBOX_STARTUP_DURATION_SECONDS.to_owned()),
             SANDBOX_STARTUP_DURATION_BUCKETS,
-        )?
-        .set_buckets_for_metric(
-            Matcher::Full(COMPANY_CONTEXT_DOCUMENT_SIZE_CHARS.to_owned()),
-            COMPANY_CONTEXT_DOCUMENT_SIZE_BUCKETS,
         )?
         .set_buckets_for_metric(
             Matcher::Full(SLACK_ARCHIVE_IMPORT_DURATION_SECONDS.to_owned()),
@@ -614,6 +606,16 @@ fn thread_trace_root_export_request(
                     start_time_unix_nano,
                     end_time_unix_nano,
                     attributes: vec![
+                        proto_kv_string("lmnr.span.type", "DEFAULT"),
+                        proto_kv_string(
+                            "lmnr.span.input",
+                            &serde_json::json!({ "thread_key": thread_key }).to_string(),
+                        ),
+                        proto_kv_string("lmnr.association.properties.session_id", thread_key),
+                        proto_kv_string(
+                            "lmnr.association.properties.metadata.thread_key",
+                            thread_key,
+                        ),
                         proto_kv_string(FIELD_COMPONENT, "session_runtime"),
                         proto_kv_string(FIELD_EVENT, "thread_trace_root"),
                         proto_kv_string("centaur.thread_key", thread_key),
@@ -994,10 +996,6 @@ fn describe_metrics() {
     metrics::describe_counter!(
         COMPANY_CONTEXT_DOCUMENTS_CHANGED_TOTAL,
         "Company context document changes observed by ETL workflows."
-    );
-    metrics::describe_histogram!(
-        COMPANY_CONTEXT_DOCUMENT_SIZE_CHARS,
-        "Company context document sizes in characters."
     );
     metrics::describe_gauge!(
         COMPANY_CONTEXT_PROJECTION_LAG_SECONDS,

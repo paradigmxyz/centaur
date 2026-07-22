@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from typing import Any
@@ -141,11 +142,15 @@ class AlliumClient:
         """Make an MCP tool call.
 
         Args:
-            tool_name: Name of the MCP tool (e.g., explorer_run_sql)
+            tool_name: Name of the MCP tool (e.g., run_sql_query)
             arguments: Arguments to pass to the tool
 
         Returns:
             Response data from the tool
+
+        Raises:
+            RuntimeError: On JSON-RPC errors or tool-level errors (isError),
+                e.g. "Unknown tool" or "Not authenticated".
         """
         payload = {
             "jsonrpc": "2.0",
@@ -182,7 +187,22 @@ class AlliumClient:
         if "error" in result:
             raise RuntimeError(f"MCP error: {result['error']}")
 
-        structured = result.get("result", {}).get("structuredContent")
+        inner = result.get("result", {})
+
+        # Tool-level errors (e.g. "Unknown tool", "Not authenticated") come back
+        # as isError + text content, not JSON-RPC errors. Surface them instead of
+        # letting them collapse into empty result lists ("No results").
+        if isinstance(inner, dict) and inner.get("isError"):
+            texts = []
+            content = inner.get("content")
+            if isinstance(content, list):
+                texts = [c.get("text", "") for c in content if isinstance(c, dict)]
+            elif isinstance(content, dict):
+                texts = [content.get("text", "")]
+            message = "; ".join(t for t in texts if t) or json.dumps(inner)
+            raise RuntimeError(f"MCP tool '{tool_name}' error: {message}")
+
+        structured = inner.get("structuredContent")
         if structured is not None:
             return structured
 
@@ -201,21 +221,76 @@ class AlliumClient:
                 return {"text": text}
         return content
 
-    def run_sql(self, sql: str, row_limit: int = 10000) -> list[dict]:
+    def run_sql(self, sql: str, row_limit: int = 10000, timeout: int = 300) -> list[dict]:
         """Execute arbitrary SQL directly against Allium.
 
-        Uses the MCP endpoint for direct SQL execution.
+        Uses the MCP endpoint for direct SQL execution. The MCP server runs SQL
+        asynchronously: `run_sql_query` returns a run_id immediately and
+        `get_query_run_results` polls for completion.
 
         Args:
             sql: SQL query to execute
             row_limit: Maximum rows to return (default 10000, max 250000)
+            timeout: Maximum seconds to wait for the query to complete
 
         Returns:
             List of result rows as dicts
+
+        Raises:
+            RuntimeError: If the query fails
+            TimeoutError: If the query doesn't complete within timeout
         """
-        result = self._mcp_call("explorer_run_sql", {"sql": sql})
-        rows = _extract_result_list(result, ("data", "rows", "results"))
-        return rows[:row_limit]
+        started = self._mcp_call("run_sql_query", {"sql": sql})
+        run_id = self._extract_run_id(started)
+
+        deadline = time.time() + timeout
+        while True:
+            # get_query_run_results blocks server-side up to 180s per call.
+            poll_seconds = max(1, min(180, int(deadline - time.time())))
+            result = self._mcp_call(
+                "get_query_run_results",
+                {
+                    "run_id": run_id,
+                    "poll_timeout_seconds": poll_seconds,
+                    "row_limit": row_limit,
+                },
+            )
+            status = ""
+            if isinstance(result, dict):
+                status = str(result.get("status", "")).lower()
+            if status in ("failed", "error", "canceled", "cancelled"):
+                error = result.get("error") or result.get("message") or json.dumps(result)
+                raise RuntimeError(f"SQL query failed: {error}")
+            if status and status not in ("success", "succeeded", "completed", "complete"):
+                if time.time() >= deadline:
+                    raise TimeoutError(f"SQL query run {run_id} timed out after {timeout}s")
+                continue
+
+            rows = _extract_result_list(result, ("data", "rows", "results"))
+            if rows and isinstance(rows[0], list):
+                columns = result.get("columns") if isinstance(result, dict) else None
+                if isinstance(columns, list):
+                    names = [
+                        c.get("name", str(i)) if isinstance(c, dict) else str(c)
+                        for i, c in enumerate(columns)
+                    ]
+                    rows = [dict(zip(names, row, strict=False)) for row in rows]
+            return rows[:row_limit]
+
+    @staticmethod
+    def _extract_run_id(result: Any) -> str:
+        """Extract a run_id from a run_sql_query response."""
+        if isinstance(result, dict):
+            for key in ("run_id", "query_run_id", "id"):
+                value = result.get(key)
+                if isinstance(value, str) and value:
+                    return value
+            text = result.get("text")
+            if isinstance(text, str):
+                match = re.search(r"run[_ ]?id[\"'\s:=]+([\w-]+)", text, re.IGNORECASE)
+                if match:
+                    return match.group(1)
+        raise RuntimeError(f"Could not extract run_id from run_sql_query response: {result!r}")
 
     def search_schemas(self, query: str) -> list[str]:
         """Search Allium schemas using semantic search.
@@ -226,9 +301,9 @@ class AlliumClient:
         Returns:
             List of matching table IDs
         """
-        result = self._mcp_call("explorer_search_schemas", {"query": query})
+        result = self._mcp_call("search_schemas", {"query": query})
 
-        items = _extract_result_list(result, ("tables", "results", "data", "matches"))
+        items = _extract_result_list(result, ("hits", "tables", "results", "data", "matches"))
         if items:
             out: list[str] = []
             for r in items:
@@ -248,13 +323,23 @@ class AlliumClient:
     def fetch_schema(self, table_id: str) -> dict:
         """Fetch schema metadata for a table.
 
+        The dedicated explorer_fetch_schema MCP tool was removed; search_schemas
+        with an `id` argument returns the single matching entry with its full
+        markdown content populated.
+
         Args:
             table_id: Full table name (e.g., "ethereum.raw.token_transfers")
 
         Returns:
-            Schema metadata dict
+            Schema metadata dict (includes markdown `content` when available)
         """
-        return self._mcp_call("explorer_fetch_schema", {"id": table_id})
+        result = self._mcp_call("search_schemas", {"id": table_id})
+        hits = _extract_result_list(result, ("hits", "results", "data", "matches"))
+        if hits and isinstance(hits[0], dict):
+            return hits[0]
+        if isinstance(result, dict):
+            return result
+        return {"id": table_id, "content": str(result)}
 
     def run_query(
         self,

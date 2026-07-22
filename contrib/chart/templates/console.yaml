@@ -4,6 +4,7 @@
 {{- $prefix := .Values.secretManager.envPrefix }}
 {{- $dbName := $console.database.name }}
 {{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") }}
+{{- $mcpPublicUrl := default .Values.slackbotv2.mcpPublicUrl .Values.apiRs.mcpPublicUrl }}
 # console — Rails control plane for authenticated API access and encrypted
 # secret storage. The chart owns the Deployment shape (image, port, env,
 # security context) so operators tune it via `helm upgrade`. It runs against a
@@ -111,6 +112,31 @@ spec:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sIRON_CONTROL_DATABASE_URL" $prefix }}
+            # Thread browsing reads api-rs session rows from its logical DB.
+            # Keep this under a Console-specific name so Rails' primary
+            # DATABASE_URL remains pointed at the console database.
+            - name: CENTAUR_CONSOLE_CENTAUR_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sDATABASE_URL" $prefix }}
+            - name: CENTAUR_CONSOLE_SLACKBOTV2_USER_NAME
+              value: {{ .Values.slackbotv2.userName | quote }}
+            - name: CENTAUR_CONSOLE_SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sSLACK_BOT_TOKEN" $prefix }}
+                  optional: true
+{{- range $name := tuple "CLAUDE_MODEL" "CODEX_MODEL" }}
+{{- if hasKey $.Values.sandbox.extraEnv $name }}
+            # Mirror the deployer's harness default-model override
+            # (sandbox.extraEnv) so the Threads view names the model threads
+            # without a recorded override actually ran on.
+            - name: {{ $name }}
+              value: {{ index $.Values.sandbox.extraEnv $name | toString | quote }}
+{{- end }}
+{{- end }}
             - name: IRON_CONTROL_INITIAL_USER_EMAIL
               valueFrom:
                 secretKeyRef:
@@ -146,6 +172,33 @@ spec:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sIRON_CONTROL_SECRET_KEY_BASE" $prefix }}
+            - name: CENTAUR_JWT_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sCENTAUR_JWT_SIGNING_SECRET" $prefix }}
+            # In-cluster console URL exactly as sandboxes dial it (the same
+            # value api-rs receives as IRON_CONTROL_URL). Console derives the
+            # sandbox entitlements injection-rule host from it, so the rule
+            # matches regardless of what Host the sync request carried.
+            - name: CENTAUR_CONSOLE_URL
+              value: {{ include "centaur.consoleUrl" . | quote }}
+{{- if $console.publicUrl }}
+            - name: CENTAUR_CONSOLE_PUBLIC_URL
+              value: {{ $console.publicUrl | quote }}
+{{- end }}
+{{- if $mcpPublicUrl }}
+            - name: CENTAUR_MCP_PUBLIC_URL
+              value: {{ $mcpPublicUrl | quote }}
+{{- end }}
+            - name: CENTAUR_CONSOLE_PASSWORD_LOGIN_ENABLED
+              value: {{ $console.passwordLoginEnabled | quote }}
+            - name: CENTAUR_CONSOLE_PUBLIC_SLACK_THREADS_ENABLED
+              value: {{ $console.publicSlackThreadsEnabled | quote }}
+{{- with $console.ssoEmailDomains }}
+            - name: CENTAUR_CONSOLE_SSO_EMAIL_DOMAINS
+              value: {{ join "," . | quote }}
+{{- end }}
 {{- if $console.googleOauth.enabled }}
             # Google OAuth app credentials (sign-in + brokered token refresh).
             # Gated on console.googleOauth.enabled; the keys must exist in the
@@ -161,6 +214,24 @@ spec:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sIRON_CONTROL_GOOGLE_CLIENT_SECRET" $prefix }}
 {{- end }}
+{{- if $console.slackOauth.enabled }}
+            # Slack OIDC app credentials (console sign-in only — distinct from
+            # the DB-managed Slack OAuth app the bot/DM sync uses). Gated on
+            # console.slackOauth.enabled; the keys must exist in the shared
+            # infra Secret when enabled. Uses the modern CENTAUR_CONSOLE_*
+            # names (unlike the legacy IRON_CONTROL_* keys above) since this
+            # block postdates the rename.
+            - name: CENTAUR_CONSOLE_SLACK_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sCENTAUR_CONSOLE_SLACK_CLIENT_ID" $prefix }}
+            - name: CENTAUR_CONSOLE_SLACK_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sCENTAUR_CONSOLE_SLACK_CLIENT_SECRET" $prefix }}
+{{- end }}
             - name: RAILS_ENV
               value: {{ $console.railsEnv | quote }}
 {{- with $console.slackDmSync.oauthAppSlug }}
@@ -174,6 +245,8 @@ spec:
             - name: RAILS_SERVE_STATIC_FILES
               value: "1"
 {{- if .Values.apiRs.enabled }}
+            - name: CENTAUR_API_URL
+              value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
             - name: CENTAUR_CONSOLE_CENTAUR_API_URL
               value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
 {{- end }}

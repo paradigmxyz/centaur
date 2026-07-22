@@ -59,7 +59,7 @@ Supported v2 primitives:
 | `handler(inp, ctx)` | Supported |
 | `ctx.step(name, fn)` | Supported |
 | `ctx.agent_turn(...)` / `ctx.run_agent(...)` | Supported |
-| `ctx.call_tool(...)` | Supported through the configured tool API proxy |
+| `ctx.call_tool(...)` | Supported through the generated `centaur-tools call` bridge in the workflow-host sandbox |
 | `ctx.post_to_slack(...)` | Supported |
 | `ctx._pool` | Supported when the workflow-host sandbox receives `DATABASE_URL` |
 | `WEBHOOKS` | Supported |
@@ -110,6 +110,8 @@ result = await ctx.agent_turn(
     "Investigate this alert and return the next action.",
     thread_key=f"workflow:{ctx.run_id}:agent",
     harness="codex",
+    model="gpt-5.2",
+    reasoning="high",
     metadata={"workflow": WORKFLOW_NAME},
 )
 ```
@@ -117,6 +119,34 @@ result = await ctx.agent_turn(
 The workflow host sandbox is separate from the agent sandbox. The workflow
 handler coordinates the run; the agent turn runs through the normal Centaur
 session runtime.
+
+#### Pick the model and reasoning effort
+
+`ctx.agent_turn(...)` accepts optional `model`, `provider`, and `reasoning`
+kwargs. They ride the turn exactly like the Slack `--model` / `--bedrock` /
+`-rsn` flags: `model` selects the model within the harness, `reasoning` sets the
+codex reasoning effort (`none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`),
+and `provider` selects the codex model provider. `provider` and `reasoning` only
+affect the codex harness; claude and amp ignore them. `reasoning` also accepts
+the `reasoning_effort` and `effort` aliases. When a kwarg is omitted the
+deployment/baked harness default stands — dispatched turns are no longer pinned
+to the deployment default.
+
+To set a default for **every** turn in a workflow, declare a module-level
+`AGENT_DEFAULTS` dict. Explicit per-call kwargs override it key by key:
+
+```python
+WORKFLOW_NAME = "nightly_report"
+AGENT_DEFAULTS = {"harness": "codex", "model": "gpt-5.2", "reasoning": "high"}
+
+async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
+    await ctx.agent_turn("Draft the report.")            # gpt-5.2 @ high
+    await ctx.agent_turn("Tidy formatting.", reasoning="low")  # gpt-5.2 @ low
+```
+
+Keep `harness` and `model` together — a model is only meaningful within its
+harness, and because kwargs override `AGENT_DEFAULTS` key by key, overriding one
+without the other can strand a model on the wrong harness.
 
 ### Declare webhook metadata in the workflow
 
@@ -151,11 +181,15 @@ Schedules can live beside the handler:
 ```python
 SCHEDULE = {
     "type": "cron",
-    "cron": "0 9 * * 1-5",
+    "cron": "0 9 * * MON-FRI",
     "timezone": "America/New_York",
     "input": {"profile": "default"},
 }
 ```
+
+Write day-of-week as names (`MON-FRI`), not numbers: the parser is Quartz-style
+(1 = Sunday), so a Unix-style `1-5` fires Sunday–Thursday. See
+[Schedule a workflow](/extend/workflows#schedule-a-workflow) for details.
 
 `api-rs` reconciles enabled schedule metadata into Absurd schedule tasks. ETL
 workflows can be routed to a separate queue so long-running sync jobs do not
@@ -197,9 +231,10 @@ Workflows that import unrelated API-service internals should move that behavior
 into the workflow-host API surface or a small local helper owned by the workflow
 domain before they are v2-ready.
 
-The tool runtime is also still proxied. `ctx.call_tool(...)` works through the
-configured tool API, but a fully native `api-rs` tool runtime is a separate
-migration step.
+`ctx.call_tool(...)` is a compatibility surface in the Python workflow host. It
+uses the generated `centaur-tools call` bridge against the installed tool
+package; agent sandboxes should use direct tool CLIs instead of deprecated
+`/tools/...` HTTP routes.
 
 ## Verify a migration
 
@@ -217,7 +252,6 @@ Then create a real run:
 ```bash
 curl -s "$CENTAUR_API_URL/api/workflows/runs" \
   -H "Content-Type: application/json" \
-  -H "X-Api-Key: $WORKFLOW_API_KEY" \
   -d '{
     "workflow_name": "nightly_report",
     "input": {"topic": "open incidents"}

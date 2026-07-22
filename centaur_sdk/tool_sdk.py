@@ -7,12 +7,14 @@ import contextlib
 import json
 import logging
 import mimetypes
-from urllib.parse import quote
+import os
 import urllib.request
+import uuid
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 log = logging.getLogger(__name__)
 
@@ -77,6 +79,14 @@ def secret(key: str, default: str | None = None) -> str:
     raise KeyError(f"Missing secret '{key}'{ctx_name}")
 
 
+def _require_api_server_enabled(operation: str) -> None:
+    if secret("CENTAUR_SANDBOX_API_SERVER_ENABLED", "true").strip().lower() == "false":
+        raise RuntimeError(
+            f"{operation} requires the API server sandbox capability, but it is disabled "
+            "for this principal."
+        )
+
+
 def current_thread_key() -> str:
     """Return the active thread key for a tool call."""
     try:
@@ -98,6 +108,7 @@ def current_session_context() -> dict[str, Any]:
     ``slack.thread_ts``. The API remains the source of truth so warm pooled
     sandboxes do not need per-thread environment mutation.
     """
+    _require_api_server_enabled("current_session_context")
     thread_key = current_thread_key()
     base_url = secret("CENTAUR_API_URL", "http://api:8000").rstrip("/")
     headers: dict[str, str] = {}
@@ -125,6 +136,145 @@ def current_slack_thread() -> dict[str, str]:
     }
 
 
+def current_discord_thread() -> dict[str, str]:
+    """Return the current Discord destination.
+
+    ``{"guild_id": ..., "channel_id": ..., "thread_id": ...}`` (``thread_id`` is
+    omitted for a channel-root message). Raises if the current thread is not a
+    Discord thread.
+    """
+    context = current_session_context()
+    discord = context.get("discord")
+    if (
+        not isinstance(discord, dict)
+        or not discord.get("guild_id")
+        or not discord.get("channel_id")
+    ):
+        raise RuntimeError(f"current thread is not a Discord thread: {context.get('thread_key')!r}")
+    destination = {
+        "guild_id": str(discord["guild_id"]),
+        "channel_id": str(discord["channel_id"]),
+    }
+    if discord.get("thread_id"):
+        destination["thread_id"] = str(discord["thread_id"])
+    return destination
+
+
+def current_linear_thread() -> dict[str, str]:
+    """Return the current Linear destination.
+
+    ``{"issue_id": ..., "comment_id": ..., "agent_session_id": ...}`` (the
+    optional comment/session ids are omitted when absent). Raises if the current
+    thread is not a Linear thread.
+    """
+    context = current_session_context()
+    linear = context.get("linear")
+    if not isinstance(linear, dict) or not linear.get("issue_id"):
+        raise RuntimeError(f"current thread is not a Linear thread: {context.get('thread_key')!r}")
+    destination = {"issue_id": str(linear["issue_id"])}
+    if linear.get("comment_id"):
+        destination["comment_id"] = str(linear["comment_id"])
+    if linear.get("agent_session_id"):
+        destination["agent_session_id"] = str(linear["agent_session_id"])
+    return destination
+
+
+def current_github_thread() -> dict[str, str | int]:
+    """Return the current GitHub destination.
+
+    ``{"owner": ..., "repo": ..., "number": ..., "kind": ..., "review_comment_id": ...}``
+    where ``kind`` is ``"issue"`` or ``"pr"`` and the optional
+    ``review_comment_id`` is omitted when the turn is not pinned to a PR
+    review-comment thread. Raises if the current thread is not a GitHub thread.
+    """
+    context = current_session_context()
+    github = context.get("github")
+    if (
+        not isinstance(github, dict)
+        or not github.get("owner")
+        or not github.get("repo")
+        or not github.get("number")
+    ):
+        raise RuntimeError(f"current thread is not a GitHub thread: {context.get('thread_key')!r}")
+    destination: dict[str, str | int] = {
+        "owner": str(github["owner"]),
+        "repo": str(github["repo"]),
+        "number": int(github["number"]),
+        "kind": str(github.get("kind") or "pr"),
+    }
+    if github.get("review_comment_id"):
+        destination["review_comment_id"] = int(github["review_comment_id"])
+    return destination
+
+
+def current_chat_destination() -> dict[str, str | int]:
+    """Return the current chat surface in a platform-agnostic shape.
+
+    Always includes ``platform`` (``"slack"`` / ``"discord"`` / ``"linear"`` /
+    ``"github"``) plus that platform's destination ids (Slack:
+    ``channel_id``/``thread_ts``; Discord: ``guild_id``/``channel_id``/``thread_id``;
+    Linear: ``issue_id``/``comment_id``/``agent_session_id``; GitHub:
+    ``owner``/``repo``/``number``/``kind``/``review_comment_id``). Prefer this
+    over the platform-specific helpers when writing tooling that should work on
+    any chat surface. Raises if the current thread is not a recognized chat
+    surface.
+    """
+    context = current_session_context()
+    platform = context.get("platform")
+    if platform == "slack":
+        return {"platform": "slack", **current_slack_thread()}
+    if platform == "discord":
+        return {"platform": "discord", **current_discord_thread()}
+    if platform == "linear":
+        return {"platform": "linear", **current_linear_thread()}
+    if platform == "github":
+        return {"platform": "github", **current_github_thread()}
+    raise RuntimeError(
+        f"current thread is not a recognized chat surface: {context.get('thread_key')!r}"
+    )
+
+
+def _sandbox_uploads_dir() -> Path | None:
+    configured = os.environ.get("CENTAUR_UPLOADS_DIR", "").strip()
+    if configured:
+        return Path(configured)
+    if os.environ.get("CENTAUR_THREAD_KEY", "").strip():
+        return Path.home() / "uploads"
+    return None
+
+
+def _unique_upload_path(uploads_dir: Path, name: str) -> Path:
+    candidate = uploads_dir / name
+    if not candidate.exists():
+        return candidate
+    suffix = candidate.suffix
+    stem = candidate.stem or "attachment"
+    return uploads_dir / f"{stem}-{uuid.uuid4().hex}{suffix}"
+
+
+def _save_local_attachment(
+    *,
+    name: str,
+    data: bytes,
+    mime_type: str,
+    source_url: str | None,
+    uploads_dir: Path,
+) -> dict[str, Any]:
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    path = _unique_upload_path(uploads_dir, name)
+    path.write_bytes(data)
+    return {
+        "attachment_id": None,
+        "filename": name,
+        "mime_type": mime_type,
+        "download_url": None,
+        "path": str(path),
+        "local_path": str(path),
+        "source_url": source_url,
+        "size_bytes": len(data),
+    }
+
+
 def save_attachment(
     *,
     name: str,
@@ -133,9 +283,20 @@ def save_attachment(
     source_url: str | None = None,
 ) -> dict[str, Any]:
     """Persist bytes as a Centaur attachment scoped to the current tool thread."""
-    thread_key = current_thread_key()
     safe_name = Path(name).name or "attachment"
     resolved_mime = mime_type or mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
+    uploads_dir = _sandbox_uploads_dir()
+    if uploads_dir is not None:
+        return _save_local_attachment(
+            name=safe_name,
+            data=data,
+            mime_type=resolved_mime,
+            source_url=source_url,
+            uploads_dir=uploads_dir,
+        )
+
+    _require_api_server_enabled("save_attachment")
+    thread_key = current_thread_key()
     base_url = secret("CENTAUR_API_URL", "http://api:8000").rstrip("/")
     payload = json.dumps(
         {

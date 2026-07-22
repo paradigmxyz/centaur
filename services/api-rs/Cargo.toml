@@ -67,13 +67,14 @@ futures-util = { version = "0.3", features = ["sink"] }
 hmac = "0.12"
 hex = "0.4"
 jiff = "0.2"
+jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }
 k8s-openapi = { version = "0.27.1", features = ["latest"] }
 kube = "3.1.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 sha2 = "0.10"
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "stream"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["form", "json", "rustls", "stream"] }
 ratatui = "0.29"
 rustls = "0.23"
 opentelemetry = "0.32.0"

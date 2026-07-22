@@ -25,6 +25,10 @@ pub enum HarnessServerError {
     },
     #[error("invalid blocks-mode input: {message}")]
     InvalidBlocksInput { message: String },
+    #[error("required environment variable {name} is not set")]
+    MissingEnvironment { name: &'static str },
+    #[error("Nanocodex error: {0}")]
+    Nanocodex(String),
     #[error("unknown threadId {thread_id}")]
     UnknownThread { thread_id: String },
     #[error("cwd must be absolute: {path}")]
@@ -49,6 +53,8 @@ pub enum HarnessServerError {
         status: ExitStatus,
         stderr: String,
     },
+    #[error("{kind:?} turn interrupted")]
+    TurnInterrupted { kind: HarnessKind },
     #[error("failed to spawn {bin} app-server: {source}")]
     SpawnCodex {
         bin: String,

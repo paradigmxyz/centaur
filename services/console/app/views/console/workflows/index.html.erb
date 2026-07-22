@@ -1,0 +1,99 @@
+<% content_for :title, "Workflows · Centaur Console" %>
+
+<% if @workflow_db_unavailable %>
+  <div class="mb-4 rounded border border-amber-500/30 bg-amber-500/[0.08] px-4 py-3 text-sm text-amber-200">
+    Workflow database is unavailable. Console needs the API workflow read-only views to show runs.
+  </div>
+<% end %>
+
+<section class="console-scroll-panel">
+  <table class="console-table">
+    <thead class="console-table-head">
+      <tr>
+        <th class="console-th">Workflow</th>
+        <th class="console-th">Status</th>
+        <th class="console-th">Attempts</th>
+        <th class="console-th">Started</th>
+        <th class="console-th">Finished</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-ink-700">
+      <% if @workflow_runs.empty? %>
+        <tr>
+          <td colspan="5" class="px-5 py-10 text-center text-zinc-600">
+            <%= @workflow_db_unavailable ? "No workflow runs available." : "No workflow runs yet." %>
+          </td>
+        </tr>
+      <% end %>
+
+      <% @workflow_runs.each do |run| %>
+        <% status = run.display_status %>
+        <% workflow_key = run.workflow_key %>
+        <% queue_runs = @queue_breakdown[workflow_key].presence || [ run ] %>
+        <tr class="console-row-hover align-top">
+          <td class="console-td">
+            <% if workflow_key.present? %>
+              <%= link_to truncate_middle(run.workflow_name_label, max: 48),
+                          console_workflow_path(workflow_key),
+                          class: "font-medium text-zinc-100 hover:text-centaur-300 hover:underline",
+                          title: run.workflow_name_label %>
+            <% else %>
+              <div class="font-medium text-zinc-100" title="<%= run.workflow_name_label %>">
+                <%= truncate_middle(run.workflow_name_label, max: 48) %>
+              </div>
+            <% end %>
+            <div class="mt-1 text-xs text-zinc-600"><%= run.task_name.presence || "workflow" %></div>
+          </td>
+
+          <td class="console-td-nowrap text-xs text-zinc-400">
+            <span class="inline-flex rounded border px-2 py-0.5 text-xs font-medium <%= workflow_status_classes(status) %>">
+              <%= status.tr("_", " ") %>
+            </span>
+            <% if queue_runs.size == 1 %>
+              <div class="mt-1.5 text-zinc-500"><%= run.queue_label %></div>
+            <% else %>
+              <div class="mt-2 space-y-2.5">
+                <% queue_runs.each_with_index do |queue_run, index| %>
+                  <div class="flex items-center gap-2">
+                    <span class="text-zinc-600"><%= index == queue_runs.size - 1 ? "└" : "├" %></span>
+                    <span><%= queue_run.queue_label %></span>
+                    <span class="inline-flex rounded border px-1.5 py-px text-[11px] font-medium <%= workflow_status_classes(queue_run.display_status) %>">
+                      <%= queue_run.display_status.tr("_", " ") %>
+                    </span>
+                    <span class="text-zinc-600">
+                      <%= local_time(queue_run.recency_at, relative: true, format: :compact) %>
+                      · <%= queue_run.queue_run_count.to_i %> runs
+                    </span>
+                  </div>
+                <% end %>
+              </div>
+            <% end %>
+          </td>
+
+          <td class="console-td-nowrap text-xs text-zinc-400">
+            <%= run.attempts || 0 %><span class="text-zinc-600"> / <%= run.max_attempts.presence || "unlimited" %></span>
+          </td>
+
+          <td class="console-td-nowrap text-xs text-zinc-400">
+            <%= local_time(run.started_or_created_at, relative: true) %>
+            <% if run.created_at.present? && run.started_or_created_at != run.created_at %>
+              <div class="mt-1 text-zinc-600">queued <%= local_time(run.created_at, relative: true, format: :compact) %></div>
+            <% end %>
+          </td>
+
+          <td class="console-td-nowrap text-xs text-zinc-400">
+            <%= local_time(run.terminal_at, relative: true) %>
+          </td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+
+  <% unless @workflow_db_unavailable %>
+    <%= render "pagination",
+               page: @page,
+               total_pages: @total_pages,
+               total_count: @total_workflows.to_i,
+               unit: "workflow" %>
+  <% end %>
+</section>

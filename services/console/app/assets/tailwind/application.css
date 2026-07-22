@@ -44,6 +44,33 @@
     @apply mt-1 text-sm text-zinc-500;
   }
 
+  /* Stacks the title over its action buttons on narrow screens so long action
+     labels (e.g. "Add Principal" + "Cancel") stay fully on-screen; reverts to
+     the title/actions row from the sm breakpoint up. */
+  .console-page-header {
+    @apply mb-6 flex min-h-11 flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4;
+  }
+
+  .console-page-heading {
+    @apply flex min-w-0 items-start gap-3;
+  }
+
+  .console-page-icon {
+    @apply mt-0.5 grid size-7 shrink-0 place-items-center rounded-lg bg-ink-850/75 text-zinc-400;
+  }
+
+  .console-page-title-copy {
+    @apply min-w-0;
+  }
+
+  .console-page-actions {
+    @apply flex shrink-0 items-center gap-2;
+  }
+
+  .console-page-meta {
+    @apply pt-1 text-xs text-zinc-500;
+  }
+
   .back-link {
     @apply text-xs text-zinc-500 hover:text-centaur-400;
   }
@@ -57,7 +84,11 @@
   }
 
   .console-table {
-    @apply min-w-full divide-y divide-ink-600 text-sm;
+    @apply min-w-full text-sm;
+  }
+
+  .console-table > thead {
+    @apply border-b border-ink-600;
   }
 
   .console-table-head {

@@ -24,6 +24,10 @@ from typing import Any
 from api import metrics
 from api.workflow_engine import WorkflowContext
 
+DATABASE_CONNECT_ATTEMPTS = 5
+DATABASE_CONNECT_BACKOFF_SECONDS = 0.25
+DATABASE_CONNECT_BACKOFF_MAX_SECONDS = 2.0
+
 
 class ProtocolError(RuntimeError):
     pass
@@ -80,6 +84,8 @@ class RegisteredWorkflow:
     input_cls: type | None
     webhooks: Any
     schedule: Any
+    principal: Any = None
+    agent_defaults: dict[str, Any] | None = None
 
 
 def workflow_dirs() -> list[Path]:
@@ -138,6 +144,9 @@ def load_workflow_file(path: Path) -> RegisteredWorkflow | None:
     handler = getattr(module, "handler", None)
     if not isinstance(workflow_name, str) or not callable(handler):
         return None
+    agent_defaults = getattr(module, "AGENT_DEFAULTS", None)
+    if not isinstance(agent_defaults, dict):
+        agent_defaults = None
     return RegisteredWorkflow(
         workflow_name=workflow_name,
         source_path=str(path),
@@ -145,6 +154,8 @@ def load_workflow_file(path: Path) -> RegisteredWorkflow | None:
         input_cls=getattr(module, "Input", None),
         webhooks=getattr(module, "WEBHOOKS", None),
         schedule=getattr(module, "SCHEDULE", None),
+        principal=getattr(module, "WORKFLOW_PRINCIPAL", None),
+        agent_defaults=agent_defaults,
     )
 
 
@@ -231,7 +242,29 @@ async def create_pool() -> Any:
         import asyncpg  # type: ignore
     except ImportError:
         return None
-    return await asyncpg.create_pool(database_url)
+
+    last_error: Exception | None = None
+    for attempt in range(1, DATABASE_CONNECT_ATTEMPTS + 1):
+        try:
+            return await asyncpg.create_pool(database_url)
+        except Exception as exc:
+            last_error = exc
+            if attempt == DATABASE_CONNECT_ATTEMPTS:
+                break
+            delay = min(
+                DATABASE_CONNECT_BACKOFF_MAX_SECONDS,
+                DATABASE_CONNECT_BACKOFF_SECONDS * (2 ** (attempt - 1)),
+            )
+            print(
+                "workflow_database_connect_retry "
+                f"attempt={attempt} attempts={DATABASE_CONNECT_ATTEMPTS} "
+                f"delay_seconds={delay} "
+                f"error={type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            await asyncio.sleep(delay)
+    assert last_error is not None
+    raise last_error
 
 
 def jsonable(value: Any) -> Any:
@@ -295,6 +328,11 @@ def normalize_schedule(workflow: RegisteredWorkflow) -> dict[str, Any] | None:
     return schedule
 
 
+def normalize_principal(workflow: RegisteredWorkflow) -> bool | None:
+    raw = workflow.principal
+    return raw if isinstance(raw, bool) and raw else None
+
+
 async def run_workflow(message: dict[str, Any], rpc: RpcClient) -> dict[str, Any]:
     workflows = discover_workflows()
     workflow_name = str(message.get("workflow_name") or "")
@@ -309,6 +347,7 @@ async def run_workflow(message: dict[str, Any], rpc: RpcClient) -> dict[str, Any
         task_id=str(message.get("task_id") or ""),
         workflow_name=workflow_name,
         pool=pool,
+        agent_defaults=registered.agent_defaults,
     )
     previous_metric_rpc = metrics.get_metric_rpc()
     metrics.set_metric_rpc(rpc)
@@ -343,6 +382,7 @@ def discovery_payload() -> dict[str, Any]:
                 "source_path": workflow.source_path,
                 "webhooks": normalize_webhooks(workflow),
                 "schedule": normalize_schedule(workflow),
+                "principal": normalize_principal(workflow),
             }
             for workflow in workflows.values()
         ],

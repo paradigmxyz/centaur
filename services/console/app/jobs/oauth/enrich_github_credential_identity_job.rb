@@ -42,7 +42,8 @@ module Oauth
         name: "GitHub – #{display_name}",
         provider_subject: subject,
         provider_email: profile[:email].presence || credential.provider_email,
-        foreign_id: "github-#{credential.oauth_app.slug}-#{subject.downcase}"
+        foreign_id: "github-#{credential.oauth_app.slug}-#{subject.downcase}",
+        labels: (credential.labels || {}).merge("github_login" => profile[:login])
       )
 
       secret = credential.static_secret
@@ -70,7 +71,8 @@ module Oauth
       {
         subject: id.to_s,
         email: response["email"].presence,
-        name: response["name"].presence || login
+        name: response["name"].presence || login,
+        login: login
       }
     rescue GithubProfileRetryableError
       raise

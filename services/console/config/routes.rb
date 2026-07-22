@@ -5,9 +5,15 @@ Rails.application.routes.draw do
   # Can be used by load balancers and uptime monitors to verify that the app is live.
   get "up" => "rails/health#show", as: :rails_health_check
 
-  # Render dynamic PWA files from app/views/pwa/* (remember to link manifest in application.html.erb)
-  # get "manifest" => "rails/pwa#manifest", as: :pwa_manifest
-  # get "service-worker" => "rails/pwa#service_worker", as: :pwa_service_worker
+  # PWA manifest + service worker, rendered from app/views/pwa/*. Served by
+  # Rails::PwaController (framework controller, no console session required) so
+  # the browser can fetch them outside an authenticated page load. Both layouts
+  # link the manifest and register the worker.
+  get "manifest" => "rails/pwa#manifest", as: :pwa_manifest
+  get "service-worker" => "rails/pwa#service_worker", as: :pwa_service_worker
+  # Target of the manifest's web+centaur:// protocol handler: maps the
+  # custom-scheme URL in ?target= onto an in-app path and redirects.
+  get "launch", to: "launch#show", as: :launch
 
   # Operator console session login (cookie-based, separate from the API key auth).
   get "login", to: "sessions#new", as: :login
@@ -22,10 +28,40 @@ Rails.application.routes.draw do
   get "auth/:provider/start", to: "session_oauth#start", as: :auth_start
   get "auth/:provider/callback", to: "session_oauth#callback", as: :auth_callback
 
+  # MCP OAuth authorization server. MCP clients discover this from api-rs'
+  # OAuth protected-resource metadata and register public PKCE clients here.
+  get ".well-known/oauth-authorization-server", to: "mcp/oauth#metadata"
+  get ".well-known/openid-configuration", to: "mcp/oauth#metadata"
+  post "mcp/oauth/register", to: "mcp/oauth#register"
+  get "mcp/oauth/authorize", to: "mcp/oauth#authorize"
+  post "mcp/oauth/authorize", to: "mcp/oauth#approve"
+  post "mcp/oauth/token", to: "mcp/oauth#token"
+
   # Operator console (server-rendered HTML UI).
   root "console#principals"
   get "console/principals", to: "console#principals", as: :console_principals
+  namespace :console do
+    get  "principals/new", to: "principals#new",    as: :new_principal
+    post "principals",     to: "principals#create", as: :create_principal
+  end
   get "console/principals/:id", to: "console#principal", as: :console_principal
+  namespace :console do
+    resources :threads, only: %i[index create]
+    post "threads/share", to: "threads#share", as: :thread_share
+    # Single-panel transcript refresh polled by thread_poller_controller.js
+    # while a turn is running. thread_key rides as a query param: keys carry
+    # colons and dots a path segment would mangle.
+    get "threads/panel", to: "threads#panel", as: :thread_panel
+    resources :workflows, only: %i[index show] do
+      member do
+        post :run, action: :force_start
+      end
+    end
+    # Lazily-loaded sidebar thread list (Turbo Frame src). Kept off the main
+    # page render so the unindexed cross-database sessions query does not block
+    # every console page. See ApplicationController#load_console_sidebar_threads.
+    get "sidebar_threads", to: "threads#sidebar", as: :sidebar_threads
+  end
   namespace :console do
     resources :roles, only: %i[index show new create edit update] do
       member do
@@ -38,7 +74,9 @@ Rails.application.routes.draw do
   # extra /roles and /grants path segments keep these clear of the show route above
   # and avoid clobbering the console_principal_path helper.
   namespace :console do
+    delete "principals/:id",                  to: "principals#destroy", as: :delete_principal
     patch  "principals/:id/sandbox_access",   to: "principals#update_sandbox_access", as: :principal_sandbox_access
+    patch  "principals/:id/slack_channel_permissions", to: "principals#update_slack_channel_permissions", as: :principal_slack_channel_permissions
     post   "principals/:id/roles",            to: "principals#assign_role",   as: :principal_assign_role
     delete "principals/:id/roles/:role_id",   to: "principals#unassign_role", as: :principal_unassign_role
     post   "principals/:id/grants",           to: "principals#grant_secret",  as: :principal_grant_secret
@@ -64,6 +102,9 @@ Rails.application.routes.draw do
   end
   get "console/credentials/:id", to: "console#credential", as: :console_credential
   get "console/oauth_apps", to: "console#oauth_apps", as: :console_oauth_apps
+  # User-facing list of enabled OAuth apps and their consent start links. Not
+  # admin-gated: any signed-in team member connects integrations from here.
+  get "console/integrations", to: "console/integrations#index", as: :console_integrations
   get "console/etls", to: "console/etls#index", as: :console_etls
   namespace :console do
     post "etls/slack_archive_imports",
@@ -97,6 +138,10 @@ Rails.application.routes.draw do
         post :promote
       end
     end
+    resource :system_settings, only: %i[edit update], path: "settings"
+    # Admin self-descope ("view as operator"): pause (admin-only) and restore
+    # admin permissions. A singular resource because it's a per-session flag.
+    resource :descope, only: %i[create destroy]
   end
 
   namespace :api do
@@ -139,6 +184,7 @@ Rails.application.routes.draw do
         end
         member do
           get "effective_config"
+          post "slack_channel_permissions", action: :upsert_slack_channel_permission
         end
         # Role assignments for a principal. :id is the role's oid.
         resources :roles, only: %i[index create destroy], controller: :principal_roles
@@ -163,12 +209,16 @@ Rails.application.routes.draw do
 
       # Called by iron-proxy instances (proxy bearer auth, not ApiKey auth).
       post "proxy/sync", to: "proxy_sync#create"
+
+      # Called from inside sandboxes through their assigned iron-proxy. The
+      # proxy injects a short-lived sandbox entitlement JWT scoped to these paths.
+      get "sandbox/permissions", to: "sandbox_permissions#show"
+      get "sandbox/oauth_apps", to: "sandbox_oauth_apps#index"
     end
   end
 
-  # Public OAuth consent flow, keyed by the app's well-known slug
-  # (/oauth/google/start). Deliberately unauthenticated: a team member clicks the
-  # link to connect an integration; the provider is derived from the app.
+  # OAuth consent flow, keyed by the app's well-known slug (/oauth/google/start).
+  # Requires an active console session; the provider is derived from the app.
   get "oauth/:slug/start", to: "oauth/flows#start", as: :oauth_start
   get "oauth/:slug/callback", to: "oauth/flows#callback", as: :oauth_callback
 

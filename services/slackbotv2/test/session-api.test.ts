@@ -2,8 +2,11 @@ import { describe, expect, test } from 'bun:test'
 import {
   clearConversationNameCacheForTests,
   clearRequesterIdentityCacheForTests,
+  DEFAULT_SESSION_IDLE_TIMEOUT_MS,
   forwardToSessionApi,
   harnessRestartPreamble,
+  interruptSessionExecution,
+  openSessionEventStream,
   serializeAttachment,
   serializeMessage
 } from '../src/session-api'
@@ -81,6 +84,14 @@ function fakeApi(responses: { createSession?: Array<{ body?: unknown; status: nu
         thread_key: 'slack:C1:1700000000.000100'
       })
     }
+    if (url.endsWith('/interrupt')) {
+      return Response.json({
+        execution_id: 'exec-1',
+        interrupted: true,
+        ok: true,
+        thread_key: 'slack:C1:1700000000.000100'
+      })
+    }
     if (!url.endsWith('/messages') && createResponses.length > 0) {
       const next = createResponses.shift()!
       return Response.json(next.body ?? { ok: next.status < 400 }, { status: next.status })
@@ -99,9 +110,13 @@ function options(fetchFn: SlackbotV2Options['fetch']): SlackbotV2Options {
   }
 }
 
-function executeLine(requests: RecordedRequest[]): JsonObject {
+function executeBody(requests: RecordedRequest[]): Record<string, unknown> {
   const execute = requests.find(request => request.url.endsWith('/execute'))
-  const inputLines = (execute?.body as { input_lines: string[] }).input_lines
+  return (execute?.body ?? {}) as Record<string, unknown>
+}
+
+function executeLine(requests: RecordedRequest[]): JsonObject {
+  const inputLines = (executeBody(requests) as { input_lines: string[] }).input_lines
   return JSON.parse(inputLines[0]!) as JsonObject
 }
 
@@ -130,6 +145,116 @@ function textPartIncludes(part: JsonObject, text: string): boolean {
 function isJsonRecord(value: JsonValue | undefined): value is JsonObject {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }
+
+describe('session event streaming', () => {
+  test('passes activity summary events through to the renderer source stream', async () => {
+    const encoded = new TextEncoder().encode(
+      [
+        'id: 1',
+        'event: session.activity_summary',
+        'data: {"summary":"The agent is reading App Server events."}',
+        '',
+        'id: 2',
+        'event: session.execution_completed',
+        'data: {"result_text":"done"}',
+        '',
+      ].join('\n')
+    )
+    const fetchFn: SlackbotV2Options['fetch'] = async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoded)
+            controller.close()
+          }
+        }),
+        { headers: { 'content-type': 'text/event-stream' } }
+      )
+    const seenEventIds: number[] = []
+
+    const stream = await openSessionEventStream(options(fetchFn), {
+      afterEventId: 0,
+      executionId: 'exec-1',
+      onEventId: eventId => seenEventIds.push(eventId),
+      threadId: 'slack:C1:1700000000.000100'
+    })
+    const events = []
+    for await (const event of stream) events.push(event)
+
+    expect(events[0]).toEqual({
+      data: { summary: 'The agent is reading App Server events.' },
+      event: 'session.activity_summary',
+      eventId: 1,
+      eventKind: 'session.activity_summary'
+    })
+    expect(events[1]).toMatchObject({
+      event: 'session.execution_completed',
+      eventId: 2,
+      eventKind: 'session.execution_completed'
+    })
+    expect(seenEventIds).toEqual([1, 2])
+  })
+
+  test('uses interrupted wording for cancelled executions without error text', async () => {
+    const encoded = new TextEncoder().encode(
+      [
+        'id: 1',
+        'event: session.execution_cancelled',
+        'data: {"status":"cancelled","reason":"turn_interrupted"}',
+        '',
+      ].join('\n')
+    )
+    const fetchFn: SlackbotV2Options['fetch'] = async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoded)
+            controller.close()
+          }
+        }),
+        { headers: { 'content-type': 'text/event-stream' } }
+      )
+    const seenEventIds: number[] = []
+
+    const stream = await openSessionEventStream(options(fetchFn), {
+      afterEventId: 0,
+      executionId: 'exec-1',
+      onEventId: eventId => seenEventIds.push(eventId),
+      threadId: 'slack:C1:1700000000.000100'
+    })
+    const events = []
+    for await (const event of stream) events.push(event)
+
+    expect(events).toEqual([
+      {
+        data: { error: 'Execution interrupted' },
+        event: 'session.execution_cancelled',
+        eventId: 1,
+        eventKind: 'session.execution_cancelled'
+      }
+    ])
+    expect(seenEventIds).toEqual([1])
+  })
+})
+
+describe('session interruption', () => {
+  test('posts interruption reason to the thread interrupt endpoint', async () => {
+    const { fetchFn, requests } = fakeApi()
+
+    const response = await interruptSessionExecution(
+      options(fetchFn),
+      'slack:C1:1700000000.000100',
+      'Interrupted from Slack by U1'
+    )
+
+    expect(response.interrupted).toBe(true)
+    const interrupt = requests.find(request => request.url.endsWith('/interrupt'))
+    expect(interrupt?.url).toBe(
+      'http://api.test/api/session/slack%3AC1%3A1700000000.000100/interrupt'
+    )
+    expect(interrupt?.body).toEqual({ reason: 'Interrupted from Slack by U1' })
+  })
+})
 
 describe('Slack display text fallback', () => {
   test('serializeMessage extracts raw Slack blocks when adapter text is empty', async () => {
@@ -433,6 +558,29 @@ describe('forwardToSessionApi overrides', () => {
     expect('model' in line).toBe(false)
   })
 
+  test('includes provider override on the execute input line', async () => {
+    const { fetchFn, requests } = fakeApi()
+    await forwardToSessionApi(
+      options(fetchFn),
+      forwardInput(apiMessage('review this'), {
+        model: 'custom-model',
+        provider: 'responses'
+      })
+    )
+    const execute = requests.find(request => request.url.endsWith('/execute'))
+    const line = JSON.parse((execute?.body as { input_lines: string[] }).input_lines[0]!)
+    expect(line.model).toBe('custom-model')
+    expect(line.provider).toBe('responses')
+  })
+
+  test('omits provider field when no override is set', async () => {
+    const { fetchFn, requests } = fakeApi()
+    await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hi')))
+    const execute = requests.find(request => request.url.endsWith('/execute'))
+    const line = JSON.parse((execute?.body as { input_lines: string[] }).input_lines[0]!)
+    expect('provider' in line).toBe(false)
+  })
+
   test('includes reasoning override on the execute input line', async () => {
     const { fetchFn, requests } = fakeApi()
     await forwardToSessionApi(
@@ -450,6 +598,31 @@ describe('forwardToSessionApi overrides', () => {
     const execute = requests.find(request => request.url.endsWith('/execute'))
     const line = JSON.parse((execute?.body as { input_lines: string[] }).input_lines[0]!)
     expect('reasoning' in line).toBe(false)
+  })
+
+  test('includes default idle timeout on execute requests', async () => {
+    const { fetchFn, requests } = fakeApi()
+    await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hi')))
+    expect(executeBody(requests).idle_timeout_ms).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
+  })
+
+  test('caps default idle timeout to max duration on execute requests', async () => {
+    const { fetchFn, requests } = fakeApi()
+    await forwardToSessionApi(
+      { ...options(fetchFn), maxDurationMs: 60_000 },
+      forwardInput(apiMessage('hi'))
+    )
+    expect(executeBody(requests).idle_timeout_ms).toBe(60_000)
+    expect(executeBody(requests).max_duration_ms).toBe(60_000)
+  })
+
+  test('allows idle timeout override on execute requests', async () => {
+    const { fetchFn, requests } = fakeApi()
+    await forwardToSessionApi(
+      { ...options(fetchFn), idleTimeoutMs: 12_345 },
+      forwardInput(apiMessage('hi'))
+    )
+    expect(executeBody(requests).idle_timeout_ms).toBe(12_345)
   })
 
   test('retries session creation with existing harness on 409 conflict', async () => {
@@ -638,9 +811,21 @@ describe('session principal display name', () => {
     }
   }
 
-  function createBody(requests: RecordedRequest[]): { metadata?: { slack_conversation_name?: string } } {
+  function createBody(requests: RecordedRequest[]): {
+    metadata?: {
+      slack_conversation_name?: string
+      slack_team_id?: string
+      slack_user_email?: string
+      slack_user_id?: string
+    }
+  } {
     return (requests.find(request => request.url.endsWith('.000100'))?.body ?? {}) as {
-      metadata?: { slack_conversation_name?: string }
+      metadata?: {
+        slack_conversation_name?: string
+        slack_team_id?: string
+        slack_user_email?: string
+        slack_user_id?: string
+      }
     }
   }
 
@@ -781,15 +966,26 @@ describe('session principal display name', () => {
     dm.threadId = 'slack:D9:1700000000.000100'
     dm.raw = { channel: 'D9' }
     await withSlackStub(
-      url =>
-        url.includes('users.info')
-          ? Response.json({ ok: true, user: { profile: { display_name: 'Ada Lovelace' } } })
-          : Response.json({ ok: true }),
+      url => {
+        if (url.includes('users.info')) {
+          return Response.json({
+            ok: true,
+            user: { profile: { display_name: 'Ada Lovelace', email: 'ada@example.com' } }
+          })
+        }
+        return Response.json({
+          ok: true,
+          profile: { display_name: 'Ada Lovelace' }
+        })
+      },
       async () => {
         await forwardToSessionApi(slackOptions(fetchFn), forwardInput(dm))
       }
     )
     expect(createBody(requests).metadata?.slack_conversation_name).toBe('Ada Lovelace')
+    expect(createBody(requests).metadata?.slack_team_id).toBe('T1')
+    expect(createBody(requests).metadata?.slack_user_email).toBe('ada@example.com')
+    expect(createBody(requests).metadata?.slack_user_id).toBe('U1')
   })
 
   test('falls back to no name when the channel lookup fails', async () => {

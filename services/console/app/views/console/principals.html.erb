@@ -1,9 +1,11 @@
 <% content_for :title, "Principals · Centaur Console" %>
 
-<div class="mb-8">
-  <h1 class="page-title">Principals</h1>
-  <p class="page-subtitle"><%= pluralize(@principals.size, "principal") %> across all namespaces. Click a row to inspect its grants.</p>
-</div>
+<%= render "control_tabs" %>
+
+<%= render "console/page_header",
+           title: "Principals",
+           subtitle: "#{pluralize(@principals.size, "principal")} across all namespaces. Click a row to inspect its grants.",
+           actions: link_to("Add Principal", console_new_principal_path, class: "btn-primary") %>
 
 <div class="console-panel">
   <table class="console-table">

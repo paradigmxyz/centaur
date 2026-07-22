@@ -2,6 +2,8 @@ import type { RustSessionStreamEvent } from '@centaur/harness-events'
 import type { CodexAppServerToChatStreamOptions } from '@centaur/rendering'
 import type { Attachment, Chat, Logger, StateAdapter } from 'chat'
 import type { Hono } from 'hono'
+import type { ChannelDefaults } from './channel-defaults'
+import type { HarnessOverrides } from './overrides'
 import type { SlackDisplayTextSource } from './slack-display-text'
 
 export type JsonPrimitive = string | number | boolean | null
@@ -91,21 +93,82 @@ export type SlackbotV2ExecuteSessionResponse = {
   thread_key: string
 }
 
+export type SlackbotV2InterruptSessionResponse = {
+  execution_id?: string
+  interrupted: boolean
+  ok: boolean
+  thread_key: string
+}
+
 export type SlackbotV2Fetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+
+export type SlackbotV2BlockActionPayload = {
+  action_id: string
+  action_ts?: string
+  block_id?: string
+  channel_id?: string
+  message_id: string
+  message_ts?: string
+  team_id?: string
+  thread_id: string
+  thread_ts?: string
+  type: 'block_actions'
+  user_id: string
+  user_name: string
+  value?: string
+}
 
 export type SlackbotV2Options = {
   allowedExternalTeamIds?: readonly string[]
   apiKey?: string
   apiUrl: string
   assistantStatus?: string
+  /**
+   * When enabled, session.activity_summary events update Slack's assistant
+   * status and structured task output is hidden from the Slack stream.
+   */
+  activitySummaryStatusEnabled?: boolean
   botToken: string
   botUserId?: string
   /**
-   * Harness for new threads when no --claude/--amp/--codex flag is given
-   * (HarnessType wire value: codex | amp | claudecode). Defaults to codex.
+   * Public origin of the Console UI (same value the Console itself uses,
+   * `CENTAUR_CONSOLE_PUBLIC_URL`). When set, the first assistant message in a
+   * Slack thread gets an "Open chat in Console" context link. Unset skips
+   * the block entirely.
+   */
+  consolePublicUrl?: string
+  /**
+   * Per-channel default harness/model/provider/reasoning, keyed by Slack
+   * conversation id (SLACKBOTV2_CHANNEL_DEFAULTS). See channel-defaults.ts.
+   */
+  channelDefaults?: ChannelDefaults
+  /**
+   * Harness for new threads when no --claude/--amp/--codex/--nanocodex flag is
+   * given (HarnessType wire value: codex | amp | claudecode | nanocodex).
+   * Defaults to codex.
    */
   defaultHarnessType?: string
   fetch?: SlackbotV2Fetch
+  /**
+   * Deployment-configured default model per harness wire value (claudecode |
+   * codex), from the CLAUDE_MODEL / CODEX_MODEL env vars the chart mirrors
+   * out of sandbox.extraEnv. Display/metadata only — never forwarded to the
+   * harness. Unset harnesses fall back to the models pinned in this repo's
+   * harness config files (see console-session-link.ts).
+   */
+  harnessDefaultModels?: Record<string, string>
+  /** Strategy for resolving message-level harness/model/provider/reasoning overrides. */
+  messageOverridesStrategy?: MessageOverridesStrategy
+  /**
+   * Backoff delays between in-process retries of a Slack handoff after a
+   * retryable session API failure. Slack's own webhook redelivery cannot
+   * drive these retries: Slack times deliveries out after ~3s, so its
+   * redelivery races the still-running original attempt, is deduped, and is
+   * acknowledged before the original attempt fails. The bot retries locally
+   * instead and posts a visible error once the delays are exhausted.
+   */
+  handoffRetryDelaysMs?: readonly number[]
+  /** Milliseconds before an idle execution pauses its sandbox. Defaults to up to 3h. */
   idleTimeoutMs?: number
   logger?: Logger
   maxDurationMs?: number
@@ -123,11 +186,24 @@ export type SlackbotV2Options = {
   slackApiTimeoutMs?: number
   state?: StateAdapter
   stateKeyPrefix?: string
-  streamTaskDisplayMode?: 'plan' | 'timeline'
+  streamTaskDisplayMode?: 'none' | 'plan' | 'timeline'
   triggerBotAllowlist?: readonly string[]
   userName?: string
   mapper?: CodexAppServerToChatStreamOptions
 }
+
+export type MessageOverridesStrategyInput = {
+  text: string
+}
+
+export type MessageOverridesStrategyResult = {
+  cleanedText?: string
+  overrides: HarnessOverrides
+}
+
+export type MessageOverridesStrategy = (
+  input: MessageOverridesStrategyInput
+) => Promise<MessageOverridesStrategyResult>
 
 export type SlackbotV2 = {
   app: Hono
@@ -180,11 +256,17 @@ export type ForwardSessionInput = {
   contextPreamble?: string
   executionId?: string
   executeMessage?: SlackbotV2ApiMessage
-  /** Effective harness selected by sticky thread flags (--claude/--amp/--codex). */
+  /** Effective harness selected by sticky thread flags (including --nanocodex). */
   harnessType?: string
   messages: SlackbotV2ApiMessage[]
   /** Effective model selected by sticky thread flags (--model/--opus/...). */
   model?: string
+  /**
+   * Model recorded in execute metadata for readers like the Console: the
+   * explicit override when one is set, else the configured/baked harness
+   * default. Metadata only — never forwarded to the harness (that is `model`).
+   */
+  metadataModel?: string
   /** Effective model provider selected by sticky thread flags (--bedrock); codex only. */
   provider?: string
   /** Per-turn reasoning effort parsed from the `-rsn` flag (codex only). */

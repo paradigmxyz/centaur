@@ -16,6 +16,7 @@ class _CreateRequest:
 class _FakeFilesApi:
     def __init__(self):
         self.create_calls: list[dict] = []
+        self.list_calls: list[dict] = []
 
     def create(self, **kwargs):
         self.create_calls.append(kwargs)
@@ -37,6 +38,24 @@ class _FakeFilesApi:
             }
         )
 
+    def list(self, **kwargs):
+        self.list_calls.append(kwargs)
+        return _CreateRequest(
+            {
+                "files": [
+                    {
+                        "id": "file-123",
+                        "name": "Quinn's paper",
+                        "mimeType": "application/pdf",
+                        "size": "1024",
+                        "modifiedTime": "2026-07-21T10:00:00Z",
+                        "webViewLink": "https://drive.google.com/file/file-123",
+                        "parents": ["folder-123"],
+                    }
+                ]
+            }
+        )
+
 
 class _FakeDriveService:
     def __init__(self):
@@ -44,6 +63,38 @@ class _FakeDriveService:
 
     def files(self):
         return self.files_api
+
+
+class _FakeGmailMessagesApi:
+    def __init__(self, full_result: dict, raw_result: dict):
+        self.full_result = full_result
+        self.raw_result = raw_result
+        self.get_calls: list[dict] = []
+
+    def get(self, **kwargs):
+        self.get_calls.append(kwargs)
+        if kwargs.get("format") == "full":
+            return _CreateRequest(self.full_result)
+        if kwargs.get("format") == "raw":
+            return _CreateRequest(self.raw_result)
+        raise AssertionError(f"Unexpected Gmail format: {kwargs.get('format')}")
+
+
+class _FakeGmailUsersApi:
+    def __init__(self, messages_api: _FakeGmailMessagesApi):
+        self.messages_api = messages_api
+
+    def messages(self):
+        return self.messages_api
+
+
+class _FakeGmailService:
+    def __init__(self, full_result: dict, raw_result: dict):
+        self.messages_api = _FakeGmailMessagesApi(full_result, raw_result)
+        self.users_api = _FakeGmailUsersApi(self.messages_api)
+
+    def users(self):
+        return self.users_api
 
 
 class _FakeSheetsValuesApi:
@@ -153,6 +204,105 @@ def _tab(tab_id: str, content: list[dict], *, child_tabs: list[dict] | None = No
     }
 
 
+def test_gmail_read_returns_plain_html_and_raw_content(monkeypatch):
+    plain = base64.urlsafe_b64encode(b"Plain body").decode().rstrip("=")
+    html = base64.urlsafe_b64encode(b"<html><body><p>HTML body</p></body></html>").decode().rstrip("=")
+    raw = (
+        b"From: sender@example.com\n"
+        b"To: recipient@example.com\n"
+        b"Subject: Newsletter\n"
+        b"MIME-Version: 1.0\n"
+        b"Content-Type: text/html\n\n"
+        b"<html><body><p>HTML body</p></body></html>"
+    )
+    raw_encoded = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    full_result = {
+        "id": "msg-1",
+        "threadId": "thread-1",
+        "labelIds": ["INBOX"],
+        "payload": {
+            "headers": [
+                {"name": "Subject", "value": "Newsletter"},
+                {"name": "From", "value": "sender@example.com"},
+                {"name": "To", "value": "recipient@example.com"},
+                {"name": "Date", "value": "Thu, 02 Jul 2026 18:15:51 +0000"},
+            ],
+            "parts": [
+                {
+                    "mimeType": "multipart/alternative",
+                    "parts": [
+                        {"mimeType": "text/plain", "body": {"data": plain}},
+                        {"mimeType": "text/html", "body": {"data": html}},
+                    ],
+                }
+            ],
+        },
+    }
+    fake_service = _FakeGmailService(full_result, {"raw": raw_encoded})
+    monkeypatch.setattr(client, "get_gmail_service", lambda: fake_service)
+
+    result = client.gmail_read("msg-1")
+
+    assert result["id"] == "msg-1"
+    assert result["subject"] == "Newsletter"
+    assert result["body"] == "Plain body"
+    assert result["html"] == "<html><body><p>HTML body</p></body></html>"
+    assert result["raw"] == raw_encoded
+    assert fake_service.messages_api.get_calls == [
+        {"userId": "me", "id": "msg-1", "format": "full"},
+        {"userId": "me", "id": "msg-1", "format": "raw"},
+    ]
+
+
+def test_drive_list_searches_name_by_default(monkeypatch):
+    fake_service = _FakeDriveService()
+    monkeypatch.setattr(client, "get_drive_service", lambda: fake_service)
+
+    result = client.drive_list(query="report")
+
+    list_call = fake_service.files_api.list_calls[0]
+    assert list_call["q"] == "name contains 'report' and trashed = false"
+    assert list_call["includeItemsFromAllDrives"] is True
+    assert list_call["supportsAllDrives"] is True
+    assert result[0]["id"] == "file-123"
+    assert result[0]["size"] == 1024
+
+
+def test_drive_list_supports_full_text_contains_and_escapes_literals(monkeypatch):
+    fake_service = _FakeDriveService()
+    monkeypatch.setattr(client, "get_drive_service", lambda: fake_service)
+
+    client.drive_list(
+        query="quinn's paper\\essay",
+        folder_id="folder'123",
+        file_type="application/pdf",
+        full_text=True,
+    )
+
+    list_call = fake_service.files_api.list_calls[0]
+    assert list_call["q"] == (
+        "fullText contains 'quinn\\'s paper\\\\essay' and "
+        "'folder\\'123' in parents and "
+        "mimeType = 'application/pdf' and "
+        "trashed = false"
+    )
+
+
+def test_gsuite_client_drive_search_supports_full_text(monkeypatch):
+    calls: list[dict] = []
+
+    def fake_drive_list(**kwargs):
+        calls.append(kwargs)
+        return []
+
+    monkeypatch.setattr(client, "drive_list", fake_drive_list)
+
+    assert client.GSuiteClient().drive_search("contract language", full_text=True) == []
+    assert calls == [
+        {"query": "contract language", "max_results": 50, "full_text": True}
+    ]
+
+
 def test_drive_upload_sets_supports_all_drives(tmp_path, monkeypatch):
     upload_file = tmp_path / "example.txt"
     upload_file.write_text("hello")
@@ -183,13 +333,44 @@ def test_drive_upload_sets_supports_all_drives(tmp_path, monkeypatch):
     assert result["name"] == "example.txt"
 
 
-def test_drive_upload_rejects_local_path_argument():
-    with pytest.raises(TypeError, match="unexpected keyword argument 'file_path'"):
-        client.drive_upload(file_path="/tmp/secret.txt")
+def test_drive_upload_accepts_content_path(tmp_path, monkeypatch):
+    upload_file = tmp_path / "example.txt"
+    upload_file.write_text("hello from disk")
+    fake_service = _FakeDriveService()
+
+    monkeypatch.setattr(client, "get_drive_service", lambda: fake_service)
+    monkeypatch.setattr(
+        client,
+        "MediaIoBaseUpload",
+        lambda fd, mimetype, resumable: {
+            "content": fd.getvalue(),
+            "mimetype": mimetype,
+            "resumable": resumable,
+        },
+    )
+
+    result = client.drive_upload(
+        content_path=str(upload_file),
+        folder_id="parent-123",
+    )
+
+    create_call = fake_service.files_api.create_calls[0]
+    assert create_call["body"]["name"] == "example.txt"
+    assert create_call["body"]["parents"] == ["parent-123"]
+    assert create_call["media_body"]["content"] == b"hello from disk"
+    assert result["id"] == "file-123"
+
+
+def test_drive_upload_rejects_missing_content_path(tmp_path):
+    with pytest.raises(ValueError, match="content_path does not exist or is not a file"):
+        client.drive_upload(content_path=str(tmp_path / "missing.txt"))
 
 
 def test_drive_upload_requires_a_content_source():
-    with pytest.raises(ValueError, match="content_base64, attachment_id, or attachment_url"):
+    with pytest.raises(
+        ValueError,
+        match="content_base64, content_path, attachment_id, or attachment_url",
+    ):
         client.drive_upload()
 
 

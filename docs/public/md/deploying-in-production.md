@@ -17,7 +17,7 @@ creates sandbox pods for agent work. [iron-proxy](https://docs.iron.sh) handles 
 need credentials:
 
 <figure className="architecture-figure">
-  <img src="/brand/workflow.svg" alt="Centaur production workflow — Centaur API plus Postgres hands a run to the Kubernetes backend, which attaches a sandbox pod whose outbound HTTP routes through iron-proxy" />
+  <img src="/brand/workflow.svg" alt="Centaur production workflow: Centaur API plus Postgres hands a run to the Kubernetes backend, which attaches a sandbox pod whose outbound HTTP routes through iron-proxy" />
   <figcaption>Slackbot and API ingress → Centaur API (Postgres-backed) → Kubernetes sandbox runtime → outbound traffic through iron-proxy.</figcaption>
 </figure>
 
@@ -62,7 +62,7 @@ Minimum keys:
 | `DATABASE_URL` | API | Postgres connection string. |
 | `IRON_MANAGEMENT_API_KEY` | [iron-proxy](https://docs.iron.sh) management API | Generate with `openssl rand -hex 32`. |
 | `SANDBOX_SIGNING_KEY` | Sandbox API tokens | Generate with `openssl rand -hex 32`; keeps sandbox tokens valid across API restarts. |
-| `SLACK_BOT_TOKEN` | Slackbot | Bot User OAuth Token from the Slack app. |
+| `SLACK_BOT_TOKEN` | Slackbot/API | Bot User OAuth Token from the Slack app. |
 | `SLACK_SIGNING_SECRET` | Slackbot/API | Used to verify Slack webhook signatures. |
 | `SLACKBOT_API_KEY` | Slackbot to API | Static service token; API bootstraps it into Postgres on startup with `agent` scope. |
 | `OP_CONNECT_TOKEN` | [iron-proxy](https://docs.iron.sh) 1Password Connect source (preferred) | Needed when `ironProxy.secretSource` is `onepassword-connect`. |
@@ -81,7 +81,7 @@ Store one secret per enabled harness credential:
 |---------|-----------|----------------|---------------------|----------|
 | Codex default | `codex` | none or `--codex` | `OPENAI_API_KEY` | `api.openai.com` |
 | Codex with OpenRouter provider | `codex` | none or `--codex` | `OPENROUTER_API_KEY` | `openrouter.ai` |
-| Codex with Bedrock provider | `codex` | `--bedrock` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | `bedrock-mantle.<region>.api.aws` |
+| Codex with Meta AI direct | `codex` | `--meta` | `META_AI_API_KEY` | `api.ai.meta.com` |
 | Amp | `amp` | `--amp` | `AMP_API_KEY` | `ampcode.com` |
 | Claude Code | `claude-code` | `--claude` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
 | pi-mono | `pi-mono` | `--pi` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
@@ -100,52 +100,14 @@ alongside `CODEX_MODEL`. Per-turn Codex model overrides with provider-style
 slugs such as `--model anthropic/claude-fable-5` also select the OpenRouter
 provider even when `OPENROUTER_MODEL` is unset.
 
+To run Codex through Meta AI direct, store `META_AI_API_KEY` and select the
+provider with `--meta`. Pair it with `--model <model-id>` when choosing a
+provider-specific model for a turn.
+
 Whatever source you pick, the vault is shared across the whole deployment,
 so any thread can use any configured credential. Per-user and per-channel
 scoping is on the roadmap; until then, scope tool and harness access
 accordingly. See [Security](/security) for the full threat model.
-
-### Codex with Amazon Bedrock
-
-Codex can run against [Amazon Bedrock](https://aws.amazon.com/bedrock/) through
-its built-in `amazon-bedrock` provider, which talks to the Bedrock
-OpenAI-compatible Responses endpoint (`bedrock-mantle.<region>.api.aws`). It is
-opt-in and is never the default provider.
-
-Authentication uses AWS SigV4, not a bearer token, but the sandbox never sees
-real AWS credentials. Codex signs each request with *placeholder* credentials
-and [iron-proxy](https://docs.iron.sh) re-signs it with the real read-only IAM
-keys — the same placeholder-swap model as every other harness credential, just
-for SigV4 (this is exactly how the `cloudwatch` tool works). The re-signing is
-scoped to the `bedrock` service and the configured region only.
-
-To enable it:
-
-1. Store `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in the vault. Scope the
-   IAM principal to Bedrock inference only (e.g. `bedrock:InvokeModel`,
-   `bedrock:InvokeModelWithResponseStream`) — least privilege, like the
-   read-only CloudWatch user. If the keys are temporary (STS) and carry a
-   session token, also store `AWS_SESSION_TOKEN` and set
-   `CODEX_BEDROCK_SESSION_TOKEN=1` (via `sandbox.extraEnv`).
-2. Set `CODEX_BEDROCK_REGION` (via `sandbox.extraEnv`) to your Bedrock region.
-   This single setting opts the provider in and is the one source of truth for
-   the region: it registers the SigV4 re-signing credential (scoped to that
-   region), injects the placeholder AWS env into sandboxes, and pins codex's
-   `amazon-bedrock` provider to the same region at sandbox boot — so the
-   in-sandbox client and the proxy can never disagree. Defaults to `us-east-1`
-   when unset. (You can still layer further codex provider config via
-   `CODEX_CONFIG_OVERLAY`, which is applied on top.)
-3. If you have locked egress down (it is open by default), allowlist
-   `bedrock-mantle.<region>.api.aws`.
-
-Select it per thread with the `--bedrock` Slack flag (it implies the codex
-harness), and pick the Bedrock model with `--model <bedrock-model-id>` (for
-example `--model anthropic.claude-sonnet-4-...` or `--model openai.gpt-oss-120b`)
-or by setting a default `CODEX_MODEL`. The provider is fixed when the codex
-thread starts. `--bedrock` on a thread pinned to another harness restarts it onto
-codex+Bedrock; to move an existing codex thread between providers, start a new
-thread (a mid-thread provider switch is logged and ignored rather than applied
-silently).
 
 ### Codex Auth Modes
 
@@ -251,10 +213,13 @@ Use the app page to install the bot, copy the Bot User OAuth Token for
 6. Set the Request URL to `https://<your-host>/api/webhooks/slack`.
 7. Subscribe to `app_mention` and to the message events you want Centaur to see:
    `message.channels`, `message.groups`, and `message.im`.
+8. Enable Interactivity and set its Request URL to the same
+   `https://<your-host>/api/webhooks/slack` URL. Block Kit actions are emitted
+   to the workflow engine as `slack.block_action.<action_id>` events.
 
-The Slackbot currently normalizes Slack `app_mention` and `message` events.
-Do not rely on assistant-specific Slack event types unless the Slackbot code has
-explicit support for them.
+The Slackbot normalizes Slack `app_mention` and `message` events plus
+`block_actions` interactions. Do not rely on assistant-specific Slack event
+types unless the Slackbot code has explicit support for them.
 
 Do not put Centaur API-key auth in front of `/api/webhooks/slack`; the Slackbot
 validates Slack's signature and then calls the Centaur API separately.
@@ -281,6 +246,10 @@ ironProxy:
   secretSource: onepassword-connect
   secretTtl: 10m
 
+apiRs:
+  # Delete any sandbox older than this, running or suspended.
+  sandboxMaxLifetimeSecs: 259200
+
 onepasswordConnect:
   connect:
     create: true
@@ -298,6 +267,17 @@ sandbox:
 The Kubernetes sandbox backend is the active runtime backend; there is no chart
 switch named `api.sandboxBackend`.
 
+Sandbox lifecycle has two separate timers:
+
+- Slackbot v2 sends `idle_timeout_ms` on execute requests, defaulting to up to
+  3 hours, so api-rs can pause an idle sandbox after a turn finishes.
+- api-rs deletes old sandboxes through `apiRs.sandboxMaxLifetimeSecs`, default
+  72 hours, regardless of whether the sandbox is still running or already
+  suspended.
+
+There is no suspended-only delete setting. If you want sandboxes gone after N
+hours, set `apiRs.sandboxMaxLifetimeSecs` to N hours in seconds.
+
 Install or upgrade:
 
 ```bash
@@ -310,59 +290,37 @@ helm upgrade --install centaur contrib/chart \
 
 ## 6. Verify the deployment
 
-Check health from inside the API deployment first. Localhost is accepted for
-operator-only routes, so this avoids needing an external admin key for the first
-smoke check:
+Check health from inside the api-rs deployment first:
 
 ```bash
-kubectl exec -n centaur-system deploy/centaur-centaur-api -- \
-  curl -fsS http://localhost:8000/health
+kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- \
+  curl -fsS http://localhost:8080/healthz
 
-kubectl exec -n centaur-system deploy/centaur-centaur-api -- \
-  curl -fsS http://localhost:8000/health/ready | jq
-
-kubectl exec -n centaur-system deploy/centaur-centaur-api -- \
-  curl -fsS http://localhost:8000/health/tools | jq
+kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- \
+  curl -fsS http://localhost:8080/readyz | jq
 ```
 
-If you need to call operator routes from outside the cluster, create an admin
-API key from inside the API deployment and save the returned plaintext key:
+Run one agent turn from inside the api-rs deployment:
 
 ```bash
-kubectl exec -n centaur-system deploy/centaur-centaur-api -- \
-  curl -fsS -X POST http://localhost:8000/admin/api-keys \
-    -H "Content-Type: application/json" \
-    -d '{"name":"operator","scopes":["admin"],"created_by":"ops"}' | jq
-```
+THREAD_KEY=cli:production-smoke-codex
+THREAD_PATH=$(jq -rn --arg v "$THREAD_KEY" '$v|@uri')
 
-External operator calls then use:
-
-```bash
-curl -s "$CENTAUR_API_URL/health/tools" \
-  -H "X-Api-Key: $ADMIN_KEY" | jq
-```
-
-Run one agent turn from inside the API deployment:
-
-```bash
-THREAD_KEY=production-smoke-codex
-
-SPAWN=$(kubectl exec -n centaur-system deploy/centaur-centaur-api -- curl -s -X POST http://localhost:8000/agent/spawn \
+SESSION=$(kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- curl -s -X POST "http://localhost:8080/api/session/${THREAD_PATH}" \
   -H "Content-Type: application/json" \
-  -d "{\"thread_key\":\"${THREAD_KEY}\"}")
-ASSIGNMENT_GENERATION=$(printf '%s' "$SPAWN" | jq -r '.assignment_generation')
+  -d '{"harness_type":"codex","on_harness_conflict":"restart"}')
 
-kubectl exec -n centaur-system deploy/centaur-centaur-api -- curl -s -X POST http://localhost:8000/agent/message \
+kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- curl -s -X POST "http://localhost:8080/api/session/${THREAD_PATH}/messages" \
   -H "Content-Type: application/json" \
-  -d "{\"thread_key\":\"${THREAD_KEY}\",\"assignment_generation\":${ASSIGNMENT_GENERATION},\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"text\":\"Reply with exactly PONG.\"}]}"
+  -d '{"messages":[{"role":"user","parts":[{"type":"text","text":"Reply with exactly PONG."}]}]}'
 
-EXECUTE=$(kubectl exec -n centaur-system deploy/centaur-centaur-api -- curl -s -X POST http://localhost:8000/agent/execute \
+EXECUTE=$(kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- curl -s -X POST "http://localhost:8080/api/session/${THREAD_PATH}/execute" \
   -H "Content-Type: application/json" \
-  -d "{\"thread_key\":\"${THREAD_KEY}\",\"assignment_generation\":${ASSIGNMENT_GENERATION},\"delivery\":{\"platform\":\"dev\"}}")
+  -d '{"input_lines":["{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Reply with exactly PONG.\"}]}}"]}')
 EXECUTION_ID=$(printf '%s' "$EXECUTE" | jq -r '.execution_id')
 
-kubectl exec -n centaur-system deploy/centaur-centaur-api -- curl -s \
-  "http://localhost:8000/agent/executions/${EXECUTION_ID}" | jq
+kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- curl -s -N \
+  "http://localhost:8080/api/session/${THREAD_PATH}/events?execution_id=${EXECUTION_ID}&after_event_id=0"
 ```
 
 Then run the same prompt through Slack:
@@ -378,16 +336,17 @@ Inspect sandbox pods with the labels Centaur actually sets:
 
 ```bash
 kubectl get pods -n centaur-system -l centaur.ai/managed=true
+kubectl exec -n centaur-system <agent-sandbox-pod> -- centaur-tools list
 ```
 
 If a run fails because the sandbox pod exits or is deleted, inspect the durable
-execution before retrying:
+session and api-rs logs before retrying:
 
 ```bash
-kubectl exec -n centaur-system deploy/centaur-centaur-api -- curl -s \
-  "http://localhost:8000/agent/executions/${EXECUTION_ID}" | jq
+kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- curl -s \
+  "http://localhost:8080/api/session/${THREAD_PATH}" | jq
 
-kubectl logs -n centaur-system deploy/centaur-centaur-api --tail=200
+kubectl logs -n centaur-system deploy/centaur-centaur-api-rs --tail=200
 kubectl get pods -n centaur-system -l centaur.ai/managed=true
 ```
 

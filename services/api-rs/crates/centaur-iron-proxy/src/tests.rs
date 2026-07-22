@@ -3,7 +3,11 @@ use super::*;
 #[test]
 fn harness_auth_fragments_are_baked_in() {
     let codex = harness_auth_fragment("codex", "api_key").unwrap().unwrap();
-    assert!(placeholder_env(&[codex]).is_empty());
+    let codex_placeholders = placeholder_env(&[codex]);
+    assert_eq!(
+        codex_placeholders.get("OPENAI_API_KEY").map(String::as_str),
+        Some("OPENAI_API_KEY")
+    );
 
     // access_token carries the token-broker credential, not a replace
     // placeholder, so it contributes no sandbox placeholder env.
@@ -15,7 +19,35 @@ fn harness_auth_fragments_are_baked_in() {
     let openrouter = harness_auth_fragment("openrouter", "api_key")
         .unwrap()
         .unwrap();
-    assert!(placeholder_env(&[openrouter]).is_empty());
+    let openrouter_placeholders = placeholder_env(&[openrouter]);
+    assert_eq!(
+        openrouter_placeholders
+            .get("OPENROUTER_API_KEY")
+            .map(String::as_str),
+        Some("OPENROUTER_API_KEY")
+    );
+
+    let meta_ai = harness_auth_fragment("meta-ai", "api_key")
+        .unwrap()
+        .unwrap();
+    let meta_ai_placeholders = placeholder_env(&[meta_ai]);
+    assert_eq!(
+        meta_ai_placeholders
+            .get("META_AI_API_KEY")
+            .map(String::as_str),
+        Some("META_AI_API_KEY")
+    );
+
+    let claude_code = harness_auth_fragment("claude-code", "api_key")
+        .unwrap()
+        .unwrap();
+    let claude_code_placeholders = placeholder_env(&[claude_code]);
+    assert_eq!(
+        claude_code_placeholders
+            .get("ANTHROPIC_API_KEY")
+            .map(String::as_str),
+        Some("ANTHROPIC_API_KEY")
+    );
 
     assert!(harness_auth_fragment("codex", "bogus").unwrap().is_none());
 
@@ -25,8 +57,8 @@ fn harness_auth_fragments_are_baked_in() {
         Some("120s")
     );
     let placeholders = placeholder_env(&[infra]);
-    for name in ["AMP_API_KEY", "GITHUB_TOKEN", "SLACK_BOT_TOKEN"] {
-        assert_eq!(placeholders.get(name).map(String::as_str), Some(name));
+    for name in ["GITHUB_TOKEN", "SLACK_BOT_TOKEN"] {
+        assert_eq!(placeholders.get(name).map(String::as_str), None);
     }
 }
 

@@ -126,11 +126,11 @@ def test_prune_slack_dm_dry_run_counts_expected_tables():
         "runs": 8,
     }
     sql = "\n".join(call[0] for call in pool.calls)
-    assert "SELECT COUNT(*) FROM slack_dm_sync_messages" in sql
-    assert "SELECT COUNT(*) FROM slack_dm_sync_conversations" in sql
+    assert "SELECT COUNT(*) FROM slack_private_sync_messages" in sql
+    assert "SELECT COUNT(*) FROM slack_private_sync_conversations" in sql
     assert "NOT EXISTS" in sql
-    assert "SELECT COUNT(*) FROM slack_dm_sync_backfill_jobs" in sql
-    assert "SELECT COUNT(*) FROM slack_dm_sync_runs" in sql
+    assert "SELECT COUNT(*) FROM slack_private_sync_backfill_jobs" in sql
+    assert "SELECT COUNT(*) FROM slack_private_sync_runs" in sql
     assert "DELETE FROM" not in sql
 
 

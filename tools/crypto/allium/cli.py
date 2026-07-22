@@ -182,10 +182,15 @@ def describe_table(
                         print(
                             f"| `{col.get('name', '')}` | {col.get('type', '')} | {col.get('description', '')} |"
                         )
+                elif "content" in schema:
+                    # search_schemas(id=...) returns schema docs as markdown
+                    print(f"\n{schema['content']}")
             else:
                 console.print(f"[bold]{table_id}[/]")
                 if "description" in schema:
                     console.print(f"[dim]{schema['description']}[/]\n")
+                if "content" in schema and "columns" not in schema:
+                    console.print(schema["content"])
                 if "columns" in schema:
                     table = Table()
                     table.add_column("Column", style="cyan")
@@ -629,21 +634,24 @@ def hyperliquid_trades(
     if coin:
         where_clauses.append(f"coin = '{coin}'")
     if address:
-        where_clauses.append(f"(buyer = '{address}' OR seller = '{address}')")
+        where_clauses.append(f"(buyer_address = '{address}' OR seller_address = '{address}')")
     if side:
-        where_clauses.append(f"side = '{side.upper()}'")
+        # B = taker buy (buyer crossed), A = taker sell (seller crossed)
+        if side.upper() == "B":
+            where_clauses.append("buyer_crossed = 'true'")
+        else:
+            where_clauses.append("seller_crossed = 'true'")
 
     where_sql = " AND ".join(where_clauses)
     sql = f"""
     SELECT
         timestamp,
         coin,
-        side,
         price,
-        size,
-        price * size as notional_usd,
-        buyer,
-        seller,
+        amount,
+        usd_amount,
+        buyer_address,
+        seller_address,
         trade_id
     FROM hyperliquid.dex.trades
     WHERE {where_sql}
@@ -681,12 +689,12 @@ def hyperliquid_volume(
     SELECT
         coin,
         COUNT(*) as trade_count,
-        SUM(price * size) as total_volume_usd,
+        SUM(usd_amount) as total_volume_usd,
         AVG(price) as avg_price,
         MIN(price) as min_price,
         MAX(price) as max_price,
-        COUNT(DISTINCT buyer) as unique_buyers,
-        COUNT(DISTINCT seller) as unique_sellers
+        COUNT(DISTINCT buyer_address) as unique_buyers,
+        COUNT(DISTINCT seller_address) as unique_sellers
     FROM hyperliquid.dex.trades
     WHERE timestamp >= CURRENT_TIMESTAMP - INTERVAL '{days} days'
     {coin_filter}
@@ -726,7 +734,7 @@ def hyperliquid_orders(
     if coin:
         where_clauses.append(f"coin = '{coin}'")
     if address:
-        where_clauses.append(f"\"user\" = '{address}'")
+        where_clauses.append(f"\"USER\" = '{address}'")
     if status:
         where_clauses.append(f"status = '{status}'")
 
@@ -736,11 +744,11 @@ def hyperliquid_orders(
         status_change_timestamp,
         coin,
         side,
-        price,
+        limit_price,
         original_size,
         status,
         order_id,
-        "user"
+        "USER" as user_address
     FROM hyperliquid.raw.orders
     WHERE {where_sql}
     ORDER BY status_change_timestamp DESC
@@ -774,10 +782,20 @@ def hyperliquid_metrics(
         allium hl-metrics -o json
     """
     sql = f"""
-    SELECT *
+    SELECT
+        activity_date,
+        total_trade_count,
+        total_volume_usd,
+        perpetual_volume_usd,
+        spot_volume_usd,
+        active_buyers,
+        active_sellers,
+        liquidations_count,
+        liquidations_volume_usd,
+        total_trading_fees_usd
     FROM hyperliquid.metrics.overview
-    WHERE day >= CURRENT_DATE - INTERVAL '{days} days'
-    ORDER BY day DESC
+    WHERE activity_date >= CURRENT_DATE - INTERVAL '{days} days'
+    ORDER BY activity_date DESC
     """
 
     try:
@@ -853,10 +871,10 @@ def hyperliquid_builders(
         builder_address,
         COALESCE(l.builder_name, 'Unknown') as builder_name,
         COUNT(*) as fill_count,
-        SUM(builder_fee) as total_fees,
-        COUNT(DISTINCT "user") as unique_users
+        SUM(builder_fee::float) as total_fees,
+        COUNT(DISTINCT "USER") as unique_users
     FROM hyperliquid.raw.builder_fills f
-    LEFT JOIN hyperliquid.raw.builder_labels l ON f.builder_address = l.address
+    LEFT JOIN hyperliquid.raw.builder_labels l ON f.builder_address = l.builder_code
     WHERE timestamp >= CURRENT_TIMESTAMP - INTERVAL '{days} days'
     {builder_filter}
     GROUP BY builder_address, l.builder_name

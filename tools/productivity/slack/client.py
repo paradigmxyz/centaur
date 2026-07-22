@@ -1,11 +1,14 @@
 """Slack API client for bot-token Slack tool operations."""
 
 import base64
+import binascii
 import json
 import mimetypes
 import os
 import re
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -84,6 +87,8 @@ class SlackClient:
     _CHANNEL_CACHE_TTL = 300  # 5 minutes
     _USER_CACHE_TTL = 600  # 10 minutes
     _MAX_PAGE_SIZE = 200
+    _MAX_SLACK_HISTORY_PROXY_PAGE_SIZE = 999
+    _MAX_SLACK_FILES_LIST_PAGE_SIZE = 200
     _DEFAULT_THREAD_REPLY_LIMIT = 50
     _DEFAULT_DUMP_MESSAGE_LIMIT = 100
     _DEFAULT_DUMP_THREAD_LIMIT = 25
@@ -92,6 +97,7 @@ class SlackClient:
     _DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
     _NUMERIC_TS_RE = re.compile(r"^\d+(?:\.\d+)?$")
     _CHANNEL_ID_RE = re.compile(r"^[CGD][A-Z0-9]+$")
+    _FILE_ID_RE = re.compile(r"^F[A-Z0-9]+$")
     _USER_ID_RE = re.compile(r"^[UW][A-Z0-9]+$")
     _AUTH_ERROR_CODES: ClassVar[frozenset[str]] = frozenset(
         {
@@ -159,6 +165,10 @@ class SlackClient:
             return max(1, int(raw))
         except ValueError:
             return cls._DEFAULT_API_TIMEOUT_SECONDS
+
+    def _api_server_proxy_enabled(self) -> bool:
+        """Return whether the sandbox API-server proxy is enabled."""
+        return secret("CENTAUR_SANDBOX_API_SERVER_ENABLED", "true").strip().lower() != "false"
 
     def _clean_channel_ref(self, channel: str) -> str:
         """Normalize #name, ID, and <#ID|name> Slack channel references."""
@@ -301,6 +311,119 @@ class SlackClient:
             parsed = parsed.replace(tzinfo=UTC)
         return self._format_ts(parsed.timestamp())
 
+    def _centaur_api_url(self) -> str:
+        """Return the Centaur API base URL available inside agent sandboxes."""
+        return secret("CENTAUR_API_URL", "http://api:8000").rstrip("/")
+
+    def _centaur_api_headers(self) -> dict[str, str]:
+        """Return headers for API-server calls.
+
+        In sandboxes, iron-proxy injects the principal-scoped Authorization
+        header for the API host. A local bearer can be supplied for tests or
+        manual CLI use.
+        """
+        headers = {"Accept": "application/json"}
+        bearer = secret("CENTAUR_API_BEARER_TOKEN", "").strip()
+        if bearer:
+            headers["Authorization"] = f"Bearer {bearer}"
+        return headers
+
+    def _centaur_api_query_value(self, value: Any) -> str:
+        """Format query values for axum/serde query extraction."""
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return str(value)
+
+    def _centaur_api_url_for(self, path: str, params: dict[str, Any]) -> str:
+        """Build a Centaur API URL with query parameters."""
+        query = urllib.parse.urlencode(
+            {
+                key: self._centaur_api_query_value(value)
+                for key, value in params.items()
+                if value is not None
+            }
+        )
+        url = f"{self._centaur_api_url()}{path}"
+        if query:
+            url = f"{url}?{query}"
+        return url
+
+    def _centaur_api_get_json(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
+        """GET a Centaur API JSON endpoint."""
+        url = self._centaur_api_url_for(path, params)
+        request = urllib.request.Request(url, headers=self._centaur_api_headers(), method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=self._api_timeout_seconds()) as response:
+                raw = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="replace")
+            detail = raw
+            try:
+                body = json.loads(raw)
+                detail = body.get("message") or body.get("detail") or raw
+            except json.JSONDecodeError:
+                pass
+            raise RuntimeError(f"Centaur API error {exc.code} on {path}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"Centaur API request failed on {path}: {exc.reason}") from exc
+        return json.loads(raw) if raw else {}
+
+    def _centaur_api_post_bytes_json(
+        self,
+        path: str,
+        params: dict[str, Any],
+        body: bytes,
+        content_type: str = "application/octet-stream",
+    ) -> dict[str, Any]:
+        """POST bytes to a Centaur API endpoint and parse a JSON response."""
+        url = self._centaur_api_url_for(path, params)
+        headers = self._centaur_api_headers()
+        headers["Content-Type"] = content_type
+        request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=self._api_timeout_seconds()) as response:
+                raw = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="replace")
+            detail = raw
+            try:
+                error_body = json.loads(raw)
+                detail = error_body.get("message") or error_body.get("detail") or raw
+            except json.JSONDecodeError:
+                pass
+            raise RuntimeError(f"Centaur API error {exc.code} on {path}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"Centaur API request failed on {path}: {exc.reason}") from exc
+        return json.loads(raw) if raw else {}
+
+    def _centaur_api_get_bytes(
+        self,
+        path: str,
+        params: dict[str, Any],
+        max_bytes: int,
+    ) -> tuple[bytes, dict[str, str]]:
+        """GET bytes from a Centaur API endpoint."""
+        url = self._centaur_api_url_for(path, params)
+        request = urllib.request.Request(url, headers=self._centaur_api_headers(), method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=self._api_timeout_seconds()) as response:
+                body = response.read(max_bytes + 1)
+                headers = {key.lower(): value for key, value in response.headers.items()}
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="replace")
+            detail = raw
+            try:
+                error_body = json.loads(raw)
+                detail = error_body.get("message") or error_body.get("detail") or raw
+            except json.JSONDecodeError:
+                pass
+            raise RuntimeError(f"Centaur API error {exc.code} on {path}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"Centaur API request failed on {path}: {exc.reason}") from exc
+        if len(body) > max_bytes:
+            raise ValueError(f"Slack file exceeds the {max_bytes}-byte download limit")
+        return body, headers
+
     def _message_permalink(self, channel_id: str, ts: str) -> str:
         """Build a Slack permalink from channel and timestamp."""
         return f"https://slack.com/archives/{channel_id}/p{ts.replace('.', '')}"
@@ -317,6 +440,34 @@ class SlackClient:
             if item["id"] == channel_id:
                 return item["name"]
         return channel_id
+
+    def _normalize_explicit_channel_id(self, channel_id: str) -> str:
+        """Normalize and validate an explicit Slack conversation ID."""
+        normalized_channel_id = self._clean_channel_ref(channel_id).upper()
+        if len(normalized_channel_id) < 9 or not self._looks_like_channel_id(
+            normalized_channel_id
+        ):
+            raise ValueError("channel_id must be a Slack conversation ID like C123456789")
+        return normalized_channel_id
+
+    def _normalize_file_id(self, file_id: str) -> str:
+        """Normalize and validate a Slack file ID."""
+        normalized_file_id = str(file_id).strip().upper()
+        if len(normalized_file_id) < 9 or not self._FILE_ID_RE.fullmatch(normalized_file_id):
+            raise ValueError("file_id must be a Slack file ID like F123456789")
+        return normalized_file_id
+
+    def _content_disposition_filename(self, value: str | None) -> str | None:
+        """Extract a simple filename value from Content-Disposition."""
+        if not value:
+            return None
+        match = re.search(r'filename="([^"]+)"', value)
+        if match:
+            return match.group(1)
+        match = re.search(r"filename=([^;]+)", value)
+        if match:
+            return match.group(1).strip()
+        return None
 
     def _serialize_message(
         self,
@@ -382,7 +533,21 @@ class SlackClient:
         return items, next_cursor, bool(next_cursor)
 
     def _resolve_channel(self, channel: str) -> str:
-        """Resolve a channel name to its ID using cached channel list."""
+        """Resolve a channel name, channel ID, user ID, or @user DM to a conversation ID.
+
+        User references (``U123``, ``<@U123>``, or ``@username``) resolve to the
+        bot's one-on-one DM channel with that user, opening it if needed.
+        """
+        raw = str(channel).strip()
+        if self._looks_like_user_id(raw):
+            return self._open_dm_channel(raw)
+        if raw.startswith("@"):
+            username = raw[1:].strip()
+            user_cache = self._get_user_cache()
+            for user_id, name in user_cache.items():
+                if name == username:
+                    return self._open_dm_channel(user_id)
+            raise RuntimeError(f"User '{channel}' not found in workspace")
         normalized = self._clean_channel_ref(channel)
         if self._looks_like_channel_id(normalized):
             return normalized.upper()
@@ -577,24 +742,23 @@ class SlackClient:
         self._save_channel_cache(result)
         return result
 
-    def _fetch_channel_history(
+    def _fetch_channel_history_for_search(
         self,
-        client: WebClient,
         channel_id: str,
         channel_name: str,
         limit: int,
         user_cache: dict[str, str],
     ) -> list[dict]:
-        """Fetch history for a single channel (used by search)."""
+        """Fetch history for a single search fallback channel."""
         try:
-            response = self._retry_on_ratelimit(
-                client.conversations_history,
-                method_key="conversations.history",
-                channel=channel_id,
-                limit=limit,
+            response = self.get_channel_history_proxy(channel_id, limit=limit)
+        except (RuntimeError, ValueError):
+            return self._fetch_direct_channel_history_for_search(
+                channel_id,
+                channel_name,
+                limit,
+                user_cache,
             )
-        except (SlackApiError, SlackRateLimitError):
-            return []
 
         messages = []
         for msg in response.get("messages", []):
@@ -606,6 +770,54 @@ class SlackClient:
                     channel_name=channel_name,
                 )
             )
+
+        return messages
+
+    _MAX_SEARCH_DIRECT_THREADS = 10
+
+    def _fetch_direct_channel_history_for_search(
+        self,
+        channel_id: str,
+        channel_name: str,
+        limit: int,
+        user_cache: dict[str, str],
+    ) -> list[dict]:
+        """Fetch direct Slack history and expand a bounded number of threads."""
+        try:
+            page = self.get_channel_history_page(channel_id, limit=limit)
+        except (RuntimeError, ValueError):
+            return []
+
+        messages = [{**msg, "channel": channel_name} for msg in page.get("messages", [])]
+        seen_timestamps = {message.get("timestamp") for message in messages}
+        expanded_threads = 0
+
+        for message in list(messages):
+            if expanded_threads >= self._MAX_SEARCH_DIRECT_THREADS:
+                break
+            if int(message.get("reply_count") or 0) <= 0:
+                continue
+
+            thread_ts = message.get("thread_ts") or message.get("timestamp")
+            if not thread_ts:
+                continue
+
+            try:
+                thread_page = self.get_thread_replies_page(
+                    channel=channel_id,
+                    thread_ts=thread_ts,
+                    limit=min(limit, self._DEFAULT_THREAD_REPLY_LIMIT),
+                )
+            except (RuntimeError, ValueError):
+                continue
+
+            expanded_threads += 1
+            for reply in thread_page.get("messages", []):
+                timestamp = reply.get("timestamp")
+                if not timestamp or timestamp in seen_timestamps:
+                    continue
+                seen_timestamps.add(timestamp)
+                messages.append({**reply, "channel": channel_name})
 
         return messages
 
@@ -666,7 +878,7 @@ class SlackClient:
         Uses Slack's native search.messages API for fast, workspace-wide
         search. When ``SLACK_SEARCH_TOKEN`` is configured, the native call runs
         with that dedicated user token and its ``search:read`` scope. Falls
-        back to local channel scanning if the native API fails.
+        back to proxy-backed channel history scanning if the native API fails.
 
         Supports Slack search modifiers in the query string:
             in:#channel, from:@user, before:YYYY-MM-DD, after:YYYY-MM-DD,
@@ -702,7 +914,7 @@ class SlackClient:
         try:
             return self._search_messages_native(search_query, max_results)
         except (SlackApiError, RuntimeError, SlackRateLimitError):
-            # Fall back to local scanning if native search fails
+            # Fall back to proxy-backed channel history scanning if native search fails.
             return self._search_messages_local(
                 local_query, max_results, local_channels, local_from_user, messages_per_channel
             )
@@ -820,7 +1032,7 @@ class SlackClient:
                 unresolved_names.add(normalized.lower())
 
         if unresolved_names:
-            for channel in self.list_bot_channels():
+            for channel in self.list_channels_proxy(history_only=True):
                 if channel["name"].lower() in unresolved_names:
                     resolved[channel["id"]] = channel
 
@@ -834,13 +1046,13 @@ class SlackClient:
         from_user: str | None = None,
         messages_per_channel: int = 200,
     ) -> list[dict]:
-        """Search messages by scanning channel histories locally (fallback)."""
+        """Search messages by scanning channel histories through the proxy."""
         query_terms = [t.strip().lower() for t in query.split() if t.strip()]
 
         if channels:
             bot_channels = self._channel_refs_for_search(channels)
         else:
-            bot_channels = self.list_bot_channels()
+            bot_channels = self.list_channels_proxy(history_only=True)
             bot_channels = self._rank_channels_for_query(bot_channels, query_terms)
             bot_channels = bot_channels[: self._MAX_SEARCH_CHANNELS]
 
@@ -856,8 +1068,7 @@ class SlackClient:
         with ThreadPoolExecutor(max_workers=min(6, len(bot_channels))) as executor:
             futures = {
                 executor.submit(
-                    self._fetch_channel_history,
-                    self._client,
+                    self._fetch_channel_history_for_search,
                     ch["id"],
                     ch["name"],
                     effective_limit,
@@ -972,6 +1183,95 @@ class SlackClient:
             },
             "order": "desc",
         }
+
+    def get_channel_history_proxy(
+        self,
+        channel_id: str,
+        cursor: str | None = None,
+        include_all_metadata: bool | None = None,
+        inclusive: bool | None = None,
+        latest: str | int | float | None = None,
+        limit: int | None = None,
+        oldest: str | int | float | None = None,
+    ) -> dict[str, Any]:
+        """Fetch Slack channel history through the Centaur API server proxy.
+
+        This maps to Slack's documented `conversations.history` arguments,
+        except `token` is intentionally omitted because the API server supplies
+        Slack credentials. `channel_id` must be an explicit Slack conversation
+        ID authorized by the principal's `slack.history_channels` claim.
+        """
+        if not self._api_server_proxy_enabled():
+            raise RuntimeError(
+                "Slack channel history proxy requires the API server sandbox capability, "
+                "but it is disabled for this principal."
+            )
+
+        normalized_channel_id = self._clean_channel_ref(channel_id).upper()
+        if len(normalized_channel_id) < 9 or not self._looks_like_channel_id(normalized_channel_id):
+            raise ValueError("channel_id must be a Slack conversation ID like C123456789")
+
+        params: dict[str, Any] = {
+            "cursor": cursor,
+            "include_all_metadata": include_all_metadata,
+            "inclusive": inclusive,
+            "latest": self._normalize_ts(latest),
+            "limit": None,
+            "oldest": self._normalize_ts(oldest),
+        }
+        if limit is not None:
+            requested_limit = int(limit)
+            if not 1 <= requested_limit <= self._MAX_SLACK_HISTORY_PROXY_PAGE_SIZE:
+                raise ValueError("limit must be between 1 and 999")
+            params["limit"] = requested_limit
+
+        channel_path = urllib.parse.quote(normalized_channel_id, safe="")
+        return self._centaur_api_get_json(
+            f"/api/slack/channels/{channel_path}/history",
+            params,
+        )
+
+    def get_thread_replies_proxy(
+        self,
+        channel_id: str,
+        thread_ts: str,
+        cursor: str | None = None,
+        inclusive: bool | None = None,
+        latest: str | int | float | None = None,
+        limit: int | None = None,
+        oldest: str | int | float | None = None,
+    ) -> dict[str, Any]:
+        """Fetch Slack thread replies through the Centaur API server."""
+        if not self._api_server_proxy_enabled():
+            raise RuntimeError(
+                "Slack thread replies require the API server sandbox capability, "
+                "but it is disabled for this principal."
+            )
+
+        normalized_channel_id = self._normalize_explicit_channel_id(channel_id)
+        normalized_thread_ts = self._normalize_ts(thread_ts)
+        if normalized_thread_ts is None:
+            raise ValueError("thread_ts is required")
+
+        params: dict[str, Any] = {
+            "cursor": cursor,
+            "inclusive": inclusive,
+            "latest": self._normalize_ts(latest),
+            "limit": None,
+            "oldest": self._normalize_ts(oldest),
+        }
+        if limit is not None:
+            requested_limit = int(limit)
+            if not 1 <= requested_limit <= self._MAX_SLACK_HISTORY_PROXY_PAGE_SIZE:
+                raise ValueError("limit must be between 1 and 999")
+            params["limit"] = requested_limit
+
+        channel_path = urllib.parse.quote(normalized_channel_id, safe="")
+        thread_path = urllib.parse.quote(normalized_thread_ts, safe="")
+        return self._centaur_api_get_json(
+            f"/api/slack/channels/{channel_path}/threads/{thread_path}/replies",
+            params,
+        )
 
     def get_channel_history(
         self,
@@ -1198,6 +1498,109 @@ class SlackClient:
                 break
 
         return sorted(channels, key=lambda x: x["name"])
+
+    def list_channels_proxy(self, limit: int = 200, history_only: bool = False) -> list[dict]:
+        """List Slack channels exposed by the Centaur API server proxy JWT."""
+        if not self._api_server_proxy_enabled():
+            raise RuntimeError(
+                "Slack channel listing proxy requires the API server sandbox capability, "
+                "but it is disabled for this principal."
+            )
+
+        response = self._centaur_api_get_json("/api/slack/channels", {})
+        channels = response.get("channels", []) or []
+        if history_only:
+            channels = [channel for channel in channels if channel.get("can_read_history")]
+        normalized_channels = [
+            {
+                "id": channel.get("id", ""),
+                "name": channel.get("name", "") or channel.get("id", ""),
+                "purpose": channel.get("purpose", ""),
+                "topic": channel.get("topic", ""),
+                "member_count": channel.get("member_count", 0),
+                "is_private": channel.get("is_private", False),
+                "is_member": channel.get("is_member", False),
+                "can_upload": channel.get("can_upload", False),
+                "can_download": channel.get("can_download", False),
+                "can_read_history": channel.get("can_read_history", False),
+            }
+            for channel in channels
+        ]
+        normalized_channels.sort(key=lambda channel: (channel["name"].lower(), channel["id"]))
+        return normalized_channels[:limit]
+
+    def list_files_proxy(
+        self,
+        channel_id: str,
+        limit: int | None = None,
+        page: int | None = None,
+    ) -> dict[str, Any]:
+        """List Slack files through the Centaur API server proxy.
+
+        This maps to Slack's `files.list` for channels authorized by the
+        principal's `slack.download_channels` claim.
+        """
+        if not self._api_server_proxy_enabled():
+            raise RuntimeError(
+                "Slack file listing proxy requires the API server sandbox capability, "
+                "but it is disabled for this principal."
+            )
+
+        requested_limit: int | None = None
+        if limit is not None:
+            requested_limit = int(limit)
+            if not 1 <= requested_limit <= self._MAX_SLACK_FILES_LIST_PAGE_SIZE:
+                raise ValueError("limit must be between 1 and 200")
+
+        requested_page: int | None = None
+        if page is not None:
+            requested_page = int(page)
+            if requested_page < 1:
+                raise ValueError("page must be greater than 0")
+
+        params: dict[str, Any] = {
+            "channel_id": self._normalize_explicit_channel_id(channel_id),
+            "limit": requested_limit,
+            "page": requested_page,
+        }
+        return self._centaur_api_get_json("/api/slack/files", params)
+
+    def get_channel_members_proxy(self, channel_id: str, limit: int = 1000) -> list[dict]:
+        """List Slack channel members through the Centaur API server proxy."""
+        if not self._api_server_proxy_enabled():
+            raise RuntimeError(
+                "Slack channel members proxy requires the API server sandbox capability, "
+                "but it is disabled for this principal."
+            )
+
+        requested_limit = int(limit)
+        if not 1 <= requested_limit <= 10_000:
+            raise ValueError("limit must be between 1 and 10000")
+
+        normalized_channel_id = self._normalize_explicit_channel_id(channel_id)
+        channel_path = urllib.parse.quote(normalized_channel_id, safe="")
+        user_cache = self._get_user_cache()
+        member_ids: list[str] = []
+        cursor: str | None = None
+
+        while len(member_ids) < requested_limit:
+            page_limit = min(requested_limit - len(member_ids), 1000)
+            response = self._centaur_api_get_json(
+                f"/api/slack/channels/{channel_path}/members",
+                {"limit": page_limit, "cursor": cursor},
+            )
+            member_ids.extend(str(member_id) for member_id in response.get("members", []) or [])
+            cursor = response.get("response_metadata", {}).get("next_cursor") or None
+            if not cursor:
+                break
+
+        return [
+            {
+                "id": member_id,
+                "name": user_cache.get(member_id, member_id),
+            }
+            for member_id in member_ids[:requested_limit]
+        ]
 
     def list_users(self, limit: int = 200) -> list[dict]:
         """List workspace users."""
@@ -1668,6 +2071,102 @@ class SlackClient:
                 resolved_channel=resolved_channel,
             )
 
+    def upload_file_proxy(
+        self,
+        channel_id: str,
+        content_base64: str,
+        filename: str,
+        thread_ts: str | None = None,
+        title: str | None = None,
+        initial_comment: str | None = None,
+        content_type: str | None = None,
+        alt_txt: str | None = None,
+        snippet_type: str | None = None,
+    ) -> dict[str, Any]:
+        """Upload a file through the Centaur API server Slack proxy.
+
+        This maps to `/api/slack/files/upload`. The caller supplies file bytes
+        as base64, and the API server handles Slack credentials and channel
+        authorization through the principal-scoped JWT.
+        """
+        if not self._api_server_proxy_enabled():
+            raise RuntimeError(
+                "Slack file upload proxy requires the API server sandbox capability, "
+                "but it is disabled for this principal."
+            )
+        normalized_channel_id = self._normalize_explicit_channel_id(channel_id)
+        effective_filename = str(filename).strip()
+        if not effective_filename:
+            raise ValueError("filename is required")
+        try:
+            body = base64.b64decode(content_base64, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError("content_base64 must be valid base64") from exc
+        if not body:
+            raise ValueError("content_base64 must not be empty")
+
+        params = {
+            "channel_id": normalized_channel_id,
+            "filename": effective_filename,
+            "thread_ts": self._normalize_ts(thread_ts),
+            "title": title,
+            "initial_comment": initial_comment,
+            "content_type": content_type,
+            "alt_txt": alt_txt,
+            "snippet_type": snippet_type,
+        }
+        return self._centaur_api_post_bytes_json(
+            "/api/slack/files/upload",
+            params,
+            body,
+            content_type or "application/octet-stream",
+        )
+
+    def download_file_proxy(self, file_id: str, channel_id: str) -> dict[str, Any]:
+        """Download a Slack file through the Centaur API server Slack proxy.
+
+        Returns base64-encoded file bytes plus filename, content type, and size.
+        """
+        if not self._api_server_proxy_enabled():
+            raise RuntimeError(
+                "Slack file download proxy requires the API server sandbox capability, "
+                "but it is disabled for this principal."
+            )
+        normalized_file_id = self._normalize_file_id(file_id)
+        normalized_channel_id = self._normalize_explicit_channel_id(channel_id)
+        body, headers = self._centaur_api_get_bytes(
+            f"/api/slack/files/{urllib.parse.quote(normalized_file_id, safe='')}/download",
+            {"channel_id": normalized_channel_id},
+            self._MAX_DOWNLOAD_BYTES,
+        )
+        filename = (
+            self._content_disposition_filename(headers.get("content-disposition"))
+            or normalized_file_id
+        )
+        content_type = headers.get("content-type") or "application/octet-stream"
+        return {
+            "file_id": normalized_file_id,
+            "channel_id": normalized_channel_id,
+            "filename": filename,
+            "content_type": content_type,
+            "size_bytes": len(body),
+            "content_base64": base64.b64encode(body).decode(),
+        }
+
+    def file_info_proxy(self, file_id: str, channel_id: str) -> dict[str, Any]:
+        """Fetch Slack file metadata through the Centaur API server proxy."""
+        if not self._api_server_proxy_enabled():
+            raise RuntimeError(
+                "Slack file info proxy requires the API server sandbox capability, "
+                "but it is disabled for this principal."
+            )
+        normalized_file_id = self._normalize_file_id(file_id)
+        normalized_channel_id = self._normalize_explicit_channel_id(channel_id)
+        return self._centaur_api_get_json(
+            f"/api/slack/files/{urllib.parse.quote(normalized_file_id, safe='')}/info",
+            {"channel_id": normalized_channel_id},
+        )
+
     def list_usergroups(self) -> list[dict]:
         """List all user groups in the workspace."""
         try:
@@ -1818,36 +2317,91 @@ class SlackClient:
 
     def search_files(
         self,
+        channel_id: str,
         query: str,
         max_results: int = 20,
     ) -> list[dict]:
-        """Search files across the workspace using files.list with metadata filter.
+        """Search files in one Slack channel using files.list with metadata filter.
 
         Note: search.files requires a user token. This uses files.list as a
         bot-token-compatible alternative that filters by filename/type.
 
         Args:
+            channel_id: Slack channel ID to search
             query: Search query string (matches against filenames)
             max_results: Maximum results to return
 
         Returns:
             List of file dicts with id, name, title, filetype, user, channels, permalink
         """
-        try:
-            response = self._retry_on_ratelimit(
-                self._client.files_list,
-                count=max_results,
+        requested_limit = max(1, int(max_results))
+        if not self._api_server_proxy_enabled():
+            raise RuntimeError(
+                "Slack file listing proxy requires the API server sandbox capability, "
+                "but it is disabled for this principal."
             )
-        except SlackApiError as e:
-            self._raise_slack_api_error(
-                e,
-                slack_method="files.list",
-                access_path="bot_token",
+        results: list[dict] = []
+        user_cache = self._get_user_cache()
+        page_limit = self._MAX_SLACK_FILES_LIST_PAGE_SIZE
+        page = 1
+        while len(results) < requested_limit:
+            response = self.list_files_proxy(
+                channel_id=channel_id,
+                limit=page_limit,
+                page=page,
             )
+            results.extend(self._filter_file_search_results(response, query, user_cache))
+            if not response.get("has_more"):
+                break
+            page += 1
+        return results[:requested_limit]
 
+    def search_files_direct(
+        self,
+        query: str,
+        max_results: int = 20,
+    ) -> list[dict]:
+        """Search files directly through Slack's `files.list` API."""
+        requested_limit = max(1, int(max_results))
+        user_cache = self._get_user_cache()
+        results: list[dict] = []
+        page = 1
+        while len(results) < requested_limit:
+            try:
+                response = self._retry_on_ratelimit(
+                    self._client.files_list,
+                    count=self._MAX_SLACK_FILES_LIST_PAGE_SIZE,
+                    page=page,
+                )
+            except SlackApiError as e:
+                self._raise_slack_api_error(
+                    e,
+                    slack_method="files.list",
+                    access_path="bot_token",
+                )
+            results.extend(self._filter_file_search_results(response, query, user_cache))
+            if not self._files_list_response_has_more(response):
+                break
+            page += 1
+        return results[:requested_limit]
+
+    def _files_list_response_has_more(self, response: dict) -> bool:
+        """Return whether a Slack files.list response has another page."""
+        paging = response.get("paging") or {}
+        try:
+            return int(paging.get("page", 0)) < int(paging.get("pages", 0))
+        except (TypeError, ValueError):
+            return False
+
+    def _filter_file_search_results(
+        self,
+        response: dict,
+        query: str,
+        user_cache: dict[str, str],
+    ) -> list[dict]:
+        """Filter a files.list response by filename/title and normalize rows."""
         files = response.get("files", [])
         query_lower = query.lower()
-        user_cache = self._get_user_cache()
 
         results = []
         for f in files:
@@ -2045,6 +2599,14 @@ def get_channel_history_page(*args, **kwargs):
     return _client().get_channel_history_page(*args, **kwargs)
 
 
+def get_channel_history_proxy(*args, **kwargs):
+    return _client().get_channel_history_proxy(*args, **kwargs)
+
+
+def get_thread_replies_proxy(*args, **kwargs):
+    return _client().get_thread_replies_proxy(*args, **kwargs)
+
+
 def get_channel_history(*args, **kwargs):
     return _client().get_channel_history(*args, **kwargs)
 
@@ -2065,12 +2627,24 @@ def list_channels(*args, **kwargs):
     return _client().list_channels(*args, **kwargs)
 
 
+def list_channels_proxy(*args, **kwargs):
+    return _client().list_channels_proxy(*args, **kwargs)
+
+
+def list_files_proxy(*args, **kwargs):
+    return _client().list_files_proxy(*args, **kwargs)
+
+
 def list_users(*args, **kwargs):
     return _client().list_users(*args, **kwargs)
 
 
 def get_channel_members(*args, **kwargs):
     return _client().get_channel_members(*args, **kwargs)
+
+
+def get_channel_members_proxy(*args, **kwargs):
+    return _client().get_channel_members_proxy(*args, **kwargs)
 
 
 def get_channel_member_emails(*args, **kwargs):
@@ -2091,6 +2665,18 @@ def send_dm(*args, **kwargs):
 
 def upload_file(*args, **kwargs):
     return _client().upload_file(*args, **kwargs)
+
+
+def upload_file_proxy(*args, **kwargs):
+    return _client().upload_file_proxy(*args, **kwargs)
+
+
+def download_file_proxy(*args, **kwargs):
+    return _client().download_file_proxy(*args, **kwargs)
+
+
+def file_info_proxy(*args, **kwargs):
+    return _client().file_info_proxy(*args, **kwargs)
 
 
 def list_usergroups(*args, **kwargs):
@@ -2119,6 +2705,10 @@ def dump_channel_with_threads(*args, **kwargs):
 
 def search_files(*args, **kwargs):
     return _client().search_files(*args, **kwargs)
+
+
+def search_files_direct(*args, **kwargs):
+    return _client().search_files_direct(*args, **kwargs)
 
 
 def search_users(*args, **kwargs):

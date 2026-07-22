@@ -14,6 +14,7 @@ use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span, span};
 use prost::Message as _;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use url::Url;
 use uuid::Uuid;
 
@@ -24,6 +25,10 @@ const LAMINAR_METADATA_PREFIX: &str = "lmnr.association.properties.metadata.";
 
 static OTLP_PROXY_ENDPOINT: OnceLock<String> = OnceLock::new();
 static OTLP_TRACE_METADATA: OnceLock<BTreeMap<String, Value>> = OnceLock::new();
+static OTLP_TRACE_ID: OnceLock<Vec<u8>> = OnceLock::new();
+// Stable thread-root parent for parentless Codex startup/background spans.
+// Per-execution parentage still comes from each input line's traceparent.
+static OTLP_THREAD_ROOT_SPAN_ID: OnceLock<Vec<u8>> = OnceLock::new();
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TraceContext {
@@ -37,16 +42,17 @@ impl TraceContext {
     pub(crate) fn effective_trace_id(&self) -> Option<String> {
         self.trace_id
             .clone()
-            .or_else(|| self.traceparent.as_deref().and_then(trace_id_from_traceparent))
+            .or_else(|| {
+                self.traceparent
+                    .as_deref()
+                    .and_then(trace_id_from_traceparent)
+            })
             .or_else(|| clean_optional(env::var("CENTAUR_TRACE_ID").ok().as_deref()))
     }
 
     pub(crate) fn effective_traceparent(&self) -> Option<String> {
         let trace_id = self.effective_trace_id()?;
-        if let Some(traceparent) = self
-            .traceparent
-            .as_deref()
-            .and_then(validate_traceparent)
+        if let Some(traceparent) = self.traceparent.as_deref().and_then(validate_traceparent)
             && trace_id_from_traceparent(traceparent).as_deref() == Some(trace_id.as_str())
         {
             return Some(traceparent.to_owned());
@@ -64,6 +70,12 @@ pub(crate) fn configure_codex_otel_for_startup(trace: &TraceContext) -> Result<(
     };
     if !trace.metadata.is_empty() {
         let _ = OTLP_TRACE_METADATA.set(trace.metadata.clone());
+    }
+    if let Some(trace_id) = trace_id_to_bytes(&trace_id) {
+        let _ = OTLP_TRACE_ID.set(trace_id);
+    }
+    if let Some(thread_root_span_id) = thread_root_parent_span_id(trace.thread_key.as_deref()) {
+        let _ = OTLP_THREAD_ROOT_SPAN_ID.set(thread_root_span_id);
     }
     let proxy_endpoint = start_otlp_proxy(&endpoint)?;
     let config_path = codex_config_path();
@@ -724,8 +736,19 @@ fn harness_usage_span_trace_ids(trace: &TraceContext) -> Result<(Vec<u8>, Vec<u8
                 None
             }
         })
+        .or_else(|| thread_root_parent_span_id(trace.thread_key.as_deref()))
         .unwrap_or_default();
     Ok((trace_id, parent_span_id))
+}
+
+fn thread_root_parent_span_id(thread_key: Option<&str>) -> Option<Vec<u8>> {
+    let thread_key = clean_optional(thread_key)?;
+    let digest = Sha256::digest(format!("centaur:thread-parent:{thread_key}"));
+    let mut bytes = digest[..8].to_vec();
+    if bytes.iter().all(|byte| *byte == 0) {
+        bytes[7] = 1;
+    }
+    Some(bytes)
 }
 
 fn set_harness_span_io_attributes(
@@ -1033,6 +1056,7 @@ pub(crate) fn rewrite_otlp_trace_payload(payload: &[u8]) -> std::result::Result<
     for resource_span in &mut request.resource_spans {
         for scope_span in &mut resource_span.scope_spans {
             for span in &mut scope_span.spans {
+                attach_thread_root_parent_span(span);
                 if !span.name.is_empty() && !span.name.starts_with(CODEX_SPAN_PREFIX) {
                     span.name = format!("{}{}", CODEX_SPAN_PREFIX, span.name);
                 }
@@ -1041,6 +1065,24 @@ pub(crate) fn rewrite_otlp_trace_payload(payload: &[u8]) -> std::result::Result<
         }
     }
     Ok(request.encode_to_vec())
+}
+
+fn attach_thread_root_parent_span(span: &mut Span) {
+    if !span.parent_span_id.is_empty() {
+        return;
+    }
+    let Some(parent_span_id) = OTLP_THREAD_ROOT_SPAN_ID.get() else {
+        return;
+    };
+    if parent_span_id.as_slice() == span.span_id.as_slice() {
+        return;
+    }
+    if let Some(trace_id) = OTLP_TRACE_ID.get()
+        && trace_id.as_slice() != span.trace_id.as_slice()
+    {
+        return;
+    }
+    span.parent_span_id = parent_span_id.clone();
 }
 
 fn normalize_codex_llm_span(span: &mut Span) {
@@ -1306,10 +1348,7 @@ trust_level = "trusted"
             metadata: BTreeMap::new(),
         };
 
-        assert_eq!(
-            trace.effective_trace_id().as_deref(),
-            Some(thread_trace_id)
-        );
+        assert_eq!(trace.effective_trace_id().as_deref(), Some(thread_trace_id));
         let effective_traceparent = trace.effective_traceparent().expect("traceparent");
         assert_ne!(effective_traceparent, execution_traceparent);
         assert_eq!(
@@ -1585,7 +1624,10 @@ trust_level = "trusted"
                 .as_bytes()
                 .to_vec()
         );
-        assert!(span.parent_span_id.is_empty());
+        assert_eq!(
+            span.parent_span_id,
+            thread_root_parent_span_id(trace.thread_key.as_deref()).expect("thread root parent")
+        );
     }
 
     #[test]
@@ -1630,7 +1672,10 @@ trust_level = "trusted"
                 .as_bytes()
                 .to_vec()
         );
-        assert!(span.parent_span_id.is_empty());
+        assert_eq!(
+            span.parent_span_id,
+            thread_root_parent_span_id(trace.thread_key.as_deref()).expect("thread root parent")
+        );
     }
 
     #[test]

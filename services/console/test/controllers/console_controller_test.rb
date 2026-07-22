@@ -12,6 +12,28 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_redirected_to login_path
   end
 
+  test "an active non-admin is redirected away from every Control page" do
+    delete logout_url
+    post login_url, params: { email: users(:member_user).email, password: "password123456" }
+
+    [ root_url, console_principals_url, console_roles_url, console_secrets_url,
+      console_credentials_url, console_oauth_apps_url ].each do |url|
+      get url
+      assert_redirected_to console_threads_path
+      assert_nil flash[:alert]
+    end
+  end
+
+  test "a non-admin cannot mutate through the Control form controllers" do
+    delete logout_url
+    post login_url, params: { email: users(:member_user).email, password: "password123456" }
+
+    assert_no_difference -> { Role.count } do
+      post console_roles_url, params: { role: { foreign_id: "sneaky", namespace: "default" } }
+    end
+    assert_redirected_to console_threads_path
+  end
+
   test "secrets table shows backend labels (not refs) and links to detail" do
     secret = static_secrets(:acme_prod_api_key)
     get console_secrets_url
@@ -119,6 +141,40 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     # namespace sit beneath it.
     assert_select "div[title=?]", principal.foreign_id, text: principal.foreign_id
     assert_select "div", text: /#{Regexp.escape(principal.oid)}.*#{Regexp.escape(principal.namespace)}/
+  end
+
+  test "principals table links to add principal" do
+    get console_principals_url
+    assert_response :ok
+    assert_select "a[href=?]", console_new_principal_path, text: "Add Principal"
+  end
+
+  test "principal detail page offers delete" do
+    principal = principals(:acme_channel)
+    get console_principal_url(principal.oid)
+    assert_response :ok
+    assert_select "form[action=?][method=?]", console_delete_principal_path(principal.oid), "post" do
+      assert_select "input[name=_method][value=delete]"
+      assert_select "button[type=submit]", "Delete"
+    end
+  end
+
+  test "principal detail page renders DM permissions as API-managed rows" do
+    principal = principals(:acme_user_bob)
+    SlackChannelPermission.create!(
+      principal: principal,
+      channel_id: "D0123456789",
+      channel_name: "U0123456789",
+      upload_enabled: true,
+      download_enabled: false,
+      history_enabled: true
+    )
+
+    get console_principal_url(principal.oid)
+    assert_response :ok
+
+    assert_select "td", text: /DM U0123456789/
+    assert_select "td", text: "API-managed"
   end
 
   test "credentials table combines id, shows status, and links to detail" do

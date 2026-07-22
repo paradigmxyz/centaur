@@ -1,5 +1,6 @@
 {{- if .Values.apiRs.enabled }}
 {{- $console := include "centaur.consoleValues" . | fromYaml -}}
+{{- $mcpPublicUrl := default .Values.slackbotv2.mcpPublicUrl .Values.apiRs.mcpPublicUrl -}}
 {{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") -}}
 {{- $repoCacheStorageType := include "centaur.repoCacheStorageType" . -}}
 {{- $repoCacheUsePvc := eq $repoCacheStorageType "persistentVolumeClaim" -}}
@@ -10,23 +11,33 @@
 {{- end -}}
 {{- $overlaySources := include "centaur.overlaySources" . | fromJsonArray -}}
 {{- $toolSources := list -}}
+{{- $publicToolSources := list -}}
 {{- $apiWorkflowDirList := list -}}
 {{- $sandboxWorkflowDirList := list -}}
 {{- $skillDirs := list -}}
+{{- $publicSkillDirs := list -}}
 {{- range $source := $overlaySources -}}
 {{- $repo := get $source "repo" | default "" -}}
+{{- $visibility := get $source "visibility" | default "private" -}}
 {{- if $repo -}}
 {{- with (get $source "toolsSubdir") -}}
-{{- $toolSource := dict "repo" $repo "subdir" . -}}
+{{- $toolSource := dict "repo" $repo "subdir" . "visibility" $visibility -}}
 {{- with (get $source "ref") }}{{- $_ := set $toolSource "ref" . -}}{{- end -}}
 {{- $toolSources = append $toolSources $toolSource -}}
+{{- if eq $visibility "public" -}}
+{{- $publicToolSources = append $publicToolSources $toolSource -}}
+{{- end -}}
 {{- end -}}
 {{- with (get $source "workflowsSubdir") -}}
 {{- $apiWorkflowDirList = append $apiWorkflowDirList (printf "%s/%s/%s" $.Values.repoCache.hostPath $repo .) -}}
 {{- $sandboxWorkflowDirList = append $sandboxWorkflowDirList (printf "/home/agent/github/%s/%s" $repo .) -}}
 {{- end -}}
 {{- with (get $source "skillsSubdir") -}}
-{{- $skillDirs = append $skillDirs (printf "/home/agent/github/%s/%s" $repo .) -}}
+{{- $skillDir := printf "/home/agent/github/%s/%s" $repo . -}}
+{{- $skillDirs = append $skillDirs $skillDir -}}
+{{- if eq $visibility "public" -}}
+{{- $publicSkillDirs = append $publicSkillDirs $skillDir -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -38,6 +49,12 @@
 {{- $toolDirs = list -}}
 {{- range $source := $toolSources }}
 {{- $toolDirs = append $toolDirs (printf "%s/%s/%s" $.Values.repoCache.hostPath (get $source "repo") (get $source "subdir")) -}}
+{{- end -}}
+{{- end -}}
+{{- $publicToolDirs := list -}}
+{{- if and .Values.repoCache.enabled (gt (len $publicToolSources) 0) -}}
+{{- range $source := $publicToolSources }}
+{{- $publicToolDirs = append $publicToolDirs (printf "%s/%s/%s" $.Values.repoCache.hostPath (get $source "repo") (get $source "subdir")) -}}
 {{- end -}}
 {{- end -}}
 {{- if and .Values.repoCache.enabled (gt (len $apiWorkflowDirList) 0) -}}
@@ -58,6 +75,7 @@
   (dict "name" "SLACK_SYNC_INTERVAL_SECONDS" "value" (dig "slack" "syncIntervalSeconds" 3600 $apiRsEtl))
   (dict "name" "SLACK_SYNC_BACKFILL_LOOKBACK_DAYS" "value" (dig "slack" "syncBackfillLookbackDays" 30 $apiRsEtl))
   (dict "name" "SLACK_SYNC_THREAD_LOOKBACK_DAYS" "value" (dig "slack" "syncThreadLookbackDays" 3 $apiRsEtl))
+  (dict "name" "SLACK_SYNC_INDEX_PRIVATE_CHANNELS" "value" (dig "slack" "indexPrivateChannels" false $apiRsEtl))
   (dict "name" "SLACK_ETL_EXCLUDED_CHANNEL_PATTERNS" "value" (dig "slack" "excludedChannelPatterns" "" $apiRsEtl))
   (dict "name" "SLACK_ETL_ATTACHMENTS_ENABLED" "value" (dig "slack" "attachments" "enabled" true $apiRsEtl))
   (dict "name" "SLACK_ETL_ATTACHMENT_MAX_BYTES" "value" (dig "slack" "attachments" "maxBytes" 10485760 $apiRsEtl))
@@ -77,6 +95,8 @@
   (dict "name" "GOOGLE_CALENDAR_SYNC_INTERVAL_SECONDS" "value" (dig "googleCalendar" "syncIntervalSeconds" 14400 $apiRsEtl))
   (dict "name" "COMPANY_CONTEXT_DOCUMENTS_ENABLED" "value" (dig "companyContextDocuments" "enabled" true $apiRsEtl))
   (dict "name" "COMPANY_CONTEXT_DOCUMENTS_INTERVAL_SECONDS" "value" (dig "companyContextDocuments" "intervalSeconds" 14400 $apiRsEtl))
+  (dict "name" "COMPANY_CONTEXT_DOCUMENTS_MAX_WINDOW_SECONDS" "value" (dig "companyContextDocuments" "maxWindowSeconds" 21600 $apiRsEtl))
+  (dict "name" "COMPANY_CONTEXT_DOCUMENTS_BATCH_SIZE" "value" (dig "companyContextDocuments" "batchSize" 50 $apiRsEtl))
 -}}
 {{- $apiRsEtlPassthroughNames := list -}}
 {{- range $env := $apiRsEtlEnv -}}
@@ -171,6 +191,7 @@ spec:
 {{- end }}
       labels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 8 }}
+        centaur.ai/observability-enabled: "true"
     spec:
       terminationGracePeriodSeconds: {{ .Values.apiRs.terminationGracePeriodSeconds }}
       automountServiceAccountToken: true
@@ -189,8 +210,27 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sDATABASE_URL" .Values.secretManager.envPrefix }}
+            - name: CENTAUR_JWT_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sCENTAUR_JWT_SIGNING_SECRET" .Values.secretManager.envPrefix }}
             - name: BIND_ADDR
               value: {{ printf "0.0.0.0:%v" .Values.apiRs.port | quote }}
+            - name: SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sSLACK_BOT_TOKEN" .Values.secretManager.envPrefix }}
+                  optional: true
+{{- if $mcpPublicUrl }}
+            - name: CENTAUR_MCP_PUBLIC_URL
+              value: {{ $mcpPublicUrl | quote }}
+{{- end }}
+{{- if $console.publicUrl }}
+            - name: CENTAUR_CONSOLE_PUBLIC_URL
+              value: {{ $console.publicUrl | quote }}
+{{- end }}
             - name: RUN_MIGRATIONS
               value: {{ .Values.apiRs.runMigrations | quote }}
             - name: IRON_CONTROL_SYNC_INFRA_SECRETS
@@ -199,11 +239,19 @@ spec:
               value: info
             - name: TOOL_DIRS
               value: {{ join ":" $toolDirs | quote }}
+{{- if gt (len $publicToolDirs) 0 }}
+            - name: KUBERNETES_PUBLIC_TOOL_DIRS
+              value: {{ join ":" $publicToolDirs | quote }}
+{{- end }}
             - name: WORKFLOW_DIRS
               value: {{ $workflowDirs | quote }}
 {{- if $sandboxWorkflowDirs }}
             - name: KUBERNETES_WORKFLOW_DIRS
               value: {{ $sandboxWorkflowDirs | quote }}
+{{- end }}
+{{- if not (hasKey .Values.apiRs.extraEnv "WORKFLOW_HOST_SANDBOX") }}
+            - name: WORKFLOW_HOST_SANDBOX
+              value: {{ .Values.apiRs.workflowHostSandbox | quote }}
 {{- end }}
 {{- if not (hasKey .Values.apiRs.extraEnv "WORKFLOW_ENABLE_MODE") }}
             - name: WORKFLOW_ENABLE_MODE
@@ -242,8 +290,10 @@ spec:
               value: {{ .Values.apiRs.sandboxWarmPoolSize | quote }}
             - name: SESSION_SANDBOX_WARM_POOL_REPLENISH_INTERVAL_SECS
               value: {{ .Values.apiRs.sandboxWarmPoolReplenishIntervalSecs | quote }}
-            - name: SESSION_SANDBOX_IDLE_STOP_TTL_SECS
-              value: {{ .Values.apiRs.sandboxIdleStopTtlSecs | quote }}
+            - name: SESSION_SANDBOX_RUNNING_LIMIT
+              value: {{ .Values.apiRs.sandboxRunningLimit | quote }}
+            - name: SESSION_SANDBOX_HOT_IDLE_GRACE_SECS
+              value: {{ .Values.apiRs.sandboxHotIdleGraceSecs | quote }}
             - name: SESSION_SANDBOX_MAX_LIFETIME_SECS
               value: {{ .Values.apiRs.sandboxMaxLifetimeSecs | quote }}
             - name: SESSION_SANDBOX_REAP_INTERVAL_SECS
@@ -252,6 +302,22 @@ spec:
               value: {{ .Values.apiRs.sandboxCleanupIntervalSecs | quote }}
             - name: SESSION_SANDBOX_IDLE_CLEANUP_BACKSTOP_SECS
               value: {{ .Values.apiRs.sandboxIdleCleanupBackstopSecs | quote }}
+            - name: SESSION_ACTIVITY_SUMMARY_ENABLED
+              value: {{ .Values.apiRs.activitySummary.enabled | quote }}
+{{- if .Values.apiRs.activitySummary.enabled }}
+            - name: SESSION_ACTIVITY_SUMMARY_MODEL
+              value: {{ .Values.apiRs.activitySummary.model | quote }}
+            - name: SESSION_ACTIVITY_SUMMARY_OPENAI_BASE_URL
+              value: {{ .Values.apiRs.activitySummary.openaiBaseUrl | quote }}
+            - name: SESSION_ACTIVITY_SUMMARY_MIN_INTERVAL_SECS
+              value: {{ .Values.apiRs.activitySummary.minIntervalSecs | quote }}
+            - name: SESSION_ACTIVITY_SUMMARY_TIMEOUT_SECS
+              value: {{ .Values.apiRs.activitySummary.timeoutSecs | quote }}
+            - name: SESSION_ACTIVITY_SUMMARY_MAX_FACTS
+              value: {{ .Values.apiRs.activitySummary.maxFacts | quote }}
+            - name: SESSION_ACTIVITY_SUMMARY_MAX_OUTPUT_TOKENS
+              value: {{ .Values.apiRs.activitySummary.maxOutputTokens | quote }}
+{{- end }}
             - name: SESSION_SANDBOX_K8S_NAMESPACE
               value: {{ .Release.Namespace | quote }}
             - name: SESSION_SANDBOX_IMAGE
@@ -323,6 +389,8 @@ spec:
             - name: KUBERNETES_IRON_PROXY_MEMORY_LIMIT
               value: {{ . | quote }}
 {{- end }}
+            - name: KUBERNETES_IRON_PROXY_UPSTREAM_DENY_CIDRS
+              value: {{ join "," .Values.ironProxy.upstreamDenyCidrs | quote }}
             - name: KUBERNETES_FIREWALL_CA_SECRET_NAME
               value: {{ include "centaur.trustedCaSecretName" . | quote }}
             - name: KUBERNETES_FIREWALL_CA_KEY_SECRET_NAME
@@ -365,6 +433,9 @@ spec:
 {{- $sandboxEnvList := list }}
 {{- if and .Values.repoCache.enabled (gt (len $skillDirs) 0) }}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" "CENTAUR_SKILL_DIRS" "value" (join ":" $skillDirs)) }}
+{{- end }}
+{{- if and .Values.repoCache.enabled (gt (len $publicSkillDirs) 0) }}
+{{- $sandboxEnvList = append $sandboxEnvList (dict "name" "CENTAUR_PUBLIC_SKILL_DIRS" "value" (join ":" $publicSkillDirs)) }}
 {{- end }}
 {{- range $k, $v := .Values.sandbox.extraEnv }}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" $k "value" ($v | toString)) }}
@@ -415,6 +486,8 @@ spec:
 {{- end }}
             - name: KUBERNETES_TOOLS_SUBDIR
               value: {{ get $firstToolSource "subdir" | quote }}
+            - name: KUBERNETES_TOOLS_VISIBILITY
+              value: {{ get $firstToolSource "visibility" | default "private" | quote }}
 {{- if $extraToolSources }}
             - name: KUBERNETES_TOOLS_EXTRA_SOURCES
               value: {{ toJson $extraToolSources | quote }}
@@ -422,6 +495,8 @@ spec:
 {{- if $toolsUseRepoCache }}
             - name: KUBERNETES_TOOLS_REPO_CACHE_PATH
               value: {{ .Values.repoCache.hostPath | quote }}
+            - name: KUBERNETES_TOOLS_AUTO_RELOAD
+              value: {{ .Values.repoCache.autoReload | quote }}
 {{- if $repoCacheUsePvc }}
             - name: KUBERNETES_TOOLS_REPO_CACHE_PVC
               value: {{ $repoCachePvcName | quote }}

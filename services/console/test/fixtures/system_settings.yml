@@ -1,0 +1,5 @@
+default:
+  singleton: true
+  default_sandbox_repo_cache: all
+  default_sandbox_observability_enabled: true
+  default_sandbox_api_server_enabled: true

@@ -12,10 +12,11 @@ from urllib.parse import quote, urljoin, urlparse, urlsplit
 
 import httplib2
 import socks
-from centaur_sdk import current_thread_key, save_attachment, secret
 from google.auth.credentials import AnonymousCredentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+
+from centaur_sdk import current_thread_key, save_attachment, secret
 
 try:
     from api.integrations.gsuite.http import build_http as _shared_build_http
@@ -145,25 +146,28 @@ def gmail_read(message_id: str) -> dict:
         message_id: The message ID
 
     Returns:
-        Dict with id, subject, from, to, date, body (plain text)
+        Dict with id, subject, from, to, date, body, html, and raw RFC822 content
     """
     service = get_gmail_service()
 
     msg = service.users().messages().get(userId="me", id=message_id, format="full").execute()
+    raw_msg = service.users().messages().get(userId="me", id=message_id, format="raw").execute()
 
     headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
 
-    def get_body(payload):
-        if payload.get("body", {}).get("data"):
-            return base64.urlsafe_b64decode(payload["body"]["data"]).decode("utf-8")
-        if payload.get("parts"):
-            for part in payload["parts"]:
-                if part.get("mimeType") == "text/plain":
-                    if part.get("body", {}).get("data"):
-                        return base64.urlsafe_b64decode(part["body"]["data"]).decode("utf-8")
-                body = get_body(part)
-                if body:
-                    return body
+    def decode_body(data):
+        padded = data + "=" * (-len(data) % 4)
+        return base64.urlsafe_b64decode(padded.encode()).decode("utf-8", errors="replace")
+
+    def get_body(payload, mime_type):
+        if not isinstance(payload, dict):
+            return ""
+        if payload.get("mimeType") == mime_type and payload.get("body", {}).get("data"):
+            return decode_body(payload["body"]["data"])
+        for part in payload.get("parts") or []:
+            body = get_body(part, mime_type)
+            if body:
+                return body
         return ""
 
     return {
@@ -174,7 +178,9 @@ def gmail_read(message_id: str) -> dict:
         "to": headers.get("To", ""),
         "cc": headers.get("Cc", ""),
         "date": headers.get("Date", ""),
-        "body": get_body(msg.get("payload", {})),
+        "body": get_body(msg.get("payload", {}), "text/plain"),
+        "html": get_body(msg.get("payload", {}), "text/html"),
+        "raw": raw_msg.get("raw", ""),
         "label_ids": msg.get("labelIds", []),
     }
 
@@ -283,9 +289,9 @@ def gmail_reply(
         Dict with id, thread_id
     """
     import mimetypes
-    from email.mime.multipart import MIMEMultipart
-    from email.mime.base import MIMEBase
     from email import encoders
+    from email.mime.base import MIMEBase
+    from email.mime.multipart import MIMEMultipart
 
     service = get_gmail_service()
 
@@ -640,19 +646,27 @@ def calendar_rsvp(
 # Drive functions
 
 
+def _drive_query_literal(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{escaped}'"
+
+
 def drive_list(
     query: str | None = None,
     folder_id: str | None = None,
     max_results: int = 50,
     file_type: str | None = None,
+    full_text: bool = False,
 ) -> list[dict]:
     """List files in Google Drive.
 
     Args:
-        query: Search query (Drive query syntax)
+        query: Search query to match against file names by default, or full text
+            when full_text is true
         folder_id: Folder ID to list contents
         max_results: Maximum number of results
         file_type: Filter by MIME type prefix (e.g., "image/", "application/pdf")
+        full_text: Use Drive's fullText contains query term instead of name contains
 
     Returns:
         List of file dicts with id, name, mimeType, size, modifiedTime, webViewLink
@@ -661,14 +675,15 @@ def drive_list(
 
     q_parts = []
     if query:
-        q_parts.append(f"name contains '{query}'")
+        query_term = "fullText" if full_text else "name"
+        q_parts.append(f"{query_term} contains {_drive_query_literal(query)}")
     if folder_id:
-        q_parts.append(f"'{folder_id}' in parents")
+        q_parts.append(f"{_drive_query_literal(folder_id)} in parents")
     if file_type:
         if file_type.endswith("/"):
-            q_parts.append(f"mimeType contains '{file_type}'")
+            q_parts.append(f"mimeType contains {_drive_query_literal(file_type)}")
         else:
-            q_parts.append(f"mimeType = '{file_type}'")
+            q_parts.append(f"mimeType = {_drive_query_literal(file_type)}")
 
     q_parts.append("trashed = false")
 
@@ -741,6 +756,11 @@ def _download_attachment_bytes(
     attachment_url: str | None = None,
 ) -> bytes:
     """Fetch bytes from Centaur's thread-scoped attachment API."""
+    if secret("CENTAUR_SANDBOX_API_SERVER_ENABLED", "true").strip().lower() == "false":
+        raise RuntimeError(
+            "Drive uploads from Centaur attachments require the API server sandbox capability, "
+            "but it is disabled for this principal."
+        )
     path = attachment_url
     if attachment_id:
         path = f"/agent/attachments/{attachment_id}/download"
@@ -769,6 +789,7 @@ def _download_attachment_bytes(
 
 def drive_upload(
     content_base64: str | None = None,
+    content_path: str | None = None,
     name: str | None = None,
     folder_id: str | None = None,
     mime_type: str | None = None,
@@ -779,14 +800,13 @@ def drive_upload(
 ) -> dict:
     """Upload a file to Google Drive.
 
-    Accepts one of: content_base64, attachment_id, or attachment_url.
-    There is deliberately no local-path option: this tool runs in-process on
-    the API server, so a caller-supplied path would read the API host's
-    filesystem. Sandboxes pass bytes via content_base64 or a Centaur attachment
-    handle instead.
+    Accepts one of: content_base64, content_path, attachment_id, or attachment_url.
+    content_path is for workflow files already on the API host filesystem. Sandbox
+    callers should pass a Centaur attachment handle instead.
 
     Args:
         content_base64: Base64-encoded file bytes
+        content_path: Path to a file on the API host filesystem
         name: File name in Drive
         folder_id: Parent folder ID
         mime_type: MIME type (auto-detected if not provided)
@@ -804,6 +824,12 @@ def drive_upload(
     if content_base64:
         upload_bytes = base64.b64decode(content_base64)
         file_name = name or filename or "upload.bin"
+    elif content_path:
+        path = Path(content_path)
+        if not path.is_file():
+            raise ValueError(f"content_path does not exist or is not a file: {content_path}")
+        upload_bytes = path.read_bytes()
+        file_name = name or filename or path.name
     elif attachment_id or attachment_url:
         upload_bytes = _download_attachment_bytes(
             attachment_id=attachment_id,
@@ -811,7 +837,9 @@ def drive_upload(
         )
         file_name = name or filename or f"{attachment_id or 'attachment'}.bin"
     else:
-        raise ValueError("One of content_base64, attachment_id, or attachment_url is required")
+        raise ValueError(
+            "One of content_base64, content_path, attachment_id, or attachment_url is required"
+        )
 
     content_type = mime_type or mimetypes.guess_type(file_name)[0] or "application/octet-stream"
 
@@ -2673,14 +2701,17 @@ class GSuiteClient:
         folder_id: str | None = None,
         max_results: int = 50,
         file_type: str | None = None,
+        full_text: bool = False,
     ) -> list[dict]:
         """List files in Google Drive.
 
         Args:
-            query: Search query (Drive query syntax)
+            query: Search query to match against file names by default, or full text
+                when full_text is true
             folder_id: Folder ID to list contents
             max_results: Maximum number of results
             file_type: Filter by MIME type prefix (e.g., "image/", "application/pdf")
+            full_text: Use Drive's fullText contains query term instead of name contains
 
         Returns:
             List of file dicts with id, name, mimeType, size, modifiedTime, webViewLink
@@ -2690,19 +2721,24 @@ class GSuiteClient:
             folder_id=folder_id,
             max_results=max_results,
             file_type=file_type,
+            full_text=full_text,
         )
 
-    def drive_search(self, query: str, max_results: int = 50) -> list[dict]:
-        """Search files in Google Drive by name.
+    def drive_search(
+        self, query: str, max_results: int = 50, full_text: bool = False
+    ) -> list[dict]:
+        """Search files in Google Drive by name or full text.
 
         Args:
-            query: Search query (matches file names)
+            query: Search query to match against file names by default, or full text
+                when full_text is true
             max_results: Maximum number of results
+            full_text: Use Drive's fullText contains query term instead of name contains
 
         Returns:
             List of file dicts with id, name, mimeType, size, modifiedTime, webViewLink
         """
-        return drive_list(query=query, max_results=max_results)
+        return drive_list(query=query, max_results=max_results, full_text=full_text)
 
     def drive_get(self, file_id: str) -> dict:
         """Get file metadata from Google Drive.
@@ -2729,6 +2765,7 @@ class GSuiteClient:
     def drive_upload(
         self,
         content_base64: str | None = None,
+        content_path: str | None = None,
         name: str | None = None,
         folder_id: str | None = None,
         mime_type: str | None = None,
@@ -2741,6 +2778,7 @@ class GSuiteClient:
 
         Args:
             content_base64: Base64-encoded file bytes
+            content_path: Path to a file on the API host filesystem
             name: File name in Drive
             folder_id: Parent folder ID
             mime_type: MIME type (auto-detected if not provided)
@@ -2754,6 +2792,7 @@ class GSuiteClient:
         """
         return drive_upload(
             content_base64=content_base64,
+            content_path=content_path,
             name=name,
             folder_id=folder_id,
             mime_type=mime_type,

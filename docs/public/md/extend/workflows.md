@@ -70,9 +70,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
 | `ctx.sleep(name, duration)` | Suspend and resume later. |
 | `ctx.sleep_until(name, when)` | Resume at a specific time. |
 | `ctx.wait_for_event(name, event_type, correlation_id)` | Wait for an external event. |
-| `ctx.start_workflow(...)` | Start a child workflow and continue immediately. |
-| `ctx.wait_for_workflow(...)` | Wait for a child workflow to finish. |
-| `ctx.run_workflow(...)` | Start and wait in one call. |
+| `ctx.start_workflow(workflow_name, input, idempotency_key=...)` | Queue a child workflow and continue immediately; returns its durable task/run identifiers. |
 | `ctx.start_agent(...)` | Start an agent turn. |
 | `ctx.run_agent(...)` | Start an agent turn and wait for the result. |
 
@@ -97,9 +95,8 @@ These primitives compose into larger automations:
 Create a run through the API:
 
 ```bash
-curl -s "$CENTAUR_API_URL/workflows/runs" \
+curl -s "$CENTAUR_API_URL/api/workflows/runs" \
   -H "Content-Type: application/json" \
-  -H "X-Api-Key: $WORKFLOW_API_KEY" \
   -d '{
     "workflow_name": "nightly_report",
     "input": {"channel": "ops", "topic": "open incidents"},
@@ -110,8 +107,7 @@ curl -s "$CENTAUR_API_URL/workflows/runs" \
 Inspect it:
 
 ```bash
-curl -s "$CENTAUR_API_URL/workflows/runs/$RUN_ID" \
-  -H "X-Api-Key: $WORKFLOW_API_KEY" | jq
+curl -s "$CENTAUR_API_URL/api/workflows/runs/$RUN_ID" | jq
 ```
 
 ## Schedule a workflow
@@ -125,7 +121,7 @@ WORKFLOW_NAME = "daily_market_digest"
 
 SCHEDULE = {
     "type": "cron",
-    "cron": "0 9 * * 1-5",
+    "cron": "0 9 * * MON-FRI",
     "timezone": "America/New_York",
     "input": {
         "channel": "markets",
@@ -140,11 +136,20 @@ Cron schedules use five fields:
 minute hour day-of-month month day-of-week
 ```
 
+:::warning[Day-of-week numbering is Quartz-style, not Unix crontab]
+The schedule engine parses cron expressions with the Rust
+[`cron` crate](https://github.com/zslayton/cron), which numbers days of week
+1–7 with **1 = Sunday** (`0` is rejected). A Unix-style `1-5` therefore fires
+Sunday–Thursday, not Monday–Friday. Always write day-of-week as names
+(`MON`, `MON-FRI`, `SAT,SUN`) — they mean the same thing in every dialect.
+:::
+
 Examples:
 
 | Cron | Meaning |
 |------|---------|
-| `0 9 * * 1-5` | 9:00 AM every weekday. |
+| `0 9 * * MON-FRI` | 9:00 AM every weekday. |
+| `0 9 * * 1-5` | 9:00 AM Sunday–Thursday (Quartz numbering — probably not what you meant). |
 | `*/15 * * * *` | Every 15 minutes. |
 | `30 6 * * *` | 6:30 AM every day. |
 | `0 0 1 * *` | Midnight on the first day of every month. |

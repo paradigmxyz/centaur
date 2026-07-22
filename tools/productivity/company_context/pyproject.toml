@@ -1,6 +1,6 @@
 [project]
 name = "company_context"
-description = "Search indexed company history and user-visible Slack DMs. Prefer this over direct Slack search for historical queries. Current sources: Slack, Slack DMs, Google Drive, Google Calendar, Linear."
+description = "Search indexed company history, user-visible Slack DMs, Google Docs, and Granola notes. Prefer this over direct Slack, Drive, or Granola search for historical queries. Current sources: Slack, Slack DMs, Google Docs, Google Calendar, Linear, Granola."
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
@@ -25,3 +25,15 @@ packages = ["."]
 
 [tool.centaur]
 module = "client.py"
+
+[[tool.centaur.secrets]]
+type = "pg_dsn"
+name = "company_context_dsn"
+database = "centaur"
+secret_ref = "CENTAUR_POSTGRES_DSN"
+role = "centaur_slack_reader"
+settings = [
+    { name = "centaur.slack_channel_id", value_from = { principal_label = "slack_channel_id" } },
+    { name = "centaur.slack_team_id", value_from = { principal_label = "slack_team_id" } },
+    { name = "centaur.slack_user_id", value_from = { principal_label = "slack_user_id" } },
+]

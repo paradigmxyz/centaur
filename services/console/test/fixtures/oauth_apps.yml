@@ -1,6 +1,18 @@
 # client_secret is encrypted and is set in test setup via the model, not here --
 # encrypt_fixtures is off (same as broker_credentials.yml). client_id is not
 # encrypted, so it lives here.
+acme_attio:
+  slug: attio
+  description: Acme Attio integration
+  provider: attio
+  client_id: acme-attio-client-id
+  allowed_scopes:
+    - record_permission:read
+    - object_configuration:read
+  credential_namespace: acme
+  enabled: true
+  created_by: acme_admin
+
 acme_google:
   slug: google
   description: Acme Google integration
@@ -46,6 +58,18 @@ acme_github:
   allowed_scopes:
     - repo
     - read:user
+  credential_namespace: acme
+  enabled: true
+  created_by: acme_admin
+
+acme_linear:
+  slug: linear
+  description: Acme Linear integration
+  provider: linear
+  client_id: acme-linear-client-id
+  allowed_scopes:
+    - read
+    - write
   credential_namespace: acme
   enabled: true
   created_by: acme_admin

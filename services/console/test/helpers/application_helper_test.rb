@@ -1,4 +1,5 @@
 require "test_helper"
+require "timeout"
 
 class ApplicationHelperTest < ActionView::TestCase
   test "truncate_middle leaves short values unchanged" do
@@ -33,8 +34,126 @@ class ApplicationHelperTest < ActionView::TestCase
     assert_select_in html, "time[data-localtime-relative-value=true]"
   end
 
+  test "local_time can request compact relative formatting" do
+    html = local_time(Time.utc(2026, 6, 4, 18, 30, 0), relative: true, format: :compact)
+
+    assert_select_in html, "time[data-localtime-relative-value=true]"
+    assert_select_in html, "time[data-localtime-format-value=compact]"
+  end
+
   test "local_time renders a placeholder for nil" do
     assert_select_in local_time(nil), "span", text: "—"
+  end
+
+  test "console_markdown renders common github-flavored markdown" do
+    html = console_markdown(<<~MARKDOWN)
+      Yes, **partially legit**.
+
+      Issue 1 is real on current `main`.
+
+      - one
+      - two
+
+      https://github.com/paradigmxyz/centaur/issues/792
+    MARKDOWN
+
+    assert_select_in html, "p", text: /Yes, partially legit/
+    assert_select_in html, "strong", text: "partially legit"
+    assert_select_in html, "code", text: "main"
+    assert_select_in html, "ul li", count: 2
+    assert_select_in html, "a.console-markdown-link[href='https://github.com/paradigmxyz/centaur/issues/792']",
+                     text: "https://github.com/paradigmxyz/centaur/issues/792"
+  end
+
+  test "console_markdown renders gfm tables with alignment" do
+    html = console_markdown(<<~MARKDOWN)
+      Before the table.
+
+      | Name | Count | Status |
+      | :--- | ---: | :---: |
+      | `api-rs` | 12 | **ok** |
+      | console | 3 | pending |
+
+      After the table.
+    MARKDOWN
+
+    assert_select_in html, "table thead tr th", count: 3
+    assert_select_in html, "table tbody tr", count: 2
+    assert_select_in html, "th.text-right", text: "Count"
+    assert_select_in html, "th.text-center", text: "Status"
+    assert_select_in html, "td.text-right", text: "12"
+    assert_select_in html, "tbody code", text: "api-rs"
+    assert_select_in html, "tbody strong", text: "ok"
+    assert_select_in html, "p", text: "Before the table."
+    assert_select_in html, "p", text: "After the table."
+  end
+
+  test "console_markdown pads and truncates ragged table rows to the header width" do
+    html = console_markdown(<<~MARKDOWN)
+      | a | b |
+      | --- | --- |
+      | only |
+      | one | two | three |
+    MARKDOWN
+
+    assert_select_in html, "tbody tr", count: 2
+    assert_select_in html, "tbody tr:first-child td", count: 2
+    assert_select_in html, "tbody tr:last-child td", count: 2
+    refute_includes html, "three"
+  end
+
+  test "console_markdown escapes html inside table cells" do
+    html = console_markdown("| h |\n| --- |\n| <script>alert(1)</script> |")
+
+    refute_includes html, "<script>"
+    assert_select_in html, "tbody td", text: /alert\(1\)/
+  end
+
+  test "console_markdown leaves pipe-prefixed lines without a separator as text" do
+    html = console_markdown("| not a table |\nplain line")
+
+    assert_select_in html, "table", count: 0
+    assert_select_in html, "p", count: 2
+    assert_includes html, "not a table"
+  end
+
+  test "console_sidebar_thread_title prefers the stored generated title" do
+    session = Struct.new(:title, :metadata_hash, keyword_init: true).new(
+      title: "Fix worker memory leak",
+      metadata_hash: { "title" => "metadata title" }
+    )
+
+    assert_equal "Fix worker memory leak", console_sidebar_thread_title(session)
+  end
+
+  test "console_sidebar_thread_title falls back to metadata when no stored title" do
+    session = Struct.new(:title, :metadata_hash, keyword_init: true).new(
+      title: nil,
+      metadata_hash: { "title" => "metadata title" }
+    )
+
+    assert_equal "metadata title", console_sidebar_thread_title(session)
+  end
+
+  test "console_markdown escapes unsafe html" do
+    html = console_markdown("<script>alert(1)</script> **safe**")
+
+    refute_includes html, "<script>"
+    assert_select_in html, "strong", text: "safe"
+  end
+
+  test "console_markdown terminates on bare list and heading markers" do
+    # A line that is only a block-start marker (no content) once spun the
+    # markdown parser forever, pinning a worker. It must render and return.
+    [ "- ", "* ", "+ ", "1. ", "# ", "## ", "hello\n- \nworld" ].each do |input|
+      html = Timeout.timeout(3) { console_markdown(input) }
+      assert html.present?, "expected markdown for #{input.inspect}"
+    end
+  end
+
+  test "console_icon renders theme toggle icons" do
+    assert_select_in console_icon("sun"), "svg path[d*='M12 3v2.25']"
+    assert_select_in console_icon("moon"), "svg path[d*='21.752 15.002']"
   end
 
   private

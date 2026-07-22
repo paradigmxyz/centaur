@@ -10,6 +10,7 @@ module Console
 
     layout "console"
 
+    before_action :require_admin
     before_action :set_credential, only: %i[edit update destroy]
 
     def new

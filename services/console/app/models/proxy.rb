@@ -3,6 +3,7 @@ class Proxy < ApplicationRecord
 
   TOKEN_PREFIX = "iprx_".freeze
   TOKEN_FORMAT = /\Aiprx_[0-9a-f]{64}\z/
+  SANDBOX_ENTITLEMENTS_PATH_PATTERN = "/api/v1/sandbox/*".freeze
 
   attr_readonly :bearer_token_hash
   attr_accessor :token
@@ -45,14 +46,17 @@ class Proxy < ApplicationRecord
     principal&.effective_config(redact_secrets: false) || Principal::EMPTY_CONFIG
   end
 
-  def sync_config_snapshot
+  def sync_config_snapshot(sandbox_entitlements_hosts: [])
     config = principal ? PrincipalSyncConfigSnapshot.fetch_for(principal).payload : Principal::EMPTY_CONFIG
+    config = with_sandbox_entitlements_secret(config, sandbox_entitlements_hosts: sandbox_entitlements_hosts)
     { config_hash: config_hash_for(config), config: config }
   end
 
-  # Opaque, deterministic fingerprint of the delivered config. The proxy treats
-  # this as an ETag: it echoes its current hash on each sync and only re-applies
-  # config when the hash changes.
+  # Opaque, deterministic fingerprint of the base (principal-derived) config.
+  # Note this is not necessarily the hash the proxy echoes on sync: the sync
+  # path hashes the delivered config, which also folds in the per-proxy
+  # sandbox entitlements secret when one is configured (see
+  # #sync_config_snapshot).
   def config_hash
     # The principal identity and assignment time are folded in so that any
     # assignment change forces a refresh, even a swap between principals whose
@@ -85,7 +89,37 @@ class Proxy < ApplicationRecord
     end
   end
 
+  def sandbox_entitlements_secret(hosts:)
+    rules = Principal.normalize_hosts(hosts)
+      .map do |host|
+        {
+          "host" => host,
+          "methods" => [ "GET" ],
+          "paths" => [ SANDBOX_ENTITLEMENTS_PATH_PATTERN ]
+        }
+      end
+    return nil if rules.empty?
+
+    token = SandboxEntitlements::Jwt.encode_for_proxy(self)
+    return nil if token.blank?
+
+    {
+      "source" => { "type" => "control_plane", "value" => token },
+      "inject" => { "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" },
+      "rules" => rules
+    }
+  end
+
   private
+
+  def with_sandbox_entitlements_secret(config, sandbox_entitlements_hosts:)
+    secret = sandbox_entitlements_secret(hosts: sandbox_entitlements_hosts)
+    return config unless secret
+
+    config.deep_dup.tap do |copy|
+      copy["secrets"] = Array(copy["secrets"]) + [ secret ]
+    end
+  end
 
   # Stamp (or clear) the assignment time whenever principal_id changes, so the
   # column always reflects the current assignment.

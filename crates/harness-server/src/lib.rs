@@ -3,6 +3,8 @@ pub mod anthropic;
 pub mod claude;
 pub mod codex;
 mod error;
+mod nanocodex;
+mod nanocodex_subagents;
 mod otel;
 mod server;
 mod traits;
@@ -12,6 +14,7 @@ mod validation;
 pub mod wire;
 
 pub use error::{HarnessServerError, Result};
+pub use nanocodex::run_nanocodex_blocks_server;
 pub use server::{run_blocks_server, run_harness_server, run_validate_jsonrpc, server_for};
 pub use traits::{
     AppServerNormalizer, AppServerRuntime, HarnessKind, HarnessServer, NormalizedContent,

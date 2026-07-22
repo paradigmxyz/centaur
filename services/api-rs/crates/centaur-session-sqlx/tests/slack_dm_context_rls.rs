@@ -12,6 +12,10 @@ const SLACK_DM_CONTEXT_DOCUMENTS_SQL: &str =
     include_str!("../migrations/0028_slack_dm_context_documents.sql");
 const SLACK_DM_CONVERSATION_CONTEXT_DOCUMENTS_SQL: &str =
     include_str!("../migrations/0029_slack_dm_conversation_context_documents.sql");
+const READONLY_DM_RLS_SQL: &str =
+    include_str!("../migrations/0042_centaur_readonly_slack_dm_rls.sql");
+const SLACK_PRIVATE_CONVERSATIONS_SQL: &str =
+    include_str!("../migrations/0045_slack_private_channel_oauth_sync.sql");
 
 const RLS_TABLES: &[&str] = &[
     "slack_dm_sync_conversations",
@@ -58,6 +62,7 @@ async fn run_rls_assertions(conn: &mut PgConnection, schema: &str) -> Result<(),
     execute_migration(conn, SLACK_DM_SYNC_SQL).await?;
     execute_slack_dm_context_documents_migration(conn).await?;
     execute_slack_dm_conversation_context_documents_migration(conn).await?;
+    execute_migration(conn, READONLY_DM_RLS_SQL).await?;
     grant_schema_usage(conn, schema).await?;
 
     assert_rls_enabled(conn).await?;
@@ -178,7 +183,11 @@ async fn run_rls_assertions(conn: &mut PgConnection, schema: &str) -> Result<(),
         Some("U_A"),
     )
     .await?;
-    assert_eq!(readonly, empty_visible_dm_rows());
+    assert_eq!(readonly, user_a);
+
+    let readonly_missing_user =
+        visible_rows(conn, schema, "centaur_readonly", Some("T_HOME"), None).await?;
+    assert_eq!(readonly_missing_user, empty_visible_dm_rows());
 
     Ok(())
 }
@@ -351,6 +360,48 @@ fn slack_dm_context_documents_test_migration_omits_bm25_when_extension_is_unavai
             "create policy centaur_slack_dm_conversation_context_documents_reader_select"
         )
     );
+}
+
+#[test]
+fn slack_private_conversation_migration_renames_every_user_scoped_table() {
+    for (old_name, new_name) in [
+        (
+            "slack_dm_sync_conversations",
+            "slack_private_sync_conversations",
+        ),
+        (
+            "slack_dm_sync_conversation_members",
+            "slack_private_sync_conversation_members",
+        ),
+        ("slack_dm_sync_runs", "slack_private_sync_runs"),
+        ("slack_dm_sync_messages", "slack_private_sync_messages"),
+        (
+            "slack_dm_sync_message_attachments",
+            "slack_private_sync_message_attachments",
+        ),
+        (
+            "slack_dm_sync_checkpoints",
+            "slack_private_sync_checkpoints",
+        ),
+        (
+            "slack_dm_sync_backfill_jobs",
+            "slack_private_sync_backfill_jobs",
+        ),
+        (
+            "slack_dm_context_documents",
+            "slack_private_context_documents",
+        ),
+        (
+            "slack_dm_conversation_context_documents",
+            "slack_private_conversation_context_documents",
+        ),
+    ] {
+        assert!(
+            SLACK_PRIVATE_CONVERSATIONS_SQL
+                .contains(format!("alter table {old_name}\n    rename to {new_name};").as_str()),
+            "missing table rename from {old_name} to {new_name}"
+        );
+    }
 }
 
 async fn assert_rls_enabled(conn: &mut PgConnection) -> Result<(), sqlx::Error> {

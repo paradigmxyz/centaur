@@ -7,6 +7,7 @@
       "properties": {
         "enabled": { "type": "boolean" },
         "replicaCount": { "type": "integer" },
+        "publicUrl": { "type": "string" },
         "railsEnv": { "type": "string" },
         "image": {
           "type": "object",
@@ -93,7 +94,11 @@
           }
         },
         "secretSource": { "type": "string" },
-        "secretTtl": { "type": "string" }
+        "secretTtl": { "type": "string" },
+        "upstreamDenyCidrs": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
       }
     },
     "toolServer": {
@@ -103,6 +108,7 @@
         "port": { "type": "integer" },
         "repo": { "type": "string" },
         "ref": { "type": "string" },
+        "visibility": { "type": "string" },
         "subdir": { "type": "string" },
         "extraSources": {
           "type": "array",
@@ -111,6 +117,7 @@
             "properties": {
               "repo": { "type": "string" },
               "ref": { "type": "string" },
+              "visibility": { "type": "string" },
               "subdir": { "type": "string" }
             },
             "required": ["repo"]
@@ -143,6 +150,7 @@
             "properties": {
               "repo": { "type": "string" },
               "ref": { "type": "string" },
+              "visibility": { "type": "string" },
               "toolsSubdir": { "type": "string" },
               "workflowsSubdir": { "type": "string" },
               "skillsSubdir": { "type": "string" },
@@ -166,10 +174,24 @@
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean" },
+        "autoReload": { "type": "boolean" },
         "hostPath": { "type": "string" },
         "repositories": {
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "anyOf": [
+              { "type": "string" },
+              {
+                "type": "object",
+                "properties": {
+                  "repo": { "type": "string" },
+                  "ref": { "type": "string" },
+                  "visibility": { "type": "string" }
+                },
+                "required": ["repo"]
+              }
+            ]
+          }
         },
         "repositoryRefs": {
           "type": "object",
@@ -242,6 +264,10 @@
       "type": "object",
       "properties": {
         "syncInfraSecrets": { "type": "boolean" },
+        "mcpPublicUrl": { "type": "string" },
+        "sandboxRunningLimit": { "type": "integer", "minimum": 0 },
+        "sandboxHotIdleGraceSecs": { "type": "integer", "minimum": 0 },
+        "workflowHostSandbox": { "type": "boolean" },
         "etl": {
           "type": "object",
           "properties": {
@@ -252,6 +278,7 @@
                 "syncIntervalSeconds": { "type": "integer" },
                 "syncBackfillLookbackDays": { "type": "integer" },
                 "syncThreadLookbackDays": { "type": "integer" },
+                "indexPrivateChannels": { "type": "boolean" },
                 "excludedChannelPatterns": { "type": "string" },
                 "attachments": {
                   "type": "object",
@@ -305,7 +332,9 @@
               "type": "object",
               "properties": {
                 "enabled": { "type": "boolean" },
-                "intervalSeconds": { "type": "integer" }
+                "intervalSeconds": { "type": "integer" },
+                "maxWindowSeconds": { "type": "integer" },
+                "batchSize": { "type": "integer", "minimum": 1 }
               }
             }
           }
@@ -330,6 +359,7 @@
     "slackbotv2": {
       "type": "object",
       "properties": {
+        "mcpPublicUrl": { "type": "string" },
         "metrics": {
           "type": "object",
           "properties": {
@@ -380,6 +410,54 @@
         "ingressControllerNamespaces": {
           "type": "array",
           "items": { "type": "string" }
+        },
+        "apiServerPort": { "type": "integer" },
+        "otlpEgress": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "namespace": { "type": "string" },
+            "port": { "type": "integer" }
+          }
+        },
+        "observabilityEgress": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "destinations": {
+              "type": "array",
+              "minItems": 0,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "namespace": { "type": "string" },
+                  "namespaceSelector": { "type": "object" },
+                  "podSelector": { "type": "object" },
+                  "ports": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "port": {
+                          "oneOf": [
+                            { "type": "integer" },
+                            { "type": "string" }
+                          ]
+                        },
+                        "protocol": {
+                          "type": "string",
+                          "enum": ["TCP", "UDP", "SCTP"]
+                        }
+                      },
+                      "required": ["port"]
+                    }
+                  }
+                },
+                "required": ["ports"]
+              }
+            }
+          }
         }
       }
     }

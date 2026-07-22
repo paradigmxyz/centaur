@@ -1,0 +1,319 @@
+<%# Chat composer, shared by the full-page New-chat view (mode: :new — a
+    model picker where each choice pins its harness, and Amp is simply one of
+    the options) and open chats (mode: :thread, session: — follow-ups on the
+    session's existing harness/model). The picker is a custom menu mirroring
+    the account dropdown (same panel/item classes), not a native select.
+    Enter sends, Shift+Enter breaks a line; the script below is idempotent
+    across Turbo visits. %>
+<% thread_mode = defined?(mode) && mode == :thread %>
+<% composer_session = thread_mode ? session : nil %>
+<%# compact: single-row textarea for new-chat composers docked in a pane,
+    matching the thread composer's height. %>
+<% compact_mode = defined?(compact) && compact %>
+<%= form_with url: console_threads_path,
+              method: :post,
+              class: "console-composer #{thread_mode ? "console-composer--thread" : "console-composer--new"}",
+              data: { console_composer: thread_mode ? "thread" : "new" } do |form| %>
+  <% if thread_mode %>
+    <%= form.hidden_field :thread_key, value: composer_session.thread_key %>
+  <% end %>
+  <%# Both modes carry the page's open panes: replies re-open them after the
+      redirect, and a new-chat pane swaps its "new" sentinel for the created
+      thread key. %>
+  <%= form.hidden_field :open_threads, value: params[:thread].to_s.presence %>
+  <div class="console-composer-box">
+    <%= form.text_area :prompt,
+                       rows: thread_mode || compact_mode ? 1 : 3,
+                       placeholder: thread_mode ? "Follow up" : "Do anything",
+                       required: true,
+                       autofocus: !thread_mode,
+                       class: "console-composer-input",
+                       data: { console_composer_input: true } %>
+    <div class="console-composer-controls">
+      <span class="console-composer-spacer"></span>
+      <% unless thread_mode %>
+        <% default_value = composer_default_agent_value %>
+        <% default_agent = Console::ThreadsController::COMPOSER_AGENTS.find { |agent| agent.value == default_value } %>
+        <div class="console-composer-model"
+             data-console-model-picker
+             data-agents="<%= composer_agents_json %>">
+          <%= form.hidden_field :model, value: default_value, data: { console_model_input: true } %>
+          <%= form.hidden_field :effort, value: "", data: { console_effort_input: true } %>
+          <button type="button"
+                  class="console-composer-model-trigger"
+                  aria-haspopup="menu"
+                  aria-expanded="false"
+                  aria-label="Model and effort">
+            <span data-console-model-label><%= default_agent&.label %></span>
+            <span class="console-composer-model-chevron" aria-hidden="true"><%= console_icon("chevron-right", classes: "size-3") %></span>
+          </button>
+          <div class="console-account-menu console-composer-model-menu" role="menu" hidden>
+            <%# Root level: one row per setting, current value on the right,
+                mirroring the codex app's composer menu. %>
+            <div data-picker-level="root">
+              <button type="button" class="console-account-menu-button console-composer-menu-row" data-picker-open="model">
+                <span>Model</span>
+                <span class="console-composer-menu-value" data-picker-current="model"><%= default_agent&.label %></span>
+                <span class="console-composer-menu-chevron" aria-hidden="true"><%= console_icon("chevron-right", classes: "size-3") %></span>
+              </button>
+              <button type="button" class="console-account-menu-button console-composer-menu-row" data-picker-open="effort"
+                      <%= "hidden" if default_agent&.efforts.blank? %>>
+                <span>Effort</span>
+                <span class="console-composer-menu-value" data-picker-current="effort">Default</span>
+                <span class="console-composer-menu-chevron" aria-hidden="true"><%= console_icon("chevron-right", classes: "size-3") %></span>
+              </button>
+            </div>
+            <div data-picker-level="model" hidden>
+              <div class="console-account-menu-line console-account-menu-muted">Model</div>
+              <% composer_agent_choices.each do |label, value| %>
+                <button type="button"
+                        class="console-account-menu-button"
+                        role="menuitemradio"
+                        aria-checked="<%= value == default_value %>"
+                        data-console-model-option
+                        data-value="<%= value %>">
+                  <span class="console-composer-model-option-label"><%= label %></span>
+                  <span class="console-composer-model-check" <%= "hidden" unless value == default_value %>><%= console_icon("check", classes: "size-4") %></span>
+                </button>
+              <% end %>
+            </div>
+            <div data-picker-level="effort" hidden>
+              <div class="console-account-menu-line console-account-menu-muted">Effort</div>
+              <%# Options are rebuilt by the picker script per selected model
+                  (efforts differ between models). %>
+              <div data-picker-effort-options></div>
+            </div>
+          </div>
+        </div>
+      <% end %>
+      <button type="submit" class="console-composer-send" aria-label="Send message" title="Send">
+        <%= console_icon("arrow-up", classes: "size-4") %>
+      </button>
+    </div>
+  </div>
+<% end %>
+
+<script>
+  (() => {
+    if (window.__consoleComposerWired) return;
+    window.__consoleComposerWired = true;
+
+    // Optimistic send: paint the outgoing message and a thinking placeholder
+    // the moment the form submits, so the seconds the server spends creating
+    // the session and dispatching the turn never look like a hang. The real
+    // transcript replaces all of it when the redirect lands. Markup mirrors
+    // the transcript partial's user bubble and _thinking_indicator.
+    const userBubble = (text) => {
+      const row = document.createElement("div");
+      row.className = "group flex justify-end";
+      const stack = document.createElement("div");
+      stack.className = "console-message-stack flex flex-col max-w-[72%] items-end";
+      const bubble = document.createElement("div");
+      bubble.className = "w-full rounded-[24px] bg-ink-700 px-4 py-3 text-zinc-100";
+      const body = document.createElement("div");
+      body.className = "console-markdown text-sm leading-6";
+      body.style.whiteSpace = "pre-wrap";
+      body.textContent = text;
+      bubble.appendChild(body);
+      stack.appendChild(bubble);
+      row.appendChild(stack);
+      return row;
+    };
+
+    const thinkingRow = () => {
+      const row = document.createElement("div");
+      row.className = "flex justify-start";
+      row.setAttribute("data-console-thinking-indicator", "");
+      const pending = document.createElement("div");
+      pending.className = "console-thinking-pending";
+      pending.textContent = "Thinking…";
+      row.appendChild(pending);
+      return row;
+    };
+
+    document.addEventListener("submit", (event) => {
+      const form = event.target;
+      if (!form.matches?.("[data-console-composer]")) return;
+      const input = form.querySelector("[data-console-composer-input]");
+      const text = (input?.value || "").trim();
+      if (!text) return;
+
+      // Full-page new chat: the form stays in the DOM (hidden) so the
+      // in-flight submission is undisturbed; the heading gives way to the
+      // painted conversation.
+      const container = form.dataset.consoleComposer === "new" && form.closest(".console-new-chat");
+      if (container) {
+        const column = document.createElement("div");
+        column.className = "flex w-full flex-col gap-6";
+        column.setAttribute("data-console-optimistic-transcript", "");
+        column.append(userBubble(text), thinkingRow());
+        container.classList.add("console-new-chat--optimistic");
+        container.querySelector(".console-new-chat-title")?.setAttribute("hidden", "");
+        container.insertBefore(column, form);
+        form.hidden = true;
+        return;
+      }
+
+      // Docked composers (thread panes and new-chat panes) paint into their
+      // pane's transcript.
+      const transcript = form.closest("section")?.querySelector(".console-transcript-scroll > div");
+      if (!transcript) return;
+      transcript.querySelector("[data-console-thinking-indicator]")?.remove();
+      transcript.append(userBubble(text), thinkingRow());
+      // Turbo builds FormData after the submit event has bubbled. Clearing the
+      // textarea here would therefore send an empty prompt; wait until the
+      // browser has captured the form payload before clearing the composer.
+      form.addEventListener("formdata", () => { input.value = ""; }, { once: true });
+    });
+
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        document.querySelectorAll("[data-console-model-picker]").forEach(closePicker);
+        return;
+      }
+      if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+      if (!event.target.matches?.("[data-console-composer-input]")) return;
+      event.preventDefault();
+      event.target.closest("form")?.requestSubmit();
+    });
+
+    const pickerAgents = (picker) => {
+      try { return JSON.parse(picker.dataset.agents || "{}"); } catch { return {}; }
+    };
+
+    // Keep the popover inside the window: it normally hangs below the pill,
+    // but docked composers sit near the bottom of the viewport, so flip it
+    // above when the space below can't fit it — and cap its height (the
+    // menu scrolls) when neither side can. Runs on every level switch since
+    // the levels differ in height.
+    const positionMenu = (picker) => {
+      const menu = picker.querySelector("[role=menu]");
+      const trigger = picker.querySelector("[aria-haspopup=menu]");
+      if (!menu || !trigger || menu.hidden) return;
+      const margin = 8;
+      menu.classList.remove("console-composer-model-menu--above");
+      menu.style.maxHeight = "";
+      const pill = trigger.getBoundingClientRect();
+      const rect = menu.getBoundingClientRect();
+      const gap = rect.top - pill.bottom;
+      const below = window.innerHeight - rect.top - margin;
+      const above = pill.top - gap - margin;
+      if (rect.height <= below) return;
+      if (above > below) {
+        menu.classList.add("console-composer-model-menu--above");
+        if (rect.height > above) menu.style.maxHeight = `${Math.max(above, 0)}px`;
+      } else {
+        menu.style.maxHeight = `${Math.max(below, 0)}px`;
+      }
+    };
+
+    window.addEventListener("resize", () => {
+      document.querySelectorAll("[data-console-model-picker]").forEach(positionMenu);
+    });
+
+    const showLevel = (picker, name) => {
+      picker.querySelectorAll("[data-picker-level]").forEach((level) => {
+        level.hidden = level.dataset.pickerLevel !== name;
+      });
+      positionMenu(picker);
+    };
+
+    function closePicker(picker) {
+      const menu = picker.querySelector("[role=menu]");
+      const trigger = picker.querySelector("[aria-haspopup=menu]");
+      if (menu) menu.hidden = true;
+      if (trigger) trigger.setAttribute("aria-expanded", "false");
+      showLevel(picker, "root");
+    }
+
+    // The pill reads "<model>" or "<model> · <effort>"; the root rows carry
+    // the same current values on their right edge.
+    const syncPickerLabels = (picker) => {
+      const agents = pickerAgents(picker);
+      const model = picker.querySelector("[data-console-model-input]").value;
+      const effort = picker.querySelector("[data-console-effort-input]").value;
+      const agent = agents[model] || { label: model, efforts: [] };
+      const effortLabel = (agent.efforts.find(([value]) => value === effort) || [])[1];
+
+      picker.querySelector("[data-console-model-label]").textContent =
+        effortLabel ? `${agent.label} · ${effortLabel}` : agent.label;
+      picker.querySelector("[data-picker-current='model']").textContent = agent.label;
+      picker.querySelector("[data-picker-current='effort']").textContent = effortLabel || "Default";
+      picker.querySelector("[data-picker-open='effort']").hidden = agent.efforts.length === 0;
+    };
+
+    // Effort options depend on the picked model (5.6 adds Max); "Default"
+    // posts an empty effort so the harness config decides.
+    const rebuildEffortOptions = (picker) => {
+      const agents = pickerAgents(picker);
+      const model = picker.querySelector("[data-console-model-input]").value;
+      const effort = picker.querySelector("[data-console-effort-input]").value;
+      const container = picker.querySelector("[data-picker-effort-options]");
+      const template = picker.querySelector("[data-console-model-option]");
+      container.replaceChildren();
+
+      const choices = [["", "Default"], ...((agents[model] || {}).efforts || [])];
+      for (const [value, label] of choices) {
+        const option = template.cloneNode(true);
+        option.removeAttribute("data-console-model-option");
+        option.setAttribute("data-console-effort-option", "");
+        option.dataset.value = value;
+        option.querySelector(".console-composer-model-option-label").textContent = label;
+        const selected = value === effort;
+        option.setAttribute("aria-checked", String(selected));
+        option.querySelector(".console-composer-model-check").hidden = !selected;
+        container.appendChild(option);
+      }
+    };
+
+    document.addEventListener("click", (event) => {
+      const picker = event.target.closest?.("[data-console-model-picker]");
+
+      if (!picker) {
+        document.querySelectorAll("[data-console-model-picker]").forEach(closePicker);
+        return;
+      }
+
+      const trigger = event.target.closest("[aria-haspopup=menu]");
+      if (trigger) {
+        const menu = picker.querySelector("[role=menu]");
+        const expanded = trigger.getAttribute("aria-expanded") === "true";
+        menu.hidden = expanded;
+        trigger.setAttribute("aria-expanded", String(!expanded));
+        showLevel(picker, "root");
+        return;
+      }
+
+      const opener = event.target.closest("[data-picker-open]");
+      if (opener) {
+        if (opener.dataset.pickerOpen === "effort") rebuildEffortOptions(picker);
+        showLevel(picker, opener.dataset.pickerOpen);
+        return;
+      }
+
+      const modelOption = event.target.closest("[data-console-model-option]");
+      if (modelOption) {
+        picker.querySelector("[data-console-model-input]").value = modelOption.dataset.value;
+        // A model switch resets effort: the lists differ per model.
+        picker.querySelector("[data-console-effort-input]").value = "";
+        picker.querySelectorAll("[data-console-model-option]").forEach((other) => {
+          const selected = other === modelOption;
+          other.setAttribute("aria-checked", String(selected));
+          other.querySelector(".console-composer-model-check").hidden = !selected;
+        });
+        syncPickerLabels(picker);
+        closePicker(picker);
+        picker.closest("form")?.querySelector("[data-console-composer-input]")?.focus();
+        return;
+      }
+
+      const effortOption = event.target.closest("[data-console-effort-option]");
+      if (effortOption) {
+        picker.querySelector("[data-console-effort-input]").value = effortOption.dataset.value;
+        syncPickerLabels(picker);
+        closePicker(picker);
+        picker.closest("form")?.querySelector("[data-console-composer-input]")?.focus();
+      }
+    });
+  })();
+</script>

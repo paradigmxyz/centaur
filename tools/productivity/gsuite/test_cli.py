@@ -6,6 +6,42 @@ from gsuite.cli import app
 runner = CliRunner()
 
 
+def test_drive_list_full_text_flag_is_passed_to_client(monkeypatch):
+    calls: list[dict] = []
+
+    def fake_drive_list(**kwargs):
+        calls.append(kwargs)
+        return [
+            {
+                "id": "file-123",
+                "name": "Contract Notes",
+                "mime_type": "application/vnd.google-apps.document",
+                "size": 0,
+                "modified_time": "2026-07-21T10:00:00Z",
+                "web_view_link": "https://drive.google.com/file/file-123",
+                "parent_ids": [],
+            }
+        ]
+
+    monkeypatch.setattr(client, "drive_list", fake_drive_list)
+
+    result = runner.invoke(
+        app,
+        ["drive", "list", "--query", "contract language", "--full-text", "--limit", "5"],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        {
+            "query": "contract language",
+            "folder_id": None,
+            "max_results": 5,
+            "file_type": None,
+            "full_text": True,
+        }
+    ]
+
+
 def test_docs_bullets_command_prints_verification_summary(monkeypatch):
     monkeypatch.setattr(
         client,

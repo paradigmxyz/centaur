@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>Offline · Centaur Console</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="initial-scale=1, width=device-width">
+    <meta name="robots" content="noindex, nofollow">
+    <style>
+      *, *::before, *::after { box-sizing: border-box; margin: 0; }
+      body {
+        background: #050506;
+        color: #d4d4d8;
+        font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+        min-height: 100dvh;
+        display: grid;
+        place-items: center;
+        -webkit-font-smoothing: antialiased;
+      }
+      main { display: grid; gap: 1rem; place-items: center; text-align: center; padding: 2rem; }
+      img { width: 96px; height: 96px; filter: drop-shadow(0 0 14px rgba(40,194,106,0.45)); }
+      h1 { font-size: 1rem; font-weight: 700; color: #f4f4f5; letter-spacing: 0.05em; text-transform: uppercase; }
+      p { font-size: 0.8rem; color: #71717a; max-width: 26rem; line-height: 1.6; }
+      button {
+        margin-top: 0.5rem;
+        font: inherit;
+        font-size: 0.8rem;
+        color: #050506;
+        background: #28c26a;
+        border: 0;
+        border-radius: 2px;
+        padding: 0.5rem 1.25rem;
+        cursor: pointer;
+      }
+      button:hover { background: #34d97c; }
+    </style>
+  </head>
+  <body>
+    <!-- Served by the service worker when a navigation fails while offline. -->
+    <main>
+      <img src="/pwa-icon.svg" alt="">
+      <h1>Console unreachable</h1>
+      <p>No connection to the Centaur Console. Check your network — and that you are on the Tailnet — then try again.</p>
+      <button onclick="location.reload()">Retry</button>
+    </main>
+  </body>
+</html>

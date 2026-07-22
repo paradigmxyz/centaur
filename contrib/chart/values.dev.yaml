@@ -32,6 +32,11 @@ apiRs:
   image:
     pullPolicy: IfNotPresent
 
+console:
+  enabled: true
+  image:
+    pullPolicy: IfNotPresent
+
 ironProxy:
   image:
     pullPolicy: IfNotPresent

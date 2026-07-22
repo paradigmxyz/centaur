@@ -114,4 +114,84 @@ class CentaurApiClientTest < ActiveSupport::TestCase
     assert_equal "http://api.internal:8080/api/admin/google/docs-sync/batch", request[:url]
     assert_equal({ "run" => { "run_id" => "gdocs_1" }, "files" => [] }, JSON.parse(request[:body]))
   end
+
+  test "creates app sessions with encoded thread keys" do
+    http = StubHTTP.new(status: 200, body: { ok: true }.to_json)
+    client = CentaurApiClient.new(base_url: "http://api.internal:8080", http: http)
+
+    client.create_session(
+      thread_key: "console:abc-123",
+      harness_type: "codex",
+      metadata: { source: "console" },
+      on_harness_conflict: "reject"
+    )
+
+    request = http.requests.first
+    assert_equal :post, request[:method]
+    assert_equal "http://api.internal:8080/api/session/console%3Aabc-123", request[:url]
+    body = JSON.parse(request[:body])
+    assert_equal "codex", body["harness_type"]
+    assert_equal({ "source" => "console" }, body["metadata"])
+    assert_equal "reject", body["on_harness_conflict"]
+  end
+
+  test "appends and executes app session messages" do
+    http = StubHTTP.new(status: 200, body: { ok: true }.to_json)
+    client = CentaurApiClient.new(base_url: "http://api.internal:8080", http: http)
+
+    client.append_session_messages(
+      thread_key: "console:abc-123",
+      messages: [ { role: "user", parts: [ { type: "text", text: "hi" } ] } ]
+    )
+    client.execute_session(
+      thread_key: "console:abc-123",
+      input_lines: [ '{"type":"user"}' ],
+      idempotency_key: "idem-1",
+      metadata: { source: "console" }
+    )
+
+    append = http.requests.first
+    assert_equal :post, append[:method]
+    assert_equal "http://api.internal:8080/api/session/console%3Aabc-123/messages", append[:url]
+    assert_equal "user", JSON.parse(append[:body]).dig("messages", 0, "role")
+
+    execute = http.requests.second
+    assert_equal :post, execute[:method]
+    assert_equal "http://api.internal:8080/api/session/console%3Aabc-123/execute", execute[:url]
+    body = JSON.parse(execute[:body])
+    assert_equal [ '{"type":"user"}' ], body["input_lines"]
+    assert_equal "idem-1", body["idempotency_key"]
+  end
+
+  test "lists workflow schedules and fetches run details" do
+    http = StubHTTP.new(status: 200, body: { ok: true, schedules: [] }.to_json)
+    client = CentaurApiClient.new(base_url: "http://api.internal:8080", http: http)
+
+    client.list_workflow_schedules
+    client.get_workflow_run("run:1")
+
+    schedules = http.requests.first
+    assert_equal :get, schedules[:method]
+    assert_equal "http://api.internal:8080/api/workflows/schedules", schedules[:url]
+
+    run = http.requests.second
+    assert_equal :get, run[:method]
+    assert_equal "http://api.internal:8080/api/workflows/runs/run%3A1", run[:url]
+  end
+
+  test "creates workflow runs with optional input" do
+    http = StubHTTP.new(status: 200, body: { ok: true, run_id: "r1" }.to_json)
+    client = CentaurApiClient.new(base_url: "http://api.internal:8080", http: http)
+
+    client.create_workflow_run(workflow_name: "slack_sync")
+    client.create_workflow_run(workflow_name: "slack_sync", input: { "mode" => "full" })
+
+    bare = http.requests.first
+    assert_equal :post, bare[:method]
+    assert_equal "http://api.internal:8080/api/workflows/runs", bare[:url]
+    assert_equal({ "workflow_name" => "slack_sync" }, JSON.parse(bare[:body]))
+
+    with_input = http.requests.second
+    assert_equal({ "workflow_name" => "slack_sync", "input" => { "mode" => "full" } }, JSON.parse(with_input[:body]))
+  end
 end

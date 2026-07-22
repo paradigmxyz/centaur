@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::env;
 use std::process::Command as ProcessCommand;
+use std::time::Duration;
 
 use codex_app_server_protocol::UserInput;
 use serde_json::json;
@@ -165,8 +166,11 @@ impl HarnessServer for AmpHarness {
         Ok(normalizer.normalize(event))
     }
 
-    fn finish_turn_on_assistant_end_turn(&self) -> bool {
-        true
+    /// Amp's stream has no native `result` event: the terminal assistant stop
+    /// IS the end of the turn, so complete immediately (a settle window would
+    /// add its full length to every turn).
+    fn terminal_assistant_stop_settle(&self) -> Option<Duration> {
+        Some(Duration::ZERO)
     }
 }
 

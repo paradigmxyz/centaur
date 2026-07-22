@@ -16,8 +16,8 @@ module Console
     test "an active non-admin is forbidden" do
       sign_in users(:member_user)
       get console_users_url
-      assert_redirected_to root_path
-      assert_equal "That page is restricted to admins.", flash[:alert]
+      assert_redirected_to console_threads_path
+      assert_nil flash[:alert]
     end
 
     test "an admin sees the index with pending users listed" do
@@ -25,6 +25,20 @@ module Console
       get console_users_url
       assert_response :ok
       assert_select "td", /pending@acme.example/
+      assert_select ".console-nav-link", text: "Control"
+      assert_select ".console-nav-link", text: "Apps", count: 0
+      assert_select ".console-nav-link", text: "Users", count: 0
+      assert_select ".console-control-tab", text: "Apps"
+      assert_select ".console-control-tab-active", text: "Users"
+      assert_select "button[data-console-theme-toggle]", text: "System mode"
+      assert_select "[data-console-theme-icon='system']:not([hidden])", count: 1
+      assert_select "[data-console-theme-icon='light'][hidden]", count: 1
+      assert_select "[data-console-theme-icon='dark'][hidden]", count: 1
+      assert_select "link[data-console-favicon][href=?]", "/icon-dark.svg"
+      assert_includes response.body, "/icon-light.svg"
+      assert_includes response.body, "prefers-color-scheme: light"
+      assert_includes response.body, "localStorage.removeItem(storageKey)"
+      assert_includes response.body, "centaur-console-theme-source"
     end
 
     test "the index shows IdP chips for linked identities and a password chip otherwise" do
@@ -53,6 +67,30 @@ module Console
       assert target.reload.disabled?
     end
 
+    test "disable revokes outstanding MCP OAuth refresh tokens" do
+      sign_in users(:acme_admin)
+      target = users(:member_user)
+      refresh = McpOauthRefreshToken.create!(
+        mcp_oauth_client: McpOauthClient.create!(
+          name: "Amp",
+          redirect_uris: [ "http://127.0.0.1:49152/callback" ],
+          grant_types: McpOauthClient::DEFAULT_GRANT_TYPES,
+          response_types: McpOauthClient::DEFAULT_RESPONSE_TYPES,
+          scopes: McpOauthClient::DEFAULT_SCOPES
+        ),
+        user: target,
+        principal: principals(:acme_channel),
+        resource: "http://localhost:3000/mcp",
+        scopes: [ "mcp:tools" ]
+      )
+
+      post disable_console_user_url(target.oid)
+
+      assert_redirected_to console_users_path
+      assert target.reload.disabled?
+      assert refresh.reload.revoked_at.present?
+    end
+
     test "an admin cannot disable their own account" do
       admin = users(:acme_admin)
       sign_in admin
@@ -76,7 +114,7 @@ module Console
       sign_in users(:member_user)
       target = users(:pending_user)
       post approve_console_user_url(target.oid)
-      assert_redirected_to root_path
+      assert_redirected_to console_threads_path
       assert target.reload.pending?
     end
   end

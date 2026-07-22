@@ -1,4 +1,4 @@
-import { codexAppServerToChatSdkStream, type ChatSDKStreamChunk } from '@centaur/rendering';
+import { harnessToChatSdkStream, type ChatSDKStreamChunk } from '@centaur/rendering';
 import type { TeamsAdapter } from '@chat-adapter/teams';
 import type { Logger, Message as ChatMessage, Thread } from 'chat';
 import type { TeamsbotConfig } from './config.js';
@@ -647,7 +647,7 @@ export class TeamsbotService {
       'open Teams recovery stream',
     );
 
-    const mappedStream = chatSdkChunksToTeamsRenderChunks(codexAppServerToChatSdkStream(stream));
+    const mappedStream = chatSdkChunksToTeamsRenderChunks(harnessToChatSdkStream(stream));
 
     const iterator = conflateTeamsRenderStream(mappedStream)[Symbol.asyncIterator]();
     while (true) {

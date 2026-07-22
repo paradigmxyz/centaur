@@ -1,5 +1,6 @@
 {{- if .Values.slackbotv2.enabled }}
 {{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") -}}
+{{- $console := include "centaur.consoleValues" . | fromYaml -}}
 {{- $slackbotV2MetricsAnnotations := dict -}}
 {{- if .Values.slackbotv2.metrics.scrapeAnnotations -}}
 {{- $slackbotV2MetricsAnnotations = dict "prometheus.io/scrape" "true" "prometheus.io/path" .Values.slackbotv2.metrics.path "prometheus.io/port" "3001" -}}
@@ -65,8 +66,33 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sDATABASE_URL" .Values.secretManager.envPrefix }}
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sOPENAI_API_KEY" .Values.secretManager.envPrefix }}
+                  optional: true
             - name: SLACKBOTV2_USER_NAME
               value: {{ .Values.slackbotv2.userName | quote }}
+            - name: SLACKBOTV2_ACTIVITY_SUMMARY_STATUS_ENABLED
+              value: {{ .Values.apiRs.activitySummary.enabled | quote }}
+            - name: SLACKBOTV2_MESSAGE_OVERRIDES_STRATEGY
+              value: {{ .Values.slackbotv2.messageOverridesStrategy.mode | quote }}
+            - name: SLACKBOTV2_MESSAGE_OVERRIDES_MODEL
+              value: {{ .Values.slackbotv2.messageOverridesStrategy.model | quote }}
+            - name: SLACKBOTV2_MESSAGE_OVERRIDES_OPENAI_BASE_URL
+              value: {{ .Values.slackbotv2.messageOverridesStrategy.openaiBaseUrl | quote }}
+            - name: SLACKBOTV2_MESSAGE_OVERRIDES_TIMEOUT_MS
+              value: {{ .Values.slackbotv2.messageOverridesStrategy.timeoutMs | quote }}
+            - name: SLACKBOTV2_MESSAGE_OVERRIDES_MAX_OUTPUT_TOKENS
+              value: {{ .Values.slackbotv2.messageOverridesStrategy.maxOutputTokens | quote }}
+{{- if $console.publicUrl }}
+            # Public origin of the Console UI (matches the Console's own
+            # CENTAUR_CONSOLE_PUBLIC_URL). When set, the first assistant message
+            # in a Slack thread gets an "Open session in Console" link.
+            - name: CENTAUR_CONSOLE_PUBLIC_URL
+              value: {{ $console.publicUrl | quote }}
+{{- end }}
 {{- if .Values.slackbotv2.assistantStatus }}
             - name: SLACKBOTV2_ASSISTANT_STATUS
               value: {{ .Values.slackbotv2.assistantStatus | quote }}
@@ -78,6 +104,26 @@ spec:
 {{- if .Values.slackbotv2.triggerBotAllowlist }}
             - name: SLACKBOT_TRIGGER_BOT_ALLOWLIST
               value: {{ .Values.slackbotv2.triggerBotAllowlist | quote }}
+{{- end }}
+{{- if .Values.slackbotv2.channelDefaults }}
+            # Per-channel default harness / model / provider / reasoning, keyed
+            # by Slack conversation id (each value an object of harness/model/
+            # provider/reasoning fields, e.g. { harness: claude, model: opus }).
+            # Applied below an explicit/sticky per-thread flag and above the
+            # deployment/baked default, and forwarded onto the harness input line
+            # so it takes effect.
+            - name: SLACKBOTV2_CHANNEL_DEFAULTS
+              value: {{ .Values.slackbotv2.channelDefaults | toJson | quote }}
+{{- end }}
+{{- range $name := tuple "CLAUDE_MODEL" "CODEX_MODEL" }}
+{{- if and (hasKey $.Values.sandbox.extraEnv $name) (not (hasKey $.Values.slackbotv2.extraEnv $name)) }}
+            # Mirror the deployer's harness default-model override
+            # (sandbox.extraEnv) so the Slack Console-link line names the model
+            # sandboxes actually run. slackbotv2.extraEnv wins if it sets the
+            # same variable.
+            - name: {{ $name }}
+              value: {{ index $.Values.sandbox.extraEnv $name | toString | quote }}
+{{- end }}
 {{- end }}
 {{- range $name, $value := .Values.slackbotv2.extraEnv }}
             - name: {{ $name }}

@@ -34,10 +34,11 @@ module SlackDm
       )
     end
 
-    test "PollSyncJob enqueues credentials for the configured Slack OAuth app with required scopes" do
+    test "PollSyncJob enqueues credentials with any supported private conversation scopes" do
       app = slack_app
       good = slack_credential(app: app)
-      missing_scope = slack_credential(app: app, scopes: %w[im:read im:history])
+      dm_only = slack_credential(app: app, scopes: SlackDm::SyncCredential::DM_REQUIRED_SCOPES)
+      missing_scope = slack_credential(app: app, scopes: %w[chat:write])
       no_token = slack_credential(app: app, access_token: nil)
       other_app = slack_app(slug: "other-slack")
       other = slack_credential(app: other_app)
@@ -48,6 +49,7 @@ module SlackDm
         .select { |job| job[:job] == SlackDm::SyncCredentialJob }
         .map { |job| job[:args].first }
       assert_includes enqueued_ids, good.id
+      assert_includes enqueued_ids, dm_only.id
       refute_includes enqueued_ids, missing_scope.id
       refute_includes enqueued_ids, no_token.id
       refute_includes enqueued_ids, other.id

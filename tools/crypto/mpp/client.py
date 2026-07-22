@@ -9,11 +9,21 @@ Ported from gtmskill's mpp-client.ts, mpp-search.ts, and mpp-onchain.ts.
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
+
 from centaur_sdk.tool_sdk import secret
+
+MPP_SERVICE_CATALOG_URL = "https://mpp.dev/api/services"
+MPP_SERVICE_CATALOG_TIMEOUT_SECONDS = 15
+DEFAULT_SERVICE_LIMIT = 20
+MAX_SERVICE_LIMIT = 100
+
+
+class MppCatalogError(RuntimeError):
+    """Raised when the public MPP service catalog cannot be used safely."""
 
 # --- Token name normalization ---
 
@@ -69,8 +79,154 @@ class MppClient:
         self._private_key: str | None = None
         self._daily_spend = 0.0
         self._daily_cap = 10.0
-        self._last_reset = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        self._last_reset = datetime.now(UTC).strftime("%Y-%m-%d")
         self._coingecko_id_cache: dict[str, str] = {}
+        self._catalog_http: httpx.Client | None = None
+
+    def _fetch_service_catalog(self) -> list[dict[str, Any]]:
+        """Fetch and validate the public MPP service catalog without using a wallet."""
+        client = self._catalog_http
+        owns_client = client is None
+        if client is None:
+            client = httpx.Client(timeout=MPP_SERVICE_CATALOG_TIMEOUT_SECONDS)
+
+        try:
+            try:
+                response = client.get(MPP_SERVICE_CATALOG_URL)
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise MppCatalogError(
+                    f"MPP service catalog returned HTTP {exc.response.status_code}"
+                ) from exc
+            except httpx.HTTPError as exc:
+                raise MppCatalogError("could not fetch MPP service catalog") from exc
+
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise MppCatalogError("MPP service catalog returned invalid JSON") from exc
+
+            services = payload.get("services") if isinstance(payload, dict) else None
+            if not isinstance(services, list) or not all(
+                isinstance(service, dict) for service in services
+            ):
+                raise MppCatalogError("MPP service catalog has an invalid services list")
+            return services
+        finally:
+            if owns_client:
+                client.close()
+
+    @staticmethod
+    def _validate_service_limit(limit: int) -> None:
+        if not 1 <= limit <= MAX_SERVICE_LIMIT:
+            raise ValueError(f"limit must be between 1 and {MAX_SERVICE_LIMIT}")
+
+    @staticmethod
+    def _matches_service(
+        service: dict[str, Any], query: str | None, category: str | None, tag: str | None
+    ) -> bool:
+        if category is not None:
+            categories = service.get("categories") or []
+            if not any(str(value).casefold() == category.casefold() for value in categories):
+                return False
+
+        if tag is not None:
+            tags = service.get("tags") or []
+            if not any(str(value).casefold() == tag.casefold() for value in tags):
+                return False
+
+        if query is None:
+            return True
+
+        haystack = [
+            service.get("id"),
+            service.get("name"),
+            service.get("description"),
+            *(service.get("categories") or []),
+            *(service.get("tags") or []),
+        ]
+        normalized_query = query.casefold()
+        return any(
+            normalized_query in str(value).casefold() for value in haystack if value is not None
+        )
+
+    @staticmethod
+    def _service_summary(service: dict[str, Any]) -> dict[str, Any]:
+        endpoints = service.get("endpoints") or []
+        paid_endpoints = service.get("paidEndpoints")
+        if not isinstance(paid_endpoints, int):
+            paid_endpoints = sum(
+                isinstance(endpoint, dict) and endpoint.get("payment") is not None
+                for endpoint in endpoints
+            )
+        return {
+            "id": service.get("id", ""),
+            "name": service.get("name", ""),
+            "description": service.get("description", ""),
+            "service_url": service.get("serviceUrl") or service.get("url") or "",
+            "categories": service.get("categories") or [],
+            "tags": service.get("tags") or [],
+            "status": service.get("status", ""),
+            "paid_endpoints": paid_endpoints,
+        }
+
+    def list_services(
+        self,
+        query: str | None = None,
+        category: str | None = None,
+        tag: str | None = None,
+        limit: int = DEFAULT_SERVICE_LIMIT,
+    ) -> list[dict[str, Any]]:
+        """List public MPP services, optionally filtered by catalog metadata."""
+        self._validate_service_limit(limit)
+        normalized_query = query.strip() if query is not None else None
+        normalized_category = category.strip() if category is not None else None
+        normalized_tag = tag.strip() if tag is not None else None
+        if normalized_query == "":
+            normalized_query = None
+        if normalized_category == "":
+            normalized_category = None
+        if normalized_tag == "":
+            normalized_tag = None
+
+        return [
+            self._service_summary(service)
+            for service in self._fetch_service_catalog()
+            if self._matches_service(service, normalized_query, normalized_category, normalized_tag)
+        ][:limit]
+
+    def search_services(
+        self,
+        query: str,
+        category: str | None = None,
+        tag: str | None = None,
+        limit: int = DEFAULT_SERVICE_LIMIT,
+    ) -> list[dict[str, Any]]:
+        """Search public MPP services by text and optional exact catalog filters."""
+        return self.list_services(query=query, category=category, tag=tag, limit=limit)
+
+    def get_service(self, service: str) -> dict[str, Any]:
+        """Return one complete public MPP service record by id or unambiguous name."""
+        identifier = service.strip()
+        if not identifier:
+            raise ValueError("service id or name is required")
+
+        services = self._fetch_service_catalog()
+        exact_ids = [item for item in services if item.get("id") == identifier]
+        if exact_ids:
+            return exact_ids[0]
+
+        name_matches = [
+            item
+            for item in services
+            if isinstance(item.get("name"), str)
+            and item["name"].casefold() == identifier.casefold()
+        ]
+        if len(name_matches) == 1:
+            return name_matches[0]
+        if len(name_matches) > 1:
+            raise ValueError(f"MPP service name {identifier!r} is ambiguous; use its id")
+        raise ValueError(f"MPP service {identifier!r} was not found")
 
     def _get_private_key(self) -> str:
         """Lazy-load MPP_PRIVATE_KEY from secrets on first use."""
@@ -84,7 +240,7 @@ class MppClient:
         return self._private_key
 
     def _check_budget(self, needed: float = 0) -> bool:
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         if today != self._last_reset:
             self._daily_spend = 0.0
             self._last_reset = today
@@ -287,9 +443,9 @@ class MppClient:
             return [
                 {
                     "date": (
-                        datetime.fromtimestamp(p[0] / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+                        datetime.fromtimestamp(p[0] / 1000, tz=UTC).strftime("%Y-%m-%d %H:%M")
                         if days <= 7
-                        else datetime.fromtimestamp(p[0] / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+                        else datetime.fromtimestamp(p[0] / 1000, tz=UTC).strftime("%Y-%m-%d")
                     ),
                     "price": p[1],
                 }
@@ -330,7 +486,7 @@ class MppClient:
                 return []
             return [
                 {
-                    "date": datetime.fromtimestamp(c[0] / 1000, tz=timezone.utc).strftime("%Y-%m-%d"),
+                    "date": datetime.fromtimestamp(c[0] / 1000, tz=UTC).strftime("%Y-%m-%d"),
                     "open": c[1],
                     "high": c[2],
                     "low": c[3],
