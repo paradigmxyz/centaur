@@ -17,7 +17,9 @@ TWEET_FIELDS = (
     "attachments,author_id,conversation_id,created_at,entities,geo,id,in_reply_to_user_id,"
     "lang,possibly_sensitive,public_metrics,referenced_tweets,reply_settings,source,text"
 )
-MEDIA_FIELDS = "alt_text,duration_ms,height,media_key,preview_image_url,public_metrics,type,url,width"
+MEDIA_FIELDS = (
+    "alt_text,duration_ms,height,media_key,preview_image_url,public_metrics,type,url,width"
+)
 POLL_FIELDS = "duration_minutes,end_datetime,id,options,voting_status"
 PLACE_FIELDS = "contained_within,country,country_code,full_name,geo,id,name,place_type"
 DEFAULT_EXPANSIONS = "author_id,attachments.media_keys,attachments.poll_ids,geo.place_id"
@@ -148,7 +150,9 @@ class XClient:
         meta: dict[str, Any] = {}
         token: str | None = None
         while len(results) < limit:
-            page_size = self._limit(limit - len(results), minimum=min_page_size, maximum=max_page_size)
+            page_size = self._limit(
+                limit - len(results), minimum=min_page_size, maximum=max_page_size
+            )
             request_params = {**params, "max_results": page_size, token_param: token}
             data = self._request(endpoint, request_params)
             meta = data.get("meta") or {}
@@ -194,7 +198,9 @@ class XClient:
         if not user:
             return [], {}
         params = {"user.fields": USER_FIELDS}
-        followers, meta, _ = self._paged(f"/users/{user['user_id']}/followers", "data", limit, params)
+        followers, meta, _ = self._paged(
+            f"/users/{user['user_id']}/followers", "data", limit, params
+        )
         normalized = [self._normalize_user(item) for item in followers]
         if ids_only:
             return [item["user_id"] for item in normalized if item.get("user_id")], meta
@@ -208,7 +214,9 @@ class XClient:
         if not user:
             return [], {}
         params = {"user.fields": USER_FIELDS}
-        following, meta, _ = self._paged(f"/users/{user['user_id']}/following", "data", limit, params)
+        following, meta, _ = self._paged(
+            f"/users/{user['user_id']}/following", "data", limit, params
+        )
         normalized = [self._normalize_user(item) for item in following]
         if ids_only:
             return [item["user_id"] for item in normalized if item.get("user_id")], meta
@@ -258,7 +266,9 @@ class XClient:
         if not user:
             return None, [], None
         params = {**self._tweet_params(), "exclude": "retweets"}
-        tweets, meta, includes = self._paged(f"/users/{user['user_id']}/tweets", "data", limit, params)
+        tweets, meta, includes = self._paged(
+            f"/users/{user['user_id']}/tweets", "data", limit, params
+        )
         return user, [self._normalize_tweet(tweet, includes) for tweet in tweets], meta
 
     def get_timeline(
@@ -267,7 +277,9 @@ class XClient:
         """Get a specific user's authored posts timeline by handle."""
         return self.get_user_posts(handle, limit=limit)
 
-    def get_mentions(self, handle: str, limit: int = 20) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    def get_mentions(
+        self, handle: str, limit: int = 20
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Get recent mentions for a user."""
         user = self.get_user(handle)
         if not user:
@@ -295,11 +307,27 @@ class XClient:
         )
         return [self._normalize_user(user) for user in users], meta
 
+    def get_quote_tweets(
+        self, tweet_id: str, limit: int = 20
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Get posts that quote a post."""
+        tweets, meta, includes = self._paged(
+            f"/tweets/{tweet_id}/quote_tweets",
+            "data",
+            limit,
+            self._tweet_params(),
+            max_page_size=100,
+            min_page_size=10,
+        )
+        return [self._normalize_tweet(tweet, includes) for tweet in tweets], meta
+
     def get_list_tweets(
         self, list_id: str, limit: int = 20
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Get posts from a List."""
-        tweets, meta, includes = self._paged(f"/lists/{list_id}/tweets", "data", limit, self._tweet_params())
+        tweets, meta, includes = self._paged(
+            f"/lists/{list_id}/tweets", "data", limit, self._tweet_params()
+        )
         return [self._normalize_tweet(tweet, includes) for tweet in tweets], meta
 
     def get_list_members(
