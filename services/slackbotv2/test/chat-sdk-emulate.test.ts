@@ -4718,7 +4718,7 @@ describe('slackbotv2', () => {
     bot = createTestBot({ triggerBotAllowlist: ['UOTHERBOT'] })
     codexApi.reset()
     slackApi.reset()
-    const richBotMessage = await postUserMessage('')
+    const richBotMessage = await postUserMessage('attachment-only event placeholder')
     const richBotWaits: Promise<unknown>[] = []
     const richBotResponse = await bot.app.request(
       '/api/webhooks/slack',
@@ -4761,7 +4761,7 @@ describe('slackbotv2', () => {
 
     bot = createTestBot()
     codexApi.reset()
-    const deniedRichBotMessage = await postUserMessage('')
+    const deniedRichBotMessage = await postUserMessage('attachment-only event placeholder')
     const deniedRichBotWaits: Promise<unknown>[] = []
     const deniedRichBotResponse = await bot.app.request(
       '/api/webhooks/slack',
@@ -5895,6 +5895,8 @@ async function sendWebResponse(res: ServerResponse, response: Response): Promise
   res.statusCode = response.status
   res.statusMessage = response.statusText
   response.headers.forEach((value, key) => {
+    // The proxy buffers the body, so let Node choose framing for the buffered response.
+    if (key === 'transfer-encoding') return
     res.setHeader(key, value)
   })
   if (response.body === null || response.status === 204) {
