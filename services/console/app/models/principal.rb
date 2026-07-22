@@ -118,33 +118,23 @@ class Principal < ApplicationRecord
   def sync_config_snapshot_payload
     served = served_credentials
     postgres, templates = sync_postgres_entries_with_templates
-    config = {
-      "secrets" => proxy_secrets_for(served) + generated_proxy_secrets,
-      "transforms" => proxy_transforms_for(served),
-      "postgres" => postgres
+    {
+      "config" => {
+        "secrets" => proxy_secrets_for(served) + generated_proxy_secrets,
+        "transforms" => proxy_transforms_for(served),
+        "postgres" => postgres
+      },
+      "postgres_setting_templates" => templates
     }
-    config["_postgres_setting_templates"] = templates if templates.any?
-    config
   end
 
   def sync_postgres_entries(proxy: nil)
-    winners = {}
-    granted_pg_dsn_secrets.each do |pg|
-      next unless pg.dsn_source
-      winners[pg.database] = pg
-    end
-    winners.values.map { |pg| pg.to_proxy_dsn(principal: self, proxy: proxy) }
+    effective_pg_dsn_secrets.map { |pg| pg.to_proxy_dsn(principal: self, proxy: proxy) }
   end
 
   def sync_postgres_entries_with_templates
-    winners = {}
-    granted_pg_dsn_secrets.each do |pg|
-      next unless pg.dsn_source
-      winners[pg.database] = pg
-    end
-
     templates = {}
-    entries = winners.values.map do |pg|
+    entries = effective_pg_dsn_secrets.map do |pg|
       templates[pg.oid] = pg.settings if pg.proxy_label_settings?
       pg.to_proxy_dsn(principal: self)
     end
@@ -243,6 +233,12 @@ class Principal < ApplicationRecord
   end
 
   private
+
+  def effective_pg_dsn_secrets
+    granted_pg_dsn_secrets.each_with_object({}) do |pg, winners|
+      winners[pg.database] = pg if pg.dsn_source
+    end.values
+  end
 
   def auto_grant_matching_oauth_credentials
     PrincipalCredentialReconciliation.new.apply_for_principal(self)

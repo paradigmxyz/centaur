@@ -1,6 +1,7 @@
 class PrincipalSyncConfigSnapshot < ApplicationRecord
   TTL = 10.minutes
   RETENTION = 1.hour
+  LEGACY_POSTGRES_SETTING_TEMPLATES_KEY = "_postgres_setting_templates".freeze
 
   belongs_to :principal
 
@@ -9,6 +10,16 @@ class PrincipalSyncConfigSnapshot < ApplicationRecord
 
   validates :principal_cache_version, presence: true
   validates :principal_id, uniqueness: { scope: :principal_cache_version }
+
+  def config
+    return payload.fetch("config") if payload.key?("config")
+
+    payload.except(LEGACY_POSTGRES_SETTING_TEMPLATES_KEY)
+  end
+
+  def postgres_setting_templates
+    payload["postgres_setting_templates"] || payload[LEGACY_POSTGRES_SETTING_TEMPLATES_KEY] || {}
+  end
 
   # Returns the freshest usable snapshot, stale-while-revalidate style. When
   # the current-version snapshot is stale or missing, exactly one caller

@@ -2,6 +2,7 @@ require "test_helper"
 
 class ProxiesControllerTest < ActionDispatch::IntegrationTest
   ACME_TOKEN = "iak_acme-ci-token".freeze
+  ACME_PROXY_TOKEN = "iprx_#{'a' * 64}".freeze
 
   def auth_headers(token = ACME_TOKEN)
     { "Authorization" => "Bearer #{token}", "Content-Type" => "application/json" }
@@ -83,23 +84,18 @@ class ProxiesControllerTest < ActionDispatch::IntegrationTest
       }
     }
 
-    expected_hash = nil
     with_env(
       "CENTAUR_JWT_SIGNING_SECRET" => "test-secret",
       "CENTAUR_CONSOLE_URL" => "http://centaur-console:3000"
     ) do
       post api_v1_proxies_url, params: body.to_json, headers: auth_headers
-      proxy = Proxy.find_by_token(json_body.dig("data", "token"))
-      expected_hash = proxy.sync_config_snapshot(
-        sandbox_entitlements_hosts: [ "centaur-console" ],
-        include_config: false
-      )[:config_hash]
-      refute_equal proxy.config_hash, expected_hash
-    end
-    assert_response :created
+      assert_response :created
+      data = json_body.fetch("data")
 
-    data = json_body.fetch("data")
-    assert_equal expected_hash, data.fetch("config_hash")
+      post api_v1_proxy_sync_url, params: {}.to_json, headers: proxy_auth_headers(data.fetch("token"))
+      assert_response :ok
+      assert_equal data.fetch("config_hash"), json_body.fetch("config_hash")
+    end
   end
 
   test "POST with invalid labels returns a validation error" do
@@ -182,21 +178,18 @@ class ProxiesControllerTest < ActionDispatch::IntegrationTest
     proxy = proxies(:acme_proxy)
     body = { data: { labels: { "centaur.slack_user_id" => "U2" } } }
 
-    expected_hash = nil
     with_env(
       "CENTAUR_JWT_SIGNING_SECRET" => "test-secret",
       "CENTAUR_CONSOLE_URL" => "http://centaur-console:3000"
     ) do
       patch api_v1_proxy_url(id: proxy.oid), params: body.to_json, headers: auth_headers
-      expected_hash = proxy.reload.sync_config_snapshot(
-        sandbox_entitlements_hosts: [ "centaur-console" ],
-        include_config: false
-      )[:config_hash]
-      refute_equal proxy.config_hash, expected_hash
-    end
-    assert_response :ok
+      assert_response :ok
+      mutation_hash = json_body.dig("data", "config_hash")
 
-    assert_equal expected_hash, json_body.dig("data", "config_hash")
+      post api_v1_proxy_sync_url, params: {}.to_json, headers: proxy_auth_headers(ACME_PROXY_TOKEN)
+      assert_response :ok
+      assert_equal mutation_hash, json_body.fetch("config_hash")
+    end
   end
 
   test "PATCH with null labels clears labels" do
@@ -268,5 +261,9 @@ class ProxiesControllerTest < ActionDispatch::IntegrationTest
     previous.each do |key, value|
       value.nil? ? ENV.delete(key) : ENV[key] = value
     end
+  end
+
+  def proxy_auth_headers(token)
+    { "Authorization" => "Bearer #{token}", "Content-Type" => "application/json" }
   end
 end

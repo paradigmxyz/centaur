@@ -102,7 +102,7 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
 
     snapshot = PrincipalSyncConfigSnapshot.find_by!(principal: @proxy.principal)
     assert_equal @proxy.principal.sync_config_cache_version, snapshot.principal_cache_version
-    assert_equal "s3cr3t-db-pass", snapshot.payload.dig("secrets", 1, "source", "value")
+    assert_equal "s3cr3t-db-pass", snapshot.config.dig("secrets", 1, "source", "value")
 
     raw = PrincipalSyncConfigSnapshot.connection.select_value(
       "SELECT payload FROM principal_sync_config_snapshots WHERE id = #{snapshot.id}"
@@ -228,7 +228,7 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
 
     original_hash = json_body.fetch("config_hash")
     snapshot = PrincipalSyncConfigSnapshot.find_by!(principal: @proxy.principal)
-    transform = snapshot.payload.fetch("transforms").find { |t| t["name"] == "gcp_id_token" }
+    transform = snapshot.config.fetch("transforms").find { |t| t["name"] == "gcp_id_token" }
     assert_equal secret.audience, transform.dig("config", "audience")
     assert_equal "CLOUD_RUN_SA_KEYFILE", transform.dig("config", "keyfile", "var")
 

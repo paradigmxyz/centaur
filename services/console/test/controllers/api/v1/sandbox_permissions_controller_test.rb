@@ -80,7 +80,10 @@ module Api
         refute_includes response.body, "s3cr3t-db-pass"
         assert_equal "no-store", response.headers["Cache-Control"]
         assert_match(/\A"[0-9a-f]{64}"\z/, response.headers["ETag"])
-        refute data.fetch("permissions").key?("_postgres_setting_templates")
+        permissions = data.fetch("permissions")
+        refute permissions.key?("postgres_setting_templates")
+        refute permissions.key?("_postgres_setting_templates")
+        refute_includes response.body, "postgres_setting_templates"
         refute_includes response.body, "_postgres_setting_templates"
       end
 

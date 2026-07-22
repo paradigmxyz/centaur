@@ -76,10 +76,6 @@ module Api
         labels
       end
 
-      def sandbox_entitlements_hosts
-        [ Principal.host_from_url(ENV["CENTAUR_CONSOLE_URL"]) ]
-      end
-
       def record_payload(proxy, include_config_hash: false)
         payload = {
           id: proxy.oid,
@@ -91,12 +87,7 @@ module Api
           created_at: proxy.created_at,
           updated_at: proxy.updated_at
         }
-        if include_config_hash
-          payload[:config_hash] = proxy.sync_config_snapshot(
-            sandbox_entitlements_hosts: sandbox_entitlements_hosts,
-            include_config: false
-          )[:config_hash]
-        end
+        payload[:config_hash] = proxy.config_hash if include_config_hash
         payload
       end
     end

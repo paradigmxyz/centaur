@@ -45,31 +45,23 @@ class Proxy < ApplicationRecord
   # proxy carries no authority and resolves to the empty config. Live secret
   # values are kept inline here because the proxy needs them to resolve.
   def sync_config
-    proxy_specific_config(principal&.sync_config_snapshot_payload || Principal::EMPTY_CONFIG)
+    sync_config_snapshot.fetch(:config)
   end
 
-  def sync_config_snapshot(sandbox_entitlements_hosts: [], include_config: true)
-    config = principal ? PrincipalSyncConfigSnapshot.fetch_for(principal).payload : Principal::EMPTY_CONFIG
-    hash_config = proxy_specific_config(config)
-    hash_config = with_sandbox_entitlements_secret(hash_config, sandbox_entitlements_hosts: sandbox_entitlements_hosts)
-    snapshot = { config_hash: config_hash_for(hash_config) }
-    return snapshot unless include_config
-
-    config = proxy_specific_config(config)
+  def sync_config_snapshot(sandbox_entitlements_hosts: self.class.sandbox_entitlements_hosts)
+    config = rendered_principal_config
     config = with_sandbox_entitlements_secret(config, sandbox_entitlements_hosts: sandbox_entitlements_hosts)
-    snapshot.merge(config: config)
+    { config_hash: config_hash_for(config), config: config }
   end
 
-  # Opaque, deterministic fingerprint of the base (principal-derived) config.
-  # Note this is not necessarily the hash the proxy echoes on sync: the sync
-  # path hashes the delivered config, which also folds in the per-proxy
-  # sandbox entitlements secret when one is configured (see
-  # #sync_config_snapshot).
+  # Opaque, deterministic fingerprint of the exact config delivered by the
+  # proxy sync endpoint.
   def config_hash
-    # The principal identity and assignment time are folded in so that any
-    # assignment change forces a refresh, even a swap between principals whose
-    # effective secrets happen to be identical (or an unassign to empty).
-    config_hash_for(sync_config)
+    sync_config_snapshot.fetch(:config_hash)
+  end
+
+  def self.sandbox_entitlements_hosts
+    [ Principal.host_from_url(ENV["CENTAUR_CONSOLE_URL"]) ]
   end
 
   def config_hash_for(config)
@@ -134,9 +126,12 @@ class Proxy < ApplicationRecord
     end
   end
 
-  def proxy_specific_config(config)
-    copy = config.deep_dup
-    templates = copy.delete("_postgres_setting_templates") || {}
+  def rendered_principal_config
+    return Principal::EMPTY_CONFIG.deep_dup unless principal
+
+    snapshot = PrincipalSyncConfigSnapshot.fetch_for(principal)
+    copy = snapshot.config.deep_dup
+    templates = snapshot.postgres_setting_templates
     copy["postgres"] = proxy_specific_postgres(copy["postgres"], templates) if templates.any?
     copy
   end

@@ -132,7 +132,7 @@ class ProxyTest < ActiveSupport::TestCase
     before = proxy.config_hash
     Grant.create!(principal: proxy.principal, pg_dsn_secret: pg_dsn_secrets(:acme_analytics_pg),
                   created_by: users(:globex_admin))
-    refute_equal before, proxy.config_hash
+    refute_equal before, proxy.reload.config_hash
   end
 
   test "config_hash changes when a transform grant is added" do
@@ -140,7 +140,7 @@ class ProxyTest < ActiveSupport::TestCase
     before = proxy.config_hash
     Grant.create!(principal: proxy.principal, gcp_auth_secret: gcp_auth_secrets(:acme_bigquery),
                   created_by: users(:globex_admin))
-    refute_equal before, proxy.config_hash
+    refute_equal before, proxy.reload.config_hash
   end
 
   test "config_hash changes when a role grant becomes reachable" do

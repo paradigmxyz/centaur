@@ -37,6 +37,8 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
       snapshot = PrincipalSyncConfigSnapshot.fetch_for(@principal)
       assert_equal @principal.sync_config_cache_version, snapshot.principal_cache_version
       assert_equal @principal.sync_config_snapshot_payload, snapshot.payload
+      assert_equal @principal.effective_config(redact_secrets: false), snapshot.config
+      assert_equal({}, snapshot.postgres_setting_templates)
     end
   end
 
@@ -48,7 +50,9 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     ])
     proxy = proxies(:acme_proxy)
     proxy.update!(labels: { "centaur.slack_user_id" => "U0123456789" })
-    PrincipalSyncConfigSnapshot.fetch_for(@principal)
+    cached = PrincipalSyncConfigSnapshot.fetch_for(@principal)
+    assert cached.postgres_setting_templates.key?(pg.oid)
+    refute cached.config.key?("postgres_setting_templates")
 
     without_live_sync_postgres do
       snapshot = proxy.reload.sync_config_snapshot
@@ -62,6 +66,17 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
         entry.fetch("settings")
       )
     end
+  end
+
+  test "snapshot accessors read legacy flat payloads" do
+    config = { "secrets" => [], "transforms" => [], "postgres" => [] }
+    templates = { "pgd_legacy" => [ { "name" => "app.user" } ] }
+    snapshot = PrincipalSyncConfigSnapshot.new(
+      payload: config.merge("_postgres_setting_templates" => templates)
+    )
+
+    assert_equal config, snapshot.config
+    assert_equal templates, snapshot.postgres_setting_templates
   end
 
   test "fetch_for returns the fresh snapshot without rebuilding" do
@@ -100,14 +115,14 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
 
       snapshot = PrincipalSyncConfigSnapshot.fetch_for(@principal)
       original_hash = proxy.sync_config_snapshot.fetch(:config_hash)
-      original_token = snapshot.payload.fetch("secrets").find do |secret|
+      original_token = snapshot.config.fetch("secrets").find do |secret|
         secret.dig("inject", "header") == "Authorization"
       end.dig("source", "value")
       snapshot.update_columns(updated_at: previous_window_time)
 
       travel_to current_time do
         refreshed = PrincipalSyncConfigSnapshot.fetch_for(@principal)
-        refreshed_token = refreshed.payload.fetch("secrets").find do |secret|
+        refreshed_token = refreshed.config.fetch("secrets").find do |secret|
           secret.dig("inject", "header") == "Authorization"
         end.dig("source", "value")
 
