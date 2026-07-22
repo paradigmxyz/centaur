@@ -44,7 +44,7 @@ def crawl(
     """Crawl a Figma file and extract design system info.
 
     Extracts colors, typography, components, variables, and frames from any Figma URL.
-    Uses FIGMA env var for authentication (personal access token).
+    Uses FIGMA_ACCESS_TOKEN for authentication.
     """
     from .client import FigmaClient
 
