@@ -16,6 +16,7 @@ class _CreateRequest:
 class _FakeFilesApi:
     def __init__(self):
         self.create_calls: list[dict] = []
+        self.list_calls: list[dict] = []
 
     def create(self, **kwargs):
         self.create_calls.append(kwargs)
@@ -34,6 +35,24 @@ class _FakeFilesApi:
                 "id": "file-123",
                 "name": kwargs["body"]["name"],
                 "webViewLink": "https://drive.google.com/file/file-123",
+            }
+        )
+
+    def list(self, **kwargs):
+        self.list_calls.append(kwargs)
+        return _CreateRequest(
+            {
+                "files": [
+                    {
+                        "id": "file-123",
+                        "name": "Quinn's paper",
+                        "mimeType": "application/pdf",
+                        "size": "1024",
+                        "modifiedTime": "2026-07-21T10:00:00Z",
+                        "webViewLink": "https://drive.google.com/file/file-123",
+                        "parents": ["folder-123"],
+                    }
+                ]
             }
         )
 
@@ -232,6 +251,55 @@ def test_gmail_read_returns_plain_html_and_raw_content(monkeypatch):
     assert fake_service.messages_api.get_calls == [
         {"userId": "me", "id": "msg-1", "format": "full"},
         {"userId": "me", "id": "msg-1", "format": "raw"},
+    ]
+
+
+def test_drive_list_searches_name_by_default(monkeypatch):
+    fake_service = _FakeDriveService()
+    monkeypatch.setattr(client, "get_drive_service", lambda: fake_service)
+
+    result = client.drive_list(query="report")
+
+    list_call = fake_service.files_api.list_calls[0]
+    assert list_call["q"] == "name contains 'report' and trashed = false"
+    assert list_call["includeItemsFromAllDrives"] is True
+    assert list_call["supportsAllDrives"] is True
+    assert result[0]["id"] == "file-123"
+    assert result[0]["size"] == 1024
+
+
+def test_drive_list_supports_full_text_contains_and_escapes_literals(monkeypatch):
+    fake_service = _FakeDriveService()
+    monkeypatch.setattr(client, "get_drive_service", lambda: fake_service)
+
+    client.drive_list(
+        query="quinn's paper\\essay",
+        folder_id="folder'123",
+        file_type="application/pdf",
+        full_text=True,
+    )
+
+    list_call = fake_service.files_api.list_calls[0]
+    assert list_call["q"] == (
+        "fullText contains 'quinn\\'s paper\\\\essay' and "
+        "'folder\\'123' in parents and "
+        "mimeType = 'application/pdf' and "
+        "trashed = false"
+    )
+
+
+def test_gsuite_client_drive_search_supports_full_text(monkeypatch):
+    calls: list[dict] = []
+
+    def fake_drive_list(**kwargs):
+        calls.append(kwargs)
+        return []
+
+    monkeypatch.setattr(client, "drive_list", fake_drive_list)
+
+    assert client.GSuiteClient().drive_search("contract language", full_text=True) == []
+    assert calls == [
+        {"query": "contract language", "max_results": 50, "full_text": True}
     ]
 
 

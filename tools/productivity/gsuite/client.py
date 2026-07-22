@@ -646,19 +646,27 @@ def calendar_rsvp(
 # Drive functions
 
 
+def _drive_query_literal(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{escaped}'"
+
+
 def drive_list(
     query: str | None = None,
     folder_id: str | None = None,
     max_results: int = 50,
     file_type: str | None = None,
+    full_text: bool = False,
 ) -> list[dict]:
     """List files in Google Drive.
 
     Args:
-        query: Search query (Drive query syntax)
+        query: Search query to match against file names by default, or full text
+            when full_text is true
         folder_id: Folder ID to list contents
         max_results: Maximum number of results
         file_type: Filter by MIME type prefix (e.g., "image/", "application/pdf")
+        full_text: Use Drive's fullText contains query term instead of name contains
 
     Returns:
         List of file dicts with id, name, mimeType, size, modifiedTime, webViewLink
@@ -667,14 +675,15 @@ def drive_list(
 
     q_parts = []
     if query:
-        q_parts.append(f"name contains '{query}'")
+        query_term = "fullText" if full_text else "name"
+        q_parts.append(f"{query_term} contains {_drive_query_literal(query)}")
     if folder_id:
-        q_parts.append(f"'{folder_id}' in parents")
+        q_parts.append(f"{_drive_query_literal(folder_id)} in parents")
     if file_type:
         if file_type.endswith("/"):
-            q_parts.append(f"mimeType contains '{file_type}'")
+            q_parts.append(f"mimeType contains {_drive_query_literal(file_type)}")
         else:
-            q_parts.append(f"mimeType = '{file_type}'")
+            q_parts.append(f"mimeType = {_drive_query_literal(file_type)}")
 
     q_parts.append("trashed = false")
 
@@ -2692,14 +2701,17 @@ class GSuiteClient:
         folder_id: str | None = None,
         max_results: int = 50,
         file_type: str | None = None,
+        full_text: bool = False,
     ) -> list[dict]:
         """List files in Google Drive.
 
         Args:
-            query: Search query (Drive query syntax)
+            query: Search query to match against file names by default, or full text
+                when full_text is true
             folder_id: Folder ID to list contents
             max_results: Maximum number of results
             file_type: Filter by MIME type prefix (e.g., "image/", "application/pdf")
+            full_text: Use Drive's fullText contains query term instead of name contains
 
         Returns:
             List of file dicts with id, name, mimeType, size, modifiedTime, webViewLink
@@ -2709,19 +2721,24 @@ class GSuiteClient:
             folder_id=folder_id,
             max_results=max_results,
             file_type=file_type,
+            full_text=full_text,
         )
 
-    def drive_search(self, query: str, max_results: int = 50) -> list[dict]:
-        """Search files in Google Drive by name.
+    def drive_search(
+        self, query: str, max_results: int = 50, full_text: bool = False
+    ) -> list[dict]:
+        """Search files in Google Drive by name or full text.
 
         Args:
-            query: Search query (matches file names)
+            query: Search query to match against file names by default, or full text
+                when full_text is true
             max_results: Maximum number of results
+            full_text: Use Drive's fullText contains query term instead of name contains
 
         Returns:
             List of file dicts with id, name, mimeType, size, modifiedTime, webViewLink
         """
-        return drive_list(query=query, max_results=max_results)
+        return drive_list(query=query, max_results=max_results, full_text=full_text)
 
     def drive_get(self, file_id: str) -> dict:
         """Get file metadata from Google Drive.
