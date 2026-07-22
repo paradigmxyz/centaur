@@ -187,6 +187,10 @@ spec:
             - name: CENTAUR_CONSOLE_PUBLIC_URL
               value: {{ $console.publicUrl | quote }}
 {{- end }}
+{{- with $console.allowedHosts }}
+            - name: CENTAUR_CONSOLE_ALLOWED_HOSTS
+              value: {{ join "," . | quote }}
+{{- end }}
 {{- if $mcpPublicUrl }}
             - name: CENTAUR_MCP_PUBLIC_URL
               value: {{ $mcpPublicUrl | quote }}

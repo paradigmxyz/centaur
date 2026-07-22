@@ -8,6 +8,11 @@
         "enabled": { "type": "boolean" },
         "replicaCount": { "type": "integer" },
         "publicUrl": { "type": "string" },
+        "allowedHosts": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
         "railsEnv": { "type": "string" },
         "image": {
           "type": "object",

@@ -106,6 +106,10 @@ console:
   # When set, the slackbotv2 deployment also links the first assistant message
   # in a Slack thread to the Console session view; leave empty to omit the link.
   publicUrl: ""
+  # Additional exact Host headers accepted by Rails Host Authorization. Use for
+  # service DNS names that differ from the chart's short in-cluster URL;
+  # publicUrl and the short service host are already included.
+  allowedHosts: []
   # Break-glass email/password login. Disable when console is reachable from
   # the public internet and SSO is configured.
   passwordLoginEnabled: true
