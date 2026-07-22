@@ -167,7 +167,9 @@ value and sanitized Slack user, team, channel, thread, and message metadata.
 
 Subscribe to the `app_mention` bot event. For a minimal channel-mention test,
 the app also needs Bot Token Scopes that let it read mentions and write replies,
-for example `app_mentions:read` and `chat:write`. If you enable DM events such
+for example `app_mentions:read` and `chat:write`. Add `channels:join` to let the
+bot join a public channel automatically when Slack delivers an invite-style
+mention. If you enable DM events such
 as `message.im`, Slack will also require direct-message scopes such as
 `im:history`.
 

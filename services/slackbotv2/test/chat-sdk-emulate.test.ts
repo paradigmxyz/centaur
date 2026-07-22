@@ -116,6 +116,58 @@ afterAll(async () => {
 })
 
 describe('slackbotv2', () => {
+  it('joins a public channel before handling an app mention', async () => {
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> join this channel`)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-public-channel-join',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          text: `<@${BOT_USER_ID}> join this channel`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+
+    const secondMention = await postUserMessage(`<@${BOT_USER_ID}> still in this channel`)
+    const secondWaits: Promise<unknown>[] = []
+    const secondResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-public-channel-join-cached',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: secondMention.ts,
+          text: `<@${BOT_USER_ID}> still in this channel`
+        }
+      }),
+      {},
+      waitUntilContext(secondWaits)
+    )
+    expect(secondResponse.status).toBe(200)
+    await Promise.all(secondWaits)
+
+    expect(
+      slackApi.calls.filter(call => call.method === 'conversations.join')
+    ).toEqual([
+      expect.objectContaining({ body: expect.objectContaining({ channel: CHANNEL_ID }) })
+    ])
+    expect(codexApi.executes).toHaveLength(2)
+  })
+
   it('accepts Slack events on the legacy route', async () => {
     const parent = await postUserMessage('Legacy route context.')
     const mention = await postUserMessage(`<@${BOT_USER_ID}> use the legacy route`, parent.ts)
@@ -5572,6 +5624,7 @@ type StreamCall = {
     | 'chat.startStream'
     | 'chat.appendStream'
     | 'chat.stopStream'
+    | 'conversations.join'
   streamTs?: string
 }
 
@@ -5736,6 +5789,12 @@ async function handlePatchedSlackRequest(
   }
 
   const path = normalizeApiPath(url.pathname)
+  if (path === '/api/conversations.join') {
+    const body = await requestBody(request)
+    input.calls.push({ method: 'conversations.join', body })
+    await sendWebResponse(res, Response.json({ ok: true, channel: { id: stringField(body.channel) } }))
+    return
+  }
   if (path === '/api/assistant.threads.setStatus') {
     const body = await requestBody(request)
     input.calls.push({ method: 'assistant.threads.setStatus', body })

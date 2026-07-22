@@ -14,7 +14,7 @@ import {
   type Thread
 } from 'chat'
 import { createSlackAdapter } from '@chat-adapter/slack'
-import { fetchSlackThreadReplies } from '@chat-adapter/slack/api'
+import { callSlackApi, fetchSlackThreadReplies } from '@chat-adapter/slack/api'
 import { createPostgresState } from '@chat-adapter/state-pg'
 import pg from 'pg'
 import {
@@ -86,6 +86,8 @@ import {
   traceLog,
   traceWarn
 } from './utils'
+
+const SLACK_CHANNEL_JOIN_CACHE_TTL_MS = 6 * 60 * 60 * 1000
 
 export type {
   SlackbotV2,
@@ -252,6 +254,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     onLockConflict: 'force',
     logger
   })
+  const slackChannelJoinCache = new Map<string, number>()
   const lateSlackFiles = createLateSlackFileRepair(options, state)
 
   chat.onAction(async event => {
@@ -318,6 +321,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
 
   chat.onNewMention(async (thread, message) => {
     if (!(await isAllowedSlackMessage(message, options, logger))) return
+    await ensureSlackChannelMembership(message, options, slackChannelJoinCache)
     lateSlackFiles.rememberFilelessMention(thread, message)
     await handleSlackMessageHandoff(thread, message, {
       assistantStatusRequested: true,
@@ -348,6 +352,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
 
   chat.onSubscribedMessage(async (thread, message) => {
     if (!(await isAllowedSlackMessage(message, options, logger))) return
+    await ensureSlackChannelMembership(message, options, slackChannelJoinCache)
     if (slackRichTextMentionsUser(message.raw, options.botUserId)) message.isMention = true
     lateSlackFiles.rememberFilelessMention(thread, message)
     await handleSlackMessageHandoff(thread, message, {
@@ -520,6 +525,42 @@ async function handleSlackMessageHandoff(
         .catch(() => undefined)
     )
     throw error
+  }
+}
+
+async function ensureSlackChannelMembership(
+  message: ChatMessage,
+  options: SlackbotV2Options,
+  channelJoinCache: Map<string, number>
+): Promise<void> {
+  if (message.isMention !== true) return
+  const raw = slackRawRecord(message)
+  if (stringField(raw.type) !== 'app_mention') return
+  const channel = stringField(raw.channel)
+  if (!channel.startsWith('C')) return
+  if ((channelJoinCache.get(channel) ?? 0) > Date.now()) return
+
+  try {
+    const response = await withSlackApiTimeout(options, 'join Slack channel', () =>
+      callSlackApi(
+        'conversations.join',
+        { channel },
+        { apiUrl: options.slackApiUrl, token: options.botToken }
+      )
+    )
+    if (response.ok === true || response.error === 'already_in_channel') {
+      channelJoinCache.set(channel, Date.now() + SLACK_CHANNEL_JOIN_CACHE_TTL_MS)
+      return
+    }
+    traceWarn(options, 'slackbotv2_channel_join_rejected', undefined, {
+      error: stringField(response.error) || 'unknown_error',
+      slack_channel: channel
+    })
+  } catch (error) {
+    traceWarn(options, 'slackbotv2_channel_join_failed', undefined, {
+      error: errorMessage(error),
+      slack_channel: channel
+    })
   }
 }
 
