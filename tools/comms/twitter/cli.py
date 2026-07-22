@@ -563,7 +563,7 @@ def usage():
     api_usage = client.get_usage()
 
     console.print("\n[bold]API Usage[/bold]\n")
-    console.print(api_usage.get("message", "No usage information returned."))
+    print(json.dumps(api_usage, indent=2, ensure_ascii=False, default=str))
 
 
 if __name__ == "__main__":
