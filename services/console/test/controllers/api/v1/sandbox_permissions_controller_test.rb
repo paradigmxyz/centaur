@@ -82,9 +82,7 @@ module Api
         assert_match(/\A"[0-9a-f]{64}"\z/, response.headers["ETag"])
         permissions = data.fetch("permissions")
         refute permissions.key?("postgres_setting_templates")
-        refute permissions.key?("_postgres_setting_templates")
         refute_includes response.body, "postgres_setting_templates"
-        refute_includes response.body, "_postgres_setting_templates"
       end
 
       test "rejects requests without a sandbox token" do

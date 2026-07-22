@@ -40,14 +40,6 @@ class Proxy < ApplicationRecord
     Digest::SHA256.hexdigest(plaintext)
   end
 
-  # The config this proxy delivers, in the iron-proxy sync shape. The assembly
-  # lives on Principal (it is a function of effective grants); an unassigned
-  # proxy carries no authority and resolves to the empty config. Live secret
-  # values are kept inline here because the proxy needs them to resolve.
-  def sync_config
-    sync_config_snapshot.fetch(:config)
-  end
-
   def sync_config_snapshot(sandbox_entitlements_hosts: self.class.sandbox_entitlements_hosts)
     config = rendered_principal_config
     config = with_sandbox_entitlements_secret(config, sandbox_entitlements_hosts: sandbox_entitlements_hosts)

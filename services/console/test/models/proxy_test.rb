@@ -61,7 +61,7 @@ class ProxyTest < ActiveSupport::TestCase
 
   test "an unassigned proxy delivers an empty config" do
     proxy = Proxy.create!(name: "idle", principal: nil)
-    config = proxy.sync_config
+    config = proxy.sync_config_snapshot.fetch(:config)
     assert_empty config["secrets"]
     assert_empty config["transforms"]
     assert_empty config["postgres"]

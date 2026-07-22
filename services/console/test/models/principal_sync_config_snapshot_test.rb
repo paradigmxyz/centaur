@@ -68,15 +68,12 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     end
   end
 
-  test "snapshot accessors read legacy flat payloads" do
+  test "snapshot accessors read flat payloads created before the snapshot envelope" do
     config = { "secrets" => [], "transforms" => [], "postgres" => [] }
-    templates = { "pgd_legacy" => [ { "name" => "app.user" } ] }
-    snapshot = PrincipalSyncConfigSnapshot.new(
-      payload: config.merge("_postgres_setting_templates" => templates)
-    )
+    snapshot = PrincipalSyncConfigSnapshot.new(payload: config)
 
     assert_equal config, snapshot.config
-    assert_equal templates, snapshot.postgres_setting_templates
+    assert_empty snapshot.postgres_setting_templates
   end
 
   test "fetch_for returns the fresh snapshot without rebuilding" do
