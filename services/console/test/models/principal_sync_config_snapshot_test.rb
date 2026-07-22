@@ -20,11 +20,47 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     singleton.define_method(:try_build_for, original)
   end
 
+  def without_live_sync_postgres
+    original = Principal.instance_method(:sync_postgres)
+    Principal.class_eval do
+      define_method(:sync_postgres) do |*_args|
+        raise "live sync_postgres should not be called"
+      end
+    end
+    yield
+  ensure
+    Principal.class_eval { define_method(:sync_postgres, original) }
+  end
+
   test "fetch_for builds a snapshot on cold start" do
     assert_difference -> { PrincipalSyncConfigSnapshot.count }, 1 do
       snapshot = PrincipalSyncConfigSnapshot.fetch_for(@principal)
       assert_equal @principal.sync_config_cache_version, snapshot.principal_cache_version
-      assert_equal @principal.effective_config(redact_secrets: false), snapshot.payload
+      assert_equal @principal.sync_config_snapshot_payload, snapshot.payload
+    end
+  end
+
+  test "proxy sync renders proxy labels from the snapshot without recomputing postgres" do
+    pg = pg_dsn_secrets(:acme_analytics_pg)
+    pg.update!(settings: [
+      { "name" => "centaur.principal", "value_from" => { "principal_field" => "foreign_id" } },
+      { "name" => "centaur.slack_user_id", "value_from" => { "proxy_label" => "centaur.slack_user_id" } }
+    ])
+    proxy = proxies(:acme_proxy)
+    proxy.update!(labels: { "centaur.slack_user_id" => "U0123456789" })
+    PrincipalSyncConfigSnapshot.fetch_for(@principal)
+
+    without_live_sync_postgres do
+      snapshot = proxy.reload.sync_config_snapshot
+      entry = snapshot.fetch(:config).fetch("postgres").find { |item| item["foreign_id"] == pg.foreign_id }
+
+      assert_equal(
+        [
+          { "name" => "centaur.principal", "value" => @principal.foreign_id },
+          { "name" => "centaur.slack_user_id", "value" => "U0123456789" }
+        ],
+        entry.fetch("settings")
+      )
     end
   end
 

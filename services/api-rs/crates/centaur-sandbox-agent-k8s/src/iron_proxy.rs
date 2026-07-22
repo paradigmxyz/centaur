@@ -178,6 +178,7 @@ struct ProxySyncEnv {
     proxy_id: String,
     control_url: String,
     token: String,
+    config_hash: Option<String>,
 }
 
 struct ControlPlaneEgressTarget {
@@ -395,8 +396,12 @@ impl AgentSandboxBackend {
             .await
             .map_err(|err| map_kube_error("create iron-proxy pod", err))?;
         self.wait_until_proxy_running(resolved).await?;
-        self.wait_for_cold_proxy_principal_applied(id, &resolved.principal_id)
-            .await;
+        self.wait_for_cold_proxy_principal_applied(
+            id,
+            &resolved.principal_id,
+            sync.config_hash.as_deref(),
+        )
+        .await;
         Ok(())
     }
 
@@ -427,6 +432,7 @@ impl AgentSandboxBackend {
             proxy_id: proxy.id,
             control_url: iron_control.control_url.clone(),
             token,
+            config_hash: proxy.config_hash,
         })
     }
 
@@ -560,7 +566,7 @@ impl AgentSandboxBackend {
             .insert(id.as_str().to_owned(), proxy.id);
         self.patch_iron_control_principal_annotation(id, principal_id)
             .await?;
-        self.wait_for_proxy_principal_applied(id, principal_id)
+        self.wait_for_proxy_principal_applied(id, principal_id, proxy.config_hash.as_deref())
             .await;
         Ok(())
     }
@@ -594,19 +600,19 @@ impl AgentSandboxBackend {
                 .annotations
                 .as_ref()
                 .and_then(|annotations| annotations.get(crate::IRON_CONTROL_PRINCIPAL_ANNOTATION));
-            if assigned_principal.map(String::as_str) == Some(principal_id) {
+            if assigned_principal.map(String::as_str) == Some(principal_id) && labels.is_empty() {
                 return Ok(());
             }
 
             let iron_control = self.config.iron_control.as_ref().ok_or_else(|| {
                 SandboxError::backend("iron-proxy requires iron-control to be configured")
             })?;
-            iron_control
+            let proxy = iron_control
                 .client
                 .assign_proxy_principal(&proxy_id, principal_id, labels)
                 .await
                 .map_err(|err| SandboxError::backend_source("iron-control assign proxy", err))?;
-            self.wait_for_proxy_principal_applied(id, principal_id)
+            self.wait_for_proxy_principal_applied(id, principal_id, proxy.config_hash.as_deref())
                 .await;
             return Ok(());
         }
@@ -728,10 +734,15 @@ impl AgentSandboxBackend {
     /// managed-mode management API fall back to a fixed delay. Never fails the
     /// claim: managed proxies fail closed until synced, so the worst case is a
     /// brief 503 window rather than a failed execution.
-    async fn wait_for_proxy_principal_applied(&self, id: &SandboxId, principal_id: &str) {
+    async fn wait_for_proxy_principal_applied(
+        &self,
+        id: &SandboxId,
+        principal_id: &str,
+        config_hash: Option<&str>,
+    ) {
         let started = Instant::now();
         match self
-            .proxy_principal_ack(id, principal_id, "claim barrier")
+            .proxy_principal_ack(id, principal_id, config_hash, "claim barrier")
             .await
         {
             Ok(ProxyAck::Applied) => {
@@ -779,10 +790,15 @@ impl AgentSandboxBackend {
     /// returns. Ask the proxy to report the requested principal's config before
     /// creating the sandbox pod. If the management API cannot prove readiness,
     /// fall back to the fixed delay instead of failing the sandbox create.
-    async fn wait_for_cold_proxy_principal_applied(&self, id: &SandboxId, principal_id: &str) {
+    async fn wait_for_cold_proxy_principal_applied(
+        &self,
+        id: &SandboxId,
+        principal_id: &str,
+        config_hash: Option<&str>,
+    ) {
         let started = Instant::now();
         match self
-            .proxy_principal_ack(id, principal_id, "cold create barrier")
+            .proxy_principal_ack(id, principal_id, config_hash, "cold create barrier")
             .await
         {
             Ok(ProxyAck::Applied) => {
@@ -829,6 +845,7 @@ impl AgentSandboxBackend {
         &self,
         id: &SandboxId,
         principal_id: &str,
+        config_hash: Option<&str>,
         barrier: &'static str,
     ) -> SandboxResult<ProxyAck> {
         let endpoint = match self.proxy_management_endpoint(id).await {
@@ -856,6 +873,7 @@ impl AgentSandboxBackend {
             &client,
             &endpoint,
             principal_id,
+            config_hash,
             PROXY_ACK_TIMEOUT,
             PROXY_ACK_PROBE_WINDOW,
             PROXY_ACK_POLL_INTERVAL,
@@ -1027,6 +1045,8 @@ struct ProxyManagementEndpoint {
 #[derive(serde::Deserialize)]
 struct ProxyManagedStatus {
     #[serde(default)]
+    config_hash: Option<String>,
+    #[serde(default)]
     principal_id: String,
     #[serde(default)]
     synced_once: bool,
@@ -1057,6 +1077,7 @@ async fn wait_for_proxy_ack(
     client: &reqwest::Client,
     endpoint: &ProxyManagementEndpoint,
     principal_id: &str,
+    config_hash: Option<&str>,
     ack_timeout: Duration,
     probe_window: Duration,
     poll_interval: Duration,
@@ -1090,6 +1111,10 @@ async fn wait_for_proxy_ack(
             if let Ok(status) = response.json::<ProxyManagedStatus>().await
                 && status.synced_once
                 && status.principal_id == principal_id
+                && status
+                    .config_hash
+                    .as_deref()
+                    .is_none_or(|applied_hash| config_hash.is_none_or(|hash| applied_hash == hash))
             {
                 return ProxyAck::Applied;
             }
@@ -2137,6 +2162,7 @@ mod tests {
             proxy_id: "iprx_test".to_owned(),
             control_url: "http://console:3000".to_owned(),
             token: "proxy-token".to_owned(),
+            config_hash: None,
         };
 
         let pod = build_iron_proxy_pod(&id, &iron_proxy, &resolved, &sync);
@@ -2319,6 +2345,7 @@ mod tests {
             proxy_id: "proxy-id".to_owned(),
             control_url: "http://iron-control".to_owned(),
             token: "proxy-token".to_owned(),
+            config_hash: None,
         };
 
         let env = iron_proxy_env_vars(&iron_proxy, &resolved(), &sync);
@@ -2343,6 +2370,7 @@ mod tests {
             proxy_id: "proxy-id".to_owned(),
             control_url: "http://iron-control".to_owned(),
             token: "proxy-token".to_owned(),
+            config_hash: None,
         };
 
         let env = iron_proxy_env_vars(&iron_proxy, &resolved(), &sync);
@@ -2594,6 +2622,7 @@ mod tests {
             &barrier_client(),
             &endpoint,
             "prin_claimed",
+            None,
             Duration::from_secs(5),
             Duration::from_secs(5),
             Duration::from_millis(10),
@@ -2620,9 +2649,33 @@ mod tests {
             &barrier_client(),
             &endpoint,
             "prin_claimed",
+            None,
             Duration::from_millis(400),
             Duration::from_millis(200),
             Duration::from_millis(25),
+        )
+        .await;
+
+        assert_eq!(ack, ProxyAck::TimedOut);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn proxy_ack_rejects_matching_principal_with_stale_config_hash() {
+        let (base_url, _sync_calls, server) = spawn_management_stub("test-key", 0).await;
+        let endpoint = ProxyManagementEndpoint {
+            base_url,
+            api_key: "test-key".to_owned(),
+        };
+
+        let ack = wait_for_proxy_ack(
+            &barrier_client(),
+            &endpoint,
+            "prin_claimed",
+            Some("sha256:expected"),
+            Duration::from_millis(200),
+            Duration::from_millis(200),
+            Duration::from_millis(10),
         )
         .await;
 
@@ -2646,6 +2699,7 @@ mod tests {
             &barrier_client(),
             &endpoint,
             "prin_claimed",
+            None,
             Duration::from_secs(2),
             Duration::from_millis(300),
             Duration::from_millis(50),

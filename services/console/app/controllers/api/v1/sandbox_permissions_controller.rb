@@ -15,9 +15,9 @@ module Api
         # principal.effective_config (the snapshot stores the unredacted
         # config) but skips the expensive per-request grant rebuild, under
         # the same freshness model the proxy sync path accepts.
-        permissions = Principal.redact_live_secrets(
-          PrincipalSyncConfigSnapshot.fetch_for(principal).payload
-        )
+        permissions_payload = PrincipalSyncConfigSnapshot.fetch_for(principal).payload.deep_dup
+        permissions_payload.delete("_postgres_setting_templates")
+        permissions = Principal.redact_live_secrets(permissions_payload)
         body = {
           data: {
             sandbox_id: sandbox_claims.fetch("sandbox_id"),

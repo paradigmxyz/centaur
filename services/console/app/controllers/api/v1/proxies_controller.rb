@@ -25,12 +25,12 @@ module Api
       end
 
       def create
-        attrs = data_params.permit(:name, :principal_id, labels: {})
+        attrs = data_params.permit(:name, :principal_id)
         # principal_id is optional: a proxy may boot unassigned and be assigned later.
         principal = attrs[:principal_id].present? ? Principal.find_by_oid!(attrs[:principal_id]) : nil
-        proxy = ::Proxy.new(name: attrs[:name], principal: principal, labels: attrs[:labels] || {})
+        proxy = ::Proxy.new(name: attrs[:name], principal: principal, labels: labels_param)
         proxy.save!
-        render status: :created, json: { data: record_payload(proxy).merge(token: proxy.token) }
+        render status: :created, json: { data: record_payload(proxy, include_config_hash: true).merge(token: proxy.token) }
       rescue ActiveRecord::RecordInvalid => e
         render_validation_error(e.record)
       end
@@ -47,7 +47,7 @@ module Api
         proxy.name = data_params[:name] if data_params.key?(:name)
         proxy.labels = permitted_labels if data_params.key?(:labels)
         proxy.save!
-        render json: { data: record_payload(proxy) }
+        render json: { data: record_payload(proxy, include_config_hash: true) }
       rescue ActiveRecord::RecordInvalid => e
         render_validation_error(e.record)
       end
@@ -65,13 +65,23 @@ module Api
       end
 
       def permitted_labels
-        return {} if data_params[:labels].nil?
-
-        data_params.permit(labels: {})[:labels] || {}
+        labels_param
       end
 
-      def record_payload(proxy)
-        {
+      def labels_param
+        labels = data_params[:labels]
+        return {} if labels.nil?
+        return labels.permit!.to_h if labels.is_a?(ActionController::Parameters)
+
+        labels
+      end
+
+      def sandbox_entitlements_hosts
+        [ Principal.host_from_url(ENV["CENTAUR_CONSOLE_URL"]) ]
+      end
+
+      def record_payload(proxy, include_config_hash: false)
+        payload = {
           id: proxy.oid,
           name: proxy.name,
           principal_id: proxy.principal&.oid,
@@ -81,6 +91,13 @@ module Api
           created_at: proxy.created_at,
           updated_at: proxy.updated_at
         }
+        if include_config_hash
+          payload[:config_hash] = proxy.sync_config_snapshot(
+            sandbox_entitlements_hosts: sandbox_entitlements_hosts,
+            include_config: false
+          )[:config_hash]
+        end
+        payload
       end
     end
   end

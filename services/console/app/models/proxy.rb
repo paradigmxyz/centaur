@@ -45,12 +45,13 @@ class Proxy < ApplicationRecord
   # proxy carries no authority and resolves to the empty config. Live secret
   # values are kept inline here because the proxy needs them to resolve.
   def sync_config
-    proxy_specific_config(principal&.effective_config(redact_secrets: false) || Principal::EMPTY_CONFIG)
+    proxy_specific_config(principal&.sync_config_snapshot_payload || Principal::EMPTY_CONFIG)
   end
 
   def sync_config_snapshot(sandbox_entitlements_hosts: [], include_config: true)
     config = principal ? PrincipalSyncConfigSnapshot.fetch_for(principal).payload : Principal::EMPTY_CONFIG
-    hash_config = with_sandbox_entitlements_secret(config, sandbox_entitlements_hosts: sandbox_entitlements_hosts)
+    hash_config = proxy_specific_config(config)
+    hash_config = with_sandbox_entitlements_secret(hash_config, sandbox_entitlements_hosts: sandbox_entitlements_hosts)
     snapshot = { config_hash: config_hash_for(hash_config) }
     return snapshot unless include_config
 
@@ -135,8 +136,51 @@ class Proxy < ApplicationRecord
 
   def proxy_specific_config(config)
     copy = config.deep_dup
-    copy["postgres"] = principal ? principal.sync_postgres(proxy: self) : []
+    templates = copy.delete("_postgres_setting_templates") || {}
+    copy["postgres"] = proxy_specific_postgres(copy["postgres"], templates) if templates.any?
     copy
+  end
+
+  def proxy_specific_postgres(postgres, templates)
+    Array(postgres).map do |entry|
+      next entry unless entry.is_a?(Hash)
+
+      template = templates[entry["id"].to_s]
+      next entry unless template
+
+      rendered_settings = proxy_specific_postgres_settings(entry["settings"], template)
+      entry.merge("settings" => rendered_settings)
+    end
+  end
+
+  def proxy_specific_postgres_settings(rendered_settings, template_settings)
+    rendered_by_name = Array(rendered_settings).each_with_object({}) do |setting, values|
+      next unless setting.is_a?(Hash)
+
+      name = setting["name"].presence || setting[:name].presence
+      values[name] = setting["value"] || setting[:value] if name.present?
+    end
+
+    Array(template_settings).filter_map do |setting|
+      next unless setting.is_a?(Hash)
+
+      name = setting["name"].presence || setting[:name].presence
+      next if name.blank?
+
+      value = proxy_label_setting_value(setting)
+      value = rendered_by_name.fetch(name, "") if value.nil?
+      { "name" => name, "value" => value }
+    end
+  end
+
+  def proxy_label_setting_value(setting)
+    ref = setting["value_from"] || setting[:value_from]
+    return nil unless ref.is_a?(Hash)
+
+    proxy_label = ref["proxy_label"] || ref[:proxy_label]
+    return nil if proxy_label.blank?
+
+    labels&.fetch(proxy_label.to_s, "").to_s
   end
 
   def with_sandbox_entitlements_secret(config, sandbox_entitlements_hosts:)

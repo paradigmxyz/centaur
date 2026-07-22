@@ -67,6 +67,17 @@ class PgDsnSecret < ApplicationRecord
     end
   end
 
+  def proxy_label_settings?
+    Array(settings).any? do |setting|
+      next false unless setting.is_a?(Hash)
+
+      ref = setting["value_from"] || setting[:value_from]
+      next false unless ref.is_a?(Hash)
+
+      (ref["proxy_label"] || ref[:proxy_label]).present?
+    end
+  end
+
   validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
   validates :foreign_id, presence: true, uniqueness: { scope: :namespace },
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
@@ -96,11 +107,13 @@ class PgDsnSecret < ApplicationRecord
     proxy_label = ref["proxy_label"] || ref[:proxy_label]
     return proxy&.labels&.fetch(proxy_label.to_s, "").to_s if proxy_label.present?
 
+    return "" unless principal
+
     case (ref["principal_field"] || ref[:principal_field]).to_s
-    when "id" then principal ? principal.oid : ""
-    when "namespace" then principal ? principal.namespace.to_s : ""
-    when "foreign_id" then principal ? principal.foreign_id.to_s : ""
-    when "name" then principal ? principal.name.to_s : ""
+    when "id" then principal.oid
+    when "namespace" then principal.namespace.to_s
+    when "foreign_id" then principal.foreign_id.to_s
+    when "name" then principal.name.to_s
     else "" # unreachable for saved records; settings_are_valid rejects others
     end
   end

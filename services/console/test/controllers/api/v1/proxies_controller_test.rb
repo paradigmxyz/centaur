@@ -75,6 +75,33 @@ class ProxiesControllerTest < ActionDispatch::IntegrationTest
     assert_equal({ "centaur.slack_user_id" => "U123" }, data["labels"])
   end
 
+  test "POST returns the sync config hash including sandbox entitlements" do
+    body = {
+      data: {
+        name: "edge-proxy-with-entitlements",
+        principal_id: principals(:acme_channel).oid
+      }
+    }
+
+    expected_hash = nil
+    with_env(
+      "CENTAUR_JWT_SIGNING_SECRET" => "test-secret",
+      "CENTAUR_CONSOLE_URL" => "http://centaur-console:3000"
+    ) do
+      post api_v1_proxies_url, params: body.to_json, headers: auth_headers
+      proxy = Proxy.find_by_token(json_body.dig("data", "token"))
+      expected_hash = proxy.sync_config_snapshot(
+        sandbox_entitlements_hosts: [ "centaur-console" ],
+        include_config: false
+      )[:config_hash]
+      refute_equal proxy.config_hash, expected_hash
+    end
+    assert_response :created
+
+    data = json_body.fetch("data")
+    assert_equal expected_hash, data.fetch("config_hash")
+  end
+
   test "POST with invalid labels returns a validation error" do
     body = { data: { name: "bad-labels", labels: { "slack_user_id" => 123 } } }
     post api_v1_proxies_url, params: body.to_json, headers: auth_headers
@@ -129,6 +156,17 @@ class ProxiesControllerTest < ActionDispatch::IntegrationTest
     assert_equal principals(:globex_user), proxy.reload.principal
   end
 
+  test "PATCH omitting labels leaves labels unchanged" do
+    proxy = proxies(:acme_proxy)
+    proxy.update!(labels: { "centaur.slack_user_id" => "U1" })
+    body = { data: { principal_id: principals(:globex_user).oid } }
+
+    patch api_v1_proxy_url(id: proxy.oid), params: body.to_json, headers: auth_headers
+    assert_response :ok
+    assert_equal({ "centaur.slack_user_id" => "U1" }, json_body.dig("data", "labels"))
+    assert_equal({ "centaur.slack_user_id" => "U1" }, proxy.reload.labels)
+  end
+
   test "PATCH replaces labels" do
     proxy = proxies(:acme_proxy)
     proxy.update!(labels: { "centaur.slack_user_id" => "U1" })
@@ -140,6 +178,27 @@ class ProxiesControllerTest < ActionDispatch::IntegrationTest
     assert_equal({ "centaur.slack_user_id" => "U2" }, proxy.reload.labels)
   end
 
+  test "PATCH returns the sync config hash including sandbox entitlements" do
+    proxy = proxies(:acme_proxy)
+    body = { data: { labels: { "centaur.slack_user_id" => "U2" } } }
+
+    expected_hash = nil
+    with_env(
+      "CENTAUR_JWT_SIGNING_SECRET" => "test-secret",
+      "CENTAUR_CONSOLE_URL" => "http://centaur-console:3000"
+    ) do
+      patch api_v1_proxy_url(id: proxy.oid), params: body.to_json, headers: auth_headers
+      expected_hash = proxy.reload.sync_config_snapshot(
+        sandbox_entitlements_hosts: [ "centaur-console" ],
+        include_config: false
+      )[:config_hash]
+      refute_equal proxy.config_hash, expected_hash
+    end
+    assert_response :ok
+
+    assert_equal expected_hash, json_body.dig("data", "config_hash")
+  end
+
   test "PATCH with null labels clears labels" do
     proxy = proxies(:acme_proxy)
     proxy.update!(labels: { "centaur.slack_user_id" => "U1" })
@@ -149,6 +208,18 @@ class ProxiesControllerTest < ActionDispatch::IntegrationTest
     assert_response :ok
     assert_equal({}, json_body.dig("data", "labels"))
     assert_equal({}, proxy.reload.labels)
+  end
+
+  test "PATCH with non-hash labels returns a validation error" do
+    proxy = proxies(:acme_proxy)
+    proxy.update!(labels: { "centaur.slack_user_id" => "U1" })
+    body = { data: { labels: "U2" } }
+
+    patch api_v1_proxy_url(id: proxy.oid), params: body.to_json, headers: auth_headers
+    assert_response :unprocessable_entity
+    assert_equal "validation failed", json_body.dig("error", "message")
+    assert_includes json_body.dig("error", "details", "labels"), "must be a hash"
+    assert_equal({ "centaur.slack_user_id" => "U1" }, proxy.reload.labels)
   end
 
   test "PATCH with a null principal_id unassigns the proxy" do
@@ -185,5 +256,17 @@ class ProxiesControllerTest < ActionDispatch::IntegrationTest
       delete api_v1_proxy_url(id: proxy.oid), headers: auth_headers
     end
     assert_response :no_content
+  end
+
+  def with_env(values)
+    previous = values.keys.to_h { |key| [ key, ENV[key] ] }
+    values.each do |key, value|
+      value.nil? ? ENV.delete(key) : ENV[key] = value
+    end
+    yield
+  ensure
+    previous.each do |key, value|
+      value.nil? ? ENV.delete(key) : ENV[key] = value
+    end
   end
 end

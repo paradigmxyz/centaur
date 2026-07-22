@@ -76,7 +76,7 @@ class PrincipalSyncConfigSnapshot < ApplicationRecord
     snapshot = find_or_initialize_by(principal: principal, principal_cache_version: version)
     return snapshot if snapshot.persisted? && snapshot.fresh_for?(principal)
 
-    snapshot.payload = principal.effective_config(redact_secrets: false)
+    snapshot.payload = principal.sync_config_snapshot_payload
     if snapshot.changed?
       snapshot.save!
     else

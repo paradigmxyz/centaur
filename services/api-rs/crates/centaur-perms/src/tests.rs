@@ -403,6 +403,20 @@ fn parses_pg_dsn_secret() {
 }
 
 #[test]
+fn rejects_pg_dsn_value_from_with_multiple_selectors() {
+    let err = tools::parse_secret(
+        &entry(r#"{ type = "pg_dsn", name = "RESHIFT_DSN", database = "pmadmin", secret_ref = "RESHIFT_DSN", settings = [{ name = "centaur.slack_user_id", value_from = { principal_label = "slack_user_id", proxy_label = "centaur.slack_user_id" } }] }"#),
+        &[],
+    )
+    .unwrap_err();
+
+    assert!(
+        err.to_string().contains("must declare exactly one"),
+        "{err}"
+    );
+}
+
+#[test]
 fn pg_dsn_requires_database() {
     let err = tools::parse_secret(&entry(r#"{ type = "pg_dsn", name = "RESHIFT_DSN" }"#), &[])
         .unwrap_err();

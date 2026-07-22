@@ -112,12 +112,43 @@ class Principal < ApplicationRecord
   # the same database, existing grant priority ordering decides the winner:
   # higher-priority grants appear later and overwrite lower-priority routes.
   def sync_postgres(proxy: nil)
+    sync_postgres_entries(proxy: proxy)
+  end
+
+  def sync_config_snapshot_payload
+    served = served_credentials
+    postgres, templates = sync_postgres_entries_with_templates
+    config = {
+      "secrets" => proxy_secrets_for(served) + generated_proxy_secrets,
+      "transforms" => proxy_transforms_for(served),
+      "postgres" => postgres
+    }
+    config["_postgres_setting_templates"] = templates if templates.any?
+    config
+  end
+
+  def sync_postgres_entries(proxy: nil)
     winners = {}
     granted_pg_dsn_secrets.each do |pg|
       next unless pg.dsn_source
       winners[pg.database] = pg
     end
     winners.values.map { |pg| pg.to_proxy_dsn(principal: self, proxy: proxy) }
+  end
+
+  def sync_postgres_entries_with_templates
+    winners = {}
+    granted_pg_dsn_secrets.each do |pg|
+      next unless pg.dsn_source
+      winners[pg.database] = pg
+    end
+
+    templates = {}
+    entries = winners.values.map do |pg|
+      templates[pg.oid] = pg.settings if pg.proxy_label_settings?
+      pg.to_proxy_dsn(principal: self)
+    end
+    [ entries, templates ]
   end
 
   # The config this principal resolves to, in the same shape iron-proxy receives
