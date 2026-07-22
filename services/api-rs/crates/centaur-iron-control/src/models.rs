@@ -504,13 +504,29 @@ pub struct EffectiveConfig {
     pub postgres: Vec<EffectivePgDsn>,
 }
 
-/// One synced secret. Only replace secrets surface a placeholder the sandbox
-/// must send; inject/oauth/gcp secrets are proxy-side and carry no `replace`.
+/// One synced secret. Replace secrets carry an explicit proxy placeholder.
+/// Static inject secrets may also expose a non-secret environment source name
+/// so the sandbox can signal tool availability without receiving the value.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct EffectiveSecret {
     #[serde(default)]
+    pub source: Option<EffectiveSecretSource>,
+    #[serde(default)]
+    pub inject: Option<EffectiveInject>,
+    #[serde(default)]
     pub replace: Option<EffectiveReplace>,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct EffectiveSecretSource {
+    #[serde(rename = "type")]
+    pub source_type: String,
+    #[serde(default)]
+    pub var: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct EffectiveInject {}
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct EffectiveReplace {
@@ -716,7 +732,7 @@ pub struct Proxy {
 
 #[cfg(test)]
 mod tests {
-    use super::{SlackChannelPermissionInput, normalize_gcp_id_token_header};
+    use super::{EffectiveConfig, SlackChannelPermissionInput, normalize_gcp_id_token_header};
 
     #[test]
     fn normalizes_supported_gcp_id_token_headers() {
@@ -745,5 +761,25 @@ mod tests {
         assert_eq!(value["upload_enabled"], false);
         assert_eq!(value["download_enabled"], true);
         assert_eq!(value["history_enabled"], false);
+    }
+
+    #[test]
+    fn effective_config_decodes_safe_inject_source_metadata() {
+        let config: EffectiveConfig = serde_json::from_value(serde_json::json!({
+            "secrets": [{
+                "source": { "type": "env", "var": "CLAY_PUBLIC_API_KEY" },
+                "inject": { "header": "clay-api-key" },
+                "rules": [{ "host": "api.clay.com" }]
+            }]
+        }))
+        .unwrap();
+
+        let secret = config.secrets.first().unwrap();
+        assert!(secret.inject.is_some());
+        assert_eq!(secret.source.as_ref().unwrap().source_type, "env");
+        assert_eq!(
+            secret.source.as_ref().unwrap().var.as_deref(),
+            Some("CLAY_PUBLIC_API_KEY")
+        );
     }
 }

@@ -136,10 +136,10 @@ pub(crate) struct ResolvedIronProxy {
     // control-plane-owned; api-rs assigns the local listen/client knobs
     // (IRON_PROXY_PG_* + the per-upstream sandbox DSN env vars).
     pg: Option<ResolvedPg>,
-    // Replace-secret placeholders the operator granted the principal
-    // (`proxy_value` -> same), set as sandbox env so tools send the value the
-    // proxy swaps. Infra placeholders are set separately from the known set.
-    replace_placeholders: BTreeMap<String, String>,
+    // Secret placeholders the operator granted the principal. Replace secrets
+    // use `proxy_value`; inject secrets use their non-secret env source name so
+    // tool clients can detect configuration while the credential stays proxy-side.
+    secret_placeholders: BTreeMap<String, String>,
     // Bearer key for the proxy's management API (/v1/status, /v1/sync),
     // random per proxy pod. The claim barrier reads it back off the live pod
     // env, so it survives api-rs restarts and respects env overrides.
@@ -150,7 +150,7 @@ pub(crate) struct ResolvedIronProxy {
 
 struct ResolvedIronProxyRuntime {
     pg: Option<ResolvedPg>,
-    replace_placeholders: BTreeMap<String, String>,
+    secret_placeholders: BTreeMap<String, String>,
     observability_enabled: bool,
     api_server_enabled: bool,
 }
@@ -210,7 +210,7 @@ impl AgentSandboxBackend {
             )
         })?;
         let pg = self.resolved_pg();
-        let replace_placeholders = self.effective_replace_placeholders(&principal_id).await?;
+        let secret_placeholders = self.effective_secret_placeholders(&principal_id).await?;
         let labels = spec.iron_control_proxy_labels.clone();
 
         Ok(Some(self.resolved_iron_proxy_for_principal(
@@ -219,18 +219,18 @@ impl AgentSandboxBackend {
             labels,
             ResolvedIronProxyRuntime {
                 pg,
-                replace_placeholders,
+                secret_placeholders,
                 observability_enabled: spec.capabilities.observability_enabled,
                 api_server_enabled: spec.capabilities.api_server_enabled,
             },
         )))
     }
 
-    /// Read the principal's effective config from iron-control for the
-    /// replace-secret placeholders set as sandbox env (so tools send the value
-    /// the proxy swaps for the real secret). The Postgres DSN catalog is
-    /// provided as one fixed local DSN instead — see [`Self::resolved_pg`].
-    async fn effective_replace_placeholders(
+    /// Read the principal's effective config from iron-control for sandbox-safe
+    /// placeholders. Replace secrets send a proxy value for substitution;
+    /// inject secrets expose only their env source name as an availability
+    /// signal while iron-proxy retains and injects the actual credential.
+    async fn effective_secret_placeholders(
         &self,
         principal: &str,
     ) -> SandboxResult<BTreeMap<String, String>> {
@@ -243,14 +243,7 @@ impl AgentSandboxBackend {
             .await
             .map_err(|err| SandboxError::backend_source("iron-control effective_config", err))?;
 
-        Ok(effective
-            .secrets
-            .iter()
-            .filter_map(|secret| secret.replace.as_ref())
-            .map(|replace| replace.proxy_value.trim().to_owned())
-            .filter(|value| !value.is_empty() && !value.contains('='))
-            .map(|value| (value.clone(), value))
-            .collect())
+        Ok(effective_secret_placeholders(&effective))
     }
 
     /// Build the single local Postgres listener every managed iron-proxy
@@ -294,7 +287,7 @@ impl AgentSandboxBackend {
             return Ok(None);
         };
         let pg = self.resolved_pg_for_recreation(Some(&sandbox));
-        let replace_placeholders = self.effective_replace_placeholders(&principal_id).await?;
+        let secret_placeholders = self.effective_secret_placeholders(&principal_id).await?;
         let observability_enabled = sandbox_observability_enabled(&sandbox, &self.config.container_name)
             .unwrap_or_else(|| {
                 tracing::warn!(
@@ -319,7 +312,7 @@ impl AgentSandboxBackend {
             BTreeMap::new(),
             ResolvedIronProxyRuntime {
                 pg,
-                replace_placeholders,
+                secret_placeholders,
                 observability_enabled,
                 api_server_enabled,
             },
@@ -346,7 +339,7 @@ impl AgentSandboxBackend {
             principal_id,
             labels,
             pg: runtime.pg,
-            replace_placeholders: runtime.replace_placeholders,
+            secret_placeholders: runtime.secret_placeholders,
             management_api_key: new_proxy_management_api_key(),
             observability_enabled: runtime.observability_enabled,
             api_server_enabled: runtime.api_server_enabled,
@@ -648,7 +641,7 @@ impl AgentSandboxBackend {
         };
         let pg = self.resolved_pg_for_recreation(sandbox.as_ref());
         let principal_id = principal_id.to_owned();
-        let replace_placeholders = self.effective_replace_placeholders(&principal_id).await?;
+        let secret_placeholders = self.effective_secret_placeholders(&principal_id).await?;
         let observability_enabled = sandbox
             .as_ref()
             .and_then(|sandbox| sandbox_observability_enabled(sandbox, &self.config.container_name))
@@ -677,7 +670,7 @@ impl AgentSandboxBackend {
             labels.clone(),
             ResolvedIronProxyRuntime {
                 pg,
-                replace_placeholders,
+                secret_placeholders,
                 observability_enabled,
                 api_server_enabled,
             },
@@ -1185,10 +1178,10 @@ pub(crate) fn apply_proxy_env(spec: &mut SandboxSpec, resolved: &ResolvedIronPro
     for (name, value) in proxy_env(&resolved.proxy_host, resolved.proxy_port, &no_proxy_extra) {
         set_env(spec, &name, &value);
     }
-    // Operator-granted replace placeholders: the sandbox sends the proxy_value
-    // and iron-proxy swaps in the real secret. set_missing so infra placeholders
-    // (already on the spec from the known set) win.
-    for (name, value) in &resolved.replace_placeholders {
+    // Operator-granted safe placeholders. Replace values are swapped by the
+    // proxy; inject values only signal configuration and are never credentials.
+    // set_missing lets an explicitly configured infra placeholder win.
+    for (name, value) in &resolved.secret_placeholders {
         set_missing_env(spec, name, value);
     }
     // The sandbox always gets one local Postgres base DSN. Tools choose the
@@ -1204,6 +1197,29 @@ pub(crate) fn apply_proxy_env(spec: &mut SandboxSpec, resolved: &ResolvedIronPro
     if !resolved.console_url.is_empty() {
         set_missing_env(spec, CENTAUR_CONSOLE_URL_ENV, &resolved.console_url);
     }
+}
+
+fn effective_secret_placeholders(
+    effective: &centaur_iron_control::EffectiveConfig,
+) -> BTreeMap<String, String> {
+    effective
+        .secrets
+        .iter()
+        .filter_map(|secret| {
+            if let Some(replace) = &secret.replace {
+                return Some(replace.proxy_value.trim());
+            }
+            if secret.inject.is_some() {
+                let source = secret.source.as_ref()?;
+                if source.source_type == "env" {
+                    return source.var.as_deref().map(str::trim);
+                }
+            }
+            None
+        })
+        .filter(|value| !value.is_empty() && !value.contains('='))
+        .map(|value| (value.to_owned(), value.to_owned()))
+        .collect()
 }
 
 pub(crate) fn sandbox_ca_volume_mount_json() -> Value {
@@ -2022,6 +2038,9 @@ fn unique_suffix() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use centaur_iron_control::{
+        EffectiveConfig, EffectiveInject, EffectiveReplace, EffectiveSecret, EffectiveSecretSource,
+    };
 
     fn resolved() -> ResolvedIronProxy {
         ResolvedIronProxy {
@@ -2032,11 +2051,72 @@ mod tests {
             principal_id: "principal".to_owned(),
             labels: BTreeMap::new(),
             pg: None,
-            replace_placeholders: BTreeMap::new(),
+            secret_placeholders: BTreeMap::new(),
             management_api_key: "test-management-key".to_owned(),
             observability_enabled: true,
             api_server_enabled: true,
         }
+    }
+
+    #[test]
+    fn effective_placeholders_include_replace_and_env_backed_inject_secrets() {
+        let effective = EffectiveConfig {
+            secrets: vec![
+                EffectiveSecret {
+                    source: None,
+                    inject: None,
+                    replace: Some(EffectiveReplace {
+                        proxy_value: "DATABASE_PASSWORD".to_owned(),
+                    }),
+                },
+                EffectiveSecret {
+                    source: Some(EffectiveSecretSource {
+                        source_type: "env".to_owned(),
+                        var: Some("CLAY_PUBLIC_API_KEY".to_owned()),
+                    }),
+                    inject: Some(EffectiveInject {}),
+                    replace: None,
+                },
+            ],
+            postgres: Vec::new(),
+        };
+
+        assert_eq!(
+            effective_secret_placeholders(&effective),
+            BTreeMap::from([
+                (
+                    "CLAY_PUBLIC_API_KEY".to_owned(),
+                    "CLAY_PUBLIC_API_KEY".to_owned()
+                ),
+                (
+                    "DATABASE_PASSWORD".to_owned(),
+                    "DATABASE_PASSWORD".to_owned()
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn effective_placeholders_ignore_non_env_and_unsafe_inject_sources() {
+        let secret = |source_type: &str, var: Option<&str>| EffectiveSecret {
+            source: Some(EffectiveSecretSource {
+                source_type: source_type.to_owned(),
+                var: var.map(ToOwned::to_owned),
+            }),
+            inject: Some(EffectiveInject {}),
+            replace: None,
+        };
+        let effective = EffectiveConfig {
+            secrets: vec![
+                secret("control_plane", Some("SHOULD_NOT_APPEAR")),
+                secret("env", None),
+                secret("env", Some("INVALID=VALUE")),
+                secret("env", Some("  ")),
+            ],
+            postgres: Vec::new(),
+        };
+
+        assert!(effective_secret_placeholders(&effective).is_empty());
     }
 
     fn control_target() -> ControlPlaneEgressTarget {
