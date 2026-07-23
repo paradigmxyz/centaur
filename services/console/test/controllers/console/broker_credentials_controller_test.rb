@@ -80,6 +80,29 @@ module Console
       assert_equal({ "x-api-key" => "password-key" }, cred.token_endpoint_headers)
     end
 
+    test "POST create builds a client_credentials credential with a client secret" do
+      assert_difference -> { BrokerCredential.count } => 1 do
+        post console_broker_credentials_url, params: {
+          credential: {
+            namespace: "acme", foreign_id: "bloomberg", name: "Bloomberg",
+            grant: "client_credentials",
+            token_endpoint: "https://bsso.blpprofessional.com/ext/api/as/token.oauth2",
+            client_id: "bloomberg-client", client_secret: "bloomberg-secret",
+            early_refresh_fraction: "0.5", early_refresh_slack_seconds: "120",
+            max_refresh_interval_seconds: "3600", refresh_timeout_seconds: "10"
+          }
+        }
+      end
+
+      cred = BrokerCredential.find_by!(namespace: "acme", foreign_id: "bloomberg")
+      assert_redirected_to console_credential_path(cred.oid)
+      assert_equal "client_credentials", cred.grant
+      assert_equal "bloomberg-client", cred.client_id
+      assert_equal "bloomberg-secret", cred.client_secret
+      assert_nil cred.refresh_token
+      assert cred.next_attempt_at.present?
+    end
+
     test "POST create builds a preqin credential with write-only API key" do
       assert_difference -> { BrokerCredential.count } => 1 do
         post console_broker_credentials_url, params: {
@@ -180,6 +203,33 @@ module Console
       assert_equal "secret", cred.client_secret
       assert_equal "user", cred.username
       assert_equal "pass", cred.password
+    end
+
+    test "PATCH update with a fresh client_credentials client secret reschedules the credential" do
+      cred = BrokerCredential.create!(namespace: "acme", foreign_id: "client-credentials-console",
+                                      grant: "client_credentials", token_endpoint: "https://idp.example/token",
+                                      client_id: "cid", client_secret: "old-secret",
+                                      dead: true, dead_reason: "invalid_client", failure_count: 3,
+                                      created_by: @operator)
+
+      patch console_broker_credential_url(cred.oid), params: {
+        credential: {
+          namespace: cred.namespace, foreign_id: cred.foreign_id,
+          grant: "client_credentials", token_endpoint: cred.token_endpoint,
+          client_id: cred.client_id, client_secret: "new-secret",
+          early_refresh_fraction: cred.early_refresh_fraction,
+          early_refresh_slack_seconds: cred.early_refresh_slack_seconds,
+          max_refresh_interval_seconds: cred.max_refresh_interval_seconds,
+          refresh_timeout_seconds: cred.refresh_timeout_seconds
+        }
+      }
+      assert_redirected_to console_credential_path(cred.oid)
+      cred.reload
+      assert_equal "new-secret", cred.client_secret
+      assert_not cred.dead?
+      assert_nil cred.dead_reason
+      assert_equal 0, cred.failure_count
+      assert cred.next_attempt_at.present?
     end
 
     test "PATCH update with blank preqin fields leaves them in place" do
