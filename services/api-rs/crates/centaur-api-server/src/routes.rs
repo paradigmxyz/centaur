@@ -2410,9 +2410,24 @@ async fn emit_workflow_event(
     Json(request): Json<EmitWorkflowEventRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let workflows = workflow_runtime(&state)?;
-    workflows
-        .emit_event(&request.event_name, request.payload)
-        .await?;
+    let event_name = match (
+        request.event_name.as_deref(),
+        request.event_type.as_deref(),
+        request.correlation_id.as_deref(),
+    ) {
+        (Some(event_name), None, None) if !event_name.trim().is_empty() => event_name.to_owned(),
+        (None, Some(event_type), Some(correlation_id))
+            if !event_type.trim().is_empty() && !correlation_id.trim().is_empty() =>
+        {
+            centaur_workflows::python_workflow_event_name(event_type, correlation_id)
+        }
+        _ => {
+            return Err(ApiError::BadRequest(
+                "provide either event_name or both event_type and correlation_id".to_owned(),
+            ));
+        }
+    };
+    workflows.emit_event(&event_name, request.payload).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
