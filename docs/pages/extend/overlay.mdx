@@ -67,11 +67,11 @@ It defaults to `private`. Set `visibility: public` only for repos whose full
 contents are safe to expose to principals configured with
 `sandbox_repo_cache=public`; invalid or missing values are treated as `private`.
 
-Each source defaults to the conventional layout — `toolsSubdir: tools`,
-`workflowsSubdir: workflows`, `skillsSubdir: .agents/skills` — and directories
-a repo does not contain are skipped at runtime, so a skills-only overlay needs
-no extra configuration. Set a subdir to a non-default path to relocate it, or
-to `""` to explicitly disable that surface for a source:
+Each source defaults to the conventional layout: `toolsSubdir: tools`,
+`workflowsSubdir: workflows`, `skillsSubdir: .agents/skills`. Directories a
+repo does not contain are skipped at runtime, so a skills-only overlay needs no
+extra configuration. Set a subdir to a non-default path to relocate it, or to
+`""` to explicitly disable that surface for a source:
 
 ```yaml
     - repo: your-org/workflows-only
@@ -135,8 +135,9 @@ overlay:
     Add deployment-specific agent guidance here.
 ```
 
-For larger prompt/persona sets, keep files in an overlay repo and expose their
-paths through `overlays.sources` as that surface is wired into your deployment.
+For larger prompt/persona sets, keep files in overlay repos. The sandbox starts
+with the root prompt, then appends every mounted
+`/home/agent/github/<owner>/<repo>/services/sandbox/SYSTEM_PROMPT.md` it finds.
 Do not rely on `overlay.image.*`; repo-cache-backed overlays are the default
 delivery path.
 
