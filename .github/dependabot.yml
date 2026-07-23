@@ -1,0 +1,88 @@
+version: 2
+updates:
+  - package-ecosystem: bundler
+    directory: /services/console
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Denver
+    commit-message:
+      prefix: chore
+      include: scope
+    open-pull-requests-limit: 5
+    groups:
+      ruby-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: cargo
+    directory: /services/api-rs
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Denver
+    commit-message:
+      prefix: chore
+      include: scope
+    open-pull-requests-limit: 5
+    groups:
+      api-rs-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: cargo
+    directory: /crates/harness-server
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Denver
+    commit-message:
+      prefix: chore
+      include: scope
+    open-pull-requests-limit: 5
+    groups:
+      harness-server-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: npm
+    directories:
+      - /
+      - /packages/*
+      - /services/linearbot
+      - /services/slackbotv2
+      - /services/discordbot
+      - /services/teamsbot
+      - /services/githubbot
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Denver
+    commit-message:
+      prefix: chore
+      include: scope
+    open-pull-requests-limit: 5
+    groups:
+      typescript-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: npm
+    directory: /docs
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Denver
+    commit-message:
+      prefix: chore
+      include: scope
+    open-pull-requests-limit: 5
+    groups:
+      docs-dependencies:
+        patterns:
+          - "*"
