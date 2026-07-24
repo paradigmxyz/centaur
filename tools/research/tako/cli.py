@@ -26,7 +26,7 @@ def health():
 
     client = _client()
     try:
-        # graph search is the cheapest authenticated read — it exercises the
+        # graph search is the cheapest authenticated read; it exercises the
         # credential path without spending a priced search or answer call.
         details = _dump(client._graph_search("nvidia", limit=1))
         payload = {"ok": True, "tool": "tako", "error": None, "details": details}
@@ -153,18 +153,18 @@ def available_data(
         None, help=f"NER label to prefer (boost, not filter): {', '.join(NER_LABELS)}"
     ),
 ):
-    """Find what data Tako has on something — free and fast. Run this FIRST.
+    """Find what data Tako has on something. Free and fast; run this first.
 
     The recommended first step for a data lookup: run it before `search` or
     `answer` whenever you're unsure the data exists or what it's called. It is
     free, it confirms coverage, and the exact names it returns make the priced
     follow-up land precisely instead of guessing.
 
-    Works on an entity (a company, person, or place → the metrics tracked on
-    it, e.g. Tesla) or a metric (→ the entities it is tracked across, e.g.
-    Inflation Rate). One metric across many entities → one metric-first call;
-    one entity across many metrics → one entity-first call — never loop one
-    call per name.
+    Works on an entity or a metric. An entity (a company, person, or place,
+    e.g. Tesla) reports the metrics tracked on it; a metric (e.g. Inflation
+    Rate) reports the entities it is tracked across. One metric across many
+    entities is one metric-first call, and one entity across many metrics is
+    one entity-first call. Never loop one call per name.
 
     Reuse each match's coverage.names verbatim in a follow-up `search` (e.g.
     "Tesla, Inc. Revenue"), optionally pinning its node_id with --node-id.

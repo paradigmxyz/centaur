@@ -4,10 +4,10 @@ Wraps the official `tako-sdk` (https://pypi.org/project/tako-sdk/). Tako returns
 structured, cited data cards backed by licensed sources, plus a knowledge graph
 that resolves entities and metrics to node ids you can pin into a search.
 
-`available_data` is the free discovery step (ported from the tako-mcp
-`tako_available_data` tool): it resolves a name to graph nodes and reports the
-data Tako holds for each, so agents confirm coverage — and learn the exact
-metric/entity names — before spending a priced `search` or `answer` call.
+`available_data` is the free discovery step, ported from the tako-mcp
+`tako_available_data` tool. It resolves a name to graph nodes and reports the
+data Tako holds for each, so agents confirm coverage, and learn the exact
+metric and entity names, before spending a priced `search` or `answer` call.
 
 API docs: https://docs.tako.com
 """
@@ -50,7 +50,7 @@ API_HOST = "tako.com"
 def _proxy_url() -> str | None:
     """Return the sandbox egress proxy, if one is configured.
 
-    The SDK's transport is urllib3, which — unlike httpx or requests — does not
+    The SDK's transport is urllib3, which, unlike httpx or requests, does not
     read proxy settings from the environment: with `configuration.proxy` unset
     it builds a plain `PoolManager` and dials the upstream directly
     (tako/rest.py). In a Centaur sandbox that means the request never reaches
@@ -147,7 +147,7 @@ class TakoClient:
             data_count: Max Tako data cards, 1-20. Pass 0 to skip the data index.
             web_count: Max web results, 1-20. Pass 0 to skip the web index.
             node_ids: Graph node ids to pin as retrieval candidates (max 20).
-                Resolve them with `graph_search` first. Ids are not durable
+                Take them from an `available_data` match. Ids are not durable
                 across knowledge-graph rebuilds.
             strict: Return only cards matching `node_ids`. Requires node_ids.
             country_code: ISO 3166-1 alpha-2 code for localization.
@@ -179,7 +179,7 @@ class TakoClient:
         """Get a synthesized written answer with the cards that support it.
 
         Same arguments as `search`. Returns a dict with `answer` and `cards`,
-        where `cards[0]` is the lead card — the one to show alongside the text.
+        where `cards[0]` is the lead card, the one to show alongside the text.
         """
         request = SearchRequest(
             query=query,
@@ -204,7 +204,7 @@ class TakoClient:
         """Fetch the underlying data behind a result URL.
 
         A Tako card URL resolves to the card's data; any other URL resolves to
-        the page's extracted text. Not every card is exportable — protected
+        the page's extracted text. Not every card is exportable; protected
         sources return 403.
 
         Args:
@@ -235,25 +235,26 @@ class TakoClient:
         types: str | None = None,
         label: str | None = None,
     ) -> dict:
-        """Find what data Tako has on an entity or metric — free, one call.
+        """Find what data Tako has on an entity or metric, in one free call.
 
         Resolves `q` against the knowledge graph, then drills coverage for the
-        top hits (entity → its metrics; metric → the entities it is tracked
-        across) and returns a deterministic summary. Run this before `search`
-        or `answer`: it confirms the data exists and returns the exact names
-        (and node ids) that make the priced follow-up land precisely.
+        top hits (an entity reports its metrics; a metric reports the entities
+        it is tracked across) and returns a deterministic summary. Run this
+        before `search` or `answer`: it confirms the data exists and returns
+        the exact names and node ids that make the priced follow-up land
+        precisely.
 
         Args:
             q: Entity or metric name to look up (min 2 chars).
             types: Narrow resolution to 'entity' (a thing) or 'metric'
                 (a measure). Omit to search both.
-            label: NER label to prefer — a boost, not a filter (PERSON, ORG,
-                GPE, LOC, PRODUCT, EVENT, LANGUAGE, MONEY, METRIC,
+            label: NER label to prefer, a boost rather than a filter (PERSON,
+                ORG, GPE, LOC, PRODUCT, EVENT, LANGUAGE, MONEY, METRIC,
                 STOCK_TICKER, WEBSITE).
 
         Returns:
             {found, query, summary, matches, other_matches}. `found` is true
-            only when a match has live coverage — node resolution alone never
+            only when a match has live coverage; node resolution alone never
             counts. Each match carries coverage.names (reuse verbatim in a
             follow-up query) and node_id (pin via search(node_ids=...)).
         """
@@ -305,9 +306,9 @@ def _run_available_data(
 
     One graph search (limit 10), then a type-aware coverage drill for the top
     EXPAND_TOP_N hits. Per-node error isolation: a failed drill yields an
-    `unavailable` match rather than sinking the whole call (auth and
-    connectivity are already proven by the search). A search failure raises —
-    there is nothing to salvage.
+    `unavailable` match rather than sinking the whole call, since auth and
+    connectivity are already proven by the search. A search failure raises,
+    because there is nothing to salvage.
     """
     response = graph_search(q, types=types, limit=10, label=label)
     results = list(response.results or [])

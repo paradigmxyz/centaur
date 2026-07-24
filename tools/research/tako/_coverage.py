@@ -1,18 +1,17 @@
-"""Pure selection + formatting helpers for the `available-data` command.
+"""Pure selection and formatting helpers for the `available-data` command.
 
 Python port of tako-mcp's `_available_data.ts`. `available-data` resolves a
-name to graph node(s) and, for each, reports what data Tako has for it — as a
+name to graph nodes and, for each, reports what data Tako has for it as a
 natural-language coverage summary. Everything here is network-free so it can
 be unit-tested in isolation; `client._run_available_data` orchestrates the
 fetches and calls these.
 
 Coverage is type-aware, because the graph models the two node kinds
-differently:
-  - an ENTITY node (Tesla) → its `metrics` group is the data Tako holds.
-  - a METRIC node (Inflation Rate) has no `metrics`; its coverage is the
-    `entities` group — the entities the metric is tracked across.
-Drilling `relation=metrics` on a metric node returns empty, so reporting
-"no metrics" there would be a false negative — hence the split.
+differently. An ENTITY node (Tesla) holds its data in the `metrics` group.
+A METRIC node (Inflation Rate) has no `metrics`; its coverage is the
+`entities` group, the entities the metric is tracked across. Drilling
+`relation=metrics` on a metric node returns empty, so reporting "no metrics"
+there would be a false negative. That is why the drill splits by type.
 """
 
 from __future__ import annotations
@@ -26,14 +25,14 @@ from typing import Any
 # ("Tesla, Inc." vs another "Tesla") visible while staying cheap.
 EXPAND_TOP_N = 2
 # Cap for the coverage name list, matched to the graph/related drill's fetch
-# limit. Coverage names are the primary payload — each is a term the agent
-# reuses in a follow-up search — so completeness beats brevity. `total` /
+# limit. Coverage names are the primary payload (each is a term the agent
+# reuses in a follow-up search), so completeness beats brevity. `total` and
 # `truncated` still report when even more exist server-side.
 PREVIEW = 50
 OTHER_MATCH_PREVIEW = 5
 
-# Metric names that read as internal/accounting plumbing rather than the
-# headline figures a person expects first. Deprioritized in the preview only —
+# Metric names that read as internal accounting plumbing rather than the
+# headline figures a person expects first. Deprioritized in the preview only;
 # they still count toward `total`. Kept deliberately narrow so a real metric
 # is never hidden, only pushed down.
 LOW_SIGNAL_METRIC = re.compile(r"\(Normalized\)|^Account Code\b", re.IGNORECASE)
@@ -74,7 +73,7 @@ class CoverageMatch:
 
 @dataclass(frozen=True)
 class OtherMatch:
-    """A search hit beyond EXPAND_TOP_N — named but not drilled."""
+    """A search hit beyond EXPAND_TOP_N, named but not drilled."""
 
     name: str
     type: str
@@ -87,7 +86,7 @@ def _empty_group(kind: str) -> CoverageGroup:
 def order_metric_names(names: Sequence[str]) -> list[str]:
     """Stable partition: headline metric names first, low-signal ones after.
 
-    Only reorders — never drops a name.
+    Only reorders; it never drops a name.
     """
     clean = [n for n in names if not LOW_SIGNAL_METRIC.search(n)]
     noisy = [n for n in names if LOW_SIGNAL_METRIC.search(n)]
@@ -106,7 +105,7 @@ def select_coverage(page: Any, kind: str) -> CoverageGroup:
     ordered = order_metric_names(raw) if kind == "metrics" else list(raw)
     total = page.total if page.total is not None else len(ordered)
     names = tuple(ordered[:PREVIEW])
-    # Capped means the server stopped counting — more names always exist
+    # Capped means the server stopped counting: more names always exist
     # beyond the floor, even if `total` happens to equal the shown count.
     capped = bool(page.total_capped)
     return CoverageGroup(
@@ -119,7 +118,7 @@ def select_coverage(page: Any, kind: str) -> CoverageGroup:
 
 
 def build_match(node: Any, page: Any) -> CoverageMatch:
-    """A CoverageMatch from a resolved GraphNode + its drilled coverage page."""
+    """A CoverageMatch from a resolved GraphNode and its drilled coverage page."""
     kind = coverage_kind_for(node.type)
     return CoverageMatch(
         node_id=node.id,
@@ -131,7 +130,7 @@ def build_match(node: Any, page: Any) -> CoverageMatch:
 
 
 def unavailable_match(node: Any) -> CoverageMatch:
-    """A match whose coverage lookup failed — resolved, coverage unavailable."""
+    """A match that resolved but whose coverage lookup failed."""
     return CoverageMatch(
         node_id=node.id,
         name=node.name,
@@ -143,7 +142,7 @@ def unavailable_match(node: Any) -> CoverageMatch:
 
 
 def has_live_coverage(match: CoverageMatch) -> bool:
-    """Real, loaded coverage — resolved AND drill succeeded AND non-empty.
+    """Real, loaded coverage: resolved, drill succeeded, and non-empty.
 
     Drives both the summary header and the `found` flag, so "found" always
     means "Tako has data", never merely "a node matched".
@@ -162,9 +161,9 @@ def _plural(n: int, one: str, many: str) -> str:
     return one if n == 1 else many
 
 
-# Counts only — the names themselves live once, in matches[].coverage.names
-# (the whole output object is what the model reads, so repeating names here
-# would double their token cost). Capped totals render as "N+" (a floor).
+# Counts only. The names themselves live once, in matches[].coverage.names;
+# the whole output object is what the model reads, so repeating names here
+# would double their token cost. Capped totals render as "N+" (a floor).
 def _count_str(group: CoverageGroup) -> str:
     return f"{group.total}{'+' if group.capped else ''}"
 
@@ -195,9 +194,11 @@ def _match_line(match: CoverageMatch) -> str:
 
 
 def _next_step_example(matches: Sequence[CoverageMatch]) -> str | None:
-    """A real follow-up query: entity's metrics → "Tesla, Inc. Revenue";
-    metric's entities → "United States Inflation Rate". Only matches with
-    actual coverage qualify — no fallback, or the summary would steer the
+    """A real follow-up query, composed entity-plus-metric.
+
+    For an entity's metrics that reads "Tesla, Inc. Revenue"; for a metric's
+    entities, "United States Inflation Rate". Only matches with actual
+    coverage qualify. There is deliberately no fallback: it would steer the
     agent into a priced search for a name it just reported as having no data.
     """
     for match in matches:
@@ -214,8 +215,8 @@ def build_summary(
     matches: Sequence[CoverageMatch],
     other_matches: Sequence[OtherMatch],
 ) -> str:
-    """The natural-language coverage summary — the narrative shell of the
-    `available-data` output. Coverage names are NOT repeated here — they live
+    """The natural-language coverage summary, the narrative shell of the
+    `available-data` output. Coverage names are not repeated here; they live
     once, in matches[].coverage.names. Node ids never appear here.
     """
     if not matches:
@@ -226,7 +227,7 @@ def build_summary(
         )
 
     n = len(matches)
-    # The header only claims coverage for matches that actually have some — a
+    # The header only claims coverage for matches that actually have some; a
     # resolved node with no coverage (or a failed drill) must not be
     # advertised as data. "Tako's proprietary data" is the grammatical subject
     # on purpose: downstream models echo this header nearly verbatim.
