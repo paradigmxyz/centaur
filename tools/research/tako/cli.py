@@ -11,12 +11,7 @@ from rich.console import Console
 
 app = typer.Typer(
     name="tako",
-    help=(
-        "Search Tako's proprietary licensed-source data and the web in one "
-        "call; returns structured data cards, cited answers, and exportable "
-        "datasets. The free `available-data` can confirm what data exists "
-        "before a priced `search`/`answer`."
-    ),
+    help="Proprietary data and web backed answers via Tako",
 )
 
 
