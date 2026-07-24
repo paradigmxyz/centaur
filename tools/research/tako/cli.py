@@ -12,9 +12,10 @@ from rich.console import Console
 app = typer.Typer(
     name="tako",
     help=(
-        "Tako: structured data cards and cited answers from licensed sources. "
-        "Run the free `available-data` first to confirm coverage, then the "
-        "priced `search`/`answer`."
+        "Search Tako's proprietary licensed-source data and the web in one "
+        "call; returns structured data cards, cited answers, and exportable "
+        "datasets. The free `available-data` can confirm what data exists "
+        "before a priced `search`/`answer`."
     ),
 )
 
@@ -153,12 +154,13 @@ def available_data(
         None, help=f"NER label to prefer (boost, not filter): {', '.join(NER_LABELS)}"
     ),
 ):
-    """Find what data Tako has on something. Free and fast; run this first.
+    """Find what proprietary data Tako has on something. Free and fast.
 
-    The recommended first step for a data lookup: run it before `search` or
-    `answer` whenever you're unsure the data exists or what it's called. It is
-    free, it confirms coverage, and the exact names it returns make the priced
-    follow-up land precisely instead of guessing.
+    A good first step for a data lookup: run it before `search` or `answer`
+    whenever you're unsure the data exists or what it's called. It is free,
+    it confirms coverage, and the exact names it returns make the priced
+    follow-up land precisely instead of guessing. Skip it when you already
+    know the data exists or the query leans on web results.
 
     Works on an entity or a metric. An entity (a company, person, or place,
     e.g. Tesla) reports the metrics tracked on it; a metric (e.g. Inflation
