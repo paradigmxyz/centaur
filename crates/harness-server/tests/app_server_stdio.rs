@@ -1525,6 +1525,7 @@ impl BridgeProcess {
         capture
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_turn_with_rejected_interrupts(
         &mut self,
         thread_id: &str,
