@@ -7,7 +7,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 
 from tako.models.graph_node import GraphNode
 from tako.models.graph_node_type import GraphNodeType
+from tako.models.graph_related_response import GraphRelatedResponse
 from tako.models.graph_relation_page import GraphRelationPage
+from tako.models.graph_search_response import GraphSearchResponse
 
 from tools.research.tako._coverage import (
     PREVIEW,
@@ -24,6 +26,9 @@ from tools.research.tako._coverage import (
     select_coverage,
     unavailable_match,
 )
+
+
+from tools.research.tako.client import _run_available_data
 
 
 def _node(node_id="tesla-inc-abc", node_type="entity", name="Tesla, Inc.", label=None):
@@ -234,3 +239,105 @@ class TestBuildSummary:
     def test_no_next_step_example_without_coverage(self):
         summary = build_summary("tesla", [build_match(_node(), _page([]))], [])
         assert "e.g." not in summary
+
+
+class FakeGraph:
+    """Stand-in for TakoClient._graph_search/_graph_related."""
+
+    def __init__(self, search_results, related_by_node=None, related_error_for=()):
+        self._search = GraphSearchResponse(results=search_results)
+        self._related_by_node = related_by_node or {}
+        self._related_error_for = set(related_error_for)
+        self.related_calls = []
+
+    def graph_search(self, q, types=None, limit=None, label=None):
+        self.last_search = {"q": q, "types": types, "limit": limit, "label": label}
+        return self._search
+
+    def graph_related(self, node_id, relation=None, limit=None):
+        self.related_calls.append({"node_id": node_id, "relation": relation, "limit": limit})
+        if node_id in self._related_error_for:
+            raise RuntimeError("boom")
+        return GraphRelatedResponse(
+            node=_node(node_id=node_id), relation=self._related_by_node.get(node_id)
+        )
+
+
+def _run(fake, q="tesla", **kwargs):
+    return _run_available_data(
+        q, graph_search=fake.graph_search, graph_related=fake.graph_related, **kwargs
+    )
+
+
+class TestRunAvailableData:
+    def test_no_results_short_circuits_without_drilling(self):
+        fake = FakeGraph(search_results=[])
+        result = _run(fake, q="xyzzy")
+        assert result["found"] is False
+        assert result["matches"] == []
+        assert result["other_matches"] == []
+        assert fake.related_calls == []
+        assert 'no data-graph node matching "xyzzy"' in result["summary"]
+
+    def test_search_uses_limit_10_and_forwards_filters(self):
+        fake = FakeGraph(search_results=[])
+        _run(fake, types="entity", label="ORG")
+        assert fake.last_search == {"q": "tesla", "types": "entity", "limit": 10, "label": "ORG"}
+
+    def test_entity_node_drills_metrics_and_metric_node_drills_entities(self):
+        entity = _node(node_id="e1")
+        metric = _node(node_id="m1", node_type="metric", name="Inflation Rate")
+        fake = FakeGraph(
+            search_results=[entity, metric],
+            related_by_node={
+                "e1": _page(["Revenue"]),
+                "m1": _page(["United States"], key="entities"),
+            },
+        )
+        result = _run(fake)
+        assert [c["relation"] for c in fake.related_calls] == ["metrics", "entities"]
+        assert all(c["limit"] == PREVIEW for c in fake.related_calls)
+        assert result["found"] is True
+        assert result["matches"][0]["coverage"]["kind"] == "metrics"
+        assert result["matches"][1]["coverage"]["kind"] == "entities"
+
+    def test_drill_failure_isolated_to_unavailable_match(self):
+        fake = FakeGraph(
+            search_results=[_node(node_id="e1"), _node(node_id="e2", name="Tesla Energy")],
+            related_by_node={"e2": _page(["Revenue"])},
+            related_error_for=("e1",),
+        )
+        result = _run(fake)
+        assert result["matches"][0]["unavailable"] is True
+        assert result["matches"][1]["unavailable"] is False
+        assert result["found"] is True
+
+    def test_found_false_when_resolution_has_no_coverage(self):
+        fake = FakeGraph(
+            search_results=[_node(node_id="e1")],
+            related_by_node={"e1": _page([])},
+        )
+        assert _run(fake)["found"] is False
+
+    def test_hits_beyond_top_n_become_other_matches(self):
+        nodes = [_node(node_id=f"e{i}", name=f"Tesla {i}") for i in range(5)]
+        fake = FakeGraph(
+            search_results=nodes,
+            related_by_node={"e0": _page(["Revenue"]), "e1": _page(["Revenue"])},
+        )
+        result = _run(fake)
+        assert len(fake.related_calls) == 2
+        assert result["other_matches"] == [
+            {"name": "Tesla 2", "type": "entity"},
+            {"name": "Tesla 3", "type": "entity"},
+            {"name": "Tesla 4", "type": "entity"},
+        ]
+
+    def test_output_is_json_serializable(self):
+        import json
+
+        fake = FakeGraph(
+            search_results=[_node(node_id="e1", label="ORG")],
+            related_by_node={"e1": _page(["Revenue"])},
+        )
+        json.dumps(_run(fake))
