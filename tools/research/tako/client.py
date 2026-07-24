@@ -32,6 +32,8 @@ from tako.lib import Tako
 
 from ._coverage import (
     EXPAND_TOP_N,
+    NER_LABELS,
+    NODE_TYPES,
     PREVIEW,
     OtherMatch,
     build_match,
@@ -319,7 +321,16 @@ def _run_available_data(
     `unavailable` match rather than sinking the whole call, since auth and
     connectivity are already proven by the search. A search failure raises,
     because there is nothing to salvage.
+
+    Raises ValueError on invalid input, so library and workflow callers get
+    the same guardrails as the CLI.
     """
+    if len(q.strip()) < 2:
+        raise ValueError("q must be at least 2 characters")
+    if types is not None and types not in NODE_TYPES:
+        raise ValueError(f"types must be one of: {', '.join(NODE_TYPES)}")
+    if label is not None and label not in NER_LABELS:
+        raise ValueError(f"label must be one of: {', '.join(NER_LABELS)}")
     response = graph_search(q, types=types, limit=10, label=label)
     results = list(response.results or [])
     if not results:

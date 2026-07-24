@@ -37,6 +37,15 @@ OTHER_MATCH_PREVIEW = 5
 # is never hidden, only pushed down.
 LOW_SIGNAL_METRIC = re.compile(r"\(Normalized\)|^Account Code\b", re.IGNORECASE)
 
+# Valid `types` values for graph resolution (SDK GraphNodeType).
+NODE_TYPES = ("entity", "metric")
+
+# Valid `label` values (SDK NerLabel). A label is a ranking boost, not a filter.
+NER_LABELS = (
+    "PERSON", "ORG", "GPE", "LOC", "PRODUCT", "EVENT",
+    "LANGUAGE", "MONEY", "METRIC", "STOCK_TICKER", "WEBSITE",
+)
+
 
 def enum_value(value: Any) -> Any:
     """Unwrap a str-Enum (SDK GraphNodeType / NerLabel) to its value."""

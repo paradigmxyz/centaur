@@ -10,8 +10,9 @@ Finish the `tako` tool plugin under `tools/research/tako/` and ship it as a PR.
 The scaffold (client, CLI, pyproject, README, .env.example) already exists and
 its SDK usage is verified against `tako-sdk` 2.2.6. This design replaces the
 three raw knowledge-graph commands with a single `available-data` command,
-ported from the `tako_available_data` tool in the user's Tako MCP
-(`tako-mcp/workers/src/tools/tako_available_data.ts` + `_available_data.ts`).
+ported from the `tako_available_data` tool in
+[tako-mcp](https://github.com/TakoData/tako-mcp)
+(`workers/src/tools/tako_available_data.ts` + `_available_data.ts`).
 
 ## Why combine graph-search + graph-related into available-data
 

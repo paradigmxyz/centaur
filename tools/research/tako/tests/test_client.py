@@ -341,3 +341,37 @@ class TestRunAvailableData:
             related_by_node={"e1": _page(["Revenue"])},
         )
         json.dumps(_run(fake))
+
+
+class TestRunAvailableDataValidation:
+    def test_short_q_raises(self):
+        fake = FakeGraph(search_results=[])
+        try:
+            _run(fake, q="x")
+            raise AssertionError("expected ValueError")
+        except ValueError as exc:
+            assert "at least 2 characters" in str(exc)
+
+    def test_bad_types_raises(self):
+        fake = FakeGraph(search_results=[])
+        try:
+            _run(fake, types="cohort")
+            raise AssertionError("expected ValueError")
+        except ValueError as exc:
+            assert "entity, metric" in str(exc)
+
+    def test_bad_label_raises(self):
+        fake = FakeGraph(search_results=[])
+        try:
+            _run(fake, label="COMPANY")
+            raise AssertionError("expected ValueError")
+        except ValueError as exc:
+            assert "ORG" in str(exc)
+
+    def test_validation_happens_before_any_network_call(self):
+        fake = FakeGraph(search_results=[])
+        try:
+            _run(fake, q="x")
+        except ValueError:
+            pass
+        assert not hasattr(fake, "last_search")

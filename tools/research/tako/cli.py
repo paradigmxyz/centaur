@@ -9,6 +9,8 @@ import json
 import typer
 from rich.console import Console
 
+from ._coverage import NER_LABELS, NODE_TYPES
+
 app = typer.Typer(
     name="tako",
     help="Proprietary data and web backed answers via Tako",
@@ -133,12 +135,6 @@ def contents(
     )
 
 
-NER_LABELS = (
-    "PERSON", "ORG", "GPE", "LOC", "PRODUCT", "EVENT",
-    "LANGUAGE", "MONEY", "METRIC", "STOCK_TICKER", "WEBSITE",
-)
-
-
 @app.command("available-data")
 def available_data(
     q: str = typer.Argument(..., help="Entity or metric name to look up (min 2 chars)"),
@@ -168,8 +164,8 @@ def available_data(
     """
     if len(q.strip()) < 2:
         raise typer.BadParameter("q must be at least 2 characters")
-    if types is not None and types not in ("entity", "metric"):
-        raise typer.BadParameter("--types must be 'entity' or 'metric'")
+    if types is not None and types not in NODE_TYPES:
+        raise typer.BadParameter(f"--types must be one of: {', '.join(NODE_TYPES)}")
     if label is not None and label not in NER_LABELS:
         raise typer.BadParameter(f"--label must be one of: {', '.join(NER_LABELS)}")
     emit(get_client().available_data(q, types=types, label=label))
