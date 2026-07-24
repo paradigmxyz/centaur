@@ -217,13 +217,26 @@ class TestBuildSummary:
         assert "couldn't load its coverage right now (temporary); retry." in summary
 
     def test_other_matches_tail_with_overflow(self):
-        others = [OtherMatch(name=f"Match {i}", type="entity") for i in range(7)]
+        others = [OtherMatch(node_id=f"n{i}", name=f"Match {i}", type="entity") for i in range(7)]
         matches = [build_match(_node(), _page(["Revenue"]))]
         summary = build_summary("tesla", matches, others)
         assert (
-            "Also matched: Match 0, Match 1, Match 2, Match 3, Match 4, and 2 more."
-            in summary
+            "Also matched (not checked): Match 0, Match 1, Match 2, Match 3, Match 4, "
+            "and 2 more." in summary
         )
+
+    def test_zero_coverage_with_other_matches_flags_unchecked_hits(self):
+        others = [OtherMatch(node_id="n1", name="Tesla, Inc.", type="entity")]
+        matches = [build_match(_node(name="Tesla Energy"), _page([]))]
+        summary = build_summary("tesla", matches, others)
+        assert "coverage-checked" in summary
+        assert "not proof Tako lacks data" in summary
+
+    def test_live_coverage_does_not_flag_unchecked_hits(self):
+        others = [OtherMatch(node_id="n1", name="Tesla Energy", type="entity")]
+        matches = [build_match(_node(), _page(["Revenue"]))]
+        summary = build_summary("tesla", matches, others)
+        assert "not proof Tako lacks data" not in summary
 
     def test_next_step_example_entity_composes_name_then_metric(self):
         match = build_match(_node(), _page(["Revenue"]))
@@ -328,9 +341,9 @@ class TestRunAvailableData:
         result = _run(fake)
         assert len(fake.related_calls) == 2
         assert result["other_matches"] == [
-            {"name": "Tesla 2", "type": "entity"},
-            {"name": "Tesla 3", "type": "entity"},
-            {"name": "Tesla 4", "type": "entity"},
+            {"node_id": "e2", "name": "Tesla 2", "type": "entity"},
+            {"node_id": "e3", "name": "Tesla 3", "type": "entity"},
+            {"node_id": "e4", "name": "Tesla 4", "type": "entity"},
         ]
 
     def test_output_is_json_serializable(self):
@@ -358,7 +371,7 @@ class TestRunAvailableDataValidation:
             _run(fake, types="cohort")
             raise AssertionError("expected ValueError")
         except ValueError as exc:
-            assert "entity, metric" in str(exc)
+            assert "entity" in str(exc) and "metric" in str(exc)
 
     def test_bad_label_raises(self):
         fake = FakeGraph(search_results=[])
@@ -421,28 +434,40 @@ class _FakeSdkResponse:
         return self._payload
 
 
-class FakeTako:
-    """Stand-in for the tako-sdk Tako facade; records requests."""
+class FakeTakoApi:
+    """Stand-in for the generated TakoApi; records requests and timeouts."""
 
     def __init__(self):
         self.calls = []
 
-    def search(self, request):
-        self.calls.append(("search", request))
+    def search(self, request, _request_timeout=None):
+        self.calls.append(("search", request, _request_timeout))
         return _FakeSdkResponse({"cards": []})
 
-    def answer(self, request):
-        self.calls.append(("answer", request))
+    def answer(self, request, _request_timeout=None):
+        self.calls.append(("answer", request, _request_timeout))
         return _FakeSdkResponse({"answer": "", "cards": []})
 
-    def contents(self, request):
-        self.calls.append(("contents", request))
+    def contents(self, request, _request_timeout=None):
+        self.calls.append(("contents", request, _request_timeout))
         return _FakeSdkResponse({"outputs": []})
+
+    def graph_search(self, q, types=None, limit=None, label=None, infer_label=None,
+                     _request_timeout=None):
+        self.calls.append(("graph_search", q, _request_timeout))
+        return GraphSearchResponse(results=[])
+
+
+class FakeTakoFacade:
+    def __init__(self):
+        self._api = FakeTakoApi()
 
 
 def _client_with_fake():
     client = TakoClient.__new__(TakoClient)
-    client._client = FakeTako()
+    client._client = FakeTakoFacade()
+    client._timeout = 120.0
+    client._graph_timeout = 30.0
     return client
 
 
@@ -452,20 +477,22 @@ class TestPricedPaths:
         result = client.search(
             "tesla revenue", effort="deep", data_count=2, node_ids=["n1"], strict=True
         )
-        method, request = client._client.calls[0]
+        method, request, timeout = client._client._api.calls[0]
         assert method == "search"
         assert request.query == "tesla revenue"
         assert request.effort == "deep"
         assert request.sources.data.node_ids == ["n1"]
+        assert timeout == 120.0
         assert result == {"cards": []}
 
     def test_answer_builds_same_request_shape(self):
         client = _client_with_fake()
         client.answer("us cpi since 2020", web_count=0)
-        method, request = client._client.calls[0]
+        method, request, timeout = client._client._api.calls[0]
         assert method == "answer"
         assert request.query == "us cpi since 2020"
         assert request.sources.web is None
+        assert timeout == 120.0
 
     def test_search_strict_without_node_ids_raises_before_network(self):
         client = _client_with_fake()
@@ -474,21 +501,48 @@ class TestPricedPaths:
             raise AssertionError("expected ValueError")
         except ValueError:
             pass
-        assert client._client.calls == []
+        assert client._client._api.calls == []
+
+    def test_search_invalid_effort_raises_before_network(self):
+        client = _client_with_fake()
+        try:
+            client.search("tesla", effort="medium")
+            raise AssertionError("expected ValueError")
+        except ValueError as exc:
+            assert "effort" in str(exc) and "deep" in str(exc)
+        assert client._client._api.calls == []
 
     def test_contents_builds_request(self):
         client = _client_with_fake()
         result = client.contents(
             "https://tako.com/card/abc", mode="inline", content_format="csv", max_rows=100
         )
-        method, request = client._client.calls[0]
+        method, request, timeout = client._client._api.calls[0]
         assert method == "contents"
         assert request.url == "https://tako.com/card/abc"
         assert request.mode == "inline"
         assert request.content_format == "csv"
         assert request.max_rows == 100
         assert request.quote_only is None
+        assert timeout == 120.0
         assert result == {"outputs": []}
+
+    def test_contents_invalid_mode_and_format_raise_before_network(self):
+        client = _client_with_fake()
+        for kwargs in ({"mode": "attachment"}, {"content_format": "xml"}):
+            try:
+                client.contents("https://tako.com/card/abc", **kwargs)
+                raise AssertionError("expected ValueError")
+            except ValueError:
+                pass
+        assert client._client._api.calls == []
+
+    def test_graph_search_forwards_graph_timeout(self):
+        client = _client_with_fake()
+        client._graph_search("nvidia", limit=1)
+        method, q, timeout = client._client._api.calls[0]
+        assert method == "graph_search"
+        assert timeout == 30.0
 
 
 class TestDrillFailureLogging:
@@ -499,3 +553,82 @@ class TestDrillFailureLogging:
         with caplog.at_level(logging.WARNING, logger="tools.research.tako.client"):
             _run(fake)
         assert any("coverage drill failed" in r.message for r in caplog.records)
+
+
+class TestSourcesReviewFindings:
+    def test_skipped_source_is_absent_from_wire_body_not_null(self):
+        sources = _sources(0, None, None, False)
+        wire = sources.to_dict()
+        assert "data" not in wire
+        assert "data" not in sources.model_fields_set
+        assert "web" in wire
+
+    def test_default_source_is_also_absent_when_only_other_is_set(self):
+        wire = _sources(None, 0, None, False).to_dict()
+        assert "web" not in wire
+        assert "data" in wire
+
+    def test_data_count_zero_with_node_ids_raises(self):
+        try:
+            _sources(0, None, ["n1"], False)
+            raise AssertionError("expected ValueError")
+        except ValueError as exc:
+            assert "contradicts" in str(exc)
+
+    def test_data_count_zero_with_strict_raises(self):
+        try:
+            _sources(0, None, ["n1"], True)
+            raise AssertionError("expected ValueError")
+        except ValueError as exc:
+            assert "contradicts" in str(exc)
+
+    def test_negative_counts_rejected_not_folded_into_skip(self):
+        for kwargs in ((-3, None), (None, -1)):
+            try:
+                _sources(kwargs[0], kwargs[1], None, False)
+                raise AssertionError("expected ValueError")
+            except ValueError as exc:
+                assert "between 0" in str(exc)
+
+    def test_over_limit_counts_rejected(self):
+        try:
+            _sources(50, None, None, False)
+            raise AssertionError("expected ValueError")
+        except ValueError as exc:
+            assert "20" in str(exc)
+
+    def test_skipping_both_sources_rejected(self):
+        try:
+            _sources(0, 0, None, False)
+            raise AssertionError("expected ValueError")
+        except ValueError as exc:
+            assert "both sources" in str(exc)
+
+
+class TestDerivedConstants:
+    def test_ner_labels_track_the_sdk_enum(self):
+        from tako.models.ner_label import NerLabel
+
+        from tools.research.tako._coverage import NER_LABELS
+
+        assert set(NER_LABELS) == {label.value for label in NerLabel}
+
+    def test_node_types_track_the_sdk_enum(self):
+        from tools.research.tako._coverage import NODE_TYPES
+
+        assert set(NODE_TYPES) == {t.value for t in GraphNodeType}
+
+    def test_effort_and_contents_options_track_the_sdk_enums(self):
+        from tako.models.contents_delivery_mode import ContentsDeliveryMode
+        from tako.models.contents_format import ContentsFormat
+        from tako.models.search_effort_level import SearchEffortLevel
+
+        from tools.research.tako.client import (
+            CONTENT_FORMATS,
+            CONTENT_MODES,
+            EFFORT_LEVELS,
+        )
+
+        assert set(EFFORT_LEVELS) == {e.value for e in SearchEffortLevel}
+        assert set(CONTENT_MODES) == {m.value for m in ContentsDeliveryMode}
+        assert set(CONTENT_FORMATS) == {f.value for f in ContentsFormat}

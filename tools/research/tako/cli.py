@@ -53,6 +53,19 @@ def emit(data) -> None:
     print(json.dumps(data, indent=2, ensure_ascii=False, default=str))
 
 
+def emit_or_reject(call) -> None:
+    """Run a client call and print its result.
+
+    The client pre-validates option contracts (enum choices, count ranges,
+    strict/node_ids) and raises ValueError before any network call; surface
+    those as one-line CLI errors instead of tracebacks.
+    """
+    try:
+        emit(call())
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
 @app.command()
 def search(
     query: str = typer.Argument(..., help="Natural language query"),
@@ -69,8 +82,8 @@ def search(
     locale: str = typer.Option(None, help="BCP-47 locale tag"),
 ):
     """Search Tako for structured data cards and web results."""
-    emit(
-        get_client().search(
+    emit_or_reject(
+        lambda: get_client().search(
             query,
             effort=effort,
             data_count=data_count,
@@ -99,8 +112,8 @@ def answer(
     locale: str = typer.Option(None, help="BCP-47 locale tag"),
 ):
     """Get a synthesized answer with the cards that support it."""
-    emit(
-        get_client().answer(
+    emit_or_reject(
+        lambda: get_client().answer(
             query,
             effort=effort,
             data_count=data_count,
@@ -123,8 +136,8 @@ def contents(
     quote_only: bool = typer.Option(False, help="Price the export without fetching or charging"),
 ):
     """Fetch the underlying data behind a result URL."""
-    emit(
-        get_client().contents(
+    emit_or_reject(
+        lambda: get_client().contents(
             url,
             mode=mode,
             content_format=content_format,
@@ -168,7 +181,7 @@ def available_data(
         raise typer.BadParameter(f"--types must be one of: {', '.join(NODE_TYPES)}")
     if label is not None and label not in NER_LABELS:
         raise typer.BadParameter(f"--label must be one of: {', '.join(NER_LABELS)}")
-    emit(get_client().available_data(q, types=types, label=label))
+    emit_or_reject(lambda: get_client().available_data(q, types=types, label=label))
 
 
 if __name__ == "__main__":

@@ -30,6 +30,9 @@ from tako import (
     WebSourceSettings,
 )
 from tako.lib import Tako
+from tako.models.contents_delivery_mode import ContentsDeliveryMode
+from tako.models.contents_format import ContentsFormat
+from tako.models.search_effort_level import SearchEffortLevel
 
 from ._coverage import (
     EXPAND_TOP_N,
@@ -50,6 +53,27 @@ logger = logging.getLogger(__name__)
 
 # The maximum node ids the API accepts as retrieval candidates per search.
 MAX_NODE_IDS = 20
+# Per-source result cap (DataSourceSettings.count is 1-20 in the SDK; 0 is
+# this tool's "skip the source" sentinel and is never sent).
+MAX_SOURCE_COUNT = 20
+
+# Valid option values, derived from the SDK enums so an upstream addition is
+# accepted the moment the dependency updates (the pin is open: >=2.2.6).
+EFFORT_LEVELS = tuple(e.value for e in SearchEffortLevel)
+CONTENT_MODES = tuple(m.value for m in ContentsDeliveryMode)
+CONTENT_FORMATS = tuple(f.value for f in ContentsFormat)
+
+# Request timeouts, in seconds. urllib3's PoolManager defaults to NO timeout
+# and the retry config excludes POST, so without these a hung search/answer/
+# contents read would block until the sandbox kills the process.
+DEFAULT_TIMEOUT_SECONDS = 120.0
+GRAPH_TIMEOUT_SECONDS = 30.0
+
+
+def _validate_choice(name: str, value: str | None, allowed: tuple[str, ...]) -> None:
+    """Reject an invalid enum option with a one-line error, pre-network."""
+    if value is not None and value not in allowed:
+        raise ValueError(f"{name} must be one of: {', '.join(allowed)}")
 
 
 def _proxy_url() -> str | None:
@@ -95,37 +119,57 @@ def _sources(
     """Build a Sources object, or None to accept the API default (data + web).
 
     A source is searched only if its key is present, so passing `data_count=0`
-    is how you get a data-only or web-only search.
+    is how you get a data-only or web-only search. A skipped source must be
+    genuinely ABSENT from the request body: passing `data=None` explicitly
+    would land `data` in pydantic's model_fields_set and the generated
+    `Sources.to_dict` re-emits it as `"data": null` — key present, promise
+    broken. Hence the conditional kwargs at the bottom.
 
     Raises ValueError on contract violations the API would otherwise reject
-    with a raw 400: `strict` without `node_ids`, or more than MAX_NODE_IDS ids.
+    with a raw 400 (or worse, silently misread): counts outside 0-20, `strict`
+    without `node_ids`, more than MAX_NODE_IDS ids, `data_count=0` combined
+    with node pinning, or skipping both sources.
     """
+    for name, count in (("data_count", data_count), ("web_count", web_count)):
+        if count is not None and not 0 <= count <= MAX_SOURCE_COUNT:
+            raise ValueError(
+                f"{name} must be between 0 (skip this source) and {MAX_SOURCE_COUNT}"
+            )
     if strict and not node_ids:
         raise ValueError("strict=True requires node_ids")
     if node_ids and len(node_ids) > MAX_NODE_IDS:
         raise ValueError(f"node_ids accepts at most {MAX_NODE_IDS} ids")
+    if data_count == 0 and (node_ids or strict):
+        raise ValueError(
+            "data_count=0 skips the data index, which contradicts node_ids/strict "
+            "(pinned nodes apply only to the data source)"
+        )
+    if data_count == 0 and web_count == 0:
+        raise ValueError("cannot skip both sources; drop one of the zero counts")
     if data_count is None and web_count is None and not node_ids and not strict:
         return None
 
-    data = None
+    kwargs: dict[str, Any] = {}
     if data_count is None or data_count > 0:
-        data = DataSourceSettings(
+        kwargs["data"] = DataSourceSettings(
             count=data_count,
             node_ids=node_ids or None,
             strict=strict or None,
         )
-
-    web = None
     if web_count is None or web_count > 0:
-        web = WebSourceSettings(count=web_count)
-
-    return Sources(data=data, web=web)
+        kwargs["web"] = WebSourceSettings(count=web_count)
+    return Sources(**kwargs)
 
 
 class TakoClient:
     """Client for the Tako API."""
 
-    def __init__(self, retries: int = 2):
+    def __init__(
+        self,
+        retries: int = 2,
+        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+        graph_timeout_seconds: float = GRAPH_TIMEOUT_SECONDS,
+    ):
         config = Configuration(retries=retries)
         config.api_key["apiKey"] = secret("TAKO_API_KEY")
 
@@ -136,6 +180,8 @@ class TakoClient:
         if ca_bundle:
             config.ssl_ca_cert = ca_bundle
 
+        self._timeout = timeout_seconds
+        self._graph_timeout = graph_timeout_seconds
         self._client = Tako(config)
         # The beta graph endpoints are missing security declarations in the
         # SDK's OpenAPI spec, so the generated client attaches no X-API-Key to
@@ -147,6 +193,13 @@ class TakoClient:
         self._client._api.api_client.set_default_header(
             "X-API-Key", config.api_key["apiKey"]
         )
+
+    # Calls go through the generated TakoApi (`_client._api`) rather than the
+    # `Tako` facade: the facade does not forward `_request_timeout`, and
+    # urllib3 defaults to NO timeout with POST excluded from retries, so a
+    # hung read would otherwise block until the sandbox kills the process.
+    # Same escape hatch as the default-header workaround above; drop both
+    # when fixed upstream.
 
     # -- search and answer ------------------------------------------------
 
@@ -178,6 +231,7 @@ class TakoClient:
         Returns:
             A dict with `cards`, `web_results`, `request_id`, and `usage`.
         """
+        _validate_choice("effort", effort, EFFORT_LEVELS)
         request = SearchRequest(
             query=query,
             effort=effort,
@@ -185,7 +239,7 @@ class TakoClient:
             country_code=country_code,
             locale=locale,
         )
-        return _dump(self._client.search(request))
+        return _dump(self._client._api.search(request, _request_timeout=self._timeout))
 
     def answer(
         self,
@@ -203,6 +257,7 @@ class TakoClient:
         Same arguments as `search`. Returns a dict with `answer` and `cards`,
         where `cards[0]` is the lead card, the one to show alongside the text.
         """
+        _validate_choice("effort", effort, EFFORT_LEVELS)
         request = SearchRequest(
             query=query,
             effort=effort,
@@ -210,7 +265,7 @@ class TakoClient:
             country_code=country_code,
             locale=locale,
         )
-        return _dump(self._client.answer(request))
+        return _dump(self._client._api.answer(request, _request_timeout=self._timeout))
 
     # -- contents ---------------------------------------------------------
 
@@ -239,6 +294,8 @@ class TakoClient:
             max_chars: Character cap on extracted web text. Default 10,000.
             quote_only: Price the export without fetching or being charged.
         """
+        _validate_choice("mode", mode, CONTENT_MODES)
+        _validate_choice("content_format", content_format, CONTENT_FORMATS)
         request = ContentsRequest(
             url=url,
             mode=mode,
@@ -247,7 +304,7 @@ class TakoClient:
             max_chars=max_chars,
             quote_only=quote_only or None,
         )
-        return _dump(self._client.contents(request))
+        return _dump(self._client._api.contents(request, _request_timeout=self._timeout))
 
     # -- data-coverage discovery -------------------------------------------
 
@@ -276,9 +333,12 @@ class TakoClient:
 
         Returns:
             {found, query, summary, matches, other_matches}. `found` is true
-            only when a match has live coverage; node resolution alone never
-            counts. Each match carries coverage.names (reuse verbatim in a
-            follow-up query) and node_id (pin via search(node_ids=...)).
+            only when a DRILLED match has live coverage; node resolution alone
+            never counts, and hits beyond the top EXPAND_TOP_N land in
+            `other_matches` (with node_id) unchecked, so `found=False` means
+            "not confirmed in the drilled set", not "Tako has no data". Each
+            match carries coverage.names (reuse verbatim in a follow-up query)
+            and node_id (pin via search(node_ids=...)).
         """
         return _run_available_data(
             q,
@@ -302,8 +362,13 @@ class TakoClient:
         infer_label: bool | None = None,
     ):
         """Resolve a name into knowledge-graph nodes. Returns the SDK model."""
-        return self._client.graph_search(
-            q, types=types, limit=limit, label=label, infer_label=infer_label
+        return self._client._api.graph_search(
+            q,
+            types=types,
+            limit=limit,
+            label=label,
+            infer_label=infer_label,
+            _request_timeout=self._graph_timeout,
         )
 
     def _graph_related(
@@ -313,7 +378,12 @@ class TakoClient:
         limit: int | None = None,
     ):
         """Walk one relation from a graph node. Returns the SDK model."""
-        return self._client.graph_related(node_id, relation=relation, limit=limit)
+        return self._client._api.graph_related(
+            node_id,
+            relation=relation,
+            limit=limit,
+            _request_timeout=self._graph_timeout,
+        )
 
 
 def _run_available_data(
@@ -354,7 +424,7 @@ def _run_available_data(
 
     top = results[:EXPAND_TOP_N]
     others = [
-        OtherMatch(name=node.name, type=enum_value(node.type))
+        OtherMatch(node_id=node.id, name=node.name, type=enum_value(node.type))
         for node in results[EXPAND_TOP_N:]
     ]
 

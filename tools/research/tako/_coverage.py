@@ -21,6 +21,9 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from tako.models.graph_node_type import GraphNodeType
+from tako.models.ner_label import NerLabel
+
 # How many search hits get a coverage drill. Two keeps disambiguation
 # ("Tesla, Inc." vs another "Tesla") visible while staying cheap.
 EXPAND_TOP_N = 2
@@ -37,14 +40,12 @@ OTHER_MATCH_PREVIEW = 5
 # is never hidden, only pushed down.
 LOW_SIGNAL_METRIC = re.compile(r"\(Normalized\)|^Account Code\b", re.IGNORECASE)
 
-# Valid `types` values for graph resolution (SDK GraphNodeType).
-NODE_TYPES = ("entity", "metric")
-
-# Valid `label` values (SDK NerLabel). A label is a ranking boost, not a filter.
-NER_LABELS = (
-    "PERSON", "ORG", "GPE", "LOC", "PRODUCT", "EVENT",
-    "LANGUAGE", "MONEY", "METRIC", "STOCK_TICKER", "WEBSITE",
-)
+# Valid values, derived from the SDK enums so an upstream addition is accepted
+# here the moment the dependency updates (the pin is open: tako-sdk>=2.2.6).
+# The API, not this tool, is the authority on what these accept.
+NODE_TYPES = tuple(t.value for t in GraphNodeType)
+# A label is a ranking boost, not a filter.
+NER_LABELS = tuple(label.value for label in NerLabel)
 
 
 def enum_value(value: Any) -> Any:
@@ -82,8 +83,13 @@ class CoverageMatch:
 
 @dataclass(frozen=True)
 class OtherMatch:
-    """A search hit beyond EXPAND_TOP_N, named but not drilled."""
+    """A search hit beyond EXPAND_TOP_N: resolved but NOT coverage-checked.
 
+    Carries node_id so an agent that recognizes the right entity here can pin
+    it in a follow-up `search --node-id` without a second resolve.
+    """
+
+    node_id: str
     name: str
     type: str
 
@@ -256,7 +262,22 @@ def build_summary(
         names = [o.name for o in other_matches[:OTHER_MATCH_PREVIEW]]
         rest = len(other_matches) - len(names)
         tail = f", and {rest} more" if rest > 0 else ""
-        blocks.extend(["", f"Also matched: {', '.join(names)}{tail}."])
+        blocks.extend(["", f"Also matched (not checked): {', '.join(names)}{tail}."])
+        # Coverage was only drilled for the top matches. Without this note, a
+        # zero-coverage result reads as "Tako has no data" when the right
+        # entity may simply have ranked below the drill cutoff.
+        if with_data == 0:
+            blocks.extend(
+                [
+                    "",
+                    f"Only the top {n} {_plural(n, 'match was', 'matches were')} "
+                    "coverage-checked; the \"Also matched\" hits were not, so this "
+                    "is not proof Tako lacks data for them. If one of them is the "
+                    "intended entity or metric, rerun with `--types`/`--label` to "
+                    "narrow resolution, or pin its node_id directly in "
+                    "`tako search --node-id <id>`.",
+                ]
+            )
 
     example = _next_step_example(matches)
     if example:

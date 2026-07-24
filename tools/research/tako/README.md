@@ -44,6 +44,12 @@ resolution alone never counts. `coverage.names` lists the exact names to reuse
 verbatim, and `total`/`truncated`/`capped` report when more exist server-side.
 `capped` means the server stopped counting, so read the total as "at least N".
 
+Only the top two matches are coverage-checked. Hits beyond them appear in
+`other_matches` with their `node_id`, explicitly marked "not checked" in the
+summary: `found: false` means "not confirmed in the checked set", never "Tako
+has no data". If an unchecked hit is the intended entity, pin its node id in
+`search --node-id`, or rerun with `--types`/`--label` to rank it higher.
+
 ## Commands
 
 ```bash
@@ -102,9 +108,13 @@ Three SDK workarounds worth knowing about, all in `client.py`:
   reads `HTTPS_PROXY` and `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE` explicitly,
   the same shape as `tools/productivity/gsuite/client.py`.
 - **Timeouts.** The SDK accepts `_request_timeout` per request, but the `Tako`
-  facade doesn't forward it, so there is no per-call timeout available through
-  the public surface. `Configuration(retries=...)` is wired instead. Worth an
-  upstream request.
+  facade doesn't forward it, and urllib3 defaults to no timeout with POST
+  excluded from retries, so a hung read would block until the sandbox kills
+  the process. The client therefore calls the generated `TakoApi` directly
+  (`_client._api`) and passes `_request_timeout` on every operation: 120s for
+  search/answer/contents, 30s for graph calls, both overridable via the
+  `TakoClient` constructor. Worth an upstream facade fix, at which point the
+  `_api` reach-through can go.
 
 The SDK agent products (`client.agent.retrieval`, `client.agent.answer`) are
 deliberately not exposed. They are async run/poll/stream, which fits a
