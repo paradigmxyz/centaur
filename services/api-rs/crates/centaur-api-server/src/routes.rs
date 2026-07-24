@@ -42,7 +42,7 @@ use centaur_workflows::{
     WorkflowWebhookSpec, WorkflowWebhookTriggerKey,
 };
 use futures_util::{Stream, StreamExt};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};

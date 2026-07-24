@@ -505,7 +505,7 @@ fn load_plugin_meta(
     })?;
     let prompt_hash = {
         let digest = Sha256::digest(prompt.as_bytes());
-        format!("sha256:{digest:x}")
+        format!("sha256:{}", hex::encode(digest))
     };
     Ok(Some(LoadedPluginMeta::Persona(PersonaDefinition {
         id,

@@ -3728,7 +3728,7 @@ fn harness_server_subcommand(harness: &HarnessType) -> &'static str {
 fn sandbox_spec_key(spec: &SandboxSpec) -> String {
     let encoded = serde_json::to_vec(spec).expect("sandbox specs should serialize");
     let digest = Sha256::digest(encoded);
-    format!("sandbox-spec-sha256:{digest:x}")
+    format!("sandbox-spec-sha256:{}", hex::encode(digest))
 }
 
 fn mock_app_server_script() -> &'static str {
