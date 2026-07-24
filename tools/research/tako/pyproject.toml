@@ -1,0 +1,35 @@
+[project]
+name = "tako"
+description = "Tako structured knowledge cards, cited answers, and knowledge-graph lookup"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "tako-sdk>=2.2.6",
+    "typer>=0.12.0",
+    "rich>=13.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+tako = "centaur_tool_tako.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_tako"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+
+[tool.centaur]
+module = "client.py"
+# Replace mode: `secret("TAKO_API_KEY")` hands the tool a placeholder, the SDK
+# puts it on the X-API-Key header (tako/configuration.py::auth_settings), and
+# iron-proxy swaps in the real value at the network boundary.
+secrets = [
+    {type = "http", name = "TAKO_API_KEY", match_headers = ["X-API-Key"], hosts = ["tako.com"]},
+]
+hosts = ["tako.com"]
