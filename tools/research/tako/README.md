@@ -86,7 +86,13 @@ Tests live in `tests/` (no `__init__.py`) rather than at the tool root. The
 tool directory shares the SDK's import name, and pytest's module naming would
 otherwise load this package as top-level `tako` and shadow the SDK.
 
-Two SDK workarounds worth knowing about, both in `client.py`:
+Three SDK workarounds worth knowing about, all in `client.py`:
+
+- **Graph auth.** The SDK's OpenAPI spec is missing security declarations on
+  the beta graph endpoints, so the generated client attaches no `X-API-Key`
+  to `graph_search`/`graph_related` and the API answers 401. The client sets
+  the key as a default header on the underlying `ApiClient`, which covers
+  every operation. Remove that line once the spec is fixed upstream.
 
 - **Proxy wiring.** `tako-sdk`'s transport is urllib3, which does not read
   proxy settings from the environment. With `Configuration.proxy` unset it

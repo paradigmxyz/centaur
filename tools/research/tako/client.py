@@ -125,6 +125,16 @@ class TakoClient:
             config.ssl_ca_cert = ca_bundle
 
         self._client = Tako(config)
+        # The beta graph endpoints are missing security declarations in the
+        # SDK's OpenAPI spec, so the generated client attaches no X-API-Key to
+        # graph_search/graph_related (their auth_settings list is empty) and
+        # the API answers 401. Setting the key as a default header covers
+        # every operation; on endpoints that do declare auth, the generated
+        # client overwrites it with the same value. Worth an upstream spec
+        # fix, at which point this line can go.
+        self._client._api.api_client.set_default_header(
+            "X-API-Key", config.api_key["apiKey"]
+        )
 
     # -- search and answer ------------------------------------------------
 
