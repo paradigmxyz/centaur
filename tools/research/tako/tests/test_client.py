@@ -13,7 +13,9 @@ from tools.research.tako._coverage import (
     PREVIEW,
     CoverageGroup,
     CoverageMatch,
+    OtherMatch,
     build_match,
+    build_summary,
     coverage_kind_for,
     enum_value,
     has_live_coverage,
@@ -162,3 +164,73 @@ class TestMatches:
         assert data["node_id"] == "tesla-inc-abc"
         assert data["coverage"]["names"] == ["Revenue"]
         assert isinstance(data["coverage"]["names"], list)
+
+
+class TestBuildSummary:
+    def test_no_matches_points_at_direct_search(self):
+        summary = build_summary("xyzzy", [], [])
+        assert 'no data-graph node matching "xyzzy"' in summary
+        assert "tako search" in summary
+
+    def test_full_coverage_header(self):
+        matches = [build_match(_node(label="ORG"), _page(["Revenue"], total=120))]
+        summary = build_summary("tesla", matches, [])
+        assert (
+            "Tako's proprietary data has live, continuously-updated coverage of "
+            '1 match for "tesla":' in summary
+        )
+        assert "**Tesla, Inc. (ORG)** — 120 metrics." in summary
+
+    def test_partial_coverage_header_counts_only_live_matches(self):
+        live = build_match(_node(), _page(["Revenue"]))
+        empty = build_match(_node(name="Tesla Energy"), _page([]))
+        summary = build_summary("tesla", [live, empty], [])
+        assert '2 matches for "tesla"' in summary
+        assert "coverage of 1 of 2 matches" in summary
+        assert "resolved, but Tako holds no metrics for it yet" in summary
+
+    def test_zero_coverage_header(self):
+        empty = build_match(_node(), _page([]))
+        summary = build_summary("tesla", [empty], [])
+        assert summary.startswith(
+            'Resolved 1 match for "tesla", but none with live data coverage:'
+        )
+
+    def test_metric_match_phrasing(self):
+        node = _node(node_type="metric", name="Inflation Rate")
+        match = build_match(node, _page(["United States"], total=63, key="entities"))
+        summary = build_summary("inflation", [match], [])
+        assert "tracked for 63 entities." in summary
+
+    def test_capped_total_renders_plus(self):
+        match = build_match(_node(), _page(["Revenue"], total=50, total_capped=True))
+        summary = build_summary("tesla", [match], [])
+        assert "50+ metrics." in summary
+
+    def test_unavailable_phrasing(self):
+        summary = build_summary("tesla", [unavailable_match(_node())], [])
+        assert "couldn't load its coverage right now (temporary); retry." in summary
+
+    def test_other_matches_tail_with_overflow(self):
+        others = [OtherMatch(name=f"Match {i}", type="entity") for i in range(7)]
+        matches = [build_match(_node(), _page(["Revenue"]))]
+        summary = build_summary("tesla", matches, others)
+        assert (
+            "Also matched: Match 0, Match 1, Match 2, Match 3, Match 4, and 2 more."
+            in summary
+        )
+
+    def test_next_step_example_entity_composes_name_then_metric(self):
+        match = build_match(_node(), _page(["Revenue"]))
+        summary = build_summary("tesla", [match], [])
+        assert '(e.g. "Tesla, Inc. Revenue")' in summary
+
+    def test_next_step_example_metric_composes_entity_then_name(self):
+        node = _node(node_type="metric", name="Inflation Rate")
+        match = build_match(node, _page(["United States"], key="entities"))
+        summary = build_summary("inflation", [match], [])
+        assert '(e.g. "United States Inflation Rate")' in summary
+
+    def test_no_next_step_example_without_coverage(self):
+        summary = build_summary("tesla", [build_match(_node(), _page([]))], [])
+        assert "e.g." not in summary

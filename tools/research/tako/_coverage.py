@@ -156,3 +156,107 @@ def match_to_dict(match: CoverageMatch) -> dict:
     data = asdict(match)
     data["coverage"]["names"] = list(match.coverage.names)
     return data
+
+
+def _plural(n: int, one: str, many: str) -> str:
+    return one if n == 1 else many
+
+
+# Counts only — the names themselves live once, in matches[].coverage.names
+# (the whole output object is what the model reads, so repeating names here
+# would double their token cost). Capped totals render as "N+" (a floor).
+def _count_str(group: CoverageGroup) -> str:
+    return f"{group.total}{'+' if group.capped else ''}"
+
+
+def _label_suffix(match: CoverageMatch) -> str:
+    return f" ({match.label})" if match.label else ""
+
+
+def _coverage_clause(group: CoverageGroup) -> str:
+    if group.kind == "entities":
+        return f"tracked for {_count_str(group)} {_plural(group.total, 'entity', 'entities')}"
+    return f"{_count_str(group)} {_plural(group.total, 'metric', 'metrics')}"
+
+
+def _empty_clause(kind: str) -> str:
+    if kind == "entities":
+        return "resolved, but Tako isn't tracking it against any entities yet"
+    return "resolved, but Tako holds no metrics for it yet"
+
+
+def _match_line(match: CoverageMatch) -> str:
+    head = f"**{match.name}{_label_suffix(match)}**"
+    if match.unavailable:
+        return f"{head} — resolved, but Tako couldn't load its coverage right now (temporary); retry."
+    if match.coverage.total == 0:
+        return f"{head} — {_empty_clause(match.coverage.kind)}."
+    return f"{head} — {_coverage_clause(match.coverage)}."
+
+
+def _next_step_example(matches: Sequence[CoverageMatch]) -> str | None:
+    """A real follow-up query: entity's metrics → "Tesla, Inc. Revenue";
+    metric's entities → "United States Inflation Rate". Only matches with
+    actual coverage qualify — no fallback, or the summary would steer the
+    agent into a priced search for a name it just reported as having no data.
+    """
+    for match in matches:
+        if not match.unavailable and match.coverage.names:
+            first = match.coverage.names[0]
+            if match.coverage.kind == "entities":
+                return f"{first} {match.name}"
+            return f"{match.name} {first}"
+    return None
+
+
+def build_summary(
+    query: str,
+    matches: Sequence[CoverageMatch],
+    other_matches: Sequence[OtherMatch],
+) -> str:
+    """The natural-language coverage summary — the narrative shell of the
+    `available-data` output. Coverage names are NOT repeated here — they live
+    once, in matches[].coverage.names. Node ids never appear here.
+    """
+    if not matches:
+        return (
+            f'Tako has no data-graph node matching "{query}". Tako may still have '
+            "relevant public/web data — try `tako search` directly, or rephrase "
+            "the entity or metric name."
+        )
+
+    n = len(matches)
+    # The header only claims coverage for matches that actually have some — a
+    # resolved node with no coverage (or a failed drill) must not be
+    # advertised as data. "Tako's proprietary data" is the grammatical subject
+    # on purpose: downstream models echo this header nearly verbatim.
+    with_data = sum(1 for m in matches if has_live_coverage(m))
+    matches_of = f'{n} {_plural(n, "match", "matches")} for "{query}"'
+    covers = "Tako's proprietary data has live, continuously-updated coverage of"
+    if with_data == 0:
+        header = f"Resolved {matches_of}, but none with live data coverage:"
+    elif with_data < n:
+        header = f"{covers} {with_data} of {matches_of}:"
+    else:
+        header = f"{covers} {matches_of}:"
+
+    blocks = [header, "", "\n\n".join(_match_line(m) for m in matches)]
+
+    if other_matches:
+        names = [o.name for o in other_matches[:OTHER_MATCH_PREVIEW]]
+        rest = len(other_matches) - len(names)
+        tail = f", and {rest} more" if rest > 0 else ""
+        blocks.extend(["", f"Also matched: {', '.join(names)}{tail}."])
+
+    example = _next_step_example(matches)
+    if example:
+        blocks.extend(
+            [
+                "",
+                "The exact names are listed in each match's coverage.names. To pull "
+                "one as a chart or dataset, run `tako search` with entity + metric "
+                f'(e.g. "{example}").',
+            ]
+        )
+
+    return "\n".join(blocks)
