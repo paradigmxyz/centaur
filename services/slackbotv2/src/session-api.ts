@@ -1,5 +1,6 @@
 import type { RustSessionStreamEvent } from '@centaur/harness-events'
 import type { Attachment, LinkPreview, Message } from 'chat'
+import { createHash } from 'node:crypto'
 import { renderSlackDisplayText, slackMessagePromptText } from './slack-display-text'
 import type {
   ForwardSessionInput,
@@ -708,6 +709,32 @@ async function bytesToBase64(data: Buffer | Blob): Promise<string> {
 }
 
 const DEFAULT_HARNESS_TYPE = 'codex'
+const NANOCODEX_HARNESS_TYPE = 'nanocodex'
+const HASH_BUCKET_COUNT = 2 ** 32
+
+/**
+ * Selects a sticky default harness for a Slack thread. Explicit message and
+ * channel overrides are resolved before this function is called.
+ */
+export function defaultHarnessForThread(
+  options: Pick<SlackbotV2Options, 'defaultHarnessType' | 'nanocodexRolloutPercent'>,
+  threadId: string
+): string {
+  const defaultHarness = options.defaultHarnessType ?? DEFAULT_HARNESS_TYPE
+  const rolloutPercent = options.nanocodexRolloutPercent ?? 0
+  if (!Number.isFinite(rolloutPercent) || rolloutPercent < 0 || rolloutPercent > 100) {
+    throw new Error('nanocodexRolloutPercent must be between 0 and 100')
+  }
+  if (defaultHarness !== DEFAULT_HARNESS_TYPE || rolloutPercent === 0) {
+    return defaultHarness
+  }
+  if (rolloutPercent === 100) return NANOCODEX_HARNESS_TYPE
+
+  const bucket = createHash('sha256').update(threadId).digest().readUInt32BE(0)
+  return bucket / HASH_BUCKET_COUNT < rolloutPercent / 100
+    ? NANOCODEX_HARNESS_TYPE
+    : defaultHarness
+}
 
 type RequesterIdentity = {
   githubHandle?: string
@@ -758,7 +785,7 @@ async function createSession(
   harnessType?: string,
   message?: SlackbotV2ApiMessage
 ): Promise<CreateSessionOutcome> {
-  const requested = harnessType ?? options.defaultHarnessType ?? DEFAULT_HARNESS_TYPE
+  const requested = harnessType ?? defaultHarnessForThread(options, threadId)
   // A sticky --claude/--amp/--codex/--nanocodex selection restarts a thread
   // pinned to another harness; the implicit default never forces a switch.
   const response = await postCreateSession(
@@ -869,7 +896,7 @@ function sessionRequesterMetadata(
 ): JsonObject {
   const slackUserId = identity?.slackUserId ?? messageRequesterUserId(message)
   const slackTeamId = identity?.slackTeamId ?? messageSlackTeamId(message)
-  const slackChannelId = slackConversationId(message)
+  const slackChannelId = message ? slackConversationId(message) : undefined
   const slackUserName = identity?.slackUserName ?? message?.author.userName
   const slackDisplayName = identity?.slackDisplayName ?? message?.author.fullName
   const slackEmail = identity?.slackEmail

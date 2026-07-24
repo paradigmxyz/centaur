@@ -11,6 +11,7 @@ import codexConfig from '../../../harness/codex/config.toml'
 describe('harnessDisplayName', () => {
   test('maps known harness wire values to display names', () => {
     expect(harnessDisplayName('codex')).toBe('Codex')
+    expect(harnessDisplayName('nanocodex')).toBe('Nanocodex')
     expect(harnessDisplayName('claudecode')).toBe('Claude Code')
     expect(harnessDisplayName('amp')).toBe('Amp')
   })
@@ -42,6 +43,7 @@ describe('defaultModelForHarness', () => {
     expect(bakedCodexModel).toBeTruthy()
     expect(defaultModelForHarness('claudecode')).toBe(bakedClaudeModel)
     expect(defaultModelForHarness('codex')).toBe(bakedCodexModel)
+    expect(defaultModelForHarness('nanocodex')).toBe(bakedCodexModel)
   })
 
   test('prefers the deployment-configured model over the baked default', () => {

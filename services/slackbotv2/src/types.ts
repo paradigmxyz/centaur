@@ -148,6 +148,12 @@ export type SlackbotV2Options = {
    * Defaults to codex.
    */
   defaultHarnessType?: string
+  /**
+   * Percentage of otherwise-default Codex threads assigned to Nanocodex.
+   * Assignment is deterministic by thread id so retries and follow-ups stay
+   * on the same variant. Ignored when the default harness is not Codex.
+   */
+  nanocodexRolloutPercent?: number
   fetch?: SlackbotV2Fetch
   /**
    * Deployment-configured default model per harness wire value (claudecode |

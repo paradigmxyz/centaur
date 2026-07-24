@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   clearConversationNameCacheForTests,
   clearRequesterIdentityCacheForTests,
+  defaultHarnessForThread,
   DEFAULT_SESSION_IDLE_TIMEOUT_MS,
   forwardToSessionApi,
   harnessRestartPreamble,
@@ -520,6 +521,56 @@ describe('forwardToSessionApi overrides', () => {
     await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hi')))
     const create = requests.find(request => request.url.endsWith('.000100'))
     expect((create?.body as { harness_type?: string }).harness_type).toBe('codex')
+  })
+
+  test('sticks the 50/50 Codex and Nanocodex rollout to the thread id', () => {
+    const rollout = { nanocodexRolloutPercent: 50 }
+    const codexThread = 'slack:C1:1700000000.000100'
+    const nanocodexThread = 'slack:C1:1700000000.000104'
+
+    expect(defaultHarnessForThread(rollout, codexThread)).toBe('codex')
+    expect(defaultHarnessForThread(rollout, nanocodexThread)).toBe('nanocodex')
+    expect(defaultHarnessForThread(rollout, nanocodexThread)).toBe('nanocodex')
+  })
+
+  test('keeps rollout boundaries and non-Codex defaults explicit', () => {
+    const threadId = 'slack:C1:1700000000.000104'
+    expect(defaultHarnessForThread({ nanocodexRolloutPercent: 0 }, threadId)).toBe('codex')
+    expect(defaultHarnessForThread({ nanocodexRolloutPercent: 100 }, threadId)).toBe(
+      'nanocodex'
+    )
+    expect(
+      defaultHarnessForThread(
+        { defaultHarnessType: 'claudecode', nanocodexRolloutPercent: 50 },
+        threadId
+      )
+    ).toBe('claudecode')
+    expect(() => defaultHarnessForThread({ nanocodexRolloutPercent: 101 }, threadId)).toThrow()
+  })
+
+  test('creates rolled-out sessions while explicit harness overrides still win', async () => {
+    const nanocodexThread = 'slack:C1:1700000000.000104'
+
+    const rolledOutApi = fakeApi()
+    const rolledOutMessage = apiMessage('try the rollout', { threadId: nanocodexThread })
+    await forwardToSessionApi(
+      { ...options(rolledOutApi.fetchFn), nanocodexRolloutPercent: 50 },
+      forwardInput(rolledOutMessage)
+    )
+    const rolledOutCreate = rolledOutApi.requests.find(request =>
+      request.url.endsWith('1700000000.000104')
+    )
+    expect((rolledOutCreate?.body as { harness_type?: string }).harness_type).toBe('nanocodex')
+
+    const explicitApi = fakeApi()
+    await forwardToSessionApi(
+      { ...options(explicitApi.fetchFn), nanocodexRolloutPercent: 50 },
+      forwardInput(rolledOutMessage, { harnessType: 'codex' })
+    )
+    const explicitCreate = explicitApi.requests.find(request =>
+      request.url.endsWith('1700000000.000104')
+    )
+    expect((explicitCreate?.body as { harness_type?: string }).harness_type).toBe('codex')
   })
 
   test('creates session with parsed harness override', async () => {

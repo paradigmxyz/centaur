@@ -34,6 +34,7 @@ import {
 import { slackUserIdForMessage } from './slack-user'
 import {
   collectInitialContext,
+  defaultHarnessForThread,
   dispatchSlackBlockAction,
   forwardToSessionApi,
   harnessRestartPreamble,
@@ -960,7 +961,7 @@ async function syncThreadMessageToSession(
       : effectiveOverrides.provider ?? channelDefault?.provider
   const resolvedReasoning = overrides.reasoning ?? channelDefault?.reasoning
   const effectiveHarnessType =
-    resolvedHarnessType ?? input.options.defaultHarnessType ?? 'codex'
+    resolvedHarnessType ?? defaultHarnessForThread(input.options, thread.id)
   // Without an explicit override or channel default the harness runs its
   // configured default (CLAUDE_MODEL/CODEX_MODEL, else the baked harness
   // config); show and record that instead of dropping the model entirely.

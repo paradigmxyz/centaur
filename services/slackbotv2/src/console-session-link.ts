@@ -15,7 +15,8 @@ import codexConfig from '../../../harness/codex/config.toml'
 const HARNESS_DISPLAY_NAMES: Record<string, string> = {
   amp: 'Amp',
   claudecode: 'Claude Code',
-  codex: 'Codex'
+  codex: 'Codex',
+  nanocodex: 'Nanocodex'
 }
 
 // Default model each harness runs when no --model/--opus/... override is set,
@@ -30,6 +31,10 @@ const HARNESS_DISPLAY_NAMES: Record<string, string> = {
 const BAKED_DEFAULT_MODELS: Record<string, string | undefined> = {
   claudecode: typeof claudeSettings.model === 'string' ? claudeSettings.model : undefined,
   codex:
+    typeof (codexConfig as { model?: unknown }).model === 'string'
+      ? ((codexConfig as { model: string }).model)
+      : undefined,
+  nanocodex:
     typeof (codexConfig as { model?: unknown }).model === 'string'
       ? ((codexConfig as { model: string }).model)
       : undefined

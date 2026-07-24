@@ -476,10 +476,14 @@ slackbotv2:
   mcpPublicUrl: "http://localhost:3000"
   externalOrgAllowlist: ""
   triggerBotAllowlist: ""
+  # Sticky percentage of otherwise-default Codex Slack threads assigned to
+  # Nanocodex. Explicit thread flags and channel defaults still win. Set to 0
+  # to send all default traffic back to Codex.
+  nanocodexRolloutPercent: 50
   # Per-channel default harness / model / provider / reasoning, keyed by Slack
   # conversation id (the C…/G…/D… id). Each value is an object of optional
   # harness / model / provider / reasoning fields, using the same vocabulary as
-  # the inline Slack flags (harness: claude|codex|amp, provider: bedrock|meta,
+  # the inline Slack flags (harness: claude|codex|nanocodex|amp, provider: bedrock|meta,
   # model accepts Claude aliases like opus). A model is only meaningful within a
   # harness, so name the harness alongside it. Applied when a message in that
   # channel carries no explicit/sticky per-thread flag, below such a flag and
