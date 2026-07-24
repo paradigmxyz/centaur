@@ -14,6 +14,7 @@ API docs: https://docs.tako.com
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Callable
 from dataclasses import asdict
@@ -45,8 +46,10 @@ from ._coverage import (
     unavailable_match,
 )
 
-# The SDK talks to https://tako.com/api by default (tako/configuration.py).
-API_HOST = "tako.com"
+logger = logging.getLogger(__name__)
+
+# The maximum node ids the API accepts as retrieval candidates per search.
+MAX_NODE_IDS = 20
 
 
 def _proxy_url() -> str | None:
@@ -93,7 +96,14 @@ def _sources(
 
     A source is searched only if its key is present, so passing `data_count=0`
     is how you get a data-only or web-only search.
+
+    Raises ValueError on contract violations the API would otherwise reject
+    with a raw 400: `strict` without `node_ids`, or more than MAX_NODE_IDS ids.
     """
+    if strict and not node_ids:
+        raise ValueError("strict=True requires node_ids")
+    if node_ids and len(node_ids) > MAX_NODE_IDS:
+        raise ValueError(f"node_ids accepts at most {MAX_NODE_IDS} ids")
     if data_count is None and web_count is None and not node_ids and not strict:
         return None
 
@@ -354,7 +364,16 @@ def _run_available_data(
         try:
             related = graph_related(node.id, relation=relation, limit=PREVIEW)
             matches.append(build_match(node, related.relation))
-        except Exception:
+        except Exception as exc:
+            # Isolated, not ignored: the match degrades to "unavailable" but
+            # the failure stays visible to operators, so a systematic drill
+            # regression doesn't masquerade as transient flakiness forever.
+            logger.warning(
+                "available-data coverage drill failed for node %s (relation=%s): %s",
+                node.id,
+                relation,
+                exc,
+            )
             matches.append(unavailable_match(node))
 
     return {

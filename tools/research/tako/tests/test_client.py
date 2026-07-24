@@ -28,7 +28,7 @@ from tools.research.tako._coverage import (
 )
 
 
-from tools.research.tako.client import _run_available_data
+from tools.research.tako.client import TakoClient, _run_available_data, _sources
 
 
 def _node(node_id="tesla-inc-abc", node_type="entity", name="Tesla, Inc.", label=None):
@@ -375,3 +375,127 @@ class TestRunAvailableDataValidation:
         except ValueError:
             pass
         assert not hasattr(fake, "last_search")
+
+
+class TestSources:
+    def test_all_defaults_returns_none_for_api_default(self):
+        assert _sources(None, None, None, False) is None
+
+    def test_data_count_zero_gives_web_only(self):
+        sources = _sources(0, None, None, False)
+        assert sources.data is None
+        assert sources.web is not None
+
+    def test_web_count_zero_gives_data_only(self):
+        sources = _sources(None, 0, None, False)
+        assert sources.web is None
+        assert sources.data is not None
+
+    def test_counts_and_node_ids_forwarded(self):
+        sources = _sources(5, 3, ["n1", "n2"], True)
+        assert sources.data.count == 5
+        assert sources.data.node_ids == ["n1", "n2"]
+        assert sources.data.strict is True
+        assert sources.web.count == 3
+
+    def test_strict_without_node_ids_raises(self):
+        try:
+            _sources(None, None, None, True)
+            raise AssertionError("expected ValueError")
+        except ValueError as exc:
+            assert "strict" in str(exc)
+
+    def test_more_than_max_node_ids_raises(self):
+        try:
+            _sources(None, None, [f"n{i}" for i in range(21)], False)
+            raise AssertionError("expected ValueError")
+        except ValueError as exc:
+            assert "20" in str(exc)
+
+
+class _FakeSdkResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def model_dump(self, mode=None, exclude_none=None):
+        return self._payload
+
+
+class FakeTako:
+    """Stand-in for the tako-sdk Tako facade; records requests."""
+
+    def __init__(self):
+        self.calls = []
+
+    def search(self, request):
+        self.calls.append(("search", request))
+        return _FakeSdkResponse({"cards": []})
+
+    def answer(self, request):
+        self.calls.append(("answer", request))
+        return _FakeSdkResponse({"answer": "", "cards": []})
+
+    def contents(self, request):
+        self.calls.append(("contents", request))
+        return _FakeSdkResponse({"outputs": []})
+
+
+def _client_with_fake():
+    client = TakoClient.__new__(TakoClient)
+    client._client = FakeTako()
+    return client
+
+
+class TestPricedPaths:
+    def test_search_builds_request_and_dumps(self):
+        client = _client_with_fake()
+        result = client.search(
+            "tesla revenue", effort="deep", data_count=2, node_ids=["n1"], strict=True
+        )
+        method, request = client._client.calls[0]
+        assert method == "search"
+        assert request.query == "tesla revenue"
+        assert request.effort == "deep"
+        assert request.sources.data.node_ids == ["n1"]
+        assert result == {"cards": []}
+
+    def test_answer_builds_same_request_shape(self):
+        client = _client_with_fake()
+        client.answer("us cpi since 2020", web_count=0)
+        method, request = client._client.calls[0]
+        assert method == "answer"
+        assert request.query == "us cpi since 2020"
+        assert request.sources.web is None
+
+    def test_search_strict_without_node_ids_raises_before_network(self):
+        client = _client_with_fake()
+        try:
+            client.search("tesla", strict=True)
+            raise AssertionError("expected ValueError")
+        except ValueError:
+            pass
+        assert client._client.calls == []
+
+    def test_contents_builds_request(self):
+        client = _client_with_fake()
+        result = client.contents(
+            "https://tako.com/card/abc", mode="inline", content_format="csv", max_rows=100
+        )
+        method, request = client._client.calls[0]
+        assert method == "contents"
+        assert request.url == "https://tako.com/card/abc"
+        assert request.mode == "inline"
+        assert request.content_format == "csv"
+        assert request.max_rows == 100
+        assert request.quote_only is None
+        assert result == {"outputs": []}
+
+
+class TestDrillFailureLogging:
+    def test_drill_failure_emits_warning(self, caplog):
+        import logging
+
+        fake = FakeGraph(search_results=[_node(node_id="e1")], related_error_for=("e1",))
+        with caplog.at_level(logging.WARNING, logger="tools.research.tako.client"):
+            _run(fake)
+        assert any("coverage drill failed" in r.message for r in caplog.records)
