@@ -1,6 +1,6 @@
 [project]
 name = "tako"
-description = "Tako structured knowledge cards, cited answers, and knowledge-graph lookup"
+description = "Tako structured data cards, cited answers, and free data-coverage discovery"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
