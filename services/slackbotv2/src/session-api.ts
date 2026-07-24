@@ -869,12 +869,14 @@ function sessionRequesterMetadata(
 ): JsonObject {
   const slackUserId = identity?.slackUserId ?? messageRequesterUserId(message)
   const slackTeamId = identity?.slackTeamId ?? messageSlackTeamId(message)
+  const slackChannelId = slackConversationId(message)
   const slackUserName = identity?.slackUserName ?? message?.author.userName
   const slackDisplayName = identity?.slackDisplayName ?? message?.author.fullName
   const slackEmail = identity?.slackEmail
   return {
     ...(slackUserId ? { slack_user_id: slackUserId } : {}),
     ...(slackTeamId ? { slack_team_id: slackTeamId } : {}),
+    ...(slackChannelId ? { slack_channel_id: slackChannelId } : {}),
     ...(slackUserName ? { slack_user_name: slackUserName } : {}),
     ...(slackDisplayName ? { slack_display_name: slackDisplayName } : {}),
     ...(slackEmail ? { slack_user_email: slackEmail } : {}),

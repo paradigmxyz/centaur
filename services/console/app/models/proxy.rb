@@ -14,8 +14,10 @@ class Proxy < ApplicationRecord
 
   validates :name, presence: true
   validates :bearer_token_hash, presence: true, uniqueness: true
+  validate :labels_are_string_map
   validate :token_matches_format, on: :create
 
+  before_validation :normalize_labels
   before_validation :issue_token, on: :create
   before_save :stamp_principal_assignment, if: :will_save_change_to_principal_id?
 
@@ -38,36 +40,27 @@ class Proxy < ApplicationRecord
     Digest::SHA256.hexdigest(plaintext)
   end
 
-  # The config this proxy delivers, in the iron-proxy sync shape. The assembly
-  # lives on Principal (it is a function of effective grants); an unassigned
-  # proxy carries no authority and resolves to the empty config. Live secret
-  # values are kept inline here because the proxy needs them to resolve.
-  def sync_config
-    principal&.effective_config(redact_secrets: false) || Principal::EMPTY_CONFIG
-  end
-
-  def sync_config_snapshot(sandbox_entitlements_hosts: [])
-    config = principal ? PrincipalSyncConfigSnapshot.fetch_for(principal).payload : Principal::EMPTY_CONFIG
+  def sync_config_snapshot(sandbox_entitlements_hosts: self.class.sandbox_entitlements_hosts)
+    config = rendered_principal_config
     config = with_sandbox_entitlements_secret(config, sandbox_entitlements_hosts: sandbox_entitlements_hosts)
     { config_hash: config_hash_for(config), config: config }
   end
 
-  # Opaque, deterministic fingerprint of the base (principal-derived) config.
-  # Note this is not necessarily the hash the proxy echoes on sync: the sync
-  # path hashes the delivered config, which also folds in the per-proxy
-  # sandbox entitlements secret when one is configured (see
-  # #sync_config_snapshot).
+  # Opaque, deterministic fingerprint of the exact config delivered by the
+  # proxy sync endpoint.
   def config_hash
-    # The principal identity and assignment time are folded in so that any
-    # assignment change forces a refresh, even a swap between principals whose
-    # effective secrets happen to be identical (or an unassign to empty).
-    config_hash_for(sync_config)
+    sync_config_snapshot.fetch(:config_hash)
+  end
+
+  def self.sandbox_entitlements_hosts
+    [ Principal.host_from_url(ENV["CENTAUR_CONSOLE_URL"]) ]
   end
 
   def config_hash_for(config)
     payload = config.merge(
       "principal" => principal&.oid,
-      "principal_assigned_at" => principal_assigned_at&.utc&.iso8601
+      "principal_assigned_at" => principal_assigned_at&.utc&.iso8601,
+      "proxy_labels" => labels || {}
     )
     "sha256:#{Digest::SHA256.hexdigest(self.class.canonical_json(payload))}"
   end
@@ -111,6 +104,71 @@ class Proxy < ApplicationRecord
   end
 
   private
+
+  def normalize_labels
+    self.labels = {} if labels.nil?
+  end
+
+  def labels_are_string_map
+    return errors.add(:labels, "must be a hash") unless labels.is_a?(Hash)
+
+    labels.each do |key, value|
+      errors.add(:labels, "keys must be strings") unless key.is_a?(String)
+      errors.add(:labels, "values must be strings") unless value.is_a?(String)
+    end
+  end
+
+  def rendered_principal_config
+    return Principal::EMPTY_CONFIG.deep_dup unless principal
+
+    snapshot = PrincipalSyncConfigSnapshot.fetch_for(principal)
+    copy = snapshot.config.deep_dup
+    templates = snapshot.postgres_setting_templates
+    copy["postgres"] = proxy_specific_postgres(copy["postgres"], templates) if templates.any?
+    copy
+  end
+
+  def proxy_specific_postgres(postgres, templates)
+    Array(postgres).map do |entry|
+      next entry unless entry.is_a?(Hash)
+
+      template = templates[entry["id"].to_s]
+      next entry unless template
+
+      rendered_settings = proxy_specific_postgres_settings(entry["settings"], template)
+      entry.merge("settings" => rendered_settings)
+    end
+  end
+
+  def proxy_specific_postgres_settings(rendered_settings, template_settings)
+    rendered_by_name = Array(rendered_settings).each_with_object({}) do |setting, values|
+      next unless setting.is_a?(Hash)
+
+      name = setting["name"].presence || setting[:name].presence
+      values[name] = setting["value"] || setting[:value] if name.present?
+    end
+
+    Array(template_settings).filter_map do |setting|
+      next unless setting.is_a?(Hash)
+
+      name = setting["name"].presence || setting[:name].presence
+      next if name.blank?
+
+      value = proxy_label_setting_value(setting)
+      value = rendered_by_name.fetch(name, "") if value.nil?
+      { "name" => name, "value" => value }
+    end
+  end
+
+  def proxy_label_setting_value(setting)
+    ref = setting["value_from"] || setting[:value_from]
+    return nil unless ref.is_a?(Hash)
+
+    proxy_label = ref["proxy_label"] || ref[:proxy_label]
+    return nil if proxy_label.blank?
+
+    labels&.fetch(proxy_label.to_s, "").to_s
+  end
 
   def with_sandbox_entitlements_secret(config, sandbox_entitlements_hosts:)
     secret = sandbox_entitlements_secret(hosts: sandbox_entitlements_hosts)

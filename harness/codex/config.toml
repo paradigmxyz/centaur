@@ -6,6 +6,7 @@ service_tier = "fast"
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
 suppress_unstable_features_warning = true
+project_doc_max_bytes = 131072
 
 [features]
 goals = true

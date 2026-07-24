@@ -8,8 +8,8 @@ use std::{
 };
 
 use absurd::{
-    Client, ClientOptions, CreateQueueOptions, RetryKind, RetryStrategy, SpawnOptions, StepHandle,
-    TaskContext, TaskRegistrationOptions, Worker, WorkerOptions,
+    AwaitEventOptions, Client, ClientOptions, CreateQueueOptions, RetryKind, RetryStrategy,
+    SpawnOptions, StepHandle, TaskContext, TaskRegistrationOptions, Worker, WorkerOptions,
 };
 use centaur_iron_control::{IdentityInput, IronControlClient, IronControlError, slugify};
 use centaur_sandbox_core::SandboxSpec;
@@ -58,6 +58,15 @@ const WORKFLOW_ALLOWED_NAMES_ENV: &str = "WORKFLOW_ALLOWED_NAMES";
 const WORKFLOW_REAP_REMOVED_AFTER_TICKS_ENV: &str = "WORKFLOW_REAP_REMOVED_AFTER_TICKS";
 const DEFAULT_WORKFLOW_REAP_REMOVED_AFTER_TICKS: u32 = 3;
 const ABSURD_TERMINAL_TASK_STATES: &str = "('completed', 'failed', 'cancelled')";
+
+pub fn python_workflow_event_name(event_type: &str, correlation_id: &str) -> String {
+    // JSON string encoding is unambiguous even when either component contains a delimiter.
+    format!(
+        "python:{}",
+        serde_json::to_string(&(event_type, correlation_id))
+            .expect("serializing two strings cannot fail")
+    )
+}
 
 /// Per-queue worker concurrency. The defaults preserve historical behavior; each
 /// can be overridden via its env var to scale a queue independently (e.g. raise
@@ -3333,6 +3342,28 @@ async fn handle_python_context_request(
                 Err(error) => Err(error),
             }
         }
+        Some("ctx.event.wait") => {
+            let step = required_python_string(message, "step", "ctx.event.wait")?;
+            let event_type = required_python_string(message, "event_type", "ctx.event.wait")?;
+            let correlation_id =
+                required_python_string(message, "correlation_id", "ctx.event.wait")?;
+            let timeout = parse_optional_python_duration_seconds(message, "timeout_seconds")?;
+            let event_name = python_workflow_event_name(event_type, correlation_id);
+            match ctx
+                .await_event::<Value>(
+                    &event_name,
+                    AwaitEventOptions {
+                        step_name: Some(step.to_owned()),
+                        timeout,
+                    },
+                )
+                .await
+            {
+                Ok(value) => Ok(value),
+                Err(absurd::Error::Suspend) => return Err(WorkflowRuntimeError::Suspend),
+                Err(error) => Err(error.to_string()),
+            }
+        }
         Some("ctx.agent_turn") => {
             let args = message.get("args").cloned().unwrap_or_else(|| json!({}));
             match run_python_agent_turn(session_runtime.clone(), ctx, input, args, &request_id)
@@ -3441,6 +3472,39 @@ fn parse_python_duration_seconds(message: &Value) -> Result<Duration, String> {
         return Err("ctx.sleep duration_seconds must be a finite non-negative number".to_owned());
     }
     Ok(Duration::from_secs_f64(seconds))
+}
+
+fn required_python_string<'a>(
+    message: &'a Value,
+    field: &str,
+    request_type: &str,
+) -> Result<&'a str, WorkflowRuntimeError> {
+    message
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            WorkflowRuntimeError::BadRequest(format!("{request_type} requires a non-empty {field}"))
+        })
+}
+
+fn parse_optional_python_duration_seconds(
+    message: &Value,
+    field: &str,
+) -> Result<Option<Duration>, WorkflowRuntimeError> {
+    let Some(value) = message.get(field) else {
+        return Ok(None);
+    };
+    let seconds = value.as_f64().ok_or_else(|| {
+        WorkflowRuntimeError::BadRequest(format!("ctx.event.wait {field} must be numeric"))
+    })?;
+    if !seconds.is_finite() || seconds < 0.0 {
+        return Err(WorkflowRuntimeError::BadRequest(format!(
+            "ctx.event.wait {field} must be a finite non-negative number"
+        )));
+    }
+    Ok(Some(Duration::from_secs_f64(seconds)))
 }
 
 fn parse_python_wake_at(message: &Value) -> Result<DateTime<Utc>, String> {
@@ -4100,6 +4164,18 @@ pub enum WorkflowRuntimeError {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn python_event_names_are_collision_free() {
+        assert_ne!(
+            python_workflow_event_name("review:a", "b"),
+            python_workflow_event_name("review", "a:b")
+        );
+        assert_eq!(
+            python_workflow_event_name("review", "change:42"),
+            "python:[\"review\",\"change:42\"]"
+        );
+    }
 
     #[test]
     fn agent_turn_input_line_omits_unset_harness_knobs() {

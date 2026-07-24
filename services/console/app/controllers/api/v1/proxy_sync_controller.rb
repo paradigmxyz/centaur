@@ -19,9 +19,7 @@ module Api
     # yet. Each secret still carries its own per-secret `rules`.
     class ProxySyncController < Api::ProxyBaseController
       def create
-        snapshot = current_proxy.sync_config_snapshot(
-          sandbox_entitlements_hosts: sandbox_entitlements_hosts
-        )
+        snapshot = current_proxy.sync_config_snapshot
         current_hash = snapshot[:config_hash]
 
         if params[:config_hash].presence == current_hash
@@ -40,16 +38,6 @@ module Api
             postgres: config["postgres"]
           }
         end
-      end
-
-      private
-
-      # Host for the entitlements secret's injection rule. It must match the
-      # host sandboxes dial, and that comes from the control URL: api-rs gets
-      # it as IRON_CONTROL_URL and the chart wires the same value here as
-      # CENTAUR_CONSOLE_URL, so both sides share one source of truth.
-      def sandbox_entitlements_hosts
-        [ Principal.host_from_url(ENV["CENTAUR_CONSOLE_URL"]) ]
       end
     end
   end

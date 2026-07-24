@@ -10,6 +10,14 @@ class PrincipalSyncConfigSnapshot < ApplicationRecord
   validates :principal_cache_version, presence: true
   validates :principal_id, uniqueness: { scope: :principal_cache_version }
 
+  def config
+    payload.fetch("config", payload)
+  end
+
+  def postgres_setting_templates
+    payload.fetch("postgres_setting_templates", {})
+  end
+
   # Returns the freshest usable snapshot, stale-while-revalidate style. When
   # the current-version snapshot is stale or missing, exactly one caller
   # rebuilds it (non-blocking row lock on the principal); concurrent callers
@@ -76,7 +84,7 @@ class PrincipalSyncConfigSnapshot < ApplicationRecord
     snapshot = find_or_initialize_by(principal: principal, principal_cache_version: version)
     return snapshot if snapshot.persisted? && snapshot.fresh_for?(principal)
 
-    snapshot.payload = principal.effective_config(redact_secrets: false)
+    snapshot.payload = principal.sync_config_snapshot_payload
     if snapshot.changed?
       snapshot.save!
     else

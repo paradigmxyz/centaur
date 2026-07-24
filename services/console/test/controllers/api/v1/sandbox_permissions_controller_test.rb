@@ -20,6 +20,10 @@ module Api
       end
 
       test "returns redacted sandbox permissions for a valid sandbox token" do
+        pg = pg_dsn_secrets(:acme_analytics_pg)
+        pg.update!(settings: [
+          { "name" => "centaur.slack_user_id", "value_from" => { "proxy_label" => "centaur.slack_user_id" } }
+        ])
         credential = BrokerCredential.create!(
           namespace: @proxy.principal.namespace,
           foreign_id: "google-personal",
@@ -76,6 +80,9 @@ module Api
         refute_includes response.body, "s3cr3t-db-pass"
         assert_equal "no-store", response.headers["Cache-Control"]
         assert_match(/\A"[0-9a-f]{64}"\z/, response.headers["ETag"])
+        permissions = data.fetch("permissions")
+        refute permissions.key?("postgres_setting_templates")
+        refute_includes response.body, "postgres_setting_templates"
       end
 
       test "rejects requests without a sandbox token" do

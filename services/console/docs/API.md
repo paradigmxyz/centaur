@@ -630,7 +630,7 @@ Listener and client knobs (bind address, client auth) are deliberately not model
 | `labels`      | optional    | Object; defaults to `{}`. |
 | `database`    | required    | Database name clients connect to through the proxy. Must match the upstream DSN's database. If several granted secrets use the same database, grant priority selects the effective route. |
 | `role`        | optional    | Upstream `SET ROLE` applied to the session. |
-| `settings`    | optional    | Ordered array of session variables (GUCs) the proxy SETs at session start, before the `SET ROLE`, and pins so clients cannot override them. Each entry is `{ "name", "value" }` for a literal value, or `{ "name", "value_from" }` to resolve the value from the assigned proxy principal at sync time (see [principal-derived values](#principal-derived-setting-values)). Names must be a bare or dotted identifier; `role` and `session_authorization` are reserved. Replaced wholesale on update. |
+| `settings`    | optional    | Ordered array of session variables (GUCs) the proxy SETs at session start, before the `SET ROLE`, and pins so clients cannot override them. Each entry is `{ "name", "value" }` for a literal value, or `{ "name", "value_from" }` to resolve the value from the assigned proxy principal or proxy labels at sync time (see [derived setting values](#derived-setting-values)). Names must be a bare or dotted identifier; `role` and `session_authorization` are reserved. Replaced wholesale on update. |
 | `dsn`         | required    | A [secret source](#secret-sources) resolving to the connection string. Replaced wholesale on update. |
 
 ### Create
@@ -676,10 +676,10 @@ Returns `201` with the created resource. Response shape:
 
 The `dsn` in responses never includes a `control_plane` `secret` value.
 
-### Principal-derived setting values
+### Derived setting values
 
-A setting may take its value from the proxy's assigned principal instead of
-storing a literal, by replacing `value` with `value_from`:
+A setting may take its value from the proxy's assigned principal or proxy
+labels instead of storing a literal, by replacing `value` with `value_from`:
 
 ```json
 { "name": "centaur.slack_channel_id", "value_from": { "principal_label": "slack_channel_id" } }
@@ -691,9 +691,10 @@ storing a literal, by replacing `value` with `value_from`:
 | ----------------- | ----------- |
 | `principal_label` | The named label on the assigned principal. A label the principal does not carry resolves to an empty string, so RLS-style policies fail closed. |
 | `principal_field` | One of the principal's identity fields: `id` (the opaque `prn_...` id), `namespace`, `foreign_id`, or `name`. |
+| `proxy_label`     | The named label on the proxy. A label the proxy does not carry resolves to an empty string, so RLS-style policies fail closed. |
 
 A setting has either `value` or `value_from`, never both; unknown
-`principal_field` names and blank `principal_label` keys are rejected at create
+`principal_field` names and blank label keys are rejected at create
 and update time. References are resolved only in the proxy sync and
 effective-config payloads; create, update, show, and list responses echo the
 stored reference.
@@ -816,13 +817,13 @@ The token credentials it refreshes with are fields on the credential, resolved b
 | `foreign_id`                   | optional    | Unique per namespace. Immutable. |
 | `name`, `description`          | optional    | |
 | `labels`                       | optional    | |
-| `grant`                        | optional    | One of `refresh_token`, `password`, or `preqin`. Defaults to `refresh_token`. |
+| `grant`                        | optional    | One of `refresh_token`, `client_credentials`, `password`, or `preqin`. Defaults to `refresh_token`. |
 | `token_endpoint`               | conditional | Token endpoint the refresh request is sent to. Required except `preqin`, which uses the fixed `https://api.preqin.com/connect/token` endpoint. |
 | `scopes`                       | optional    | Array of strings. |
-| `client_id`                    | conditional | OAuth client id. Required for standalone `refresh_token` and `password` credentials. Returned in responses. Not used for `preqin`. |
-| `client_secret`                | optional    | OAuth client secret. Write-only and encrypted at rest; omit for public clients. Never returned. |
+| `client_id`                    | conditional | OAuth client id. Required for standalone `refresh_token`, `client_credentials`, and `password` credentials. Returned in responses. Not used for `preqin`. |
+| `client_secret`                | conditional | OAuth client secret. Required for `client_credentials`, optional for `refresh_token` and `password`, and not used for `preqin`. Write-only and encrypted at rest; omit for public clients. Never returned. |
 | `token_endpoint_headers`       | optional    | Object mapping header name to a string value, sent on the refresh request. Values are write-only and encrypted; only the header names are returned (as `token_endpoint_header_names`). |
-| `refresh_token`                | optional    | Write-only initial value for `refresh_token` credentials. Also used by `password` credentials when the provider returns one. Supplying a value schedules the credential immediately and clears dead state. Never returned. |
+| `refresh_token`                | optional    | Write-only initial value for `refresh_token` credentials. Also used by `password` credentials when the provider returns one. Not used by `client_credentials` credentials. Supplying a value schedules the credential immediately and clears dead state. Never returned. |
 | `username`                     | conditional | Required for `password` credentials. Write-only and encrypted at rest. Never returned. |
 | `password`                     | conditional | Required for `password` credentials. Write-only and encrypted at rest. Never returned. |
 | `api_key`                      | conditional | Required for `preqin` credentials. Write-only and encrypted at rest. Never returned. |
@@ -851,6 +852,8 @@ Read-only fields are returned but never accepted in requests:
 The minted `access_token`, the `refresh_token`, `username`, `password`, `api_key`, the `client_secret`, and the `token_endpoint_headers` values are never returned in any response.
 
 Password-grant credentials first use the stored initial values with `grant_type=password`. If the token endpoint returns a `refresh_token`, iron-control stores it and uses `grant_type=refresh_token` on later scheduled refreshes. If that stored refresh token is rejected with an unrecoverable OAuth error, iron-control retries once with `grant_type=password`; retryable network, 5xx, rate-limit, and parse failures keep the existing backoff behavior and do not fall back to password.
+
+Client-credentials credentials use the stored `client_id` and encrypted `client_secret` with `grant_type=client_credentials` every time they mint an access token. Providers that return only `access_token`, `token_type`, and `expires_in` are supported; no `refresh_token` is required or stored.
 
 Credentials minted by the [OAuth consent flow](#oauth-consent-flow) are linked to an OAuth app and delegate their `client_id` and `client_secret` to it: rotating the app's secret applies to every credential it minted. Such a credential needs no `client_id`/`client_secret` of its own, and its `scopes` reflect exactly what the IdP granted.
 
@@ -922,6 +925,22 @@ Password-grant providers use the same endpoint with `grant: "password"`:
     "username": "user@example.com",
     "password": "account-password",
     "token_endpoint_headers": { "x-api-key": "api-key" }
+  }
+}
+```
+
+Client-credentials providers use the same endpoint with `grant: "client_credentials"`:
+
+```json
+{
+  "data": {
+    "namespace": "default",
+    "foreign_id": "bloomberg-dl",
+    "name": "Bloomberg DL",
+    "grant": "client_credentials",
+    "token_endpoint": "https://bsso.blpprofessional.com/ext/api/as/token.oauth2",
+    "client_id": "client-id",
+    "client_secret": "client-secret"
   }
 }
 ```
@@ -1429,7 +1448,17 @@ A proxy's `status` is `assigned` when it currently holds a principal and `unassi
 `POST /api/v1/proxies`
 
 ```json
-{ "data": { "name": "Edge Proxy - US", "principal_id": "prn_..." } }
+{
+  "data": {
+    "name": "Edge Proxy - US",
+    "principal_id": "prn_...",
+    "labels": {
+      "centaur.slack_user_id": "U0123456789",
+      "centaur.slack_team_id": "T0123456789",
+      "centaur.slack_channel_id": "C0123456789"
+    }
+  }
+}
 ```
 
 Returns `201`. The plaintext proxy `token` (`iprx_...`) is included **only** in this create response: save it immediately. The proxy uses it to authenticate to [proxy sync](#proxy-sync).
@@ -1441,6 +1470,11 @@ Returns `201`. The plaintext proxy `token` (`iprx_...`) is included **only** in 
     "name": "Edge Proxy - US",
     "principal_id": "prn_...",
     "status": "assigned",
+    "labels": {
+      "centaur.slack_user_id": "U0123456789",
+      "centaur.slack_team_id": "T0123456789",
+      "centaur.slack_channel_id": "C0123456789"
+    },
     "principal_assigned_at": "2026-06-01T10:00:00Z",
     "created_at": "2026-06-01T10:00:00Z",
     "updated_at": "2026-06-01T10:00:00Z"
@@ -1448,7 +1482,7 @@ Returns `201`. The plaintext proxy `token` (`iprx_...`) is included **only** in 
 }
 ```
 
-`name` is required. `principal_id` is optional: omit it to create an unassigned proxy (`status` is then `unassigned`, `principal_id` and `principal_assigned_at` are `null`). When supplied, a missing principal returns `404`.
+`name` is required. `principal_id` is optional: omit it to create an unassigned proxy (`status` is then `unassigned`, `principal_id` and `principal_assigned_at` are `null`). `labels` is optional and defaults to `{}`; keys and values must be strings. Labels initialized by Centaur's Slack API path use the `centaur.` prefix. When supplied, a missing principal returns `404`.
 
 ### Assign, swap, or clear the principal
 
@@ -1458,13 +1492,13 @@ Returns `201`. The plaintext proxy `token` (`iprx_...`) is included **only** in 
 { "data": { "principal_id": "prn_..." } }
 ```
 
-Assigns the principal when the proxy is unassigned, or swaps it when already assigned. The token is unchanged; the proxy picks up the new config on its next [sync](#proxy-sync). Send `"principal_id": null` to unassign. Omitting `principal_id` leaves the assignment unchanged; `name` may also be updated. A missing principal returns `404`. Returns `200` with the updated proxy.
+Assigns the principal when the proxy is unassigned, or swaps it when already assigned. The token is unchanged; the proxy picks up the new config on its next [sync](#proxy-sync). Send `"principal_id": null` to unassign. Omitting `principal_id` leaves the assignment unchanged; `name` and `labels` may also be updated. Omitting `labels` leaves labels unchanged, `"labels": null` clears labels, and an object replaces labels. A missing principal returns `404`. Returns `200` with the updated proxy.
 
 ### Other operations
 
 | Method   | Path | Notes |
 | -------- | ---- | ----- |
-| `GET`    | `/api/v1/proxies` | List. Optional `principal_id` filter; paginated. Tokens are never returned. |
+| `GET`    | `/api/v1/proxies` | List. Optional `principal_id` and `labels[k]=v` filters; paginated. Tokens are never returned. |
 | `GET`    | `/api/v1/proxies/:id` | Fetch one (no token). |
 | `DELETE` | `/api/v1/proxies/:id` | Deregister. Returns `204`. |
 

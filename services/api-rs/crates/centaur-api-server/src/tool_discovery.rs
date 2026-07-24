@@ -984,14 +984,24 @@ fn parse_pg_dsn_setting_value_from(
     })?;
     let principal_label = optional_str(table, "principal_label").map(ToOwned::to_owned);
     let principal_field = optional_str(table, "principal_field").map(ToOwned::to_owned);
-    if principal_label.is_none() && principal_field.is_none() {
+    let proxy_label = optional_str(table, "proxy_label").map(ToOwned::to_owned);
+    let declared = [
+        principal_label.as_ref(),
+        principal_field.as_ref(),
+        proxy_label.as_ref(),
+    ]
+    .into_iter()
+    .filter(|value| value.is_some())
+    .count();
+    if declared != 1 {
         return Err(ToolDiscoveryError::Invalid(
-            "pg_dsn setting value_from must declare principal_label or principal_field".to_owned(),
+            "pg_dsn setting value_from must declare exactly one of principal_label, principal_field, or proxy_label".to_owned(),
         ));
     }
     Ok(Some(PgDsnSettingValueFrom {
         principal_label,
         principal_field,
+        proxy_label,
     }))
 }
 
@@ -1620,14 +1630,26 @@ mod tests {
             labels: tool_labels("company_context", "centaur"),
             database: "warehouse".to_owned(),
             role: Some("centaur_slack_reader".to_owned()),
-            settings: vec![PgDsnSetting {
-                name: "centaur.slack_channel_id".to_owned(),
-                value: None,
-                value_from: Some(PgDsnSettingValueFrom {
-                    principal_label: Some("slack_channel_id".to_owned()),
-                    principal_field: None,
-                }),
-            }],
+            settings: vec![
+                PgDsnSetting {
+                    name: "centaur.slack_channel_id".to_owned(),
+                    value: None,
+                    value_from: Some(PgDsnSettingValueFrom {
+                        principal_label: Some("slack_channel_id".to_owned()),
+                        principal_field: None,
+                        proxy_label: None,
+                    }),
+                },
+                PgDsnSetting {
+                    name: "centaur.slack_user_id".to_owned(),
+                    value: None,
+                    value_from: Some(PgDsnSettingValueFrom {
+                        principal_label: None,
+                        principal_field: None,
+                        proxy_label: Some("centaur.slack_user_id".to_owned()),
+                    }),
+                },
+            ],
         })])
         .unwrap();
 
@@ -1638,8 +1660,41 @@ mod tests {
             listeners[0].extra.get("role").and_then(YamlValue::as_str),
             Some("centaur_slack_reader")
         );
-        assert_eq!(listeners[0].settings.len(), 1);
+        assert_eq!(listeners[0].settings.len(), 2);
         assert_eq!(listeners[0].settings[0].name, "centaur.slack_channel_id");
+        assert_eq!(listeners[0].settings[1].name, "centaur.slack_user_id");
+        assert_eq!(
+            listeners[0].settings[1]
+                .value_from
+                .as_ref()
+                .and_then(|value_from| value_from.proxy_label.as_deref()),
+            Some("centaur.slack_user_id")
+        );
+    }
+
+    #[test]
+    fn rejects_pg_dsn_value_from_with_multiple_selectors() {
+        let value: TomlValue = toml::from_str(
+            r#"
+database = "warehouse"
+settings = [
+  { name = "centaur.slack_user_id", value_from = { principal_label = "slack_user_id", proxy_label = "centaur.slack_user_id" } }
+]
+"#,
+        )
+        .unwrap();
+        let err = parse_pg_dsn_secret(
+            value.as_table().unwrap(),
+            "RESHIFT_DSN".to_owned(),
+            "RESHIFT_DSN".to_owned(),
+            &BTreeMap::new(),
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("must declare exactly one"),
+            "{err}"
+        );
     }
 
     #[test]

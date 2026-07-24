@@ -760,6 +760,7 @@ struct EnsureSessionSandboxRequest<'a> {
     existing_sandbox_id: Option<&'a str>,
     existing_sandbox_capabilities: Option<&'a SessionSandboxCapabilities>,
     iron_control_principal: Option<&'a str>,
+    proxy_labels: &'a BTreeMap<String, String>,
     desired_capabilities: &'a SessionSandboxCapabilities,
     execution_id: &'a str,
 }
@@ -1040,7 +1041,7 @@ impl SessionRuntime {
         let metadata = tool_host_session_metadata(principal_id);
         let session = self
             .store
-            .create_or_get_session(thread_key, &harness, None, metadata)
+            .create_or_get_session(thread_key, &harness, None, metadata, BTreeMap::new())
             .await?;
         if self.iron_control.is_some()
             && session.iron_control_principal.as_deref() != Some(principal_id)
@@ -1355,6 +1356,7 @@ impl SessionRuntime {
             );
             let mut harness_switched = false;
             let mut session_metadata = default_metadata(metadata);
+            let proxy_labels = proxy_labels_from_session_metadata(thread_key, &session_metadata);
             let (registered_principal, desired_capabilities) =
                 if let Some(registrar) = &self.iron_control {
                     let principal = registrar
@@ -1377,6 +1379,7 @@ impl SessionRuntime {
                     harness_type,
                     persona_resolution.persona_id.as_deref(),
                     session_metadata.clone(),
+                    proxy_labels.clone(),
                 )
                 .await
             {
@@ -1390,6 +1393,7 @@ impl SessionRuntime {
                             harness_type,
                             existing.as_deref(),
                             default_metadata(None),
+                            BTreeMap::new(),
                         )
                         .await?
                 }
@@ -1939,6 +1943,7 @@ impl SessionRuntime {
                     existing_sandbox_id: session.sandbox_id.as_deref(),
                     existing_sandbox_capabilities: session.sandbox_capabilities.as_ref(),
                     iron_control_principal: session.iron_control_principal.as_deref(),
+                    proxy_labels: &session.proxy_labels,
                     desired_capabilities: &desired_capabilities,
                     execution_id: &execution.execution_id,
                 })
@@ -2328,6 +2333,7 @@ impl SessionRuntime {
             existing_sandbox_id,
             existing_sandbox_capabilities,
             iron_control_principal,
+            proxy_labels,
             desired_capabilities,
             execution_id,
         } = request;
@@ -2398,7 +2404,11 @@ impl SessionRuntime {
                             if let Some(principal_id) = iron_control_principal {
                                 self.sandbox_runtime
                                     .manager
-                                    .ensure_iron_control_proxy_resources(&id, principal_id)
+                                    .ensure_iron_control_proxy_resources(
+                                        &id,
+                                        principal_id,
+                                        proxy_labels,
+                                    )
                                     .await?;
                             }
                             span.record("centaur.sandbox_id", sandbox_id);
@@ -2446,6 +2456,16 @@ impl SessionRuntime {
                                 .await
                             {
                                 Ok(()) => {
+                                    if let Some(principal_id) = iron_control_principal {
+                                        self.sandbox_runtime
+                                            .manager
+                                            .ensure_iron_control_proxy_resources(
+                                                &id,
+                                                principal_id,
+                                                proxy_labels,
+                                            )
+                                            .await?;
+                                    }
                                     span.record("centaur.sandbox_id", sandbox_id);
                                     span.record("sandbox_id", sandbox_id);
                                     let ready_duration = ensure_started.elapsed();
@@ -2566,7 +2586,7 @@ impl SessionRuntime {
                 })
             {
                 match warm_pool
-                    .claim(thread_key.as_str(), iron_control_principal)
+                    .claim(thread_key.as_str(), iron_control_principal, proxy_labels)
                     .await
                 {
                     Ok(Some(sandbox_id)) => {
@@ -2634,6 +2654,7 @@ impl SessionRuntime {
             );
             if let Some(principal) = iron_control_principal {
                 spec.iron_control_principal = Some(principal.to_owned());
+                spec.iron_control_proxy_labels = proxy_labels.clone();
             }
             apply_sandbox_boot_mode(&mut spec, &boot_mode);
             apply_sandbox_capabilities(&mut spec, desired_capabilities);
@@ -6615,6 +6636,54 @@ fn tool_host_session_metadata(principal_id: &str) -> Value {
     })
 }
 
+fn proxy_labels_from_session_metadata(
+    thread_key: &ThreadKey,
+    metadata: &Value,
+) -> BTreeMap<String, String> {
+    let mut labels = BTreeMap::new();
+    insert_metadata_string_label(
+        &mut labels,
+        "centaur.slack_user_id",
+        metadata.get("slack_user_id"),
+    );
+    insert_metadata_string_label(
+        &mut labels,
+        "centaur.slack_team_id",
+        metadata.get("slack_team_id"),
+    );
+    insert_metadata_string_label(
+        &mut labels,
+        "centaur.slack_channel_id",
+        metadata.get("slack_channel_id"),
+    );
+    if !labels.contains_key("centaur.slack_channel_id")
+        && let Some(channel_id) = slack_conversation_id(thread_key)
+    {
+        labels.insert("centaur.slack_channel_id".to_owned(), channel_id.to_owned());
+    }
+    labels
+}
+
+fn insert_metadata_string_label(
+    labels: &mut BTreeMap<String, String>,
+    label: &str,
+    value: Option<&Value>,
+) {
+    let Some(value) = value.and_then(Value::as_str).map(str::trim) else {
+        return;
+    };
+    if !value.is_empty() {
+        labels.insert(label.to_owned(), value.to_owned());
+    }
+}
+
+fn slack_conversation_id(thread_key: &ThreadKey) -> Option<String> {
+    if let Some(ChatDestination::Slack { channel_id, .. }) = thread_key.chat_destination() {
+        return Some(channel_id);
+    }
+    None
+}
+
 fn sandbox_boot_mode_for_thread(
     thread_key: &ThreadKey,
     iron_control_principal: Option<&str>,
@@ -8157,6 +8226,49 @@ mod tests {
         assert_ne!(thread_trace_parent_span_id(&thread_key), "0000000000000000");
     }
 
+    #[test]
+    fn proxy_labels_from_session_metadata_use_centaur_slack_keys() {
+        let thread_key = ThreadKey::parse("slack:T123:C123:1700000000.000000").unwrap();
+        let labels = proxy_labels_from_session_metadata(
+            &thread_key,
+            &json!({
+                "slack_user_id": "U123",
+                "slack_team_id": "T123",
+                "slack_channel_id": "C456",
+                "slack_user_email": "ada@example.com"
+            }),
+        );
+
+        assert_eq!(
+            labels,
+            BTreeMap::from([
+                ("centaur.slack_channel_id".to_owned(), "C456".to_owned()),
+                ("centaur.slack_team_id".to_owned(), "T123".to_owned()),
+                ("centaur.slack_user_id".to_owned(), "U123".to_owned()),
+            ])
+        );
+    }
+
+    #[test]
+    fn proxy_labels_from_session_metadata_does_not_infer_slack_channel_for_linear_keys() {
+        let thread_key = ThreadKey::parse("linear:CEN-123:s:agent-session").unwrap();
+        let labels = proxy_labels_from_session_metadata(
+            &thread_key,
+            &json!({
+                "slack_user_id": "U123",
+                "slack_team_id": "T123",
+            }),
+        );
+
+        assert_eq!(
+            labels,
+            BTreeMap::from([
+                ("centaur.slack_team_id".to_owned(), "T123".to_owned()),
+                ("centaur.slack_user_id".to_owned(), "U123".to_owned()),
+            ])
+        );
+    }
+
     fn session_with_sandbox(sandbox_id: &str) -> Session {
         let thread_key = ThreadKey::parse("cli:test-idle").unwrap();
         let now = OffsetDateTime::now_utc();
@@ -8170,6 +8282,7 @@ mod tests {
             persona_id: None,
             status: SessionStatus::Idle,
             iron_control_principal: None,
+            proxy_labels: BTreeMap::new(),
             sandbox_last_active_at: Some(now),
             created_at: now,
             updated_at: now,
@@ -8237,6 +8350,8 @@ mod adoption_tests {
     /// fully terminalizes its own executions before releasing the lock.
     static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
+    type ProxyEnsure = (String, String, BTreeMap<String, String>);
+
     struct MockBackend {
         ios: Mutex<VecDeque<SandboxIo>>,
         recorded_output: std::sync::Mutex<Vec<String>>,
@@ -8247,7 +8362,7 @@ mod adoption_tests {
         created_specs: std::sync::Mutex<Vec<SandboxSpec>>,
         resume_fails: AtomicBool,
         stopped: std::sync::Mutex<Vec<String>>,
-        proxy_ensures: std::sync::Mutex<Vec<(String, String)>>,
+        proxy_ensures: std::sync::Mutex<Vec<ProxyEnsure>>,
         missing_on_stop: std::sync::Mutex<BTreeSet<String>>,
     }
 
@@ -8314,7 +8429,7 @@ mod adoption_tests {
             self.stopped.lock().unwrap().clone()
         }
 
-        fn proxy_ensures(&self) -> Vec<(String, String)> {
+        fn proxy_ensures(&self) -> Vec<ProxyEnsure> {
             self.proxy_ensures.lock().unwrap().clone()
         }
 
@@ -8390,11 +8505,13 @@ mod adoption_tests {
             &self,
             id: &SandboxId,
             principal_id: &str,
+            labels: &BTreeMap<String, String>,
         ) -> SandboxResult<()> {
-            self.proxy_ensures
-                .lock()
-                .unwrap()
-                .push((id.as_str().to_owned(), principal_id.to_owned()));
+            self.proxy_ensures.lock().unwrap().push((
+                id.as_str().to_owned(),
+                principal_id.to_owned(),
+                labels.clone(),
+            ));
             Ok(())
         }
 
@@ -8466,7 +8583,13 @@ mod adoption_tests {
         running: bool,
     ) -> String {
         store
-            .create_or_get_session(thread_key, &HarnessType::Codex, None, json!({}))
+            .create_or_get_session(
+                thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
             .await
             .expect("create session");
         if sandbox_id.is_some() {
@@ -8656,7 +8779,13 @@ mod adoption_tests {
         let _serial = TEST_LOCK.lock().await;
         let thread_key = ThreadKey::parse(format!("test:title-{}", uuid::Uuid::new_v4())).unwrap();
         store
-            .create_or_get_session(&thread_key, &HarnessType::Codex, None, json!({}))
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
             .await
             .expect("create session");
 
@@ -8827,7 +8956,13 @@ mod adoption_tests {
         let thread_key =
             ThreadKey::parse(format!("test:cap-replace-{}", uuid::Uuid::new_v4())).unwrap();
         store
-            .create_or_get_session(&thread_key, &HarnessType::Codex, None, json!({}))
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
             .await
             .expect("create session");
         store
@@ -8852,6 +8987,7 @@ mod adoption_tests {
                 existing_sandbox_id: session.sandbox_id.as_deref(),
                 existing_sandbox_capabilities: session.sandbox_capabilities.as_ref(),
                 iron_control_principal: None,
+                proxy_labels: &BTreeMap::new(),
                 desired_capabilities: &restricted_capabilities(),
                 execution_id: &execution_id,
             })
@@ -8904,7 +9040,13 @@ mod adoption_tests {
         let thread_key =
             ThreadKey::parse(format!("test:cap-warm-skip-{}", uuid::Uuid::new_v4())).unwrap();
         store
-            .create_or_get_session(&thread_key, &HarnessType::Codex, None, json!({}))
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
             .await
             .expect("create session");
         let execution_id = store
@@ -8936,6 +9078,7 @@ mod adoption_tests {
                 existing_sandbox_id: None,
                 existing_sandbox_capabilities: None,
                 iron_control_principal: None,
+                proxy_labels: &BTreeMap::new(),
                 desired_capabilities: &restricted_capabilities(),
                 execution_id: &execution_id,
             })
@@ -8970,7 +9113,13 @@ mod adoption_tests {
         let thread_key =
             ThreadKey::parse(format!("test:proxy-reuse-{}", uuid::Uuid::new_v4())).unwrap();
         store
-            .create_or_get_session(&thread_key, &HarnessType::Codex, None, json!({}))
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
             .await
             .expect("create session");
         let execution_id = store
@@ -8982,6 +9131,8 @@ mod adoption_tests {
 
         let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
         let runtime = runtime_with(&store, backend.clone());
+        let proxy_labels =
+            BTreeMap::from([("centaur.slack_user_id".to_owned(), "U0123456789".to_owned())]);
         let sandbox_id = runtime
             .ensure_session_sandbox(EnsureSessionSandboxRequest {
                 thread_key: &thread_key,
@@ -8990,6 +9141,7 @@ mod adoption_tests {
                 existing_sandbox_id: Some("sbx-existing"),
                 existing_sandbox_capabilities: None,
                 iron_control_principal: Some("principal-existing"),
+                proxy_labels: &proxy_labels,
                 desired_capabilities: &SessionSandboxCapabilities::default_enabled(),
                 execution_id: &execution_id,
             })
@@ -8999,7 +9151,11 @@ mod adoption_tests {
         assert_eq!(sandbox_id, "sbx-existing");
         assert_eq!(
             backend.proxy_ensures(),
-            vec![("sbx-existing".to_owned(), "principal-existing".to_owned())]
+            vec![(
+                "sbx-existing".to_owned(),
+                "principal-existing".to_owned(),
+                proxy_labels
+            )]
         );
     }
 
@@ -9031,7 +9187,13 @@ mod adoption_tests {
             ThreadKey::parse(format!("test:capacity-trigger-{}", uuid::Uuid::new_v4())).unwrap();
 
         store
-            .create_or_get_session(&stale_thread, &HarnessType::Codex, None, json!({}))
+            .create_or_get_session(
+                &stale_thread,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
             .await
             .expect("create stale session");
         store
@@ -9039,7 +9201,13 @@ mod adoption_tests {
             .await
             .expect("assign stale sandbox");
         store
-            .create_or_get_session(&paused_thread, &HarnessType::Codex, None, json!({}))
+            .create_or_get_session(
+                &paused_thread,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
             .await
             .expect("create paused session");
         store
@@ -9060,7 +9228,13 @@ mod adoption_tests {
             .await
             .expect("append paused event");
         store
-            .create_or_get_session(&old_thread, &HarnessType::Codex, None, json!({}))
+            .create_or_get_session(
+                &old_thread,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
             .await
             .expect("create old session");
         store
@@ -9068,7 +9242,13 @@ mod adoption_tests {
             .await
             .expect("assign old sandbox");
         store
-            .create_or_get_session(&hot_thread, &HarnessType::Codex, None, json!({}))
+            .create_or_get_session(
+                &hot_thread,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
             .await
             .expect("create hot session");
         store
@@ -9158,6 +9338,7 @@ mod adoption_tests {
                     "workflow_run_id": workflow_run_id,
                     "workflow_owned_thread": true,
                 }),
+                Default::default(),
             )
             .await
             .expect("create session");
@@ -9230,6 +9411,7 @@ mod adoption_tests {
                     "source": "absurd_workflow",
                     "workflow_run_id": workflow_run_id,
                 }),
+                Default::default(),
             )
             .await
             .expect("create session");
@@ -9272,6 +9454,7 @@ mod adoption_tests {
                     "workflow_run_id": workflow_run_id,
                     "workflow_owned_thread": true,
                 }),
+                Default::default(),
             )
             .await
             .expect("create session");
@@ -9304,7 +9487,13 @@ mod adoption_tests {
         let thread_key =
             ThreadKey::parse(format!("test:resume-failed-{}", uuid::Uuid::new_v4())).unwrap();
         store
-            .create_or_get_session(&thread_key, &HarnessType::Codex, None, json!({}))
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
             .await
             .expect("create session");
         store
@@ -9333,6 +9522,7 @@ mod adoption_tests {
                 existing_sandbox_id: Some("sbx-old"),
                 existing_sandbox_capabilities: None,
                 iron_control_principal: None,
+                proxy_labels: &BTreeMap::new(),
                 desired_capabilities: &SessionSandboxCapabilities::default_enabled(),
                 execution_id: &execution_id,
             })

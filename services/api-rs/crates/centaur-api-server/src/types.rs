@@ -140,7 +140,9 @@ pub struct ListWorkflowRunsQuery {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct EmitWorkflowEventRequest {
-    pub event_name: String,
+    pub event_name: Option<String>,
+    pub event_type: Option<String>,
+    pub correlation_id: Option<String>,
     #[serde(default)]
     pub payload: Value,
 }

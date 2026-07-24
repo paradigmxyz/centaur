@@ -111,13 +111,34 @@ class Principal < ApplicationRecord
   # proxy can't dial an upstream without one. When several granted PG DSNs route
   # the same database, existing grant priority ordering decides the winner:
   # higher-priority grants appear later and overwrite lower-priority routes.
-  def sync_postgres
-    winners = {}
-    granted_pg_dsn_secrets.each do |pg|
-      next unless pg.dsn_source
-      winners[pg.database] = pg
+  def sync_postgres(proxy: nil)
+    sync_postgres_entries(proxy: proxy)
+  end
+
+  def sync_config_snapshot_payload
+    served = served_credentials
+    postgres, templates = sync_postgres_entries_with_templates
+    {
+      "config" => {
+        "secrets" => proxy_secrets_for(served) + generated_proxy_secrets,
+        "transforms" => proxy_transforms_for(served),
+        "postgres" => postgres
+      },
+      "postgres_setting_templates" => templates
+    }
+  end
+
+  def sync_postgres_entries(proxy: nil)
+    effective_pg_dsn_secrets.map { |pg| pg.to_proxy_dsn(principal: self, proxy: proxy) }
+  end
+
+  def sync_postgres_entries_with_templates
+    templates = {}
+    entries = effective_pg_dsn_secrets.map do |pg|
+      templates[pg.oid] = pg.settings if pg.proxy_label_settings?
+      pg.to_proxy_dsn(principal: self)
     end
-    winners.values.map { |pg| pg.to_proxy_dsn(principal: self) }
+    [ entries, templates ]
   end
 
   # The config this principal resolves to, in the same shape iron-proxy receives
@@ -212,6 +233,12 @@ class Principal < ApplicationRecord
   end
 
   private
+
+  def effective_pg_dsn_secrets
+    granted_pg_dsn_secrets.each_with_object({}) do |pg, winners|
+      winners[pg.database] = pg if pg.dsn_source
+    end.values
+  end
 
   def auto_grant_matching_oauth_credentials
     PrincipalCredentialReconciliation.new.apply_for_principal(self)

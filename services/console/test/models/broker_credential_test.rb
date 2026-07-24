@@ -59,6 +59,19 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     assert bc.valid?, bc.errors.full_messages.to_sentence
   end
 
+  test "client_credentials grant is valid with client credentials and no refresh token" do
+    bc = build_credential(grant: "client_credentials", refresh_token: nil,
+                          client_id: "cid", client_secret: "sec")
+    assert bc.valid?, bc.errors.full_messages.to_sentence
+  end
+
+  test "client_credentials grant requires a client secret" do
+    bc = build_credential(grant: "client_credentials", refresh_token: nil,
+                          client_id: "cid", client_secret: nil)
+    refute bc.valid?
+    assert bc.errors[:client_secret].any? { |m| m.include?("client_credentials grant") }
+  end
+
   test "password grant requires username and password" do
     bc = build_credential(grant: "password", username: "user", password: nil, refresh_token: nil)
     refute bc.valid?
@@ -275,6 +288,29 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     assert_equal "AT", bc.access_token
   end
 
+  test "client_credentials grant refreshes without a refresh_token" do
+    now = Time.current
+    captured = {}
+    bc = create_credential(grant: "client_credentials", refresh_token: nil,
+                           client_id: "bloomberg-client", client_secret: "bloomberg-secret",
+                           scopes: [])
+    bc.refresh_client = StubClient.new do |**kw|
+      captured = kw
+      result(access_token: "AT-client", refresh_token: nil, expires_in: 7199)
+    end
+    bc.refresh!(now: now)
+    bc.reload
+
+    assert_equal "client_credentials", request_grant(captured)
+    assert_equal "bloomberg-client", captured[:form]["client_id"]
+    assert_equal "bloomberg-secret", captured[:form]["client_secret"]
+    refute captured[:form].key?("refresh_token")
+    assert_equal "AT-client", bc.access_token
+    assert_nil bc.refresh_token
+    assert_in_delta (now + 7199).to_f, bc.expires_at.to_f, 1
+    refute bc.dead?
+  end
+
   test "password grant prefers a stored refresh_token" do
     captured = {}
     bc = create_credential(grant: "password", username: "user", password: "pass", refresh_token: "RT-old")
@@ -446,6 +482,14 @@ class BrokerCredentialTest < ActiveSupport::TestCase
   test "refreshable includes preqin credentials without a refresh_token" do
     bc = create_credential(grant: "preqin", client_id: nil, username: "user",
                            api_key: "api-key", refresh_token: nil)
+    bc.update_columns(last_refresh: 1.hour.ago, next_attempt_at: 1.minute.ago)
+
+    assert_includes BrokerCredential.refreshable.pluck(:id), bc.id
+  end
+
+  test "refreshable includes client_credentials without a refresh_token after a prior refresh" do
+    bc = create_credential(grant: "client_credentials", refresh_token: nil,
+                           client_id: "cid", client_secret: "sec")
     bc.update_columns(last_refresh: 1.hour.ago, next_attempt_at: 1.minute.ago)
 
     assert_includes BrokerCredential.refreshable.pluck(:id), bc.id

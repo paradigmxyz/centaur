@@ -102,7 +102,7 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
 
     snapshot = PrincipalSyncConfigSnapshot.find_by!(principal: @proxy.principal)
     assert_equal @proxy.principal.sync_config_cache_version, snapshot.principal_cache_version
-    assert_equal "s3cr3t-db-pass", snapshot.payload.dig("secrets", 1, "source", "value")
+    assert_equal "s3cr3t-db-pass", snapshot.config.dig("secrets", 1, "source", "value")
 
     raw = PrincipalSyncConfigSnapshot.connection.select_value(
       "SELECT payload FROM principal_sync_config_snapshots WHERE id = #{snapshot.id}"
@@ -228,7 +228,7 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
 
     original_hash = json_body.fetch("config_hash")
     snapshot = PrincipalSyncConfigSnapshot.find_by!(principal: @proxy.principal)
-    transform = snapshot.payload.fetch("transforms").find { |t| t["name"] == "gcp_id_token" }
+    transform = snapshot.config.fetch("transforms").find { |t| t["name"] == "gcp_id_token" }
     assert_equal secret.audience, transform.dig("config", "audience")
     assert_equal "CLOUD_RUN_SA_KEYFILE", transform.dig("config", "keyfile", "var")
 
@@ -315,6 +315,26 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
     entry = json_body.fetch("postgres").find { |e| e["foreign_id"] == pg.foreign_id }
     assert_equal(
       [ { "name" => "centaur.slack_channel_id", "value" => "C0123456789" } ],
+      entry["settings"]
+    )
+  end
+
+  test "postgres entries resolve value_from settings against proxy labels" do
+    @proxy.update!(labels: { "centaur.slack_user_id" => "U0123456789" })
+    pg = pg_dsn_secrets(:acme_analytics_pg)
+    pg.update!(settings: [
+      {
+        "name" => "centaur.slack_user_id",
+        "value_from" => { "proxy_label" => "centaur.slack_user_id" }
+      }
+    ])
+
+    post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
+    assert_response :ok
+
+    entry = json_body.fetch("postgres").find { |e| e["foreign_id"] == pg.foreign_id }
+    assert_equal(
+      [ { "name" => "centaur.slack_user_id", "value" => "U0123456789" } ],
       entry["settings"]
     )
   end

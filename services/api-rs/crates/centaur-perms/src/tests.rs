@@ -372,7 +372,7 @@ fn aws_auth_requires_hosts() {
 #[test]
 fn parses_pg_dsn_secret() {
     let parsed = tools::parse_secret(
-        &entry(r#"{ type = "pg_dsn", name = "RESHIFT_DSN", database = "pmadmin", secret_ref = "RESHIFT_DSN", role = "centaur_slack_reader", settings = [{ name = "centaur.slack_channel_id", value_from = { principal_label = "slack_channel_id" } }] }"#),
+        &entry(r#"{ type = "pg_dsn", name = "RESHIFT_DSN", database = "pmadmin", secret_ref = "RESHIFT_DSN", role = "centaur_slack_reader", settings = [{ name = "centaur.slack_channel_id", value_from = { principal_label = "slack_channel_id" } }, { name = "centaur.slack_user_id", value_from = { proxy_label = "centaur.slack_user_id" } }] }"#),
         &[],
     )
     .unwrap();
@@ -383,7 +383,7 @@ fn parses_pg_dsn_secret() {
     assert_eq!(pg.database, "pmadmin");
     assert_eq!(pg.secret_ref, "RESHIFT_DSN");
     assert_eq!(pg.role.as_deref(), Some("centaur_slack_reader"));
-    assert_eq!(pg.settings.len(), 1);
+    assert_eq!(pg.settings.len(), 2);
     assert_eq!(pg.settings[0].name, "centaur.slack_channel_id");
     assert_eq!(
         pg.settings[0]
@@ -391,6 +391,28 @@ fn parses_pg_dsn_secret() {
             .as_ref()
             .and_then(|value_from| value_from.principal_label.as_deref()),
         Some("slack_channel_id")
+    );
+    assert_eq!(pg.settings[1].name, "centaur.slack_user_id");
+    assert_eq!(
+        pg.settings[1]
+            .value_from
+            .as_ref()
+            .and_then(|value_from| value_from.proxy_label.as_deref()),
+        Some("centaur.slack_user_id")
+    );
+}
+
+#[test]
+fn rejects_pg_dsn_value_from_with_multiple_selectors() {
+    let err = tools::parse_secret(
+        &entry(r#"{ type = "pg_dsn", name = "RESHIFT_DSN", database = "pmadmin", secret_ref = "RESHIFT_DSN", settings = [{ name = "centaur.slack_user_id", value_from = { principal_label = "slack_user_id", proxy_label = "centaur.slack_user_id" } }] }"#),
+        &[],
+    )
+    .unwrap_err();
+
+    assert!(
+        err.to_string().contains("must declare exactly one"),
+        "{err}"
     );
 }
 
@@ -541,7 +563,7 @@ fn translates_oauth_with_json_key_fields() {
 fn translates_pg_dsn_to_input_with_roundtrip_foreign_id() {
     let secrets = vec![
         tools::parse_secret(
-            &entry(r#"{ type = "pg_dsn", name = "RESHIFT_DSN", database = "pmadmin", secret_ref = "RESHIFT_DSN", role = "centaur_slack_reader", settings = [{ name = "centaur.slack_channel_id", value_from = { principal_label = "slack_channel_id" } }] }"#),
+            &entry(r#"{ type = "pg_dsn", name = "RESHIFT_DSN", database = "pmadmin", secret_ref = "RESHIFT_DSN", role = "centaur_slack_reader", settings = [{ name = "centaur.slack_channel_id", value_from = { principal_label = "slack_channel_id" } }, { name = "centaur.slack_user_id", value_from = { proxy_label = "centaur.slack_user_id" } }] }"#),
             &[],
         )
         .unwrap(),
@@ -557,13 +579,20 @@ fn translates_pg_dsn_to_input_with_roundtrip_foreign_id() {
     assert_eq!(input.name, "RESHIFT_DSN");
     assert_eq!(input.database, "pmadmin");
     assert_eq!(input.role.as_deref(), Some("centaur_slack_reader"));
-    assert_eq!(input.settings.len(), 1);
+    assert_eq!(input.settings.len(), 2);
     assert_eq!(
         input.settings[0]
             .value_from
             .as_ref()
             .and_then(|value_from| value_from.principal_label.as_deref()),
         Some("slack_channel_id")
+    );
+    assert_eq!(
+        input.settings[1]
+            .value_from
+            .as_ref()
+            .and_then(|value_from| value_from.proxy_label.as_deref()),
+        Some("centaur.slack_user_id")
     );
     assert_eq!(input.dsn.source_type, "env");
     assert_eq!(

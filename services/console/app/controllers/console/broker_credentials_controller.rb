@@ -69,7 +69,10 @@ module Console
       credential.labels = label_params
 
       secret = credential_params[:client_secret]
-      credential.client_secret = secret if secret.present?
+      if secret.present?
+        credential.client_secret = secret
+        reset_refresh_state(credential) if credential.grant == "client_credentials"
+      end
       apply_initial_values(credential)
     end
 
@@ -95,6 +98,13 @@ module Console
       end
       return unless changed
 
+      credential.dead = false
+      credential.dead_reason = nil
+      credential.failure_count = 0
+      credential.next_attempt_at = Time.current
+    end
+
+    def reset_refresh_state(credential)
       credential.dead = false
       credential.dead_reason = nil
       credential.failure_count = 0

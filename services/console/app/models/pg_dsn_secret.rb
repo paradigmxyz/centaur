@@ -28,7 +28,7 @@ class PgDsnSecret < ApplicationRecord
   RESERVED_SETTING_NAMES = %w[role session_authorization].freeze
 
   # A setting's `value_from` reference takes exactly one of these keys.
-  VALUE_FROM_KEYS = %w[principal_label principal_field].freeze
+  VALUE_FROM_KEYS = %w[principal_label principal_field proxy_label].freeze
   # Principal attributes a `principal_field` reference may name, matching how
   # the API serializes principals (`id` is the opaque oid).
   PRINCIPAL_FIELDS = %w[id namespace foreign_id name].freeze
@@ -41,7 +41,7 @@ class PgDsnSecret < ApplicationRecord
   # `database`. The opaque id is carried too so the proxy can refer back to the
   # canonical resource (it ignores fields it does not use). The DSN reuses the
   # shared secrets source shape.
-  def to_proxy_dsn(principal: nil)
+  def to_proxy_dsn(principal: nil, proxy: nil)
     entry = {
       "id" => oid,
       "foreign_id" => foreign_id,
@@ -49,7 +49,7 @@ class PgDsnSecret < ApplicationRecord
       "dsn" => dsn_source&.to_proxy_source
     }
     entry["role"] = role if role.present?
-    rendered_settings = proxy_settings(principal: principal)
+    rendered_settings = proxy_settings(principal: principal, proxy: proxy)
     entry["settings"] = rendered_settings if rendered_settings.present?
     entry
   end
@@ -57,13 +57,24 @@ class PgDsnSecret < ApplicationRecord
   # The pinned session settings as the proxy expects them: an ordered array of
   # { "name", "value" } objects. Normalizes whatever shape was stored (string
   # keys, blank rows) into the canonical form, dropping entries without a name,
-  # and resolves `value_from` references against the given principal.
-  def proxy_settings(principal: nil)
+  # and resolves `value_from` references against the given principal/proxy.
+  def proxy_settings(principal: nil, proxy: nil)
     Array(settings).filter_map do |s|
       next unless s.is_a?(Hash)
       name = s["name"].presence || s[:name].presence
       next if name.blank?
-      { "name" => name, "value" => setting_value(s, principal) }
+      { "name" => name, "value" => setting_value(s, principal, proxy) }
+    end
+  end
+
+  def proxy_label_settings?
+    Array(settings).any? do |setting|
+      next false unless setting.is_a?(Hash)
+
+      ref = setting["value_from"] || setting[:value_from]
+      next false unless ref.is_a?(Hash)
+
+      (ref["proxy_label"] || ref[:proxy_label]).present?
     end
   end
 
@@ -83,16 +94,20 @@ class PgDsnSecret < ApplicationRecord
   end
 
   # The concrete value the proxy should pin: the stored literal, or the
-  # principal attribute/label a `value_from` reference names. References
-  # resolve to "" when no principal is given or the label is absent, so
+  # principal/proxy attribute or label a `value_from` reference names. References
+  # resolve to "" when no principal/proxy is given or the label is absent, so
   # RLS-style policies fail closed rather than seeing a literal placeholder.
-  def setting_value(setting, principal)
+  def setting_value(setting, principal, proxy)
     ref = setting["value_from"] || setting[:value_from]
     return (setting["value"] || setting[:value]).to_s unless ref.is_a?(Hash)
-    return "" unless principal
 
     label = ref["principal_label"] || ref[:principal_label]
-    return principal.labels.fetch(label.to_s, "").to_s if label.present?
+    return principal&.labels&.fetch(label.to_s, "").to_s if label.present?
+
+    proxy_label = ref["proxy_label"] || ref[:proxy_label]
+    return proxy&.labels&.fetch(proxy_label.to_s, "").to_s if proxy_label.present?
+
+    return "" unless principal
 
     case (ref["principal_field"] || ref[:principal_field]).to_s
     when "id" then principal.oid
@@ -151,6 +166,8 @@ class PgDsnSecret < ApplicationRecord
     label = ref["principal_label"] || ref[:principal_label]
     field = ref["principal_field"] || ref[:principal_field]
     return "principal_label can't be blank" if keys.first == "principal_label" && label.to_s.blank?
+    proxy_label = ref["proxy_label"] || ref[:proxy_label]
+    return "proxy_label can't be blank" if keys.first == "proxy_label" && proxy_label.to_s.blank?
     if keys.first == "principal_field" && !PRINCIPAL_FIELDS.include?(field.to_s)
       return "unknown principal_field #{field.to_s.inspect} (one of: #{PRINCIPAL_FIELDS.join(", ")})"
     end

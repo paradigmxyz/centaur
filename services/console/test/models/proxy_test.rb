@@ -14,6 +14,25 @@ class ProxyTest < ActiveSupport::TestCase
     assert proxy.valid?
   end
 
+  test "labels default to an empty hash and accept string labels" do
+    proxy = Proxy.create!(
+      name: "labels",
+      principal: principals(:globex_user),
+      labels: { "slack_user_id" => "U123" }
+    )
+
+    assert_equal({ "slack_user_id" => "U123" }, proxy.reload.labels)
+  end
+
+  test "labels require string values" do
+    invalid = Proxy.new(valid_attrs(labels: {
+      "centaur.slack_team_id" => 123
+    }))
+
+    assert_not invalid.valid?
+    assert_includes invalid.errors[:labels], "values must be strings"
+  end
+
   test "requires name" do
     proxy = Proxy.new(valid_attrs(name: nil))
     assert_not proxy.valid?
@@ -42,7 +61,7 @@ class ProxyTest < ActiveSupport::TestCase
 
   test "an unassigned proxy delivers an empty config" do
     proxy = Proxy.create!(name: "idle", principal: nil)
-    config = proxy.sync_config
+    config = proxy.sync_config_snapshot.fetch(:config)
     assert_empty config["secrets"]
     assert_empty config["transforms"]
     assert_empty config["postgres"]
@@ -52,6 +71,13 @@ class ProxyTest < ActiveSupport::TestCase
     proxy = Proxy.create!(name: "swap", principal: principals(:globex_user))
     before = proxy.config_hash
     proxy.update!(principal: principals(:acme_channel))
+    refute_equal before, proxy.config_hash
+  end
+
+  test "config_hash changes when labels change" do
+    proxy = Proxy.create!(name: "label-hash", principal: principals(:globex_user))
+    before = proxy.config_hash
+    proxy.update!(labels: { "centaur.slack_user_id" => "U123" })
     refute_equal before, proxy.config_hash
   end
 
@@ -106,7 +132,7 @@ class ProxyTest < ActiveSupport::TestCase
     before = proxy.config_hash
     Grant.create!(principal: proxy.principal, pg_dsn_secret: pg_dsn_secrets(:acme_analytics_pg),
                   created_by: users(:globex_admin))
-    refute_equal before, proxy.config_hash
+    refute_equal before, proxy.reload.config_hash
   end
 
   test "config_hash changes when a transform grant is added" do
@@ -114,7 +140,7 @@ class ProxyTest < ActiveSupport::TestCase
     before = proxy.config_hash
     Grant.create!(principal: proxy.principal, gcp_auth_secret: gcp_auth_secrets(:acme_bigquery),
                   created_by: users(:globex_admin))
-    refute_equal before, proxy.config_hash
+    refute_equal before, proxy.reload.config_hash
   end
 
   test "config_hash changes when a role grant becomes reachable" do

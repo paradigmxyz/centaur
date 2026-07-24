@@ -344,6 +344,8 @@ pub struct PgDsnSettingValueFromInput {
     pub principal_label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub principal_field: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_label: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -693,6 +695,8 @@ impl Grant {
 pub struct ProxyInput {
     pub name: String,
     pub principal_id: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
 }
 
 /// A registered proxy. ``token`` (the plaintext ``iprx_`` bearer) is only
@@ -702,6 +706,10 @@ pub struct Proxy {
     pub id: String,
     pub name: String,
     pub principal_id: String,
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
+    #[serde(default)]
+    pub config_hash: Option<String>,
     #[serde(default)]
     pub token: Option<String>,
 }

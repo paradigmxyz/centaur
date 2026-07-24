@@ -161,6 +161,36 @@ class PgDsnSecretTest < ActiveSupport::TestCase
     )
   end
 
+  test "to_proxy_dsn resolves value_from proxy labels" do
+    principal = principals(:acme_channel)
+    proxy = Proxy.create!(
+      name: "proxy-labels",
+      principal: principal,
+      labels: { "centaur.slack_user_id" => "U0123456789" }
+    )
+    secret = with_dsn(PgDsnSecret.new(base_attrs(settings: [
+      {
+        "name" => "centaur.slack_user_id",
+        "value_from" => { "proxy_label" => "centaur.slack_user_id" }
+      }
+    ])))
+    assert secret.valid?
+
+    assert_equal(
+      [ { "name" => "centaur.slack_user_id", "value" => "U0123456789" } ],
+      secret.to_proxy_dsn(principal: principal, proxy: proxy)["settings"]
+    )
+  end
+
+  test "to_proxy_dsn resolves a proxy label the proxy does not carry as an empty string" do
+    secret = with_dsn(PgDsnSecret.new(base_attrs(settings: [
+      { "name" => "centaur.slack_user_id", "value_from" => { "proxy_label" => "centaur.slack_user_id" } }
+    ])))
+
+    value = secret.to_proxy_dsn(principal: principals(:acme_channel), proxy: proxies(:acme_proxy)).dig("settings", 0, "value")
+    assert_equal "", value
+  end
+
   test "to_proxy_dsn resolves a label the principal does not carry as an empty string" do
     secret = with_dsn(PgDsnSecret.new(base_attrs(settings: [
       { "name" => "centaur.slack_admin", "value_from" => { "principal_label" => "centaur_slack_admin" } }
@@ -203,7 +233,7 @@ class PgDsnSecretTest < ActiveSupport::TestCase
       secret = with_dsn(PgDsnSecret.new(base_attrs(settings: [ { "name" => "app.tenant", "value_from" => ref } ])))
       assert_not secret.valid?
       assert_includes secret.errors[:settings],
-        "[0] value_from must have exactly one of principal_label or principal_field"
+        "[0] value_from must have exactly one of principal_label or principal_field or proxy_label"
     end
   end
 
@@ -213,6 +243,14 @@ class PgDsnSecretTest < ActiveSupport::TestCase
     ])))
     assert_not secret.valid?
     assert_includes secret.errors[:settings], "[0] principal_label can't be blank"
+  end
+
+  test "a value_from with a blank proxy_label is rejected" do
+    secret = with_dsn(PgDsnSecret.new(base_attrs(settings: [
+      { "name" => "app.tenant", "value_from" => { "proxy_label" => "" } }
+    ])))
+    assert_not secret.valid?
+    assert_includes secret.errors[:settings], "[0] proxy_label can't be blank"
   end
 
   test "a value_from with an unknown principal_field is rejected" do
