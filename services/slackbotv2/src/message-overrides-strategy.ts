@@ -21,7 +21,7 @@ const SYSTEM_PROMPT = [
   'Map fuzzy effort words to the nearest reasoning value by magnitude. Examples: tiny/cheap/fast -> low or minimal; normal/default -> medium; deep/strong/intense -> high or xhigh; maximum/superduper/biggest -> max.',
   'Return reasoning even when the requested model is not Codex; validation will ignore reasoning that cannot apply.',
   'Map OpenAI model aliases to canonical IDs: sol -> gpt-5.6-sol, terra -> gpt-5.6-terra, luna -> gpt-5.6-luna, 5.5 -> gpt-5.5, 5.5 pro -> gpt-5.5-pro, 5.4 -> gpt-5.4, 5.4 pro -> gpt-5.4-pro, 5.4 mini -> gpt-5.4-mini, 5.4 nano -> gpt-5.4-nano.',
-  'Map Claude model aliases to canonical IDs: fable -> claude-fable-5, opus -> claude-opus-4-8, opus 4.7 -> claude-opus-4-7, sonnet -> claude-sonnet-4-6, sonnet 5 -> claude-sonnet-5, haiku -> claude-haiku-4-5.',
+  'Map Claude model aliases to canonical IDs: fable -> claude-fable-5, opus -> claude-opus-4-8, opus 4.7 -> claude-opus-4-7, opus 5 -> claude-opus-5, opus 5 fast -> claude-opus-5-fast, sonnet -> claude-sonnet-4-6, sonnet 5 -> claude-sonnet-5, haiku -> claude-haiku-4-5.',
   'Map Amp model aliases to canonical IDs: deep -> deep, fast -> fast.',
   'For example, "use max effort and the sol model" should return model "gpt-5.6-sol" and reasoning "max".',
   'Do not treat ordinary discussion of model names as a selection request.'
@@ -32,6 +32,8 @@ const MODEL_VALUES = [
   'claude-haiku-4-5',
   'claude-opus-4-7',
   'claude-opus-4-8',
+  'claude-opus-5',
+  'claude-opus-5-fast',
   'claude-sonnet-4-6',
   'claude-sonnet-5',
   'deep',

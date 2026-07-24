@@ -95,9 +95,10 @@ class Console::ThreadsController < ApplicationController
   # serde lowercase); the model ids are the ones the bots' --model flags
   # expand to (services/slackbotv2/src/overrides.ts). Amp appears as a plain
   # entry with no model: it picks its own model per turn. `efforts` are the
-  # per-turn reasoning efforts the harness accepts for the model (codex only —
-  # harness-server discards `reasoning` for claude/amp; enum per
-  # crates/harness-server/src/codex.rs, `max` being 5.6-specific).
+  # per-turn reasoning efforts the harness accepts for the model, except
+  # Claude Opus 5's `fast` choice, which selects OpenRouter's native fast model
+  # variant. Codex's enum lives in crates/harness-server/src/codex.rs, with
+  # `max` being 5.6-specific.
   ComposerAgent = Struct.new(:value, :label, :harness, :model, :efforts, keyword_init: true)
   CODEX_EFFORTS = [
     %w[minimal Minimal],
@@ -106,6 +107,9 @@ class Console::ThreadsController < ApplicationController
     %w[high High],
     [ "xhigh", "Extra High" ]
   ].freeze
+  MODEL_EFFORT_OVERRIDES = {
+    [ "claude-opus-5", "fast" ] => "claude-opus-5-fast"
+  }.freeze
   # First entry doubles as the default pick (unless the deploy's default-model
   # resolution for its harness names another listed model).
   COMPOSER_AGENTS = [
@@ -117,6 +121,9 @@ class Console::ThreadsController < ApplicationController
     ComposerAgent.new(value: "gpt-5.5", label: "GPT-5.5",
                       harness: "codex", model: "gpt-5.5",
                       efforts: CODEX_EFFORTS),
+    ComposerAgent.new(value: "claude-opus-5", label: "Claude Opus 5",
+                      harness: "claudecode", model: "claude-opus-5",
+                      efforts: [ %w[fast Fast] ]),
     ComposerAgent.new(value: "claude-opus-4-8", label: "Claude Opus 4.8",
                       harness: "claudecode", model: "claude-opus-4-8", efforts: []),
     ComposerAgent.new(value: "claude-sonnet-4-6", label: "Claude Sonnet 4.6",
@@ -323,6 +330,10 @@ class Console::ThreadsController < ApplicationController
     agent.efforts.map(&:first).include?(effort) ? effort : nil
   end
 
+  def composer_model_for(agent, effort)
+    MODEL_EFFORT_OVERRIDES.fetch([ agent.model, effort ], agent.model)
+  end
+
   def composer_agent_for(raw)
     value = raw.to_s.strip
     value = composer_default_agent_value if value.blank?
@@ -337,13 +348,18 @@ class Console::ThreadsController < ApplicationController
       return
     end
 
+    effort = composer_effort_param(agent)
+    model = composer_model_for(agent, effort)
+    # A model-variant effort is already encoded in the model slug. Only Codex
+    # consumes the blocks protocol's reasoning field.
+    reasoning = agent.harness == "codex" ? effort : nil
     thread_key = "console:#{SecureRandom.uuid}"
     api_client.create_session(
       thread_key: thread_key,
       harness_type: agent.harness,
-      metadata: console_actor_metadata.merge(agent.model.present? ? { model: agent.model } : {})
+      metadata: console_actor_metadata.merge(model.present? ? { model: model } : {})
     )
-    send_prompt(thread_key, prompt, model: agent.model, effort: composer_effort_param(agent))
+    send_prompt(thread_key, prompt, model: model, effort: reasoning)
     # A new-chat pane in a split view swaps the sentinel for the created
     # thread so the other panes stay open.
     open_keys = params[:open_threads].to_s.split(",").map(&:strip).reject(&:blank?)
