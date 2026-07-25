@@ -34,6 +34,7 @@ async fn run() -> Result<()> {
     let cwd = env::current_dir()?;
     let session_id = format!("nanocodex-{}", Uuid::new_v4().simple());
     let child_agents = Arc::new(ChildAgents::default());
+    let default_thinking = configured_default_thinking();
 
     let (sender, mut receiver) = mpsc::unbounded_channel();
     std::thread::spawn(move || {
@@ -56,10 +57,20 @@ async fn run() -> Result<()> {
             continue;
         }
         match parse_blocks_line(&line, &mut staged)? {
-            BlocksCommand::User { prompt, subagents } => {
+            BlocksCommand::User {
+                prompt,
+                subagents,
+                thinking,
+            } => {
                 if agent.is_none() {
-                    let (new_agent, new_events) =
-                        build_agent(&api_key, &cwd, &session_id, &child_agents, subagents)?;
+                    let (new_agent, new_events) = build_agent(
+                        &api_key,
+                        &cwd,
+                        &session_id,
+                        &child_agents,
+                        subagents,
+                        default_thinking,
+                    )?;
                     agent = Some(new_agent);
                     events = Some(new_events);
                     subagents_enabled = subagents;
@@ -69,6 +80,10 @@ async fn run() -> Result<()> {
                 let agent = agent.as_ref().ok_or_else(|| {
                     HarnessServerError::Nanocodex("agent was not initialized".to_owned())
                 })?;
+                agent
+                    .set_thinking(thinking.unwrap_or(default_thinking))
+                    .await
+                    .map_err(nanocodex_error)?;
                 let turn = agent.prompt(prompt).await.map_err(nanocodex_error)?;
                 let events = events.as_mut().ok_or_else(|| {
                     HarnessServerError::Nanocodex("event stream was not initialized".to_owned())
@@ -99,9 +114,10 @@ fn build_agent(
     session_id: &str,
     child_agents: &Arc<ChildAgents>,
     subagents: bool,
+    thinking: Thinking,
 ) -> Result<(Nanocodex, AgentEvents)> {
     let builder = Nanocodex::builder(api_key)
-        .thinking(Thinking::Low)
+        .thinking(thinking)
         .workspace(cwd)
         .session_id(session_id);
     let result = if subagents {
@@ -147,7 +163,11 @@ async fn run_turn(
                     continue;
                 }
                 match parse_blocks_line(&line, staged)? {
-                    BlocksCommand::User { prompt, subagents } => {
+                    BlocksCommand::User {
+                        prompt,
+                        subagents,
+                        thinking: _,
+                    } => {
                         if subagents && !subagents_enabled {
                             eprintln!("nanocodex --subagents only applies to the first session message");
                         }
@@ -181,7 +201,11 @@ fn nanocodex_error(error: nanocodex::NanocodexError) -> HarnessServerError {
 }
 
 enum BlocksCommand {
-    User { prompt: Prompt, subagents: bool },
+    User {
+        prompt: Prompt,
+        subagents: bool,
+        thinking: Option<Thinking>,
+    },
     AttachmentChunk,
     Interrupt,
 }
@@ -196,6 +220,8 @@ struct BlocksLine {
     content: Option<Value>,
     #[serde(default)]
     message: Option<BlocksMessage>,
+    #[serde(default)]
+    reasoning: Option<String>,
     #[serde(rename = "attachmentId", default)]
     attachment_id: Option<String>,
     #[serde(rename = "localPath", alias = "path", default)]
@@ -241,9 +267,15 @@ fn parse_blocks_line(line: &str, staged: &mut HashMap<String, PathBuf>) -> Resul
                 });
             }
             let subagents = take_subagents_flag(&mut inputs);
+            let thinking = parsed
+                .reasoning
+                .as_deref()
+                .map(parse_thinking)
+                .transpose()?;
             Ok(BlocksCommand::User {
                 prompt: Prompt::content(inputs),
                 subagents,
+                thinking,
             })
         }
         "attachment.chunk" => {
@@ -279,6 +311,36 @@ fn parse_blocks_line(line: &str, staged: &mut HashMap<String, PathBuf>) -> Resul
             message: format!("unsupported blocks input type `{kind}`"),
         }),
     }
+}
+
+fn configured_default_thinking() -> Thinking {
+    let Some(value) = env::var("CODEX_MODEL_REASONING_EFFORT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Thinking::Low;
+    };
+    match parse_thinking(&value) {
+        Ok(thinking) => thinking,
+        Err(error) => {
+            eprintln!("ignoring invalid CODEX_MODEL_REASONING_EFFORT: {error}");
+            Thinking::Low
+        }
+    }
+}
+
+fn parse_thinking(value: &str) -> Result<Thinking> {
+    let normalized = value.trim().to_ascii_lowercase();
+    // Nanocodex does not expose a distinct `minimal` level. Low is the nearest
+    // supported Responses effort and is also Centaur's stock Codex default.
+    let normalized = if normalized == "minimal" {
+        "low"
+    } else {
+        normalized.as_str()
+    };
+    normalized
+        .parse()
+        .map_err(|message| HarnessServerError::InvalidBlocksInput { message })
 }
 
 fn take_subagents_flag(inputs: &mut [UserInput]) -> bool {
@@ -467,10 +529,16 @@ mod tests {
             &mut HashMap::new(),
         )
         .unwrap();
-        let BlocksCommand::User { prompt, subagents } = command else {
+        let BlocksCommand::User {
+            prompt,
+            subagents,
+            thinking,
+        } = command
+        else {
             panic!("expected user prompt");
         };
         assert!(!subagents);
+        assert_eq!(thinking, None);
         assert_eq!(
             serde_json::to_value(prompt).unwrap()["instruction"][0]["text"],
             "hello"
@@ -484,7 +552,10 @@ mod tests {
             &mut HashMap::new(),
         )
         .unwrap();
-        let BlocksCommand::User { prompt, subagents } = command else {
+        let BlocksCommand::User {
+            prompt, subagents, ..
+        } = command
+        else {
             panic!("expected user prompt");
         };
         assert!(!subagents);
@@ -508,7 +579,10 @@ mod tests {
             &mut HashMap::new(),
         )
         .unwrap();
-        let BlocksCommand::User { prompt, subagents } = command else {
+        let BlocksCommand::User {
+            prompt, subagents, ..
+        } = command
+        else {
             panic!("expected user prompt");
         };
         assert!(subagents);
@@ -525,7 +599,10 @@ mod tests {
             &mut HashMap::new(),
         )
         .unwrap();
-        let BlocksCommand::User { prompt, subagents } = command else {
+        let BlocksCommand::User {
+            prompt, subagents, ..
+        } = command
+        else {
             panic!("expected user prompt");
         };
         assert!(!subagents);
@@ -533,5 +610,18 @@ mod tests {
             serde_json::to_value(prompt).unwrap()["instruction"][0]["text"],
             "keep --subagents=false literal"
         );
+    }
+
+    #[test]
+    fn parses_reasoning_effort_for_nanocodex_turns() {
+        let command = parse_blocks_line(
+            r#"{"type":"user","reasoning":"high","text":"inspect"}"#,
+            &mut HashMap::new(),
+        )
+        .unwrap();
+        let BlocksCommand::User { thinking, .. } = command else {
+            panic!("expected user prompt");
+        };
+        assert_eq!(thinking, Some(Thinking::High));
     }
 }

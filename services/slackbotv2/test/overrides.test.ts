@@ -427,6 +427,12 @@ describe('validateStrategyOverrides', () => {
       provider: undefined,
       reasoning: 'max'
     })
+    expect(validateStrategyOverrides({ harness: 'nanocodex', reasoning: 'high' })).toEqual({
+      harnessType: 'nanocodex',
+      model: undefined,
+      provider: undefined,
+      reasoning: 'high'
+    })
   })
 })
 

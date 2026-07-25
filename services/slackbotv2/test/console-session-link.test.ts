@@ -117,6 +117,20 @@ describe('buildConsoleSessionContextBlock', () => {
     )
   })
 
+  test('labels Codex/Nanocodex experiment cohorts explicitly', () => {
+    const block = buildConsoleSessionContextBlock({
+      consoleBaseUrl: 'https://console.centaur.dev',
+      threadKey: 'slack:C1:1',
+      harnessType: 'nanocodex',
+      model: 'gpt-5.6-sol',
+      abTested: true
+    })
+
+    expect(block?.elements[0]?.text).toBe(
+      '<https://console.centaur.dev/console/threads?thread=slack%3AC1%3A1|Open chat in Console> · GPT-5.6-SOL · Nanocodex · Codex/Nanocodex A/B test'
+    )
+  })
+
   test('skips the block entirely when no console base URL is set', () => {
     expect(
       buildConsoleSessionContextBlock({

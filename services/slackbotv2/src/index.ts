@@ -1040,6 +1040,7 @@ async function syncThreadMessageToSession(
     // Sticky harness changes only apply when a message starts an execution;
     // restarting the thread out from under an active execution would kill it.
     harnessType: shouldStartExecution ? resolvedHarnessType : undefined,
+    metadataHarnessType: shouldStartExecution ? effectiveHarnessType : undefined,
     messages: messagesToAppend,
     model: shouldStartExecution ? resolvedModel : undefined,
     metadataModel: shouldStartExecution ? effectiveModel : undefined,
@@ -1172,8 +1173,11 @@ async function syncThreadMessageToSession(
       onExecutionStarted: commitExecutionStarted,
       onMessagesAppended: commitMessagesAppended,
       onSessionCreated: async outcome => {
-        const harnessType = outcome.harnessType
-        if (!harnessType || harnessType === effectiveHarnessType) return
+        const harnessType = outcome.harnessType ?? effectiveHarnessType
+        const abTested = outcome.harnessAssignment?.experiment === 'codex_nanocodex_ab'
+        forwardInput.metadataHarnessType = harnessType
+        forwardInput.harnessAssignment = outcome.harnessAssignment
+        if (harnessType === effectiveHarnessType && !abTested) return
         const model =
           resolvedModel ?? defaultModelForHarness(harnessType, input.options.harnessDefaultModels)
         forwardInput.metadataModel = model
@@ -1182,10 +1186,14 @@ async function syncThreadMessageToSession(
             consoleBaseUrl: input.options.consolePublicUrl,
             threadKey: thread.id,
             harnessType,
-            model
+            model,
+            abTested
           })
         }
         traceLog(input.options, 'slackbotv2_session_harness_resolved', trace, {
+          ab_tested: abTested,
+          ab_test_experiment: outcome.harnessAssignment?.experiment,
+          ab_test_cohort: outcome.harnessAssignment?.cohort,
           requested_harness_type: effectiveHarnessType,
           resolved_harness_type: harnessType
         })

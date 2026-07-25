@@ -113,6 +113,7 @@ export function buildConsoleSessionContextBlock(params: {
   threadKey: string
   harnessType?: string | null
   model?: string | null
+  abTested?: boolean
 }): SlackContextBlock | undefined {
   const url = consoleSessionUrl(params.consoleBaseUrl, params.threadKey)
   if (!url) return undefined
@@ -121,6 +122,7 @@ export function buildConsoleSessionContextBlock(params: {
   if (model) segments.push(escapeSlackMrkdwn(model.toUpperCase()))
   const harness = harnessDisplayName(params.harnessType)
   if (harness) segments.push(escapeSlackMrkdwn(harness))
+  if (params.abTested) segments.push('Codex/Nanocodex A/B test')
   // Middot (U+00B7) with a space on each side, matching the bot's other
   // context lines.
   return {

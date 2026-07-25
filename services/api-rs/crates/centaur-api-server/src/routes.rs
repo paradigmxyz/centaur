@@ -60,10 +60,10 @@ use crate::{
     types::{
         AppendMessagesRequest, AppendMessagesResponse, CreateSessionRequest, CreateSessionResponse,
         DiscordThreadContext, EmitWorkflowEventRequest, EventsQuery, ExecuteSessionRequest,
-        ExecuteSessionResponse, GithubThreadContext, InterruptSessionExecutionRequest,
-        InterruptSessionExecutionResponse, LinearThreadContext, ListWorkflowRunsQuery,
-        OnHarnessConflict, SessionContextResponse, SessionSseEvent, SlackThreadContext,
-        stream_error_sse,
+        ExecuteSessionResponse, GithubThreadContext, HarnessAssignment,
+        InterruptSessionExecutionRequest, InterruptSessionExecutionResponse, LinearThreadContext,
+        ListWorkflowRunsQuery, OnHarnessConflict, SessionContextResponse, SessionSseEvent,
+        SlackThreadContext, stream_error_sse,
     },
 };
 
@@ -461,12 +461,24 @@ async fn create_or_get_session(
             state.codex_nanocodex_rollout_percent,
         )
     });
+    let harness_assignment = codex_nanocodex_assignment(
+        &requested_harness,
+        &harness_type,
+        state.codex_nanocodex_rollout_percent,
+    );
     tracing::info!(
         component = "api_server",
         event = "session_harness_rollout_resolved",
         thread_key = %thread_key,
         requested_harness = %requested_harness,
         resolved_harness = %harness_type,
+        ab_test = harness_assignment.is_some(),
+        ab_test_experiment = harness_assignment
+            .as_ref()
+            .map_or("", |assignment| assignment.experiment),
+        ab_test_cohort = harness_assignment
+            .as_ref()
+            .map_or("", |assignment| assignment.cohort.as_ref()),
         existing_rollout_harness_preserved = existing_rollout_harness.is_some(),
         codex_nanocodex_rollout_percent = state.codex_nanocodex_rollout_percent,
         "resolved requested session harness"
@@ -480,14 +492,54 @@ async fn create_or_get_session(
             &thread_key,
             &harness_type,
             request.persona_id.as_deref(),
-            request.metadata,
+            session_metadata_with_harness_assignment(request.metadata, harness_assignment.as_ref()),
             on_harness_conflict,
         )
         .await?;
     Ok(Json(CreateSessionResponse {
         session: outcome.session,
         harness_switched: outcome.harness_switched,
+        harness_assignment,
     }))
+}
+
+const CODEX_NANOCODEX_AB_EXPERIMENT: &str = "codex_nanocodex_ab";
+
+fn codex_nanocodex_assignment(
+    requested_harness: &HarnessType,
+    cohort: &HarnessType,
+    rollout_percent: u8,
+) -> Option<HarnessAssignment> {
+    (*requested_harness == HarnessType::Codex && (1..100).contains(&rollout_percent)).then(|| {
+        HarnessAssignment {
+            experiment: CODEX_NANOCODEX_AB_EXPERIMENT,
+            requested_harness: requested_harness.clone(),
+            cohort: cohort.clone(),
+            rollout_percent,
+        }
+    })
+}
+
+fn session_metadata_with_harness_assignment(
+    metadata: Option<Value>,
+    assignment: Option<&HarnessAssignment>,
+) -> Option<Value> {
+    let Some(assignment) = assignment else {
+        return metadata;
+    };
+    let mut metadata = metadata.unwrap_or_else(|| json!({}));
+    if let Value::Object(object) = &mut metadata {
+        object.insert(
+            "harness_assignment".to_owned(),
+            json!({
+                "experiment": assignment.experiment,
+                "requested_harness": assignment.requested_harness,
+                "cohort": assignment.cohort,
+                "rollout_percent": assignment.rollout_percent,
+            }),
+        );
+    }
+    Some(metadata)
 }
 
 fn rollout_harness_for_thread(
@@ -571,6 +623,30 @@ mod harness_rollout_tests {
         assert!(
             (4_900..=5_100).contains(&nanocodex),
             "nanocodex={nanocodex}"
+        );
+    }
+
+    #[test]
+    fn codex_rollout_assignment_is_explicit_and_persistable() {
+        let assignment =
+            codex_nanocodex_assignment(&HarnessType::Codex, &HarnessType::Nanocodex, 50).unwrap();
+        let metadata = session_metadata_with_harness_assignment(
+            Some(json!({"source": "slackbotv2"})),
+            Some(&assignment),
+        )
+        .unwrap();
+
+        assert_eq!(assignment.experiment, CODEX_NANOCODEX_AB_EXPERIMENT);
+        assert_eq!(assignment.cohort, HarnessType::Nanocodex);
+        assert_eq!(
+            metadata.pointer("/harness_assignment/cohort"),
+            Some(&json!("nanocodex"))
+        );
+        assert_eq!(metadata.get("source"), Some(&json!("slackbotv2")));
+        assert!(codex_nanocodex_assignment(&HarnessType::Codex, &HarnessType::Codex, 0).is_none());
+        assert!(
+            codex_nanocodex_assignment(&HarnessType::Nanocodex, &HarnessType::Nanocodex, 50)
+                .is_none()
         );
     }
 }
