@@ -43,11 +43,10 @@ spec:
             - name: CENTAUR_API_URL
               value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
             # New threads without an explicit --claude/--amp/--codex/
-            # --nanocodex flag enter the configured default rollout.
+            # --nanocodex flag run the deployment's default harness. api-rs
+            # applies any configured Codex/Nanocodex rollout.
             - name: SLACKBOTV2_DEFAULT_HARNESS
               value: {{ .Values.sandbox.harnessEngine | quote }}
-            - name: SLACKBOTV2_NANOCODEX_ROLLOUT_PERCENT
-              value: {{ .Values.slackbotv2.nanocodexRolloutPercent | quote }}
             - name: SLACK_BOT_TOKEN
               valueFrom:
                 secretKeyRef:

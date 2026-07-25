@@ -27,7 +27,7 @@ use axum::{
     routing::{any, get, post},
 };
 use base64::{Engine as _, engine::general_purpose};
-use centaur_session_core::{ChatDestination, ThreadKey};
+use centaur_session_core::{ChatDestination, HarnessType, ThreadKey};
 use centaur_session_runtime::{
     ExecuteSessionInput, HarnessConflictPolicy, PersonaSummary, SandboxRuntime, SessionRuntime,
     thread_trace_id, thread_trace_parent_span_id,
@@ -71,6 +71,7 @@ use crate::{
 pub struct AppState {
     initialized: Arc<RwLock<Option<AppRuntimeState>>>,
     metrics: PrometheusHandle,
+    codex_nanocodex_rollout_percent: u8,
 }
 
 #[derive(Clone)]
@@ -85,7 +86,13 @@ impl AppState {
         Self {
             initialized: Arc::new(RwLock::new(None)),
             metrics: prometheus_handle().expect("failed to initialize Prometheus metrics recorder"),
+            codex_nanocodex_rollout_percent: 0,
         }
+    }
+
+    pub fn with_codex_nanocodex_rollout_percent(mut self, percent: u8) -> Self {
+        self.codex_nanocodex_rollout_percent = percent;
+        self
     }
 
     pub fn ready(runtime: SessionRuntime, workflows: Option<WorkflowRuntime>) -> Self {
@@ -437,15 +444,41 @@ async fn create_or_get_session(
     Json(request): Json<CreateSessionRequest>,
 ) -> Result<Json<CreateSessionResponse>, ApiError> {
     let thread_key = ThreadKey::try_from(raw_thread_key)?;
+    let requested_harness = request.harness_type;
+    let runtime = state.runtime()?;
+    let existing_rollout_harness = if requested_harness == HarnessType::Codex {
+        runtime
+            .existing_session_harness(&thread_key)
+            .await?
+            .filter(|harness| matches!(harness, HarnessType::Codex | HarnessType::Nanocodex))
+    } else {
+        None
+    };
+    let harness_type = existing_rollout_harness.clone().unwrap_or_else(|| {
+        rollout_harness_for_thread(
+            &thread_key,
+            &requested_harness,
+            state.codex_nanocodex_rollout_percent,
+        )
+    });
+    tracing::info!(
+        component = "api_server",
+        event = "session_harness_rollout_resolved",
+        thread_key = %thread_key,
+        requested_harness = %requested_harness,
+        resolved_harness = %harness_type,
+        existing_rollout_harness_preserved = existing_rollout_harness.is_some(),
+        codex_nanocodex_rollout_percent = state.codex_nanocodex_rollout_percent,
+        "resolved requested session harness"
+    );
     let on_harness_conflict = match request.on_harness_conflict {
         Some(OnHarnessConflict::Restart) => HarnessConflictPolicy::Restart,
         Some(OnHarnessConflict::Reject) | None => HarnessConflictPolicy::Reject,
     };
-    let outcome = state
-        .runtime()?
+    let outcome = runtime
         .create_or_get_session(
             &thread_key,
-            &request.harness_type,
+            &harness_type,
             request.persona_id.as_deref(),
             request.metadata,
             on_harness_conflict,
@@ -455,6 +488,91 @@ async fn create_or_get_session(
         session: outcome.session,
         harness_switched: outcome.harness_switched,
     }))
+}
+
+fn rollout_harness_for_thread(
+    thread_key: &ThreadKey,
+    requested_harness: &HarnessType,
+    nanocodex_percent: u8,
+) -> HarnessType {
+    if *requested_harness != HarnessType::Codex || nanocodex_percent == 0 {
+        return requested_harness.clone();
+    }
+    if nanocodex_percent >= 100 {
+        return HarnessType::Nanocodex;
+    }
+
+    let digest = Sha256::digest(thread_key.as_str().as_bytes());
+    let bucket = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]);
+    let threshold = (u64::from(nanocodex_percent) * (u64::from(u32::MAX) + 1)) / 100;
+    if u64::from(bucket) < threshold {
+        HarnessType::Nanocodex
+    } else {
+        HarnessType::Codex
+    }
+}
+
+#[cfg(test)]
+mod harness_rollout_tests {
+    use super::*;
+
+    #[test]
+    fn codex_rollout_is_sticky_and_split_by_thread_key() {
+        let codex_thread = ThreadKey::try_from("slack:C1:1700000000.000100".to_owned()).unwrap();
+        let nanocodex_thread =
+            ThreadKey::try_from("slack:C1:1700000000.000104".to_owned()).unwrap();
+
+        assert_eq!(
+            rollout_harness_for_thread(&codex_thread, &HarnessType::Codex, 50),
+            HarnessType::Codex
+        );
+        assert_eq!(
+            rollout_harness_for_thread(&nanocodex_thread, &HarnessType::Codex, 50),
+            HarnessType::Nanocodex
+        );
+        assert_eq!(
+            rollout_harness_for_thread(&nanocodex_thread, &HarnessType::Codex, 50),
+            HarnessType::Nanocodex
+        );
+    }
+
+    #[test]
+    fn codex_rollout_honors_boundaries_and_other_harnesses() {
+        let thread_key = ThreadKey::try_from("cli:rollout-boundaries".to_owned()).unwrap();
+
+        assert_eq!(
+            rollout_harness_for_thread(&thread_key, &HarnessType::Codex, 0),
+            HarnessType::Codex
+        );
+        assert_eq!(
+            rollout_harness_for_thread(&thread_key, &HarnessType::Codex, 100),
+            HarnessType::Nanocodex
+        );
+        assert_eq!(
+            rollout_harness_for_thread(&thread_key, &HarnessType::ClaudeCode, 50),
+            HarnessType::ClaudeCode
+        );
+        assert_eq!(
+            rollout_harness_for_thread(&thread_key, &HarnessType::Nanocodex, 50),
+            HarnessType::Nanocodex
+        );
+    }
+
+    #[test]
+    fn codex_rollout_is_balanced_across_many_thread_keys() {
+        let nanocodex = (0..10_000)
+            .filter(|index| {
+                let thread_key = ThreadKey::try_from(format!("cli:rollout-{index}")).unwrap();
+                rollout_harness_for_thread(&thread_key, &HarnessType::Codex, 50)
+                    == HarnessType::Nanocodex
+            })
+            .count();
+
+        assert!(
+            (4_900..=5_100).contains(&nanocodex),
+            "nanocodex={nanocodex}"
+        );
+    }
 }
 
 async fn get_session_context(

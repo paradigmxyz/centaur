@@ -350,6 +350,10 @@ apiRs:
     tag: latest
     pullPolicy: Always
   port: 8080
+  # Sticky percentage of session requests for Codex assigned to Nanocodex.
+  # The API hashes the thread key once and persists the resolved harness on the
+  # session. Set to 0 to keep new Codex requests on Codex.
+  codexNanocodexRolloutPercent: 50
   # Public/local MCP endpoint advertised through OAuth protected-resource
   # metadata. Empty falls back to slackbotv2.mcpPublicUrl.
   mcpPublicUrl: ""
@@ -476,10 +480,6 @@ slackbotv2:
   mcpPublicUrl: "http://localhost:3000"
   externalOrgAllowlist: ""
   triggerBotAllowlist: ""
-  # Sticky percentage of otherwise-default Codex Slack threads assigned to
-  # Nanocodex. Explicit thread flags and channel defaults still win. Set to 0
-  # to send all default traffic back to Codex.
-  nanocodexRolloutPercent: 50
   # Per-channel default harness / model / provider / reasoning, keyed by Slack
   # conversation id (the C…/G…/D… id). Each value is an object of optional
   # harness / model / provider / reasoning fields, using the same vocabulary as

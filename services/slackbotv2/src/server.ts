@@ -46,7 +46,6 @@ const options: SlackbotV2Options = {
   ),
   consolePublicUrl: optionalEnv('CENTAUR_CONSOLE_PUBLIC_URL'),
   defaultHarnessType: optionalEnv('SLACKBOTV2_DEFAULT_HARNESS'),
-  nanocodexRolloutPercent: optionalPercentageEnv('SLACKBOTV2_NANOCODEX_ROLLOUT_PERCENT'),
   // Same env vars deployers use to override the sandbox harness model
   // (sandbox.extraEnv); the chart mirrors them here so displayed defaults
   // track the deployment instead of the baked harness config.
@@ -91,7 +90,6 @@ console.log(
     message_overrides_strategy: messageOverridesStrategyMode,
     message_overrides_strategy_enabled:
       messageOverridesStrategyMode !== 'llm' || Boolean(messageOverridesStrategyApiKey),
-    nanocodex_rollout_percent: options.nanocodexRolloutPercent ?? 0,
     port: server.port,
     api_url: apiUrl
   })
@@ -100,16 +98,6 @@ console.log(
 function optionalEnv(name: string): string | undefined {
   const value = process.env[name]?.trim()
   return value ? value : undefined
-}
-
-function optionalPercentageEnv(name: string): number | undefined {
-  const value = optionalEnv(name)
-  if (!value) return undefined
-  const parsed = Number(value)
-  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) {
-    throw new Error(`${name} must be a number between 0 and 100`)
-  }
-  return parsed
 }
 
 function requiredEnv(name: string): string {

@@ -34,7 +34,6 @@ import {
 import { slackUserIdForMessage } from './slack-user'
 import {
   collectInitialContext,
-  defaultHarnessForThread,
   dispatchSlackBlockAction,
   forwardToSessionApi,
   harnessRestartPreamble,
@@ -960,15 +959,14 @@ async function syncThreadMessageToSession(
       ? undefined
       : effectiveOverrides.provider ?? channelDefault?.provider
   const resolvedReasoning = overrides.reasoning ?? channelDefault?.reasoning
-  const effectiveHarnessType =
-    resolvedHarnessType ?? defaultHarnessForThread(input.options, thread.id)
+  const effectiveHarnessType = resolvedHarnessType ?? input.options.defaultHarnessType ?? 'codex'
   // Without an explicit override or channel default the harness runs its
   // configured default (CLAUDE_MODEL/CODEX_MODEL, else the baked harness
   // config); show and record that instead of dropping the model entirely.
   const effectiveModel =
     resolvedModel ??
     defaultModelForHarness(effectiveHarnessType, input.options.harnessDefaultModels)
-  const consoleSessionBlock = isFirstAssistantMessage
+  let consoleSessionBlock = isFirstAssistantMessage
     ? buildConsoleSessionContextBlock({
         consoleBaseUrl: input.options.consolePublicUrl,
         threadKey: thread.id,
@@ -1173,6 +1171,25 @@ async function syncThreadMessageToSession(
     await forwardToSessionApi(input.options, forwardInput, {
       onExecutionStarted: commitExecutionStarted,
       onMessagesAppended: commitMessagesAppended,
+      onSessionCreated: async outcome => {
+        const harnessType = outcome.harnessType
+        if (!harnessType || harnessType === effectiveHarnessType) return
+        const model =
+          resolvedModel ?? defaultModelForHarness(harnessType, input.options.harnessDefaultModels)
+        forwardInput.metadataModel = model
+        if (isFirstAssistantMessage) {
+          consoleSessionBlock = buildConsoleSessionContextBlock({
+            consoleBaseUrl: input.options.consolePublicUrl,
+            threadKey: thread.id,
+            harnessType,
+            model
+          })
+        }
+        traceLog(input.options, 'slackbotv2_session_harness_resolved', trace, {
+          requested_harness_type: effectiveHarnessType,
+          resolved_harness_type: harnessType
+        })
+      },
       onSessionRestarted: handleSessionRestarted
     })
     scheduleExecutionRender(

@@ -1,6 +1,5 @@
 import type { RustSessionStreamEvent } from '@centaur/harness-events'
 import type { Attachment, LinkPreview, Message } from 'chat'
-import { createHash } from 'node:crypto'
 import { renderSlackDisplayText, slackMessagePromptText } from './slack-display-text'
 import type {
   ForwardSessionInput,
@@ -167,6 +166,7 @@ export async function withSlackApiTimeout<T>(
 type ForwardSessionApiCallbacks = {
   onExecutionStarted?(execution: SlackbotV2ExecuteSessionResponse): Promise<void>
   onMessagesAppended?(): Promise<void>
+  onSessionCreated?(outcome: CreateSessionOutcome): Promise<void>
   /**
    * Fires when session creation restarted the thread onto a new harness
    * (sticky --claude/--amp/--codex/--nanocodex state on a thread pinned to
@@ -484,9 +484,11 @@ export async function forwardToSessionApi(
     'create session'
   )
   traceLog(options, 'slackbotv2_session_create_complete', input.trace, {
+    harness_type: created.harnessType,
     harness_switched: created.harnessSwitched,
     phase_ms: elapsedMs(createStartedAtMs)
   })
+  await callbacks.onSessionCreated?.(created)
   if (created.harnessSwitched) {
     await callbacks.onSessionRestarted?.()
   }
@@ -709,32 +711,6 @@ async function bytesToBase64(data: Buffer | Blob): Promise<string> {
 }
 
 const DEFAULT_HARNESS_TYPE = 'codex'
-const NANOCODEX_HARNESS_TYPE = 'nanocodex'
-const HASH_BUCKET_COUNT = 2 ** 32
-
-/**
- * Selects a sticky default harness for a Slack thread. Explicit message and
- * channel overrides are resolved before this function is called.
- */
-export function defaultHarnessForThread(
-  options: Pick<SlackbotV2Options, 'defaultHarnessType' | 'nanocodexRolloutPercent'>,
-  threadId: string
-): string {
-  const defaultHarness = options.defaultHarnessType ?? DEFAULT_HARNESS_TYPE
-  const rolloutPercent = options.nanocodexRolloutPercent ?? 0
-  if (!Number.isFinite(rolloutPercent) || rolloutPercent < 0 || rolloutPercent > 100) {
-    throw new Error('nanocodexRolloutPercent must be between 0 and 100')
-  }
-  if (defaultHarness !== DEFAULT_HARNESS_TYPE || rolloutPercent === 0) {
-    return defaultHarness
-  }
-  if (rolloutPercent === 100) return NANOCODEX_HARNESS_TYPE
-
-  const bucket = createHash('sha256').update(threadId).digest().readUInt32BE(0)
-  return bucket / HASH_BUCKET_COUNT < rolloutPercent / 100
-    ? NANOCODEX_HARNESS_TYPE
-    : defaultHarness
-}
 
 type RequesterIdentity = {
   githubHandle?: string
@@ -775,6 +751,8 @@ export function clearConversationNameCacheForTests(): void {
 }
 
 type CreateSessionOutcome = {
+  /** The harness persisted by the API after applying control-plane policy. */
+  harnessType?: string
   /** The API restarted the thread onto the requested harness. */
   harnessSwitched: boolean
 }
@@ -785,7 +763,7 @@ async function createSession(
   harnessType?: string,
   message?: SlackbotV2ApiMessage
 ): Promise<CreateSessionOutcome> {
-  const requested = harnessType ?? defaultHarnessForThread(options, threadId)
+  const requested = harnessType ?? options.defaultHarnessType ?? DEFAULT_HARNESS_TYPE
   // A sticky --claude/--amp/--codex/--nanocodex selection restarts a thread
   // pinned to another harness; the implicit default never forces a switch.
   const response = await postCreateSession(
@@ -796,7 +774,7 @@ async function createSession(
     harnessType ? 'restart' : undefined
   )
   if (response.ok) {
-    return { harnessSwitched: await harnessSwitchedFromResponse(response) }
+    return sessionOutcomeFromResponse(response)
   }
 
   let body = ''
@@ -813,7 +791,7 @@ async function createSession(
   if (existing && existing !== requested) {
     const retry = await postCreateSession(options, threadId, existing, message)
     await ensureApiOk(retry, 'create session')
-    return { harnessSwitched: false }
+    return sessionOutcomeFromResponse(retry)
   }
   throw new SessionApiError({
     action: 'create session',
@@ -864,12 +842,16 @@ async function postCreateSession(
   )
 }
 
-async function harnessSwitchedFromResponse(response: Response): Promise<boolean> {
+async function sessionOutcomeFromResponse(response: Response): Promise<CreateSessionOutcome> {
   try {
     const payload = await response.json()
-    return isJsonObject(payload) && payload.harness_switched === true
+    const harnessType = isJsonObject(payload) ? stringValue(payload.harness_type) : undefined
+    return {
+      harnessSwitched: isJsonObject(payload) && payload.harness_switched === true,
+      ...(harnessType ? { harnessType } : {})
+    }
   } catch {
-    return false
+    return { harnessSwitched: false }
   }
 }
 
