@@ -3,6 +3,8 @@ import {
   buildConsoleSessionContextBlock,
   consoleSessionUrl,
   defaultModelForHarness,
+  defaultReasoningForHarness,
+  effectiveReasoningForHarness,
   harnessDisplayName
 } from '../src/console-session-link'
 import claudeSettings from '../../../harness/claude/settings.json'
@@ -66,6 +68,30 @@ describe('defaultModelForHarness', () => {
   })
 })
 
+describe('defaultReasoningForHarness', () => {
+  const bakedCodexReasoning = (codexConfig as { model_reasoning_effort: string })
+    .model_reasoning_effort
+
+  test('shares the baked Codex reasoning default with Nanocodex', () => {
+    expect(bakedCodexReasoning).toBe('low')
+    expect(defaultReasoningForHarness('codex')).toBe(bakedCodexReasoning)
+    expect(defaultReasoningForHarness('nanocodex')).toBe(bakedCodexReasoning)
+    expect(defaultReasoningForHarness('claudecode')).toBeUndefined()
+  })
+
+  test('prefers a deployment-configured Codex-compatible default', () => {
+    const configured = { codex: 'HIGH', nanocodex: 'HIGH' }
+    expect(defaultReasoningForHarness('codex', configured)).toBe('high')
+    expect(defaultReasoningForHarness('nanocodex', configured)).toBe('high')
+  })
+
+  test('reports the effort the selected harness actually runs', () => {
+    expect(effectiveReasoningForHarness('codex', 'xhigh')).toBe('xhigh')
+    expect(effectiveReasoningForHarness('nanocodex', 'minimal')).toBe('low')
+    expect(effectiveReasoningForHarness('claudecode', 'high')).toBeUndefined()
+  })
+})
+
 describe('consoleSessionUrl', () => {
   test('builds the /console/threads URL with an encoded thread key', () => {
     expect(consoleSessionUrl('https://console.centaur.dev', 'slack:C123:1700000000.000100')).toBe(
@@ -92,7 +118,8 @@ describe('buildConsoleSessionContextBlock', () => {
       consoleBaseUrl: 'https://console.centaur.dev',
       threadKey: 'slack:C123:1700000000.000100',
       harnessType: 'codex',
-      model: 'gpt-5.2'
+      model: 'gpt-5.2',
+      reasoning: 'xhigh'
     })
     expect(block).toEqual({
       type: 'context',
@@ -100,7 +127,7 @@ describe('buildConsoleSessionContextBlock', () => {
         {
           type: 'mrkdwn',
           text:
-            '<https://console.centaur.dev/console/threads?thread=slack%3AC123%3A1700000000.000100|Open chat in Console> · GPT-5.2 · Codex'
+            '<https://console.centaur.dev/console/threads?thread=slack%3AC123%3A1700000000.000100|Open chat in Console> · GPT-5.2 · Codex · XHigh'
         }
       ]
     })
@@ -117,17 +144,18 @@ describe('buildConsoleSessionContextBlock', () => {
     )
   })
 
-  test('labels Codex/Nanocodex experiment cohorts explicitly', () => {
+  test('marks experiment assignments as Codex without exposing the cohort', () => {
     const block = buildConsoleSessionContextBlock({
       consoleBaseUrl: 'https://console.centaur.dev',
       threadKey: 'slack:C1:1',
       harnessType: 'nanocodex',
       model: 'gpt-5.6-sol',
+      reasoning: 'low',
       abTested: true
     })
 
     expect(block?.elements[0]?.text).toBe(
-      '<https://console.centaur.dev/console/threads?thread=slack%3AC1%3A1|Open chat in Console> · GPT-5.6-SOL · Nanocodex · Codex/Nanocodex A/B test'
+      '<https://console.centaur.dev/console/threads?thread=slack%3AC1%3A1|Open chat in Console> · GPT-5.6-SOL · Codex* · Low'
     )
   })
 

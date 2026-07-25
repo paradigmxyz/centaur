@@ -49,6 +49,7 @@ import {
 import {
   buildConsoleSessionContextBlock,
   defaultModelForHarness,
+  effectiveReasoningForHarness,
   type SlackContextBlock
 } from './console-session-link'
 import { resolveChannelDefault } from './channel-defaults'
@@ -966,12 +967,19 @@ async function syncThreadMessageToSession(
   const effectiveModel =
     resolvedModel ??
     defaultModelForHarness(effectiveHarnessType, input.options.harnessDefaultModels)
+  const effectiveReasoning =
+    effectiveReasoningForHarness(
+      effectiveHarnessType,
+      resolvedReasoning,
+      input.options.harnessDefaultReasoning
+    )
   let consoleSessionBlock = isFirstAssistantMessage
     ? buildConsoleSessionContextBlock({
         consoleBaseUrl: input.options.consolePublicUrl,
         threadKey: thread.id,
         harnessType: effectiveHarnessType,
-        model: effectiveModel
+        model: effectiveModel,
+        reasoning: effectiveReasoning
       })
     : undefined
   if (overrides.harnessType || overrides.model || overrides.provider || overrides.reasoning) {
@@ -1180,6 +1188,12 @@ async function syncThreadMessageToSession(
         if (harnessType === effectiveHarnessType && !abTested) return
         const model =
           resolvedModel ?? defaultModelForHarness(harnessType, input.options.harnessDefaultModels)
+        const reasoning =
+          effectiveReasoningForHarness(
+            harnessType,
+            resolvedReasoning,
+            input.options.harnessDefaultReasoning
+          )
         forwardInput.metadataModel = model
         if (isFirstAssistantMessage) {
           consoleSessionBlock = buildConsoleSessionContextBlock({
@@ -1187,6 +1201,7 @@ async function syncThreadMessageToSession(
             threadKey: thread.id,
             harnessType,
             model,
+            reasoning,
             abTested
           })
         }

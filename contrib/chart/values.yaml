@@ -262,9 +262,10 @@ sandbox:
   # their session's harness via container args; the sandbox image CMD only
   # matters for containers started outside api-rs.
   harnessEngine: codex
-  # Copied into every sandbox pod. CLAUDE_MODEL / CODEX_MODEL set here (the
-  # harness default-model overrides) are also mirrored into slackbotv2 and the
-  # Console so their model displays match what sandboxes actually run.
+  # Copied into every sandbox pod. CLAUDE_MODEL / CODEX_MODEL set here are also
+  # mirrored into slackbotv2 and the Console; CODEX_MODEL_REASONING_EFFORT is
+  # mirrored into slackbotv2. This keeps Slack's model/thinking footer aligned
+  # with the policy the sandbox actually runs.
   extraEnv: {}
   stateVolume:
     enabled: false
