@@ -775,7 +775,7 @@ describe('slackbotv2', () => {
     expect(consoleBlockTexts(slackApi.calls)).toHaveLength(0)
   })
 
-  it('marks API-assigned cohorts subtly in Slack and retains execution metadata', async () => {
+  it('shows the API-assigned harness in Slack and retains execution metadata', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
     codexApi.resolvedHarnessType = 'nanocodex'
@@ -818,10 +818,9 @@ describe('slackbotv2', () => {
       .flatMap(call => (Array.isArray(call.body.blocks) ? (call.body.blocks as unknown[]) : []))
       .map(block => JSON.stringify(block))
       .find(text => text.includes('Open chat in Console'))
-    expect(footer).toContain('Codex*')
+    expect(footer).toContain('Nanocodex')
     expect(footer).toContain('Low')
-    expect(footer).not.toContain('Nanocodex')
-    expect(footer).not.toContain('A/B test')
+    expect(footer).not.toContain('Codex*')
     expect(codexApi.creates[0]?.body.harness_type).toBe('codex')
     expect(codexApi.executes[0]?.body.metadata).toMatchObject({
       harness_type: 'nanocodex',

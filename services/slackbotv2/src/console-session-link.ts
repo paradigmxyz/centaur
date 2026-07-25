@@ -167,16 +167,13 @@ export function buildConsoleSessionContextBlock(params: {
   harnessType?: string | null
   model?: string | null
   reasoning?: string | null
-  abTested?: boolean
 }): SlackContextBlock | undefined {
   const url = consoleSessionUrl(params.consoleBaseUrl, params.threadKey)
   if (!url) return undefined
   const segments = [`<${url}|Open chat in Console>`]
   const model = params.model?.trim()
   if (model) segments.push(escapeSlackMrkdwn(model.toUpperCase()))
-  // Keep experiment assignment unobtrusive in Slack. The asterisk identifies
-  // an A/B-assigned Codex request without exposing its internal cohort.
-  const harness = params.abTested ? 'Codex*' : harnessDisplayName(params.harnessType)
+  const harness = harnessDisplayName(params.harnessType)
   if (harness) segments.push(escapeSlackMrkdwn(harness))
   const reasoning = reasoningDisplayName(params.reasoning)
   if (reasoning) segments.push(escapeSlackMrkdwn(reasoning))

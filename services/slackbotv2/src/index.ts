@@ -1201,8 +1201,7 @@ async function syncThreadMessageToSession(
             threadKey: thread.id,
             harnessType,
             model,
-            reasoning,
-            abTested
+            reasoning
           })
         }
         traceLog(input.options, 'slackbotv2_session_harness_resolved', trace, {

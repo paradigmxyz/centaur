@@ -144,18 +144,17 @@ describe('buildConsoleSessionContextBlock', () => {
     )
   })
 
-  test('marks experiment assignments as Codex without exposing the cohort', () => {
+  test('shows the resolved Nanocodex harness', () => {
     const block = buildConsoleSessionContextBlock({
       consoleBaseUrl: 'https://console.centaur.dev',
       threadKey: 'slack:C1:1',
       harnessType: 'nanocodex',
       model: 'gpt-5.6-sol',
-      reasoning: 'low',
-      abTested: true
+      reasoning: 'low'
     })
 
     expect(block?.elements[0]?.text).toBe(
-      '<https://console.centaur.dev/console/threads?thread=slack%3AC1%3A1|Open chat in Console> · GPT-5.6-SOL · Codex* · Low'
+      '<https://console.centaur.dev/console/threads?thread=slack%3AC1%3A1|Open chat in Console> · GPT-5.6-SOL · Nanocodex · Low'
     )
   })
 
