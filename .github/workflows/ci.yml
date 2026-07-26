@@ -118,19 +118,6 @@ jobs:
     runs-on: depot-ubuntu-24.04-16
     needs: ci_changes
     if: needs.ci_changes.outputs.rust_api == 'true'
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd="pg_isready -U postgres"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=5
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -153,11 +140,37 @@ jobs:
         working-directory: services/api-rs
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Start Rust test Postgres
+        run: |
+          docker run --detach --name centaur-rust-test-postgres \
+            --publish 127.0.0.1:5432:5432 \
+            --env POSTGRES_USER=postgres \
+            --env POSTGRES_PASSWORD=postgres \
+            --env POSTGRES_DB=postgres \
+            paradedb/paradedb:0.23.0-pg16 \
+            -c shared_preload_libraries=pg_search,pg_cron \
+            -c max_connections=500
+          for attempt in {1..60}; do
+            if docker logs centaur-rust-test-postgres 2>&1 \
+              | grep -q 'PostgreSQL init process complete' \
+              && docker exec centaur-rust-test-postgres \
+              psql -U postgres -d postgres -tAc 'select 1' >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs centaur-rust-test-postgres
+          exit 1
+
       - name: Test
         working-directory: services/api-rs
         env:
           SESSION_SQLX_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: cargo test --workspace
+
+      - name: Cleanup Rust test Postgres
+        if: ${{ always() }}
+        run: docker rm -f centaur-rust-test-postgres || true
 
       - name: Start API integration test dependencies
         run: |
