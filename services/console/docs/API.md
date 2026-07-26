@@ -690,7 +690,7 @@ labels instead of storing a literal, by replacing `value` with `value_from`:
 | Key               | Resolves to |
 | ----------------- | ----------- |
 | `principal_label` | The named label on the assigned principal. A label the principal does not carry resolves to an empty string, so RLS-style policies fail closed. |
-| `principal_field` | One of the principal's identity fields: `id` (the opaque `prn_...` id), `namespace`, `foreign_id`, or `name`. |
+| `principal_field` | One of the principal's fields: `id` (the opaque `prn_...` id), `namespace`, `foreign_id`, `name`, or `slack_history_channel_ids` (JSON array of Slack channel IDs with history permission). |
 | `proxy_label`     | The named label on the proxy. A label the proxy does not carry resolves to an empty string, so RLS-style policies fail closed. |
 
 A setting has either `value` or `value_from`, never both; unknown
