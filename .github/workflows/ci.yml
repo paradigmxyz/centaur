@@ -123,6 +123,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Start Test Postgres
+        run: .github/scripts/start-paradedb-postgres.sh centaur-api-test-postgres 5432 centaur
+
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: stable
@@ -140,59 +143,11 @@ jobs:
         working-directory: services/api-rs
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Start Rust test Postgres
-        run: |
-          docker run --detach --name centaur-rust-test-postgres \
-            --publish 127.0.0.1:5432:5432 \
-            --env POSTGRES_USER=postgres \
-            --env POSTGRES_PASSWORD=postgres \
-            --env POSTGRES_DB=postgres \
-            paradedb/paradedb:0.23.0-pg16 \
-            -c shared_preload_libraries=pg_search,pg_cron \
-            -c max_connections=500
-          for attempt in {1..60}; do
-            if docker logs centaur-rust-test-postgres 2>&1 \
-              | grep -q 'PostgreSQL init process complete' \
-              && docker exec centaur-rust-test-postgres \
-              psql -U postgres -d postgres -tAc 'select 1' >/dev/null; then
-              exit 0
-            fi
-            sleep 1
-          done
-          docker logs centaur-rust-test-postgres
-          exit 1
-
       - name: Test
         working-directory: services/api-rs
         env:
           SESSION_SQLX_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: cargo test --workspace
-
-      - name: Cleanup Rust test Postgres
-        if: ${{ always() }}
-        run: docker rm -f centaur-rust-test-postgres || true
-
-      - name: Start API integration test dependencies
-        run: |
-          docker run --detach --name centaur-api-integration-test-postgres \
-            --publish 127.0.0.1:15432:5432 \
-            --env POSTGRES_USER=postgres \
-            --env POSTGRES_PASSWORD=postgres \
-            --env POSTGRES_DB=centaur \
-            paradedb/paradedb:0.23.0-pg16 \
-            -c shared_preload_libraries=pg_search,pg_cron \
-            -c max_connections=500
-          for attempt in {1..60}; do
-            if docker logs centaur-api-integration-test-postgres 2>&1 \
-              | grep -q 'PostgreSQL init process complete' \
-              && docker exec centaur-api-integration-test-postgres \
-              psql -U postgres -d centaur -tAc 'select 1' >/dev/null; then
-              exit 0
-            fi
-            sleep 1
-          done
-          docker logs centaur-api-integration-test-postgres
-          exit 1
 
       - name: Run API integration test
         working-directory: services/api-rs
@@ -200,7 +155,7 @@ jobs:
           API_INTEGRATION_WORKFLOW_DIR: ${{ runner.temp }}/api-integration-workflows
           BIND_ADDR: 127.0.0.1:18080
           CENTAUR_API_URL: http://127.0.0.1:18080
-          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:15432/centaur?sslmode=disable
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/centaur?sslmode=disable
           RUN_MIGRATIONS: "true"
           RUST_LOG: info
           WORKFLOW_DIRS: ${{ runner.temp }}/api-integration-workflows
@@ -222,7 +177,7 @@ jobs:
         if: ${{ failure() }}
         run: |
           cat "$RUNNER_TEMP/centaur-api-server.log" || true
-          docker logs centaur-api-integration-test-postgres || true
+          docker logs centaur-api-test-postgres || true
 
       - name: Cleanup API integration test dependencies
         if: ${{ always() }}
@@ -230,7 +185,7 @@ jobs:
           if [ -f "$RUNNER_TEMP/centaur-api-server.pid" ]; then
             kill "$(cat "$RUNNER_TEMP/centaur-api-server.pid")" 2>/dev/null || true
           fi
-          docker rm -f centaur-api-integration-test-postgres || true
+          docker rm -f centaur-api-test-postgres || true
 
   sandbox-tests:
     name: Sandbox Python tests

@@ -38,27 +38,8 @@ as $$
     select current_setting('centaur.slack_include_public', true) = 'true'
 $$;
 
-create or replace function centaur_company_context_can_read_slack_channel(
-    p_channel_id text,
-    p_is_private boolean
-)
-returns boolean
-language sql
-stable
-as $$
-    select p_channel_id = public.centaur_current_slack_channel_id()
-        or p_channel_id = any(
-            (select public.centaur_current_slack_history_channel_ids())::text[]
-        )
-        or (
-            (select public.centaur_company_context_include_public_slack())
-            and not coalesce(p_is_private, true)
-        )
-$$;
-
 revoke all on function centaur_current_slack_history_channel_ids() from public;
 revoke all on function centaur_company_context_include_public_slack() from public;
-revoke all on function centaur_company_context_can_read_slack_channel(text, boolean) from public;
 
 grant execute on function centaur_current_slack_channel_id()
     to centaur_company_context_reader;
@@ -78,8 +59,6 @@ grant execute on function centaur_current_slack_history_channel_ids()
     to centaur_company_context_reader;
 grant execute on function centaur_company_context_include_public_slack()
     to centaur_company_context_reader;
-grant execute on function centaur_company_context_can_read_slack_channel(text, boolean)
-    to centaur_company_context_reader;
 
 grant select on
     slack_sync_channels,
@@ -97,7 +76,16 @@ create policy centaur_cc_reader_channels_select
     on slack_sync_channels
     for select
     to centaur_company_context_reader
-    using (centaur_company_context_can_read_slack_channel(channel_id, is_private));
+    using (
+        channel_id = centaur_current_slack_channel_id()
+        or channel_id = any(
+            (select centaur_current_slack_history_channel_ids())::text[]
+        )
+        or (
+            (select centaur_company_context_include_public_slack())
+            and not is_private
+        )
+    );
 
 drop policy if exists centaur_cc_reader_documents_select
     on company_context_documents;

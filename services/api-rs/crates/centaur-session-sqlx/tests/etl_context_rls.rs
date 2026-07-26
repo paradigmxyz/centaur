@@ -159,14 +159,14 @@ async fn run_rls_assertions(conn: &mut PgConnection) -> Result<(), Box<dyn Error
         visible_rows(conn, "centaur_readonly", Some("G_PRIVATE")).await?;
     assert_eq!(readonly_private_channel, public_and_private_visible_rows());
 
-    let company_context_public = company_context_docs(conn, r#"[]"#, true).await?;
+    let company_context_public = company_context_docs(conn, None, r#"[]"#, true).await?;
     assert_eq!(
         company_context_public,
         vec!["doc_slack_alpha".to_owned(), "doc_slack_beta".to_owned(),]
     );
 
     let company_context_private_history =
-        company_context_docs(conn, r#"["G_PRIVATE"]"#, true).await?;
+        company_context_docs(conn, None, r#"["G_PRIVATE"]"#, true).await?;
     assert_eq!(
         company_context_private_history,
         vec![
@@ -176,9 +176,17 @@ async fn run_rls_assertions(conn: &mut PgConnection) -> Result<(), Box<dyn Error
         ]
     );
 
-    let company_context_no_public = company_context_docs(conn, r#"["C_ALPHA"]"#, false).await?;
+    let company_context_history_no_public =
+        company_context_docs(conn, None, r#"["C_ALPHA"]"#, false).await?;
     assert_eq!(
-        company_context_no_public,
+        company_context_history_no_public,
+        vec!["doc_slack_alpha".to_owned()]
+    );
+
+    let company_context_current_channel =
+        company_context_docs(conn, Some("C_ALPHA"), r#"[]"#, false).await?;
+    assert_eq!(
+        company_context_current_channel,
         vec!["doc_slack_alpha".to_owned()]
     );
 
@@ -633,6 +641,7 @@ async fn visible_rows(
 
 async fn company_context_docs(
     conn: &mut PgConnection,
+    slack_channel_id: Option<&str>,
     slack_history_channel_ids: &str,
     include_public_slack: bool,
 ) -> Result<Vec<String>, sqlx::Error> {
@@ -640,6 +649,12 @@ async fn company_context_docs(
     tx.execute("set local search_path to public").await?;
     tx.execute("set role centaur_company_context_reader")
         .await?;
+    if let Some(channel_id) = slack_channel_id {
+        sqlx::query("select set_config('centaur.slack_channel_id', $1, true)")
+            .bind(channel_id)
+            .execute(&mut *tx)
+            .await?;
+    }
     sqlx::query("select set_config('centaur.slack_history_channel_ids', $1, true)")
         .bind(slack_history_channel_ids)
         .execute(&mut *tx)
