@@ -1629,7 +1629,7 @@ mod tests {
             secret_ref: "RESHIFT_DSN".to_owned(),
             labels: tool_labels("company_context", "centaur"),
             database: "warehouse".to_owned(),
-            role: Some("centaur_slack_reader_v2".to_owned()),
+            role: Some("centaur_company_context_reader".to_owned()),
             settings: vec![
                 PgDsnSetting {
                     name: "centaur.slack_channel_id".to_owned(),
@@ -1672,7 +1672,7 @@ mod tests {
         assert_eq!(sandbox_env.database.as_deref(), Some("warehouse"));
         assert_eq!(
             listeners[0].extra.get("role").and_then(YamlValue::as_str),
-            Some("centaur_slack_reader_v2")
+            Some("centaur_company_context_reader")
         );
         assert_eq!(listeners[0].settings.len(), 4);
         assert_eq!(listeners[0].settings[0].name, "centaur.slack_channel_id");

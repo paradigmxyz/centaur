@@ -30,6 +30,15 @@ struct VisibleRows {
     linear_checkpoints: i64,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct CompanyContextSearchRows {
+    company_context_docs: Vec<String>,
+    google_docs: Vec<String>,
+    granola_docs: Vec<String>,
+    slack_private_docs: Vec<String>,
+    slack_private_conversation_docs: Vec<String>,
+}
+
 #[tokio::test]
 async fn etl_context_rls_enforces_channel_visibility() -> Result<(), Box<dyn Error>> {
     let Some(database_url) = test_database_url() else {
@@ -173,6 +182,24 @@ async fn run_rls_assertions(conn: &mut PgConnection) -> Result<(), Box<dyn Error
         vec!["doc_slack_alpha".to_owned()]
     );
 
+    let search_rows = company_context_search_rows(conn).await?;
+    assert_eq!(
+        search_rows,
+        CompanyContextSearchRows {
+            company_context_docs: vec![
+                "doc_slack_alpha".to_owned(),
+                "doc_slack_beta".to_owned(),
+                "doc_slack_private".to_owned(),
+            ],
+            google_docs: vec!["gdocs_doc".to_owned()],
+            granola_docs: vec!["granola:note:granola_note".to_owned()],
+            slack_private_docs: vec!["slack_dm:T_HOME:D_VISIBLE:2000.000001".to_owned()],
+            slack_private_conversation_docs: vec![
+                "slack_dm_conversation:T_HOME:D_VISIBLE".to_owned()
+            ],
+        }
+    );
+
     Ok(())
 }
 
@@ -283,11 +310,28 @@ fn expected_policies() -> Vec<(String, String)> {
         ),
         (
             "company_context_documents",
-            "centaur_slack_reader_v2_documents_select",
+            "centaur_cc_reader_documents_select",
+        ),
+        ("slack_sync_channels", "centaur_cc_reader_channels_select"),
+        (
+            "granola_context_documents",
+            "centaur_cc_reader_granola_documents_select",
         ),
         (
-            "slack_sync_channels",
-            "centaur_slack_reader_v2_channels_select",
+            "slack_private_context_documents",
+            "centaur_cc_reader_private_docs_select",
+        ),
+        (
+            "slack_private_conversation_context_documents",
+            "centaur_cc_reader_private_conversation_docs_select",
+        ),
+        (
+            "google_docs_sync_file_observations",
+            "centaur_cc_reader_gdocs_observations_select",
+        ),
+        (
+            "google_docs_context_documents",
+            "centaur_cc_reader_gdocs_documents_select",
         ),
         (
             "google_drive_sync_runs",
@@ -484,6 +528,42 @@ async fn insert_fixture_rows(conn: &mut PgConnection) -> Result<(), sqlx::Error>
         insert into linear_sync_issues (issue_id) values ('linear_issue');
         insert into linear_sync_comments (comment_id) values ('linear_comment');
         insert into linear_sync_checkpoints (scope_id) values ('linear_scope');
+
+        insert into google_docs_sync_runs
+            (run_id, status, broker_credential_id, provider_subject)
+        values
+            ('gdocs_run', 'succeeded', 'gdocs_credential', 'google_subject');
+        insert into google_docs_sync_files (file_id, source_run_id)
+        values ('gdocs_file', 'gdocs_run');
+        insert into google_docs_sync_file_observations
+            (broker_credential_id, observed_file_id, file_id, provider_subject, active)
+        values
+            ('gdocs_credential', 'gdocs_observed_file', 'gdocs_file', 'google_subject', true);
+        insert into google_docs_context_documents
+            (document_id, file_id, chunk_id, title, body)
+        values
+            ('gdocs_doc', 'gdocs_file', 'chunk_1', 'Google Doc', 'Google Doc body');
+
+        insert into granola_sync_notes
+            (note_id, title, access_emails)
+        values
+            ('granola_note', 'Granola note', array['viewer@example.com']);
+
+        insert into slack_private_sync_conversations
+            (home_team_id, conversation_id, conversation_type)
+        values
+            ('T_HOME', 'D_VISIBLE', 'im'),
+            ('T_HOME', 'D_HIDDEN', 'im');
+        insert into slack_private_sync_conversation_members
+            (home_team_id, conversation_id, user_id, is_current_member)
+        values
+            ('T_HOME', 'D_VISIBLE', 'U_VIEWER', true),
+            ('T_HOME', 'D_HIDDEN', 'U_OTHER', true);
+        insert into slack_private_sync_messages
+            (home_team_id, conversation_id, message_ts, user_id, text)
+        values
+            ('T_HOME', 'D_VISIBLE', '2000.000001', 'U_VIEWER', 'visible dm'),
+            ('T_HOME', 'D_HIDDEN', '2000.000002', 'U_OTHER', 'hidden dm');
         "#,
     )
     .execute(&mut *conn)
@@ -558,7 +638,8 @@ async fn company_context_docs(
 ) -> Result<Vec<String>, sqlx::Error> {
     let mut tx = conn.begin().await?;
     tx.execute("set local search_path to public").await?;
-    tx.execute("set role centaur_slack_reader_v2").await?;
+    tx.execute("set role centaur_company_context_reader")
+        .await?;
     sqlx::query("select set_config('centaur.slack_history_channel_ids', $1, true)")
         .bind(slack_history_channel_ids)
         .execute(&mut *tx)
@@ -577,6 +658,69 @@ async fn company_context_docs(
         "select coalesce(array_agg(document_id order by document_id), '{}') from company_context_documents",
     )
     .await?;
+
+    tx.execute("reset role").await?;
+    tx.rollback().await?;
+    Ok(rows)
+}
+
+async fn company_context_search_rows(
+    conn: &mut PgConnection,
+) -> Result<CompanyContextSearchRows, sqlx::Error> {
+    let mut tx = conn.begin().await?;
+    tx.execute("set local search_path to public").await?;
+    tx.execute("set role centaur_company_context_reader")
+        .await?;
+    sqlx::query("select set_config('centaur.slack_channel_id', 'C_ALPHA', true)")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("select set_config('centaur.slack_history_channel_ids', $1, true)")
+        .bind(r#"["G_PRIVATE"]"#)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("select set_config('centaur.slack_include_public', 'true', true)")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("select set_config('centaur.slack_team_id', 'T_HOME', true)")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("select set_config('centaur.slack_user_id', 'U_VIEWER', true)")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("select set_config('centaur.user_email', 'viewer@example.com', true)")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("select set_config('centaur.google_subject', 'google_subject', true)")
+        .execute(&mut *tx)
+        .await?;
+
+    let rows = CompanyContextSearchRows {
+        company_context_docs: text_array(
+            &mut tx,
+            "select coalesce(array_agg(document_id order by document_id), '{}') from company_context_documents",
+        )
+        .await?,
+        google_docs: text_array(
+            &mut tx,
+            "select coalesce(array_agg(document_id order by document_id), '{}') from google_docs_context_documents",
+        )
+        .await?,
+        granola_docs: text_array(
+            &mut tx,
+            "select coalesce(array_agg(document_id order by document_id), '{}') from granola_context_documents",
+        )
+        .await?,
+        slack_private_docs: text_array(
+            &mut tx,
+            "select coalesce(array_agg(document_id order by document_id), '{}') from slack_private_context_documents",
+        )
+        .await?,
+        slack_private_conversation_docs: text_array(
+            &mut tx,
+            "select coalesce(array_agg(document_id order by document_id), '{}') from slack_private_conversation_context_documents",
+        )
+        .await?,
+    };
 
     tx.execute("reset role").await?;
     tx.rollback().await?;
