@@ -701,14 +701,30 @@ class TestMcpBackend:
         backend = TakoMcpBackend(
             transport=_mcp_transport({"tako_search": payload}, record=record)
         )
-        result = backend.search("tesla revenue", effort="deep", web_count=0)
+        result = backend.search("tesla revenue", effort="instant", web_count=0)
         assert result["cards"] == [{"title": "Revenue"}]
         assert "pub_id" not in result and "embed_url" not in result
         assert result["meta"]["backend"] == "tako:mcp"
         call = next(p for m, p in record if m == "tools/call")
         assert call["name"] == "tako_search"
         assert call["arguments"]["sources"] == ["data"]
-        assert call["arguments"]["effort"] == "deep"
+        assert call["arguments"]["effort"] == "instant"
+
+    def test_search_flags_deep_effort_and_omits_it(self):
+        # The hosted search tool's effort enum is fast/instant only; sending
+        # "deep" would be rejected by its input schema, so the backend must
+        # degrade it to a partial failure and run the search at the default.
+        record = []
+        payload = {"cards": [], "web_results": [], "usage": None, "request_id": "r"}
+        backend = TakoMcpBackend(
+            transport=_mcp_transport({"tako_search": payload}, record=record)
+        )
+        result = backend.search("tesla revenue", effort="deep")
+        call = next(p for m, p in record if m == "tools/call")
+        assert "effort" not in call["arguments"]
+        failures = result["meta"]["partial_failures"]
+        assert [f["feature"] for f in failures] == ["effort"]
+        assert "TAKO_API_KEY" in failures[0]["error"]
 
     def test_differing_counts_recorded_as_partial_failure(self):
         sources, count, failures = _sources_and_count(5, 3)

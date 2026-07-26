@@ -290,7 +290,9 @@ class TakoClient:
 
         Args:
             query: Natural language query.
-            effort: 'instant', 'fast' (default), or 'deep'.
+            effort: 'instant', 'fast' (default), or 'deep'. The keyless MCP
+                backend serves fast and instant only; 'deep' is flagged in
+                meta.partial_failures and the search runs at the default.
             data_count: Max Tako data cards, 1-20. Pass 0 to skip the data index.
             web_count: Max web results, 1-20. Pass 0 to skip the web index.
             node_ids: Graph node ids to pin as retrieval candidates (max 20).
@@ -444,10 +446,11 @@ class TakoClient:
             {found, query, summary, matches, other_matches}. `found` is true
             only when a DRILLED match has live coverage; node resolution alone
             never counts, and hits beyond the top EXPAND_TOP_N land in
-            `other_matches` (with node_id) unchecked, so `found=False` means
-            "not confirmed in the drilled set", not "Tako has no data". Each
-            match carries coverage.names (reuse verbatim in a follow-up query)
-            and node_id (pin via search(node_ids=...)).
+            `other_matches` unchecked, so `found=False` means "not confirmed
+            in the drilled set", not "Tako has no data". Each match carries
+            coverage.names (reuse verbatim in a follow-up query) and node_id
+            (pin via search(node_ids=...)). `other_matches` include node_id on
+            the SDK backend; the hosted MCP returns name/type only today.
         """
         if self._mcp is not None:
             _validate_discovery_args(q, types, label)

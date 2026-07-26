@@ -12,11 +12,18 @@ a number, a trend, or a cohort comparison.
 
 | Capability | No credentials (free MCP tier) | + `TAKO_API_KEY` |
 | --- | --- | --- |
-| `available-data` | Free hosted MCP, rate-limited | Direct graph API |
-| `search` | Free hosted MCP, rate-limited, single shared result count | Full API: per-source counts, higher limits |
+| `available-data` | Free hosted MCP, rate-limited; `other_matches` carry name/type only | Direct graph API; `other_matches` include `node_id` |
+| `search` | Free hosted MCP, rate-limited, single shared result count, no `--effort deep` | Full API: per-source counts, higher limits, `deep` |
 | `answer` | Free hosted MCP, rate-limited, no `--effort` | Full API |
 | `contents` | not available (key required) | Row exports, 20-row free allowance |
 | `health` | Probes the free MCP | Probes the graph API |
+
+Backend defaults differ when no count options are passed: the hosted MCP
+returns up to 10 results per source, each card with a small inline row
+preview (the free tier's only data access, since `contents` is key-only),
+while the API defaults to 5 pointer cards per source, with `contents`
+available for full rows. Every knob a backend cannot honor is reported in
+`meta.partial_failures`, never silently dropped.
 
 The credential is additive, like websearch's `PARALLEL_API_KEY`: with no key
 configured, `search`/`answer`/`available-data` fall back to Tako's free
@@ -60,10 +67,12 @@ verbatim, and `total`/`truncated`/`capped` report when more exist server-side.
 `capped` means the server stopped counting, so read the total as "at least N".
 
 Only the top two matches are coverage-checked. Hits beyond them appear in
-`other_matches` with their `node_id`, explicitly marked "not checked" in the
-summary: `found: false` means "not confirmed in the checked set", never "Tako
-has no data". If an unchecked hit is the intended entity, pin its node id in
-`search --node-id`, or rerun with `--types`/`--label` to rank it higher.
+`other_matches`, explicitly marked "not checked" in the summary: `found:
+false` means "not confirmed in the checked set", never "Tako has no data".
+On the keyed backend each entry carries its `node_id`; the hosted MCP returns
+name/type only today. If an unchecked hit is the intended entity, pin its
+node id in `search --node-id`, or rerun with `--types`/`--label` to rank it
+higher.
 
 ## Commands
 
@@ -115,6 +124,16 @@ widget fields stripped so both backends return the same shape. Routing is by
 value), the same helper websearch uses. A stable client-minted id is sent as
 `Mcp-Session-Id` so the free tier can rate-limit per client instead of per
 egress IP; the server side of that attribution ships with the free tier.
+
+The argument mapping in `_mcp.py` is verified against the hosted worker's
+tool schemas (tako-mcp `workers/src/tools/`) as of 2026-07-26: search takes
+a single `count` plus `sources[]` and its `effort` enum is fast/instant only;
+answer takes neither `effort` nor `count`; `other_matches` come back without
+`node_id`; the widget fields are top-level on the tool output. Every mismatch
+degrades to a `meta.partial_failures` entry client-side. Recheck those
+schemas when the anonymous free tier ships — its tako-mcp PR is not merged
+yet, and the final keyless contract (rate-limit attribution, any effort
+support) lands there.
 
 Three SDK workarounds worth knowing about, all in `client.py`:
 

@@ -38,6 +38,12 @@ MCP_CLIENT_VERSION = "0.1.0"
 # same top-level keys (cards, web_results, usage, request_id).
 _WIDGET_FIELDS = ("pub_id", "embed_url", "image_url", "dark_mode", "width", "height")
 
+# Effort levels the hosted search tool accepts. Its input schema is
+# fast/instant only — the synchronous tool has no deep mode — so the SDK's
+# "deep" is flagged and omitted rather than sent to a certain schema
+# rejection server-side.
+MCP_SEARCH_EFFORTS = ("fast", "instant")
+
 
 class McpAuthRequired(RuntimeError):
     """The MCP rejected the anonymous call (free tier absent or exhausted)."""
@@ -113,6 +119,18 @@ class TakoMcpBackend:
         locale: str | None = None,
     ) -> dict:
         sources, count, partial_failures = _sources_and_count(data_count, web_count)
+        if effort is not None and effort not in MCP_SEARCH_EFFORTS:
+            partial_failures.append(
+                {
+                    "feature": "effort",
+                    "error": (
+                        "the free MCP search tool serves "
+                        f"{' and '.join(MCP_SEARCH_EFFORTS)} only; ignoring "
+                        f"effort={effort}. Configure TAKO_API_KEY for deep search."
+                    ),
+                }
+            )
+            effort = None
         arguments = _drop_none(
             {
                 "query": query,

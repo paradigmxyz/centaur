@@ -70,7 +70,9 @@ def emit_or_reject(call) -> None:
 @app.command()
 def search(
     query: str = typer.Argument(..., help="Natural language query"),
-    effort: str = typer.Option(None, help="instant, fast (default), or deep"),
+    effort: str = typer.Option(
+        None, help="instant, fast (default), or deep (deep requires TAKO_API_KEY)"
+    ),
     data_count: int = typer.Option(None, help="Max data cards, 1-20. 0 skips the data index"),
     web_count: int = typer.Option(None, help="Max web results, 1-20. 0 skips the web index"),
     node_id: list[str] = typer.Option(  # noqa: B008
