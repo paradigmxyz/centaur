@@ -26,11 +26,15 @@ available for full rows. Every knob a backend cannot honor is reported in
 `meta.partial_failures`, never silently dropped.
 
 The credential is additive, like websearch's `PARALLEL_API_KEY`: with no key
-configured, `search`/`answer`/`available-data` fall back to Tako's free
-rate-limited hosted MCP at `mcp.tako.com` (until that tier launches, keyless
-calls report that a key is required). Responses carry `meta.backend`
-(`tako:sdk` or `tako:mcp`) and `meta.partial_failures` for knobs the free
-tier cannot honor.
+configured, `search`/`answer`/`available-data` fall back to Tako's anonymous
+free MCP tier at `mcp.tako.com` (TakoData/tako-mcp#171). The tier is enabled
+per server environment, fail-closed: where it is off, keyless calls report
+that a key is required. Where it is on, `tools/call` is metered at 10/min
+per client IP — sandboxes NATed through one egress IP share that bucket, so
+treat the free tier as a fallback, not fleet capacity. Over-limit calls
+raise a clear rate-limit error carrying the server's own message and
+retry hint. Responses carry `meta.backend` (`tako:sdk` or `tako:mcp`) and
+`meta.partial_failures` for knobs the free tier cannot honor.
 
 ```bash
 TAKO_API_KEY=...   # optional; https://tako.com, account settings
@@ -121,19 +125,20 @@ The keyless path lives in `_mcp.py`: a small Streamable HTTP JSON-RPC client
 hosted MCP's `tako_search`/`tako_answer`/`tako_available_data` tools, with
 widget fields stripped so both backends return the same shape. Routing is by
 `_is_configured("TAKO_API_KEY")` (ctx.secrets membership, never the key
-value), the same helper websearch uses. A stable client-minted id is sent as
-`Mcp-Session-Id` so the free tier can rate-limit per client instead of per
-egress IP; the server side of that attribution ships with the free tier.
+value), the same helper websearch uses. No `Mcp-Session-Id` is sent: the
+Worker is stateless and never issues one, and free-tier metering is per
+client IP (Cloudflare `CF-Connecting-IP`), not per session.
 
 The argument mapping in `_mcp.py` is verified against the hosted worker's
-tool schemas (tako-mcp `workers/src/tools/`) as of 2026-07-26: search takes
-a single `count` plus `sources[]` and its `effort` enum is fast/instant only;
-answer takes neither `effort` nor `count`; `other_matches` come back without
-`node_id`; the widget fields are top-level on the tool output. Every mismatch
-degrades to a `meta.partial_failures` entry client-side. Recheck those
-schemas when the anonymous free tier ships — its tako-mcp PR is not merged
-yet, and the final keyless contract (rate-limit attribution, any effort
-support) lands there.
+tool schemas (tako-mcp `workers/src/tools/`) and the anonymous-tier contract
+(TakoData/tako-mcp#171) as of 2026-07-26: search takes a single `count` plus
+`sources[]` and its `effort` enum is fast/instant only; answer takes neither
+`effort` nor `count`; `other_matches` come back without `node_id`; the
+widget fields are top-level on the tool output; the anonymous surface is
+exactly the three tools this backend calls. Every knob mismatch degrades to
+a `meta.partial_failures` entry client-side; a disabled tier 401s
+(`McpAuthRequired`), an over-limit IP 429s (`McpRateLimited`, surfacing the
+server's own message and Retry-After).
 
 Three SDK workarounds worth knowing about, all in `client.py`:
 

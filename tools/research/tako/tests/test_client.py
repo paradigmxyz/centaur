@@ -644,21 +644,23 @@ import httpx  # noqa: E402
 
 from tools.research.tako._mcp import (  # noqa: E402
     McpAuthRequired,
+    McpRateLimited,
     TakoMcpBackend,
     _sources_and_count,
 )
 
 
-def _mcp_transport(tool_payloads, status_code=200, record=None):
+def _mcp_transport(tool_payloads, status_code=200, record=None, error_body=None):
     """MockTransport speaking just enough Streamable HTTP for the backend.
 
     tool_payloads: dict of tool name -> structuredContent payload.
     record: optional list collecting (method, params) JSON-RPC pairs.
+    error_body: JSON body for non-200 responses (default {"detail": "denied"}).
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
         if status_code != 200:
-            return httpx.Response(status_code, json={"detail": "denied"})
+            return httpx.Response(status_code, json=error_body or {"detail": "denied"})
         body = json.loads(request.content)
         if record is not None:
             record.append((body.get("method"), body.get("params")))
@@ -761,6 +763,66 @@ class TestMcpBackend:
             raise AssertionError("expected McpAuthRequired")
         except McpAuthRequired as exc:
             assert "TAKO_API_KEY" in str(exc)
+
+    def test_rate_limit_surfaces_the_server_message(self):
+        # The free tier 429s with a JSON-RPC error envelope whose message
+        # states the actual limit and upsell — surface it verbatim so the
+        # number can never drift from the server's configured limit.
+        envelope = {
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {
+                "code": -32000,
+                "message": "Free tier limit reached (10 requests/min).",
+                "data": {"kind": "rate_limited"},
+            },
+        }
+        backend = TakoMcpBackend(
+            transport=_mcp_transport({}, status_code=429, error_body=envelope)
+        )
+        try:
+            backend.search("tesla revenue")
+            raise AssertionError("expected McpRateLimited")
+        except McpRateLimited as exc:
+            assert "10 requests/min" in str(exc)
+            assert "TAKO_API_KEY" in str(exc)
+
+    def test_rate_limit_with_unparseable_body_is_still_clear(self):
+        backend = TakoMcpBackend(transport=_mcp_transport({}, status_code=429))
+        try:
+            backend.search("tesla revenue")
+            raise AssertionError("expected McpRateLimited")
+        except McpRateLimited as exc:
+            assert "rate limit" in str(exc)
+            assert "TAKO_API_KEY" in str(exc)
+
+    def test_requests_carry_no_auth_or_session_headers(self):
+        # The anonymous tier is selected by the complete ABSENCE of an
+        # Authorization header (empty/malformed would 401), and the Worker
+        # neither issues nor reads Mcp-Session-Id.
+        seen_headers = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen_headers.append(request.headers)
+            body = json.loads(request.content)
+            if body.get("method") == "notifications/initialized":
+                return httpx.Response(202)
+            result = (
+                {"structuredContent": {"found": False, "query": "q", "summary": "s",
+                                       "matches": [], "other_matches": []}}
+                if body.get("method") == "tools/call"
+                else {}
+            )
+            return httpx.Response(
+                200, json={"jsonrpc": "2.0", "id": body.get("id"), "result": result}
+            )
+
+        backend = TakoMcpBackend(transport=httpx.MockTransport(handler))
+        backend.available_data("tesla")
+        assert seen_headers
+        for headers in seen_headers:
+            assert "authorization" not in headers
+            assert "mcp-session-id" not in headers
 
 
 class TestBackendRouting:
