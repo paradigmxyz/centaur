@@ -468,6 +468,8 @@ def _client_with_fake():
     client._client = FakeTakoFacade()
     client._timeout = 120.0
     client._graph_timeout = 30.0
+    client._has_key = True
+    client._mcp = None
     return client
 
 
@@ -483,7 +485,8 @@ class TestPricedPaths:
         assert request.effort == "deep"
         assert request.sources.data.node_ids == ["n1"]
         assert timeout == 120.0
-        assert result == {"cards": []}
+        assert result["cards"] == []
+        assert result["meta"] == {"backend": "tako:sdk", "partial_failures": []}
 
     def test_answer_builds_same_request_shape(self):
         client = _client_with_fake()
@@ -525,7 +528,8 @@ class TestPricedPaths:
         assert request.max_rows == 100
         assert request.quote_only is None
         assert timeout == 120.0
-        assert result == {"outputs": []}
+        assert result["outputs"] == []
+        assert result["meta"]["backend"] == "tako:sdk"
 
     def test_contents_invalid_mode_and_format_raise_before_network(self):
         client = _client_with_fake()
@@ -632,3 +636,161 @@ class TestDerivedConstants:
         assert set(EFFORT_LEVELS) == {e.value for e in SearchEffortLevel}
         assert set(CONTENT_MODES) == {m.value for m in ContentsDeliveryMode}
         assert set(CONTENT_FORMATS) == {f.value for f in ContentsFormat}
+
+
+# -- MCP fallback backend ----------------------------------------------------
+
+import httpx  # noqa: E402
+
+from tools.research.tako._mcp import (  # noqa: E402
+    McpAuthRequired,
+    TakoMcpBackend,
+    _sources_and_count,
+)
+
+
+def _mcp_transport(tool_payloads, status_code=200, record=None):
+    """MockTransport speaking just enough Streamable HTTP for the backend.
+
+    tool_payloads: dict of tool name -> structuredContent payload.
+    record: optional list collecting (method, params) JSON-RPC pairs.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if status_code != 200:
+            return httpx.Response(status_code, json={"detail": "denied"})
+        body = json.loads(request.content)
+        if record is not None:
+            record.append((body.get("method"), body.get("params")))
+        method = body.get("method")
+        if method == "initialize":
+            return httpx.Response(
+                200, json={"jsonrpc": "2.0", "id": body["id"], "result": {}}
+            )
+        if method == "notifications/initialized":
+            return httpx.Response(202)
+        if method == "tools/call":
+            name = body["params"]["name"]
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": body["id"],
+                    "result": {"structuredContent": tool_payloads[name]},
+                },
+            )
+        raise AssertionError(f"unexpected method {method}")
+
+    return httpx.MockTransport(handler)
+
+
+import json  # noqa: E402
+
+
+class TestMcpBackend:
+    def test_search_maps_args_and_strips_widget_fields(self):
+        record = []
+        payload = {
+            "cards": [{"title": "Revenue"}],
+            "web_results": [],
+            "usage": None,
+            "request_id": "r1",
+            "pub_id": "widget",
+            "embed_url": "https://x",
+        }
+        backend = TakoMcpBackend(
+            transport=_mcp_transport({"tako_search": payload}, record=record)
+        )
+        result = backend.search("tesla revenue", effort="deep", web_count=0)
+        assert result["cards"] == [{"title": "Revenue"}]
+        assert "pub_id" not in result and "embed_url" not in result
+        assert result["meta"]["backend"] == "tako:mcp"
+        call = next(p for m, p in record if m == "tools/call")
+        assert call["name"] == "tako_search"
+        assert call["arguments"]["sources"] == ["data"]
+        assert call["arguments"]["effort"] == "deep"
+
+    def test_differing_counts_recorded_as_partial_failure(self):
+        sources, count, failures = _sources_and_count(5, 3)
+        assert sources is None
+        assert count == 5
+        assert failures and failures[0]["feature"] == "per_source_counts"
+
+    def test_answer_flags_unsupported_effort(self):
+        payload = {"answer": "text", "cards": [], "request_id": "r2"}
+        backend = TakoMcpBackend(transport=_mcp_transport({"tako_answer": payload}))
+        result = backend.answer("us cpi", effort="deep")
+        features = [f["feature"] for f in result["meta"]["partial_failures"]]
+        assert "effort" in features
+
+    def test_available_data_passes_through(self):
+        payload = {
+            "found": True,
+            "query": "tesla",
+            "summary": "s",
+            "matches": [],
+            "other_matches": [],
+        }
+        backend = TakoMcpBackend(
+            transport=_mcp_transport({"tako_available_data": payload})
+        )
+        result = backend.available_data("tesla", types="entity")
+        assert result["found"] is True
+        assert result["meta"]["backend"] == "tako:mcp"
+
+    def test_auth_rejection_is_a_clear_message(self):
+        backend = TakoMcpBackend(transport=_mcp_transport({}, status_code=401))
+        try:
+            backend.available_data("tesla")
+            raise AssertionError("expected McpAuthRequired")
+        except McpAuthRequired as exc:
+            assert "TAKO_API_KEY" in str(exc)
+
+
+class TestBackendRouting:
+    def _keyless_client(self, tool_payloads):
+        client = TakoClient.__new__(TakoClient)
+        client._has_key = False
+        client._client = None
+        client._timeout = 120.0
+        client._graph_timeout = 30.0
+        client._mcp = TakoMcpBackend(transport=_mcp_transport(tool_payloads))
+        return client
+
+    def test_keyless_search_routes_to_mcp(self):
+        payload = {"cards": [], "web_results": [], "usage": None, "request_id": "r"}
+        client = self._keyless_client({"tako_search": payload})
+        result = client.search("tesla")
+        assert result["meta"]["backend"] == "tako:mcp"
+
+    def test_keyless_search_still_validates_contracts(self):
+        client = self._keyless_client({})
+        try:
+            client.search("tesla", strict=True)
+            raise AssertionError("expected ValueError")
+        except ValueError:
+            pass
+
+    def test_keyless_contents_requires_key(self):
+        client = self._keyless_client({})
+        try:
+            client.contents("https://tako.com/card/abc")
+            raise AssertionError("expected ValueError")
+        except ValueError as exc:
+            assert "TAKO_API_KEY" in str(exc)
+
+    def test_keyless_available_data_validates_then_routes(self):
+        payload = {"found": False, "query": "q", "summary": "s", "matches": [], "other_matches": []}
+        client = self._keyless_client({"tako_available_data": payload})
+        try:
+            client.available_data("x")
+            raise AssertionError("expected ValueError")
+        except ValueError:
+            pass
+        result = client.available_data("nvidia")
+        assert result["meta"]["backend"] == "tako:mcp"
+
+    def test_sdk_path_stamps_meta(self):
+        client = _client_with_fake()
+        result = client.search("tesla revenue")
+        assert result["meta"]["backend"] == "tako:sdk"

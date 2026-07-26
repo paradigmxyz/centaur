@@ -20,13 +20,14 @@ app = typer.Typer(
 @app.command("health")
 def health():
     """Assert tako connectivity and auth with a safe read-only check."""
-    from .client import _client, _dump
+    from .client import _client
 
     client = _client()
     try:
-        # graph search is the cheapest authenticated read; it exercises the
-        # credential path without spending a priced search or answer call.
-        details = _dump(client._graph_search("nvidia", limit=1))
+        # The cheapest read for the active backend: a one-node graph search
+        # with a key, a free MCP available-data call without one. Neither
+        # spends a priced search or answer call.
+        details = client.probe()
         payload = {"ok": True, "tool": "tako", "error": None, "details": details}
     except Exception as exc:
         payload = {"ok": False, "tool": "tako", "error": str(exc), "details": {}}
@@ -135,7 +136,7 @@ def contents(
     max_chars: int = typer.Option(None, help="Character cap on extracted web text"),
     quote_only: bool = typer.Option(False, help="Price the export without fetching or charging"),
 ):
-    """Fetch the underlying data behind a result URL."""
+    """Fetch the underlying data behind a result URL. Requires TAKO_API_KEY."""
     emit_or_reject(
         lambda: get_client().contents(
             url,

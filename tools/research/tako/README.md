@@ -10,8 +10,23 @@ a number, a trend, or a cohort comparison.
 
 ## Setup
 
+| Capability | No credentials (free MCP tier) | + `TAKO_API_KEY` |
+| --- | --- | --- |
+| `available-data` | Free hosted MCP, rate-limited | Direct graph API |
+| `search` | Free hosted MCP, rate-limited, single shared result count | Full API: per-source counts, higher limits |
+| `answer` | Free hosted MCP, rate-limited, no `--effort` | Full API |
+| `contents` | not available (key required) | Row exports, 20-row free allowance |
+| `health` | Probes the free MCP | Probes the graph API |
+
+The credential is additive, like websearch's `PARALLEL_API_KEY`: with no key
+configured, `search`/`answer`/`available-data` fall back to Tako's free
+rate-limited hosted MCP at `mcp.tako.com` (until that tier launches, keyless
+calls report that a key is required). Responses carry `meta.backend`
+(`tako:sdk` or `tako:mcp`) and `meta.partial_failures` for knobs the free
+tier cannot honor.
+
 ```bash
-TAKO_API_KEY=...   # https://tako.com, account settings
+TAKO_API_KEY=...   # optional; https://tako.com, account settings
 ```
 
 ## The flow: discover free, then search priced
@@ -91,6 +106,15 @@ or cohort walking later is a CLI change rather than a rebuild.
 Tests live in `tests/` (no `__init__.py`) rather than at the tool root. The
 tool directory shares the SDK's import name, and pytest's module naming would
 otherwise load this package as top-level `tako` and shadow the SDK.
+
+The keyless path lives in `_mcp.py`: a small Streamable HTTP JSON-RPC client
+(httpx, which honors `HTTPS_PROXY`/`SSL_CERT_FILE` natively) against the
+hosted MCP's `tako_search`/`tako_answer`/`tako_available_data` tools, with
+widget fields stripped so both backends return the same shape. Routing is by
+`_is_configured("TAKO_API_KEY")` (ctx.secrets membership, never the key
+value), the same helper websearch uses. A stable client-minted id is sent as
+`Mcp-Session-Id` so the free tier can rate-limit per client instead of per
+egress IP; the server side of that attribution ships with the free tier.
 
 Three SDK workarounds worth knowing about, all in `client.py`:
 

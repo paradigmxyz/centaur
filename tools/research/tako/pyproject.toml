@@ -4,6 +4,7 @@ description = "Tako structured data cards, cited answers, and free data-coverage
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
+    "httpx>=0.28.0",
     "tako-sdk>=2.2.6",
     "typer>=0.12.0",
     "rich>=13.0.0",
@@ -29,7 +30,11 @@ module = "client.py"
 # Replace mode: `secret("TAKO_API_KEY")` hands the tool a placeholder, the SDK
 # puts it on the X-API-Key header (tako/configuration.py::auth_settings), and
 # iron-proxy swaps in the real value at the network boundary.
-secrets = [
+#
+# Optional: without a key, search/answer/available-data fall back to Tako's
+# free rate-limited hosted MCP at mcp.tako.com (anonymous; no secret bound to
+# that host). contents requires the key.
+optional_secrets = [
     {type = "http", name = "TAKO_API_KEY", match_headers = ["X-API-Key"], hosts = ["tako.com"]},
 ]
-hosts = ["tako.com"]
+hosts = ["tako.com", "mcp.tako.com"]

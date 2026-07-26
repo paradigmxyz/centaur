@@ -9,6 +9,17 @@ that resolves entities and metrics to node ids you can pin into a search.
 data Tako holds for each, so agents confirm coverage, and learn the exact
 metric and entity names, before spending a priced `search` or `answer` call.
 
+Two backends, selected by whether a TAKO_API_KEY is configured (never by the
+key's value — inside a sandbox the tool only holds placeholders):
+
+- key configured -> the SDK against tako.com/api, full features.
+- no key -> Tako's free rate-limited hosted MCP (`_mcp.py`) for `search`,
+  `answer`, and `available_data`; `contents` stays key-only. Same fallback
+  shape as the websearch tool's keyless Parallel MCP path.
+
+Responses carry `meta.backend` ("tako:sdk" | "tako:mcp") and
+`meta.partial_failures` for knobs a backend cannot honor.
+
 API docs: https://docs.tako.com
 """
 
@@ -20,7 +31,7 @@ from collections.abc import Callable
 from dataclasses import asdict
 from typing import Any
 
-from centaur_sdk import secret
+from centaur_sdk import get_tool_context, secret
 from tako import (
     Configuration,
     ContentsRequest,
@@ -48,6 +59,7 @@ from ._coverage import (
     match_to_dict,
     unavailable_match,
 )
+from ._mcp import MCP_URL, TakoMcpBackend
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +86,31 @@ def _validate_choice(name: str, value: str | None, allowed: tuple[str, ...]) -> 
     """Reject an invalid enum option with a one-line error, pre-network."""
     if value is not None and value not in allowed:
         raise ValueError(f"{name} must be one of: {', '.join(allowed)}")
+
+
+def _is_configured(key: str) -> bool:
+    """Authoritative check for whether a secret was explicitly configured.
+
+    `secret(key)` is unsafe for routing decisions: under centaur's default
+    StubBackend it returns the literal key name as a placeholder for
+    un-configured secrets. Both signals are needed (same helper as the
+    websearch tool):
+
+    - Server / tool-runtime: ToolManager populates ``ctx.secrets[key]`` only
+      for secrets it actually resolved, so dict membership is authoritative.
+    - CLI / direct-invoke: no ToolContext is bound; fall through to
+      ``secret(key)`` and treat the value-equals-key stub case as "not
+      configured".
+    """
+    try:
+        ctx = get_tool_context()
+        return bool(ctx.secrets.get(key))
+    except LookupError:
+        try:
+            val = secret(key)
+        except KeyError:
+            return False
+        return bool(val) and val != key
 
 
 def _proxy_url() -> str | None:
@@ -110,25 +147,17 @@ def _dump(model: Any) -> Any:
     return model
 
 
-def _sources(
+def _validate_source_args(
     data_count: int | None,
     web_count: int | None,
     node_ids: list[str] | None,
     strict: bool,
-) -> Sources | None:
-    """Build a Sources object, or None to accept the API default (data + web).
+) -> None:
+    """Source-selection contract checks, shared by the SDK and MCP backends.
 
-    A source is searched only if its key is present, so passing `data_count=0`
-    is how you get a data-only or web-only search. A skipped source must be
-    genuinely ABSENT from the request body: passing `data=None` explicitly
-    would land `data` in pydantic's model_fields_set and the generated
-    `Sources.to_dict` re-emits it as `"data": null` — key present, promise
-    broken. Hence the conditional kwargs at the bottom.
-
-    Raises ValueError on contract violations the API would otherwise reject
-    with a raw 400 (or worse, silently misread): counts outside 0-20, `strict`
-    without `node_ids`, more than MAX_NODE_IDS ids, `data_count=0` combined
-    with node pinning, or skipping both sources.
+    Rejects: counts outside 0-20, `strict` without `node_ids`, more than
+    MAX_NODE_IDS ids, `data_count=0` combined with node pinning, and skipping
+    both sources.
     """
     for name, count in (("data_count", data_count), ("web_count", web_count)):
         if count is not None and not 0 <= count <= MAX_SOURCE_COUNT:
@@ -146,6 +175,27 @@ def _sources(
         )
     if data_count == 0 and web_count == 0:
         raise ValueError("cannot skip both sources; drop one of the zero counts")
+
+
+def _sources(
+    data_count: int | None,
+    web_count: int | None,
+    node_ids: list[str] | None,
+    strict: bool,
+) -> Sources | None:
+    """Build a Sources object, or None to accept the API default (data + web).
+
+    A source is searched only if its key is present, so passing `data_count=0`
+    is how you get a data-only or web-only search. A skipped source must be
+    genuinely ABSENT from the request body: passing `data=None` explicitly
+    would land `data` in pydantic's model_fields_set and the generated
+    `Sources.to_dict` re-emits it as `"data": null` — key present, promise
+    broken. Hence the conditional kwargs at the bottom.
+
+    Raises ValueError on contract violations the API would otherwise reject
+    with a raw 400 (or worse, silently misread).
+    """
+    _validate_source_args(data_count, web_count, node_ids, strict)
     if data_count is None and web_count is None and not node_ids and not strict:
         return None
 
@@ -162,16 +212,35 @@ def _sources(
 
 
 class TakoClient:
-    """Client for the Tako API."""
+    """Client for the Tako API (SDK with a key, free hosted MCP without)."""
 
     def __init__(
         self,
         retries: int = 2,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         graph_timeout_seconds: float = GRAPH_TIMEOUT_SECONDS,
+        api_key: str | None = None,
+        mcp_url: str | None = None,
     ):
+        self._timeout = timeout_seconds
+        self._graph_timeout = graph_timeout_seconds
+        self._has_key = api_key is not None or _is_configured("TAKO_API_KEY")
+
+        if not self._has_key:
+            # Keyless: everything except `contents` runs on the free hosted
+            # MCP tier. httpx picks up HTTPS_PROXY/SSL_CERT_FILE itself.
+            self._client = None
+            self._mcp = TakoMcpBackend(
+                mcp_url=mcp_url or MCP_URL, timeout_seconds=timeout_seconds
+            )
+            return
+
+        self._mcp = None
         config = Configuration(retries=retries)
-        config.api_key["apiKey"] = secret("TAKO_API_KEY")
+        # Read via secret() so the firewall (StubBackend -> iron-proxy) can
+        # swap the placeholder on outbound headers; _is_configured() above is
+        # the routing signal, never this value.
+        config.api_key["apiKey"] = api_key or secret("TAKO_API_KEY")
 
         proxy = _proxy_url()
         if proxy:
@@ -180,8 +249,6 @@ class TakoClient:
         if ca_bundle:
             config.ssl_ca_cert = ca_bundle
 
-        self._timeout = timeout_seconds
-        self._graph_timeout = graph_timeout_seconds
         self._client = Tako(config)
         # The beta graph endpoints are missing security declarations in the
         # SDK's OpenAPI spec, so the generated client attaches no X-API-Key to
@@ -193,6 +260,11 @@ class TakoClient:
         self._client._api.api_client.set_default_header(
             "X-API-Key", config.api_key["apiKey"]
         )
+
+    @property
+    def backend(self) -> str:
+        """Which backend serves this client: 'tako:sdk' or 'tako:mcp'."""
+        return "tako:sdk" if self._has_key else "tako:mcp"
 
     # Calls go through the generated TakoApi (`_client._api`) rather than the
     # `Tako` facade: the facade does not forward `_request_timeout`, and
@@ -229,9 +301,22 @@ class TakoClient:
             locale: BCP-47 locale tag.
 
         Returns:
-            A dict with `cards`, `web_results`, `request_id`, and `usage`.
+            A dict with `cards`, `web_results`, `request_id`, `usage`, and
+            `meta` ({backend, partial_failures}).
         """
         _validate_choice("effort", effort, EFFORT_LEVELS)
+        if self._mcp is not None:
+            _validate_source_args(data_count, web_count, node_ids, strict)
+            return self._mcp.search(
+                query,
+                effort=effort,
+                data_count=data_count,
+                web_count=web_count,
+                node_ids=node_ids,
+                strict=strict,
+                country_code=country_code,
+                locale=locale,
+            )
         request = SearchRequest(
             query=query,
             effort=effort,
@@ -239,7 +324,9 @@ class TakoClient:
             country_code=country_code,
             locale=locale,
         )
-        return _dump(self._client._api.search(request, _request_timeout=self._timeout))
+        return _with_meta(
+            _dump(self._client._api.search(request, _request_timeout=self._timeout))
+        )
 
     def answer(
         self,
@@ -258,6 +345,18 @@ class TakoClient:
         where `cards[0]` is the lead card, the one to show alongside the text.
         """
         _validate_choice("effort", effort, EFFORT_LEVELS)
+        if self._mcp is not None:
+            _validate_source_args(data_count, web_count, node_ids, strict)
+            return self._mcp.answer(
+                query,
+                effort=effort,
+                data_count=data_count,
+                web_count=web_count,
+                node_ids=node_ids,
+                strict=strict,
+                country_code=country_code,
+                locale=locale,
+            )
         request = SearchRequest(
             query=query,
             effort=effort,
@@ -265,7 +364,9 @@ class TakoClient:
             country_code=country_code,
             locale=locale,
         )
-        return _dump(self._client._api.answer(request, _request_timeout=self._timeout))
+        return _with_meta(
+            _dump(self._client._api.answer(request, _request_timeout=self._timeout))
+        )
 
     # -- contents ---------------------------------------------------------
 
@@ -294,6 +395,12 @@ class TakoClient:
             max_chars: Character cap on extracted web text. Default 10,000.
             quote_only: Price the export without fetching or being charged.
         """
+        if self._mcp is not None:
+            raise ValueError(
+                "contents requires TAKO_API_KEY (row-level export billing is "
+                "not part of the free tier); search and available_data work "
+                "without one"
+            )
         _validate_choice("mode", mode, CONTENT_MODES)
         _validate_choice("content_format", content_format, CONTENT_FORMATS)
         request = ContentsRequest(
@@ -304,7 +411,9 @@ class TakoClient:
             max_chars=max_chars,
             quote_only=quote_only or None,
         )
-        return _dump(self._client._api.contents(request, _request_timeout=self._timeout))
+        return _with_meta(
+            _dump(self._client._api.contents(request, _request_timeout=self._timeout))
+        )
 
     # -- data-coverage discovery -------------------------------------------
 
@@ -340,6 +449,9 @@ class TakoClient:
             match carries coverage.names (reuse verbatim in a follow-up query)
             and node_id (pin via search(node_ids=...)).
         """
+        if self._mcp is not None:
+            _validate_discovery_args(q, types, label)
+            return self._mcp.available_data(q, types=types, label=label)
         return _run_available_data(
             q,
             graph_search=self._graph_search,
@@ -347,6 +459,12 @@ class TakoClient:
             types=types,
             label=label,
         )
+
+    def probe(self) -> dict:
+        """Cheapest authenticated (or anonymous) read, for `health`."""
+        if self._mcp is not None:
+            return self._mcp.available_data("nvidia")
+        return _dump(self._graph_search("nvidia", limit=1))
 
     # -- knowledge graph plumbing ------------------------------------------
     # Private: `available_data` is the supported discovery surface. Kept as
@@ -386,6 +504,22 @@ class TakoClient:
         )
 
 
+def _validate_discovery_args(q: str, types: str | None, label: str | None) -> None:
+    """available_data input contract, shared by the SDK pipeline and MCP path."""
+    if len(q.strip()) < 2:
+        raise ValueError("q must be at least 2 characters")
+    if types is not None and types not in NODE_TYPES:
+        raise ValueError(f"types must be one of: {', '.join(NODE_TYPES)}")
+    if label is not None and label not in NER_LABELS:
+        raise ValueError(f"label must be one of: {', '.join(NER_LABELS)}")
+
+
+def _with_meta(payload: dict) -> dict:
+    """Stamp SDK-path responses with the same meta shape the MCP path emits."""
+    payload["meta"] = {"backend": "tako:sdk", "partial_failures": []}
+    return payload
+
+
 def _run_available_data(
     q: str,
     *,
@@ -405,22 +539,19 @@ def _run_available_data(
     Raises ValueError on invalid input, so library and workflow callers get
     the same guardrails as the CLI.
     """
-    if len(q.strip()) < 2:
-        raise ValueError("q must be at least 2 characters")
-    if types is not None and types not in NODE_TYPES:
-        raise ValueError(f"types must be one of: {', '.join(NODE_TYPES)}")
-    if label is not None and label not in NER_LABELS:
-        raise ValueError(f"label must be one of: {', '.join(NER_LABELS)}")
+    _validate_discovery_args(q, types, label)
     response = graph_search(q, types=types, limit=10, label=label)
     results = list(response.results or [])
     if not results:
-        return {
-            "found": False,
-            "query": q,
-            "summary": build_summary(q, [], []),
-            "matches": [],
-            "other_matches": [],
-        }
+        return _with_meta(
+            {
+                "found": False,
+                "query": q,
+                "summary": build_summary(q, [], []),
+                "matches": [],
+                "other_matches": [],
+            }
+        )
 
     top = results[:EXPAND_TOP_N]
     others = [
@@ -446,13 +577,15 @@ def _run_available_data(
             )
             matches.append(unavailable_match(node))
 
-    return {
-        "found": any(has_live_coverage(m) for m in matches),
-        "query": q,
-        "summary": build_summary(q, matches, others),
-        "matches": [match_to_dict(m) for m in matches],
-        "other_matches": [asdict(o) for o in others],
-    }
+    return _with_meta(
+        {
+            "found": any(has_live_coverage(m) for m in matches),
+            "query": q,
+            "summary": build_summary(q, matches, others),
+            "matches": [match_to_dict(m) for m in matches],
+            "other_matches": [asdict(o) for o in others],
+        }
+    )
 
 
 def _client() -> TakoClient:
