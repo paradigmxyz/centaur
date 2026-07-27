@@ -30,6 +30,13 @@ class RecordingReadonlyClient(LinearReadonlyClient):
                     "pageInfo": {"hasNextPage": False, "endCursor": None},
                 }
             }
+        if "query Issues" in query:
+            return {
+                "issues": {
+                    "nodes": [{"identifier": "ENG-1", "title": "Filtered"}],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                }
+            }
         return {
             "searchIssues": {
                 "nodes": [{"identifier": "ENG-1", "title": "Search result"}],
@@ -62,3 +69,18 @@ def test_project_milestones_filters_by_project_id():
         "first": 10,
         "after": None,
     }
+
+
+def test_issues_filters_by_project_and_milestone_ids():
+    client = RecordingReadonlyClient()
+
+    result = client.issues(
+        project_id="project-1",
+        project_milestone_id="milestone-1",
+        limit=10,
+    )
+
+    assert result == [{"identifier": "ENG-1", "title": "Filtered"}]
+    query = client.calls[0]["query"]
+    assert 'project: { id: { eq: "project-1" } }' in query
+    assert 'projectMilestone: { id: { eq: "milestone-1" } }' in query

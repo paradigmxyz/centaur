@@ -62,6 +62,8 @@ class LinearReadonlyClient(LinearGraphQLClient):
         team_key: str | None = None,
         assignee: str | None = None,
         state: str | None = None,
+        project_id: str | None = None,
+        project_milestone_id: str | None = None,
         limit: int = 50,
         include_archived: bool = False,
     ) -> list[dict[str, Any]]:
@@ -79,6 +81,15 @@ class LinearReadonlyClient(LinearGraphQLClient):
         if state:
             filters.append(
                 f"state: {{ name: {{ containsIgnoreCase: {_linear_string_literal(state)} }} }}"
+            )
+        if project_id:
+            filters.append(
+                f"project: {{ id: {{ eq: {_linear_string_literal(project_id)} }} }}"
+            )
+        if project_milestone_id:
+            filters.append(
+                "projectMilestone: "
+                f"{{ id: {{ eq: {_linear_string_literal(project_milestone_id)} }} }}"
             )
 
         filter_arg = f"filter: {{ {', '.join(filters)} }}, " if filters else ""
@@ -325,7 +336,12 @@ class LinearReadonlyClient(LinearGraphQLClient):
                 projectMilestones {
                     nodes { id name description targetDate progress }
                 }
-                issues { nodes { id identifier title state { name } } }
+                issues {
+                    nodes {
+                        id identifier title state { name }
+                        projectMilestone { id name targetDate }
+                    }
+                }
                 url
             }
         }
@@ -431,6 +447,8 @@ class LinearReadonlyClient(LinearGraphQLClient):
                     state { name }
                     assignee { name }
                     team { key }
+                    project { id name }
+                    projectMilestone { id name targetDate }
                     dueDate
                     url
                 }

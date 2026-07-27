@@ -129,6 +129,8 @@ def issues(
         None, "--assignee", "-a", help="Filter by assignee (use 'me' for self)"
     ),
     state: str = typer.Option(None, "--state", "-s", help="Filter by state name"),
+    project: str = typer.Option(None, "--project", help="Filter by project name"),
+    milestone: str = typer.Option(None, "--milestone", help="Filter by project milestone"),
     limit: int = typer.Option(25, "--limit", "-n", help="Max results"),
     full: bool = typer.Option(False, "--full", "-f", help="Show full details"),
     json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
@@ -139,9 +141,36 @@ def issues(
         linear issues --team ENG --assignee me
         linear issues --state "In Progress" -n 50
         linear issues -t ENG -s Done --json
+        linear issues --project Solar --milestone LSP
     """
     client = get_client()
-    result = client.issues(team_key=team, assignee=assignee, state=state, limit=limit)
+    project_id = None
+    if project:
+        project_match = find_project(client, project)
+        if not project_match:
+            console.print(f"[red]Project '{project}' not found.[/]")
+            raise typer.Exit(1)
+        project_id = project_match["id"]
+
+    project_milestone_id = None
+    if milestone:
+        if not project_id:
+            console.print("[red]--milestone requires --project when listing issues.[/]")
+            raise typer.Exit(1)
+        milestone_match = find_project_milestone(client, project_id, milestone)
+        if not milestone_match:
+            console.print(f"[red]Milestone '{milestone}' not found in project '{project}'.[/]")
+            raise typer.Exit(1)
+        project_milestone_id = milestone_match["id"]
+
+    result = client.issues(
+        team_key=team,
+        assignee=assignee,
+        state=state,
+        project_id=project_id,
+        project_milestone_id=project_milestone_id,
+        limit=limit,
+    )
 
     if not result:
         console.print("[yellow]No issues found.[/]")
@@ -159,6 +188,11 @@ def issues(
             )
             console.print(f"\n[bold cyan]{issue.get('identifier')}[/] {issue.get('title')}")
             console.print(f"  State: [green]{state_name}[/]  Assignee: {assignee_name or '-'}")
+            if issue.get("project"):
+                project_name = issue["project"].get("name", "")
+                milestone_name = (issue.get("projectMilestone") or {}).get("name")
+                suffix = f" / {milestone_name}" if milestone_name else ""
+                console.print(f"  Project: {project_name}{suffix}")
             if issue.get("description"):
                 desc = issue["description"][:200].replace("\n", " ")
                 console.print(f"  {desc}{'...' if len(issue['description']) > 200 else ''}")
@@ -615,8 +649,11 @@ def project_detail(
     if issues:
         console.print(f"\n[bold]Issues ({len(issues)}):[/]")
         for iss in issues[:10]:
+            milestone = (iss.get("projectMilestone") or {}).get("name")
+            milestone_suffix = f" — {milestone}" if milestone else ""
             console.print(
-                f"  {iss.get('identifier')} - {iss.get('title')[:50]} [{iss.get('state', {}).get('name', '')}]"
+                f"  {iss.get('identifier')} - {iss.get('title')[:50]} "
+                f"[{iss.get('state', {}).get('name', '')}]{milestone_suffix}"
             )
         if len(issues) > 10:
             console.print(f"  ... and {len(issues) - 10} more")

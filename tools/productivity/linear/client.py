@@ -30,6 +30,8 @@ class LinearClient(LinearReadonlyClient):
         team_key: str | None = None,
         assignee: str | None = None,
         state: str | None = None,
+        project_id: str | None = None,
+        project_milestone_id: str | None = None,
         limit: int = 50,
         include_archived: bool = False,
     ) -> list[dict[str, Any]]:
@@ -38,6 +40,8 @@ class LinearClient(LinearReadonlyClient):
             team_key=team_key,
             assignee=assignee,
             state=state,
+            project_id=project_id,
+            project_milestone_id=project_milestone_id,
             limit=limit,
             include_archived=include_archived,
         )
