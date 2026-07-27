@@ -151,7 +151,6 @@ describe('slackbotv2', () => {
   })
 
   it('joins newly-created public channels', async () => {
-    bot = createTestBot({ autoJoinCreatedChannels: true })
     const waits: Promise<unknown>[] = []
     const response = await bot.app.request(
       '/api/webhooks/slack',
@@ -183,312 +182,20 @@ describe('slackbotv2', () => {
     expect(codexApi.executes).toHaveLength(0)
   })
 
-  it('does not join newly-created public channels when auto-join is disabled', async () => {
-    const waits: Promise<unknown>[] = []
-    const response = await bot.app.request(
-      '/api/webhooks/slack',
-      signedSlackEvent({
-        event_id: 'Ev-slackbotv2-channel-created-disabled',
-        event: {
-          type: 'channel_created',
-          channel: {
-            id: 'CDISABLEDCHANNEL',
-            name: 'disabled-channel',
-            created: 1700000000,
-            creator: USER_ID
-          },
-          team: TEAM_ID
-        }
-      }),
-      {},
-      waitUntilContext(waits)
-    )
-
-    expect(response.status).toBe(200)
-    await Promise.all(waits)
-    expect(slackApi.calls.filter(call => call.method === 'conversations.join')).toEqual([])
-  })
-
-  it('deduplicates channel-created join retries by Slack event id', async () => {
-    bot = createTestBot({ autoJoinCreatedChannels: true })
-    const event = signedSlackEvent({
-      event_id: 'Ev-slackbotv2-channel-created-retry',
-      event: {
-        type: 'channel_created',
-        channel: {
-          id: 'CRETRYCHANNEL',
-          name: 'retry-channel',
-          created: 1700000000,
-          creator: USER_ID
-        },
-        team: TEAM_ID
-      }
-    })
-
-    for (let index = 0; index < 2; index += 1) {
-      const waits: Promise<unknown>[] = []
-      const response = await bot.app.request(
-        '/api/webhooks/slack',
-        event,
-        {},
-        waitUntilContext(waits)
-      )
-      expect(response.status).toBe(200)
-      await Promise.all(waits)
-    }
-
-    expect(slackApi.calls.filter(call => call.method === 'conversations.join')).toEqual([
-      {
-        method: 'conversations.join',
-        body: { channel: 'CRETRYCHANNEL' }
-      }
-    ])
-  })
-
-  it('does not mark non-Slack conversations.join error responses as successful', async () => {
-    bot = createTestBot({
-      autoJoinCreatedChannels: true,
-      channelCreatedJoinRetryDelaysMs: []
-    })
-    slackApi.failNextConversationsJoin(500, { message: 'upstream unavailable' })
-    const event = signedSlackEvent({
-      event_id: 'Ev-slackbotv2-channel-created-false-success',
-      event: {
-        type: 'channel_created',
-        channel: {
-          id: 'CFALSESUCCESS',
-          name: 'false-success',
-          created: 1700000000,
-          creator: USER_ID
-        },
-        team: TEAM_ID
-      }
-    })
-
-    for (let index = 0; index < 2; index += 1) {
-      const waits: Promise<unknown>[] = []
-      const response = await bot.app.request(
-        '/api/webhooks/slack',
-        event,
-        {},
-        waitUntilContext(waits)
-      )
-      expect(response.status).toBe(200)
-      await Promise.all(waits)
-    }
-
-    expect(slackApi.calls.filter(call => call.method === 'conversations.join')).toEqual([
-      {
-        method: 'conversations.join',
-        body: { channel: 'CFALSESUCCESS' }
-      },
-      {
-        method: 'conversations.join',
-        body: { channel: 'CFALSESUCCESS' }
-      }
-    ])
-  })
-
-  it('retries transient conversations.join failures in-process', async () => {
-    bot = createTestBot({
-      autoJoinCreatedChannels: true,
-      channelCreatedJoinRetryDelaysMs: [0]
-    })
+  it('logs conversations.join failures without failing the webhook', async () => {
+    const logs: CapturedLog[] = []
+    bot = createTestBot({ logger: captureLogger(logs) })
     slackApi.failNextConversationsJoin(500, { ok: false, error: 'server_error' })
     const waits: Promise<unknown>[] = []
     const response = await bot.app.request(
       '/api/webhooks/slack',
       signedSlackEvent({
-        event_id: 'Ev-slackbotv2-channel-created-retry-transient',
+        event_id: 'Ev-slackbotv2-channel-created-failure',
         event: {
           type: 'channel_created',
           channel: {
-            id: 'CTRANSIENTJOIN',
-            name: 'transient-join',
-            created: 1700000000,
-            creator: USER_ID
-          },
-          team: TEAM_ID
-        }
-      }),
-      {},
-      waitUntilContext(waits)
-    )
-
-    expect(response.status).toBe(200)
-    await Promise.all(waits)
-    expect(slackApi.calls.filter(call => call.method === 'conversations.join')).toEqual([
-      {
-        method: 'conversations.join',
-        body: { channel: 'CTRANSIENTJOIN' }
-      },
-      {
-        method: 'conversations.join',
-        body: { channel: 'CTRANSIENTJOIN' }
-      }
-    ])
-  })
-
-  it('sizes the channel-created join lease to cover the configured retry window', async () => {
-    const memoryState = createMemoryState()
-    let leaseTtlMs = 0
-    const state = Object.create(memoryState) as typeof memoryState
-    state.setIfNotExists = async (key: string, value: unknown, ttlMs?: number) => {
-      if (key.startsWith('slackbotv2:channel-created-join:')) leaseTtlMs = ttlMs ?? 0
-      return memoryState.setIfNotExists(key, value, ttlMs)
-    }
-    bot = createTestBot({
-      autoJoinCreatedChannels: true,
-      channelCreatedJoinRetryDelaysMs: [20_000, 40_000],
-      slackApiTimeoutMs: 5_000,
-      state
-    })
-
-    const waits: Promise<unknown>[] = []
-    const response = await bot.app.request(
-      '/api/webhooks/slack',
-      signedSlackEvent({
-        event_id: 'Ev-slackbotv2-channel-created-lease-window',
-        event: {
-          type: 'channel_created',
-          channel: {
-            id: 'CLEASEWINDOW',
-            name: 'lease-window',
-            created: 1700000000,
-            creator: USER_ID
-          },
-          team: TEAM_ID
-        }
-      }),
-      {},
-      waitUntilContext(waits)
-    )
-
-    expect(response.status).toBe(200)
-    await Promise.all(waits)
-    expect(leaseTtlMs).toBeGreaterThanOrEqual(76_000)
-  })
-
-  it('retries 408 and 425 conversations.join responses', async () => {
-    for (const [status, channel] of [
-      [408, 'CJOIN408'],
-      [425, 'CJOIN425']
-    ] as const) {
-      slackApi.reset()
-      bot = createTestBot({
-        autoJoinCreatedChannels: true,
-        channelCreatedJoinRetryDelaysMs: [0]
-      })
-      slackApi.failNextConversationsJoin(status, { ok: false, error: `http_${status}` })
-      const waits: Promise<unknown>[] = []
-      const response = await bot.app.request(
-        '/api/webhooks/slack',
-        signedSlackEvent({
-          event_id: `Ev-slackbotv2-channel-created-retry-${status}`,
-          event: {
-            type: 'channel_created',
-            channel: {
-              id: channel,
-              name: `join-${status}`,
-              created: 1700000000,
-              creator: USER_ID
-            },
-            team: TEAM_ID
-          }
-        }),
-        {},
-        waitUntilContext(waits)
-      )
-
-      expect(response.status).toBe(200)
-      await Promise.all(waits)
-      expect(slackApi.calls.filter(call => call.method === 'conversations.join')).toEqual([
-        {
-          method: 'conversations.join',
-          body: { channel }
-        },
-        {
-          method: 'conversations.join',
-          body: { channel }
-        }
-      ])
-    }
-  })
-
-  it('aborts a timed-out conversations.join request before retrying', async () => {
-    let attempts = 0
-    let firstAborted = false
-    bot = createTestBot({
-      autoJoinCreatedChannels: true,
-      channelCreatedJoinRetryDelaysMs: [0],
-      fetch: async (_input, init) => {
-        attempts += 1
-        const signal = init?.signal
-        if (attempts === 1) {
-          return await new Promise<Response>((_resolve, reject) => {
-            signal?.addEventListener('abort', () => {
-              firstAborted = true
-              reject(new Error('aborted'))
-            })
-          })
-        }
-        expect(firstAborted).toBe(true)
-        return Response.json({ ok: true })
-      },
-      slackApiTimeoutMs: 5
-    })
-
-    const waits: Promise<unknown>[] = []
-    const response = await bot.app.request(
-      '/api/webhooks/slack',
-      signedSlackEvent({
-        event_id: 'Ev-slackbotv2-channel-created-abort-timeout',
-        event: {
-          type: 'channel_created',
-          channel: {
-            id: 'CABORTJOIN',
-            name: 'abort-join',
-            created: 1700000000,
-            creator: USER_ID
-          },
-          team: TEAM_ID
-        }
-      }),
-      {},
-      waitUntilContext(waits)
-    )
-
-    expect(response.status).toBe(200)
-    await Promise.all(waits)
-    expect(attempts).toBe(2)
-    expect(firstAborted).toBe(true)
-  })
-
-  it('does not report join failure when only dedupe persistence fails after a successful join', async () => {
-    const logs: CapturedLog[] = []
-    const memoryState = createMemoryState()
-    const state = Object.create(memoryState) as typeof memoryState
-    state.set = async (key: string, value: unknown, ttlMs?: number) => {
-      if (
-        key.startsWith('slackbotv2:channel-created-join:')
-        && value === true
-      ) {
-        throw new Error('state write unavailable')
-      }
-      return memoryState.set(key, value, ttlMs)
-    }
-    bot = createTestBot({ autoJoinCreatedChannels: true, logger: captureLogger(logs), state })
-
-    const waits: Promise<unknown>[] = []
-    const response = await bot.app.request(
-      '/api/webhooks/slack',
-      signedSlackEvent({
-        event_id: 'Ev-slackbotv2-channel-created-state-blip',
-        event: {
-          type: 'channel_created',
-          channel: {
-            id: 'CSTATEBLIP',
-            name: 'state-blip',
+            id: 'CFAILEDCHANNEL',
+            name: 'failed-channel',
             created: 1700000000,
             creator: USER_ID
           },
@@ -503,11 +210,9 @@ describe('slackbotv2', () => {
     await Promise.all(waits)
     expect(slackApi.calls).toContainEqual({
       method: 'conversations.join',
-      body: { channel: 'CSTATEBLIP' }
+      body: { channel: 'CFAILEDCHANNEL' }
     })
-    expect(hasLog(logs, 'slackbotv2_channel_created_join_complete')).toBe(true)
-    expect(hasLog(logs, 'slackbotv2_channel_created_join_dedupe_persist_failed')).toBe(true)
-    expect(hasLog(logs, 'slackbotv2_channel_created_join_failed')).toBe(false)
+    expect(hasLog(logs, 'slackbotv2_channel_created_join_failed')).toBe(true)
   })
 
   it('dispatches signed Slack button and select actions to durable workflow events', async () => {

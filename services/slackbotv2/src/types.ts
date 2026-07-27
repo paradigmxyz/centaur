@@ -135,8 +135,6 @@ export type SlackbotV2Options = {
    * status and structured task output is hidden from the Slack stream.
    */
   activitySummaryStatusEnabled?: boolean
-  /** When enabled, Slackbot joins public channels after Slack channel_created events. */
-  autoJoinCreatedChannels?: boolean
   botToken: string
   botUserId?: string
   /**
@@ -183,8 +181,6 @@ export type SlackbotV2Options = {
    * instead and posts a visible error once the delays are exhausted.
    */
   handoffRetryDelaysMs?: readonly number[]
-  /** Backoff delays between in-process retries of channel-created Slack joins. */
-  channelCreatedJoinRetryDelaysMs?: readonly number[]
   /** Milliseconds before an idle execution pauses its sandbox. Defaults to up to 3h. */
   idleTimeoutMs?: number
   logger?: Logger

@@ -44,7 +44,6 @@ import {
   serializeMessageLinks,
   serializeMessage,
   sessionStreamError,
-  slackApiTimeoutMs,
   withSlackApiTimeout
 } from './session-api'
 import {
@@ -150,10 +149,6 @@ const LATE_SLACK_FILE_IDLE_POLL_MS = 500
 const LATE_SLACK_FILE_MESSAGE_TEXT = 'Late Slack file attachment for the previous message.'
 const SLACK_BLOCK_ACTION_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000
 const SLACK_BLOCK_ACTION_LEASE_TTL_MS = 60 * 1000
-const SLACK_CHANNEL_CREATED_JOIN_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000
-const SLACK_CHANNEL_CREATED_JOIN_MIN_LEASE_TTL_MS = 60 * 1000
-const SLACK_CHANNEL_CREATED_JOIN_LEASE_TTL_BUFFER_MS = 1_000
-const SLACK_CHANNEL_CREATED_JOIN_RETRY_DELAYS_MS: readonly number[] = [5_000, 30_000, 120_000]
 
 type PendingLateSlackFileMention = {
   channel: string
@@ -400,10 +395,9 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
           }
         })
       })
-      const channelCreatedJoinTask =
-        response.ok && options.autoJoinCreatedChannels === true
-          ? joinSlackChannelCreatedEvent(rawBody, options, state)
-          : null
+      const channelCreatedJoinTask = response.ok
+        ? joinSlackChannelCreatedEvent(rawBody, options)
+        : null
       if (channelCreatedJoinTask) waitUntil(c, channelCreatedJoinTask)
       if (awaitHandoff && response.ok) {
         const waitStartedAtMs = nowMs()
@@ -626,24 +620,12 @@ function slackWebhookEventType(rawBody: string): string {
   return stringValue(payload.type) ?? 'unknown'
 }
 
-type SlackChannelCreatedJoinInput = {
+function slackChannelCreatedJoinInput(rawBody: string): {
   channelId: string
   channelName?: string
   eventId?: string
   teamId?: string
-}
-
-class SlackChannelJoinError extends Error {
-  readonly retryable: boolean
-
-  constructor(message: string, retryable: boolean) {
-    super(message)
-    this.name = 'SlackChannelJoinError'
-    this.retryable = retryable
-  }
-}
-
-function slackChannelCreatedJoinInput(rawBody: string): SlackChannelCreatedJoinInput | null {
+} | null {
   const payload = parseSlackWebhookPayload(rawBody)
   if (!payload || payload.type !== 'event_callback') return null
   const event = isJsonObject(payload.event) ? payload.event : undefined
@@ -661,122 +643,35 @@ function slackChannelCreatedJoinInput(rawBody: string): SlackChannelCreatedJoinI
 
 function joinSlackChannelCreatedEvent(
   rawBody: string,
-  options: SlackbotV2Options,
-  state: StateAdapter
+  options: SlackbotV2Options
 ): Promise<void> | null {
   const input = slackChannelCreatedJoinInput(rawBody)
   if (!input) return null
-  return joinSlackChannelCreatedEventInput(input, options, state)
-}
 
-async function joinSlackChannelCreatedEventInput(
-  input: SlackChannelCreatedJoinInput,
-  options: SlackbotV2Options,
-  state: StateAdapter
-): Promise<void> {
-  const startedAtMs = nowMs()
-  const fields = {
-    channel_id: input.channelId,
-    channel_name: input.channelName,
-    slack_event_id: input.eventId,
-    team_id: input.teamId
-  }
-  const dedupeKey = input.eventId
-    ? `slackbotv2:channel-created-join:${input.teamId ?? 'unknown'}:${input.eventId}`
-    : undefined
-  const leaseToken = randomUUID()
-  const leaseTtlMs = slackChannelCreatedJoinLeaseTtlMs(options)
-  try {
-    if (
-      dedupeKey
-      && !(await state.setIfNotExists(
-        dedupeKey,
-        leaseToken,
-        leaseTtlMs
-      ))
-    ) {
-      traceLog(options, 'slackbotv2_channel_created_join_duplicate_ignored', undefined, fields)
-      return
+  return (async () => {
+    const startedAtMs = nowMs()
+    const fields = {
+      channel_id: input.channelId,
+      channel_name: input.channelName,
+      slack_event_id: input.eventId,
+      team_id: input.teamId
     }
-
     traceLog(options, 'slackbotv2_channel_created_join_started', undefined, fields)
-    const result = await joinSlackChannelWithRetry(input, options, fields)
-    traceLog(options, 'slackbotv2_channel_created_join_complete', undefined, {
-      ...fields,
-      already_joined: result.alreadyJoined,
-      phase_ms: elapsedMs(startedAtMs)
-    })
-  } catch (error) {
-    if (dedupeKey) {
-      try {
-        if ((await state.get(dedupeKey)) === leaseToken) await state.delete(dedupeKey)
-      } catch (cleanupError) {
-        traceWarn(options, 'slackbotv2_channel_created_join_dedupe_cleanup_failed', undefined, {
-          ...fields,
-          error: errorMessage(cleanupError)
-        })
-      }
-    }
-    traceWarn(options, 'slackbotv2_channel_created_join_failed', undefined, {
-      ...fields,
-      error: errorMessage(error),
-      phase_ms: elapsedMs(startedAtMs)
-    })
-    return
-  }
-  if (dedupeKey) {
     try {
-      if ((await state.get(dedupeKey)) !== leaseToken) {
-        traceLog(options, 'slackbotv2_channel_created_join_dedupe_persist_skipped', undefined, {
-          ...fields,
-          phase_ms: elapsedMs(startedAtMs)
-        })
-        return
-      }
-      await state.set(dedupeKey, true, SLACK_CHANNEL_CREATED_JOIN_DEDUPE_TTL_MS)
+      const result = await joinSlackChannel(input.channelId, options)
+      traceLog(options, 'slackbotv2_channel_created_join_complete', undefined, {
+        ...fields,
+        already_joined: result.alreadyJoined,
+        phase_ms: elapsedMs(startedAtMs)
+      })
     } catch (error) {
-      traceWarn(options, 'slackbotv2_channel_created_join_dedupe_persist_failed', undefined, {
+      traceWarn(options, 'slackbotv2_channel_created_join_failed', undefined, {
         ...fields,
         error: errorMessage(error),
         phase_ms: elapsedMs(startedAtMs)
       })
     }
-  }
-}
-
-function slackChannelCreatedJoinLeaseTtlMs(options: SlackbotV2Options): number {
-  const delays = options.channelCreatedJoinRetryDelaysMs ?? SLACK_CHANNEL_CREATED_JOIN_RETRY_DELAYS_MS
-  const retryDelayMs = delays.reduce((sum, delayMs) => sum + Math.max(0, delayMs), 0)
-  const attemptCount = delays.length + 1
-  const requestBudgetMs = attemptCount * slackApiTimeoutMs(options)
-  return Math.max(
-    SLACK_CHANNEL_CREATED_JOIN_MIN_LEASE_TTL_MS,
-    retryDelayMs + requestBudgetMs + SLACK_CHANNEL_CREATED_JOIN_LEASE_TTL_BUFFER_MS
-  )
-}
-
-async function joinSlackChannelWithRetry(
-  input: SlackChannelCreatedJoinInput,
-  options: SlackbotV2Options,
-  fields: JsonObject
-): Promise<{ alreadyJoined: boolean }> {
-  const delays = options.channelCreatedJoinRetryDelaysMs ?? SLACK_CHANNEL_CREATED_JOIN_RETRY_DELAYS_MS
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      return await joinSlackChannel(input.channelId, options)
-    } catch (error) {
-      const retryable = isRetryableSlackChannelJoinError(error)
-      if (!retryable || attempt >= delays.length) throw error
-      const delayMs = delays[attempt] ?? 0
-      traceLog(options, 'slackbotv2_channel_created_join_retry_scheduled', undefined, {
-        ...fields,
-        attempt: attempt + 1,
-        delay_ms: delayMs,
-        error: errorMessage(error)
-      })
-      await sleep(delayMs)
-    }
-  }
+  })()
 }
 
 async function joinSlackChannel(
@@ -797,30 +692,21 @@ async function joinSlackChannel(
         signal: controller.signal
       })
       const payload: unknown = await response.json().catch(() => null)
-      if (response.ok && isJsonObject(payload) && payload.ok !== false) return { alreadyJoined: false }
+      if (response.ok && isJsonObject(payload) && payload.ok === true) {
+        return { alreadyJoined: false }
+      }
       const slackError = isJsonObject(payload) ? stringValue(payload.error) : undefined
       if (slackError === 'already_in_channel') return { alreadyJoined: true }
-      const retryable = isRetryableSlackChannelJoinFailure(response.status, slackError)
-      throw new SlackChannelJoinError(
+      throw new Error(
         slackError
           ? `Slack API conversations.join failed: ${slackError}`
-          : `Slack API conversations.join failed with HTTP ${response.status}`,
-        retryable
+          : `Slack API conversations.join failed with HTTP ${response.status}`
       )
     })
   } catch (error) {
     controller.abort()
     throw error
   }
-}
-
-function isRetryableSlackChannelJoinError(error: unknown): boolean {
-  return error instanceof SlackChannelJoinError ? error.retryable : true
-}
-
-function isRetryableSlackChannelJoinFailure(status: number, slackError: string | undefined): boolean {
-  if (status === 408 || status === 425 || status === 429 || status >= 500) return true
-  return slackError === 'ratelimited' || slackError === 'request_timeout' || slackError === 'fatal_error'
 }
 
 function slackBlockActionPayload(event: ActionEvent): SlackbotV2BlockActionPayload {
