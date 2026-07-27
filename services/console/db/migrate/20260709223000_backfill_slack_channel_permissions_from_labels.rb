@@ -20,7 +20,7 @@ class BackfillSlackChannelPermissionsFromLabels < ActiveRecord::Migration[8.1]
         CURRENT_TIMESTAMP
       FROM principals
       WHERE upper(trim(principals.labels->>'slack_channel_id')) ~ '^[CDG][A-Z0-9]{8,}$'
-      ON CONFLICT (principal_id, channel_id) WHERE principal_id IS NOT NULL DO NOTHING
+      ON CONFLICT (principal_id, channel_id) DO NOTHING
     SQL
   end
 
