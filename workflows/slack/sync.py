@@ -131,10 +131,6 @@ def _filter_non_member_channels(
     return included, skipped
 
 
-def _is_not_in_channel_error(error: str) -> bool:
-    return "not_in_channel" in error.lower()
-
-
 SCHEDULE = {
     "schedule_id": "slack_sync",
     "interval_seconds": positive_int(
@@ -777,15 +773,6 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             )
         except Exception as exc:
             error = str(exc)
-            if _is_not_in_channel_error(error):
-                skipped.append(channel_ref(channel, NOT_IN_CHANNEL_SKIP_REASON))
-                ctx.log(
-                    "slack_sync_channel_skipped",
-                    channel_id=channel_id,
-                    channel_name=channel_name,
-                    reason=NOT_IN_CHANNEL_SKIP_REASON,
-                )
-                continue
             ctx.log(
                 "slack_sync_channel_failed",
                 channel_id=channel_id,
