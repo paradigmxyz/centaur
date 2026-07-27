@@ -569,6 +569,67 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     refute_equal old.id, fresh.id
   end
 
+  test "role Slack permission changes rebuild snapshots with inherited JWT claims" do
+    with_env(
+      "CENTAUR_JWT_SIGNING_SECRET" => "test-secret",
+      "CENTAUR_API_URL" => "http://api.internal:8080"
+    ) do
+      old = PrincipalSyncConfigSnapshot.fetch_for(@principal)
+      old_version = @principal.sync_config_cache_version
+
+      roles(:acme_infra).slack_channel_permissions.create!(
+        channel_id: "C0123456789",
+        upload_enabled: true,
+        history_enabled: true
+      )
+
+      @principal.reload
+      assert_operator @principal.sync_config_cache_version, :>, old_version
+
+      PrincipalSyncConfigSnapshotWarmJob.perform_now(@principal.id)
+      fresh = PrincipalSyncConfigSnapshot.fetch_for(@principal)
+      refute_equal old.id, fresh.id
+      token = fresh.config.fetch("secrets").find do |secret|
+        secret.dig("inject", "header") == "Authorization"
+      end.dig("source", "value")
+      claims = jwt_payload(token)
+      assert_equal [ "C0123456789" ], claims.dig("slack", "upload_channels")
+      assert_equal [ "C0123456789" ], claims.dig("slack", "history_channels")
+    end
+  end
+
+  test "role assignment and removal rebuild snapshots with changed inherited access" do
+    with_env(
+      "CENTAUR_JWT_SIGNING_SECRET" => "test-secret",
+      "CENTAUR_API_URL" => "http://api.internal:8080"
+    ) do
+      role = roles(:acme_admin_role)
+      role.slack_channel_permissions.create!(
+        channel_id: "G9876543210",
+        download_enabled: true
+      )
+      old = PrincipalSyncConfigSnapshot.fetch_for(@principal)
+
+      assignment = @principal.principal_roles.create!(role: role)
+      PrincipalSyncConfigSnapshotWarmJob.perform_now(@principal.id)
+      assigned = PrincipalSyncConfigSnapshot.fetch_for(@principal.reload)
+      refute_equal old.id, assigned.id
+      token = assigned.config.fetch("secrets").find do |secret|
+        secret.dig("inject", "header") == "Authorization"
+      end.dig("source", "value")
+      assert_equal [ "G9876543210" ], jwt_payload(token).dig("slack", "download_channels")
+
+      assignment.destroy!
+      PrincipalSyncConfigSnapshotWarmJob.perform_now(@principal.id)
+      removed = PrincipalSyncConfigSnapshot.fetch_for(@principal.reload)
+      refute_equal assigned.id, removed.id
+      api_server_secrets = removed.config.fetch("secrets").select do |secret|
+        secret.dig("inject", "header") == "Authorization"
+      end
+      assert_empty api_server_secrets
+    end
+  end
+
   test "fetch_for falls back to a blocking build on cold start" do
     assert_difference -> { PrincipalSyncConfigSnapshot.count }, 1 do
       snapshot = PrincipalSyncConfigSnapshot.fetch_for(@principal)

@@ -43,6 +43,7 @@ module Api
           foreign_id: role.foreign_id,
           name: role.name,
           labels: role.labels,
+          slack_channel_permissions: role.slack_channel_permissions_payload,
           created_at: role.created_at,
           updated_at: role.updated_at
         }

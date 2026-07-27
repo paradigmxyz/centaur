@@ -109,12 +109,16 @@ class Principal < ApplicationRecord
   end
 
   def slack_channel_permissions_payload
-    permissions = if association(:slack_channel_permissions).loaded?
-      slack_channel_permissions.sort_by { |permission| [ permission.channel_id, permission.id ] }
+    merged_slack_channel_permissions(effective_slack_channel_permissions)
+  end
+
+  def inherited_slack_channel_permissions_payload
+    permissions = if loaded_role_slack_channel_permissions?
+      roles.flat_map { |role| role.slack_channel_permissions.to_a }
     else
-      slack_channel_permissions.ordered
+      SlackChannelPermission.where(role_id: role_ids)
     end
-    permissions.map(&:as_permission_json)
+    merged_slack_channel_permissions(permissions)
   end
 
   def slack_upload_channel_ids
@@ -190,7 +194,45 @@ class Principal < ApplicationRecord
   end
 
   def slack_channel_ids_for(permission)
-    slack_channel_permissions.where(permission => true).ordered.pluck(:channel_id)
+    slack_channel_permissions_payload.filter_map do |row|
+      row["channel_id"] if row.fetch(permission.to_s)
+    end
+  end
+
+  def effective_slack_channel_permissions
+    if association(:slack_channel_permissions).loaded? && loaded_role_slack_channel_permissions?
+      return slack_channel_permissions.to_a + roles.flat_map { |role| role.slack_channel_permissions.to_a }
+    end
+
+    direct = SlackChannelPermission.where(principal_id: id)
+    role_permissions = SlackChannelPermission.where(role_id: role_ids)
+    direct.or(role_permissions)
+  end
+
+  def loaded_role_slack_channel_permissions?
+    association(:roles).loaded? &&
+      roles.all? { |role| role.association(:slack_channel_permissions).loaded? }
+  end
+
+  def merged_slack_channel_permissions(permissions)
+    ordered = permissions.sort_by do |permission|
+      [ permission.principal_id.present? ? 0 : 1, permission.role_id || 0, permission.id || 0 ]
+    end
+
+    ordered.each_with_object({}) do |permission, by_channel|
+      channel_id = permission.channel_id.to_s.strip.upcase
+      row = by_channel[channel_id] ||= {
+        "channel_id" => channel_id,
+        "channel_name" => nil,
+        "upload_enabled" => false,
+        "download_enabled" => false,
+        "history_enabled" => false
+      }
+      row["channel_name"] ||= permission.channel_name.presence
+      row["upload_enabled"] ||= permission.upload_enabled
+      row["download_enabled"] ||= permission.download_enabled
+      row["history_enabled"] ||= permission.history_enabled
+    end.values.sort_by { |row| row.fetch("channel_id") }
   end
 
   def self.host_from_url(value)

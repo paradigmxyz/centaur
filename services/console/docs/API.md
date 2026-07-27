@@ -1266,7 +1266,7 @@ The `secrets`, `transforms`, and `postgres` arrays are assembled exactly as in [
 
 ## Roles
 
-A role is a reusable bundle of [grants](#grants). Principals are assigned roles, and a principal's effective secrets are the union of its own direct grants and the grants of every role it holds. Use a role to apply a common set of secrets (for example, shared infrastructure credentials) to many principals without re-granting each one.
+A role is a reusable bundle of [grants](#grants) and Slack channel permissions. Principals are assigned roles, and a principal's effective access is the union of its own direct grants and Slack permissions plus those of every role it holds.
 
 Roles are namespaced. A principal may only be assigned roles in its own namespace.
 
@@ -1278,6 +1278,7 @@ Roles are namespaced. A principal may only be assigned roles in its own namespac
 | `foreign_id` | optional    | Unique per namespace. Immutable. Handy for idempotent provisioning. |
 | `name`       | optional    | |
 | `labels`     | optional    | |
+| `slack_channel_permissions` | optional | Full replacement when present on create or update. Each row accepts `channel_id`, optional `channel_name`, and the `upload_enabled`, `download_enabled`, and `history_enabled` flags. |
 
 ### Operations
 
@@ -1297,6 +1298,7 @@ Returns `201`:
     "foreign_id": "infra",
     "name": "Infra",
     "labels": { "kind": "shared" },
+    "slack_channel_permissions": [],
     "created_at": "2026-06-01T10:00:00Z",
     "updated_at": "2026-06-01T10:00:00Z"
   }
@@ -1309,7 +1311,8 @@ Returns `201`:
 | `GET`    | `/api/v1/roles/:id` | Fetch one. |
 | `GET`    | `/api/v1/roles/lookup/:namespace/:foreign_id` | Fetch by namespace + foreign id. `404` if missing. |
 | `GET`    | `/api/v1/roles/:role_id/grants` | [List the grants](#list-by-grantee) attached to the role. |
-| `PUT`/`PATCH` | `/api/v1/roles/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`. Only `name` and `labels` are mutable on an existing record; `namespace`/`foreign_id` apply only when creating. |
+| `POST`   | `/api/v1/roles/:id/slack_channel_permissions` | Idempotently create or update one role-owned Slack channel permission without replacing other rows. |
+| `PUT`/`PATCH` | `/api/v1/roles/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`. `name`, `labels`, and `slack_channel_permissions` are mutable on an existing record; `namespace` and `foreign_id` apply only when creating. |
 | `DELETE` | `/api/v1/roles/:id` | Delete. Returns `204`. Cascades: the role's grants and its assignments are removed. |
 
 ### Role assignments

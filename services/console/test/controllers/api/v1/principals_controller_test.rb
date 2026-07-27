@@ -366,6 +366,35 @@ module Api
         )
       end
 
+      test "GET returns merged direct and role Slack channel permissions" do
+        principal = principals(:acme_channel)
+        SlackChannelPermission.create!(
+          principal: principal,
+          channel_id: "C0123456789",
+          channel_name: "direct",
+          upload_enabled: true
+        )
+        roles(:acme_infra).slack_channel_permissions.create!(
+          channel_id: "C0123456789",
+          channel_name: "role",
+          download_enabled: true,
+          history_enabled: true
+        )
+
+        get api_v1_principal_url(id: principal.oid), headers: auth_headers
+        assert_response :ok
+        assert_equal(
+          {
+            "channel_id" => "C0123456789",
+            "channel_name" => "direct",
+            "upload_enabled" => true,
+            "download_enabled" => true,
+            "history_enabled" => true
+          },
+          json_body.dig("data", "slack_channel_permissions").sole
+        )
+      end
+
       test "PUT rejects a single Slack channel permission object" do
         principal = principals(:acme_channel)
         body = {

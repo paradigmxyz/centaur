@@ -27,6 +27,7 @@ class ConsoleController < ApplicationController
     @principal = Principal.find_by_oid!(params[:id])
     @slack_channel_catalog = SlackChannelCatalog.fetch
     @slack_channel_permissions = @principal.slack_channel_permissions.ordered
+    @inherited_slack_channel_permissions = @principal.inherited_slack_channel_permissions_payload
     @slack_channel_options = @slack_channel_catalog.channels.map do |channel|
       label = "##{channel.name} (#{channel.id}) #{channel.private ? "Private" : "Public"}"
       [ label, channel.id ]

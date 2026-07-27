@@ -177,6 +177,22 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_select "td", text: "API-managed"
   end
 
+  test "principal detail page renders inherited Slack permissions as read-only context" do
+    principal = principals(:acme_channel)
+    roles(:acme_infra).slack_channel_permissions.create!(
+      channel_id: "G9876543210",
+      channel_name: "private",
+      history_enabled: true
+    )
+
+    get console_principal_url(principal.oid)
+    assert_response :ok
+
+    assert_select "h3", text: "Inherited From Roles"
+    assert_select "td", text: /private/
+    assert_select "input[type=checkbox][disabled]", minimum: 3
+  end
+
   test "credentials table combines id, shows status, and links to detail" do
     credential = broker_credentials(:acme_managed_gmail)
     get console_credentials_url

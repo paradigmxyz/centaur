@@ -138,6 +138,67 @@ class PrincipalTest < ActiveSupport::TestCase
     )
   end
 
+  test "effective Slack permissions merge direct and role rows deterministically" do
+    principal = principals(:acme_channel)
+    role = roles(:acme_infra)
+    SlackChannelPermission.create!(
+      principal: principal,
+      channel_id: "C0123456789",
+      channel_name: "direct-name",
+      upload_enabled: true
+    )
+    SlackChannelPermission.create!(
+      role: role,
+      channel_id: "C0123456789",
+      channel_name: "role-name",
+      download_enabled: true
+    )
+    SlackChannelPermission.create!(
+      role: role,
+      channel_id: "G9876543210",
+      channel_name: "private",
+      history_enabled: true
+    )
+
+    assert_equal(
+      [
+        {
+          "channel_id" => "C0123456789",
+          "channel_name" => "direct-name",
+          "upload_enabled" => true,
+          "download_enabled" => true,
+          "history_enabled" => false
+        },
+        {
+          "channel_id" => "G9876543210",
+          "channel_name" => "private",
+          "upload_enabled" => false,
+          "download_enabled" => false,
+          "history_enabled" => true
+        }
+      ],
+      principal.slack_channel_permissions_payload
+    )
+    assert_equal [ "C0123456789" ], principal.slack_upload_channel_ids
+    assert_equal [ "C0123456789" ], principal.slack_download_channel_ids
+    assert_equal [ "G9876543210" ], principal.slack_history_channel_ids
+  end
+
+  test "api server JWT includes inherited role Slack permissions" do
+    with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
+      principal = principals(:acme_channel)
+      roles(:acme_infra).slack_channel_permissions.create!(
+        channel_id: "C0123456789",
+        upload_enabled: true,
+        history_enabled: true
+      )
+
+      claims = jwt_payload(ApiServer::Jwt.encode_for_principal(principal))
+      assert_equal [ "C0123456789" ], claims.dig("slack", "upload_channels")
+      assert_equal [ "C0123456789" ], claims.dig("slack", "history_channels")
+    end
+  end
+
   test "api server JWT does not fall back to slack channel label" do
     with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
       principal = principals(:acme_channel)
@@ -320,5 +381,10 @@ class PrincipalTest < ActiveSupport::TestCase
     previous.each do |key, value|
       value.nil? ? ENV.delete(key) : ENV[key] = value
     end
+  end
+
+  def jwt_payload(token)
+    _header, payload, _signature = token.split(".")
+    JSON.parse(Base64.urlsafe_decode64(payload))
   end
 end

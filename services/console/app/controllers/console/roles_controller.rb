@@ -8,13 +8,21 @@ module Console
     layout "console"
 
     before_action :require_admin
-    before_action :set_role, only: %i[show edit update grant_secret revoke_grant]
+    before_action :set_role, only: %i[
+      show edit update grant_secret revoke_grant update_slack_channel_permissions
+    ]
 
     def index
       @roles = Role.order(:namespace, :id)
     end
 
     def show
+      @slack_channel_catalog = SlackChannelCatalog.fetch
+      @slack_channel_permissions = @role.slack_channel_permissions.ordered
+      @slack_channel_options = @slack_channel_catalog.channels.map do |channel|
+        label = "##{channel.name} (#{channel.id}) #{channel.private ? "Private" : "Public"}"
+        [ label, channel.id ]
+      end
       @grants = @role.grants.includes(Grant::GRANTABLE_ASSOCIATIONS).order(:id)
       granted_ids = Hash.new { |h, k| h[k] = [] }
       @grants.each do |grant|
@@ -80,6 +88,13 @@ module Console
       redirect_to console_role_path(@role.oid), notice: "Revoked grant."
     end
 
+    def update_slack_channel_permissions
+      @role.update!(slack_channel_permission_params)
+      redirect_to console_role_path(@role.oid), notice: "Updated Slack channel permissions."
+    rescue ActiveRecord::RecordInvalid => e
+      redirect_to console_role_path(@role.oid), alert: e.record.errors.full_messages.to_sentence
+    end
+
     private
 
     def assign_form(role, include_readonly:)
@@ -99,6 +114,20 @@ module Console
 
     def role_params
       params.fetch(:role, ActionController::Parameters.new)
+    end
+
+    def slack_channel_permission_params
+      params.require(:role).permit(
+        slack_channel_permissions_attributes: %i[
+          id
+          channel_id
+          channel_name
+          upload_enabled
+          download_enabled
+          history_enabled
+          _destroy
+        ]
+      )
     end
 
     def resolve_grantable(value)

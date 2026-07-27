@@ -155,6 +155,39 @@
       </div>
     <% end %>
   </div>
+
+  <% if @inherited_slack_channel_permissions.present? %>
+    <div class="mb-3 mt-6">
+      <h3 class="text-xs font-semibold uppercase tracking-wider text-zinc-500">Inherited From Roles</h3>
+    </div>
+    <div class="console-panel overflow-x-auto">
+      <table class="console-table">
+        <thead class="console-table-head">
+          <tr>
+            <th class="console-th">Channel</th>
+            <th class="console-th">Upload</th>
+            <th class="console-th">Download</th>
+            <th class="console-th">History</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-ink-700">
+          <% @inherited_slack_channel_permissions.each do |permission| %>
+            <tr>
+              <td class="console-td">
+                <div class="text-sm text-zinc-100"><%= permission["channel_name"].presence || permission["channel_id"] %></div>
+                <div class="mt-1 text-xs text-zinc-500"><%= permission["channel_id"] %></div>
+              </td>
+              <% %w[upload_enabled download_enabled history_enabled].each do |flag| %>
+                <td class="console-td">
+                  <%= check_box_tag nil, "1", permission.fetch(flag), disabled: true, class: checkbox_class %>
+                </td>
+              <% end %>
+            </tr>
+          <% end %>
+        </tbody>
+      </table>
+    </div>
+  <% end %>
 </section>
 
 <!-- Sandbox access -->
