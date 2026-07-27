@@ -5,7 +5,6 @@ class SlackChannelPermissionTest < ActiveSupport::TestCase
     permission = SlackChannelPermission.new(
       principal: principals(:acme_channel),
       channel_id: " c0123456789 ",
-      channel_name: " general ",
       upload_enabled: true,
       download_enabled: false,
       history_enabled: false
@@ -14,7 +13,6 @@ class SlackChannelPermissionTest < ActiveSupport::TestCase
     assert_predicate permission, :valid?
     permission.save!
     assert_equal "C0123456789", permission.channel_id
-    assert_equal "general", permission.channel_name
 
     empty = SlackChannelPermission.new(
       principal: principals(:acme_channel),
@@ -45,7 +43,6 @@ class SlackChannelPermissionTest < ActiveSupport::TestCase
       [
         {
           channel_id: "c0123456789",
-          channel_name: "general",
           upload_enabled: true,
           download_enabled: true,
           history_enabled: false
@@ -55,7 +52,6 @@ class SlackChannelPermissionTest < ActiveSupport::TestCase
 
     permission = principal.slack_channel_permissions.reload.sole
     assert_equal "C0123456789", permission.channel_id
-    assert_equal "general", permission.channel_name
     assert_equal true, permission.upload_enabled
     assert_equal true, permission.download_enabled
     assert_equal false, permission.history_enabled
@@ -122,14 +118,12 @@ class SlackChannelPermissionTest < ActiveSupport::TestCase
       [
         {
           channel_id: " c0123456789 ",
-          channel_name: "general",
           upload_enabled: "1",
           download_enabled: "0",
           history_enabled: "0"
         },
         {
           channel_id: "C0123456789",
-          channel_name: "ignored",
           upload_enabled: "0",
           download_enabled: "1",
           history_enabled: "1"
@@ -139,7 +133,6 @@ class SlackChannelPermissionTest < ActiveSupport::TestCase
 
     permission = role.slack_channel_permissions.reload.sole
     assert_equal "C0123456789", permission.channel_id
-    assert_equal "general", permission.channel_name
     assert_predicate permission, :upload_enabled
     assert_predicate permission, :download_enabled
     assert_predicate permission, :history_enabled

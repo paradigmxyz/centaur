@@ -13,7 +13,6 @@ module Api
         SlackChannelPermission.create!(
           principal: @proxy.principal,
           channel_id: "C0123456789",
-          channel_name: "general",
           upload_enabled: true,
           history_enabled: true
         )
@@ -88,7 +87,6 @@ module Api
       test "returns merged role Slack channel permissions" do
         roles(:acme_infra).slack_channel_permissions.create!(
           channel_id: "C0123456789",
-          channel_name: "role-name",
           download_enabled: true
         )
 
@@ -98,7 +96,7 @@ module Api
         assert_response :ok
 
         permission = json_body.dig("data", "slack_channel_permissions").sole
-        assert_equal "general", permission.fetch("channel_name")
+        assert_not permission.key?("channel_name")
         assert_equal true, permission.fetch("upload_enabled")
         assert_equal true, permission.fetch("download_enabled")
         assert_equal true, permission.fetch("history_enabled")

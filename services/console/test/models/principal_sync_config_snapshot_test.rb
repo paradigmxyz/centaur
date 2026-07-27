@@ -103,7 +103,6 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
       SlackChannelPermission.create!(
         principal: principal,
         channel_id: "C0123456789",
-        channel_name: "general",
         upload_enabled: true,
         download_enabled: false,
         history_enabled: true
@@ -111,7 +110,6 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
       SlackChannelPermission.create!(
         principal: principal,
         channel_id: "G9876543210",
-        channel_name: "private",
         upload_enabled: false,
         download_enabled: true,
         history_enabled: false

@@ -126,7 +126,6 @@ module Console
         slack_channel_permissions_attributes: %i[
           id
           channel_id
-          channel_name
           upload_enabled
           download_enabled
           history_enabled

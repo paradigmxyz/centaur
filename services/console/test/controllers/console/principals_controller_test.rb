@@ -127,14 +127,12 @@ module Console
         [
           {
             "channel_id" => "C0123456789",
-            "channel_name" => nil,
             "upload_enabled" => true,
             "download_enabled" => false,
             "history_enabled" => true
           },
           {
             "channel_id" => "G9876543210",
-            "channel_name" => nil,
             "upload_enabled" => false,
             "download_enabled" => true,
             "history_enabled" => false
@@ -149,7 +147,6 @@ module Console
       permission = SlackChannelPermission.create!(
         principal: principal,
         channel_id: "C0123456789",
-        channel_name: "old-channel",
         upload_enabled: true,
         download_enabled: true,
         history_enabled: true
@@ -162,7 +159,6 @@ module Console
                   "0" => {
                     id: permission.id,
                     channel_id: "G9876543210",
-                    channel_name: "",
                     upload_enabled: "1",
                     download_enabled: "1",
                     history_enabled: "1"
@@ -174,7 +170,6 @@ module Console
       assert_redirected_to console_principal_path(principal.oid)
       assert_equal "Slack channels cannot be changed after creation.", flash[:alert]
       assert_equal "C0123456789", permission.reload.channel_id
-      assert_equal "old-channel", permission.channel_name
     end
 
     test "destroy deletes the principal and dependent access records" do

@@ -144,19 +144,16 @@ class PrincipalTest < ActiveSupport::TestCase
     SlackChannelPermission.create!(
       principal: principal,
       channel_id: "C0123456789",
-      channel_name: "direct-name",
       upload_enabled: true
     )
     SlackChannelPermission.create!(
       role: role,
       channel_id: "C0123456789",
-      channel_name: "role-name",
       download_enabled: true
     )
     SlackChannelPermission.create!(
       role: role,
       channel_id: "G9876543210",
-      channel_name: "private",
       history_enabled: true
     )
 
@@ -164,14 +161,12 @@ class PrincipalTest < ActiveSupport::TestCase
       [
         {
           "channel_id" => "C0123456789",
-          "channel_name" => "direct-name",
           "upload_enabled" => true,
           "download_enabled" => true,
           "history_enabled" => false
         },
         {
           "channel_id" => "G9876543210",
-          "channel_name" => "private",
           "upload_enabled" => false,
           "download_enabled" => false,
           "history_enabled" => true
@@ -205,7 +200,6 @@ class PrincipalTest < ActiveSupport::TestCase
     payload = [
       {
         "channel_id" => "C0123456789",
-        "channel_name" => "general",
         "upload_enabled" => true,
         "download_enabled" => true,
         "history_enabled" => false

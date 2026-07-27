@@ -1283,7 +1283,7 @@ Roles are namespaced. A principal may only be assigned roles in its own namespac
 | `foreign_id` | optional    | Unique per namespace. Immutable. Handy for idempotent provisioning. |
 | `name`       | optional    | |
 | `labels`     | optional    | |
-| `slack_channel_permissions` | optional | Full replacement when present on create or update. Each row accepts `channel_id`, optional `channel_name`, and the `upload_enabled`, `download_enabled`, and `history_enabled` flags. |
+| `slack_channel_permissions` | optional | Full replacement when present on create or update. Each row accepts `channel_id` and the `upload_enabled`, `download_enabled`, and `history_enabled` flags. |
 
 ### Operations
 

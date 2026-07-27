@@ -161,10 +161,10 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
 
   test "principal detail page renders DM permissions as API-managed rows" do
     principal = principals(:acme_user_bob)
+    principal.update!(name: "Bob")
     SlackChannelPermission.create!(
       principal: principal,
       channel_id: "D0123456789",
-      channel_name: "U0123456789",
       upload_enabled: true,
       download_enabled: false,
       history_enabled: true
@@ -173,7 +173,7 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     get console_principal_url(principal.oid)
     assert_response :ok
 
-    assert_select "td", text: /DM U0123456789/
+    assert_select "td", text: /DM Bob/
     assert_select "td", text: "API-managed"
   end
 

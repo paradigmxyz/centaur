@@ -66,8 +66,9 @@
               <% permissions.each do |permission| %>
                 <tr>
                   <% if permission.channel_id.to_s.start_with?("D") %>
+                    <% dm_name = @principal.name.presence || @principal.labels["slack_user_id"].presence || permission.channel_id %>
                     <td class="console-td min-w-80">
-                      <div class="text-sm text-zinc-100">DM <%= permission.channel_name.presence || permission.channel_id %></div>
+                      <div class="text-sm text-zinc-100">DM <%= dm_name %></div>
                       <div class="mt-1 text-xs text-zinc-500"><%= permission.channel_id %></div>
                     </td>
                     <td class="console-td">
@@ -84,7 +85,7 @@
                     </td>
                   <% else %>
                     <%= form.fields_for :slack_channel_permissions, permission do |permission_fields| %>
-                    <% channel_name = permission.channel_name.presence || @slack_channel_names&.fetch(permission.channel_id, nil) %>
+                    <% channel_name = @slack_channel_names&.fetch(permission.channel_id, nil) %>
                     <td class="console-td min-w-80">
                       <%= permission_fields.hidden_field :id %>
                       <div class="text-sm text-zinc-100"><%= channel_name.present? ? "##{channel_name}" : permission.channel_id %></div>
@@ -168,7 +169,7 @@
         </thead>
         <tbody class="divide-y divide-ink-700">
           <% @inherited_slack_channel_permissions.each do |permission| %>
-            <% channel_name = permission["channel_name"].presence || @slack_channel_names&.fetch(permission["channel_id"], nil) %>
+            <% channel_name = @slack_channel_names&.fetch(permission["channel_id"], nil) %>
             <tr>
               <td class="console-td">
                 <div class="text-sm text-zinc-100"><%= channel_name.present? ? "##{channel_name}" : permission["channel_id"] %></div>

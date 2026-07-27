@@ -56,7 +56,6 @@ module Api
             slack_channel_permissions: [
               {
                 channel_id: " c0123456789 ",
-                channel_name: "general",
                 upload_enabled: true,
                 history_enabled: true
               }
@@ -135,7 +134,6 @@ module Api
         body = {
           data: {
             channel_id: " c0123456789 ",
-            channel_name: "general",
             upload_enabled: true,
             download_enabled: false,
             history_enabled: false

@@ -239,12 +239,10 @@ class Principal < ApplicationRecord
       channel_id = permission.channel_id.to_s.strip.upcase
       row = by_channel[channel_id] ||= {
         "channel_id" => channel_id,
-        "channel_name" => nil,
         "upload_enabled" => false,
         "download_enabled" => false,
         "history_enabled" => false
       }
-      row["channel_name"] ||= permission.channel_name.presence
       row["upload_enabled"] ||= permission.upload_enabled
       row["download_enabled"] ||= permission.download_enabled
       row["history_enabled"] ||= permission.history_enabled

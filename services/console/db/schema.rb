@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_07_27_183832) do
+ActiveRecord::Schema[8.1].define(version: 2026_07_27_233739) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -399,7 +399,6 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_27_183832) do
 
   create_table "slack_channel_permissions", force: :cascade do |t|
     t.string "channel_id", null: false
-    t.string "channel_name"
     t.datetime "created_at", null: false
     t.boolean "download_enabled", default: false, null: false
     t.boolean "history_enabled", default: false, null: false

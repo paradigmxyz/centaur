@@ -6,7 +6,7 @@ class SlackChannelPermission < ApplicationRecord
   belongs_to :principal, optional: true
   belongs_to :role, optional: true
 
-  before_validation :normalize_channel_fields
+  before_validation :normalize_channel_id
 
   validates :channel_id, presence: true,
                          format: { with: Principal::SLACK_CHANNEL_ID_FORMAT, message: "is not a valid Slack channel ID" }
@@ -60,7 +60,6 @@ class SlackChannelPermission < ApplicationRecord
   def as_permission_json
     {
       "channel_id" => channel_id,
-      "channel_name" => channel_name,
       "upload_enabled" => upload_enabled,
       "download_enabled" => download_enabled,
       "history_enabled" => history_enabled
@@ -75,12 +74,10 @@ class SlackChannelPermission < ApplicationRecord
       channel_id = attrs[:channel_id].to_s.strip.upcase
       row = rows[channel_id] ||= {
         channel_id: channel_id,
-        channel_name: nil,
         upload_enabled: false,
         download_enabled: false,
         history_enabled: false
       }
-      row[:channel_name] ||= attrs[:channel_name].to_s.strip.presence
       %i[upload_enabled download_enabled history_enabled].each do |permission|
         row[permission] ||= ActiveModel::Type::Boolean.new.cast(attrs[permission]) == true
       end
@@ -93,7 +90,6 @@ class SlackChannelPermission < ApplicationRecord
       "principal_id",
       "role_id",
       "channel_id",
-      "channel_name",
       "upload_enabled",
       "download_enabled",
       "history_enabled"
@@ -101,9 +97,8 @@ class SlackChannelPermission < ApplicationRecord
   end
   private_class_method :bulk_insert_attributes
 
-  def normalize_channel_fields
+  def normalize_channel_id
     self.channel_id = channel_id.to_s.strip.upcase if new_record?
-    self.channel_name = channel_name.to_s.strip.presence
   end
 
   def at_least_one_permission

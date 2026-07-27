@@ -102,7 +102,7 @@ module Console
             }
 
       assert_redirected_to console_role_path(role.oid)
-      assert_nil permission.reload.channel_name
+      permission.reload
       assert_equal "C0123456789", permission.channel_id
     end
 

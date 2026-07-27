@@ -51,7 +51,6 @@ module SlackChannelPermissionApi
     rows = data_params.permit(
       slack_channel_permissions: %i[
         channel_id
-        channel_name
         upload_enabled
         download_enabled
         history_enabled
@@ -68,7 +67,6 @@ module SlackChannelPermissionApi
   def upsert_slack_channel_permission_params
     data_params.permit(
       :channel_id,
-      :channel_name,
       :upload_enabled,
       :download_enabled,
       :history_enabled

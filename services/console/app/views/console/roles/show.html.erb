@@ -61,7 +61,7 @@
             <tbody class="divide-y divide-ink-700">
               <% permissions.each do |permission| %>
                 <%= form.fields_for :slack_channel_permissions, permission do |permission_fields| %>
-                  <% channel_name = permission.channel_name.presence || @slack_channel_names&.fetch(permission.channel_id, nil) %>
+                  <% channel_name = @slack_channel_names&.fetch(permission.channel_id, nil) %>
                   <tr>
                     <td class="console-td min-w-80">
                       <%= permission_fields.hidden_field :id %>

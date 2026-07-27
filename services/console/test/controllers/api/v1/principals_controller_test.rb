@@ -76,7 +76,6 @@ module Api
             slack_channel_permissions: [
               {
                 channel_id: "C0123456789",
-                channel_name: "general",
                 upload_enabled: true,
                 download_enabled: false,
                 history_enabled: true
@@ -106,7 +105,6 @@ module Api
           [
             {
               "channel_id" => "C0123456789",
-              "channel_name" => "general",
               "upload_enabled" => true,
               "download_enabled" => false,
               "history_enabled" => true
@@ -349,14 +347,12 @@ module Api
           [
             {
               "channel_id" => "C0123456789",
-              "channel_name" => nil,
               "upload_enabled" => true,
               "download_enabled" => true,
               "history_enabled" => false
             },
             {
               "channel_id" => "G9876543210",
-              "channel_name" => nil,
               "upload_enabled" => false,
               "download_enabled" => false,
               "history_enabled" => true
@@ -371,12 +367,10 @@ module Api
         SlackChannelPermission.create!(
           principal: principal,
           channel_id: "C0123456789",
-          channel_name: "direct",
           upload_enabled: true
         )
         roles(:acme_infra).slack_channel_permissions.create!(
           channel_id: "C0123456789",
-          channel_name: "role",
           download_enabled: true,
           history_enabled: true
         )
@@ -386,7 +380,6 @@ module Api
         assert_equal(
           {
             "channel_id" => "C0123456789",
-            "channel_name" => "direct",
             "upload_enabled" => true,
             "download_enabled" => false,
             "history_enabled" => false
@@ -396,7 +389,6 @@ module Api
         assert_equal(
           {
             "channel_id" => "C0123456789",
-            "channel_name" => "direct",
             "upload_enabled" => true,
             "download_enabled" => true,
             "history_enabled" => true
@@ -495,7 +487,6 @@ module Api
         body = {
           data: {
             channel_id: "C0123456789",
-            channel_name: "general",
             upload_enabled: true,
             download_enabled: true,
             history_enabled: true
@@ -511,7 +502,7 @@ module Api
           [ "C0123456789", "G9876543210" ],
           principal.reload.slack_channel_permissions.ordered.pluck(:channel_id)
         )
-        assert_equal "general", json_body.dig("data", "channel_name")
+        assert_not json_body.fetch("data").key?("channel_name")
       end
 
       test "POST updates an existing Slack channel permission with normalized channel id" do
@@ -519,7 +510,6 @@ module Api
         SlackChannelPermission.create!(
           principal: principal,
           channel_id: "C0123456789",
-          channel_name: "general",
           upload_enabled: true,
           download_enabled: false,
           history_enabled: false
@@ -527,7 +517,6 @@ module Api
         body = {
           data: {
             channel_id: " c0123456789 ",
-            channel_name: "general",
             upload_enabled: false,
             download_enabled: true,
             history_enabled: true
@@ -553,7 +542,6 @@ module Api
         body = {
           data: {
             channel_id: "C0123456789",
-            channel_name: "new-name",
             upload_enabled: false,
             download_enabled: true,
             history_enabled: false
@@ -567,7 +555,6 @@ module Api
           if calls == 1
             target_principal.slack_channel_permissions.create!(
               channel_id: attrs[:channel_id],
-              channel_name: "winner",
               upload_enabled: true,
               download_enabled: false,
               history_enabled: true
@@ -588,7 +575,6 @@ module Api
 
         permission = principal.reload.slack_channel_permissions.sole
         assert_equal "C0123456789", permission.channel_id
-        assert_equal "new-name", permission.channel_name
         assert_not permission.upload_enabled
         assert_predicate permission, :download_enabled
         assert_not permission.history_enabled
@@ -602,8 +588,7 @@ module Api
         principal = principals(:acme_user_bob)
         body = {
           data: {
-            channel_id: "D0123456789",
-            channel_name: "U0123456789"
+            channel_id: "D0123456789"
           }
         }
 
@@ -614,7 +599,6 @@ module Api
 
         permission = principal.reload.slack_channel_permissions.sole
         assert_equal "D0123456789", permission.channel_id
-        assert_equal "U0123456789", permission.channel_name
         assert_predicate permission, :upload_enabled
         assert_predicate permission, :download_enabled
         assert_predicate permission, :history_enabled
