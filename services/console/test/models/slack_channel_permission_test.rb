@@ -237,9 +237,20 @@ class SlackChannelPermissionTest < ActiveSupport::TestCase
   private
 
   def run_label_backfill
+    connection = SlackChannelPermission.connection
+    index_name = "test_legacy_slack_permissions_unique_principal_channel"
+    connection.add_index(
+      :slack_channel_permissions,
+      %i[principal_id channel_id],
+      unique: true,
+      name: index_name
+    )
+
     ActiveRecord::Migration.suppress_messages do
       BackfillSlackChannelPermissionsFromLabels.new.up
     end
+  ensure
+    connection&.remove_index(:slack_channel_permissions, name: index_name, if_exists: true)
   end
 
   def insert_principal_with_slack_channel_label!(channel_id)

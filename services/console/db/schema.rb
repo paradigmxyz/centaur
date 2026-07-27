@@ -407,7 +407,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_27_183832) do
     t.bigint "role_id"
     t.datetime "updated_at", null: false
     t.boolean "upload_enabled", default: false, null: false
-    t.index ["principal_id", "channel_id"], name: "index_slack_channel_permissions_on_principal_id_and_channel_id", unique: true
+    t.index ["principal_id", "channel_id"], name: "idx_slack_permissions_unique_principal_channel", unique: true, where: "(principal_id IS NOT NULL)"
     t.index ["principal_id"], name: "index_slack_channel_permissions_on_principal_id"
     t.index ["role_id", "channel_id"], name: "idx_slack_permissions_unique_role_channel", unique: true, where: "(role_id IS NOT NULL)"
     t.check_constraint "(principal_id IS NOT NULL) <> (role_id IS NOT NULL)", name: "slack_channel_permissions_exactly_one_grantee"
