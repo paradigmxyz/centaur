@@ -447,10 +447,12 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     stale_time = (PrincipalSyncConfigSnapshot::TTL + 1.minute).ago
     snapshot.update_columns(updated_at: stale_time)
 
-    assert_no_changes -> { snapshot.reload.updated_at } do
-      served = PrincipalSyncConfigSnapshot.fetch_for(@principal)
-      assert_equal snapshot.id, served.id
-      refute served.fresh?
+    assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ @principal.id ]) do
+      assert_no_changes -> { snapshot.reload.updated_at } do
+        served = PrincipalSyncConfigSnapshot.fetch_for(@principal)
+        assert_equal snapshot.id, served.id
+        refute served.fresh?
+      end
     end
   end
 
@@ -486,11 +488,14 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
         secret.dig("inject", "header") == "Authorization"
       end.dig("source", "value")
       snapshot.update_columns(updated_at: previous_window_time)
+      clear_enqueued_jobs
 
       travel_to current_time do
-        served = PrincipalSyncConfigSnapshot.fetch_for(@principal)
-        assert_equal snapshot.id, served.id
-        refute served.fresh_for?(@principal)
+        assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ @principal.id ]) do
+          served = PrincipalSyncConfigSnapshot.fetch_for(@principal)
+          assert_equal snapshot.id, served.id
+          refute served.fresh_for?(@principal)
+        end
 
         PrincipalSyncConfigSnapshotWarmJob.perform_now(@principal.id)
         refreshed = snapshot.reload
@@ -541,11 +546,14 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     old = PrincipalSyncConfigSnapshot.fetch_for(@principal)
     Principal.bump_sync_config_cache_versions(@principal.id)
     @principal.reload
+    clear_enqueued_jobs
 
-    assert_no_difference -> { PrincipalSyncConfigSnapshot.count } do
-      served = PrincipalSyncConfigSnapshot.fetch_for(@principal)
-      assert_equal old.id, served.id
-      refute_equal @principal.sync_config_cache_version, served.principal_cache_version
+    assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ @principal.id ]) do
+      assert_no_difference -> { PrincipalSyncConfigSnapshot.count } do
+        served = PrincipalSyncConfigSnapshot.fetch_for(@principal)
+        assert_equal old.id, served.id
+        refute_equal @principal.sync_config_cache_version, served.principal_cache_version
+      end
     end
   end
 

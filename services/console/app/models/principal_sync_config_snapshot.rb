@@ -89,7 +89,13 @@ class PrincipalSyncConfigSnapshot < ApplicationRecord
     snapshot = find_by(principal: principal, principal_cache_version: version)
     return snapshot if snapshot&.fresh_for?(principal)
 
-    snapshot || latest_for(principal) || build_for(principal)
+    stale = snapshot || latest_for(principal)
+    if stale
+      Principal.enqueue_sync_config_snapshot_warm(principal.id)
+      return stale
+    end
+
+    build_for(principal)
   end
 
   def self.prune_expired!
