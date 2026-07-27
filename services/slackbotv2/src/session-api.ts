@@ -129,7 +129,7 @@ async function withTimeout<T>(
   }
 }
 
-async function fetchWithTimeout(
+export async function fetchWithTimeout(
   fetchFn: SlackbotV2Fetch,
   input: RequestInfo | URL,
   init: RequestInit,

@@ -212,7 +212,7 @@ describe('slackbotv2', () => {
   it('logs conversations.join failures without failing the webhook', async () => {
     const logs: CapturedLog[] = []
     bot = createTestBot({ autoJoinCreatedChannels: true, logger: captureLogger(logs) })
-    slackApi.failNextConversationsJoin(500, { ok: false, error: 'server_error' })
+    slackApi.respondToNextConversationsJoin(500, { ok: false, error: 'server_error' })
     const waits: Promise<unknown>[] = []
     const response = await bot.app.request(
       '/api/webhooks/slack',
@@ -240,6 +240,53 @@ describe('slackbotv2', () => {
       body: { channel: 'CFAILEDCHANNEL' }
     })
     expect(hasLog(logs, 'slackbotv2_channel_created_join_failed')).toBe(true)
+  })
+
+  it('logs already joined from Slack warning responses', async () => {
+    for (const [suffix, slackResponse] of [
+      ['top-level', { ok: true, warning: 'already_in_channel' }],
+      [
+        'metadata',
+        { ok: true, response_metadata: { warnings: ['already_in_channel'] } }
+      ]
+    ] as const) {
+      const logs: CapturedLog[] = []
+      bot = createTestBot({
+        allowedExternalTeamIds: ['TEVENTTEAM'],
+        autoJoinCreatedChannels: true,
+        logger: captureLogger(logs)
+      })
+      slackApi.respondToNextConversationsJoin(200, slackResponse)
+      const waits: Promise<unknown>[] = []
+      const response = await bot.app.request(
+        '/api/webhooks/slack',
+        signedSlackEvent({
+          event_id: `Ev-slackbotv2-channel-created-already-joined-${suffix}`,
+          event: {
+            type: 'channel_created',
+            channel: {
+              id: `CALREADYJOINED${suffix.toUpperCase().replace('-', '')}`,
+              name: `already-joined-${suffix}`,
+              created: 1700000000,
+              creator: USER_ID
+            },
+            team: 'TEVENTTEAM'
+          }
+        }),
+        {},
+        waitUntilContext(waits)
+      )
+
+      expect(response.status).toBe(200)
+      await Promise.all(waits)
+      expect(
+        logData(logs, 'slackbotv2_channel_created_join_complete')?.already_joined
+      ).toBe(true)
+      expect(
+        logData(logs, 'slackbotv2_channel_created_join_complete')?.team_id
+      ).toBe('TEVENTTEAM')
+      expect(hasLog(logs, 'slackbotv2_channel_created_join_failed')).toBe(false)
+    }
   })
 
   it('dispatches signed Slack button and select actions to durable workflow events', async () => {
@@ -5737,12 +5784,12 @@ type PatchedSlackApi = {
   calls: StreamCall[]
   close(): Promise<void>
   failRepliesWithThreadNotFound(channel: string, ts: string): void
-  failNextConversationsJoin(status: number, body: Record<string, unknown>): void
   failStreamAppendsAfter(count: number, error: string): void
   failStreamStopsLongerThan(maxChars: number): void
   fileInfoRequestCount(fileId: string): number
   holdAssistantStatus(): () => void
   reset(): void
+  respondToNextConversationsJoin(status: number, body: Record<string, unknown>): void
   setFileInfo(fileId: string, file: Record<string, unknown>): void
   setUserProfile(userId: string, profile: Record<string, unknown>): void
   userProfileMethodRequestCount(userId: string, method: string): number
@@ -5769,7 +5816,7 @@ type StreamRecord = {
   ts: string
 }
 
-type SlackApiFailure = {
+type QueuedSlackApiResponse = {
   body: Record<string, unknown>
   status: number
 }
@@ -5788,7 +5835,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
   const calls: StreamCall[] = []
   const fileInfo = new Map<string, Record<string, unknown>>()
   const fileInfoRequests = new Map<string, number>()
-  const conversationsJoinFailures: SlackApiFailure[] = []
+  const conversationsJoinResponses: QueuedSlackApiResponse[] = []
   const threadMessageFiles = new Map<string, Record<string, unknown>[]>()
   const userProfiles = new Map<string, Record<string, unknown>>()
   const userProfileRequests = new Map<string, number>()
@@ -5810,7 +5857,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
       appendFailure,
       assistantStatusGate: () => assistantStatusGate,
       calls,
-      conversationsJoinFailures,
+      conversationsJoinResponses,
       fileInfo,
       fileInfoRequests,
       maxStreamStopChars,
@@ -5837,9 +5884,6 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
     failRepliesWithThreadNotFound(channel: string, ts: string) {
       threadNotFoundReplies.add(slackReplyKey(channel, ts))
     },
-    failNextConversationsJoin(status: number, body: Record<string, unknown>) {
-      conversationsJoinFailures.push({ body, status })
-    },
     failStreamAppendsAfter(count: number, error: string) {
       appendFailure.remaining = count
       appendFailure.error = error
@@ -5863,7 +5907,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
       maxStreamStopChars = null
       appendFailure.remaining = -1
       appendFailure.error = ''
-      conversationsJoinFailures.length = 0
+      conversationsJoinResponses.length = 0
       threadNotFoundReplies.clear()
       threadMessageFiles.clear()
       fileInfo.clear()
@@ -5871,6 +5915,9 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
       streams.clear()
       userProfiles.clear()
       userProfileRequests.clear()
+    },
+    respondToNextConversationsJoin(status: number, body: Record<string, unknown>) {
+      conversationsJoinResponses.push({ body, status })
     },
     setFileInfo(fileId: string, file: Record<string, unknown>) {
       fileInfo.set(fileId, file)
@@ -5895,7 +5942,7 @@ async function handlePatchedSlackRequest(
     appendFailure: { error: string; remaining: number }
     assistantStatusGate: () => Promise<void> | null
     calls: StreamCall[]
-    conversationsJoinFailures: SlackApiFailure[]
+    conversationsJoinResponses: QueuedSlackApiResponse[]
     fileInfo: Map<string, Record<string, unknown>>
     fileInfoRequests: Map<string, number>
     maxStreamStopChars: number | null
@@ -5993,9 +6040,12 @@ async function handlePatchedSlackRequest(
   if (path === '/api/conversations.join') {
     const body = await requestBody(request)
     input.calls.push({ method: 'conversations.join', body })
-    const failure = input.conversationsJoinFailures.shift()
-    if (failure) {
-      await sendWebResponse(res, Response.json(failure.body, { status: failure.status }))
+    const configuredResponse = input.conversationsJoinResponses.shift()
+    if (configuredResponse) {
+      await sendWebResponse(
+        res,
+        Response.json(configuredResponse.body, { status: configuredResponse.status })
+      )
       return
     }
     await sendWebResponse(

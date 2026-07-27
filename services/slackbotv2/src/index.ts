@@ -14,7 +14,11 @@ import {
   type Thread
 } from 'chat'
 import { createSlackAdapter } from '@chat-adapter/slack'
-import { fetchSlackThreadReplies } from '@chat-adapter/slack/api'
+import {
+  assertSlackOk,
+  callSlackApi,
+  fetchSlackThreadReplies
+} from '@chat-adapter/slack/api'
 import { createPostgresState } from '@chat-adapter/state-pg'
 import pg from 'pg'
 import {
@@ -35,6 +39,7 @@ import { slackUserIdForMessage } from './slack-user'
 import {
   collectInitialContext,
   dispatchSlackBlockAction,
+  fetchWithTimeout,
   forwardToSessionApi,
   harnessRestartPreamble,
   interruptSessionExecution,
@@ -44,6 +49,7 @@ import {
   serializeMessageLinks,
   serializeMessage,
   sessionStreamError,
+  slackApiTimeoutMs,
   withSlackApiTimeout
 } from './session-api'
 import {
@@ -626,9 +632,9 @@ function slackChannelCreatedJoinInput(rawBody: string): {
   eventId?: string
   teamId?: string
 } | null {
-  const payload = parseSlackWebhookPayload(rawBody)
+  const payload = slackWebhookPayload(rawBody)
   if (!payload || payload.type !== 'event_callback') return null
-  const event = isJsonObject(payload.event) ? payload.event : undefined
+  const event = slackWebhookEvent(payload)
   if (!event || stringValue(event.type) !== 'channel_created') return null
   const channel = isJsonObject(event.channel) ? event.channel : undefined
   const channelId = stringValue(channel?.id) ?? stringValue(event.channel)
@@ -637,7 +643,7 @@ function slackChannelCreatedJoinInput(rawBody: string): {
     channelId,
     channelName: stringValue(channel?.name),
     eventId: stringValue(payload.event_id),
-    teamId: stringValue(payload.team_id) ?? stringValue(event.team)
+    teamId: slackEventTeamId(payload, event) || undefined
   }
 }
 
@@ -678,35 +684,32 @@ async function joinSlackChannel(
   channelId: string,
   options: SlackbotV2Options
 ): Promise<{ alreadyJoined: boolean }> {
-  const url = new URL('conversations.join', options.slackApiUrl ?? 'https://slack.com/api/')
-  const controller = new AbortController()
-  try {
-    return await withSlackApiTimeout(options, 'Slack API conversations.join', async () => {
-      const response = await (options.fetch ?? fetch)(url, {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${options.botToken}`,
-          'content-type': 'application/json'
-        },
-        body: JSON.stringify({ channel: channelId }),
-        signal: controller.signal
-      })
-      const payload: unknown = await response.json().catch(() => null)
-      if (response.ok && isJsonObject(payload) && payload.ok === true) {
-        return { alreadyJoined: false }
-      }
-      const slackError = isJsonObject(payload) ? stringValue(payload.error) : undefined
-      if (slackError === 'already_in_channel') return { alreadyJoined: true }
-      throw new Error(
-        slackError
-          ? `Slack API conversations.join failed: ${slackError}`
-          : `Slack API conversations.join failed with HTTP ${response.status}`
-      )
-    })
-  } catch (error) {
-    controller.abort()
-    throw error
-  }
+  const fetchFn = options.fetch ?? fetch
+  const timeoutFetch = Object.assign(
+    (input: RequestInfo | URL, init?: RequestInit) =>
+      fetchWithTimeout(
+        fetchFn,
+        input,
+        init ?? {},
+        slackApiTimeoutMs(options),
+        'Slack API conversations.join'
+      ),
+    { preconnect: fetch.preconnect }
+  )
+  const payload = await callSlackApi(
+    'conversations.join',
+    { channel: channelId },
+    {
+      apiUrl: options.slackApiUrl,
+      fetch: timeoutFetch,
+      token: options.botToken
+    }
+  )
+  const alreadyJoined =
+    stringValue(payload.warning) === 'already_in_channel'
+    || payload.response_metadata?.warnings?.includes('already_in_channel') === true
+  assertSlackOk('conversations.join', payload)
+  return { alreadyJoined }
 }
 
 function slackBlockActionPayload(event: ActionEvent): SlackbotV2BlockActionPayload {
