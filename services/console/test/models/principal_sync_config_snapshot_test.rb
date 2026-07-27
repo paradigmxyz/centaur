@@ -1,43 +1,34 @@
 require "test_helper"
 
 class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
+  include ActiveJob::TestHelper
   include ActiveSupport::Testing::TimeHelpers
 
   setup do
     @principal = principals(:acme_channel)
   end
 
-  # Simulates losing the non-blocking rebuild race: another session holds the
-  # principal row lock, so try_build_for's SKIP LOCKED select comes back empty.
-  # (Real cross-session lock contention is not reproducible under transactional
-  # tests, where all sessions share one connection.)
-  def while_rebuild_lock_held
-    singleton = PrincipalSyncConfigSnapshot.singleton_class
-    original = PrincipalSyncConfigSnapshot.method(:try_build_for)
-    singleton.define_method(:try_build_for) { |_principal| nil }
-    yield
-  ensure
-    singleton.define_method(:try_build_for, original)
+  teardown do
+    clear_enqueued_jobs
+    clear_performed_jobs
   end
 
   def without_live_sync_postgres
-    original = Principal.instance_method(:sync_postgres)
-    Principal.class_eval do
-      define_method(:sync_postgres) do |*_args|
-        raise "live sync_postgres should not be called"
-      end
+    original = PrincipalSyncConfigSnapshot.method(:sync_postgres_for)
+    PrincipalSyncConfigSnapshot.define_singleton_method(:sync_postgres_for) do |*_args|
+      raise "live sync_postgres should not be called"
     end
     yield
   ensure
-    Principal.class_eval { define_method(:sync_postgres, original) }
+    PrincipalSyncConfigSnapshot.define_singleton_method(:sync_postgres_for, original)
   end
 
   test "fetch_for builds a snapshot on cold start" do
     assert_difference -> { PrincipalSyncConfigSnapshot.count }, 1 do
       snapshot = PrincipalSyncConfigSnapshot.fetch_for(@principal)
       assert_equal @principal.sync_config_cache_version, snapshot.principal_cache_version
-      assert_equal @principal.sync_config_snapshot_payload, snapshot.payload
-      assert_equal @principal.effective_config(redact_secrets: false), snapshot.config
+      assert_equal PrincipalSyncConfigSnapshot.payload_for(@principal), snapshot.payload
+      assert_equal PrincipalSyncConfigSnapshot.config_for(@principal), snapshot.config
       assert_equal({}, snapshot.postgres_setting_templates)
     end
   end
@@ -85,17 +76,30 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     assert_equal snapshot.updated_at, snapshot.reload.updated_at
   end
 
-  test "fetch_for rebuilds a snapshot stale past TTL" do
+  test "fetch_for serves a snapshot stale past TTL" do
     snapshot = PrincipalSyncConfigSnapshot.fetch_for(@principal)
     stale_time = (PrincipalSyncConfigSnapshot::TTL + 1.minute).ago
     snapshot.update_columns(updated_at: stale_time)
 
-    refreshed = PrincipalSyncConfigSnapshot.fetch_for(@principal)
-    assert_equal snapshot.id, refreshed.id
-    assert refreshed.fresh?
+    assert_no_changes -> { snapshot.reload.updated_at } do
+      served = PrincipalSyncConfigSnapshot.fetch_for(@principal)
+      assert_equal snapshot.id, served.id
+      refute served.fresh?
+    end
   end
 
-  test "fetch_for rebuilds api server JWT snapshots when the jwt window advances" do
+  test "warm job rebuilds a snapshot stale past TTL" do
+    snapshot = PrincipalSyncConfigSnapshot.fetch_for(@principal)
+    stale_time = (PrincipalSyncConfigSnapshot::TTL + 1.minute).ago
+    snapshot.update_columns(updated_at: stale_time)
+
+    PrincipalSyncConfigSnapshotWarmJob.perform_now(@principal.id)
+
+    assert_equal snapshot.id, snapshot.reload.id
+    assert snapshot.fresh?
+  end
+
+  test "warm job rebuilds api server JWT snapshots when the jwt window advances" do
     with_env(
       "CENTAUR_JWT_SIGNING_SECRET" => "test-secret",
       "CENTAUR_API_URL" => "http://api.internal:8080"
@@ -118,13 +122,18 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
       snapshot.update_columns(updated_at: previous_window_time)
 
       travel_to current_time do
-        refreshed = PrincipalSyncConfigSnapshot.fetch_for(@principal)
+        served = PrincipalSyncConfigSnapshot.fetch_for(@principal)
+        assert_equal snapshot.id, served.id
+        refute served.fresh_for?(@principal)
+
+        PrincipalSyncConfigSnapshotWarmJob.perform_now(@principal.id)
+        refreshed = snapshot.reload
         refreshed_token = refreshed.config.fetch("secrets").find do |secret|
           secret.dig("inject", "header") == "Authorization"
         end.dig("source", "value")
 
         assert_equal snapshot.id, refreshed.id
-        assert refreshed.fresh?
+        assert refreshed.fresh_for?(@principal)
         refute_equal original_token, refreshed_token
         refute_equal original_hash, proxy.reload.sync_config_snapshot.fetch(:config_hash)
       end
@@ -156,68 +165,40 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     end
   end
 
-  test "fetch_for builds a new snapshot after a cache version bump" do
+  test "cache version bump enqueues a snapshot warm job" do
+    assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ @principal.id ]) do
+      Principal.bump_sync_config_cache_versions(@principal.id)
+    end
+  end
+
+  test "fetch_for serves the previous-version snapshot after a cache version bump" do
     old = PrincipalSyncConfigSnapshot.fetch_for(@principal)
     Principal.bump_sync_config_cache_versions(@principal.id)
     @principal.reload
-
-    fresh = PrincipalSyncConfigSnapshot.fetch_for(@principal)
-    refute_equal old.id, fresh.id
-    assert_equal @principal.sync_config_cache_version, fresh.principal_cache_version
-  end
-
-  # The stampede regression: when another session holds the rebuild lock,
-  # fetch_for must serve the stale current-version snapshot instead of
-  # queuing behind the row lock.
-  test "fetch_for serves the stale snapshot while another session rebuilds" do
-    snapshot = PrincipalSyncConfigSnapshot.fetch_for(@principal)
-    stale_time = (PrincipalSyncConfigSnapshot::TTL + 1.minute).ago
-    snapshot.update_columns(updated_at: stale_time)
-
-    while_rebuild_lock_held do
-      assert_no_difference -> { PrincipalSyncConfigSnapshot.count } do
-        served = PrincipalSyncConfigSnapshot.fetch_for(@principal)
-        assert_equal snapshot.id, served.id
-        refute served.fresh?
-      end
-    end
-  end
-
-  test "fetch_for serves the previous-version snapshot while another session rebuilds after a bump" do
-    old = PrincipalSyncConfigSnapshot.fetch_for(@principal)
-    Principal.bump_sync_config_cache_versions(@principal.id)
-    @principal.reload
-
-    while_rebuild_lock_held do
-      assert_no_difference -> { PrincipalSyncConfigSnapshot.count } do
-        served = PrincipalSyncConfigSnapshot.fetch_for(@principal)
-        assert_equal old.id, served.id
-        refute_equal @principal.sync_config_cache_version, served.principal_cache_version
-      end
-    end
-  end
-
-  test "fetch_for falls back to a blocking build on cold start when the non-blocking build loses" do
-    while_rebuild_lock_held do
-      assert_difference -> { PrincipalSyncConfigSnapshot.count }, 1 do
-        snapshot = PrincipalSyncConfigSnapshot.fetch_for(@principal)
-        assert_equal @principal.sync_config_cache_version, snapshot.principal_cache_version
-      end
-    end
-  end
-
-  test "try_build_for builds when the principal row lock is free" do
-    assert_difference -> { PrincipalSyncConfigSnapshot.count }, 1 do
-      snapshot = PrincipalSyncConfigSnapshot.try_build_for(@principal)
-      assert_equal @principal.sync_config_cache_version, snapshot.principal_cache_version
-    end
-  end
-
-  test "try_build_for returns the existing snapshot when already fresh" do
-    snapshot = PrincipalSyncConfigSnapshot.fetch_for(@principal)
 
     assert_no_difference -> { PrincipalSyncConfigSnapshot.count } do
-      assert_equal snapshot, PrincipalSyncConfigSnapshot.try_build_for(@principal)
+      served = PrincipalSyncConfigSnapshot.fetch_for(@principal)
+      assert_equal old.id, served.id
+      refute_equal @principal.sync_config_cache_version, served.principal_cache_version
+    end
+  end
+
+  test "warm job builds a new snapshot after a cache version bump" do
+    old = PrincipalSyncConfigSnapshot.fetch_for(@principal)
+    Principal.bump_sync_config_cache_versions(@principal.id)
+    @principal.reload
+
+    assert_difference -> { PrincipalSyncConfigSnapshot.count }, 1 do
+      PrincipalSyncConfigSnapshotWarmJob.perform_now(@principal.id)
+    end
+    fresh = PrincipalSyncConfigSnapshot.find_by!(principal: @principal, principal_cache_version: @principal.sync_config_cache_version)
+    refute_equal old.id, fresh.id
+  end
+
+  test "fetch_for falls back to a blocking build on cold start" do
+    assert_difference -> { PrincipalSyncConfigSnapshot.count }, 1 do
+      snapshot = PrincipalSyncConfigSnapshot.fetch_for(@principal)
+      assert_equal @principal.sync_config_cache_version, snapshot.principal_cache_version
     end
   end
 

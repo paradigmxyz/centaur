@@ -162,7 +162,7 @@ class PrincipalTest < ActiveSupport::TestCase
         history_enabled: false
       )
 
-      config = principal.effective_config(redact_secrets: false)
+      config = PrincipalSyncConfigSnapshot.config_for(principal)
       entry = config.fetch("secrets").find do |secret|
         secret.dig("inject", "header") == "Authorization" &&
           secret.dig("source", "type") == "control_plane"
@@ -230,7 +230,7 @@ class PrincipalTest < ActiveSupport::TestCase
         upload_enabled: true
       )
 
-      config = principal.effective_config(redact_secrets: false)
+      config = PrincipalSyncConfigSnapshot.config_for(principal)
       entry = config.fetch("secrets").find do |secret|
         secret.dig("inject", "header") == "Authorization" &&
           secret.dig("source", "type") == "control_plane"
@@ -351,27 +351,28 @@ class PrincipalTest < ActiveSupport::TestCase
     principal = principal_with_grants(secret)
 
     # Bootstrapping (no token yet) -> the secret is omitted from sync entirely.
-    assert_empty principal.sync_secrets
+    assert_empty PrincipalSyncConfigSnapshot.sync_secrets_for(principal)
 
     # Once control mints a token, it is delivered inline like a control_plane value.
     cred.update!(access_token: "live-token", expires_at: 1.hour.from_now, last_refresh: Time.current)
-    secrets = principal.sync_secrets
+    secrets = PrincipalSyncConfigSnapshot.sync_secrets_for(principal)
     assert_equal 1, secrets.length
     assert_equal({ "type" => "control_plane", "value" => "live-token" }, secrets.first["source"])
 
     # ...and redacted in the operator inspection view (no special-casing needed).
-    assert_equal "[redacted]", principal.effective_config.dig("secrets", 0, "source", "value")
+    redacted = PrincipalSyncConfigSnapshot.redacted_config_for(principal)
+    assert_equal "[redacted]", redacted.dig("secrets", 0, "source", "value")
   end
 
   test "sync_transforms emits a gcp_auth transform per granted GcpAuthSecret" do
-    transforms = principal_with_grants(gcp_auth_secrets(:acme_bigquery)).sync_transforms
+    transforms = PrincipalSyncConfigSnapshot.sync_transforms_for(principal_with_grants(gcp_auth_secrets(:acme_bigquery)))
     assert_equal 1, transforms.length
     assert_equal "gcp_auth", transforms.first["name"]
     assert_equal({ "type" => "workload_identity" }, transforms.first.dig("config", "credentials_provider"))
   end
 
   test "sync_transforms emits a gcp_id_token transform per granted GcpIdTokenSecret" do
-    transforms = principal_with_grants(gcp_id_token_secrets(:acme_cloud_run)).sync_transforms
+    transforms = PrincipalSyncConfigSnapshot.sync_transforms_for(principal_with_grants(gcp_id_token_secrets(:acme_cloud_run)))
     assert_equal 1, transforms.length
     transform = transforms.first
     assert_equal "gcp_id_token", transform["name"]
@@ -381,7 +382,7 @@ class PrincipalTest < ActiveSupport::TestCase
   end
 
   test "sync_transforms emits an aws_auth transform per granted AwsAuthSecret" do
-    transforms = principal_with_grants(aws_auth_secrets(:acme_cloudwatch_aws)).sync_transforms
+    transforms = PrincipalSyncConfigSnapshot.sync_transforms_for(principal_with_grants(aws_auth_secrets(:acme_cloudwatch_aws)))
     aws = transforms.find { |t| t["name"] == "aws_auth" }
     refute_nil aws
     assert_equal({ "type" => "env", "var" => "AWS_ACCESS_KEY_ID" }, aws.dig("config", "access_key_id"))
@@ -391,7 +392,7 @@ class PrincipalTest < ActiveSupport::TestCase
   end
 
   test "sync_transforms bundles all granted oauth tokens into one transform" do
-    transforms = principal_with_grants(oauth_token_secrets(:acme_gmail_oauth)).sync_transforms
+    transforms = PrincipalSyncConfigSnapshot.sync_transforms_for(principal_with_grants(oauth_token_secrets(:acme_gmail_oauth)))
     oauth = transforms.find { |t| t["name"] == "oauth_token" }
     refute_nil oauth
     tokens = oauth.dig("config", "tokens")
@@ -400,11 +401,11 @@ class PrincipalTest < ActiveSupport::TestCase
   end
 
   test "sync_transforms is empty without transform grants" do
-    assert_empty principals(:globex_user).sync_transforms
+    assert_empty PrincipalSyncConfigSnapshot.sync_transforms_for(principals(:globex_user))
   end
 
   test "sync_postgres emits a DSN entry per granted PgDsnSecret with foreign_id" do
-    entries = principal_with_grants(pg_dsn_secrets(:acme_analytics_pg)).sync_postgres
+    entries = PrincipalSyncConfigSnapshot.sync_postgres_for(principal_with_grants(pg_dsn_secrets(:acme_analytics_pg)))
     assert_equal 1, entries.length
     assert_equal pg_dsn_secrets(:acme_analytics_pg).foreign_id, entries.first["foreign_id"]
     assert_equal({ "type" => "env", "var" => "PG_ANALYTICS_DSN" }, entries.first["dsn"])
@@ -423,7 +424,7 @@ class PrincipalTest < ActiveSupport::TestCase
     ])
     Grant.create!(principal: principal, pg_dsn_secret: pg, created_by: users(:globex_admin))
 
-    entry = principal.sync_postgres.fetch(0)
+    entry = PrincipalSyncConfigSnapshot.sync_postgres_for(principal).fetch(0)
     assert_equal(
       [
         { "name" => "centaur.slack_channel_id", "value" => "C999" },
@@ -450,14 +451,14 @@ class PrincipalTest < ActiveSupport::TestCase
     Grant.create!(principal: principal, pg_dsn_secret: low, created_by: users(:acme_admin), priority: 0)
     Grant.create!(principal: principal, pg_dsn_secret: high, created_by: users(:acme_admin), priority: 100)
 
-    entries = principal.sync_postgres
+    entries = PrincipalSyncConfigSnapshot.sync_postgres_for(principal)
     assert_equal 1, entries.length
     assert_equal "pg-analytics-privileged", entries.first["foreign_id"]
     assert_equal "PG_PRIVILEGED_DSN", entries.first.dig("dsn", "var")
   end
 
   test "sync_postgres is empty without pg_dsn grants" do
-    assert_empty principals(:globex_user).sync_postgres
+    assert_empty PrincipalSyncConfigSnapshot.sync_postgres_for(principals(:globex_user))
   end
 
   test "granted_static_secrets includes secrets granted via an assigned role" do
@@ -579,8 +580,8 @@ class PrincipalTest < ActiveSupport::TestCase
     grant_role_gcp(host: "api.test.com")
     principal = principals(:globex_user)
 
-    assert_equal 1, principal.sync_secrets.length
-    assert_empty principal.sync_transforms, "the lower-priority role gcp_auth should be withheld"
+    assert_equal 1, PrincipalSyncConfigSnapshot.sync_secrets_for(principal).length
+    assert_empty PrincipalSyncConfigSnapshot.sync_transforms_for(principal), "the lower-priority role gcp_auth should be withheld"
   end
 
   test "credentials writing different headers on the same host both serve" do
@@ -588,8 +589,8 @@ class PrincipalTest < ActiveSupport::TestCase
     grant_role_gcp(host: "api.test.com")
     principal = principals(:globex_user)
 
-    assert_equal 1, principal.sync_secrets.length
-    assert_equal 1, principal.sync_transforms.count { |t| t["name"] == "gcp_auth" }
+    assert_equal 1, PrincipalSyncConfigSnapshot.sync_secrets_for(principal).length
+    assert_equal 1, PrincipalSyncConfigSnapshot.sync_transforms_for(principal).count { |t| t["name"] == "gcp_auth" }
   end
 
   test "credentials writing the same header on different hosts both serve" do
@@ -597,8 +598,8 @@ class PrincipalTest < ActiveSupport::TestCase
     grant_role_gcp(host: "other.test.com")
     principal = principals(:globex_user)
 
-    assert_equal 1, principal.sync_secrets.length
-    assert_equal 1, principal.sync_transforms.count { |t| t["name"] == "gcp_auth" }
+    assert_equal 1, PrincipalSyncConfigSnapshot.sync_secrets_for(principal).length
+    assert_equal 1, PrincipalSyncConfigSnapshot.sync_transforms_for(principal).count { |t| t["name"] == "gcp_auth" }
   end
 
   test "same-priority credentials writing the same header on the same host both serve" do
@@ -606,8 +607,8 @@ class PrincipalTest < ActiveSupport::TestCase
     grant_direct_gcp(host: "api.test.com")
     principal = principals(:globex_user)
 
-    assert_equal 1, principal.sync_secrets.length
-    assert_equal 1, principal.sync_transforms.count { |t| t["name"] == "gcp_auth" }
+    assert_equal 1, PrincipalSyncConfigSnapshot.sync_secrets_for(principal).length
+    assert_equal 1, PrincipalSyncConfigSnapshot.sync_transforms_for(principal).count { |t| t["name"] == "gcp_auth" }
   end
 
   test "a wildcard static secret suppresses a role-granted transform on a matching exact host" do
@@ -615,8 +616,8 @@ class PrincipalTest < ActiveSupport::TestCase
     grant_role_gcp(host: "api.test.com")
     principal = principals(:globex_user)
 
-    assert_equal 1, principal.sync_secrets.length
-    assert_empty principal.sync_transforms, "the lower-priority role gcp_auth should be withheld"
+    assert_equal 1, PrincipalSyncConfigSnapshot.sync_secrets_for(principal).length
+    assert_empty PrincipalSyncConfigSnapshot.sync_transforms_for(principal), "the lower-priority role gcp_auth should be withheld"
   end
 
   test "a wildcard googleapis static secret suppresses oauth token entries on matching exact hosts" do
@@ -624,8 +625,8 @@ class PrincipalTest < ActiveSupport::TestCase
     grant_role_oauth
     principal = principals(:globex_user)
 
-    assert_equal 1, principal.sync_secrets.length
-    assert_empty principal.sync_transforms, "the lower-priority google oauth_token should be withheld"
+    assert_equal 1, PrincipalSyncConfigSnapshot.sync_secrets_for(principal).length
+    assert_empty PrincipalSyncConfigSnapshot.sync_transforms_for(principal), "the lower-priority google oauth_token should be withheld"
   end
 
   test "a higher-priority wildcard googleapis static secret suppresses all google auth transforms" do
@@ -635,8 +636,8 @@ class PrincipalTest < ActiveSupport::TestCase
     grant_role_gcp(host: "*.googleapis.com")
     principal = principals(:globex_user)
 
-    assert_equal 1, principal.sync_secrets.length
-    assert_empty principal.sync_transforms, "lower-priority google auth transforms should be withheld"
+    assert_equal 1, PrincipalSyncConfigSnapshot.sync_secrets_for(principal).length
+    assert_empty PrincipalSyncConfigSnapshot.sync_transforms_for(principal), "lower-priority google auth transforms should be withheld"
   end
 
   test "equal-priority google auth transforms all serve without a stronger wildcard static secret" do
@@ -645,7 +646,7 @@ class PrincipalTest < ActiveSupport::TestCase
     grant_role_gcp(host: "*.googleapis.com")
     principal = principals(:globex_user)
 
-    transforms = principal.sync_transforms
+    transforms = PrincipalSyncConfigSnapshot.sync_transforms_for(principal)
     assert_equal 2, transforms.count { |t| t["name"] == "gcp_auth" }
     assert_equal 1, transforms.count { |t| t["name"] == "oauth_token" }
     assert_equal 1, transforms.find { |t| t["name"] == "oauth_token" }.dig("config", "tokens").length
@@ -659,19 +660,20 @@ class PrincipalTest < ActiveSupport::TestCase
     Grant.find_by!(gcp_auth_secret: gcp).update!(priority: 900)
     principal = principals(:globex_user)
 
-    assert_empty principal.sync_secrets, "the now-lower-priority direct static secret should be withheld"
-    assert_equal 1, principal.sync_transforms.count { |t| t["name"] == "gcp_auth" }
+    assert_empty PrincipalSyncConfigSnapshot.sync_secrets_for(principal), "the now-lower-priority direct static secret should be withheld"
+    assert_equal 1, PrincipalSyncConfigSnapshot.sync_transforms_for(principal).count { |t| t["name"] == "gcp_auth" }
   end
 
-  test "effective_config redacts inline control_plane values by default but not when asked for live secrets" do
+  test "snapshot config can redact inline control_plane values" do
     principal = principals(:acme_channel)
     SecretSource.create!(source_type: "control_plane", secret: "s3cr3t",
                          static_secret: static_secrets(:db_password_replace))
 
-    redacted = principal.effective_config.fetch("secrets").find { |s| s.dig("source", "type") == "control_plane" }
+    redacted_config = PrincipalSyncConfigSnapshot.redacted_config_for(principal)
+    redacted = redacted_config.fetch("secrets").find { |s| s.dig("source", "type") == "control_plane" }
     assert_equal "[redacted]", redacted.dig("source", "value")
 
-    live = principal.effective_config(redact_secrets: false)
+    live = PrincipalSyncConfigSnapshot.config_for(principal)
                     .fetch("secrets").find { |s| s.dig("source", "type") == "control_plane" }
     assert_equal "s3cr3t", live.dig("source", "value")
   end

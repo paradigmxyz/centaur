@@ -70,7 +70,7 @@ module Api
       # grants and must never be served from a cache.
       def effective_config
         principal = params[:foreign_id].present? ? find_by_foreign_id!(Principal) : Principal.find_by_oid!(params[:id])
-        body = { data: { id: principal.oid }.merge(principal.effective_config) }.to_json
+        body = { data: { id: principal.oid }.merge(PrincipalSyncConfigSnapshot.redacted_config_for(principal)) }.to_json
 
         response.headers["ETag"] = %("#{Digest::SHA256.hexdigest(body)}")
         response.headers["Cache-Control"] = "no-store"

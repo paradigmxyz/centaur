@@ -61,7 +61,7 @@ class SecretSource < ApplicationRecord
   # Whether this source can currently deliver a value to a proxy. Always true
   # except for a token_broker source whose credential has not minted an access
   # token yet (bootstrapping) or is dead -- those are omitted from sync so the
-  # proxy never receives an empty inline value (see Principal#sync_secrets).
+  # proxy never receives an empty inline value.
   def deliverable?
     return brokered_credential&.access_token.present? if source_type == "token_broker"
     true
