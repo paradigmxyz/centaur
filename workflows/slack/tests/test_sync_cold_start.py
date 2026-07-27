@@ -284,3 +284,34 @@ def test_non_member_channel_is_reported_as_skipped_not_failed(monkeypatch):
         }
     ]
     assert calls["checkpoint_failure"] == []
+
+
+def test_non_member_channel_skip_is_recorded_on_run_start_and_finish(monkeypatch):
+    monkeypatch.setenv("SLACK_ETL_ENABLED", "true")
+    sync = _load_sync()
+    client, calls = _patch_handler_io(
+        monkeypatch,
+        sync,
+        client=FakeClient(
+            channels=[
+                {"id": "C123", "name": "cold-start", "is_member": True},
+                {"id": "C456", "name": "not-joined", "is_member": False},
+            ]
+        ),
+    )
+
+    result = asyncio.run(sync.handler(sync.Input(), FakeContext()))
+
+    expected_skipped = [
+        {
+            "channel_id": "C456",
+            "channel_name": "not-joined",
+            "reason": sync.NOT_IN_CHANNEL_SKIP_REASON,
+        }
+    ]
+    assert result["status"] == "completed"
+    assert result["channels_synced"] == 1
+    assert result["channels_skipped"] == 1
+    assert [call["channel_id"] for call in client.history_calls] == ["C123"]
+    assert calls["run_start"][0]["skipped"] == expected_skipped
+    assert calls["finish"][0]["skipped"] == expected_skipped

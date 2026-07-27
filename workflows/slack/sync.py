@@ -512,7 +512,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         workflow_run_id=ctx.run_id,
         mode="incremental",
         requested=[channel_ref(channel) for channel in channels_to_sync],
-        skipped=excluded_channels,
+        skipped=skipped_channels,
         metadata={
             **inp.metadata,
             "slack_access_mode": access_mode,
