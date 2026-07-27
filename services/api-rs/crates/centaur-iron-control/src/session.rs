@@ -150,7 +150,9 @@ fn slack_permission_for_thread(
             .then(|| slack_permission(channel_id.to_owned()));
     }
 
-    labels.get("slack_user_id")?;
+    if !labels.contains_key("slack_user_id") {
+        return None;
+    }
     let conversation_id = slack_conversation_id(thread_key)?;
     is_direct_message(Some(conversation_id)).then(|| slack_permission(conversation_id.to_owned()))
 }
