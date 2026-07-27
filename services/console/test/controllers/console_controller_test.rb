@@ -177,19 +177,31 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_select "td", text: "API-managed"
   end
 
-  test "principal detail page renders inherited Slack permissions as read-only context" do
+  test "principal detail page resolves direct and inherited Slack channel names from the catalog" do
     principal = principals(:acme_channel)
+    principal.slack_channel_permissions.create!(
+      channel_id: "C0123456789",
+      upload_enabled: true
+    )
     roles(:acme_infra).slack_channel_permissions.create!(
       channel_id: "G9876543210",
-      channel_name: "private",
       history_enabled: true
     )
+    catalog = SlackChannelCatalog::Result.new(
+      channels: [
+        SlackChannelCatalog::Channel.new(id: "C0123456789", name: "general", private: false),
+        SlackChannelCatalog::Channel.new(id: "G9876543210", name: "private", private: true)
+      ],
+      error: nil,
+      configured: true
+    )
 
-    get console_principal_url(principal.oid)
+    with_slack_channel_catalog(catalog) { get console_principal_url(principal.oid) }
     assert_response :ok
 
+    assert_select "td", text: /#general/
     assert_select "h3", text: "Inherited From Roles"
-    assert_select "td", text: /private/
+    assert_select "td", text: /#private/
     assert_select "input[type=checkbox][disabled]", minimum: 3
   end
 
@@ -342,5 +354,16 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
       assert_select "input[name=_method][value=delete]", count: 1
       assert_select "button", text: "Sign out"
     end
+  end
+
+  private
+
+  def with_slack_channel_catalog(catalog)
+    singleton = SlackChannelCatalog.singleton_class
+    original = singleton.instance_method(:fetch)
+    singleton.define_method(:fetch) { catalog }
+    yield
+  ensure
+    singleton.define_method(:fetch, original)
   end
 end

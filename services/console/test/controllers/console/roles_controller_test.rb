@@ -71,11 +71,15 @@ module Console
       role = roles(:acme_infra)
       permission = role.slack_channel_permissions.create!(
         channel_id: "C0123456789",
-        channel_name: "general",
         upload_enabled: true
       )
+      catalog = SlackChannelCatalog::Result.new(
+        channels: [ SlackChannelCatalog::Channel.new(id: permission.channel_id, name: "general", private: false) ],
+        error: nil,
+        configured: true
+      )
 
-      get console_role_url(role.oid)
+      with_slack_channel_catalog(catalog) { get console_role_url(role.oid) }
       assert_response :ok
       assert_select "tbody tr" do
         assert_select "td", text: /#general/
@@ -98,7 +102,7 @@ module Console
             }
 
       assert_redirected_to console_role_path(role.oid)
-      assert_equal "general", permission.reload.channel_name
+      assert_nil permission.reload.channel_name
       assert_equal "C0123456789", permission.channel_id
     end
 
@@ -233,6 +237,17 @@ module Console
     test "unknown role returns 404" do
       get console_role_url("role_missing")
       assert_response :not_found
+    end
+
+    private
+
+    def with_slack_channel_catalog(catalog)
+      singleton = SlackChannelCatalog.singleton_class
+      original = singleton.instance_method(:fetch)
+      singleton.define_method(:fetch) { catalog }
+      yield
+    ensure
+      singleton.define_method(:fetch, original)
     end
   end
 end

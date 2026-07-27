@@ -18,6 +18,7 @@ module Console
 
     def show
       @slack_channel_catalog = SlackChannelCatalog.fetch
+      @slack_channel_names = @slack_channel_catalog.channels.to_h { |channel| [ channel.id, channel.name ] }
       @slack_channel_permissions = @role.slack_channel_permissions.ordered
       @slack_channel_options = @slack_channel_catalog.channels.map do |channel|
         label = "##{channel.name} (#{channel.id}) #{channel.private ? "Private" : "Public"}"

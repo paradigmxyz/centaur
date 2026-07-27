@@ -61,11 +61,12 @@
             <tbody class="divide-y divide-ink-700">
               <% permissions.each do |permission| %>
                 <%= form.fields_for :slack_channel_permissions, permission do |permission_fields| %>
+                  <% channel_name = permission.channel_name.presence || @slack_channel_names&.fetch(permission.channel_id, nil) %>
                   <tr>
                     <td class="console-td min-w-80">
                       <%= permission_fields.hidden_field :id %>
-                      <div class="text-sm text-zinc-100"><%= permission.channel_name.present? ? "##{permission.channel_name}" : permission.channel_id %></div>
-                      <% if permission.channel_name.present? %>
+                      <div class="text-sm text-zinc-100"><%= channel_name.present? ? "##{channel_name}" : permission.channel_id %></div>
+                      <% if channel_name.present? %>
                         <div class="mt-1 text-xs text-zinc-500"><%= permission.channel_id %></div>
                       <% end %>
                     </td>
