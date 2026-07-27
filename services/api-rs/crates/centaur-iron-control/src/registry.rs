@@ -24,9 +24,9 @@ use crate::client::IronControlClient;
 use crate::error::IronControlError;
 use crate::models::{
     AwsAuthSecretInput, GcpAuthSecretInput, GcpIdTokenSecretInput, GrantSecret, Grantee,
-    HmacSecretInput, IdentityInput, InjectConfig, OAuthTokenSecretInput, PgDsnSecretInput,
-    PgDsnSettingInput, PgDsnSettingValueFromInput, ReplaceConfig, RequestRule, SecretSource,
-    StaticSecretInput,
+    HmacSecretHeader, HmacSecretInput, IdentityInput, InjectConfig, OAuthTokenSecretInput,
+    PgDsnSecretInput, PgDsnSettingInput, PgDsnSettingValueFromInput, ReplaceConfig, RequestRule,
+    SecretSource, StaticSecretInput,
 };
 use crate::util::{managed_labels, slugify};
 
@@ -183,13 +183,10 @@ pub async fn grant_inputs_to_role(
 ///
 /// Only the transform shapes Centaur uses are translated: the ``secrets``
 /// transform (replace and inject, including ``token_broker`` sources),
-/// ``oauth_token``, ``gcp_auth``, ``gcp_id_token``, and ``aws_auth``. Postgres
-/// listeners translate to ``pg_dsn`` secrets (one per listener). ``hmac_sign``
-/// errors out here: it is represented in iron-control (see [`HmacSecretInput`]),
-/// but only the infra and harness fragments flow through this fragment
-/// translator and none sign requests — tool ``hmac_sign`` secrets are
-/// operator-managed via the ``centaur-perms`` CLI, which parses
-/// ``pyproject.toml`` directly.
+/// ``oauth_token``, ``gcp_auth``, ``gcp_id_token``, ``hmac_sign``, and
+/// ``aws_auth``. Postgres listeners translate to ``pg_dsn`` secrets (one per
+/// listener). Tool discovery emits the same shapes so brokered-token and HMAC
+/// tool secrets register through this path rather than being silently dropped.
 pub fn secret_inputs_from_fragment(
     namespace: &str,
     role_foreign_id: &str,
@@ -237,12 +234,10 @@ pub fn secret_inputs_from_fragment(
                 inputs.push(SecretInput::GcpIdToken(input));
             }
             "hmac_sign" => {
-                // Representable in iron-control, but never reached: only infra/
-                // harness fragments come through here and neither signs requests.
-                // Tool hmac_sign secrets are registered via the centaur-perms CLI.
-                return Err(TranslateError::Unsupported {
-                    what: "hmac_sign request signing in an infra/harness fragment".to_owned(),
-                });
+                let mut input =
+                    hmac_sign_from_transform(namespace, role_foreign_id, transform, policy)?;
+                input.foreign_id = unique_foreign_id(input.foreign_id, &mut used_foreign_ids);
+                inputs.push(SecretInput::Hmac(input));
             }
             "aws_auth" => {
                 let mut input =
@@ -857,6 +852,93 @@ fn aws_auth_from_transform(
     })
 }
 
+/// Translate an ``hmac_sign`` transform into an [`HmacSecretInput`]. Credentials
+/// are placeholders resolved through [`SourcePolicy`]; ``foreign_id`` keys on
+/// the secret name so re-registration stays stable.
+fn hmac_sign_from_transform(
+    namespace: &str,
+    role: &str,
+    transform: &centaur_iron_proxy::Transform,
+    policy: &SourcePolicy,
+) -> Result<HmacSecretInput, TranslateError> {
+    let config = &transform.config.extra;
+    let name = config
+        .get("name")
+        .and_then(YamlValue::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| malformed(role, "hmac_sign missing name"))?
+        .to_owned();
+    let timestamp_format = required_config_str(role, config, "timestamp_format")?;
+    let signature_algorithm = required_config_str(role, config, "signature_algorithm")?;
+    let signature_key_encoding = required_config_str(role, config, "signature_key_encoding")?;
+    let signature_output_encoding =
+        required_config_str(role, config, "signature_output_encoding")?;
+    let signature_message = required_config_str(role, config, "signature_message")?;
+    let credentials_value = config
+        .get("credentials")
+        .ok_or_else(|| malformed(role, "hmac_sign missing credentials"))?;
+    let credentials_map = credentials_value.as_mapping().ok_or_else(|| {
+        malformed(role, "hmac_sign credentials must be a mapping")
+    })?;
+    let mut credentials = BTreeMap::new();
+    for (key, value) in credentials_map {
+        let field = key
+            .as_str()
+            .ok_or_else(|| malformed(role, "hmac_sign credential keys must be strings"))?;
+        let (source, _) = aws_source(role, field, value, policy)?;
+        credentials.insert(field.to_owned(), source);
+    }
+    if !credentials.contains_key("secret") {
+        return Err(malformed(
+            role,
+            "hmac_sign credentials must include secret (the HMAC key)",
+        ));
+    }
+    let mut headers = Vec::new();
+    for header in sequence(config.get("headers")) {
+        let header_name = yaml_str(&header, "name")
+            .ok_or_else(|| malformed(role, "hmac_sign header missing name"))?;
+        let header_value = yaml_str(&header, "value")
+            .ok_or_else(|| malformed(role, "hmac_sign header missing value"))?;
+        headers.push(HmacSecretHeader {
+            name: header_name.to_owned(),
+            value: header_value.to_owned(),
+        });
+    }
+    if headers.is_empty() {
+        return Err(malformed(role, "hmac_sign headers must be non-empty"));
+    }
+    Ok(HmacSecretInput {
+        namespace: namespace.to_owned(),
+        foreign_id: format!("{role}-hmac-{}", slugify(&name)),
+        name,
+        description: None,
+        labels: resource_labels(config.get("labels")),
+        timestamp_format,
+        signature_algorithm,
+        signature_key_encoding,
+        signature_output_encoding,
+        signature_message,
+        allow_chunked_body: yaml_bool(config.get("allow_chunked_body")),
+        headers,
+        credentials,
+        rules: rules_from_values(role, &sequence(config.get("rules")))?,
+    })
+}
+
+fn required_config_str(
+    role: &str,
+    config: &BTreeMap<String, YamlValue>,
+    key: &str,
+) -> Result<String, TranslateError> {
+    config
+        .get(key)
+        .and_then(YamlValue::as_str)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| malformed(role, &format!("hmac_sign missing {key}")))
+}
+
 /// Resolve one ``aws_auth`` credential ref — a ``{placeholder: NAME}`` mapping or
 /// a bare ``NAME`` string — into its [`SecretSource`], returning the placeholder
 /// too so the caller can derive the secret's ``foreign_id``.
@@ -1160,19 +1242,54 @@ postgres:
     }
 
     #[test]
-    fn hmac_sign_is_unsupported() {
+    fn translates_hmac_sign_transform() {
         let fragment = load_fragment_str(
             r#"
 transforms:
   - name: hmac_sign
     config:
-      extra: {}
+      name: FALCONX_P1
+      timestamp_format: unix_seconds
+      signature_algorithm: sha256
+      signature_key_encoding: base64
+      signature_output_encoding: base64
+      signature_message: "{{.Timestamp}}{{.Method}}{{.PathWithQuery}}{{.Body}}"
+      credentials:
+        secret: { placeholder: FALCONX_P1_SECRET_KEY }
+        key: { placeholder: FALCONX_P1_API_KEY }
+      headers:
+        - { name: FX-ACCESS-SIGN, value: "{{.Signature}}" }
+        - { name: FX-ACCESS-KEY, value: "{{.Credentials.key}}" }
+      rules:
+        - { host: api.falconx.io }
 "#,
         )
         .unwrap();
-        let err =
-            secret_inputs_from_fragment("default", "tool-x", &fragment, &env_policy()).unwrap_err();
-        assert!(matches!(err, TranslateError::Unsupported { .. }));
+        let inputs =
+            secret_inputs_from_fragment("default", "tool-falconx", &fragment, &env_policy())
+                .unwrap();
+        let SecretInput::Hmac(input) = &inputs[0] else {
+            panic!("expected an hmac secret");
+        };
+        assert_eq!(input.foreign_id, "tool-falconx-hmac-falconx-p1");
+        assert_eq!(input.name, "FALCONX_P1");
+        assert_eq!(input.signature_algorithm, "sha256");
+        assert_eq!(input.timestamp_format, "unix_seconds");
+        assert_eq!(
+            input.signature_message,
+            "{{.Timestamp}}{{.Method}}{{.PathWithQuery}}{{.Body}}"
+        );
+        assert_eq!(
+            input.credentials["secret"].config,
+            json!({ "var": "FALCONX_P1_SECRET_KEY" })
+        );
+        assert_eq!(
+            input.credentials["key"].config,
+            json!({ "var": "FALCONX_P1_API_KEY" })
+        );
+        assert_eq!(input.headers.len(), 2);
+        assert_eq!(input.headers[0].name, "FX-ACCESS-SIGN");
+        assert_eq!(input.rules[0].host.as_deref(), Some("api.falconx.io"));
     }
 
     #[test]

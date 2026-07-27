@@ -604,6 +604,8 @@ enum ToolSecret {
     GcpIdToken(GcpIdTokenSecret),
     PgDsn(PgDsnSecret),
     AwsAuth(AwsAuthSecret),
+    BrokerToken(BrokerTokenSecret),
+    HmacSign(HmacSignSecret),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -697,6 +699,52 @@ struct AwsAuthSecret {
     allowed_services: Vec<String>,
 }
 
+/// A `type = "brokered_token"` secret: consumer side of an iron-control broker
+/// credential. The broker itself is provisioned out of band; this entry registers
+/// a static secret that injects the broker's current access token. Mirrors
+/// `centaur-perms` so discovery and CLI registration agree.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct BrokerTokenSecret {
+    name: String,
+    credential: String,
+    labels: BTreeMap<String, String>,
+    hosts: Vec<String>,
+    inject_header: String,
+    inject_formatter: String,
+}
+
+/// One header iron-proxy's `hmac_sign` transform writes onto the upstream request.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct HmacHeader {
+    name: String,
+    value: String,
+}
+
+/// A `type = "hmac_sign"` secret: per-request HMAC signing handled by iron-proxy.
+/// Credentials never reach the sandbox. Mirrors the `centaur-perms` parser.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct HmacSignSecret {
+    name: String,
+    labels: BTreeMap<String, String>,
+    hosts: Vec<String>,
+    credentials: Vec<(String, OAuthFieldSource)>,
+    headers: Vec<HmacHeader>,
+    algorithm: String,
+    key_encoding: String,
+    output_encoding: String,
+    message: String,
+    timestamp_format: String,
+    allow_chunked_body: bool,
+}
+
+const BROKER_TOKEN_DEFAULT_HEADER: &str = "Authorization";
+const BROKER_TOKEN_DEFAULT_FORMATTER: &str = "Bearer {{.Value}}";
+const HMAC_ALGORITHMS: &[&str] = &["sha256", "sha512", "sha1"];
+const HMAC_KEY_ENCODINGS: &[&str] = &["raw", "base64", "hex"];
+const HMAC_OUTPUT_ENCODINGS: &[&str] = &["base64", "hex"];
+const HMAC_TIMESTAMP_FORMATS: &[&str] = &["unix_seconds", "unix_millis", "unix_nanos", "rfc3339"];
+const HMAC_REQUIRED_CREDENTIAL: &str = "secret";
+
 fn parse_secret_list(
     value: Option<&TomlValue>,
     default_hosts: &[String],
@@ -759,10 +807,8 @@ fn parse_secret(
         "gcp_id_token" => parse_gcp_id_token_secret(table, name, secret_ref, labels),
         "pg_dsn" => parse_pg_dsn_secret(table, name, secret_ref, labels),
         "aws_auth" => parse_aws_auth_secret(table, name, labels),
-        "brokered_token" | "hmac_sign" => Err(ToolDiscoveryError::Invalid(format!(
-            "api-rs iron-control tool discovery does not yet support secret type {:?}",
-            optional_str(table, "type").unwrap_or("unknown")
-        ))),
+        "brokered_token" => parse_brokered_token_secret(table, name, default_hosts, labels),
+        "hmac_sign" => parse_hmac_sign_secret(table, name, labels),
         other => Err(ToolDiscoveryError::Invalid(format!(
             "unknown secret type {other:?}"
         ))),
@@ -1034,6 +1080,158 @@ fn parse_aws_auth_secret(
     }))
 }
 
+fn parse_brokered_token_secret(
+    table: &toml::Table,
+    name: String,
+    default_hosts: &[String],
+    labels: &BTreeMap<String, String>,
+) -> Result<ToolSecret, ToolDiscoveryError> {
+    let hosts =
+        optional_string_array(table.get("hosts"))?.unwrap_or_else(|| default_hosts.to_vec());
+    if hosts.is_empty() || hosts.iter().any(String::is_empty) {
+        return Err(ToolDiscoveryError::Invalid(format!(
+            "brokered_token entry {name:?} 'hosts' must be a non-empty array of non-empty \
+             strings (or the tool must declare top-level hosts)"
+        )));
+    }
+    let credential = optional_str(table, "credential")
+        .unwrap_or(name.as_str())
+        .to_owned();
+    let inject_header = optional_str(table, "inject_header")
+        .unwrap_or(BROKER_TOKEN_DEFAULT_HEADER)
+        .to_owned();
+    let inject_formatter = optional_str(table, "inject_formatter")
+        .unwrap_or(BROKER_TOKEN_DEFAULT_FORMATTER)
+        .to_owned();
+    Ok(ToolSecret::BrokerToken(BrokerTokenSecret {
+        name,
+        credential,
+        labels: labels.clone(),
+        hosts,
+        inject_header,
+        inject_formatter,
+    }))
+}
+
+fn parse_hmac_sign_secret(
+    table: &toml::Table,
+    name: String,
+    labels: &BTreeMap<String, String>,
+) -> Result<ToolSecret, ToolDiscoveryError> {
+    let hosts = required_string_array(table.get("hosts"), "hosts")?;
+    let credentials = parse_hmac_credentials(table.get("credentials"), &name)?;
+    let headers = parse_hmac_headers(table.get("headers"), &name)?;
+    let algorithm = parse_hmac_enum(table, &name, "algorithm", HMAC_ALGORITHMS)?;
+    let key_encoding = parse_hmac_enum(table, &name, "key_encoding", HMAC_KEY_ENCODINGS)?;
+    let output_encoding = parse_hmac_enum(table, &name, "output_encoding", HMAC_OUTPUT_ENCODINGS)?;
+    let timestamp_format =
+        parse_hmac_enum(table, &name, "timestamp_format", HMAC_TIMESTAMP_FORMATS)?;
+    let message = required_str(table, "message")?.to_owned();
+    let allow_chunked_body = optional_bool(table, "allow_chunked_body")?.unwrap_or(false);
+    Ok(ToolSecret::HmacSign(HmacSignSecret {
+        name,
+        labels: labels.clone(),
+        hosts,
+        credentials,
+        headers,
+        algorithm,
+        key_encoding,
+        output_encoding,
+        message,
+        timestamp_format,
+        allow_chunked_body,
+    }))
+}
+
+fn parse_hmac_credentials(
+    value: Option<&TomlValue>,
+    name: &str,
+) -> Result<Vec<(String, OAuthFieldSource)>, ToolDiscoveryError> {
+    let table = value
+        .and_then(TomlValue::as_table)
+        .filter(|table| !table.is_empty())
+        .ok_or_else(|| {
+            ToolDiscoveryError::Invalid(format!(
+                "hmac_sign entry {name:?} 'credentials' must be a non-empty table"
+            ))
+        })?;
+    let mut out = Vec::with_capacity(table.len());
+    for (field, raw) in table {
+        let source = if let Some(secret_ref) = raw.as_str() {
+            OAuthFieldSource {
+                secret_ref: nonempty(secret_ref, "hmac credential secret_ref")?.to_owned(),
+                json_key: None,
+            }
+        } else {
+            let table = raw.as_table().ok_or_else(|| {
+                ToolDiscoveryError::Invalid(format!(
+                    "hmac_sign entry {name:?} credential {field:?} must be a string or table"
+                ))
+            })?;
+            OAuthFieldSource {
+                secret_ref: required_str(table, "secret_ref")?.to_owned(),
+                json_key: optional_str(table, "json_key").map(ToOwned::to_owned),
+            }
+        };
+        out.push((field.clone(), source));
+    }
+    if !out
+        .iter()
+        .any(|(field, _)| field == HMAC_REQUIRED_CREDENTIAL)
+    {
+        return Err(ToolDiscoveryError::Invalid(format!(
+            "hmac_sign entry {name:?} 'credentials' must include {HMAC_REQUIRED_CREDENTIAL:?} (the HMAC key)"
+        )));
+    }
+    Ok(out)
+}
+
+fn parse_hmac_headers(
+    value: Option<&TomlValue>,
+    name: &str,
+) -> Result<Vec<HmacHeader>, ToolDiscoveryError> {
+    let array = value.and_then(TomlValue::as_array).ok_or_else(|| {
+        ToolDiscoveryError::Invalid(format!(
+            "hmac_sign entry {name:?} 'headers' must be a non-empty list"
+        ))
+    })?;
+    if array.is_empty() {
+        return Err(ToolDiscoveryError::Invalid(format!(
+            "hmac_sign entry {name:?} 'headers' must be a non-empty list"
+        )));
+    }
+    let mut headers = Vec::with_capacity(array.len());
+    for (index, item) in array.iter().enumerate() {
+        let table = item.as_table().ok_or_else(|| {
+            ToolDiscoveryError::Invalid(format!(
+                "hmac_sign entry {name:?} header[{index}] must be a table"
+            ))
+        })?;
+        let header_name = required_str(table, "name")?.to_owned();
+        let header_value = required_str(table, "value")?.to_owned();
+        headers.push(HmacHeader {
+            name: header_name,
+            value: header_value,
+        });
+    }
+    Ok(headers)
+}
+
+fn parse_hmac_enum(
+    table: &toml::Table,
+    name: &str,
+    key: &str,
+    allowed: &[&str],
+) -> Result<String, ToolDiscoveryError> {
+    let value = required_str(table, key)?;
+    if allowed.contains(&value) {
+        return Ok(value.to_owned());
+    }
+    Err(ToolDiscoveryError::Invalid(format!(
+        "hmac_sign entry {name:?} {key:?} must be one of {allowed:?}, got {value:?}"
+    )))
+}
+
 fn parse_oauth_fields(
     value: Option<&TomlValue>,
     secret_name: &str,
@@ -1072,8 +1270,24 @@ fn parse_oauth_fields(
 
 fn fragment_from_secrets(secrets: Vec<ToolSecret>) -> Result<ProxyFragment, ToolDiscoveryError> {
     let mut fragment = ProxyFragment::default();
-    let http = http_secret_transform(&secrets)?;
-    if let Some(transform) = http {
+    let mut secrets_transform = http_secret_transform(&secrets)?;
+    let brokered = brokered_token_secrets(&secrets)?;
+    if !brokered.is_empty() {
+        match &mut secrets_transform {
+            Some(transform) => transform.config.secrets.extend(brokered),
+            None => {
+                secrets_transform = Some(Transform {
+                    name: "secrets".to_owned(),
+                    config: TransformConfig {
+                        secrets: brokered,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                });
+            }
+        }
+    }
+    if let Some(transform) = secrets_transform {
         fragment.transforms.push(transform);
     }
     fragment.transforms.extend(gcp_auth_transforms(&secrets)?);
@@ -1081,6 +1295,7 @@ fn fragment_from_secrets(secrets: Vec<ToolSecret>) -> Result<ProxyFragment, Tool
         .transforms
         .extend(gcp_id_token_transforms(&secrets)?);
     fragment.transforms.extend(aws_auth_transforms(&secrets)?);
+    fragment.transforms.extend(hmac_sign_transforms(&secrets)?);
     if let Some(transform) = oauth_token_transform(&secrets)? {
         fragment.transforms.push(transform);
     }
@@ -1342,6 +1557,94 @@ fn aws_auth_transforms(secrets: &[ToolSecret]) -> Result<Vec<Transform>, ToolDis
         config.insert("labels".to_owned(), yaml_value(labels)?);
         transforms.push(Transform {
             name: "aws_auth".to_owned(),
+            config: TransformConfig {
+                extra: config,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+    }
+    Ok(transforms)
+}
+
+fn brokered_token_secrets(secrets: &[ToolSecret]) -> Result<Vec<Secret>, ToolDiscoveryError> {
+    let mut entries = Vec::new();
+    for secret in secrets {
+        let ToolSecret::BrokerToken(secret) = secret else {
+            continue;
+        };
+        let mut entry = Secret {
+            id: Some(secret.name.clone()),
+            source: Some(yaml_map([
+                ("type", yaml_string("token_broker")),
+                ("credential_id", yaml_string(&secret.credential)),
+            ])?),
+            inject: Some(yaml_value(BTreeMap::from([
+                ("header", yaml_string(&secret.inject_header)),
+                ("formatter", yaml_string(&secret.inject_formatter)),
+            ]))?),
+            rules: host_rules_set(&secret.hosts)?,
+            ..Default::default()
+        };
+        entry
+            .extra
+            .insert("labels".to_owned(), yaml_value(&secret.labels)?);
+        entries.push(entry);
+    }
+    Ok(entries)
+}
+
+fn hmac_sign_transforms(secrets: &[ToolSecret]) -> Result<Vec<Transform>, ToolDiscoveryError> {
+    let mut transforms = Vec::new();
+    for secret in secrets {
+        let ToolSecret::HmacSign(secret) = secret else {
+            continue;
+        };
+        let mut credentials = BTreeMap::new();
+        for (field, source) in &secret.credentials {
+            credentials.insert(field.clone(), oauth_field_source(source)?);
+        }
+        let headers = secret
+            .headers
+            .iter()
+            .map(|header| {
+                yaml_value(BTreeMap::from([
+                    ("name", yaml_string(&header.name)),
+                    ("value", yaml_string(&header.value)),
+                ]))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut config = BTreeMap::new();
+        config.insert("name".to_owned(), yaml_string(&secret.name));
+        config.insert(
+            "timestamp_format".to_owned(),
+            yaml_string(&secret.timestamp_format),
+        );
+        config.insert(
+            "signature_algorithm".to_owned(),
+            yaml_string(&secret.algorithm),
+        );
+        config.insert(
+            "signature_key_encoding".to_owned(),
+            yaml_string(&secret.key_encoding),
+        );
+        config.insert(
+            "signature_output_encoding".to_owned(),
+            yaml_string(&secret.output_encoding),
+        );
+        config.insert(
+            "signature_message".to_owned(),
+            yaml_string(&secret.message),
+        );
+        if secret.allow_chunked_body {
+            config.insert("allow_chunked_body".to_owned(), yaml_value(true)?);
+        }
+        config.insert("headers".to_owned(), yaml_value(headers)?);
+        config.insert("credentials".to_owned(), yaml_value(credentials)?);
+        config.insert("rules".to_owned(), yaml_value(host_rules_set(&secret.hosts)?)?);
+        config.insert("labels".to_owned(), yaml_value(&secret.labels)?);
+        transforms.push(Transform {
+            name: "hmac_sign".to_owned(),
             config: TransformConfig {
                 extra: config,
                 ..Default::default()
@@ -1942,6 +2245,108 @@ secrets = [
         let placeholders =
             centaur_iron_proxy::placeholder_env(std::slice::from_ref(&discovered.fragment));
         assert!(placeholders.is_empty());
+
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn discovers_brokered_token_tool_as_secrets_entry() {
+        let temp = temp_dir("api-rs-tools-brokered-token");
+        let base = temp.join("base");
+        write_tool(
+            &base.join("productivity").join("codex_broker"),
+            r#"
+[project]
+description = "codex broker consumer"
+
+[tool.centaur]
+secrets = [
+  { type = "brokered_token", name = "openai-codex", hosts = ["chatgpt.com"] },
+]
+"#,
+        );
+
+        let discovered = discover_tool_proxy_fragment(std::slice::from_ref(&base)).unwrap();
+        assert_eq!(discovered.tool_count, 1);
+        assert_eq!(discovered.secret_count, 1);
+        let secrets = discovered
+            .fragment
+            .transforms
+            .iter()
+            .find(|transform| transform.name == "secrets")
+            .expect("secrets transform present");
+        assert_eq!(secrets.config.secrets.len(), 1);
+        let secret = &secrets.config.secrets[0];
+        assert_eq!(secret.id.as_deref(), Some("openai-codex"));
+        assert_eq!(
+            secret.source.as_ref().and_then(|value| value["type"].as_str()),
+            Some("token_broker")
+        );
+        assert_eq!(
+            secret
+                .source
+                .as_ref()
+                .and_then(|value| value["credential_id"].as_str()),
+            Some("openai-codex")
+        );
+        assert_eq!(
+            secret
+                .inject
+                .as_ref()
+                .and_then(|value| value["header"].as_str()),
+            Some("Authorization")
+        );
+        assert_eq!(
+            secret
+                .inject
+                .as_ref()
+                .and_then(|value| value["formatter"].as_str()),
+            Some("Bearer {{.Value}}")
+        );
+
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn discovers_hmac_sign_tool_as_transform() {
+        let temp = temp_dir("api-rs-tools-hmac-sign");
+        let base = temp.join("base");
+        write_tool(
+            &base.join("trading").join("falconx"),
+            r#"
+[project]
+description = "falconx"
+
+[tool.centaur]
+secrets = [
+  { type = "hmac_sign", name = "FALCONX_P1", hosts = ["api.falconx.io"], algorithm = "sha256", key_encoding = "base64", output_encoding = "base64", timestamp_format = "unix_seconds", message = "{{.Timestamp}}{{.Method}}{{.PathWithQuery}}{{.Body}}", credentials = { key = "FALCONX_P1_API_KEY", secret = "FALCONX_P1_SECRET_KEY" }, headers = [ { name = "FX-ACCESS-KEY", value = "{{.Credentials.key}}" }, { name = "FX-ACCESS-SIGN", value = "{{.Signature}}" } ] },
+]
+"#,
+        );
+
+        let discovered = discover_tool_proxy_fragment(std::slice::from_ref(&base)).unwrap();
+        assert_eq!(discovered.tool_count, 1);
+        assert_eq!(discovered.secret_count, 1);
+        let transform = discovered
+            .fragment
+            .transforms
+            .iter()
+            .find(|transform| transform.name == "hmac_sign")
+            .expect("hmac_sign transform present");
+        let config = &transform.config.extra;
+        assert_eq!(config["name"].as_str(), Some("FALCONX_P1"));
+        assert_eq!(config["signature_algorithm"].as_str(), Some("sha256"));
+        assert_eq!(
+            config["signature_message"].as_str(),
+            Some("{{.Timestamp}}{{.Method}}{{.PathWithQuery}}{{.Body}}")
+        );
+        assert_eq!(
+            config["credentials"]["secret"]["placeholder"].as_str(),
+            Some("FALCONX_P1_SECRET_KEY")
+        );
+        assert_eq!(config["headers"].as_sequence().unwrap().len(), 2);
+        assert_eq!(config["rules"].as_sequence().unwrap().len(), 1);
+        assert_eq!(config["labels"]["centaur-tool"].as_str(), Some("falconx"));
 
         let _ = fs::remove_dir_all(temp);
     }
