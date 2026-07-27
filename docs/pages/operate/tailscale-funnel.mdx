@@ -112,9 +112,11 @@ https://<name>.<tailnet>.ts.net/api/webhooks/slack
 
 Then finish the Slack app in
 [Deploying in Production → Configure Slack](/deploying-in-production#4-configure-slack):
-subscribe to `app_mention` and the `message.*` events you want, and make sure the
-bot has the `chat:write` scope — the Slackbot delivers replies with Slack's
-streaming API, which requires it.
+subscribe to `app_mention` and the `message.*` events you want. Make sure the
+bot has the `chat:write` scope for Slack's streaming API. If
+`SLACKBOTV2_AUTO_JOIN_CREATED_CHANNELS` is enabled, also subscribe to
+`channel_created` and grant `channels:read` plus `channels:join` so Slackbot v2
+can join newly-created public channels.
 
 ## Verify
 

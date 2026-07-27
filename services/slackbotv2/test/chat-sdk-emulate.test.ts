@@ -71,7 +71,13 @@ beforeAll(async () => {
       tokens: {
         [BOT_TOKEN]: {
           login: BOT_USER_ID,
-          scopes: ['assistant:write', 'chat:write', 'channels:read', 'users:read']
+          scopes: [
+            'assistant:write',
+            'channels:join',
+            'channels:read',
+            'chat:write',
+            'users:read'
+          ]
         },
         [USER_TOKEN]: {
           login: USER_ID,
@@ -142,6 +148,366 @@ describe('slackbotv2', () => {
     await Promise.all(waits)
     expect(codexApi.executes).toHaveLength(1)
     expect(codexApi.executes[0]?.threadKey).toBe(threadKey(parent.ts))
+  })
+
+  it('joins newly-created public channels', async () => {
+    bot = createTestBot({ autoJoinCreatedChannels: true })
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-channel-created',
+        event: {
+          type: 'channel_created',
+          channel: {
+            id: 'CNEWCHANNEL',
+            name: 'new-channel',
+            created: 1700000000,
+            creator: USER_ID
+          },
+          team: TEAM_ID
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+    expect(slackApi.calls).toContainEqual({
+      method: 'conversations.join',
+      body: { channel: 'CNEWCHANNEL' }
+    })
+    expect(codexApi.creates).toHaveLength(0)
+    expect(codexApi.appends).toHaveLength(0)
+    expect(codexApi.executes).toHaveLength(0)
+  })
+
+  it('does not join newly-created public channels when auto-join is disabled', async () => {
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-channel-created-disabled',
+        event: {
+          type: 'channel_created',
+          channel: {
+            id: 'CDISABLEDCHANNEL',
+            name: 'disabled-channel',
+            created: 1700000000,
+            creator: USER_ID
+          },
+          team: TEAM_ID
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+    expect(slackApi.calls.filter(call => call.method === 'conversations.join')).toEqual([])
+  })
+
+  it('deduplicates channel-created join retries by Slack event id', async () => {
+    bot = createTestBot({ autoJoinCreatedChannels: true })
+    const event = signedSlackEvent({
+      event_id: 'Ev-slackbotv2-channel-created-retry',
+      event: {
+        type: 'channel_created',
+        channel: {
+          id: 'CRETRYCHANNEL',
+          name: 'retry-channel',
+          created: 1700000000,
+          creator: USER_ID
+        },
+        team: TEAM_ID
+      }
+    })
+
+    for (let index = 0; index < 2; index += 1) {
+      const waits: Promise<unknown>[] = []
+      const response = await bot.app.request(
+        '/api/webhooks/slack',
+        event,
+        {},
+        waitUntilContext(waits)
+      )
+      expect(response.status).toBe(200)
+      await Promise.all(waits)
+    }
+
+    expect(slackApi.calls.filter(call => call.method === 'conversations.join')).toEqual([
+      {
+        method: 'conversations.join',
+        body: { channel: 'CRETRYCHANNEL' }
+      }
+    ])
+  })
+
+  it('does not mark non-Slack conversations.join error responses as successful', async () => {
+    bot = createTestBot({
+      autoJoinCreatedChannels: true,
+      channelCreatedJoinRetryDelaysMs: []
+    })
+    slackApi.failNextConversationsJoin(500, { message: 'upstream unavailable' })
+    const event = signedSlackEvent({
+      event_id: 'Ev-slackbotv2-channel-created-false-success',
+      event: {
+        type: 'channel_created',
+        channel: {
+          id: 'CFALSESUCCESS',
+          name: 'false-success',
+          created: 1700000000,
+          creator: USER_ID
+        },
+        team: TEAM_ID
+      }
+    })
+
+    for (let index = 0; index < 2; index += 1) {
+      const waits: Promise<unknown>[] = []
+      const response = await bot.app.request(
+        '/api/webhooks/slack',
+        event,
+        {},
+        waitUntilContext(waits)
+      )
+      expect(response.status).toBe(200)
+      await Promise.all(waits)
+    }
+
+    expect(slackApi.calls.filter(call => call.method === 'conversations.join')).toEqual([
+      {
+        method: 'conversations.join',
+        body: { channel: 'CFALSESUCCESS' }
+      },
+      {
+        method: 'conversations.join',
+        body: { channel: 'CFALSESUCCESS' }
+      }
+    ])
+  })
+
+  it('retries transient conversations.join failures in-process', async () => {
+    bot = createTestBot({
+      autoJoinCreatedChannels: true,
+      channelCreatedJoinRetryDelaysMs: [0]
+    })
+    slackApi.failNextConversationsJoin(500, { ok: false, error: 'server_error' })
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-channel-created-retry-transient',
+        event: {
+          type: 'channel_created',
+          channel: {
+            id: 'CTRANSIENTJOIN',
+            name: 'transient-join',
+            created: 1700000000,
+            creator: USER_ID
+          },
+          team: TEAM_ID
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+    expect(slackApi.calls.filter(call => call.method === 'conversations.join')).toEqual([
+      {
+        method: 'conversations.join',
+        body: { channel: 'CTRANSIENTJOIN' }
+      },
+      {
+        method: 'conversations.join',
+        body: { channel: 'CTRANSIENTJOIN' }
+      }
+    ])
+  })
+
+  it('sizes the channel-created join lease to cover the configured retry window', async () => {
+    const memoryState = createMemoryState()
+    let leaseTtlMs = 0
+    const state = Object.create(memoryState) as typeof memoryState
+    state.setIfNotExists = async (key: string, value: unknown, ttlMs?: number) => {
+      if (key.startsWith('slackbotv2:channel-created-join:')) leaseTtlMs = ttlMs ?? 0
+      return memoryState.setIfNotExists(key, value, ttlMs)
+    }
+    bot = createTestBot({
+      autoJoinCreatedChannels: true,
+      channelCreatedJoinRetryDelaysMs: [20_000, 40_000],
+      slackApiTimeoutMs: 5_000,
+      state
+    })
+
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-channel-created-lease-window',
+        event: {
+          type: 'channel_created',
+          channel: {
+            id: 'CLEASEWINDOW',
+            name: 'lease-window',
+            created: 1700000000,
+            creator: USER_ID
+          },
+          team: TEAM_ID
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+    expect(leaseTtlMs).toBeGreaterThanOrEqual(76_000)
+  })
+
+  it('retries 408 and 425 conversations.join responses', async () => {
+    for (const [status, channel] of [
+      [408, 'CJOIN408'],
+      [425, 'CJOIN425']
+    ] as const) {
+      slackApi.reset()
+      bot = createTestBot({
+        autoJoinCreatedChannels: true,
+        channelCreatedJoinRetryDelaysMs: [0]
+      })
+      slackApi.failNextConversationsJoin(status, { ok: false, error: `http_${status}` })
+      const waits: Promise<unknown>[] = []
+      const response = await bot.app.request(
+        '/api/webhooks/slack',
+        signedSlackEvent({
+          event_id: `Ev-slackbotv2-channel-created-retry-${status}`,
+          event: {
+            type: 'channel_created',
+            channel: {
+              id: channel,
+              name: `join-${status}`,
+              created: 1700000000,
+              creator: USER_ID
+            },
+            team: TEAM_ID
+          }
+        }),
+        {},
+        waitUntilContext(waits)
+      )
+
+      expect(response.status).toBe(200)
+      await Promise.all(waits)
+      expect(slackApi.calls.filter(call => call.method === 'conversations.join')).toEqual([
+        {
+          method: 'conversations.join',
+          body: { channel }
+        },
+        {
+          method: 'conversations.join',
+          body: { channel }
+        }
+      ])
+    }
+  })
+
+  it('aborts a timed-out conversations.join request before retrying', async () => {
+    let attempts = 0
+    let firstAborted = false
+    bot = createTestBot({
+      autoJoinCreatedChannels: true,
+      channelCreatedJoinRetryDelaysMs: [0],
+      fetch: async (_input, init) => {
+        attempts += 1
+        const signal = init?.signal
+        if (attempts === 1) {
+          return await new Promise<Response>((_resolve, reject) => {
+            signal?.addEventListener('abort', () => {
+              firstAborted = true
+              reject(new Error('aborted'))
+            })
+          })
+        }
+        expect(firstAborted).toBe(true)
+        return Response.json({ ok: true })
+      },
+      slackApiTimeoutMs: 5
+    })
+
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-channel-created-abort-timeout',
+        event: {
+          type: 'channel_created',
+          channel: {
+            id: 'CABORTJOIN',
+            name: 'abort-join',
+            created: 1700000000,
+            creator: USER_ID
+          },
+          team: TEAM_ID
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+    expect(attempts).toBe(2)
+    expect(firstAborted).toBe(true)
+  })
+
+  it('does not report join failure when only dedupe persistence fails after a successful join', async () => {
+    const logs: CapturedLog[] = []
+    const memoryState = createMemoryState()
+    const state = Object.create(memoryState) as typeof memoryState
+    state.set = async (key: string, value: unknown, ttlMs?: number) => {
+      if (
+        key.startsWith('slackbotv2:channel-created-join:')
+        && value === true
+      ) {
+        throw new Error('state write unavailable')
+      }
+      return memoryState.set(key, value, ttlMs)
+    }
+    bot = createTestBot({ autoJoinCreatedChannels: true, logger: captureLogger(logs), state })
+
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-channel-created-state-blip',
+        event: {
+          type: 'channel_created',
+          channel: {
+            id: 'CSTATEBLIP',
+            name: 'state-blip',
+            created: 1700000000,
+            creator: USER_ID
+          },
+          team: TEAM_ID
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+    expect(slackApi.calls).toContainEqual({
+      method: 'conversations.join',
+      body: { channel: 'CSTATEBLIP' }
+    })
+    expect(hasLog(logs, 'slackbotv2_channel_created_join_complete')).toBe(true)
+    expect(hasLog(logs, 'slackbotv2_channel_created_join_dedupe_persist_failed')).toBe(true)
+    expect(hasLog(logs, 'slackbotv2_channel_created_join_failed')).toBe(false)
   })
 
   it('dispatches signed Slack button and select actions to durable workflow events', async () => {
@@ -5639,6 +6005,7 @@ type PatchedSlackApi = {
   calls: StreamCall[]
   close(): Promise<void>
   failRepliesWithThreadNotFound(channel: string, ts: string): void
+  failNextConversationsJoin(status: number, body: Record<string, unknown>): void
   failStreamAppendsAfter(count: number, error: string): void
   failStreamStopsLongerThan(maxChars: number): void
   fileInfoRequestCount(fileId: string): number
@@ -5659,6 +6026,7 @@ type StreamCall = {
     | 'chat.startStream'
     | 'chat.appendStream'
     | 'chat.stopStream'
+    | 'conversations.join'
   streamTs?: string
 }
 
@@ -5667,6 +6035,11 @@ type StreamRecord = {
   payloadChars: number
   text: string
   ts: string
+}
+
+type SlackApiFailure = {
+  body: Record<string, unknown>
+  status: number
 }
 
 type SlackStreamTranscript = {
@@ -5683,6 +6056,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
   const calls: StreamCall[] = []
   const fileInfo = new Map<string, Record<string, unknown>>()
   const fileInfoRequests = new Map<string, number>()
+  const conversationsJoinFailures: SlackApiFailure[] = []
   const threadMessageFiles = new Map<string, Record<string, unknown>[]>()
   const userProfiles = new Map<string, Record<string, unknown>>()
   const userProfileRequests = new Map<string, number>()
@@ -5704,6 +6078,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
       appendFailure,
       assistantStatusGate: () => assistantStatusGate,
       calls,
+      conversationsJoinFailures,
       fileInfo,
       fileInfoRequests,
       maxStreamStopChars,
@@ -5730,6 +6105,9 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
     failRepliesWithThreadNotFound(channel: string, ts: string) {
       threadNotFoundReplies.add(slackReplyKey(channel, ts))
     },
+    failNextConversationsJoin(status: number, body: Record<string, unknown>) {
+      conversationsJoinFailures.push({ body, status })
+    },
     failStreamAppendsAfter(count: number, error: string) {
       appendFailure.remaining = count
       appendFailure.error = error
@@ -5753,6 +6131,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
       maxStreamStopChars = null
       appendFailure.remaining = -1
       appendFailure.error = ''
+      conversationsJoinFailures.length = 0
       threadNotFoundReplies.clear()
       threadMessageFiles.clear()
       fileInfo.clear()
@@ -5784,6 +6163,7 @@ async function handlePatchedSlackRequest(
     appendFailure: { error: string; remaining: number }
     assistantStatusGate: () => Promise<void> | null
     calls: StreamCall[]
+    conversationsJoinFailures: SlackApiFailure[]
     fileInfo: Map<string, Record<string, unknown>>
     fileInfoRequests: Map<string, number>
     maxStreamStopChars: number | null
@@ -5875,6 +6255,26 @@ async function handlePatchedSlackRequest(
       file
         ? Response.json({ ok: true, file })
         : Response.json({ ok: false, error: 'file_not_found' })
+    )
+    return
+  }
+  if (path === '/api/conversations.join') {
+    const body = await requestBody(request)
+    input.calls.push({ method: 'conversations.join', body })
+    const failure = input.conversationsJoinFailures.shift()
+    if (failure) {
+      await sendWebResponse(res, Response.json(failure.body, { status: failure.status }))
+      return
+    }
+    await sendWebResponse(
+      res,
+      Response.json({
+        ok: true,
+        channel: {
+          id: stringField(body.channel),
+          is_channel: true
+        }
+      })
     )
     return
   }

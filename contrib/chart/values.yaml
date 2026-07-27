@@ -476,6 +476,11 @@ slackbotv2:
     pullPolicy: Always
   userName: centaur
   assistantStatus: ""
+  # When true, Slackbot v2 listens for Slack channel_created events and calls
+  # conversations.join so the bot joins newly-created public channels. Requires
+  # the Slack app to subscribe to channel_created and grant channels:read plus
+  # channels:join.
+  autoJoinCreatedChannels: false
   # Public/local MCP endpoint shown in MCP SSO setup messages. The default
   # assumes users connect through `kubectl port-forward ... 3000:8080`.
   mcpPublicUrl: "http://localhost:3000"
