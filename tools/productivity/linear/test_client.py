@@ -88,6 +88,21 @@ def test_update_issue_merges_success_into_issue_fields():
     assert updated["success"] is True
 
 
+def test_update_issue_sets_project_milestone():
+    client = RecordingLinearClient(
+        {
+            "issueUpdate": {
+                "success": True,
+                "issue": {"id": "issue-1", "identifier": "ENG-1"},
+            }
+        }
+    )
+
+    client.update_issue("ENG-1", project_milestone_id="milestone-1")
+
+    assert client.calls[0]["variables"]["input"] == {"projectMilestoneId": "milestone-1"}
+
+
 def test_add_comment_merges_success_into_comment_fields():
     client = RecordingLinearClient(
         {"commentCreate": {"success": True, "comment": {"id": "comment-1", "body": "hi"}}}

@@ -177,6 +177,8 @@ def issue(
         console.print(f"Assignee: {result['assignee'].get('name', '')}")
     if result.get("project"):
         console.print(f"Project: {result['project'].get('name', '')}")
+    if result.get("projectMilestone"):
+        console.print(f"Milestone: {result['projectMilestone'].get('name', '')}")
     if result.get("cycle"):
         console.print(f"Cycle: {result['cycle'].get('name', '')}")
 
@@ -307,6 +309,7 @@ def update(
     due_date: str = typer.Option(None, "--due-date", help="Due date as YYYY-MM-DD"),
     priority: int = typer.Option(None, "--priority", "-p", help="Priority (0-4)"),
     project: str = typer.Option(None, "--project", help="Project name to add issue to"),
+    milestone: str = typer.Option(None, "--milestone", help="Project milestone name"),
 ):
     """Update an existing issue.
 
@@ -314,6 +317,7 @@ def update(
         linear update ENG-123 --state "In Progress"
         linear update ENG-123 --assignee me
         linear update ENG-123 --project "Q1 Roadmap"
+        linear update ENG-123 --milestone "Public beta"
     """
     client = get_client()
 
@@ -363,6 +367,25 @@ def update(
             console.print(f"[red]Project '{project}' not found.[/]")
             raise typer.Exit(1)
 
+    project_milestone_id = None
+    if milestone:
+        issue_project = project_id or (current.get("project") or {}).get("id")
+        if not issue_project:
+            console.print("[red]A milestone requires the issue to belong to a project.[/]")
+            raise typer.Exit(1)
+        milestone_match = next(
+            (
+                item
+                for item in client.project_milestones(project_id=issue_project)
+                if milestone.lower() == item.get("name", "").lower()
+            ),
+            None,
+        )
+        if not milestone_match:
+            console.print(f"[red]Milestone '{milestone}' not found in the issue's project.[/]")
+            raise typer.Exit(1)
+        project_milestone_id = milestone_match.get("id")
+
     result = client.update_issue(
         issue_id=issue_id,
         title=title,
@@ -371,6 +394,7 @@ def update(
         due_date=due_date,
         priority=priority,
         project_id=project_id,
+        project_milestone_id=project_milestone_id,
     )
 
     require_mutation_success(result, "issue update")
@@ -379,6 +403,8 @@ def update(
     console.print(f"State: {result.get('state', {}).get('name', '')}")
     if result.get("project"):
         console.print(f"Project: {result.get('project', {}).get('name', '')}")
+    if result.get("projectMilestone"):
+        console.print(f"Milestone: {result.get('projectMilestone', {}).get('name', '')}")
     console.print(f"[dim]{result.get('url')}[/]")
 
 
@@ -434,6 +460,48 @@ def projects(
             proj.get("targetDate") or "",
         )
 
+    console.print(table)
+
+
+@app.command("milestones")
+def milestones(
+    project: str = typer.Option(None, "--project", "-p", help="Filter by project name"),
+    limit: int = typer.Option(50, "--limit", "-n", help="Max results"),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
+    """List project milestones."""
+    client = get_client()
+    project_id = None
+    if project:
+        project_match = next(
+            (p for p in client.projects() if project.lower() in p.get("name", "").lower()),
+            None,
+        )
+        if not project_match:
+            console.print(f"[red]Project '{project}' not found.[/]")
+            raise typer.Exit(1)
+        project_id = project_match["id"]
+
+    result = client.project_milestones(project_id=project_id, limit=limit)
+    if json_output:
+        print(json.dumps(result, indent=2, default=str), file=sys.stdout)
+        raise typer.Exit()
+    if not result:
+        console.print("[yellow]No milestones found.[/]")
+        raise typer.Exit()
+
+    table = Table(title=f"Project milestones ({len(result)})")
+    table.add_column("Project", style="cyan", max_width=30)
+    table.add_column("Milestone", style="white", max_width=30)
+    table.add_column("Progress", style="yellow", max_width=10)
+    table.add_column("Target", style="dim", max_width=12)
+    for item in result:
+        table.add_row(
+            (item.get("project") or {}).get("name", ""),
+            item.get("name", ""),
+            f"{int(item.get('progress', 0) * 100)}%",
+            item.get("targetDate") or "",
+        )
     console.print(table)
 
 

@@ -102,6 +102,7 @@ class LinearReadonlyClient(LinearGraphQLClient):
                     assignee {{ id name }}
                     team {{ id name key }}
                     project {{ id name }}
+                    projectMilestone {{ id name targetDate }}
                     cycle {{ id name number }}
                     labels {{ nodes {{ id name color }} }}
                     dueDate
@@ -135,6 +136,7 @@ class LinearReadonlyClient(LinearGraphQLClient):
                 assignee { id name }
                 team { id name key }
                 project { id name }
+                projectMilestone { id name targetDate }
                 cycle { id name number }
                 labels { nodes { id name color } }
                 comments { nodes { id body user { name } createdAt } }
@@ -207,6 +209,46 @@ class LinearReadonlyClient(LinearGraphQLClient):
         }
         """
         return self._connection_nodes(query, connection_path=("projects",), limit=limit)
+
+    def project_milestones(
+        self, project_id: str | None = None, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """List project milestones, optionally filtered by project ID."""
+        filter_arg = "filter: { project: { id: { eq: $projectId } } }," if project_id else ""
+        project_id_var = "$projectId: ID,\n" if project_id else ""
+        query = f"""
+        query ProjectMilestones(
+            {project_id_var}
+            $first: Int!,
+            $after: String
+        ) {{
+            projectMilestones(
+                {filter_arg}
+                first: $first,
+                after: $after,
+                orderBy: updatedAt
+            ) {{
+                nodes {{
+                    id
+                    name
+                    description
+                    targetDate
+                    progress
+                    project {{ id name }}
+                    createdAt
+                    updatedAt
+                }}
+                pageInfo {{ hasNextPage endCursor }}
+            }}
+        }}
+        """
+        variables = {"projectId": project_id} if project_id else None
+        return self._connection_nodes(
+            query,
+            connection_path=("projectMilestones",),
+            variables=variables,
+            limit=limit,
+        )
 
     def list_etl_projects(
         self,
