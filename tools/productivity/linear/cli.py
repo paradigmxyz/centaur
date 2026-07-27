@@ -78,6 +78,19 @@ def find_project(client, name: str) -> dict | None:
     )
 
 
+def find_project_milestone(client, project_id: str, name: str) -> dict | None:
+    """Resolve a milestone by exact name within one project."""
+    normalized = name.casefold()
+    return next(
+        (
+            milestone
+            for milestone in client.project_milestones(project_id=project_id, limit=None)
+            if milestone.get("name", "").casefold() == normalized
+        ),
+        None,
+    )
+
+
 @app.command()
 def me():
     """Show authenticated user info."""
@@ -263,6 +276,8 @@ def create(
     parent: str = typer.Option(
         None, "--parent", help="Parent issue identifier (e.g., ENG-123) for sub-issues"
     ),
+    project: str = typer.Option(None, "--project", help="Project name"),
+    milestone: str = typer.Option(None, "--milestone", help="Project milestone name"),
 ):
     """Create a new issue.
 
@@ -270,6 +285,7 @@ def create(
         linear create "Fix login bug" --team ENG
         linear create "New feature" -t ENG -d "Description here" -p 2
         linear create "Sub-task" -t ENG --parent ENG-123
+        linear create "Beta task" -t ENG --project "Q1 Roadmap" --milestone "Public beta"
     """
     client = get_client()
 
@@ -301,6 +317,25 @@ def create(
             raise typer.Exit(1)
         parent_id = parent_issue.get("id")
 
+    project_id = None
+    if project:
+        project_match = find_project(client, project)
+        if not project_match:
+            console.print(f"[red]Project '{project}' not found.[/]")
+            raise typer.Exit(1)
+        project_id = project_match["id"]
+
+    project_milestone_id = None
+    if milestone:
+        if not project_id:
+            console.print("[red]--milestone requires --project when creating an issue.[/]")
+            raise typer.Exit(1)
+        milestone_match = find_project_milestone(client, project_id, milestone)
+        if not milestone_match:
+            console.print(f"[red]Milestone '{milestone}' not found in project '{project}'.[/]")
+            raise typer.Exit(1)
+        project_milestone_id = milestone_match["id"]
+
     result = client.create_issue(
         title=title,
         team_id=team_match["id"],
@@ -309,11 +344,17 @@ def create(
         due_date=due_date,
         priority=priority,
         parent_id=parent_id,
+        project_id=project_id,
+        project_milestone_id=project_milestone_id,
     )
 
     require_mutation_success(result, "issue creation")
 
     console.print(f"[green]Created:[/] [bold]{result.get('identifier')}[/] {result.get('title')}")
+    if result.get("project"):
+        console.print(f"Project: {result['project'].get('name', '')}")
+    if result.get("projectMilestone"):
+        console.print(f"Milestone: {result['projectMilestone'].get('name', '')}")
     console.print(f"[dim]{result.get('url')}[/]")
 
 
@@ -327,6 +368,9 @@ def update(
     priority: int = typer.Option(None, "--priority", "-p", help="Priority (0-4)"),
     project: str = typer.Option(None, "--project", help="Project name to add issue to"),
     milestone: str = typer.Option(None, "--milestone", help="Project milestone name"),
+    clear_milestone: bool = typer.Option(
+        False, "--clear-milestone", help="Remove the issue's project milestone"
+    ),
 ):
     """Update an existing issue.
 
@@ -335,6 +379,7 @@ def update(
         linear update ENG-123 --assignee me
         linear update ENG-123 --project "Q1 Roadmap"
         linear update ENG-123 --milestone "Public beta"
+        linear update ENG-123 --clear-milestone
     """
     client = get_client()
 
@@ -380,20 +425,17 @@ def update(
             console.print(f"[red]Project '{project}' not found.[/]")
             raise typer.Exit(1)
 
+    if milestone and clear_milestone:
+        console.print("[red]--milestone and --clear-milestone are mutually exclusive.[/]")
+        raise typer.Exit(1)
+
     project_milestone_id = None
     if milestone:
         issue_project = project_id or (current.get("project") or {}).get("id")
         if not issue_project:
             console.print("[red]A milestone requires the issue to belong to a project.[/]")
             raise typer.Exit(1)
-        milestone_match = next(
-            (
-                item
-                for item in client.project_milestones(project_id=issue_project)
-                if milestone.lower() == item.get("name", "").lower()
-            ),
-            None,
-        )
+        milestone_match = find_project_milestone(client, issue_project, milestone)
         if not milestone_match:
             console.print(f"[red]Milestone '{milestone}' not found in the issue's project.[/]")
             raise typer.Exit(1)
@@ -408,6 +450,7 @@ def update(
         priority=priority,
         project_id=project_id,
         project_milestone_id=project_milestone_id,
+        clear_project_milestone=clear_milestone,
     )
 
     require_mutation_success(result, "issue update")
@@ -558,6 +601,15 @@ def project_detail(
     if teams:
         team_names = ", ".join(t.get("key", "") for t in teams)
         console.print(f"Teams: {team_names}")
+
+    milestones = result.get("projectMilestones", {}).get("nodes", [])
+    if milestones:
+        console.print(f"\n[bold]Milestones ({len(milestones)}):[/]")
+        for milestone in milestones:
+            target = f" — {milestone['targetDate']}" if milestone.get("targetDate") else ""
+            console.print(
+                f"  {milestone.get('name')} ({milestone.get('progress', 0):g}%){target}"
+            )
 
     issues = result.get("issues", {}).get("nodes", [])
     if issues:

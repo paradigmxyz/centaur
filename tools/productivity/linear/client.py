@@ -55,7 +55,7 @@ class LinearClient(LinearReadonlyClient):
         return super().projects(limit=limit)
 
     def project_milestones(
-        self, project_id: str | None = None, limit: int = 50
+        self, project_id: str | None = None, limit: int | None = 50
     ) -> list[dict[str, Any]]:
         """List project milestones, optionally filtered by project ID."""
         return super().project_milestones(project_id=project_id, limit=limit)
@@ -117,7 +117,11 @@ class LinearClient(LinearReadonlyClient):
         mutation IssueCreate($input: IssueCreateInput!) {
             issueCreate(input: $input) {
                 success
-                issue { id identifier title dueDate url }
+                issue {
+                    id identifier title dueDate project { id name }
+                    projectMilestone { id name targetDate }
+                    url
+                }
             }
         }
         """
@@ -156,6 +160,7 @@ class LinearClient(LinearReadonlyClient):
         priority: int | None = None,
         project_id: str | None = None,
         project_milestone_id: str | None = None,
+        clear_project_milestone: bool = False,
         due_date: str | None = None,
     ) -> dict[str, Any]:
         """Update an existing issue.
@@ -188,8 +193,14 @@ class LinearClient(LinearReadonlyClient):
             input_data["priority"] = priority
         if project_id:
             input_data["projectId"] = project_id
+        if project_milestone_id and clear_project_milestone:
+            raise ValueError(
+                "project_milestone_id and clear_project_milestone are mutually exclusive"
+            )
         if project_milestone_id:
             input_data["projectMilestoneId"] = project_milestone_id
+        elif clear_project_milestone:
+            input_data["projectMilestoneId"] = None
         if due_date:
             input_data["dueDate"] = due_date
 

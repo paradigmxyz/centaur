@@ -211,7 +211,7 @@ class LinearReadonlyClient(LinearGraphQLClient):
         return self._connection_nodes(query, connection_path=("projects",), limit=limit)
 
     def project_milestones(
-        self, project_id: str | None = None, limit: int = 50
+        self, project_id: str | None = None, limit: int | None = 50
     ) -> list[dict[str, Any]]:
         """List project milestones, optionally filtered by project ID."""
         filter_arg = "filter: { project: { id: { eq: $projectId } } }," if project_id else ""
@@ -322,6 +322,9 @@ class LinearReadonlyClient(LinearGraphQLClient):
                 targetDate
                 lead { id name }
                 teams { nodes { id name key } }
+                projectMilestones {
+                    nodes { id name description targetDate progress }
+                }
                 issues { nodes { id identifier title state { name } } }
                 url
             }
