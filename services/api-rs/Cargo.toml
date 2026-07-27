@@ -57,25 +57,25 @@ centaur-workflows = { path = "crates/centaur-workflows" }
 clap = { version = "4.6.1", features = ["derive", "env"] }
 chrono = { version = "0.4", features = ["serde", "clock"] }
 chrono-tz = "0.10.4"
-cron = "0.16.0"
-crossterm = "0.28"
+cron = "0.17.0"
+crossterm = "0.29"
 dashmap = "6"
 eventsource-stream = "0.2.3"
 eyre = "0.6"
-base64 = "0.22"
+base64 = "0.23"
 futures-util = { version = "0.3", features = ["sink"] }
-hmac = "0.12"
+hmac = "0.13"
 hex = "0.4"
 jiff = "0.2"
 jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }
-k8s-openapi = { version = "0.27.1", features = ["latest"] }
-kube = "3.1.0"
+k8s-openapi = { version = "0.28.0", features = ["latest"] }
+kube = "4.2.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-sha2 = "0.10"
+sha2 = "0.11"
 reqwest = { version = "0.13.4", default-features = false, features = ["form", "json", "rustls", "stream"] }
-ratatui = "0.29"
+ratatui = "0.30"
 rustls = "0.23"
 opentelemetry = "0.32.0"
 opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace"] }
@@ -92,9 +92,9 @@ thiserror = "2"
 time = { version = "0.3", features = ["serde", "serde-well-known"] }
 tokio = "1"
 tokio-util = "0.7"
-toml = "0.8"
+toml = "1.1"
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6.11", features = ["trace"] }
+tower-http = { version = "0.7.0", features = ["trace"] }
 tracing = "0.1"
 tracing-opentelemetry = "0.33.0"
 tracing-subscriber = "0.3"

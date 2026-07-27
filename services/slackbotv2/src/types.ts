@@ -78,6 +78,13 @@ export type SlackbotV2CreateSessionRequest = {
   on_harness_conflict?: 'reject' | 'restart'
 }
 
+export type SlackbotV2HarnessAssignment = {
+  experiment: string
+  requestedHarness: string
+  cohort: string
+  rolloutPercent: number
+}
+
 export type SlackbotV2ExecuteSessionRequest = {
   idempotency_key?: string
   idle_timeout_ms?: number
@@ -157,6 +164,12 @@ export type SlackbotV2Options = {
    * harness config files (see console-session-link.ts).
    */
   harnessDefaultModels?: Record<string, string>
+  /**
+   * Deployment-configured default reasoning per Codex-compatible harness,
+   * mirrored from CODEX_MODEL_REASONING_EFFORT. Display only; explicit and
+   * channel reasoning selections are forwarded separately on each turn.
+   */
+  harnessDefaultReasoning?: Record<string, string>
   /** Strategy for resolving message-level harness/model/provider/reasoning overrides. */
   messageOverridesStrategy?: MessageOverridesStrategy
   /**
@@ -258,6 +271,10 @@ export type ForwardSessionInput = {
   executeMessage?: SlackbotV2ApiMessage
   /** Effective harness selected by sticky thread flags (including --nanocodex). */
   harnessType?: string
+  /** Harness returned by api-rs after applying control-plane policy. */
+  metadataHarnessType?: string
+  /** Experiment/cohort returned by api-rs and recorded on this execution. */
+  harnessAssignment?: SlackbotV2HarnessAssignment
   messages: SlackbotV2ApiMessage[]
   /** Effective model selected by sticky thread flags (--model/--opus/...). */
   model?: string
@@ -269,7 +286,7 @@ export type ForwardSessionInput = {
   metadataModel?: string
   /** Effective model provider selected by sticky thread flags (--bedrock); codex only. */
   provider?: string
-  /** Per-turn reasoning effort parsed from the `-rsn` flag (codex only). */
+  /** Per-turn reasoning effort parsed from the `-rsn` flag (Codex/Nanocodex). */
   reasoning?: string
   onEventId(eventId: number): void
   openStream: boolean

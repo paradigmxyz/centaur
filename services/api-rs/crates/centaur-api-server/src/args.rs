@@ -113,6 +113,10 @@ impl Args {
         Duration::from_secs(self.server.shutdown_execution_drain_timeout_secs)
     }
 
+    pub(crate) fn codex_nanocodex_rollout_percent(&self) -> u8 {
+        self.server.codex_nanocodex_rollout_percent
+    }
+
     pub(crate) fn execution_adoption_interval(&self) -> Option<Duration> {
         (self.server.execution_adoption_interval_secs > 0)
             .then(|| Duration::from_secs(self.server.execution_adoption_interval_secs))
@@ -461,6 +465,16 @@ pub(crate) struct ServerArgs {
     pub(crate) bind_addr: SocketAddr,
     #[arg(long, env = "RUN_MIGRATIONS", default_value_t = false)]
     pub(crate) run_migrations: bool,
+    /// Percentage of sessions requesting Codex that are assigned to
+    /// Nanocodex. The assignment is deterministic by thread key and the
+    /// resolved harness is persisted on the session.
+    #[arg(
+        long = "session-codex-nanocodex-rollout-percent",
+        env = "SESSION_CODEX_NANOCODEX_ROLLOUT_PERCENT",
+        default_value_t = 0,
+        value_parser = clap::value_parser!(u8).range(0..=100)
+    )]
+    codex_nanocodex_rollout_percent: u8,
     /// How long shutdown waits for in-flight executions to finish before
     /// releasing their stdout-owner leases for adoption by a peer. Keep
     /// below the pod's terminationGracePeriodSeconds (35s in the chart) so
@@ -2251,6 +2265,33 @@ mod tests {
         assert_eq!(args.sandbox.k8s_namespace, "centaur-test");
         assert_eq!(args.sandbox.ready_timeout_secs, 17);
         assert_eq!(args.sandbox.k8s_context.as_deref(), Some("kind-test"));
+    }
+
+    #[test]
+    fn parses_codex_nanocodex_rollout_percent() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-codex-nanocodex-rollout-percent",
+            "50",
+        ])
+        .unwrap();
+
+        assert_eq!(args.codex_nanocodex_rollout_percent(), 50);
+    }
+
+    #[test]
+    fn rejects_invalid_codex_nanocodex_rollout_percent() {
+        let result = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-codex-nanocodex-rollout-percent",
+            "101",
+        ]);
+
+        assert!(result.is_err());
     }
 
     #[test]

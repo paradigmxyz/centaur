@@ -712,6 +712,47 @@ describe('forwardToSessionApi harness restart', () => {
     expect('on_harness_conflict' in (create?.body as object)).toBe(false)
   })
 
+  test('reports the harness resolved by api-rs', async () => {
+    const { fetchFn, requests } = fakeApi({
+      createSession: [
+        {
+          body: {
+            harness_switched: false,
+            harness_type: 'nanocodex',
+            harness_assignment: {
+              experiment: 'codex_nanocodex_ab',
+              requested_harness: 'codex',
+              cohort: 'nanocodex',
+              rollout_percent: 50
+            }
+          },
+          status: 200
+        }
+      ]
+    })
+    let resolvedHarness: string | undefined
+    let resolvedExperiment: string | undefined
+
+    await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hi')), {
+      onSessionCreated: async outcome => {
+        resolvedHarness = outcome.harnessType
+        resolvedExperiment = outcome.harnessAssignment?.experiment
+      }
+    })
+
+    expect(resolvedHarness).toBe('nanocodex')
+    expect(resolvedExperiment).toBe('codex_nanocodex_ab')
+    expect(executeBody(requests).metadata).toMatchObject({
+      harness_type: 'nanocodex',
+      harness_assignment: {
+        experiment: 'codex_nanocodex_ab',
+        requested_harness: 'codex',
+        cohort: 'nanocodex',
+        rollout_percent: 50
+      }
+    })
+  })
+
   test('harness_switched response fires onSessionRestarted and prepends the preamble', async () => {
     const { fetchFn, requests } = fakeApi({
       createSession: [{ body: { ok: true, harness_switched: true }, status: 200 }]

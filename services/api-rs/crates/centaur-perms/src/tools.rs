@@ -369,9 +369,8 @@ pub fn parse_manifest(tool_dir: &Path) -> Result<ToolManifest> {
     let path = tool_dir.join("pyproject.toml");
     let text =
         std::fs::read_to_string(&path).wrap_err_with(|| format!("reading {}", path.display()))?;
-    let doc: Value = text
-        .parse::<Value>()
-        .wrap_err_with(|| format!("parsing {}", path.display()))?;
+    let doc: Value =
+        toml::from_str(&text).wrap_err_with(|| format!("parsing {}", path.display()))?;
     let centaur = doc
         .get("tool")
         .and_then(|t| t.get("centaur"))

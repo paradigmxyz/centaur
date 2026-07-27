@@ -775,6 +775,59 @@ describe('slackbotv2', () => {
     expect(consoleBlockTexts(slackApi.calls)).toHaveLength(0)
   })
 
+  it('shows the API-assigned harness in Slack and retains execution metadata', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    codexApi.resolvedHarnessType = 'nanocodex'
+    codexApi.harnessAssignment = {
+      experiment: 'codex_nanocodex_ab',
+      requested_harness: 'codex',
+      cohort: 'nanocodex',
+      rollout_percent: 50
+    }
+    bot = createTestBot({ consolePublicUrl: 'https://console.example.dev', state: sharedState })
+
+    const parent = await postUserMessage('A/B test thread context.')
+    const mention = await postUserMessage(
+      `<@${BOT_USER_ID}> inspect the repository and report what you find`,
+      parent.ts
+    )
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-api-ab-nanocodex',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> inspect the repository and report what you find`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+
+    const footer = slackApi.calls
+      .filter(call => call.method === 'chat.stopStream')
+      .flatMap(call => (Array.isArray(call.body.blocks) ? (call.body.blocks as unknown[]) : []))
+      .map(block => JSON.stringify(block))
+      .find(text => text.includes('Open chat in Console'))
+    expect(footer).toContain('Nanocodex')
+    expect(footer).toContain('Low')
+    expect(footer).not.toContain('Codex*')
+    expect(codexApi.creates[0]?.body.harness_type).toBe('codex')
+    expect(codexApi.executes[0]?.body.metadata).toMatchObject({
+      harness_type: 'nanocodex',
+      harness_assignment: codexApi.harnessAssignment
+    })
+  })
+
   it('shows the harness default model in the Console context block when no --model is set', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
@@ -5199,6 +5252,13 @@ type MockSessionApi = {
   failNextExecute: boolean
   failNextExecuteAfterAccept: boolean
   holdNextExecute(): () => void
+  harnessAssignment?: {
+    experiment: string
+    requested_harness: string
+    cohort: string
+    rollout_percent: number
+  }
+  resolvedHarnessType?: string
   reset(): void
   streamCount: number
   url: string
@@ -5221,6 +5281,8 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
   let failNextEvents = false
   let failNextExecute = false
   let failNextExecuteAfterAccept = false
+  let harnessAssignment: MockSessionApi['harnessAssignment']
+  let resolvedHarnessType: string | undefined
   const port = await availablePort(4063)
   const closeStreams = () => {
     for (const stream of streams) stream.end()
@@ -5248,12 +5310,18 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
       get failNextEvents() {
         return failNextEvents
       },
+      get harnessAssignment() {
+        return harnessAssignment
+      },
       idempotentExecutions,
       nextEventId() {
         eventId += 1
         return eventId
       },
       port,
+      get resolvedHarnessType() {
+        return resolvedHarnessType
+      },
       setFailNextEvents(value) {
         failNextEvents = value
       },
@@ -5293,6 +5361,8 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
       failNextEvents = false
       failNextExecute = false
       failNextExecuteAfterAccept = false
+      harnessAssignment = undefined
+      resolvedHarnessType = undefined
       workflowEvents.length = 0
     },
     url: `http://127.0.0.1:${port}`,
@@ -5322,6 +5392,12 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
     set failNextEvents(value: boolean) {
       failNextEvents = value
     },
+    get harnessAssignment() {
+      return harnessAssignment
+    },
+    set harnessAssignment(value) {
+      harnessAssignment = value
+    },
     holdNextExecute() {
       if (executeHoldRelease) throw new Error('execute is already held')
       executeHold = new Promise(resolve => {
@@ -5333,6 +5409,12 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
         executeHold = null
         release?.()
       }
+    },
+    get resolvedHarnessType() {
+      return resolvedHarnessType
+    },
+    set resolvedHarnessType(value: string | undefined) {
+      resolvedHarnessType = value
     },
     get streamCount() {
       return streams.size
@@ -5384,9 +5466,11 @@ async function handleMockCodexRequest(
     failNextExecuteAfterAccept: boolean
     failNextEvents: boolean
     failNextExecute: boolean
+    harnessAssignment?: MockSessionApi['harnessAssignment']
       idempotentExecutions: Map<string, string>
     nextEventId(): number
     port: number
+    resolvedHarnessType?: string
     setFailNextEvents(value: boolean): void
     setFailNextExecute(value: boolean): void
     setFailNextExecuteAfterAccept(value: boolean): void
@@ -5418,7 +5502,10 @@ async function handleMockCodexRequest(
       Response.json({
         thread_key: threadKey,
         sandbox_id: null,
-        harness_type: body.harness_type,
+        harness_type: input.resolvedHarnessType ?? body.harness_type,
+        ...(input.harnessAssignment
+          ? { harness_assignment: input.harnessAssignment }
+          : {}),
         harness_thread_id: null,
         status: 'active'
       })

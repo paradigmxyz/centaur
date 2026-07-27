@@ -849,8 +849,15 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
       # through a hidden field, not a native select.
       assert_select "input[type=hidden][name=model]", count: 1
       assert_select "[data-console-model-option][data-value=?]", "amp"
+      assert_select "[data-console-model-option][data-value=?]", "claude-opus-5"
       assert_select "select", count: 0
     end
+    picker = css_select("[data-console-model-picker]").first
+    agents = JSON.parse(picker["data-agents"])
+    assert_equal(
+      { "label" => "Claude Opus 5", "efforts" => [ %w[fast Fast] ] },
+      agents["claude-opus-5"]
+    )
     # Submitting replaces the centered empty state with a full-height,
     # bottom-aligned optimistic transcript while the request is in flight.
     assert_includes response.body, 'container.classList.add("console-new-chat--optimistic")'
@@ -1148,10 +1155,46 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_equal "max", line["reasoning"]
   end
 
+  test "Claude Opus 5 Fast selects the native fast model variant" do
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      post console_threads_url,
+           params: { prompt: "Reply with PONG.", model: "claude-opus-5", effort: "fast" }
+    end
+
+    create = client.calls[0].last
+    assert_equal "claudecode", create[:harness_type]
+    assert_equal "claude-opus-5-fast", create[:metadata][:model]
+
+    execute = client.calls[2].last
+    assert_equal "claude-opus-5-fast", execute[:metadata][:model]
+    assert_not execute[:metadata].key?(:reasoning)
+    line = JSON.parse(execute[:input_lines].first)
+    assert_equal "claude-opus-5-fast", line["model"]
+    assert_not line.key?("reasoning")
+  end
+
+  test "Claude Opus 5 uses the standard model by default" do
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      post console_threads_url,
+           params: { prompt: "Reply with PONG.", model: "claude-opus-5" }
+    end
+
+    create = client.calls[0].last
+    assert_equal "claudecode", create[:harness_type]
+    assert_equal "claude-opus-5", create[:metadata][:model]
+
+    execute = client.calls[2].last
+    assert_equal "claude-opus-5", execute[:metadata][:model]
+    line = JSON.parse(execute[:input_lines].first)
+    assert_equal "claude-opus-5", line["model"]
+  end
+
   test "an effort the model does not offer is dropped" do
     client = RecordingApiClient.new
     with_composer(client: client) do
-      # max is 5.6-only; claude models take no effort at all.
+      # max is 5.6-only; Opus 4.8 does not offer model-variant efforts.
       post console_threads_url,
            params: { prompt: "Reply with PONG.", model: "gpt-5.5", effort: "max" }
       post console_threads_url,

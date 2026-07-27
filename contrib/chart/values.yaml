@@ -284,9 +284,10 @@ sandbox:
   # their session's harness via container args; the sandbox image CMD only
   # matters for containers started outside api-rs.
   harnessEngine: codex
-  # Copied into every sandbox pod. CLAUDE_MODEL / CODEX_MODEL set here (the
-  # harness default-model overrides) are also mirrored into slackbotv2 and the
-  # Console so their model displays match what sandboxes actually run.
+  # Copied into every sandbox pod. CLAUDE_MODEL / CODEX_MODEL set here are also
+  # mirrored into slackbotv2 and the Console; CODEX_MODEL_REASONING_EFFORT is
+  # mirrored into slackbotv2. This keeps Slack's model/thinking footer aligned
+  # with the policy the sandbox actually runs.
   extraEnv: {}
   stateVolume:
     enabled: false
@@ -376,6 +377,10 @@ apiRs:
     tag: latest
     pullPolicy: Always
   port: 8080
+  # Sticky percentage of session requests for Codex assigned to Nanocodex.
+  # The API hashes the thread key once and persists the resolved harness on the
+  # session. Set to 0 to keep new Codex requests on Codex.
+  codexNanocodexRolloutPercent: 50
   # Public/local MCP endpoint advertised through OAuth protected-resource
   # metadata. Empty falls back to slackbotv2.mcpPublicUrl.
   mcpPublicUrl: ""
@@ -505,7 +510,7 @@ slackbotv2:
   # Per-channel default harness / model / provider / reasoning, keyed by Slack
   # conversation id (the C…/G…/D… id). Each value is an object of optional
   # harness / model / provider / reasoning fields, using the same vocabulary as
-  # the inline Slack flags (harness: claude|codex|amp, provider: bedrock|meta,
+  # the inline Slack flags (harness: claude|codex|nanocodex|amp, provider: bedrock|meta,
   # model accepts Claude aliases like opus). A model is only meaningful within a
   # harness, so name the harness alongside it. Applied when a message in that
   # channel carries no explicit/sticky per-thread flag, below such a flag and

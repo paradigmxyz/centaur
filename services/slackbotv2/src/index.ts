@@ -49,6 +49,7 @@ import {
 import {
   buildConsoleSessionContextBlock,
   defaultModelForHarness,
+  effectiveReasoningForHarness,
   type SlackContextBlock
 } from './console-session-link'
 import { resolveChannelDefault } from './channel-defaults'
@@ -959,20 +960,26 @@ async function syncThreadMessageToSession(
       ? undefined
       : effectiveOverrides.provider ?? channelDefault?.provider
   const resolvedReasoning = overrides.reasoning ?? channelDefault?.reasoning
-  const effectiveHarnessType =
-    resolvedHarnessType ?? input.options.defaultHarnessType ?? 'codex'
+  const effectiveHarnessType = resolvedHarnessType ?? input.options.defaultHarnessType ?? 'codex'
   // Without an explicit override or channel default the harness runs its
   // configured default (CLAUDE_MODEL/CODEX_MODEL, else the baked harness
   // config); show and record that instead of dropping the model entirely.
   const effectiveModel =
     resolvedModel ??
     defaultModelForHarness(effectiveHarnessType, input.options.harnessDefaultModels)
-  const consoleSessionBlock = isFirstAssistantMessage
+  const effectiveReasoning =
+    effectiveReasoningForHarness(
+      effectiveHarnessType,
+      resolvedReasoning,
+      input.options.harnessDefaultReasoning
+    )
+  let consoleSessionBlock = isFirstAssistantMessage
     ? buildConsoleSessionContextBlock({
         consoleBaseUrl: input.options.consolePublicUrl,
         threadKey: thread.id,
         harnessType: effectiveHarnessType,
-        model: effectiveModel
+        model: effectiveModel,
+        reasoning: effectiveReasoning
       })
     : undefined
   if (overrides.harnessType || overrides.model || overrides.provider || overrides.reasoning) {
@@ -1041,6 +1048,7 @@ async function syncThreadMessageToSession(
     // Sticky harness changes only apply when a message starts an execution;
     // restarting the thread out from under an active execution would kill it.
     harnessType: shouldStartExecution ? resolvedHarnessType : undefined,
+    metadataHarnessType: shouldStartExecution ? effectiveHarnessType : undefined,
     messages: messagesToAppend,
     model: shouldStartExecution ? resolvedModel : undefined,
     metadataModel: shouldStartExecution ? effectiveModel : undefined,
@@ -1172,6 +1180,38 @@ async function syncThreadMessageToSession(
     await forwardToSessionApi(input.options, forwardInput, {
       onExecutionStarted: commitExecutionStarted,
       onMessagesAppended: commitMessagesAppended,
+      onSessionCreated: async outcome => {
+        const harnessType = outcome.harnessType ?? effectiveHarnessType
+        const abTested = outcome.harnessAssignment?.experiment === 'codex_nanocodex_ab'
+        forwardInput.metadataHarnessType = harnessType
+        forwardInput.harnessAssignment = outcome.harnessAssignment
+        if (harnessType === effectiveHarnessType && !abTested) return
+        const model =
+          resolvedModel ?? defaultModelForHarness(harnessType, input.options.harnessDefaultModels)
+        const reasoning =
+          effectiveReasoningForHarness(
+            harnessType,
+            resolvedReasoning,
+            input.options.harnessDefaultReasoning
+          )
+        forwardInput.metadataModel = model
+        if (isFirstAssistantMessage) {
+          consoleSessionBlock = buildConsoleSessionContextBlock({
+            consoleBaseUrl: input.options.consolePublicUrl,
+            threadKey: thread.id,
+            harnessType,
+            model,
+            reasoning
+          })
+        }
+        traceLog(input.options, 'slackbotv2_session_harness_resolved', trace, {
+          ab_tested: abTested,
+          ab_test_experiment: outcome.harnessAssignment?.experiment,
+          ab_test_cohort: outcome.harnessAssignment?.cohort,
+          requested_harness_type: effectiveHarnessType,
+          resolved_harness_type: harnessType
+        })
+      },
       onSessionRestarted: handleSessionRestarted
     })
     scheduleExecutionRender(

@@ -51,8 +51,16 @@ const options: SlackbotV2Options = {
   // track the deployment instead of the baked harness config.
   harnessDefaultModels: {
     ...(optionalEnv('CLAUDE_MODEL') ? { claudecode: optionalEnv('CLAUDE_MODEL')! } : {}),
-    ...(optionalEnv('CODEX_MODEL') ? { codex: optionalEnv('CODEX_MODEL')! } : {})
+    ...(optionalEnv('CODEX_MODEL')
+      ? { codex: optionalEnv('CODEX_MODEL')!, nanocodex: optionalEnv('CODEX_MODEL')! }
+      : {})
   },
+  harnessDefaultReasoning: optionalEnv('CODEX_MODEL_REASONING_EFFORT')
+    ? {
+        codex: optionalEnv('CODEX_MODEL_REASONING_EFFORT')!,
+        nanocodex: optionalEnv('CODEX_MODEL_REASONING_EFFORT')!
+      }
+    : {},
   idleTimeoutMs: optionalNumberEnv('SESSION_IDLE_TIMEOUT_MS'),
   maxDurationMs: optionalNumberEnv('SESSION_MAX_DURATION_MS'),
   messageOverridesStrategy: createMessageOverridesStrategy(),
