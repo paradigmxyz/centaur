@@ -10,7 +10,7 @@ data Tako holds for each, so agents confirm coverage, and learn the exact
 metric and entity names, before spending a priced `search` or `answer` call.
 
 Two backends, selected by whether a TAKO_API_KEY is configured (never by the
-key's value — inside a sandbox the tool only holds placeholders):
+key's value, since inside a sandbox the tool only holds placeholders):
 
 - key configured -> the SDK against tako.com/api, full features.
 - no key -> Tako's free rate-limited hosted MCP (`_mcp.py`) for `search`,
@@ -189,7 +189,7 @@ def _sources(
     is how you get a data-only or web-only search. A skipped source must be
     genuinely ABSENT from the request body: passing `data=None` explicitly
     would land `data` in pydantic's model_fields_set and the generated
-    `Sources.to_dict` re-emits it as `"data": null` — key present, promise
+    `Sources.to_dict` re-emits it as `"data": null`: key present, promise
     broken. Hence the conditional kwargs at the bottom.
 
     Raises ValueError on contract violations the API would otherwise reject

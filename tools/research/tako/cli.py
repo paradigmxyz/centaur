@@ -58,13 +58,19 @@ def emit_or_reject(call) -> None:
     """Run a client call and print its result.
 
     The client pre-validates option contracts (enum choices, count ranges,
-    strict/node_ids) and raises ValueError before any network call; surface
-    those as one-line CLI errors instead of tracebacks.
+    strict/node_ids) and raises ValueError before any network call; the free
+    MCP tier raises McpAuthRequired/McpRateLimited with actionable messages.
+    Surface all of these as one-line CLI errors instead of tracebacks.
     """
+    from ._mcp import McpAuthRequired, McpRateLimited
+
     try:
         emit(call())
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
+    except (McpAuthRequired, McpRateLimited) as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(1) from exc
 
 
 @app.command()

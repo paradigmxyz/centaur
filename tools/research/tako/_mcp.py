@@ -16,7 +16,7 @@ written against:
   never metered). Over-limit -> HTTP 429 with a JSON-RPC error body and
   `Retry-After` (`_raise_for_rate_limit` -> `McpRateLimited`). NB: metering
   is per egress IP, so Centaur sandboxes NATed through one IP share the
-  bucket — the free tier is a fallback, not fleet capacity.
+  bucket. The free tier is a fallback, not fleet capacity.
 - JSON-RPC batch arrays are rejected (400); this client never sends one.
 - Only a request with NO Authorization header reaches the free tier; this
   backend sends none. (A malformed/empty header would 401.)
@@ -50,7 +50,7 @@ MCP_CLIENT_VERSION = "0.1.0"
 _WIDGET_FIELDS = ("pub_id", "embed_url", "image_url", "dark_mode", "width", "height")
 
 # Effort levels the hosted search tool accepts. Its input schema is
-# fast/instant only — the synchronous tool has no deep mode — so the SDK's
+# fast/instant only (the synchronous tool has no deep mode), so the SDK's
 # "deep" is flagged and omitted rather than sent to a certain schema
 # rejection server-side.
 MCP_SEARCH_EFFORTS = ("fast", "instant")
@@ -276,7 +276,7 @@ class TakoMcpBackend:
             )
 
     def _headers(self) -> dict[str, str]:
-        # No Authorization header — its complete ABSENCE is what routes the
+        # No Authorization header: its complete ABSENCE is what routes the
         # request to the anonymous tier (an empty/malformed header would
         # 401). No Mcp-Session-Id either: the Worker is stateless and never
         # issues one, and free-tier metering is per client IP, not session.
@@ -293,7 +293,7 @@ def _drop_none(mapping: dict[str, Any]) -> dict[str, Any]:
 def _raise_for_auth(response: httpx.Response) -> None:
     if response.status_code in (401, 403):
         raise McpAuthRequired(
-            "Tako's MCP rejected the anonymous request — the free tier is "
+            "Tako's MCP rejected the anonymous request; the free tier is "
             "not enabled on this endpoint. Configure TAKO_API_KEY for full "
             "access."
         )

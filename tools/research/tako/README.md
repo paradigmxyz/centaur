@@ -30,7 +30,7 @@ configured, `search`/`answer`/`available-data` fall back to Tako's anonymous
 free MCP tier at `mcp.tako.com` (TakoData/tako-mcp#171). The tier is enabled
 per server environment, fail-closed: where it is off, keyless calls report
 that a key is required. Where it is on, `tools/call` is metered at 10/min
-per client IP — sandboxes NATed through one egress IP share that bucket, so
+per client IP; sandboxes NATed through one egress IP share that bucket, so
 treat the free tier as a fallback, not fleet capacity. Over-limit calls
 raise a clear rate-limit error carrying the server's own message and
 retry hint. Responses carry `meta.backend` (`tako:sdk` or `tako:mcp`) and
