@@ -93,6 +93,8 @@ module Console
       redirect_to console_role_path(@role.oid), notice: "Updated Slack channel permissions."
     rescue ActiveRecord::RecordInvalid => e
       redirect_to console_role_path(@role.oid), alert: e.record.errors.full_messages.to_sentence
+    rescue ActiveRecord::RecordNotUnique
+      redirect_to console_role_path(@role.oid), alert: "Each Slack channel can only be selected once."
     end
 
     private

@@ -86,7 +86,7 @@
                     <%= form.fields_for :slack_channel_permissions, permission do |permission_fields| %>
                     <td class="console-td min-w-80">
                       <%= permission_fields.hidden_field :id %>
-                      <%= permission_fields.hidden_field :channel_name, value: nil %>
+                      <%= permission_fields.hidden_field :channel_name %>
                       <% if channel_options.any? %>
                         <%= permission_fields.select :channel_id,
                                                      options_for_select(slack_channel_options_for_permission(permission, channel_options), permission.channel_id),

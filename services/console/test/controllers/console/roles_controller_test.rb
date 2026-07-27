@@ -67,6 +67,66 @@ module Console
       assert_predicate permission, :history_enabled
     end
 
+    test "role permission form preserves channel names when saved unchanged" do
+      role = roles(:acme_infra)
+      permission = role.slack_channel_permissions.create!(
+        channel_id: "C0123456789",
+        channel_name: "general",
+        upload_enabled: true
+      )
+
+      get console_role_url(role.oid)
+      assert_response :ok
+      assert_select "input[type=hidden][name$='[channel_name]'][value=general]"
+
+      patch slack_channel_permissions_console_role_url(role.oid),
+            params: {
+              role: {
+                slack_channel_permissions_attributes: {
+                  "0" => {
+                    id: permission.id,
+                    channel_id: permission.channel_id,
+                    channel_name: permission.channel_name,
+                    upload_enabled: "1",
+                    download_enabled: "0",
+                    history_enabled: "0"
+                  }
+                }
+              }
+            }
+
+      assert_redirected_to console_role_path(role.oid)
+      assert_equal "general", permission.reload.channel_name
+    end
+
+    test "duplicate role channels redirect with an alert" do
+      role = roles(:acme_infra)
+      permission = role.slack_channel_permissions.create!(
+        channel_id: "C0123456789",
+        upload_enabled: true
+      )
+
+      patch slack_channel_permissions_console_role_url(role.oid),
+            params: {
+              role: {
+                slack_channel_permissions_attributes: {
+                  "0" => {
+                    id: permission.id,
+                    channel_id: "G9876543210",
+                    upload_enabled: "1"
+                  },
+                  "1" => {
+                    channel_id: "G9876543210",
+                    history_enabled: "1"
+                  }
+                }
+              }
+            }
+
+      assert_redirected_to console_role_path(role.oid)
+      assert_equal "Each Slack channel can only be selected once.", flash[:alert]
+    end
+
     test "new and edit render forms" do
       role = roles(:acme_infra)
       get new_console_role_url

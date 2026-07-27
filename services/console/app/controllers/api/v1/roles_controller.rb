@@ -1,9 +1,7 @@
 module Api
   module V1
     class RolesController < Api::BaseController
-      InvalidSlackChannelPermissions = Class.new(StandardError)
-
-      rescue_from InvalidSlackChannelPermissions, with: :render_slack_channel_permissions_error
+      include SlackChannelPermissionApi
 
       def index
         records, meta = paginated_label_search(Role.includes(:slack_channel_permissions))
@@ -55,23 +53,6 @@ module Api
         head :no_content
       end
 
-      # POST /api/v1/roles/:id/slack_channel_permissions
-      def upsert_slack_channel_permission
-        role = Role.find_by_oid!(params[:id])
-        attrs = upsert_slack_channel_permission_params
-        attrs[:channel_id] = attrs[:channel_id].to_s.strip.upcase
-        permission, was_new = save_slack_channel_permission!(role, attrs)
-
-        render status: (was_new ? :created : :ok), json: { data: permission.as_permission_json }
-      rescue ActiveRecord::RecordNotUnique
-        permission = role.slack_channel_permissions.find_by!(channel_id: attrs[:channel_id])
-        permission.assign_attributes(attrs)
-        permission.save!
-        render status: :ok, json: { data: permission.as_permission_json }
-      rescue ActiveRecord::RecordInvalid => e
-        render_validation_error(e.record)
-      end
-
       private
 
       def record_payload(role)
@@ -87,59 +68,8 @@ module Api
         }
       end
 
-      def replace_slack_channel_permissions!(role)
-        SlackChannelPermission.replace_for_role!(role, slack_channel_permission_params)
-      end
-
-      def save_slack_channel_permission!(role, attrs)
-        permission = role.slack_channel_permissions.find_or_initialize_by(
-          channel_id: attrs[:channel_id]
-        )
-        was_new = permission.new_record?
-        permission.assign_attributes(attrs)
-        permission.save!
-        [ permission, was_new ]
-      end
-
-      def slack_channel_permission_params
-        raw = data_params[:slack_channel_permissions]
-        unless raw.nil? || raw.is_a?(Array)
-          raise InvalidSlackChannelPermissions, "slack_channel_permissions must be an array"
-        end
-
-        rows = data_params.permit(
-          slack_channel_permissions: %i[
-            channel_id
-            channel_name
-            upload_enabled
-            download_enabled
-            history_enabled
-          ]
-        ).fetch(:slack_channel_permissions, [])
-
-        if raw.present? && rows.length != raw.length
-          raise InvalidSlackChannelPermissions, "slack_channel_permissions rows must be objects"
-        end
-
-        rows
-      end
-
-      def upsert_slack_channel_permission_params
-        @upsert_slack_channel_permission_params ||= data_params.permit(
-          :channel_id,
-          :channel_name,
-          :upload_enabled,
-          :download_enabled,
-          :history_enabled
-        ).tap do |attrs|
-          attrs[:upload_enabled] = true unless attrs.key?(:upload_enabled)
-          attrs[:download_enabled] = true unless attrs.key?(:download_enabled)
-          attrs[:history_enabled] = true unless attrs.key?(:history_enabled)
-        end
-      end
-
-      def render_slack_channel_permissions_error(error)
-        render_error(status: :unprocessable_entity, message: error.message)
+      def slack_channel_permission_owner
+        Role.find_by_oid!(params[:id])
       end
     end
   end

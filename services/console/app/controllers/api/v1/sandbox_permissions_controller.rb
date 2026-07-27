@@ -23,7 +23,7 @@ module Api
             principal_id: principal.oid,
             principal: principal_payload(principal),
             capabilities: capabilities_payload(principal),
-            slack_channel_permissions: principal.slack_channel_permissions_payload,
+            slack_channel_permissions: principal.effective_slack_channel_permissions_payload,
             oauth_credentials: oauth_credentials_payload(principal),
             permissions: permissions
           }

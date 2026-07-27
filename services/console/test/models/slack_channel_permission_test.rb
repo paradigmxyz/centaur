@@ -104,6 +104,7 @@ class SlackChannelPermissionTest < ActiveSupport::TestCase
 
   test "replace_for_role normalizes and merges duplicate rows" do
     role = roles(:acme_infra)
+    versions = Principal.where(id: role.principal_ids).pluck(:id, :sync_config_cache_version).to_h
 
     SlackChannelPermission.replace_for_role!(
       role,
@@ -131,6 +132,37 @@ class SlackChannelPermissionTest < ActiveSupport::TestCase
     assert_predicate permission, :upload_enabled
     assert_predicate permission, :download_enabled
     assert_predicate permission, :history_enabled
+    Principal.where(id: role.principal_ids).find_each do |principal|
+      assert_equal versions.fetch(principal.id) + 1, principal.sync_config_cache_version
+    end
+  end
+
+  test "invalid role replacement rolls back rows and cache versions" do
+    role = roles(:acme_infra)
+    permission = role.slack_channel_permissions.create!(
+      channel_id: "C0123456789",
+      upload_enabled: true
+    )
+    versions = Principal.where(id: role.principal_ids).pluck(:id, :sync_config_cache_version).to_h
+
+    assert_raises ActiveRecord::RecordInvalid do
+      SlackChannelPermission.replace_for_role!(
+        role,
+        [
+          {
+            channel_id: "G9876543210",
+            upload_enabled: false,
+            download_enabled: false,
+            history_enabled: false
+          }
+        ]
+      )
+    end
+
+    assert_equal [ permission.id ], role.slack_channel_permissions.reload.pluck(:id)
+    Principal.where(id: role.principal_ids).find_each do |principal|
+      assert_equal versions.fetch(principal.id), principal.sync_config_cache_version
+    end
   end
 
   test "role permission changes invalidate every assigned principal" do
@@ -143,19 +175,19 @@ class SlackChannelPermissionTest < ActiveSupport::TestCase
       upload_enabled: true
     )
     Principal.where(id: principal_ids).find_each do |principal|
-      assert_operator principal.sync_config_cache_version, :>, versions.fetch(principal.id)
+      assert_equal versions.fetch(principal.id) + 1, principal.sync_config_cache_version
     end
 
     versions = Principal.where(id: principal_ids).pluck(:id, :sync_config_cache_version).to_h
     permission.update!(history_enabled: true)
     Principal.where(id: principal_ids).find_each do |principal|
-      assert_operator principal.sync_config_cache_version, :>, versions.fetch(principal.id)
+      assert_equal versions.fetch(principal.id) + 1, principal.sync_config_cache_version
     end
 
     versions = Principal.where(id: principal_ids).pluck(:id, :sync_config_cache_version).to_h
     permission.destroy!
     Principal.where(id: principal_ids).find_each do |principal|
-      assert_operator principal.sync_config_cache_version, :>, versions.fetch(principal.id)
+      assert_equal versions.fetch(principal.id) + 1, principal.sync_config_cache_version
     end
   end
 

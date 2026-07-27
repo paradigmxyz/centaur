@@ -316,8 +316,6 @@ class PrincipalSyncConfigSnapshot < ApplicationRecord
   def self.api_server_jwt_secret_for(principal)
     return nil unless principal.sandbox_api_server_enabled?
 
-    return nil if principal.slack_jwt_channel_ids.empty?
-
     token = ApiServer::Jwt.encode_for_principal(principal)
     return nil if token.blank?
 

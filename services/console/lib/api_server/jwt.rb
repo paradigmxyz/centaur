@@ -8,9 +8,10 @@ module ApiServer
     module_function
 
     def encode_for_principal(principal, now: Time.current)
-      upload_channels = principal.slack_upload_channel_ids
-      download_channels = principal.slack_download_channel_ids
-      history_channels = principal.slack_history_channel_ids
+      channels = principal.slack_channel_ids_by_permission
+      upload_channels = channels.fetch(:upload)
+      download_channels = channels.fetch(:download)
+      history_channels = channels.fetch(:history)
       return nil if upload_channels.empty? && download_channels.empty? && history_channels.empty?
 
       CentaurJwt::WindowedToken.encode(

@@ -1,11 +1,13 @@
 class SlackChannelPermission < ApplicationRecord
+  include SyncConfigCacheInvalidation
+
   attr_readonly :principal_id, :role_id
 
   belongs_to :principal, optional: true
   belongs_to :role, optional: true
 
+  before_validation :clear_stale_channel_name
   before_validation :normalize_channel_fields
-  after_commit :bump_sync_config_cache_versions
 
   validates :channel_id, presence: true,
                          format: { with: Principal::SLACK_CHANNEL_ID_FORMAT, message: "is not a valid Slack channel ID" }
@@ -20,11 +22,40 @@ class SlackChannelPermission < ApplicationRecord
   scope :ordered, -> { order(:channel_id, :id) }
 
   def self.replace_for_principal!(principal, permission_rows)
-    replace_for!(principal.slack_channel_permissions, permission_rows)
+    replace_for!(principal, permission_rows)
   end
 
   def self.replace_for_role!(role, permission_rows)
-    replace_for!(role.slack_channel_permissions, permission_rows)
+    replace_for!(role, permission_rows)
+  end
+
+  def self.replace_for!(grantee, permission_rows)
+    association = grantee.slack_channel_permissions
+    rows_by_channel = normalized_permission_rows(permission_rows)
+    affected_principal_ids = principal_ids_for_grantee(grantee)
+
+    transaction do
+      association.delete_all
+      association.reset
+      records = rows_by_channel.map { |attrs| association.build(attrs) }
+      records.each do |record|
+        raise ActiveRecord::RecordInvalid, record unless record.valid?
+      end
+
+      now = Time.current
+      insert_all!(records.map { |record| bulk_insert_attributes(record, now) }) if records.any?
+      Principal.bump_sync_config_cache_versions(affected_principal_ids)
+    end
+  ensure
+    association&.reset
+  end
+
+  def self.principal_ids_for_grantee(grantee)
+    case grantee
+    when Principal then [ grantee.id ]
+    when Role then PrincipalRole.where(role_id: grantee.id).pluck(:principal_id)
+    else []
+    end
   end
 
   def as_permission_json
@@ -39,8 +70,8 @@ class SlackChannelPermission < ApplicationRecord
 
   private
 
-  def self.replace_for!(association, permission_rows)
-    rows_by_channel = permission_rows.each_with_object({}) do |raw_attrs, rows|
+  def self.normalized_permission_rows(permission_rows)
+    permission_rows.each_with_object({}) do |raw_attrs, rows|
       attrs = raw_attrs.to_h.symbolize_keys
       channel_id = attrs[:channel_id].to_s.strip.upcase
       row = rows[channel_id] ||= {
@@ -54,14 +85,26 @@ class SlackChannelPermission < ApplicationRecord
       %i[upload_enabled download_enabled history_enabled].each do |permission|
         row[permission] ||= ActiveModel::Type::Boolean.new.cast(attrs[permission]) == true
       end
-    end
-
-    transaction do
-      association.destroy_all
-      rows_by_channel.each_value { |attrs| association.create!(attrs) }
-    end
+    end.values
   end
-  private_class_method :replace_for!
+  private_class_method :normalized_permission_rows
+
+  def self.bulk_insert_attributes(record, timestamp)
+    record.attributes.slice(
+      "principal_id",
+      "role_id",
+      "channel_id",
+      "channel_name",
+      "upload_enabled",
+      "download_enabled",
+      "history_enabled"
+    ).merge("created_at" => timestamp, "updated_at" => timestamp)
+  end
+  private_class_method :bulk_insert_attributes
+
+  def clear_stale_channel_name
+    self.channel_name = nil if persisted? && will_save_change_to_channel_id?
+  end
 
   def normalize_channel_fields
     self.channel_id = channel_id.to_s.strip.upcase
@@ -79,9 +122,7 @@ class SlackChannelPermission < ApplicationRecord
     errors.add(:base, "must reference exactly one of principal, role")
   end
 
-  def bump_sync_config_cache_versions
-    principal_ids = [ principal_id ]
-    principal_ids.concat(PrincipalRole.where(role_id: role_id).pluck(:principal_id)) if role_id.present?
-    Principal.bump_sync_config_cache_versions(principal_ids)
+  def sync_config_affected_principal_ids
+    self.class.principal_ids_for_grantee(principal || role)
   end
 end

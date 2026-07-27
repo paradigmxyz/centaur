@@ -161,6 +161,26 @@ module Api
         assert_predicate permission, :history_enabled
       end
 
+      test "POST leaves omitted flags unchanged on an existing role permission" do
+        role = roles(:acme_infra)
+        permission = role.slack_channel_permissions.create!(
+          channel_id: "C0123456789",
+          upload_enabled: false,
+          download_enabled: true,
+          history_enabled: false
+        )
+
+        post "/api/v1/roles/#{role.oid}/slack_channel_permissions",
+             params: { data: { channel_id: permission.channel_id, history_enabled: true } }.to_json,
+             headers: auth_headers
+        assert_response :ok
+
+        permission.reload
+        assert_not permission.upload_enabled
+        assert_predicate permission, :download_enabled
+        assert_predicate permission, :history_enabled
+      end
+
       test "PUT by an unknown opaque id returns 404" do
         put api_v1_role_url(id: "role_nope"), params: { data: { name: "x" } }.to_json, headers: auth_headers
         assert_response :not_found
