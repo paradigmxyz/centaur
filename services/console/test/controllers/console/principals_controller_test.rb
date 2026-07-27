@@ -144,7 +144,7 @@ module Console
       )
     end
 
-    test "update_slack_channel_permissions clears stale channel names when changing channels" do
+    test "update_slack_channel_permissions rejects channel id changes" do
       principal = principals(:acme_user_bob)
       permission = SlackChannelPermission.create!(
         principal: principal,
@@ -172,9 +172,9 @@ module Console
             }
 
       assert_redirected_to console_principal_path(principal.oid)
-      permission.reload
-      assert_equal "G9876543210", permission.channel_id
-      assert_nil permission.channel_name
+      assert_equal "Slack channels cannot be changed after creation.", flash[:alert]
+      assert_equal "C0123456789", permission.reload.channel_id
+      assert_equal "old-channel", permission.channel_name
     end
 
     test "destroy deletes the principal and dependent access records" do

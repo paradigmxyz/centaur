@@ -26,6 +26,19 @@ class SlackChannelPermissionTest < ActiveSupport::TestCase
     assert_includes empty.errors[:base], "Select at least one Slack permission"
   end
 
+  test "channel id cannot change after creation" do
+    permission = SlackChannelPermission.create!(
+      principal: principals(:acme_channel),
+      channel_id: "C0123456789",
+      upload_enabled: true
+    )
+
+    assert_raises(ActiveRecord::ReadonlyAttributeError) do
+      permission.update!(channel_id: "G9876543210")
+    end
+    assert_equal "C0123456789", permission.reload.channel_id
+  end
+
   test "replace_for_principal replaces permission rows" do
     principal = principals(:acme_channel)
 

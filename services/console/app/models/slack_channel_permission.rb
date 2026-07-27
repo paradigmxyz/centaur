@@ -1,12 +1,11 @@
 class SlackChannelPermission < ApplicationRecord
   include SyncConfigCacheInvalidation
 
-  attr_readonly :principal_id, :role_id
+  attr_readonly :principal_id, :role_id, :channel_id
 
   belongs_to :principal, optional: true
   belongs_to :role, optional: true
 
-  before_validation :clear_stale_channel_name
   before_validation :normalize_channel_fields
 
   validates :channel_id, presence: true,
@@ -102,12 +101,8 @@ class SlackChannelPermission < ApplicationRecord
   end
   private_class_method :bulk_insert_attributes
 
-  def clear_stale_channel_name
-    self.channel_name = nil if persisted? && will_save_change_to_channel_id?
-  end
-
   def normalize_channel_fields
-    self.channel_id = channel_id.to_s.strip.upcase
+    self.channel_id = channel_id.to_s.strip.upcase if new_record?
     self.channel_name = channel_name.to_s.strip.presence
   end
 

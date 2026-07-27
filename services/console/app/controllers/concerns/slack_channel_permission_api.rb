@@ -16,7 +16,7 @@ module SlackChannelPermissionApi
     render status: (was_new ? :created : :ok), json: { data: permission.as_permission_json }
   rescue ActiveRecord::RecordNotUnique
     permission = owner.slack_channel_permissions.find_by!(channel_id: attrs[:channel_id])
-    permission.assign_attributes(attrs)
+    permission.assign_attributes(attrs.except(:channel_id))
     permission.save!
     render status: :ok, json: { data: permission.as_permission_json }
   rescue ActiveRecord::RecordInvalid => e
@@ -33,7 +33,7 @@ module SlackChannelPermissionApi
       download_enabled: true,
       history_enabled: true
     ) if was_new
-    permission.assign_attributes(attrs)
+    permission.assign_attributes(was_new ? attrs : attrs.except(:channel_id))
     permission.save!
     [ permission, was_new ]
   end

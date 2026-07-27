@@ -67,7 +67,7 @@ module Console
       assert_predicate permission, :history_enabled
     end
 
-    test "role permission form preserves channel names when saved unchanged" do
+    test "role permission form renders existing channels as immutable" do
       role = roles(:acme_infra)
       permission = role.slack_channel_permissions.create!(
         channel_id: "C0123456789",
@@ -77,7 +77,11 @@ module Console
 
       get console_role_url(role.oid)
       assert_response :ok
-      assert_select "input[type=hidden][name$='[channel_name]'][value=general]"
+      assert_select "tbody tr" do
+        assert_select "td", text: /#general/
+        assert_select "select[name$='[channel_id]']", count: 0
+        assert_select "input[name$='[channel_id]']", count: 0
+      end
 
       patch slack_channel_permissions_console_role_url(role.oid),
             params: {
@@ -85,8 +89,6 @@ module Console
                 slack_channel_permissions_attributes: {
                   "0" => {
                     id: permission.id,
-                    channel_id: permission.channel_id,
-                    channel_name: permission.channel_name,
                     upload_enabled: "1",
                     download_enabled: "0",
                     history_enabled: "0"
@@ -97,9 +99,10 @@ module Console
 
       assert_redirected_to console_role_path(role.oid)
       assert_equal "general", permission.reload.channel_name
+      assert_equal "C0123456789", permission.channel_id
     end
 
-    test "duplicate role channels redirect with an alert" do
+    test "update_slack_channel_permissions rejects channel id changes" do
       role = roles(:acme_infra)
       permission = role.slack_channel_permissions.create!(
         channel_id: "C0123456789",
@@ -114,17 +117,14 @@ module Console
                     id: permission.id,
                     channel_id: "G9876543210",
                     upload_enabled: "1"
-                  },
-                  "1" => {
-                    channel_id: "G9876543210",
-                    history_enabled: "1"
                   }
                 }
               }
             }
 
       assert_redirected_to console_role_path(role.oid)
-      assert_equal "Each Slack channel can only be selected once.", flash[:alert]
+      assert_equal "Slack channels cannot be changed after creation.", flash[:alert]
+      assert_equal "C0123456789", permission.reload.channel_id
     end
 
     test "new and edit render forms" do
