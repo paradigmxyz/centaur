@@ -95,10 +95,9 @@ create policy centaur_cc_reader_documents_select
     to centaur_company_context_reader
     using (
         source = 'slack'
-        and exists (
-            select 1
+        and metadata ->> 'channel_id' in (
+            select channels.channel_id
             from slack_sync_channels channels
-            where channels.channel_id = metadata ->> 'channel_id'
         )
     );
 
