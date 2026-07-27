@@ -50,7 +50,7 @@ class LinearClient(LinearReadonlyClient):
         """Download a Linear-hosted asset such as an embedded screenshot."""
         return super().fetch_asset(url, filename=filename)
 
-    def projects(self, limit: int = 50) -> list[dict[str, Any]]:
+    def projects(self, limit: int | None = 50) -> list[dict[str, Any]]:
         """List projects."""
         return super().projects(limit=limit)
 

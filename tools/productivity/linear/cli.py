@@ -61,6 +61,23 @@ def require_mutation_success(result: dict, action: str) -> None:
         raise typer.Exit(1)
 
 
+def find_project(client, name: str) -> dict | None:
+    """Resolve a project by exact name before falling back to a partial match."""
+    projects = client.projects(limit=None)
+    normalized = name.casefold()
+    return next(
+        (project for project in projects if project.get("name", "").casefold() == normalized),
+        next(
+            (
+                project
+                for project in projects
+                if normalized in project.get("name", "").casefold()
+            ),
+            None,
+        ),
+    )
+
+
 @app.command()
 def me():
     """Show authenticated user info."""
@@ -356,11 +373,7 @@ def update(
 
     project_id = None
     if project:
-        projects_list = client.projects()
-        project_match = next(
-            (p for p in projects_list if project.lower() in p.get("name", "").lower()),
-            None,
-        )
+        project_match = find_project(client, project)
         if project_match:
             project_id = project_match.get("id")
         else:
@@ -473,10 +486,7 @@ def milestones(
     client = get_client()
     project_id = None
     if project:
-        project_match = next(
-            (p for p in client.projects() if project.lower() in p.get("name", "").lower()),
-            None,
-        )
+        project_match = find_project(client, project)
         if not project_match:
             console.print(f"[red]Project '{project}' not found.[/]")
             raise typer.Exit(1)
@@ -499,7 +509,7 @@ def milestones(
         table.add_row(
             (item.get("project") or {}).get("name", ""),
             item.get("name", ""),
-            f"{int(item.get('progress', 0) * 100)}%",
+            f"{item.get('progress', 0):g}%",
             item.get("targetDate") or "",
         )
     console.print(table)
@@ -517,12 +527,7 @@ def project_detail(
         linear project roadmap --json
     """
     client = get_client()
-    projects_list = client.projects()
-
-    project_match = next(
-        (p for p in projects_list if project_name.lower() in p.get("name", "").lower()),
-        None,
-    )
+    project_match = find_project(client, project_name)
     if not project_match:
         console.print(f"[red]Project '{project_name}' not found.[/]")
         raise typer.Exit(1)

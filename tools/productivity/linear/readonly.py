@@ -187,7 +187,7 @@ class LinearReadonlyClient(LinearGraphQLClient):
             "byte_length": len(content),
         }
 
-    def projects(self, limit: int = 50) -> list[dict[str, Any]]:
+    def projects(self, limit: int | None = 50) -> list[dict[str, Any]]:
         """List projects."""
         query = """
         query Projects($first: Int!, $after: String) {
