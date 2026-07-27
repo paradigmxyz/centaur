@@ -72,17 +72,23 @@ class FakeContext:
 
 
 class FakeClient:
-    def __init__(self, *, cursor: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        cursor: str | None = None,
+        channels: list[dict] | None = None,
+    ) -> None:
         self.history_calls: list[dict] = []
         self.channel_calls: list[dict] = []
         self.cursor = cursor
+        self.channels = channels or [{"id": "C123", "name": "cold-start"}]
 
     def _etl_access_mode(self):
         return "test"
 
     def _list_etl_channels(self, *_args, **kwargs):
         self.channel_calls.append(kwargs)
-        return [{"id": "C123", "name": "cold-start"}]
+        return self.channels
 
     def _list_etl_users(self, *_args, **_kwargs):
         return []
@@ -118,6 +124,7 @@ async def _zero(*_args, **_kwargs):
 def _patch_handler_io(monkeypatch, sync, *, checkpoint=None, client=None):
     calls: dict[str, list] = {
         "checkpoint_success": [],
+        "checkpoint_failure": [],
         "enqueued": [],
         "finish": [],
         "run_start": [],
@@ -136,6 +143,12 @@ def _patch_handler_io(monkeypatch, sync, *, checkpoint=None, client=None):
 
     async def fake_update_checkpoint_success(_pool, **kwargs):
         calls["checkpoint_success"].append(kwargs)
+
+    async def fake_update_checkpoint_failure(_pool, **kwargs):
+        calls["checkpoint_failure"].append(kwargs)
+
+    async def fake_clear_checkpoint_error(_pool, **kwargs):
+        calls["checkpoint_failure"].append({**kwargs, "error": ""})
 
     async def fake_enqueue_backfill_job(_pool, **kwargs):
         calls["enqueued"].append(kwargs)
@@ -157,7 +170,8 @@ def _patch_handler_io(monkeypatch, sync, *, checkpoint=None, client=None):
     monkeypatch.setattr(sync, "_upsert_messages", fake_upsert_messages)
     monkeypatch.setattr(sync, "load_thread_refresh_times", fake_load_thread_refresh_times)
     monkeypatch.setattr(sync, "_update_checkpoint_success", fake_update_checkpoint_success)
-    monkeypatch.setattr(sync, "_update_checkpoint_failure", _noop)
+    monkeypatch.setattr(sync, "_update_checkpoint_failure", fake_update_checkpoint_failure)
+    monkeypatch.setattr(sync, "_clear_checkpoint_error", fake_clear_checkpoint_error)
     monkeypatch.setattr(sync, "enqueue_backfill_job", fake_enqueue_backfill_job)
     monkeypatch.setattr(sync, "emit_slack_checkpoint_metrics", _noop)
     monkeypatch.setattr(sync, "record_run_start", fake_record_run_start)
@@ -240,3 +254,89 @@ def test_private_channel_flag_is_passed_to_discovery(monkeypatch):
     assert result["status"] == "completed"
     assert client.channel_calls[0]["include_private_channels"] is True
     assert calls["run_start"][0]["metadata"]["index_private_channels"] is True
+
+
+def test_non_member_channel_is_reported_as_skipped_not_failed(monkeypatch):
+    monkeypatch.setenv("SLACK_ETL_ENABLED", "true")
+    sync = _load_sync()
+    client, calls = _patch_handler_io(
+        monkeypatch,
+        sync,
+        client=FakeClient(
+            channels=[
+                {
+                    "id": "C123",
+                    "name": "not-joined",
+                    "is_member": False,
+                }
+            ]
+        ),
+    )
+
+    result = asyncio.run(sync.handler(sync.Input(), FakeContext()))
+
+    assert result["status"] == "completed"
+    assert result["channels_skipped"] == 1
+    assert result["channels_failed"] == 0
+    assert client.history_calls == []
+    assert calls["finish"][0]["failed"] == []
+    assert calls["finish"][0]["skipped"] == [
+        {
+            "channel_id": "C123",
+            "channel_name": "not-joined",
+            "reason": sync.NOT_IN_CHANNEL_SKIP_REASON,
+        }
+    ]
+    assert calls["checkpoint_failure"] == [
+        {
+            "channel_id": "C123",
+            "run_id": "slack_sync_wfr_test",
+            "error": "",
+        }
+    ]
+
+
+def test_not_in_channel_response_is_reported_as_skipped_not_failed(monkeypatch):
+    monkeypatch.setenv("SLACK_ETL_ENABLED", "true")
+    sync = _load_sync()
+
+    class NotInChannelClient(FakeClient):
+        def _sync_etl_channel_history(self, channel_id, **kwargs):
+            self.history_calls.append({"channel_id": channel_id, **kwargs})
+            raise RuntimeError("Slack API error: not_in_channel")
+
+    client, calls = _patch_handler_io(
+        monkeypatch,
+        sync,
+        client=NotInChannelClient(
+            channels=[
+                {
+                    "id": "C123",
+                    "name": "stale-membership",
+                    "is_member": True,
+                }
+            ]
+        ),
+    )
+
+    result = asyncio.run(sync.handler(sync.Input(), FakeContext()))
+
+    assert result["status"] == "completed"
+    assert result["channels_skipped"] == 1
+    assert result["channels_failed"] == 0
+    assert len(client.history_calls) == 1
+    assert calls["finish"][0]["failed"] == []
+    assert calls["finish"][0]["skipped"] == [
+        {
+            "channel_id": "C123",
+            "channel_name": "stale-membership",
+            "reason": sync.NOT_IN_CHANNEL_SKIP_REASON,
+        }
+    ]
+    assert calls["checkpoint_failure"] == [
+        {
+            "channel_id": "C123",
+            "run_id": "slack_sync_wfr_test",
+            "error": "",
+        }
+    ]
