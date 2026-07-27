@@ -117,6 +117,20 @@ def _channel_is_non_member(channel: dict[str, Any]) -> bool:
     return channel.get("is_member") is False
 
 
+def _filter_non_member_channels(
+    channels: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Split channels into history-readable channels and membership skips."""
+    included = []
+    skipped = []
+    for channel in channels:
+        if _channel_is_non_member(channel):
+            skipped.append(channel_ref(channel, NOT_IN_CHANNEL_SKIP_REASON))
+        else:
+            included.append(channel)
+    return included, skipped
+
+
 def _is_not_in_channel_error(error: str) -> bool:
     return "not_in_channel" in error.lower()
 
@@ -361,21 +375,6 @@ async def _update_checkpoint_failure(
     )
 
 
-async def _clear_checkpoint_error(
-    pool,
-    *,
-    channel_id: str,
-    run_id: str,
-) -> None:
-    """Clear stale per-channel error state for channels intentionally skipped."""
-    await _update_checkpoint_failure(
-        pool,
-        channel_id=channel_id,
-        run_id=run_id,
-        error="",
-    )
-
-
 async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     """Sync Slack channels visible through the configured ETL user token."""
     started_at = time.monotonic()
@@ -437,6 +436,16 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             patterns=exclusion_patterns,
             channels=excluded_channels,
         )
+    channels_to_sync, non_member_channels = _filter_non_member_channels(
+        channels_to_sync,
+    )
+    if non_member_channels:
+        ctx.log(
+            "slack_sync_channels_skipped_not_in_channel",
+            count=len(non_member_channels),
+            channels=non_member_channels,
+        )
+    skipped_channels = list(excluded_channels) + list(non_member_channels)
     await _upsert_channels(ctx._pool, channels_to_sync)
     record_etl_items_upserted("slack", "channel", "channel", len(channels_to_sync))
 
@@ -460,12 +469,17 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         }
 
     if not channels_to_sync:
-        reason = "all_channels_excluded"
+        if non_member_channels:
+            reason = "all_channels_skipped"
+            log_name = "slack_sync_skipped_all_channels_skipped"
+        else:
+            reason = "all_channels_excluded"
+            log_name = "slack_sync_skipped_all_channels_excluded"
         ctx.log(
-            "slack_sync_skipped_all_channels_excluded",
+            log_name,
             access_mode=access_mode,
             reason=reason,
-            channels_skipped=excluded_channels,
+            channels_skipped=skipped_channels,
         )
         await emit_slack_checkpoint_metrics(ctx._pool)
         record_slack_retention_run(WORKFLOW_NAME, "skipped", mode, reason)
@@ -475,7 +489,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         return {
             "status": "skipped",
             "reason": reason,
-            "channels_skipped": excluded_channels,
+            "channels_skipped": skipped_channels,
         }
 
     try:
@@ -513,7 +527,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     )
 
     synced: list[dict[str, str]] = []
-    skipped: list[dict[str, str]] = list(excluded_channels)
+    skipped: list[dict[str, str]] = list(skipped_channels)
     failed: list[dict[str, str]] = []
     counts = {
         "messages_fetched": 0,
@@ -526,20 +540,6 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     for channel in channels_to_sync:
         channel_id = str(channel.get("id") or "")
         channel_name = str(channel.get("name") or channel_id)
-        if _channel_is_non_member(channel):
-            skipped.append(channel_ref(channel, NOT_IN_CHANNEL_SKIP_REASON))
-            await _clear_checkpoint_error(
-                ctx._pool,
-                channel_id=channel_id,
-                run_id=run_id,
-            )
-            ctx.log(
-                "slack_sync_channel_skipped",
-                channel_id=channel_id,
-                channel_name=channel_name,
-                reason=NOT_IN_CHANNEL_SKIP_REASON,
-            )
-            continue
         try:
             checkpoint = await _load_checkpoint(ctx._pool, channel_id)
             checkpoint_watermark = (
@@ -779,11 +779,6 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             error = str(exc)
             if _is_not_in_channel_error(error):
                 skipped.append(channel_ref(channel, NOT_IN_CHANNEL_SKIP_REASON))
-                await _clear_checkpoint_error(
-                    ctx._pool,
-                    channel_id=channel_id,
-                    run_id=run_id,
-                )
                 ctx.log(
                     "slack_sync_channel_skipped",
                     channel_id=channel_id,

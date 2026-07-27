@@ -147,9 +147,6 @@ def _patch_handler_io(monkeypatch, sync, *, checkpoint=None, client=None):
     async def fake_update_checkpoint_failure(_pool, **kwargs):
         calls["checkpoint_failure"].append(kwargs)
 
-    async def fake_clear_checkpoint_error(_pool, **kwargs):
-        calls["checkpoint_failure"].append({**kwargs, "error": ""})
-
     async def fake_enqueue_backfill_job(_pool, **kwargs):
         calls["enqueued"].append(kwargs)
 
@@ -171,7 +168,6 @@ def _patch_handler_io(monkeypatch, sync, *, checkpoint=None, client=None):
     monkeypatch.setattr(sync, "load_thread_refresh_times", fake_load_thread_refresh_times)
     monkeypatch.setattr(sync, "_update_checkpoint_success", fake_update_checkpoint_success)
     monkeypatch.setattr(sync, "_update_checkpoint_failure", fake_update_checkpoint_failure)
-    monkeypatch.setattr(sync, "_clear_checkpoint_error", fake_clear_checkpoint_error)
     monkeypatch.setattr(sync, "enqueue_backfill_job", fake_enqueue_backfill_job)
     monkeypatch.setattr(sync, "emit_slack_checkpoint_metrics", _noop)
     monkeypatch.setattr(sync, "record_run_start", fake_record_run_start)
@@ -275,25 +271,19 @@ def test_non_member_channel_is_reported_as_skipped_not_failed(monkeypatch):
 
     result = asyncio.run(sync.handler(sync.Input(), FakeContext()))
 
-    assert result["status"] == "completed"
-    assert result["channels_skipped"] == 1
-    assert result["channels_failed"] == 0
+    assert result["status"] == "skipped"
+    assert result["reason"] == "all_channels_skipped"
     assert client.history_calls == []
-    assert calls["finish"][0]["failed"] == []
-    assert calls["finish"][0]["skipped"] == [
+    assert calls["run_start"] == []
+    assert calls["finish"] == []
+    assert result["channels_skipped"] == [
         {
             "channel_id": "C123",
             "channel_name": "not-joined",
             "reason": sync.NOT_IN_CHANNEL_SKIP_REASON,
         }
     ]
-    assert calls["checkpoint_failure"] == [
-        {
-            "channel_id": "C123",
-            "run_id": "slack_sync_wfr_test",
-            "error": "",
-        }
-    ]
+    assert calls["checkpoint_failure"] == []
 
 
 def test_not_in_channel_response_is_reported_as_skipped_not_failed(monkeypatch):
@@ -333,10 +323,4 @@ def test_not_in_channel_response_is_reported_as_skipped_not_failed(monkeypatch):
             "reason": sync.NOT_IN_CHANNEL_SKIP_REASON,
         }
     ]
-    assert calls["checkpoint_failure"] == [
-        {
-            "channel_id": "C123",
-            "run_id": "slack_sync_wfr_test",
-            "error": "",
-        }
-    ]
+    assert calls["checkpoint_failure"] == []
