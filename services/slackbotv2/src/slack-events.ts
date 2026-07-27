@@ -11,12 +11,16 @@ type RawSlackBotProfile = {
 
 type RawSlackEvent = {
   app_id?: JsonValue
+  attachments?: JsonValue
   bot_id?: JsonValue
   bot_profile?: RawSlackBotProfile
+  blocks?: JsonValue
   source_team?: JsonValue
   subtype?: JsonValue
   team?: JsonValue
   team_id?: JsonValue
+  text?: JsonValue
+  type?: JsonValue
   user?: JsonValue
   user_team?: JsonValue
 }
@@ -70,6 +74,13 @@ export function isAllowedSlackWebhookBody(
     logger.warn('slackbotv2_event_ignored_external_org_not_allowlisted', {
       event_id: stringValue(payload.event_id),
       external_team_id: externalTeamId,
+      team_id: stringValue(payload.team_id)
+    })
+    return false
+  }
+  if (shouldIgnoreEmptyBotMessageBeforeMentionEvent(event)) {
+    logger.debug('slackbotv2_empty_bot_message_ignored_before_app_mention', {
+      event_id: stringValue(payload.event_id),
       team_id: stringValue(payload.team_id)
     })
     return false
@@ -171,6 +182,16 @@ function externalSlackTeamIdForHome(
 
 function isBotAuthoredSlackEvent(event: RawSlackEvent): boolean {
   return Boolean(event.bot_id || event.bot_profile || event.subtype === 'bot_message')
+}
+
+function shouldIgnoreEmptyBotMessageBeforeMentionEvent(event: RawSlackEvent): boolean {
+  if (stringValue(event.type) !== 'message' || !isBotAuthoredSlackEvent(event)) return false
+  if ((stringValue(event.text) ?? '').trim()) return false
+  return !hasItems(event.attachments) && !hasItems(event.blocks)
+}
+
+function hasItems(value: JsonValue | undefined): boolean {
+  return Array.isArray(value) && value.length > 0
 }
 
 function isRawSlackInteraction(value: unknown): value is RawSlackInteraction {

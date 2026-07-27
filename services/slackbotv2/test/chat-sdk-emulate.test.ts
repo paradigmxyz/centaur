@@ -4782,22 +4782,25 @@ describe('slackbotv2', () => {
           app_id: 'AOTHERBOT',
           attachments: [
             {
-              pretext: `<@${BOT_USER_ID}> investigate`,
-              title: ':red_circle: Validator stalled',
-              text: '*Cluster:* stg-na\n*Tenant:* luganodes'
+              blocks: [
+                {
+                  type: 'section',
+                  text: {
+                    type: 'mrkdwn',
+                    text: `*Validator stalled*\n*Cluster:* stg-na\n<@${BOT_USER_ID}> investigate`
+                  }
+                }
+              ],
+              color: '#E01E5A',
+              fallback: `Validator stalled. <@${BOT_USER_ID}> investigate.`
             }
           ],
           bot_id: 'BOTHERBOT',
-          bot_profile: {
-            app_id: 'AOTHERBOT',
-            id: 'BOTHERBOT',
-            user_id: 'UOTHERBOT'
-          },
           channel: CHANNEL_ID,
-          subtype: 'bot_message',
           team: TEAM_ID,
           text: '',
           ts: richBotMessage.ts,
+          user: 'UOTHERBOT',
           username: 'otherbot'
         }
       }),
@@ -4806,6 +4809,75 @@ describe('slackbotv2', () => {
     )
     expect(richBotResponse.status).toBe(200)
     await Promise.all(richBotWaits)
+    expect(codexApi.appends).toHaveLength(1)
+    expect(codexApi.executes).toHaveLength(1)
+    expect(sessionMessageTexts(codexApi.appends[0]!.body.messages).join('\n')).toContain(
+      'Validator stalled'
+    )
+
+    bot = createTestBot({ triggerBotAllowlist: ['bot:BOTHERBOT'] })
+    codexApi.reset()
+    const splitBotMessage = await postUserMessage('')
+    const emptyMessageWaits: Promise<unknown>[] = []
+    const emptyMessageResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-empty-bot-message-before-rich-mention',
+        event: {
+          type: 'message',
+          app_id: 'AOTHERBOT',
+          bot_id: 'BOTHERBOT',
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          text: '',
+          ts: splitBotMessage.ts,
+          user: 'UOTHERBOT',
+          username: 'otherbot'
+        }
+      }),
+      {},
+      waitUntilContext(emptyMessageWaits)
+    )
+    expect(emptyMessageResponse.status).toBe(200)
+    await Promise.all(emptyMessageWaits)
+
+    const splitMentionWaits: Promise<unknown>[] = []
+    const splitMentionResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-rich-app-mention-after-empty-message',
+        event: {
+          type: 'app_mention',
+          app_id: 'AOTHERBOT',
+          attachments: [
+            {
+              blocks: [
+                {
+                  type: 'section',
+                  text: {
+                    type: 'mrkdwn',
+                    text: `*Validator stalled*\n*Cluster:* stg-na\n<@${BOT_USER_ID}> investigate`
+                  }
+                }
+              ],
+              color: '#E01E5A',
+              fallback: `Validator stalled. <@${BOT_USER_ID}> investigate.`
+            }
+          ],
+          bot_id: 'BOTHERBOT',
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          text: '',
+          ts: splitBotMessage.ts,
+          user: 'UOTHERBOT',
+          username: 'otherbot'
+        }
+      }),
+      {},
+      waitUntilContext(splitMentionWaits)
+    )
+    expect(splitMentionResponse.status).toBe(200)
+    await Promise.all(splitMentionWaits)
     expect(codexApi.appends).toHaveLength(1)
     expect(codexApi.executes).toHaveLength(1)
     expect(sessionMessageTexts(codexApi.appends[0]!.body.messages).join('\n')).toContain(
