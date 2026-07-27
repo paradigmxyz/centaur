@@ -114,7 +114,10 @@ impl Args {
     }
 
     pub(crate) fn codex_nanocodex_rollout_percent(&self) -> u8 {
-        self.server.codex_nanocodex_rollout_percent
+        effective_codex_nanocodex_rollout_percent(
+            self.server.codex_nanocodex_rollout_percent,
+            env::var("CODEX_AUTH_MODE").ok().as_deref(),
+        )
     }
 
     pub(crate) fn execution_adoption_interval(&self) -> Option<Duration> {
@@ -1996,6 +1999,40 @@ fn clean_optional_value(value: Option<&str>) -> Option<String> {
     non_empty(value).map(ToOwned::to_owned)
 }
 
+/// Nanocodex requires `OPENAI_API_KEY`, which the sandbox env only injects when
+/// Codex auth is `api_key`. When `CODEX_AUTH_MODE` is set to anything else
+/// (e.g. `access_token` / `chatgpt`), force the Codex↔Nanocodex A/B percent to
+/// 0 so cohort sandboxes never start without that key.
+pub(crate) fn effective_codex_nanocodex_rollout_percent(
+    configured: u8,
+    codex_auth_mode: Option<&str>,
+) -> u8 {
+    if configured == 0 {
+        return 0;
+    }
+    if nanocodex_compatible_with_codex_auth(codex_auth_mode) {
+        return configured;
+    }
+    let normalized = normalize_codex_auth_mode(codex_auth_mode).unwrap_or_default();
+    tracing::warn!(
+        configured_percent = configured,
+        codex_auth_mode = %normalized,
+        "disabling Nanocodex A/B rollout because CODEX_AUTH_MODE is not api_key"
+    );
+    0
+}
+
+pub(crate) fn nanocodex_compatible_with_codex_auth(codex_auth_mode: Option<&str>) -> bool {
+    match normalize_codex_auth_mode(codex_auth_mode) {
+        None => true,
+        Some(mode) => mode == "api_key",
+    }
+}
+
+fn normalize_codex_auth_mode(codex_auth_mode: Option<&str>) -> Option<String> {
+    clean_optional_value(codex_auth_mode).map(|mode| mode.replace('-', "_"))
+}
+
 fn upsert_spec_env(spec: &mut SandboxSpec, name: String, value: String) {
     if let Some(existing) = spec.env.iter_mut().find(|env| env.name == name) {
         existing.value = value;
@@ -2048,6 +2085,20 @@ mod tests {
                 // cannot observe partial mutations.
                 unsafe {
                     env::set_var(name, value);
+                }
+            }
+            Self { saved }
+        }
+
+        fn clear(names: &[&'static str]) -> Self {
+            let saved = names
+                .iter()
+                .map(|name| (*name, env::var(name).ok()))
+                .collect();
+            for name in names {
+                // SAFETY: see EnvGuard::set; the lock outlives the guard.
+                unsafe {
+                    env::remove_var(name);
                 }
             }
             Self { saved }
@@ -2172,6 +2223,8 @@ mod tests {
 
     #[test]
     fn parses_codex_nanocodex_rollout_percent() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::clear(&["CODEX_AUTH_MODE"]);
         let args = Args::try_parse_from([
             "centaur-api-server",
             "--database-url",
@@ -2182,6 +2235,34 @@ mod tests {
         .unwrap();
 
         assert_eq!(args.codex_nanocodex_rollout_percent(), 50);
+    }
+
+    #[test]
+    fn nanocodex_rollout_is_disabled_when_codex_auth_is_not_api_key() {
+        assert_eq!(
+            effective_codex_nanocodex_rollout_percent(50, Some("access_token")),
+            0
+        );
+        assert_eq!(
+            effective_codex_nanocodex_rollout_percent(50, Some("access-token")),
+            0
+        );
+        assert_eq!(
+            effective_codex_nanocodex_rollout_percent(50, Some("chatgpt")),
+            0
+        );
+        assert_eq!(
+            effective_codex_nanocodex_rollout_percent(50, Some("api_key")),
+            50
+        );
+        assert_eq!(
+            effective_codex_nanocodex_rollout_percent(50, Some("api-key")),
+            50
+        );
+        assert_eq!(effective_codex_nanocodex_rollout_percent(50, None), 50);
+        assert!(!nanocodex_compatible_with_codex_auth(Some("access_token")));
+        assert!(nanocodex_compatible_with_codex_auth(Some("api_key")));
+        assert!(nanocodex_compatible_with_codex_auth(None));
     }
 
     #[test]

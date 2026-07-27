@@ -446,6 +446,8 @@ async fn create_or_get_session(
     let thread_key = ThreadKey::try_from(raw_thread_key)?;
     let requested_harness = request.harness_type;
     let runtime = state.runtime()?;
+    let allow_nanocodex =
+        nanocodex_compatible_with_codex_auth(std::env::var("CODEX_AUTH_MODE").ok().as_deref());
     let existing_rollout_harness = if requested_harness == HarnessType::Codex {
         runtime
             .existing_session_harness(&thread_key)
@@ -459,8 +461,10 @@ async fn create_or_get_session(
             &thread_key,
             &requested_harness,
             state.codex_nanocodex_rollout_percent,
+            allow_nanocodex,
         )
     });
+    let harness_type = guard_nanocodex_harness(harness_type, allow_nanocodex);
     let harness_assignment = codex_nanocodex_assignment(
         &requested_harness,
         &harness_type,
@@ -546,8 +550,12 @@ fn rollout_harness_for_thread(
     thread_key: &ThreadKey,
     requested_harness: &HarnessType,
     nanocodex_percent: u8,
+    allow_nanocodex: bool,
 ) -> HarnessType {
-    if *requested_harness != HarnessType::Codex || nanocodex_percent == 0 {
+    if *requested_harness == HarnessType::Nanocodex {
+        return guard_nanocodex_harness(HarnessType::Nanocodex, allow_nanocodex);
+    }
+    if *requested_harness != HarnessType::Codex || nanocodex_percent == 0 || !allow_nanocodex {
         return requested_harness.clone();
     }
     if nanocodex_percent >= 100 {
@@ -564,6 +572,25 @@ fn rollout_harness_for_thread(
     }
 }
 
+fn guard_nanocodex_harness(harness: HarnessType, allow_nanocodex: bool) -> HarnessType {
+    if harness == HarnessType::Nanocodex && !allow_nanocodex {
+        HarnessType::Codex
+    } else {
+        harness
+    }
+}
+
+fn nanocodex_compatible_with_codex_auth(codex_auth_mode: Option<&str>) -> bool {
+    match codex_auth_mode
+        .map(str::trim)
+        .filter(|mode| !mode.is_empty())
+        .map(|mode| mode.replace('-', "_"))
+    {
+        None => true,
+        Some(mode) => mode == "api_key",
+    }
+}
+
 #[cfg(test)]
 mod harness_rollout_tests {
     use super::*;
@@ -575,15 +602,15 @@ mod harness_rollout_tests {
             ThreadKey::try_from("slack:C1:1700000000.000104".to_owned()).unwrap();
 
         assert_eq!(
-            rollout_harness_for_thread(&codex_thread, &HarnessType::Codex, 50),
+            rollout_harness_for_thread(&codex_thread, &HarnessType::Codex, 50, true),
             HarnessType::Codex
         );
         assert_eq!(
-            rollout_harness_for_thread(&nanocodex_thread, &HarnessType::Codex, 50),
+            rollout_harness_for_thread(&nanocodex_thread, &HarnessType::Codex, 50, true),
             HarnessType::Nanocodex
         );
         assert_eq!(
-            rollout_harness_for_thread(&nanocodex_thread, &HarnessType::Codex, 50),
+            rollout_harness_for_thread(&nanocodex_thread, &HarnessType::Codex, 50, true),
             HarnessType::Nanocodex
         );
     }
@@ -593,19 +620,19 @@ mod harness_rollout_tests {
         let thread_key = ThreadKey::try_from("cli:rollout-boundaries".to_owned()).unwrap();
 
         assert_eq!(
-            rollout_harness_for_thread(&thread_key, &HarnessType::Codex, 0),
+            rollout_harness_for_thread(&thread_key, &HarnessType::Codex, 0, true),
             HarnessType::Codex
         );
         assert_eq!(
-            rollout_harness_for_thread(&thread_key, &HarnessType::Codex, 100),
+            rollout_harness_for_thread(&thread_key, &HarnessType::Codex, 100, true),
             HarnessType::Nanocodex
         );
         assert_eq!(
-            rollout_harness_for_thread(&thread_key, &HarnessType::ClaudeCode, 50),
+            rollout_harness_for_thread(&thread_key, &HarnessType::ClaudeCode, 50, true),
             HarnessType::ClaudeCode
         );
         assert_eq!(
-            rollout_harness_for_thread(&thread_key, &HarnessType::Nanocodex, 50),
+            rollout_harness_for_thread(&thread_key, &HarnessType::Nanocodex, 50, true),
             HarnessType::Nanocodex
         );
     }
@@ -615,7 +642,7 @@ mod harness_rollout_tests {
         let nanocodex = (0..10_000)
             .filter(|index| {
                 let thread_key = ThreadKey::try_from(format!("cli:rollout-{index}")).unwrap();
-                rollout_harness_for_thread(&thread_key, &HarnessType::Codex, 50)
+                rollout_harness_for_thread(&thread_key, &HarnessType::Codex, 50, true)
                     == HarnessType::Nanocodex
             })
             .count();
@@ -623,6 +650,35 @@ mod harness_rollout_tests {
         assert!(
             (4_900..=5_100).contains(&nanocodex),
             "nanocodex={nanocodex}"
+        );
+    }
+
+    #[test]
+    fn access_token_auth_disables_nanocodex_rollout_and_remaps_explicit_request() {
+        let nanocodex_thread =
+            ThreadKey::try_from("slack:C1:1700000000.000104".to_owned()).unwrap();
+
+        assert!(!nanocodex_compatible_with_codex_auth(Some("access_token")));
+        assert!(!nanocodex_compatible_with_codex_auth(Some("access-token")));
+        assert!(nanocodex_compatible_with_codex_auth(Some("api_key")));
+        assert!(nanocodex_compatible_with_codex_auth(Some("api-key")));
+        assert!(nanocodex_compatible_with_codex_auth(None));
+
+        assert_eq!(
+            rollout_harness_for_thread(&nanocodex_thread, &HarnessType::Codex, 50, false),
+            HarnessType::Codex
+        );
+        assert_eq!(
+            rollout_harness_for_thread(&nanocodex_thread, &HarnessType::Codex, 50, true),
+            HarnessType::Nanocodex
+        );
+        assert_eq!(
+            rollout_harness_for_thread(&nanocodex_thread, &HarnessType::Nanocodex, 50, false),
+            HarnessType::Codex
+        );
+        assert_eq!(
+            guard_nanocodex_harness(HarnessType::Nanocodex, false),
+            HarnessType::Codex
         );
     }
 
