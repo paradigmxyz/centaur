@@ -36,6 +36,15 @@ raise a clear rate-limit error carrying the server's own message and
 retry hint. Responses carry `meta.backend` (`tako:sdk` or `tako:mcp`) and
 `meta.partial_failures` for knobs the free tier cannot honor.
 
+Inside a sandbox the routing works differently, because tool secrets leave no
+env signal there: `secret()` returns a placeholder and iron-proxy swaps it on
+the wire, so the tool cannot see whether the deployment vault holds the key.
+When the sandbox firewall is active (`HTTPS_PROXY` set), the client takes the
+SDK path optimistically and falls back to the free MCP tier once, on the
+first auth rejection, remembering the switch for the client's lifetime. A
+deployment with the key never notices; a deployment without one pays a
+single failed probe and then runs keyless.
+
 ```bash
 TAKO_API_KEY=...   # optional; https://tako.com, account settings
 ```

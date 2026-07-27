@@ -470,6 +470,8 @@ def _client_with_fake():
     client._graph_timeout = 30.0
     client._has_key = True
     client._mcp = None
+    client._fallback_on_auth = False
+    client._mcp_url = "https://mcp.tako.com/mcp"
     return client
 
 
@@ -832,6 +834,8 @@ class TestBackendRouting:
         client._client = None
         client._timeout = 120.0
         client._graph_timeout = 30.0
+        client._fallback_on_auth = False
+        client._mcp_url = "https://mcp.tako.com/mcp"
         client._mcp = TakoMcpBackend(transport=_mcp_transport(tool_payloads))
         return client
 
@@ -872,3 +876,72 @@ class TestBackendRouting:
         client = _client_with_fake()
         result = client.search("tesla revenue")
         assert result["meta"]["backend"] == "tako:sdk"
+
+
+class _AuthRejectingApi:
+    """Fake TakoApi whose every call 401s, as an un-swapped placeholder would."""
+
+    def __init__(self):
+        from tako.exceptions import ApiException
+
+        self._exc = ApiException(status=401, reason="Unauthorized")
+        self.calls = 0
+
+    def __getattr__(self, name):
+        def call(*args, **kwargs):
+            self.calls += 1
+            raise self._exc
+
+        return call
+
+
+class TestSandboxAuthFallback:
+    def _sandbox_client(self, tool_payloads):
+        """A client shaped like the in-sandbox keyless case: firewall active,
+        no configured key, SDK path first with MCP fallback armed."""
+        client = TakoClient.__new__(TakoClient)
+        client._has_key = False
+        client._fallback_on_auth = True
+        client._timeout = 5.0
+        client._graph_timeout = 5.0
+        client._mcp_url = "https://mcp.tako.com/mcp"
+        client._mcp = None
+
+        class Facade:
+            _api = _AuthRejectingApi()
+
+        client._client = Facade()
+        client._make_mcp = lambda: TakoMcpBackend(
+            transport=_mcp_transport(tool_payloads)
+        )
+        return client
+
+    def test_search_falls_back_to_mcp_on_401(self):
+        payload = {"cards": [], "web_results": [], "usage": None, "request_id": "r"}
+        client = self._sandbox_client({"tako_search": payload})
+        result = client.search("tesla")
+        assert result["meta"]["backend"] == "tako:mcp"
+        assert client.backend == "tako:mcp"
+
+    def test_fallback_is_remembered_not_retried(self):
+        payload = {
+            "found": True, "query": "q", "summary": "s",
+            "matches": [], "other_matches": [],
+        }
+        client = self._sandbox_client({"tako_available_data": payload})
+        client.available_data("nvidia")
+        sdk_calls_after_first = client._client._api.calls
+        client.available_data("nvidia")
+        assert client._client._api.calls == sdk_calls_after_first
+
+    def test_no_fallback_when_key_was_configured(self):
+        from tako.exceptions import ApiException
+
+        client = self._sandbox_client({})
+        client._fallback_on_auth = False
+        try:
+            client.search("tesla")
+            raise AssertionError("expected ApiException")
+        except ApiException:
+            pass
+        assert client._mcp is None

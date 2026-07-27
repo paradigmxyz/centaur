@@ -40,6 +40,7 @@ from tako import (
     Sources,
     WebSourceSettings,
 )
+from tako.exceptions import ApiException
 from tako.lib import Tako
 from tako.models.contents_delivery_mode import ContentsDeliveryMode
 from tako.models.contents_format import ContentsFormat
@@ -224,14 +225,23 @@ class TakoClient:
     ):
         self._timeout = timeout_seconds
         self._graph_timeout = graph_timeout_seconds
+        self._mcp_url = mcp_url or MCP_URL
         self._has_key = api_key is not None or _is_configured("TAKO_API_KEY")
+        # Inside a sandbox, tool secrets have NO env signal: `secret()` hands
+        # back the placeholder name and iron-proxy swaps it on the wire, so
+        # _is_configured() cannot see whether the deployment vault holds the
+        # key. When the firewall is active, take the SDK path optimistically
+        # (if the vault has the key, the swap makes it work) and fall back to
+        # the free MCP tier once on an auth rejection (vault doesn't have it).
+        firewall_active = bool(_proxy_url())
+        self._fallback_on_auth = not self._has_key and firewall_active
 
-        if not self._has_key:
-            # Keyless: everything except `contents` runs on the free hosted
-            # MCP tier. httpx picks up HTTPS_PROXY/SSL_CERT_FILE itself.
+        if not self._has_key and not firewall_active:
+            # Keyless outside a sandbox: everything except `contents` runs on
+            # the free hosted MCP tier directly.
             self._client = None
             self._mcp = TakoMcpBackend(
-                mcp_url=mcp_url or MCP_URL, timeout_seconds=timeout_seconds
+                mcp_url=self._mcp_url, timeout_seconds=timeout_seconds
             )
             return
 
@@ -264,7 +274,33 @@ class TakoClient:
     @property
     def backend(self) -> str:
         """Which backend serves this client: 'tako:sdk' or 'tako:mcp'."""
-        return "tako:sdk" if self._has_key else "tako:mcp"
+        return "tako:mcp" if self._mcp is not None else "tako:sdk"
+
+    def _make_mcp(self) -> TakoMcpBackend:
+        """Fallback factory; an instance attribute so tests can substitute it."""
+        return TakoMcpBackend(mcp_url=self._mcp_url, timeout_seconds=self._timeout)
+
+    def _with_fallback(self, sdk_call, mcp_call):
+        """Run the SDK path, degrading to the free MCP once on sandbox 401s.
+
+        Only when no key was explicitly configured AND the sandbox firewall is
+        active: an auth rejection there means the deployment vault has no
+        TAKO_API_KEY, so the placeholder was forwarded un-swapped. The switch
+        is remembered for the client's lifetime, so one probe pays the cost.
+        """
+        try:
+            return sdk_call()
+        except ApiException as exc:
+            if self._fallback_on_auth and getattr(exc, "status", None) in (401, 403):
+                logger.warning(
+                    "tako: API rejected the placeholder credential (no "
+                    "TAKO_API_KEY in the deployment vault); falling back to "
+                    "the free MCP tier"
+                )
+                self._fallback_on_auth = False
+                self._mcp = self._make_mcp()
+                return mcp_call()
+            raise
 
     # Calls go through the generated TakoApi (`_client._api`) rather than the
     # `Tako` facade: the facade does not forward `_request_timeout`, and
@@ -307,8 +343,9 @@ class TakoClient:
             `meta` ({backend, partial_failures}).
         """
         _validate_choice("effort", effort, EFFORT_LEVELS)
-        if self._mcp is not None:
-            _validate_source_args(data_count, web_count, node_ids, strict)
+        _validate_source_args(data_count, web_count, node_ids, strict)
+
+        def via_mcp() -> dict:
             return self._mcp.search(
                 query,
                 effort=effort,
@@ -319,6 +356,9 @@ class TakoClient:
                 country_code=country_code,
                 locale=locale,
             )
+
+        if self._mcp is not None:
+            return via_mcp()
         request = SearchRequest(
             query=query,
             effort=effort,
@@ -326,8 +366,11 @@ class TakoClient:
             country_code=country_code,
             locale=locale,
         )
-        return _with_meta(
-            _dump(self._client._api.search(request, _request_timeout=self._timeout))
+        return self._with_fallback(
+            lambda: _with_meta(
+                _dump(self._client._api.search(request, _request_timeout=self._timeout))
+            ),
+            via_mcp,
         )
 
     def answer(
@@ -347,8 +390,9 @@ class TakoClient:
         where `cards[0]` is the lead card, the one to show alongside the text.
         """
         _validate_choice("effort", effort, EFFORT_LEVELS)
-        if self._mcp is not None:
-            _validate_source_args(data_count, web_count, node_ids, strict)
+        _validate_source_args(data_count, web_count, node_ids, strict)
+
+        def via_mcp() -> dict:
             return self._mcp.answer(
                 query,
                 effort=effort,
@@ -359,6 +403,9 @@ class TakoClient:
                 country_code=country_code,
                 locale=locale,
             )
+
+        if self._mcp is not None:
+            return via_mcp()
         request = SearchRequest(
             query=query,
             effort=effort,
@@ -366,8 +413,11 @@ class TakoClient:
             country_code=country_code,
             locale=locale,
         )
-        return _with_meta(
-            _dump(self._client._api.answer(request, _request_timeout=self._timeout))
+        return self._with_fallback(
+            lambda: _with_meta(
+                _dump(self._client._api.answer(request, _request_timeout=self._timeout))
+            ),
+            via_mcp,
         )
 
     # -- contents ---------------------------------------------------------
@@ -452,22 +502,28 @@ class TakoClient:
             (pin via search(node_ids=...)). `other_matches` include node_id on
             the SDK backend; the hosted MCP returns name/type only today.
         """
+        _validate_discovery_args(q, types, label)
         if self._mcp is not None:
-            _validate_discovery_args(q, types, label)
             return self._mcp.available_data(q, types=types, label=label)
-        return _run_available_data(
-            q,
-            graph_search=self._graph_search,
-            graph_related=self._graph_related,
-            types=types,
-            label=label,
+        return self._with_fallback(
+            lambda: _run_available_data(
+                q,
+                graph_search=self._graph_search,
+                graph_related=self._graph_related,
+                types=types,
+                label=label,
+            ),
+            lambda: self._mcp.available_data(q, types=types, label=label),
         )
 
     def probe(self) -> dict:
         """Cheapest authenticated (or anonymous) read, for `health`."""
         if self._mcp is not None:
             return self._mcp.available_data("nvidia")
-        return _dump(self._graph_search("nvidia", limit=1))
+        return self._with_fallback(
+            lambda: _dump(self._graph_search("nvidia", limit=1)),
+            lambda: self._mcp.available_data("nvidia"),
+        )
 
     # -- knowledge graph plumbing ------------------------------------------
     # Private: `available_data` is the supported discovery surface. Kept as
