@@ -395,7 +395,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
           }
         })
       })
-      const channelCreatedJoinTask = response.ok
+      const channelCreatedJoinTask = response.ok && options.autoJoinCreatedChannels === true
         ? joinSlackChannelCreatedEvent(rawBody, options)
         : null
       if (channelCreatedJoinTask) waitUntil(c, channelCreatedJoinTask)

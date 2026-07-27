@@ -151,6 +151,7 @@ describe('slackbotv2', () => {
   })
 
   it('joins newly-created public channels', async () => {
+    bot = createTestBot({ autoJoinCreatedChannels: true })
     const waits: Promise<unknown>[] = []
     const response = await bot.app.request(
       '/api/webhooks/slack',
@@ -182,9 +183,35 @@ describe('slackbotv2', () => {
     expect(codexApi.executes).toHaveLength(0)
   })
 
+  it('does not join newly-created public channels when auto-join is disabled', async () => {
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-channel-created-disabled',
+        event: {
+          type: 'channel_created',
+          channel: {
+            id: 'CDISABLEDCHANNEL',
+            name: 'disabled-channel',
+            created: 1700000000,
+            creator: USER_ID
+          },
+          team: TEAM_ID
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+    expect(slackApi.calls.filter(call => call.method === 'conversations.join')).toEqual([])
+  })
+
   it('logs conversations.join failures without failing the webhook', async () => {
     const logs: CapturedLog[] = []
-    bot = createTestBot({ logger: captureLogger(logs) })
+    bot = createTestBot({ autoJoinCreatedChannels: true, logger: captureLogger(logs) })
     slackApi.failNextConversationsJoin(500, { ok: false, error: 'server_error' })
     const waits: Promise<unknown>[] = []
     const response = await bot.app.request(
