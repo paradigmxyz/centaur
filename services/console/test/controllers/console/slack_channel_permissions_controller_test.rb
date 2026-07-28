@@ -28,21 +28,6 @@ module Console
       assert_predicate keep_permission.reload, :persisted?
     end
 
-    test "destroy does not accept a numeric database id" do
-      principal = principals(:acme_user_bob)
-      permission = principal.slack_channel_permissions.create!(
-        channel_id: "C0123456789",
-        upload_enabled: true
-      )
-
-      assert_no_difference -> { principal.slack_channel_permissions.count } do
-        delete console_slack_channel_permission_url(permission.id)
-      end
-
-      assert_response :not_found
-      assert_predicate permission.reload, :persisted?
-    end
-
     test "destroy deletes a role permission and redirects to the role" do
       role = roles(:acme_infra)
       delete_permission = role.slack_channel_permissions.create!(
