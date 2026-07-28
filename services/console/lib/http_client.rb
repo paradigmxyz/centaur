@@ -35,10 +35,15 @@ class HttpClient
 
   def initialize(http: nil, open_timeout: DEFAULT_OPEN_TIMEOUT, read_timeout: DEFAULT_READ_TIMEOUT,
                  write_timeout: nil, max_body_bytes: nil)
-    @http = http
-    @open_timeout = open_timeout
-    @read_timeout = read_timeout
-    @write_timeout = write_timeout
+    @http = if http
+      InjectedTransport.new(http, default_timeout: read_timeout || open_timeout || write_timeout)
+    else
+      NetHttpTransport.new(
+        open_timeout: open_timeout,
+        read_timeout: read_timeout,
+        write_timeout: write_timeout
+      )
+    end
     @max_body_bytes = max_body_bytes
   end
 
@@ -94,34 +99,80 @@ class HttpClient
     apply_content_type(request_headers, json: json, form: form, multipart: multipart)
     body = request_body(json: json, form: form)
 
-    raw_response = if @http
-      @http.call(
-        method: method,
-        url: uri.to_s,
-        body: body,
-        headers: request_headers,
-        timeout: timeout || read_timeout || @read_timeout || @open_timeout || @write_timeout
-      )
-    else
-      net_http_request(
-        method: method,
-        uri: uri,
-        headers: request_headers,
-        json: json,
-        form: form,
-        multipart: multipart,
-        body: body,
-        timeout: timeout,
-        open_timeout: open_timeout,
-        read_timeout: read_timeout,
-        write_timeout: write_timeout
-      )
-    end
+    raw_response = @http.call(
+      method: method,
+      url: uri.to_s,
+      body: body,
+      form: form,
+      multipart: multipart,
+      headers: request_headers,
+      timeout: timeout,
+      open_timeout: open_timeout,
+      read_timeout: read_timeout,
+      write_timeout: write_timeout
+    )
 
     normalize_response(raw_response)
   end
 
   private
+
+  class InjectedTransport
+    def initialize(http, default_timeout:)
+      @http = http
+      @default_timeout = default_timeout
+    end
+
+    def call(method:, url:, body:, headers:, timeout:, open_timeout:, read_timeout:, write_timeout:,
+             form:, multipart:)
+      @http.call(
+        method: method,
+        url: url,
+        body: body,
+        headers: headers,
+        timeout: timeout || read_timeout || open_timeout || write_timeout || @default_timeout
+      )
+    end
+  end
+
+  class NetHttpTransport
+    def initialize(open_timeout:, read_timeout:, write_timeout:)
+      @open_timeout = open_timeout
+      @read_timeout = read_timeout
+      @write_timeout = write_timeout
+    end
+
+    def call(method:, url:, body:, headers:, timeout:, open_timeout:, read_timeout:, write_timeout:,
+             form:, multipart:)
+      uri = URI.parse(url)
+      request = REQUEST_CLASSES.fetch(method).new(uri)
+      headers.each { |key, value| request[key] = value }
+      apply_body(request, body: body, form: form, multipart: multipart)
+
+      http = Net::HTTP.new(uri.host, uri.port)
+      http.use_ssl = uri.scheme == "https"
+      http.open_timeout = open_timeout || timeout || @open_timeout
+      http.read_timeout = read_timeout || timeout || @read_timeout
+      resolved_write_timeout = write_timeout || timeout || @write_timeout
+      http.write_timeout = resolved_write_timeout if resolved_write_timeout
+
+      http.request(request)
+    end
+
+    private
+
+    def apply_body(request, body:, form:, multipart:)
+      if form
+        if multipart
+          request.set_form(form.to_a, "multipart/form-data")
+        else
+          request.set_form_data(form)
+        end
+      elsif body
+        request.body = body
+      end
+    end
+  end
 
   def build_uri(url, params)
     uri = URI.parse(url)
@@ -138,34 +189,6 @@ class HttpClient
     return URI.encode_www_form(form) if form
 
     nil
-  end
-
-  def net_http_request(method:, uri:, headers:, json:, form:, multipart:, body:, timeout:,
-                       open_timeout:, read_timeout:, write_timeout:)
-    request = REQUEST_CLASSES.fetch(method).new(uri)
-    headers.each { |key, value| request[key] = value }
-    apply_body(request, json: json, form: form, multipart: multipart, body: body)
-
-    http = Net::HTTP.new(uri.host, uri.port)
-    http.use_ssl = uri.scheme == "https"
-    http.open_timeout = open_timeout || timeout || @open_timeout
-    http.read_timeout = read_timeout || timeout || @read_timeout
-    resolved_write_timeout = write_timeout || timeout || @write_timeout
-    http.write_timeout = resolved_write_timeout if resolved_write_timeout
-
-    http.request(request)
-  end
-
-  def apply_body(request, json:, form:, multipart:, body:)
-    if !json.nil?
-      request.body = body
-    elsif form
-      if multipart
-        request.set_form(form.to_a, "multipart/form-data")
-      else
-        request.set_form_data(form)
-      end
-    end
   end
 
   def apply_content_type(headers, json:, form:, multipart:)
