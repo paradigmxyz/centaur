@@ -10,7 +10,6 @@ module Console
     before_action :require_admin
     before_action :set_role, only: %i[
       show edit update grant_secret revoke_grant update_slack_channel_permissions
-      destroy_slack_channel_permission
     ]
 
     def index
@@ -99,11 +98,6 @@ module Console
       redirect_to console_role_path(@role.oid), alert: "Slack channels cannot be changed after creation."
     rescue ActiveRecord::RecordNotUnique
       redirect_to console_role_path(@role.oid), alert: "Each Slack channel can only be selected once."
-    end
-
-    def destroy_slack_channel_permission
-      @role.slack_channel_permissions.find(params.require(:permission_id)).destroy!
-      redirect_to console_role_path(@role.oid), notice: "Deleted Slack channel permission."
     end
 
     private

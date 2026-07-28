@@ -189,7 +189,7 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
 
     assert_select(
       "button[type=submit][name=_method][value=delete][formaction=?][aria-label=?]",
-      console_principal_slack_channel_permission_path(principal.oid, permission.id),
+      console_slack_channel_permission_path(permission.id),
       "Delete #{permission.channel_id} Slack channel permission"
     )
   end

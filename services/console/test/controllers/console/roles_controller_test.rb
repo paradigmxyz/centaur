@@ -54,7 +54,7 @@ module Console
 
       assert_select(
         "button[type=submit][name=_method][value=delete][formaction=?][aria-label=?]",
-        slack_channel_permission_console_role_path(role.oid, permission.id),
+        console_slack_channel_permission_path(permission.id),
         "Delete #{permission.channel_id} Slack channel permission"
       )
     end
@@ -149,27 +149,6 @@ module Console
       assert_redirected_to console_role_path(role.oid)
       assert_equal "Slack channels cannot be changed after creation.", flash[:alert]
       assert_equal "C0123456789", permission.reload.channel_id
-    end
-
-    test "destroy_slack_channel_permission deletes the selected role permission" do
-      role = roles(:acme_infra)
-      delete_permission = role.slack_channel_permissions.create!(
-        channel_id: "C0123456789",
-        upload_enabled: true
-      )
-      keep_permission = role.slack_channel_permissions.create!(
-        channel_id: "G9876543210",
-        upload_enabled: true
-      )
-
-      assert_difference -> { role.slack_channel_permissions.count }, -1 do
-        delete slack_channel_permission_console_role_url(role.oid, delete_permission.id)
-      end
-
-      assert_redirected_to console_role_path(role.oid)
-      assert_equal "Deleted Slack channel permission.", flash[:notice]
-      assert_raises(ActiveRecord::RecordNotFound) { delete_permission.reload }
-      assert_predicate keep_permission.reload, :persisted?
     end
 
     test "new and edit render forms" do

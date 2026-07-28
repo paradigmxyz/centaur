@@ -69,10 +69,10 @@ Rails.application.routes.draw do
         delete "grants/:grant_id", to: "roles#revoke_grant", as: :revoke_grant
         patch "slack_channel_permissions", to: "roles#update_slack_channel_permissions",
               as: :slack_channel_permissions
-        delete "slack_channel_permissions/:permission_id", to: "roles#destroy_slack_channel_permission",
-               as: :slack_channel_permission
       end
     end
+    delete "slack_channel_permissions/:id", to: "slack_channel_permissions#destroy",
+           as: :slack_channel_permission
   end
   # Role assignments and direct grants managed from the principal detail page. The
   # extra /roles and /grants path segments keep these clear of the show route above
@@ -81,9 +81,6 @@ Rails.application.routes.draw do
     delete "principals/:id",                  to: "principals#destroy", as: :delete_principal
     patch  "principals/:id/sandbox_access",   to: "principals#update_sandbox_access", as: :principal_sandbox_access
     patch  "principals/:id/slack_channel_permissions", to: "principals#update_slack_channel_permissions", as: :principal_slack_channel_permissions
-    delete "principals/:id/slack_channel_permissions/:permission_id",
-           to: "principals#destroy_slack_channel_permission",
-           as: :principal_slack_channel_permission
     post   "principals/:id/roles",            to: "principals#assign_role",   as: :principal_assign_role
     delete "principals/:id/roles/:role_id",   to: "principals#unassign_role", as: :principal_unassign_role
     post   "principals/:id/grants",           to: "principals#grant_secret",  as: :principal_grant_secret
