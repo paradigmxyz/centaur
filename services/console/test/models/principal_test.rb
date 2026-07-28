@@ -174,8 +174,9 @@ class PrincipalTest < ActiveSupport::TestCase
       ],
       principal.effective_slack_channel_permissions_payload
     )
-    assert_equal [ "C0123456789" ], principal.slack_upload_channel_ids
-    assert_equal [ "C0123456789" ], principal.slack_download_channel_ids
+    channel_ids = principal.slack_channel_ids_by_permission
+    assert_equal [ "C0123456789" ], channel_ids.fetch(:upload)
+    assert_equal [ "C0123456789" ], channel_ids.fetch(:download)
     assert_equal [ "G9876543210" ], principal.slack_history_channel_ids
   end
 
@@ -260,7 +261,7 @@ class PrincipalTest < ActiveSupport::TestCase
       )
       assert_not_nil ApiServer::Jwt.encode_for_principal(principal)
 
-      SlackChannelPermission.replace_for_principal!(principal, [])
+      SlackChannelPermission.replace_for!(principal, [])
 
       assert_empty principal.slack_channel_permissions.reload
       assert_nil ApiServer::Jwt.encode_for_principal(principal)

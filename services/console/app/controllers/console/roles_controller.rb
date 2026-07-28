@@ -4,6 +4,7 @@ module Console
   class RolesController < ApplicationController
     include KvRowParams
     include SecretKinds
+    include Console::SlackChannelPermissionManagement
 
     layout "console"
 
@@ -17,13 +18,7 @@ module Console
     end
 
     def show
-      @slack_channel_catalog = SlackChannelCatalog.fetch
-      @slack_channel_names = @slack_channel_catalog.channels.to_h { |channel| [ channel.id, channel.name ] }
-      @slack_channel_permissions = @role.slack_channel_permissions.ordered
-      @slack_channel_options = @slack_channel_catalog.channels.map do |channel|
-        label = "##{channel.name} (#{channel.id}) #{channel.private ? "Private" : "Public"}"
-        [ label, channel.id ]
-      end
+      load_slack_channel_permission_form(@role)
       @grants = @role.grants.includes(Grant::GRANTABLE_ASSOCIATIONS).order(:id)
       granted_ids = Hash.new { |h, k| h[k] = [] }
       @grants.each do |grant|
@@ -90,14 +85,7 @@ module Console
     end
 
     def update_slack_channel_permissions
-      @role.update!(slack_channel_permission_params)
-      redirect_to console_role_path(@role.oid), notice: "Updated Slack channel permissions."
-    rescue ActiveRecord::RecordInvalid => e
-      redirect_to console_role_path(@role.oid), alert: e.record.errors.full_messages.to_sentence
-    rescue ActiveRecord::ReadonlyAttributeError
-      redirect_to console_role_path(@role.oid), alert: "Slack channels cannot be changed after creation."
-    rescue ActiveRecord::RecordNotUnique
-      redirect_to console_role_path(@role.oid), alert: "Each Slack channel can only be selected once."
+      update_slack_channel_permissions_from_form(@role, console_role_path(@role.oid))
     end
 
     private
@@ -119,19 +107,6 @@ module Console
 
     def role_params
       params.fetch(:role, ActionController::Parameters.new)
-    end
-
-    def slack_channel_permission_params
-      params.require(:role).permit(
-        slack_channel_permissions_attributes: %i[
-          id
-          channel_id
-          upload_enabled
-          download_enabled
-          history_enabled
-          _destroy
-        ]
-      )
     end
 
     def resolve_grantable(value)

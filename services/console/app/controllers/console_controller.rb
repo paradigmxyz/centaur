@@ -4,6 +4,7 @@
 # like every Control/Data Sync page. Distinct from the JSON API.
 class ConsoleController < ApplicationController
   include SecretKinds
+  include Console::SlackChannelPermissionManagement
 
   layout "console"
 
@@ -25,14 +26,8 @@ class ConsoleController < ApplicationController
 
   def principal
     @principal = Principal.find_by_oid!(params[:id])
-    @slack_channel_catalog = SlackChannelCatalog.fetch
-    @slack_channel_names = @slack_channel_catalog.channels.to_h { |channel| [ channel.id, channel.name ] }
-    @slack_channel_permissions = @principal.slack_channel_permissions.ordered
+    load_slack_channel_permission_form(@principal)
     @inherited_slack_channel_permissions = @principal.inherited_slack_channel_permissions_payload
-    @slack_channel_options = @slack_channel_catalog.channels.map do |channel|
-      label = "##{channel.name} (#{channel.id}) #{channel.private ? "Private" : "Public"}"
-      [ label, channel.id ]
-    end
     @roles = @principal.roles.order(:id)
     @granted = {
       "static" => @principal.granted_static_secrets,

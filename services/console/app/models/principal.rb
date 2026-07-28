@@ -19,9 +19,7 @@ class Principal < ApplicationRecord
   has_many :mcp_oauth_refresh_tokens, dependent: :destroy
   belongs_to :created_by, class_name: "User"
 
-  accepts_nested_attributes_for :slack_channel_permissions,
-                                allow_destroy: true,
-                                reject_if: :reject_slack_channel_permission_attributes?
+  include SlackChannelPermissionOwner
 
   after_commit :auto_grant_matching_oauth_credentials, on: %i[create update]
   before_validation :apply_sandbox_repo_cache_label
@@ -108,34 +106,19 @@ class Principal < ApplicationRecord
     labels.to_h.merge(SANDBOX_REPO_CACHE_LABEL => sandbox_repo_cache)
   end
 
-  def slack_channel_permissions_payload
-    permissions = if association(:slack_channel_permissions).loaded?
-      slack_channel_permissions.sort_by { |permission| [ permission.channel_id, permission.id ] }
-    else
-      slack_channel_permissions.ordered
-    end
-    permissions.map(&:as_permission_json)
-  end
-
   def effective_slack_channel_permissions_payload
-    merged_slack_channel_permissions(effective_slack_channel_permissions)
+    @effective_slack_channel_permissions_payload ||= merged_slack_channel_permissions(effective_slack_channel_permissions)
   end
 
   def inherited_slack_channel_permissions_payload
-    permissions = if loaded_role_slack_channel_permissions?
-      roles.flat_map { |role| role.slack_channel_permissions.to_a }
-    else
-      SlackChannelPermission.where(role_id: role_ids)
+    @inherited_slack_channel_permissions_payload ||= begin
+      permissions = if loaded_role_slack_channel_permissions?
+        roles.flat_map { |role| role.slack_channel_permissions.to_a }
+      else
+        SlackChannelPermission.where(role_id: role_ids)
+      end
+      merged_slack_channel_permissions(permissions)
     end
-    merged_slack_channel_permissions(permissions)
-  end
-
-  def slack_upload_channel_ids
-    slack_channel_ids_by_permission.fetch(:upload)
-  end
-
-  def slack_download_channel_ids
-    slack_channel_ids_by_permission.fetch(:download)
   end
 
   def slack_history_channel_ids
@@ -147,13 +130,24 @@ class Principal < ApplicationRecord
   end
 
   def slack_channel_ids_by_permission
-    effective_slack_channel_permissions_payload.each_with_object(
-      { upload: [], download: [], history: [] }
-    ) do |row, channels|
-      channel_id = row.fetch("channel_id")
-      channels[:upload] << channel_id if row.fetch("upload_enabled")
-      channels[:download] << channel_id if row.fetch("download_enabled")
-      channels[:history] << channel_id if row.fetch("history_enabled")
+    @slack_channel_ids_by_permission ||= begin
+      initial = SlackChannelPermission::PERMISSION_FLAGS.to_h { |flag| [ flag.fetch(:key), [] ] }
+      effective_slack_channel_permissions_payload.each_with_object(initial) do |row, channels|
+        channel_id = row.fetch("channel_id")
+        SlackChannelPermission::PERMISSION_FLAGS.each do |flag|
+          channels[flag.fetch(:key)] << channel_id if row.fetch(flag.fetch(:attribute).to_s)
+        end
+      end
+    end
+  end
+
+  def reset_slack_channel_permissions_cache!
+    %i[
+      @effective_slack_channel_permissions_payload
+      @inherited_slack_channel_permissions_payload
+      @slack_channel_ids_by_permission
+    ].each do |ivar|
+      remove_instance_variable(ivar) if instance_variable_defined?(ivar)
     end
   end
 
@@ -209,10 +203,6 @@ class Principal < ApplicationRecord
     attributes.key?(key) || attributes.key?(key.to_s)
   end
 
-  def reject_slack_channel_permission_attributes?(attributes)
-    attributes["id"].blank? && attributes["channel_id"].blank?
-  end
-
   def effective_slack_channel_permissions
     return slack_channel_permissions.to_a unless persisted?
 
@@ -238,14 +228,12 @@ class Principal < ApplicationRecord
     ordered.each_with_object({}) do |permission, by_channel|
       channel_id = permission.channel_id.to_s.strip.upcase
       row = by_channel[channel_id] ||= {
-        "channel_id" => channel_id,
-        "upload_enabled" => false,
-        "download_enabled" => false,
-        "history_enabled" => false
+        "channel_id" => channel_id
       }
-      row["upload_enabled"] ||= permission.upload_enabled
-      row["download_enabled"] ||= permission.download_enabled
-      row["history_enabled"] ||= permission.history_enabled
+      SlackChannelPermission::PERMISSION_ATTRIBUTE_NAMES.each { |flag| row[flag] = false unless row.key?(flag) }
+      SlackChannelPermission::PERMISSION_ATTRIBUTE_NAMES.each do |flag|
+        row[flag] ||= permission.public_send(flag)
+      end
     end.values.sort_by { |row| row.fetch("channel_id") }
   end
 

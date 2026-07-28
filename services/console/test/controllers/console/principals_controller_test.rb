@@ -166,7 +166,7 @@ module Console
             }
 
       assert_redirected_to console_principal_path(principal.oid)
-      permission.reload
+      permission = principal.slack_channel_permissions.find_by!(channel_id: "C0123456789")
       assert_not permission.upload_enabled
       assert_predicate permission, :download_enabled
       assert_not permission.history_enabled
@@ -200,6 +200,36 @@ module Console
       assert_redirected_to console_principal_path(principal.oid)
       assert_equal "Slack channels cannot be changed after creation.", flash[:alert]
       assert_equal "C0123456789", permission.reload.channel_id
+    end
+
+    test "update_slack_channel_permissions preserves api managed direct messages" do
+      principal = principals(:acme_user_bob)
+      channel_permission = principal.slack_channel_permissions.create!(
+        channel_id: "C0123456789",
+        upload_enabled: true
+      )
+      dm_permission = principal.slack_channel_permissions.create!(
+        channel_id: "D0123456789",
+        download_enabled: true
+      )
+
+      patch console_principal_slack_channel_permissions_url(principal.oid),
+            params: {
+              principal: {
+                slack_channel_permissions_attributes: {
+                  "0" => {
+                    id: channel_permission.id,
+                    upload_enabled: "0",
+                    download_enabled: "1",
+                    history_enabled: "0"
+                  }
+                }
+              }
+            }
+
+      assert_redirected_to console_principal_path(principal.oid)
+      assert_equal %w[C0123456789 D0123456789], principal.slack_channel_permissions.reload.pluck(:channel_id).sort
+      assert_predicate principal.slack_channel_permissions.find_by!(channel_id: dm_permission.channel_id), :download_enabled
     end
 
     test "destroy deletes the principal and dependent access records" do
