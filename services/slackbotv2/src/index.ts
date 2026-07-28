@@ -130,6 +130,12 @@ type SlackbotV2RequestContext = {
   waitUntil(promise: Promise<unknown>): void
 }
 
+type StateConnectionStatus = {
+  attempts: number
+  connected: boolean
+  lastError?: string
+}
+
 const requestContext = new AsyncLocalStorage<SlackbotV2RequestContext>()
 const RENDER_OBLIGATION_INDEX_KEY = 'slackbotv2:render:index'
 const RENDER_OBLIGATION_INDEX_MAX_LENGTH = 2000
@@ -260,6 +266,9 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     logger
   })
   const lateSlackFiles = createLateSlackFileRepair(options, state)
+  const stateConnectionStatus: StateConnectionStatus = { attempts: 0, connected: false }
+  const stateConnected = ensureStateConnected(state, options, stateConnectionStatus)
+  backgroundWaitUntil(stateConnected)
 
   chat.onAction(async event => {
     const payload = slackBlockActionPayload(event)
@@ -367,7 +376,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   })
 
   const app = new Hono()
-  app.get('/health', c => c.json({ ok: true, service: 'slackbotv2' }))
+  app.get('/health', c => healthResponse(c, stateConnectionStatus))
   app.get('/metrics', c =>
     c.text(slackbotMetrics.expose(), 200, {
       'Content-Type': 'text/plain; version=0.0.4; charset=utf-8'
@@ -459,7 +468,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   app.post('/api/slack/commands', handleSlackWebhook)
 
   if (options.recoverRenderObligationsOnStart !== false) {
-    scheduleRenderObligationRecovery(chat, state, options)
+    scheduleRenderObligationRecovery(chat, state, options, stateConnected)
   }
 
   return { app, chat }
@@ -849,6 +858,26 @@ function createDefaultState(options: SlackbotV2Options, logger: Logger): StateAd
   })
 }
 
+function healthResponse(c: Context, stateConnectionStatus: StateConnectionStatus): Response {
+  if (stateConnectionStatus.connected) {
+    return c.json({
+      ok: true,
+      service: 'slackbotv2',
+      database_connected: true
+    })
+  }
+  return c.json(
+    {
+      ok: false,
+      service: 'slackbotv2',
+      database_connected: false,
+      database_status: 'connecting',
+      database_connect_attempts: stateConnectionStatus.attempts
+    },
+    503
+  )
+}
+
 /**
  * Blocks until the state backend accepts a connection, retrying with exponential
  * backoff. The first DB connection fires within milliseconds of process start and
@@ -856,15 +885,24 @@ function createDefaultState(options: SlackbotV2Options, logger: Logger): StateAd
  * Retrying instead of throwing absorbs that race; the first successful connect
  * also flips the adapter's `connected` flag, so the message path comes alive too.
  */
-async function ensureStateConnected(state: StateAdapter, options: SlackbotV2Options): Promise<void> {
+async function ensureStateConnected(
+  state: StateAdapter,
+  options: SlackbotV2Options,
+  status: StateConnectionStatus
+): Promise<void> {
   for (let attempt = 0; ; attempt++) {
+    status.attempts = attempt + 1
     try {
       await state.connect()
+      status.connected = true
+      status.lastError = undefined
       if (attempt > 0) {
         traceLog(options, 'slackbotv2_postgres_connected', undefined, { attempts: attempt + 1 })
       }
       return
     } catch (error) {
+      status.connected = false
+      status.lastError = errorMessage(error)
       const delayMs = Math.min(
         POSTGRES_CONNECT_INITIAL_DELAY_MS * 2 ** attempt,
         POSTGRES_CONNECT_MAX_DELAY_MS
@@ -872,7 +910,7 @@ async function ensureStateConnected(state: StateAdapter, options: SlackbotV2Opti
       traceLog(options, 'slackbotv2_postgres_connect_retry', undefined, {
         attempt: attempt + 1,
         delay_ms: delayMs,
-        error: errorMessage(error)
+        error: status.lastError
       })
       await sleep(delayMs)
     }
@@ -1733,21 +1771,22 @@ async function renderFallbackFinalAnswer(
 function scheduleRenderObligationRecovery(
   chat: Chat<Record<string, Adapter>, SlackbotV2ThreadState>,
   state: StateAdapter,
-  options: SlackbotV2Options
+  options: SlackbotV2Options,
+  stateConnected: Promise<void>
 ): void {
   backgroundWaitUntil(
-    recoverRenderObligationsWithRetry(chat, state, options)
+    recoverRenderObligationsWithRetry(chat, state, options, stateConnected)
   )
 }
 
 async function recoverRenderObligationsWithRetry(
   chat: Chat<Record<string, Adapter>, SlackbotV2ThreadState>,
   state: StateAdapter,
-  options: SlackbotV2Options
+  options: SlackbotV2Options,
+  stateConnected: Promise<void>
 ): Promise<void> {
-  // Wait for Postgres before scanning for obligations. This is also what warms the
-  // shared pool at startup, so transient connect failures don't wedge the bot.
-  await ensureStateConnected(state, options)
+  // Wait for the startup Postgres connection before scanning for obligations.
+  await stateConnected
   const failureCounts = new Map<string, number>()
   let attempt = 0
   while (true) {

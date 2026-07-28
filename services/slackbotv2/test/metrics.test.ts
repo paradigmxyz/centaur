@@ -4,6 +4,44 @@ import { createSlackbotV2 } from '../src/index'
 import { resetSlackbotMetricsForTests, slackbotMetrics } from '../src/metrics'
 
 describe('slackbotv2 metrics', () => {
+  test('withholds health until state connects', async () => {
+    const state = createMemoryState()
+    const originalConnect = state.connect.bind(state)
+    let releaseConnect!: () => void
+    const connectGate = new Promise<void>(resolve => {
+      releaseConnect = resolve
+    })
+    state.connect = async () => {
+      await connectGate
+      await originalConnect()
+    }
+    const bot = createSlackbotV2({
+      apiUrl: 'http://api.test',
+      botToken: 'xoxb-test',
+      recoverRenderObligationsOnStart: false,
+      signingSecret: 'secret',
+      state
+    })
+
+    const notReadyResponse = await bot.app.request('/health')
+    expect(notReadyResponse.status).toBe(503)
+    await expect(notReadyResponse.json()).resolves.toMatchObject({
+      ok: false,
+      service: 'slackbotv2',
+      database_connected: false,
+      database_status: 'connecting'
+    })
+
+    releaseConnect()
+    const readyResponse = await waitForHealthy(bot)
+    expect(readyResponse.status).toBe(200)
+    await expect(readyResponse.json()).resolves.toMatchObject({
+      ok: true,
+      service: 'slackbotv2',
+      database_connected: true
+    })
+  })
+
   test('serves Prometheus text metrics', async () => {
     resetSlackbotMetricsForTests()
     slackbotMetrics.webhookRequests.inc({
@@ -38,3 +76,16 @@ describe('slackbotv2 metrics', () => {
     )
   })
 })
+
+async function waitForHealthy(bot: ReturnType<typeof createSlackbotV2>): Promise<Response> {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const response = await bot.app.request('/health')
+    if (response.status === 200) return response
+    await sleep(5)
+  }
+  return bot.app.request('/health')
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
