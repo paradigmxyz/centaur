@@ -36,7 +36,7 @@ class HttpClient
   def initialize(http: nil, open_timeout: DEFAULT_OPEN_TIMEOUT, read_timeout: DEFAULT_READ_TIMEOUT,
                  write_timeout: nil, max_body_bytes: nil)
     @http = if http
-      InjectedTransport.new(http, default_timeout: read_timeout || open_timeout || write_timeout)
+      InjectedTransport.new(http, timeout: read_timeout || open_timeout || write_timeout)
     else
       NetHttpTransport.new(
         open_timeout: open_timeout,
@@ -47,22 +47,16 @@ class HttpClient
     end
   end
 
-  def get(url, params: {}, headers: {}, timeout: nil, open_timeout: nil, read_timeout: nil,
-          write_timeout: nil)
+  def get(url, params: {}, headers: {})
     request(
       method: :get,
       url: url,
       params: params,
-      headers: headers,
-      timeout: timeout,
-      open_timeout: open_timeout,
-      read_timeout: read_timeout,
-      write_timeout: write_timeout
+      headers: headers
     )
   end
 
-  def post(url, params: {}, json: nil, form: nil, multipart: false, headers: {}, timeout: nil,
-           open_timeout: nil, read_timeout: nil, write_timeout: nil)
+  def post(url, params: {}, json: nil, form: nil, multipart: false, headers: {})
     request(
       method: :post,
       url: url,
@@ -70,30 +64,20 @@ class HttpClient
       json: json,
       form: form,
       multipart: multipart,
-      headers: headers,
-      timeout: timeout,
-      open_timeout: open_timeout,
-      read_timeout: read_timeout,
-      write_timeout: write_timeout
+      headers: headers
     )
   end
 
-  def delete(url, params: {}, headers: {}, timeout: nil, open_timeout: nil, read_timeout: nil,
-             write_timeout: nil)
+  def delete(url, params: {}, headers: {})
     request(
       method: :delete,
       url: url,
       params: params,
-      headers: headers,
-      timeout: timeout,
-      open_timeout: open_timeout,
-      read_timeout: read_timeout,
-      write_timeout: write_timeout
+      headers: headers
     )
   end
 
-  def request(method:, url:, params: {}, json: nil, form: nil, multipart: false, headers: {},
-              timeout: nil, open_timeout: nil, read_timeout: nil, write_timeout: nil)
+  def request(method:, url:, params: {}, json: nil, form: nil, multipart: false, headers: {})
     uri = build_uri(url, params)
     request_headers = default_headers.merge(headers)
     apply_content_type(request_headers, json: json, form: form, multipart: multipart)
@@ -105,44 +89,40 @@ class HttpClient
       body: body,
       form: form,
       multipart: multipart,
-      headers: request_headers,
-      timeout: timeout,
-      open_timeout: open_timeout,
-      read_timeout: read_timeout,
-      write_timeout: write_timeout
+      headers: request_headers
     )
   end
 
   private
 
   class InjectedTransport
-    def initialize(http, default_timeout:)
+    def initialize(http, timeout:)
       @http = http
-      @default_timeout = default_timeout
+      @timeout = timeout
     end
 
-    def call(method:, url:, body:, headers:, timeout:, open_timeout:, read_timeout:, write_timeout:,
-             form:, multipart:)
+    def call(method:, url:, body:, headers:, form:, multipart:)
       @http.call(
         method: method,
         url: url,
         body: body,
         headers: headers,
-        timeout: timeout || read_timeout || open_timeout || write_timeout || @default_timeout
+        timeout: @timeout
       )
     end
   end
 
   class NetHttpTransport
     def initialize(open_timeout:, read_timeout:, write_timeout:, max_body_bytes:)
-      @open_timeout = open_timeout
-      @read_timeout = read_timeout
-      @write_timeout = write_timeout
+      @default_timeouts = {
+        open: open_timeout,
+        read: read_timeout,
+        write: write_timeout
+      }
       @max_body_bytes = max_body_bytes
     end
 
-    def call(method:, url:, body:, headers:, timeout:, open_timeout:, read_timeout:, write_timeout:,
-             form:, multipart:)
+    def call(method:, url:, body:, headers:, form:, multipart:)
       uri = URI.parse(url)
       request = REQUEST_CLASSES.fetch(method).new(uri)
       apply_body(request, body: body, form: form, multipart: multipart)
@@ -150,10 +130,7 @@ class HttpClient
 
       http = Net::HTTP.new(uri.host, uri.port)
       http.use_ssl = uri.scheme == "https"
-      http.open_timeout = open_timeout || timeout || @open_timeout
-      http.read_timeout = read_timeout || timeout || @read_timeout
-      resolved_write_timeout = write_timeout || timeout || @write_timeout
-      http.write_timeout = resolved_write_timeout if resolved_write_timeout
+      apply_timeouts(http)
 
       response = http.request(request)
       Response.new(
@@ -164,6 +141,14 @@ class HttpClient
     end
 
     private
+
+    def apply_timeouts(http)
+      http.open_timeout = @default_timeouts.fetch(:open)
+      http.read_timeout = @default_timeouts.fetch(:read)
+
+      write_timeout = @default_timeouts.fetch(:write)
+      http.write_timeout = write_timeout if write_timeout
+    end
 
     def response_body(response)
       body = response.body.to_s

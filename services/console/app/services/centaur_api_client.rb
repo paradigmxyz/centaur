@@ -12,7 +12,6 @@ class CentaurApiClient
     @base_url = (base_url.presence || ConsoleEnv["CENTAUR_API_URL"].presence || "http://localhost:8080").delete_suffix("/")
     @api_key = api_key.presence || ConsoleEnv["CENTAUR_API_KEY"].presence
     @api = HttpClient.new(http: http, open_timeout: timeout, read_timeout: timeout)
-    @timeout = timeout
   end
 
   def list_slack_archive_imports(limit: 100)
@@ -131,8 +130,7 @@ class CentaurApiClient
       method: method,
       url: URI.join("#{@base_url}/", path.delete_prefix("/")).to_s,
       json: payload,
-      headers: request_headers,
-      timeout: @timeout
+      headers: request_headers
     )
     parsed = parse_body(response.body)
     return parsed if response.status.between?(200, 299)

@@ -48,8 +48,7 @@ class HttpClientTest < ActiveSupport::TestCase
       "https://api.test/widgets?existing=1",
       params: { page: 2, empty: nil },
       json: { name: "demo" },
-      headers: { "Authorization" => "Bearer token" },
-      timeout: 7
+      headers: { "Authorization" => "Bearer token" }
     )
 
     assert_equal({ "ok" => true }, response.json)
@@ -60,7 +59,7 @@ class HttpClientTest < ActiveSupport::TestCase
     assert_equal "application/json", request[:headers]["Accept"]
     assert_equal "application/json", request[:headers]["Content-Type"]
     assert_equal "Bearer token", request[:headers]["Authorization"]
-    assert_equal 7, request[:timeout]
+    assert_equal 5, request[:timeout]
   end
 
   test "serializes form requests" do
