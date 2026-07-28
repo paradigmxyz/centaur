@@ -128,10 +128,10 @@ class CentaurApiClient
   end
 
   def request(method, path, payload = nil)
-    response = @api.request_json(
+    response = @api.request(
       method: method,
       url: URI.join("#{@base_url}/", path.delete_prefix("/")).to_s,
-      body: payload,
+      json: payload,
       headers: request_headers,
       timeout: @timeout
     )

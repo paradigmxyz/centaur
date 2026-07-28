@@ -3,7 +3,6 @@ require "net/http"
 require "uri"
 
 class HttpClient
-  UNSET = Object.new.freeze
   DEFAULT_OPEN_TIMEOUT = 5
   DEFAULT_READ_TIMEOUT = 5
 
@@ -57,7 +56,7 @@ class HttpClient
     )
   end
 
-  def post(url, params: {}, json: UNSET, form: nil, multipart: false, headers: {}, timeout: nil,
+  def post(url, params: {}, json: nil, form: nil, multipart: false, headers: {}, timeout: nil,
            open_timeout: nil, read_timeout: nil, write_timeout: nil)
     request(
       method: :post,
@@ -88,7 +87,7 @@ class HttpClient
     )
   end
 
-  def request(method:, url:, params: {}, json: UNSET, form: nil, multipart: false, headers: {},
+  def request(method:, url:, params: {}, json: nil, form: nil, multipart: false, headers: {},
               timeout: nil, open_timeout: nil, read_timeout: nil, write_timeout: nil)
     uri = build_uri(url, params)
     request_headers = default_headers.merge(headers)
@@ -122,22 +121,6 @@ class HttpClient
     normalize_response(raw_response)
   end
 
-  def request_json(method:, url:, params: {}, body: nil, headers: {}, timeout: nil, open_timeout: nil,
-                   read_timeout: nil, write_timeout: nil)
-    options = {
-      method: method,
-      url: url,
-      params: params,
-      headers: headers,
-      timeout: timeout,
-      open_timeout: open_timeout,
-      read_timeout: read_timeout,
-      write_timeout: write_timeout
-    }
-    options[:json] = body unless body.nil?
-    request(**options)
-  end
-
   private
 
   def build_uri(url, params)
@@ -151,7 +134,7 @@ class HttpClient
   end
 
   def request_body(json:, form:)
-    return json.to_json unless json.equal?(UNSET)
+    return json.to_json unless json.nil?
     return URI.encode_www_form(form) if form
 
     nil
@@ -174,7 +157,7 @@ class HttpClient
   end
 
   def apply_body(request, json:, form:, multipart:, body:)
-    if !json.equal?(UNSET)
+    if !json.nil?
       request.body = body
     elsif form
       if multipart
@@ -188,7 +171,7 @@ class HttpClient
   def apply_content_type(headers, json:, form:, multipart:)
     return if header?(headers, "Content-Type")
 
-    if !json.equal?(UNSET)
+    if !json.nil?
       headers["Content-Type"] = "application/json"
     elsif form && !multipart
       headers["Content-Type"] = "application/x-www-form-urlencoded"
