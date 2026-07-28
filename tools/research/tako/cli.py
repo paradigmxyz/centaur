@@ -9,11 +9,16 @@ import json
 import typer
 from rich.console import Console
 
-from ._coverage import NER_LABELS, NODE_TYPES
+from ._coverage import NER_LABELS, NODE_TYPES, TOOL_COMMAND
 
 app = typer.Typer(
-    name="tako",
-    help="Proprietary data and web backed answers via Tako",
+    name=TOOL_COMMAND,
+    help=(
+        "Web search along with structured data from licensed sources: company "
+        "financials (S&P Global), macro indicators like CPI/GDP/rates (FRED), "
+        "website traffic (SimilarWeb), and more. Instant, cited, chart-backed "
+        "answers via Tako."
+    ),
 )
 
 
@@ -28,9 +33,9 @@ def health():
         # with a key, a free MCP available-data call without one. Neither
         # spends a priced search or answer call.
         details = client.probe()
-        payload = {"ok": True, "tool": "tako", "error": None, "details": details}
+        payload = {"ok": True, "tool": TOOL_COMMAND, "error": None, "details": details}
     except Exception as exc:
-        payload = {"ok": False, "tool": "tako", "error": str(exc), "details": {}}
+        payload = {"ok": False, "tool": TOOL_COMMAND, "error": str(exc), "details": {}}
         print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
         raise typer.Exit(1) from exc
     finally:

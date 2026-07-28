@@ -1,6 +1,6 @@
 [project]
 name = "tako"
-description = "Tako structured data cards, cited answers, and free data-coverage discovery"
+description = "Web search plus structured data from licensed sources (S&P Global financials, FRED macro, SimilarWeb traffic) via Tako"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.scripts]
-tako = "centaur_tool_tako.cli:app"
+research = "centaur_tool_tako.cli:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["."]

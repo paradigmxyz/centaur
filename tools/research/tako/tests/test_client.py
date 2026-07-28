@@ -13,6 +13,7 @@ from tako.models.graph_search_response import GraphSearchResponse
 
 from tools.research.tako._coverage import (
     PREVIEW,
+    TOOL_COMMAND,
     CoverageGroup,
     CoverageMatch,
     OtherMatch,
@@ -175,7 +176,7 @@ class TestBuildSummary:
     def test_no_matches_points_at_direct_search(self):
         summary = build_summary("xyzzy", [], [])
         assert 'no data-graph node matching "xyzzy"' in summary
-        assert "tako search" in summary
+        assert f"{TOOL_COMMAND} search" in summary
 
     def test_full_coverage_header(self):
         matches = [build_match(_node(label="ORG"), _page(["Revenue"], total=120))]

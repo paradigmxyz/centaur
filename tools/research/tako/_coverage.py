@@ -40,6 +40,10 @@ OTHER_MATCH_PREVIEW = 5
 # is never hidden, only pushed down.
 LOW_SIGNAL_METRIC = re.compile(r"\(Normalized\)|^Account Code\b", re.IGNORECASE)
 
+# The installed CLI command name (the [project.scripts] entry). Referenced in
+# model-facing summary strings so a rename stays consistent everywhere.
+TOOL_COMMAND = "research"
+
 # Valid values, derived from the SDK enums so an upstream addition is accepted
 # here the moment the dependency updates (the pin is open: tako-sdk>=2.2.6).
 # The API, not this tool, is the authority on what these accept.
@@ -237,7 +241,7 @@ def build_summary(
     if not matches:
         return (
             f'Tako has no data-graph node matching "{query}". Tako may still have '
-            "relevant public/web data — try `tako search` directly, or rephrase "
+            f"relevant public/web data — try `{TOOL_COMMAND} search` directly, or rephrase "
             "the entity or metric name."
         )
 
@@ -275,7 +279,7 @@ def build_summary(
                     "is not proof Tako lacks data for them. If one of them is the "
                     "intended entity or metric, rerun with `--types`/`--label` to "
                     "narrow resolution, or pin its node_id directly in "
-                    "`tako search --node-id <id>`.",
+                    f"`{TOOL_COMMAND} search --node-id <id>`.",
                 ]
             )
 
@@ -285,7 +289,8 @@ def build_summary(
             [
                 "",
                 "The exact names are listed in each match's coverage.names. To pull "
-                "one as a chart or dataset, run `tako search` with entity + metric "
+                "one as a chart or dataset, run "
+                f"`{TOOL_COMMAND} search` with entity + metric "
                 f'(e.g. "{example}").',
             ]
         )
