@@ -114,7 +114,7 @@ class HttpClient
 
   class NetHttpTransport
     def initialize(open_timeout:, read_timeout:, write_timeout:, max_body_bytes:)
-      @default_timeouts = {
+      @timeouts = {
         open: open_timeout,
         read: read_timeout,
         write: write_timeout
@@ -143,10 +143,10 @@ class HttpClient
     private
 
     def apply_timeouts(http)
-      http.open_timeout = @default_timeouts.fetch(:open)
-      http.read_timeout = @default_timeouts.fetch(:read)
+      http.open_timeout = @timeouts.fetch(:open)
+      http.read_timeout = @timeouts.fetch(:read)
 
-      write_timeout = @default_timeouts.fetch(:write)
+      write_timeout = @timeouts.fetch(:write)
       http.write_timeout = write_timeout if write_timeout
     end
 
