@@ -1,5 +1,5 @@
 {{- $console := include "centaur.consoleValues" . | fromYaml }}
-{{- if and $console.enabled $console.worker.enabled }}
+{{- if $console.enabled }}
 {{- $secretEnv := include "centaur.secretEnvName" . }}
 {{- $prefix := .Values.secretManager.envPrefix }}
 {{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") }}
