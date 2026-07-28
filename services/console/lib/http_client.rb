@@ -41,10 +41,10 @@ class HttpClient
       NetHttpTransport.new(
         open_timeout: open_timeout,
         read_timeout: read_timeout,
-        write_timeout: write_timeout
+        write_timeout: write_timeout,
+        max_body_bytes: max_body_bytes
       )
     end
-    @max_body_bytes = max_body_bytes
   end
 
   def get(url, params: {}, headers: {}, timeout: nil, open_timeout: nil, read_timeout: nil,
@@ -99,7 +99,7 @@ class HttpClient
     apply_content_type(request_headers, json: json, form: form, multipart: multipart)
     body = request_body(json: json, form: form)
 
-    raw_response = @http.call(
+    @http.call(
       method: method,
       url: uri.to_s,
       body: body,
@@ -111,8 +111,6 @@ class HttpClient
       read_timeout: read_timeout,
       write_timeout: write_timeout
     )
-
-    normalize_response(raw_response)
   end
 
   private
@@ -136,10 +134,11 @@ class HttpClient
   end
 
   class NetHttpTransport
-    def initialize(open_timeout:, read_timeout:, write_timeout:)
+    def initialize(open_timeout:, read_timeout:, write_timeout:, max_body_bytes:)
       @open_timeout = open_timeout
       @read_timeout = read_timeout
       @write_timeout = write_timeout
+      @max_body_bytes = max_body_bytes
     end
 
     def call(method:, url:, body:, headers:, timeout:, open_timeout:, read_timeout:, write_timeout:,
@@ -156,10 +155,28 @@ class HttpClient
       resolved_write_timeout = write_timeout || timeout || @write_timeout
       http.write_timeout = resolved_write_timeout if resolved_write_timeout
 
-      http.request(request)
+      response = http.request(request)
+      Response.new(
+        status: response.code.to_i,
+        body: response_body(response),
+        headers: response_headers(response)
+      )
     end
 
     private
+
+    def response_body(response)
+      body = response.body.to_s
+      @max_body_bytes ? body.byteslice(0, @max_body_bytes) : body
+    end
+
+    def response_headers(response)
+      return {} unless response.respond_to?(:to_hash)
+
+      response.to_hash.to_h do |key, value|
+        [ key.to_s.downcase, Array(value).join(", ") ]
+      end
+    end
 
     def apply_body(request, body:, form:, multipart:)
       if form
@@ -203,20 +220,6 @@ class HttpClient
 
   def header?(headers, name)
     headers.any? { |key, _value| key.to_s.casecmp?(name) }
-  end
-
-  def normalize_response(response)
-    return response if response.is_a?(Response)
-
-    headers = {}
-    if response.respond_to?(:to_hash)
-      response.to_hash.each do |key, value|
-        headers[key.to_s.downcase] = Array(value).join(", ")
-      end
-    end
-    body = response.body.to_s
-    body = body.byteslice(0, @max_body_bytes) if @max_body_bytes
-    Response.new(status: response.code.to_i, body: body, headers: headers)
   end
 
   def default_headers
