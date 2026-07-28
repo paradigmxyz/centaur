@@ -15,10 +15,15 @@ module Console
     end
 
     def update_slack_channel_permissions_from_form(owner, path, preserve_api_managed_direct_messages: false)
-      replace_slack_channel_permissions_from_form!(
+      rows = slack_channel_permission_replacement_rows(
         owner,
         preserve_api_managed_direct_messages: preserve_api_managed_direct_messages
       )
+      if slack_channel_permission_rows_unchanged?(owner, rows)
+        return redirect_to path, notice: "Slack channel permissions unchanged."
+      end
+
+      SlackChannelPermission.replace_for!(owner, rows)
       redirect_to path, notice: "Updated Slack channel permissions."
     rescue ActiveRecord::RecordInvalid => e
       redirect_to path, alert: e.record.errors.full_messages.to_sentence
@@ -28,10 +33,14 @@ module Console
       redirect_to path, alert: "Each Slack channel can only be selected once."
     end
 
-    def replace_slack_channel_permissions_from_form!(owner, preserve_api_managed_direct_messages: false)
+    def slack_channel_permission_replacement_rows(owner, preserve_api_managed_direct_messages: false)
       rows = slack_channel_permission_form_rows(owner)
       rows.concat(api_managed_direct_message_rows(owner)) if preserve_api_managed_direct_messages
-      SlackChannelPermission.replace_for!(owner, rows)
+      rows
+    end
+
+    def slack_channel_permission_rows_unchanged?(owner, rows)
+      owner.slack_channel_permissions_payload == SlackChannelPermission.permission_rows_payload(rows)
     end
 
     def slack_channel_permission_form_rows(owner)

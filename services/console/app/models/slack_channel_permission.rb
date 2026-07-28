@@ -29,6 +29,14 @@ class SlackChannelPermission < ApplicationRecord
 
   scope :ordered, -> { order(:channel_id, :id) }
 
+  def self.permission_rows_payload(permission_rows)
+    normalized_permission_rows(permission_rows).map do |attrs|
+      { "channel_id" => attrs.fetch(:channel_id) }.merge(
+        PERMISSION_ATTRIBUTE_NAMES.to_h { |permission| [ permission, attrs.fetch(permission.to_sym) ] }
+      )
+    end.sort_by { |row| row.fetch("channel_id") }
+  end
+
   def self.replace_for!(grantee, permission_rows)
     association = grantee.slack_channel_permissions
     rows_by_channel = normalized_permission_rows(permission_rows)

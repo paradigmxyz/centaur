@@ -189,6 +189,36 @@ module Console
       assert_equal %w[C0123456789 C2222222222], role.slack_channel_permissions.reload.pluck(:channel_id).sort
     end
 
+    test "update_slack_channel_permissions skips unchanged submissions" do
+      role = roles(:acme_infra)
+      permission = role.slack_channel_permissions.create!(channel_id: "C0123456789", upload_enabled: true)
+      versions = Principal.where(id: role.principal_ids).pluck(:id, :sync_config_cache_version).to_h
+      clear_enqueued_jobs
+
+      assert_no_enqueued_jobs only: PrincipalSyncConfigSnapshotWarmJob do
+        patch slack_channel_permissions_console_role_url(role.oid),
+              params: {
+                role: {
+                  slack_channel_permissions_attributes: {
+                    "0" => {
+                      id: permission.id,
+                      upload_enabled: "1",
+                      download_enabled: "0",
+                      history_enabled: "0"
+                    }
+                  }
+                }
+              }
+      end
+
+      assert_redirected_to console_role_path(role.oid)
+      assert_equal "Slack channel permissions unchanged.", flash[:notice]
+      assert_equal [ permission.id ], role.slack_channel_permissions.reload.pluck(:id)
+      Principal.where(id: role.principal_ids).find_each do |principal|
+        assert_equal versions.fetch(principal.id), principal.sync_config_cache_version
+      end
+    end
+
     test "new and edit render forms" do
       role = roles(:acme_infra)
       get new_console_role_url
