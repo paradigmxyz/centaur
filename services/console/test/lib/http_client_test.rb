@@ -18,7 +18,7 @@ class HttpClientTest < ActiveSupport::TestCase
   end
 
   class FakeNetHTTP
-    attr_reader :open_timeout, :read_timeout
+    attr_reader :open_timeout, :read_timeout, :captured_request
 
     def initialize(response)
       @response = response
@@ -34,7 +34,8 @@ class HttpClientTest < ActiveSupport::TestCase
       @read_timeout = value
     end
 
-    def request(_request)
+    def request(request)
+      @captured_request = request
       @response
     end
   end
@@ -102,5 +103,19 @@ class HttpClientTest < ActiveSupport::TestCase
 
     assert_equal HttpClient::DEFAULT_OPEN_TIMEOUT, http.open_timeout
     assert_equal HttpClient::DEFAULT_READ_TIMEOUT, http.read_timeout
+  end
+
+  test "preserves caller content type for encoded form requests" do
+    http = FakeNetHTTP.new(FakeResponse.new("200", "{}"))
+
+    Net::HTTP.stub(:new, ->(_host, _port) { http }) do
+      HttpClient.new.post(
+        "https://api.test/token",
+        form: { "grant_type" => "refresh_token" },
+        headers: { "Content-Type" => "application/custom-form" }
+      )
+    end
+
+    assert_equal "application/custom-form", http.captured_request["Content-Type"]
   end
 end

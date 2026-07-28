@@ -145,8 +145,8 @@ class HttpClient
              form:, multipart:)
       uri = URI.parse(url)
       request = REQUEST_CLASSES.fetch(method).new(uri)
-      headers.each { |key, value| request[key] = value }
       apply_body(request, body: body, form: form, multipart: multipart)
+      headers.each { |key, value| request[key] = value }
 
       http = Net::HTTP.new(uri.host, uri.port)
       http.use_ssl = uri.scheme == "https"
