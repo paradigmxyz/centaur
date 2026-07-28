@@ -49,7 +49,6 @@
         "worker": {
           "type": "object",
           "properties": {
-            "enabled": { "type": "boolean" },
             "replicaCount": { "type": "integer" },
             "resources": { "type": "object" }
           }

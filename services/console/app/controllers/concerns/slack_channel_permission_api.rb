@@ -32,11 +32,7 @@ module SlackChannelPermissionApi
   def save_slack_channel_permission!(owner, attrs)
     permission = owner.slack_channel_permissions.find_or_initialize_by(channel_id: attrs[:channel_id])
     was_new = permission.new_record?
-    permission.assign_attributes(
-      upload_enabled: true,
-      download_enabled: true,
-      history_enabled: true
-    ) if was_new
+    permission.assign_attributes(SlackChannelPermission::DEFAULT_ENABLED_ATTRIBUTES) if was_new
     permission.assign_attributes(was_new ? attrs : attrs.except(:channel_id))
     permission.save!
     [ permission, was_new ]
@@ -53,11 +49,9 @@ module SlackChannelPermissionApi
     end
 
     rows = data_params.permit(
-      slack_channel_permissions: %i[
-        channel_id
-        upload_enabled
-        download_enabled
-        history_enabled
+      slack_channel_permissions: [
+        :channel_id,
+        *SlackChannelPermission::PERMISSION_ATTRIBUTES
       ]
     ).fetch(:slack_channel_permissions, [])
 
@@ -71,9 +65,7 @@ module SlackChannelPermissionApi
   def upsert_slack_channel_permission_params
     data_params.permit(
       :channel_id,
-      :upload_enabled,
-      :download_enabled,
-      :history_enabled
+      *SlackChannelPermission::PERMISSION_ATTRIBUTES
     )
   end
 

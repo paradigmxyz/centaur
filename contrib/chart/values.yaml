@@ -184,9 +184,8 @@ console:
   # most importantly the broker-credential OAuth refresh loop that mints and
   # refreshes the access tokens delivered inline via `token_broker` sources
   # (e.g. the `openai-codex` brokered token). The web Puma pod runs no worker, so
-  # without this those jobs never execute. Active only when console.enabled.
+  # without this those jobs never execute. Active when console.enabled.
   worker:
-    enabled: true
     replicaCount: 1
     resources: {}
 
