@@ -1,34 +1,31 @@
 require "test_helper"
 
 class CentaurApiClientTest < ActiveSupport::TestCase
-  class StubHTTP
-    attr_reader :requests
-
-    def initialize(status:, body:)
-      @status = status
-      @body = body
-      @requests = []
-    end
-
-    def call(method:, url:, body:, headers:, timeout:)
-      @requests << { method: method, url: url, body: body, headers: headers, timeout: timeout }
-      HttpClient::Response.new(status: @status, body: @body)
+  def expect_request(http, requests, status:, body:)
+    http.expect(:call, HttpClient::Response.new(status: status, body: body)) do |method:, url:, body:, headers:, timeout:|
+      requests << { method: method, url: url, body: body, headers: headers, timeout: timeout }
+      true
     end
   end
 
   test "lists Slack archive imports with query params" do
-    http = StubHTTP.new(status: 200, body: { imports: [] }.to_json)
+    http = Minitest::Mock.new
+    requests = []
+    expect_request(http, requests, status: 200, body: { imports: [] }.to_json)
     client = CentaurApiClient.new(base_url: "http://api.internal:8080", http: http)
 
     assert_equal({ "imports" => [] }, client.list_slack_archive_imports(limit: 25))
-    request = http.requests.first
+    http.verify
+    request = requests.first
     assert_equal :get, request[:method]
     assert_equal "http://api.internal:8080/api/admin/slack/archive-imports?limit=25", request[:url]
     assert_equal "application/json", request[:headers]["Accept"]
   end
 
   test "creates Slack archive imports with optional bearer auth" do
-    http = StubHTTP.new(status: 201, body: { ok: true }.to_json)
+    http = Minitest::Mock.new
+    requests = []
+    expect_request(http, requests, status: 201, body: { ok: true }.to_json)
     client = CentaurApiClient.new(
       base_url: "http://api.internal:8080/",
       api_key: "secret-key",
@@ -42,7 +39,8 @@ class CentaurApiClientTest < ActiveSupport::TestCase
       metadata: { source: "test" }
     )
 
-    request = http.requests.first
+    http.verify
+    request = requests.first
     assert_equal :post, request[:method]
     assert_equal "Bearer secret-key", request[:headers]["Authorization"]
     body = JSON.parse(request[:body])
@@ -51,17 +49,22 @@ class CentaurApiClientTest < ActiveSupport::TestCase
   end
 
   test "raises useful errors for non-2xx responses" do
-    http = StubHTTP.new(status: 400, body: { error: "bad archive" }.to_json)
+    http = Minitest::Mock.new
+    requests = []
+    expect_request(http, requests, status: 400, body: { error: "bad archive" }.to_json)
     client = CentaurApiClient.new(base_url: "http://api.internal:8080", http: http)
 
     error = assert_raises(CentaurApiClient::Error) do
       client.start_slack_archive_import("sai_bad")
     end
+    http.verify
     assert_equal "bad archive", error.message
   end
 
   test "lists Slack DM sync checkpoints for a broker credential" do
-    http = StubHTTP.new(status: 200, body: { checkpoints: [] }.to_json)
+    http = Minitest::Mock.new
+    requests = []
+    expect_request(http, requests, status: 200, body: { checkpoints: [] }.to_json)
     client = CentaurApiClient.new(base_url: "http://api.internal:8080", http: http)
 
     client.list_slack_dm_sync_checkpoints(
@@ -69,7 +72,8 @@ class CentaurApiClientTest < ActiveSupport::TestCase
       home_team_id: "T123"
     )
 
-    request = http.requests.first
+    http.verify
+    request = requests.first
     assert_equal :get, request[:method]
     assert_equal(
       "http://api.internal:8080/api/admin/slack/dm-sync/checkpoints?broker_credential_id=bcr_123&home_team_id=T123",
@@ -78,24 +82,30 @@ class CentaurApiClientTest < ActiveSupport::TestCase
   end
 
   test "posts Slack DM sync batches" do
-    http = StubHTTP.new(status: 200, body: { ok: true }.to_json)
+    http = Minitest::Mock.new
+    requests = []
+    expect_request(http, requests, status: 200, body: { ok: true }.to_json)
     client = CentaurApiClient.new(base_url: "http://api.internal:8080", http: http)
 
     client.ingest_slack_dm_sync_batch(run: { run_id: "sdms_1" }, messages: [])
 
-    request = http.requests.first
+    http.verify
+    request = requests.first
     assert_equal :post, request[:method]
     assert_equal "http://api.internal:8080/api/admin/slack/dm-sync/batch", request[:url]
     assert_equal({ "run" => { "run_id" => "sdms_1" }, "messages" => [] }, JSON.parse(request[:body]))
   end
 
   test "gets Google Docs sync checkpoint for a broker credential" do
-    http = StubHTTP.new(status: 200, body: { checkpoint: nil }.to_json)
+    http = Minitest::Mock.new
+    requests = []
+    expect_request(http, requests, status: 200, body: { checkpoint: nil }.to_json)
     client = CentaurApiClient.new(base_url: "http://api.internal:8080", http: http)
 
     client.get_google_docs_sync_checkpoint(broker_credential_id: "bcr_123")
 
-    request = http.requests.first
+    http.verify
+    request = requests.first
     assert_equal :get, request[:method]
     assert_equal(
       "http://api.internal:8080/api/admin/google/docs-sync/checkpoint?broker_credential_id=bcr_123",
@@ -104,19 +114,24 @@ class CentaurApiClientTest < ActiveSupport::TestCase
   end
 
   test "posts Google Docs sync batches" do
-    http = StubHTTP.new(status: 200, body: { ok: true }.to_json)
+    http = Minitest::Mock.new
+    requests = []
+    expect_request(http, requests, status: 200, body: { ok: true }.to_json)
     client = CentaurApiClient.new(base_url: "http://api.internal:8080", http: http)
 
     client.ingest_google_docs_sync_batch(run: { run_id: "gdocs_1" }, files: [])
 
-    request = http.requests.first
+    http.verify
+    request = requests.first
     assert_equal :post, request[:method]
     assert_equal "http://api.internal:8080/api/admin/google/docs-sync/batch", request[:url]
     assert_equal({ "run" => { "run_id" => "gdocs_1" }, "files" => [] }, JSON.parse(request[:body]))
   end
 
   test "creates app sessions with encoded thread keys" do
-    http = StubHTTP.new(status: 200, body: { ok: true }.to_json)
+    http = Minitest::Mock.new
+    requests = []
+    expect_request(http, requests, status: 200, body: { ok: true }.to_json)
     client = CentaurApiClient.new(base_url: "http://api.internal:8080", http: http)
 
     client.create_session(
@@ -126,7 +141,8 @@ class CentaurApiClientTest < ActiveSupport::TestCase
       on_harness_conflict: "reject"
     )
 
-    request = http.requests.first
+    http.verify
+    request = requests.first
     assert_equal :post, request[:method]
     assert_equal "http://api.internal:8080/api/session/console%3Aabc-123", request[:url]
     body = JSON.parse(request[:body])
@@ -136,7 +152,10 @@ class CentaurApiClientTest < ActiveSupport::TestCase
   end
 
   test "appends and executes app session messages" do
-    http = StubHTTP.new(status: 200, body: { ok: true }.to_json)
+    http = Minitest::Mock.new
+    requests = []
+    expect_request(http, requests, status: 200, body: { ok: true }.to_json)
+    expect_request(http, requests, status: 200, body: { ok: true }.to_json)
     client = CentaurApiClient.new(base_url: "http://api.internal:8080", http: http)
 
     client.append_session_messages(
@@ -150,12 +169,13 @@ class CentaurApiClientTest < ActiveSupport::TestCase
       metadata: { source: "console" }
     )
 
-    append = http.requests.first
+    http.verify
+    append = requests.first
     assert_equal :post, append[:method]
     assert_equal "http://api.internal:8080/api/session/console%3Aabc-123/messages", append[:url]
     assert_equal "user", JSON.parse(append[:body]).dig("messages", 0, "role")
 
-    execute = http.requests.second
+    execute = requests.second
     assert_equal :post, execute[:method]
     assert_equal "http://api.internal:8080/api/session/console%3Aabc-123/execute", execute[:url]
     body = JSON.parse(execute[:body])
@@ -164,34 +184,42 @@ class CentaurApiClientTest < ActiveSupport::TestCase
   end
 
   test "lists workflow schedules and fetches run details" do
-    http = StubHTTP.new(status: 200, body: { ok: true, schedules: [] }.to_json)
+    http = Minitest::Mock.new
+    requests = []
+    expect_request(http, requests, status: 200, body: { ok: true, schedules: [] }.to_json)
+    expect_request(http, requests, status: 200, body: { ok: true, schedules: [] }.to_json)
     client = CentaurApiClient.new(base_url: "http://api.internal:8080", http: http)
 
     client.list_workflow_schedules
     client.get_workflow_run("run:1")
 
-    schedules = http.requests.first
+    http.verify
+    schedules = requests.first
     assert_equal :get, schedules[:method]
     assert_equal "http://api.internal:8080/api/workflows/schedules", schedules[:url]
 
-    run = http.requests.second
+    run = requests.second
     assert_equal :get, run[:method]
     assert_equal "http://api.internal:8080/api/workflows/runs/run%3A1", run[:url]
   end
 
   test "creates workflow runs with optional input" do
-    http = StubHTTP.new(status: 200, body: { ok: true, run_id: "r1" }.to_json)
+    http = Minitest::Mock.new
+    requests = []
+    expect_request(http, requests, status: 200, body: { ok: true, run_id: "r1" }.to_json)
+    expect_request(http, requests, status: 200, body: { ok: true, run_id: "r1" }.to_json)
     client = CentaurApiClient.new(base_url: "http://api.internal:8080", http: http)
 
     client.create_workflow_run(workflow_name: "slack_sync")
     client.create_workflow_run(workflow_name: "slack_sync", input: { "mode" => "full" })
 
-    bare = http.requests.first
+    http.verify
+    bare = requests.first
     assert_equal :post, bare[:method]
     assert_equal "http://api.internal:8080/api/workflows/runs", bare[:url]
     assert_equal({ "workflow_name" => "slack_sync" }, JSON.parse(bare[:body]))
 
-    with_input = http.requests.second
+    with_input = requests.second
     assert_equal({ "workflow_name" => "slack_sync", "input" => { "mode" => "full" } }, JSON.parse(with_input[:body]))
   end
 end

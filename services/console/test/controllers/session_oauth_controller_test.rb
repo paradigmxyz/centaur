@@ -15,6 +15,7 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
   ].freeze
 
   setup do
+    @exchange_http_mocks = []
     @prev_env = ENV.to_hash.slice(*ENV_KEYS)
     ENV["CENTAUR_CONSOLE_GOOGLE_CLIENT_ID"] = GOOGLE_CLIENT_ID
     ENV["CENTAUR_CONSOLE_GOOGLE_CLIENT_SECRET"] = "google-login-secret"
@@ -25,26 +26,19 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
     ENV_KEYS.each { |k| ENV.delete(k) }
     @prev_env.each { |k, v| ENV[k] = v }
     SessionOauthController.exchange_client_factory = -> { Broker::AuthorizationCodeClient.new }
-  end
-
-  class StubHTTP
-    attr_reader :captured
-
-    def initialize(status:, body:)
-      @status = status
-      @body = body
-    end
-
-    def call(url:, form:, headers:, timeout:)
-      @captured = { url: url, form: form, headers: headers, timeout: timeout }
-      HttpClient::Response.new(status: @status, body: @body)
-    end
+    @exchange_http_mocks.each(&:verify)
   end
 
   def stub_exchange(status:, body:)
-    http = StubHTTP.new(status: status, body: body)
+    http = Minitest::Mock.new
+    captured = {}
+    http.expect(:call, HttpClient::Response.new(status: status, body: body)) do |url:, form:, headers:, timeout:|
+      captured.replace(url: url, form: form, headers: headers, timeout: timeout)
+      true
+    end
+    @exchange_http_mocks << http
     SessionOauthController.exchange_client_factory = -> { Broker::AuthorizationCodeClient.new(http: http) }
-    http
+    captured
   end
 
   def id_token(claims)
@@ -140,8 +134,8 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
     get auth_callback_url(provider: "slack"), params: { code: "the-code", state: state }
 
     assert_redirected_to console_threads_path
-    assert_equal "slack-login-secret", exchange.captured.dig(:form, "client_secret")
-    assert_nil exchange.captured.dig(:form, "code_verifier")
+    assert_equal "slack-login-secret", exchange.dig(:form, "client_secret")
+    assert_nil exchange.dig(:form, "code_verifier")
     user = User.find_by!(email: "rotating@example.com")
     assert_equal "Rotating User", user.name
     assert_equal [ [ "slack", "U123ROTATING" ] ], user.user_identities.pluck(:provider, :subject)
