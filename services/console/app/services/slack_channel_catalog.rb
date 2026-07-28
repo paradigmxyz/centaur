@@ -1,7 +1,5 @@
 require "digest"
 require "json"
-require "net/http"
-require "uri"
 
 class SlackChannelCatalog
   Channel = Data.define(:id, :name, :private)
@@ -61,9 +59,14 @@ class SlackChannelCatalog
     Result.new(channels: channels, error: payload["error"], configured: payload["configured"])
   end
 
-  def initialize(token:, api_url:)
+  def initialize(token:, api_url:, api: nil)
     @token = token
     @api_url = api_url.to_s.delete_suffix("/")
+    @api = api || HttpClient.new(
+      open_timeout: OPEN_TIMEOUT_SECONDS,
+      read_timeout: READ_TIMEOUT_SECONDS,
+      write_timeout: WRITE_TIMEOUT_SECONDS
+    )
   end
 
   def fetch
@@ -92,32 +95,21 @@ class SlackChannelCatalog
   private
 
   def request_page(cursor)
-    uri = URI("#{@api_url}/conversations.list")
     params = {
       types: DEFAULT_TYPES,
       exclude_archived: "true",
       limit: "1000"
     }
     params[:cursor] = cursor if cursor.present?
-    uri.query = URI.encode_www_form(params)
 
-    request = Net::HTTP::Get.new(uri)
-    request["Authorization"] = "Bearer #{@token}"
-    request["Accept"] = "application/json"
+    response = @api.get(
+      "#{@api_url}/conversations.list",
+      params: params,
+      headers: { "Authorization" => "Bearer #{@token}" }
+    )
+    return { "ok" => false, "error" => "HTTP #{response.status}" } unless response.success?
 
-    response = Net::HTTP.start(
-      uri.host,
-      uri.port,
-      use_ssl: uri.scheme == "https",
-      open_timeout: OPEN_TIMEOUT_SECONDS,
-      read_timeout: READ_TIMEOUT_SECONDS,
-      write_timeout: WRITE_TIMEOUT_SECONDS
-    ) do |http|
-      http.request(request)
-    end
-    return { "ok" => false, "error" => "HTTP #{response.code}" } unless response.code.to_i.between?(200, 299)
-
-    JSON.parse(response.body)
+    response.json
   end
 
   def parse_channel(channel)

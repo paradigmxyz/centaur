@@ -1,6 +1,4 @@
-require "net/http"
 require "json"
-require "uri"
 
 module Broker
   # RefreshClient performs raw token POSTs and returns the parsed response. It
@@ -61,24 +59,17 @@ module Broker
                           form_encoding: form_encoding)
       end
 
-      uri = URI.parse(url)
-      req = Net::HTTP::Post.new(uri)
-      if form_encoding == :multipart
-        req.set_form(form.to_a, "multipart/form-data")
-      else
-        req.set_form_data(form)
-        req["Content-Type"] = "application/x-www-form-urlencoded"
-      end
-      req["Accept"] = "application/json"
-      headers.each { |name, value| req[name] = value }
-
-      http = Net::HTTP.new(uri.host, uri.port)
-      http.use_ssl = uri.scheme == "https"
-      http.open_timeout = timeout
-      http.read_timeout = timeout
-
-      res = http.request(req)
-      Response.new(status: res.code.to_i, body: res.body.to_s.byteslice(0, MAX_BODY_BYTES))
+      response = HttpClient.new(
+        open_timeout: timeout,
+        read_timeout: timeout,
+        max_body_bytes: MAX_BODY_BYTES
+      ).post(
+        url,
+        form: form,
+        multipart: form_encoding == :multipart,
+        headers: headers
+      )
+      Response.new(status: response.status, body: response.body)
     rescue StandardError => e
       # Network/transport failures are transient: a brief outage must not mark the
       # credential dead. Backoff exhaustion is the louder signal.

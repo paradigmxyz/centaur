@@ -4,6 +4,7 @@ ENV["RAILS_ENV"] ||= "test"
 ENV["PGGSSENCMODE"] ||= "disable"
 require_relative "../config/environment"
 require "rails/test_help"
+require "minitest/mock"
 
 module ActiveSupport
   class TestCase

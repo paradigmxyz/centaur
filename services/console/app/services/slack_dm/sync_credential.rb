@@ -1,7 +1,3 @@
-require "json"
-require "net/http"
-require "uri"
-
 module SlackDm
   class SyncCredential
     DM_REQUIRED_SCOPES = %w[im:read im:history].freeze
@@ -326,21 +322,15 @@ module SlackDm
         )
       end
 
-      uri = URI.parse(endpoint)
-      uri.query = URI.encode_www_form(params) if params.any?
-      request = Net::HTTP::Get.new(uri)
-      request["Authorization"] = "Bearer #{@credential.access_token}"
-      request["Accept"] = "application/json"
+      response = HttpClient.new(open_timeout: slack_timeout, read_timeout: slack_timeout).get(
+        endpoint,
+        params: params,
+        headers: { "Authorization" => "Bearer #{@credential.access_token}" }
+      )
+      raise SlackApiError, "Slack API rate limited" if response.status == 429
 
-      http = Net::HTTP.new(uri.host, uri.port)
-      http.use_ssl = uri.scheme == "https"
-      http.open_timeout = slack_timeout
-      http.read_timeout = slack_timeout
-      response = http.request(request)
-      raise SlackApiError, "Slack API rate limited" if response.code.to_i == 429
-
-      parsed = JSON.parse(response.body.to_s)
-      raise SlackApiError, "Slack API returned HTTP #{response.code}" unless response.code.to_i.between?(200, 299)
+      parsed = response.json
+      raise SlackApiError, "Slack API returned HTTP #{response.status}" unless response.success?
       raise SlackApiError, "Slack API returned #{parsed['error']}" unless parsed["ok"] == true
 
       parsed

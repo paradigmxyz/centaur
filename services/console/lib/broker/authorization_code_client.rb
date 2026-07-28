@@ -1,6 +1,4 @@
-require "net/http"
 require "json"
-require "uri"
 
 module Broker
   # Performs the RFC 6749 4.1.3 authorization_code grant POST (optionally with PKCE) and
@@ -70,19 +68,15 @@ module Broker
         return @http.call(url: url, form: form, headers: {}, timeout: timeout)
       end
 
-      uri = URI.parse(url)
-      req = Net::HTTP::Post.new(uri)
-      req.set_form_data(form)
-      req["Content-Type"] = "application/x-www-form-urlencoded"
-      req["Accept"] = "application/json"
-
-      http = Net::HTTP.new(uri.host, uri.port)
-      http.use_ssl = uri.scheme == "https"
-      http.open_timeout = timeout
-      http.read_timeout = timeout
-
-      res = http.request(req)
-      Response.new(status: res.code.to_i, body: res.body.to_s.byteslice(0, MAX_BODY_BYTES))
+      response = HttpClient.new(
+        open_timeout: timeout,
+        read_timeout: timeout,
+        max_body_bytes: MAX_BODY_BYTES
+      ).post(
+        url,
+        form: form
+      )
+      Response.new(status: response.status, body: response.body)
     rescue StandardError => e
       raise ExchangeError.new("token endpoint request failed: #{e.class}", stage: "network")
     end
