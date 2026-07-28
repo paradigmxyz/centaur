@@ -202,6 +202,27 @@ module Console
       assert_equal "C0123456789", permission.reload.channel_id
     end
 
+    test "destroy_slack_channel_permission deletes the selected principal permission" do
+      principal = principals(:acme_user_bob)
+      delete_permission = principal.slack_channel_permissions.create!(
+        channel_id: "C0123456789",
+        upload_enabled: true
+      )
+      keep_permission = principal.slack_channel_permissions.create!(
+        channel_id: "G9876543210",
+        upload_enabled: true
+      )
+
+      assert_difference -> { principal.slack_channel_permissions.count }, -1 do
+        delete console_principal_slack_channel_permission_url(principal.oid, delete_permission.id)
+      end
+
+      assert_redirected_to console_principal_path(principal.oid)
+      assert_equal "Deleted Slack channel permission.", flash[:notice]
+      assert_raises(ActiveRecord::RecordNotFound) { delete_permission.reload }
+      assert_predicate keep_permission.reload, :persisted?
+    end
+
     test "destroy deletes the principal and dependent access records" do
       principal = principals(:acme_channel)
       proxy = proxies(:acme_proxy)

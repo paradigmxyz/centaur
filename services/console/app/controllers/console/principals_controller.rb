@@ -55,6 +55,11 @@ module Console
       redirect_to console_principal_path(@principal.oid), alert: "Each Slack channel can only be selected once."
     end
 
+    def destroy_slack_channel_permission
+      @principal.slack_channel_permissions.find(params.require(:permission_id)).destroy!
+      redirect_to console_principal_path(@principal.oid), notice: "Deleted Slack channel permission."
+    end
+
     def assign_role
       role = Role.find_by_oid!(params[:role_id])
       @principal.principal_roles.find_or_create_by!(role: role)

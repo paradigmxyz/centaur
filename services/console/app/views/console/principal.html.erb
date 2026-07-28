@@ -59,7 +59,7 @@
                 <th class="console-th">Upload</th>
                 <th class="console-th">Download</th>
                 <th class="console-th">History</th>
-                <th class="console-th">Remove</th>
+                <th class="console-th">Delete</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-ink-700">
@@ -103,7 +103,16 @@
                       <%= permission_fields.check_box :history_enabled, class: checkbox_class, aria: { label: "History for #{permission.channel_id}" } %>
                     </td>
                     <td class="console-td">
-                      <%= permission_fields.check_box :_destroy, class: checkbox_class, aria: { label: "Remove #{permission.channel_id}" } %>
+                      <%= button_tag type: "submit",
+                                     name: "_method",
+                                     value: "delete",
+                                     formaction: console_principal_slack_channel_permission_path(@principal.oid, permission.id),
+                                     formmethod: "post",
+                                     class: "grid size-8 place-items-center rounded text-zinc-500 transition-colors hover:bg-red-500/10 hover:text-red-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-400",
+                                     aria: { label: "Delete #{permission.channel_id} Slack channel permission" },
+                                     title: "Delete #{permission.channel_id}" do %>
+                        <%= console_icon("trash", classes: "size-4") %>
+                      <% end %>
                     </td>
                     <% end %>
                   <% end %>
