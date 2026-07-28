@@ -189,7 +189,7 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
 
     assert_select(
       "a[href=?][data-turbo-method=delete][title=?]",
-      console_slack_channel_permission_path(permission.id),
+      console_slack_channel_permission_path(permission.oid),
       "Delete #{permission.channel_id}"
     )
   end

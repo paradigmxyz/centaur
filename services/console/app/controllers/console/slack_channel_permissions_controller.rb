@@ -5,7 +5,7 @@ module Console
     before_action :require_admin
 
     def destroy
-      permission = SlackChannelPermission.find(params.require(:id))
+      permission = SlackChannelPermission.find_by_oid!(params.require(:slack_channel_permission_id))
       redirect_path = owner_path(permission)
 
       permission.destroy!

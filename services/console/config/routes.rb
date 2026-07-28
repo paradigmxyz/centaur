@@ -71,7 +71,7 @@ Rails.application.routes.draw do
               as: :slack_channel_permissions
       end
     end
-    delete "slack_channel_permissions/:id", to: "slack_channel_permissions#destroy",
+    delete "slack_channel_permissions/:slack_channel_permission_id", to: "slack_channel_permissions#destroy",
            as: :slack_channel_permission
   end
   # Role assignments and direct grants managed from the principal detail page. The

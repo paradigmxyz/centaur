@@ -1,6 +1,17 @@
 require "test_helper"
 
 class SlackChannelPermissionTest < ActiveSupport::TestCase
+  test "has an opaque id" do
+    permission = SlackChannelPermission.create!(
+      principal: principals(:acme_channel),
+      channel_id: "C0123456789",
+      upload_enabled: true
+    )
+
+    assert_match(/\Ascp_[A-Za-z0-9]+\z/, permission.oid)
+    assert_equal permission, SlackChannelPermission.find_by_oid!(permission.oid)
+  end
+
   test "normalizes channel id and requires at least one permission" do
     permission = SlackChannelPermission.new(
       principal: principals(:acme_channel),

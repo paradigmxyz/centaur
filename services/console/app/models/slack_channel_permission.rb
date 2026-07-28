@@ -1,6 +1,8 @@
 class SlackChannelPermission < ApplicationRecord
   include SyncConfigCacheInvalidation
 
+  oid_prefix "scp"
+
   attr_readonly :principal_id, :role_id, :channel_id
 
   belongs_to :principal, optional: true
