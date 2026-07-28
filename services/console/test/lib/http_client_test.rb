@@ -73,6 +73,17 @@ class HttpClientTest < ActiveSupport::TestCase
     assert_equal "application/x-www-form-urlencoded", request[:headers]["Content-Type"]
   end
 
+  test "omits optional JSON request bodies when no body is provided" do
+    http = StubHTTP.new(HttpClient::Response.new(status: 204, body: ""))
+    client = HttpClient.new(http: http)
+
+    client.request_json(method: :delete, url: "https://api.test/widgets/1")
+
+    request = http.requests.first
+    assert_nil request[:body]
+    assert_nil request[:headers]["Content-Type"]
+  end
+
   test "supports custom accept headers" do
     http = StubHTTP.new(HttpClient::Response.new(status: 200, body: "{}"))
     client = HttpClient.new(http: http)

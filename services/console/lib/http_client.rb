@@ -122,6 +122,22 @@ class HttpClient
     normalize_response(raw_response)
   end
 
+  def request_json(method:, url:, params: {}, body: nil, headers: {}, timeout: nil, open_timeout: nil,
+                   read_timeout: nil, write_timeout: nil)
+    options = {
+      method: method,
+      url: url,
+      params: params,
+      headers: headers,
+      timeout: timeout,
+      open_timeout: open_timeout,
+      read_timeout: read_timeout,
+      write_timeout: write_timeout
+    }
+    options[:json] = body unless body.nil?
+    request(**options)
+  end
+
   private
 
   def build_uri(url, params)
