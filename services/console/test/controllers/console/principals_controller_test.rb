@@ -264,7 +264,7 @@ module Console
       end
 
       assert_redirected_to console_principal_path(principal.oid)
-      assert_equal "Slack channel permissions unchanged.", flash[:notice]
+      assert_equal "Updated Slack channel permissions.", flash[:notice]
       assert_equal version, principal.reload.sync_config_cache_version
       assert_equal [ channel_permission.id, dm_permission.id ].sort, principal.slack_channel_permissions.reload.pluck(:id).sort
     end

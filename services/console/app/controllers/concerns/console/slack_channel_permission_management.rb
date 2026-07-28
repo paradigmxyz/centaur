@@ -20,7 +20,7 @@ module Console
         preserve_api_managed_direct_messages: preserve_api_managed_direct_messages
       )
       if slack_channel_permission_rows_unchanged?(owner, rows)
-        return redirect_to path, notice: "Slack channel permissions unchanged."
+        return redirect_to path, notice: "Updated Slack channel permissions."
       end
 
       SlackChannelPermission.replace_for!(owner, rows)
