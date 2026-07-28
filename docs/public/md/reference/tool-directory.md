@@ -35,7 +35,7 @@ These are broadly useful across most deployments and are good candidates to conf
 | `gsuite` | Use Gmail, Calendar, Drive, Docs, Sheets, Slides, and Google Analytics | `GOOGLE_TOKEN_JSON` |
 | `websearch` | Free web search via Parallel and deep research | None; `PARALLEL_API_KEY` for `deep_research`; `ANTHROPIC_API_KEY` for search synthesis |
 | `company_context` | Search indexed company history, private Slack conversations, and Google Docs | None |
-| `grafana` | Query dashboards, alerts, VictoriaMetrics, VictoriaLogs, and annotations | `GRAFANA_URL`, `GRAFANA_API_KEY` |
+| `grafana` | Query dashboards, alerts, VictoriaMetrics, VictoriaLogs, Loki, and annotations | `GRAFANA_URL`, `GRAFANA_API_KEY` |
 | `posthog` | Query product analytics, events, pageviews, breakdowns, and user agents | `POSTHOG_API_KEY`, `POSTHOG_PROJECT_ID` |
 | `amplitude` | Query product analytics — event segmentation, funnels, retention, user activity, and taxonomy | `AMPLITUDE_API_KEY`, `AMPLITUDE_SECRET_KEY` |
 | `attio` | Work with CRM objects, records, lists, notes, tasks, calls, and meetings | `ATTIO_API_KEY` |
@@ -63,7 +63,7 @@ These are broadly useful across most deployments and are good candidates to conf
 | `centaur-console` | Inspect the current sandbox's redacted permissions and capabilities | None |
 | `chart` | Render charts as PNG images for Slack or reports | None |
 | `demo` | Test tool hot-reload and basic tool plumbing | None |
-| `grafana` | Grafana dashboards, alerts, VictoriaMetrics, VictoriaLogs, and annotations | `GRAFANA_URL`, `GRAFANA_API_KEY` |
+| `grafana` | Grafana dashboards, alerts, VictoriaMetrics, VictoriaLogs, Loki, and annotations | `GRAFANA_URL`, `GRAFANA_API_KEY` |
 | `posthog` | Product analytics through HogQL, events, pageviews, and breakdowns | `POSTHOG_API_KEY`, `POSTHOG_PROJECT_ID` |
 | `amplitude` | Amplitude event segmentation, funnels, retention, user activity, realtime, and taxonomy | `AMPLITUDE_API_KEY`, `AMPLITUDE_SECRET_KEY` |
 | `profslice` | Extract Firefox Profiler data for analysis | None |

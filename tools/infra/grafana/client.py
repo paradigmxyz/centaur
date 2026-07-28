@@ -3,6 +3,7 @@
 import json as _json
 import os
 import re
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import SplitResult, quote, urlsplit, urlunsplit
 
@@ -53,11 +54,22 @@ def _normalize_thread_key_input(value: str) -> str:
     raise ValueError(f"Could not parse Slack thread input: {value}")
 
 
+def _parse_loki_timestamp(ts: Any) -> tuple[int, str]:
+    """Parse a Loki Unix-nanosecond timestamp into a sort key and an RFC3339 string."""
+    try:
+        ns = int(ts)
+    except (TypeError, ValueError):
+        return 0, str(ts)
+    seconds, remainder = divmod(ns, 1_000_000_000)
+    stamp = datetime.fromtimestamp(seconds, tz=UTC).replace(microsecond=remainder // 1000)
+    return ns, stamp.isoformat()
+
+
 class GrafanaClient:
     """Client for the Grafana HTTP API.
 
-    Supports dashboard search, VictoriaMetrics/VictoriaLogs datasource proxy queries,
-    alert rules, and annotations. Authenticates via service-account token
+    Supports dashboard search, VictoriaMetrics/VictoriaLogs/Loki datasource proxy
+    queries, alert rules, and annotations. Authenticates via service-account token
     (GRAFANA_API_KEY) or basic auth (GRAFANA_USER / GRAFANA_PASSWORD).
     """
 
@@ -284,6 +296,69 @@ class GrafanaClient:
         )
         result = resp.json()
         return [v["value"] for v in result.get("values", [])]
+
+    # -- Loki queries via datasource proxy ------------------------------------
+
+    def query_loki(
+        self,
+        query: str,
+        datasource_uid: str = "loki",
+        start: str | None = None,
+        end: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """Run a LogQL log query via the Loki datasource proxy.
+
+        Args:
+            query: LogQL log-selector expression (e.g. '{app="api"} |= "error"').
+                Metric LogQL queries (rate, count_over_time, ...) are rejected.
+            datasource_uid: Datasource UID (default: 'loki').
+            start: Range start (RFC3339 or Unix nanoseconds). Omit for Loki's default window.
+            end: Range end.
+            limit: Max log lines.
+        """
+        params: dict[str, Any] = {"query": query, "limit": limit}
+        if start:
+            params["start"] = start
+        if end:
+            params["end"] = end
+        data = self._request(
+            "GET",
+            f"/api/datasources/proxy/uid/{datasource_uid}/loki/api/v1/query_range",
+            params=params,
+        )
+        result_type = data.get("data", {}).get("resultType")
+        if result_type != "streams":
+            raise ValueError(
+                f"query_loki supports log queries only (got resultType {result_type!r}); "
+                "use a log-selector LogQL expression instead of a metric query"
+            )
+        rows: list[tuple[int, dict]] = []
+        for result in data.get("data", {}).get("result", []):
+            labels = result.get("stream", {})
+            for value in result.get("values", []):
+                if len(value) < 2:
+                    continue
+                sort_key, stamp = _parse_loki_timestamp(value[0])
+                rows.append((sort_key, {"time": stamp, "stream": labels, "line": value[1]}))
+        rows.sort(key=lambda row: row[0])
+        return [entry for _, entry in rows]
+
+    def loki_labels(self, datasource_uid: str = "loki") -> list[str]:
+        """List all Loki label names."""
+        data = self._request(
+            "GET",
+            f"/api/datasources/proxy/uid/{datasource_uid}/loki/api/v1/labels",
+        )
+        return data.get("data", [])
+
+    def loki_label_values(self, label: str, datasource_uid: str = "loki") -> list[str]:
+        """Get values for a Loki label."""
+        data = self._request(
+            "GET",
+            f"/api/datasources/proxy/uid/{datasource_uid}/loki/api/v1/label/{label}/values",
+        )
+        return data.get("data", [])
 
     # -- Alerts --------------------------------------------------------------
 

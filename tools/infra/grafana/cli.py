@@ -176,6 +176,34 @@ def query_victorialogs(
         console.print(f"[dim]{time}[/] [cyan]{stream}[/] {msg}")
 
 
+@app.command("loki")
+def query_loki(
+    query: str = typer.Argument(..., help="LogQL expression"),
+    datasource: str = typer.Option("loki", "--ds", help="Datasource UID"),
+    start: str = typer.Option(None, "--start", "-s", help="Range start"),
+    end: str = typer.Option(None, "--end", "-e", help="Range end"),
+    limit: int = typer.Option(100, "--limit", "-n", help="Max log lines"),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
+    """Run a LogQL query via Loki datasource proxy."""
+    client = get_client()
+    results = client.query_loki(
+        query=query, datasource_uid=datasource, start=start, end=end, limit=limit
+    )
+
+    if json_output:
+        print(json.dumps(results, indent=2))
+        return
+
+    if not results:
+        console.print("[yellow]No results[/]")
+        return
+
+    for entry in results:
+        labels = ", ".join(f"{k}={v}" for k, v in entry.get("stream", {}).items())
+        console.print(f"[dim]{entry.get('time', '')}[/] [cyan]{labels}[/] {entry.get('line', '')}")
+
+
 @app.command("alerts")
 def get_alerts(
     json_output: bool = typer.Option(False, "--json", help="Output as JSON"),

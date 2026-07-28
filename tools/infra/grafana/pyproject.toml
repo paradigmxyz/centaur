@@ -1,6 +1,6 @@
 [project]
 name = "grafana"
-description = "Grafana observability — dashboards, VictoriaMetrics, VictoriaLogs, alerts, annotations"
+description = "Grafana observability — dashboards, VictoriaMetrics, VictoriaLogs, Loki, alerts, annotations"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
