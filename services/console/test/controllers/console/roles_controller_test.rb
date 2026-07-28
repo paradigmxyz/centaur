@@ -44,6 +44,23 @@ module Console
       end
     end
 
+    test "show renders Slack channel permission delete buttons" do
+      role = roles(:acme_infra)
+      permission = role.slack_channel_permissions.create!(
+        channel_id: "C0123456789",
+        upload_enabled: true
+      )
+
+      get console_role_url(role.oid)
+      assert_response :ok
+
+      assert_select(
+        "button[type=submit][name=_method][value=delete][formaction=?][aria-label=?]",
+        console_slack_channel_permission_path(permission.id),
+        "Delete #{permission.channel_id} Slack channel permission"
+      )
+    end
+
     test "update_slack_channel_permissions stores role permissions" do
       role = roles(:acme_infra)
 

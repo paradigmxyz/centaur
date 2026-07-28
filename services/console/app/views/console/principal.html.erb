@@ -146,7 +146,14 @@
 
   <% if @direct_grants.any? %>
     <div class="console-panel mb-4">
-      <table class="console-table">
+      <table class="console-table console-table-fixed">
+        <colgroup>
+          <col class="w-40">
+          <col class="w-32">
+          <col class="w-[28%]">
+          <col>
+          <col class="w-28">
+        </colgroup>
         <thead class="console-table-head">
           <tr>
             <th class="console-th">Type</th>
@@ -167,8 +174,20 @@
               <td class="console-td-nowrap">
                 <%= link_to s.oid, console_secret_path(kind, s.oid), class: "console-link" %>
               </td>
-              <td class="console-td-nowrap text-zinc-300"><%= s.foreign_id || "—" %></td>
-              <td class="console-td-nowrap text-zinc-100"><%= s.try(:name).presence || %(<span class="text-zinc-600">unnamed</span>).html_safe %></td>
+              <td class="console-td-truncate text-zinc-300">
+                <% if s.foreign_id.present? %>
+                  <span class="console-cell-truncate" title="<%= s.foreign_id %>"><%= s.foreign_id %></span>
+                <% else %>
+                  <span class="text-zinc-600">—</span>
+                <% end %>
+              </td>
+              <td class="console-td-truncate text-zinc-100">
+                <% if (secret_name = s.try(:name).presence) %>
+                  <span class="console-cell-truncate" title="<%= secret_name %>"><%= secret_name %></span>
+                <% else %>
+                  <span class="text-zinc-600">unnamed</span>
+                <% end %>
+              </td>
               <td class="console-td-nowrap text-right">
                 <%= button_to "Revoke", console_principal_revoke_grant_path(@principal.oid, grant.oid), method: :delete,
                       form: { data: { turbo_confirm: "Revoke this grant?" } },
@@ -214,7 +233,14 @@
     </div>
   <% else %>
     <div class="console-panel">
-      <table class="console-table">
+      <table class="console-table console-table-fixed">
+        <colgroup>
+          <col class="w-40">
+          <col class="w-32">
+          <col class="w-[28%]">
+          <col>
+          <col class="w-56">
+        </colgroup>
         <thead class="console-table-head">
           <tr>
             <th class="console-th">Type</th>
@@ -236,16 +262,31 @@
                 <td class="console-td-nowrap">
                   <%= link_to s.oid, console_secret_path(kind, s.oid), class: "console-link" %>
                 </td>
-                <td class="console-td-nowrap text-zinc-300"><%= s.foreign_id || "—" %></td>
-                <td class="console-td-nowrap text-zinc-100"><%= s.try(:name).presence || %(<span class="text-zinc-600">unnamed</span>).html_safe %></td>
-                <td class="console-td-nowrap">
+                <td class="console-td-truncate text-zinc-300">
+                  <% if s.foreign_id.present? %>
+                    <span class="console-cell-truncate" title="<%= s.foreign_id %>"><%= s.foreign_id %></span>
+                  <% else %>
+                    <span class="text-zinc-600">—</span>
+                  <% end %>
+                </td>
+                <td class="console-td-truncate text-zinc-100">
+                  <% if (secret_name = s.try(:name).presence) %>
+                    <span class="console-cell-truncate" title="<%= secret_name %>"><%= secret_name %></span>
+                  <% else %>
+                    <span class="text-zinc-600">unnamed</span>
+                  <% end %>
+                </td>
+                <td class="console-td-truncate">
                   <div class="flex flex-wrap gap-1">
                     <% if sources.any? { |x| x[:type] == :direct } %>
                       <span class="inline-flex items-center rounded bg-centaur-500/10 px-2 py-0.5 text-[11px] text-centaur-300 ring-1 ring-centaur-500/30">direct</span>
                     <% end %>
                     <% roles.each do |r| %>
-                      <span class="inline-flex items-center rounded bg-ink-700 px-2 py-0.5 text-[11px] text-zinc-300 ring-1 ring-ink-600"
-                            title="<%= r.oid %>">via <%= r.name.presence || r.foreign_id || r.oid %></span>
+                      <% role_label = r.name.presence || r.foreign_id || r.oid %>
+                      <span class="inline-flex min-w-0 max-w-full items-center rounded bg-ink-700 px-2 py-0.5 text-[11px] text-zinc-300 ring-1 ring-ink-600"
+                            title="<%= role_label %> (<%= r.oid %>)">
+                        <span class="console-cell-inline-truncate">via <%= role_label %></span>
+                      </span>
                     <% end %>
                   </div>
                 </td>
