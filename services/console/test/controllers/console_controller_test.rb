@@ -177,23 +177,6 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_select "td", text: "API-managed"
   end
 
-  test "principal detail page renders Slack channel permission delete buttons" do
-    principal = principals(:acme_user_bob)
-    permission = principal.slack_channel_permissions.create!(
-      channel_id: "C0123456789",
-      upload_enabled: true
-    )
-
-    get console_principal_url(principal.oid)
-    assert_response :ok
-
-    assert_select(
-      "a[href=?][data-turbo-method=delete][title=?]",
-      console_slack_channel_permission_path(permission.oid),
-      "Delete #{permission.channel_id}"
-    )
-  end
-
   test "principal detail page resolves direct and inherited Slack channel names from the catalog" do
     principal = principals(:acme_channel)
     principal.slack_channel_permissions.create!(

@@ -60,6 +60,7 @@
                   <% else %>
                     <%= form.fields_for :slack_channel_permissions, permission do |permission_fields| %>
                       <% channel_name = @slack_channel_names&.fetch(permission.channel_id, nil) %>
+                      <% delete_form_id = "delete_slack_channel_permission_#{permission.oid}" %>
                       <td class="console-td min-w-80">
                         <%= permission_fields.hidden_field :id %>
                         <div class="text-sm text-zinc-100"><%= channel_name.present? ? "##{channel_name}" : permission.channel_id %></div>
@@ -75,10 +76,12 @@
                         </td>
                       <% end %>
                       <td class="console-td">
-                        <%= link_to console_slack_channel_permission_path(permission),
-                                    data: { turbo_method: :delete },
-                                    class: "grid size-8 place-items-center rounded text-zinc-500 transition-colors hover:bg-red-500/10 hover:text-red-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-400",
-                                    title: "Delete #{permission.channel_id}" do %>
+                        <%= button_tag type: "submit",
+                                       name: nil,
+                                       form: delete_form_id,
+                                       class: "grid size-8 place-items-center rounded text-zinc-500 transition-colors hover:bg-red-500/10 hover:text-red-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-400",
+                                       title: "Delete #{permission.channel_id}",
+                                       aria: { label: "Delete #{permission.channel_id}" } do %>
                           <%= console_icon("trash", classes: "size-4") %>
                         <% end %>
                       </td>
@@ -121,6 +124,16 @@
       <div class="px-5 pb-5">
         <%= submit_tag "Save Slack channel permissions", class: "btn-primary" %>
       </div>
+    <% end %>
+
+    <% permissions.each do |permission| %>
+      <% next if api_managed_direct_messages && permission.channel_id.to_s.start_with?("D") %>
+      <%= form_with url: console_slack_channel_permission_path(permission),
+                    method: :delete,
+                    id: "delete_slack_channel_permission_#{permission.oid}",
+                    data: { turbo: false },
+                    class: "hidden" do %>
+      <% end %>
     <% end %>
   </div>
 
