@@ -37,7 +37,7 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
 
     def call(url:, form:, headers:, timeout:)
       @captured = { url: url, form: form, headers: headers, timeout: timeout }
-      Broker::AuthorizationCodeClient::Response.new(status: @status, body: @body)
+      HttpClient::Response.new(status: @status, body: @body)
     end
   end
 

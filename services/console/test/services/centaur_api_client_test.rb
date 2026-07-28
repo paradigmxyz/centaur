@@ -12,7 +12,7 @@ class CentaurApiClientTest < ActiveSupport::TestCase
 
     def call(method:, url:, body:, headers:, timeout:)
       @requests << { method: method, url: url, body: body, headers: headers, timeout: timeout }
-      CentaurApiClient::Response.new(status: @status, body: @body)
+      HttpClient::Response.new(status: @status, body: @body)
     end
   end
 

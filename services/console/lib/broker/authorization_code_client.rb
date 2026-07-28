@@ -17,10 +17,6 @@ module Broker
     # the parsed provider response for provider-specific metadata.
     Result = Data.define(:access_token, :refresh_token, :expires_in, :scope, :id_token, :response)
 
-    # The minimal HTTP response shape consumed, so tests can inject a double
-    # without Net::HTTP.
-    Response = Data.define(:status, :body)
-
     DEFAULT_TIMEOUT = 30
     MAX_BODY_BYTES = 64 * 1024
 
@@ -76,7 +72,7 @@ module Broker
         url,
         form: form
       )
-      Response.new(status: response.status, body: response.body)
+      response
     rescue StandardError => e
       raise ExchangeError.new("token endpoint request failed: #{e.class}", stage: "network")
     end

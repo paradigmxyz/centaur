@@ -39,7 +39,7 @@ module Oauth
       end
 
       def call(url:, form:, headers:, timeout:)
-        Broker::AuthorizationCodeClient::Response.new(status: @status, body: @body)
+        HttpClient::Response.new(status: @status, body: @body)
       end
     end
 

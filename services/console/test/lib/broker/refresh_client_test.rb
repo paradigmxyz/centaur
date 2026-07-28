@@ -14,7 +14,7 @@ module Broker
 
       def call(url:, form:, headers:, timeout:, form_encoding:)
         @captured = { url: url, form: form, headers: headers, timeout: timeout, form_encoding: form_encoding }
-        Broker::RefreshClient::Response.new(status: @status, body: @body)
+        HttpClient::Response.new(status: @status, body: @body)
       end
     end
 

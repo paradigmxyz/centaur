@@ -2,7 +2,6 @@ require "cgi"
 require "uri"
 
 class CentaurApiClient
-  Response = HttpClient::Response
   Error = Class.new(StandardError)
 
   DEFAULT_TIMEOUT_SECONDS = 20

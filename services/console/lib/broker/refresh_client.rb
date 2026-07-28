@@ -13,10 +13,6 @@ module Broker
     # it -- the caller picks a conservative default).
     Result = Data.define(:access_token, :refresh_token, :expires_in)
 
-    # The minimal HTTP response shape RefreshClient consumes, so tests can inject
-    # a double without Net::HTTP.
-    Response = Data.define(:status, :body)
-
     DEFAULT_TIMEOUT = 30
     MAX_BODY_BYTES = 64 * 1024
 
@@ -69,7 +65,7 @@ module Broker
         multipart: form_encoding == :multipart,
         headers: headers
       )
-      Response.new(status: response.status, body: response.body)
+      response
     rescue StandardError => e
       # Network/transport failures are transient: a brief outage must not mark the
       # credential dead. Backoff exhaustion is the louder signal.
