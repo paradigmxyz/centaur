@@ -21,5 +21,13 @@ module ActiveSupport
       end
       http
     end
+
+    def with_env(overrides)
+      previous = overrides.keys.index_with { |name| ENV[name] }
+      overrides.each { |name, value| value.nil? ? ENV.delete(name) : ENV[name] = value }
+      yield
+    ensure
+      previous.each { |name, value| value.nil? ? ENV.delete(name) : ENV[name] = value }
+    end
   end
 end

@@ -1918,16 +1918,6 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     Console::ThreadsController.client_factory = original_factory
   end
 
-  # Sets each env var for the block (nil deletes) and restores the previous
-  # values afterwards.
-  def with_env(overrides)
-    previous = overrides.keys.index_with { |name| ENV[name] }
-    overrides.each { |name, value| value.nil? ? ENV.delete(name) : ENV[name] = value }
-    yield
-  ensure
-    previous.each { |name, value| value.nil? ? ENV.delete(name) : ENV[name] = value }
-  end
-
   def with_recent_first_error
     singleton = class << CentaurSession; self; end
     original = CentaurSession.method(:recent_first)

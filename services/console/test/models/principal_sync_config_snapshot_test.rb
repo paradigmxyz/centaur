@@ -639,16 +639,4 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     _header, payload, _signature = token.split(".")
     JSON.parse(Base64.urlsafe_decode64(payload))
   end
-
-  def with_env(values)
-    previous = values.keys.to_h { |key| [ key, ENV[key] ] }
-    values.each do |key, value|
-      value.nil? ? ENV.delete(key) : ENV[key] = value
-    end
-    yield
-  ensure
-    previous.each do |key, value|
-      value.nil? ? ENV.delete(key) : ENV[key] = value
-    end
-  end
 end

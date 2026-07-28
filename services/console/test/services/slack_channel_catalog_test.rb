@@ -76,14 +76,4 @@ class SlackChannelCatalogTest < ActiveSupport::TestCase
     assert_equal SlackChannelCatalog::WRITE_TIMEOUT_SECONDS, captured_options.fetch(:write_timeout)
     api.verify
   end
-
-  private
-
-  def with_env(values)
-    previous = values.keys.to_h { |key| [ key, ENV[key] ] }
-    values.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
-    yield
-  ensure
-    previous.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
-  end
 end

@@ -407,18 +407,6 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_equal static_secrets(:acme_prod_api_key).id, ids.last
   end
 
-  def with_env(values)
-    previous = values.keys.to_h { |key| [ key, ENV[key] ] }
-    values.each do |key, value|
-      value.nil? ? ENV.delete(key) : ENV[key] = value
-    end
-    yield
-  ensure
-    previous.each do |key, value|
-      value.nil? ? ENV.delete(key) : ENV[key] = value
-    end
-  end
-
   def jwt_payload(token)
     _header, payload, _signature = token.split(".")
     JSON.parse(Base64.urlsafe_decode64(payload))
