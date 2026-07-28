@@ -53,9 +53,9 @@ module Console
       assert_response :ok
 
       assert_select(
-        "button[type=submit][name=_method][value=delete][formaction=?][aria-label=?]",
+        "a[href=?][data-turbo-method=delete][title=?]",
         console_slack_channel_permission_path(permission.id),
-        "Delete #{permission.channel_id} Slack channel permission"
+        "Delete #{permission.channel_id}"
       )
     end
 
