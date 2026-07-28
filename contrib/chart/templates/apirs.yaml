@@ -263,6 +263,26 @@ spec:
             - name: WORKFLOW_ALLOWED_NAMES
               value: {{ .Values.apiRs.workflowAllowedNames | quote }}
 {{- end }}
+{{- with .Values.apiRs.workflowHostResources.requests }}
+{{- if .cpu }}
+            - name: WORKFLOW_HOST_CPU_REQUEST
+              value: {{ .cpu | quote }}
+{{- end }}
+{{- if .memory }}
+            - name: WORKFLOW_HOST_MEMORY_REQUEST
+              value: {{ .memory | quote }}
+{{- end }}
+{{- end }}
+{{- with .Values.apiRs.workflowHostResources.limits }}
+{{- if .cpu }}
+            - name: WORKFLOW_HOST_CPU_LIMIT
+              value: {{ .cpu | quote }}
+{{- end }}
+{{- if .memory }}
+            - name: WORKFLOW_HOST_MEMORY_LIMIT
+              value: {{ .memory | quote }}
+{{- end }}
+{{- end }}
 {{- range $env := $apiRsEtlEnv }}
 {{- if not (hasKey $.Values.apiRs.extraEnv $env.name) }}
             - name: {{ $env.name }}
@@ -326,6 +346,26 @@ spec:
               value: {{ printf "%s:%s" .Values.sandbox.image.repository .Values.sandbox.image.tag | quote }}
             - name: SESSION_SANDBOX_IMAGE_PULL_POLICY
               value: {{ .Values.sandbox.image.pullPolicy | quote }}
+{{- with .Values.sandbox.resources.requests }}
+{{- if .cpu }}
+            - name: SESSION_SANDBOX_CPU_REQUEST
+              value: {{ .cpu | quote }}
+{{- end }}
+{{- if .memory }}
+            - name: SESSION_SANDBOX_MEMORY_REQUEST
+              value: {{ .memory | quote }}
+{{- end }}
+{{- end }}
+{{- with .Values.sandbox.resources.limits }}
+{{- if .cpu }}
+            - name: SESSION_SANDBOX_CPU_LIMIT
+              value: {{ .cpu | quote }}
+{{- end }}
+{{- if .memory }}
+            - name: SESSION_SANDBOX_MEMORY_LIMIT
+              value: {{ .memory | quote }}
+{{- end }}
+{{- end }}
 {{- if .Values.global.imagePullSecrets }}
             - name: SESSION_SANDBOX_IMAGE_PULL_SECRETS
               value: "{{- range $index, $secret := .Values.global.imagePullSecrets }}{{- if $index }},{{ end -}}{{ $secret.name }}{{- end }}"
@@ -349,6 +389,26 @@ spec:
               value: {{ .Values.ironProxy.image.pullPolicy | quote }}
             - name: KUBERNETES_IRON_PROXY_UPSTREAM_DENY_CIDRS
               value: {{ join "," .Values.ironProxy.upstreamDenyCidrs | quote }}
+{{- with .Values.ironProxy.resources.requests }}
+{{- if .cpu }}
+            - name: KUBERNETES_IRON_PROXY_CPU_REQUEST
+              value: {{ .cpu | quote }}
+{{- end }}
+{{- if .memory }}
+            - name: KUBERNETES_IRON_PROXY_MEMORY_REQUEST
+              value: {{ .memory | quote }}
+{{- end }}
+{{- end }}
+{{- with .Values.ironProxy.resources.limits }}
+{{- if .cpu }}
+            - name: KUBERNETES_IRON_PROXY_CPU_LIMIT
+              value: {{ .cpu | quote }}
+{{- end }}
+{{- if .memory }}
+            - name: KUBERNETES_IRON_PROXY_MEMORY_LIMIT
+              value: {{ .memory | quote }}
+{{- end }}
+{{- end }}
             - name: KUBERNETES_FIREWALL_CA_SECRET_NAME
               value: {{ include "centaur.trustedCaSecretName" . | quote }}
             - name: KUBERNETES_FIREWALL_CA_KEY_SECRET_NAME

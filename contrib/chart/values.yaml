@@ -41,6 +41,8 @@ ironProxy:
     - "10.43.0.0/16"
   secretSource: onepassword
   secretTtl: 10m
+  # Requests/limits for each per-sandbox iron-proxy pod (k8s resources map).
+  resources: {}
 
 # Base tools delivery for api-rs sandboxes. When enabled, repo-cache keeps `repo`
 # fresh on each node and a tools-bootstrap init container copies `subdir` into
@@ -270,11 +272,9 @@ sandbox:
     enabled: false
     size: 10Gi
     storageClassName: ""
-  resources:
-    limits: {}
-    requests:
-      cpu: 100m
-      memory: 512Mi
+  # Requests/limits for the agent container of every sandbox pod, per-session
+  # and warm (k8s resources map).
+  resources: {}
 
 repoCache:
   enabled: true
@@ -379,6 +379,8 @@ apiRs:
   workflowHostSandbox: true
   workflowEnableMode: all
   workflowAllowedNames: ""
+  # Requests/limits for the workflow-host sandbox pod (k8s resources map).
+  workflowHostResources: {}
   # Scheduled ETL workflow configuration. The chart renders these into api-rs
   # env so workflow discovery sees the right schedules, then derives the
   # workflow-host passthrough list from the same non-secret config.

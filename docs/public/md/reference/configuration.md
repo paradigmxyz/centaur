@@ -180,7 +180,9 @@ Kubernetes backend:
 | `KUBERNETES_NAMESPACE`, `POD_NAMESPACE`, `KUBERNETES_KUBECONFIG` | Chart namespace, downward API, or `api.extraEnv`. | Kubernetes client namespace/config. |
 | `KUBERNETES_AGENT_IMAGE_PULL_POLICY`, `KUBERNETES_SANDBOX_IMAGE_PULL_SECRETS` | `sandbox.image.pullPolicy`, `global.imagePullSecrets`. | Sandbox image pull behavior. |
 | `KUBERNETES_SANDBOX_RUNTIME_CLASS_NAME`, `KUBERNETES_SANDBOX_SERVICE_ACCOUNT_NAME` | `sandbox.runtimeClassName`, `api.extraEnv`. | Pod runtime class and service account. |
-| `KUBERNETES_SANDBOX_CPU_LIMIT`, `KUBERNETES_SANDBOX_MEMORY_LIMIT`, `KUBERNETES_SANDBOX_CPU_REQUEST`, `KUBERNETES_SANDBOX_MEMORY_REQUEST` | `sandbox.resources.*`. | Sandbox pod resources. |
+| `SESSION_SANDBOX_CPU_REQUEST`, `SESSION_SANDBOX_CPU_LIMIT`, `SESSION_SANDBOX_MEMORY_REQUEST`, `SESSION_SANDBOX_MEMORY_LIMIT` | `sandbox.resources.*`. | Session sandbox pod resources (per-session and warm). Unset keys leave the pod unconstrained. |
+| `WORKFLOW_HOST_CPU_REQUEST`, `WORKFLOW_HOST_CPU_LIMIT`, `WORKFLOW_HOST_MEMORY_REQUEST`, `WORKFLOW_HOST_MEMORY_LIMIT` | `apiRs.workflowHostResources.*`. | Workflow-host sandbox pod resources, sized independently of session sandboxes. |
+| `KUBERNETES_IRON_PROXY_CPU_REQUEST`, `KUBERNETES_IRON_PROXY_CPU_LIMIT`, `KUBERNETES_IRON_PROXY_MEMORY_REQUEST`, `KUBERNETES_IRON_PROXY_MEMORY_LIMIT` | `ironProxy.resources.*`. | Per-sandbox iron-proxy pod resources. |
 | `KUBERNETES_SANDBOX_READY_TIMEOUT_S`, `KUBERNETES_ATTACH_LOG_TAIL_LINES` | `api.extraEnv`. | Sandbox readiness and attach diagnostics. |
 | `SESSION_SANDBOX_CLEANUP_INTERVAL_SECS`, `SESSION_SANDBOX_IDLE_CLEANUP_BACKSTOP_SECS` | `apiRs.sandboxCleanupIntervalSecs`, `apiRs.sandboxIdleCleanupBackstopSecs`. | DB-aware cleanup of unreferenced sandboxes and restart recovery for idle pauses. Persisted `idle_timeout_ms` is honored after restart; the backstop is the fallback for older execution rows without that metadata. |
 | `KUBERNETES_SANDBOX_EXTRA_ENV` | `sandbox.extraEnv`. | JSON list copied into each sandbox. |

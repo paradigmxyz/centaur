@@ -61,7 +61,7 @@ pub struct SandboxSpec {
     pub env: Vec<EnvVar>,
     pub working_dir: Option<String>,
     pub mounts: Vec<Mount>,
-    pub resources: Option<ResourceLimits>,
+    pub resources: Option<ResourceRequirements>,
     /// iron-control principal OID (``prn_…``) this sandbox's egress proxy
     /// should act as. When set, the backend registers/binds an iron-control
     /// proxy for the sandbox instead of rendering a static proxy config.
@@ -133,7 +133,7 @@ impl SandboxSpec {
         self
     }
 
-    pub fn resources(mut self, resources: ResourceLimits) -> Self {
+    pub fn resources(mut self, resources: ResourceRequirements) -> Self {
         self.resources = Some(resources);
         self
     }
@@ -191,33 +191,45 @@ pub enum MountKind {
     Bind { source_path: String },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ResourceLimits {
-    pub cpu_millis: Option<u32>,
-    pub memory_bytes: Option<u64>,
+/// Container resource requests/limits as Kubernetes quantity strings
+/// (`"100m"`, `"4Gi"`).
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ResourceRequirements {
+    pub cpu_request: Option<String>,
+    pub cpu_limit: Option<String>,
+    pub memory_request: Option<String>,
+    pub memory_limit: Option<String>,
 }
 
-impl ResourceLimits {
+impl ResourceRequirements {
     pub fn new() -> Self {
-        Self {
-            cpu_millis: None,
-            memory_bytes: None,
-        }
+        Self::default()
     }
 
-    pub fn cpu_millis(mut self, cpu_millis: u32) -> Self {
-        self.cpu_millis = Some(cpu_millis);
+    pub fn cpu_request(mut self, cpu_request: impl Into<String>) -> Self {
+        self.cpu_request = Some(cpu_request.into());
         self
     }
 
-    pub fn memory_bytes(mut self, memory_bytes: u64) -> Self {
-        self.memory_bytes = Some(memory_bytes);
+    pub fn cpu_limit(mut self, cpu_limit: impl Into<String>) -> Self {
+        self.cpu_limit = Some(cpu_limit.into());
         self
     }
-}
 
-impl Default for ResourceLimits {
-    fn default() -> Self {
-        Self::new()
+    pub fn memory_request(mut self, memory_request: impl Into<String>) -> Self {
+        self.memory_request = Some(memory_request.into());
+        self
+    }
+
+    pub fn memory_limit(mut self, memory_limit: impl Into<String>) -> Self {
+        self.memory_limit = Some(memory_limit.into());
+        self
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.cpu_request.is_none()
+            && self.cpu_limit.is_none()
+            && self.memory_request.is_none()
+            && self.memory_limit.is_none()
     }
 }
