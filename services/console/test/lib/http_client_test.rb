@@ -4,12 +4,7 @@ class HttpClientTest < ActiveSupport::TestCase
   FakeResponse = Struct.new(:code, :body)
 
   def expect_transport_call(response)
-    http = Minitest::Mock.new
-    http.expect(:call, response) do |method:, url:, body:, headers:, timeout:|
-      yield({ method: method, url: url, body: body, headers: headers, timeout: timeout }) if block_given?
-      true
-    end
-    http
+    expect_http_call(status: response.status, body: response.body, headers: response.headers) { |request| yield request if block_given? }
   end
 
   test "serializes JSON requests and parses JSON responses" do

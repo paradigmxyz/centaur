@@ -36,11 +36,7 @@ module Oauth
 
     def stub_exchange(status:, body:, expected: true)
       http = Minitest::Mock.new
-      if expected
-        http.expect(:call, HttpClient::Response.new(status: status, body: body)) do |**_kwargs|
-          true
-        end
-      end
+      expect_http_call(http, status: status, body: body) if expected
       @exchange_http_mocks << http
       FlowsController.exchange_client_factory = -> { Broker::AuthorizationCodeClient.new(http: http) }
     end

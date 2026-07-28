@@ -2,10 +2,7 @@ require "test_helper"
 
 class CentaurApiClientTest < ActiveSupport::TestCase
   def expect_request(http, status:, body:)
-    http.expect(:call, HttpClient::Response.new(status: status, body: body)) do |method:, url:, body:, headers:, timeout:|
-      yield({ method: method, url: url, body: body, headers: headers, timeout: timeout }) if block_given?
-      true
-    end
+    expect_http_call(http, status: status, body: body) { |request| yield request if block_given? }
   end
 
   test "lists Slack archive imports with query params" do

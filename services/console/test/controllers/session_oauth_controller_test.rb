@@ -30,11 +30,7 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
   end
 
   def stub_exchange(status:, body:)
-    http = Minitest::Mock.new
-    http.expect(:call, HttpClient::Response.new(status: status, body: body)) do |**request|
-      yield request if block_given?
-      true
-    end
+    http = expect_http_call(status: status, body: body) { |request| yield request if block_given? }
     @exchange_http_mocks << http
     SessionOauthController.exchange_client_factory = -> { Broker::AuthorizationCodeClient.new(http: http) }
   end

@@ -3,11 +3,7 @@ require "test_helper"
 module Broker
   class AuthorizationCodeClientTest < ActiveSupport::TestCase
     def client_with(status:, body:)
-      http = Minitest::Mock.new
-      http.expect(:call, HttpClient::Response.new(status: status, body: body)) do |**request|
-        yield request if block_given?
-        true
-      end
+      http = expect_http_call(status: status, body: body) { |request| yield request if block_given? }
       [ AuthorizationCodeClient.new(http: http), http ]
     end
 
