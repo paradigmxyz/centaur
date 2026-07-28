@@ -31,14 +31,12 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
 
   def stub_exchange(status:, body:)
     http = Minitest::Mock.new
-    captured = {}
-    http.expect(:call, HttpClient::Response.new(status: status, body: body)) do |url:, form:, headers:, timeout:|
-      captured.replace(url: url, form: form, headers: headers, timeout: timeout)
+    http.expect(:call, HttpClient::Response.new(status: status, body: body)) do |**request|
+      yield request if block_given?
       true
     end
     @exchange_http_mocks << http
     SessionOauthController.exchange_client_factory = -> { Broker::AuthorizationCodeClient.new(http: http) }
-    captured
   end
 
   def id_token(claims)
@@ -120,7 +118,7 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
       "email_verified" => true,
       "name" => "Rotating User"
     }
-    exchange = stub_exchange(
+    stub_exchange(
       status: 200,
       body: {
         ok: true,
@@ -129,13 +127,14 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
         expires_in: 43_200,
         id_token: id_token(claims)
       }.to_json
-    )
+    ) do |request|
+      assert_equal "slack-login-secret", request.dig(:form, "client_secret")
+      assert_nil request.dig(:form, "code_verifier")
+    end
 
     get auth_callback_url(provider: "slack"), params: { code: "the-code", state: state }
 
     assert_redirected_to console_threads_path
-    assert_equal "slack-login-secret", exchange.dig(:form, "client_secret")
-    assert_nil exchange.dig(:form, "code_verifier")
     user = User.find_by!(email: "rotating@example.com")
     assert_equal "Rotating User", user.name
     assert_equal [ [ "slack", "U123ROTATING" ] ], user.user_identities.pluck(:provider, :subject)
