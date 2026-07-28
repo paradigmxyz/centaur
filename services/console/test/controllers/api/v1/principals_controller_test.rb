@@ -584,6 +584,40 @@ module Api
         Api::V1::PrincipalsController.send(:private, :save_slack_channel_permission!)
       end
 
+      test "POST returns a validation error when the uniqueness retry is invalid" do
+        principal = principals(:acme_channel)
+        body = {
+          data: {
+            channel_id: "C0123456789",
+            upload_enabled: false,
+            download_enabled: false,
+            history_enabled: false
+          }
+        }
+        original = Api::V1::PrincipalsController.instance_method(:save_slack_channel_permission!)
+
+        Api::V1::PrincipalsController.define_method(:save_slack_channel_permission!) do |target_principal, attrs|
+          target_principal.slack_channel_permissions.create!(
+            channel_id: attrs[:channel_id],
+            upload_enabled: true
+          )
+          raise ActiveRecord::RecordNotUnique, "duplicate key value violates unique constraint"
+        end
+        Api::V1::PrincipalsController.send(:private, :save_slack_channel_permission!)
+
+        assert_difference -> { principal.slack_channel_permissions.count } => 1 do
+          post "/api/v1/principals/#{principal.oid}/slack_channel_permissions",
+               params: body.to_json,
+               headers: auth_headers
+        end
+        assert_response :unprocessable_content
+        assert_equal "validation failed", json_body.dig("error", "message")
+        assert_includes json_body.dig("error", "details", "base"), "Select at least one Slack permission"
+      ensure
+        Api::V1::PrincipalsController.define_method(:save_slack_channel_permission!, original)
+        Api::V1::PrincipalsController.send(:private, :save_slack_channel_permission!)
+      end
+
       test "POST upserts one Slack DM permission" do
         principal = principals(:acme_user_bob)
         body = {

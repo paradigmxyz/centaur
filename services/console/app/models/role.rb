@@ -35,7 +35,7 @@ class Role < ApplicationRecord
   private
 
   def reject_slack_channel_permission_attributes?(attributes)
-    attributes["channel_id"].blank?
+    attributes["id"].blank? && attributes["channel_id"].blank?
   end
 
   def labels_is_a_hash

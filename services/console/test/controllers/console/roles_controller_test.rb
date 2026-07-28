@@ -93,8 +93,8 @@ module Console
                 slack_channel_permissions_attributes: {
                   "0" => {
                     id: permission.id,
-                    upload_enabled: "1",
-                    download_enabled: "0",
+                    upload_enabled: "0",
+                    download_enabled: "1",
                     history_enabled: "0"
                   }
                 }
@@ -104,6 +104,9 @@ module Console
       assert_redirected_to console_role_path(role.oid)
       permission.reload
       assert_equal "C0123456789", permission.channel_id
+      assert_not permission.upload_enabled
+      assert_predicate permission, :download_enabled
+      assert_not permission.history_enabled
     end
 
     test "update_slack_channel_permissions rejects channel id changes" do

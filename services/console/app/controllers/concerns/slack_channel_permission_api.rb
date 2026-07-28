@@ -11,19 +11,23 @@ module SlackChannelPermissionApi
     owner = slack_channel_permission_owner
     attrs = upsert_slack_channel_permission_params
     attrs[:channel_id] = attrs[:channel_id].to_s.strip.upcase
-    permission, was_new = save_slack_channel_permission!(owner, attrs)
+    permission, was_new = save_slack_channel_permission_with_race_retry!(owner, attrs)
 
     render status: (was_new ? :created : :ok), json: { data: permission.as_permission_json }
-  rescue ActiveRecord::RecordNotUnique
-    permission = owner.slack_channel_permissions.find_by!(channel_id: attrs[:channel_id])
-    permission.assign_attributes(attrs.except(:channel_id))
-    permission.save!
-    render status: :ok, json: { data: permission.as_permission_json }
   rescue ActiveRecord::RecordInvalid => e
     render_validation_error(e.record)
   end
 
   private
+
+  def save_slack_channel_permission_with_race_retry!(owner, attrs)
+    save_slack_channel_permission!(owner, attrs)
+  rescue ActiveRecord::RecordNotUnique
+    permission = owner.slack_channel_permissions.find_by!(channel_id: attrs[:channel_id])
+    permission.assign_attributes(attrs.except(:channel_id))
+    permission.save!
+    [ permission, false ]
+  end
 
   def save_slack_channel_permission!(owner, attrs)
     permission = owner.slack_channel_permissions.find_or_initialize_by(channel_id: attrs[:channel_id])

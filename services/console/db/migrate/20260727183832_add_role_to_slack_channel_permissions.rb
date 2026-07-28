@@ -3,7 +3,7 @@ class AddRoleToSlackChannelPermissions < ActiveRecord::Migration[8.1]
     change_column_null :slack_channel_permissions, :principal_id, true
     add_reference :slack_channel_permissions, :role, null: true, foreign_key: true, index: false
 
-    remove_index :slack_channel_permissions, %i[principal_id channel_id]
+    remove_index :slack_channel_permissions, %i[principal_id channel_id], unique: true
     add_index :slack_channel_permissions,
               %i[principal_id channel_id],
               unique: true,

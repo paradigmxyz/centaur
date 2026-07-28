@@ -210,7 +210,7 @@ class Principal < ApplicationRecord
   end
 
   def reject_slack_channel_permission_attributes?(attributes)
-    attributes["channel_id"].blank?
+    attributes["id"].blank? && attributes["channel_id"].blank?
   end
 
   def effective_slack_channel_permissions

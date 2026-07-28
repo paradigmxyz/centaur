@@ -142,6 +142,36 @@ module Console
       )
     end
 
+    test "update_slack_channel_permissions persists flag changes without a channel id" do
+      principal = principals(:acme_user_bob)
+      permission = principal.slack_channel_permissions.create!(
+        channel_id: "C0123456789",
+        upload_enabled: true,
+        download_enabled: true,
+        history_enabled: true
+      )
+
+      patch console_principal_slack_channel_permissions_url(principal.oid),
+            params: {
+              principal: {
+                slack_channel_permissions_attributes: {
+                  "0" => {
+                    id: permission.id,
+                    upload_enabled: "0",
+                    download_enabled: "1",
+                    history_enabled: "0"
+                  }
+                }
+              }
+            }
+
+      assert_redirected_to console_principal_path(principal.oid)
+      permission.reload
+      assert_not permission.upload_enabled
+      assert_predicate permission, :download_enabled
+      assert_not permission.history_enabled
+    end
+
     test "update_slack_channel_permissions rejects channel id changes" do
       principal = principals(:acme_user_bob)
       permission = SlackChannelPermission.create!(
