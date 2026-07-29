@@ -116,7 +116,7 @@ module Api
       if sync_config_replacement_unchanged?(record, attributes, **associations)
         raise ActiveRecord::RecordInvalid, record unless record.valid?
 
-        record.reload
+        record
       else
         yield
       end

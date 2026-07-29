@@ -1,10 +1,11 @@
 module SyncConfigReplacement
-  SOURCE_ATTRIBUTES = %w[source_type config secret role role_kind].freeze
-  RULE_ATTRIBUTES = %w[position host cidr http_methods paths].freeze
+  IGNORED_ASSOCIATION_ATTRIBUTES = %w[id created_at updated_at].freeze
+  REPLACEMENT_ASSOCIATION_CLASSES = [ SecretSource, RequestRule ].freeze
 
   module_function
 
   def equivalent?(record, attributes, associations)
+    validate_association_coverage!(record, associations)
     current_document(record, attributes, associations) == replacement_document(record, attributes, associations)
   end
 
@@ -45,29 +46,32 @@ module SyncConfigReplacement
     documents = records.map { |record| record_document(record, record_class) }
     return documents unless record_class == SecretSource
 
-    documents.sort_by { |document| JSON.generate(document) }
+    documents.sort_by { |document| JSON.generate(normalize(document)) }
   end
 
   def record_document(record, record_class)
-    fields = case record_class.name
-    when "SecretSource" then SOURCE_ATTRIBUTES
-    when "RequestRule" then RULE_ATTRIBUTES
-    else raise ArgumentError, "unsupported association class #{record_class.name}"
-    end
+    raise ArgumentError, "unsupported association class #{record_class.name}" unless
+      REPLACEMENT_ASSOCIATION_CLASSES.include?(record_class)
 
-    attributes = if record.is_a?(record_class)
-      fields.index_with { |name| record.public_send(name) }
-    else
-      normalize(record.to_h)
-    end
+    record = record_class.new(record.to_h) unless record.is_a?(record_class)
+    association_attribute_names(record_class).index_with { |name| record.public_send(name) }
+  end
 
-    fields.index_with { |field| attributes[field] }.tap do |document|
-      document["config"] ||= {} if record_class == SecretSource
-      if record_class == RequestRule
-        document["http_methods"] ||= []
-        document["paths"] ||= []
-      end
+  def association_attribute_names(record_class)
+    owner_foreign_keys = record_class.const_get(:OWNER_ASSOCIATIONS).map do |association|
+      record_class.reflect_on_association(association).foreign_key.to_s
     end
+    record_class.attribute_names - IGNORED_ASSOCIATION_ATTRIBUTES - owner_foreign_keys
+  end
+
+  def validate_association_coverage!(record, associations)
+    expected = record.class.reflect_on_all_associations.filter_map do |reflection|
+      reflection.name if REPLACEMENT_ASSOCIATION_CLASSES.include?(reflection.klass)
+    end
+    missing = expected - associations.keys.map(&:to_sym)
+    return if missing.empty?
+
+    raise ArgumentError, "missing replacement associations: #{missing.join(", ")}"
   end
 
   def attribute_names(attributes)
