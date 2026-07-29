@@ -48,7 +48,7 @@ module SyncConfigReplacement
 
   def collection_document(records, record_class)
     documents = records.map { |record| record_document(record, record_class) }
-    return documents unless record_class == SecretSource
+    return documents if record_class == RequestRule
 
     documents.sort_by { |document| JSON.generate(normalize(document)) }
   end
