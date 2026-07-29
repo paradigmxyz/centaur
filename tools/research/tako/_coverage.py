@@ -42,7 +42,7 @@ LOW_SIGNAL_METRIC = re.compile(r"\(Normalized\)|^Account Code\b", re.IGNORECASE)
 
 # The installed CLI command name (the [project.scripts] entry). Referenced in
 # model-facing summary strings so a rename stays consistent everywhere.
-TOOL_COMMAND = "research"
+TOOL_COMMAND = "datasearch"
 
 # Valid values, derived from the SDK enums so an upstream addition is accepted
 # here the moment the dependency updates (the pin is open: tako-sdk>=2.2.6).

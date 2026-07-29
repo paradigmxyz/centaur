@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.scripts]
-research = "centaur_tool_tako.cli:app"
+datasearch = "centaur_tool_tako.cli:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["."]

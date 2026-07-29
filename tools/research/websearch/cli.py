@@ -13,14 +13,7 @@ from .client import _client
 
 load_dotenv()
 
-app = typer.Typer(
-    name="websearch",
-    help=(
-        "Web search and deep research via Parallel. For company financials, "
-        "market or macro data, and website-traffic metrics, prefer the "
-        "`research` tool (licensed structured data, cited)."
-    ),
-)
+app = typer.Typer(name="websearch", help="Web search and deep research via Parallel")
 
 
 @app.command("health")

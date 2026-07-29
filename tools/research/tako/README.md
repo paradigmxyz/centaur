@@ -1,9 +1,9 @@
-# research (Tako)
+# datasearch (Tako)
 
 Web search plus structured, cited data from [Tako](https://tako.com): company
 financials (S&P Global), macro indicators (FRED), website traffic (SimilarWeb),
 synthesized answers, and free data-coverage discovery. Installed as the
-`research` CLI; the package and directory keep the `tako` name.
+`datasearch` CLI; the package and directory keep the `tako` name.
 
 Where `websearch` retrieves prose from web pages, Tako returns typed series and
 comparable metrics with sources attached. The two complement each other. Use
@@ -55,13 +55,13 @@ TAKO_API_KEY=...   # optional; https://tako.com, account settings
 
 ```bash
 # 1. Free: does Tako have data on this, and what is it called?
-research available-data "Tesla"
+datasearch available-data "Tesla"
 
 # 2. Priced: pull the card, reusing the exact name (and optionally the node id)
-research search "Tesla, Inc. Revenue" --node-id <node_id from step 1>
+datasearch search "Tesla, Inc. Revenue" --node-id <node_id from step 1>
 
 # 3. Priced beyond the free allowance: export the full dataset behind a card
-research contents "<card webpage_url>" --content-format json_records
+datasearch contents "<card webpage_url>" --content-format json_records
 ```
 
 `available-data` is the recommended first step for any data lookup. It costs
@@ -92,11 +92,11 @@ higher.
 ## Commands
 
 ```bash
-research health
-research available-data "inflation rate" --types metric
-research search "Nvidia vs AMD revenue" --effort deep
-research answer "How has US CPI moved since 2020?"
-research contents "<card webpage_url>" --mode inline --content-format csv
+datasearch health
+datasearch available-data "inflation rate" --types metric
+datasearch search "Nvidia vs AMD revenue" --effort deep
+datasearch answer "How has US CPI moved since 2020?"
+datasearch contents "<card webpage_url>" --mode inline --content-format csv
 ```
 
 `search` and `answer` take the same options. `--data-count 0` gives a web-only
