@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 import os
+import subprocess
 import sys
 import tempfile
 import types
@@ -430,6 +432,57 @@ class WorkflowHostTests(unittest.TestCase):
 
         assert registered is not None
         self.assertEqual(host.normalize_principal(registered), True)
+
+    def test_failed_workflow_host_exits_even_when_stdin_remains_open(self) -> None:
+        host_path = Path(__file__).resolve().parents[1] / "workflow_host.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow_path = Path(tmp) / "failing_workflow.py"
+            workflow_path.write_text(
+                "WORKFLOW_NAME = 'failing_workflow'\n"
+                "async def handler(inp, ctx):\n"
+                "    raise RuntimeError('boom')\n"
+            )
+
+            env = os.environ.copy()
+            env["WORKFLOW_DIRS"] = tmp
+            proc = subprocess.Popen(
+                [sys.executable, str(host_path)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            assert proc.stdin is not None
+            assert proc.stdout is not None
+            try:
+                proc.stdin.write(
+                    json.dumps(
+                        {
+                            "type": "workflow.start",
+                            "run_id": "run-123",
+                            "task_id": "task-456",
+                            "workflow_name": "failing_workflow",
+                            "input": {},
+                        },
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                )
+                proc.stdin.flush()
+
+                line = proc.stdout.readline()
+                self.assertTrue(line, "workflow host did not emit a response")
+                payload = json.loads(line)
+                self.assertEqual(payload["type"], "workflow.error")
+                self.assertEqual(payload["message"], "boom")
+
+                proc.wait(timeout=2)
+                self.assertEqual(proc.returncode, 0)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                proc.communicate(timeout=2)
 
 
 if __name__ == "__main__":

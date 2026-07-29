@@ -171,7 +171,6 @@ class PgDsnSecretTest < ActiveSupport::TestCase
     SlackChannelPermission.create!(
       principal: principal,
       channel_id: "GPRIVATE123",
-      channel_name: "private",
       upload_enabled: false,
       download_enabled: false,
       history_enabled: true
@@ -179,7 +178,6 @@ class PgDsnSecretTest < ActiveSupport::TestCase
     SlackChannelPermission.create!(
       principal: principal,
       channel_id: "CUPLOAD123",
-      channel_name: "uploads",
       upload_enabled: true,
       download_enabled: false,
       history_enabled: false
@@ -187,7 +185,6 @@ class PgDsnSecretTest < ActiveSupport::TestCase
     SlackChannelPermission.create!(
       principal: principal,
       channel_id: "CDOWNLD123",
-      channel_name: "downloads",
       upload_enabled: false,
       download_enabled: true,
       history_enabled: false

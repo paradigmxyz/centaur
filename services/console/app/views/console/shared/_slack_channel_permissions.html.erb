@@ -1,0 +1,177 @@
+<% owner = local_assigns.fetch(:owner) %>
+<% url = local_assigns.fetch(:url) %>
+<% inherited_permissions = local_assigns.fetch(:inherited_permissions, []) %>
+<% api_managed_direct_messages = local_assigns.fetch(:api_managed_direct_messages, false) %>
+<% checkbox_class = "mt-1 h-4 w-4 rounded border-ink-500 bg-ink-800 text-centaur-500 focus:ring-centaur-500" %>
+<% channel_options = @slack_channel_options || [] %>
+<% permissions = @slack_channel_permissions || [] %>
+
+<section class="mb-8">
+  <div class="mb-4">
+    <h2 class="mb-1 text-xs font-semibold uppercase tracking-wider text-zinc-500">Slack Channel Permissions</h2>
+  </div>
+  <div class="console-panel">
+    <%= form_with model: owner,
+                  url: url,
+                  method: :patch,
+                  data: { turbo: false },
+                  class: "space-y-0" do |form| %>
+      <% if @slack_channel_catalog&.error.present? %>
+        <div class="m-4 rounded border border-amber-500/30 bg-amber-500/[0.08] px-3 py-2 text-sm text-amber-200">
+          <%= @slack_channel_catalog.error %>
+        </div>
+      <% end %>
+
+      <% if permissions.any? %>
+        <div class="overflow-x-auto">
+          <table class="console-table">
+            <thead class="console-table-head">
+              <tr>
+                <th class="console-th">Channel</th>
+                <% SlackChannelPermission::PERMISSION_FLAGS.each do |flag| %>
+                  <th class="console-th"><%= flag.fetch(:label) %></th>
+                <% end %>
+                <th class="console-th">Delete</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-ink-700">
+              <% permissions.each do |permission| %>
+                <% api_managed = api_managed_direct_messages && permission.channel_id.to_s.start_with?("D") %>
+                <tr>
+                  <% if api_managed %>
+                    <% dm_name = owner.name.presence || owner.labels["slack_user_id"].presence || permission.channel_id %>
+                    <td class="console-td min-w-80">
+                      <div class="text-sm text-zinc-100">DM <%= dm_name %></div>
+                      <div class="mt-1 text-xs text-zinc-500"><%= permission.channel_id %></div>
+                    </td>
+                    <% SlackChannelPermission::PERMISSION_FLAGS.each do |flag| %>
+                      <td class="console-td">
+                        <%= check_box_tag nil,
+                                          "1",
+                                          permission.public_send(flag.fetch(:attribute)),
+                                          disabled: true,
+                                          class: checkbox_class,
+                                          aria: { label: "#{flag.fetch(:label)} for #{permission.channel_id}" } %>
+                      </td>
+                    <% end %>
+                    <td class="console-td">
+                      <span class="text-xs text-zinc-500">API-managed</span>
+                    </td>
+                  <% else %>
+                    <%= form.fields_for :slack_channel_permissions, permission do |permission_fields| %>
+                      <% channel_name = @slack_channel_names&.fetch(permission.channel_id, nil) %>
+                      <% delete_form_id = "delete_slack_channel_permission_#{permission.oid}" %>
+                      <td class="console-td min-w-80">
+                        <%= permission_fields.hidden_field :id %>
+                        <div class="text-sm text-zinc-100"><%= channel_name.present? ? "##{channel_name}" : permission.channel_id %></div>
+                        <% if channel_name.present? %>
+                          <div class="mt-1 text-xs text-zinc-500"><%= permission.channel_id %></div>
+                        <% end %>
+                      </td>
+                      <% SlackChannelPermission::PERMISSION_FLAGS.each do |flag| %>
+                        <td class="console-td">
+                          <%= permission_fields.check_box flag.fetch(:attribute),
+                                                          class: checkbox_class,
+                                                          aria: { label: "#{flag.fetch(:label)} for #{permission.channel_id}" } %>
+                        </td>
+                      <% end %>
+                      <td class="console-td">
+                        <%= button_tag type: "submit",
+                                       name: nil,
+                                       form: delete_form_id,
+                                       class: "grid size-8 place-items-center rounded text-zinc-500 transition-colors hover:bg-red-500/10 hover:text-red-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-400",
+                                       title: "Delete #{permission.channel_id}",
+                                       aria: { label: "Delete #{permission.channel_id}" } do %>
+                          <%= console_icon("trash", classes: "size-4") %>
+                        <% end %>
+                      </td>
+                    <% end %>
+                  <% end %>
+                </tr>
+              <% end %>
+            </tbody>
+          </table>
+        </div>
+      <% else %>
+        <div class="p-4">
+          <div class="empty-state">No Slack channels selected.</div>
+        </div>
+      <% end %>
+
+      <% new_permission = SlackChannelPermission.new(SlackChannelPermission::DEFAULT_ENABLED_ATTRIBUTES) %>
+      <%= form.fields_for :slack_channel_permissions, new_permission do |permission_fields| %>
+        <div class="grid gap-4 border-t border-ink-700 p-5 lg:grid-cols-[minmax(0,1fr)_auto_auto_auto]">
+          <label class="block">
+            <span class="form-label">Add Channel</span>
+            <% if channel_options.any? %>
+              <%= permission_fields.select :channel_id,
+                                           options_for_select([ [ "Select a Slack channel", "" ] ] + channel_options),
+                                           {},
+                                           class: "form-input" %>
+            <% else %>
+              <%= permission_fields.text_field :channel_id, class: "form-input", placeholder: "C0123456789" %>
+            <% end %>
+          </label>
+          <% SlackChannelPermission::PERMISSION_FLAGS.each do |flag| %>
+            <label class="flex items-start gap-3 pt-6">
+              <%= permission_fields.check_box flag.fetch(:attribute), class: checkbox_class %>
+              <span class="text-sm font-medium text-zinc-100"><%= flag.fetch(:label) %></span>
+            </label>
+          <% end %>
+        </div>
+      <% end %>
+
+      <div class="px-5 pb-5">
+        <%= submit_tag "Save Slack channel permissions", class: "btn-primary" %>
+      </div>
+    <% end %>
+
+    <% permissions.each do |permission| %>
+      <% next if api_managed_direct_messages && permission.channel_id.to_s.start_with?("D") %>
+      <%= form_with url: console_slack_channel_permission_path(permission),
+                    method: :delete,
+                    id: "delete_slack_channel_permission_#{permission.oid}",
+                    data: { turbo: false },
+                    class: "hidden" do %>
+      <% end %>
+    <% end %>
+  </div>
+
+  <% if inherited_permissions.present? %>
+    <div class="mb-3 mt-6">
+      <h3 class="text-xs font-semibold uppercase tracking-wider text-zinc-500">Inherited From Roles</h3>
+    </div>
+    <div class="console-panel overflow-x-auto">
+      <table class="console-table">
+        <thead class="console-table-head">
+          <tr>
+            <th class="console-th">Channel</th>
+            <% SlackChannelPermission::PERMISSION_FLAGS.each do |flag| %>
+              <th class="console-th"><%= flag.fetch(:label) %></th>
+            <% end %>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-ink-700">
+          <% inherited_permissions.each do |permission| %>
+            <% channel_name = @slack_channel_names&.fetch(permission["channel_id"], nil) %>
+            <tr>
+              <td class="console-td">
+                <div class="text-sm text-zinc-100"><%= channel_name.present? ? "##{channel_name}" : permission["channel_id"] %></div>
+                <div class="mt-1 text-xs text-zinc-500"><%= permission["channel_id"] %></div>
+              </td>
+              <% SlackChannelPermission::PERMISSION_FLAGS.each do |flag| %>
+                <td class="console-td">
+                  <%= check_box_tag nil,
+                                    "1",
+                                    permission.fetch(flag.fetch(:attribute).to_s),
+                                    disabled: true,
+                                    class: checkbox_class %>
+                </td>
+              <% end %>
+            </tr>
+          <% end %>
+        </tbody>
+      </table>
+    </div>
+  <% end %>
+</section>

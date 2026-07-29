@@ -28,6 +28,7 @@ module Api
         assert_equal "acme", data["namespace"]
         assert_equal "infra", data["foreign_id"]
         assert_equal "Infra", data["name"]
+        assert_equal [], data["slack_channel_permissions"]
       end
 
       test "GET returns 404 for an unknown oid" do
@@ -45,6 +46,30 @@ module Api
         data = json_body.fetch("data")
         assert_match(/\Arole_/, data["id"])
         assert_equal "payments", data["foreign_id"]
+      end
+
+      test "POST creates a role with Slack channel permissions" do
+        body = {
+          data: {
+            namespace: "acme",
+            foreign_id: "support",
+            slack_channel_permissions: [
+              {
+                channel_id: " c0123456789 ",
+                upload_enabled: true,
+                history_enabled: true
+              }
+            ]
+          }
+        }
+
+        post api_v1_roles_url, params: body.to_json, headers: auth_headers
+        assert_response :created
+
+        role = Role.find_by!(namespace: "acme", foreign_id: "support")
+        assert_equal [ "C0123456789" ], role.slack_channel_permissions.pluck(:channel_id)
+        assert_equal role.slack_channel_permissions_payload,
+                     json_body.dig("data", "slack_channel_permissions")
       end
 
       test "POST defaults the namespace" do
@@ -78,6 +103,80 @@ module Api
         assert_equal "Infrastructure", role.name
         assert_equal({ "tier" => "base" }, role.labels)
         assert_equal "acme", role.namespace
+      end
+
+      test "PUT replaces role Slack channel permissions when present" do
+        role = roles(:acme_infra)
+        role.slack_channel_permissions.create!(
+          channel_id: "C1111111111",
+          upload_enabled: true
+        )
+        body = {
+          data: {
+            slack_channel_permissions: [
+              {
+                channel_id: "G9876543210",
+                download_enabled: true
+              }
+            ]
+          }
+        }
+
+        put api_v1_role_url(id: role.oid), params: body.to_json, headers: auth_headers
+        assert_response :ok
+        assert_equal [ "G9876543210" ], role.slack_channel_permissions.reload.pluck(:channel_id)
+        assert_equal [ "G9876543210" ],
+                     json_body.dig("data", "slack_channel_permissions").pluck("channel_id")
+      end
+
+      test "POST upserts one role Slack channel permission idempotently" do
+        role = roles(:acme_infra)
+        body = {
+          data: {
+            channel_id: " c0123456789 ",
+            upload_enabled: true,
+            download_enabled: false,
+            history_enabled: false
+          }
+        }
+
+        post "/api/v1/roles/#{role.oid}/slack_channel_permissions",
+             params: body.to_json,
+             headers: auth_headers
+        assert_response :created
+
+        body[:data][:upload_enabled] = false
+        body[:data][:history_enabled] = true
+        assert_no_difference -> { role.slack_channel_permissions.count } do
+          post "/api/v1/roles/#{role.oid}/slack_channel_permissions",
+               params: body.to_json,
+               headers: auth_headers
+        end
+        assert_response :ok
+
+        permission = role.slack_channel_permissions.reload.sole
+        assert_not permission.upload_enabled
+        assert_predicate permission, :history_enabled
+      end
+
+      test "POST leaves omitted flags unchanged on an existing role permission" do
+        role = roles(:acme_infra)
+        permission = role.slack_channel_permissions.create!(
+          channel_id: "C0123456789",
+          upload_enabled: false,
+          download_enabled: true,
+          history_enabled: false
+        )
+
+        post "/api/v1/roles/#{role.oid}/slack_channel_permissions",
+             params: { data: { channel_id: permission.channel_id, history_enabled: true } }.to_json,
+             headers: auth_headers
+        assert_response :ok
+
+        permission.reload
+        assert_not permission.upload_enabled
+        assert_predicate permission, :download_enabled
+        assert_predicate permission, :history_enabled
       end
 
       test "PUT by an unknown opaque id returns 404" do

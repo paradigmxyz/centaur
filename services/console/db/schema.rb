@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_07_21_213228) do
+ActiveRecord::Schema[8.1].define(version: 2026_07_27_233739) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -399,15 +399,17 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_21_213228) do
 
   create_table "slack_channel_permissions", force: :cascade do |t|
     t.string "channel_id", null: false
-    t.string "channel_name"
     t.datetime "created_at", null: false
     t.boolean "download_enabled", default: false, null: false
     t.boolean "history_enabled", default: false, null: false
-    t.bigint "principal_id", null: false
+    t.bigint "principal_id"
+    t.bigint "role_id"
     t.datetime "updated_at", null: false
     t.boolean "upload_enabled", default: false, null: false
-    t.index ["principal_id", "channel_id"], name: "index_slack_channel_permissions_on_principal_id_and_channel_id", unique: true
+    t.index ["principal_id", "channel_id"], name: "idx_slack_permissions_unique_principal_channel", unique: true, where: "(principal_id IS NOT NULL)"
     t.index ["principal_id"], name: "index_slack_channel_permissions_on_principal_id"
+    t.index ["role_id", "channel_id"], name: "idx_slack_permissions_unique_role_channel", unique: true, where: "(role_id IS NOT NULL)"
+    t.check_constraint "(principal_id IS NOT NULL) <> (role_id IS NOT NULL)", name: "slack_channel_permissions_exactly_one_grantee"
   end
 
   create_table "static_secrets", force: :cascade do |t|
@@ -520,6 +522,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_21_213228) do
   add_foreign_key "secret_sources", "pg_dsn_secrets"
   add_foreign_key "secret_sources", "static_secrets"
   add_foreign_key "slack_channel_permissions", "principals"
+  add_foreign_key "slack_channel_permissions", "roles"
   add_foreign_key "static_secrets", "broker_credentials"
   add_foreign_key "static_secrets", "users", column: "created_by_id"
   add_foreign_key "thread_shares", "users", column: "created_by_id"

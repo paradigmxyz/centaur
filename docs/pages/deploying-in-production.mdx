@@ -212,14 +212,20 @@ Use the app page to install the bot, copy the Bot User OAuth Token for
 5. Enable Event Subscriptions.
 6. Set the Request URL to `https://<your-host>/api/webhooks/slack`.
 7. Subscribe to `app_mention` and to the message events you want Centaur to see:
-   `message.channels`, `message.groups`, and `message.im`.
+   `message.channels`, `message.groups`, and `message.im`. To automatically join
+   newly-created public channels, set `slackbotv2.autoJoinCreatedChannels` to
+   `true` and subscribe to `channel_created`.
 8. Enable Interactivity and set its Request URL to the same
    `https://<your-host>/api/webhooks/slack` URL. Block Kit actions are emitted
    to the workflow engine as `slack.block_action.<action_id>` events.
 
 The Slackbot normalizes Slack `app_mention` and `message` events plus
-`block_actions` interactions. Do not rely on assistant-specific Slack event
-types unless the Slackbot code has explicit support for them.
+`block_actions` interactions. When `SLACKBOTV2_AUTO_JOIN_CREATED_CHANNELS` is
+enabled, it also joins newly-created public channels from subscribed
+`channel_created` events. The Slack app needs `channels:read` to receive those
+events and `channels:join` for the auto-join behavior. Do not rely on
+assistant-specific Slack event types unless the Slackbot code has explicit
+support for them.
 
 Do not put Centaur API-key auth in front of `/api/webhooks/slack`; the Slackbot
 validates Slack's signature and then calls the Centaur API separately.

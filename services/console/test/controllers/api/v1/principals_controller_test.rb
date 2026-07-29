@@ -76,7 +76,6 @@ module Api
             slack_channel_permissions: [
               {
                 channel_id: "C0123456789",
-                channel_name: "general",
                 upload_enabled: true,
                 download_enabled: false,
                 history_enabled: true
@@ -106,7 +105,6 @@ module Api
           [
             {
               "channel_id" => "C0123456789",
-              "channel_name" => "general",
               "upload_enabled" => true,
               "download_enabled" => false,
               "history_enabled" => true
@@ -349,14 +347,12 @@ module Api
           [
             {
               "channel_id" => "C0123456789",
-              "channel_name" => nil,
               "upload_enabled" => true,
               "download_enabled" => true,
               "history_enabled" => false
             },
             {
               "channel_id" => "G9876543210",
-              "channel_name" => nil,
               "upload_enabled" => false,
               "download_enabled" => false,
               "history_enabled" => true
@@ -364,6 +360,73 @@ module Api
           ],
           principal.reload.slack_channel_permissions_payload
         )
+      end
+
+      test "GET separates direct and effective Slack channel permissions" do
+        principal = principals(:acme_channel)
+        SlackChannelPermission.create!(
+          principal: principal,
+          channel_id: "C0123456789",
+          upload_enabled: true
+        )
+        roles(:acme_infra).slack_channel_permissions.create!(
+          channel_id: "C0123456789",
+          download_enabled: true,
+          history_enabled: true
+        )
+
+        get api_v1_principal_url(id: principal.oid), headers: auth_headers
+        assert_response :ok
+        assert_equal(
+          {
+            "channel_id" => "C0123456789",
+            "upload_enabled" => true,
+            "download_enabled" => false,
+            "history_enabled" => false
+          },
+          json_body.dig("data", "slack_channel_permissions").sole
+        )
+        assert_equal(
+          {
+            "channel_id" => "C0123456789",
+            "upload_enabled" => true,
+            "download_enabled" => true,
+            "history_enabled" => true
+          },
+          json_body.dig("data", "effective_slack_channel_permissions").sole
+        )
+
+        returned = json_body.fetch("data")
+        put api_v1_principal_url(id: principal.oid),
+            params: { data: returned }.to_json,
+            headers: auth_headers
+        assert_response :ok
+
+        principal.principal_roles.find_by!(role: roles(:acme_infra)).destroy!
+        assert_equal [ "C0123456789" ], principal.reload.slack_channel_permissions.pluck(:channel_id)
+        direct = principal.slack_channel_permissions.sole
+        assert_not direct.download_enabled
+        assert_not direct.history_enabled
+      end
+
+      test "POST leaves omitted flags unchanged on an existing permission" do
+        principal = principals(:acme_channel)
+        permission = principal.slack_channel_permissions.create!(
+          channel_id: "C0123456789",
+          upload_enabled: false,
+          download_enabled: true,
+          history_enabled: false
+        )
+
+        post "/api/v1/principals/#{principal.oid}/slack_channel_permissions",
+             params: { data: { channel_id: permission.channel_id, history_enabled: true } }.to_json,
+             headers: auth_headers
+        assert_response :ok
+
+        permission.reload
+        assert_not permission.upload_enabled
+        assert_predicate permission, :download_enabled
+        assert_predicate permission, :history_enabled
       end
 
       test "PUT rejects a single Slack channel permission object" do
@@ -424,7 +487,6 @@ module Api
         body = {
           data: {
             channel_id: "C0123456789",
-            channel_name: "general",
             upload_enabled: true,
             download_enabled: true,
             history_enabled: true
@@ -440,7 +502,7 @@ module Api
           [ "C0123456789", "G9876543210" ],
           principal.reload.slack_channel_permissions.ordered.pluck(:channel_id)
         )
-        assert_equal "general", json_body.dig("data", "channel_name")
+        assert_not json_body.fetch("data").key?("channel_name")
       end
 
       test "POST updates an existing Slack channel permission with normalized channel id" do
@@ -448,7 +510,6 @@ module Api
         SlackChannelPermission.create!(
           principal: principal,
           channel_id: "C0123456789",
-          channel_name: "general",
           upload_enabled: true,
           download_enabled: false,
           history_enabled: false
@@ -456,7 +517,6 @@ module Api
         body = {
           data: {
             channel_id: " c0123456789 ",
-            channel_name: "general",
             upload_enabled: false,
             download_enabled: true,
             history_enabled: true
@@ -482,7 +542,6 @@ module Api
         body = {
           data: {
             channel_id: "C0123456789",
-            channel_name: "new-name",
             upload_enabled: false,
             download_enabled: true,
             history_enabled: false
@@ -496,7 +555,6 @@ module Api
           if calls == 1
             target_principal.slack_channel_permissions.create!(
               channel_id: attrs[:channel_id],
-              channel_name: "winner",
               upload_enabled: true,
               download_enabled: false,
               history_enabled: true
@@ -517,7 +575,6 @@ module Api
 
         permission = principal.reload.slack_channel_permissions.sole
         assert_equal "C0123456789", permission.channel_id
-        assert_equal "new-name", permission.channel_name
         assert_not permission.upload_enabled
         assert_predicate permission, :download_enabled
         assert_not permission.history_enabled
@@ -527,12 +584,45 @@ module Api
         Api::V1::PrincipalsController.send(:private, :save_slack_channel_permission!)
       end
 
+      test "POST returns a validation error when the uniqueness retry is invalid" do
+        principal = principals(:acme_channel)
+        body = {
+          data: {
+            channel_id: "C0123456789",
+            upload_enabled: false,
+            download_enabled: false,
+            history_enabled: false
+          }
+        }
+        original = Api::V1::PrincipalsController.instance_method(:save_slack_channel_permission!)
+
+        Api::V1::PrincipalsController.define_method(:save_slack_channel_permission!) do |target_principal, attrs|
+          target_principal.slack_channel_permissions.create!(
+            channel_id: attrs[:channel_id],
+            upload_enabled: true
+          )
+          raise ActiveRecord::RecordNotUnique, "duplicate key value violates unique constraint"
+        end
+        Api::V1::PrincipalsController.send(:private, :save_slack_channel_permission!)
+
+        assert_difference -> { principal.slack_channel_permissions.count } => 1 do
+          post "/api/v1/principals/#{principal.oid}/slack_channel_permissions",
+               params: body.to_json,
+               headers: auth_headers
+        end
+        assert_response :unprocessable_content
+        assert_equal "validation failed", json_body.dig("error", "message")
+        assert_includes json_body.dig("error", "details", "base"), "Select at least one Slack permission"
+      ensure
+        Api::V1::PrincipalsController.define_method(:save_slack_channel_permission!, original)
+        Api::V1::PrincipalsController.send(:private, :save_slack_channel_permission!)
+      end
+
       test "POST upserts one Slack DM permission" do
         principal = principals(:acme_user_bob)
         body = {
           data: {
-            channel_id: "D0123456789",
-            channel_name: "U0123456789"
+            channel_id: "D0123456789"
           }
         }
 
@@ -543,7 +633,6 @@ module Api
 
         permission = principal.reload.slack_channel_permissions.sole
         assert_equal "D0123456789", permission.channel_id
-        assert_equal "U0123456789", permission.channel_name
         assert_predicate permission, :upload_enabled
         assert_predicate permission, :download_enabled
         assert_predicate permission, :history_enabled

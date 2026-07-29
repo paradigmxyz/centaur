@@ -8,7 +8,10 @@ class Role < ApplicationRecord
   has_many :grants, dependent: :destroy
   has_many :principal_roles, dependent: :destroy
   has_many :principals, through: :principal_roles
+  has_many :slack_channel_permissions, dependent: :destroy
   belongs_to :created_by, class_name: "User"
+
+  include SlackChannelPermissionOwner
 
   URL_SAFE_FORMAT = /\A[A-Za-z0-9\-._~]+\z/
   URL_SAFE_MESSAGE = "must contain only URL-safe characters (A-Z, a-z, 0-9, -, ., _, ~)"

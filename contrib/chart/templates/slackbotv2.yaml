@@ -77,6 +77,8 @@ spec:
               value: {{ .Values.slackbotv2.userName | quote }}
             - name: SLACKBOTV2_ACTIVITY_SUMMARY_STATUS_ENABLED
               value: {{ .Values.apiRs.activitySummary.enabled | quote }}
+            - name: SLACKBOTV2_AUTO_JOIN_CREATED_CHANNELS
+              value: {{ .Values.slackbotv2.autoJoinCreatedChannels | quote }}
             - name: SLACKBOTV2_MESSAGE_OVERRIDES_STRATEGY
               value: {{ .Values.slackbotv2.messageOverridesStrategy.mode | quote }}
             - name: SLACKBOTV2_MESSAGE_OVERRIDES_MODEL

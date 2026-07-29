@@ -1,7 +1,3 @@
-require "json"
-require "net/http"
-require "uri"
-
 module Oauth
   class EnrichCredentialIdentityJob < ApplicationJob
     queue_as :default
@@ -79,18 +75,11 @@ module Oauth
         )
       end
 
-      uri = URI.parse(url)
-      req = Net::HTTP::Post.new(uri)
-      req["Authorization"] = "Bearer #{access_token}"
-      req["Accept"] = "application/json"
-      req.set_form_data(params) if params.any?
-
-      http = Net::HTTP.new(uri.host, uri.port)
-      http.use_ssl = uri.scheme == "https"
-      http.open_timeout = 5
-      http.read_timeout = 5
-
-      JSON.parse(http.request(req).body.to_s)
+      HttpClient.new.post(
+        url,
+        form: (params if params.any?),
+        headers: { "Authorization" => "Bearer #{access_token}" }
+      ).json
     end
   end
 end

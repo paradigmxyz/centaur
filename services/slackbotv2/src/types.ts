@@ -135,6 +135,8 @@ export type SlackbotV2Options = {
    * status and structured task output is hidden from the Slack stream.
    */
   activitySummaryStatusEnabled?: boolean
+  /** Join public channels after Slack channel_created events. */
+  autoJoinCreatedChannels?: boolean
   botToken: string
   botUserId?: string
   /**

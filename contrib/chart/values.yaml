@@ -194,9 +194,8 @@ console:
   # most importantly the broker-credential OAuth refresh loop that mints and
   # refreshes the access tokens delivered inline via `token_broker` sources
   # (e.g. the `openai-codex` brokered token). The web Puma pod runs no worker, so
-  # without this those jobs never execute. Active only when console.enabled.
+  # without this those jobs never execute. Active when console.enabled.
   worker:
-    enabled: true
     replicaCount: 1
     resources: {}
 
@@ -502,6 +501,9 @@ slackbotv2:
     pullPolicy: Always
   userName: centaur
   assistantStatus: ""
+  # Join newly-created public channels after subscribed channel_created events.
+  # Requires the Slack app to grant channels:read and channels:join.
+  autoJoinCreatedChannels: false
   # Public/local MCP endpoint shown in MCP SSO setup messages. The default
   # assumes users connect through `kubectl port-forward ... 3000:8080`.
   mcpPublicUrl: "http://localhost:3000"
