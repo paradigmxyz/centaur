@@ -33,6 +33,18 @@ module Api
         refute data.key?("client_user")
       end
 
+      test "PUT with an unchanged document preserves the dsn source record" do
+        secret = pg_dsn_secrets(:acme_analytics_pg)
+        source_id = secret.dsn_source.id
+
+        get api_v1_pg_dsn_secret_url(id: secret.oid), headers: auth_headers
+        data = json_body.fetch("data").except("id", "created_at", "updated_at")
+        put api_v1_pg_dsn_secret_url(id: secret.oid), params: { data: data }.to_json, headers: auth_headers
+
+        assert_response :ok
+        assert_equal source_id, secret.reload.dsn_source.id
+      end
+
       test "GET lookup finds a pg_dsn secret by namespace and foreign_id" do
         secret = pg_dsn_secrets(:acme_analytics_pg)
         get lookup_api_v1_pg_dsn_secrets_url(namespace: secret.namespace, foreign_id: secret.foreign_id),

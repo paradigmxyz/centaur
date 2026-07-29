@@ -74,21 +74,22 @@ module Api
         rules_attrs = request_rule_attributes(attrs)
 
         StaticSecret.transaction do
-          ref.lock! unless ref.new_record?
-          ref.assign_attributes(ss_attrs)
-          ref.save!
+          with_sync_config_replacement_guard(ref, ss_attrs, source: source_attrs, rules: rules_attrs) do
+            ref.assign_attributes(ss_attrs)
+            ref.save!
 
-          ref.source&.destroy!
-          if source_attrs
-            SecretSource.create!(source_attrs.to_h.merge(static_secret: ref))
+            ref.source&.destroy!
+            if source_attrs
+              SecretSource.create!(source_attrs.to_h.merge(static_secret: ref))
+            end
+
+            ref.rules.destroy_all
+            rules_attrs.each do |r|
+              RequestRule.create!(r.merge(static_secret: ref))
+            end
+
+            ref.reload
           end
-
-          ref.rules.destroy_all
-          rules_attrs.each do |r|
-            RequestRule.create!(r.merge(static_secret: ref))
-          end
-
-          ref.reload
         end
       end
 

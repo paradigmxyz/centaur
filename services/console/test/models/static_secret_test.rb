@@ -1,6 +1,8 @@
 require "test_helper"
 
 class StaticSecretTest < ActiveSupport::TestCase
+  include ActiveJob::TestHelper
+
   def valid_inject_attrs(overrides = {})
     {
       namespace: "acme",
@@ -165,6 +167,32 @@ class StaticSecretTest < ActiveSupport::TestCase
     r1 = RequestRule.create!(host: "api.github.com", static_secret: ref)
     r2 = RequestRule.create!(host: "api.example.com", static_secret: ref, position: 1)
     assert_equal [ r1, r2 ], ref.reload.rules.to_a
+  end
+
+  test "unchanged save does not enqueue a snapshot warm job" do
+    ref = static_secrets(:github_token_inject)
+    principal = principals(:acme_channel)
+    version = principal.reload.sync_config_cache_version
+    clear_enqueued_jobs
+
+    assert_no_enqueued_jobs only: PrincipalSyncConfigSnapshotWarmJob do
+      ref.save!
+    end
+
+    assert_equal version, principal.reload.sync_config_cache_version
+  end
+
+  test "a later touch does not hide an earlier invalidating save in the same transaction" do
+    ref = static_secrets(:github_token_inject)
+    principal = principals(:acme_channel)
+    version = principal.reload.sync_config_cache_version
+
+    StaticSecret.transaction do
+      ref.update!(description: "updated")
+      ref.touch
+    end
+
+    assert_equal version + 1, principal.reload.sync_config_cache_version
   end
 
   test "declares ssr as its oid prefix" do

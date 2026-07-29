@@ -32,6 +32,22 @@ module Api
         assert_equal 1, data["rules"].length
       end
 
+      test "PUT with an unchanged document preserves keyfile and rule records" do
+        secret = gcp_id_token_secrets(:acme_cloud_run)
+        source_id = secret.keyfile_source.id
+        rule_ids = secret.rules.ids
+
+        get api_v1_gcp_id_token_secret_url(id: secret.oid), headers: auth_headers
+        data = json_body.fetch("data").except("id", "created_at", "updated_at")
+        data["header"] = data.fetch("header").upcase
+        put api_v1_gcp_id_token_secret_url(id: secret.oid), params: { data: data }.to_json, headers: auth_headers
+
+        assert_response :ok
+        secret.reload
+        assert_equal source_id, secret.keyfile_source.id
+        assert_equal rule_ids, secret.rules.ids
+      end
+
       test "GET lookup finds a gcp_id_token secret by namespace and foreign_id" do
         secret = gcp_id_token_secrets(:acme_cloud_run)
         get lookup_api_v1_gcp_id_token_secrets_url(namespace: secret.namespace, foreign_id: secret.foreign_id),

@@ -63,10 +63,12 @@ module Api
         # validation (dsn_source_present) sees the source. Assigning the has_one
         # replaces (and destroys) any prior source; a PUT is a full replace.
         PgDsnSecret.transaction do
-          ref.assign_attributes(base)
-          ref.dsn_source = source_attrs ? SecretSource.new(source_attrs.to_h) : nil
-          ref.save!
-          ref.reload
+          with_sync_config_replacement_guard(ref, base, dsn_source: source_attrs) do
+            ref.assign_attributes(base)
+            ref.dsn_source = source_attrs ? SecretSource.new(source_attrs.to_h) : nil
+            ref.save!
+            ref.reload
+          end
         end
       end
 

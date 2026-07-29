@@ -48,6 +48,21 @@ module Api
         assert_equal 1, data["rules"].length
       end
 
+      test "PUT with an unchanged document preserves credential and rule records" do
+        secret = hmac_secrets(:acme_webhook_hmac)
+        source_ids = secret.sources.ids
+        rule_ids = secret.rules.ids
+
+        get api_v1_hmac_secret_url(id: secret.oid), headers: auth_headers
+        data = json_body.fetch("data").except("id", "created_at", "updated_at")
+        put api_v1_hmac_secret_url(id: secret.oid), params: { data: data }.to_json, headers: auth_headers
+
+        assert_response :ok
+        secret.reload
+        assert_equal source_ids, secret.sources.ids
+        assert_equal rule_ids, secret.rules.ids
+      end
+
       test "GET lookup finds an hmac secret by namespace and foreign_id" do
         secret = hmac_secrets(:acme_webhook_hmac)
         get lookup_api_v1_hmac_secrets_url(namespace: secret.namespace, foreign_id: secret.foreign_id),

@@ -3,6 +3,8 @@ require "test_helper"
 module Api
   module V1
     class StaticSecretsControllerTest < ActionDispatch::IntegrationTest
+      include ActiveJob::TestHelper
+
       ACME_TOKEN = "iak_acme-ci-token".freeze
 
       def auth_headers(token = ACME_TOKEN)
@@ -297,6 +299,39 @@ module Api
         assert_equal [ "new.example.com" ], ref.rules.map(&:host)
         assert_nil SecretSource.find_by(id: old_source.id), "old source should be deleted"
         assert_nil RequestRule.find_by(id: old_rule.id), "old rule should be deleted"
+      end
+
+      test "PUT with an unchanged document does not enqueue snapshot warm jobs" do
+        ref = static_secrets(:github_token_inject)
+        source = SecretSource.create!(source_type: "control_plane", secret: "same-secret",
+                                      static_secret: ref)
+        rule = RequestRule.create!(host: "api.github.com", http_methods: [ "GET" ],
+                                   paths: [ "/" ], position: 0, static_secret: ref)
+        principal = principals(:acme_channel)
+        version = principal.reload.sync_config_cache_version
+        clear_enqueued_jobs
+
+        body = {
+          data: {
+            namespace: ref.namespace,
+            name: ref.name,
+            description: ref.description,
+            labels: ref.labels,
+            inject_config: ref.inject_config,
+            source: { source_type: "control_plane", secret: "same-secret" },
+            rules: [ { host: "api.github.com", http_methods: [ "GET" ], paths: [ "/" ] } ]
+          }
+        }
+
+        assert_no_enqueued_jobs only: PrincipalSyncConfigSnapshotWarmJob do
+          put api_v1_static_secret_url(id: ref.oid), params: body.to_json, headers: auth_headers
+        end
+        assert_response :ok
+
+        ref.reload
+        assert_equal source.id, ref.source.id
+        assert_equal [ rule.id ], ref.rules.pluck(:id)
+        assert_equal version, principal.reload.sync_config_cache_version
       end
 
       test "PUT does not retain omitted source fields" do

@@ -60,11 +60,13 @@ module Api
         rules_attrs = build_rules(attrs)
 
         GcpAuthSecret.transaction do
-          ref.assign_attributes(base)
-          ref.keyfile_source = keyfile_attrs ? SecretSource.new(keyfile_attrs.to_h) : nil
-          ref.rules = rules_attrs
-          ref.save!
-          ref.reload
+          with_sync_config_replacement_guard(ref, base, keyfile_source: keyfile_attrs, rules: rules_attrs) do
+            ref.assign_attributes(base)
+            ref.keyfile_source = keyfile_attrs ? SecretSource.new(keyfile_attrs.to_h) : nil
+            ref.rules = rules_attrs
+            ref.save!
+            ref.reload
+          end
         end
       end
 

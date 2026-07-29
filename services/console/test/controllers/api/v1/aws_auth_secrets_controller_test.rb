@@ -3,6 +3,8 @@ require "test_helper"
 module Api
   module V1
     class AwsAuthSecretsControllerTest < ActionDispatch::IntegrationTest
+      include ActiveJob::TestHelper
+
       ACME_TOKEN = "iak_acme-ci-token".freeze
 
       def auth_headers(token = ACME_TOKEN)
@@ -111,6 +113,47 @@ module Api
 
         secret.reload
         assert_equal "NEW_AK", secret.sources.find { |s| s.role == "access_key_id" }.config["var"]
+      end
+
+      test "PUT with an unchanged document does not enqueue snapshot warm jobs" do
+        secret = aws_auth_secrets(:acme_cloudwatch_aws)
+        principal = principals(:acme_channel)
+        Grant.create!(
+          principal: principal,
+          aws_auth_secret: secret,
+          created_by: users(:acme_admin),
+          priority: Grant::DEFAULT_DIRECT_PRIORITY
+        )
+        source_ids = secret.sources.pluck(:role, :id).to_h
+        rule_ids = secret.rules.pluck(:id)
+        version = principal.reload.sync_config_cache_version
+        clear_enqueued_jobs
+
+        body = {
+          data: {
+            namespace: secret.namespace,
+            foreign_id: secret.foreign_id,
+            name: secret.name,
+            labels: secret.labels,
+            allowed_regions: secret.allowed_regions,
+            allowed_services: secret.allowed_services,
+            access_key_id: { source_type: "env", config: { var: "AWS_ACCESS_KEY_ID" } },
+            secret_access_key: { source_type: "env", config: { var: "AWS_SECRET_ACCESS_KEY" } },
+            rules: [
+              { host: "logs.us-west-2.amazonaws.com", http_methods: [ "POST" ], paths: [] }
+            ]
+          }
+        }
+
+        assert_no_enqueued_jobs only: PrincipalSyncConfigSnapshotWarmJob do
+          put api_v1_aws_auth_secret_url(id: secret.oid), params: body.to_json, headers: auth_headers
+        end
+        assert_response :ok
+
+        secret.reload
+        assert_equal source_ids, secret.sources.pluck(:role, :id).to_h
+        assert_equal rule_ids, secret.rules.pluck(:id)
+        assert_equal version, principal.reload.sync_config_cache_version
       end
 
       test "PUT clears fields omitted from the body" do
