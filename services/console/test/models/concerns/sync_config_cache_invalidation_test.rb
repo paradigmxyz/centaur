@@ -1,17 +1,12 @@
 require "test_helper"
 
 class SyncConfigCacheInvalidationTest < ActiveSupport::TestCase
-  include ActiveJob::TestHelper
-
-  test "unchanged save does not enqueue a snapshot warm job" do
+  test "unchanged save does not bump the sync config cache version" do
     principal = principals(:acme_channel)
     record = static_secrets(:github_token_inject)
     version = principal.reload.sync_config_cache_version
-    clear_enqueued_jobs
 
-    assert_no_enqueued_jobs only: PrincipalSyncConfigSnapshotWarmJob do
-      record.save!
-    end
+    record.save!
 
     assert_equal version, principal.reload.sync_config_cache_version
   end

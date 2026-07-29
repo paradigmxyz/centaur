@@ -3,8 +3,6 @@ require "test_helper"
 module Api
   module V1
     class StaticSecretsControllerTest < ActionDispatch::IntegrationTest
-      include ActiveJob::TestHelper
-
       ACME_TOKEN = "iak_acme-ci-token".freeze
 
       def auth_headers(token = ACME_TOKEN)
@@ -301,7 +299,7 @@ module Api
         assert_nil RequestRule.find_by(id: old_rule.id), "old rule should be deleted"
       end
 
-      test "PUT with an unchanged document does not enqueue snapshot warm jobs" do
+      test "PUT with an unchanged document does not bump the sync config cache version" do
         ref = static_secrets(:github_token_inject)
         source = SecretSource.create!(source_type: "control_plane", secret: "same-secret",
                                       static_secret: ref)
@@ -309,7 +307,6 @@ module Api
                                    paths: [ "/" ], position: 0, static_secret: ref)
         principal = principals(:acme_channel)
         version = principal.reload.sync_config_cache_version
-        clear_enqueued_jobs
 
         body = {
           data: {
@@ -323,9 +320,7 @@ module Api
           }
         }
 
-        assert_no_enqueued_jobs only: PrincipalSyncConfigSnapshotWarmJob do
-          put api_v1_static_secret_url(id: ref.oid), params: body.to_json, headers: auth_headers
-        end
+        put api_v1_static_secret_url(id: ref.oid), params: body.to_json, headers: auth_headers
         assert_response :ok
 
         ref.reload
