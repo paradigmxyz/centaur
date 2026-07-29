@@ -1068,14 +1068,10 @@ async function syncThreadMessageToSession(
     effectiveModel,
     overrides.reasoning ?? channelDefault?.reasoning
   )
-  const effectiveReasoning = reasoningForModel(
+  const effectiveReasoning = effectiveReasoningForHarness(
     effectiveHarnessType,
-    effectiveModel,
-    effectiveReasoningForHarness(
-      effectiveHarnessType,
-      resolvedReasoning,
-      input.options.harnessDefaultReasoning
-    )
+    resolvedReasoning,
+    input.options.harnessDefaultReasoning
   )
   let consoleSessionBlock = isFirstAssistantMessage
     ? buildConsoleSessionContextBlock({
@@ -1293,14 +1289,10 @@ async function syncThreadMessageToSession(
         const model =
           resolvedModel ?? defaultModelForHarness(harnessType, input.options.harnessDefaultModels)
         const requestedReasoning = reasoningForModel(harnessType, model, resolvedReasoning)
-        const reasoning = reasoningForModel(
+        const reasoning = effectiveReasoningForHarness(
           harnessType,
-          model,
-          effectiveReasoningForHarness(
-            harnessType,
-            requestedReasoning,
-            input.options.harnessDefaultReasoning
-          )
+          requestedReasoning,
+          input.options.harnessDefaultReasoning
         )
         forwardInput.metadataModel = model
         forwardInput.reasoning = requestedReasoning
