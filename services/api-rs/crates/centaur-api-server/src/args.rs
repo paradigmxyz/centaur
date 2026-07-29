@@ -1955,10 +1955,9 @@ fn merge_fragment(target: &mut ProxyFragment, source: ProxyFragment) {
 
 fn harness_auth_mode_env(engine: &HarnessType) -> Option<String> {
     match engine {
-        HarnessType::Codex => env::var("CODEX_AUTH_MODE").ok(),
+        HarnessType::Codex | HarnessType::Nanocodex => env::var("CODEX_AUTH_MODE").ok(),
         HarnessType::ClaudeCode => env::var("CLAUDE_CODE_AUTH_MODE").ok(),
         HarnessType::Amp => None,
-        HarnessType::Nanocodex => Some("api_key".to_owned()),
     }
 }
 
@@ -2973,13 +2972,16 @@ mod tests {
 
     #[test]
     fn nanocodex_reuses_the_codex_proxy_fragment() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[("CODEX_AUTH_MODE", "access_token")]);
+
         assert_eq!(
             harness_fragment_engine_name(&HarnessType::Nanocodex),
             harness_fragment_engine_name(&HarnessType::Codex)
         );
         assert_eq!(
             harness_auth_mode_env(&HarnessType::Nanocodex).as_deref(),
-            Some("api_key")
+            Some("access_token")
         );
     }
 }
