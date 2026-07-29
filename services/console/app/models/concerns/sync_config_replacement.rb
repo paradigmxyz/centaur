@@ -1,10 +1,15 @@
 module SyncConfigReplacement
-  REPLACEMENT_ASSOCIATION_CLASSES = [ SecretSource, RequestRule ].freeze
+  ASSOCIATION_CLASSES = {
+    source: SecretSource,
+    sources: SecretSource,
+    keyfile_source: SecretSource,
+    dsn_source: SecretSource,
+    rules: RequestRule
+  }.freeze
 
   module_function
 
   def equivalent?(record, attributes, associations)
-    validate_association_coverage!(record, associations)
     current_document(record, attributes, associations) == replacement_document(record, attributes, associations)
   end
 
@@ -26,19 +31,19 @@ module SyncConfigReplacement
     normalize(
       "record" => attribute_names.index_with { |name| record.public_send(name) },
       "associations" => associations.to_h do |name, association|
-        reflection = record.class.reflect_on_association(name)
-        [ name, association_document(reflection, association) ]
+        [ name, association_document(name, association) ]
       end
     )
   end
 
-  def association_document(reflection, association)
-    raise ArgumentError, "unknown association" unless reflection
+  def association_document(name, association)
+    record_class = ASSOCIATION_CLASSES.fetch(name.to_sym)
 
-    return collection_document(Array(association), reflection.klass) if reflection.collection?
+    return collection_document(Array(association), record_class) if association.is_a?(Array) ||
+                                                                    association.is_a?(ActiveRecord::Associations::CollectionProxy)
     return nil if association.nil?
 
-    record_document(association, reflection.klass)
+    record_document(association, record_class)
   end
 
   def collection_document(records, record_class)
@@ -49,27 +54,12 @@ module SyncConfigReplacement
   end
 
   def record_document(record, record_class)
-    raise ArgumentError, "unsupported association class #{record_class.name}" unless
-      REPLACEMENT_ASSOCIATION_CLASSES.include?(record_class)
-
     record = record_class.new(record.to_h) unless record.is_a?(record_class)
     association_attribute_names(record_class).index_with { |name| record.public_send(name) }
   end
 
   def association_attribute_names(record_class)
     record_class.const_get(:SYNC_CONFIG_REPLACEMENT_ATTRIBUTES)
-  end
-
-  def validate_association_coverage!(record, associations)
-    expected = record.class.reflect_on_all_associations.filter_map do |reflection|
-      next if reflection.polymorphic?
-
-      reflection.name if REPLACEMENT_ASSOCIATION_CLASSES.include?(reflection.klass)
-    end
-    missing = expected - associations.keys.map(&:to_sym)
-    return if missing.empty?
-
-    raise ArgumentError, "missing replacement associations: #{missing.join(", ")}"
   end
 
   def attribute_names(attributes)
