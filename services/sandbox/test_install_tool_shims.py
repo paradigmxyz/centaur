@@ -5,6 +5,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -310,6 +311,82 @@ class GeneratedShimTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 2)
             self.assertIn("usage: centaur-tools", result.stderr)
+
+    def test_call_runner_loads_hyphenated_tool_as_normalized_package(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            fake_bin = root / "fake-bin"
+            project_dir = root / "data-query-and-viz"
+            bin_dir.mkdir()
+            fake_bin.mkdir()
+            project_dir.mkdir()
+            (project_dir / "__init__.py").write_text("")
+            (project_dir / "helper.py").write_text('VALUE = "package-loaded"\n')
+            (project_dir / "client.py").write_text(
+                "from .helper import VALUE\n"
+                "\n"
+                "class Client:\n"
+                "    def ping(self, suffix):\n"
+                "        return f'{VALUE}:{suffix}'\n"
+                "\n"
+                "def _client():\n"
+                "    return Client()\n"
+            )
+
+            index_path = bin_dir / ".centaur-tools.json"
+            index_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "name": "data-query-and-viz",
+                            "project_dir": str(project_dir),
+                            "package": "data-query-and-viz",
+                            "entrypoint": "cli:app",
+                            "client_module": "client.py",
+                        }
+                    ]
+                )
+                + "\n"
+            )
+            install_tool_shims._write_catalog(
+                bin_dir / "centaur-tools",
+                index_path,
+                str(Path(__file__).resolve().parents[2]),
+            )
+
+            fake_uvx = fake_bin / "uvx"
+            fake_uvx.write_text(
+                f"#!{sys.executable}\n"
+                "import subprocess\n"
+                "import sys\n"
+                "\n"
+                "args = sys.argv[1:]\n"
+                "if len(args) < 3 or args[0] != '--from' or args[2] != 'python':\n"
+                "    raise SystemExit(2)\n"
+                "raise SystemExit(subprocess.call([sys.executable, *args[3:]]))\n"
+            )
+            fake_uvx.chmod(0o755)
+
+            env = os.environ.copy()
+            env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
+            env["CENTAUR_TOOL_ANALYTICS_LOG_PATH"] = "off"
+            result = subprocess.run(
+                [
+                    str(bin_dir / "centaur-tools"),
+                    "call",
+                    "data-query-and-viz",
+                    "ping",
+                    json.dumps({"suffix": "ok"}),
+                ],
+                check=False,
+                env=env,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), "package-loaded:ok")
 
 
 class RefreshInstallTest(unittest.TestCase):
