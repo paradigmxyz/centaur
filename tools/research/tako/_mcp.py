@@ -44,11 +44,6 @@ MCP_PROTOCOL_VERSION = "2025-03-26"
 MCP_CLIENT_NAME = "centaur-tako-tool"
 MCP_CLIENT_VERSION = "0.1.0"
 
-# MCP-app widget plumbing on tako_search/tako_answer outputs that has no
-# equivalent in the SDK response shape. Stripped so both backends return the
-# same top-level keys (cards, web_results, usage, request_id).
-_WIDGET_FIELDS = ("pub_id", "embed_url", "image_url", "dark_mode", "width", "height")
-
 # Effort levels the hosted search tool accepts. Its input schema is
 # fast/instant only (the synchronous tool has no deep mode), so the SDK's
 # "deep" is flagged and omitted rather than sent to a certain schema
@@ -62,10 +57,6 @@ class McpAuthRequired(RuntimeError):
 
 class McpRateLimited(RuntimeError):
     """The free tier's per-IP rate limit (10 tools calls/min) was hit."""
-
-
-def _strip_widget_fields(payload: dict[str, Any]) -> dict[str, Any]:
-    return {k: v for k, v in payload.items() if k not in _WIDGET_FIELDS}
 
 
 def _sources_and_count(
@@ -156,9 +147,18 @@ class TakoMcpBackend:
                 "locale": locale,
             }
         )
-        payload = _strip_widget_fields(self._call_tool("tako_search", arguments))
-        payload["meta"] = {"backend": "tako:mcp", "partial_failures": partial_failures}
-        return payload
+        structured, markdown = self._call_tool("tako_search", arguments)
+        return {
+            "query": query,
+            # The readable `## Tako Data` document. The hosted tool renders it
+            # in the MCP text channel; card rows ride in structuredContent
+            # (post tako-mcp#187) with a pointer in the text.
+            "answer_markdown": markdown,
+            "cards": structured.get("cards", []),
+            "web_results": structured.get("web_results", []),
+            "request_id": structured.get("request_id"),
+            "meta": {"backend": "tako:mcp", "partial_failures": partial_failures},
+        }
 
     def answer(
         self,
@@ -193,9 +193,17 @@ class TakoMcpBackend:
                 "locale": locale,
             }
         )
-        payload = _strip_widget_fields(self._call_tool("tako_answer", arguments))
-        payload["meta"] = {"backend": "tako:mcp", "partial_failures": partial_failures}
-        return payload
+        structured, markdown = self._call_tool("tako_answer", arguments)
+        return {
+            "query": query,
+            # Post tako-mcp#187 the synthesized answer rides in
+            # structuredContent; before it, only the text channel carries it.
+            "answer": structured.get("answer") or markdown,
+            "cards": structured.get("cards", []),
+            "web_results": structured.get("web_results", []),
+            "request_id": structured.get("request_id"),
+            "meta": {"backend": "tako:mcp", "partial_failures": partial_failures},
+        }
 
     def available_data(
         self,
@@ -204,17 +212,34 @@ class TakoMcpBackend:
         types: str | None = None,
         label: str | None = None,
     ) -> dict:
-        # The hosted tool's output shape is the source this tool's local
-        # pipeline was ported from: {found, query, summary, matches,
-        # other_matches} passes through unchanged.
+        # The hosted tool returns {found, query, next_call} in structuredContent
+        # and the coverage report as the markdown text block. Surface the text
+        # as `summary` and keep the SDK-path key set so both backends match.
+        # `matches`/`other_matches` aren't individually structured on the MCP,
+        # so they come through only when the server provides them.
         arguments = _drop_none({"q": q, "types": types, "label": label})
-        payload = self._call_tool("tako_available_data", arguments)
-        payload["meta"] = {"backend": "tako:mcp", "partial_failures": []}
-        return payload
+        structured, markdown = self._call_tool("tako_available_data", arguments)
+        return {
+            "found": structured.get("found", False),
+            "query": structured.get("query", q),
+            "summary": markdown,
+            "matches": structured.get("matches", []),
+            "other_matches": structured.get("other_matches", []),
+            "meta": {"backend": "tako:mcp", "partial_failures": []},
+        }
 
     # -- MCP plumbing ---------------------------------------------------------
 
-    def _call_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    def _call_tool(self, tool_name: str, arguments: dict[str, Any]) -> tuple[dict[str, Any], str]:
+        """Call an MCP tool and return (structuredContent, text_markdown).
+
+        MCP responses carry two channels, and this tool needs both: the text
+        block is the readable `## Tako Data` document, and structuredContent
+        holds the machine payload (cards[].content, web_results, answer, plus
+        request_id/usage). Callers read the readable field from the text and
+        the structured fields from the dict; either can be empty depending on
+        the server version (tako-mcp#187 moved bulk data into structuredContent).
+        """
         with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
             self._initialize(client)
             envelope = {
@@ -234,16 +259,16 @@ class TakoMcpBackend:
         if result.get("isError"):
             raise RuntimeError(f"Tako MCP tool error: {str(result)[:500]}")
         structured = result.get("structuredContent")
-        if isinstance(structured, dict):
-            return structured
-        for block in result.get("content", []) or []:
-            if isinstance(block, dict) and block.get("type") == "text":
-                text = str(block.get("text") or "")
-                try:
-                    return json.loads(text)
-                except json.JSONDecodeError:
-                    continue
-        raise RuntimeError(f"Tako MCP returned no parseable content: {str(result)[:500]}")
+        structured = structured if isinstance(structured, dict) else {}
+        texts = [
+            str(block.get("text") or "")
+            for block in (result.get("content") or [])
+            if isinstance(block, dict) and block.get("type") == "text" and block.get("text")
+        ]
+        text = "\n\n".join(texts)
+        if not structured and not text:
+            raise RuntimeError(f"Tako MCP returned no content: {str(result)[:500]}")
+        return structured, text
 
     def _initialize(self, client: httpx.Client) -> None:
         """One protocol-compliant handshake per command.

@@ -368,7 +368,9 @@ class TakoClient:
         )
         return self._with_fallback(
             lambda: _with_meta(
-                _dump(self._client._api.search(request, _request_timeout=self._timeout))
+                _add_search_markdown(
+                    _dump(self._client._api.search(request, _request_timeout=self._timeout))
+                )
             ),
             via_mcp,
         )
@@ -577,6 +579,49 @@ def _with_meta(payload: dict) -> dict:
     """Stamp SDK-path responses with the same meta shape the MCP path emits."""
     payload["meta"] = {"backend": "tako:sdk", "partial_failures": []}
     return payload
+
+
+def _add_search_markdown(payload: dict) -> dict:
+    """Add an `answer_markdown` rendering to an SDK-path search response.
+
+    The MCP backend returns the hosted tool's readable `## Tako Data` document
+    in `answer_markdown`; the SDK backend returns only structured cards. This
+    renders an equivalent readable document from those cards so both backends
+    return the same shape and downstream models get prose to synthesize from,
+    while the full structured cards (with row `content`, `image_url`, etc.)
+    stay in `cards`. Rows are pointed at, not inlined (matching tako-mcp#187).
+    """
+    payload["answer_markdown"] = _render_search_markdown(
+        payload.get("cards") or [], payload.get("web_results") or []
+    )
+    return payload
+
+
+def _render_search_markdown(cards: list[dict], web_results: list[dict]) -> str:
+    blocks: list[str] = []
+    if cards:
+        blocks.append(f"## Tako Data ({len(cards)} {'card' if len(cards) == 1 else 'cards'})")
+        for i, card in enumerate(cards, 1):
+            lines = [f"### {i}. {card.get('title') or 'Untitled card'}"]
+            if card.get("description"):
+                lines.append(str(card["description"]))
+            facts = []
+            if card.get("data_freshness"):
+                facts.append(f"freshness: {card['data_freshness']}")
+            if card.get("exportable"):
+                facts.append("exportable via `contents`")
+            if facts:
+                lines.append(" · ".join(facts))
+            if card.get("image_url"):
+                lines.append(f"chart: {card['image_url']}")
+            if card.get("content"):
+                lines.append("data: rows available in this card's `content`")
+            blocks.append("\n".join(lines))
+    if web_results:
+        blocks.append(f"## Web Results ({len(web_results)})")
+        for i, w in enumerate(web_results, 1):
+            blocks.append(f"{i}. [{w.get('title') or w.get('url')}]({w.get('url')})")
+    return "\n\n".join(blocks)
 
 
 def _run_available_data(

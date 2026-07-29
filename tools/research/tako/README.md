@@ -38,6 +38,17 @@ raise a clear rate-limit error carrying the server's own message and
 retry hint. Responses carry `meta.backend` (`tako:sdk` or `tako:mcp`) and
 `meta.partial_failures` for knobs the free tier cannot honor.
 
+Both backends return the same shape. `search` returns `answer_markdown` (a
+readable `## Tako Data` document the model synthesizes from) alongside
+structured `cards` (with `image_url`, `webpage_url`, `node_ids`, `exportable`,
+and row `content`); `answer` returns `answer` prose plus supporting `cards`.
+The SDK path renders `answer_markdown` from its cards; the MCP path takes it
+from the hosted tool's text channel and reads the structured fields from
+`structuredContent`. Card rows are pointed at, not inlined, matching the MCP
+(TakoData/tako-mcp#187 moved bulk payload into `structuredContent`); on
+free-tier servers before that change, `cards` may be empty while
+`answer_markdown` still carries the full readable document.
+
 Inside a sandbox the routing works differently, because tool secrets leave no
 env signal there: `secret()` returns a placeholder and iron-proxy swaps it on
 the wire, so the tool cannot see whether the deployment vault holds the key.

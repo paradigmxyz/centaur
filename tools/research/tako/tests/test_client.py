@@ -10,12 +10,10 @@ from tako.models.graph_node_type import GraphNodeType
 from tako.models.graph_related_response import GraphRelatedResponse
 from tako.models.graph_relation_page import GraphRelationPage
 from tako.models.graph_search_response import GraphSearchResponse
-
 from tools.research.tako._coverage import (
     PREVIEW,
     TOOL_COMMAND,
     CoverageGroup,
-    CoverageMatch,
     OtherMatch,
     build_match,
     build_summary,
@@ -27,8 +25,6 @@ from tools.research.tako._coverage import (
     select_coverage,
     unavailable_match,
 )
-
-
 from tools.research.tako.client import TakoClient, _run_available_data, _sources
 
 
@@ -383,11 +379,11 @@ class TestRunAvailableDataValidation:
             assert "ORG" in str(exc)
 
     def test_validation_happens_before_any_network_call(self):
+        import contextlib
+
         fake = FakeGraph(search_results=[])
-        try:
+        with contextlib.suppress(ValueError):
             _run(fake, q="x")
-        except ValueError:
-            pass
         assert not hasattr(fake, "last_search")
 
 
@@ -547,7 +543,7 @@ class TestPricedPaths:
     def test_graph_search_forwards_graph_timeout(self):
         client = _client_with_fake()
         client._graph_search("nvidia", limit=1)
-        method, q, timeout = client._client._api.calls[0]
+        method, _q, timeout = client._client._api.calls[0]
         assert method == "graph_search"
         assert timeout == 30.0
 
@@ -615,7 +611,6 @@ class TestSourcesReviewFindings:
 class TestDerivedConstants:
     def test_ner_labels_track_the_sdk_enum(self):
         from tako.models.ner_label import NerLabel
-
         from tools.research.tako._coverage import NER_LABELS
 
         assert set(NER_LABELS) == {label.value for label in NerLabel}
@@ -629,7 +624,6 @@ class TestDerivedConstants:
         from tako.models.contents_delivery_mode import ContentsDeliveryMode
         from tako.models.contents_format import ContentsFormat
         from tako.models.search_effort_level import SearchEffortLevel
-
         from tools.research.tako.client import (
             CONTENT_FORMATS,
             CONTENT_MODES,
@@ -644,7 +638,6 @@ class TestDerivedConstants:
 # -- MCP fallback backend ----------------------------------------------------
 
 import httpx  # noqa: E402
-
 from tools.research.tako._mcp import (  # noqa: E402
     McpAuthRequired,
     McpRateLimited,
@@ -656,7 +649,10 @@ from tools.research.tako._mcp import (  # noqa: E402
 def _mcp_transport(tool_payloads, status_code=200, record=None, error_body=None):
     """MockTransport speaking just enough Streamable HTTP for the backend.
 
-    tool_payloads: dict of tool name -> structuredContent payload.
+    tool_payloads: dict of tool name -> either a dict (used as structuredContent)
+    or a (structuredContent, text_markdown) tuple. The two-channel form models
+    the real MCP: structuredContent carries the machine payload and the text
+    block carries the readable `## Tako Data` document.
     record: optional list collecting (method, params) JSON-RPC pairs.
     error_body: JSON body for non-200 responses (default {"detail": "denied"}).
     """
@@ -675,14 +671,14 @@ def _mcp_transport(tool_payloads, status_code=200, record=None, error_body=None)
         if method == "notifications/initialized":
             return httpx.Response(202)
         if method == "tools/call":
-            name = body["params"]["name"]
+            entry = tool_payloads[body["params"]["name"]]
+            structured, text = entry if isinstance(entry, tuple) else (entry, "")
+            result: dict = {"structuredContent": structured}
+            if text:
+                result["content"] = [{"type": "text", "text": text}]
             return httpx.Response(
                 200,
-                json={
-                    "jsonrpc": "2.0",
-                    "id": body["id"],
-                    "result": {"structuredContent": tool_payloads[name]},
-                },
+                json={"jsonrpc": "2.0", "id": body["id"], "result": result},
             )
         raise AssertionError(f"unexpected method {method}")
 
@@ -693,27 +689,37 @@ import json  # noqa: E402
 
 
 class TestMcpBackend:
-    def test_search_maps_args_and_strips_widget_fields(self):
+    def test_search_reads_both_channels(self):
+        # Structured cards from structuredContent; the readable document from
+        # the text block (surfaced as answer_markdown). Models the real MCP.
         record = []
-        payload = {
-            "cards": [{"title": "Revenue"}],
-            "web_results": [],
-            "usage": None,
-            "request_id": "r1",
-            "pub_id": "widget",
-            "embed_url": "https://x",
-        }
+        structured = {"cards": [{"title": "Revenue"}], "web_results": [], "request_id": "r1"}
+        text = "## Tako Data (1 card)\n\n### 1. Tesla revenue"
         backend = TakoMcpBackend(
-            transport=_mcp_transport({"tako_search": payload}, record=record)
+            transport=_mcp_transport({"tako_search": (structured, text)}, record=record)
         )
         result = backend.search("tesla revenue", effort="instant", web_count=0)
         assert result["cards"] == [{"title": "Revenue"}]
-        assert "pub_id" not in result and "embed_url" not in result
+        assert result["answer_markdown"] == text
+        assert result["request_id"] == "r1"
         assert result["meta"]["backend"] == "tako:mcp"
         call = next(p for m, p in record if m == "tools/call")
         assert call["name"] == "tako_search"
         assert call["arguments"]["sources"] == ["data"]
         assert call["arguments"]["effort"] == "instant"
+
+    def test_search_works_pre_187_shape(self):
+        # Before tako-mcp#187, structuredContent lacks cards and the rows live
+        # in the text. The backend must still return usable content (the
+        # markdown) rather than empty results.
+        structured = {"request_id": "r", "image_url": "https://img", "usage": None}
+        text = "## Tako Data (1 card)\n\n### 1. Tesla, Inc. Total Revenues"
+        backend = TakoMcpBackend(
+            transport=_mcp_transport({"tako_search": (structured, text)})
+        )
+        result = backend.search("tesla revenue")
+        assert result["cards"] == []
+        assert "Total Revenues" in result["answer_markdown"]
 
     def test_search_flags_deep_effort_and_omits_it(self):
         # The hosted search tool's effort enum is fast/instant only; sending
@@ -737,26 +743,33 @@ class TestMcpBackend:
         assert count == 5
         assert failures and failures[0]["feature"] == "per_source_counts"
 
-    def test_answer_flags_unsupported_effort(self):
-        payload = {"answer": "text", "cards": [], "request_id": "r2"}
-        backend = TakoMcpBackend(transport=_mcp_transport({"tako_answer": payload}))
+    def test_answer_reads_both_channels_and_flags_effort(self):
+        # answer prose comes from structuredContent post-#187, else the text.
+        structured = {"answer": "CPI rose from 1.2% to 8.0%", "cards": [], "request_id": "r2"}
+        backend = TakoMcpBackend(transport=_mcp_transport({"tako_answer": (structured, "idx")}))
         result = backend.answer("us cpi", effort="deep")
+        assert result["answer"] == "CPI rose from 1.2% to 8.0%"
         features = [f["feature"] for f in result["meta"]["partial_failures"]]
         assert "effort" in features
 
-    def test_available_data_passes_through(self):
-        payload = {
-            "found": True,
-            "query": "tesla",
-            "summary": "s",
-            "matches": [],
-            "other_matches": [],
-        }
+    def test_answer_falls_back_to_text_when_answer_not_structured(self):
         backend = TakoMcpBackend(
-            transport=_mcp_transport({"tako_available_data": payload})
+            transport=_mcp_transport({"tako_answer": ({"request_id": "r"}, "the answer prose")})
+        )
+        assert backend.answer("us cpi")["answer"] == "the answer prose"
+
+    def test_available_data_surfaces_text_summary(self):
+        # found/query from structuredContent; the coverage report is the text
+        # block, surfaced as `summary` with the SDK-path key set preserved.
+        structured = {"found": True, "query": "tesla", "next_call": None}
+        text = "**Tesla, Inc. (ORG)** — 250+ metrics."
+        backend = TakoMcpBackend(
+            transport=_mcp_transport({"tako_available_data": (structured, text)})
         )
         result = backend.available_data("tesla", types="entity")
         assert result["found"] is True
+        assert result["summary"] == text
+        assert result["matches"] == [] and result["other_matches"] == []
         assert result["meta"]["backend"] == "tako:mcp"
 
     def test_auth_rejection_is_a_clear_message(self):
