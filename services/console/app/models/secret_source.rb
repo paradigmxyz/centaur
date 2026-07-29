@@ -4,6 +4,7 @@ class SecretSource < ApplicationRecord
   include SyncConfigOwnerInvalidation
 
   SOURCE_TYPES = %w[env aws_sm aws_ssm 1password 1password_connect control_plane token_broker].freeze
+  SYNC_CONFIG_REPLACEMENT_ATTRIBUTES = %w[source_type config secret role role_kind].freeze
 
   UNIVERSAL_OPTIONAL = %w[json_key ttl].freeze
 

@@ -1,5 +1,4 @@
 module SyncConfigReplacement
-  IGNORED_ASSOCIATION_ATTRIBUTES = %w[id created_at updated_at].freeze
   REPLACEMENT_ASSOCIATION_CLASSES = [ SecretSource, RequestRule ].freeze
 
   module_function
@@ -58,14 +57,13 @@ module SyncConfigReplacement
   end
 
   def association_attribute_names(record_class)
-    owner_foreign_keys = record_class.const_get(:OWNER_ASSOCIATIONS).map do |association|
-      record_class.reflect_on_association(association).foreign_key.to_s
-    end
-    record_class.attribute_names - IGNORED_ASSOCIATION_ATTRIBUTES - owner_foreign_keys
+    record_class.const_get(:SYNC_CONFIG_REPLACEMENT_ATTRIBUTES)
   end
 
   def validate_association_coverage!(record, associations)
     expected = record.class.reflect_on_all_associations.filter_map do |reflection|
+      next if reflection.polymorphic?
+
       reflection.name if REPLACEMENT_ASSOCIATION_CLASSES.include?(reflection.klass)
     end
     missing = expected - associations.keys.map(&:to_sym)

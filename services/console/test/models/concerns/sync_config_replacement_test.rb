@@ -1,6 +1,10 @@
 require "test_helper"
 
 class SyncConfigReplacementTest < ActiveSupport::TestCase
+  class PolymorphicAwsAuthSecret < AwsAuthSecret
+    belongs_to :metadata_owner, polymorphic: true, optional: true
+  end
+
   def source(role, secret_id:, region:)
     SecretSource.new(
       source_type: "aws_sm",
@@ -46,5 +50,29 @@ class SyncConfigReplacementTest < ActiveSupport::TestCase
     end
 
     assert_equal "missing replacement associations: rules", error.message
+  end
+
+  test "association coverage ignores polymorphic associations" do
+    record = PolymorphicAwsAuthSecret.new(namespace: "acme")
+
+    assert SyncConfigReplacement.equivalent?(
+      record,
+      { namespace: "acme" },
+      { sources: [], rules: [] }
+    )
+  end
+
+  test "secret source replacement fields are explicit" do
+    assert_equal(
+      %w[config role role_kind secret source_type],
+      SyncConfigReplacement.association_attribute_names(SecretSource).sort
+    )
+  end
+
+  test "request rule replacement fields are explicit" do
+    assert_equal(
+      %w[cidr host http_methods paths position],
+      SyncConfigReplacement.association_attribute_names(RequestRule).sort
+    )
   end
 end
