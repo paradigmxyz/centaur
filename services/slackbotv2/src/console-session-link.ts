@@ -37,11 +37,14 @@ const STANDARD_CODEX_REASONING_EFFORTS = new Set([
   'xhigh'
 ])
 const PRO_CODEX_REASONING_EFFORTS = new Set(['medium', 'high', 'xhigh'])
+const CODEX_MODEL_REASONING_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh'])
 const GPT_5_6_REASONING_EFFORTS = new Set([
   ...STANDARD_CODEX_REASONING_EFFORTS,
   'max'
 ])
 const CODEX_REASONING_EFFORTS_BY_MODEL: Record<string, ReadonlySet<string>> = {
+  'gpt-5.2': STANDARD_CODEX_REASONING_EFFORTS,
+  'gpt-5.2-codex': CODEX_MODEL_REASONING_EFFORTS,
   'gpt-5.4': STANDARD_CODEX_REASONING_EFFORTS,
   'gpt-5.4-mini': STANDARD_CODEX_REASONING_EFFORTS,
   'gpt-5.4-nano': STANDARD_CODEX_REASONING_EFFORTS,
@@ -161,15 +164,18 @@ export function reasoningForModel(
   const selectedModel = model?.trim().toLowerCase()
   const effort = reasoning?.trim().toLowerCase()
   if (!selectedModel || !effort) return undefined
-  if (harness === 'nanocodex') return effort === 'max' ? undefined : effort
-  if (harness !== 'codex') return undefined
+  if (harness !== 'codex' && harness !== 'nanocodex') return undefined
+  // Nanocodex maps its compatibility-only Minimal value to Low before it
+  // reaches the Responses API, so validate the effective value against the
+  // selected model while preserving Minimal for the adapter to normalize.
+  const effectiveEffort = harness === 'nanocodex' && effort === 'minimal' ? 'low' : effort
   if (selectedModel === 'gpt-5.6') {
-    return GPT_5_6_REASONING_EFFORTS.has(effort) ? effort : undefined
+    return GPT_5_6_REASONING_EFFORTS.has(effectiveEffort) ? effort : undefined
   }
   const supported = Object.entries(CODEX_REASONING_EFFORTS_BY_MODEL).find(
     ([modelId]) => selectedModel === modelId || selectedModel.startsWith(`${modelId}-20`)
   )?.[1]
-  return supported?.has(effort) ? effort : undefined
+  return supported?.has(effectiveEffort) ? effort : undefined
 }
 
 function reasoningDisplayName(reasoning: string | null | undefined): string | undefined {

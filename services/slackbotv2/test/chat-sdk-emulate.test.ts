@@ -749,7 +749,7 @@ describe('slackbotv2', () => {
                       harness: strategyRequestCount === 1 ? 'codex' : null,
                       model: strategyRequestCount === 1 ? 'gpt-5.6-sol' : null,
                       provider: strategyRequestCount === 1 ? 'responses' : null,
-                      reasoning: 'high'
+                      reasoning: 'max'
                     })
                   }
                 ]
@@ -824,8 +824,8 @@ describe('slackbotv2', () => {
     ) as Record<string, unknown>
     expect(followUpInput.model).toBeUndefined()
     expect(followUpInput.provider).toBeUndefined()
-    // Nanocodex supports the inferred high effort.
-    expect(followUpInput.reasoning).toBe('high')
+    // Nanocodex supports Max on its default GPT-5.6 Sol model.
+    expect(followUpInput.reasoning).toBe('max')
     const defaultInput = JSON.parse(
       codexApi.executes[2]!.body.input_lines.at(-1)!
     ) as Record<string, unknown>
