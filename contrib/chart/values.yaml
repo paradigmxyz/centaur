@@ -241,6 +241,24 @@ sandbox:
     repository: centaur-agent
     tag: latest
     pullPolicy: Always
+  # Node steering for sandbox pods. These reach the pod through the control
+  # plane, not through this chart's templates: sandbox pods are created at
+  # runtime by api-rs, so a Helm or kustomize patch cannot touch them. They are
+  # passed through to `Sandbox.spec.podTemplate.spec`, which already accepts all
+  # three.
+  #
+  # Set these to keep sandboxes on a dedicated node pool — commonly a tainted,
+  # sandbox-only pool, so untrusted agent workloads never share a node with the
+  # control plane, and so a preemption/spot reclaim cannot take out a live
+  # session. Empty leaves placement to the default scheduler.
+  nodeSelector: {}
+  #   workload: centaur-sandbox
+  tolerations: []
+  # - key: centaur.ai/sandbox
+  #   operator: Exists
+  #   effect: NoSchedule
+  # RuntimeClass for sandbox pods, e.g. a gVisor class for stronger isolation of
+  # untrusted agent code.
   runtimeClassName: ""
   reposPath: ""
   # How the in-sandbox harness authenticates upstream. Single source of truth:
