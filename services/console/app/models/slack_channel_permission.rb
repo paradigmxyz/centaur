@@ -42,7 +42,7 @@ class SlackChannelPermission < ApplicationRecord
   def self.replace_for!(grantee, permission_rows)
     association = grantee.slack_channel_permissions
     rows_by_channel = normalized_permission_rows(permission_rows)
-    affected_principal_ids = principal_ids_for_grantee(grantee)
+    affected_principals = principals_for_grantee(grantee)
 
     transaction do
       association.delete_all
@@ -54,18 +54,18 @@ class SlackChannelPermission < ApplicationRecord
 
       now = Time.current
       insert_all!(records.map { |record| bulk_insert_attributes(record, now) }) if records.any?
-      Principal.bump_sync_config_cache_versions(affected_principal_ids)
+      Principal.bump_sync_config_cache_versions(affected_principals)
     end
   ensure
     grantee&.reset_slack_channel_permissions_cache! if grantee.respond_to?(:reset_slack_channel_permissions_cache!)
     association&.reset
   end
 
-  def self.principal_ids_for_grantee(grantee)
+  def self.principals_for_grantee(grantee)
     case grantee
-    when Principal then [ grantee.id ]
-    when Role then PrincipalRole.where(role_id: grantee.id).pluck(:principal_id)
-    else []
+    when Principal then Principal.where(id: grantee.id)
+    when Role then Principal.where(id: PrincipalRole.where(role_id: grantee.id).select(:principal_id))
+    else Principal.none
     end
   end
 
@@ -117,7 +117,7 @@ class SlackChannelPermission < ApplicationRecord
     errors.add(:base, "must reference exactly one of principal, role")
   end
 
-  def sync_config_affected_principal_ids
-    self.class.principal_ids_for_grantee(principal || role)
+  def sync_config_affected_principals
+    self.class.principals_for_grantee(principal || role)
   end
 end

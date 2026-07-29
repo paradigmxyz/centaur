@@ -234,11 +234,11 @@ class BrokerCredential < ApplicationRecord
   end
 
   def bump_referencing_principal_sync_config_versions
-    ids = SecretSource.referencing_broker_credential(self).flat_map do |source|
+    scopes = SecretSource.referencing_broker_credential(self).filter_map do |source|
       owner = source.sync_config_owner
-      owner ? Principal.effective_grantee_ids_for_grantable(owner) : []
+      Principal.effective_grantees_for_grantable(owner) if owner
     end
-    Principal.bump_sync_config_cache_versions(ids)
+    Principal.bump_sync_config_cache_versions(Principal.combine_scopes(scopes))
   end
 
   def labels_is_a_hash

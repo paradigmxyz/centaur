@@ -76,9 +76,10 @@ class PrincipalSyncConfigSnapshot < ApplicationRecord
   end
 
   # Returns the freshest usable snapshot, stale-while-revalidate style. Config
-  # invalidations enqueue a background rebuild, so polling requests serve stale
-  # snapshots immediately instead of using request threads and DB connections to
-  # rebuild the effective config.
+  # invalidations only bump the principal cache version; polling requests serve
+  # stale snapshots immediately and enqueue the background rebuild on demand
+  # instead of using request threads and DB connections to rebuild the effective
+  # config.
   #
   # Serving a stale snapshot is safe: iron-proxy treats the config hash as an
   # ETag and re-applies on its next 5s poll once the rebuild lands. Only a

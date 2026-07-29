@@ -151,12 +151,11 @@ class Principal < ApplicationRecord
     end
   end
 
-  def self.bump_sync_config_cache_versions(ids)
-    ids = Array(ids).compact.uniq
-    return if ids.empty?
+  def self.bump_sync_config_cache_versions(targets)
+    scope = sync_config_cache_bump_scope(targets)
+    return unless scope
 
-    where(id: ids).update_all("sync_config_cache_version = sync_config_cache_version + 1")
-    enqueue_sync_config_snapshot_warm(ids)
+    scope.update_all("sync_config_cache_version = sync_config_cache_version + 1")
   end
 
   def self.enqueue_sync_config_snapshot_warm(ids)
@@ -165,13 +164,20 @@ class Principal < ApplicationRecord
     end
   end
 
-  def self.effective_grantee_ids_for_grantable(grantable)
+  def self.effective_grantees_for_grantable(grantable)
     association = grantable.model_name.singular.to_sym
     grants = Grant.where(association => grantable)
-    direct_ids = grants.where.not(principal_id: nil).pluck(:principal_id)
-    role_ids = grants.where.not(role_id: nil).pluck(:role_id)
-    role_principal_ids = role_ids.empty? ? [] : PrincipalRole.where(role_id: role_ids).pluck(:principal_id)
-    direct_ids + role_principal_ids
+    direct = where(id: grants.where.not(principal_id: nil).select(:principal_id))
+    role_members = where(
+      id: PrincipalRole.where(
+        role_id: grants.where.not(role_id: nil).select(:role_id)
+      ).select(:principal_id)
+    )
+    direct.or(role_members)
+  end
+
+  def self.combine_scopes(scopes)
+    scopes.compact.reduce(none) { |combined, scope| combined.or(scope) }
   end
 
   # Deep-walk a config payload and blank out the inline value of every
@@ -251,6 +257,17 @@ class Principal < ApplicationRecord
       .reject(&:blank?)
       .uniq
   end
+
+  def self.sync_config_cache_bump_scope(targets)
+    case targets
+    when ActiveRecord::Relation
+      targets
+    else
+      ids = Array(targets).compact.uniq
+      where(id: ids) if ids.any?
+    end
+  end
+  private_class_method :sync_config_cache_bump_scope
 
   # The single place secret order is decided for every sync array. iron-proxy
   # applies matching transforms in array order and the LAST one wins, so we emit

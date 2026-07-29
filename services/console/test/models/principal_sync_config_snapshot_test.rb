@@ -534,10 +534,40 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     end
   end
 
-  test "cache version bump enqueues a snapshot warm job" do
-    assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ @principal.id ]) do
+  test "cache version bump does not enqueue a snapshot warm job" do
+    version = @principal.sync_config_cache_version
+
+    assert_no_enqueued_jobs only: PrincipalSyncConfigSnapshotWarmJob do
       Principal.bump_sync_config_cache_versions(@principal.id)
     end
+
+    assert_equal version + 1, @principal.reload.sync_config_cache_version
+  end
+
+  test "relation cache version bump updates direct and role grantees without warm jobs" do
+    secret = static_secrets(:acme_prod_api_key)
+    Grant.create!(
+      principal: principals(:acme_user_bob),
+      static_secret: secret,
+      created_by: users(:acme_admin)
+    )
+    affected = [
+      principals(:acme_channel),
+      principals(:acme_user_alice),
+      principals(:acme_user_bob)
+    ]
+    unaffected = principals(:globex_user)
+    versions = Principal.where(id: (affected + [ unaffected ]).map(&:id)).pluck(:id, :sync_config_cache_version).to_h
+    clear_enqueued_jobs
+
+    assert_no_enqueued_jobs only: PrincipalSyncConfigSnapshotWarmJob do
+      Principal.bump_sync_config_cache_versions(Principal.effective_grantees_for_grantable(secret))
+    end
+
+    affected.each do |principal|
+      assert_equal versions.fetch(principal.id) + 1, principal.reload.sync_config_cache_version
+    end
+    assert_equal versions.fetch(unaffected.id), unaffected.reload.sync_config_cache_version
   end
 
   test "fetch_for serves the previous-version snapshot after a cache version bump" do

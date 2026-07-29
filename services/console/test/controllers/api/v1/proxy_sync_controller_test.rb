@@ -122,11 +122,17 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
     assert_response :ok
     original_version = @proxy.principal.reload.sync_config_cache_version
 
-    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob) do
-      @replace.source.update!(secret: "rotated-db-pass")
-    end
+    @replace.source.update!(secret: "rotated-db-pass")
 
     assert_operator @proxy.principal.reload.sync_config_cache_version, :>, original_version
+    assert_no_difference -> { PrincipalSyncConfigSnapshot.count } do
+      assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ @proxy.principal.id ]) do
+        post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
+      end
+    end
+    assert_response :ok
+
+    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob)
     assert_no_difference -> { PrincipalSyncConfigSnapshot.count } do
       post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
     end
@@ -250,11 +256,17 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
     assert_equal secret.audience, transform.dig("config", "audience")
 
     original_version = @proxy.principal.reload.sync_config_cache_version
-    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob) do
-      secret.update!(audience: "https://updated-service-abc123-uc.a.run.app")
-    end
+    secret.update!(audience: "https://updated-service-abc123-uc.a.run.app")
 
     assert_operator @proxy.principal.reload.sync_config_cache_version, :>, original_version
+    assert_no_difference -> { PrincipalSyncConfigSnapshot.count } do
+      assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ @proxy.principal.id ]) do
+        post api_v1_proxy_sync_url, params: { config_hash: original_hash }.to_json, headers: auth_headers
+      end
+    end
+    assert_response :ok
+
+    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob)
     assert_no_difference -> { PrincipalSyncConfigSnapshot.count } do
       post api_v1_proxy_sync_url, params: { config_hash: original_hash }.to_json, headers: auth_headers
     end
@@ -370,9 +382,13 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
     end
 
     # Promote the role grant above the direct grants and it now sorts last.
-    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob) do
-      grants(:acme_infra_prod_api_key).update!(priority: 500)
+    grants(:acme_infra_prod_api_key).update!(priority: 500)
+    assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ @proxy.principal.id ]) do
+      post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
     end
+    assert_response :ok
+
+    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob)
     post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
     assert_response :ok
     bumped = json_body.fetch("secrets").map { |s| s.dig("source", "var") || s.dig("source", "type") }
@@ -422,11 +438,15 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
     assert_response :ok
     original_version = @proxy.principal.reload.sync_config_cache_version
 
-    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob) do
-      credential.update!(access_token: "token-2", expires_at: 2.hours.from_now, last_refresh: Time.current)
-    end
+    credential.update!(access_token: "token-2", expires_at: 2.hours.from_now, last_refresh: Time.current)
 
     assert_operator @proxy.principal.reload.sync_config_cache_version, :>, original_version
+    assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ @proxy.principal.id ]) do
+      post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
+    end
+    assert_response :ok
+
+    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob)
     post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
     assert_response :ok
 

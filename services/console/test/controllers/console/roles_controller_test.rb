@@ -136,13 +136,14 @@ module Console
       assert_equal "C0123456789", permission.reload.channel_id
     end
 
-    test "update_slack_channel_permissions batches warm jobs" do
+    test "update_slack_channel_permissions bumps versions without warm jobs" do
       role = roles(:acme_infra)
       first = role.slack_channel_permissions.create!(channel_id: "C0123456789", upload_enabled: true)
       second = role.slack_channel_permissions.create!(channel_id: "G9876543210", download_enabled: true)
+      versions = Principal.where(id: role.principal_ids).pluck(:id, :sync_config_cache_version).to_h
       clear_enqueued_jobs
 
-      assert_enqueued_jobs role.principal_ids.uniq.size, only: PrincipalSyncConfigSnapshotWarmJob do
+      assert_no_enqueued_jobs only: PrincipalSyncConfigSnapshotWarmJob do
         patch slack_channel_permissions_console_role_url(role.oid),
               params: {
                 role: {
@@ -170,6 +171,9 @@ module Console
 
       assert_redirected_to console_role_path(role.oid)
       assert_equal %w[C0123456789 C2222222222], role.slack_channel_permissions.reload.pluck(:channel_id).sort
+      Principal.where(id: role.principal_ids).find_each do |principal|
+        assert_equal versions.fetch(principal.id) + 1, principal.sync_config_cache_version
+      end
     end
 
     test "update_slack_channel_permissions skips unchanged submissions" do
