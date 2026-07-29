@@ -38,14 +38,37 @@ describe('harnessDisplayName', () => {
 })
 
 describe('reasoningForModel', () => {
-  test('accepts standard Codex efforts for GPT models', () => {
-    expect(reasoningForModel('codex', 'gpt-5.5', 'high')).toBe('high')
-    expect(reasoningForModel('codex', 'gpt-5.6-sol', 'minimal')).toBe('minimal')
+  test('matches the reasoning efforts advertised by every selectable Codex model', () => {
+    const allEfforts = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+    const standardEfforts = ['none', 'low', 'medium', 'high', 'xhigh']
+    const proEfforts = ['medium', 'high', 'xhigh']
+    const effortsByModel: Record<string, string[]> = {
+      'gpt-5.4': standardEfforts,
+      'gpt-5.4-mini': standardEfforts,
+      'gpt-5.4-nano': standardEfforts,
+      'gpt-5.4-pro': proEfforts,
+      'gpt-5.5': standardEfforts,
+      'gpt-5.5-pro': proEfforts,
+      'gpt-5.6-luna': [...standardEfforts, 'max'],
+      'gpt-5.6-sol': [...standardEfforts, 'max'],
+      'gpt-5.6-terra': [...standardEfforts, 'max']
+    }
+
+    for (const [model, supportedEfforts] of Object.entries(effortsByModel)) {
+      for (const effort of allEfforts) {
+        expect(reasoningForModel('codex', model, effort)).toBe(
+          supportedEfforts.includes(effort) ? effort : undefined
+        )
+      }
+    }
   })
 
-  test('accepts max only for GPT-5.6 models', () => {
-    expect(reasoningForModel('codex', 'gpt-5.6-sol', 'max')).toBe('max')
-    expect(reasoningForModel('codex', 'gpt-5.5', 'max')).toBeUndefined()
+  test('supports current model aliases and snapshots without widening their effort sets', () => {
+    expect(reasoningForModel('codex', 'gpt-5.6', 'max')).toBe('max')
+    expect(reasoningForModel('codex', 'gpt-5.6-sol-2026-07-01', 'minimal')).toBeUndefined()
+    expect(reasoningForModel('codex', 'gpt-5.5-pro-2026-07-01', 'low')).toBeUndefined()
+    expect(reasoningForModel('codex', 'gpt-5.4-2026-03-05', 'xhigh')).toBe('xhigh')
+    expect(reasoningForModel('codex', 'gpt-5.3', 'high')).toBeUndefined()
   })
 
   test('rejects Codex efforts for the currently selected non-Codex model', () => {

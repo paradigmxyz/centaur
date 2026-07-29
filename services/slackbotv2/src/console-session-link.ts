@@ -29,6 +29,30 @@ const REASONING_DISPLAY_NAMES: Record<string, string> = {
   max: 'Max'
 }
 
+const STANDARD_CODEX_REASONING_EFFORTS = new Set([
+  'none',
+  'low',
+  'medium',
+  'high',
+  'xhigh'
+])
+const PRO_CODEX_REASONING_EFFORTS = new Set(['medium', 'high', 'xhigh'])
+const GPT_5_6_REASONING_EFFORTS = new Set([
+  ...STANDARD_CODEX_REASONING_EFFORTS,
+  'max'
+])
+const CODEX_REASONING_EFFORTS_BY_MODEL: Record<string, ReadonlySet<string>> = {
+  'gpt-5.4': STANDARD_CODEX_REASONING_EFFORTS,
+  'gpt-5.4-mini': STANDARD_CODEX_REASONING_EFFORTS,
+  'gpt-5.4-nano': STANDARD_CODEX_REASONING_EFFORTS,
+  'gpt-5.4-pro': PRO_CODEX_REASONING_EFFORTS,
+  'gpt-5.5': STANDARD_CODEX_REASONING_EFFORTS,
+  'gpt-5.5-pro': PRO_CODEX_REASONING_EFFORTS,
+  'gpt-5.6-luna': GPT_5_6_REASONING_EFFORTS,
+  'gpt-5.6-sol': GPT_5_6_REASONING_EFFORTS,
+  'gpt-5.6-terra': GPT_5_6_REASONING_EFFORTS
+}
+
 const CODEX_CONFIG = codexConfig as {
   model?: unknown
   model_reasoning_effort?: unknown
@@ -138,9 +162,14 @@ export function reasoningForModel(
   const effort = reasoning?.trim().toLowerCase()
   if (!selectedModel || !effort) return undefined
   if (harness === 'nanocodex') return effort === 'max' ? undefined : effort
-  if (harness !== 'codex' || !selectedModel.startsWith('gpt-')) return undefined
-  if (effort === 'max' && !selectedModel.startsWith('gpt-5.6-')) return undefined
-  return effort
+  if (harness !== 'codex') return undefined
+  if (selectedModel === 'gpt-5.6') {
+    return GPT_5_6_REASONING_EFFORTS.has(effort) ? effort : undefined
+  }
+  const supported = Object.entries(CODEX_REASONING_EFFORTS_BY_MODEL).find(
+    ([modelId]) => selectedModel === modelId || selectedModel.startsWith(`${modelId}-20`)
+  )?.[1]
+  return supported?.has(effort) ? effort : undefined
 }
 
 function reasoningDisplayName(reasoning: string | null | undefined): string | undefined {
