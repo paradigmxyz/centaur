@@ -5,7 +5,8 @@ import {
   defaultModelForHarness,
   defaultReasoningForHarness,
   effectiveReasoningForHarness,
-  harnessDisplayName
+  harnessDisplayName,
+  reasoningForModel
 } from '../src/console-session-link'
 import claudeSettings from '../../../harness/claude/settings.json'
 import codexConfig from '../../../harness/codex/config.toml'
@@ -33,6 +34,23 @@ describe('harnessDisplayName', () => {
     expect(harnessDisplayName(null)).toBeUndefined()
     expect(harnessDisplayName('')).toBeUndefined()
     expect(harnessDisplayName('   ')).toBeUndefined()
+  })
+})
+
+describe('reasoningForModel', () => {
+  test('accepts standard Codex efforts for GPT models', () => {
+    expect(reasoningForModel('codex', 'gpt-5.5', 'high')).toBe('high')
+    expect(reasoningForModel('codex', 'gpt-5.6-sol', 'minimal')).toBe('minimal')
+  })
+
+  test('accepts max only for GPT-5.6 models', () => {
+    expect(reasoningForModel('codex', 'gpt-5.6-sol', 'max')).toBe('max')
+    expect(reasoningForModel('codex', 'gpt-5.5', 'max')).toBeUndefined()
+  })
+
+  test('rejects Codex efforts for the currently selected non-Codex model', () => {
+    expect(reasoningForModel('claudecode', 'claude-opus-4-8', 'high')).toBeUndefined()
+    expect(reasoningForModel('amp', 'fast', 'low')).toBeUndefined()
   })
 })
 

@@ -127,6 +127,22 @@ export function effectiveReasoningForHarness(
   return key === 'nanocodex' && reasoning === 'minimal' ? 'low' : reasoning
 }
 
+/** Returns the requested effort only when the selected model supports it. */
+export function reasoningForModel(
+  harnessType: string | null | undefined,
+  model: string | null | undefined,
+  reasoning: string | null | undefined
+): string | undefined {
+  const harness = harnessType?.trim().toLowerCase()
+  const selectedModel = model?.trim().toLowerCase()
+  const effort = reasoning?.trim().toLowerCase()
+  if (!selectedModel || !effort) return undefined
+  if (harness === 'nanocodex') return effort === 'max' ? undefined : effort
+  if (harness !== 'codex' || !selectedModel.startsWith('gpt-')) return undefined
+  if (effort === 'max' && !selectedModel.startsWith('gpt-5.6-')) return undefined
+  return effort
+}
+
 function reasoningDisplayName(reasoning: string | null | undefined): string | undefined {
   const key = reasoning?.trim().toLowerCase()
   if (!key) return undefined

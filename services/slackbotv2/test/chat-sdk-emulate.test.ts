@@ -749,7 +749,7 @@ describe('slackbotv2', () => {
                       harness: strategyRequestCount === 1 ? 'codex' : null,
                       model: strategyRequestCount === 1 ? 'gpt-5.6-sol' : null,
                       provider: strategyRequestCount === 1 ? 'responses' : null,
-                      reasoning: strategyRequestCount === 1 ? 'high' : null
+                      reasoning: 'high'
                     })
                   }
                 ]
@@ -824,9 +824,14 @@ describe('slackbotv2', () => {
     ) as Record<string, unknown>
     expect(followUpInput.model).toBeUndefined()
     expect(followUpInput.provider).toBeUndefined()
-    // Reasoning remains a per-turn setting; only the sticky harness/model/
-    // provider selection is protected by the root flag.
+    // Nanocodex supports the inferred high effort.
     expect(followUpInput.reasoning).toBe('high')
+    const defaultInput = JSON.parse(
+      codexApi.executes[2]!.body.input_lines.at(-1)!
+    ) as Record<string, unknown>
+    // The same inferred effort is incompatible with the currently selected
+    // Claude model and is therefore dropped.
+    expect(defaultInput.reasoning).toBeUndefined()
 
     const nanocodexState = await sharedState.get<Record<string, unknown>>(
       `thread-state:${threadKey(nanocodexRoot.ts)}`
@@ -1025,13 +1030,12 @@ describe('slackbotv2', () => {
     expect(JSON.parse(executeBody.input_lines.at(-1)!).model).toBeUndefined()
   })
 
-  it('forwards a per-channel default harness + model + reasoning onto the turn', async () => {
+  it('drops a per-channel reasoning default incompatible with its selected model', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
     bot = createTestBot({
       state: sharedState,
-      // The channel pins the harness and its model together (as `--claude
-      // --model opus -rsn high` would parse), so the pair can't mismatch.
+      // The channel pins Claude and also carries an incompatible Codex effort.
       channelDefaults: {
         [CHANNEL_ID]: { harnessType: 'claudecode', model: 'claude-opus-4-8', reasoning: 'high' }
       }
@@ -1068,7 +1072,7 @@ describe('slackbotv2', () => {
     const executeBody = codexApi.executes[0]!.body
     const inputLine = JSON.parse(executeBody.input_lines.at(-1)!) as Record<string, unknown>
     expect(inputLine.model).toBe('claude-opus-4-8')
-    expect(inputLine.reasoning).toBe('high')
+    expect(inputLine.reasoning).toBeUndefined()
     expect(executeBody.metadata.model).toBe('claude-opus-4-8')
   })
 
