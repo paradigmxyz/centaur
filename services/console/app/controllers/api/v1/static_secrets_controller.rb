@@ -71,21 +71,24 @@ module Api
           attrs.require(:source).permit(:source_type, :secret, config: {})
         end
 
-        rules_attrs = request_rule_attributes(attrs)
+        source = source_attrs ? SecretSource.new(source_attrs.to_h) : nil
+        rules = build_rules(attrs)
 
         StaticSecret.transaction do
-          with_sync_config_replacement_guard(ref, ss_attrs, source: source_attrs, rules: rules_attrs) do
+          with_sync_config_replacement_guard(ref, ss_attrs, source: source, rules: rules) do
             ref.assign_attributes(ss_attrs)
             ref.save!
 
             ref.source&.destroy!
-            if source_attrs
-              SecretSource.create!(source_attrs.to_h.merge(static_secret: ref))
+            if source
+              source.static_secret = ref
+              source.save!
             end
 
             ref.rules.destroy_all
-            rules_attrs.each do |r|
-              RequestRule.create!(r.merge(static_secret: ref))
+            rules.each do |rule|
+              rule.static_secret = ref
+              rule.save!
             end
 
             ref.reload

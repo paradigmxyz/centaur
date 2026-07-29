@@ -105,21 +105,11 @@ module Api
       end
     end
 
-    def sync_config_replacement_unchanged?(record, attributes, **associations)
-      return false if record.new_record?
-
-      SyncConfigReplacement.equivalent?(record, attributes, associations)
-    end
-
     def with_sync_config_replacement_guard(record, attributes, **associations)
       record.lock! unless record.new_record?
-      if sync_config_replacement_unchanged?(record, attributes, **associations)
-        raise ActiveRecord::RecordInvalid, record unless record.valid?
+      return record if !record.new_record? && SyncConfigReplacement.equivalent?(record, attributes, associations)
 
-        record
-      else
-        yield
-      end
+      yield
     end
 
     DEFAULT_PAGE_LIMIT = 50

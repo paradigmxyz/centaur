@@ -1,81 +1,28 @@
 module SyncConfigReplacement
-  ASSOCIATION_CLASSES = {
-    source: SecretSource,
-    sources: SecretSource,
-    keyfile_source: SecretSource,
-    dsn_source: SecretSource,
-    rules: RequestRule
-  }.freeze
-
+  # Association values must be model instances (or arrays of them) whose class
+  # defines SYNC_CONFIG_REPLACEMENT_ATTRIBUTES — controllers pass the same
+  # instances they persist when the replacement turns out not to be a no-op.
   module_function
 
   def equivalent?(record, attributes, associations)
-    current_document(record, attributes, associations) == replacement_document(record, attributes, associations)
-  end
-
-  def current_document(record, attributes, associations)
-    document(
-      record,
-      attribute_names(attributes),
-      associations.to_h { |association, _| [ association, record.public_send(association) ] }
-    )
-  end
-
-  def replacement_document(record, attributes, associations)
     replacement = record.dup
     replacement.assign_attributes(attributes)
-    document(replacement, attribute_names(attributes), associations)
-  end
+    names = attributes.to_h.keys.map(&:to_s)
+    return false unless names.index_with { |name| record.public_send(name).as_json } ==
+                        names.index_with { |name| replacement.public_send(name).as_json }
 
-  def document(record, attribute_names, associations)
-    normalize(
-      "record" => attribute_names.index_with { |name| record.public_send(name) },
-      "associations" => associations.to_h do |name, association|
-        [ name, association_document(name, association) ]
-      end
-    )
-  end
-
-  def association_document(name, association)
-    record_class = ASSOCIATION_CLASSES.fetch(name.to_sym)
-
-    return collection_document(Array(association), record_class) if association.is_a?(Array) ||
-                                                                    association.is_a?(ActiveRecord::Associations::CollectionProxy)
-    return nil if association.nil?
-
-    record_document(association, record_class)
-  end
-
-  def collection_document(records, record_class)
-    documents = records.map { |record| record_document(record, record_class) }
-    return documents if record_class == RequestRule
-
-    documents.sort_by { |document| JSON.generate(normalize(document)) }
-  end
-
-  def record_document(record, record_class)
-    record = record_class.new(record.to_h) unless record.is_a?(record_class)
-    association_attribute_names(record_class).index_with { |name| record.public_send(name) }
-  end
-
-  def association_attribute_names(record_class)
-    record_class.const_get(:SYNC_CONFIG_REPLACEMENT_ATTRIBUTES)
-  end
-
-  def attribute_names(attributes)
-    attributes.to_h.keys.map(&:to_s)
-  end
-
-  def normalize(value)
-    case value
-    when Hash
-      value.to_h.each_with_object({}) do |(key, nested), normalized|
-        normalized[key.to_s] = normalize(nested)
-      end.sort.to_h
-    when Array
-      value.map { |nested| normalize(nested) }
-    else
-      value
+    associations.all? do |name, replacement_records|
+      documents(record.public_send(name)) == documents(replacement_records)
     end
+  end
+
+  # Hash#== ignores key order, so as_json (deep string keys) is the only
+  # normalization needed. Sorting by role/position is equality-preserving
+  # because both are part of the document: roles are unique within a secret's
+  # sources and rule positions are assigned 0..n from the request body.
+  def documents(records)
+    Array(records)
+      .map { |record| record.slice(*record.class::SYNC_CONFIG_REPLACEMENT_ATTRIBUTES).as_json }
+      .sort_by { |document| [ document["role"].to_s, document["position"].to_i ] }
   end
 end

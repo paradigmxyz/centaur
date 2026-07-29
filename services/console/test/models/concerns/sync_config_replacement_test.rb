@@ -38,17 +38,29 @@ class SyncConfigReplacementTest < ActiveSupport::TestCase
     )
   end
 
-  test "secret source replacement fields are explicit" do
+  # A new column must be explicitly classified: either compared (add it to
+  # SYNC_CONFIG_REPLACEMENT_ATTRIBUTES) or excluded here. Without this check a
+  # forgotten column is invisible to the comparison on both sides, so a PUT
+  # changing only that column would be silently skipped as a no-op.
+  test "secret source replacement fields cover the schema" do
+    owner_foreign_keys = SecretSource::OWNER_ASSOCIATIONS.map do |association|
+      SecretSource.reflect_on_association(association).foreign_key.to_s
+    end
+
     assert_equal(
-      %w[config role role_kind secret source_type],
-      SyncConfigReplacement.association_attribute_names(SecretSource).sort
+      (SecretSource.attribute_names - %w[id created_at updated_at] - owner_foreign_keys).sort,
+      SecretSource::SYNC_CONFIG_REPLACEMENT_ATTRIBUTES.sort
     )
   end
 
-  test "request rule replacement fields are explicit" do
+  test "request rule replacement fields cover the schema" do
+    owner_foreign_keys = RequestRule::OWNER_ASSOCIATIONS.map do |association|
+      RequestRule.reflect_on_association(association).foreign_key.to_s
+    end
+
     assert_equal(
-      %w[cidr host http_methods paths position],
-      SyncConfigReplacement.association_attribute_names(RequestRule).sort
+      (RequestRule.attribute_names - %w[id created_at updated_at] - owner_foreign_keys).sort,
+      RequestRule::SYNC_CONFIG_REPLACEMENT_ATTRIBUTES.sort
     )
   end
 end
