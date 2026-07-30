@@ -47,7 +47,7 @@ RUN useradd -m -s /bin/bash -u 1001 agent \
     && echo "agent ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/agent
 
 ARG CLAUDE_CODE_VERSION=2.1.143
-ARG CODEX_VERSION=0.130.0
+ARG CODEX_VERSION=0.146.0
 ARG PI_CODING_AGENT_VERSION=0.67.2
 
 # ── Global npm CLIs (root) ──────────────────────────────────────────────────
