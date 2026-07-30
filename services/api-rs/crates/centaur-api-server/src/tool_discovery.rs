@@ -1629,7 +1629,7 @@ mod tests {
             secret_ref: "RESHIFT_DSN".to_owned(),
             labels: tool_labels("company_context", "centaur"),
             database: "warehouse".to_owned(),
-            role: Some("centaur_slack_reader".to_owned()),
+            role: Some("centaur_company_context_reader".to_owned()),
             settings: vec![
                 PgDsnSetting {
                     name: "centaur.slack_channel_id".to_owned(),
@@ -1649,6 +1649,20 @@ mod tests {
                         proxy_label: Some("centaur.slack_user_id".to_owned()),
                     }),
                 },
+                PgDsnSetting {
+                    name: "centaur.slack_history_channel_ids".to_owned(),
+                    value: None,
+                    value_from: Some(PgDsnSettingValueFrom {
+                        principal_label: None,
+                        principal_field: Some("slack_history_channel_ids".to_owned()),
+                        proxy_label: None,
+                    }),
+                },
+                PgDsnSetting {
+                    name: "centaur.slack_include_public".to_owned(),
+                    value: Some("true".to_owned()),
+                    value_from: None,
+                },
             ],
         })])
         .unwrap();
@@ -1658,9 +1672,9 @@ mod tests {
         assert_eq!(sandbox_env.database.as_deref(), Some("warehouse"));
         assert_eq!(
             listeners[0].extra.get("role").and_then(YamlValue::as_str),
-            Some("centaur_slack_reader")
+            Some("centaur_company_context_reader")
         );
-        assert_eq!(listeners[0].settings.len(), 2);
+        assert_eq!(listeners[0].settings.len(), 4);
         assert_eq!(listeners[0].settings[0].name, "centaur.slack_channel_id");
         assert_eq!(listeners[0].settings[1].name, "centaur.slack_user_id");
         assert_eq!(
@@ -1670,6 +1684,18 @@ mod tests {
                 .and_then(|value_from| value_from.proxy_label.as_deref()),
             Some("centaur.slack_user_id")
         );
+        assert_eq!(
+            listeners[0].settings[2].name,
+            "centaur.slack_history_channel_ids"
+        );
+        assert_eq!(
+            listeners[0].settings[2]
+                .value_from
+                .as_ref()
+                .and_then(|value_from| value_from.principal_field.as_deref()),
+            Some("slack_history_channel_ids")
+        );
+        assert_eq!(listeners[0].settings[3].value.as_deref(), Some("true"));
     }
 
     #[test]

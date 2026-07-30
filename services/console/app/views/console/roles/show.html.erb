@@ -27,6 +27,10 @@
   <% end %>
 </div>
 
+<%= render "console/shared/slack_channel_permissions",
+           owner: @role,
+           url: slack_channel_permissions_console_role_path(@role.oid) %>
+
 <section>
   <div class="mb-4 flex flex-wrap items-end justify-between gap-3">
     <div>
@@ -52,7 +56,14 @@
 
   <% if @grants.any? %>
     <div class="console-panel">
-      <table class="console-table">
+      <table class="console-table console-table-fixed">
+        <colgroup>
+          <col class="w-40">
+          <col class="w-32">
+          <col class="w-[28%]">
+          <col>
+          <col class="w-28">
+        </colgroup>
         <thead class="console-table-head">
           <tr>
             <th class="console-th">Type</th>
@@ -73,8 +84,20 @@
               <td class="console-td-nowrap">
                 <%= link_to secret.oid, console_secret_path(kind, secret.oid), class: "console-link" %>
               </td>
-              <td class="console-td-nowrap text-zinc-300"><%= secret.foreign_id || "—" %></td>
-              <td class="console-td-nowrap text-zinc-100"><%= secret.try(:name).presence || %(<span class="text-zinc-600">unnamed</span>).html_safe %></td>
+              <td class="console-td-truncate text-zinc-300">
+                <% if secret.foreign_id.present? %>
+                  <span class="console-cell-truncate" title="<%= secret.foreign_id %>"><%= secret.foreign_id %></span>
+                <% else %>
+                  <span class="text-zinc-600">—</span>
+                <% end %>
+              </td>
+              <td class="console-td-truncate text-zinc-100">
+                <% if (secret_name = secret.try(:name).presence) %>
+                  <span class="console-cell-truncate" title="<%= secret_name %>"><%= secret_name %></span>
+                <% else %>
+                  <span class="text-zinc-600">unnamed</span>
+                <% end %>
+              </td>
               <td class="console-td-nowrap text-right">
                 <%= button_to "Revoke", revoke_grant_console_role_path(@role.oid, grant.oid), method: :delete,
                       form: { data: { turbo_confirm: "Revoke this grant?" } },

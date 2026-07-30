@@ -16,6 +16,7 @@ module Oauth
     LINEAR_CLIENT_ID = "acme-linear-client-id".freeze
 
     setup do
+      @exchange_http_mocks = []
       @app = oauth_apps(:acme_google) # slug "google"
       @app.update!(client_secret: "app-secret")
       oauth_apps(:acme_slack).update!(client_secret: "slack-secret")
@@ -30,21 +31,14 @@ module Oauth
     teardown do
       FlowsController.exchange_client_factory = -> { Broker::AuthorizationCodeClient.new }
       clear_enqueued_jobs
+      @exchange_http_mocks.each(&:verify)
     end
 
-    class StubHTTP
-      def initialize(status:, body:)
-        @status = status
-        @body = body
-      end
-
-      def call(url:, form:, headers:, timeout:)
-        Broker::AuthorizationCodeClient::Response.new(status: @status, body: @body)
-      end
-    end
-
-    def stub_exchange(status:, body:)
-      FlowsController.exchange_client_factory = -> { Broker::AuthorizationCodeClient.new(http: StubHTTP.new(status: status, body: body)) }
+    def stub_exchange(status:, body:, expected: true)
+      http = Minitest::Mock.new
+      expect_http_call(http, status: status, body: body) if expected
+      @exchange_http_mocks << http
+      FlowsController.exchange_client_factory = -> { Broker::AuthorizationCodeClient.new(http: http) }
     end
 
     def id_token(claims)
@@ -550,7 +544,7 @@ module Oauth
     test "callback redirects signed-out users to login and mints nothing" do
       state = start_flow
       sign_out
-      stub_exchange(status: 200, body: token_body)
+      stub_exchange(status: 200, body: token_body, expected: false)
 
       assert_no_difference -> { BrokerCredential.count } do
         get oauth_callback_url(slug: "google"), params: { state: state, code: "auth-code" }
@@ -564,7 +558,7 @@ module Oauth
       user = users(:member_user)
       state = start_flow
       user.update!(status: :disabled)
-      stub_exchange(status: 200, body: token_body)
+      stub_exchange(status: 200, body: token_body, expected: false)
 
       assert_no_difference -> { BrokerCredential.count } do
         get oauth_callback_url(slug: "google"), params: { state: state, code: "auth-code" }

@@ -39,6 +39,7 @@ const options: SlackbotV2Options = {
   apiKey: optionalEnv('SLACKBOT_API_KEY'),
   assistantStatus: optionalEnv('SLACKBOTV2_ASSISTANT_STATUS'),
   activitySummaryStatusEnabled: booleanEnv('SLACKBOTV2_ACTIVITY_SUMMARY_STATUS_ENABLED', false),
+  autoJoinCreatedChannels: booleanEnv('SLACKBOTV2_AUTO_JOIN_CREATED_CHANNELS', false),
   botToken,
   botUserId: optionalEnv('SLACK_BOT_USER_ID'),
   channelDefaults: parseChannelDefaults(optionalEnv('SLACKBOTV2_CHANNEL_DEFAULTS'), reason =>
@@ -51,8 +52,16 @@ const options: SlackbotV2Options = {
   // track the deployment instead of the baked harness config.
   harnessDefaultModels: {
     ...(optionalEnv('CLAUDE_MODEL') ? { claudecode: optionalEnv('CLAUDE_MODEL')! } : {}),
-    ...(optionalEnv('CODEX_MODEL') ? { codex: optionalEnv('CODEX_MODEL')! } : {})
+    ...(optionalEnv('CODEX_MODEL')
+      ? { codex: optionalEnv('CODEX_MODEL')!, nanocodex: optionalEnv('CODEX_MODEL')! }
+      : {})
   },
+  harnessDefaultReasoning: optionalEnv('CODEX_MODEL_REASONING_EFFORT')
+    ? {
+        codex: optionalEnv('CODEX_MODEL_REASONING_EFFORT')!,
+        nanocodex: optionalEnv('CODEX_MODEL_REASONING_EFFORT')!
+      }
+    : {},
   idleTimeoutMs: optionalNumberEnv('SESSION_IDLE_TIMEOUT_MS'),
   maxDurationMs: optionalNumberEnv('SESSION_MAX_DURATION_MS'),
   messageOverridesStrategy: createMessageOverridesStrategy(),
@@ -85,6 +94,7 @@ console.log(
     event: 'slackbotv2_started',
     service: 'slackbotv2',
     activity_summary_status_enabled: options.activitySummaryStatusEnabled,
+    auto_join_created_channels_enabled: options.autoJoinCreatedChannels,
     message_overrides_strategy: messageOverridesStrategyMode,
     message_overrides_strategy_enabled:
       messageOverridesStrategyMode !== 'llm' || Boolean(messageOverridesStrategyApiKey),

@@ -1,6 +1,13 @@
 require "test_helper"
 
 class ProxyTest < ActiveSupport::TestCase
+  include ActiveJob::TestHelper
+
+  teardown do
+    clear_enqueued_jobs
+    clear_performed_jobs
+  end
+
   def valid_attrs(overrides = {})
     {
       name: "my-proxy",
@@ -124,14 +131,21 @@ class ProxyTest < ActiveSupport::TestCase
   end
 
   # --- config_hash --------------------------------------------------------
-  # Grant resolution and sync-payload assembly are tested on Principal, which
-  # owns that logic; here we cover only how the proxy's hash reacts to changes.
+  # Grant resolution and sync-payload assembly are tested on
+  # PrincipalSyncConfigSnapshot; here we cover only how the proxy's hash reacts
+  # to changes.
 
   test "config_hash changes when a pg_dsn grant is added" do
     proxy = Proxy.create!(name: "pg-hashing", principal: principals(:globex_user))
     before = proxy.config_hash
     Grant.create!(principal: proxy.principal, pg_dsn_secret: pg_dsn_secrets(:acme_analytics_pg),
                   created_by: users(:globex_admin))
+
+    assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ proxy.principal.id ]) do
+      assert_equal before, proxy.reload.config_hash
+    end
+
+    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob)
     refute_equal before, proxy.reload.config_hash
   end
 
@@ -140,6 +154,12 @@ class ProxyTest < ActiveSupport::TestCase
     before = proxy.config_hash
     Grant.create!(principal: proxy.principal, gcp_auth_secret: gcp_auth_secrets(:acme_bigquery),
                   created_by: users(:globex_admin))
+
+    assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ proxy.principal.id ]) do
+      assert_equal before, proxy.reload.config_hash
+    end
+
+    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob)
     refute_equal before, proxy.reload.config_hash
   end
 
@@ -150,6 +170,12 @@ class ProxyTest < ActiveSupport::TestCase
     Grant.create!(role: role, gcp_auth_secret: gcp_auth_secrets(:acme_bigquery),
                   created_by: users(:acme_admin))
     principals(:acme_channel).principal_roles.create!(role: role)
+
+    assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ proxy.principal.id ]) do
+      assert_equal before, proxy.reload.config_hash
+    end
+
+    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob)
     refute_equal before, proxy.reload.config_hash
   end
 end

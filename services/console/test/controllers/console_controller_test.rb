@@ -161,10 +161,10 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
 
   test "principal detail page renders DM permissions as API-managed rows" do
     principal = principals(:acme_user_bob)
+    principal.update!(name: "Bob")
     SlackChannelPermission.create!(
       principal: principal,
       channel_id: "D0123456789",
-      channel_name: "U0123456789",
       upload_enabled: true,
       download_enabled: false,
       history_enabled: true
@@ -173,8 +173,36 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     get console_principal_url(principal.oid)
     assert_response :ok
 
-    assert_select "td", text: /DM U0123456789/
+    assert_select "td", text: /DM Bob/
     assert_select "td", text: "API-managed"
+  end
+
+  test "principal detail page resolves direct and inherited Slack channel names from the catalog" do
+    principal = principals(:acme_channel)
+    principal.slack_channel_permissions.create!(
+      channel_id: "C0123456789",
+      upload_enabled: true
+    )
+    roles(:acme_infra).slack_channel_permissions.create!(
+      channel_id: "G9876543210",
+      history_enabled: true
+    )
+    catalog = SlackChannelCatalog::Result.new(
+      channels: [
+        SlackChannelCatalog::Channel.new(id: "C0123456789", name: "general", private: false),
+        SlackChannelCatalog::Channel.new(id: "G9876543210", name: "private", private: true)
+      ],
+      error: nil,
+      configured: true
+    )
+
+    with_slack_channel_catalog(catalog) { get console_principal_url(principal.oid) }
+    assert_response :ok
+
+    assert_select "td", text: /#general/
+    assert_select "h3", text: "Inherited From Roles"
+    assert_select "td", text: /#private/
+    assert_select "input[type=checkbox][disabled]", minimum: 3
   end
 
   test "credentials table combines id, shows status, and links to detail" do
@@ -326,5 +354,16 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
       assert_select "input[name=_method][value=delete]", count: 1
       assert_select "button", text: "Sign out"
     end
+  end
+
+  private
+
+  def with_slack_channel_catalog(catalog)
+    singleton = SlackChannelCatalog.singleton_class
+    original = singleton.instance_method(:fetch)
+    singleton.define_method(:fetch) { catalog }
+    yield
+  ensure
+    singleton.define_method(:fetch, original)
   end
 end

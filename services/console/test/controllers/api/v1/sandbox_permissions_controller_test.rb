@@ -13,7 +13,6 @@ module Api
         SlackChannelPermission.create!(
           principal: @proxy.principal,
           channel_id: "C0123456789",
-          channel_name: "general",
           upload_enabled: true,
           history_enabled: true
         )
@@ -85,6 +84,24 @@ module Api
         refute_includes response.body, "postgres_setting_templates"
       end
 
+      test "returns merged role Slack channel permissions" do
+        roles(:acme_infra).slack_channel_permissions.create!(
+          channel_id: "C0123456789",
+          download_enabled: true
+        )
+
+        with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
+          get "/api/v1/sandbox/permissions", headers: auth_headers(token_for(@proxy))
+        end
+        assert_response :ok
+
+        permission = json_body.dig("data", "slack_channel_permissions").sole
+        assert_not permission.key?("channel_name")
+        assert_equal true, permission.fetch("upload_enabled")
+        assert_equal true, permission.fetch("download_enabled")
+        assert_equal true, permission.fetch("history_enabled")
+      end
+
       test "rejects requests without a sandbox token" do
         get "/api/v1/sandbox/permissions"
         assert_response :unauthorized
@@ -123,18 +140,6 @@ module Api
 
       def json_body
         JSON.parse(response.body)
-      end
-
-      def with_env(values)
-        previous = values.keys.to_h { |key| [ key, ENV[key] ] }
-        values.each do |key, value|
-          value.nil? ? ENV.delete(key) : ENV[key] = value
-        end
-        yield
-      ensure
-        previous.each do |key, value|
-          value.nil? ? ENV.delete(key) : ENV[key] = value
-        end
       end
     end
   end

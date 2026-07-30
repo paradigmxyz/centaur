@@ -4,17 +4,21 @@ module Console
   class RolesController < ApplicationController
     include KvRowParams
     include SecretKinds
+    include Console::SlackChannelPermissionManagement
 
     layout "console"
 
     before_action :require_admin
-    before_action :set_role, only: %i[show edit update grant_secret revoke_grant]
+    before_action :set_role, only: %i[
+      show edit update grant_secret revoke_grant update_slack_channel_permissions
+    ]
 
     def index
       @roles = Role.order(:namespace, :id)
     end
 
     def show
+      load_slack_channel_permission_form(@role)
       @grants = @role.grants.includes(Grant::GRANTABLE_ASSOCIATIONS).order(:id)
       granted_ids = Hash.new { |h, k| h[k] = [] }
       @grants.each do |grant|
@@ -78,6 +82,10 @@ module Console
       grant = @role.grants.find_by_oid!(params[:grant_id])
       grant.destroy!
       redirect_to console_role_path(@role.oid), notice: "Revoked grant."
+    end
+
+    def update_slack_channel_permissions
+      update_slack_channel_permissions_from_form(@role, console_role_path(@role.oid))
     end
 
     private

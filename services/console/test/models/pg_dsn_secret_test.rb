@@ -145,6 +145,10 @@ class PgDsnSecretTest < ActiveSupport::TestCase
       },
       { "name" => "centaur.principal", "value_from" => { "principal_field" => "foreign_id" } },
       { "name" => "centaur.principal_id", "value_from" => { "principal_field" => "id" } },
+      {
+        "name" => "centaur.slack_history_channel_ids",
+        "value_from" => { "principal_field" => "slack_history_channel_ids" }
+      },
       { "name" => "app.tenant", "value" => "centaur" }
     ])))
     assert secret.valid?
@@ -155,7 +159,50 @@ class PgDsnSecretTest < ActiveSupport::TestCase
         { "name" => "centaur.google_subject", "value" => "google-sub-alice" },
         { "name" => "centaur.principal", "value" => principal.foreign_id },
         { "name" => "centaur.principal_id", "value" => principal.oid },
+        { "name" => "centaur.slack_history_channel_ids", "value" => "[]" },
         { "name" => "app.tenant", "value" => "centaur" }
+      ],
+      secret.to_proxy_dsn(principal: principal)["settings"]
+    )
+  end
+
+  test "to_proxy_dsn resolves Slack history channel ids from permission rows" do
+    principal = principals(:acme_channel)
+    SlackChannelPermission.create!(
+      principal: principal,
+      channel_id: "GPRIVATE123",
+      upload_enabled: false,
+      download_enabled: false,
+      history_enabled: true
+    )
+    SlackChannelPermission.create!(
+      principal: principal,
+      channel_id: "CUPLOAD123",
+      upload_enabled: true,
+      download_enabled: false,
+      history_enabled: false
+    )
+    SlackChannelPermission.create!(
+      principal: principal,
+      channel_id: "CDOWNLD123",
+      upload_enabled: false,
+      download_enabled: true,
+      history_enabled: false
+    )
+    secret = with_dsn(PgDsnSecret.new(base_attrs(settings: [
+      {
+        "name" => "centaur.slack_history_channel_ids",
+        "value_from" => { "principal_field" => "slack_history_channel_ids" }
+      }
+    ])))
+    assert secret.valid?
+
+    assert_equal(
+      [
+        {
+          "name" => "centaur.slack_history_channel_ids",
+          "value" => "[\"GPRIVATE123\"]"
+        }
       ],
       secret.to_proxy_dsn(principal: principal)["settings"]
     )
@@ -259,7 +306,7 @@ class PgDsnSecretTest < ActiveSupport::TestCase
     ])))
     assert_not secret.valid?
     assert_includes secret.errors[:settings],
-      %([0] unknown principal_field "labels" (one of: id, namespace, foreign_id, name))
+      %([0] unknown principal_field "labels" (one of: id, namespace, foreign_id, name, slack_history_channel_ids))
   end
 
   test "settings with a valid empty value are accepted and stringified" do

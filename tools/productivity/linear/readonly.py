@@ -62,6 +62,8 @@ class LinearReadonlyClient(LinearGraphQLClient):
         team_key: str | None = None,
         assignee: str | None = None,
         state: str | None = None,
+        project_id: str | None = None,
+        project_milestone_id: str | None = None,
         limit: int = 50,
         include_archived: bool = False,
     ) -> list[dict[str, Any]]:
@@ -79,6 +81,15 @@ class LinearReadonlyClient(LinearGraphQLClient):
         if state:
             filters.append(
                 f"state: {{ name: {{ containsIgnoreCase: {_linear_string_literal(state)} }} }}"
+            )
+        if project_id:
+            filters.append(
+                f"project: {{ id: {{ eq: {_linear_string_literal(project_id)} }} }}"
+            )
+        if project_milestone_id:
+            filters.append(
+                "projectMilestone: "
+                f"{{ id: {{ eq: {_linear_string_literal(project_milestone_id)} }} }}"
             )
 
         filter_arg = f"filter: {{ {', '.join(filters)} }}, " if filters else ""
@@ -102,6 +113,7 @@ class LinearReadonlyClient(LinearGraphQLClient):
                     assignee {{ id name }}
                     team {{ id name key }}
                     project {{ id name }}
+                    projectMilestone {{ id name targetDate }}
                     cycle {{ id name number }}
                     labels {{ nodes {{ id name color }} }}
                     dueDate
@@ -135,6 +147,7 @@ class LinearReadonlyClient(LinearGraphQLClient):
                 assignee { id name }
                 team { id name key }
                 project { id name }
+                projectMilestone { id name targetDate }
                 cycle { id name number }
                 labels { nodes { id name color } }
                 comments { nodes { id body user { name } createdAt } }
@@ -185,7 +198,7 @@ class LinearReadonlyClient(LinearGraphQLClient):
             "byte_length": len(content),
         }
 
-    def projects(self, limit: int = 50) -> list[dict[str, Any]]:
+    def projects(self, limit: int | None = 50) -> list[dict[str, Any]]:
         """List projects."""
         query = """
         query Projects($first: Int!, $after: String) {
@@ -207,6 +220,46 @@ class LinearReadonlyClient(LinearGraphQLClient):
         }
         """
         return self._connection_nodes(query, connection_path=("projects",), limit=limit)
+
+    def project_milestones(
+        self, project_id: str | None = None, limit: int | None = 50
+    ) -> list[dict[str, Any]]:
+        """List project milestones, optionally filtered by project ID."""
+        filter_arg = "filter: { project: { id: { eq: $projectId } } }," if project_id else ""
+        project_id_var = "$projectId: ID,\n" if project_id else ""
+        query = f"""
+        query ProjectMilestones(
+            {project_id_var}
+            $first: Int!,
+            $after: String
+        ) {{
+            projectMilestones(
+                {filter_arg}
+                first: $first,
+                after: $after,
+                orderBy: updatedAt
+            ) {{
+                nodes {{
+                    id
+                    name
+                    description
+                    targetDate
+                    progress
+                    project {{ id name }}
+                    createdAt
+                    updatedAt
+                }}
+                pageInfo {{ hasNextPage endCursor }}
+            }}
+        }}
+        """
+        variables = {"projectId": project_id} if project_id else None
+        return self._connection_nodes(
+            query,
+            connection_path=("projectMilestones",),
+            variables=variables,
+            limit=limit,
+        )
 
     def list_etl_projects(
         self,
@@ -280,7 +333,15 @@ class LinearReadonlyClient(LinearGraphQLClient):
                 targetDate
                 lead { id name }
                 teams { nodes { id name key } }
-                issues { nodes { id identifier title state { name } } }
+                projectMilestones {
+                    nodes { id name description targetDate progress }
+                }
+                issues {
+                    nodes {
+                        id identifier title state { name }
+                        projectMilestone { id name targetDate }
+                    }
+                }
                 url
             }
         }
@@ -386,6 +447,8 @@ class LinearReadonlyClient(LinearGraphQLClient):
                     state { name }
                     assignee { name }
                     team { key }
+                    project { id name }
+                    projectMilestone { id name targetDate }
                     dueDate
                     url
                 }

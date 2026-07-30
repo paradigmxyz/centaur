@@ -1194,7 +1194,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1366,7 +1366,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1781,6 +1781,11 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash 0.2.0",
+]
 
 [[package]]
 name = "heck"
@@ -1949,7 +1954,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots",
 ]
 
 [[package]]
@@ -2301,7 +2305,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2721,12 +2725,13 @@ dependencies = [
 
 [[package]]
 name = "nanocodex"
-version = "0.1.0"
-source = "git+https://github.com/gakonst/nanocodex?rev=c99b521ef101c3ee4382d2a3301a77cca80d19ac#c99b521ef101c3ee4382d2a3301a77cca80d19ac"
+version = "0.1.1"
+source = "git+https://github.com/gakonst/nanocodex?rev=bf022728c6d36501bdb1c380c7092743db3d5dae#bf022728c6d36501bdb1c380c7092743db3d5dae"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chrono",
+ "getrandom 0.3.4",
  "iana-time-zone",
  "image",
  "js-sys",
@@ -2735,14 +2740,18 @@ dependencies = [
  "nanocodex-mcp",
  "nanocodex-service",
  "nanocodex-tools",
+ "reqwest 0.13.4",
  "schemars 0.8.22",
  "serde",
  "serde_json",
  "sha1 0.11.0",
+ "sha2 0.10.9",
  "thiserror 2.0.19",
  "tokio",
  "tower",
  "tracing",
+ "url",
+ "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-time",
@@ -2750,20 +2759,21 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-core"
-version = "0.1.0"
-source = "git+https://github.com/gakonst/nanocodex?rev=c99b521ef101c3ee4382d2a3301a77cca80d19ac#c99b521ef101c3ee4382d2a3301a77cca80d19ac"
+version = "0.1.1"
+source = "git+https://github.com/gakonst/nanocodex?rev=bf022728c6d36501bdb1c380c7092743db3d5dae#bf022728c6d36501bdb1c380c7092743db3d5dae"
 dependencies = [
  "serde",
  "serde_json",
  "smallvec",
  "thiserror 2.0.19",
  "tokio",
+ "web-time",
 ]
 
 [[package]]
 name = "nanocodex-macros"
-version = "0.1.0"
-source = "git+https://github.com/gakonst/nanocodex?rev=c99b521ef101c3ee4382d2a3301a77cca80d19ac#c99b521ef101c3ee4382d2a3301a77cca80d19ac"
+version = "0.1.1"
+source = "git+https://github.com/gakonst/nanocodex?rev=bf022728c6d36501bdb1c380c7092743db3d5dae#bf022728c6d36501bdb1c380c7092743db3d5dae"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2773,14 +2783,15 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-mcp"
-version = "0.1.0"
-source = "git+https://github.com/gakonst/nanocodex?rev=c99b521ef101c3ee4382d2a3301a77cca80d19ac#c99b521ef101c3ee4382d2a3301a77cca80d19ac"
+version = "0.1.1"
+source = "git+https://github.com/gakonst/nanocodex?rev=bf022728c6d36501bdb1c380c7092743db3d5dae#bf022728c6d36501bdb1c380c7092743db3d5dae"
 dependencies = [
  "async-trait",
  "bm25",
  "http",
  "nanocodex-core",
  "nanocodex-tools",
+ "reqwest 0.13.4",
  "rmcp",
  "rustls",
  "serde",
@@ -2792,14 +2803,15 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-service"
-version = "0.1.0"
-source = "git+https://github.com/gakonst/nanocodex?rev=c99b521ef101c3ee4382d2a3301a77cca80d19ac#c99b521ef101c3ee4382d2a3301a77cca80d19ac"
+version = "0.1.1"
+source = "git+https://github.com/gakonst/nanocodex?rev=bf022728c6d36501bdb1c380c7092743db3d5dae#bf022728c6d36501bdb1c380c7092743db3d5dae"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
  "http",
  "js-sys",
  "nanocodex-core",
+ "reqwest 0.13.4",
  "rustls",
  "serde",
  "serde_json",
@@ -2816,8 +2828,8 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-tools"
-version = "0.1.0"
-source = "git+https://github.com/gakonst/nanocodex?rev=c99b521ef101c3ee4382d2a3301a77cca80d19ac#c99b521ef101c3ee4382d2a3301a77cca80d19ac"
+version = "0.1.1"
+source = "git+https://github.com/gakonst/nanocodex?rev=bf022728c6d36501bdb1c380c7092743db3d5dae#bf022728c6d36501bdb1c380c7092743db3d5dae"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2827,7 +2839,9 @@ dependencies = [
  "nanocodex-core",
  "nix 0.30.1",
  "portable-pty",
- "reqwest 0.12.28",
+ "rand 0.9.4",
+ "reqwest 0.13.4",
+ "rquickjs",
  "schemars 0.8.22",
  "serde",
  "serde_json",
@@ -2932,7 +2946,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3381,6 +3395,7 @@ version = "0.11.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2f4bfc015262b9df63c8845072ce59068853ff5872180c2ce2f13038b970e560"
 dependencies = [
+ "aws-lc-rs",
  "bytes",
  "getrandom 0.4.2",
  "lru-slab",
@@ -3408,7 +3423,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3924,6 +3939,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
+name = "relative-path"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bca40a312222d8ba74837cb474edef44b37f561da5f773981007a10bbaa992b0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "reqwest"
 version = "0.12.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3949,8 +3973,6 @@ dependencies = [
  "native-tls",
  "percent-encoding",
  "pin-project-lite",
- "quinn",
- "rustls",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -3958,7 +3980,6 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-native-tls",
- "tokio-rustls",
  "tower",
  "tower-http",
  "tower-service",
@@ -3966,7 +3987,6 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "webpki-roots",
 ]
 
 [[package]]
@@ -3989,11 +4009,13 @@ dependencies = [
  "log",
  "percent-encoding",
  "pin-project-lite",
+ "quinn",
  "rustls",
  "rustls-pki-types",
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
@@ -4069,6 +4091,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "rquickjs"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ce6b626d30ecbedaaf8097a04982bc3b081f958f5bdf9b8796be4ac00ee48bb"
+dependencies = [
+ "rquickjs-core",
+]
+
+[[package]]
+name = "rquickjs-core"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9334dd11023d5ae6c751f64496510a576208802ed1d022ef94afa7639c2c55e"
+dependencies = [
+ "hashbrown 0.17.1",
+ "relative-path",
+ "rquickjs-sys",
+]
+
+[[package]]
+name = "rquickjs-sys"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eef73520804cf5aa4876097ac5733058d628c769eba9678e0f4dba5a4ef79703"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "rust-stemmers"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4112,7 +4163,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4171,7 +4222,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4972,7 +5023,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5791,7 +5842,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

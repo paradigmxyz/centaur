@@ -5,7 +5,7 @@
  *   --bedrock                                    codex via the AWS Bedrock provider
  *   --meta                                       codex via Meta AI direct
  *   --model <name> (or --model=<name>)           pick the model within that harness
- *   -rsn <effort> (or -rsn=<effort>)             per-turn reasoning effort (codex)
+ *   -rsn <effort> (or -rsn=<effort>)             per-turn reasoning effort (codex/nanocodex)
  *   --fable | --opus | --sonnet | --haiku        model shortcuts (imply claude-code)
  *
  * Flags are stripped from the text before it reaches the agent. The harness
@@ -15,8 +15,8 @@
  * turns in the same thread. `--model` accepts either a full model id
  * (claude-sonnet-4-6, gpt-5.2, ...), an amp mode (deep/fast), or a Claude alias
  * (fable/opus/sonnet/haiku) which expands to the full id. Reasoning effort only
- * affects the codex harness (it maps to codex's `turn/start` `effort`) and stays
- * per-turn; other harnesses ignore it. The provider rides the blocks-protocol
+ * affects the codex-compatible harnesses and stays per-turn; other harnesses
+ * ignore it. The provider rides the blocks-protocol
  * `provider` field and is fixed when the codex thread starts. Provider
  * shortcuts imply the codex harness.
  */
@@ -89,6 +89,8 @@ const STRATEGY_MODEL_HARNESSES: Record<string, string> = {
   'claude-haiku-4-5': 'claudecode',
   'claude-opus-4-7': 'claudecode',
   'claude-opus-4-8': 'claudecode',
+  'claude-opus-5': 'claudecode',
+  'claude-opus-5-fast': 'claudecode',
   'claude-sonnet-4-6': 'claudecode',
   'claude-sonnet-5': 'claudecode',
   deep: 'amp',
@@ -235,7 +237,10 @@ export function validateStrategyOverrides(
   if (reasoningRaw) {
     const normalized = reasoningRaw.toLowerCase()
     if (!STRATEGY_REASONING_EFFORTS.has(normalized)) return {}
-    reasoning = harnessType === undefined || harnessType === 'codex' ? normalized : undefined
+    reasoning =
+      harnessType === undefined || harnessType === 'codex' || harnessType === 'nanocodex'
+        ? normalized
+        : undefined
   }
 
   return { harnessType, model, provider, reasoning }

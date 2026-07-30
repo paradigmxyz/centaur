@@ -242,6 +242,7 @@ fn initial_blocks_thread_state<H: HarnessServer>(harness: &H) -> Result<ThreadSt
     Ok(harness.thread_state(&params, cwd))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_blocks_turn<H: HarnessServer, W: Write>(
     harness: &H,
     state: &mut ThreadState,
@@ -284,6 +285,7 @@ fn drain_active_turn_requests(rx: &Receiver<ActiveTurnRequest>) {
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum BlocksCommand {
     User {
         input: Vec<UserInput>,
@@ -388,6 +390,7 @@ enum BlocksContent {
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
+#[allow(clippy::large_enum_variant)]
 enum BlocksInput {
     UserInput(UserInput),
     Attachment(AttachmentBlock),
@@ -582,17 +585,17 @@ fn attachment_block_to_user_input(
     }
 
     if let Some(staged_attachment_id) = non_empty(block.staged_attachment_id.as_deref()) {
-        if let Some(staged) = state.staged.get(staged_attachment_id) {
-            if staged.path.exists() {
-                return Ok(local_file_inputs(
-                    &staged.path,
+        if let Some(staged) = state.staged.get(staged_attachment_id)
+            && staged.path.exists()
+        {
+            return Ok(local_file_inputs(
+                &staged.path,
+                staged.mime_type.as_deref().or(mime_type),
+                is_image_attachment(
+                    staged.attachment_type.as_deref(),
                     staged.mime_type.as_deref().or(mime_type),
-                    is_image_attachment(
-                        staged.attachment_type.as_deref(),
-                        staged.mime_type.as_deref().or(mime_type),
-                    ),
-                ));
-            }
+                ),
+            ));
         }
         return Ok(vec![UserInput::Text {
             text: format!("[Attachment was not staged successfully: {name}]"),
@@ -661,10 +664,10 @@ fn handle_attachment_chunk(parsed: BlocksLine, state: &mut BlocksState) -> Resul
         file.write_all(&bytes)?;
     }
 
-    if parsed.final_chunk {
-        if let Some(upload) = state.uploads.remove(attachment_id) {
-            state.staged.insert(attachment_id.to_string(), upload);
-        }
+    if parsed.final_chunk
+        && let Some(upload) = state.uploads.remove(attachment_id)
+    {
+        state.staged.insert(attachment_id.to_string(), upload);
     }
 
     Ok(())
@@ -932,7 +935,7 @@ fn handle_request<H: HarnessServer, W: Write>(
                 .get_mut(&thread_id)
                 .expect("thread state inserted or existed");
             apply_resume_overrides(state, &params)?;
-            let normalizer = normalizer_for(harness, &state, "turn-placeholder");
+            let normalizer = normalizer_for(harness, state, "turn-placeholder");
             let mut thread = normalizer.thread_snapshot()?;
             if !params.exclude_turns {
                 thread.turns = state.completed_turns.clone();
@@ -1184,6 +1187,7 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_normalized_turn<H: HarnessServer, W: Write>(
     harness: &H,
     state: &mut ThreadState,
@@ -1425,6 +1429,7 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
     Ok(completed_turn)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn export_harness_usage_if_available(
     trace_context: Option<&TraceContext>,
     harness: HarnessKind,

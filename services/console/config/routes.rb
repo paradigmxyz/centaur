@@ -67,8 +67,12 @@ Rails.application.routes.draw do
       member do
         post "grants", to: "roles#grant_secret", as: :grant_secret
         delete "grants/:grant_id", to: "roles#revoke_grant", as: :revoke_grant
+        patch "slack_channel_permissions", to: "roles#update_slack_channel_permissions",
+              as: :slack_channel_permissions
       end
     end
+    delete "slack_channel_permissions/:slack_channel_permission_id", to: "slack_channel_permissions#destroy",
+           as: :slack_channel_permission
   end
   # Role assignments and direct grants managed from the principal detail page. The
   # extra /roles and /grants path segments keep these clear of the show route above
@@ -172,6 +176,9 @@ Rails.application.routes.draw do
       resources :roles, only: %i[index show create update destroy] do
         collection do
           get "lookup/:namespace/:foreign_id", action: :lookup, as: :lookup
+        end
+        member do
+          post "slack_channel_permissions", action: :upsert_slack_channel_permission
         end
         # Grants whose grantee is this role. :role_id is the role's oid.
         resources :grants, only: %i[index], controller: :grantee_grants

@@ -396,12 +396,19 @@ async def main() -> int:
     active_workflow: asyncio.Task[dict[str, Any]] | None = None
 
     async def read_stdin() -> None:
-        while True:
-            line = await asyncio.to_thread(sys.stdin.readline)
-            if line == "":
-                await stdin_queue.put(None)
-                return
-            await stdin_queue.put(json.loads(line))
+        loop = asyncio.get_running_loop()
+        reader = asyncio.StreamReader()
+        protocol = asyncio.StreamReaderProtocol(reader)
+        transport, _ = await loop.connect_read_pipe(lambda: protocol, sys.stdin)
+        try:
+            while True:
+                line = await reader.readline()
+                if line == b"":
+                    await stdin_queue.put(None)
+                    return
+                await stdin_queue.put(json.loads(line))
+        finally:
+            transport.close()
 
     asyncio.create_task(read_stdin())
 
@@ -436,9 +443,7 @@ async def main() -> int:
         if message is None:
             if active_workflow is not None:
                 continue
-            await asyncio.sleep(0.1)
-            asyncio.create_task(read_stdin())
-            continue
+            return 0
         message_type = message.get("type")
         try:
             if message_type == "ctx.response":

@@ -1,6 +1,4 @@
 require "json"
-require "net/http"
-require "uri"
 
 module Oauth
   class EnrichAttioCredentialIdentityJob < ApplicationJob
@@ -89,19 +87,14 @@ module Oauth
         )
       end
 
-      uri = URI.parse(SELF_ENDPOINT)
-      req = Net::HTTP::Get.new(uri)
-      req["Accept"] = "application/json"
-      req["Authorization"] = "Bearer #{access_token}"
-      req["User-Agent"] = "centaur-console"
-
-      http = Net::HTTP.new(uri.host, uri.port)
-      http.use_ssl = uri.scheme == "https"
-      http.open_timeout = 5
-      http.read_timeout = 5
-
-      response = http.request(req)
-      status = response.code.to_i
+      response = HttpClient.new.get(
+        SELF_ENDPOINT,
+        headers: {
+          "Authorization" => "Bearer #{access_token}",
+          "User-Agent" => "centaur-console"
+        }
+      )
+      status = response.status
       if status == 429 || status >= 500
         raise AttioSelfRetryableError, "attio self lookup http #{status}"
       end
@@ -110,7 +103,7 @@ module Oauth
         return nil
       end
 
-      parsed = JSON.parse(response.body.to_s)
+      parsed = response.json
       parsed.is_a?(Hash) ? parsed : nil
     rescue AttioSelfRetryableError
       raise

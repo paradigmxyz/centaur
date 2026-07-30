@@ -40,7 +40,7 @@ class GcpAuthSecret < ApplicationRecord
   end
 
   # gcp_auth always sets the Authorization header (a Bearer access token); used
-  # for cross-type conflict detection in Principal#served_credentials.
+  # for cross-type conflict detection during snapshot assembly.
   def proxy_conflict_targets
     [ "header:authorization" ]
   end
