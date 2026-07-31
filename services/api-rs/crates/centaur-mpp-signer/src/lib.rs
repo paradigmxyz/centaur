@@ -114,6 +114,10 @@ impl AppState {
     pub fn budgets_disabled(&self) -> bool {
         self.max_per_charge_atomic.is_none() && self.max_daily_atomic.is_none()
     }
+
+    fn reservations_enabled(&self) -> bool {
+        self.max_daily_atomic.is_some()
+    }
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -427,7 +431,7 @@ async fn authorize_inner(
         .map_err(ApiError::internal)?
     {
         BeginAttempt::Created => {
-            if !state.budgets_disabled() {
+            if state.reservations_enabled() {
                 metrics::gauge!(ACTIVE_RESERVATIONS).increment(1.0);
             }
         }
@@ -465,7 +469,7 @@ async fn authorize_inner(
                 .mark_sign_failed(attempt_id, "signing_failed")
                 .await
                 .map_err(ApiError::internal)?;
-            if !state.budgets_disabled() {
+            if state.reservations_enabled() {
                 metrics::gauge!(ACTIVE_RESERVATIONS).decrement(1.0);
             }
             tracing::warn!(
@@ -478,6 +482,13 @@ async fn authorize_inner(
         }
     };
     metrics::histogram!(SIGNING_DURATION_SECONDS).record(sign_started.elapsed().as_secs_f64());
+    tracing::info!(
+        service_id,
+        execution_ref = %redacted_identifier(&attempt.execution_id),
+        amount_atomic = amount,
+        currency = %charge.currency,
+        "signed MPP charge credential"
+    );
     state
         .store
         .mark_authorized(attempt_id)
@@ -523,22 +534,11 @@ async fn complete(
     let receipt_hash = receipt_header
         .as_deref()
         .map(|receipt| sha256_hex(receipt.as_bytes()));
-    let (outcome, error_code) = if receipt_header
-        .as_deref()
-        .is_some_and(|receipt| parse_receipt(receipt).is_ok_and(|receipt| receipt.is_success()))
-    {
-        (CompletionOutcome::Settled, None)
-    } else if request.replay_status == Some(StatusCode::PAYMENT_REQUIRED.as_u16())
-        && request.transport_error.is_none()
-    {
-        (CompletionOutcome::Released, Some("credential_rejected"))
-    } else if receipt_header.is_some() {
-        (CompletionOutcome::Unknown, Some("invalid_receipt"))
-    } else if request.transport_error.is_some() {
-        (CompletionOutcome::Unknown, Some("transport_error"))
-    } else {
-        (CompletionOutcome::Unknown, Some("missing_receipt"))
-    };
+    let (outcome, error_code) = completion_outcome(
+        request.replay_status,
+        request.transport_error.as_deref(),
+        receipt_header.as_deref(),
+    );
 
     let completed = state
         .store
@@ -552,7 +552,7 @@ async fn complete(
         .await
         .map_err(ApiError::internal)?;
     if let Some(ref completed) = completed {
-        if !state.budgets_disabled() {
+        if state.reservations_enabled() {
             metrics::gauge!(ACTIVE_RESERVATIONS).decrement(1.0);
         }
         metrics::counter!(
@@ -592,6 +592,36 @@ async fn complete(
         ok: completed.is_some(),
         outcome: outcome.as_str(),
     }))
+}
+
+fn completion_outcome(
+    replay_status: Option<u16>,
+    transport_error: Option<&str>,
+    receipt: Option<&str>,
+) -> (CompletionOutcome, Option<&'static str>) {
+    let receipt_is_valid = receipt
+        .map(parse_receipt)
+        .transpose()
+        .is_ok_and(|receipt| receipt.is_none_or(|receipt| receipt.is_success()));
+    if receipt.is_some() && receipt_is_valid {
+        return (CompletionOutcome::Settled, None);
+    }
+    if transport_error.is_some() {
+        return (CompletionOutcome::Unknown, Some("transport_error"));
+    }
+    if replay_status.is_some_and(|status| (200..300).contains(&status)) {
+        return (
+            CompletionOutcome::Settled,
+            (!receipt_is_valid).then_some("invalid_receipt"),
+        );
+    }
+    if replay_status == Some(StatusCode::PAYMENT_REQUIRED.as_u16()) {
+        return (CompletionOutcome::Released, Some("credential_rejected"));
+    }
+    if replay_status.is_some() {
+        return (CompletionOutcome::Released, Some("replay_failed"));
+    }
+    (CompletionOutcome::Unknown, Some("missing_replay_outcome"))
 }
 
 fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
@@ -1168,5 +1198,66 @@ mod tests {
         assert!(!redacted.contains(raw));
         assert_eq!(super::metric_method("get"), "GET");
         assert_eq!(super::metric_method("ATTACKER-CONTROLLED-METHOD"), "OTHER");
+    }
+
+    #[tokio::test]
+    async fn budget_caps_and_reservations_are_distinct() {
+        let (mut state, _) = state(false).await;
+        assert!(state.budgets_disabled());
+        assert!(!state.reservations_enabled());
+
+        state.max_per_charge_atomic = Some(100);
+        assert!(!state.budgets_disabled());
+        assert!(!state.reservations_enabled());
+
+        state.max_daily_atomic = Some(1_000);
+        assert!(state.reservations_enabled());
+    }
+
+    #[test]
+    fn completion_outcomes_settle_optional_receipts_and_release_failed_replays() {
+        for (status, transport_error, receipt, expected_outcome, expected_reason) in [
+            (Some(200), None, None, CompletionOutcome::Settled, None),
+            (
+                Some(204),
+                None,
+                Some("invalid"),
+                CompletionOutcome::Settled,
+                Some("invalid_receipt"),
+            ),
+            (
+                Some(402),
+                None,
+                None,
+                CompletionOutcome::Released,
+                Some("credential_rejected"),
+            ),
+            (
+                Some(500),
+                None,
+                None,
+                CompletionOutcome::Released,
+                Some("replay_failed"),
+            ),
+            (
+                None,
+                Some("upstream_transport_error"),
+                None,
+                CompletionOutcome::Unknown,
+                Some("transport_error"),
+            ),
+            (
+                None,
+                None,
+                None,
+                CompletionOutcome::Unknown,
+                Some("missing_replay_outcome"),
+            ),
+        ] {
+            assert_eq!(
+                super::completion_outcome(status, transport_error, receipt),
+                (expected_outcome, expected_reason)
+            );
+        }
     }
 }

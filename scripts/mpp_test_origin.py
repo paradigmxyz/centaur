@@ -56,7 +56,23 @@ class Handler(BaseHTTPRequestHandler):
                                             "0x20c0000000000000000000000000000000000000",
                                         ),
                                     },
-                                }
+                                },
+                                {
+                                    "method": "POST",
+                                    "path": "/paid",
+                                    "description": "Mutating paid test response",
+                                    "payment": {
+                                        "intent": "charge",
+                                        "method": "tempo",
+                                        "amount": os.environ.get(
+                                            "MPP_TEST_AMOUNT", "1"
+                                        ),
+                                        "currency": os.environ.get(
+                                            "MPP_TEST_CURRENCY",
+                                            "0x20c0000000000000000000000000000000000000",
+                                        ),
+                                    },
+                                },
                             ],
                         }
                     ],

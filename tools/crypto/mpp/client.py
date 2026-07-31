@@ -202,7 +202,7 @@ class MppClient:
     ) -> dict[str, Any]:
         """Call one exact registered route through Centaur's egress proxy."""
         snapshot = self._catalog()
-        record = self._find_service(snapshot.catalog["services"], service)
+        record = self._find_service_by_id(snapshot.catalog["services"], service)
         endpoint = self._find_endpoint(record, method, path)
         availability = self._endpoint_availability(record, endpoint)
         if not availability["executable"]:
@@ -483,6 +483,12 @@ class MppClient:
         if len(names) > 1:
             raise ValueError(f"MPP service name {value!r} is ambiguous; use a service id")
         raise ValueError(f"MPP service {value!r} was not found")
+
+    def _find_service_by_id(self, services: list[dict[str, Any]], value: str) -> dict[str, Any]:
+        for service in services:
+            if service["id"] == value:
+                return service
+        raise ValueError(f"MPP service id {value!r} was not found")
 
     def _find_endpoint(self, service: dict[str, Any], method: str, path: str) -> dict[str, Any]:
         normalized_method = method.upper()

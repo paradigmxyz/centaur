@@ -273,6 +273,14 @@ def test_request_resolves_registered_path_and_never_follows_redirects(tmp_path: 
         redirecting.request("catalog", "GET", "/v1/records")
 
 
+def test_request_requires_registry_service_id(tmp_path: Path) -> None:
+    client = make_client(tmp_path, lambda _: httpx.Response(200, json=CATALOG))
+
+    for value in ("Catalog Service", "CATALOG"):
+        with pytest.raises(ValueError, match="service id"):
+            client.request(value, "GET", "/v1/records")
+
+
 def test_request_supports_registered_gateway_realm_and_base_path(tmp_path: Path) -> None:
     catalog = copy.deepcopy(CATALOG)
     catalog["services"][0]["serviceUrl"] = "https://gateway.example/provider"

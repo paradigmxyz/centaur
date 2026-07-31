@@ -145,7 +145,8 @@ impl SignerStore for PgSignerStore {
             r#"
             select count(*)::bigint
             from mpp_charge_attempts
-            where status in ('reserving', 'authorized')
+            where budget_reserved
+              and status in ('reserving', 'authorized')
             "#,
         )
         .fetch_one(&self.pool)
@@ -215,9 +216,10 @@ impl SignerStore for PgSignerStore {
                 currency,
                 sandbox_id,
                 execution_id,
+                budget_reserved,
                 status
             )
-            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'reserving')
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'reserving')
             "#,
         )
         .bind(attempt.attempt_id)
@@ -229,6 +231,7 @@ impl SignerStore for PgSignerStore {
         .bind(&attempt.currency)
         .bind(&attempt.sandbox_id)
         .bind(&attempt.execution_id)
+        .bind(max_daily_atomic.is_some())
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
@@ -425,7 +428,21 @@ mod tests {
         );
         assert!(matches!(first_result.unwrap(), BeginAttempt::Created));
         assert!(matches!(second_result.unwrap(), BeginAttempt::Created));
-        assert_eq!(store.active_reservation_count().await.unwrap(), 2);
+        assert_eq!(store.active_reservation_count().await.unwrap(), 0);
+
+        sqlx::query("delete from mpp_charge_attempts")
+            .execute(&pool)
+            .await
+            .expect("clear attempts");
+        let capped_first = attempt(&execution_id, "capped-first");
+        let capped_second = attempt(&execution_id, "capped-second");
+        let (first_result, second_result) = tokio::join!(
+            store.begin_attempt(&capped_first, Some(100), None),
+            store.begin_attempt(&capped_second, Some(100), None),
+        );
+        assert!(matches!(first_result.unwrap(), BeginAttempt::Created));
+        assert!(matches!(second_result.unwrap(), BeginAttempt::Created));
+        assert_eq!(store.active_reservation_count().await.unwrap(), 0);
 
         sqlx::query("delete from mpp_charge_attempts")
             .execute(&pool)
