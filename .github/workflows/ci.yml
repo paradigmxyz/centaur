@@ -20,6 +20,7 @@ jobs:
       migration_order: ${{ steps.filter.outputs.migration_order }}
       rust_api: ${{ steps.filter.outputs.rust_api }}
       sandbox_tests: ${{ steps.filter.outputs.sandbox_tests }}
+      workflow_python_tests: ${{ steps.filter.outputs.workflow_python_tests }}
       slackbotv2_tests: ${{ steps.filter.outputs.slackbotv2_tests }}
       discordbot_checks: ${{ steps.filter.outputs.discordbot_checks }}
       githubbot_checks: ${{ steps.filter.outputs.githubbot_checks }}
@@ -70,9 +71,14 @@ jobs:
             '^\.github/workflows/ci\.yml$'
           set_output rust_api \
             '^services/api-rs/' \
+            '^services/workflow-python/' \
+            '^workflows/' \
             '^\.github/workflows/ci\.yml$'
           set_output sandbox_tests \
             '^services/sandbox/' \
+            '^\.github/workflows/ci\.yml$'
+          set_output workflow_python_tests \
+            '^services/workflow-python/' \
             '^\.github/workflows/ci\.yml$'
           set_output slackbotv2_tests \
             '^services/slackbotv2/' \
@@ -206,6 +212,32 @@ jobs:
           GIT_CONFIG_GLOBAL: /dev/null
           PYTHONPATH: ${{ github.workspace }}
         run: python -m unittest discover -s services/sandbox -p 'test_*.py'
+
+  workflow-python-tests:
+    name: Workflow Python tests
+    runs-on: ubuntu-latest
+    needs: ci_changes
+    if: needs.ci_changes.outputs.workflow_python_tests == 'true'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: services/workflow-python/pyproject.toml
+
+      - name: Workflow Python tests
+        run: >-
+          uv run --project services/workflow-python
+          python -m unittest discover
+          -s services/workflow-python/tests
+          -p 'test_*.py'
 
   slackbotv2-tests:
     name: Slackbot v2 tests

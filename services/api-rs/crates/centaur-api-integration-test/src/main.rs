@@ -70,6 +70,14 @@ async fn main() -> Result<()> {
     let line = line!() + 1;
     record_result(
         &mut results,
+        "Python workflows call agent turns and durable context methods",
+        line,
+        test_python_workflow_durable_methods(&http, &base_url).await,
+    );
+
+    let line = line!() + 1;
+    record_result(
+        &mut results,
         "Metrics expose API request counters",
         line,
         test_metrics(&http, &base_url).await,
@@ -562,6 +570,105 @@ async fn test_workflows_api(http: &HttpClient, base_url: &str) -> Result<()> {
     Ok(())
 }
 
+async fn test_python_workflow_durable_methods(http: &HttpClient, base_url: &str) -> Result<()> {
+    let workflow_dir = integration_workflow_dir()?;
+    fs::create_dir_all(&workflow_dir)
+        .with_context(|| format!("create workflow dir {}", workflow_dir.display()))?;
+
+    let unique = Uuid::new_v4().simple().to_string();
+    let workflow_name = format!("api_integration_durable_{unique}");
+    let child_workflow_name = format!("api_integration_child_{unique}");
+    let correlation_id = format!("api-integration-event-{unique}");
+    let workflow_path = workflow_dir.join(format!("{workflow_name}.py"));
+    let child_workflow_path = workflow_dir.join(format!("{child_workflow_name}.py"));
+
+    write_child_workflow(&child_workflow_path, &child_workflow_name)?;
+    write_durable_context_workflow(&workflow_path, &workflow_name)?;
+
+    wait_for_workflow_schedule(http, base_url, &workflow_name, true)
+        .await
+        .context("wait for durable context workflow to be discovered")?;
+
+    let run_id = create_workflow_run(
+        http,
+        base_url,
+        &workflow_name,
+        json!({
+            "child_workflow_name": child_workflow_name,
+            "correlation_id": correlation_id,
+            "model": TEST_MODEL,
+        }),
+    )
+    .await
+    .context("create durable context workflow run")?;
+
+    post_json_ok(
+        http,
+        format!("{base_url}/api/workflows/events"),
+        json!({
+            "event_type": "integration_test",
+            "correlation_id": correlation_id,
+            "payload": {"approved": true},
+        }),
+    )
+    .await
+    .context("emit durable workflow event")?;
+
+    let completed_run = wait_for_workflow_run_status(http, base_url, &run_id, &["completed"])
+        .await
+        .context("wait for durable context workflow completion")?;
+    let output = completed_run
+        .pointer("/result/output")
+        .context("durable context workflow missing result output")?;
+
+    let checkpoint_host = output
+        .pointer("/checkpoint/host_instance_id")
+        .and_then(Value::as_str)
+        .context("durable step output missing host instance id")?;
+    let result_host = output
+        .get("result_host_instance_id")
+        .and_then(Value::as_str)
+        .context("workflow output missing result host instance id")?;
+    if checkpoint_host == result_host {
+        bail!("checkpointed step was recomputed after durable sleep instead of replayed: {output}");
+    }
+    if output.pointer("/event/approved").and_then(Value::as_bool) != Some(true) {
+        bail!("workflow did not receive the durable event: {output}");
+    }
+    if output.pointer("/agent/status").and_then(Value::as_str) != Some("completed") {
+        bail!("workflow agent turn did not complete: {output}");
+    }
+    let result_text = output
+        .pointer("/agent/result_text")
+        .and_then(Value::as_str)
+        .context("workflow agent turn missing result text")?;
+    if !result_text.contains("PONG")
+        || !result_text.contains(&format!("model={TEST_MODEL}"))
+        || !result_text.contains("harness=codex")
+    {
+        bail!("workflow agent turn returned unexpected output: {result_text:?}");
+    }
+    if output.pointer("/child/created").and_then(Value::as_bool) != Some(true) {
+        bail!("workflow did not create its durable child: {output}");
+    }
+    let child_run_id = output
+        .pointer("/child/run_id")
+        .and_then(Value::as_str)
+        .context("durable child result missing run id")?;
+    let child_run = wait_for_workflow_run_status(http, base_url, child_run_id, &["completed"])
+        .await
+        .context("wait for durable child workflow completion")?;
+    if child_run
+        .pointer("/result/output/received/from_parent")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        bail!("durable child workflow did not receive parent input: {child_run}");
+    }
+
+    Ok(())
+}
+
 fn integration_workflow_dir() -> Result<PathBuf> {
     let path = env::var("API_INTEGRATION_WORKFLOW_DIR")
         .context("API_INTEGRATION_WORKFLOW_DIR must point at the mounted workflow test dir")?;
@@ -614,6 +721,71 @@ async def handler(params, ctx):
 "#
     );
     fs::write(path, source).with_context(|| format!("write test workflow {}", path.display()))
+}
+
+fn write_child_workflow(path: &Path, workflow_name: &str) -> Result<()> {
+    let source = format!(
+        r#"
+WORKFLOW_NAME = "{workflow_name}"
+
+
+async def handler(params, ctx):
+    return {{"workflow_name": ctx.workflow_name, "received": params}}
+"#
+    );
+    fs::write(path, source).with_context(|| format!("write child workflow {}", path.display()))
+}
+
+fn write_durable_context_workflow(path: &Path, workflow_name: &str) -> Result<()> {
+    let source = format!(
+        r#"
+import uuid
+
+WORKFLOW_NAME = "{workflow_name}"
+HOST_INSTANCE_ID = uuid.uuid4().hex
+SCHEDULE = {{
+    "schedule_id": "{workflow_name}",
+    "interval_seconds": 3600,
+    "enabled": True,
+    "no_delivery": True,
+    "input": {{"source": "centaur-api-integration-test"}},
+}}
+
+
+async def handler(params, ctx):
+    checkpoint = await ctx.step(
+        "checkpoint_before_sleep",
+        lambda: {{"host_instance_id": HOST_INSTANCE_ID}},
+    )
+    await ctx.sleep("durable_sleep", 0.05)
+    event = await ctx.wait_for_event(
+        "durable_event",
+        "integration_test",
+        params["correlation_id"],
+        timeout=10,
+    )
+    agent = await ctx.agent_turn(
+        "Reply with PONG, the model, and the harness.",
+        model=params["model"],
+        idle_timeout_ms=5_000,
+        max_duration_ms=15_000,
+    )
+    child = await ctx.start_workflow(
+        params["child_workflow_name"],
+        {{"from_parent": True}},
+        idempotency_key=f"{{ctx.run_id}}:child",
+    )
+    return {{
+        "checkpoint": checkpoint,
+        "result_host_instance_id": HOST_INSTANCE_ID,
+        "event": event,
+        "agent": agent,
+        "child": child,
+    }}
+"#
+    );
+    fs::write(path, source)
+        .with_context(|| format!("write durable context workflow {}", path.display()))
 }
 
 async fn create_workflow_run(
