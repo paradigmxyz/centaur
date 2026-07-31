@@ -705,7 +705,7 @@ async fn assert_company_context_reader_denies_unauthorized_rows(
             slack_include_public: Some(false),
             slack_team_id: Some("T_HOME"),
             slack_user_id: Some("U_PRIVATE"),
-            google_email: Some("viewer@example.com"),
+            google_subject: Some("google_subject"),
             ..Default::default()
         },
     )
@@ -735,7 +735,7 @@ async fn assert_company_context_reader_denies_unauthorized_rows(
             slack_team_id: Some("T_HOME"),
             slack_user_id: Some("U_OTHER"),
             user_email: Some("other@example.com"),
-            google_email: Some("other@example.com"),
+            google_subject: Some("google_subject_other"),
             ..Default::default()
         },
     )
@@ -808,20 +808,20 @@ async fn assert_company_context_reader_denies_unauthorized_rows(
         "missing identity must fail closed across every company context source"
     );
 
-    let google_subject_only = company_context_reader_rows(
+    let google_email_only = company_context_reader_rows(
         conn,
         CompanyContextReaderSettings {
             slack_history_channel_ids: Some("[]"),
             slack_include_public: Some(false),
             slack_team_id: Some("T_HOME"),
             slack_user_id: Some("U_PRIVATE"),
-            google_subject: Some("google_subject"),
+            google_email: Some("viewer@example.com"),
             ..Default::default()
         },
     )
     .await?;
-    assert!(google_subject_only.google_docs.is_empty());
-    assert!(google_subject_only.google_docs_observations.is_empty());
+    assert!(google_email_only.google_docs.is_empty());
+    assert!(google_email_only.google_docs_observations.is_empty());
 
     let slack_email_only = company_context_reader_rows(
         conn,
@@ -948,7 +948,7 @@ async fn insert_fixture_rows(conn: &mut PgConnection) -> Result<(), sqlx::Error>
             ('gdocs_credential', 'gdocs_observed_file', 'gdocs_file', 'google_subject', 'viewer@example.com', true),
             ('gdocs_credential', 'gdocs_observed_other', 'gdocs_file_other', 'google_subject_other', 'other@example.com', true),
             ('gdocs_credential', 'gdocs_observed_inactive', 'gdocs_file_inactive', 'google_subject', 'viewer@example.com', false),
-            ('gdocs_credential', 'gdocs_observed_blank_email', 'gdocs_file_blank_email', 'google_subject', '', true);
+            ('gdocs_credential', 'gdocs_observed_blank_email', 'gdocs_file_blank_email', 'google_subject_blank_email', '', true);
         insert into google_docs_context_documents
             (document_id, file_id, chunk_id, title, body)
         values
@@ -1126,7 +1126,7 @@ async fn company_context_search_rows(
     sqlx::query("select set_config('centaur.user_email', 'viewer@example.com', true)")
         .execute(&mut *tx)
         .await?;
-    sqlx::query("select set_config('centaur.google_email', 'viewer@example.com', true)")
+    sqlx::query("select set_config('centaur.google_subject', 'google_subject', true)")
         .execute(&mut *tx)
         .await?;
 
