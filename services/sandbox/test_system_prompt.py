@@ -13,9 +13,10 @@ class SystemPromptTest(unittest.TestCase):
 
         self.assertIn("[MPP fallback discovery]", prompt)
         self.assertIn("centaur-tools list", prompt)
-        self.assertIn('mpp services search "<sanitized task capability>" --limit 5', prompt)
-        self.assertIn("mpp services show <service-id>", prompt)
-        self.assertIn("Current MPP support discovers candidates only", prompt)
+        self.assertIn('mpp search "<sanitized task capability>" --limit 5', prompt)
+        self.assertIn("mpp show <service-id>", prompt)
+        self.assertIn("mpp request <service-id> --method <METHOD>", prompt)
+        self.assertIn("A live 402 challenge is authoritative", prompt)
 
     def test_runtime_discovery_and_vlogs_examples_match_available_surfaces(self) -> None:
         prompt = SYSTEM_PROMPT.read_text()
