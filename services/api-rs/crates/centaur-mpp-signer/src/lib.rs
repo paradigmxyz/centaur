@@ -1021,6 +1021,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn signer_endpoints_require_proxy_authentication() {
+        let (state, store) = state(true).await;
+        for (uri, payload) in [
+            (
+                "/authorize",
+                json!({
+                    "host": "service.example",
+                    "method": "GET",
+                    "path": "/paid",
+                    "status": 402,
+                    "response_headers": {"WWW-Authenticate": [challenge()]},
+                    "replayable": true,
+                    "sandbox_id": "sandbox-test"
+                }),
+            ),
+            (
+                "/complete",
+                json!({
+                    "attempt_id": Uuid::new_v4(),
+                    "replay_status": 200,
+                    "response_headers": {},
+                    "transport_error": null,
+                    "traceparent": null,
+                    "replay_duration_ms": 1,
+                    "charge_duration_ms": 2
+                }),
+            ),
+        ] {
+            for authorization in [None, Some("Bearer wrong-token")] {
+                let mut request = Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json");
+                if let Some(authorization) = authorization {
+                    request = request.header("authorization", authorization);
+                }
+                let response = build_router(state.clone())
+                    .oneshot(
+                        request
+                            .body(Body::from(payload.to_string()))
+                            .expect("request"),
+                    )
+                    .await
+                    .expect("response");
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+                let body = to_bytes(response.into_body(), 64 << 10)
+                    .await
+                    .expect("response body");
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&body).expect("response JSON"),
+                    json!({"error": "unauthorized"})
+                );
+            }
+        }
+        assert_eq!(store.attempts.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn authorize_signs_registered_get_with_active_lease() {
         let (state, store) = state(true).await;
 

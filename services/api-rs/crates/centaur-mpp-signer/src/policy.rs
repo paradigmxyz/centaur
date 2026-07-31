@@ -84,8 +84,17 @@ fn rule_matches(rule: &PolicyRule, service: &Service, endpoint: &Endpoint) -> bo
         return false;
     }
     if let Some(pattern) = &rule.realm {
-        let realm = service.realm.as_deref().unwrap_or_default();
-        if !wildcard_matches(pattern, realm) {
+        let realm = service
+            .realm
+            .clone()
+            .or_else(|| {
+                service
+                    .base_url()
+                    .and_then(|value| reqwest::Url::parse(value).ok())
+                    .and_then(|url| url.host_str().map(str::to_owned))
+            })
+            .unwrap_or_default();
+        if !wildcard_matches(pattern, &realm) {
             return false;
         }
     }
@@ -201,6 +210,32 @@ mod tests {
 
         assert_eq!(
             policy.decide(&service(), &endpoint("POST")),
+            Decision {
+                allowed: false,
+                reason: "policy_denied"
+            }
+        );
+    }
+
+    #[test]
+    fn realm_rules_fall_back_to_registered_service_host() {
+        let mut service = service();
+        service.realm = None;
+        let policy = Policy::new(
+            vec!["GET".to_owned()],
+            vec![PolicyRule {
+                effect: PolicyEffect::Deny,
+                service: None,
+                category: None,
+                realm: Some("api.*".to_owned()),
+                methods: Some(vec!["GET".to_owned()]),
+                path: None,
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(
+            policy.decide(&service, &endpoint("GET")),
             Decision {
                 allowed: false,
                 reason: "policy_denied"

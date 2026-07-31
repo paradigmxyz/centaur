@@ -311,9 +311,209 @@ fn has_dot_segments(path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        collections::HashMap,
+        sync::{
+            Arc, Mutex as StdMutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+    };
+
+    use async_trait::async_trait;
+    use axum::{
+        Json, Router,
+        extract::State,
+        http::{HeaderMap, StatusCode},
+        response::{IntoResponse, Response},
+        routing::get,
+    };
     use reqwest::Url;
+    use time::{Duration, OffsetDateTime};
+    use tokio::net::TcpListener;
+    use uuid::Uuid;
 
     use super::{has_dot_segments, path_matches, registered_path};
+    use crate::{
+        model::{
+            ActiveExecution, BeginAttempt, Catalog, CompletedAttempt, CompletionOutcome, Endpoint,
+            NewAttempt, RegistrySnapshot, Service,
+        },
+        store::SignerStore,
+    };
+
+    struct MemoryStore {
+        cached: StdMutex<Option<RegistrySnapshot>>,
+        saves: AtomicUsize,
+    }
+
+    impl MemoryStore {
+        fn new(cached: Option<RegistrySnapshot>) -> Self {
+            Self {
+                cached: StdMutex::new(cached),
+                saves: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SignerStore for MemoryStore {
+        async fn load_registry_cache(&self) -> anyhow::Result<Option<RegistrySnapshot>> {
+            Ok(self.cached.lock().expect("cached registry").clone())
+        }
+
+        async fn save_registry_cache(&self, snapshot: &RegistrySnapshot) -> anyhow::Result<()> {
+            *self.cached.lock().expect("cached registry") = Some(snapshot.clone());
+            self.saves.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn active_execution(
+            &self,
+            _sandbox_id: &str,
+        ) -> anyhow::Result<Option<ActiveExecution>> {
+            Ok(None)
+        }
+
+        async fn active_execution_lease_count(&self) -> anyhow::Result<i64> {
+            Ok(0)
+        }
+
+        async fn active_reservation_count(&self) -> anyhow::Result<i64> {
+            Ok(0)
+        }
+
+        async fn begin_attempt(
+            &self,
+            _attempt: &NewAttempt,
+            _max_per_charge_atomic: Option<i64>,
+            _max_daily_atomic: Option<i64>,
+        ) -> anyhow::Result<BeginAttempt> {
+            Ok(BeginAttempt::Created)
+        }
+
+        async fn mark_authorized(&self, _attempt_id: Uuid) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn mark_sign_failed(
+            &self,
+            _attempt_id: Uuid,
+            _error_code: &str,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn complete_attempt(
+            &self,
+            _attempt_id: Uuid,
+            _outcome: CompletionOutcome,
+            _replay_status: Option<u16>,
+            _receipt_hash: Option<&str>,
+            _error_code: Option<&str>,
+        ) -> anyhow::Result<Option<CompletedAttempt>> {
+            Ok(None)
+        }
+
+        async fn ready(&self) -> bool {
+            true
+        }
+    }
+
+    #[derive(Clone)]
+    struct RegistryServerState {
+        response: Arc<AtomicUsize>,
+        calls: Arc<AtomicUsize>,
+        saw_conditions: Arc<AtomicBool>,
+    }
+
+    async fn registry_handler(
+        State(state): State<RegistryServerState>,
+        headers: HeaderMap,
+    ) -> Response {
+        state.calls.fetch_add(1, Ordering::SeqCst);
+        state.saw_conditions.store(
+            headers
+                .get("if-none-match")
+                .and_then(|value| value.to_str().ok())
+                == Some("\"catalog-v1\"")
+                && headers
+                    .get("if-modified-since")
+                    .and_then(|value| value.to_str().ok())
+                    == Some("Thu, 30 Jul 2026 00:00:00 GMT"),
+            Ordering::SeqCst,
+        );
+        match state.response.load(Ordering::SeqCst) {
+            0 => StatusCode::NOT_MODIFIED.into_response(),
+            1 => Json(serde_json::json!({"services": "invalid"})).into_response(),
+            _ => (StatusCode::SERVICE_UNAVAILABLE, "unavailable").into_response(),
+        }
+    }
+
+    async fn registry_server(state: RegistryServerState) -> Url {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind registry server");
+        let address = listener.local_addr().expect("registry server address");
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/registry", get(registry_handler))
+                    .with_state(state),
+            )
+            .await
+            .expect("serve registry");
+        });
+        Url::parse(&format!("http://{address}/registry")).expect("registry URL")
+    }
+
+    fn catalog() -> Catalog {
+        Catalog {
+            services: vec![Service {
+                id: "catalog".to_owned(),
+                name: Some("Catalog".to_owned()),
+                description: None,
+                service_url: Some("https://api.example".to_owned()),
+                url: None,
+                realm: Some("api.example".to_owned()),
+                categories: vec!["data".to_owned()],
+                tags: vec![],
+                status: Some("active".to_owned()),
+                endpoints: vec![Endpoint {
+                    method: "GET".to_owned(),
+                    path: "/v1/records".to_owned(),
+                    description: None,
+                    payment: None,
+                    extra: HashMap::new(),
+                }],
+                extra: HashMap::new(),
+            }],
+            extra: HashMap::new(),
+        }
+    }
+
+    fn snapshot(fetched_at: OffsetDateTime) -> RegistrySnapshot {
+        RegistrySnapshot {
+            catalog: catalog(),
+            fetched_at,
+            etag: Some("\"catalog-v1\"".to_owned()),
+            last_modified: Some("Thu, 30 Jul 2026 00:00:00 GMT".to_owned()),
+        }
+    }
+
+    fn registry(store: Arc<MemoryStore>, url: Url) -> super::Registry {
+        super::Registry {
+            store,
+            client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("registry client"),
+            url,
+            cache_ttl: Duration::minutes(15),
+            max_stale: Duration::hours(24),
+            snapshot: tokio::sync::Mutex::new(None),
+        }
+    }
 
     #[test]
     fn route_templates_match_whole_segments_only() {
@@ -343,5 +543,64 @@ mod tests {
             &registered_path(&service, "/v1/:id"),
             "/provider/v1/record-1"
         ));
+    }
+
+    #[tokio::test]
+    async fn fresh_cache_skips_refresh_and_conditional_refresh_is_saved() {
+        let state = RegistryServerState {
+            response: Arc::new(AtomicUsize::new(0)),
+            calls: Arc::new(AtomicUsize::new(0)),
+            saw_conditions: Arc::new(AtomicBool::new(false)),
+        };
+        let url = registry_server(state.clone()).await;
+        let fresh_store = Arc::new(MemoryStore::new(Some(snapshot(OffsetDateTime::now_utc()))));
+        let fresh = registry(fresh_store.clone(), url.clone())
+            .snapshot()
+            .await
+            .expect("fresh cache");
+        assert_eq!(fresh.catalog.services[0].id, "catalog");
+        assert_eq!(state.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fresh_store.saves.load(Ordering::SeqCst), 0);
+
+        let stale_store = Arc::new(MemoryStore::new(Some(snapshot(
+            OffsetDateTime::now_utc() - Duration::hours(1),
+        ))));
+        let refreshed = registry(stale_store.clone(), url)
+            .snapshot()
+            .await
+            .expect("conditional refresh");
+        assert!(OffsetDateTime::now_utc() - refreshed.fetched_at < Duration::seconds(2));
+        assert_eq!(state.calls.load(Ordering::SeqCst), 1);
+        assert!(state.saw_conditions.load(Ordering::SeqCst));
+        assert_eq!(stale_store.saves.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn invalid_refresh_uses_valid_stale_cache_but_expired_cache_fails_closed() {
+        let state = RegistryServerState {
+            response: Arc::new(AtomicUsize::new(1)),
+            calls: Arc::new(AtomicUsize::new(0)),
+            saw_conditions: Arc::new(AtomicBool::new(false)),
+        };
+        let url = registry_server(state.clone()).await;
+        let stale_at = OffsetDateTime::now_utc() - Duration::hours(1);
+        let stale_store = Arc::new(MemoryStore::new(Some(snapshot(stale_at))));
+        let stale = registry(stale_store.clone(), url.clone())
+            .snapshot()
+            .await
+            .expect("stale fallback");
+        assert_eq!(stale.fetched_at, stale_at);
+        assert_eq!(stale_store.saves.load(Ordering::SeqCst), 0);
+
+        let expired_store = Arc::new(MemoryStore::new(Some(snapshot(
+            OffsetDateTime::now_utc() - Duration::hours(25),
+        ))));
+        let error = registry(expired_store.clone(), url)
+            .snapshot()
+            .await
+            .expect_err("expired cache must fail");
+        assert!(error.to_string().contains("decode MPP registry JSON"));
+        assert_eq!(expired_store.saves.load(Ordering::SeqCst), 0);
+        assert_eq!(state.calls.load(Ordering::SeqCst), 2);
     }
 }

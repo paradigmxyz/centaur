@@ -454,4 +454,75 @@ mod tests {
             .await
             .expect("delete session");
     }
+
+    #[tokio::test]
+    async fn active_execution_requires_running_status_and_live_owner_lease() {
+        let _guard = database_lock().lock().await;
+        let Some(pool) = test_pool().await else {
+            eprintln!("skipping: no session SQLx test database configured");
+            return;
+        };
+        let suffix = Uuid::new_v4().to_string();
+        let thread_key = format!("mpp-lease:{suffix}");
+        let sandbox_id = format!("sandbox-mpp-lease-{suffix}");
+        let execution_id = format!("exe-mpp-lease-{suffix}");
+        sqlx::query(
+            "insert into sessions (thread_key, sandbox_id, harness_type, status) values ($1, $2, 'codex', 'active')",
+        )
+        .bind(&thread_key)
+        .bind(&sandbox_id)
+        .execute(&pool)
+        .await
+        .expect("insert session");
+        sqlx::query(
+            r#"
+            insert into session_executions (
+                execution_id,
+                thread_key,
+                status,
+                started_at,
+                stdout_owner_id,
+                stdout_owner_lease_expires_at
+            )
+            values ($1, $2, 'running', now(), 'api-rs-test', now() + interval '1 minute')
+            "#,
+        )
+        .bind(&execution_id)
+        .bind(&thread_key)
+        .execute(&pool)
+        .await
+        .expect("insert execution");
+
+        let store = PgSignerStore::new(pool.clone());
+        let active = store
+            .active_execution(&sandbox_id)
+            .await
+            .expect("active execution")
+            .expect("live execution lease");
+        assert_eq!(active.execution_id, execution_id);
+        assert_eq!(active.thread_key, thread_key);
+        assert_eq!(store.active_execution_lease_count().await.unwrap(), 1);
+
+        sqlx::query(
+            "update session_executions set status = 'completed', completed_at = now() where execution_id = $1",
+        )
+        .bind(&execution_id)
+        .execute(&pool)
+        .await
+        .expect("complete execution");
+        assert!(
+            store
+                .active_execution(&sandbox_id)
+                .await
+                .expect("terminal execution query")
+                .is_none()
+        );
+        assert_eq!(store.active_execution_lease_count().await.unwrap(), 0);
+
+        sqlx::query("delete from sessions where thread_key = $1")
+            .bind(thread_key)
+            .execute(&pool)
+            .await
+            .expect("delete session");
+    }
 }

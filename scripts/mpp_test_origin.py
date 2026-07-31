@@ -17,6 +17,39 @@ def _token(value: object) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
 
 
+def _payment() -> dict[str, str]:
+    return {
+        "intent": "charge",
+        "method": "tempo",
+        "amount": os.environ.get("MPP_TEST_AMOUNT", "1"),
+        "currency": os.environ.get(
+            "MPP_TEST_CURRENCY", "0x20c0000000000000000000000000000000000000"
+        ),
+    }
+
+
+def _endpoints() -> list[dict[str, object]]:
+    path = os.environ.get("MPP_TEST_ENDPOINT_PATH", "/paid")
+    endpoints = [
+        {
+            "method": "GET",
+            "path": path,
+            "description": "Paid test response",
+            "payment": _payment(),
+        }
+    ]
+    if os.environ.get("MPP_TEST_INCLUDE_POST", "1") == "1":
+        endpoints.append(
+            {
+                "method": "POST",
+                "path": path,
+                "description": "Mutating paid test response",
+                "payment": _payment(),
+            }
+        )
+    return endpoints
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -33,53 +66,25 @@ class Handler(BaseHTTPRequestHandler):
                     "version": "1",
                     "services": [
                         {
-                            "id": "local-paid",
-                            "name": "Local paid origin",
-                            "description": "Deterministic MPP charge fixture",
+                            "id": os.environ.get("MPP_TEST_SERVICE_ID", "local-paid"),
+                            "name": os.environ.get(
+                                "MPP_TEST_SERVICE_NAME", "Local paid origin"
+                            ),
+                            "description": os.environ.get(
+                                "MPP_TEST_SERVICE_DESCRIPTION",
+                                "Deterministic MPP charge fixture",
+                            ),
                             "serviceUrl": service_url,
                             "realm": realm,
                             "categories": ["test"],
                             "status": "active",
-                            "endpoints": [
-                                {
-                                    "method": "GET",
-                                    "path": "/paid",
-                                    "description": "Paid test response",
-                                    "payment": {
-                                        "intent": "charge",
-                                        "method": "tempo",
-                                        "amount": os.environ.get(
-                                            "MPP_TEST_AMOUNT", "1"
-                                        ),
-                                        "currency": os.environ.get(
-                                            "MPP_TEST_CURRENCY",
-                                            "0x20c0000000000000000000000000000000000000",
-                                        ),
-                                    },
-                                },
-                                {
-                                    "method": "POST",
-                                    "path": "/paid",
-                                    "description": "Mutating paid test response",
-                                    "payment": {
-                                        "intent": "charge",
-                                        "method": "tempo",
-                                        "amount": os.environ.get(
-                                            "MPP_TEST_AMOUNT", "1"
-                                        ),
-                                        "currency": os.environ.get(
-                                            "MPP_TEST_CURRENCY",
-                                            "0x20c0000000000000000000000000000000000000",
-                                        ),
-                                    },
-                                },
-                            ],
+                            "endpoints": _endpoints(),
                         }
                     ],
                 },
             )
             return
-        if self.path != "/paid":
+        if self.path != os.environ.get("MPP_TEST_ENDPOINT_PATH", "/paid"):
             self._json(404, {"error": "not_found"})
             return
         authorization = self.headers.get("Authorization", "")
