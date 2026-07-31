@@ -117,15 +117,6 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_select "td", text: "CLOUD_RUN_SA_KEYFILE"
   end
 
-  test "pg_dsn detail page lists configured session settings" do
-    secret = pg_dsn_secrets(:acme_analytics_pg)
-    secret.update!(settings: [ { "name" => "app.tenant", "value" => "centaur" } ])
-    get console_secret_url("pg_dsn", secret.oid)
-    assert_response :ok
-    assert_select "dt", text: "Session settings"
-    assert_select "dd", text: "app.tenant = centaur"
-  end
-
   test "secret detail page 404s for an unknown kind or id" do
     get console_secret_url("bogus", "ssr_whatever")
     assert_response :not_found

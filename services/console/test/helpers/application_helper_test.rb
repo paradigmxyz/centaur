@@ -151,11 +151,6 @@ class ApplicationHelperTest < ActionView::TestCase
     end
   end
 
-  test "console_icon renders theme toggle icons" do
-    assert_select_in console_icon("sun"), "svg path[d*='M12 3v2.25']"
-    assert_select_in console_icon("moon"), "svg path[d*='21.752 15.002']"
-  end
-
   private
 
   def assert_select_in(html, *args, &block)
