@@ -65,6 +65,19 @@ class ApplicationHelperTest < ActionView::TestCase
                      text: "https://github.com/paradigmxyz/centaur/issues/792"
   end
 
+  test "console_markdown restores every inline markdown link" do
+    html = console_markdown(<<~MARKDOWN)
+      Compare [Centaur](https://github.com/paradigmxyz/centaur),
+      [Tempo](https://github.com/tempoxyz/tempo), and [QM](https://github.com/yc-software/qm).
+    MARKDOWN
+
+    assert_select_in html, "a.console-markdown-link", count: 3
+    assert_select_in html, "a.console-markdown-link[href='https://github.com/paradigmxyz/centaur']", text: "Centaur"
+    assert_select_in html, "a.console-markdown-link[href='https://github.com/tempoxyz/tempo']", text: "Tempo"
+    assert_select_in html, "a.console-markdown-link[href='https://github.com/yc-software/qm']", text: "QM"
+    refute_match(/%%MDPH\d+%%/, html)
+  end
+
   test "console_markdown renders gfm tables with alignment" do
     html = console_markdown(<<~MARKDOWN)
       Before the table.

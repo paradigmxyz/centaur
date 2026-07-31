@@ -582,8 +582,8 @@ module ApplicationHelper
     text = text.gsub(/(?<!\*)\*([^*\n]+)\*(?!\*)/, '<em>\1</em>')
     text = text.gsub(/(?<!_)_([^_\n]+)_(?!_)/, '<em>\1</em>')
 
-    placeholders.each_with_index do |html, offset|
-      text = text.gsub(markdown_token(offset), html)
+    text.gsub(/%%MDPH(\d+)%%/) do |token|
+      placeholders[Regexp.last_match(1).to_i] || token
     end
 
     text
