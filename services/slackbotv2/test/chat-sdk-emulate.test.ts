@@ -971,7 +971,7 @@ describe('slackbotv2', () => {
       .map(block => JSON.stringify(block))
       .find(text => text.includes('Open chat in Console'))
     expect(footer).toContain('Nanocodex')
-    expect(footer).toContain('Low')
+    expect(footer).toContain('High')
     expect(footer).not.toContain('Codex*')
     expect(codexApi.creates[0]?.body.harness_type).toBe('codex')
     expect(codexApi.executes[0]?.body.metadata).toMatchObject({
