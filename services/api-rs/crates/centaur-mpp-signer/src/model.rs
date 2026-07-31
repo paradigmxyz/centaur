@@ -75,6 +75,7 @@ pub struct RegisteredRoute {
 pub struct ActiveExecution {
     pub execution_id: String,
     pub sandbox_id: String,
+    pub thread_key: String,
 }
 
 #[derive(Clone, Debug)]
@@ -93,8 +94,14 @@ pub struct NewAttempt {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BeginAttempt {
     Created,
-    Duplicate { attempt_id: Uuid },
-    BudgetDenied { reason: &'static str },
+    Duplicate {
+        attempt_id: Uuid,
+        sandbox_id: String,
+        execution_id: String,
+    },
+    BudgetDenied {
+        reason: &'static str,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -150,6 +157,8 @@ pub struct AuthorizeResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attempt_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub traceparent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<&'static str>,
 }
 
@@ -159,6 +168,7 @@ impl AuthorizeResponse {
             retry: false,
             headers: HashMap::new(),
             attempt_id: None,
+            traceparent: None,
             reason: Some(reason),
         }
     }
@@ -168,6 +178,7 @@ impl AuthorizeResponse {
             retry: true,
             headers: HashMap::from([("Authorization".to_owned(), authorization)]),
             attempt_id: Some(attempt_id),
+            traceparent: None,
             reason: None,
         }
     }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 
@@ -83,6 +84,11 @@ def test_list_search_and_show_include_cache_and_availability(tmp_path: Path) -> 
 
     assert [service["id"] for service in listed["services"]] == ["catalog"]
     assert listed["services"][0]["executable_endpoints"] == 2
+    assert listed["services"][0]["available"] is True
+    assert listed["services"][0]["unavailable_reasons"] == [
+        "POST requires an operator policy rule",
+        "unsupported payment intent 'session'",
+    ]
     assert listed["cache"] == {
         "fetched_at": 1_000.0,
         "age_seconds": 0,
@@ -90,6 +96,8 @@ def test_list_search_and_show_include_cache_and_availability(tmp_path: Path) -> 
         "stale": False,
     }
     assert [service["id"] for service in searched["services"]] == ["search"]
+    assert searched["services"][0]["available"] is False
+    assert searched["services"][0]["unavailable_reasons"] == ["service has no registered endpoints"]
     assert shown["endpoints"][0]["availability"] == {
         "executable": True,
         "reason": "GET is enabled by default",
@@ -263,6 +271,26 @@ def test_request_resolves_registered_path_and_never_follows_redirects(tmp_path: 
     )
     with pytest.raises(MppRequestError, match="redirects"):
         redirecting.request("catalog", "GET", "/v1/records")
+
+
+def test_request_supports_registered_gateway_realm_and_base_path(tmp_path: Path) -> None:
+    catalog = copy.deepcopy(CATALOG)
+    catalog["services"][0]["serviceUrl"] = "https://gateway.example/provider"
+    catalog["services"][0]["realm"] = "payments.example"
+    catalog["services"][0]["endpoints"] = [catalog["services"][0]["endpoints"][0]]
+    captured: list[httpx.Request] = []
+
+    def service_handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    client = make_client(tmp_path, lambda _: httpx.Response(200, json=catalog))
+    client._service_http = httpx.Client(transport=httpx.MockTransport(service_handler))
+
+    result = client.request("catalog", "GET", "/v1/records")
+
+    assert result["status"] == 200
+    assert str(captured[0].url) == "https://gateway.example/provider/v1/records"
 
 
 @pytest.mark.parametrize(

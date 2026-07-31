@@ -60,6 +60,9 @@ impl Registry {
         let hostname = authority
             .host_str()
             .context("MPP request authority has no hostname")?;
+        let port = authority
+            .port_or_known_default()
+            .context("MPP request authority has no port")?;
         let concrete_path = path_and_query
             .split_once('?')
             .map_or(path_and_query, |(path, _)| path);
@@ -81,17 +84,17 @@ impl Registry {
                 continue;
             };
             let service_url = Url::parse(base_url)?;
-            if service_url.host_str() != Some(hostname) {
-                continue;
-            }
-            if let Some(realm) = &service.realm
-                && !realm.eq_ignore_ascii_case(hostname)
+            if service_url
+                .host_str()
+                .is_none_or(|candidate| !candidate.eq_ignore_ascii_case(hostname))
+                || service_url.port_or_known_default() != Some(port)
             {
                 continue;
             }
             for endpoint in &service.endpoints {
+                let registered_path = registered_path(&service_url, &endpoint.path);
                 if endpoint.method.eq_ignore_ascii_case(method)
-                    && path_matches(&endpoint.path, concrete_path)
+                    && path_matches(&registered_path, concrete_path)
                 {
                     matches.push(RegisteredRoute {
                         service: service.clone(),
@@ -119,8 +122,15 @@ impl Registry {
 
     async fn snapshot(&self) -> anyhow::Result<RegistrySnapshot> {
         let mut guard = self.snapshot.lock().await;
-        if guard.is_none() {
-            *guard = self.store.load_registry_cache().await?;
+        if guard.is_none()
+            && let Some(cached) = self.store.load_registry_cache().await?
+        {
+            match validate_catalog(&cached.catalog) {
+                Ok(()) => *guard = Some(cached),
+                Err(error) => {
+                    tracing::warn!(error = %error, "discarding invalid cached MPP registry");
+                }
+            }
         }
         let now = OffsetDateTime::now_utc();
         if let Some(snapshot) = guard.as_ref()
@@ -229,16 +239,22 @@ fn validate_catalog(catalog: &Catalog) -> anyhow::Result<()> {
             .context("MPP registry service has no URL")?;
         let url = Url::parse(base_url).context("parse MPP service URL")?;
         anyhow::ensure!(
-            url.scheme() == "https" && url.host_str().is_some() && url.username().is_empty(),
+            url.scheme() == "https"
+                && url.host_str().is_some()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none()
+                && !has_dot_segments(url.path()),
             "MPP registry service URL must be absolute HTTPS without credentials"
         );
-        if let Some(realm) = &service.realm {
-            anyhow::ensure!(
-                url.host_str()
-                    .is_some_and(|host| realm.eq_ignore_ascii_case(host)),
-                "MPP registry service realm does not match its URL"
-            );
-        }
+        anyhow::ensure!(
+            service
+                .realm
+                .as_deref()
+                .is_none_or(|realm| !realm.is_empty()),
+            "MPP registry service realm cannot be empty"
+        );
         for endpoint in &service.endpoints {
             validate_endpoint(endpoint)?;
         }
@@ -276,6 +292,14 @@ fn path_matches(template: &str, concrete: &str) -> bool {
             })
 }
 
+fn registered_path(service_url: &Url, endpoint_path: &str) -> String {
+    format!(
+        "{}{}",
+        service_url.path().trim_end_matches('/'),
+        endpoint_path
+    )
+}
+
 fn has_dot_segments(path: &str) -> bool {
     path.split('/').any(|segment| {
         let encoded = segment.to_ascii_lowercase();
@@ -287,7 +311,9 @@ fn has_dot_segments(path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{has_dot_segments, path_matches};
+    use reqwest::Url;
+
+    use super::{has_dot_segments, path_matches, registered_path};
 
     #[test]
     fn route_templates_match_whole_segments_only() {
@@ -304,5 +330,18 @@ mod tests {
         assert!(has_dot_segments("/v1/%2e./admin"));
         assert!(has_dot_segments("/v1/record%2Fadmin"));
         assert!(!has_dot_segments("/v1/records"));
+    }
+
+    #[test]
+    fn service_base_paths_are_part_of_registered_routes() {
+        let service = Url::parse("https://gateway.example/provider").unwrap();
+        assert_eq!(
+            registered_path(&service, "/v1/search"),
+            "/provider/v1/search"
+        );
+        assert!(path_matches(
+            &registered_path(&service, "/v1/:id"),
+            "/provider/v1/record-1"
+        ));
     }
 }

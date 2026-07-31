@@ -214,7 +214,7 @@ class MppClient:
         resolved_path = _resolve_path(endpoint["path"], path_params or {})
         base_url = _service_url(record)
         url = urljoin(f"{base_url.rstrip('/')}/", resolved_path.lstrip("/"))
-        _validate_service_destination(url, base_url, record)
+        _validate_service_destination(url, base_url)
 
         try:
             response = self.service_http.request(
@@ -389,6 +389,11 @@ class MppClient:
                 temporary.flush()
                 os.fsync(temporary.fileno())
             temporary_path.replace(self.cache_path)
+            directory = os.open(self.cache_path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
         finally:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
@@ -433,11 +438,24 @@ class MppClient:
 
     def _service_summary(self, service: dict[str, Any]) -> dict[str, Any]:
         endpoints = service.get("endpoints", [])
-        executable = sum(
-            1
+        endpoint_availability = [
+            {
+                "method": endpoint["method"].upper(),
+                "path": endpoint["path"],
+                **self._endpoint_availability(service, endpoint),
+            }
             for endpoint in endpoints
-            if self._endpoint_availability(service, endpoint)["executable"]
+        ]
+        executable = sum(1 for availability in endpoint_availability if availability["executable"])
+        unavailable_reasons = sorted(
+            {
+                availability["reason"]
+                for availability in endpoint_availability
+                if not availability["executable"]
+            }
         )
+        if not endpoints:
+            unavailable_reasons = ["service has no registered endpoints"]
         return {
             "id": service["id"],
             "name": service.get("name"),
@@ -448,6 +466,8 @@ class MppClient:
             "status": service.get("status"),
             "endpoints": len(endpoints),
             "executable_endpoints": executable,
+            "available": executable > 0,
+            "unavailable_reasons": unavailable_reasons,
         }
 
     def _find_service(self, services: list[dict[str, Any]], value: str) -> dict[str, Any]:
@@ -480,6 +500,9 @@ class MppClient:
     def _endpoint_availability(
         self, service: dict[str, Any], endpoint: dict[str, Any]
     ) -> dict[str, Any]:
+        status = service.get("status")
+        if status not in {None, "active"}:
+            return {"executable": False, "reason": f"service status is {status!r}"}
         decision = self._policy_decision(service, endpoint)
         payment = endpoint.get("payment") or {}
         intent = payment.get("intent")
@@ -564,9 +587,16 @@ def _validate_https_url(value: str, label: str) -> None:
 def _validate_catalog(payload: Any) -> None:
     if not isinstance(payload, dict) or not isinstance(payload.get("services"), list):
         raise MppCatalogError("MPP registry returned an invalid services list")
+    service_ids: set[str] = set()
     for service in payload["services"]:
-        if not isinstance(service, dict) or not isinstance(service.get("id"), str):
+        if (
+            not isinstance(service, dict)
+            or not isinstance(service.get("id"), str)
+            or not service["id"]
+            or service["id"] in service_ids
+        ):
             raise MppCatalogError("MPP registry returned an invalid services list")
+        service_ids.add(service["id"])
         service_url = service.get("serviceUrl") or service.get("url")
         try:
             _validate_https_url(service_url, "MPP service URL")
@@ -581,8 +611,11 @@ def _validate_catalog(payload: Any) -> None:
             if (
                 not isinstance(endpoint, dict)
                 or not isinstance(endpoint.get("method"), str)
+                or not endpoint["method"]
+                or not endpoint["method"].isalpha()
                 or not isinstance(endpoint.get("path"), str)
                 or not endpoint["path"].startswith("/")
+                or _has_unsafe_path_segments(endpoint["path"])
             ):
                 raise MppCatalogError(
                     f"MPP registry service {service['id']!r} has an invalid endpoint"
@@ -655,11 +688,16 @@ def _resolve_path(template: str, path_params: dict[str, str]) -> str:
     return resolved
 
 
-def _validate_service_destination(url: str, base_url: str, service: dict[str, Any]) -> None:
+def _validate_service_destination(url: str, base_url: str) -> None:
     target = urlsplit(url)
     base = urlsplit(base_url)
     if target.scheme != "https" or target.hostname != base.hostname or target.port != base.port:
         raise ValueError("MPP request destination does not match the registered service")
-    realm = service.get("realm")
-    if realm and realm.casefold() != (target.hostname or "").casefold():
-        raise ValueError("MPP service realm does not match its registered destination")
+
+
+def _has_unsafe_path_segments(path: str) -> bool:
+    for segment in path.split("/"):
+        decoded = unquote(segment)
+        if decoded in {".", ".."} or "/" in decoded or "\\" in decoded:
+            return True
+    return False

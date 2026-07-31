@@ -26,6 +26,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/registry":
             realm = os.environ["MPP_TEST_REALM"]
+            service_url = os.environ.get("MPP_TEST_SERVICE_URL", f"https://{realm}")
             self._json(
                 200,
                 {
@@ -35,7 +36,7 @@ class Handler(BaseHTTPRequestHandler):
                             "id": "local-paid",
                             "name": "Local paid origin",
                             "description": "Deterministic MPP charge fixture",
-                            "serviceUrl": f"https://{realm}",
+                            "serviceUrl": service_url,
                             "realm": realm,
                             "categories": ["test"],
                             "status": "active",
@@ -119,6 +120,10 @@ class Handler(BaseHTTPRequestHandler):
                     "time": datetime.now(UTC).isoformat(),
                     "client": self.client_address[0],
                     "request": format % args,
+                    "traceparent": self.headers.get("traceparent"),
+                    "payment_authorization_present": self.headers.get(
+                        "Authorization", ""
+                    ).startswith("Payment "),
                 }
             ),
             flush=True,

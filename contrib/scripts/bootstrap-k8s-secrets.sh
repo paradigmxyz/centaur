@@ -205,6 +205,11 @@ if secret_exists centaur-infra-env; then
   if ! secret_key_present IRON_BROKER_TOKEN; then
     patch_data+=("\"IRON_BROKER_TOKEN\":\"$(rand_hex | base64 | tr -d '\n')\"")
   fi
+  # Shared authentication between sandbox proxies and mpp-signer. Keep it in
+  # the infra Secret so the dedicated signer Secret remains private-key-only.
+  if ! secret_key_present MPP_SIGNER_TOKEN; then
+    patch_data+=("\"MPP_SIGNER_TOKEN\":\"$(rand_hex | base64 | tr -d '\n')\"")
+  fi
   if [[ -n "${LOCAL_DEV_API_KEY:-}" ]]; then
     patch_data+=("\"LOCAL_DEV_API_KEY\":\"$(printf '%s' "$LOCAL_DEV_API_KEY" | base64 | tr -d '\n')\"")
   fi
@@ -316,6 +321,7 @@ else
     -n "$NAMESPACE" create secret generic centaur-infra-env
     --from-literal=IRON_MANAGEMENT_API_KEY="$(rand_hex)"
     --from-literal=IRON_BROKER_TOKEN="$(rand_hex)"
+    --from-literal=MPP_SIGNER_TOKEN="$(rand_hex)"
     --from-literal=SANDBOX_SIGNING_KEY="$(rand_hex)"
     --from-literal=OP_SERVICE_ACCOUNT_TOKEN="$OP_SERVICE_ACCOUNT_TOKEN"
     --from-literal=OP_VAULT="$OP_VAULT"

@@ -1,5 +1,6 @@
 create table if not exists mpp_registry_cache (
     singleton boolean primary key default true check (singleton),
+    schema_version smallint not null default 1 check (schema_version = 1),
     catalog jsonb not null,
     fetched_at timestamptz not null,
     etag text,

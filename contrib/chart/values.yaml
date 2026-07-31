@@ -462,7 +462,9 @@ apiRs:
   resources: {}
 
 # Registry-backed Machine Payments Protocol fallback. One cluster-internal
-# signer owns the shared wallet key; sandbox tools never receive it.
+# signer owns the shared wallet key; sandbox tools never receive it. The
+# dedicated signer Secret contains only MPP_PRIVATE_KEY. MPP_SIGNER_TOKEN is
+# shared through the ordinary infra Secret (`just bootstrap-secrets` creates it).
 mpp:
   enabled: false
   port: 8090
@@ -474,7 +476,6 @@ mpp:
   signer:
     existingSecretName: centaur-mpp-signer
     privateKeyKey: MPP_PRIVATE_KEY
-    tokenKey: MPP_SIGNER_TOKEN
   policy:
     defaultMethods:
       - GET

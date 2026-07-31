@@ -395,8 +395,8 @@ spec:
             - name: KUBERNETES_IRON_PROXY_RESPONSE_RETRY_HANDLER_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ required "mpp.signer.existingSecretName is required" .Values.mpp.signer.existingSecretName }}
-                  key: {{ .Values.mpp.signer.tokenKey }}
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sMPP_SIGNER_TOKEN" .Values.secretManager.envPrefix }}
 {{- end }}
 {{- $sandboxEnvList := list }}
 {{- if and .Values.repoCache.enabled (gt (len $skillDirs) 0) }}

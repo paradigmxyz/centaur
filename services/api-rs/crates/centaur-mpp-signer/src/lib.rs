@@ -14,7 +14,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use centaur_telemetry::{render_metrics, set_span_parent_trace};
+use centaur_telemetry::{render_metrics, set_span_parent_trace, traceparent_for_span};
 use model::{
     AuthorizeRequest, AuthorizeResponse, BeginAttempt, CompleteRequest, CompleteResponse,
     CompletionOutcome, NewAttempt, PolicyRule,
@@ -28,7 +28,6 @@ use policy::Policy;
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 use subtle::ConstantTimeEq as _;
-use tokio::sync::RwLock;
 use tower_http::trace::TraceLayer;
 use tracing::{Instrument as _, Span, info_span};
 use uuid::Uuid;
@@ -81,7 +80,6 @@ pub struct AppState {
     registry: Arc<Registry>,
     policy: Arc<Policy>,
     signer: Arc<dyn ChargeSigner>,
-    credentials: Arc<RwLock<HashMap<Uuid, String>>>,
     max_per_charge_atomic: Option<i64>,
     max_daily_atomic: Option<i64>,
 }
@@ -108,7 +106,6 @@ impl AppState {
             registry,
             policy: Arc::new(Policy::new(default_methods, policy_rules)?),
             signer,
-            credentials: Arc::new(RwLock::new(HashMap::new())),
             max_per_charge_atomic,
             max_daily_atomic,
         })
@@ -214,12 +211,13 @@ async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 async fn metrics(State(state): State<AppState>) -> Result<String, ApiError> {
-    let leases = state
-        .store
-        .active_execution_lease_count()
-        .await
-        .map_err(ApiError::internal)?;
+    let (leases, reservations) = tokio::try_join!(
+        state.store.active_execution_lease_count(),
+        state.store.active_reservation_count(),
+    )
+    .map_err(ApiError::internal)?;
     metrics::gauge!(ACTIVE_EXECUTION_LEASES).set(leases as f64);
+    metrics::gauge!(ACTIVE_RESERVATIONS).set(reservations as f64);
     render_metrics().map_err(ApiError::internal)
 }
 
@@ -229,33 +227,55 @@ async fn authorize(
     Json(request): Json<AuthorizeRequest>,
 ) -> Result<Json<AuthorizeResponse>, ApiError> {
     authenticate(&state, &headers)?;
-    if let Some(traceparent) = request.traceparent.as_deref() {
-        apply_traceparent(traceparent);
-    }
+    let execution = state
+        .store
+        .active_execution(&request.sandbox_id)
+        .await
+        .map_err(ApiError::internal)?;
+    let parent_traceparent = request
+        .traceparent
+        .clone()
+        .filter(|value| valid_traceparent(value))
+        .or_else(|| {
+            execution
+                .as_ref()
+                .map(|value| thread_traceparent(&value.thread_key))
+        });
     let started = Instant::now();
+    let sandbox_ref = redacted_identifier(&request.sandbox_id);
     let span = info_span!(
         "mpp.charge",
-        "mpp.sandbox_id" = %request.sandbox_id,
+        "mpp.sandbox_ref" = %sandbox_ref,
         "mpp.service_id" = tracing::field::Empty,
-        "mpp.execution_id" = tracing::field::Empty,
+        "mpp.execution_ref" = tracing::field::Empty,
         "mpp.amount_atomic" = tracing::field::Empty,
         "mpp.currency" = tracing::field::Empty,
         "mpp.outcome" = tracing::field::Empty,
     );
+    if let Some(traceparent) = parent_traceparent.as_deref() {
+        apply_traceparent_to(&span, traceparent);
+    }
+    let charge_traceparent = traceparent_for_span(&span).or(parent_traceparent);
     let result = async {
-        authorize_inner(&state, request)
+        authorize_inner(&state, request, execution)
             .instrument(info_span!("mpp.authorize"))
             .await
     }
     .instrument(span)
     .await;
     metrics::histogram!(AUTHORIZATION_DURATION_SECONDS).record(started.elapsed().as_secs_f64());
-    result.map(Json)
+    result.map(|mut response| {
+        if response.retry {
+            response.traceparent = charge_traceparent;
+        }
+        Json(response)
+    })
 }
 
 async fn authorize_inner(
     state: &AppState,
     request: AuthorizeRequest,
+    execution: Option<model::ActiveExecution>,
 ) -> Result<AuthorizeResponse, ApiError> {
     if request.status != StatusCode::PAYMENT_REQUIRED.as_u16() {
         return Ok(decline(
@@ -272,17 +292,13 @@ async fn authorize_inner(
         ));
     }
 
-    let Some(execution) = state
-        .store
-        .active_execution(&request.sandbox_id)
-        .await
-        .map_err(ApiError::internal)?
-    else {
+    let Some(execution) = execution else {
         metrics::counter!(LEASE_CHECKS_TOTAL, "outcome" => "rejected").increment(1);
         return Ok(decline("no_active_execution", "unknown", &request.method));
     };
     metrics::counter!(LEASE_CHECKS_TOTAL, "outcome" => "allowed").increment(1);
-    Span::current().record("mpp.execution_id", execution.execution_id.as_str());
+    let execution_ref = redacted_identifier(&execution.execution_id);
+    Span::current().record("mpp.execution_ref", execution_ref.as_str());
 
     let challenge_headers = header_values(&request.response_headers, "www-authenticate");
     let mut selected = None;
@@ -335,12 +351,16 @@ async fn authorize_inner(
             &request.method,
         ));
     }
-    let hostname = reqwest::Url::parse(&format!("https://{}", request.host))
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_owned));
-    if hostname
+    let expected_realm = route.service.realm.clone().or_else(|| {
+        route
+            .service
+            .base_url()
+            .and_then(|url| reqwest::Url::parse(url).ok())
+            .and_then(|url| url.host_str().map(str::to_owned))
+    });
+    if expected_realm
         .as_deref()
-        .is_none_or(|host| !challenge.realm.eq_ignore_ascii_case(host))
+        .is_none_or(|realm| !challenge.realm.eq_ignore_ascii_case(realm))
     {
         return Ok(decline("realm_mismatch", service_id, &request.method));
     }
@@ -383,8 +403,7 @@ async fn authorize_inner(
     Span::current().record("mpp.amount_atomic", amount);
     Span::current().record("mpp.currency", charge.currency.as_str());
 
-    let raw_challenge = challenge_headers.join("\n");
-    let challenge_hash = sha256_hex(raw_challenge.as_bytes());
+    let challenge_hash = sha256_hex(&serde_json::to_vec(&challenge).map_err(ApiError::internal)?);
     let attempt_id = Uuid::new_v4();
     let attempt = NewAttempt {
         attempt_id,
@@ -413,11 +432,16 @@ async fn authorize_inner(
             }
         }
         BeginAttempt::Duplicate {
-            attempt_id: existing,
+            attempt_id: _,
+            sandbox_id,
+            execution_id,
         } => {
-            if let Some(authorization) = state.credentials.read().await.get(&existing).cloned() {
-                record_authorization("retry", "duplicate_in_flight", service_id, &request.method);
-                return Ok(AuthorizeResponse::retry(existing, authorization));
+            if sandbox_id != attempt.sandbox_id || execution_id != attempt.execution_id {
+                return Ok(decline(
+                    "duplicate_challenge_identity_mismatch",
+                    service_id,
+                    &request.method,
+                ));
             }
             return Ok(decline("duplicate_challenge", service_id, &request.method));
         }
@@ -447,7 +471,7 @@ async fn authorize_inner(
             tracing::warn!(
                 error = %error,
                 service_id,
-                execution_id = %attempt.execution_id,
+                execution_ref = %redacted_identifier(&attempt.execution_id),
                 "MPP charge signing failed"
             );
             return Ok(decline("signing_failed", service_id, &request.method));
@@ -459,15 +483,11 @@ async fn authorize_inner(
         .mark_authorized(attempt_id)
         .await
         .map_err(ApiError::internal)?;
-    state
-        .credentials
-        .write()
-        .await
-        .insert(attempt_id, authorization.clone());
+    Span::current().record("mpp.outcome", "authorized");
     record_authorization("retry", "authorized", service_id, &request.method);
     tracing::info!(
         service_id,
-        execution_id = %attempt.execution_id,
+        execution_ref = %redacted_identifier(&attempt.execution_id),
         amount_atomic = amount,
         currency = %charge.currency,
         "authorized MPP charge replay"
@@ -481,9 +501,21 @@ async fn complete(
     Json(request): Json<CompleteRequest>,
 ) -> Result<Json<CompleteResponse>, ApiError> {
     authenticate(&state, &headers)?;
+    let complete_span = info_span!(
+        "mpp.complete",
+        "mpp.attempt_ref" = %redacted_identifier(&request.attempt_id.to_string()),
+    );
     if let Some(traceparent) = request.traceparent.as_deref() {
-        apply_traceparent(traceparent);
+        apply_traceparent_to(&complete_span, traceparent);
+        let replay_span = info_span!(
+            "mpp.replay",
+            "http.response.status_code" = request.replay_status,
+            "mpp.replay_duration_ms" = request.replay_duration_ms,
+        );
+        apply_traceparent_to(&replay_span, traceparent);
+        let _entered = replay_span.enter();
     }
+    let _entered = complete_span.enter();
     let started = Instant::now();
     let receipt_header = header_values(&request.response_headers, "payment-receipt")
         .into_iter()
@@ -519,7 +551,6 @@ async fn complete(
         )
         .await
         .map_err(ApiError::internal)?;
-    state.credentials.write().await.remove(&request.attempt_id);
     if let Some(ref completed) = completed {
         if !state.budgets_disabled() {
             metrics::gauge!(ACTIVE_RESERVATIONS).decrement(1.0);
@@ -529,7 +560,7 @@ async fn complete(
             "outcome" => completed.outcome.as_str(),
             "reason" => completed.reason.clone(),
             "intent" => "charge",
-            "method" => completed.method.clone(),
+            "method" => metric_method(&completed.method),
             "service" => completed.service_id.clone(),
         )
         .increment(1);
@@ -595,7 +626,7 @@ fn record_authorization(outcome: &'static str, reason: &'static str, service: &s
         "outcome" => outcome,
         "reason" => reason,
         "intent" => "charge",
-        "method" => method.to_ascii_uppercase(),
+        "method" => metric_method(method),
         "service" => service.to_owned(),
     )
     .increment(1);
@@ -613,11 +644,54 @@ fn sha256_hex(value: &[u8]) -> String {
     hex::encode(Sha256::digest(value))
 }
 
-fn apply_traceparent(traceparent: &str) {
-    let parts = traceparent.split('-').collect::<Vec<_>>();
-    if parts.len() == 4 {
-        let _ = set_span_parent_trace(&Span::current(), parts[1], parts[2]);
+fn redacted_identifier(value: &str) -> String {
+    format!("sha256:{}", &sha256_hex(value.as_bytes())[..16])
+}
+
+fn thread_traceparent(thread_key: &str) -> String {
+    let trace_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("centaur:thread:{thread_key}").as_bytes(),
+    )
+    .simple()
+    .to_string();
+    let digest = Sha256::digest(format!("centaur:thread-parent:{thread_key}"));
+    let mut span_id = [0_u8; 8];
+    span_id.copy_from_slice(&digest[..8]);
+    if span_id.iter().all(|byte| *byte == 0) {
+        span_id[7] = 1;
     }
+    format!("00-{trace_id}-{}-01", hex::encode(span_id))
+}
+
+fn metric_method(method: &str) -> String {
+    let method = method.to_ascii_uppercase();
+    match method.as_str() {
+        "DELETE" | "GET" | "HEAD" | "OPTIONS" | "PATCH" | "POST" | "PUT" => method,
+        _ => "OTHER".to_owned(),
+    }
+}
+
+fn apply_traceparent_to(span: &Span, traceparent: &str) {
+    if !valid_traceparent(traceparent) {
+        return;
+    }
+    let parts = traceparent.split('-').collect::<Vec<_>>();
+    let _ = set_span_parent_trace(span, parts[1], parts[2]);
+}
+
+fn valid_traceparent(value: &str) -> bool {
+    let parts = value.split('-').collect::<Vec<_>>();
+    parts.len() == 4
+        && parts[0] == "00"
+        && parts[1].len() == 32
+        && parts[2].len() == 16
+        && parts[3].len() == 2
+        && parts
+            .iter()
+            .all(|part| part.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        && parts[1].bytes().any(|byte| byte != b'0')
+        && parts[2].bytes().any(|byte| byte != b'0')
 }
 
 #[derive(Serialize)]
@@ -713,6 +787,10 @@ mod tests {
             Ok(i64::from(self.execution.is_some()))
         }
 
+        async fn active_reservation_count(&self) -> anyhow::Result<i64> {
+            Ok(0)
+        }
+
         async fn begin_attempt(
             &self,
             _attempt: &NewAttempt,
@@ -770,7 +848,7 @@ mod tests {
                         description: None,
                         service_url: Some("https://service.example".to_owned()),
                         url: None,
-                        realm: Some("service.example".to_owned()),
+                        realm: Some("payments.example".to_owned()),
                         categories: vec!["test".to_owned()],
                         tags: vec![],
                         status: Some("active".to_owned()),
@@ -817,6 +895,7 @@ mod tests {
             execution: with_execution.then(|| ActiveExecution {
                 execution_id: "exe-test".to_owned(),
                 sandbox_id: "sandbox-test".to_owned(),
+                thread_key: "cli:test".to_owned(),
             }),
             attempts: AtomicUsize::new(0),
             begin_result: Mutex::new(BeginAttempt::Created),
@@ -844,7 +923,7 @@ mod tests {
     }
 
     fn challenge() -> String {
-        challenge_for("service.example", "charge", &mpp::expires::minutes(5))
+        challenge_for("payments.example", "charge", &mpp::expires::minutes(5))
     }
 
     async fn state(with_execution: bool) -> (AppState, Arc<FakeStore>) {
@@ -921,7 +1000,36 @@ mod tests {
         assert_eq!(response["retry"], true);
         assert_eq!(response["headers"]["Authorization"], "Payment credential");
         assert!(response["attempt_id"].is_string());
+        assert_eq!(
+            response["traceparent"],
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        );
         assert_eq!(store.attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn authorize_links_to_thread_trace_when_request_has_no_traceparent() {
+        let (state, _) = state(true).await;
+        let (status, response) = authorize_request_with(
+            state,
+            json!({
+                "host": "service.example",
+                "method": "GET",
+                "path": "/paid",
+                "status": 402,
+                "response_headers": {"WWW-Authenticate": [challenge()]},
+                "replayable": true,
+                "sandbox_id": "sandbox-test"
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["retry"], true);
+        assert_eq!(
+            response["traceparent"],
+            super::thread_traceparent("cli:test")
+        );
     }
 
     #[tokio::test]
@@ -1024,6 +1132,8 @@ mod tests {
             (
                 BeginAttempt::Duplicate {
                     attempt_id: Uuid::new_v4(),
+                    sandbox_id: "sandbox-test".to_owned(),
+                    execution_id: "exe-test".to_owned(),
                 },
                 "duplicate_challenge",
             ),
@@ -1033,6 +1143,14 @@ mod tests {
                 },
                 "daily_budget_exceeded",
             ),
+            (
+                BeginAttempt::Duplicate {
+                    attempt_id: Uuid::new_v4(),
+                    sandbox_id: "other-sandbox".to_owned(),
+                    execution_id: "other-execution".to_owned(),
+                },
+                "duplicate_challenge_identity_mismatch",
+            ),
         ] {
             let (state, store) = state(true).await;
             *store.begin_result.lock().expect("begin result") = begin_result;
@@ -1040,5 +1158,15 @@ mod tests {
             assert_eq!(response["reason"], expected);
             assert_eq!(store.attempts.load(Ordering::SeqCst), 1);
         }
+    }
+
+    #[test]
+    fn observability_identifiers_are_redacted_and_method_labels_are_bounded() {
+        let raw = "execution-sensitive-identifier";
+        let redacted = super::redacted_identifier(raw);
+        assert_eq!(redacted.len(), "sha256:".len() + 16);
+        assert!(!redacted.contains(raw));
+        assert_eq!(super::metric_method("get"), "GET");
+        assert_eq!(super::metric_method("ATTACKER-CONTROLLED-METHOD"), "OTHER");
     }
 }
