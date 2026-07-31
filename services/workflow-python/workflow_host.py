@@ -389,6 +389,27 @@ def discovery_payload() -> dict[str, Any]:
     }
 
 
+async def read_protocol_line(reader: asyncio.StreamReader, buffer: bytearray) -> bytes:
+    search_from = 0
+    while True:
+        newline = buffer.find(b"\n", search_from)
+        if newline >= 0:
+            line = bytes(buffer[: newline + 1])
+            del buffer[: newline + 1]
+            return line
+
+        search_from = len(buffer)
+        chunk = await reader.read(64 * 1024)
+        if chunk:
+            buffer.extend(chunk)
+            continue
+        if buffer:
+            line = bytes(buffer)
+            buffer.clear()
+            return line
+        return b""
+
+
 async def main() -> int:
     rpc = RpcClient()
     active_workflow: asyncio.Task[dict[str, Any]] | None = None
@@ -419,13 +440,16 @@ async def main() -> int:
         return 1
 
     stdin_read: asyncio.Task[bytes] | None = None
+    stdin_buffer = bytearray()
 
     try:
         while True:
             if active_workflow is None:
-                line = await reader.readline()
+                line = await read_protocol_line(reader, stdin_buffer)
             else:
-                stdin_read = asyncio.create_task(reader.readline())
+                stdin_read = asyncio.create_task(
+                    read_protocol_line(reader, stdin_buffer)
+                )
                 done, _ = await asyncio.wait(
                     {stdin_read, active_workflow},
                     return_when=asyncio.FIRST_COMPLETED,

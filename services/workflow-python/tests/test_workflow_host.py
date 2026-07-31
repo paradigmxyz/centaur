@@ -787,6 +787,72 @@ class WorkflowHostTests(unittest.TestCase):
             assert proc.stderr is not None
             self.assertEqual(proc.stderr.read(), "")
 
+    def test_workflow_host_accepts_large_start_input(self) -> None:
+        source = (
+            "WORKFLOW_NAME = 'large_input_workflow'\n"
+            "async def handler(inp, ctx):\n"
+            "    return {'size': len(inp['payload'])}\n"
+        )
+        payload = "x" * (128 * 1024)
+        with self.workflow_host(source) as proc:
+            self.send_host_message(
+                proc,
+                {
+                    "type": "workflow.start",
+                    "run_id": "run-123",
+                    "task_id": "task-456",
+                    "workflow_name": "large_input_workflow",
+                    "input": {"payload": payload},
+                },
+            )
+
+            response = self.read_host_message(proc)
+            self.assertEqual(response["type"], "workflow.result")
+            self.assertEqual(response["result"], {"size": len(payload)})
+            proc.wait(timeout=2)
+            self.assertEqual(proc.returncode, 0)
+            assert proc.stderr is not None
+            self.assertEqual(proc.stderr.read(), "")
+
+    def test_workflow_host_accepts_large_context_response(self) -> None:
+        source = (
+            "WORKFLOW_NAME = 'agent_workflow'\n"
+            "async def handler(inp, ctx):\n"
+            "    result = await ctx.agent_turn('return a large result')\n"
+            "    return {'size': len(result['text'])}\n"
+        )
+        result_text = "x" * (128 * 1024)
+        with self.workflow_host(source) as proc:
+            self.send_host_message(
+                proc,
+                {
+                    "type": "workflow.start",
+                    "run_id": "run-123",
+                    "task_id": "task-456",
+                    "workflow_name": "agent_workflow",
+                    "input": {},
+                },
+            )
+            request = self.read_host_message(proc)
+            self.assertEqual(request["type"], "ctx.agent_turn")
+            self.send_host_message(
+                proc,
+                {
+                    "type": "ctx.response",
+                    "request_id": request["request_id"],
+                    "ok": True,
+                    "value": {"text": result_text},
+                },
+            )
+
+            response = self.read_host_message(proc)
+            self.assertEqual(response["type"], "workflow.result")
+            self.assertEqual(response["result"], {"size": len(result_text)})
+            proc.wait(timeout=2)
+            self.assertEqual(proc.returncode, 0)
+            assert proc.stderr is not None
+            self.assertEqual(proc.stderr.read(), "")
+
 
 if __name__ == "__main__":
     unittest.main()
