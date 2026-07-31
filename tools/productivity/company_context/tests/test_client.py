@@ -34,6 +34,9 @@ class _FakeConnection:
         self.fetch_calls = []
         self.fetchrow_calls = []
         self.fetchval_calls = []
+        self.execute_calls = []
+        self.cursor_calls = []
+        self.transaction_calls = []
         self.closed = False
 
     async def fetch(self, query, *args):
@@ -52,8 +55,41 @@ class _FakeConnection:
         self.fetchval_calls.append((query, args))
         return self.val
 
+    async def execute(self, query, *args):
+        self.execute_calls.append((query, args))
+
+    def cursor(self, query, *args, **kwargs):
+        self.cursor_calls.append((query, args, kwargs))
+        return _FakeCursor(self.rows)
+
     async def close(self):
         self.closed = True
+
+    def transaction(self, **kwargs):
+        self.transaction_calls.append(kwargs)
+        return _FakeTransaction()
+
+
+class _FakeTransaction:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+
+class _FakeCursor:
+    def __init__(self, rows):
+        self._rows = iter(rows)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._rows)
+        except StopIteration as exc:
+            raise StopAsyncIteration from exc
 
 
 @pytest.fixture(autouse=True)
@@ -123,6 +159,87 @@ def test_postgres_database_name_uses_default_for_blank_override(monkeypatch):
     monkeypatch.setenv("COMPANY_CONTEXT_POSTGRES_DATABASE", " ")
 
     assert company_context_client._postgres_database_name() == "ai_v2"
+
+
+@pytest.mark.parametrize("sql", ["", "   "])
+def test_query_rejects_empty_sql(sql):
+    result = CompanyContextClient("postgresql://example").query(sql)
+
+    assert result == {"status": "error", "error": "sql cannot be empty"}
+
+
+def test_query_runs_in_read_only_transaction_with_bounded_results(monkeypatch):
+    fake = _FakeConnection(
+        rows=[
+            {"source": "slack", "count": 3},
+            {"source": "linear", "count": 2},
+            {"source": "docs", "count": 1},
+        ]
+    )
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+
+    result = CompanyContextClient("postgresql://example").query(
+        "SELECT source, count(*) AS count FROM company_context_documents GROUP BY source;",
+        limit=2,
+        timeout_seconds=7,
+    )
+
+    assert result == {
+        "status": "ok",
+        "row_count": 2,
+        "limit": 2,
+        "truncated": True,
+        "columns": ["source", "count"],
+        "rows": [
+            {"source": "slack", "count": 3},
+            {"source": "linear", "count": 2},
+        ],
+    }
+    assert fake.transaction_calls == [{"readonly": True}]
+    assert fake.execute_calls == [
+        ("SELECT set_config('statement_timeout', $1, true)", ("7s",))
+    ]
+    assert fake.cursor_calls == [
+        (
+            "SELECT source, count(*) AS count "
+            "FROM company_context_documents GROUP BY source",
+            (),
+            {"prefetch": 3, "timeout": 7},
+        )
+    ]
+    assert fake.closed is True
+
+
+def test_query_clamps_limit_and_timeout(monkeypatch):
+    fake = _FakeConnection(rows=[])
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+
+    result = CompanyContextClient("postgresql://example").query(
+        "SELECT 1 AS value",
+        limit=10_000,
+        timeout_seconds=600,
+    )
+
+    assert result["status"] == "ok"
+    assert result["limit"] == 1_000
+    assert fake.execute_calls == [
+        ("SELECT set_config('statement_timeout', $1, true)", ("30s",))
+    ]
+    assert fake.cursor_calls == [
+        (
+            "SELECT 1 AS value",
+            (),
+            {"prefetch": 100, "timeout": 30},
+        )
+    ]
 
 
 def test_search_queries_bm25_and_returns_compact_results(monkeypatch):

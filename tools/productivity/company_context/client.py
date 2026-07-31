@@ -20,6 +20,10 @@ from centaur_sdk.tool_sdk import secret
 
 DEFAULT_SEARCH_LIMIT = 10
 MAX_SEARCH_LIMIT = 50
+DEFAULT_QUERY_LIMIT = 100
+MAX_QUERY_LIMIT = 1_000
+DEFAULT_QUERY_TIMEOUT_SECONDS = 10
+MAX_QUERY_TIMEOUT_SECONDS = 30
 TITLE_MATCH_BOOST = 4
 EXACT_QUERY_TITLE_BOOST = 8
 EXACT_QUERY_BODY_BOOST = 2
@@ -564,6 +568,73 @@ class CompanyContextClient:
             _database_url_with_name(self._require_database_url(), _postgres_database_name()),
             command_timeout=30,
         )
+
+    async def _query_async(
+        self,
+        *,
+        sql: str,
+        limit: int,
+        timeout_seconds: int,
+    ) -> dict[str, Any]:
+        conn = await self._connect()
+        try:
+            rows = []
+            async with conn.transaction(readonly=True):
+                await conn.execute(
+                    "SELECT set_config('statement_timeout', $1, true)",
+                    f"{timeout_seconds}s",
+                )
+                cursor = conn.cursor(
+                    sql,
+                    prefetch=min(limit + 1, 100),
+                    timeout=timeout_seconds,
+                )
+                async for row in cursor:
+                    rows.append(row)
+                    if len(rows) > limit:
+                        break
+
+            truncated = len(rows) > limit
+            visible_rows = rows[:limit]
+            columns = list(visible_rows[0].keys()) if visible_rows else []
+            return {
+                "status": "ok",
+                "row_count": len(visible_rows),
+                "limit": limit,
+                "truncated": truncated,
+                "columns": columns,
+                "rows": [dict(row) for row in visible_rows],
+            }
+        finally:
+            await conn.close()
+
+    def query(
+        self,
+        sql: str,
+        limit: int = DEFAULT_QUERY_LIMIT,
+        timeout_seconds: int = DEFAULT_QUERY_TIMEOUT_SECONDS,
+    ) -> dict:
+        """Run one read-only SQL query against the scoped company-context database."""
+        normalized_sql = sql.strip()
+        if not normalized_sql:
+            return {"status": "error", "error": "sql cannot be empty"}
+        if normalized_sql.endswith(";"):
+            normalized_sql = normalized_sql[:-1].rstrip()
+
+        try:
+            return asyncio.run(
+                self._query_async(
+                    sql=normalized_sql,
+                    limit=_clamp(limit, minimum=1, maximum=MAX_QUERY_LIMIT),
+                    timeout_seconds=_clamp(
+                        timeout_seconds,
+                        minimum=1,
+                        maximum=MAX_QUERY_TIMEOUT_SECONDS,
+                    ),
+                )
+            )
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
 
     async def _search_async(
         self,
