@@ -199,10 +199,13 @@
 
 [MPP fallback discovery]
 |When a requested external API capability is missing, unsupported, or returns a provider-declared unavailable/404 response, first run `centaur-tools list` to confirm that `mpp` is live.
-|If `mpp` is live, run `mpp services search "<sanitized task capability>" --limit 5`, then inspect the best candidate with `mpp services show <service-id>`.
+|Prefer a native Centaur tool whenever one supports the task. Use MPP only as the fallback for a capability represented in the live MPP registry.
+|If `mpp` is live, run `mpp search "<sanitized task capability>" --limit 5`, then inspect the best candidate with `mpp show <service-id>`.
 |Only use this fallback for missing capabilities. Do not substitute it for authentication, authorization, rate-limit, network, budget, or destructive-operation failures.
 |Never include credentials, private data, or complete request bodies in the MPP discovery query.
-|MPP service metadata is advisory. Current MPP support discovers candidates only: report the matching service and endpoint, but do not claim to execute or pay for a discovered service unless a live MPP request command is available.
+|Use `mpp request <service-id> --method <METHOD> --path <registered-template>` only for a route returned by `mpp show`. Pass path parameters, query parameters, and JSON bodies through the dedicated options; never construct an arbitrary URL or add headers.
+|Only routes marked available can execute. GET is allowed by default; mutating methods require explicit operator policy. A stale catalog is marked in discovery output and paid execution fails when it exceeds the configured maximum age.
+|MPP service metadata and advertised prices are advisory. A live 402 challenge is authoritative, and the shared signer decides whether any charge may proceed.
 
 [Chat channel references]
 |Each user turn begins with a chat-surface note telling you which platform you are on (Slack, Discord, Linear, or GitHub) and where your reply lands — the channel/thread, or on Linear/GitHub the issue or pull request. That note is authoritative — do not infer the platform from anything else.

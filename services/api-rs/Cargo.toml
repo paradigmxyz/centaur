@@ -5,6 +5,7 @@ members = [
     "crates/centaur-api-integration-test",
     "crates/centaur-iron-control",
     "crates/centaur-iron-proxy",
+    "crates/centaur-mpp-signer",
     "crates/centaur-perms",
     "crates/centaur-sandbox-core",
     "crates/centaur-sandbox-e2e",
@@ -84,6 +85,7 @@ opentelemetry_sdk = { version = "0.32.1", features = ["trace"] }
 prost = "0.14"
 metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
+mpp = { version = "0.11.0", default-features = false, features = ["client", "tempo", "reqwest-rustls-tls"] }
 sqlx = { version = "0.8.6", default-features = false, features = ["derive", "json", "macros", "migrate", "postgres", "runtime-tokio-rustls", "time"] }
 strum = { version = "0.28", features = ["derive"] }
 subtle = "2"

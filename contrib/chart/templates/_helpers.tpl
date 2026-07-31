@@ -39,6 +39,19 @@ app.kubernetes.io/component: {{ .component }}
 {{- printf "%s-%s" (include "centaur.fullname" .root) .component | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{- define "centaur.durationSeconds" -}}
+{{- $value := toString . -}}
+{{- if regexMatch "^[0-9]+s$" $value -}}
+{{- trimSuffix "s" $value -}}
+{{- else if regexMatch "^[0-9]+m$" $value -}}
+{{- mul (int (trimSuffix "m" $value)) 60 -}}
+{{- else if regexMatch "^[0-9]+h$" $value -}}
+{{- mul (int (trimSuffix "h" $value)) 3600 -}}
+{{- else -}}
+{{- fail (printf "duration %q must use whole seconds, minutes, or hours (for example 15m)" $value) -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "centaur.secretEnvName" -}}
 {{- required "secretManager.existingSecretName is required" .Values.secretManager.existingSecretName | trunc 63 | trimSuffix "-" -}}
 {{- end -}}

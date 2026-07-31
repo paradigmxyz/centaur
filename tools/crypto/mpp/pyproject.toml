@@ -1,7 +1,7 @@
 [project]
 name = "mpp"
-description = "Market data via MPP (Machine Payments Protocol) — token prices, web search, on-chain data, trending tokens, wallet balances, and Dune SQL queries. Paid per-query with Tempo stablecoins."
-version = "0.1.0"
+description = "Discover and call registered MPP services through Centaur's transparent payment proxy."
+version = "0.2.0"
 requires-python = ">=3.11"
 dependencies = [
     "python-dotenv>=1.0.0",

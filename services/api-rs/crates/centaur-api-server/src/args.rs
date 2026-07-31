@@ -1618,6 +1618,21 @@ struct IronProxyArgs {
     bootstrap_secret_name: Option<String>,
     #[arg(long = "kubernetes-api-pod-label-selector", env = "KUBERNETES_API_POD_LABEL_SELECTOR", value_parser = parse_label_selector_arg)]
     api_pod_label_selector: Option<BTreeMap<String, String>>,
+    #[arg(
+        long = "kubernetes-iron-proxy-response-retry-handler-url",
+        env = "KUBERNETES_IRON_PROXY_RESPONSE_RETRY_HANDLER_URL"
+    )]
+    response_retry_handler_url: Option<String>,
+    #[arg(
+        long = "kubernetes-iron-proxy-response-retry-complete-url",
+        env = "KUBERNETES_IRON_PROXY_RESPONSE_RETRY_COMPLETE_URL"
+    )]
+    response_retry_complete_url: Option<String>,
+    #[arg(
+        long = "kubernetes-iron-proxy-response-retry-handler-token",
+        env = "KUBERNETES_IRON_PROXY_RESPONSE_RETRY_HANDLER_TOKEN"
+    )]
+    response_retry_handler_token: Option<String>,
 }
 
 impl IronProxyArgs {
@@ -1643,6 +1658,21 @@ impl IronProxyArgs {
             .filter(|labels| !labels.is_empty())
         {
             config.api_pod_labels = labels.clone();
+        }
+        let retry_parts = [
+            self.response_retry_handler_url.as_ref(),
+            self.response_retry_complete_url.as_ref(),
+            self.response_retry_handler_token.as_ref(),
+        ];
+        if retry_parts.iter().any(|value| value.is_some()) {
+            if retry_parts.iter().any(|value| value.is_none()) {
+                return Err(ServerError::UnsupportedConfig(
+                    "MPP response retry requires handler URL, completion URL, and token".to_owned(),
+                ));
+            }
+            config.response_retry_handler_url = self.response_retry_handler_url.clone();
+            config.response_retry_complete_url = self.response_retry_complete_url.clone();
+            config.response_retry_handler_token = self.response_retry_handler_token.clone();
         }
         Ok(config)
     }

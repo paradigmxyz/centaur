@@ -87,6 +87,9 @@ pub struct IronProxyConfig {
     pub op_connect_port: u16,
     pub api_pod_labels: BTreeMap<String, String>,
     pub control_plane_pod_labels: BTreeMap<String, String>,
+    pub response_retry_handler_url: Option<String>,
+    pub response_retry_complete_url: Option<String>,
+    pub response_retry_handler_token: Option<String>,
 }
 
 impl IronProxyConfig {
@@ -115,6 +118,9 @@ impl IronProxyConfig {
                 "app.kubernetes.io/component".to_owned(),
                 "console".to_owned(),
             )]),
+            response_retry_handler_url: None,
+            response_retry_complete_url: None,
+            response_retry_handler_token: None,
         }
     }
 }
@@ -1250,7 +1256,7 @@ fn build_iron_proxy_pod(
         spec: Some(PodSpec {
             automount_service_account_token: Some(false),
             restart_policy: Some("Never".to_owned()),
-            containers: vec![iron_proxy_container(iron_proxy, resolved, sync)],
+            containers: vec![iron_proxy_container(id, iron_proxy, resolved, sync)],
             volumes: Some(iron_proxy_volumes(iron_proxy)),
             ..Default::default()
         }),
@@ -1259,6 +1265,7 @@ fn build_iron_proxy_pod(
 }
 
 fn iron_proxy_container(
+    id: &SandboxId,
     iron_proxy: &IronProxyConfig,
     resolved: &ResolvedIronProxy,
     sync: &ProxySyncEnv,
@@ -1267,7 +1274,7 @@ fn iron_proxy_container(
         name: "iron-proxy".to_owned(),
         image: Some(iron_proxy.image.clone()),
         image_pull_policy: iron_proxy.image_pull_policy.clone(),
-        env: Some(iron_proxy_env_vars(iron_proxy, resolved, sync)),
+        env: Some(iron_proxy_env_vars(id, iron_proxy, resolved, sync)),
         env_from: iron_proxy_env_from(iron_proxy),
         ports: Some(container_ports(resolved)),
         readiness_probe: Some(health_probe(Some(5), Some(30))),
@@ -1298,6 +1305,7 @@ fn iron_proxy_container(
 }
 
 fn iron_proxy_env_vars(
+    id: &SandboxId,
     iron_proxy: &IronProxyConfig,
     resolved: &ResolvedIronProxy,
     sync: &ProxySyncEnv,
@@ -1356,6 +1364,22 @@ fn iron_proxy_env_vars(
                 &iron_proxy.upstream_deny_cidrs.join(","),
             ),
         );
+    }
+    if let (Some(handler_url), Some(complete_url), Some(token)) = (
+        iron_proxy.response_retry_handler_url.as_deref(),
+        iron_proxy.response_retry_complete_url.as_deref(),
+        iron_proxy.response_retry_handler_token.as_deref(),
+    ) {
+        for (name, value) in [
+            ("IRON_RESPONSE_RETRY_HANDLER_URL", handler_url),
+            ("IRON_RESPONSE_RETRY_COMPLETE_URL", complete_url),
+            ("IRON_RESPONSE_RETRY_HANDLER_TOKEN", token),
+            ("IRON_RESPONSE_RETRY_HANDLER_SANDBOX_ID", id.as_str()),
+            ("IRON_RESPONSE_RETRY_HANDLER_ALLOW_HTTP", "true"),
+            ("IRON_RESPONSE_RETRY_STATUSES", "402"),
+        ] {
+            env.insert(name.to_owned(), env_var(name, value));
+        }
     }
     for (name, value) in &iron_proxy.extra_env {
         env.insert(name.clone(), env_var(name, value));
@@ -1529,6 +1553,17 @@ fn proxy_egress_rules(
         vec![network_port(PG_LISTENER_PORT)],
     ));
     rules.push(egress_to(vec![public_ipv4_peer()], upstream_ports));
+    if let Some(handler_url) = iron_proxy.response_retry_handler_url.as_deref() {
+        let mut labels = iron_proxy.api_pod_labels.clone();
+        labels.insert(
+            "app.kubernetes.io/component".to_owned(),
+            "mpp-signer".to_owned(),
+        );
+        rules.push(egress_to(
+            vec![pod_peer(labels)],
+            vec![network_port(url_port(handler_url).unwrap_or(8090))],
+        ));
+    }
     if observability_enabled {
         rules.push(egress_to(
             vec![pod_peer(iron_proxy.api_pod_labels.clone())],
@@ -2516,7 +2551,12 @@ mod tests {
             config_hash: None,
         };
 
-        let env = iron_proxy_env_vars(&iron_proxy, &resolved(), &sync);
+        let env = iron_proxy_env_vars(
+            &SandboxId::new("asbx-test"),
+            &iron_proxy,
+            &resolved(),
+            &sync,
+        );
         let timeout = env
             .iter()
             .find(|var| var.name == "IRON_PROXY_UPSTREAM_RESPONSE_HEADER_TIMEOUT")
@@ -2541,7 +2581,12 @@ mod tests {
             config_hash: None,
         };
 
-        let env = iron_proxy_env_vars(&iron_proxy, &resolved(), &sync);
+        let env = iron_proxy_env_vars(
+            &SandboxId::new("asbx-test"),
+            &iron_proxy,
+            &resolved(),
+            &sync,
+        );
         let deny_cidrs = env
             .iter()
             .find(|var| var.name == PROXY_UPSTREAM_DENY_CIDRS_ENV)
@@ -2550,6 +2595,57 @@ mod tests {
         assert_eq!(
             deny_cidrs,
             Some("169.254.169.254/32,127.0.0.0/8,10.42.0.0/16,10.43.0.0/16")
+        );
+    }
+
+    #[test]
+    fn managed_proxy_env_sets_authenticated_response_retry_contract() {
+        let mut iron_proxy = IronProxyConfig::new("proxy:test", "ca-cert", "ca-key");
+        iron_proxy.response_retry_handler_url =
+            Some("http://centaur-mpp-signer:8090/authorize".to_owned());
+        iron_proxy.response_retry_complete_url =
+            Some("http://centaur-mpp-signer:8090/complete".to_owned());
+        iron_proxy.response_retry_handler_token = Some("signer-token".to_owned());
+        let sync = ProxySyncEnv {
+            proxy_id: "proxy-id".to_owned(),
+            control_url: "http://iron-control".to_owned(),
+            token: "proxy-token".to_owned(),
+            config_hash: None,
+        };
+
+        let env = iron_proxy_env_vars(
+            &SandboxId::new("asbx-test"),
+            &iron_proxy,
+            &resolved(),
+            &sync,
+        )
+        .into_iter()
+        .filter_map(|value| value.value.map(|inner| (value.name, inner)))
+        .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            env.get("IRON_RESPONSE_RETRY_HANDLER_URL")
+                .map(String::as_str),
+            Some("http://centaur-mpp-signer:8090/authorize")
+        );
+        assert_eq!(
+            env.get("IRON_RESPONSE_RETRY_COMPLETE_URL")
+                .map(String::as_str),
+            Some("http://centaur-mpp-signer:8090/complete")
+        );
+        assert_eq!(
+            env.get("IRON_RESPONSE_RETRY_HANDLER_SANDBOX_ID")
+                .map(String::as_str),
+            Some("asbx-test")
+        );
+        assert_eq!(
+            env.get("IRON_RESPONSE_RETRY_HANDLER_ALLOW_HTTP")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            env.get("IRON_RESPONSE_RETRY_STATUSES").map(String::as_str),
+            Some("402")
         );
     }
 

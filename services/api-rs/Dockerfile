@@ -17,8 +17,10 @@ ARG RUST_BUILD_PROFILE=release
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     case "$RUST_BUILD_PROFILE" in \
-      release) cargo build --release -p centaur-api-server && cp target/release/centaur-api-server /usr/local/bin/centaur-api-server ;; \
-      debug|dev) cargo build -p centaur-api-server && cp target/debug/centaur-api-server /usr/local/bin/centaur-api-server ;; \
+      release) cargo build --release -p centaur-api-server -p centaur-mpp-signer \
+        && cp target/release/centaur-api-server target/release/centaur-mpp-signer /usr/local/bin/ ;; \
+      debug|dev) cargo build -p centaur-api-server -p centaur-mpp-signer \
+        && cp target/debug/centaur-api-server target/debug/centaur-mpp-signer /usr/local/bin/ ;; \
       *) echo "unsupported RUST_BUILD_PROFILE=$RUST_BUILD_PROFILE" >&2; exit 2 ;; \
     esac
 
@@ -27,6 +29,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git python3 python3-pip
 COPY --from=builder /usr/local/bin/centaur-api-server /usr/local/bin/centaur-api-server
+COPY --from=builder /usr/local/bin/centaur-mpp-signer /usr/local/bin/centaur-mpp-signer
 WORKDIR /app
 COPY centaur_sdk/ /app/centaur_sdk/
 COPY services/workflow-python/ /app/workflow-python/

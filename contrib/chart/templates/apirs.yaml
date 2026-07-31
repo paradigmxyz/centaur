@@ -2,6 +2,7 @@
 {{- $console := include "centaur.consoleValues" . | fromYaml -}}
 {{- $mcpPublicUrl := default .Values.slackbotv2.mcpPublicUrl .Values.apiRs.mcpPublicUrl -}}
 {{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") -}}
+{{- $mppSignerName := include "centaur.componentName" (dict "root" . "component" "mpp-signer") -}}
 {{- $repoCacheStorageType := include "centaur.repoCacheStorageType" . -}}
 {{- $repoCacheUsePvc := eq $repoCacheStorageType "persistentVolumeClaim" -}}
 {{- $repoCachePvcName := include "centaur.repoCachePvcName" . -}}
@@ -386,6 +387,17 @@ spec:
             # with the harness the sandbox image CMD actually runs.
             - name: KUBERNETES_IRON_PROXY_HARNESS_ENGINE
               value: {{ .Values.sandbox.harnessEngine | quote }}
+{{- if .Values.mpp.enabled }}
+            - name: KUBERNETES_IRON_PROXY_RESPONSE_RETRY_HANDLER_URL
+              value: {{ printf "http://%s:%v/authorize" $mppSignerName .Values.mpp.port | quote }}
+            - name: KUBERNETES_IRON_PROXY_RESPONSE_RETRY_COMPLETE_URL
+              value: {{ printf "http://%s:%v/complete" $mppSignerName .Values.mpp.port | quote }}
+            - name: KUBERNETES_IRON_PROXY_RESPONSE_RETRY_HANDLER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "mpp.signer.existingSecretName is required" .Values.mpp.signer.existingSecretName }}
+                  key: {{ .Values.mpp.signer.tokenKey }}
+{{- end }}
 {{- $sandboxEnvList := list }}
 {{- if and .Values.repoCache.enabled (gt (len $skillDirs) 0) }}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" "CENTAUR_SKILL_DIRS" "value" (join ":" $skillDirs)) }}
@@ -395,6 +407,13 @@ spec:
 {{- end }}
 {{- range $k, $v := .Values.sandbox.extraEnv }}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" $k "value" ($v | toString)) }}
+{{- end }}
+{{- if .Values.mpp.enabled }}
+{{- $sandboxEnvList = append $sandboxEnvList (dict "name" "MPP_REGISTRY_URL" "value" .Values.mpp.registry.url) }}
+{{- $sandboxEnvList = append $sandboxEnvList (dict "name" "MPP_REGISTRY_CACHE_TTL_SECONDS" "value" (include "centaur.durationSeconds" .Values.mpp.registry.cacheTtl)) }}
+{{- $sandboxEnvList = append $sandboxEnvList (dict "name" "MPP_REGISTRY_MAX_STALE_SECONDS" "value" (include "centaur.durationSeconds" .Values.mpp.registry.maxStale)) }}
+{{- $sandboxEnvList = append $sandboxEnvList (dict "name" "MPP_DEFAULT_METHODS" "value" (join "," .Values.mpp.policy.defaultMethods)) }}
+{{- $sandboxEnvList = append $sandboxEnvList (dict "name" "MPP_POLICY_RULES" "value" (toJson .Values.mpp.policy.rules)) }}
 {{- end }}
 {{- if and $sandboxEnvList (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_EXTRA_ENV")) }}
             # Operator sandbox env (sandbox.extraEnv) plus chart-rendered

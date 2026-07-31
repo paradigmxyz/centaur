@@ -1,0 +1,120 @@
+{{- if .Values.mpp.enabled }}
+{{- $name := include "centaur.componentName" (dict "root" . "component" "mpp-signer") -}}
+{{- $cacheTtlSeconds := include "centaur.durationSeconds" .Values.mpp.registry.cacheTtl -}}
+{{- $maxStaleSeconds := include "centaur.durationSeconds" .Values.mpp.registry.maxStale -}}
+{{- $metricsAnnotations := dict -}}
+{{- if .Values.mpp.metrics.scrapeAnnotations -}}
+{{- $metricsAnnotations = dict "prometheus.io/scrape" "true" "prometheus.io/path" .Values.mpp.metrics.path "prometheus.io/port" (printf "%v" .Values.mpp.port) -}}
+{{- $metricsAnnotations = mergeOverwrite $metricsAnnotations (.Values.mpp.metrics.annotations | default dict) -}}
+{{- end -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "mpp-signer") | nindent 4 }}
+spec:
+  selector:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "mpp-signer") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.mpp.port }}
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "mpp-signer") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "mpp-signer") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "mpp-signer") | nindent 8 }}
+        centaur.ai/observability-enabled: "true"
+{{- with $metricsAnnotations }}
+      annotations:
+{{ toYaml . | nindent 8 }}
+{{- end }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: mpp-signer
+          image: {{ printf "%s:%s" .Values.apiRs.image.repository .Values.apiRs.image.tag | quote }}
+          imagePullPolicy: {{ .Values.apiRs.image.pullPolicy }}
+          command: ["/usr/local/bin/centaur-mpp-signer"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sDATABASE_URL" .Values.secretManager.envPrefix }}
+            - name: MPP_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "mpp.signer.existingSecretName is required" .Values.mpp.signer.existingSecretName }}
+                  key: {{ .Values.mpp.signer.privateKeyKey }}
+            - name: MPP_SIGNER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.mpp.signer.existingSecretName }}
+                  key: {{ .Values.mpp.signer.tokenKey }}
+            - name: MPP_SIGNER_BIND_ADDR
+              value: {{ printf "0.0.0.0:%v" .Values.mpp.port | quote }}
+            - name: MPP_RPC_URL
+              value: {{ .Values.mpp.rpcUrl | quote }}
+            - name: MPP_REGISTRY_URL
+              value: {{ .Values.mpp.registry.url | quote }}
+            - name: MPP_REGISTRY_CACHE_TTL_SECONDS
+              value: {{ $cacheTtlSeconds | quote }}
+            - name: MPP_REGISTRY_MAX_STALE_SECONDS
+              value: {{ $maxStaleSeconds | quote }}
+            - name: MPP_DEFAULT_METHODS
+              value: {{ join "," .Values.mpp.policy.defaultMethods | quote }}
+            - name: MPP_POLICY_RULES
+              value: {{ toJson .Values.mpp.policy.rules | quote }}
+{{- if ne .Values.mpp.budget.maxPerChargeAtomic nil }}
+            - name: MPP_MAX_PER_CHARGE_ATOMIC
+              value: {{ .Values.mpp.budget.maxPerChargeAtomic | quote }}
+{{- end }}
+{{- if ne .Values.mpp.budget.maxDailyAtomic nil }}
+            - name: MPP_MAX_DAILY_ATOMIC
+              value: {{ .Values.mpp.budget.maxDailyAtomic | quote }}
+{{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.mpp.port }}
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            failureThreshold: 30
+            periodSeconds: 2
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+{{ toYaml .Values.mpp.resources | nindent 12 }}
+{{- end }}

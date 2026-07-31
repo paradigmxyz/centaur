@@ -61,6 +61,11 @@ spec:
             matchLabels:
               centaur.ai/component: workflow-run
 {{- end }}
+{{- if .Values.mpp.enabled }}
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "mpp-signer") | nindent 14 }}
+{{- end }}
 {{- if .Values.slackbotv2.enabled }}
         - podSelector:
             matchLabels:
@@ -344,6 +349,48 @@ spec:
     - ports:
         - protocol: TCP
           port: {{ .Values.networkPolicy.apiServerPort }}
+---
+{{- end }}
+{{- if .Values.mpp.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "mpp-signer") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "mpp-signer") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "mpp-signer") | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              centaur.ai/iron-proxy: "true"
+{{- range .Values.networkPolicy.apiIngressSourceNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . | quote }}
+{{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.mpp.port }}
+  egress:
+{{- if .Values.postgres.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 5432
+{{- end }}
+    - ports:
+        - protocol: TCP
+          port: 443
 ---
 {{- end }}
 {{- if .Values.slackbotv2.enabled }}

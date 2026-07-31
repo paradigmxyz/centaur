@@ -461,6 +461,33 @@ apiRs:
   extraEnv: {}
   resources: {}
 
+# Registry-backed Machine Payments Protocol fallback. One cluster-internal
+# signer owns the shared wallet key; sandbox tools never receive it.
+mpp:
+  enabled: false
+  port: 8090
+  rpcUrl: https://rpc.tempo.xyz
+  registry:
+    url: https://mpp.dev/api/services
+    cacheTtl: 15m
+    maxStale: 24h
+  signer:
+    existingSecretName: centaur-mpp-signer
+    privateKeyKey: MPP_PRIVATE_KEY
+    tokenKey: MPP_SIGNER_TOKEN
+  policy:
+    defaultMethods:
+      - GET
+    rules: []
+  budget:
+    maxPerChargeAtomic:
+    maxDailyAtomic:
+  metrics:
+    scrapeAnnotations: true
+    path: /metrics
+    annotations: {}
+  resources: {}
+
 # Chat SDK Slackbot v2. Forwards Slack events to the api-rs control plane
 # (:8080) and streams responses back. Listens on :3001.
 slackbotv2:

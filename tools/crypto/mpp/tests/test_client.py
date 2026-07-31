@@ -1,139 +1,318 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import httpx
 import pytest
-from mpp import client as client_module
-from mpp.client import MppCatalogError, MppClient
+from mpp.client import MppCatalogError, MppClient, MppPolicyError, MppRequestError
 
 CATALOG = {
+    "version": 1,
     "services": [
         {
-            "id": "fal",
-            "name": "Fal AI",
-            "description": "Image generation models",
-            "serviceUrl": "https://fal.mpp.example",
-            "categories": ["AI", "media"],
-            "tags": ["image", "generation"],
+            "id": "catalog",
+            "name": "Catalog",
+            "description": "Read and update catalog records",
+            "serviceUrl": "https://api.catalog.example",
+            "realm": "api.catalog.example",
+            "categories": ["data"],
+            "tags": ["records"],
             "status": "active",
-            "paidEndpoints": 2,
             "endpoints": [
                 {
-                    "method": "POST",
-                    "path": "/generate",
+                    "method": "GET",
+                    "path": "/v1/records",
                     "payment": {"intent": "charge", "method": "tempo", "amount": "100"},
-                }
+                },
+                {
+                    "method": "GET",
+                    "path": "/v1/records/:id",
+                    "payment": {"intent": "charge", "method": "tempo", "amount": "25"},
+                },
+                {
+                    "method": "POST",
+                    "path": "/v1/records",
+                    "payment": {"intent": "charge", "method": "tempo", "amount": "200"},
+                },
+                {
+                    "method": "GET",
+                    "path": "/v1/session",
+                    "payment": {"intent": "session", "method": "tempo"},
+                },
             ],
         },
         {
-            "id": "exa",
-            "name": "Exa",
-            "description": "Web search API",
-            "url": "https://exa.example",
+            "id": "search",
+            "name": "Search",
+            "description": "Search the web",
+            "url": "https://search.example",
             "categories": ["search"],
-            "tags": ["web", "research"],
+            "tags": ["web"],
             "status": "active",
-            "endpoints": [{"method": "POST", "path": "/search", "payment": {"intent": "charge"}}],
-        },
-        {
-            "id": "exa-archive",
-            "name": "Exa",
-            "description": "Archived Exa service",
-            "serviceUrl": "https://archive.example",
-            "categories": ["search"],
-            "tags": ["archive"],
-            "status": "inactive",
             "endpoints": [],
         },
-    ]
+    ],
 }
 
 
-def make_client(handler) -> MppClient:
-    client = MppClient()
+def make_client(
+    tmp_path: Path,
+    handler,
+    *,
+    now=lambda: 1_000.0,
+    policy_rules=None,
+) -> MppClient:
+    client = MppClient(
+        cache_path=tmp_path / "registry.json",
+        cache_ttl_seconds=900,
+        max_stale_seconds=86_400,
+        policy_rules=policy_rules,
+        now=now,
+    )
     client._catalog_http = httpx.Client(transport=httpx.MockTransport(handler))
     return client
 
 
-def test_list_services_filters_summarizes_and_never_loads_a_private_key(monkeypatch) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert str(request.url) == "https://mpp.dev/api/services"
-        return httpx.Response(200, json=CATALOG)
+def test_list_search_and_show_include_cache_and_availability(tmp_path: Path) -> None:
+    client = make_client(tmp_path, lambda _: httpx.Response(200, json=CATALOG))
 
-    monkeypatch.setattr(
-        client_module,
-        "secret",
-        lambda _: pytest.fail("service discovery must not load MPP_PRIVATE_KEY"),
+    listed = client.list_services(query="record", category="DATA", tag="records")
+    searched = client.search_services("web")
+    shown = client.show_service("catalog")
+
+    assert [service["id"] for service in listed["services"]] == ["catalog"]
+    assert listed["services"][0]["executable_endpoints"] == 2
+    assert listed["cache"] == {
+        "fetched_at": 1_000.0,
+        "age_seconds": 0,
+        "from_cache": False,
+        "stale": False,
+    }
+    assert [service["id"] for service in searched["services"]] == ["search"]
+    assert shown["endpoints"][0]["availability"] == {
+        "executable": True,
+        "reason": "GET is enabled by default",
+    }
+    assert shown["endpoints"][2]["availability"] == {
+        "executable": False,
+        "reason": "POST requires an operator policy rule",
+    }
+    assert shown["endpoints"][3]["availability"]["reason"] == (
+        "unsupported payment intent 'session'"
     )
-    client = make_client(handler)
 
-    assert client.list_services(query="image", category="ai", tag="generation") == [
-        {
-            "id": "fal",
-            "name": "Fal AI",
-            "description": "Image generation models",
-            "service_url": "https://fal.mpp.example",
-            "categories": ["AI", "media"],
-            "tags": ["image", "generation"],
-            "status": "active",
-            "paid_endpoints": 2,
-        }
+
+def test_cache_is_atomic_fresh_and_uses_conditional_refresh(tmp_path: Path) -> None:
+    clock = [1_000.0]
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(
+                200,
+                json=CATALOG,
+                headers={"ETag": '"catalog-v1"', "Last-Modified": "Thu, 30 Jul 2026 00:00:00 GMT"},
+            )
+        assert request.headers["If-None-Match"] == '"catalog-v1"'
+        assert request.headers["If-Modified-Since"] == "Thu, 30 Jul 2026 00:00:00 GMT"
+        return httpx.Response(304)
+
+    client = make_client(tmp_path, handler, now=lambda: clock[0])
+    client.list_services()
+    assert len(requests) == 1
+    assert json.loads((tmp_path / "registry.json").read_text())["catalog"] == CATALOG
+
+    second = client.list_services()
+    assert len(requests) == 1
+    assert second["cache"]["from_cache"] is True
+
+    clock[0] += 901
+    third = client.list_services()
+    assert len(requests) == 2
+    assert third["cache"]["fetched_at"] == clock[0]
+    assert third["cache"]["stale"] is False
+
+
+def test_invalid_refresh_never_replaces_valid_stale_cache(tmp_path: Path) -> None:
+    clock = [1_000.0]
+    responses = [
+        httpx.Response(200, json=CATALOG),
+        httpx.Response(200, json={"services": "invalid"}),
     ]
+    client = make_client(
+        tmp_path,
+        lambda _: responses.pop(0),
+        now=lambda: clock[0],
+    )
+    client.list_services()
+    original = (tmp_path / "registry.json").read_text()
+
+    clock[0] += 901
+    result = client.list_services()
+
+    assert result["cache"]["stale"] is True
+    assert (tmp_path / "registry.json").read_text() == original
 
 
-def test_search_matches_all_supported_metadata_and_honors_limit() -> None:
-    client = make_client(lambda _: httpx.Response(200, json=CATALOG))
+def test_corrupt_or_expired_cache_fails_closed(tmp_path: Path) -> None:
+    cache_path = tmp_path / "registry.json"
+    cache_path.write_text("{broken")
+    client = make_client(
+        tmp_path,
+        lambda request: httpx.Response(503, request=request),
+    )
+    with pytest.raises(MppCatalogError, match="HTTP 503"):
+        client.list_services()
 
-    assert [service["id"] for service in client.search_services("web", limit=1)] == ["exa"]
-    assert [service["id"] for service in client.list_services(query="media")] == ["fal"]
-    assert [service["id"] for service in client.list_services(query="exa")] == [
-        "exa",
-        "exa-archive",
-    ]
-
-
-def test_get_service_returns_raw_endpoint_and_payment_metadata() -> None:
-    client = make_client(lambda _: httpx.Response(200, json=CATALOG))
-
-    assert client.get_service("fal") == CATALOG["services"][0]
-
-
-def test_get_service_resolves_an_unambiguous_name_and_rejects_ambiguous_or_unknown_names() -> None:
-    single = {"services": [CATALOG["services"][0], CATALOG["services"][1]]}
-    client = make_client(lambda _: httpx.Response(200, json=single))
-    assert client.get_service("fal ai")["id"] == "fal"
-
-    ambiguous = make_client(lambda _: httpx.Response(200, json=CATALOG))
-    with pytest.raises(ValueError, match="ambiguous"):
-        ambiguous.get_service("Exa")
-
-    with pytest.raises(ValueError, match="was not found"):
-        client.get_service("missing")
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "fetched_at": -100_000.0,
+                "etag": None,
+                "last_modified": None,
+                "catalog": CATALOG,
+            }
+        )
+    )
+    with pytest.raises(MppCatalogError, match="HTTP 503"):
+        client.request("catalog", "GET", "/v1/records")
 
 
-@pytest.mark.parametrize("payload", [{}, {"services": {}}, {"services": ["not-a-service"]}])
-def test_catalog_rejects_invalid_shapes(payload) -> None:
-    client = make_client(lambda _: httpx.Response(200, json=payload))
+def test_policy_allow_and_deny_precedence(tmp_path: Path) -> None:
+    client = make_client(
+        tmp_path,
+        lambda _: httpx.Response(200, json=CATALOG),
+        policy_rules=[
+            {
+                "effect": "allow",
+                "service": "catalog",
+                "methods": ["POST"],
+                "path": "/v1/*",
+            },
+            {
+                "effect": "deny",
+                "service": "catalog",
+                "methods": ["POST"],
+                "path": "/v1/records",
+            },
+        ],
+    )
+    client._service_http = httpx.Client(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"ok": True}))
+    )
 
+    with pytest.raises(MppPolicyError, match="denied by operator policy"):
+        client.request("catalog", "POST", "/v1/records", body={"name": "test"})
+
+    allow = make_client(
+        tmp_path / "allowed",
+        lambda _: httpx.Response(200, json=CATALOG),
+        policy_rules=[
+            {
+                "effect": "allow",
+                "service": "catalog",
+                "methods": ["POST"],
+                "path": "/v1/records",
+            }
+        ],
+    )
+    allow._service_http = httpx.Client(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"ok": True}))
+    )
+    assert allow.request("catalog", "POST", "/v1/records", body={"name": "test"})["data"] == {
+        "ok": True
+    }
+
+
+def test_request_resolves_registered_path_and_never_follows_redirects(tmp_path: Path) -> None:
+    captured: list[httpx.Request] = []
+
+    def service_handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(
+            200,
+            json={"id": "a/b"},
+            headers={"Payment-Receipt": "redacted-receipt"},
+        )
+
+    client = make_client(tmp_path, lambda _: httpx.Response(200, json=CATALOG))
+    client._service_http = httpx.Client(transport=httpx.MockTransport(service_handler))
+
+    result = client.request(
+        "catalog",
+        "GET",
+        "/v1/records/:id",
+        path_params={"id": "abc 123"},
+        query={"include": "summary"},
+    )
+
+    assert str(captured[0].url) == (
+        "https://api.catalog.example/v1/records/abc%20123?include=summary"
+    )
+    assert result["payment_receipt_present"] is True
+    assert "redacted-receipt" not in json.dumps(result)
+
+    redirecting = make_client(tmp_path / "redirect", lambda _: httpx.Response(200, json=CATALOG))
+    redirecting._service_http = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(302, headers={"Location": "https://evil.example"})
+        )
+    )
+    with pytest.raises(MppRequestError, match="redirects"):
+        redirecting.request("catalog", "GET", "/v1/records")
+
+
+@pytest.mark.parametrize(
+    ("path_params", "message"),
+    [
+        ({}, "missing"),
+        ({"id": "ok", "extra": "no"}, "unexpected"),
+        ({"id": "../admin"}, "invalid"),
+        ({"id": "%2Fadmin"}, "invalid"),
+    ],
+)
+def test_path_parameter_validation(
+    tmp_path: Path, path_params: dict[str, str], message: str
+) -> None:
+    client = make_client(tmp_path, lambda _: httpx.Response(200, json=CATALOG))
+    with pytest.raises(ValueError, match=message):
+        client.request(
+            "catalog",
+            "GET",
+            "/v1/records/:id",
+            path_params=path_params,
+        )
+
+
+def test_payment_402_is_concise_and_does_not_expose_challenge(tmp_path: Path) -> None:
+    client = make_client(tmp_path, lambda _: httpx.Response(200, json=CATALOG))
+    client._service_http = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(
+                402,
+                headers={"WWW-Authenticate": "Payment secret-challenge"},
+                json={"detail": "sensitive"},
+            )
+        )
+    )
+
+    with pytest.raises(MppRequestError, match="payment was not authorized") as error:
+        client.request("catalog", "GET", "/v1/records")
+    assert "secret-challenge" not in str(error.value)
+
+
+@pytest.mark.parametrize("payload", [{}, {"services": {}}, {"services": ["bad"]}])
+def test_catalog_rejects_invalid_shapes(tmp_path: Path, payload: object) -> None:
+    client = make_client(tmp_path, lambda _: httpx.Response(200, json=payload))
     with pytest.raises(MppCatalogError, match="invalid services list"):
         client.list_services()
 
 
-def test_catalog_errors_are_concise() -> None:
-    def http_error(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(503, request=request)
-
-    client = make_client(http_error)
-    with pytest.raises(MppCatalogError, match="HTTP 503"):
-        client.list_services()
-
-    malformed = make_client(lambda _: httpx.Response(200, content=b"not-json"))
-    with pytest.raises(MppCatalogError, match="invalid JSON"):
-        malformed.list_services()
-
-
 @pytest.mark.parametrize("limit", [0, 101])
-def test_list_services_rejects_unsafe_limits(limit: int) -> None:
-    client = MppClient()
-
+def test_list_services_rejects_unsafe_limits(tmp_path: Path, limit: int) -> None:
+    client = make_client(tmp_path, lambda _: httpx.Response(200, json=CATALOG))
     with pytest.raises(ValueError, match="between 1 and 100"):
         client.list_services(limit=limit)
