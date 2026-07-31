@@ -583,7 +583,8 @@ module ApplicationHelper
     text = text.gsub(/(?<!_)_([^_\n]+)_(?!_)/, '<em>\1</em>')
 
     text.gsub(/%%MDPH(\d+)%%/) do |token|
-      placeholders[Regexp.last_match(1).to_i] || token
+      offset = token.delete_prefix("%%MDPH").delete_suffix("%%").to_i
+      placeholders[offset] || token
     end
 
     text
