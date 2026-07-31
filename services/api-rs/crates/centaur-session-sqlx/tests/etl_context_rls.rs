@@ -115,6 +115,18 @@ async fn company_context_reader_accepts_only_explicit_channel_grants() -> Result
     fixture.finish(result).await
 }
 
+#[tokio::test]
+async fn company_context_reader_public_membership_does_not_grant_channel_access()
+-> Result<(), Box<dyn Error>> {
+    let Some(mut fixture) = RlsTestFixture::create().await? else {
+        return Ok(());
+    };
+    let result = assert_company_context_reader_public_channel_membership(&mut fixture.conn)
+        .await
+        .map_err(Into::into);
+    fixture.finish(result).await
+}
+
 async fn assert_channel_visibility(conn: &mut PgConnection) -> Result<(), Box<dyn Error>> {
     assert_rls_enabled(conn).await?;
     assert_expected_policies(conn).await?;
@@ -692,12 +704,76 @@ async fn assert_company_context_reader_role_security(
         tables_without_rls.is_empty(),
         "company context reader table lacks RLS: {tables_without_rls:?}"
     );
+
+    let writable_relations: Vec<(String, String)> = sqlx::query_as(
+        r#"
+        with application_relations as (
+            select relations.oid, relations.relname
+            from pg_class relations
+            join pg_namespace schemas on schemas.oid = relations.relnamespace
+            where schemas.nspname = 'public'
+              and relations.relkind in ('r', 'p', 'v', 'm', 'f')
+              and not exists (
+                  select 1
+                  from pg_depend dependencies
+                  where dependencies.classid = 'pg_class'::regclass
+                    and dependencies.objid = relations.oid
+                    and dependencies.deptype = 'e'
+              )
+        ), effective_write_privileges as (
+            select relations.relname, privileges.privilege
+            from application_relations relations
+            cross join (values ('INSERT'), ('UPDATE'), ('DELETE')) privileges(privilege)
+            where has_table_privilege(
+                'centaur_company_context_reader',
+                relations.oid,
+                privileges.privilege
+            )
+
+            union
+
+            select relations.relname, privileges.privilege
+            from application_relations relations
+            cross join (values ('INSERT'), ('UPDATE')) privileges(privilege)
+            where has_any_column_privilege(
+                'centaur_company_context_reader',
+                relations.oid,
+                privileges.privilege
+            )
+        )
+        select relname, privilege
+        from effective_write_privileges
+        order by relname, privilege
+        "#,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    assert!(
+        writable_relations.is_empty(),
+        "company context reader gained an effective write privilege: {writable_relations:?}"
+    );
     Ok(())
 }
 
 async fn assert_company_context_reader_denies_unauthorized_rows(
     conn: &mut PgConnection,
 ) -> Result<(), sqlx::Error> {
+    let missing_identity =
+        company_context_reader_rows(conn, CompanyContextReaderSettings::default()).await?;
+    assert_eq!(
+        missing_identity,
+        CompanyContextReaderRows {
+            slack_channels: Vec::new(),
+            company_context_docs: Vec::new(),
+            google_docs_observations: Vec::new(),
+            google_docs: Vec::new(),
+            granola_docs: Vec::new(),
+            slack_private_docs: Vec::new(),
+            slack_private_conversation_docs: Vec::new(),
+        },
+        "missing identity and access settings must fail closed across every company context source"
+    );
+
     let viewer = company_context_reader_rows(
         conn,
         CompanyContextReaderSettings {
@@ -785,29 +861,6 @@ async fn assert_company_context_reader_denies_unauthorized_rows(
         "Slack team scope leaked rows from another team"
     );
 
-    let missing_identity = company_context_reader_rows(
-        conn,
-        CompanyContextReaderSettings {
-            slack_history_channel_ids: Some("[]"),
-            slack_include_public: Some(false),
-            ..Default::default()
-        },
-    )
-    .await?;
-    assert_eq!(
-        missing_identity,
-        CompanyContextReaderRows {
-            slack_channels: Vec::new(),
-            company_context_docs: Vec::new(),
-            google_docs_observations: Vec::new(),
-            google_docs: Vec::new(),
-            granola_docs: Vec::new(),
-            slack_private_docs: Vec::new(),
-            slack_private_conversation_docs: Vec::new(),
-        },
-        "missing identity must fail closed across every company context source"
-    );
-
     let google_email_only = company_context_reader_rows(
         conn,
         CompanyContextReaderSettings {
@@ -870,6 +923,69 @@ async fn assert_company_context_reader_channel_grants(
         },
         "channel-only grants must expose exactly the granted channels without user-scoped data"
     );
+    Ok(())
+}
+
+async fn assert_company_context_reader_public_channel_membership(
+    conn: &mut PgConnection,
+) -> Result<(), sqlx::Error> {
+    let mut tx = conn.begin().await?;
+    sqlx::query(
+        r#"
+        insert into slack_private_sync_conversations
+            (home_team_id, conversation_id, conversation_type)
+        values ('T_HOME', 'C_BETA', 'private_channel')
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+        insert into slack_private_sync_conversation_members
+            (home_team_id, conversation_id, user_id, is_current_member)
+        values ('T_HOME', 'C_BETA', 'U_PUBLIC_ONLY', true)
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    tx.execute("set local search_path to public").await?;
+    tx.execute("set role centaur_company_context_reader")
+        .await?;
+    sqlx::query("select set_config('centaur.slack_history_channel_ids', '[]', true)")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("select set_config('centaur.slack_include_public', 'false', true)")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("select set_config('centaur.slack_team_id', 'T_HOME', true)")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("select set_config('centaur.slack_user_id', 'U_PUBLIC_ONLY', true)")
+        .execute(&mut *tx)
+        .await?;
+
+    let visible_channels = text_array(
+        &mut tx,
+        "select coalesce(array_agg(channel_id order by channel_id), '{}') from slack_sync_channels",
+    )
+    .await?;
+    let visible_documents = text_array(
+        &mut tx,
+        "select coalesce(array_agg(document_id order by document_id), '{}') from company_context_documents",
+    )
+    .await?;
+    assert!(
+        visible_channels.is_empty(),
+        "membership must not grant access to a public channel when public access is disabled"
+    );
+    assert!(
+        visible_documents.is_empty(),
+        "membership must not expose a public channel document when public access is disabled"
+    );
+
+    tx.execute("reset role").await?;
+    tx.rollback().await?;
     Ok(())
 }
 
