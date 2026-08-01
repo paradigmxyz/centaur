@@ -40,7 +40,12 @@ describe('parseChannelDefaults', () => {
     // with no `harness` inherits the thread/deployment harness rather than one
     // guessed from the model name.
     expect(
-      parseChannelDefaults(JSON.stringify({ C0A: { model: 'opus' }, C0B: { model: 'gpt-5.2' } }))
+      parseChannelDefaults(
+        JSON.stringify({
+          C0A: { model: 'opus' },
+          C0B: { model: 'gpt-5.2' }
+        })
+      )
     ).toEqual({
       C0A: { model: 'claude-opus-4-8' },
       C0B: { model: 'gpt-5.2' }

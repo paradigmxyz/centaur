@@ -105,6 +105,13 @@ module Api
       end
     end
 
+    def with_sync_config_replacement_guard(record, attributes, **associations)
+      record.lock! unless record.new_record?
+      return record if !record.new_record? && SyncConfigReplacement.equivalent?(record, attributes, associations)
+
+      yield
+    end
+
     DEFAULT_PAGE_LIMIT = 50
     MAX_PAGE_LIMIT = 200
 

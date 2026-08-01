@@ -9,6 +9,14 @@ class Console::ThreadsController < ApplicationController
   EXECUTION_LIMIT = 8
   TRANSCRIPT_EVENT_LIMIT = 80
   PANEL_LIMIT = 4
+  MAX_INLINE_IMAGE_BASE64_CHARS = 1_000_000
+  INLINE_IMAGE_MIME_TYPES = %w[
+    image/avif
+    image/gif
+    image/jpeg
+    image/png
+    image/webp
+  ].freeze
   THINKING_EVENT_LIMIT = 200
   ACTIVITY_SUMMARY_EVENT_LIMIT = 200
   RAW_TRACE_OUTPUT_LINE_PATTERNS = %w[
@@ -18,6 +26,8 @@ class Console::ThreadsController < ApplicationController
     tool_use
     toolresult
     tool_result
+    tool.call
+    tool.result
   ].freeze
   COMPLETED_TRACE_METHOD_PATTERNS = %w[
     item/completed
@@ -34,8 +44,6 @@ class Console::ThreadsController < ApplicationController
     tool_use
     functioncall
     function_call
-    filechange
-    file_change
   ].freeze
   TOOL_TRACE_ITEM_TYPES = %w[
     commandExecution
@@ -48,8 +56,6 @@ class Console::ThreadsController < ApplicationController
     tool_use
     functionCall
     function_call
-    fileChange
-    file_change
   ].freeze
   # Messages and thinking precede the terminal event for a same-timestamp tie.
   TRANSCRIPT_SOURCE_ORDER = { message: 0, thinking: 1, event: 2 }.freeze
@@ -89,9 +95,10 @@ class Console::ThreadsController < ApplicationController
   # serde lowercase); the model ids are the ones the bots' --model flags
   # expand to (services/slackbotv2/src/overrides.ts). Amp appears as a plain
   # entry with no model: it picks its own model per turn. `efforts` are the
-  # per-turn reasoning efforts the harness accepts for the model (codex only —
-  # harness-server discards `reasoning` for claude/amp; enum per
-  # crates/harness-server/src/codex.rs, `max` being 5.6-specific).
+  # per-turn reasoning efforts the harness accepts for the model, except
+  # Claude Opus 5's `fast` choice, which selects OpenRouter's native fast model
+  # variant. Codex's enum lives in crates/harness-server/src/codex.rs, with
+  # `max` being 5.6-specific.
   ComposerAgent = Struct.new(:value, :label, :harness, :model, :efforts, keyword_init: true)
   CODEX_EFFORTS = [
     %w[minimal Minimal],
@@ -100,15 +107,23 @@ class Console::ThreadsController < ApplicationController
     %w[high High],
     [ "xhigh", "Extra High" ]
   ].freeze
+  MODEL_EFFORT_OVERRIDES = {
+    [ "claude-opus-5", "fast" ] => "claude-opus-5-fast"
+  }.freeze
   # First entry doubles as the default pick (unless the deploy's default-model
   # resolution for its harness names another listed model).
   COMPOSER_AGENTS = [
     ComposerAgent.new(value: "gpt-5.6-sol", label: "GPT-5.6 Sol",
                       harness: "codex", model: "gpt-5.6-sol",
                       efforts: CODEX_EFFORTS + [ %w[max Max] ]),
+    ComposerAgent.new(value: "nanocodex", label: "Nanocodex (GPT-5.6 Sol)",
+                      harness: "nanocodex", model: nil, efforts: []),
     ComposerAgent.new(value: "gpt-5.5", label: "GPT-5.5",
                       harness: "codex", model: "gpt-5.5",
                       efforts: CODEX_EFFORTS),
+    ComposerAgent.new(value: "claude-opus-5", label: "Claude Opus 5",
+                      harness: "claudecode", model: "claude-opus-5",
+                      efforts: [ %w[fast Fast] ]),
     ComposerAgent.new(value: "claude-opus-4-8", label: "Claude Opus 4.8",
                       harness: "claudecode", model: "claude-opus-4-8", efforts: []),
     ComposerAgent.new(value: "claude-sonnet-4-6", label: "Claude Sonnet 4.6",
@@ -134,7 +149,8 @@ class Console::ThreadsController < ApplicationController
                 :composer_default_agent_value,
                 :composer_agents_json,
                 :thread_execution_active?,
-                :thread_owned?
+                :thread_owned?,
+                :thread_writable?
 
   def index
     @query = params[:q].to_s.strip
@@ -150,7 +166,11 @@ class Console::ThreadsController < ApplicationController
     @thread_db_unavailable = false
     @thread_not_found = false
 
-    load_threads
+    # A standalone composer does not use session discovery, summaries, counts,
+    # or transcripts. Skip those cross-database queries so opening New chat is
+    # independent of the size and health of the api-rs session tables. The
+    # sidebar keeps loading its small thread list through its lazy Turbo Frame.
+    @starting_new_thread ? empty_thread_state : load_threads
     if @thread_not_found
       render status: :not_found
       return
@@ -203,8 +223,7 @@ class Console::ThreadsController < ApplicationController
       return
     end
 
-    @latest_executions = latest_executions_for([ session.thread_key ])
-    panel = thread_panel_for(session)
+    panel = thread_panel_for(session, include_access: false)
     active = thread_execution_active?(session.thread_key)
     # The poller stops rescheduling once this header reports the turn is done,
     # after swapping in the final transcript below.
@@ -262,12 +281,20 @@ class Console::ThreadsController < ApplicationController
     execution.present? && %w[queued running executing].include?(execution.status.to_s)
   end
 
-  # Public and explicitly shared chats are read-only for non-owners. Keep the
-  # composer and write endpoint tied to the original owner scope.
+  # Ownership still controls publication. Access controls whether a user can
+  # continue a chat, and includes deployment-public and explicitly shared
+  # threads in addition to chats they started themselves.
   def thread_owned?(session)
     @thread_owned ||= {}
     @thread_owned.fetch(session.thread_key) do |thread_key|
       @thread_owned[thread_key] = owned_thread_scope.where(thread_key: thread_key).exists?
+    end
+  end
+
+  def thread_writable?(session)
+    @thread_writable ||= {}
+    @thread_writable.fetch(session.thread_key) do |thread_key|
+      @thread_writable[thread_key] = readable_thread(thread_key).present?
     end
   end
 
@@ -303,6 +330,10 @@ class Console::ThreadsController < ApplicationController
     agent.efforts.map(&:first).include?(effort) ? effort : nil
   end
 
+  def composer_model_for(agent, effort)
+    MODEL_EFFORT_OVERRIDES.fetch([ agent.model, effort ], agent.model)
+  end
+
   def composer_agent_for(raw)
     value = raw.to_s.strip
     value = composer_default_agent_value if value.blank?
@@ -317,13 +348,18 @@ class Console::ThreadsController < ApplicationController
       return
     end
 
+    effort = composer_effort_param(agent)
+    model = composer_model_for(agent, effort)
+    # A model-variant effort is already encoded in the model slug. Only Codex
+    # consumes the blocks protocol's reasoning field.
+    reasoning = agent.harness == "codex" ? effort : nil
     thread_key = "console:#{SecureRandom.uuid}"
     api_client.create_session(
       thread_key: thread_key,
       harness_type: agent.harness,
-      metadata: console_actor_metadata.merge(agent.model.present? ? { model: agent.model } : {})
+      metadata: console_actor_metadata.merge(model.present? ? { model: model } : {})
     )
-    send_prompt(thread_key, prompt, model: agent.model, effort: composer_effort_param(agent))
+    send_prompt(thread_key, prompt, model: model, effort: reasoning)
     # A new-chat pane in a split view swaps the sentinel for the created
     # thread so the other panes stay open.
     open_keys = params[:open_threads].to_s.split(",").map(&:strip).reject(&:blank?)
@@ -335,9 +371,10 @@ class Console::ThreadsController < ApplicationController
   end
 
   def reply_to_thread(thread_key, prompt)
-    # Resolve through the owner scope so a crafted thread_key cannot post into
-    # another user's chat, even when public or shared read access is allowed.
-    session = owned_thread_scope.where(thread_key: thread_key).first
+    # Resolve through the same access policy as the transcript. This lets users
+    # continue deployment-public and explicitly shared chats while still
+    # rejecting a crafted key for a private, inaccessible thread.
+    session = readable_thread(thread_key)
     if session.nil?
       redirect_to console_threads_path, alert: "Chat not found."
       return
@@ -481,31 +518,69 @@ class Console::ThreadsController < ApplicationController
   end
 
   def load_threads
-    session_scope = visible_thread_scope
-    base_sessions = session_scope.recent_first.limit(THREAD_LIMIT).to_a
+    # Direct navigation already tells us exactly which (at most PANEL_LIMIT)
+    # sessions the page needs. Avoid running the recent-chat discovery query and
+    # its per-list summaries before loading those sessions by primary key.
+    if @selected_thread_key.present?
+      load_requested_threads
+      return
+    end
+
+    # The bare Chats route only needs a destination. Do not build a transcript
+    # that will be thrown away by #redirect_to_first_thread, or load the whole
+    # discovery window when the permanent sidebar owns recent-chat navigation.
+    if @query.blank?
+      empty_thread_state
+      @selected_session = owned_thread_scope.recent_first.first
+      return
+    end
+
+    # The query path still needs a bounded discovery window to match titles,
+    # metadata, and latest-message previews. Keep discovery personal even when
+    # deployment-wide read access is enabled.
+    owned_scope = owned_thread_scope
+    base_sessions = owned_scope.recent_first.limit(THREAD_LIMIT).to_a
     keys = base_sessions.map(&:thread_key).uniq
 
     @latest_messages = latest_messages_for(keys)
-    @latest_executions = latest_executions_for(keys)
-    @message_counts = count_records(CentaurSessionMessage, keys)
-    @execution_counts = count_records(CentaurSessionExecution, keys)
+    @latest_executions = {}
 
     @sessions = base_sessions.select { |session| matches_query?(session) }
-    @selected_session = selected_session(session_scope, base_sessions)
-    if @thread_not_found
-      @pane_sessions = []
-      @thread_panels = []
-      @selected_messages = []
-      @selected_executions = []
-      @selected_events = []
-      @selected_transcript_items = []
+    @selected_session = @sessions.first
+    @pane_sessions = []
+    loaded_sessions = ([ @selected_session ] + Array(@pane_sessions)).compact
+    cache_thread_access(loaded_sessions, owned_keys: loaded_sessions.map(&:thread_key))
+    finalize_thread_panels
+  end
+
+  def load_requested_threads
+    empty_thread_state
+    requested_keys = ([ @selected_thread_key ] + @pane_thread_keys).uniq
+    owned_sessions = owned_thread_scope
+      .where(thread_key: requested_keys)
+      .to_a
+    sessions_by_key = owned_sessions.index_by(&:thread_key)
+
+    missing_keys = requested_keys - sessions_by_key.keys
+    if missing_keys.any?
+      visible_sessions = visible_thread_scope
+        .where(thread_key: missing_keys)
+        .to_a
+      sessions_by_key.merge!(visible_sessions.index_by(&:thread_key))
+      missing_keys -= visible_sessions.map(&:thread_key)
+    end
+    sessions_by_key.merge!(explicitly_shared_threads(missing_keys))
+
+    @selected_session = sessions_by_key[@selected_thread_key]
+    if @selected_session.nil?
+      @thread_not_found = true
       return
     end
-    @pane_sessions = resolve_pane_sessions(session_scope, base_sessions)
-    load_selected_session_summaries(keys)
-    @selected_thread_key = @selected_session&.thread_key.to_s
-    @thread_panels = build_thread_panels
-    @selected_transcript_items = @thread_panels.first&.dig(:transcript_items) || []
+
+    @pane_sessions = @pane_thread_keys.filter_map { |key| sessions_by_key[key] }
+    loaded_sessions = ([ @selected_session ] + @pane_sessions).uniq(&:thread_key)
+    cache_thread_access(loaded_sessions, owned_keys: owned_sessions.map(&:thread_key))
+    finalize_thread_panels
   end
 
   def empty_thread_state
@@ -520,8 +595,6 @@ class Console::ThreadsController < ApplicationController
     @selected_transcript_items = []
     @latest_messages = {}
     @latest_executions = {}
-    @message_counts = {}
-    @execution_counts = {}
   end
 
   def matches_query?(session)
@@ -537,25 +610,6 @@ class Console::ThreadsController < ApplicationController
     ].any? { |value| value.to_s.downcase.include?(needle) }
   end
 
-  def selected_session(session_scope, base_sessions)
-    return nil if @starting_new_thread
-
-    if @selected_thread_key.present?
-      selected = base_sessions.find { |session| session.thread_key == @selected_thread_key }
-      # Resolve the key through the readable scope so a directly linked chat only
-      # loads when it is visible to the current user. base_sessions is capped at
-      # THREAD_LIMIT, so this also recovers a visible thread beyond that window.
-      selected ||= session_scope.where(thread_key: @selected_thread_key).first
-      selected ||= explicitly_shared_thread(@selected_thread_key)
-      # A directly requested key outside the readable scope renders as 404 rather
-      # than silently falling back to another chat, so nonexistent and
-      # inaccessible chats are indistinguishable to the viewer.
-      @thread_not_found = selected.nil?
-      return selected
-    end
-    @sessions.first
-  end
-
   def auto_select_first_thread?
     params[:thread].blank? && !@starting_new_thread && @query.blank? && @selected_session.present?
   end
@@ -565,17 +619,6 @@ class Console::ThreadsController < ApplicationController
   # (Cmd/Ctrl-click on a sidebar thread appends its key).
   def requested_thread_keys
     params[:thread].to_s.split(",").map(&:strip).reject(&:blank?).uniq.first(PANEL_LIMIT)
-  end
-
-  # Extra split-view panes resolve through the same readable scope as the
-  # primary thread. Inaccessible keys are dropped silently.
-  def resolve_pane_sessions(session_scope, base_sessions)
-    keys = @pane_thread_keys - [ @selected_session&.thread_key ]
-    keys.filter_map do |key|
-      base_sessions.find { |session| session.thread_key == key } ||
-        session_scope.where(thread_key: key).first ||
-        explicitly_shared_thread(key)
-    end
   end
 
   def build_thread_panels
@@ -601,17 +644,22 @@ class Console::ThreadsController < ApplicationController
     panels
   end
 
-  def thread_panel_for(session)
+  def thread_panel_for(session, include_access: true)
     @selected_session = session
     @selected_messages = selected_messages
     @selected_executions = selected_executions
     @selected_events = selected_events
+    @latest_messages ||= {}
+    @latest_executions ||= {}
+    @latest_messages[session.thread_key] ||= @selected_messages.last
+    @latest_executions[session.thread_key] ||= @selected_executions.first
     reset_selected_thread_memos
 
     {
       session: session,
       thread_key: session.thread_key,
-      writable: thread_owned?(session),
+      owned: include_access && thread_owned?(session),
+      writable: include_access && thread_writable?(session),
       transcript_items: selected_transcript_items
     }
   end
@@ -627,17 +675,17 @@ class Console::ThreadsController < ApplicationController
     redirect_to console_threads_path(thread: @selected_session.thread_key)
   end
 
-  def load_selected_session_summaries(loaded_keys)
-    missing_keys = ([ @selected_session ] + Array(@pane_sessions)).compact
-      .map(&:thread_key)
-      .uniq
-      .reject { |key| loaded_keys.include?(key) }
-    return if missing_keys.empty?
+  def finalize_thread_panels
+    @selected_thread_key = @selected_session&.thread_key.to_s
+    @thread_panels = build_thread_panels
+    @selected_transcript_items = @thread_panels.first&.dig(:transcript_items) || []
+  end
 
-    @latest_messages.merge!(latest_messages_for(missing_keys))
-    @latest_executions.merge!(latest_executions_for(missing_keys))
-    @message_counts.merge!(count_records(CentaurSessionMessage, missing_keys))
-    @execution_counts.merge!(count_records(CentaurSessionExecution, missing_keys))
+  def cache_thread_access(sessions, owned_keys:)
+    @thread_owned = sessions.to_h do |session|
+      [ session.thread_key, owned_keys.include?(session.thread_key) ]
+    end
+    @thread_writable = sessions.to_h { |session| [ session.thread_key, true ] }
   end
 
   def visible_thread_scope
@@ -674,6 +722,15 @@ class Console::ThreadsController < ApplicationController
     return unless ThreadShare.exists?(thread_key: thread_key)
 
     CentaurSession.where(thread_key: thread_key).first
+  end
+
+  def explicitly_shared_threads(thread_keys)
+    return {} if thread_keys.empty?
+
+    shared_keys = ThreadShare.where(thread_key: thread_keys).pluck(:thread_key)
+    return {} if shared_keys.empty?
+
+    CentaurSession.where(thread_key: shared_keys).index_by(&:thread_key)
   end
 
   def console_thread_owner_sql
@@ -966,6 +1023,16 @@ class Console::ThreadsController < ApplicationController
   end
 
   def compact_trace_items(items)
+    items = items.each_with_object([]) do |item, compacted|
+      previous = compacted.last
+      if item[:trace_kind] == "reasoning_delta" &&
+          previous&.dig(:trace_kind) == "reasoning_delta" && same_trace_group?(previous, item)
+        previous[:text] += item[:text]
+      else
+        compacted << item.dup
+      end
+    end
+
     grouped = []
     command_group = []
 
@@ -1058,13 +1125,18 @@ class Console::ThreadsController < ApplicationController
 
   def reasoning_trace(value)
     text = reasoning_event_text(value)
-    return nil if text.blank?
+    kind = value["type"].to_s == "reasoning.summary.delta" ? "reasoning_delta" : nil
+    return nil if text.nil? || (kind.nil? && text.blank?)
 
-    { label: "Thinking", text: text }
+    { label: "Thinking", text: text, kind: kind }
   end
 
   def reasoning_event_text(value)
     method = (value["method"] || value["type"]).to_s.tr("/", ".")
+    if method == "reasoning.summary.delta"
+      text = value.dig("payload", "text").to_s
+      return text.empty? ? nil : text
+    end
     return nil unless method == "item.completed"
 
     item = value.dig("params", "item") || value["item"]
@@ -1100,7 +1172,24 @@ class Console::ThreadsController < ApplicationController
   end
 
   def tool_trace(value)
-    completed_item_trace(value) || claude_tool_use_trace(value) || claude_tool_result_trace(value)
+    nanocodex_tool_trace(value) || completed_item_trace(value) ||
+      claude_tool_use_trace(value) || claude_tool_result_trace(value)
+  end
+
+  def nanocodex_tool_trace(value)
+    type = value["type"].to_s
+    return nil unless %w[tool.call tool.result].include?(type)
+
+    payload = value["payload"]
+    return nil unless payload.is_a?(Hash)
+
+    item = {
+      "name" => payload["tool"],
+      "status" => type == "tool.call" ? "in_progress" : payload["status"],
+      "arguments" => payload["arguments"],
+      "result" => payload["result"]
+    }
+    generic_tool_item_trace(item)
   end
 
   def completed_item_trace(value)
@@ -1161,7 +1250,6 @@ class Console::ThreadsController < ApplicationController
   end
 
   def generic_tool_item_trace(item)
-    label = trace_label_for_item(item)
     name = first_present(item["name"], item["tool"], item["toolName"], item["tool_name"])
     input = item["input"] || item["arguments"] || item["args"]
     output = item["output"] || item["result"]
@@ -1175,7 +1263,7 @@ class Console::ThreadsController < ApplicationController
     text = sections.compact.join("\n\n").strip
     return nil if text.blank?
 
-    { label: label, text: text }
+    { label: "Tool call", text: text }
   end
 
   def claude_tool_use_trace(value)
@@ -1229,14 +1317,6 @@ class Console::ThreadsController < ApplicationController
   def message_content(value)
     message = value["message"]
     message.is_a?(Hash) ? message["content"] : value["content"]
-  end
-
-  def trace_label_for_item(item)
-    case item["type"].to_s
-    when "fileChange", "file_change" then "File change"
-    when "mcpToolCall", "mcp_tool_call" then "Tool call"
-    else "Tool call"
-    end
   end
 
   def markdown_code_block(value, language: nil)
@@ -1311,15 +1391,41 @@ class Console::ThreadsController < ApplicationController
       label: transcript_message_label(message.role, metadata),
       align: transcript_message_align(message.role, metadata),
       text: resolve_slack_mentions(thread_message_text(message)),
+      images: transcript_message_images(message),
       created_at: message.created_at,
       source: :message
     }
   end
 
-  def count_records(model, keys)
-    return {} if keys.empty?
+  def transcript_message_images(message)
+    message.parts_array.filter_map do |part|
+      next unless inline_image_part?(part)
 
-    model.where(thread_key: keys).group(:thread_key).count
+      mime_type = part["mimeType"].to_s.downcase
+      data = part["dataBase64"].to_s
+      next unless INLINE_IMAGE_MIME_TYPES.include?(mime_type)
+      next if data.blank? || data.bytesize > MAX_INLINE_IMAGE_BASE64_CHARS
+      next unless data.bytesize.modulo(4).zero? && data.match?(/\A[A-Za-z0-9+\/]*={0,2}\z/)
+
+      {
+        src: "data:#{mime_type};base64,#{data}",
+        alt: part["name"].presence || "Attached image",
+        width: positive_image_dimension(part["width"]),
+        height: positive_image_dimension(part["height"])
+      }
+    end
+  end
+
+  def inline_image_part?(part)
+    return false unless part.is_a?(Hash)
+
+    part["type"] == "image" ||
+      (part["type"] == "attachment" && part["attachment_type"] == "image")
+  end
+
+  def positive_image_dimension(value)
+    dimension = Integer(value, exception: false)
+    dimension if dimension&.positive? && dimension <= 100_000
   end
 
   def thread_title(session)
@@ -1366,6 +1472,7 @@ class Console::ThreadsController < ApplicationController
     when "codex" then "Codex"
     when "claudecode" then "Claude Code"
     when "amp" then "Amp"
+    when "nanocodex" then "Nanocodex"
     else source_label(session.harness_type)
     end
   end

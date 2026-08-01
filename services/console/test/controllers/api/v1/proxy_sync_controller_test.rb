@@ -1,6 +1,8 @@
 require "test_helper"
 
 class ProxySyncControllerTest < ActionDispatch::IntegrationTest
+  include ActiveJob::TestHelper
+
   ACME_TOKEN = "iprx_#{'a' * 64}".freeze
 
   def auth_headers(token = ACME_TOKEN)
@@ -25,6 +27,11 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
 
     RequestRule.create!(host: "api.example.com", http_methods: [ "POST" ], paths: [ "/v1/*" ],
                         position: 0, static_secret: @inject)
+  end
+
+  teardown do
+    clear_enqueued_jobs
+    clear_performed_jobs
   end
 
   test "rejects requests without an Authorization header" do
@@ -102,7 +109,7 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
 
     snapshot = PrincipalSyncConfigSnapshot.find_by!(principal: @proxy.principal)
     assert_equal @proxy.principal.sync_config_cache_version, snapshot.principal_cache_version
-    assert_equal "s3cr3t-db-pass", snapshot.payload.dig("secrets", 1, "source", "value")
+    assert_equal "s3cr3t-db-pass", snapshot.config.dig("secrets", 1, "source", "value")
 
     raw = PrincipalSyncConfigSnapshot.connection.select_value(
       "SELECT payload FROM principal_sync_config_snapshots WHERE id = #{snapshot.id}"
@@ -118,7 +125,15 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
     @replace.source.update!(secret: "rotated-db-pass")
 
     assert_operator @proxy.principal.reload.sync_config_cache_version, :>, original_version
-    assert_difference -> { PrincipalSyncConfigSnapshot.count }, 1 do
+    assert_no_difference -> { PrincipalSyncConfigSnapshot.count } do
+      assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ @proxy.principal.id ]) do
+        post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
+      end
+    end
+    assert_response :ok
+
+    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob)
+    assert_no_difference -> { PrincipalSyncConfigSnapshot.count } do
       post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
     end
     assert_response :ok
@@ -228,7 +243,7 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
 
     original_hash = json_body.fetch("config_hash")
     snapshot = PrincipalSyncConfigSnapshot.find_by!(principal: @proxy.principal)
-    transform = snapshot.payload.fetch("transforms").find { |t| t["name"] == "gcp_id_token" }
+    transform = snapshot.config.fetch("transforms").find { |t| t["name"] == "gcp_id_token" }
     assert_equal secret.audience, transform.dig("config", "audience")
     assert_equal "CLOUD_RUN_SA_KEYFILE", transform.dig("config", "keyfile", "var")
 
@@ -244,7 +259,15 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
     secret.update!(audience: "https://updated-service-abc123-uc.a.run.app")
 
     assert_operator @proxy.principal.reload.sync_config_cache_version, :>, original_version
-    assert_difference -> { PrincipalSyncConfigSnapshot.count }, 1 do
+    assert_no_difference -> { PrincipalSyncConfigSnapshot.count } do
+      assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ @proxy.principal.id ]) do
+        post api_v1_proxy_sync_url, params: { config_hash: original_hash }.to_json, headers: auth_headers
+      end
+    end
+    assert_response :ok
+
+    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob)
+    assert_no_difference -> { PrincipalSyncConfigSnapshot.count } do
       post api_v1_proxy_sync_url, params: { config_hash: original_hash }.to_json, headers: auth_headers
     end
     assert_response :ok
@@ -319,6 +342,26 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
     )
   end
 
+  test "postgres entries resolve value_from settings against proxy labels" do
+    @proxy.update!(labels: { "centaur.slack_user_id" => "U0123456789" })
+    pg = pg_dsn_secrets(:acme_analytics_pg)
+    pg.update!(settings: [
+      {
+        "name" => "centaur.slack_user_id",
+        "value_from" => { "proxy_label" => "centaur.slack_user_id" }
+      }
+    ])
+
+    post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
+    assert_response :ok
+
+    entry = json_body.fetch("postgres").find { |e| e["foreign_id"] == pg.foreign_id }
+    assert_equal(
+      [ { "name" => "centaur.slack_user_id", "value" => "U0123456789" } ],
+      entry["settings"]
+    )
+  end
+
   test "directly-granted secrets are emitted after role-granted ones" do
     # acme_channel holds github_token_inject and db_password_replace directly
     # (priority 100) and resolves acme_prod_api_key through the acme_infra role
@@ -340,6 +383,12 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
 
     # Promote the role grant above the direct grants and it now sorts last.
     grants(:acme_infra_prod_api_key).update!(priority: 500)
+    assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ @proxy.principal.id ]) do
+      post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
+    end
+    assert_response :ok
+
+    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob)
     post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
     assert_response :ok
     bumped = json_body.fetch("secrets").map { |s| s.dig("source", "var") || s.dig("source", "type") }
@@ -392,6 +441,12 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
     credential.update!(access_token: "token-2", expires_at: 2.hours.from_now, last_refresh: Time.current)
 
     assert_operator @proxy.principal.reload.sync_config_cache_version, :>, original_version
+    assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ @proxy.principal.id ]) do
+      post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
+    end
+    assert_response :ok
+
+    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob)
     post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
     assert_response :ok
 
@@ -402,17 +457,5 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
   def jwt_payload(token)
     _header, payload, _signature = token.split(".")
     JSON.parse(Base64.urlsafe_decode64(payload))
-  end
-
-  def with_env(values)
-    previous = values.keys.to_h { |key| [ key, ENV[key] ] }
-    values.each do |key, value|
-      value.nil? ? ENV.delete(key) : ENV[key] = value
-    end
-    yield
-  ensure
-    previous.each do |key, value|
-      value.nil? ? ENV.delete(key) : ENV[key] = value
-    end
   end
 end

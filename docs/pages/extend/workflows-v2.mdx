@@ -64,6 +64,7 @@ Supported v2 primitives:
 | `ctx._pool` | Supported when the workflow-host sandbox receives `DATABASE_URL` |
 | `WEBHOOKS` | Supported |
 | `SCHEDULE` | Supported |
+| `WORKFLOW_PRINCIPAL` | Supported for workflow-host sandbox tool permissions |
 
 ## Required migrations
 
@@ -119,6 +120,32 @@ result = await ctx.agent_turn(
 The workflow host sandbox is separate from the agent sandbox. The workflow
 handler coordinates the run; the agent turn runs through the normal Centaur
 session runtime.
+
+#### Declare Workflow-Host Permissions
+
+When a workflow calls tools directly from the workflow host with
+`ctx.call_tool(...)`, declare the principal that should own those permissions:
+
+```python
+WORKFLOW_NAME = "nightly_report"
+WORKFLOW_PRINCIPAL = True
+```
+
+The API derives and registers the `workflow-nightly-report` principal in the
+Centaur Console and runs that workflow's host sandbox under it. Grant only the
+roles or secrets that workflow needs:
+
+```bash
+cargo run -p centaur-perms -- \
+  principals grant workflow-nightly-report \
+  --tool slack
+```
+
+The principal id is always `workflow-` plus the slugged `WORKFLOW_NAME`.
+Workflow code cannot choose another principal id, display name, or labels.
+`WORKFLOW_PRINCIPAL = True` requires `apiRs.workflowHostSandbox=true`, which
+renders `WORKFLOW_HOST_SANDBOX=true`; startup fails if a workflow declares a
+principal while workflow-host sandboxing is disabled.
 
 #### Pick the model and reasoning effort
 

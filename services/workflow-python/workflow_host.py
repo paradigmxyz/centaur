@@ -84,6 +84,7 @@ class RegisteredWorkflow:
     input_cls: type | None
     webhooks: Any
     schedule: Any
+    principal: Any = None
     agent_defaults: dict[str, Any] | None = None
 
 
@@ -153,6 +154,7 @@ def load_workflow_file(path: Path) -> RegisteredWorkflow | None:
         input_cls=getattr(module, "Input", None),
         webhooks=getattr(module, "WEBHOOKS", None),
         schedule=getattr(module, "SCHEDULE", None),
+        principal=getattr(module, "WORKFLOW_PRINCIPAL", None),
         agent_defaults=agent_defaults,
     )
 
@@ -326,6 +328,11 @@ def normalize_schedule(workflow: RegisteredWorkflow) -> dict[str, Any] | None:
     return schedule
 
 
+def normalize_principal(workflow: RegisteredWorkflow) -> bool | None:
+    raw = workflow.principal
+    return raw if isinstance(raw, bool) and raw else None
+
+
 async def run_workflow(message: dict[str, Any], rpc: RpcClient) -> dict[str, Any]:
     workflows = discover_workflows()
     workflow_name = str(message.get("workflow_name") or "")
@@ -375,6 +382,7 @@ def discovery_payload() -> dict[str, Any]:
                 "source_path": workflow.source_path,
                 "webhooks": normalize_webhooks(workflow),
                 "schedule": normalize_schedule(workflow),
+                "principal": normalize_principal(workflow),
             }
             for workflow in workflows.values()
         ],

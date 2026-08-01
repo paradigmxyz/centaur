@@ -138,54 +138,104 @@ class PrincipalTest < ActiveSupport::TestCase
     )
   end
 
-  test "effective_config adds api server JWT from Slack channel permission rows" do
-    with_env(
-      "CENTAUR_JWT_SIGNING_SECRET" => "test-secret",
-      "CENTAUR_API_URL" => "http://api.internal:8080",
-      "CENTAUR_API_SERVER_PROXY_HOSTS" => nil
-    ) do
+  test "effective Slack permissions merge direct and role rows deterministically" do
+    principal = principals(:acme_channel)
+    role = roles(:acme_infra)
+    SlackChannelPermission.create!(
+      principal: principal,
+      channel_id: "C0123456789",
+      upload_enabled: true
+    )
+    SlackChannelPermission.create!(
+      role: role,
+      channel_id: "C0123456789",
+      download_enabled: true
+    )
+    SlackChannelPermission.create!(
+      role: role,
+      channel_id: "G9876543210",
+      history_enabled: true
+    )
+
+    assert_equal(
+      [
+        {
+          "channel_id" => "C0123456789",
+          "upload_enabled" => true,
+          "download_enabled" => true,
+          "history_enabled" => false
+        },
+        {
+          "channel_id" => "G9876543210",
+          "upload_enabled" => false,
+          "download_enabled" => false,
+          "history_enabled" => true
+        }
+      ],
+      principal.effective_slack_channel_permissions_payload
+    )
+    channel_ids = principal.slack_channel_ids_by_permission
+    assert_equal [ "C0123456789" ], channel_ids.fetch(:upload)
+    assert_equal [ "C0123456789" ], channel_ids.fetch(:download)
+    assert_equal [ "G9876543210" ], principal.slack_history_channel_ids
+  end
+
+  test "unsaved principals do not load role-owned Slack permissions" do
+    roles(:acme_infra).slack_channel_permissions.create!(
+      channel_id: "G9876543210",
+      history_enabled: true
+    )
+    principal = Principal.new
+    principal.slack_channel_permissions.build(
+      channel_id: "C0123456789",
+      upload_enabled: true
+    )
+
+    assert_equal [ "C0123456789" ],
+                 principal.effective_slack_channel_permissions_payload.pluck("channel_id")
+  end
+
+  test "api server JWT derives all Slack claims from one effective payload" do
+    principal = principals(:acme_channel)
+    calls = 0
+    payload = [
+      {
+        "channel_id" => "C0123456789",
+        "upload_enabled" => true,
+        "download_enabled" => true,
+        "history_enabled" => false
+      }
+    ]
+    original = principal.method(:effective_slack_channel_permissions_payload)
+    principal.define_singleton_method(:effective_slack_channel_permissions_payload) do
+      calls += 1
+      payload
+    end
+
+    with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
+      assert_not_nil ApiServer::Jwt.encode_for_principal(principal)
+    end
+    assert_equal 1, calls
+  ensure
+    principal&.define_singleton_method(:effective_slack_channel_permissions_payload, original) if original
+  end
+
+  test "api server JWT includes inherited role Slack permissions" do
+    with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
       principal = principals(:acme_channel)
-      SlackChannelPermission.create!(
-        principal: principal,
+      roles(:acme_infra).slack_channel_permissions.create!(
         channel_id: "C0123456789",
-        channel_name: "general",
         upload_enabled: true,
-        download_enabled: false,
         history_enabled: true
       )
-      SlackChannelPermission.create!(
-        principal: principal,
-        channel_id: "G9876543210",
-        channel_name: "private",
-        upload_enabled: false,
-        download_enabled: true,
-        history_enabled: false
-      )
 
-      config = principal.effective_config(redact_secrets: false)
-      entry = config.fetch("secrets").find do |secret|
-        secret.dig("inject", "header") == "Authorization" &&
-          secret.dig("source", "type") == "control_plane"
-      end
-
-      refute_nil entry
-      assert_equal "Bearer {{ .Value }}", entry.dig("inject", "formatter")
-      assert_equal [ { "host" => "api.internal" } ], entry.fetch("rules")
-
-      claims = jwt_payload(entry.dig("source", "value"))
-      assert_equal "centaur-console", claims.fetch("iss")
-      assert_equal "centaur-api", claims.fetch("aud")
-      assert_equal principal.oid, claims.fetch("sub")
+      claims = jwt_payload(ApiServer::Jwt.encode_for_principal(principal))
       assert_equal [ "C0123456789" ], claims.dig("slack", "upload_channels")
-      assert_equal [ "G9876543210" ], claims.dig("slack", "download_channels")
       assert_equal [ "C0123456789" ], claims.dig("slack", "history_channels")
-      assert_equal 1.hour.to_i, claims.fetch("exp") - claims.fetch("iat")
-      assert_equal ApiServer::Jwt.rotation_offset(principal),
-                   claims.fetch("iat") % ApiServer::Jwt::DEFAULT_WINDOW_SECONDS
     end
   end
 
-  test "effective_config does not fall back to slack channel label" do
+  test "api server JWT does not fall back to slack channel label" do
     with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
       principal = principals(:acme_channel)
       principal.update!(labels: { Principal::SLACK_CHANNEL_ID_LABEL => "C0123456789" })
@@ -211,32 +261,10 @@ class PrincipalTest < ActiveSupport::TestCase
       )
       assert_not_nil ApiServer::Jwt.encode_for_principal(principal)
 
-      SlackChannelPermission.replace_for_principal!(principal, [])
+      SlackChannelPermission.replace_for!(principal, [])
 
       assert_empty principal.slack_channel_permissions.reload
       assert_nil ApiServer::Jwt.encode_for_principal(principal)
-    end
-  end
-
-  test "effective_config omits api server JWT when sandbox api access is disabled" do
-    with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
-      principal = principals(:acme_channel)
-      principal.update!(
-        sandbox_api_server_enabled: false
-      )
-      SlackChannelPermission.create!(
-        principal: principal,
-        channel_id: "C0123456789",
-        upload_enabled: true
-      )
-
-      config = principal.effective_config(redact_secrets: false)
-      entry = config.fetch("secrets").find do |secret|
-        secret.dig("inject", "header") == "Authorization" &&
-          secret.dig("source", "type") == "control_plane"
-      end
-
-      assert_nil entry
     end
   end
 
@@ -326,139 +354,7 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_equal "unassigned", proxy.status
   end
 
-  # --- effective config / grant resolution --------------------------------
-
-  def principal_with_grants(*grantables)
-    principal = principals(:globex_user)
-    grantables.each do |g|
-      key = Grant::GRANTABLE_ASSOCIATIONS.find { |a| g.is_a?(a.to_s.camelize.constantize) }
-      Grant.create!(principal: principal, key => g, created_by: users(:globex_admin))
-    end
-    principal
-  end
-
-  test "sync_secrets delivers a brokered token inline and omits it until minted" do
-    cred = BrokerCredential.create!(namespace: "default", foreign_id: "sync-#{SecureRandom.hex(4)}",
-                                    token_endpoint: "https://idp.example/token", client_id: "cid",
-                                    created_by: users(:globex_admin), refresh_token: "seed")
-
-    secret = StaticSecret.new(namespace: "default", foreign_id: "brokered-#{SecureRandom.hex(4)}",
-                              inject_config: { "header" => "Authorization" }, created_by: users(:globex_admin))
-    secret.build_source(source_type: "token_broker", config: { "credential_id" => cred.oid })
-    secret.rules.build(host: "api.example.com", position: 0)
-    secret.save!
-
-    principal = principal_with_grants(secret)
-
-    # Bootstrapping (no token yet) -> the secret is omitted from sync entirely.
-    assert_empty principal.sync_secrets
-
-    # Once control mints a token, it is delivered inline like a control_plane value.
-    cred.update!(access_token: "live-token", expires_at: 1.hour.from_now, last_refresh: Time.current)
-    secrets = principal.sync_secrets
-    assert_equal 1, secrets.length
-    assert_equal({ "type" => "control_plane", "value" => "live-token" }, secrets.first["source"])
-
-    # ...and redacted in the operator inspection view (no special-casing needed).
-    assert_equal "[redacted]", principal.effective_config.dig("secrets", 0, "source", "value")
-  end
-
-  test "sync_transforms emits a gcp_auth transform per granted GcpAuthSecret" do
-    transforms = principal_with_grants(gcp_auth_secrets(:acme_bigquery)).sync_transforms
-    assert_equal 1, transforms.length
-    assert_equal "gcp_auth", transforms.first["name"]
-    assert_equal({ "type" => "workload_identity" }, transforms.first.dig("config", "credentials_provider"))
-  end
-
-  test "sync_transforms emits a gcp_id_token transform per granted GcpIdTokenSecret" do
-    transforms = principal_with_grants(gcp_id_token_secrets(:acme_cloud_run)).sync_transforms
-    assert_equal 1, transforms.length
-    transform = transforms.first
-    assert_equal "gcp_id_token", transform["name"]
-    assert_equal({ "type" => "env", "var" => "CLOUD_RUN_SA_KEYFILE" }, transform.dig("config", "keyfile"))
-    assert_equal "https://my-service-abc123-uc.a.run.app", transform.dig("config", "audience")
-    assert_equal "x-serverless-authorization", transform.dig("config", "header")
-  end
-
-  test "sync_transforms emits an aws_auth transform per granted AwsAuthSecret" do
-    transforms = principal_with_grants(aws_auth_secrets(:acme_cloudwatch_aws)).sync_transforms
-    aws = transforms.find { |t| t["name"] == "aws_auth" }
-    refute_nil aws
-    assert_equal({ "type" => "env", "var" => "AWS_ACCESS_KEY_ID" }, aws.dig("config", "access_key_id"))
-    assert_equal({ "type" => "env", "var" => "AWS_SECRET_ACCESS_KEY" }, aws.dig("config", "secret_access_key"))
-    assert_equal %w[logs monitoring], aws.dig("config", "allowed_services")
-    assert_equal 1, aws.dig("config", "rules").length
-  end
-
-  test "sync_transforms bundles all granted oauth tokens into one transform" do
-    transforms = principal_with_grants(oauth_token_secrets(:acme_gmail_oauth)).sync_transforms
-    oauth = transforms.find { |t| t["name"] == "oauth_token" }
-    refute_nil oauth
-    tokens = oauth.dig("config", "tokens")
-    assert_equal 1, tokens.length
-    assert_equal "refresh_token", tokens.first["grant"]
-  end
-
-  test "sync_transforms is empty without transform grants" do
-    assert_empty principals(:globex_user).sync_transforms
-  end
-
-  test "sync_postgres emits a DSN entry per granted PgDsnSecret with foreign_id" do
-    entries = principal_with_grants(pg_dsn_secrets(:acme_analytics_pg)).sync_postgres
-    assert_equal 1, entries.length
-    assert_equal pg_dsn_secrets(:acme_analytics_pg).foreign_id, entries.first["foreign_id"]
-    assert_equal({ "type" => "env", "var" => "PG_ANALYTICS_DSN" }, entries.first["dsn"])
-  end
-
-  test "sync_postgres resolves value_from settings against the principal" do
-    principal = principals(:globex_user)
-    principal.update!(labels: { "slack_channel_id" => "C999" })
-    pg = pg_dsn_secrets(:acme_analytics_pg)
-    pg.update!(settings: [
-      {
-        "name" => "centaur.slack_channel_id",
-        "value_from" => { "principal_label" => "slack_channel_id" }
-      },
-      { "name" => "centaur.principal", "value_from" => { "principal_field" => "foreign_id" } }
-    ])
-    Grant.create!(principal: principal, pg_dsn_secret: pg, created_by: users(:globex_admin))
-
-    entry = principal.sync_postgres.fetch(0)
-    assert_equal(
-      [
-        { "name" => "centaur.slack_channel_id", "value" => "C999" },
-        { "name" => "centaur.principal", "value" => principal.foreign_id }
-      ],
-      entry["settings"]
-    )
-  end
-
-  test "sync_postgres emits only the highest-priority route for each database" do
-    principal = principals(:globex_user)
-    low = pg_dsn_secrets(:acme_analytics_pg)
-    high = PgDsnSecret.new(
-      namespace: low.namespace,
-      foreign_id: "pg-analytics-privileged",
-      name: "analytics privileged",
-      database: low.database,
-      role: "centaur_readonly",
-      created_by: users(:acme_admin)
-    )
-    high.build_dsn_source(source_type: "env", config: { "var" => "PG_PRIVILEGED_DSN" })
-    high.save!
-
-    Grant.create!(principal: principal, pg_dsn_secret: low, created_by: users(:acme_admin), priority: 0)
-    Grant.create!(principal: principal, pg_dsn_secret: high, created_by: users(:acme_admin), priority: 100)
-
-    entries = principal.sync_postgres
-    assert_equal 1, entries.length
-    assert_equal "pg-analytics-privileged", entries.first["foreign_id"]
-    assert_equal "PG_PRIVILEGED_DSN", entries.first.dig("dsn", "var")
-  end
-
-  test "sync_postgres is empty without pg_dsn grants" do
-    assert_empty principals(:globex_user).sync_postgres
-  end
+  # --- grant resolution ---------------------------------------------------
 
   test "granted_static_secrets includes secrets granted via an assigned role" do
     # acme_channel holds the acme_infra role, which is granted acme_prod_api_key.
@@ -511,185 +407,8 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_equal static_secrets(:acme_prod_api_key).id, ids.last
   end
 
-  # --- cross-type conflict resolution -------------------------------------
-
-  # Builds a static secret injecting `header` on `host`, granted directly to
-  # globex_user (priority 100).
-  def grant_direct_static(host:, header:)
-    secret = StaticSecret.new(namespace: "globex", foreign_id: "static-#{SecureRandom.hex(4)}",
-                              inject_config: { "header" => header, "formatter" => "Bearer {{ .Value }}" },
-                              created_by: users(:globex_admin))
-    secret.build_source(source_type: "control_plane", secret: "direct-token")
-    secret.rules.build(host: host, position: 0)
-    secret.save!
-    Grant.create!(principal: principals(:globex_user), static_secret: secret, created_by: users(:globex_admin))
-    secret
-  end
-
-  # Builds a gcp_auth secret (writes Authorization) matching `host`, granted to
-  # globex_user through the globex_infra role (priority 0).
-  def grant_role_gcp(host:)
-    PrincipalRole.find_or_create_by!(principal: principals(:globex_user), role: roles(:globex_infra))
-    secret = GcpAuthSecret.new(namespace: "globex", foreign_id: "gcp-#{SecureRandom.hex(4)}",
-                               credentials_provider: { "type" => "workload_identity" },
-                               scopes: [ "https://www.googleapis.com/auth/cloud-platform" ],
-                               created_by: users(:globex_admin))
-    secret.rules.build(host: host, position: 0)
-    secret.save!
-    Grant.create!(role: roles(:globex_infra), gcp_auth_secret: secret, created_by: users(:globex_admin))
-    secret
-  end
-
-  def grant_direct_gcp(host:)
-    secret = GcpAuthSecret.new(namespace: "globex", foreign_id: "gcp-#{SecureRandom.hex(4)}",
-                               credentials_provider: { "type" => "workload_identity" },
-                               scopes: [ "https://www.googleapis.com/auth/cloud-platform" ],
-                               created_by: users(:globex_admin))
-    secret.rules.build(host: host, position: 0)
-    secret.save!
-    Grant.create!(principal: principals(:globex_user), gcp_auth_secret: secret, created_by: users(:globex_admin))
-    secret
-  end
-
-  def grant_role_oauth(secret = nil)
-    PrincipalRole.find_or_create_by!(principal: principals(:globex_user), role: roles(:globex_infra))
-    unless secret
-      secret = OauthTokenSecret.new(
-        namespace: "globex",
-        foreign_id: "oauth-#{SecureRandom.hex(4)}",
-        name: "gmail",
-        grant: "refresh_token",
-        token_endpoint: "https://oauth2.googleapis.com/token",
-        scopes: [ "https://www.googleapis.com/auth/gmail.readonly" ],
-        created_by: users(:globex_admin)
-      )
-      secret.sources.build(source_type: "1password", config: { "secret_ref" => "op://eng/gmail/refresh-token" },
-                           role: "refresh_token", role_kind: "credential_field")
-      secret.sources.build(source_type: "env", config: { "var" => "GMAIL_CLIENT_ID" },
-                           role: "client_id", role_kind: "credential_field")
-      secret.rules.build(host: "gmail.googleapis.com", http_methods: [ "GET" ], paths: [], position: 0)
-      secret.save!
-    end
-    Grant.create!(role: roles(:globex_infra), oauth_token_secret: secret, created_by: users(:globex_admin))
-    secret
-  end
-
-  test "a direct static secret suppresses a role-granted transform on the same host and header" do
-    grant_direct_static(host: "api.test.com", header: "Authorization")
-    grant_role_gcp(host: "api.test.com")
-    principal = principals(:globex_user)
-
-    assert_equal 1, principal.sync_secrets.length
-    assert_empty principal.sync_transforms, "the lower-priority role gcp_auth should be withheld"
-  end
-
-  test "credentials writing different headers on the same host both serve" do
-    grant_direct_static(host: "api.test.com", header: "X-Api-Key")
-    grant_role_gcp(host: "api.test.com")
-    principal = principals(:globex_user)
-
-    assert_equal 1, principal.sync_secrets.length
-    assert_equal 1, principal.sync_transforms.count { |t| t["name"] == "gcp_auth" }
-  end
-
-  test "credentials writing the same header on different hosts both serve" do
-    grant_direct_static(host: "api.test.com", header: "Authorization")
-    grant_role_gcp(host: "other.test.com")
-    principal = principals(:globex_user)
-
-    assert_equal 1, principal.sync_secrets.length
-    assert_equal 1, principal.sync_transforms.count { |t| t["name"] == "gcp_auth" }
-  end
-
-  test "same-priority credentials writing the same header on the same host both serve" do
-    grant_direct_static(host: "api.test.com", header: "Authorization")
-    grant_direct_gcp(host: "api.test.com")
-    principal = principals(:globex_user)
-
-    assert_equal 1, principal.sync_secrets.length
-    assert_equal 1, principal.sync_transforms.count { |t| t["name"] == "gcp_auth" }
-  end
-
-  test "a wildcard static secret suppresses a role-granted transform on a matching exact host" do
-    grant_direct_static(host: "*.test.com", header: "Authorization")
-    grant_role_gcp(host: "api.test.com")
-    principal = principals(:globex_user)
-
-    assert_equal 1, principal.sync_secrets.length
-    assert_empty principal.sync_transforms, "the lower-priority role gcp_auth should be withheld"
-  end
-
-  test "a wildcard googleapis static secret suppresses oauth token entries on matching exact hosts" do
-    grant_direct_static(host: "*.googleapis.com", header: "Authorization")
-    grant_role_oauth
-    principal = principals(:globex_user)
-
-    assert_equal 1, principal.sync_secrets.length
-    assert_empty principal.sync_transforms, "the lower-priority google oauth_token should be withheld"
-  end
-
-  test "a higher-priority wildcard googleapis static secret suppresses all google auth transforms" do
-    grant_direct_static(host: "*.googleapis.com", header: "Authorization")
-    grant_role_gcp(host: "bigquery.googleapis.com")
-    grant_role_oauth
-    grant_role_gcp(host: "*.googleapis.com")
-    principal = principals(:globex_user)
-
-    assert_equal 1, principal.sync_secrets.length
-    assert_empty principal.sync_transforms, "lower-priority google auth transforms should be withheld"
-  end
-
-  test "equal-priority google auth transforms all serve without a stronger wildcard static secret" do
-    grant_role_gcp(host: "bigquery.googleapis.com")
-    grant_role_oauth
-    grant_role_gcp(host: "*.googleapis.com")
-    principal = principals(:globex_user)
-
-    transforms = principal.sync_transforms
-    assert_equal 2, transforms.count { |t| t["name"] == "gcp_auth" }
-    assert_equal 1, transforms.count { |t| t["name"] == "oauth_token" }
-    assert_equal 1, transforms.find { |t| t["name"] == "oauth_token" }.dig("config", "tokens").length
-  end
-
-  test "a promoted role transform suppresses a lower-priority direct static secret" do
-    grant_direct_static(host: "api.test.com", header: "Authorization")
-    gcp = grant_role_gcp(host: "api.test.com")
-    # Promote the role grant above the direct grant (priority 100): now the
-    # transform wins the conflict and the static secret is withheld.
-    Grant.find_by!(gcp_auth_secret: gcp).update!(priority: 900)
-    principal = principals(:globex_user)
-
-    assert_empty principal.sync_secrets, "the now-lower-priority direct static secret should be withheld"
-    assert_equal 1, principal.sync_transforms.count { |t| t["name"] == "gcp_auth" }
-  end
-
-  test "effective_config redacts inline control_plane values by default but not when asked for live secrets" do
-    principal = principals(:acme_channel)
-    SecretSource.create!(source_type: "control_plane", secret: "s3cr3t",
-                         static_secret: static_secrets(:db_password_replace))
-
-    redacted = principal.effective_config.fetch("secrets").find { |s| s.dig("source", "type") == "control_plane" }
-    assert_equal "[redacted]", redacted.dig("source", "value")
-
-    live = principal.effective_config(redact_secrets: false)
-                    .fetch("secrets").find { |s| s.dig("source", "type") == "control_plane" }
-    assert_equal "s3cr3t", live.dig("source", "value")
-  end
-
   def jwt_payload(token)
     _header, payload, _signature = token.split(".")
     JSON.parse(Base64.urlsafe_decode64(payload))
-  end
-
-  def with_env(values)
-    previous = values.keys.to_h { |key| [ key, ENV[key] ] }
-    values.each do |key, value|
-      value.nil? ? ENV.delete(key) : ENV[key] = value
-    end
-    yield
-  ensure
-    previous.each do |key, value|
-      value.nil? ? ENV.delete(key) : ENV[key] = value
-    end
   end
 end

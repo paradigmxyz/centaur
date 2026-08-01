@@ -14,7 +14,7 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose};
 use centaur_session_runtime::{SessionRuntime, ToolHostCallInput};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};

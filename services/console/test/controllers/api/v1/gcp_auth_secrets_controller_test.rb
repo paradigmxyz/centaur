@@ -29,6 +29,35 @@ module Api
         assert_equal "storage-bot@acme.example", data["subject"]
       end
 
+      test "PUT with an unchanged document preserves keyfile and rule records" do
+        secret = gcp_auth_secrets(:acme_gcs_keyfile)
+        source_id = secret.keyfile_source.id
+        rule_ids = secret.rules.ids
+
+        get api_v1_gcp_auth_secret_url(id: secret.oid), headers: auth_headers
+        data = json_body.fetch("data").except("id", "created_at", "updated_at")
+        put api_v1_gcp_auth_secret_url(id: secret.oid), params: { data: data }.to_json, headers: auth_headers
+
+        assert_response :ok
+        secret.reload
+        assert_equal source_id, secret.keyfile_source.id
+        assert_equal rule_ids, secret.rules.ids
+      end
+
+      test "PUT with an unchanged credentials_provider document is not rewritten" do
+        secret = gcp_auth_secrets(:acme_bigquery)
+        updated_at = secret.updated_at
+
+        get api_v1_gcp_auth_secret_url(id: secret.oid), headers: auth_headers
+        data = json_body.fetch("data").except("id", "created_at", "updated_at")
+        put api_v1_gcp_auth_secret_url(id: secret.oid), params: { data: data }.to_json, headers: auth_headers
+
+        assert_response :ok
+        secret.reload
+        assert_nil secret.keyfile_source
+        assert_equal updated_at, secret.updated_at
+      end
+
       test "GET lookup finds a gcp_auth secret by namespace and foreign_id" do
         secret = gcp_auth_secrets(:acme_gcs_keyfile)
         get lookup_api_v1_gcp_auth_secrets_url(namespace: secret.namespace, foreign_id: secret.foreign_id),

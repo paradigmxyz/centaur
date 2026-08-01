@@ -69,6 +69,8 @@ class RequestRpc(FakeRpc):
             }
         if message_type == "ctx.sleep":
             return {"slept": True}
+        if message_type == "ctx.event.wait":
+            return {"approved": True}
         raise AssertionError(f"unexpected request {payload}")
 
 
@@ -131,6 +133,34 @@ class WorkflowHostTests(unittest.TestCase):
         self.assertEqual(
             rpc.requests,
             [{"type": "ctx.sleep", "step": "pause", "duration_seconds": 2.5}],
+        )
+
+    def test_wait_for_event_sends_durable_event_identity_and_timeout(self) -> None:
+        host = load_workflow_host()
+        rpc = RequestRpc()
+        ctx = host.WorkflowContext(
+            rpc,
+            run_id="run-123",
+            task_id="task-456",
+            workflow_name="sample",
+        )
+
+        result = asyncio.run(
+            ctx.wait_for_event("approval", "review", "change:42", timeout=30)
+        )
+
+        self.assertEqual(result, {"approved": True})
+        self.assertEqual(
+            rpc.requests,
+            [
+                {
+                    "type": "ctx.event.wait",
+                    "step": "approval",
+                    "event_type": "review",
+                    "correlation_id": "change:42",
+                    "timeout_seconds": 30.0,
+                }
+            ],
         )
 
     def test_tools_proxy_calls_tool_manager(self) -> None:
@@ -385,6 +415,21 @@ class WorkflowHostTests(unittest.TestCase):
             registered.agent_defaults,
             {"model": "claude-opus-4-8", "reasoning": "high"},
         )
+
+    def test_load_workflow_file_reads_workflow_principal(self) -> None:
+        host = load_workflow_host()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "principal_workflow.py"
+            path.write_text(
+                "WORKFLOW_NAME = 'principal_workflow'\n"
+                "WORKFLOW_PRINCIPAL = True\n"
+                "def handler(inp, ctx):\n"
+                "    return None\n"
+            )
+            registered = host.load_workflow_file(path)
+
+        assert registered is not None
+        self.assertEqual(host.normalize_principal(registered), True)
 
 
 if __name__ == "__main__":

@@ -712,6 +712,47 @@ describe('forwardToSessionApi harness restart', () => {
     expect('on_harness_conflict' in (create?.body as object)).toBe(false)
   })
 
+  test('reports the harness resolved by api-rs', async () => {
+    const { fetchFn, requests } = fakeApi({
+      createSession: [
+        {
+          body: {
+            harness_switched: false,
+            harness_type: 'nanocodex',
+            harness_assignment: {
+              experiment: 'codex_nanocodex_ab',
+              requested_harness: 'codex',
+              cohort: 'nanocodex',
+              rollout_percent: 50
+            }
+          },
+          status: 200
+        }
+      ]
+    })
+    let resolvedHarness: string | undefined
+    let resolvedExperiment: string | undefined
+
+    await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hi')), {
+      onSessionCreated: async outcome => {
+        resolvedHarness = outcome.harnessType
+        resolvedExperiment = outcome.harnessAssignment?.experiment
+      }
+    })
+
+    expect(resolvedHarness).toBe('nanocodex')
+    expect(resolvedExperiment).toBe('codex_nanocodex_ab')
+    expect(executeBody(requests).metadata).toMatchObject({
+      harness_type: 'nanocodex',
+      harness_assignment: {
+        experiment: 'codex_nanocodex_ab',
+        requested_harness: 'codex',
+        cohort: 'nanocodex',
+        rollout_percent: 50
+      }
+    })
+  })
+
   test('harness_switched response fires onSessionRestarted and prepends the preamble', async () => {
     const { fetchFn, requests } = fakeApi({
       createSession: [{ body: { ok: true, harness_switched: true }, status: 200 }]
@@ -811,19 +852,21 @@ describe('session principal display name', () => {
     }
   }
 
-  function createBody(requests: RecordedRequest[]): {
-    metadata?: {
-      slack_conversation_name?: string
-      slack_team_id?: string
-      slack_user_email?: string
+	  function createBody(requests: RecordedRequest[]): {
+	    metadata?: {
+	      slack_channel_id?: string
+	      slack_conversation_name?: string
+	      slack_team_id?: string
+	      slack_user_email?: string
       slack_user_id?: string
     }
-  } {
-    return (requests.find(request => request.url.endsWith('.000100'))?.body ?? {}) as {
-      metadata?: {
-        slack_conversation_name?: string
-        slack_team_id?: string
-        slack_user_email?: string
+	  } {
+	    return (requests.find(request => request.url.endsWith('.000100'))?.body ?? {}) as {
+	      metadata?: {
+	        slack_channel_id?: string
+	        slack_conversation_name?: string
+	        slack_team_id?: string
+	        slack_user_email?: string
         slack_user_id?: string
       }
     }
@@ -933,9 +976,10 @@ describe('session principal display name', () => {
       async () => {
         await forwardToSessionApi(slackOptions(fetchFn), forwardInput(apiMessage('hi')))
       }
-    )
-    expect(createBody(requests).metadata?.slack_conversation_name).toBe('eng-oncall')
-  })
+	    )
+	    expect(createBody(requests).metadata?.slack_conversation_name).toBe('eng-oncall')
+	    expect(createBody(requests).metadata?.slack_channel_id).toBe('C1')
+	  })
 
   test('continues creating the session when the channel lookup never settles', async () => {
     const { fetchFn, requests } = fakeApi()
@@ -981,9 +1025,10 @@ describe('session principal display name', () => {
       async () => {
         await forwardToSessionApi(slackOptions(fetchFn), forwardInput(dm))
       }
-    )
-    expect(createBody(requests).metadata?.slack_conversation_name).toBe('Ada Lovelace')
-    expect(createBody(requests).metadata?.slack_team_id).toBe('T1')
+	    )
+	    expect(createBody(requests).metadata?.slack_conversation_name).toBe('Ada Lovelace')
+	    expect(createBody(requests).metadata?.slack_channel_id).toBe('D9')
+	    expect(createBody(requests).metadata?.slack_team_id).toBe('T1')
     expect(createBody(requests).metadata?.slack_user_email).toBe('ada@example.com')
     expect(createBody(requests).metadata?.slack_user_id).toBe('U1')
   })

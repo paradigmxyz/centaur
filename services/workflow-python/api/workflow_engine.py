@@ -101,6 +101,25 @@ class WorkflowContext:
             }
         )
 
+    async def wait_for_event(
+        self,
+        name: str,
+        event_type: str,
+        correlation_id: str,
+        *,
+        timeout: dt.timedelta | int | float | None = None,
+    ) -> Any:
+        """Suspend until the matching durable workflow event is delivered."""
+        request: dict[str, Any] = {
+            "type": "ctx.event.wait",
+            "step": name,
+            "event_type": event_type,
+            "correlation_id": correlation_id,
+        }
+        if timeout is not None:
+            request["timeout_seconds"] = duration_seconds(timeout)
+        return await self._rpc.request(request)
+
     async def agent_turn(self, text: str | None = None, **kwargs: Any) -> Any:
         # Per-workflow AGENT_DEFAULTS (model / provider / reasoning / harness,
         # ...) form the base; explicit per-call kwargs override them key by key.

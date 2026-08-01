@@ -184,9 +184,8 @@ console:
   # most importantly the broker-credential OAuth refresh loop that mints and
   # refreshes the access tokens delivered inline via `token_broker` sources
   # (e.g. the `openai-codex` brokered token). The web Puma pod runs no worker, so
-  # without this those jobs never execute. Active only when console.enabled.
+  # without this those jobs never execute. Active when console.enabled.
   worker:
-    enabled: true
     replicaCount: 1
     resources: {}
 
@@ -262,9 +261,10 @@ sandbox:
   # their session's harness via container args; the sandbox image CMD only
   # matters for containers started outside api-rs.
   harnessEngine: codex
-  # Copied into every sandbox pod. CLAUDE_MODEL / CODEX_MODEL set here (the
-  # harness default-model overrides) are also mirrored into slackbotv2 and the
-  # Console so their model displays match what sandboxes actually run.
+  # Copied into every sandbox pod. CLAUDE_MODEL / CODEX_MODEL set here are also
+  # mirrored into slackbotv2 and the Console; CODEX_MODEL_REASONING_EFFORT is
+  # mirrored into slackbotv2. This keeps Slack's model/thinking footer aligned
+  # with the policy the sandbox actually runs.
   extraEnv: {}
   stateVolume:
     enabled: false
@@ -350,6 +350,10 @@ apiRs:
     tag: latest
     pullPolicy: Always
   port: 8080
+  # Sticky percentage of session requests for Codex assigned to Nanocodex.
+  # The API hashes the thread key once and persists the resolved harness on the
+  # session. Set to 0 to keep new Codex requests on Codex.
+  codexNanocodexRolloutPercent: 50
   # Public/local MCP endpoint advertised through OAuth protected-resource
   # metadata. Empty falls back to slackbotv2.mcpPublicUrl.
   mcpPublicUrl: ""
@@ -372,6 +376,7 @@ apiRs:
   # Workflow enablement policy. Production defaults to all workflows enabled.
   # Set workflowEnableMode: allowlist in staging and list allowed workflow names
   # in workflowAllowedNames as a comma/whitespace-separated string.
+  workflowHostSandbox: true
   workflowEnableMode: all
   workflowAllowedNames: ""
   # Scheduled ETL workflow configuration. The chart renders these into api-rs
@@ -470,6 +475,9 @@ slackbotv2:
     pullPolicy: Always
   userName: centaur
   assistantStatus: ""
+  # Join newly-created public channels after subscribed channel_created events.
+  # Requires the Slack app to grant channels:read and channels:join.
+  autoJoinCreatedChannels: false
   # Public/local MCP endpoint shown in MCP SSO setup messages. The default
   # assumes users connect through `kubectl port-forward ... 3000:8080`.
   mcpPublicUrl: "http://localhost:3000"
@@ -478,7 +486,7 @@ slackbotv2:
   # Per-channel default harness / model / provider / reasoning, keyed by Slack
   # conversation id (the C…/G…/D… id). Each value is an object of optional
   # harness / model / provider / reasoning fields, using the same vocabulary as
-  # the inline Slack flags (harness: claude|codex|amp, provider: bedrock|meta,
+  # the inline Slack flags (harness: claude|codex|nanocodex|amp, provider: bedrock|meta,
   # model accepts Claude aliases like opus). A model is only meaningful within a
   # harness, so name the harness alongside it. Applied when a message in that
   # channel carries no explicit/sticky per-thread flag, below such a flag and
@@ -489,6 +497,18 @@ slackbotv2:
   #     C0ENG: { harness: claude, model: opus, reasoning: high }
   #     C0TRIAGE: { reasoning: low }
   channelDefaults: {}
+  # Message overrides strategy for Slack message text. "flags" keeps the legacy
+  # deterministic --model/--claude/-rsn strategy. "llm" asks a small model for
+  # normalized overrides, allowing natural language requests such as
+  # "use max effort and the sol model". In llm mode,
+  # set OPENAI_API_KEY in the shared secret or provide
+  # SLACKBOTV2_MESSAGE_OVERRIDES_OPENAI_API_KEY via extraEnv.
+  messageOverridesStrategy:
+    mode: flags
+    model: gpt-5.4-nano
+    openaiBaseUrl: https://api.openai.com/v1
+    timeoutMs: 1500
+    maxOutputTokens: 300
   metrics:
     # slackbotv2 serves Prometheus text metrics at /metrics. This flag only
     # controls scrape annotations for Prometheus/VictoriaMetrics-style discovery.

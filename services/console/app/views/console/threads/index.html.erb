@@ -94,7 +94,7 @@
         <% end %>
       </div>
 
-      <% if @selected_session && thread_owned?(@selected_session) %>
+      <% if @selected_session && thread_writable?(@selected_session) %>
         <div class="console-composer-dock">
           <div class="console-thread-content">
             <%= render "console/threads/composer", mode: :thread, session: @selected_session %>

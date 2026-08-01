@@ -2,7 +2,7 @@
 # and injects them as a bearer header on matching requests. Each credential
 # field (client_id, refresh_token, private_key, ...) is its own secret source,
 # as are any token-endpoint headers. The proxy carries a list of these entries
-# under one oauth_token transform; Proxy#sync_transforms bundles all of a
+# under one oauth_token transform; snapshot assembly bundles all of a
 # proxy's granted entries together.
 class OauthTokenSecret < ApplicationRecord
   oid_prefix "ots"
@@ -48,7 +48,7 @@ class OauthTokenSecret < ApplicationRecord
 
   # oauth_token injects the minted bearer into its configured header, defaulting
   # to Authorization (the proxy's default when none is set); used for cross-type
-  # conflict detection in Principal#served_credentials.
+  # conflict detection during snapshot assembly.
   def proxy_conflict_targets
     [ "header:#{(header.presence || "Authorization").downcase}" ]
   end

@@ -1,45 +1,13 @@
 use std::{
     env,
     error::Error,
+    str::FromStr,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use sqlx::{Connection, Executor, PgConnection, Row};
+use sqlx::{Connection, Executor, PgConnection, Row, postgres::PgConnectOptions};
 
-const SLACK_CONTEXT_RLS_SQL: &str = include_str!("../migrations/0016_slack_context_rls.sql");
-const SLACK_ATTACHMENTS_RLS_SQL: &str =
-    include_str!("../migrations/0017_slack_sync_message_attachments.sql");
-const SLACK_CONTEXT_ADMIN_CHANNELS_SQL: &str =
-    include_str!("../migrations/0018_slack_context_rls_admin_channels.sql");
-const CENTAUR_READONLY_ROLE_ONLY_SQL: &str =
-    include_str!("../migrations/0020_centaur_readonly_role_only.sql");
-const ETL_CONTEXT_RLS_SQL: &str = include_str!("../migrations/0021_etl_context_rls.sql");
-const DROP_SLACK_CONTEXT_ADMIN_CHANNELS_SQL: &str =
-    include_str!("../migrations/0022_drop_slack_context_rls_admin_channels.sql");
-const CENTAUR_READONLY_RLS_POLICIES_SQL: &str =
-    include_str!("../migrations/0023_centaur_readonly_rls_policies.sql");
-const SLACK_PRIVATE_CHANNELS_SQL: &str =
-    include_str!("../migrations/0038_slack_private_channels.sql");
-
-const RLS_TABLES: &[&str] = &[
-    "slack_sync_channels",
-    "slack_sync_users",
-    "slack_sync_messages",
-    "slack_sync_message_attachments",
-    "company_context_documents",
-    "google_drive_sync_runs",
-    "google_drive_sync_files",
-    "google_drive_sync_checkpoints",
-    "google_calendar_sync_runs",
-    "google_calendar_sync_calendars",
-    "google_calendar_sync_events",
-    "google_calendar_sync_checkpoints",
-    "linear_sync_runs",
-    "linear_sync_projects",
-    "linear_sync_issues",
-    "linear_sync_comments",
-    "linear_sync_checkpoints",
-];
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 #[derive(Debug, PartialEq, Eq)]
 struct VisibleRows {
@@ -62,32 +30,42 @@ struct VisibleRows {
     linear_checkpoints: i64,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct CompanyContextSearchRows {
+    company_context_docs: Vec<String>,
+    google_docs: Vec<String>,
+    granola_docs: Vec<String>,
+    slack_private_docs: Vec<String>,
+    slack_private_conversation_docs: Vec<String>,
+}
+
 #[tokio::test]
 async fn etl_context_rls_enforces_channel_visibility() -> Result<(), Box<dyn Error>> {
     let Some(database_url) = test_database_url() else {
         return Ok(());
     };
-    let mut conn = PgConnection::connect(&database_url).await?;
-    let schema = TestSchema::create(&mut conn).await?;
+    let mut admin_conn = PgConnection::connect(&database_url).await?;
+    let database = TestDatabase::create(&mut admin_conn, &database_url).await?;
+    let mut conn = match PgConnection::connect_with(&database.options).await {
+        Ok(conn) => conn,
+        Err(err) => {
+            database.drop(&mut admin_conn).await?;
+            return Err(err.into());
+        }
+    };
 
-    let result = run_rls_assertions(&mut conn, &schema.name).await;
-    schema.drop(&mut conn).await?;
-    result
+    let result = run_rls_assertions(&mut conn).await;
+    let close_result = conn.close().await;
+    let drop_result = database.drop(&mut admin_conn).await;
+
+    result?;
+    close_result?;
+    drop_result?;
+    Ok(())
 }
 
-async fn run_rls_assertions(conn: &mut PgConnection, schema: &str) -> Result<(), Box<dyn Error>> {
-    set_search_path(conn, schema).await?;
-    create_minimal_etl_tables(conn).await?;
-    execute_migration(conn, SLACK_CONTEXT_RLS_SQL).await?;
-    execute_migration(conn, SLACK_ATTACHMENTS_RLS_SQL).await?;
-    execute_migration(conn, SLACK_CONTEXT_ADMIN_CHANNELS_SQL).await?;
-    create_minimal_non_slack_etl_tables(conn).await?;
-    execute_migration(conn, CENTAUR_READONLY_ROLE_ONLY_SQL).await?;
-    execute_migration(conn, ETL_CONTEXT_RLS_SQL).await?;
-    execute_migration(conn, DROP_SLACK_CONTEXT_ADMIN_CHANNELS_SQL).await?;
-    execute_migration(conn, CENTAUR_READONLY_RLS_POLICIES_SQL).await?;
-    execute_migration(conn, SLACK_PRIVATE_CHANNELS_SQL).await?;
-    grant_schema_usage(conn, schema).await?;
+async fn run_rls_assertions(conn: &mut PgConnection) -> Result<(), Box<dyn Error>> {
+    MIGRATOR.run(&mut *conn).await?;
 
     assert_rls_enabled(conn).await?;
     assert_expected_policies(conn).await?;
@@ -95,7 +73,7 @@ async fn run_rls_assertions(conn: &mut PgConnection, schema: &str) -> Result<(),
 
     insert_fixture_rows(conn).await?;
 
-    let c_alpha = visible_rows(conn, schema, "centaur_slack_reader", Some("C_ALPHA")).await?;
+    let c_alpha = visible_rows(conn, "centaur_slack_reader", Some("C_ALPHA")).await?;
     assert_eq!(
         c_alpha,
         VisibleRows {
@@ -119,7 +97,7 @@ async fn run_rls_assertions(conn: &mut PgConnection, schema: &str) -> Result<(),
         }
     );
 
-    let c_beta = visible_rows(conn, schema, "centaur_slack_reader", Some("C_BETA")).await?;
+    let c_beta = visible_rows(conn, "centaur_slack_reader", Some("C_BETA")).await?;
     assert_eq!(
         c_beta,
         VisibleRows {
@@ -143,15 +121,14 @@ async fn run_rls_assertions(conn: &mut PgConnection, schema: &str) -> Result<(),
         }
     );
 
-    let dm_or_missing_channel =
-        visible_rows(conn, schema, "centaur_slack_reader", Some("")).await?;
+    let dm_or_missing_channel = visible_rows(conn, "centaur_slack_reader", Some("")).await?;
     assert_eq!(dm_or_missing_channel, empty_visible_rows());
 
-    let unset_channel = visible_rows(conn, schema, "centaur_slack_reader", None).await?;
+    let unset_channel = visible_rows(conn, "centaur_slack_reader", None).await?;
     assert_eq!(unset_channel, empty_visible_rows());
 
     let formerly_admin_channel =
-        visible_rows(conn, schema, "centaur_slack_reader", Some("C_ADMIN")).await?;
+        visible_rows(conn, "centaur_slack_reader", Some("C_ADMIN")).await?;
     assert_eq!(
         formerly_admin_channel,
         VisibleRows {
@@ -175,12 +152,61 @@ async fn run_rls_assertions(conn: &mut PgConnection, schema: &str) -> Result<(),
         }
     );
 
-    let readonly_role = visible_rows(conn, schema, "centaur_readonly", None).await?;
+    let readonly_role = visible_rows(conn, "centaur_readonly", None).await?;
     assert_eq!(readonly_role, public_visible_rows());
 
     let readonly_private_channel =
-        visible_rows(conn, schema, "centaur_readonly", Some("G_PRIVATE")).await?;
+        visible_rows(conn, "centaur_readonly", Some("G_PRIVATE")).await?;
     assert_eq!(readonly_private_channel, public_and_private_visible_rows());
+
+    let company_context_public = company_context_docs(conn, None, r#"[]"#, true).await?;
+    assert_eq!(
+        company_context_public,
+        vec!["doc_slack_alpha".to_owned(), "doc_slack_beta".to_owned(),]
+    );
+
+    let company_context_private_history =
+        company_context_docs(conn, None, r#"["G_PRIVATE"]"#, true).await?;
+    assert_eq!(
+        company_context_private_history,
+        vec![
+            "doc_slack_alpha".to_owned(),
+            "doc_slack_beta".to_owned(),
+            "doc_slack_private".to_owned(),
+        ]
+    );
+
+    let company_context_history_no_public =
+        company_context_docs(conn, None, r#"["C_ALPHA"]"#, false).await?;
+    assert_eq!(
+        company_context_history_no_public,
+        vec!["doc_slack_alpha".to_owned()]
+    );
+
+    let company_context_current_channel =
+        company_context_docs(conn, Some("C_ALPHA"), r#"[]"#, false).await?;
+    assert_eq!(
+        company_context_current_channel,
+        vec!["doc_slack_alpha".to_owned()]
+    );
+
+    let search_rows = company_context_search_rows(conn).await?;
+    assert_eq!(
+        search_rows,
+        CompanyContextSearchRows {
+            company_context_docs: vec![
+                "doc_slack_alpha".to_owned(),
+                "doc_slack_beta".to_owned(),
+                "doc_slack_private".to_owned(),
+            ],
+            google_docs: vec!["gdocs_doc".to_owned()],
+            granola_docs: vec!["granola:note:granola_note".to_owned()],
+            slack_private_docs: vec!["slack_dm:T_HOME:D_VISIBLE:2000.000001".to_owned()],
+            slack_private_conversation_docs: vec![
+                "slack_dm_conversation:T_HOME:D_VISIBLE".to_owned()
+            ],
+        }
+    );
 
     Ok(())
 }
@@ -196,137 +222,47 @@ fn test_database_url() -> Option<String> {
         .ok()
 }
 
-struct TestSchema {
+struct TestDatabase {
     name: String,
+    options: PgConnectOptions,
 }
 
-impl TestSchema {
-    async fn create(conn: &mut PgConnection) -> Result<Self, Box<dyn Error>> {
+impl TestDatabase {
+    async fn create(conn: &mut PgConnection, database_url: &str) -> Result<Self, Box<dyn Error>> {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-        let name = format!("etl_rls_{}_{}", std::process::id(), nanos);
-        conn.execute(format!(r#"create schema "{}""#, name).as_str())
+        let name = format!("centaur_etl_rls_{}_{}", std::process::id(), nanos);
+        conn.execute(format!(r#"create database "{}""#, name).as_str())
             .await?;
-        Ok(Self { name })
+        let options = PgConnectOptions::from_str(database_url)?.database(&name);
+        Ok(Self { name, options })
     }
 
-    async fn drop(self, conn: &mut PgConnection) -> Result<(), Box<dyn Error>> {
-        conn.execute(format!(r#"drop schema if exists "{}" cascade"#, self.name).as_str())
+    async fn drop(&self, conn: &mut PgConnection) -> Result<(), sqlx::Error> {
+        conn.execute(format!(r#"drop database if exists "{}""#, self.name).as_str())
             .await?;
         Ok(())
     }
 }
 
-async fn set_search_path(conn: &mut PgConnection, schema: &str) -> Result<(), sqlx::Error> {
-    conn.execute(format!(r#"set search_path to "{}", public"#, schema).as_str())
-        .await?;
-    Ok(())
-}
-
-async fn grant_schema_usage(conn: &mut PgConnection, schema: &str) -> Result<(), sqlx::Error> {
-    conn.execute(
-        format!(
-            r#"grant usage on schema "{}" to centaur_slack_reader, centaur_readonly"#,
-            schema
-        )
-        .as_str(),
-    )
-    .await?;
-    conn.execute(
-        format!(
-            r#"grant select on all tables in schema "{}" to centaur_readonly"#,
-            schema
-        )
-        .as_str(),
-    )
-    .await?;
-    Ok(())
-}
-
-async fn execute_migration(conn: &mut PgConnection, sql: &str) -> Result<(), sqlx::Error> {
-    sqlx::raw_sql(sql).execute(&mut *conn).await?;
-    Ok(())
-}
-
-async fn create_minimal_etl_tables(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
-    sqlx::raw_sql(
-        r#"
-        create table slack_sync_channels (
-            channel_id text primary key,
-            channel_name text not null default ''
-        );
-
-        create table slack_sync_users (
-            user_id text primary key,
-            user_name text not null default ''
-        );
-
-        create table slack_sync_runs (
-            run_id text primary key
-        );
-
-        create table slack_sync_messages (
-            channel_id text not null references slack_sync_channels(channel_id) on delete cascade,
-            message_ts text not null,
-            user_id text not null default '',
-            text text not null default '',
-            primary key (channel_id, message_ts)
-        );
-
-        create table company_context_documents (
-            document_id text primary key,
-            source text not null,
-            source_type text not null,
-            metadata jsonb not null default '{}'::jsonb
-        );
-        "#,
-    )
-    .execute(&mut *conn)
-    .await?;
-    Ok(())
-}
-
-async fn create_minimal_non_slack_etl_tables(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
-    sqlx::raw_sql(
-        r#"
-        create table google_drive_sync_runs (run_id text primary key);
-        create table google_drive_sync_files (file_id text primary key);
-        create table google_drive_sync_checkpoints (scope_id text primary key);
-
-        create table google_calendar_sync_runs (run_id text primary key);
-        create table google_calendar_sync_calendars (calendar_id text primary key);
-        create table google_calendar_sync_events (
-            calendar_id text not null,
-            event_id text not null,
-            primary key (calendar_id, event_id)
-        );
-        create table google_calendar_sync_checkpoints (calendar_id text primary key);
-
-        create table linear_sync_runs (run_id text primary key);
-        create table linear_sync_projects (project_id text primary key);
-        create table linear_sync_issues (issue_id text primary key);
-        create table linear_sync_comments (comment_id text primary key);
-        create table linear_sync_checkpoints (scope_id text primary key);
-        "#,
-    )
-    .execute(&mut *conn)
-    .await?;
-    Ok(())
-}
-
 async fn assert_rls_enabled(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
-    for table in RLS_TABLES {
-        let enabled: bool = sqlx::query_scalar(
-            r#"
-            select relrowsecurity
-            from pg_class
-            where oid = to_regclass($1)::oid
-            "#,
-        )
-        .bind(*table)
-        .fetch_one(&mut *conn)
-        .await?;
-        assert!(enabled, "expected row level security on {table}");
-    }
+    let tables_without_rls: Vec<String> = sqlx::query_scalar(
+        r#"
+        select distinct policies.tablename
+        from pg_policies policies
+        join pg_class tables
+          on tables.oid = to_regclass(quote_ident(policies.schemaname) || '.' || quote_ident(policies.tablename))
+        where policies.schemaname = current_schema()
+          and not tables.relrowsecurity
+        order by policies.tablename
+        "#,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    assert!(
+        tables_without_rls.is_empty(),
+        "expected row level security on tables with policies: {tables_without_rls:?}"
+    );
     Ok(())
 }
 
@@ -354,15 +290,6 @@ async fn assert_expected_policies(conn: &mut PgConnection) -> Result<(), sqlx::E
         );
     }
 
-    for table in RLS_TABLES {
-        let expected = (*table, format!("centaur_readonly_{table}_select"));
-        assert!(
-            policies
-                .iter()
-                .any(|(table, policy)| table == expected.0 && policy == &expected.1),
-            "missing centaur_readonly RLS policy on {table}"
-        );
-    }
     Ok(())
 }
 
@@ -388,6 +315,31 @@ fn expected_policies() -> Vec<(String, String)> {
         (
             "company_context_documents",
             "centaur_readonly_company_context_documents_select",
+        ),
+        (
+            "company_context_documents",
+            "centaur_cc_reader_documents_select",
+        ),
+        ("slack_sync_channels", "centaur_cc_reader_channels_select"),
+        (
+            "granola_context_documents",
+            "centaur_cc_reader_granola_documents_select",
+        ),
+        (
+            "slack_private_context_documents",
+            "centaur_cc_reader_private_docs_select",
+        ),
+        (
+            "slack_private_conversation_context_documents",
+            "centaur_cc_reader_private_conversation_docs_select",
+        ),
+        (
+            "google_docs_sync_file_observations",
+            "centaur_cc_reader_gdocs_observations_select",
+        ),
+        (
+            "google_docs_context_documents",
+            "centaur_cc_reader_gdocs_documents_select",
         ),
         (
             "google_drive_sync_runs",
@@ -558,30 +510,68 @@ async fn insert_fixture_rows(conn: &mut PgConnection) -> Result<(), sqlx::Error>
             ('C_BETA', '1000.000002', 'F_BETA', 'beta.pdf'),
             ('G_PRIVATE', '1000.000003', 'F_PRIVATE', 'private.pdf');
 
-        insert into company_context_documents (document_id, source, source_type, metadata) values
-            ('doc_slack_alpha', 'slack', 'slack_thread', '{"channel_id": "C_ALPHA"}'),
-            ('doc_slack_beta', 'slack', 'slack_thread', '{"channel_id": "C_BETA"}'),
-            ('doc_slack_private', 'slack', 'slack_thread', '{"channel_id": "G_PRIVATE"}'),
-            ('doc_slack_unknown_channel', 'slack', 'slack_thread', '{}'),
-            ('doc_gdrive', 'google_drive', 'google_doc', '{}'),
-            ('doc_gcal', 'google_calendar', 'calendar_event', '{}'),
-            ('doc_linear', 'linear', 'linear_issue', '{}');
+        insert into company_context_documents
+            (document_id, source, source_type, source_document_id, metadata)
+        values
+            ('doc_slack_alpha', 'slack', 'slack_thread', 'C_ALPHA:1000.000001', '{"channel_id": "C_ALPHA"}'),
+            ('doc_slack_beta', 'slack', 'slack_thread', 'C_BETA:1000.000002', '{"channel_id": "C_BETA"}'),
+            ('doc_slack_private', 'slack', 'slack_thread', 'G_PRIVATE:1000.000003', '{"channel_id": "G_PRIVATE"}'),
+            ('doc_slack_unknown_channel', 'slack', 'slack_thread', 'unknown', '{}'),
+            ('doc_gdrive', 'google_drive', 'google_doc', 'gdrive_file', '{}'),
+            ('doc_gcal', 'google_calendar', 'calendar_event', 'gcal_event', '{}'),
+            ('doc_linear', 'linear', 'linear_issue', 'linear_issue', '{}');
 
-        insert into google_drive_sync_runs (run_id) values ('gdrive_run');
+        insert into google_drive_sync_runs (run_id, status) values ('gdrive_run', 'succeeded');
         insert into google_drive_sync_files (file_id) values ('gdrive_file');
         insert into google_drive_sync_checkpoints (scope_id) values ('gdrive_scope');
 
-        insert into google_calendar_sync_runs (run_id) values ('gcal_run');
+        insert into google_calendar_sync_runs (run_id, status) values ('gcal_run', 'succeeded');
         insert into google_calendar_sync_calendars (calendar_id) values ('gcal_calendar');
         insert into google_calendar_sync_events (calendar_id, event_id)
             values ('gcal_calendar', 'gcal_event');
         insert into google_calendar_sync_checkpoints (calendar_id) values ('gcal_calendar');
 
-        insert into linear_sync_runs (run_id) values ('linear_run');
+        insert into linear_sync_runs (run_id, status) values ('linear_run', 'succeeded');
         insert into linear_sync_projects (project_id) values ('linear_project');
         insert into linear_sync_issues (issue_id) values ('linear_issue');
         insert into linear_sync_comments (comment_id) values ('linear_comment');
         insert into linear_sync_checkpoints (scope_id) values ('linear_scope');
+
+        insert into google_docs_sync_runs
+            (run_id, status, broker_credential_id, provider_subject)
+        values
+            ('gdocs_run', 'succeeded', 'gdocs_credential', 'google_subject');
+        insert into google_docs_sync_files (file_id, source_run_id)
+        values ('gdocs_file', 'gdocs_run');
+        insert into google_docs_sync_file_observations
+            (broker_credential_id, observed_file_id, file_id, provider_subject, active)
+        values
+            ('gdocs_credential', 'gdocs_observed_file', 'gdocs_file', 'google_subject', true);
+        insert into google_docs_context_documents
+            (document_id, file_id, chunk_id, title, body)
+        values
+            ('gdocs_doc', 'gdocs_file', 'chunk_1', 'Google Doc', 'Google Doc body');
+
+        insert into granola_sync_notes
+            (note_id, title, access_emails)
+        values
+            ('granola_note', 'Granola note', array['viewer@example.com']);
+
+        insert into slack_private_sync_conversations
+            (home_team_id, conversation_id, conversation_type)
+        values
+            ('T_HOME', 'D_VISIBLE', 'im'),
+            ('T_HOME', 'D_HIDDEN', 'im');
+        insert into slack_private_sync_conversation_members
+            (home_team_id, conversation_id, user_id, is_current_member)
+        values
+            ('T_HOME', 'D_VISIBLE', 'U_VIEWER', true),
+            ('T_HOME', 'D_HIDDEN', 'U_OTHER', true);
+        insert into slack_private_sync_messages
+            (home_team_id, conversation_id, message_ts, user_id, text)
+        values
+            ('T_HOME', 'D_VISIBLE', '2000.000001', 'U_VIEWER', 'visible dm'),
+            ('T_HOME', 'D_HIDDEN', '2000.000002', 'U_OTHER', 'hidden dm');
         "#,
     )
     .execute(&mut *conn)
@@ -591,13 +581,11 @@ async fn insert_fixture_rows(conn: &mut PgConnection) -> Result<(), sqlx::Error>
 
 async fn visible_rows(
     conn: &mut PgConnection,
-    schema: &str,
     role: &str,
     slack_channel_id: Option<&str>,
 ) -> Result<VisibleRows, sqlx::Error> {
     let mut tx = conn.begin().await?;
-    tx.execute(format!(r#"set local search_path to "{}", public"#, schema).as_str())
-        .await?;
+    tx.execute("set local search_path to public").await?;
     tx.execute(format!("set role {role}").as_str()).await?;
     if let Some(channel_id) = slack_channel_id {
         sqlx::query("select set_config('centaur.slack_channel_id', $1, true)")
@@ -644,6 +632,109 @@ async fn visible_rows(
         linear_issues: count(&mut tx, "linear_sync_issues").await?,
         linear_comments: count(&mut tx, "linear_sync_comments").await?,
         linear_checkpoints: count(&mut tx, "linear_sync_checkpoints").await?,
+    };
+
+    tx.execute("reset role").await?;
+    tx.rollback().await?;
+    Ok(rows)
+}
+
+async fn company_context_docs(
+    conn: &mut PgConnection,
+    slack_channel_id: Option<&str>,
+    slack_history_channel_ids: &str,
+    include_public_slack: bool,
+) -> Result<Vec<String>, sqlx::Error> {
+    let mut tx = conn.begin().await?;
+    tx.execute("set local search_path to public").await?;
+    tx.execute("set role centaur_company_context_reader")
+        .await?;
+    if let Some(channel_id) = slack_channel_id {
+        sqlx::query("select set_config('centaur.slack_channel_id', $1, true)")
+            .bind(channel_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    sqlx::query("select set_config('centaur.slack_history_channel_ids', $1, true)")
+        .bind(slack_history_channel_ids)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("select set_config('centaur.slack_include_public', $1, true)")
+        .bind(if include_public_slack {
+            "true"
+        } else {
+            "false"
+        })
+        .execute(&mut *tx)
+        .await?;
+
+    let rows = text_array(
+        &mut tx,
+        "select coalesce(array_agg(document_id order by document_id), '{}') from company_context_documents",
+    )
+    .await?;
+
+    tx.execute("reset role").await?;
+    tx.rollback().await?;
+    Ok(rows)
+}
+
+async fn company_context_search_rows(
+    conn: &mut PgConnection,
+) -> Result<CompanyContextSearchRows, sqlx::Error> {
+    let mut tx = conn.begin().await?;
+    tx.execute("set local search_path to public").await?;
+    tx.execute("set role centaur_company_context_reader")
+        .await?;
+    sqlx::query("select set_config('centaur.slack_channel_id', 'C_ALPHA', true)")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("select set_config('centaur.slack_history_channel_ids', $1, true)")
+        .bind(r#"["G_PRIVATE"]"#)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("select set_config('centaur.slack_include_public', 'true', true)")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("select set_config('centaur.slack_team_id', 'T_HOME', true)")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("select set_config('centaur.slack_user_id', 'U_VIEWER', true)")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("select set_config('centaur.user_email', 'viewer@example.com', true)")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("select set_config('centaur.google_subject', 'google_subject', true)")
+        .execute(&mut *tx)
+        .await?;
+
+    let rows = CompanyContextSearchRows {
+        company_context_docs: text_array(
+            &mut tx,
+            "select coalesce(array_agg(document_id order by document_id), '{}') from company_context_documents",
+        )
+        .await?,
+        google_docs: text_array(
+            &mut tx,
+            "select coalesce(array_agg(document_id order by document_id), '{}') from google_docs_context_documents",
+        )
+        .await?,
+        granola_docs: text_array(
+            &mut tx,
+            "select coalesce(array_agg(document_id order by document_id), '{}') from granola_context_documents",
+        )
+        .await?,
+        slack_private_docs: text_array(
+            &mut tx,
+            "select coalesce(array_agg(document_id order by document_id), '{}') from slack_private_context_documents",
+        )
+        .await?,
+        slack_private_conversation_docs: text_array(
+            &mut tx,
+            "select coalesce(array_agg(document_id order by document_id), '{}') from slack_private_conversation_context_documents",
+        )
+        .await?,
     };
 
     tx.execute("reset role").await?;

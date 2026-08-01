@@ -407,27 +407,9 @@ unset _centaur_tools_auto_reload
 
 # ── Assemble system prompt from bind mounts ──────────────────────────────────
 # Base prompt: mounted as AGENTS_BASE.md when present, fallback to baked-in AGENTS.md.
-# Org/persona overlays are mounted alongside the base prompt when present.
+# Prompt overlays from mounted repos are appended when present.
 TARGET_PROMPT="$WORKSPACE_DIR/AGENTS.md"
-if [ -f "$HOME_DIR/AGENTS_BASE.md" ]; then
-    cp "$HOME_DIR/AGENTS_BASE.md" "$TARGET_PROMPT"
-elif [ -f "$HOME_DIR/AGENTS.md" ]; then
-    cp "$HOME_DIR/AGENTS.md" "$TARGET_PROMPT"
-fi
-
-if [ -f "$HOME_DIR/AGENTS_OVERLAY.md" ] && [ -f "$TARGET_PROMPT" ]; then
-    printf '\n\n---\n\n' >> "$TARGET_PROMPT"
-    cat "$HOME_DIR/AGENTS_OVERLAY.md" >> "$TARGET_PROMPT"
-# Repo-cache-era org prompt: with overlay images gone, point CENTAUR_OVERLAY_DIR
-# at the org repo's clone under the repos mount (e.g. ~/github/<owner>/<repo>)
-# and its SYSTEM_PROMPT.md is appended here, same contract the overlay-bootstrap
-# init container used to fulfil by staging $HOME/AGENTS_OVERLAY.md.
-elif [ -n "${CENTAUR_OVERLAY_DIR:-}" ] \
-    && [ -f "${CENTAUR_OVERLAY_DIR}/services/sandbox/SYSTEM_PROMPT.md" ] \
-    && [ -f "$TARGET_PROMPT" ]; then
-    printf '\n\n---\n\n' >> "$TARGET_PROMPT"
-    cat "${CENTAUR_OVERLAY_DIR}/services/sandbox/SYSTEM_PROMPT.md" >> "$TARGET_PROMPT"
-fi
+compose-system-prompt --home-dir "$HOME_DIR" --target-prompt "$TARGET_PROMPT"
 
 if [ "${CENTAUR_SANDBOX_OBSERVABILITY_ENABLED:-true}" = "false" ] && [ -f "$TARGET_PROMPT" ]; then
     cat >> "$TARGET_PROMPT" <<'EOF'

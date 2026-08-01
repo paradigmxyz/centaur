@@ -65,9 +65,9 @@ class StaticSecret < ApplicationRecord
   end
 
   # The request targets this secret writes, normalized for cross-type conflict
-  # detection (see Principal#served_credentials): a header (case-insensitive) or
-  # a query param. A replace with no match_headers rewrites the body/path/query
-  # rather than a header, so it claims no target and never collides with a header
+  # detection during snapshot assembly: a header (case-insensitive) or a query
+  # param. A replace with no match_headers rewrites the body/path/query rather
+  # than a header, so it claims no target and never collides with a header
   # injector.
   def proxy_conflict_targets
     if inject_config.present?

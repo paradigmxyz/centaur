@@ -30,132 +30,11 @@
   <% end %>
 </div>
 
-<!-- Slack channel permissions -->
-<section class="mb-8">
-  <div class="mb-4">
-    <h2 class="mb-1 text-xs font-semibold uppercase tracking-wider text-zinc-500">Slack Channel Permissions</h2>
-  </div>
-  <div class="console-panel">
-    <% checkbox_class = "mt-1 h-4 w-4 rounded border-ink-500 bg-ink-800 text-centaur-500 focus:ring-centaur-500" %>
-    <% channel_options = @slack_channel_options || [] %>
-    <% permissions = @slack_channel_permissions || [] %>
-    <%= form_with model: @principal,
-                  url: console_principal_slack_channel_permissions_path(@principal.oid),
-                  method: :patch,
-                  data: { turbo: false },
-                  class: "space-y-0" do |form| %>
-      <% if @slack_channel_catalog&.error.present? %>
-        <div class="m-4 rounded border border-amber-500/30 bg-amber-500/[0.08] px-3 py-2 text-sm text-amber-200">
-          <%= @slack_channel_catalog.error %>
-        </div>
-      <% end %>
-
-      <% if permissions.any? %>
-        <div class="overflow-x-auto">
-          <table class="console-table">
-            <thead class="console-table-head">
-              <tr>
-                <th class="console-th">Channel</th>
-                <th class="console-th">Upload</th>
-                <th class="console-th">Download</th>
-                <th class="console-th">History</th>
-                <th class="console-th">Remove</th>
-              </tr>
-            </thead>
-            <tbody class="divide-y divide-ink-700">
-              <% permissions.each do |permission| %>
-                <tr>
-                  <% if permission.channel_id.to_s.start_with?("D") %>
-                    <td class="console-td min-w-80">
-                      <div class="text-sm text-zinc-100">DM <%= permission.channel_name.presence || permission.channel_id %></div>
-                      <div class="mt-1 text-xs text-zinc-500"><%= permission.channel_id %></div>
-                    </td>
-                    <td class="console-td">
-                      <%= check_box_tag nil, "1", permission.upload_enabled, disabled: true, class: checkbox_class, aria: { label: "Upload for #{permission.channel_id}" } %>
-                    </td>
-                    <td class="console-td">
-                      <%= check_box_tag nil, "1", permission.download_enabled, disabled: true, class: checkbox_class, aria: { label: "Download for #{permission.channel_id}" } %>
-                    </td>
-                    <td class="console-td">
-                      <%= check_box_tag nil, "1", permission.history_enabled, disabled: true, class: checkbox_class, aria: { label: "History for #{permission.channel_id}" } %>
-                    </td>
-                    <td class="console-td">
-                      <span class="text-xs text-zinc-500">API-managed</span>
-                    </td>
-                  <% else %>
-                    <%= form.fields_for :slack_channel_permissions, permission do |permission_fields| %>
-                    <td class="console-td min-w-80">
-                      <%= permission_fields.hidden_field :id %>
-                      <%= permission_fields.hidden_field :channel_name, value: nil %>
-                      <% if channel_options.any? %>
-                        <%= permission_fields.select :channel_id,
-                                                     options_for_select(slack_channel_options_for_permission(permission, channel_options), permission.channel_id),
-                                                     {},
-                                                     class: "form-input" %>
-                      <% else %>
-                        <%= permission_fields.text_field :channel_id, class: "form-input", placeholder: "C0123456789" %>
-                      <% end %>
-                    </td>
-                    <td class="console-td">
-                      <%= permission_fields.check_box :upload_enabled, class: checkbox_class, aria: { label: "Upload for #{permission.channel_id}" } %>
-                    </td>
-                    <td class="console-td">
-                      <%= permission_fields.check_box :download_enabled, class: checkbox_class, aria: { label: "Download for #{permission.channel_id}" } %>
-                    </td>
-                    <td class="console-td">
-                      <%= permission_fields.check_box :history_enabled, class: checkbox_class, aria: { label: "History for #{permission.channel_id}" } %>
-                    </td>
-                    <td class="console-td">
-                      <%= permission_fields.check_box :_destroy, class: checkbox_class, aria: { label: "Remove #{permission.channel_id}" } %>
-                    </td>
-                    <% end %>
-                  <% end %>
-                </tr>
-              <% end %>
-            </tbody>
-          </table>
-        </div>
-      <% else %>
-        <div class="p-4">
-          <div class="empty-state">No Slack channels selected.</div>
-        </div>
-      <% end %>
-
-      <% new_permission = SlackChannelPermission.new(upload_enabled: true, download_enabled: true, history_enabled: true) %>
-      <%= form.fields_for :slack_channel_permissions, new_permission do |permission_fields| %>
-        <div class="grid gap-4 border-t border-ink-700 p-5 lg:grid-cols-[minmax(0,1fr)_auto_auto_auto]">
-          <label class="block">
-            <span class="form-label">Add Channel</span>
-            <% if channel_options.any? %>
-              <%= permission_fields.select :channel_id,
-                                           options_for_select([ [ "Select a Slack channel", "" ] ] + channel_options),
-                                           {},
-                                           class: "form-input" %>
-            <% else %>
-              <%= permission_fields.text_field :channel_id, class: "form-input", placeholder: "C0123456789" %>
-            <% end %>
-          </label>
-          <label class="flex items-start gap-3 pt-6">
-            <%= permission_fields.check_box :upload_enabled, class: checkbox_class %>
-            <span class="text-sm font-medium text-zinc-100">Upload</span>
-          </label>
-          <label class="flex items-start gap-3 pt-6">
-            <%= permission_fields.check_box :download_enabled, class: checkbox_class %>
-            <span class="text-sm font-medium text-zinc-100">Download</span>
-          </label>
-          <label class="flex items-start gap-3 pt-6">
-            <%= permission_fields.check_box :history_enabled, class: checkbox_class %>
-            <span class="text-sm font-medium text-zinc-100">History</span>
-          </label>
-        </div>
-      <% end %>
-
-      <div class="px-5 pb-5">
-        <%= submit_tag "Save Slack channel permissions", class: "btn-primary" %>
-      </div>
-    <% end %>
-  </div>
-</section>
+<%= render "console/shared/slack_channel_permissions",
+           owner: @principal,
+           url: console_principal_slack_channel_permissions_path(@principal.oid),
+           inherited_permissions: @inherited_slack_channel_permissions,
+           api_managed_direct_messages: true %>
 
 <!-- Sandbox access -->
 <section class="mb-8">
@@ -267,7 +146,14 @@
 
   <% if @direct_grants.any? %>
     <div class="console-panel mb-4">
-      <table class="console-table">
+      <table class="console-table console-table-fixed">
+        <colgroup>
+          <col class="w-40">
+          <col class="w-32">
+          <col class="w-[28%]">
+          <col>
+          <col class="w-28">
+        </colgroup>
         <thead class="console-table-head">
           <tr>
             <th class="console-th">Type</th>
@@ -288,8 +174,20 @@
               <td class="console-td-nowrap">
                 <%= link_to s.oid, console_secret_path(kind, s.oid), class: "console-link" %>
               </td>
-              <td class="console-td-nowrap text-zinc-300"><%= s.foreign_id || "—" %></td>
-              <td class="console-td-nowrap text-zinc-100"><%= s.try(:name).presence || %(<span class="text-zinc-600">unnamed</span>).html_safe %></td>
+              <td class="console-td-truncate text-zinc-300">
+                <% if s.foreign_id.present? %>
+                  <span class="console-cell-truncate" title="<%= s.foreign_id %>"><%= s.foreign_id %></span>
+                <% else %>
+                  <span class="text-zinc-600">—</span>
+                <% end %>
+              </td>
+              <td class="console-td-truncate text-zinc-100">
+                <% if (secret_name = s.try(:name).presence) %>
+                  <span class="console-cell-truncate" title="<%= secret_name %>"><%= secret_name %></span>
+                <% else %>
+                  <span class="text-zinc-600">unnamed</span>
+                <% end %>
+              </td>
               <td class="console-td-nowrap text-right">
                 <%= button_to "Revoke", console_principal_revoke_grant_path(@principal.oid, grant.oid), method: :delete,
                       form: { data: { turbo_confirm: "Revoke this grant?" } },
@@ -335,7 +233,14 @@
     </div>
   <% else %>
     <div class="console-panel">
-      <table class="console-table">
+      <table class="console-table console-table-fixed">
+        <colgroup>
+          <col class="w-40">
+          <col class="w-32">
+          <col class="w-[28%]">
+          <col>
+          <col class="w-56">
+        </colgroup>
         <thead class="console-table-head">
           <tr>
             <th class="console-th">Type</th>
@@ -357,16 +262,31 @@
                 <td class="console-td-nowrap">
                   <%= link_to s.oid, console_secret_path(kind, s.oid), class: "console-link" %>
                 </td>
-                <td class="console-td-nowrap text-zinc-300"><%= s.foreign_id || "—" %></td>
-                <td class="console-td-nowrap text-zinc-100"><%= s.try(:name).presence || %(<span class="text-zinc-600">unnamed</span>).html_safe %></td>
-                <td class="console-td-nowrap">
+                <td class="console-td-truncate text-zinc-300">
+                  <% if s.foreign_id.present? %>
+                    <span class="console-cell-truncate" title="<%= s.foreign_id %>"><%= s.foreign_id %></span>
+                  <% else %>
+                    <span class="text-zinc-600">—</span>
+                  <% end %>
+                </td>
+                <td class="console-td-truncate text-zinc-100">
+                  <% if (secret_name = s.try(:name).presence) %>
+                    <span class="console-cell-truncate" title="<%= secret_name %>"><%= secret_name %></span>
+                  <% else %>
+                    <span class="text-zinc-600">unnamed</span>
+                  <% end %>
+                </td>
+                <td class="console-td-truncate">
                   <div class="flex flex-wrap gap-1">
                     <% if sources.any? { |x| x[:type] == :direct } %>
                       <span class="inline-flex items-center rounded bg-centaur-500/10 px-2 py-0.5 text-[11px] text-centaur-300 ring-1 ring-centaur-500/30">direct</span>
                     <% end %>
                     <% roles.each do |r| %>
-                      <span class="inline-flex items-center rounded bg-ink-700 px-2 py-0.5 text-[11px] text-zinc-300 ring-1 ring-ink-600"
-                            title="<%= r.oid %>">via <%= r.name.presence || r.foreign_id || r.oid %></span>
+                      <% role_label = r.name.presence || r.foreign_id || r.oid %>
+                      <span class="inline-flex min-w-0 max-w-full items-center rounded bg-ink-700 px-2 py-0.5 text-[11px] text-zinc-300 ring-1 ring-ink-600"
+                            title="<%= role_label %> (<%= r.oid %>)">
+                        <span class="console-cell-inline-truncate">via <%= role_label %></span>
+                      </span>
                     <% end %>
                   </div>
                 </td>

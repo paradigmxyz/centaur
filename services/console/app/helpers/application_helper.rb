@@ -50,6 +50,7 @@ module ApplicationHelper
     when "codex" then "Codex"
     when "claudecode" then "Claude Code"
     when "amp" then "Amp"
+    when "nanocodex" then "Nanocodex"
     when "" then nil
     else harness_type.to_s.tr("_-", " ").squish.split.map(&:capitalize).join(" ")
     end
@@ -200,6 +201,11 @@ module ApplicationHelper
       outline_icon(
         classes,
         "M12 16.5V3m0 0L7.5 7.5M12 3l4.5 4.5M6.75 10.5h-.75A2.25 2.25 0 0 0 3.75 12.75v6A2.25 2.25 0 0 0 6 21h12a2.25 2.25 0 0 0 2.25-2.25v-6A2.25 2.25 0 0 0 18 10.5h-.75"
+      )
+    when "trash"
+      outline_icon(
+        classes,
+        "M3.75 6h16.5M9.75 6V4.5A1.5 1.5 0 0 1 11.25 3h1.5a1.5 1.5 0 0 1 1.5 1.5V6m3.75 0-.75 13.5A1.5 1.5 0 0 1 15.75 21h-7.5a1.5 1.5 0 0 1-1.5-1.5L6 6m4.5 4.5v6m3-6v6"
       )
     when "slack"
       tag.svg(

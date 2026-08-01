@@ -33,7 +33,7 @@ use centaur_session_core::HarnessType;
 use centaur_session_runtime::{
     PersonaRegistry, SandboxCapacityConfig, SandboxWorkloadMode, SessionSandboxCleanupConfig,
 };
-use centaur_workflows::WorkflowHostSandboxRuntime;
+use centaur_workflows::{WorkflowHostSandboxRuntime, WorkflowPrincipalRegistrar};
 use clap::{Args as ClapArgs, Parser, ValueEnum};
 use tracing::{info, warn};
 
@@ -113,6 +113,10 @@ impl Args {
         Duration::from_secs(self.server.shutdown_execution_drain_timeout_secs)
     }
 
+    pub(crate) fn codex_nanocodex_rollout_percent(&self) -> u8 {
+        self.server.codex_nanocodex_rollout_percent
+    }
+
     pub(crate) fn execution_adoption_interval(&self) -> Option<Duration> {
         (self.server.execution_adoption_interval_secs > 0)
             .then(|| Duration::from_secs(self.server.execution_adoption_interval_secs))
@@ -123,6 +127,7 @@ pub(crate) struct IronControlRuntime {
     pub(crate) registrar: SessionRegistrar,
     pub(crate) warm_pool_bootstrap_principal: String,
     pub(crate) workflow_host_principal: String,
+    pub(crate) workflow_principal_registrar: WorkflowPrincipalRegistrar,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -460,6 +465,16 @@ pub(crate) struct ServerArgs {
     pub(crate) bind_addr: SocketAddr,
     #[arg(long, env = "RUN_MIGRATIONS", default_value_t = false)]
     pub(crate) run_migrations: bool,
+    /// Percentage of sessions requesting Codex that are assigned to
+    /// Nanocodex. The assignment is deterministic by thread key and the
+    /// resolved harness is persisted on the session.
+    #[arg(
+        long = "session-codex-nanocodex-rollout-percent",
+        env = "SESSION_CODEX_NANOCODEX_ROLLOUT_PERCENT",
+        default_value_t = 0,
+        value_parser = clap::value_parser!(u8).range(0..=100)
+    )]
+    codex_nanocodex_rollout_percent: u8,
     /// How long shutdown waits for in-flight executions to finish before
     /// releasing their stdout-owner leases for adoption by a peer. Keep
     /// below the pod's terminationGracePeriodSeconds (35s in the chart) so
@@ -723,9 +738,10 @@ impl SandboxArgs {
             client.assign_role(&workflow_host.id, role_id).await?;
         }
         Ok(Some(IronControlRuntime {
-            registrar: SessionRegistrar::new(client, namespace, role_ids),
+            registrar: SessionRegistrar::new(client.clone(), namespace.clone(), role_ids),
             warm_pool_bootstrap_principal: bootstrap.id,
             workflow_host_principal: workflow_host.id,
+            workflow_principal_registrar: WorkflowPrincipalRegistrar::new(client, namespace),
         }))
     }
 
@@ -1842,7 +1858,7 @@ impl IronProxyHarnessArgs {
             HarnessType::ClaudeCode,
             HarnessType::Amp,
         ] {
-            if engine == self.engine {
+            if harness_fragment_engine_name(&engine) == harness_fragment_engine_name(&self.engine) {
                 continue;
             }
             let auth_mode = harness_auth_mode_env(&engine).unwrap_or_else(|| "api_key".to_owned());
@@ -1924,6 +1940,7 @@ fn harness_fragment_engine_name(engine: &HarnessType) -> &'static str {
         HarnessType::Codex => "codex",
         HarnessType::Amp => "amp",
         HarnessType::ClaudeCode => "claude-code",
+        HarnessType::Nanocodex => "codex",
     }
 }
 
@@ -1941,6 +1958,7 @@ fn harness_auth_mode_env(engine: &HarnessType) -> Option<String> {
         HarnessType::Codex => env::var("CODEX_AUTH_MODE").ok(),
         HarnessType::ClaudeCode => env::var("CLAUDE_CODE_AUTH_MODE").ok(),
         HarnessType::Amp => None,
+        HarnessType::Nanocodex => Some("api_key".to_owned()),
     }
 }
 
@@ -2150,6 +2168,33 @@ mod tests {
         assert_eq!(args.sandbox.k8s_namespace, "centaur-test");
         assert_eq!(args.sandbox.ready_timeout_secs, 17);
         assert_eq!(args.sandbox.k8s_context.as_deref(), Some("kind-test"));
+    }
+
+    #[test]
+    fn parses_codex_nanocodex_rollout_percent() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-codex-nanocodex-rollout-percent",
+            "50",
+        ])
+        .unwrap();
+
+        assert_eq!(args.codex_nanocodex_rollout_percent(), 50);
+    }
+
+    #[test]
+    fn rejects_invalid_codex_nanocodex_rollout_percent() {
+        let result = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-codex-nanocodex-rollout-percent",
+            "101",
+        ]);
+
+        assert!(result.is_err());
     }
 
     #[test]
@@ -2923,6 +2968,18 @@ mod tests {
         assert_eq!(
             args.sandbox.iron_proxy.harness.engine,
             HarnessType::ClaudeCode
+        );
+    }
+
+    #[test]
+    fn nanocodex_reuses_the_codex_proxy_fragment() {
+        assert_eq!(
+            harness_fragment_engine_name(&HarnessType::Nanocodex),
+            harness_fragment_engine_name(&HarnessType::Codex)
+        );
+        assert_eq!(
+            harness_auth_mode_env(&HarnessType::Nanocodex).as_deref(),
+            Some("api_key")
         );
     }
 }

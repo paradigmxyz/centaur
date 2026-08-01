@@ -53,8 +53,8 @@ The script exports recent `sessions`, `session_messages`,
 `session.output.line` events (capped by `THINKING_EVENT_LIMIT_PER_THREAD`,
 default 200 per thread), and referenced `slack_sync_users` rows with the source
 connection forced read-only, then imports them into the local `ai_v2` database
-used by the Console dev container. The Threads surface is read-only: it does
-not render a composer and rejects POSTs server-side.
+used by the Console dev container. The Console never writes directly to those
+session tables; starting and continuing accessible chats goes through api-rs.
 
 Threads extras beyond the Slack surface:
 

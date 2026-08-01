@@ -233,6 +233,8 @@ spec:
 {{- end }}
             - name: RUN_MIGRATIONS
               value: {{ .Values.apiRs.runMigrations | quote }}
+            - name: SESSION_CODEX_NANOCODEX_ROLLOUT_PERCENT
+              value: {{ .Values.apiRs.codexNanocodexRolloutPercent | quote }}
             - name: IRON_CONTROL_SYNC_INFRA_SECRETS
               value: {{ .Values.apiRs.syncInfraSecrets | quote }}
             - name: RUST_LOG
@@ -248,6 +250,10 @@ spec:
 {{- if $sandboxWorkflowDirs }}
             - name: KUBERNETES_WORKFLOW_DIRS
               value: {{ $sandboxWorkflowDirs | quote }}
+{{- end }}
+{{- if not (hasKey .Values.apiRs.extraEnv "WORKFLOW_HOST_SANDBOX") }}
+            - name: WORKFLOW_HOST_SANDBOX
+              value: {{ .Values.apiRs.workflowHostSandbox | quote }}
 {{- end }}
 {{- if not (hasKey .Values.apiRs.extraEnv "WORKFLOW_ENABLE_MODE") }}
             - name: WORKFLOW_ENABLE_MODE

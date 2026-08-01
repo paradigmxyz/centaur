@@ -31,6 +31,17 @@ pub struct CreateSessionResponse {
     pub session: Session,
     /// True when this request restarted the thread onto a different harness.
     pub harness_switched: bool,
+    /// Present when the API assigned this Codex request through an experiment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub harness_assignment: Option<HarnessAssignment>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct HarnessAssignment {
+    pub experiment: &'static str,
+    pub requested_harness: HarnessType,
+    pub cohort: HarnessType,
+    pub rollout_percent: u8,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -140,7 +151,9 @@ pub struct ListWorkflowRunsQuery {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct EmitWorkflowEventRequest {
-    pub event_name: String,
+    pub event_name: Option<String>,
+    pub event_type: Option<String>,
+    pub correlation_id: Option<String>,
     #[serde(default)]
     pub payload: Value,
 }

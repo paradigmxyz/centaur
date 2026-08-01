@@ -344,6 +344,8 @@ pub struct PgDsnSettingValueFromInput {
     pub principal_label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub principal_field: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_label: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -484,8 +486,6 @@ pub struct Principal {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct SlackChannelPermissionInput {
     pub channel_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub channel_name: Option<String>,
     pub upload_enabled: bool,
     pub download_enabled: bool,
     pub history_enabled: bool,
@@ -693,6 +693,8 @@ impl Grant {
 pub struct ProxyInput {
     pub name: String,
     pub principal_id: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
 }
 
 /// A registered proxy. ``token`` (the plaintext ``iprx_`` bearer) is only
@@ -702,6 +704,10 @@ pub struct Proxy {
     pub id: String,
     pub name: String,
     pub principal_id: String,
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
+    #[serde(default)]
+    pub config_hash: Option<String>,
     #[serde(default)]
     pub token: Option<String>,
 }
@@ -727,7 +733,6 @@ mod tests {
     fn slack_channel_permission_serializes_false_values() {
         let value = serde_json::to_value(SlackChannelPermissionInput {
             channel_id: "C0123456789".to_owned(),
-            channel_name: None,
             upload_enabled: false,
             download_enabled: true,
             history_enabled: false,

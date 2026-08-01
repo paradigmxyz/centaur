@@ -30,6 +30,21 @@ module Api
         assert data.dig("credentials", "refresh_token").present?
       end
 
+      test "PUT with an unchanged document preserves credential and rule records" do
+        secret = oauth_token_secrets(:acme_gmail_oauth)
+        source_ids = secret.sources.ids
+        rule_ids = secret.rules.ids
+
+        get api_v1_oauth_token_secret_url(id: secret.oid), headers: auth_headers
+        data = json_body.fetch("data").except("id", "created_at", "updated_at")
+        put api_v1_oauth_token_secret_url(id: secret.oid), params: { data: data }.to_json, headers: auth_headers
+
+        assert_response :ok
+        secret.reload
+        assert_equal source_ids, secret.sources.ids
+        assert_equal rule_ids, secret.rules.ids
+      end
+
       test "GET lookup finds an oauth_token secret by namespace and foreign_id" do
         secret = oauth_token_secrets(:acme_gmail_oauth)
         get lookup_api_v1_oauth_token_secrets_url(namespace: secret.namespace, foreign_id: secret.foreign_id),

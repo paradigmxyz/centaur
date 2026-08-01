@@ -103,6 +103,10 @@
       </div>
       <%= field_error(credential, :grant) %>
 
+      <div data-toggle-target="panel" data-toggle-key="client_credentials">
+        <p class="form-hint">Uses the client ID and client secret above to mint each access token. No refresh token is required.</p>
+      </div>
+
       <div data-toggle-target="panel" data-toggle-key="refresh_token">
         <label class="form-label" for="credential_refresh_token">Refresh Token</label>
         <%= text_area_tag "credential[refresh_token]", nil, id: "credential_refresh_token", rows: 3, class: "form-input", autocomplete: "off", placeholder: credential.new_record? ? "initial refresh token for the loop" : "•••••••• (unchanged)" %>

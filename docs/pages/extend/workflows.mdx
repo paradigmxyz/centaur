@@ -45,6 +45,8 @@ from api.workflow_engine import WorkflowContext
 
 WORKFLOW_NAME = "nightly_report"
 
+WORKFLOW_PRINCIPAL = True
+
 
 @dataclass
 class Input:
@@ -61,6 +63,16 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     )
     return {"channel": inp.channel, "report": result}
 ```
+
+`WORKFLOW_PRINCIPAL` is optional. Use it when the workflow host calls tools
+directly with `ctx.call_tool(...)` and should have its own credential boundary.
+The API derives and registers the `workflow-nightly-report` principal from
+`WORKFLOW_NAME` and runs that workflow-host sandbox under it. Workflow code
+cannot choose another principal id, display name, or labels. Grant the required
+tool roles or secrets to the derived principal. `WORKFLOW_PRINCIPAL = True`
+requires `apiRs.workflowHostSandbox=true`, which renders
+`WORKFLOW_HOST_SANDBOX=true`; startup fails if workflow-host sandboxing is
+disabled.
 
 ## Durable primitives
 

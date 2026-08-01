@@ -479,7 +479,17 @@ def calendar_rsvp_cmd(
 def drive_list(
     limit: int = typer.Option(50, "--limit", "-n", help="Max results"),
     folder: str = typer.Option(None, "--folder", "-f", help="Folder ID to list"),
-    query: str = typer.Option(None, "--query", "-q", help="Search by name"),
+    query: str = typer.Option(
+        None,
+        "--query",
+        "-q",
+        help="Search by name unless --full-text is set",
+    ),
+    full_text: bool = typer.Option(
+        False,
+        "--full-text",
+        help="Search file contents and metadata with Drive fullText contains",
+    ),
     file_type: str = typer.Option(None, "--type", "-t", help="Filter by MIME type"),
 ):
     """List files in Google Drive.
@@ -487,6 +497,7 @@ def drive_list(
     Examples:
         gsuite drive list
         gsuite drive list -q "report"
+        gsuite drive list -q "contract language" --full-text
         gsuite drive list --folder "1234abc" -n 20
         gsuite drive list --type "application/pdf"
     """
@@ -497,6 +508,7 @@ def drive_list(
         folder_id=folder,
         max_results=limit,
         file_type=file_type,
+        full_text=full_text,
     )
 
     if not results:

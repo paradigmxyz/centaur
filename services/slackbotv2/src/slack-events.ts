@@ -28,6 +28,13 @@ type RawSlackEnvelope = {
   type?: JsonValue
 }
 
+type RawSlackInteraction = {
+  actions?: JsonValue
+  team?: JsonValue
+  type?: JsonValue
+  user?: JsonValue
+}
+
 type TriggerBotIdentity = {
   appId?: string
   userId?: string
@@ -47,11 +54,10 @@ export function isAllowedSlackWebhookBody(
   options: SlackbotV2Options,
   logger: Logger
 ): boolean {
-  let payload: unknown
-  try {
-    payload = JSON.parse(rawBody)
-  } catch {
-    return true
+  const payload = parseSlackWebhookPayload(rawBody)
+  if (!payload) return true
+  if (isRawSlackInteraction(payload) && payload.type === 'block_actions') {
+    return isAllowedSlackInteraction(payload, options, logger)
   }
   if (!isRawSlackEnvelope(payload) || payload.type !== 'event_callback') return true
   const event = isRawSlackEvent(payload.event) ? payload.event : undefined
@@ -69,6 +75,47 @@ export function isAllowedSlackWebhookBody(
     return false
   }
   return true
+}
+
+export function parseSlackWebhookPayload(rawBody: string): Record<string, unknown> | null {
+  const parsed = parseJsonObject(rawBody)
+  if (parsed) return parsed
+  const formPayload = new URLSearchParams(rawBody).get('payload')
+  return formPayload ? parseJsonObject(formPayload) : null
+}
+
+function parseJsonObject(value: string): Record<string, unknown> | null {
+  try {
+    const parsed: unknown = JSON.parse(value)
+    return isJsonObject(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function isAllowedSlackInteraction(
+  payload: RawSlackInteraction,
+  options: SlackbotV2Options,
+  logger: Logger
+): boolean {
+  const team = isJsonObject(payload.team) ? payload.team : undefined
+  const user = isJsonObject(payload.user) ? payload.user : undefined
+  const homeTeamId = stringValue(team?.id)
+  const externalTeamId = externalSlackTeamIdForHome(homeTeamId, {
+    user_team: user?.team_id
+  })
+  const allowedExternalTeamIds =
+    options.allowedExternalTeamIds ?? splitEnvList(process.env.SLACKBOT_EXTERNAL_ORG_ALLOWLIST)
+  if (!externalTeamId || new Set(allowedExternalTeamIds).has(externalTeamId)) return true
+
+  const actions = Array.isArray(payload.actions) ? payload.actions : []
+  const firstAction = actions.find(isJsonObject)
+  logger.warn('slackbotv2_event_ignored_external_org_not_allowlisted', {
+    action_id: firstAction ? stringValue(firstAction.action_id) : undefined,
+    external_team_id: externalTeamId,
+    team_id: homeTeamId
+  })
+  return false
 }
 
 export async function isAllowedSlackMessage(
@@ -124,6 +171,10 @@ function externalSlackTeamIdForHome(
 
 function isBotAuthoredSlackEvent(event: RawSlackEvent): boolean {
   return Boolean(event.bot_id || event.bot_profile || event.subtype === 'bot_message')
+}
+
+function isRawSlackInteraction(value: unknown): value is RawSlackInteraction {
+  return isJsonObject(value)
 }
 
 async function isAllowedTriggerBotMessage(

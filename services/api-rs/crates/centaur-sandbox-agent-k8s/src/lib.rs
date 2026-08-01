@@ -446,16 +446,18 @@ impl SandboxBackend for AgentSandboxBackend {
         &self,
         id: &SandboxId,
         principal_id: &str,
+        labels: &BTreeMap<String, String>,
     ) -> SandboxResult<()> {
-        self.assign_proxy_principal(id, principal_id).await
+        self.assign_proxy_principal(id, principal_id, labels).await
     }
 
     async fn ensure_iron_control_proxy_resources(
         &self,
         id: &SandboxId,
         principal_id: &str,
+        labels: &BTreeMap<String, String>,
     ) -> SandboxResult<()> {
-        self.ensure_proxy_resources_for_principal(id, principal_id)
+        self.ensure_proxy_resources_for_principal(id, principal_id, labels)
             .await
     }
 

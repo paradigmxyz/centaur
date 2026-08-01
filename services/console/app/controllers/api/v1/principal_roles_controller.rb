@@ -7,7 +7,8 @@ module Api
     class PrincipalRolesController < Api::BaseController
       def index
         principal = Principal.find_by_oid!(params[:principal_id])
-        render json: { data: principal.roles.order(:id).map { |r| role_payload(r) } }
+        roles = principal.roles.includes(:slack_channel_permissions).order(:id)
+        render json: { data: roles.map { |r| role_payload(r) } }
       end
 
       # Idempotent: re-assigning a role the principal already holds returns the
@@ -43,6 +44,7 @@ module Api
           foreign_id: role.foreign_id,
           name: role.name,
           labels: role.labels,
+          slack_channel_permissions: role.slack_channel_permissions_payload,
           created_at: role.created_at,
           updated_at: role.updated_at
         }

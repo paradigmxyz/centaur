@@ -160,6 +160,11 @@ https://<your-host>/api/webhooks/slack
 In your Slack app's **Event Subscriptions** settings, set the Request URL to the
 Slackbot webhook URL above.
 
+To use Block Kit buttons or selects, enable **Interactivity & Shortcuts** and
+set its Request URL to the same Slackbot webhook URL. Each interaction is
+delivered to workflows as `slack.block_action.<action_id>` with the selected
+value and sanitized Slack user, team, channel, thread, and message metadata.
+
 Subscribe to the `app_mention` bot event. For a minimal channel-mention test,
 the app also needs Bot Token Scopes that let it read mentions and write replies,
 for example `app_mentions:read` and `chat:write`. If you enable DM events such

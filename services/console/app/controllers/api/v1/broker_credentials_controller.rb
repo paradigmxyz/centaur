@@ -80,7 +80,10 @@ module Api
 
       def apply_client_secret(ref, attrs)
         secret = attrs[:client_secret]
-        ref.client_secret = secret if secret.present?
+        return if secret.blank?
+
+        ref.client_secret = secret
+        reset_refresh_state(ref) if ref.grant == "client_credentials"
       end
 
       # These fields are write-only initial/re-auth values. Supplying any
@@ -98,6 +101,13 @@ module Api
         end
         return unless changed
 
+        ref.dead = false
+        ref.dead_reason = nil
+        ref.failure_count = 0
+        ref.next_attempt_at = Time.current
+      end
+
+      def reset_refresh_state(ref)
         ref.dead = false
         ref.dead_reason = nil
         ref.failure_count = 0

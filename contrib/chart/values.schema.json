@@ -49,7 +49,6 @@
         "worker": {
           "type": "object",
           "properties": {
-            "enabled": { "type": "boolean" },
             "replicaCount": { "type": "integer" },
             "resources": { "type": "object" }
           }
@@ -267,6 +266,7 @@
         "mcpPublicUrl": { "type": "string" },
         "sandboxRunningLimit": { "type": "integer", "minimum": 0 },
         "sandboxHotIdleGraceSecs": { "type": "integer", "minimum": 0 },
+        "workflowHostSandbox": { "type": "boolean" },
         "etl": {
           "type": "object",
           "properties": {

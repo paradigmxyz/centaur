@@ -147,17 +147,14 @@ fn slack_permission_for_thread(
     if let Some(channel_id) = labels.get("slack_channel_id") {
         let channel_id = channel_id.trim();
         return (!is_direct_message(Some(channel_id)))
-            .then(|| slack_permission(channel_id.to_owned(), None));
+            .then(|| slack_permission(channel_id.to_owned()));
     }
 
-    let user_id = labels.get("slack_user_id")?;
+    if !labels.contains_key("slack_user_id") {
+        return None;
+    }
     let conversation_id = slack_conversation_id(thread_key)?;
-    is_direct_message(Some(conversation_id)).then(|| {
-        slack_permission(
-            conversation_id.to_owned(),
-            Some(user_id.trim().to_owned()).filter(|value| !value.is_empty()),
-        )
-    })
+    is_direct_message(Some(conversation_id)).then(|| slack_permission(conversation_id.to_owned()))
 }
 
 fn apply_slack_dm_email_label(
@@ -179,13 +176,9 @@ fn apply_slack_dm_email_label(
     }
 }
 
-fn slack_permission(
-    channel_id: String,
-    channel_name: Option<String>,
-) -> SlackChannelPermissionInput {
+fn slack_permission(channel_id: String) -> SlackChannelPermissionInput {
     SlackChannelPermissionInput {
         channel_id,
-        channel_name,
         upload_enabled: true,
         download_enabled: true,
         history_enabled: true,

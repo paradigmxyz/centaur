@@ -30,10 +30,14 @@ module Console
       assert_select ".console-nav-link", text: "Users", count: 0
       assert_select ".console-control-tab", text: "Apps"
       assert_select ".console-control-tab-active", text: "Users"
-      assert_select "button[data-console-theme-toggle]", text: "Light mode"
+      assert_select "button[data-console-theme-toggle]", text: "System mode"
+      assert_select "[data-console-theme-icon='system']:not([hidden])", count: 1
+      assert_select "[data-console-theme-icon='light'][hidden]", count: 1
+      assert_select "[data-console-theme-icon='dark'][hidden]", count: 1
       assert_select "link[data-console-favicon][href=?]", "/icon-dark.svg"
       assert_includes response.body, "/icon-light.svg"
       assert_includes response.body, "prefers-color-scheme: light"
+      assert_includes response.body, "localStorage.removeItem(storageKey)"
       assert_includes response.body, "centaur-console-theme-source"
     end
 

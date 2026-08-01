@@ -12,7 +12,7 @@
  *
  * Fields are independent. Precedence (in index.ts): per-thread override, then
  * channel default, then deployment default. Setting `harness` restarts a thread
- * onto it like `--claude`/`--codex`; `reasoning` only affects codex.
+ * onto it like `--claude`/`--codex`; `reasoning` affects Codex and Nanocodex.
  */
 
 import { normalizeHarnessOverrides, type HarnessOverrides } from './overrides'

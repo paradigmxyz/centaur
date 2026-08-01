@@ -207,10 +207,6 @@ class ApplicationController < ActionController::Base
       console_sidebar_console_thread_owner_sql,
       (console_sidebar_slack_thread_owner_sql(slack_owners) if slack_owners.any?)
     ].compact
-    if CentaurSession.public_slack_threads_enabled?
-      public_slack_sql = CentaurSession.public_slack_channel_sql
-      conditions << public_slack_sql if public_slack_sql
-    end
 
     return CentaurSession.where("1=0") if conditions.empty?
 
@@ -226,12 +222,11 @@ class ApplicationController < ActionController::Base
     thread_keys = console_sidebar_selected_thread_keys - threads.map(&:thread_key)
     return [] if thread_keys.empty?
 
+    # Global and explicitly shared chats remain readable from their direct
+    # links, but the sidebar is a personal navigation surface. Only recover a
+    # selected thread here when it belongs to the signed-in user.
     visible = console_sidebar_visible_thread_scope.where(thread_key: thread_keys).to_a
-    missing_keys = thread_keys - visible.map(&:thread_key)
-    shared_keys = ThreadShare.where(thread_key: missing_keys).pluck(:thread_key)
-    shared = CentaurSession.where(thread_key: shared_keys).to_a
-    sessions_by_key = (visible + shared).index_by(&:thread_key)
-
+    sessions_by_key = visible.index_by(&:thread_key)
     thread_keys.filter_map { |thread_key| sessions_by_key[thread_key] }
   end
 

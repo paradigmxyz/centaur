@@ -15,7 +15,50 @@ import codexConfig from '../../../harness/codex/config.toml'
 const HARNESS_DISPLAY_NAMES: Record<string, string> = {
   amp: 'Amp',
   claudecode: 'Claude Code',
-  codex: 'Codex'
+  codex: 'Codex',
+  nanocodex: 'Nanocodex'
+}
+
+const REASONING_DISPLAY_NAMES: Record<string, string> = {
+  none: 'None',
+  minimal: 'Minimal',
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'XHigh',
+  max: 'Max'
+}
+
+const STANDARD_CODEX_REASONING_EFFORTS = new Set([
+  'none',
+  'low',
+  'medium',
+  'high',
+  'xhigh'
+])
+const PRO_CODEX_REASONING_EFFORTS = new Set(['medium', 'high', 'xhigh'])
+const CODEX_MODEL_REASONING_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh'])
+const GPT_5_6_REASONING_EFFORTS = new Set([
+  ...STANDARD_CODEX_REASONING_EFFORTS,
+  'max'
+])
+const CODEX_REASONING_EFFORTS_BY_MODEL: Record<string, ReadonlySet<string>> = {
+  'gpt-5.2': STANDARD_CODEX_REASONING_EFFORTS,
+  'gpt-5.2-codex': CODEX_MODEL_REASONING_EFFORTS,
+  'gpt-5.4': STANDARD_CODEX_REASONING_EFFORTS,
+  'gpt-5.4-mini': STANDARD_CODEX_REASONING_EFFORTS,
+  'gpt-5.4-nano': STANDARD_CODEX_REASONING_EFFORTS,
+  'gpt-5.4-pro': PRO_CODEX_REASONING_EFFORTS,
+  'gpt-5.5': STANDARD_CODEX_REASONING_EFFORTS,
+  'gpt-5.5-pro': PRO_CODEX_REASONING_EFFORTS,
+  'gpt-5.6-luna': GPT_5_6_REASONING_EFFORTS,
+  'gpt-5.6-sol': GPT_5_6_REASONING_EFFORTS,
+  'gpt-5.6-terra': GPT_5_6_REASONING_EFFORTS
+}
+
+const CODEX_CONFIG = codexConfig as {
+  model?: unknown
+  model_reasoning_effort?: unknown
 }
 
 // Default model each harness runs when no --model/--opus/... override is set,
@@ -29,9 +72,21 @@ const HARNESS_DISPLAY_NAMES: Record<string, string> = {
 // intentionally absent.
 const BAKED_DEFAULT_MODELS: Record<string, string | undefined> = {
   claudecode: typeof claudeSettings.model === 'string' ? claudeSettings.model : undefined,
+  codex: typeof CODEX_CONFIG.model === 'string' ? CODEX_CONFIG.model : undefined,
+  nanocodex: typeof CODEX_CONFIG.model === 'string' ? CODEX_CONFIG.model : undefined
+}
+
+// Nanocodex deliberately shares Codex's default reasoning policy. Its harness
+// adapter consumes the same CODEX_MODEL_REASONING_EFFORT deployment override,
+// and falls back to the baked Codex effort when that override is absent.
+const BAKED_DEFAULT_REASONING: Record<string, string | undefined> = {
   codex:
-    typeof (codexConfig as { model?: unknown }).model === 'string'
-      ? ((codexConfig as { model: string }).model)
+    typeof CODEX_CONFIG.model_reasoning_effort === 'string'
+      ? CODEX_CONFIG.model_reasoning_effort
+      : undefined,
+  nanocodex:
+    typeof CODEX_CONFIG.model_reasoning_effort === 'string'
+      ? CODEX_CONFIG.model_reasoning_effort
       : undefined
 }
 
@@ -76,6 +131,59 @@ export function defaultModelForHarness(
   return configured?.[key]?.trim() || BAKED_DEFAULT_MODELS[key]
 }
 
+/** Returns the configured or baked default reasoning effort for a harness. */
+export function defaultReasoningForHarness(
+  harnessType: string | null | undefined,
+  configured?: Record<string, string>
+): string | undefined {
+  if (!harnessType) return undefined
+  const key = harnessType.trim().toLowerCase()
+  return configured?.[key]?.trim().toLowerCase() || BAKED_DEFAULT_REASONING[key]
+}
+
+/** Resolves the effort the selected harness actually runs for this turn. */
+export function effectiveReasoningForHarness(
+  harnessType: string | null | undefined,
+  requested?: string | null,
+  configured?: Record<string, string>
+): string | undefined {
+  const key = harnessType?.trim().toLowerCase()
+  if (key !== 'codex' && key !== 'nanocodex') return undefined
+  const reasoning = requested?.trim().toLowerCase() || defaultReasoningForHarness(key, configured)
+  // Nanocodex has no distinct Minimal level; its adapter maps Minimal to Low.
+  return key === 'nanocodex' && reasoning === 'minimal' ? 'low' : reasoning
+}
+
+/** Returns the requested effort only when the selected model supports it. */
+export function reasoningForModel(
+  harnessType: string | null | undefined,
+  model: string | null | undefined,
+  reasoning: string | null | undefined
+): string | undefined {
+  const harness = harnessType?.trim().toLowerCase()
+  const selectedModel = model?.trim().toLowerCase()
+  const effort = reasoning?.trim().toLowerCase()
+  if (!selectedModel || !effort) return undefined
+  if (harness !== 'codex' && harness !== 'nanocodex') return undefined
+  // Nanocodex maps its compatibility-only Minimal value to Low before it
+  // reaches the Responses API, so validate the effective value against the
+  // selected model while preserving Minimal for the adapter to normalize.
+  const effectiveEffort = harness === 'nanocodex' && effort === 'minimal' ? 'low' : effort
+  if (selectedModel === 'gpt-5.6') {
+    return GPT_5_6_REASONING_EFFORTS.has(effectiveEffort) ? effort : undefined
+  }
+  const supported = Object.entries(CODEX_REASONING_EFFORTS_BY_MODEL).find(
+    ([modelId]) => selectedModel === modelId || selectedModel.startsWith(`${modelId}-20`)
+  )?.[1]
+  return supported?.has(effectiveEffort) ? effort : undefined
+}
+
+function reasoningDisplayName(reasoning: string | null | undefined): string | undefined {
+  const key = reasoning?.trim().toLowerCase()
+  if (!key) return undefined
+  return REASONING_DISPLAY_NAMES[key] ?? titleCase(key)
+}
+
 /**
  * Builds the Console session URL for a Slack thread key, or undefined when no
  * Console base URL is configured (in which case no link/block should render).
@@ -98,7 +206,8 @@ export type SlackContextBlock = {
 }
 
 /**
- * Builds the "Open chat in Console · {MODEL} · {Harness}" context block, or
+ * Builds the "Open chat in Console · {MODEL} · {Harness} · {Effort}"
+ * context block, or
  * undefined when no Console base URL is configured (a bare "Open chat in
  * Console" with no link is pointless, so the whole block is skipped). The
  * model id is uppercased for display.
@@ -108,6 +217,7 @@ export function buildConsoleSessionContextBlock(params: {
   threadKey: string
   harnessType?: string | null
   model?: string | null
+  reasoning?: string | null
 }): SlackContextBlock | undefined {
   const url = consoleSessionUrl(params.consoleBaseUrl, params.threadKey)
   if (!url) return undefined
@@ -116,6 +226,8 @@ export function buildConsoleSessionContextBlock(params: {
   if (model) segments.push(escapeSlackMrkdwn(model.toUpperCase()))
   const harness = harnessDisplayName(params.harnessType)
   if (harness) segments.push(escapeSlackMrkdwn(harness))
+  const reasoning = reasoningDisplayName(params.reasoning)
+  if (reasoning) segments.push(escapeSlackMrkdwn(reasoning))
   // Middot (U+00B7) with a space on each side, matching the bot's other
   // context lines.
   return {

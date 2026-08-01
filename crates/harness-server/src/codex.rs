@@ -290,6 +290,7 @@ fn initialize_codex<W: Write>(
         .map(|_| ())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_codex_user_turn<W: Write>(
     codex: &mut CodexJsonRpcChild,
     stdout: &mut W,

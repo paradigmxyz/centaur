@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use centaur_sandbox_core::{SandboxError, SandboxId, SandboxSpec, SandboxStatus};
 use centaur_session_sqlx::{PgSessionStore, SessionStoreError};
@@ -65,6 +65,7 @@ impl WarmPoolManager {
         &self,
         thread_key: &str,
         iron_control_principal: Option<&str>,
+        proxy_labels: &BTreeMap<String, String>,
     ) -> Result<Option<String>, WarmPoolError> {
         loop {
             let Some(sandbox_id) = self
@@ -85,7 +86,7 @@ impl WarmPoolManager {
                     if let Some(principal_id) = iron_control_principal
                         && let Err(error) = self
                             .manager
-                            .assign_iron_control_proxy_principal(&id, principal_id)
+                            .assign_iron_control_proxy_principal(&id, principal_id, proxy_labels)
                             .await
                     {
                         let error_message = error.to_string();

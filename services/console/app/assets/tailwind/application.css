@@ -87,6 +87,10 @@
     @apply min-w-full text-sm;
   }
 
+  .console-table-fixed {
+    @apply w-full table-fixed;
+  }
+
   .console-table > thead {
     @apply border-b border-ink-600;
   }
@@ -105,6 +109,18 @@
 
   .console-td-nowrap {
     @apply px-5 py-3 whitespace-nowrap;
+  }
+
+  .console-td-truncate {
+    @apply min-w-0 px-5 py-3 whitespace-nowrap;
+  }
+
+  .console-cell-truncate {
+    @apply block min-w-0 truncate;
+  }
+
+  .console-cell-inline-truncate {
+    @apply inline-block max-w-full truncate align-bottom;
   }
 
   .console-row-hover {

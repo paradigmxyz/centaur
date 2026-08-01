@@ -11,8 +11,8 @@ class PrincipalRole < ApplicationRecord
 
   private
 
-  def sync_config_affected_principal_ids
-    [ principal_id ]
+  def sync_config_affected_principals
+    Principal.where(id: principal_id)
   end
 
   # A principal may only hold roles from its own namespace; roles are scoped to

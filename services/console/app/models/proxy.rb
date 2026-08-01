@@ -14,8 +14,10 @@ class Proxy < ApplicationRecord
 
   validates :name, presence: true
   validates :bearer_token_hash, presence: true, uniqueness: true
+  validate :labels_are_string_map
   validate :token_matches_format, on: :create
 
+  before_validation :normalize_labels
   before_validation :issue_token, on: :create
   before_save :stamp_principal_assignment, if: :will_save_change_to_principal_id?
 
@@ -38,86 +40,32 @@ class Proxy < ApplicationRecord
     Digest::SHA256.hexdigest(plaintext)
   end
 
-  # The config this proxy delivers, in the iron-proxy sync shape. The assembly
-  # lives on Principal (it is a function of effective grants); an unassigned
-  # proxy carries no authority and resolves to the empty config. Live secret
-  # values are kept inline here because the proxy needs them to resolve.
-  def sync_config
-    principal&.effective_config(redact_secrets: false) || Principal::EMPTY_CONFIG
+  def sync_config_snapshot(sandbox_entitlements_hosts: self.class.sandbox_entitlements_hosts)
+    PrincipalSyncConfigSnapshot.sync_config_for_proxy(self, sandbox_entitlements_hosts: sandbox_entitlements_hosts)
   end
 
-  def sync_config_snapshot(sandbox_entitlements_hosts: [])
-    config = principal ? PrincipalSyncConfigSnapshot.fetch_for(principal).payload : Principal::EMPTY_CONFIG
-    config = with_sandbox_entitlements_secret(config, sandbox_entitlements_hosts: sandbox_entitlements_hosts)
-    { config_hash: config_hash_for(config), config: config }
-  end
-
-  # Opaque, deterministic fingerprint of the base (principal-derived) config.
-  # Note this is not necessarily the hash the proxy echoes on sync: the sync
-  # path hashes the delivered config, which also folds in the per-proxy
-  # sandbox entitlements secret when one is configured (see
-  # #sync_config_snapshot).
+  # Opaque, deterministic fingerprint of the exact config delivered by the
+  # proxy sync endpoint.
   def config_hash
-    # The principal identity and assignment time are folded in so that any
-    # assignment change forces a refresh, even a swap between principals whose
-    # effective secrets happen to be identical (or an unassign to empty).
-    config_hash_for(sync_config)
+    sync_config_snapshot.fetch(:config_hash)
   end
 
-  def config_hash_for(config)
-    payload = config.merge(
-      "principal" => principal&.oid,
-      "principal_assigned_at" => principal_assigned_at&.utc&.iso8601
-    )
-    "sha256:#{Digest::SHA256.hexdigest(self.class.canonical_json(payload))}"
-  end
-
-  # Deep key-sorted JSON so the hash is stable regardless of Hash insertion or
-  # jsonb column ordering.
-  def self.canonical_json(value)
-    JSON.generate(canonicalize(value))
-  end
-
-  def self.canonicalize(value)
-    case value
-    when Hash
-      value.sort_by { |k, _| k.to_s }.to_h.transform_values { |v| canonicalize(v) }
-    when Array
-      value.map { |v| canonicalize(v) }
-    else
-      value
-    end
-  end
-
-  def sandbox_entitlements_secret(hosts:)
-    rules = Principal.normalize_hosts(hosts)
-      .map do |host|
-        {
-          "host" => host,
-          "methods" => [ "GET" ],
-          "paths" => [ SANDBOX_ENTITLEMENTS_PATH_PATTERN ]
-        }
-      end
-    return nil if rules.empty?
-
-    token = SandboxEntitlements::Jwt.encode_for_proxy(self)
-    return nil if token.blank?
-
-    {
-      "source" => { "type" => "control_plane", "value" => token },
-      "inject" => { "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" },
-      "rules" => rules
-    }
+  def self.sandbox_entitlements_hosts
+    [ Principal.host_from_url(ENV["CENTAUR_CONSOLE_URL"]) ]
   end
 
   private
 
-  def with_sandbox_entitlements_secret(config, sandbox_entitlements_hosts:)
-    secret = sandbox_entitlements_secret(hosts: sandbox_entitlements_hosts)
-    return config unless secret
+  def normalize_labels
+    self.labels = {} if labels.nil?
+  end
 
-    config.deep_dup.tap do |copy|
-      copy["secrets"] = Array(copy["secrets"]) + [ secret ]
+  def labels_are_string_map
+    return errors.add(:labels, "must be a hash") unless labels.is_a?(Hash)
+
+    labels.each do |key, value|
+      errors.add(:labels, "keys must be strings") unless key.is_a?(String)
+      errors.add(:labels, "values must be strings") unless value.is_a?(String)
     end
   end
 

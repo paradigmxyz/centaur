@@ -58,11 +58,13 @@ module Api
         rules_attrs = build_rules(attrs)
 
         AwsAuthSecret.transaction do
-          ref.assign_attributes(base)
-          ref.sources = sources
-          ref.rules = rules_attrs
-          ref.save!
-          ref.reload
+          with_sync_config_replacement_guard(ref, base, sources: sources, rules: rules_attrs) do
+            ref.assign_attributes(base)
+            ref.sources = sources
+            ref.rules = rules_attrs
+            ref.save!
+            ref.reload
+          end
         end
       end
 

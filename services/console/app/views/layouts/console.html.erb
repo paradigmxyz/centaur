@@ -29,6 +29,7 @@
             return null;
           }
         };
+        const preference = () => storedTheme() || "system";
         const resolveTheme = () => storedTheme() || systemTheme();
         const applyTheme = (theme) => {
           const nextTheme = validTheme(theme) ? theme : systemTheme();
@@ -45,6 +46,16 @@
         window.ConsoleTheme = {
           apply: applyTheme,
           persist: (theme) => {
+            if (theme === "system") {
+              try {
+                localStorage.removeItem(storageKey);
+                localStorage.removeItem(storageSourceKey);
+              } catch (_error) {
+                // Theme still follows the system for this page load when storage is unavailable.
+              }
+              return applyTheme(systemTheme());
+            }
+
             const nextTheme = applyTheme(theme);
             try {
               localStorage.setItem(storageKey, nextTheme);
@@ -54,6 +65,7 @@
             }
             return nextTheme;
           },
+          preference: preference,
           resolve: resolveTheme
         };
 
@@ -506,6 +518,7 @@
       }
 
       .console-thinking-preview {
+        flex: 1 1 auto;
         min-width: 0;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -517,6 +530,7 @@
         flex: 0 0 auto;
         color: #d4d4d8;
         font-weight: 500;
+        white-space: nowrap;
       }
 
       .console-thinking-failed,
@@ -527,7 +541,9 @@
       /* The comma hugs the group title: pull the label back across the flex
          gap so it reads "Ran 2 commands, 1 failed". */
       .console-thinking-failed {
+        flex: 0 0 auto;
         margin-left: -0.4rem;
+        white-space: nowrap;
       }
 
       .console-thinking-failed::before {
@@ -888,6 +904,25 @@
 
       .console-message-stack {
         min-width: 0;
+      }
+
+      .console-message-images {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.75rem;
+        max-width: 100%;
+      }
+
+      .console-message-image {
+        display: block;
+        width: auto;
+        height: auto;
+        max-width: 100%;
+        max-height: min(28rem, 60vh);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 0.75rem;
+        object-fit: contain;
       }
 
       .console-message-timestamp {
@@ -1923,10 +1958,11 @@
                       class="console-account-menu-button"
                       data-console-theme-toggle
                       role="menuitem"
-                      aria-label="Switch to light mode">
-                <span data-console-theme-action-icon="light"><%= console_icon("sun", classes: "size-4") %></span>
-                <span data-console-theme-action-icon="dark" hidden><%= console_icon("moon", classes: "size-4") %></span>
-                <span data-console-theme-label>Light mode</span>
+                      aria-label="Current theme: system. Switch to light mode">
+                <span data-console-theme-icon="light" hidden><%= console_icon("sun", classes: "size-4") %></span>
+                <span data-console-theme-icon="dark" hidden><%= console_icon("moon", classes: "size-4") %></span>
+                <span data-console-theme-icon="system"><%= console_icon("computer", classes: "size-4") %></span>
+                <span data-console-theme-label>System mode</span>
               </button>
               <% if acting_admin? %>
                 <%= button_to console_descope_path,
@@ -2078,35 +2114,51 @@
 
         const root = document.documentElement;
         const label = themeToggle.querySelector("[data-console-theme-label]");
-        const lightIcon = themeToggle.querySelector("[data-console-theme-action-icon='light']");
-        const darkIcon = themeToggle.querySelector("[data-console-theme-action-icon='dark']");
+        const lightIcon = themeToggle.querySelector("[data-console-theme-icon='light']");
+        const darkIcon = themeToggle.querySelector("[data-console-theme-icon='dark']");
+        const systemIcon = themeToggle.querySelector("[data-console-theme-icon='system']");
+        const themePreferences = ["system", "light", "dark"];
+        const themeLabels = {
+          system: "System mode",
+          light: "Light mode",
+          dark: "Dark mode"
+        };
 
-        const syncThemeControl = (theme) => {
-          const nextTheme = theme === "light" ? "light" : "dark";
-          const isLight = nextTheme === "light";
-          if (label) label.textContent = isLight ? "Dark mode" : "Light mode";
+        const nextThemePreference = (preference) => {
+          const currentIndex = themePreferences.indexOf(preference);
+          return themePreferences[(currentIndex + 1) % themePreferences.length];
+        };
+
+        const syncThemeControl = (preference) => {
+          const nextPreference = nextThemePreference(preference);
+          if (label) label.textContent = themeLabels[preference];
           themeToggle.setAttribute(
             "aria-label",
-            isLight ? "Switch to dark mode" : "Switch to light mode"
+            `Current theme: ${preference}. Switch to ${nextPreference} mode`
           );
-          if (lightIcon) lightIcon.hidden = isLight;
-          if (darkIcon) darkIcon.hidden = !isLight;
+          themeToggle.dataset.consoleThemePreference = preference;
+          if (lightIcon) lightIcon.hidden = preference !== "light";
+          if (darkIcon) darkIcon.hidden = preference !== "dark";
+          if (systemIcon) systemIcon.hidden = preference !== "system";
         };
 
-        const applyTheme = (theme, persist = false) => {
-          let nextTheme;
+        const applyTheme = (preference, persist = false) => {
           if (window.ConsoleTheme) {
-            nextTheme = persist ? window.ConsoleTheme.persist(theme) : window.ConsoleTheme.apply(theme);
+            if (persist) window.ConsoleTheme.persist(preference);
+            else window.ConsoleTheme.apply(preference);
           } else {
-            nextTheme = theme === "light" ? "light" : "dark";
+            const useLightTheme = preference === "light" ||
+              (preference === "system" && window.matchMedia?.("(prefers-color-scheme: light)").matches);
+            const nextTheme = useLightTheme ? "light" : "dark";
             root.dataset.consoleTheme = nextTheme;
           }
-          syncThemeControl(nextTheme);
+          syncThemeControl(preference);
         };
 
-        applyTheme(root.dataset.consoleTheme || window.ConsoleTheme?.resolve?.() || "dark");
+        applyTheme(window.ConsoleTheme?.preference?.() || root.dataset.consoleTheme || "dark");
         themeToggle.addEventListener("click", () => {
-          applyTheme(root.dataset.consoleTheme === "light" ? "dark" : "light", true);
+          const currentPreference = themeToggle.dataset.consoleThemePreference || "system";
+          applyTheme(nextThemePreference(currentPreference), true);
         });
       })();
 

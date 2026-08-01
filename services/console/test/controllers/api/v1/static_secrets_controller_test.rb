@@ -299,6 +299,36 @@ module Api
         assert_nil RequestRule.find_by(id: old_rule.id), "old rule should be deleted"
       end
 
+      test "PUT with an unchanged document does not bump the sync config cache version" do
+        ref = static_secrets(:github_token_inject)
+        source = SecretSource.create!(source_type: "control_plane", secret: "same-secret",
+                                      static_secret: ref)
+        rule = RequestRule.create!(host: "api.github.com", http_methods: [ "GET" ],
+                                   paths: [ "/" ], position: 0, static_secret: ref)
+        principal = principals(:acme_channel)
+        version = principal.reload.sync_config_cache_version
+
+        body = {
+          data: {
+            namespace: ref.namespace,
+            name: ref.name,
+            description: ref.description,
+            labels: ref.labels,
+            inject_config: ref.inject_config,
+            source: { source_type: "control_plane", secret: "same-secret" },
+            rules: [ { host: "api.github.com", http_methods: [ "GET" ], paths: [ "/" ] } ]
+          }
+        }
+
+        put api_v1_static_secret_url(id: ref.oid), params: body.to_json, headers: auth_headers
+        assert_response :ok
+
+        ref.reload
+        assert_equal source.id, ref.source.id
+        assert_equal [ rule.id ], ref.rules.pluck(:id)
+        assert_equal version, principal.reload.sync_config_cache_version
+      end
+
       test "PUT does not retain omitted source fields" do
         ref = static_secrets(:github_token_inject)
         SecretSource.create!(source_type: "control_plane", secret: "OLD",

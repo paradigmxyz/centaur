@@ -25,7 +25,8 @@ async fn main() -> Result<(), ServerError> {
         "starting centaur api-rs server"
     );
 
-    let app_state = AppState::unready();
+    let app_state = AppState::unready()
+        .with_codex_nanocodex_rollout_percent(args.codex_nanocodex_rollout_percent());
     let app = build_router_with_app_state(app_state.clone());
     let shutdown_state = app_state.clone();
     let drain_timeout = args.shutdown_execution_drain_timeout();
@@ -79,10 +80,12 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
         .with_openai_session_title_generator_from_env();
     let mut warm_pool_bootstrap_principal = None;
     let mut workflow_host_principal = None;
+    let mut workflow_principal_registrar = None;
     if let Some(iron_control) = args.iron_control_runtime().await? {
         info!("iron-control session registration enabled");
         warm_pool_bootstrap_principal = Some(iron_control.warm_pool_bootstrap_principal);
         workflow_host_principal = Some(iron_control.workflow_host_principal);
+        workflow_principal_registrar = Some(iron_control.workflow_principal_registrar);
         runtime = runtime.with_iron_control(iron_control.registrar);
     }
     runtime = runtime.with_personas(args.persona_registry()?);
@@ -100,10 +103,11 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
         .workflow_host_sandbox_runtime(workflow_host_principal.as_deref())
         .await?;
     let workflows = Some(
-        WorkflowRuntime::new_with_workflow_host_sandbox(
+        WorkflowRuntime::new_with_workflow_host_sandbox_and_principal_registrar(
             store,
             runtime.clone(),
             workflow_host_sandbox,
+            workflow_principal_registrar,
         )
         .await?,
     );

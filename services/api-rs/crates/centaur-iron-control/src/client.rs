@@ -436,10 +436,12 @@ impl IronControlClient {
         &self,
         name: impl Into<String>,
         principal_id: impl Into<String>,
+        labels: std::collections::BTreeMap<String, String>,
     ) -> Result<Proxy> {
         let input = ProxyInput {
             name: name.into(),
             principal_id: principal_id.into(),
+            labels,
         };
         self.write(Method::POST, &collection_path("proxies"), &input)
             .await
@@ -450,14 +452,15 @@ impl IronControlClient {
     /// `/proxy/sync` (the config hash changes). This is how a warm-pool proxy,
     /// booted under a bootstrap principal, is bound to a session's principal at
     /// checkout without a restart or token swap.
-    pub async fn assign_proxy_principal(&self, id: &str, principal_id: &str) -> Result<Proxy> {
+    pub async fn assign_proxy_principal(
+        &self,
+        id: &str,
+        principal_id: &str,
+        labels: &std::collections::BTreeMap<String, String>,
+    ) -> Result<Proxy> {
         let path = format!("{API_PREFIX}/proxies/{}", urlencoding::encode(id));
-        self.write(
-            Method::PATCH,
-            &path,
-            &json!({ "principal_id": principal_id }),
-        )
-        .await
+        let body = proxy_assignment_payload(principal_id, labels);
+        self.write(Method::PATCH, &path, &body).await
     }
 
     /// Deregister a proxy by OID.
@@ -511,6 +514,20 @@ impl IronControlClient {
                 source,
             })
     }
+}
+
+fn proxy_assignment_payload(
+    principal_id: &str,
+    labels: &std::collections::BTreeMap<String, String>,
+) -> Value {
+    let mut body = serde_json::Map::from_iter([(
+        "principal_id".to_owned(),
+        Value::String(principal_id.to_owned()),
+    )]);
+    if !labels.is_empty() {
+        body.insert("labels".to_owned(), json!(labels));
+    }
+    Value::Object(body)
 }
 
 fn grant_body(grantee: &Grantee, secret: &GrantSecret) -> Value {
@@ -815,10 +832,18 @@ mod tests {
             "id": "prx_1",
             "name": "edge",
             "principal_id": "prn_1",
+            "labels": { "centaur.slack_user_id": "U1" },
             "token": "iprx_secret"
         }))
         .unwrap();
         assert_eq!(created.token.as_deref(), Some("iprx_secret"));
+        assert_eq!(
+            created
+                .labels
+                .get("centaur.slack_user_id")
+                .map(String::as_str),
+            Some("U1")
+        );
 
         let listed: Proxy = serde_json::from_value(json!({
             "id": "prx_1",
@@ -827,5 +852,51 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(listed.token, None);
+        assert!(listed.labels.is_empty());
+    }
+
+    #[test]
+    fn proxy_input_serializes_labels() {
+        let input = ProxyInput {
+            name: "edge".to_owned(),
+            principal_id: "prn_1".to_owned(),
+            labels: std::collections::BTreeMap::from([(
+                "centaur.slack_user_id".to_owned(),
+                "U1".to_owned(),
+            )]),
+        };
+
+        assert_eq!(
+            serde_json::to_value(input).unwrap(),
+            json!({
+                "name": "edge",
+                "principal_id": "prn_1",
+                "labels": { "centaur.slack_user_id": "U1" }
+            })
+        );
+    }
+
+    #[test]
+    fn proxy_assignment_payload_omits_empty_labels() {
+        assert_eq!(
+            proxy_assignment_payload("prn_1", &std::collections::BTreeMap::new()),
+            json!({ "principal_id": "prn_1" })
+        );
+    }
+
+    #[test]
+    fn proxy_assignment_payload_includes_non_empty_labels() {
+        let labels = std::collections::BTreeMap::from([(
+            "centaur.slack_user_id".to_owned(),
+            "U1".to_owned(),
+        )]);
+
+        assert_eq!(
+            proxy_assignment_payload("prn_1", &labels),
+            json!({
+                "principal_id": "prn_1",
+                "labels": { "centaur.slack_user_id": "U1" }
+            })
+        );
     }
 }
