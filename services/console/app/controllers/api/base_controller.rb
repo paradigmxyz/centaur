@@ -115,24 +115,11 @@ module Api
     DEFAULT_PAGE_LIMIT = 50
     MAX_PAGE_LIMIT = 200
 
-    def paginated_label_search(scope, promoted_label_columns: [])
+    def paginated_label_search(scope, label_filters: label_filter_params)
       namespace = params.require(:namespace)
 
-      labels = label_filter_params
       filtered = scope.where(namespace: namespace)
-      promoted_label_columns.each do |column|
-        legacy_value = labels.delete(column)
-        native_value = params[column] if params.key?(column)
-        if legacy_value.present?
-          Rails.logger.warn("deprecated_principal_label_filter field=#{column}")
-          if native_value.present? && native_value.to_s != legacy_value.to_s
-            raise ActionController::BadRequest, "conflicting #{column} and labels[#{column}] filters"
-          end
-        end
-        value = native_value.presence || legacy_value
-        filtered = filtered.where(column => value.to_s) if value.present?
-      end
-      filtered = filtered.where("labels @> ?", labels.to_json) if labels.any?
+      filtered = filtered.where("labels @> ?", label_filters.to_json) if label_filters.any?
 
       limit = pagination_limit
       page = pagination_page

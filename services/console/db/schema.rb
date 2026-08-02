@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_07_31_120000) do
+ActiveRecord::Schema[8.1].define(version: 2026_08_02_002000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -282,6 +282,20 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_31_120000) do
     t.index ["namespace", "foreign_id"], name: "index_pg_dsn_secrets_on_namespace_and_foreign_id", unique: true
   end
 
+  create_table "principal_identifiers", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.string "issuer", default: "", null: false
+    t.jsonb "metadata", default: {}, null: false
+    t.string "namespace", null: false
+    t.bigint "principal_id", null: false
+    t.string "scheme", null: false
+    t.string "subject", null: false
+    t.datetime "updated_at", null: false
+    t.index ["namespace", "scheme", "issuer", "subject"], name: "index_principal_identifiers_on_lookup_key"
+    t.index ["principal_id", "scheme", "issuer", "subject"], name: "index_principal_identifiers_unique_per_principal", unique: true
+    t.index ["principal_id"], name: "index_principal_identifiers_on_principal_id"
+  end
+
   create_table "principal_roles", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.bigint "principal_id", null: false
@@ -314,20 +328,13 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_31_120000) do
     t.boolean "sandbox_api_server_enabled", default: true, null: false
     t.boolean "sandbox_observability_enabled", default: true, null: false
     t.string "sandbox_repo_cache", default: "all", null: false
-    t.string "slack_channel_id"
-    t.string "slack_email"
-    t.string "slack_team_id"
-    t.string "slack_user_id"
     t.bigint "sync_config_cache_version", default: 0, null: false
     t.datetime "updated_at", null: false
     t.index ["created_by_id"], name: "index_principals_on_created_by_id"
+    t.index ["id", "namespace"], name: "index_principals_on_id_and_namespace", unique: true
     t.index ["labels"], name: "index_principals_on_labels", using: :gin
     t.index ["namespace", "foreign_id"], name: "index_principals_on_namespace_and_foreign_id", unique: true
     t.index ["namespace", "kind"], name: "index_principals_on_namespace_and_kind"
-    t.index ["namespace", "slack_channel_id"], name: "index_principals_on_namespace_and_slack_channel_id"
-    t.index ["namespace", "slack_email"], name: "index_principals_on_namespace_and_slack_email"
-    t.index ["namespace", "slack_team_id"], name: "index_principals_on_namespace_and_slack_team_id"
-    t.index ["namespace", "slack_user_id"], name: "index_principals_on_namespace_and_slack_user_id"
   end
 
   create_table "proxies", force: :cascade do |t|
@@ -512,6 +519,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_31_120000) do
   add_foreign_key "oauth_apps", "users", column: "created_by_id"
   add_foreign_key "oauth_token_secrets", "users", column: "created_by_id"
   add_foreign_key "pg_dsn_secrets", "users", column: "created_by_id"
+  add_foreign_key "principal_identifiers", "principals", column: ["principal_id", "namespace"], primary_key: ["id", "namespace"], on_delete: :cascade
   add_foreign_key "principal_roles", "principals"
   add_foreign_key "principal_roles", "roles"
   add_foreign_key "principal_sync_config_snapshots", "principals"

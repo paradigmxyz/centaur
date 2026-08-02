@@ -1,16 +1,8 @@
 class AddIdentityFieldsToPrincipals < ActiveRecord::Migration[8.1]
   def up
     add_column :principals, :kind, :string, null: false, default: "unknown"
-    add_column :principals, :slack_user_id, :string
-    add_column :principals, :slack_channel_id, :string
-    add_column :principals, :slack_team_id, :string
-    add_column :principals, :slack_email, :string
 
     add_index :principals, [ :namespace, :kind ]
-    add_index :principals, [ :namespace, :slack_user_id ]
-    add_index :principals, [ :namespace, :slack_channel_id ]
-    add_index :principals, [ :namespace, :slack_team_id ]
-    add_index :principals, [ :namespace, :slack_email ]
 
     execute <<~SQL.squish
       UPDATE principals
@@ -45,40 +37,20 @@ class AddIdentityFieldsToPrincipals < ActiveRecord::Migration[8.1]
             WHEN foreign_id LIKE 'slack-user-%'
               THEN 'slack_dm'
             ELSE 'unknown'
-          END,
-          slack_user_id = NULLIF(TRIM(labels ->> 'slack_user_id'), ''),
-          slack_channel_id = NULLIF(TRIM(labels ->> 'slack_channel_id'), ''),
-          slack_team_id = NULLIF(TRIM(labels ->> 'slack_team_id'), ''),
-          slack_email = NULLIF(TRIM(labels ->> 'slack_email'), '')
+          END
     SQL
 
     # Keep aliases synchronized for legacy readers during the cutover.
     execute <<~SQL.squish
       UPDATE principals
-      SET labels = (labels - 'kind' - 'slack_user_id' - 'slack_channel_id' - 'slack_team_id' - 'slack_email') ||
+      SET labels = (labels - 'kind') ||
                    CASE WHEN kind = 'unknown' THEN '{}'::jsonb
-                        ELSE jsonb_build_object('kind', kind) END ||
-                   CASE WHEN slack_user_id IS NULL THEN '{}'::jsonb
-                        ELSE jsonb_build_object('slack_user_id', slack_user_id) END ||
-                   CASE WHEN slack_channel_id IS NULL THEN '{}'::jsonb
-                        ELSE jsonb_build_object('slack_channel_id', slack_channel_id) END ||
-                   CASE WHEN slack_team_id IS NULL THEN '{}'::jsonb
-                        ELSE jsonb_build_object('slack_team_id', slack_team_id) END ||
-                   CASE WHEN slack_email IS NULL THEN '{}'::jsonb
-                        ELSE jsonb_build_object('slack_email', slack_email) END
+                        ELSE jsonb_build_object('kind', kind) END
     SQL
   end
 
   def down
-    remove_index :principals, [ :namespace, :slack_email ], if_exists: true
-    remove_index :principals, [ :namespace, :slack_team_id ], if_exists: true
-    remove_index :principals, [ :namespace, :slack_channel_id ], if_exists: true
-    remove_index :principals, [ :namespace, :slack_user_id ], if_exists: true
     remove_index :principals, [ :namespace, :kind ], if_exists: true
-    remove_column :principals, :slack_email, if_exists: true
-    remove_column :principals, :slack_team_id, if_exists: true
-    remove_column :principals, :slack_channel_id, if_exists: true
-    remove_column :principals, :slack_user_id, if_exists: true
     remove_column :principals, :kind, if_exists: true
   end
 end

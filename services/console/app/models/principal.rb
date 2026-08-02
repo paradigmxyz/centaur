@@ -11,6 +11,7 @@ class Principal < ApplicationRecord
   # Proxies outlive their principal: deleting a principal unassigns its proxies
   # rather than destroying them, leaving them ready for reassignment.
   has_many :proxies, dependent: :nullify
+  has_many :principal_identifiers, dependent: :destroy, inverse_of: :principal, autosave: true
   has_many :principal_roles, dependent: :destroy
   has_many :roles, through: :principal_roles
   has_many :slack_channel_permissions, dependent: :destroy
@@ -23,23 +24,27 @@ class Principal < ApplicationRecord
 
   after_commit :auto_grant_matching_oauth_credentials, on: %i[create update]
   before_validation :apply_sandbox_repo_cache_label
-  before_validation :promote_identity_labels_to_fields
-  before_validation :normalize_identity_fields
-  before_validation :mirror_identity_fields_to_labels
+  before_validation :promote_identity_labels
+  before_validation :normalize_kind
+  before_validation :mirror_identity_labels
   before_commit :bump_own_sync_config_cache_version, on: :update, if: :sync_config_fields_changed?
+  after_save :clear_explicit_identifier_assignment
 
   URL_SAFE_FORMAT = /\A[A-Za-z0-9\-._~]+\z/
   URL_SAFE_MESSAGE = "must contain only URL-safe characters (A-Z, a-z, 0-9, -, ., _, ~)"
   SANDBOX_REPO_CACHE_LABEL = "centaur.sandbox_repo_cache".freeze
   SANDBOX_REPO_CACHE_VALUES = %w[none public all].freeze
   UNKNOWN_KIND = "unknown".freeze
-  PROMOTED_LABEL_FIELDS = %w[kind slack_user_id slack_channel_id slack_team_id slack_email].freeze
+  RESERVED_IDENTITY_LABEL_FIELDS = PrincipalIdentifierCompatibility::RESERVED_LABEL_FIELDS
+
+  attr_writer :identifiers_assigned_explicitly
 
   validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
   validates :foreign_id, uniqueness: { scope: :namespace, allow_nil: true },
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }, allow_nil: true
   validates :sandbox_repo_cache, inclusion: { in: SANDBOX_REPO_CACHE_VALUES }
   validates :kind, presence: true
+  validate :principal_identifiers_are_unique
 
   # Stand-in for an inline secret value in redacted config: operator inspection
   # reports that a control_plane source carries a value without revealing it.
@@ -109,14 +114,16 @@ class Principal < ApplicationRecord
   end
 
   def labels_with_sandbox_capabilities
-    labels.to_h
-      .merge(SANDBOX_REPO_CACHE_LABEL => sandbox_repo_cache, "kind" => kind)
-      .then { |value| slack_user_id.present? ? value.merge("slack_user_id" => slack_user_id) : value.except("slack_user_id") }
-      .then do |value|
-        slack_channel_id.present? ? value.merge("slack_channel_id" => slack_channel_id) : value.except("slack_channel_id")
-      end
-      .then { |value| slack_team_id.present? ? value.merge("slack_team_id" => slack_team_id) : value.except("slack_team_id") }
-      .then { |value| slack_email.present? ? value.merge("slack_email" => slack_email) : value.except("slack_email") }
+    PrincipalIdentifierCompatibility.response_labels(self)
+      .merge(SANDBOX_REPO_CACHE_LABEL => sandbox_repo_cache)
+  end
+
+  def replace_identifiers!(attributes)
+    PrincipalIdentifierCompatibility.replace!(self, attributes)
+  end
+
+  def identifiers_assigned_explicitly?
+    @identifiers_assigned_explicitly == true
   end
 
   def effective_slack_channel_permissions_payload
@@ -218,38 +225,31 @@ class Principal < ApplicationRecord
     self[:labels] = labels.to_h.merge(SANDBOX_REPO_CACHE_LABEL => sandbox_repo_cache)
   end
 
-  # Legacy writers still send principal identity through labels. Promote only
-  # fields that were not assigned directly, then mirror the authoritative
-  # columns back into aliases below for legacy readers.
-  def promote_identity_labels_to_fields
+  # Old clients still describe identities in labels. Convert those aliases to
+  # identifier rows before persisting, then mirror the authoritative rows back
+  # into labels below for rolling-deploy and rollback compatibility.
+  def promote_identity_labels
     return unless will_save_change_to_labels?
 
-    PROMOTED_LABEL_FIELDS.each do |field|
-      next if will_save_change_to_attribute?(field) || !labels.to_h.key?(field)
-
-      self[field] = labels.to_h[field]
-    end
+    PrincipalIdentifierCompatibility.promote!(self)
   end
 
-  def normalize_identity_fields
+  def normalize_kind
     self.kind = kind.to_s.strip
-    self.slack_user_id = slack_user_id.to_s.strip.presence
-    self.slack_channel_id = slack_channel_id.to_s.strip.presence
-    self.slack_team_id = slack_team_id.to_s.strip.presence
-    self.slack_email = slack_email.to_s.strip.presence
   end
 
-  # Compatibility-release dual write. New code treats the columns as
-  # authoritative; these aliases exist only for old Console instances during a
-  # rolling deploy and are removed by the contract release.
-  def mirror_identity_fields_to_labels
-    mirrored = labels.to_h.except(*PROMOTED_LABEL_FIELDS)
-    mirrored["kind"] = kind if kind.present? && kind != UNKNOWN_KIND
-    mirrored["slack_user_id"] = slack_user_id if slack_user_id.present?
-    mirrored["slack_channel_id"] = slack_channel_id if slack_channel_id.present?
-    mirrored["slack_team_id"] = slack_team_id if slack_team_id.present?
-    mirrored["slack_email"] = slack_email if slack_email.present?
-    self[:labels] = mirrored
+  def mirror_identity_labels
+    PrincipalIdentifierCompatibility.mirror!(self)
+  end
+
+  def principal_identifiers_are_unique
+    identifiers = principal_identifiers.to_a.reject(&:marked_for_destruction?)
+    keys = identifiers.map { |identifier| [ identifier.scheme, identifier.issuer, identifier.subject ] }
+    errors.add(:principal_identifiers, "contain duplicates") if keys.uniq.length != keys.length
+  end
+
+  def clear_explicit_identifier_assignment
+    @identifiers_assigned_explicitly = false
   end
 
   def supplied_key?(attributes, key)
