@@ -219,6 +219,34 @@ module Mcp
       assert_nil principal.slack_team_id
     end
 
+    test "authorization approval leaves Slack fields unset for a malformed Slack user ID" do
+      @operator.user_identities.create!(
+        provider: "slack", subject: "U12345", team_id: "T0123456789",
+        email: @operator.email, email_verified: true
+      )
+      client = create_client
+
+      code = authorize_code(client)
+
+      principal = McpOauthAuthorizationCode.find_usable(code).principal
+      assert_nil principal.slack_user_id
+      assert_nil principal.slack_team_id
+    end
+
+    test "authorization approval leaves Slack fields unset for a malformed Slack team ID" do
+      @operator.user_identities.create!(
+        provider: "slack", subject: "U0123456789", team_id: "TACME",
+        email: @operator.email, email_verified: true
+      )
+      client = create_client
+
+      code = authorize_code(client)
+
+      principal = McpOauthAuthorizationCode.find_usable(code).principal
+      assert_nil principal.slack_user_id
+      assert_nil principal.slack_team_id
+    end
+
     test "authorization approval reuses an existing user-mcp role" do
       existing = Role.create!(
         namespace: "default",

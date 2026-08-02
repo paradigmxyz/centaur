@@ -498,6 +498,9 @@ module Mcp
       return {} unless identities.one?
 
       slack_user_id, slack_team_id = identities.first
+      return {} unless Principal::SLACK_USER_ID_FORMAT.match?(slack_user_id)
+      return {} unless Principal::SLACK_TEAM_ID_FORMAT.match?(slack_team_id)
+
       { "slack_user_id" => slack_user_id, "slack_team_id" => slack_team_id }
     end
 
