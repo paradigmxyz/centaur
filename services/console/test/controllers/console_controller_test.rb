@@ -140,6 +140,32 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_select "a[href=?]", console_new_principal_path, text: "Add Principal"
   end
 
+  test "principal pages render first-class identity fields as labels" do
+    principal = principals(:acme_channel)
+    principal.update!(
+      kind: "slack_dm",
+      slack_user_id: "U0123456789",
+      slack_channel_id: "D0123456789",
+      slack_team_id: "T0123456789",
+      slack_email: "member@example.com"
+    )
+    expected_labels = {
+      "kind" => "slack_dm",
+      "slack_user_id" => "U0123456789",
+      "slack_channel_id" => "D0123456789",
+      "slack_team_id" => "T0123456789",
+      "slack_email" => "member@example.com"
+    }
+
+    [ console_principals_url, console_principal_url(principal.oid) ].each do |url|
+      get url
+      assert_response :ok
+      expected_labels.each do |key, value|
+        assert_select ".label-chip", text: "#{key}=#{value}"
+      end
+    end
+  end
+
   test "principal detail page offers delete" do
     principal = principals(:acme_channel)
     get console_principal_url(principal.oid)
