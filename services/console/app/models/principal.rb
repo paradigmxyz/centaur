@@ -18,6 +18,7 @@ class Principal < ApplicationRecord
   has_many :mcp_oauth_authorization_codes, dependent: :destroy
   has_many :mcp_oauth_refresh_tokens, dependent: :destroy
   belongs_to :created_by, class_name: "User"
+  belongs_to :console_user, class_name: "User", optional: true
 
   include SlackChannelPermissionOwner
 
@@ -49,7 +50,6 @@ class Principal < ApplicationRecord
   SLACK_USER_ID_FORMAT = /\A(?:[UW][A-Z0-9]{8,}|USLACK)\z/
   SLACK_CHANNEL_ID_FORMAT = /\A[CDG][A-Z0-9]{8,}\z/
   SLACK_TEAM_ID_FORMAT = /\A[TE][A-Z0-9]{8,}\z/
-  CONSOLE_USER_ID_FORMAT = /\Ausr_[A-Za-z0-9]{8,}\z/
 
   validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
   validates :foreign_id, uniqueness: { scope: :namespace, allow_nil: true },
@@ -65,9 +65,7 @@ class Principal < ApplicationRecord
                             allow_nil: true, if: :will_save_change_to_slack_team_id?
   validates :slack_email, format: { with: URI::MailTo::EMAIL_REGEXP, message: "is not a valid email address" },
                           allow_nil: true, if: :will_save_change_to_slack_email?
-  validates :console_user_id,
-            format: { with: CONSOLE_USER_ID_FORMAT, message: "is not a valid console user ID" },
-            allow_nil: true, if: :will_save_change_to_console_user_id?
+  validates :console_user_id, presence: true, if: -> { kind == "console_user" }
   validates :console_user_email, format: { with: URI::MailTo::EMAIL_REGEXP, message: "is not a valid email address" },
                                  allow_nil: true, if: :will_save_change_to_console_user_email?
 
@@ -138,8 +136,8 @@ class Principal < ApplicationRecord
   end
 
   def labels_with_sandbox_capabilities
-    compatibility_labels = self.class.promoted_label_fields_for(kind).to_h do |label, field|
-      [ label, public_send(field) ]
+    compatibility_labels = self.class.promoted_label_fields_for(kind).to_h do |label, _field|
+      [ label, promoted_label_value(label) ]
     end.compact
 
     labels.to_h.merge(
@@ -228,6 +226,20 @@ class Principal < ApplicationRecord
     PROMOTED_LABEL_FIELDS.reject { |_label, field| field.start_with?("console_user_") }
   end
 
+  def self.promoted_label_filter_value(label, value)
+    return User.decode_oid(value) if label.to_s == "console-user-id"
+
+    value.to_s
+  end
+
+  def promoted_label_value(label)
+    field = self.class.promoted_label_fields_for(kind)[label.to_s]
+    return unless field
+    return console_user&.oid if field == "console_user_id"
+
+    public_send(field)
+  end
+
   # Deep-walk a config payload and blank out the inline value of every
   # control_plane source, leaving the rest of the structure intact.
   def self.redact_live_secrets(value)
@@ -288,7 +300,13 @@ class Principal < ApplicationRecord
     return if will_save_change_to_attribute?(field) || !labels.to_h.key?(label)
 
     value = labels.to_h[label]
-    self[field] = field == "kind" ? value : value.presence
+    self[field] = if field == "kind"
+      value
+    elsif field == "console_user_id"
+      User.find_by_oid(value)&.id
+    else
+      value.presence
+    end
   end
 
   def supplied_key?(attributes, key)

@@ -172,7 +172,7 @@ class PgDsnSecretTest < ActiveSupport::TestCase
     principal = Principal.create!(
       namespace: "acme",
       kind: "console_user",
-      console_user_id: user.oid,
+      console_user_id: user.id,
       console_user_email: user.email,
       created_by: user
     )

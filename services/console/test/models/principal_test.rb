@@ -73,13 +73,13 @@ class PrincipalTest < ActiveSupport::TestCase
     user = users(:acme_admin)
     principal = Principal.create!(default_attrs(
       kind: "console_user",
-      console_user_id: user.oid,
+      console_user_id: user.id,
       console_user_email: user.email,
       labels: { "managed-by" => "centaur" }
     ))
 
     principal.reload
-    assert_equal user.oid, principal.console_user_id
+    assert_equal user.id, principal.console_user_id
     assert_equal user.email, principal.console_user_email
     assert_empty principal.labels.slice("console-user-id", "email")
     assert_equal user.oid, principal.labels_with_sandbox_capabilities["console-user-id"]
@@ -99,7 +99,7 @@ class PrincipalTest < ActiveSupport::TestCase
       labels: { "kind" => "user", "email" => user.email }
     ))
 
-    assert_equal user.oid, console_user.reload.console_user_id
+    assert_equal user.id, console_user.reload.console_user_id
     assert_equal user.email, console_user.console_user_email
     assert_empty console_user.labels.slice("console-user-id", "email")
     assert_nil ordinary_user.reload.console_user_id
@@ -133,7 +133,9 @@ class PrincipalTest < ActiveSupport::TestCase
 
   test "kind accepts only known values" do
     Principal::KINDS.each do |kind|
-      assert Principal.new(default_attrs(kind: kind)).valid?, "expected #{kind.inspect} to be valid"
+      attrs = { kind: kind }
+      attrs[:console_user_id] = users(:acme_admin).id if kind == "console_user"
+      assert Principal.new(default_attrs(attrs)).valid?, "expected #{kind.inspect} to be valid"
     end
 
     %w[service future_platform].each do |kind|
@@ -171,23 +173,23 @@ class PrincipalTest < ActiveSupport::TestCase
     end
   end
 
-  test "console user identity fields must use canonical formats" do
+  test "console user principals require a console user id and valid email" do
     user = users(:acme_admin)
     principal = Principal.new(default_attrs(
       kind: "console_user",
-      console_user_id: user.oid,
+      console_user_id: user.id,
       console_user_email: user.email
     ))
     assert principal.valid?
 
-    {
-      console_user_id: "not-a-user-id",
-      console_user_email: "not-an-email"
-    }.each do |field, value|
-      principal = Principal.new(default_attrs(kind: "console_user", field => value))
-      assert_not principal.valid?
-      assert_predicate principal.errors[field], :any?
-    end
+    principal.console_user_id = nil
+    assert_not principal.valid?
+    assert_predicate principal.errors[:console_user_id], :any?
+
+    principal.console_user_id = user.id
+    principal.console_user_email = "not-an-email"
+    assert_not principal.valid?
+    assert_predicate principal.errors[:console_user_email], :any?
   end
 
   test "unchanged malformed migrated Slack identities do not block unrelated saves" do

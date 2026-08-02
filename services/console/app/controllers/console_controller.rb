@@ -21,7 +21,7 @@ class ConsoleController < ApplicationController
   }.freeze
 
   def principals
-    @principals = Principal.order(created_at: :asc, id: :asc)
+    @principals = Principal.includes(:console_user).order(created_at: :asc, id: :asc)
   end
 
   def principal

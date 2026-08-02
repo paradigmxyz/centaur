@@ -2,44 +2,32 @@ require "test_helper"
 require Rails.root.join("db/migrate/20260802170149_add_console_user_identity_fields_to_principals")
 
 class AddConsoleUserIdentityFieldsToPrincipalsTest < ActiveSupport::TestCase
-  test "preserves console user identity values exactly regardless of format" do
+  test "decodes existing console user oids and rejects stale references" do
+    user = users(:acme_admin)
+    stale_oid = User.new(id: User.maximum(:id) + 1_000).oid
+    migration = AddConsoleUserIdentityFieldsToPrincipals.new
+
+    assert_equal user.id, migration.send(:console_user_id_from_oid, user.oid)
+    assert_nil migration.send(:console_user_id_from_oid, stale_oid)
+    assert_nil migration.send(:console_user_id_from_oid, "not-an-oid")
+  end
+
+  test "removes migrated identity values from labels" do
     labels = {
-      "console-user-id" => " stale-user-id ",
-      "email" => " pending ",
+      "console-user-id" => "usr_12345678",
+      "email" => "ada@example.com",
       "managed-by" => "centaur"
     }
-    row = connection.select_one(<<~SQL.squish)
-      SELECT
-        #{AddConsoleUserIdentityFieldsToPrincipals::CONSOLE_USER_ID_SQL} AS console_user_id,
-        #{AddConsoleUserIdentityFieldsToPrincipals::CONSOLE_USER_EMAIL_SQL} AS console_user_email,
-        #{AddConsoleUserIdentityFieldsToPrincipals::ORDINARY_LABELS_SQL} AS labels
-      FROM (VALUES (#{connection.quote(labels.to_json)}::jsonb)) AS principals(labels)
-    SQL
+    migration = AddConsoleUserIdentityFieldsToPrincipals.new
 
-    assert_equal " stale-user-id ", row.fetch("console_user_id")
-    assert_equal " pending ", row.fetch("console_user_email")
-    assert_equal({ "managed-by" => "centaur" }, JSON.parse(row.fetch("labels")))
+    assert_equal({ "managed-by" => "centaur" }, migration.send(:ordinary_labels, labels))
   end
 
-  test "restores console user identity columns to labels for rollback" do
-    labels = { "managed-by" => "centaur", "nullable" => nil }
-    restored = connection.select_value(<<~SQL.squish)
-      SELECT #{AddConsoleUserIdentityFieldsToPrincipals::RESTORED_LABELS_SQL}
-      FROM (VALUES (
-        #{connection.quote(labels.to_json)}::jsonb,
-        'usr_12345678', 'ada@example.com'
-      )) AS principals(labels, console_user_id, console_user_email)
-    SQL
+  test "encodes console user ids back to oids for rollback" do
+    user = users(:acme_admin)
+    migration = AddConsoleUserIdentityFieldsToPrincipals.new
 
-    assert_equal(
-      labels.merge("console-user-id" => "usr_12345678", "email" => "ada@example.com"),
-      JSON.parse(restored)
-    )
-  end
-
-  private
-
-  def connection
-    ActiveRecord::Base.connection
+    assert_equal user.oid, migration.send(:console_user_oid_from_id, user.id)
+    assert_nil migration.send(:console_user_oid_from_id, User.maximum(:id) + 1_000)
   end
 end

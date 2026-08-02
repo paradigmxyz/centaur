@@ -481,7 +481,7 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
       foreign_id: foreign_id,
       name: user.name.presence || user.email,
       kind: "console_user",
-      console_user_id: user.oid,
+      console_user_id: user.id,
       console_user_email: email || user.email,
       labels: {
         "managed-by" => "centaur"

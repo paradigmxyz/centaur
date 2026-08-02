@@ -305,7 +305,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_02_170149) do
 
   create_table "principals", force: :cascade do |t|
     t.string "console_user_email"
-    t.string "console_user_id"
+    t.bigint "console_user_id"
     t.datetime "created_at", null: false
     t.bigint "created_by_id", null: false
     t.string "foreign_id"
@@ -332,6 +332,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_02_170149) do
     t.index ["namespace", "slack_email"], name: "index_principals_on_namespace_and_slack_email"
     t.index ["namespace", "slack_team_id"], name: "index_principals_on_namespace_and_slack_team_id"
     t.index ["namespace", "slack_user_id"], name: "index_principals_on_namespace_and_slack_user_id"
+    t.check_constraint "kind::text <> 'console_user'::text OR console_user_id IS NOT NULL", name: "chk_principals_console_user_id"
   end
 
   create_table "proxies", force: :cascade do |t|
@@ -520,6 +521,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_02_170149) do
   add_foreign_key "principal_roles", "principals"
   add_foreign_key "principal_roles", "roles"
   add_foreign_key "principal_sync_config_snapshots", "principals"
+  add_foreign_key "principals", "users", column: "console_user_id"
   add_foreign_key "principals", "users", column: "created_by_id"
   add_foreign_key "proxies", "principals", on_delete: :nullify
   add_foreign_key "request_rules", "aws_auth_secrets"
