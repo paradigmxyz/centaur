@@ -109,14 +109,16 @@ class Principal < ApplicationRecord
   end
 
   def labels_with_sandbox_capabilities
-    labels.to_h
-      .merge(SANDBOX_REPO_CACHE_LABEL => sandbox_repo_cache, "kind" => kind)
-      .then { |value| slack_user_id.present? ? value.merge("slack_user_id" => slack_user_id) : value.except("slack_user_id") }
-      .then do |value|
-        slack_channel_id.present? ? value.merge("slack_channel_id" => slack_channel_id) : value.except("slack_channel_id")
-      end
-      .then { |value| slack_team_id.present? ? value.merge("slack_team_id" => slack_team_id) : value.except("slack_team_id") }
-      .then { |value| slack_email.present? ? value.merge("slack_email" => slack_email) : value.except("slack_email") }
+    compatibility_labels = {
+      SANDBOX_REPO_CACHE_LABEL => sandbox_repo_cache,
+      "kind" => kind,
+      "slack_user_id" => slack_user_id,
+      "slack_channel_id" => slack_channel_id,
+      "slack_team_id" => slack_team_id,
+      "slack_email" => slack_email
+    }.compact
+
+    labels.to_h.merge(compatibility_labels)
   end
 
   def effective_slack_channel_permissions_payload
