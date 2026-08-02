@@ -123,16 +123,14 @@ class Principal < ApplicationRecord
   end
 
   def labels_with_sandbox_capabilities
-    compatibility_labels = {
-      SANDBOX_REPO_CACHE_LABEL => sandbox_repo_cache,
-      "kind" => kind,
-      "slack_user_id" => slack_user_id,
-      "slack_channel_id" => slack_channel_id,
-      "slack_team_id" => slack_team_id,
-      "slack_email" => slack_email
-    }.compact
+    compatibility_labels = PROMOTED_LABEL_FIELDS.to_h do |field|
+      [ field, public_send(field) ]
+    end.compact
 
-    labels.to_h.merge(compatibility_labels)
+    labels.to_h.merge(
+      compatibility_labels,
+      SANDBOX_REPO_CACHE_LABEL => sandbox_repo_cache
+    )
   end
 
   def effective_slack_channel_permissions_payload

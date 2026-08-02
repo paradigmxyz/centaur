@@ -98,27 +98,13 @@ module Api
       end
 
       def principal_params
-        permitted = data_params.permit(
+        data_params.permit(
           :name,
           :sandbox_repo_cache,
           :sandbox_observability_enabled,
           :sandbox_api_server_enabled,
           labels: {}
         )
-        promote_identity_labels!(permitted)
-        permitted
-      end
-
-      def promote_identity_labels!(permitted)
-        labels = permitted[:labels]
-        return unless labels.respond_to?(:key?)
-
-        Principal::PROMOTED_LABEL_FIELDS.each do |field|
-          next unless labels.key?(field)
-
-          value = labels[field]
-          permitted[field] = field == "kind" ? value : value.presence
-        end
       end
 
       def slack_channel_permission_owner
