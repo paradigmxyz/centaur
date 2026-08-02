@@ -5,7 +5,6 @@
     "consoleConfig": {
       "type": "object",
       "properties": {
-        "enabled": { "type": "boolean" },
         "replicaCount": { "type": "integer" },
         "publicUrl": { "type": "string" },
         "railsEnv": { "type": "string" },

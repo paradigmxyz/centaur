@@ -408,10 +408,8 @@ spec:
             - name: SESSION_SANDBOX_EXTRA_ENV
               value: {{ $sandboxEnvList | toJson | quote }}
 {{- end }}
-{{- if $console.enabled }}
             # console control plane: principals/roles/grants + per-sandbox
-            # proxy sync. When unset, the api-rs falls back to the rendered
-            # static proxy config.
+            # proxy sync.
             - name: IRON_CONTROL_URL
               value: {{ include "centaur.consoleUrl" . | quote }}
             - name: IRON_CONTROL_API_KEY
@@ -419,7 +417,6 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sIRON_CONTROL_INITIAL_API_KEY" .Values.secretManager.envPrefix }}
-{{- end }}
 {{- if and .Values.toolServer.enabled (not .Values.toolServer.repo) (eq (len $toolSources) 0) }}
 {{- fail "toolServer.repo (owner/name) must be set when toolServer.enabled=true" }}
 {{- end }}

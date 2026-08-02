@@ -85,7 +85,7 @@ toolServer:
     secretKey: token
 
 # console — Rails control plane (formerly "iron-control") for authenticated API
-# access + encrypted secret storage. Off by default; enable per-environment.
+# access + encrypted secret storage. The console is a required chart component.
 # Uses a dedicated `iron_control_production` database on the bundled Postgres
 # (its own logical DB so its Rails schema_migrations table never collides with
 # the API's migration table); an init container creates the DB idempotently.
@@ -98,7 +98,6 @@ toolServer:
 # on top of these `console` defaults (see the `centaur.consoleValues` helper), so
 # existing values files keep working. Prefer `console` for new configuration.
 console:
-  enabled: false
   replicaCount: 1
   # Public URL users reach in a browser (e.g. https://console.example.com), used
   # as CENTAUR_CONSOLE_PUBLIC_URL. Set this when console is exposed behind
@@ -184,7 +183,7 @@ console:
   # most importantly the broker-credential OAuth refresh loop that mints and
   # refreshes the access tokens delivered inline via `token_broker` sources
   # (e.g. the `openai-codex` brokered token). The web Puma pod runs no worker, so
-  # without this those jobs never execute. Active when console.enabled.
+  # without this those jobs never execute.
   worker:
     replicaCount: 1
     resources: {}

@@ -179,8 +179,7 @@ namespace as this release, so a short DNS name is enough.
 
 {{- /*
 console — Rails control plane (formerly "iron-control") for authenticated API
-access and encrypted secret storage. Flag-gated (console.enabled), in-cluster
-ClusterIP Service.
+access and encrypted secret storage. Required in-cluster ClusterIP Service.
 
 Backwards compatibility: the canonical values key is `console`; `ironControl` is
 a deprecated alias that is still honored. `centaur.consoleValues` returns the
@@ -199,6 +198,9 @@ IRON_CONTROL_API_KEY (their names are hardcoded in the Rust binaries); the URL
 {{- define "centaur.consoleValues" -}}
 {{- $console := deepCopy (.Values.console | default dict) -}}
 {{- $legacy := .Values.ironControl | default dict -}}
+{{- if or (hasKey $console "enabled") (hasKey $legacy "enabled") -}}
+{{- fail "console.enabled has been removed; the console is now a required chart component" -}}
+{{- end -}}
 {{- toYaml (mergeOverwrite $console $legacy) -}}
 {{- end -}}
 

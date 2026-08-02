@@ -86,7 +86,6 @@ spec:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "teamsbot") | nindent 14 }}
 {{- end }}
-{{- if $console.enabled }}
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console") | nindent 14 }}
@@ -94,7 +93,6 @@ spec:
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-worker") | nindent 14 }}
-{{- end }}
         # iron-proxy pods forward the tool-server sidecar's pool to Postgres
         # (the sidecar reaches the core DB through the per-sandbox proxy, not
         # directly), so the proxy must be allowed to connect.
@@ -180,7 +178,6 @@ spec:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "teamsbot") | nindent 14 }}
 {{- end }}
-{{- if $console.enabled }}
         # Console pages call api-rs for admin-backed views such as ETLs.
         - podSelector:
             matchLabels:
@@ -189,7 +186,6 @@ spec:
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-worker") | nindent 14 }}
-{{- end }}
         # New sandboxes call back into the control plane only when their
         # principal has the API server sandbox capability.
         - podSelector:
@@ -331,7 +327,6 @@ spec:
           port: {{ .Values.ironProxy.service.pgPort }}
         - protocol: TCP
           port: {{ .Values.ironProxy.service.managementPort }}
-{{- if $console.enabled }}
     # console control plane: register principals/roles/grants and per-sandbox proxies.
     - to:
         - podSelector:
@@ -340,7 +335,6 @@ spec:
       ports:
         - protocol: TCP
           port: {{ $console.service.httpPort }}
-{{- end }}
     - ports:
         - protocol: TCP
           port: 443
