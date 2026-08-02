@@ -41,7 +41,7 @@ module Api
         assert_equal principal.oid, data["id"]
         assert_equal "acme", data["namespace"]
         assert_equal "C0123456789", data["foreign_id"]
-        Principal::PROMOTED_LABEL_FIELDS.each_value { |field| assert_not data.key?(field) }
+        PrincipalIdentityLabels.columns.each { |field| assert_not data.key?(field) }
         assert_equal(
           {
             "kind" => "slack_channel",
@@ -313,7 +313,7 @@ module Api
         principal = Principal.find_by!(namespace: "acme", foreign_id: "mixed-identity")
         assert_equal "user", principal.kind
         assert_nil principal.slack_email
-        Principal::PROMOTED_LABEL_FIELDS.each_value do |field|
+        PrincipalIdentityLabels.columns.each do |field|
           assert_not json_body.fetch("data").key?(field)
         end
       end
@@ -546,7 +546,7 @@ module Api
         assert_equal "TACME", principal.slack_team_id
         assert_equal "pending", principal.slack_email
         assert_equal "identity-platform", principal.labels["team"]
-        assert_empty principal.labels.slice(*Principal::PROMOTED_LABEL_FIELDS.keys)
+        assert_empty principal.labels.slice(*PrincipalIdentityLabels.labels_for(principal.kind))
       end
 
       test "POST leaves omitted flags unchanged on an existing permission" do

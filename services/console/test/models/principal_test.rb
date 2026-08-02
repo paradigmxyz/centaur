@@ -66,7 +66,7 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_equal "U0123456789", principal.slack_user_id
     assert_equal "T0123456789", principal.slack_team_id
     assert_equal "ada@example.com", principal.slack_email
-    assert_empty principal.labels.slice(*Principal::PROMOTED_LABEL_FIELDS.keys)
+    assert_empty principal.labels.slice(*PrincipalIdentityLabels.labels_for(principal.kind))
   end
 
   test "console user identity is stored only in columns and synthesized for compatibility" do

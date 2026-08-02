@@ -38,15 +38,6 @@ class Principal < ApplicationRecord
     unknown user console_user workflow slack_channel slack_dm discord_channel linear_issue
     teams_user teams_conversation
   ].freeze
-  PROMOTED_LABEL_FIELDS = {
-    "kind" => "kind",
-    "slack_user_id" => "slack_user_id",
-    "slack_channel_id" => "slack_channel_id",
-    "slack_team_id" => "slack_team_id",
-    "slack_email" => "slack_email",
-    "console-user-id" => "console_user_id",
-    "email" => "console_user_email"
-  }.freeze
   SLACK_USER_ID_FORMAT = /\A(?:[UW][A-Z0-9]{8,}|USLACK)\z/
   SLACK_CHANNEL_ID_FORMAT = /\A[CDG][A-Z0-9]{8,}\z/
   SLACK_TEAM_ID_FORMAT = /\A[TE][A-Z0-9]{8,}\z/
@@ -135,12 +126,8 @@ class Principal < ApplicationRecord
   end
 
   def labels_with_sandbox_capabilities
-    compatibility_labels = self.class.promoted_label_fields_for(kind).to_h do |label, _field|
-      [ label, promoted_label_value(label) ]
-    end.compact
-
     labels.to_h.merge(
-      compatibility_labels,
+      PrincipalIdentityLabels.serialize(self),
       SANDBOX_REPO_CACHE_LABEL => sandbox_repo_cache
     )
   end
@@ -219,26 +206,6 @@ class Principal < ApplicationRecord
     scopes.compact.reduce(none) { |combined, scope| combined.or(scope) }
   end
 
-  def self.promoted_label_fields_for(kind)
-    return PROMOTED_LABEL_FIELDS if kind == "console_user"
-
-    PROMOTED_LABEL_FIELDS.reject { |_label, field| field.start_with?("console_user_") }
-  end
-
-  def self.promoted_label_filter_value(label, value)
-    return User.decode_oid(value) if label.to_s == "console-user-id"
-
-    value.to_s
-  end
-
-  def promoted_label_value(label)
-    field = self.class.promoted_label_fields_for(kind)[label.to_s]
-    return unless field
-    return console_user&.oid if field == "console_user_id"
-
-    public_send(field)
-  end
-
   # Deep-walk a config payload and blank out the inline value of every
   # control_plane source, leaving the rest of the structure intact.
   def self.redact_live_secrets(value)
@@ -281,31 +248,11 @@ class Principal < ApplicationRecord
   # compatibility release. Promote only fields that were not assigned directly.
   # Reserved identity labels are stripped below so columns remain authoritative.
   def promote_identity_labels_to_fields
-    return unless will_save_change_to_labels?
-
-    promote_identity_label("kind", "kind")
-    self.class.promoted_label_fields_for(kind).each do |label, field|
-      next if field == "kind"
-
-      promote_identity_label(label, field)
-    end
+    PrincipalIdentityLabels.assign(self)
   end
 
   def strip_identity_labels
-    self[:labels] = labels.to_h.except(*self.class.promoted_label_fields_for(kind).keys)
-  end
-
-  def promote_identity_label(label, field)
-    return if will_save_change_to_attribute?(field) || !labels.to_h.key?(label)
-
-    value = labels.to_h[label]
-    self[field] = if field == "kind"
-      value
-    elsif field == "console_user_id"
-      User.find_by_oid(value)&.id
-    else
-      value.presence
-    end
+    PrincipalIdentityLabels.strip(self)
   end
 
   def supplied_key?(attributes, key)
@@ -400,7 +347,7 @@ class Principal < ApplicationRecord
   end
 
   def sync_config_fields_changed?
-    identity_fields = PROMOTED_LABEL_FIELDS.values
+    identity_fields = PrincipalIdentityLabels.columns
     ([ "name", "labels", "sandbox_api_server_enabled" ] + identity_fields).any? do |field|
       previous_changes.key?(field)
     end
