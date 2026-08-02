@@ -134,6 +134,7 @@ class PgDsnSecretTest < ActiveSupport::TestCase
         "google_subject" => "google-sub-alice"
       }
     )
+    assert_not principal.reload.labels.key?("slack_channel_id")
     secret = with_dsn(PgDsnSecret.new(base_attrs(settings: [
       {
         "name" => "centaur.slack_channel_id",
@@ -142,6 +143,10 @@ class PgDsnSecretTest < ActiveSupport::TestCase
       {
         "name" => "centaur.google_subject",
         "value_from" => { "principal_label" => "google_subject" }
+      },
+      {
+        "name" => "centaur.slack_channel_field",
+        "value_from" => { "principal_field" => "slack_channel_id" }
       },
       { "name" => "centaur.principal", "value_from" => { "principal_field" => "foreign_id" } },
       { "name" => "centaur.principal_id", "value_from" => { "principal_field" => "id" } },
@@ -157,6 +162,7 @@ class PgDsnSecretTest < ActiveSupport::TestCase
       [
         { "name" => "centaur.slack_channel_id", "value" => "C0123456789" },
         { "name" => "centaur.google_subject", "value" => "google-sub-alice" },
+        { "name" => "centaur.slack_channel_field", "value" => "C0123456789" },
         { "name" => "centaur.principal", "value" => principal.foreign_id },
         { "name" => "centaur.principal_id", "value" => principal.oid },
         { "name" => "centaur.slack_history_channel_ids", "value" => "[]" },
@@ -306,7 +312,7 @@ class PgDsnSecretTest < ActiveSupport::TestCase
     ])))
     assert_not secret.valid?
     assert_includes secret.errors[:settings],
-      %([0] unknown principal_field "labels" (one of: id, namespace, foreign_id, name, slack_history_channel_ids))
+      %([0] unknown principal_field "labels" (one of: id, namespace, foreign_id, name, kind, slack_user_id, slack_channel_id, slack_team_id, slack_email, slack_history_channel_ids))
   end
 
   test "settings with a valid empty value are accepted and stringified" do

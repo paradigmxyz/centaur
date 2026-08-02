@@ -4,7 +4,6 @@ acme_channel:
   kind: slack_channel
   slack_channel_id: C0123456789
   labels:
-    kind: slack_channel
     team: platform
     centaur.sandbox_repo_cache: all
   created_by: acme_admin
@@ -14,7 +13,6 @@ globex_user:
   foreign_id: U987654321
   kind: user
   labels:
-    kind: user
     centaur.sandbox_repo_cache: all
   created_by: globex_admin
 
@@ -23,7 +21,6 @@ acme_user_alice:
   foreign_id: U-alice
   kind: user
   labels:
-    kind: user
     team: platform
     centaur.sandbox_repo_cache: all
   created_by: acme_admin
@@ -33,7 +30,6 @@ acme_user_bob:
   foreign_id: U-bob
   kind: user
   labels:
-    kind: user
     team: ops
     centaur.sandbox_repo_cache: all
   created_by: acme_admin
@@ -43,7 +39,6 @@ globex_user_overlap:
   foreign_id: U-overlap
   kind: user
   labels:
-    kind: user
     team: platform
     centaur.sandbox_repo_cache: all
   created_by: globex_admin

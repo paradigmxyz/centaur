@@ -39,7 +39,7 @@
                 <% api_managed = api_managed_direct_messages && permission.channel_id.to_s.start_with?("D") %>
                 <tr>
                   <% if api_managed %>
-                    <% dm_name = owner.name.presence || owner.labels["slack_user_id"].presence || permission.channel_id %>
+                    <% dm_name = owner.name.presence || owner.slack_user_id.presence || permission.channel_id %>
                     <td class="console-td min-w-80">
                       <div class="text-sm text-zinc-100">DM <%= dm_name %></div>
                       <div class="mt-1 text-xs text-zinc-500"><%= permission.channel_id %></div>

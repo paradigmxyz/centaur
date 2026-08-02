@@ -53,9 +53,9 @@ module Console
       assert_redirected_to console_principal_path(principal.oid)
       assert_equal "Principal created.", flash[:notice]
       assert_equal "New console principal", principal.name
+      assert_equal "slack_channel", principal.kind
       assert_equal(
         {
-          "kind" => "slack_channel",
           "team" => "platform",
           Principal::SANDBOX_REPO_CACHE_LABEL => "public"
         },

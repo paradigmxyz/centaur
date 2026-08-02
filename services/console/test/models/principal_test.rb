@@ -17,7 +17,7 @@ class PrincipalTest < ActiveSupport::TestCase
     assert principal.valid?
   end
 
-  test "identity fields are normalized and mirrored for compatibility" do
+  test "identity fields are normalized, stored only in columns, and synthesized for compatibility" do
     principal = Principal.create!(default_attrs(
       kind: "custom_identity",
       slack_user_id: "  U123  ",
@@ -33,12 +33,22 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_equal "C123", principal.slack_channel_id
     assert_equal "T123", principal.slack_team_id
     assert_equal "ada@example.com", principal.slack_email
-    assert_equal "custom_identity", principal.labels["kind"]
-    assert_equal "U123", principal.labels["slack_user_id"]
-    assert_equal "C123", principal.labels["slack_channel_id"]
-    assert_equal "T123", principal.labels["slack_team_id"]
-    assert_equal "ada@example.com", principal.labels["slack_email"]
-    assert_equal "platform", principal.labels["team"]
+    assert_equal(
+      { "team" => "platform", Principal::SANDBOX_REPO_CACHE_LABEL => "all" },
+      principal.labels
+    )
+    assert_equal(
+      {
+        "team" => "platform",
+        Principal::SANDBOX_REPO_CACHE_LABEL => "all",
+        "kind" => "custom_identity",
+        "slack_user_id" => "U123",
+        "slack_channel_id" => "C123",
+        "slack_team_id" => "T123",
+        "slack_email" => "ada@example.com"
+      },
+      principal.labels_with_sandbox_capabilities
+    )
   end
 
   test "legacy identity labels are promoted into columns" do
@@ -56,6 +66,7 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_equal "U123", principal.slack_user_id
     assert_equal "T123", principal.slack_team_id
     assert_equal "ada@example.com", principal.slack_email
+    assert_empty principal.labels.slice(*Principal::PROMOTED_LABEL_FIELDS)
   end
 
   test "kind accepts custom values but rejects blanks" do
@@ -285,10 +296,10 @@ class PrincipalTest < ActiveSupport::TestCase
     end
   end
 
-  test "api server JWT does not fall back to slack channel label" do
+  test "api server JWT does not infer permissions from Slack channel identity" do
     with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
       principal = principals(:acme_channel)
-      principal.update!(labels: { Principal::SLACK_CHANNEL_ID_LABEL => "C0123456789" })
+      principal.update!(slack_channel_id: "C0123456789")
 
       assert_nil ApiServer::Jwt.encode_for_principal(principal)
     end
@@ -368,8 +379,6 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_equal(
       {
         "changed" => "yes",
-        "kind" => "slack_channel",
-        "slack_channel_id" => "C0123456789",
         Principal::SANDBOX_REPO_CACHE_LABEL => "all"
       },
       principal.reload.labels

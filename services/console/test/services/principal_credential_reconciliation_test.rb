@@ -177,7 +177,7 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     end
   end
 
-  test "console user principal syncs Slack labels from a matched admin credential" do
+  test "console user principal syncs Slack fields from a matched admin credential" do
     app = oauth_apps(:acme_slack)
     app.update!(labels: app.labels.merge("slack_team_id" => "TACME"))
     credential = create_credential(app, "U-MEMBER", "member@acme.example")
@@ -186,8 +186,9 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     principal = create_console_user_principal(users(:member_user), foreign_id: "console-user-slack")
 
     assert principal.grants.exists?(static_secret: secret)
-    assert_equal "U-MEMBER", principal.reload.labels["slack_user_id"]
-    assert_equal "TACME", principal.labels["slack_team_id"]
+    assert_equal "U-MEMBER", principal.reload.slack_user_id
+    assert_equal "TACME", principal.slack_team_id
+    assert_empty principal.labels.slice("slack_user_id", "slack_team_id")
   end
 
   test "console user principal ignores a spoofed email label" do

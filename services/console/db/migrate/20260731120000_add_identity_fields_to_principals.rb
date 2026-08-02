@@ -26,6 +26,9 @@ class AddIdentityFieldsToPrincipals < ActiveRecord::Migration[8.1]
       ELSE 'unknown'
     END
   SQL
+  ORDINARY_LABELS_SQL = <<~SQL.squish.freeze
+    labels - 'kind' - 'slack_user_id' - 'slack_channel_id' - 'slack_team_id' - 'slack_email'
+  SQL
 
   def up
     add_column :principals, :kind, :string, null: false, default: "unknown"
@@ -49,20 +52,11 @@ class AddIdentityFieldsToPrincipals < ActiveRecord::Migration[8.1]
           slack_email = NULLIF(TRIM(labels ->> 'slack_email'), '')
     SQL
 
-    # Keep aliases synchronized for legacy readers during the cutover.
+    # Identity aliases are accepted and synthesized at the API boundary during
+    # the cutover, but columns are the only persisted identity representation.
     execute <<~SQL.squish
       UPDATE principals
-      SET labels = (labels - 'kind' - 'slack_user_id' - 'slack_channel_id' - 'slack_team_id' - 'slack_email') ||
-                   CASE WHEN kind = 'unknown' THEN '{}'::jsonb
-                        ELSE jsonb_build_object('kind', kind) END ||
-                   CASE WHEN slack_user_id IS NULL THEN '{}'::jsonb
-                        ELSE jsonb_build_object('slack_user_id', slack_user_id) END ||
-                   CASE WHEN slack_channel_id IS NULL THEN '{}'::jsonb
-                        ELSE jsonb_build_object('slack_channel_id', slack_channel_id) END ||
-                   CASE WHEN slack_team_id IS NULL THEN '{}'::jsonb
-                        ELSE jsonb_build_object('slack_team_id', slack_team_id) END ||
-                   CASE WHEN slack_email IS NULL THEN '{}'::jsonb
-                        ELSE jsonb_build_object('slack_email', slack_email) END
+      SET labels = #{ORDINARY_LABELS_SQL}
     SQL
   end
 

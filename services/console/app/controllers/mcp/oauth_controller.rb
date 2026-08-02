@@ -452,12 +452,13 @@ module Mcp
         newly_created = principal.new_record?
         principal.created_by ||= current_user
         principal.name = current_user.name.presence || current_user.email
+        principal.kind = "console_user"
+        principal.assign_attributes(slack_identity_fields_for(current_user))
         principal.labels = principal.labels.merge(
           "managed-by" => "centaur",
-          "kind" => "console_user",
           "console-user-id" => current_user.oid,
           "email" => current_user.email
-        ).merge(slack_identity_labels_for(current_user))
+        )
         principal.save!
         assign_user_mcp_role(principal) if newly_created
         principal
@@ -487,7 +488,7 @@ module Mcp
     # Slack's OIDC id_token is the authenticated source of the user's native
     # Slack identity. Refuse an ambiguous account rather than guessing which
     # workspace should determine company-context RLS.
-    def slack_identity_labels_for(user)
+    def slack_identity_fields_for(user)
       identities = user.user_identities.where(provider: UserIdentity::SLACK_PROVIDER).order(:id)
       identities = identities.filter_map do |identity|
         next if identity.subject.blank? || identity.team_id.blank?

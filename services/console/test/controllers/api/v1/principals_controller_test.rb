@@ -318,13 +318,13 @@ module Api
         principal.reload
         assert_equal(
           {
-            "kind" => "slack_channel",
             "team" => "ops",
-            "slack_channel_id" => "C0123456789",
             Principal::SANDBOX_REPO_CACHE_LABEL => "all"
           },
           principal.labels
         )
+        assert_equal "slack_channel", json_body.dig("data", "labels", "kind")
+        assert_equal "C0123456789", json_body.dig("data", "labels", "slack_channel_id")
       end
 
       test "PUT updates first-class identity fields and removes cleared Slack aliases" do
@@ -349,12 +349,15 @@ module Api
         assert_nil principal.slack_channel_id
         assert_equal "T123", principal.slack_team_id
         assert_equal "ada@example.com", principal.slack_email
-        assert_equal "custom_identity", principal.labels["kind"]
-        assert_equal "U123", principal.labels["slack_user_id"]
-        assert_not principal.labels.key?("slack_channel_id")
-        assert_equal "T123", principal.labels["slack_team_id"]
-        assert_equal "ada@example.com", principal.labels["slack_email"]
-        assert_equal "ops", principal.labels["team"]
+        assert_equal(
+          { "team" => "ops", Principal::SANDBOX_REPO_CACHE_LABEL => "all" },
+          principal.labels
+        )
+        assert_equal "custom_identity", json_body.dig("data", "labels", "kind")
+        assert_equal "U123", json_body.dig("data", "labels", "slack_user_id")
+        assert_not json_body.dig("data", "labels").key?("slack_channel_id")
+        assert_equal "T123", json_body.dig("data", "labels", "slack_team_id")
+        assert_equal "ada@example.com", json_body.dig("data", "labels", "slack_email")
       end
 
       test "PUT rejects mixed top-level and legacy label identity fields" do

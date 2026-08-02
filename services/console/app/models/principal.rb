@@ -25,7 +25,7 @@ class Principal < ApplicationRecord
   before_validation :apply_sandbox_repo_cache_label
   before_validation :promote_identity_labels_to_fields
   before_validation :normalize_identity_fields
-  before_validation :mirror_identity_fields_to_labels
+  before_validation :strip_identity_labels
   before_commit :bump_own_sync_config_cache_version, on: :update, if: :sync_config_fields_changed?
 
   URL_SAFE_FORMAT = /\A[A-Za-z0-9\-._~]+\z/
@@ -219,8 +219,8 @@ class Principal < ApplicationRecord
   end
 
   # Legacy writers still send principal identity through labels. Promote only
-  # fields that were not assigned directly, then mirror the authoritative
-  # columns back into aliases below for legacy readers.
+  # fields that were not assigned directly. Reserved identity labels are
+  # stripped below so columns remain the only persisted representation.
   def promote_identity_labels_to_fields
     return unless will_save_change_to_labels?
 
@@ -239,17 +239,8 @@ class Principal < ApplicationRecord
     self.slack_email = slack_email.to_s.strip.presence
   end
 
-  # Compatibility-release dual write. New code treats the columns as
-  # authoritative; these aliases exist only for old Console instances during a
-  # rolling deploy and are removed by the contract release.
-  def mirror_identity_fields_to_labels
-    mirrored = labels.to_h.except(*PROMOTED_LABEL_FIELDS)
-    mirrored["kind"] = kind if kind.present? && kind != UNKNOWN_KIND
-    mirrored["slack_user_id"] = slack_user_id if slack_user_id.present?
-    mirrored["slack_channel_id"] = slack_channel_id if slack_channel_id.present?
-    mirrored["slack_team_id"] = slack_team_id if slack_team_id.present?
-    mirrored["slack_email"] = slack_email if slack_email.present?
-    self[:labels] = mirrored
+  def strip_identity_labels
+    self[:labels] = labels.to_h.except(*PROMOTED_LABEL_FIELDS)
   end
 
   def supplied_key?(attributes, key)
@@ -344,9 +335,9 @@ class Principal < ApplicationRecord
   end
 
   def sync_config_fields_changed?
-    previous_changes.key?("name") ||
-      previous_changes.key?("labels") ||
-      previous_changes.key?("sandbox_api_server_enabled")
+    ([ "name", "labels", "sandbox_api_server_enabled" ] + PROMOTED_LABEL_FIELDS).any? do |field|
+      previous_changes.key?(field)
+    end
   end
 
   def bump_own_sync_config_cache_version

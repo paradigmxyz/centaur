@@ -33,6 +33,23 @@ class AddIdentityFieldsToPrincipalsTest < ActiveSupport::TestCase
     assert_equal expected, rows.to_h
   end
 
+  test "removes identity aliases from persisted labels" do
+    labels = {
+      "kind" => "slack_dm",
+      "slack_user_id" => "U123",
+      "slack_channel_id" => "D123",
+      "slack_team_id" => "T123",
+      "slack_email" => "ada@example.com",
+      "team" => "platform"
+    }
+    ordinary_labels = connection.select_value(<<~SQL.squish)
+      SELECT #{AddIdentityFieldsToPrincipals::ORDINARY_LABELS_SQL}
+      FROM (VALUES (#{connection.quote(labels.to_json)}::jsonb)) AS principals(labels)
+    SQL
+
+    assert_equal({ "team" => "platform" }, JSON.parse(ordinary_labels))
+  end
+
   private
 
   def connection
