@@ -64,5 +64,17 @@ module Console
       assert_redirected_to edit_console_system_settings_path
       assert_empty Role.where(assign_by_default: true)
     end
+
+    test "updating sandbox defaults without role params preserves default roles" do
+      sign_in users(:acme_admin)
+      role = roles(:acme_infra)
+      role.update!(assign_by_default: true)
+
+      patch console_system_settings_url,
+            params: { system_setting: { default_sandbox_repo_cache: "public" } }
+
+      assert_redirected_to edit_console_system_settings_path
+      assert_predicate role.reload, :assign_by_default?
+    end
   end
 end

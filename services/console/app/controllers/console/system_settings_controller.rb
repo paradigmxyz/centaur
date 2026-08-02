@@ -14,7 +14,7 @@ module Console
 
       ActiveRecord::Base.transaction do
         @system_setting.save!
-        Role.replace_default_assignments!(selected_default_role_ids)
+        Role.replace_default_assignments!(selected_default_role_ids) if params[:system_setting]&.key?(:default_role_ids)
       end
 
       redirect_to edit_console_system_settings_path, notice: "System settings updated."
