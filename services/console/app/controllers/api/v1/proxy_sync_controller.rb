@@ -8,7 +8,8 @@ module Api
     # full `secrets` and `transforms` payload.
     #
     # `secrets` populates the proxy's `secrets` transform. `transforms` carries
-    # whole transforms the proxy splices into its pipeline: one gcp_auth,
+    # whole transforms the proxy splices into its pipeline: an optional
+    # `allowlist` (from CENTAUR_IRON_PROXY_ALLOWLIST_DOMAINS), one gcp_auth,
     # gcp_id_token, hmac_sign, or aws_auth transform per granted secret, and one
     # bundled oauth_token transform. `postgres` carries one upstream-DSN
     # entry per granted PgDsnSecret, keyed by foreign_id; the proxy's

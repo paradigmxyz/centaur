@@ -153,6 +153,10 @@ spec:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sIRON_CONTROL_GOOGLE_CLIENT_SECRET" $prefix }}
 {{- end }}
+{{- with .Values.ironProxy.allowlistDomains }}
+            - name: CENTAUR_IRON_PROXY_ALLOWLIST_DOMAINS
+              value: {{ join "," . | quote }}
+{{- end }}
             - name: RAILS_ENV
               value: {{ $console.railsEnv | quote }}
 {{- with $console.slackDmSync.oauthAppSlug }}

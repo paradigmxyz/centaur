@@ -11,9 +11,11 @@
 - `spaces/schema/` — placeholder for Phase 2 durable product state
 - CI: `.github/scripts/check-spaces-import-boundary.sh`
 - Console OAuth providers: `hubspot`, `microsoft` (+ HubSpot identity enrichment job)
+- Managed egress lock: `ironProxy.allowlistDomains` + [`values.spaces.yaml`](../../../contrib/chart/values.spaces.yaml)
+- Tools: `tools/business/hubspot`, `tools/business/microsoft_graph` (need real tokens for live calls)
 
 ## Still blocked on always-on host + real apps
 
 - Public HTTPS for console OAuth callbacks and Teams `/api/messages`
-- HubSpot developer app + Entra app client secrets (lock iron-proxy domain allowlist first)
+- HubSpot developer app + Entra app client secrets (after allowlist overlay is deployed)
 - Teamsbot enablement and two-staff consent proof

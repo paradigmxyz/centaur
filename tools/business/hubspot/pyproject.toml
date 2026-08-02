@@ -1,0 +1,32 @@
+[project]
+name = "hubspot"
+description = "HubSpot CRM — contacts, companies, deals (OAuth or private app token)"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27.0",
+    "typer>=0.12.0",
+    "rich>=13.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+hubspot = "centaur_tool_hubspot.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_hubspot"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.centaur]
+module = "client.py"
+# Prefer granting the console OAuth wrapper secret for api.hubapi.com to the
+# principal. HUBSPOT_ACCESS_TOKEN remains for private-app / local .env use.
+secrets = [
+    {type = "http", name = "HUBSPOT_ACCESS_TOKEN", mode = "inject", inject_header = "Authorization", inject_formatter = "Bearer {{ .Value }}", hosts = ["api.hubapi.com", "api.hubspot.com"]},
+]

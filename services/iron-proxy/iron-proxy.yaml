@@ -19,10 +19,22 @@ tls:
   ca_key: "/etc/iron-proxy/ca.key"
 
 transforms:
+  # Unmanaged-mode default. Managed sandboxes ignore this file and take the
+  # allowlist from console proxy sync (CENTAUR_IRON_PROXY_ALLOWLIST_DOMAINS /
+  # ironProxy.allowlistDomains). Keep both lists in sync when tightening.
   - name: allowlist
     config:
       domains:
-        - "*"
+        - "api.anthropic.com"
+        - "*.anthropic.com"
+        - "api.openai.com"
+        - "*.openai.com"
+        - "api.hubapi.com"
+        - "api.hubspot.com"
+        - "graph.microsoft.com"
+        - "github.com"
+        - "api.github.com"
+        - "*.githubusercontent.com"
   - name: header_allowlist
     config:
       headers:

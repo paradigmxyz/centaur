@@ -39,6 +39,11 @@ ironProxy:
     - "::1/128"
     - "10.42.0.0/16"
     - "10.43.0.0/16"
+  # Managed-mode domain allowlist synced to every sandbox proxy via console
+  # (CENTAUR_IRON_PROXY_ALLOWLIST_DOMAINS). Empty = omit the allowlist transform
+  # (open egress). Set an explicit list (see contrib/chart/values.spaces.yaml)
+  # before registering real OAuth / client credentials.
+  allowlistDomains: []
   secretSource: onepassword
   secretTtl: 10m
 

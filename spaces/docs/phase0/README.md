@@ -3,7 +3,7 @@
 | Doc | Status |
 |-----|--------|
 | [footprint.md](footprint.md) | Measured on kind (Windows) |
-| [egress.md](egress.md) | NP default-deny verified; domain allowlist still `*` until lock |
+| [egress.md](egress.md) | NP default-deny verified; managed allowlist via `ironProxy.allowlistDomains` |
 | [console-coverage.md](console-coverage.md) | Console sufficient for Phase 1 |
 | [escape-hatch.md](escape-hatch.md) | Replacement contract |
 | [droplet-migration.md](droplet-migration.md) | DO Droplet checklist |

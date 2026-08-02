@@ -56,21 +56,18 @@ All outbound traffic from the sandbox routes through iron-proxy, so
 egress policy is enforced in one place. By default the policy is
 open.
 
-To lock egress down, edit
+To lock egress down in **managed** mode (the default for Centaur
+sandboxes), set `ironProxy.allowlistDomains` in Helm values (or
+`CENTAUR_IRON_PROXY_ALLOWLIST_DOMAINS` on the console). Console emits an
+`allowlist` transform on every proxy sync. Empty means open egress.
+
+For **unmanaged** iron-proxy, edit
 [`iron-proxy.yaml`](https://github.com/paradigmxyz/centaur/blob/main/services/iron-proxy/iron-proxy.yaml)
-and replace:
+and replace the `domains` list with the hostnames (or globs like
+`*.anthropic.com`) your tools need, then rebuild the proxy image.
 
-```yaml
-transforms:
-  - name: allowlist
-    config:
-      domains:
-        - "*"
-```
-
-with the explicit list of hostnames (or globs like `*.anthropic.com`)
-your tools actually need. iron-proxy will reject everything else with
-a 403. See the [iron-proxy configuration reference](https://docs.iron.sh/reference/configuration/)
+iron-proxy rejects everything else with a 403. See the
+[iron-proxy configuration reference](https://docs.iron.sh/reference/configuration/)
 for the full set of allowlist options.
 
 ### Credentials
