@@ -50,18 +50,18 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     principal = principals(:acme_user_alice)
     principal.update!(
       labels: principal.labels.merge(
-        "slack_user_id" => "U12345",
+        "slack_user_id" => "U0123456789",
         "google_subject" => "google-sub-alice",
         "email" => "alice@example.com"
       )
     )
-    slack = create_credential(oauth_apps(:acme_slack), "U12345", "wrong-slack@example.com")
+    slack = create_credential(oauth_apps(:acme_slack), "U0123456789", "wrong-slack@example.com")
     google = create_credential(
       oauth_apps(:acme_google),
       "google-sub-alice",
       "wrong-google@example.com"
     )
-    email_only_slack = create_credential(oauth_apps(:acme_slack), "U99999", "alice@example.com")
+    email_only_slack = create_credential(oauth_apps(:acme_slack), "U9999999999", "alice@example.com")
     email_only_google = create_credential(
       oauth_apps(:acme_google),
       "google-sub-other",
@@ -88,12 +88,12 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     principal = principals(:acme_user_alice)
     principal.update!(
       labels: principal.labels.merge(
-        "slack_team_id" => "T123",
-        "slack_user_id" => "U12345"
+        "slack_team_id" => "T0123456789",
+        "slack_user_id" => "U0123456789"
       )
     )
-    mismatched = create_credential(oauth_apps(:acme_slack), "U12345", "alice-alt@example.com")
-    mismatched.update!(labels: { "slack_team_id" => "T999" })
+    mismatched = create_credential(oauth_apps(:acme_slack), "U0123456789", "alice-alt@example.com")
+    mismatched.update!(labels: { "slack_team_id" => "T9999999999" })
     secret = wrap(mismatched)
 
     entry = PrincipalCredentialReconciliation.new.entries.find do |candidate|
@@ -179,15 +179,15 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
 
   test "console user principal syncs Slack fields from a matched admin credential" do
     app = oauth_apps(:acme_slack)
-    app.update!(labels: app.labels.merge("slack_team_id" => "TACME"))
-    credential = create_credential(app, "U-MEMBER", "member@acme.example")
+    app.update!(labels: app.labels.merge("slack_team_id" => "T0123456789"))
+    credential = create_credential(app, "U0123456789", "member@acme.example")
     secret = wrap(credential)
 
     principal = create_console_user_principal(users(:member_user), foreign_id: "console-user-slack")
 
     assert principal.grants.exists?(static_secret: secret)
-    assert_equal "U-MEMBER", principal.reload.slack_user_id
-    assert_equal "TACME", principal.slack_team_id
+    assert_equal "U0123456789", principal.reload.slack_user_id
+    assert_equal "T0123456789", principal.slack_team_id
     assert_empty principal.labels.slice("slack_user_id", "slack_team_id")
   end
 

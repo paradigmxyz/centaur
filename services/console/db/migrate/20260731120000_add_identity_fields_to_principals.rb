@@ -46,9 +46,18 @@ class AddIdentityFieldsToPrincipals < ActiveRecord::Migration[8.1]
     execute <<~SQL.squish
       UPDATE principals
       SET kind = #{KIND_FROM_FOREIGN_ID_SQL},
-          slack_user_id = NULLIF(TRIM(labels ->> 'slack_user_id'), ''),
-          slack_channel_id = NULLIF(TRIM(labels ->> 'slack_channel_id'), ''),
-          slack_team_id = NULLIF(TRIM(labels ->> 'slack_team_id'), ''),
+          slack_user_id = CASE
+            WHEN TRIM(labels ->> 'slack_user_id') ~ '^[UW][A-Z0-9]{8,}$'
+              THEN TRIM(labels ->> 'slack_user_id')
+          END,
+          slack_channel_id = CASE
+            WHEN TRIM(labels ->> 'slack_channel_id') ~ '^[CDG][A-Z0-9]{8,}$'
+              THEN TRIM(labels ->> 'slack_channel_id')
+          END,
+          slack_team_id = CASE
+            WHEN TRIM(labels ->> 'slack_team_id') ~ '^T[A-Z0-9]{8,}$'
+              THEN TRIM(labels ->> 'slack_team_id')
+          END,
           slack_email = NULLIF(TRIM(labels ->> 'slack_email'), '')
     SQL
 

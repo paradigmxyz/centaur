@@ -17,21 +17,21 @@ class PrincipalTest < ActiveSupport::TestCase
     assert principal.valid?
   end
 
-  test "identity fields are normalized, stored only in columns, and synthesized for compatibility" do
+  test "identity fields are stored only in columns and synthesized for compatibility" do
     principal = Principal.create!(default_attrs(
-      kind: "custom_identity",
-      slack_user_id: "  U123  ",
-      slack_channel_id: "  C123  ",
-      slack_team_id: "  T123  ",
-      slack_email: "  ada@example.com  ",
+      kind: "slack_dm",
+      slack_user_id: "U0123456789",
+      slack_channel_id: "D0123456789",
+      slack_team_id: "T0123456789",
+      slack_email: "ada@example.com",
       labels: { "team" => "platform" }
     ))
 
     principal.reload
-    assert_equal "custom_identity", principal.kind
-    assert_equal "U123", principal.slack_user_id
-    assert_equal "C123", principal.slack_channel_id
-    assert_equal "T123", principal.slack_team_id
+    assert_equal "slack_dm", principal.kind
+    assert_equal "U0123456789", principal.slack_user_id
+    assert_equal "D0123456789", principal.slack_channel_id
+    assert_equal "T0123456789", principal.slack_team_id
     assert_equal "ada@example.com", principal.slack_email
     assert_equal(
       { "team" => "platform", Principal::SANDBOX_REPO_CACHE_LABEL => "all" },
@@ -41,10 +41,10 @@ class PrincipalTest < ActiveSupport::TestCase
       {
         "team" => "platform",
         Principal::SANDBOX_REPO_CACHE_LABEL => "all",
-        "kind" => "custom_identity",
-        "slack_user_id" => "U123",
-        "slack_channel_id" => "C123",
-        "slack_team_id" => "T123",
+        "kind" => "slack_dm",
+        "slack_user_id" => "U0123456789",
+        "slack_channel_id" => "D0123456789",
+        "slack_team_id" => "T0123456789",
         "slack_email" => "ada@example.com"
       },
       principal.labels_with_sandbox_capabilities
@@ -55,26 +55,56 @@ class PrincipalTest < ActiveSupport::TestCase
     principal = Principal.create!(default_attrs(
       labels: {
         "kind" => "slack_dm",
-        "slack_user_id" => "  U123  ",
-        "slack_team_id" => "  T123  ",
-        "slack_email" => "  ada@example.com  "
+        "slack_user_id" => "U0123456789",
+        "slack_team_id" => "T0123456789",
+        "slack_email" => "ada@example.com"
       }
     ))
 
     principal.reload
     assert_equal "slack_dm", principal.kind
-    assert_equal "U123", principal.slack_user_id
-    assert_equal "T123", principal.slack_team_id
+    assert_equal "U0123456789", principal.slack_user_id
+    assert_equal "T0123456789", principal.slack_team_id
     assert_equal "ada@example.com", principal.slack_email
     assert_empty principal.labels.slice(*Principal::PROMOTED_LABEL_FIELDS)
   end
 
-  test "kind accepts custom values but rejects blanks" do
-    assert Principal.new(default_attrs(kind: "future_platform")).valid?
+  test "kind accepts only known values" do
+    Principal::KINDS.each do |kind|
+      assert Principal.new(default_attrs(kind: kind)).valid?, "expected #{kind.inspect} to be valid"
+    end
+
+    principal = Principal.new(default_attrs(kind: "future_platform"))
+    assert_not principal.valid?
+    assert_includes principal.errors[:kind], "must be one of #{Principal::KINDS.join(", ")}"
 
     principal = Principal.new(default_attrs(kind: "  "))
     assert_not principal.valid?
     assert_includes principal.errors[:kind], "can't be blank"
+  end
+
+  test "Slack identity fields must use canonical formats" do
+    {
+      slack_user_id: %w[U0123456789 W0123456789],
+      slack_channel_id: %w[C0123456789 D0123456789 G0123456789],
+      slack_team_id: %w[T0123456789],
+      slack_email: %w[ada@example.com]
+    }.each do |field, values|
+      values.each do |value|
+        assert Principal.new(default_attrs(field => value)).valid?, "expected #{field}=#{value.inspect} to be valid"
+      end
+    end
+
+    {
+      slack_user_id: " U0123456789 ",
+      slack_channel_id: "C123",
+      slack_team_id: "t0123456789",
+      slack_email: "not-an-email"
+    }.each do |field, value|
+      principal = Principal.new(default_attrs(field => value))
+      assert_not principal.valid?
+      assert_predicate principal.errors[field], :any?
+    end
   end
 
   test "is valid with only a name" do
@@ -395,7 +425,12 @@ class PrincipalTest < ActiveSupport::TestCase
     principal = Principal.create!(default_attrs)
     previous_version = principal.sync_config_cache_version
 
-    principal.update!(kind: "custom_identity", slack_user_id: "U123", slack_team_id: "T123", slack_email: "a@example.com")
+    principal.update!(
+      kind: "slack_dm",
+      slack_user_id: "U0123456789",
+      slack_team_id: "T0123456789",
+      slack_email: "a@example.com"
+    )
 
     assert_equal previous_version + 1, principal.reload.sync_config_cache_version
   end

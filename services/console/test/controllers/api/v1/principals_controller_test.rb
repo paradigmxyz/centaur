@@ -331,11 +331,11 @@ module Api
         principal = principals(:acme_channel)
         body = {
           data: {
-            kind: "custom_identity",
-            slack_user_id: "  U123  ",
+            kind: "slack_dm",
+            slack_user_id: "U0123456789",
             slack_channel_id: nil,
-            slack_team_id: "  T123  ",
-            slack_email: "  ada@example.com  ",
+            slack_team_id: "T0123456789",
+            slack_email: "ada@example.com",
             labels: { "team" => "ops" }
           }
         }
@@ -344,19 +344,19 @@ module Api
         assert_response :ok
 
         principal.reload
-        assert_equal "custom_identity", principal.kind
-        assert_equal "U123", principal.slack_user_id
+        assert_equal "slack_dm", principal.kind
+        assert_equal "U0123456789", principal.slack_user_id
         assert_nil principal.slack_channel_id
-        assert_equal "T123", principal.slack_team_id
+        assert_equal "T0123456789", principal.slack_team_id
         assert_equal "ada@example.com", principal.slack_email
         assert_equal(
           { "team" => "ops", Principal::SANDBOX_REPO_CACHE_LABEL => "all" },
           principal.labels
         )
-        assert_equal "custom_identity", json_body.dig("data", "labels", "kind")
-        assert_equal "U123", json_body.dig("data", "labels", "slack_user_id")
+        assert_equal "slack_dm", json_body.dig("data", "labels", "kind")
+        assert_equal "U0123456789", json_body.dig("data", "labels", "slack_user_id")
         assert_not json_body.dig("data", "labels").key?("slack_channel_id")
-        assert_equal "T123", json_body.dig("data", "labels", "slack_team_id")
+        assert_equal "T0123456789", json_body.dig("data", "labels", "slack_team_id")
         assert_equal "ada@example.com", json_body.dig("data", "labels", "slack_email")
       end
 
@@ -390,6 +390,28 @@ module Api
 
         assert_response :unprocessable_content
         assert_includes json_body.dig("error", "details", "kind"), "can't be blank"
+      end
+
+      test "PUT rejects unknown kinds and malformed Slack identity fields" do
+        principal = principals(:acme_channel)
+
+        put api_v1_principal_url(id: principal.oid),
+            params: {
+              data: {
+                kind: "future_platform",
+                slack_user_id: " U0123456789 ",
+                slack_channel_id: "C123",
+                slack_team_id: "t0123456789",
+                slack_email: "not-an-email"
+              }
+            }.to_json,
+            headers: auth_headers
+
+        assert_response :unprocessable_content
+        details = json_body.dig("error", "details")
+        %w[kind slack_user_id slack_channel_id slack_team_id slack_email].each do |field|
+          assert_predicate details.fetch(field), :any?
+        end
       end
 
       test "PUT overwrites explicit repo-cache label" do

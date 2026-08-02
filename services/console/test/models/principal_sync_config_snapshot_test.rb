@@ -236,7 +236,7 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
 
   test "sync_postgres resolves value_from settings against the principal" do
     principal = principals(:globex_user)
-    principal.update!(labels: { "slack_channel_id" => "C999" })
+    principal.update!(labels: { "slack_channel_id" => "C9999999999" })
     pg = pg_dsn_secrets(:acme_analytics_pg)
     pg.update!(settings: [
       {
@@ -250,7 +250,7 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     entry = PrincipalSyncConfigSnapshot.sync_postgres_for(principal).fetch(0)
     assert_equal(
       [
-        { "name" => "centaur.slack_channel_id", "value" => "C999" },
+        { "name" => "centaur.slack_channel_id", "value" => "C9999999999" },
         { "name" => "centaur.principal", "value" => principal.foreign_id }
       ],
       entry["settings"]

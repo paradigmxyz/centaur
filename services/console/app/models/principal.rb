@@ -24,7 +24,6 @@ class Principal < ApplicationRecord
   after_commit :auto_grant_matching_oauth_credentials, on: %i[create update]
   before_validation :apply_sandbox_repo_cache_label
   before_validation :promote_identity_labels_to_fields
-  before_validation :normalize_identity_fields
   before_validation :strip_identity_labels
   before_commit :bump_own_sync_config_cache_version, on: :update, if: :sync_config_fields_changed?
 
@@ -33,19 +32,34 @@ class Principal < ApplicationRecord
   SANDBOX_REPO_CACHE_LABEL = "centaur.sandbox_repo_cache".freeze
   SANDBOX_REPO_CACHE_VALUES = %w[none public all].freeze
   UNKNOWN_KIND = "unknown".freeze
+  KINDS = %w[
+    unknown user console_user service workflow slack_channel slack_dm discord_channel linear_issue
+    teams_user teams_conversation
+  ].freeze
   PROMOTED_LABEL_FIELDS = %w[kind slack_user_id slack_channel_id slack_team_id slack_email].freeze
+  SLACK_USER_ID_FORMAT = /\A[UW][A-Z0-9]{8,}\z/
+  SLACK_CHANNEL_ID_FORMAT = /\A[CDG][A-Z0-9]{8,}\z/
+  SLACK_TEAM_ID_FORMAT = /\AT[A-Z0-9]{8,}\z/
 
   validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
   validates :foreign_id, uniqueness: { scope: :namespace, allow_nil: true },
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }, allow_nil: true
   validates :sandbox_repo_cache, inclusion: { in: SANDBOX_REPO_CACHE_VALUES }
-  validates :kind, presence: true
+  validates :kind, presence: true,
+                   inclusion: { in: KINDS, message: "must be one of #{KINDS.join(", ")}" }
+  validates :slack_user_id, format: { with: SLACK_USER_ID_FORMAT, message: "is not a valid Slack user ID" },
+                            allow_nil: true
+  validates :slack_channel_id, format: { with: SLACK_CHANNEL_ID_FORMAT, message: "is not a valid Slack channel ID" },
+                               allow_nil: true
+  validates :slack_team_id, format: { with: SLACK_TEAM_ID_FORMAT, message: "is not a valid Slack team ID" },
+                            allow_nil: true
+  validates :slack_email, format: { with: URI::MailTo::EMAIL_REGEXP, message: "is not a valid email address" },
+                          allow_nil: true
 
   # Stand-in for an inline secret value in redacted config: operator inspection
   # reports that a control_plane source carries a value without revealing it.
   REDACTED = "[redacted]".freeze
   SLACK_CHANNEL_ID_LABEL = "slack_channel_id".freeze
-  SLACK_CHANNEL_ID_FORMAT = /\A[CDG][A-Z0-9]{8,}\z/
 
   # The config of a principal with no effective grants; also what an unassigned
   # proxy resolves to.
@@ -231,14 +245,6 @@ class Principal < ApplicationRecord
 
       self[field] = labels.to_h[field]
     end
-  end
-
-  def normalize_identity_fields
-    self.kind = kind.to_s.strip
-    self.slack_user_id = slack_user_id.to_s.strip.presence
-    self.slack_channel_id = slack_channel_id.to_s.strip.presence
-    self.slack_team_id = slack_team_id.to_s.strip.presence
-    self.slack_email = slack_email.to_s.strip.presence
   end
 
   def strip_identity_labels

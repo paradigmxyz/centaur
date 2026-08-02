@@ -1187,14 +1187,18 @@ A principal is an identity (an application, service, or proxy owner) that can be
 | `namespace`  | optional    | Defaults to `"default"`. Immutable. |
 | `foreign_id` | optional    | Unique per namespace. Immutable. |
 | `name`       | optional    | |
-| `kind`       | optional    | Principal identity kind. Defaults to `"unknown"`; arbitrary nonblank values are accepted. |
-| `slack_user_id` | optional | Native Slack user ID, or `null`. |
-| `slack_channel_id` | optional | Native Slack channel/conversation ID, or `null`. |
-| `slack_team_id` | optional | Native Slack workspace/team ID, or `null`. |
-| `slack_email` | optional | Slack account email, or `null`. |
+| `kind`       | optional    | Principal identity kind. Defaults to `"unknown"`; must be a known kind. |
+| `slack_user_id` | optional | Native `U...` or `W...` Slack user ID, or `null`. |
+| `slack_channel_id` | optional | Native `C...`, `D...`, or `G...` Slack conversation ID, or `null`. |
+| `slack_team_id` | optional | Native `T...` Slack workspace/team ID, or `null`. |
+| `slack_email` | optional | Valid Slack account email, or `null`. |
 | `labels`     | optional    | |
 | `slack_channel_permissions` | optional | Direct permissions owned by the principal. Full replacement when present on create or update. |
 | `effective_slack_channel_permissions` | response only | Direct permissions merged with permissions inherited from assigned roles. |
+
+Known kinds are `unknown`, `user`, `console_user`, `service`, `workflow`,
+`slack_channel`, `slack_dm`, `discord_channel`, `linear_issue`, `teams_user`,
+and `teams_conversation`.
 
 ### Operations
 
@@ -1245,7 +1249,7 @@ labels. A write may use either the top-level identity fields or their reserved
 aliases in `labels`, but not both in the same request. Mixed writes are rejected
 with `422`. On update, omitted identity fields are unchanged, an explicit `null`
 clears any Slack identity field, and a null or blank `kind` is rejected. Custom
-nonblank kinds are valid.
+kind values are rejected.
 
 See [Role assignments](#role-assignments) for attaching roles to a principal.
 
