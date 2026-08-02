@@ -31,10 +31,7 @@ class PgDsnSecret < ApplicationRecord
   VALUE_FROM_KEYS = %w[principal_label principal_field proxy_label].freeze
   # Principal attributes a `principal_field` reference may name, matching how
   # the API serializes principals (`id` is the opaque oid).
-  PRINCIPAL_FIELDS = %w[
-    id namespace foreign_id name kind slack_user_id slack_channel_id slack_team_id slack_email
-    slack_history_channel_ids
-  ].freeze
+  PRINCIPAL_FIELDS = %w[id namespace foreign_id name slack_history_channel_ids].freeze
 
   has_one :dsn_source, class_name: "SecretSource", dependent: :destroy
   has_many :grants, dependent: :destroy
@@ -107,7 +104,6 @@ class PgDsnSecret < ApplicationRecord
     label = ref["principal_label"] || ref[:principal_label]
     if label.present?
       if Principal::PROMOTED_LABEL_FIELDS.include?(label.to_s)
-        Rails.logger.warn("deprecated_principal_label_reference field=#{label}")
         return principal&.public_send(label).to_s
       end
 
@@ -124,11 +120,6 @@ class PgDsnSecret < ApplicationRecord
     when "namespace" then principal.namespace.to_s
     when "foreign_id" then principal.foreign_id.to_s
     when "name" then principal.name.to_s
-    when "kind" then principal.kind.to_s
-    when "slack_user_id" then principal.slack_user_id.to_s
-    when "slack_channel_id" then principal.slack_channel_id.to_s
-    when "slack_team_id" then principal.slack_team_id.to_s
-    when "slack_email" then principal.slack_email.to_s
     when "slack_history_channel_ids" then JSON.generate(principal.slack_history_channel_ids)
     else "" # unreachable for saved records; settings_are_valid rejects others
     end

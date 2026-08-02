@@ -69,6 +69,30 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_empty principal.labels.slice(*Principal::PROMOTED_LABEL_FIELDS)
   end
 
+  test "blank legacy Slack identity labels clear columns" do
+    principal = Principal.create!(default_attrs(
+      kind: "slack_dm",
+      slack_user_id: "U0123456789",
+      slack_channel_id: "D0123456789",
+      slack_team_id: "T0123456789",
+      slack_email: "ada@example.com"
+    ))
+
+    principal.update!(labels: {
+      "kind" => "slack_dm",
+      "slack_user_id" => "",
+      "slack_channel_id" => "  ",
+      "slack_team_id" => nil,
+      "slack_email" => "\t"
+    })
+
+    principal.reload
+    assert_nil principal.slack_user_id
+    assert_nil principal.slack_channel_id
+    assert_nil principal.slack_team_id
+    assert_nil principal.slack_email
+  end
+
   test "kind accepts only known values" do
     Principal::KINDS.each do |kind|
       assert Principal.new(default_attrs(kind: kind)).valid?, "expected #{kind.inspect} to be valid"
@@ -105,6 +129,25 @@ class PrincipalTest < ActiveSupport::TestCase
       assert_not principal.valid?
       assert_predicate principal.errors[field], :any?
     end
+  end
+
+  test "unchanged malformed migrated Slack identities do not block unrelated saves" do
+    principal = principals(:acme_user_alice)
+    principal.update_columns(
+      slack_user_id: "U12345",
+      slack_channel_id: "D123",
+      slack_team_id: "TACME",
+      slack_email: "pending"
+    )
+
+    assert principal.reload.update!(name: "Renamed legacy principal")
+
+    principal.slack_user_id = "U67890"
+    assert_not principal.valid?
+    assert_includes principal.errors[:slack_user_id], "is not a valid Slack user ID"
+
+    principal.slack_user_id = nil
+    assert principal.save!
   end
 
   test "is valid with only a name" do

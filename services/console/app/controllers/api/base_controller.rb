@@ -121,15 +121,7 @@ module Api
       labels = label_filter_params
       filtered = scope.where(namespace: namespace)
       promoted_label_columns.each do |column|
-        legacy_value = labels.delete(column)
-        native_value = params[column] if params.key?(column)
-        if legacy_value.present?
-          Rails.logger.warn("deprecated_principal_label_filter field=#{column}")
-          if native_value.present? && native_value.to_s != legacy_value.to_s
-            raise ActionController::BadRequest, "conflicting #{column} and labels[#{column}] filters"
-          end
-        end
-        value = native_value.presence || legacy_value
+        value = labels.delete(column)
         filtered = filtered.where(column => value.to_s) if value.present?
       end
       filtered = filtered.where("labels @> ?", labels.to_json) if labels.any?

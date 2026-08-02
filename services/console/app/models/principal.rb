@@ -48,13 +48,13 @@ class Principal < ApplicationRecord
   validates :kind, presence: true,
                    inclusion: { in: KINDS, message: "must be one of #{KINDS.join(", ")}" }
   validates :slack_user_id, format: { with: SLACK_USER_ID_FORMAT, message: "is not a valid Slack user ID" },
-                            allow_nil: true
+                            allow_nil: true, if: :will_save_change_to_slack_user_id?
   validates :slack_channel_id, format: { with: SLACK_CHANNEL_ID_FORMAT, message: "is not a valid Slack channel ID" },
-                               allow_nil: true
+                               allow_nil: true, if: :will_save_change_to_slack_channel_id?
   validates :slack_team_id, format: { with: SLACK_TEAM_ID_FORMAT, message: "is not a valid Slack scope ID" },
-                            allow_nil: true
+                            allow_nil: true, if: :will_save_change_to_slack_team_id?
   validates :slack_email, format: { with: URI::MailTo::EMAIL_REGEXP, message: "is not a valid email address" },
-                          allow_nil: true
+                          allow_nil: true, if: :will_save_change_to_slack_email?
 
   # Stand-in for an inline secret value in redacted config: operator inspection
   # reports that a control_plane source carries a value without revealing it.
@@ -234,16 +234,17 @@ class Principal < ApplicationRecord
     self[:labels] = labels.to_h.merge(SANDBOX_REPO_CACHE_LABEL => sandbox_repo_cache)
   end
 
-  # Legacy writers still send principal identity through labels. Promote only
-  # fields that were not assigned directly. Reserved identity labels are
-  # stripped below so columns remain the only persisted representation.
+  # API writers still send principal identity through labels during the
+  # compatibility release. Promote only fields that were not assigned directly.
+  # Reserved identity labels are stripped below so columns remain authoritative.
   def promote_identity_labels_to_fields
     return unless will_save_change_to_labels?
 
     PROMOTED_LABEL_FIELDS.each do |field|
       next if will_save_change_to_attribute?(field) || !labels.to_h.key?(field)
 
-      self[field] = labels.to_h[field]
+      value = labels.to_h[field]
+      self[field] = field == "kind" ? value : value.presence
     end
   end
 

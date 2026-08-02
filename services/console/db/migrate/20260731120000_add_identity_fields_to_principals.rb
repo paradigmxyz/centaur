@@ -1,4 +1,15 @@
 class AddIdentityFieldsToPrincipals < ActiveRecord::Migration[8.1]
+  KNOWN_KINDS = %w[
+    unknown user console_user service workflow slack_channel slack_dm discord_channel linear_issue
+    teams_user teams_conversation
+  ].freeze
+  LEGACY_KIND_SQL = <<~SQL.squish.freeze
+    CASE
+      WHEN labels ->> 'kind' IN (#{KNOWN_KINDS.map { |kind| "'#{kind}'" }.join(", ")})
+        THEN labels ->> 'kind'
+      ELSE 'unknown'
+    END
+  SQL
   KIND_FROM_FOREIGN_ID_SQL = <<~SQL.squish.freeze
     CASE
       WHEN foreign_id IN ('warm-pool-bootstrap', 'workflow-host')
@@ -17,17 +28,32 @@ class AddIdentityFieldsToPrincipals < ActiveRecord::Migration[8.1]
         THEN 'teams_conversation'
       WHEN foreign_id ~ '^slack-user-[te][a-z0-9]+-u[a-z0-9]+$'
         THEN 'slack_dm'
+      WHEN foreign_id LIKE 'slack-user-%'
+        THEN 'unknown'
       WHEN foreign_id ~ '^slack-channel-[te][a-z0-9]+-d[a-z0-9]+$'
         THEN 'slack_dm'
       WHEN foreign_id ~ '^slack-channel-d[a-z0-9]+$'
         THEN 'unknown'
       WHEN foreign_id LIKE 'slack-channel-%'
         THEN 'slack_channel'
-      ELSE 'unknown'
+      ELSE #{LEGACY_KIND_SQL}
     END
   SQL
   ORDINARY_LABELS_SQL = <<~SQL.squish.freeze
     labels - 'kind' - 'slack_user_id' - 'slack_channel_id' - 'slack_team_id' - 'slack_email'
+  SQL
+  SLACK_USER_ID_SQL = "NULLIF(TRIM(labels ->> 'slack_user_id'), '')".freeze
+  SLACK_CHANNEL_ID_SQL = "NULLIF(TRIM(labels ->> 'slack_channel_id'), '')".freeze
+  SLACK_TEAM_ID_SQL = "NULLIF(TRIM(labels ->> 'slack_team_id'), '')".freeze
+  SLACK_EMAIL_SQL = "NULLIF(TRIM(labels ->> 'slack_email'), '')".freeze
+  RESTORED_LABELS_SQL = <<~SQL.squish.freeze
+    labels || jsonb_strip_nulls(jsonb_build_object(
+      'kind', kind,
+      'slack_user_id', slack_user_id,
+      'slack_channel_id', slack_channel_id,
+      'slack_team_id', slack_team_id,
+      'slack_email', slack_email
+    ))
   SQL
 
   def up
@@ -46,19 +72,10 @@ class AddIdentityFieldsToPrincipals < ActiveRecord::Migration[8.1]
     execute <<~SQL.squish
       UPDATE principals
       SET kind = #{KIND_FROM_FOREIGN_ID_SQL},
-          slack_user_id = CASE
-            WHEN TRIM(labels ->> 'slack_user_id') ~ '^([UW][A-Z0-9]{8,}|USLACK)$'
-              THEN TRIM(labels ->> 'slack_user_id')
-          END,
-          slack_channel_id = CASE
-            WHEN TRIM(labels ->> 'slack_channel_id') ~ '^[CDG][A-Z0-9]{8,}$'
-              THEN TRIM(labels ->> 'slack_channel_id')
-          END,
-          slack_team_id = CASE
-            WHEN TRIM(labels ->> 'slack_team_id') ~ '^[TE][A-Z0-9]{8,}$'
-              THEN TRIM(labels ->> 'slack_team_id')
-          END,
-          slack_email = NULLIF(TRIM(labels ->> 'slack_email'), '')
+          slack_user_id = #{SLACK_USER_ID_SQL},
+          slack_channel_id = #{SLACK_CHANNEL_ID_SQL},
+          slack_team_id = #{SLACK_TEAM_ID_SQL},
+          slack_email = #{SLACK_EMAIL_SQL}
     SQL
 
     # Identity aliases are accepted and synthesized at the API boundary during
@@ -70,6 +87,11 @@ class AddIdentityFieldsToPrincipals < ActiveRecord::Migration[8.1]
   end
 
   def down
+    execute <<~SQL.squish
+      UPDATE principals
+      SET labels = #{RESTORED_LABELS_SQL}
+    SQL
+
     remove_index :principals, [ :namespace, :slack_email ], if_exists: true
     remove_index :principals, [ :namespace, :slack_team_id ], if_exists: true
     remove_index :principals, [ :namespace, :slack_channel_id ], if_exists: true
