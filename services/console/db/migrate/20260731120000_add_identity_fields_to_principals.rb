@@ -1,6 +1,6 @@
 class AddIdentityFieldsToPrincipals < ActiveRecord::Migration[8.1]
   KNOWN_KINDS = %w[
-    unknown user console_user service workflow slack_channel slack_dm discord_channel linear_issue
+    unknown user console_user workflow slack_channel slack_dm discord_channel linear_issue
     teams_user teams_conversation
   ].freeze
   LEGACY_KIND_SQL = <<~SQL.squish.freeze
@@ -12,20 +12,12 @@ class AddIdentityFieldsToPrincipals < ActiveRecord::Migration[8.1]
   SQL
   KIND_FROM_FOREIGN_ID_SQL = <<~SQL.squish.freeze
     CASE
-      WHEN foreign_id IN ('warm-pool-bootstrap', 'workflow-host')
-        THEN 'service'
       WHEN foreign_id LIKE 'console-user-%'
         THEN 'console_user'
+      WHEN foreign_id = 'workflow-host'
+        THEN 'unknown'
       WHEN foreign_id LIKE 'workflow-%'
         THEN 'workflow'
-      WHEN foreign_id LIKE 'discord-channel-%'
-        THEN 'discord_channel'
-      WHEN foreign_id LIKE 'linear-issue-%'
-        THEN 'linear_issue'
-      WHEN foreign_id LIKE 'teams-user-%'
-        THEN 'teams_user'
-      WHEN foreign_id LIKE 'teams-conversation-%'
-        THEN 'teams_conversation'
       WHEN foreign_id ~ '^slack-user-[te][a-z0-9]+-u[a-z0-9]+$'
         THEN 'slack_dm'
       WHEN foreign_id LIKE 'slack-user-%'
@@ -42,10 +34,10 @@ class AddIdentityFieldsToPrincipals < ActiveRecord::Migration[8.1]
   ORDINARY_LABELS_SQL = <<~SQL.squish.freeze
     labels - 'kind' - 'slack_user_id' - 'slack_channel_id' - 'slack_team_id' - 'slack_email'
   SQL
-  SLACK_USER_ID_SQL = "NULLIF(TRIM(labels ->> 'slack_user_id'), '')".freeze
-  SLACK_CHANNEL_ID_SQL = "NULLIF(TRIM(labels ->> 'slack_channel_id'), '')".freeze
-  SLACK_TEAM_ID_SQL = "NULLIF(TRIM(labels ->> 'slack_team_id'), '')".freeze
-  SLACK_EMAIL_SQL = "NULLIF(TRIM(labels ->> 'slack_email'), '')".freeze
+  SLACK_USER_ID_SQL = "labels ->> 'slack_user_id'".freeze
+  SLACK_CHANNEL_ID_SQL = "labels ->> 'slack_channel_id'".freeze
+  SLACK_TEAM_ID_SQL = "labels ->> 'slack_team_id'".freeze
+  SLACK_EMAIL_SQL = "labels ->> 'slack_email'".freeze
   RESTORED_LABELS_SQL = <<~SQL.squish.freeze
     labels || jsonb_strip_nulls(jsonb_build_object(
       'kind', kind,

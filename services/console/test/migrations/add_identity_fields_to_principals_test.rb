@@ -4,14 +4,14 @@ require Rails.root.join("db/migrate/20260731120000_add_identity_fields_to_princi
 class AddIdentityFieldsToPrincipalsTest < ActiveSupport::TestCase
   test "infers canonical kinds and otherwise preserves known legacy kinds" do
     cases = {
-      "warm-pool-bootstrap" => [ {}, "service" ],
-      "workflow-host" => [ {}, "service" ],
+      "warm-pool-bootstrap" => [ {}, "unknown" ],
+      "workflow-host" => [ {}, "unknown" ],
       "console-user-ada-123" => [ {}, "console_user" ],
       "workflow-daily-report" => [ {}, "workflow" ],
-      "discord-channel-guild-channel" => [ {}, "discord_channel" ],
-      "linear-issue-issue-123" => [ {}, "linear_issue" ],
-      "teams-user-user-123" => [ {}, "teams_user" ],
-      "teams-conversation-conversation-123" => [ {}, "teams_conversation" ],
+      "discord-channel-guild-channel" => [ {}, "unknown" ],
+      "linear-issue-issue-123" => [ {}, "unknown" ],
+      "teams-user-user-123" => [ {}, "unknown" ],
+      "teams-conversation-conversation-123" => [ {}, "unknown" ],
       "slack-user-t123-u123" => [ { "kind" => "user" }, "slack_dm" ],
       "slack-user-e123-u123" => [ {}, "slack_dm" ],
       "slack-user-u123" => [ { "kind" => "slack_dm" }, "unknown" ],
@@ -25,7 +25,7 @@ class AddIdentityFieldsToPrincipalsTest < ActiveSupport::TestCase
       "U987654321" => [ { "kind" => "user" }, "user" ],
       "U-alice" => [ { "kind" => "user" }, "user" ],
       "thread-slack-c123-ts" => [ {}, "unknown" ],
-      "manually-created" => [ { "kind" => "service" }, "service" ],
+      "manually-created" => [ { "kind" => "service" }, "unknown" ],
       "invalid-kind" => [ { "kind" => "future_platform" }, "unknown" ]
     }
 
@@ -40,7 +40,7 @@ class AddIdentityFieldsToPrincipalsTest < ActiveSupport::TestCase
     assert_equal cases.transform_values(&:last), rows.to_h
   end
 
-  test "preserves trimmed nonblank Slack identity values regardless of format" do
+  test "preserves Slack identity values exactly regardless of format" do
     labels = {
       "slack_user_id" => " U12345 ",
       "slack_channel_id" => " D123 ",
@@ -58,10 +58,10 @@ class AddIdentityFieldsToPrincipalsTest < ActiveSupport::TestCase
 
     assert_equal(
       {
-        "slack_user_id" => "U12345",
-        "slack_channel_id" => "D123",
-        "slack_team_id" => "TACME",
-        "slack_email" => "pending"
+        "slack_user_id" => " U12345 ",
+        "slack_channel_id" => " D123 ",
+        "slack_team_id" => " TACME ",
+        "slack_email" => " pending "
       },
       row
     )

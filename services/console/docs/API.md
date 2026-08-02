@@ -1191,7 +1191,7 @@ A principal is an identity (an application, service, or proxy owner) that can be
 | `slack_channel_permissions` | optional | Direct permissions owned by the principal. Full replacement when present on create or update. |
 | `effective_slack_channel_permissions` | response only | Direct permissions merged with permissions inherited from assigned roles. |
 
-Known kinds are `unknown`, `user`, `console_user`, `service`, `workflow`,
+Known kinds are `unknown`, `user`, `console_user`, `workflow`,
 `slack_channel`, `slack_dm`, `discord_channel`, `linear_issue`, `teams_user`,
 and `teams_conversation`. Use one of these values for the `kind` label.
 
@@ -1200,7 +1200,7 @@ and `teams_conversation`. Use one of these values for the `kind` label.
 `POST /api/v1/principals`
 
 ```json
-{ "data": { "namespace": "default", "foreign_id": "api-service", "name": "API Service", "labels": { "kind": "service", "tier": "backend" } } }
+{ "data": { "namespace": "default", "foreign_id": "api-service", "name": "API Service", "labels": { "tier": "backend" } } }
 ```
 
 Returns `201`:
@@ -1212,7 +1212,7 @@ Returns `201`:
     "namespace": "default",
     "foreign_id": "api-service",
     "name": "API Service",
-    "labels": { "tier": "backend", "kind": "service" },
+    "labels": { "tier": "backend", "kind": "unknown" },
     "slack_channel_permissions": [],
     "effective_slack_channel_permissions": [],
     "created_at": "2026-06-01T10:00:00Z",

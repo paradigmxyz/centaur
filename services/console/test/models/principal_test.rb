@@ -98,9 +98,11 @@ class PrincipalTest < ActiveSupport::TestCase
       assert Principal.new(default_attrs(kind: kind)).valid?, "expected #{kind.inspect} to be valid"
     end
 
-    principal = Principal.new(default_attrs(kind: "future_platform"))
-    assert_not principal.valid?
-    assert_includes principal.errors[:kind], "must be one of #{Principal::KINDS.join(", ")}"
+    %w[service future_platform].each do |kind|
+      principal = Principal.new(default_attrs(kind: kind))
+      assert_not principal.valid?
+      assert_includes principal.errors[:kind], "must be one of #{Principal::KINDS.join(", ")}"
+    end
 
     principal = Principal.new(default_attrs(kind: "  "))
     assert_not principal.valid?
