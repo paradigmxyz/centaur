@@ -37,9 +37,9 @@ class Principal < ApplicationRecord
     teams_user teams_conversation
   ].freeze
   PROMOTED_LABEL_FIELDS = %w[kind slack_user_id slack_channel_id slack_team_id slack_email].freeze
-  SLACK_USER_ID_FORMAT = /\A[UW][A-Z0-9]{8,}\z/
+  SLACK_USER_ID_FORMAT = /\A(?:[UW][A-Z0-9]{8,}|USLACK)\z/
   SLACK_CHANNEL_ID_FORMAT = /\A[CDG][A-Z0-9]{8,}\z/
-  SLACK_TEAM_ID_FORMAT = /\AT[A-Z0-9]{8,}\z/
+  SLACK_TEAM_ID_FORMAT = /\A[TE][A-Z0-9]{8,}\z/
 
   validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
   validates :foreign_id, uniqueness: { scope: :namespace, allow_nil: true },
@@ -51,7 +51,7 @@ class Principal < ApplicationRecord
                             allow_nil: true
   validates :slack_channel_id, format: { with: SLACK_CHANNEL_ID_FORMAT, message: "is not a valid Slack channel ID" },
                                allow_nil: true
-  validates :slack_team_id, format: { with: SLACK_TEAM_ID_FORMAT, message: "is not a valid Slack team ID" },
+  validates :slack_team_id, format: { with: SLACK_TEAM_ID_FORMAT, message: "is not a valid Slack scope ID" },
                             allow_nil: true
   validates :slack_email, format: { with: URI::MailTo::EMAIL_REGEXP, message: "is not a valid email address" },
                           allow_nil: true

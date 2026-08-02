@@ -15,9 +15,9 @@ class AddIdentityFieldsToPrincipals < ActiveRecord::Migration[8.1]
         THEN 'teams_user'
       WHEN foreign_id LIKE 'teams-conversation-%'
         THEN 'teams_conversation'
-      WHEN foreign_id ~ '^slack-user-t[a-z0-9]+-u[a-z0-9]+$'
+      WHEN foreign_id ~ '^slack-user-[te][a-z0-9]+-u[a-z0-9]+$'
         THEN 'slack_dm'
-      WHEN foreign_id ~ '^slack-channel-t[a-z0-9]+-d[a-z0-9]+$'
+      WHEN foreign_id ~ '^slack-channel-[te][a-z0-9]+-d[a-z0-9]+$'
         THEN 'slack_dm'
       WHEN foreign_id ~ '^slack-channel-d[a-z0-9]+$'
         THEN 'unknown'
@@ -47,7 +47,7 @@ class AddIdentityFieldsToPrincipals < ActiveRecord::Migration[8.1]
       UPDATE principals
       SET kind = #{KIND_FROM_FOREIGN_ID_SQL},
           slack_user_id = CASE
-            WHEN TRIM(labels ->> 'slack_user_id') ~ '^[UW][A-Z0-9]{8,}$'
+            WHEN TRIM(labels ->> 'slack_user_id') ~ '^([UW][A-Z0-9]{8,}|USLACK)$'
               THEN TRIM(labels ->> 'slack_user_id')
           END,
           slack_channel_id = CASE
@@ -55,7 +55,7 @@ class AddIdentityFieldsToPrincipals < ActiveRecord::Migration[8.1]
               THEN TRIM(labels ->> 'slack_channel_id')
           END,
           slack_team_id = CASE
-            WHEN TRIM(labels ->> 'slack_team_id') ~ '^T[A-Z0-9]{8,}$'
+            WHEN TRIM(labels ->> 'slack_team_id') ~ '^[TE][A-Z0-9]{8,}$'
               THEN TRIM(labels ->> 'slack_team_id')
           END,
           slack_email = NULLIF(TRIM(labels ->> 'slack_email'), '')

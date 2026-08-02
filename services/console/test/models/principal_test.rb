@@ -85,9 +85,9 @@ class PrincipalTest < ActiveSupport::TestCase
 
   test "Slack identity fields must use canonical formats" do
     {
-      slack_user_id: %w[U0123456789 W0123456789],
+      slack_user_id: %w[U0123456789 W0123456789 USLACK],
       slack_channel_id: %w[C0123456789 D0123456789 G0123456789],
-      slack_team_id: %w[T0123456789],
+      slack_team_id: %w[T0123456789 E0123456789],
       slack_email: %w[ada@example.com]
     }.each do |field, values|
       values.each do |value|

@@ -1188,9 +1188,9 @@ A principal is an identity (an application, service, or proxy owner) that can be
 | `foreign_id` | optional    | Unique per namespace. Immutable. |
 | `name`       | optional    | |
 | `kind`       | optional    | Principal identity kind. Defaults to `"unknown"`; must be a known kind. |
-| `slack_user_id` | optional | Native `U...` or `W...` Slack user ID, or `null`. |
+| `slack_user_id` | optional | Native `U...` or `W...` Slack user ID, the special `USLACK` user, or `null`. |
 | `slack_channel_id` | optional | Native `C...`, `D...`, or `G...` Slack conversation ID, or `null`. |
-| `slack_team_id` | optional | Native `T...` Slack workspace/team ID, or `null`. |
+| `slack_team_id` | optional | Native `T...` workspace or `E...` Enterprise Grid scope ID, or `null`. |
 | `slack_email` | optional | Valid Slack account email, or `null`. |
 | `labels`     | optional    | |
 | `slack_channel_permissions` | optional | Direct permissions owned by the principal. Full replacement when present on create or update. |
