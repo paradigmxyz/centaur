@@ -109,6 +109,8 @@ done
 
 require_env() {
   local name="$1"
+  # Normalize Windows CRLF when values come from a checked-out .env.
+  printf -v "$name" '%s' "$(printf '%s' "${!name:-}" | tr -d '\r')"
   if [[ -z "${!name:-}" ]]; then
     echo "FATAL: $name is required in the shell environment" >&2
     exit 1
@@ -134,7 +136,9 @@ delete_if_forced() {
 }
 
 rand_hex() {
-  openssl rand -hex 32 | tr -d '\n'
+  # Strip CR too: Git Bash/MSYS openssl on Windows often emits CRLF, which
+  # corrupts Postgres passwords and breaks console create-db auth.
+  openssl rand -hex 32 | tr -d '\r\n'
 }
 
 require_cmd kubectl

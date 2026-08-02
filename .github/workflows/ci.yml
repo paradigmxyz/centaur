@@ -119,6 +119,25 @@ jobs:
       - name: Check migration versions
         run: .github/scripts/check-migration-order.sh "origin/${{ github.base_ref || 'main' }}"
 
+  spaces-import-boundary:
+    name: Spaces import boundary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Check Spaces does not import Centaur packages
+        run: .github/scripts/check-spaces-import-boundary.sh
+
+      - name: Adapter unit tests
+        run: |
+          if command -v uv >/dev/null 2>&1; then
+            uv run --project spaces/adapter python -m unittest discover -s spaces/adapter/tests -p 'test_*.py'
+          else
+            PYTHONPATH=spaces/adapter/src python3 -m unittest discover -s spaces/adapter/tests -p 'test_*.py'
+          fi
+
   rust-api:
     name: Rust API fmt, clippy, and tests
     runs-on: depot-ubuntu-24.04-16
