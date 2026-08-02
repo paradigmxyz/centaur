@@ -28,6 +28,10 @@ use crate::util::{managed_labels, slugify};
 const KIND_LABEL: &str = "kind";
 const SLACK_DM_KIND: &str = "slack_dm";
 const SLACK_CHANNEL_KIND: &str = "slack_channel";
+const DISCORD_CHANNEL_KIND: &str = "discord_channel";
+const LINEAR_ISSUE_KIND: &str = "linear_issue";
+const TEAMS_USER_KIND: &str = "teams_user";
+const TEAMS_CONVERSATION_KIND: &str = "teams_conversation";
 
 /// The principal a session resolves to, as a stable upsert key plus a label.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,6 +99,7 @@ pub fn derive_principal_with_slack_team(
     // into the key so the same channel id in two guilds never collides.
     if let Some((guild_id, channel_id)) = parse_discord_segments(thread_key) {
         let mut labels = BTreeMap::new();
+        labels.insert(KIND_LABEL.to_owned(), DISCORD_CHANNEL_KIND.to_owned());
         labels.insert("discord_guild_id".to_owned(), guild_id.to_owned());
         let scope = format!("{}-", slugify(guild_id));
         let key_id = channel_id.unwrap_or(guild_id);
@@ -116,6 +121,7 @@ pub fn derive_principal_with_slack_team(
     // linearbot resolves — cosmetic, since the key stays derived from the id.
     if let Some(issue_id) = parse_linear_issue(thread_key) {
         let mut labels = BTreeMap::new();
+        labels.insert(KIND_LABEL.to_owned(), LINEAR_ISSUE_KIND.to_owned());
         labels.insert("linear_issue_id".to_owned(), issue_id.to_owned());
         return PrincipalRef {
             foreign_id: format!("linear-issue-{}", slugify(issue_id)),
@@ -141,6 +147,7 @@ pub fn derive_principal_with_slack_team(
         if let Some(user) = actor_user_id.map(str::trim).filter(|user| !user.is_empty())
             && !conversation_id.starts_with("19:")
         {
+            labels.insert(KIND_LABEL.to_owned(), TEAMS_USER_KIND.to_owned());
             labels.insert("teams_user_id".to_owned(), user.to_owned());
             return PrincipalRef {
                 foreign_id: format!("teams-user-{}", slugify(user)),
@@ -150,6 +157,7 @@ pub fn derive_principal_with_slack_team(
                 labels,
             };
         }
+        labels.insert(KIND_LABEL.to_owned(), TEAMS_CONVERSATION_KIND.to_owned());
         return PrincipalRef {
             foreign_id: format!("teams-conversation-{}", slugify(&conversation_id)),
             name: display_name
@@ -478,6 +486,10 @@ mod tests {
             thread_a.labels.get("discord_guild_id").map(String::as_str),
             Some("111")
         );
+        assert_eq!(
+            thread_a.labels.get("kind").map(String::as_str),
+            Some("discord_channel")
+        );
     }
 
     #[test]
@@ -491,6 +503,10 @@ mod tests {
         assert_eq!(
             session_a.labels.get("linear_issue_id").map(String::as_str),
             Some("issue-1")
+        );
+        assert_eq!(
+            session_a.labels.get("kind").map(String::as_str),
+            Some("linear_issue")
         );
     }
 
@@ -544,6 +560,10 @@ mod tests {
                 .map(String::as_str),
             Some("https://smba.trafficmanager.net/amer/")
         );
+        assert_eq!(
+            principal.labels.get("kind").map(String::as_str),
+            Some("teams_conversation")
+        );
     }
 
     #[test]
@@ -587,6 +607,10 @@ mod tests {
         assert_eq!(
             principal.labels.get("teams_user_id").map(String::as_str),
             Some("aad-user-1")
+        );
+        assert_eq!(
+            principal.labels.get("kind").map(String::as_str),
+            Some("teams_user")
         );
     }
 
