@@ -1,5 +1,9 @@
 {{- if .Values.apiRs.enabled }}
 {{- $console := include "centaur.consoleValues" . | fromYaml -}}
+{{- $apiRsIronProxy := .Values.apiRs.ironProxy | default dict -}}
+{{- if hasKey $apiRsIronProxy "mode" -}}
+{{- fail "apiRs.ironProxy.mode has been removed; iron-proxy is always enabled" -}}
+{{- end -}}
 {{- $mcpPublicUrl := default .Values.slackbotv2.mcpPublicUrl .Values.apiRs.mcpPublicUrl -}}
 {{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") -}}
 {{- $repoCacheStorageType := include "centaur.repoCacheStorageType" . -}}
@@ -341,8 +345,6 @@ spec:
               value: {{ $repoCachePvcName | quote }}
 {{- end }}
 {{- end }}
-            - name: KUBERNETES_SANDBOX_IRON_PROXY_MODE
-              value: {{ .Values.apiRs.ironProxy.mode | quote }}
             - name: KUBERNETES_IRON_PROXY_IMAGE
               value: {{ printf "%s:%s" .Values.ironProxy.image.repository .Values.ironProxy.image.tag | quote }}
             - name: KUBERNETES_IRON_PROXY_IMAGE_PULL_POLICY
