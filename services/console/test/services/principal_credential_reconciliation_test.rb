@@ -274,6 +274,53 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     assert_empty principal.labels.slice("slack_user_id", "slack_team_id")
   end
 
+  test "console user creation grants but does not sync malformed Slack credential identity" do
+    credential = create_credential(oauth_apps(:acme_slack), "U12345", "member@acme.example")
+    credential.update!(labels: { "slack_team_id" => "T0123456789" })
+    secret = wrap(credential)
+
+    principal = create_console_user_principal(
+      users(:member_user),
+      foreign_id: "console-user-malformed-slack-on-create"
+    )
+
+    assert principal.grants.exists?(static_secret: secret)
+    assert_nil principal.reload.slack_user_id
+    assert_nil principal.slack_team_id
+  end
+
+  test "wrapper creation grants but does not sync malformed Slack credential identity" do
+    principal = create_console_user_principal(
+      users(:member_user),
+      foreign_id: "console-user-malformed-slack-on-wrap"
+    )
+    credential = create_credential(oauth_apps(:acme_slack), "U0123456789", "member@acme.example")
+    credential.update!(labels: { "slack_team_id" => "TACME" })
+
+    secret = nil
+    assert_nothing_raised { secret = wrap(credential) }
+
+    assert principal.grants.exists?(static_secret: secret)
+    assert_nil principal.reload.slack_user_id
+    assert_nil principal.slack_team_id
+  end
+
+  test "credential update grants but does not sync malformed Slack credential identity" do
+    principal = create_console_user_principal(
+      users(:member_user),
+      foreign_id: "console-user-malformed-slack-on-credential-update"
+    )
+    credential = create_credential(oauth_apps(:acme_slack), "U12345", nil)
+    credential.update!(labels: { "slack_team_id" => "TACME" })
+    secret = wrap(credential)
+
+    assert_nothing_raised { credential.update!(provider_email: "member@acme.example") }
+
+    assert principal.grants.exists?(static_secret: secret)
+    assert_nil principal.reload.slack_user_id
+    assert_nil principal.slack_team_id
+  end
+
   test "console user Slack scope bootstraps once and then rejects another scope" do
     first = create_credential(oauth_apps(:acme_slack), "U6123456789", "member@acme.example")
     first.update!(labels: { "slack_team_id" => "T6123456789" })

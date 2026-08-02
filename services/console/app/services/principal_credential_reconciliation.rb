@@ -300,6 +300,8 @@ class PrincipalCredentialReconciliation
     slack_user_id = unique_present_value(slack_credentials.map(&:provider_subject))
     slack_team_id = unique_present_value(slack_credentials.map { |credential| slack_team_for(credential) })
     return unless slack_user_id && slack_team_id
+    return unless Principal::SLACK_USER_ID_FORMAT.match?(slack_user_id)
+    return unless Principal::SLACK_TEAM_ID_FORMAT.match?(slack_team_id)
 
     updates = {
       slack_user_id: slack_user_id,
