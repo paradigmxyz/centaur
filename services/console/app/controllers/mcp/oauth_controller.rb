@@ -453,11 +453,11 @@ module Mcp
         principal.created_by ||= current_user
         principal.name = current_user.name.presence || current_user.email
         principal.kind = "console_user"
+        principal.console_user_id = current_user.oid
+        principal.console_user_email = current_user.email
         principal.assign_attributes(slack_identity_fields_for(current_user))
         principal.labels = principal.labels.merge(
-          "managed-by" => "centaur",
-          "console-user-id" => current_user.oid,
-          "email" => current_user.email
+          "managed-by" => "centaur"
         )
         principal.save!
         assign_user_mcp_role(principal) if newly_created

@@ -156,6 +156,10 @@ module Mcp
       assert_equal @operator, stored_code.user
       assert_equal "http://localhost:3000/mcp", stored_code.resource
       assert_match(/\Aprn_/, stored_code.principal.oid)
+      assert_equal "console_user", stored_code.principal.kind
+      assert_equal @operator.oid, stored_code.principal.console_user_id
+      assert_equal @operator.email, stored_code.principal.console_user_email
+      assert_empty stored_code.principal.labels.slice("console-user-id", "email")
 
       exchange_authorization_code(client, code)
 

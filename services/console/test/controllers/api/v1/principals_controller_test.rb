@@ -41,7 +41,7 @@ module Api
         assert_equal principal.oid, data["id"]
         assert_equal "acme", data["namespace"]
         assert_equal "C0123456789", data["foreign_id"]
-        Principal::PROMOTED_LABEL_FIELDS.each { |field| assert_not data.key?(field) }
+        Principal::PROMOTED_LABEL_FIELDS.each_value { |field| assert_not data.key?(field) }
         assert_equal(
           {
             "kind" => "slack_channel",
@@ -313,7 +313,9 @@ module Api
         principal = Principal.find_by!(namespace: "acme", foreign_id: "mixed-identity")
         assert_equal "user", principal.kind
         assert_nil principal.slack_email
-        Principal::PROMOTED_LABEL_FIELDS.each { |field| assert_not json_body.fetch("data").key?(field) }
+        Principal::PROMOTED_LABEL_FIELDS.each_value do |field|
+          assert_not json_body.fetch("data").key?(field)
+        end
       end
 
       test "PUT updates labels" do
@@ -544,7 +546,7 @@ module Api
         assert_equal "TACME", principal.slack_team_id
         assert_equal "pending", principal.slack_email
         assert_equal "identity-platform", principal.labels["team"]
-        assert_empty principal.labels.slice(*Principal::PROMOTED_LABEL_FIELDS)
+        assert_empty principal.labels.slice(*Principal::PROMOTED_LABEL_FIELDS.keys)
       end
 
       test "POST leaves omitted flags unchanged on an existing permission" do
@@ -896,6 +898,52 @@ module Api
         assert_response :ok
 
         assert_equal [ "C0123456789" ], json_body.fetch("data").map { |p| p["foreign_id"] }
+      end
+
+      test "GET index filters console user compatibility labels through columns" do
+        user = users(:acme_admin)
+        Principal.create!(
+          namespace: "acme",
+          foreign_id: "console-user-admin",
+          kind: "console_user",
+          console_user_id: user.oid,
+          console_user_email: user.email,
+          created_by: user
+        )
+
+        get api_v1_principals_url,
+            params: {
+              namespace: "acme",
+              labels: {
+                kind: "console_user",
+                "console-user-id" => user.oid,
+                email: user.email
+              }
+            },
+            headers: auth_headers
+        assert_response :ok
+
+        data = json_body.fetch("data")
+        assert_equal [ "console-user-admin" ], data.map { |p| p["foreign_id"] }
+        assert_equal user.oid, data.first.dig("labels", "console-user-id")
+        assert_equal user.email, data.first.dig("labels", "email")
+      end
+
+      test "GET index still filters ordinary email labels" do
+        Principal.create!(
+          namespace: "acme",
+          foreign_id: "ordinary-email-principal",
+          kind: "user",
+          labels: { "email" => "ordinary@example.com" },
+          created_by: users(:acme_admin)
+        )
+
+        get api_v1_principals_url,
+            params: { namespace: "acme", labels: { email: "ordinary@example.com" } },
+            headers: auth_headers
+        assert_response :ok
+
+        assert_equal [ "ordinary-email-principal" ], json_body.fetch("data").map { |p| p["foreign_id"] }
       end
 
       test "GET index filters by sandbox repo-cache label" do

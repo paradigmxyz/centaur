@@ -33,7 +33,6 @@ class PrincipalCredentialReconciliation
   # provider-subject labels, which would widen the trust boundary beyond the
   # authenticated user.
   CONSOLE_USER_KIND = "console_user"
-  CONSOLE_USER_ID_LABEL = "console-user-id"
   SLACK_PROVIDER = Oauth::Providers::Slack::KEY
   GOOGLE_PROVIDER = Oauth::Providers::Google::KEY
   EMAIL_LABELS = %w[email google_email].freeze
@@ -338,7 +337,7 @@ class PrincipalCredentialReconciliation
   # Unverified emails are excluded: an unverified address must not adopt
   # someone else's credentials.
   def console_user_emails(principal)
-    user_oid = principal.labels&.[](CONSOLE_USER_ID_LABEL)
+    user_oid = principal.console_user_id
     return [] if user_oid.blank?
 
     @console_user_emails ||= {}

@@ -167,6 +167,29 @@ class PgDsnSecretTest < ActiveSupport::TestCase
     )
   end
 
+  test "to_proxy_dsn resolves console user compatibility labels from columns" do
+    user = users(:acme_admin)
+    principal = Principal.create!(
+      namespace: "acme",
+      kind: "console_user",
+      console_user_id: user.oid,
+      console_user_email: user.email,
+      created_by: user
+    )
+    secret = with_dsn(PgDsnSecret.new(base_attrs(settings: [
+      { "name" => "app.user_id", "value_from" => { "principal_label" => "console-user-id" } },
+      { "name" => "app.email", "value_from" => { "principal_label" => "email" } }
+    ])))
+
+    assert_equal(
+      [
+        { "name" => "app.user_id", "value" => user.oid },
+        { "name" => "app.email", "value" => user.email }
+      ],
+      secret.to_proxy_dsn(principal: principal)["settings"]
+    )
+  end
+
   test "to_proxy_dsn resolves Slack history channel ids from permission rows" do
     principal = principals(:acme_channel)
     SlackChannelPermission.create!(

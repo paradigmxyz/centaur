@@ -1193,7 +1193,7 @@ system-managed `default/infra` role.
 | `namespace`  | optional    | Defaults to `"default"`. Immutable. |
 | `foreign_id` | optional    | Unique per namespace. Immutable. |
 | `name`       | optional    | |
-| `labels`     | optional    | Identity values remain represented here in this API version. Reserved keys are `kind`, `slack_user_id`, `slack_channel_id`, `slack_team_id`, and `slack_email`. |
+| `labels`     | optional    | Identity values remain represented here in this API version. Reserved keys are `kind`, `slack_user_id`, `slack_channel_id`, `slack_team_id`, and `slack_email`. For `console_user` principals, `console-user-id` and `email` are also reserved. |
 | `slack_channel_permissions` | optional | Direct permissions owned by the principal. Full replacement when present on create or update. |
 | `effective_slack_channel_permissions` | response only | Direct permissions merged with permissions inherited from assigned roles. |
 

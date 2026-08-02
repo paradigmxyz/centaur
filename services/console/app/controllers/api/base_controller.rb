@@ -115,14 +115,22 @@ module Api
     DEFAULT_PAGE_LIMIT = 50
     MAX_PAGE_LIMIT = 200
 
-    def paginated_label_search(scope, promoted_label_columns: [])
+    def paginated_label_search(scope, promoted_label_fields: {})
       namespace = params.require(:namespace)
 
       labels = label_filter_params
       filtered = scope.where(namespace: namespace)
-      promoted_label_columns.each do |column|
-        value = labels.delete(column)
-        filtered = filtered.where(column => value.to_s) if value.present?
+      promoted_label_fields.each do |label, column|
+        value = labels.delete(label)
+        next if value.blank?
+
+        table = scope.connection.quote_table_name(scope.table_name)
+        field = scope.connection.quote_column_name(column)
+        filtered = filtered.where(
+          "#{table}.#{field} = ? OR #{table}.labels @> ?",
+          value.to_s,
+          { label => value }.to_json
+        )
       end
       filtered = filtered.where("labels @> ?", labels.to_json) if labels.any?
 
