@@ -1214,7 +1214,7 @@ impl SessionRuntime {
     }
 
     /// Attach an iron-control registrar so each new session upserts its
-    /// principal and assigns it the configured roles.
+    /// principal. Iron-control applies configured default roles on creation.
     pub fn with_iron_control(mut self, registrar: SessionRegistrar) -> Self {
         self.iron_control = Some(registrar);
         self

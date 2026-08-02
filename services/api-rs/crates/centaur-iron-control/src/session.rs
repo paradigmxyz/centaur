@@ -1,11 +1,11 @@
 //! Per-session principal registration.
 //!
 //! Roles are registered once at startup (see [`crate::register_role`]); a
-//! [`SessionRegistrar`] carries the resulting role OIDs and, when a session
-//! starts, upserts the session's principal. Brand-new principals receive the
-//! default roles once; existing principals keep their current assignments so
-//! operator revocations in console or ``centaur-perms`` remain sticky. The
-//! principal is derived from the thread key (see [`crate::derive_principal`]).
+//! When a session starts, [`SessionRegistrar`] upserts the session's principal.
+//! Iron-control owns default role assignment for brand-new principals, while
+//! existing principals keep their current assignments so operator revocations
+//! in console or ``centaur-perms`` remain sticky. The principal is derived from
+//! the thread key (see [`crate::derive_principal`]).
 
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -56,21 +56,13 @@ impl<'a> SessionPrincipalMetadata<'a> {
 pub struct SessionRegistrar {
     client: IronControlClient,
     namespace: String,
-    assign_role_ids: Vec<String>,
 }
 
 impl SessionRegistrar {
-    /// ``assign_role_ids`` are the iron-control role OIDs (from
-    /// [`crate::register_role`]) to assign to every session's principal.
-    pub fn new(
-        client: IronControlClient,
-        namespace: impl Into<String>,
-        assign_role_ids: Vec<String>,
-    ) -> Self {
+    pub fn new(client: IronControlClient, namespace: impl Into<String>) -> Self {
         Self {
             client,
             namespace: namespace.into(),
-            assign_role_ids,
         }
     }
 
@@ -79,10 +71,8 @@ impl SessionRegistrar {
     /// the OID) so callers can bind the session's egress proxy to the same
     /// identity.
     ///
-    /// Default roles are assigned only when the principal does not already
-    /// exist. Re-registering an existing channel/user still refreshes identity
-    /// metadata, but it must not restore roles that an operator manually
-    /// removed.
+    /// Re-registering an existing channel/user refreshes identity metadata but
+    /// leaves its role assignments to iron-control.
     pub async fn register_session(
         &self,
         thread_key: &str,
@@ -122,15 +112,6 @@ impl SessionRegistrar {
             self.client
                 .upsert_slack_channel_permission(&record.id, &permission)
                 .await?;
-        }
-        if !exists {
-            for role_id in &self.assign_role_ids {
-                match self.client.assign_role(&record.id, role_id).await {
-                    Ok(()) => {}
-                    Err(error) if is_status(&error, 409) || is_status(&error, 422) => {}
-                    Err(error) => return Err(error),
-                }
-            }
         }
         Ok(record)
     }
@@ -284,13 +265,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn register_session_seeds_roles_for_new_principal() {
+    async fn register_session_leaves_default_roles_to_iron_control() {
         let (base_url, requests, server) = spawn_iron_control_stub(false).await;
-        let registrar = SessionRegistrar::new(
-            IronControlClient::new(base_url, "test-key"),
-            "default",
-            vec!["role_infra".to_owned()],
-        );
+        let registrar =
+            SessionRegistrar::new(IronControlClient::new(base_url, "test-key"), "default");
         let metadata = json!({
             "slack_user_id": "U123",
             "slack_team_id": "T123",
@@ -314,18 +292,20 @@ mod tests {
                 &"POST /api/v1/principals/prn_channel/slack_channel_permissions".to_owned()
             )
         );
-        assert!(requests.contains(&"POST /api/v1/principals/prn_channel/roles".to_owned()));
+        assert!(
+            !requests
+                .iter()
+                .any(|request| request == "POST /api/v1/principals/prn_channel/roles"),
+            "iron-control assigns configured default roles during principal creation"
+        );
         server.abort();
     }
 
     #[tokio::test]
     async fn register_session_does_not_restore_roles_for_existing_principal() {
         let (base_url, requests, server) = spawn_iron_control_stub(true).await;
-        let registrar = SessionRegistrar::new(
-            IronControlClient::new(base_url, "test-key"),
-            "default",
-            vec!["role_infra".to_owned()],
-        );
+        let registrar =
+            SessionRegistrar::new(IronControlClient::new(base_url, "test-key"), "default");
         let metadata = json!({
             "slack_user_id": "U123",
             "slack_team_id": "T123",
@@ -362,11 +342,8 @@ mod tests {
     #[tokio::test]
     async fn register_session_upserts_slack_dm_permission_for_new_user_principal() {
         let (base_url, requests, server) = spawn_iron_control_stub(false).await;
-        let registrar = SessionRegistrar::new(
-            IronControlClient::new(base_url, "test-key"),
-            "default",
-            vec![],
-        );
+        let registrar =
+            SessionRegistrar::new(IronControlClient::new(base_url, "test-key"), "default");
         let metadata = json!({
             "slack_user_id": "U123",
             "slack_team_id": "T123",
@@ -390,11 +367,8 @@ mod tests {
     #[tokio::test]
     async fn register_session_upserts_slack_dm_permission_for_existing_user_principal() {
         let (base_url, requests, server) = spawn_iron_control_stub(true).await;
-        let registrar = SessionRegistrar::new(
-            IronControlClient::new(base_url, "test-key"),
-            "default",
-            vec!["role_infra".to_owned()],
-        );
+        let registrar =
+            SessionRegistrar::new(IronControlClient::new(base_url, "test-key"), "default");
         let metadata = json!({
             "slack_user_id": "U123",
             "slack_team_id": "T123",

@@ -37,6 +37,8 @@ module Console
         default_sandbox_observability_enabled: false,
         default_sandbox_api_server_enabled: false
       )
+      roles(:acme_infra).update!(assign_by_default: true)
+      roles(:globex_infra).update!(assign_by_default: true)
 
       assert_difference -> { Principal.count }, 1 do
         post console_create_principal_url,
@@ -64,6 +66,7 @@ module Console
       assert_equal "public", principal.sandbox_repo_cache
       assert_equal false, principal.sandbox_observability_enabled
       assert_equal false, principal.sandbox_api_server_enabled
+      assert_equal [ roles(:acme_infra) ], principal.roles
       assert_equal @operator, principal.created_by
     end
 

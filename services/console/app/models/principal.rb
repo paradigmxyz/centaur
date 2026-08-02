@@ -22,6 +22,7 @@ class Principal < ApplicationRecord
   include SlackChannelPermissionOwner
 
   after_commit :auto_grant_matching_oauth_credentials, on: %i[create update]
+  after_create :assign_default_roles, if: :roles_blank_for_defaulting?
   before_validation :apply_sandbox_repo_cache_label
   before_validation :promote_identity_labels_to_fields
   before_validation :strip_identity_labels
@@ -223,6 +224,19 @@ class Principal < ApplicationRecord
   end
 
   private
+
+  def roles_blank_for_defaulting?
+    association(:roles).target.empty? && !roles.exists?
+  end
+
+  def assign_default_roles
+    role_ids = Role.where(namespace: namespace, assign_by_default: true).ids
+    return if role_ids.empty?
+
+    # These assignments are part of the principal's initial state, so there is
+    # no prior sync config to invalidate.
+    PrincipalRole.insert_all!(role_ids.map { |role_id| { principal_id: id, role_id: role_id } })
+  end
 
   def auto_grant_matching_oauth_credentials
     PrincipalCredentialReconciliation.new.apply_for_principal(self)

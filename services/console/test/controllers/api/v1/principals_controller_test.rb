@@ -142,6 +142,18 @@ module Api
         assert_equal false, data["sandbox_api_server_enabled"]
       end
 
+      test "POST applies configured default roles from the principal namespace" do
+        roles(:acme_infra).update!(assign_by_default: true)
+        roles(:globex_infra).update!(assign_by_default: true)
+        body = { data: { namespace: "acme", foreign_id: "U-default-roles" } }
+
+        post api_v1_principals_url, params: body.to_json, headers: auth_headers
+        assert_response :created
+
+        principal = Principal.find_by!(namespace: "acme", foreign_id: "U-default-roles")
+        assert_equal [ roles(:acme_infra) ], principal.roles
+      end
+
       test "POST keeps explicit sandbox capabilities over system defaults" do
         system_settings(:default).update!(
           default_sandbox_repo_cache: "none",
@@ -821,6 +833,18 @@ module Api
         end
         assert_response :ok
         assert_equal "Renamed channel", principal.reload.name
+      end
+
+      test "PUT by foreign_id does not apply defaults to an existing roleless principal" do
+        principal = principals(:acme_user_bob)
+        principal.principal_roles.destroy_all
+        roles(:acme_infra).update!(assign_by_default: true)
+        body = { data: { namespace: "acme", name: "Still roleless" } }
+
+        put api_v1_principal_url(id: principal.foreign_id), params: body.to_json, headers: auth_headers
+
+        assert_response :ok
+        assert_empty principal.reload.roles
       end
 
       test "GET index rejects requests without an Authorization header" do

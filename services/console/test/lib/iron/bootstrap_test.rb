@@ -65,12 +65,16 @@ class Iron::BootstrapTest < ActiveSupport::TestCase
     end
   end
 
-  test "creates user and api key when env vars supplied and DB empty" do
+  test "creates user, default infra role, and api key when env vars supplied and DB empty" do
     set_env(email: "boot@example.com", password: "password123456", api_key: VALID_TOKEN)
     Iron::Bootstrap.run!
     user = User.find_by!(email: "boot@example.com")
+    role = Role.find_by!(namespace: "default", foreign_id: "infra")
+
     assert_equal user, user.authenticate("password123456")
     assert_equal user, ApiKey.find_by_token(VALID_TOKEN).user
+    assert_equal user, role.created_by
+    assert_predicate role, :assign_by_default?
     assert user.active?, "the bootstrap operator must be active"
     assert user.admin?, "the bootstrap operator must be an admin"
   end

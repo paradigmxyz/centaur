@@ -1180,6 +1180,12 @@ Slack OAuth apps should use normal Slack API scopes such as `channels:history`, 
 
 A principal is an identity (an application, service, or proxy owner) that can be granted secrets.
 
+When a principal is created with no preassigned roles, the console assigns the
+system default roles configured for that principal's namespace. Defaults apply
+only during initial creation. Updating an existing roleless principal does not
+restore roles that an operator removed. The default configuration assigns the
+system-managed `default/infra` role.
+
 ### Attributes
 
 | Field        | In requests | Notes |

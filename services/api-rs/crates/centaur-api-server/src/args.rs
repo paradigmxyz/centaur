@@ -688,30 +688,23 @@ impl SandboxArgs {
             return Ok(None);
         };
         let namespace = self.iron_control.namespace.clone();
-        let role_ids = if self.iron_control_sync_infra_secrets {
+        if self.iron_control_sync_infra_secrets {
             let policy = self.iron_proxy.source_policy();
             let roles = self.iron_proxy.roles_to_register()?;
-            let mut role_ids = Vec::with_capacity(roles.len());
             for (spec, fragment) in &roles {
-                role_ids.push(
-                    register_role_with_retry(&client, &namespace, spec, fragment, &policy).await?,
-                );
+                register_role_with_retry(&client, &namespace, spec, fragment, &policy).await?;
             }
-            role_ids
         } else {
             let spec = RoleSpec::infra();
-            vec![
-                client
-                    .upsert_role(&IdentityInput {
-                        namespace: namespace.clone(),
-                        foreign_id: spec.foreign_id,
-                        name: spec.name,
-                        labels: BTreeMap::from([("managed-by".to_owned(), "centaur".to_owned())]),
-                    })
-                    .await?
-                    .id,
-            ]
-        };
+            client
+                .upsert_role(&IdentityInput {
+                    namespace: namespace.clone(),
+                    foreign_id: spec.foreign_id,
+                    name: spec.name,
+                    labels: BTreeMap::from([("managed-by".to_owned(), "centaur".to_owned())]),
+                })
+                .await?;
+        }
         let bootstrap = client
             .upsert_principal(&IdentityInput {
                 namespace: namespace.clone(),
@@ -734,11 +727,8 @@ impl SandboxArgs {
                 ]),
             })
             .await?;
-        for role_id in &role_ids {
-            client.assign_role(&workflow_host.id, role_id).await?;
-        }
         Ok(Some(IronControlRuntime {
-            registrar: SessionRegistrar::new(client.clone(), namespace.clone(), role_ids),
+            registrar: SessionRegistrar::new(client.clone(), namespace.clone()),
             warm_pool_bootstrap_principal: bootstrap.id,
             workflow_host_principal: workflow_host.id,
             workflow_principal_registrar: WorkflowPrincipalRegistrar::new(client, namespace),

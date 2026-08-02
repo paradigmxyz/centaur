@@ -21,6 +21,32 @@ class Role < ApplicationRecord
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }, allow_nil: true
   validate :labels_is_a_hash
 
+  def self.ensure_default_infra!(created_by:)
+    role = find_or_initialize_by(namespace: "default", foreign_id: "infra")
+    if role.new_record?
+      role.assign_attributes(
+        name: "Infra",
+        labels: { "managed-by" => "centaur" },
+        assign_by_default: true,
+        created_by: created_by
+      )
+      role.save!
+    elsif !role.assign_by_default?
+      role.update!(assign_by_default: true)
+    end
+    role
+  end
+
+  def self.replace_default_assignments!(role_ids)
+    transaction do
+      now = Time.current
+      where(assign_by_default: true).where.not(id: role_ids)
+        .update_all(assign_by_default: false, updated_at: now)
+      where(id: role_ids, assign_by_default: false)
+        .update_all(assign_by_default: true, updated_at: now)
+    end
+  end
+
   private
 
   def labels_is_a_hash

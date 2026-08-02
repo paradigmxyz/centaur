@@ -14,6 +14,52 @@ class RoleTest < ActiveSupport::TestCase
     assert Role.new(valid_attrs).valid?
   end
 
+  test "requires a creator for operator-managed roles" do
+    role = Role.new(valid_attrs(created_by: nil))
+
+    assert_not role.valid?
+    assert_includes role.errors[:created_by], "must exist"
+  end
+
+  test "the system-managed infra role is the initial default" do
+    assert_predicate roles(:default_infra), :assign_by_default?
+  end
+
+  test "ensure_default_infra creates the role when missing" do
+    roles(:default_infra).destroy!
+    owner = users(:acme_admin)
+
+    role = Role.ensure_default_infra!(created_by: owner)
+
+    assert_equal "default", role.namespace
+    assert_equal "infra", role.foreign_id
+    assert_equal "Infra", role.name
+    assert_equal({ "managed-by" => "centaur" }, role.labels)
+    assert_predicate role, :assign_by_default?
+    assert_equal owner, role.created_by
+  end
+
+  test "ensure_default_infra preserves an existing role and marks it default" do
+    role = roles(:default_infra)
+    role.update!(name: "Custom Infra", assign_by_default: false)
+
+    result = Role.ensure_default_infra!(created_by: users(:globex_admin))
+
+    assert_equal role, result
+    assert_equal "Custom Infra", result.name
+    assert_equal users(:acme_admin), result.created_by
+    assert_predicate result, :assign_by_default?
+  end
+
+  test "replace_default_assignments updates the selected roles" do
+    selected = roles(:acme_infra)
+
+    Role.replace_default_assignments!([ selected.id ])
+
+    assert_predicate selected.reload, :assign_by_default?
+    assert_not roles(:default_infra).reload.assign_by_default?
+  end
+
   test "requires namespace" do
     role = Role.new(valid_attrs(namespace: nil))
     assert_not role.valid?

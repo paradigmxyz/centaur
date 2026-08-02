@@ -1,3 +1,12 @@
+default_infra:
+  namespace: default
+  foreign_id: infra
+  name: Infra
+  labels:
+    managed-by: centaur
+  assign_by_default: true
+  created_by: acme_admin
+
 acme_infra:
   namespace: acme
   foreign_id: infra
