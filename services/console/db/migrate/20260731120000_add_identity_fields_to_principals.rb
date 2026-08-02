@@ -1,4 +1,30 @@
 class AddIdentityFieldsToPrincipals < ActiveRecord::Migration[8.1]
+  KIND_FROM_FOREIGN_ID_SQL = <<~SQL.squish.freeze
+    CASE
+      WHEN foreign_id IN ('warm-pool-bootstrap', 'workflow-host')
+        THEN 'service'
+      WHEN foreign_id LIKE 'console-user-%'
+        THEN 'console_user'
+      WHEN foreign_id LIKE 'workflow-%'
+        THEN 'workflow'
+      WHEN foreign_id LIKE 'discord-channel-%'
+        THEN 'discord_channel'
+      WHEN foreign_id LIKE 'linear-issue-%'
+        THEN 'linear_issue'
+      WHEN foreign_id LIKE 'teams-user-%'
+        THEN 'teams_user'
+      WHEN foreign_id LIKE 'teams-conversation-%'
+        THEN 'teams_conversation'
+      WHEN foreign_id LIKE 'slack-user-%'
+        THEN 'slack_dm'
+      WHEN foreign_id ~ '^slack-channel-(t[a-z0-9]+-)?d[a-z0-9]+$'
+        THEN 'slack_dm'
+      WHEN foreign_id LIKE 'slack-channel-%'
+        THEN 'slack_channel'
+      ELSE 'unknown'
+    END
+  SQL
+
   def up
     add_column :principals, :kind, :string, null: false, default: "unknown"
     add_column :principals, :slack_user_id, :string
@@ -14,38 +40,7 @@ class AddIdentityFieldsToPrincipals < ActiveRecord::Migration[8.1]
 
     execute <<~SQL.squish
       UPDATE principals
-      SET kind = CASE
-            WHEN NULLIF(TRIM(labels ->> 'kind'), '') IS NOT NULL
-              THEN TRIM(labels ->> 'kind')
-            WHEN NULLIF(TRIM(labels ->> 'console-user-id'), '') IS NOT NULL OR
-                 foreign_id LIKE 'console-user-%'
-              THEN 'console_user'
-            WHEN labels ->> 'purpose' IN ('warm-pool-bootstrap', 'workflow-host') OR
-                 foreign_id IN ('warm-pool-bootstrap', 'workflow-host')
-              THEN 'service'
-            WHEN NULLIF(TRIM(labels ->> 'workflow_name'), '') IS NOT NULL OR
-                 foreign_id LIKE 'workflow-%'
-              THEN 'workflow'
-            WHEN NULLIF(TRIM(labels ->> 'discord_guild_id'), '') IS NOT NULL OR
-                 foreign_id LIKE 'discord-channel-%'
-              THEN 'discord_channel'
-            WHEN NULLIF(TRIM(labels ->> 'linear_issue_id'), '') IS NOT NULL OR
-                 foreign_id LIKE 'linear-issue-%'
-              THEN 'linear_issue'
-            WHEN NULLIF(TRIM(labels ->> 'teams_user_id'), '') IS NOT NULL OR
-                 foreign_id LIKE 'teams-user-%'
-              THEN 'teams_user'
-            WHEN NULLIF(TRIM(labels ->> 'teams_conversation_id'), '') IS NOT NULL OR
-                 foreign_id LIKE 'teams-conversation-%'
-              THEN 'teams_conversation'
-            WHEN UPPER(TRIM(COALESCE(labels ->> 'slack_channel_id', ''))) LIKE 'D%'
-              THEN 'slack_dm'
-            WHEN NULLIF(TRIM(labels ->> 'slack_channel_id'), '') IS NOT NULL
-              THEN 'slack_channel'
-            WHEN foreign_id LIKE 'slack-user-%'
-              THEN 'slack_dm'
-            ELSE 'unknown'
-          END,
+      SET kind = #{KIND_FROM_FOREIGN_ID_SQL},
           slack_user_id = NULLIF(TRIM(labels ->> 'slack_user_id'), ''),
           slack_channel_id = NULLIF(TRIM(labels ->> 'slack_channel_id'), ''),
           slack_team_id = NULLIF(TRIM(labels ->> 'slack_team_id'), ''),
