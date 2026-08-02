@@ -6,15 +6,9 @@ module Api
       before_action :reject_mixed_identity_representations!, only: %i[create update]
 
       def index
-        labels = label_filter_params
-        scope = apply_principal_identity_filters(
-          Principal.includes(:principal_identifiers, :slack_channel_permissions,
-                             roles: :slack_channel_permissions),
-          labels
-        )
         records, meta = paginated_label_search(
-          scope,
-          label_filters: labels
+          Principal.includes(:slack_channel_permissions, roles: :slack_channel_permissions),
+          promoted_label_columns: Principal::PROMOTED_LABEL_FIELDS
         )
         render json: { data: records.map { |p| record_payload(p) }, meta: meta }
       end
@@ -38,7 +32,7 @@ module Api
         principal = Principal.new(namespace: upsert_namespace, foreign_id: data_params[:foreign_id],
                                   created_by: current_user)
         ActiveRecord::Base.transaction do
-          assign_principal_attributes(principal)
+          principal.assign_attributes(principal_params)
           principal.apply_default_sandbox_capabilities!(principal_params)
           principal.save!
           replace_slack_channel_permissions!(principal) if data_params.key?(:slack_channel_permissions)
@@ -55,7 +49,7 @@ module Api
         principal = resolve_for_upsert(Principal)
         was_new = principal.new_record?
         ActiveRecord::Base.transaction do
-          assign_principal_attributes(principal)
+          principal.assign_attributes(principal_params)
           principal.apply_default_sandbox_capabilities!(principal_params) if was_new
           principal.save!
           replace_slack_channel_permissions!(principal) if data_params.key?(:slack_channel_permissions)
@@ -95,10 +89,10 @@ module Api
           foreign_id: principal.foreign_id,
           name: principal.name,
           kind: principal.kind,
-          identifiers: principal.principal_identifiers
-            .reject(&:marked_for_destruction?)
-            .sort_by { |identifier| [ identifier.scheme, identifier.issuer, identifier.subject ] }
-            .map(&:api_payload),
+          slack_user_id: principal.slack_user_id,
+          slack_channel_id: principal.slack_channel_id,
+          slack_team_id: principal.slack_team_id,
+          slack_email: principal.slack_email,
           labels: principal.labels_with_sandbox_capabilities,
           slack_channel_permissions: principal.slack_channel_permissions_payload,
           effective_slack_channel_permissions: principal.effective_slack_channel_permissions_payload,
@@ -111,52 +105,47 @@ module Api
       end
 
       def principal_params
-        data_params.permit(
+        permitted = data_params.permit(
           :name,
           :kind,
+          :slack_user_id,
+          :slack_channel_id,
+          :slack_team_id,
+          :slack_email,
           :sandbox_repo_cache,
           :sandbox_observability_enabled,
           :sandbox_api_server_enabled,
           labels: {}
         )
+        promote_legacy_identity_labels!(permitted)
+        permitted
       end
 
-      def assign_principal_attributes(principal)
-        principal.assign_attributes(principal_params)
-        principal.replace_identifiers!(identifier_attributes) if data_params.key?(:identifiers)
-      end
+      def promote_legacy_identity_labels!(permitted)
+        labels = permitted[:labels]
+        return unless labels.respond_to?(:key?)
 
-      def identifier_attributes
-        raw = data_params[:identifiers]
-        unless raw.is_a?(Array)
-          raise ActionController::BadRequest, "identifiers must be an array"
+        Principal::PROMOTED_LABEL_FIELDS.each do |field|
+          next unless labels.key?(field)
+
+          Rails.logger.warn("deprecated_principal_label_write field=#{field}")
+          permitted[field] = labels[field]
         end
-
-        data_params.permit(identifiers: [ :scheme, :issuer, :subject, { metadata: {} } ])[:identifiers] || []
       end
 
       def reject_mixed_identity_representations!
         labels = data_params[:labels]
         return unless labels.respond_to?(:key?)
 
-        label_fields = Principal::RESERVED_IDENTITY_LABEL_FIELDS.select { |field| labels.key?(field) }
-        label_fields.each { |field| Rails.logger.warn("deprecated_principal_label_write field=#{field}") }
-        return if label_fields.empty?
-
-        top_level_fields = %w[kind identifiers].select { |field| data_params.key?(field) }
-        return if top_level_fields.empty?
+        top_level_fields = Principal::PROMOTED_LABEL_FIELDS.select { |field| data_params.key?(field) }
+        label_fields = Principal::PROMOTED_LABEL_FIELDS.select { |field| labels.key?(field) }
+        return if top_level_fields.empty? || label_fields.empty?
 
         render_error(
           status: :unprocessable_content,
           message: "principal identity must use either top-level fields or legacy label aliases, not both",
           details: { top_level_fields: top_level_fields, label_fields: label_fields }
         )
-      end
-
-      def apply_principal_identity_filters(scope, labels)
-        PrincipalIdentifierFilter.new(params:, labels:).apply(scope)
-      rescue PrincipalIdentifierFilter::Invalid => e
-        raise ActionController::BadRequest, e.message
       end
 
       def slack_channel_permission_owner

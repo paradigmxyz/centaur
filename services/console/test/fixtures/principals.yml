@@ -2,6 +2,7 @@ acme_channel:
   namespace: acme
   foreign_id: C0123456789
   kind: slack_channel
+  slack_channel_id: C0123456789
   labels:
     kind: slack_channel
     team: platform

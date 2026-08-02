@@ -1,7 +1,0 @@
-acme_channel_slack:
-  principal: acme_channel
-  namespace: acme
-  scheme: slack_channel
-  issuer: ""
-  subject: C0123456789
-  metadata: {}

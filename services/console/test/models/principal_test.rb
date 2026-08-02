@@ -17,25 +17,22 @@ class PrincipalTest < ActiveSupport::TestCase
     assert principal.valid?
   end
 
-  test "identifier rows are normalized and mirrored for compatibility" do
-    principal = Principal.new(default_attrs(kind: "custom_identity", labels: { "team" => "platform" }))
-    principal.replace_identifiers!([
-      {
-        scheme: "slack_user",
-        issuer: "  T123  ",
-        subject: "  U123  ",
-        metadata: { email: "ada@example.com" }
-      },
-      { scheme: "slack_channel", issuer: "  T123  ", subject: "  C123  " }
-    ])
-    principal.save!
+  test "identity fields are normalized and mirrored for compatibility" do
+    principal = Principal.create!(default_attrs(
+      kind: "custom_identity",
+      slack_user_id: "  U123  ",
+      slack_channel_id: "  C123  ",
+      slack_team_id: "  T123  ",
+      slack_email: "  ada@example.com  ",
+      labels: { "team" => "platform" }
+    ))
 
     principal.reload
     assert_equal "custom_identity", principal.kind
-    assert_equal(
-      [ [ "slack_channel", "T123", "C123" ], [ "slack_user", "T123", "U123" ] ],
-      principal.principal_identifiers.order(:scheme).pluck(:scheme, :issuer, :subject)
-    )
+    assert_equal "U123", principal.slack_user_id
+    assert_equal "C123", principal.slack_channel_id
+    assert_equal "T123", principal.slack_team_id
+    assert_equal "ada@example.com", principal.slack_email
     assert_equal "custom_identity", principal.labels["kind"]
     assert_equal "U123", principal.labels["slack_user_id"]
     assert_equal "C123", principal.labels["slack_channel_id"]
@@ -44,7 +41,7 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_equal "platform", principal.labels["team"]
   end
 
-  test "legacy identity labels are promoted into identifier rows" do
+  test "legacy identity labels are promoted into columns" do
     principal = Principal.create!(default_attrs(
       labels: {
         "kind" => "slack_dm",
@@ -56,79 +53,9 @@ class PrincipalTest < ActiveSupport::TestCase
 
     principal.reload
     assert_equal "slack_dm", principal.kind
-    identifier = principal.principal_identifiers.sole
-    assert_equal "slack_user", identifier.scheme
-    assert_equal "U123", identifier.subject
-    assert_equal "T123", identifier.issuer
-    assert_equal({ "email" => "ada@example.com" }, identifier.metadata)
-  end
-
-  test "legacy labels promote several provider identities on one principal" do
-    principal = Principal.create!(default_attrs(
-      labels: {
-        "console-user-id" => "usr_123",
-        "slack_user_id" => "U123",
-        "slack_team_id" => "T123",
-        "google_subject" => "google-123",
-        "google_email" => "ada@example.com"
-      }
-    ))
-
-    assert_equal(
-      [
-        [ "console_user", "", "usr_123" ],
-        [ "google_user", "", "google-123" ],
-        [ "slack_user", "T123", "U123" ]
-      ],
-      principal.principal_identifiers.order(:scheme).pluck(:scheme, :issuer, :subject)
-    )
-  end
-
-  test "legacy producer labels promote platform resource identifiers" do
-    principal = Principal.create!(default_attrs(
-      labels: {
-        "discord_guild_id" => "guild-123",
-        "discord_channel_id" => "channel-123",
-        "linear_issue_id" => "issue-123",
-        "teams_user_id" => "teams-user-123",
-        "teams_conversation_id" => "teams-conversation-123",
-        "workflow_name" => "daily-report"
-      }
-    ))
-
-    assert_equal(
-      [
-        [ "discord_channel", "guild-123", "channel-123" ],
-        [ "linear_issue", "", "issue-123" ],
-        [ "teams_conversation", "", "teams-conversation-123" ],
-        [ "teams_user", "", "teams-user-123" ],
-        [ "workflow", "", "daily-report" ]
-      ],
-      principal.principal_identifiers.order(:scheme).pluck(:scheme, :issuer, :subject)
-    )
-  end
-
-  test "legacy producer labels infer kind for new principals" do
-    principal = Principal.create!(default_attrs(
-      foreign_id: "discord-channel-guild-channel",
-      labels: { "discord_guild_id" => "guild-123", "discord_channel_id" => "channel-123" }
-    ))
-
-    assert_equal "discord_channel", principal.kind
-    assert_equal "discord_channel", principal.labels["kind"]
-  end
-
-  test "compatibility aliases omit identities that cannot be represented as scalars" do
-    principal = Principal.new(default_attrs)
-    principal.replace_identifiers!([
-      { scheme: "slack_user", issuer: "T123", subject: "U123" },
-      { scheme: "slack_user", issuer: "T456", subject: "U456" }
-    ])
-    principal.save!
-
-    labels = principal.reload.labels_with_sandbox_capabilities
-    assert_not labels.key?("slack_user_id")
-    assert_not labels.key?("slack_team_id")
+    assert_equal "U123", principal.slack_user_id
+    assert_equal "T123", principal.slack_team_id
+    assert_equal "ada@example.com", principal.slack_email
   end
 
   test "kind accepts custom values but rejects blanks" do
@@ -455,20 +382,11 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_equal "Acme Slack channel", principal.reload.name
   end
 
-  test "identifier changes invalidate the sync config cache through compatibility labels" do
+  test "identity field changes invalidate the sync config cache" do
     principal = Principal.create!(default_attrs)
     previous_version = principal.sync_config_cache_version
 
-    principal.kind = "custom_identity"
-    principal.replace_identifiers!([
-      {
-        scheme: "slack_user",
-        issuer: "T123",
-        subject: "U123",
-        metadata: { email: "a@example.com" }
-      }
-    ])
-    principal.save!
+    principal.update!(kind: "custom_identity", slack_user_id: "U123", slack_team_id: "T123", slack_email: "a@example.com")
 
     assert_equal previous_version + 1, principal.reload.sync_config_cache_version
   end

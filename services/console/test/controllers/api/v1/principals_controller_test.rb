@@ -42,17 +42,10 @@ module Api
         assert_equal "acme", data["namespace"]
         assert_equal "C0123456789", data["foreign_id"]
         assert_equal "slack_channel", data["kind"]
-        assert_equal(
-          [
-            {
-              "scheme" => "slack_channel",
-              "issuer" => "",
-              "subject" => "C0123456789",
-              "metadata" => {}
-            }
-          ],
-          data["identifiers"]
-        )
+        assert_nil data["slack_user_id"]
+        assert_equal "C0123456789", data["slack_channel_id"]
+        assert_nil data["slack_team_id"]
+        assert_nil data["slack_email"]
         assert_equal(
           {
             "kind" => "slack_channel",
@@ -303,7 +296,7 @@ module Api
                data: {
                  namespace: "acme",
                  foreign_id: "mixed-identity",
-                 identifiers: [ { scheme: "slack_user", issuer: "T123", subject: "U123" } ],
+                 slack_email: "ada@example.com",
                  labels: { "kind" => "user" }
                }
              }.to_json,
@@ -334,19 +327,15 @@ module Api
         )
       end
 
-      test "PUT replaces first-class identifiers and updates compatibility aliases" do
+      test "PUT updates first-class identity fields and removes cleared Slack aliases" do
         principal = principals(:acme_channel)
         body = {
           data: {
             kind: "custom_identity",
-            identifiers: [
-              {
-                scheme: "slack_user",
-                issuer: "  T123  ",
-                subject: "  U123  ",
-                metadata: { email: "ada@example.com" }
-              }
-            ],
+            slack_user_id: "  U123  ",
+            slack_channel_id: nil,
+            slack_team_id: "  T123  ",
+            slack_email: "  ada@example.com  ",
             labels: { "team" => "ops" }
           }
         }
@@ -356,11 +345,10 @@ module Api
 
         principal.reload
         assert_equal "custom_identity", principal.kind
-        identifier = principal.principal_identifiers.sole
-        assert_equal "slack_user", identifier.scheme
-        assert_equal "U123", identifier.subject
-        assert_equal "T123", identifier.issuer
-        assert_equal({ "email" => "ada@example.com" }, identifier.metadata)
+        assert_equal "U123", principal.slack_user_id
+        assert_nil principal.slack_channel_id
+        assert_equal "T123", principal.slack_team_id
+        assert_equal "ada@example.com", principal.slack_email
         assert_equal "custom_identity", principal.labels["kind"]
         assert_equal "U123", principal.labels["slack_user_id"]
         assert_not principal.labels.key?("slack_channel_id")
@@ -369,47 +357,13 @@ module Api
         assert_equal "ops", principal.labels["team"]
       end
 
-      test "PUT with an empty identifiers array clears identifiers and aliases" do
-        principal = principals(:acme_channel)
-
-        put api_v1_principal_url(id: principal.oid),
-            params: { data: { identifiers: [] } }.to_json,
-            headers: auth_headers
-
-        assert_response :ok
-        assert_empty principal.principal_identifiers.reload
-        assert_not principal.reload.labels.key?("slack_channel_id")
-      end
-
-      test "PUT rejects duplicate identifiers" do
-        principal = principals(:acme_channel)
-        duplicate = { scheme: "slack_user", issuer: "T123", subject: "U123" }
-
-        put api_v1_principal_url(id: principal.oid),
-            params: { data: { identifiers: [ duplicate, duplicate ] } }.to_json,
-            headers: auth_headers
-
-        assert_response :unprocessable_content
-        assert_includes json_body.dig("error", "details", "principal_identifiers"), "contain duplicates"
-      end
-
-      test "PUT requires identifiers to be an array" do
-        principal = principals(:acme_channel)
-
-        put api_v1_principal_url(id: principal.oid),
-            params: { data: { identifiers: { scheme: "slack_user", subject: "U123" } } }.to_json,
-            headers: auth_headers
-
-        assert_response :bad_request
-      end
-
       test "PUT rejects mixed top-level and legacy label identity fields" do
         principal = principals(:acme_channel)
 
         put api_v1_principal_url(id: principal.oid),
             params: {
               data: {
-                identifiers: [ { scheme: "slack_user", issuer: "", subject: "U123" } ],
+                kind: "slack_dm",
                 labels: { "slack_user_id" => "U123" }
               }
             }.to_json,
@@ -420,7 +374,7 @@ module Api
           "principal identity must use either top-level fields or legacy label aliases, not both",
           json_body.dig("error", "message")
         )
-        assert_equal [ "identifiers" ], json_body.dig("error", "details", "top_level_fields")
+        assert_equal [ "kind" ], json_body.dig("error", "details", "top_level_fields")
         assert_equal [ "slack_user_id" ], json_body.dig("error", "details", "label_fields")
       end
 
@@ -535,7 +489,7 @@ module Api
         )
 
         returned = json_body.fetch("data")
-        returned["labels"] = returned.fetch("labels").except(*Principal::RESERVED_IDENTITY_LABEL_FIELDS)
+        returned["labels"] = returned.fetch("labels").except(*Principal::PROMOTED_LABEL_FIELDS)
         put api_v1_principal_url(id: principal.oid),
             params: { data: returned }.to_json,
             headers: auth_headers
@@ -868,48 +822,21 @@ module Api
         assert_equal %w[U-alice U-bob].sort, foreign_ids.sort
       end
 
-      test "GET index filters by native principal identifier fields" do
+      test "GET index filters by native principal identity fields" do
+        principals(:acme_channel).update!(slack_team_id: "T0123456789", slack_email: "channel@example.com")
+
         get api_v1_principals_url,
             params: {
               namespace: "acme",
               kind: "slack_channel",
-              identifier_scheme: "slack_channel",
-              identifier_issuer: "",
-              identifier_subject: "C0123456789"
+              slack_channel_id: "C0123456789",
+              slack_team_id: "T0123456789",
+              slack_email: "channel@example.com"
             },
             headers: auth_headers
         assert_response :ok
 
         assert_equal [ "C0123456789" ], json_body.fetch("data").map { |p| p["foreign_id"] }
-      end
-
-      test "GET index translates legacy identifier label filters" do
-        get api_v1_principals_url,
-            params: { namespace: "acme", labels: { slack_channel_id: "C0123456789" } },
-            headers: auth_headers
-
-        assert_response :ok
-        assert_equal [ "C0123456789" ], json_body.fetch("data").map { |p| p["foreign_id"] }
-      end
-
-      test "GET index requires a scheme for native identifier filters" do
-        get api_v1_principals_url,
-            params: { namespace: "acme", identifier_subject: "C0123456789" },
-            headers: auth_headers
-
-        assert_response :bad_request
-      end
-
-      test "GET index rejects mixed native and legacy identifier filters" do
-        get api_v1_principals_url,
-            params: {
-              namespace: "acme",
-              identifier_scheme: "slack_channel",
-              labels: { slack_channel_id: "C0123456789" }
-            },
-            headers: auth_headers
-
-        assert_response :bad_request
       end
 
       test "GET index rejects conflicting native and legacy identity filters" do

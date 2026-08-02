@@ -1178,9 +1178,7 @@ Slack OAuth apps should use normal Slack API scopes such as `channels:history`, 
 
 ## Principals
 
-A principal is an authorization subject that can be granted secrets. Provider
-identifiers are first-class links used to resolve external users, channels,
-workflows, and other provider resources to that subject.
+A principal is an identity (an application, service, or proxy owner) that can be granted secrets.
 
 ### Attributes
 
@@ -1189,8 +1187,11 @@ workflows, and other provider resources to that subject.
 | `namespace`  | optional    | Defaults to `"default"`. Immutable. |
 | `foreign_id` | optional    | Unique per namespace. Immutable. |
 | `name`       | optional    | |
-| `kind`       | optional    | Principal kind. Defaults to `"unknown"`; arbitrary nonblank values are accepted. |
-| `identifiers` | optional | Provider identifiers that resolve to this principal. Full replacement when present. Each entry has `scheme`, `issuer`, `subject`, and optional `metadata`. |
+| `kind`       | optional    | Principal identity kind. Defaults to `"unknown"`; arbitrary nonblank values are accepted. |
+| `slack_user_id` | optional | Native Slack user ID, or `null`. |
+| `slack_channel_id` | optional | Native Slack channel/conversation ID, or `null`. |
+| `slack_team_id` | optional | Native Slack workspace/team ID, or `null`. |
+| `slack_email` | optional | Slack account email, or `null`. |
 | `labels`     | optional    | |
 | `slack_channel_permissions` | optional | Direct permissions owned by the principal. Full replacement when present on create or update. |
 | `effective_slack_channel_permissions` | response only | Direct permissions merged with permissions inherited from assigned roles. |
@@ -1213,7 +1214,10 @@ Returns `201`:
     "foreign_id": "api-service",
     "name": "API Service",
     "kind": "service",
-    "identifiers": [],
+    "slack_user_id": null,
+    "slack_channel_id": null,
+    "slack_team_id": null,
+    "slack_email": null,
     "labels": { "tier": "backend", "kind": "service" },
     "slack_channel_permissions": [],
     "effective_slack_channel_permissions": [],
@@ -1225,30 +1229,22 @@ Returns `201`:
 
 | Method | Path | Notes |
 | ------ | ---- | ----- |
-| `GET`  | `/api/v1/principals?namespace=default` | List. Accepts an exact-match `kind` filter and `identifier_scheme`, `identifier_issuer`, and `identifier_subject` filters. `identifier_scheme` is required when either other identifier filter is present. |
+| `GET`  | `/api/v1/principals?namespace=default` | List. Accepts exact-match `kind`, `slack_user_id`, `slack_channel_id`, `slack_team_id`, and `slack_email` filters. |
 | `GET`  | `/api/v1/principals/:id` | Fetch one by OID. To fetch by `foreign_id`, use the lookup route below. |
 | `GET`  | `/api/v1/principals/lookup/:namespace/:foreign_id` | Fetch by namespace + foreign id. `404` if missing. |
 | `GET`  | `/api/v1/principals/:id/effective_config` | [Effective config](#effective-config) the principal resolves to. `:id` is an OID. |
 | `GET`  | `/api/v1/principals/lookup/:namespace/:foreign_id/effective_config` | [Effective config](#effective-config) by namespace + foreign id. `404` if missing. |
 | `GET`  | `/api/v1/principals/:principal_id/grants` | [List the grants](#list-by-grantee) granted directly to the principal. |
 | `POST` | `/api/v1/principals/:id/slack_channel_permissions` | Idempotently create or update one direct Slack channel permission. Omitted flags default to enabled on create and remain unchanged on update. |
-| `PUT`/`PATCH` | `/api/v1/principals/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`. `name`, `kind`, `identifiers`, `labels`, and direct `slack_channel_permissions` are mutable on an existing record; `namespace` and `foreign_id` apply only when creating. |
+| `PUT`/`PATCH` | `/api/v1/principals/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`. `name`, `kind`, Slack identity fields, `labels`, and direct `slack_channel_permissions` are mutable on an existing record; `namespace` and `foreign_id` apply only when creating. |
 
-An identifier's `scheme` describes the external identity type, such as
-`console_user`, `slack_user`, `slack_channel`, `discord_channel`, or
-`linear_issue`. `issuer` scopes the provider subject, such as a Slack team ID;
-use an empty string when no issuer is required. `subject` is the provider's
-stable identifier. Mutable display attributes such as an email belong in
-`metadata` and must not be used as identity or merge keys.
-
-During the compatibility window, known identifier values and `kind` are also
-mirrored into response `labels`. Legacy label-only writes are promoted into
-identifier rows. A write may use either top-level `kind` and `identifiers` or
-their reserved aliases in `labels`, but not both in the same request. Mixed
-writes are rejected with `422`. Omitted `identifiers` remain unchanged; an empty
-array removes all identifiers. A null or blank `kind` is rejected, and custom
-nonblank kinds are valid. Compatibility aliases are omitted when multiple
-identifiers cannot be represented by one legacy scalar value.
+During the principal identity compatibility window, `kind`, `slack_user_id`,
+`slack_channel_id`, `slack_team_id`, and `slack_email` are also mirrored into
+response `labels`. A write may use either the top-level identity fields or their
+reserved aliases in `labels`, but not both in the same request. Mixed writes are
+rejected with `422`. On update, omitted identity fields are unchanged, an
+explicit `null` clears any Slack identity field, and a null or blank `kind` is
+rejected. Custom nonblank kinds are valid.
 
 See [Role assignments](#role-assignments) for attaching roles to a principal.
 
