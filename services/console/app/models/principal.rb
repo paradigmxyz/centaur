@@ -65,7 +65,6 @@ class Principal < ApplicationRecord
                             allow_nil: true, if: :will_save_change_to_slack_team_id?
   validates :slack_email, format: { with: URI::MailTo::EMAIL_REGEXP, message: "is not a valid email address" },
                           allow_nil: true, if: :will_save_change_to_slack_email?
-  validates :console_user_id, presence: true, if: -> { kind == "console_user" }
   validates :console_user_email, format: { with: URI::MailTo::EMAIL_REGEXP, message: "is not a valid email address" },
                                  allow_nil: true, if: :will_save_change_to_console_user_email?
 

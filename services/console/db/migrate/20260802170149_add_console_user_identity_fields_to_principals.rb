@@ -1,6 +1,4 @@
 class AddConsoleUserIdentityFieldsToPrincipals < ActiveRecord::Migration[8.1]
-  CONSOLE_USER_ID_CHECK = "chk_principals_console_user_id".freeze
-
   class BackfillPrincipal < ActiveRecord::Base
     self.table_name = "principals"
   end
@@ -24,14 +22,6 @@ class AddConsoleUserIdentityFieldsToPrincipals < ActiveRecord::Migration[8.1]
       labels = principal.labels.to_h
       [ principal, labels, console_user_id_from_oid(labels["console-user-id"]) ]
     end
-    stale_principal_ids = backfills.filter_map do |principal, _labels, console_user_id|
-      principal.id unless console_user_id
-    end
-    if stale_principal_ids.any?
-      raise ActiveRecord::MigrationError,
-            "console-user principals reference missing users: #{stale_principal_ids.join(", ")}"
-    end
-
     backfills.each do |principal, labels, console_user_id|
       principal.update_columns(
         console_user_id: console_user_id,
@@ -41,13 +31,9 @@ class AddConsoleUserIdentityFieldsToPrincipals < ActiveRecord::Migration[8.1]
     end
 
     add_foreign_key :principals, :users, column: :console_user_id
-    add_check_constraint :principals,
-                         "kind <> 'console_user' OR console_user_id IS NOT NULL",
-                         name: CONSOLE_USER_ID_CHECK
   end
 
   def down
-    remove_check_constraint :principals, name: CONSOLE_USER_ID_CHECK, if_exists: true
     remove_foreign_key :principals, column: :console_user_id, if_exists: true
 
     BackfillPrincipal.reset_column_information

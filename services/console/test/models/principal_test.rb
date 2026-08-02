@@ -133,9 +133,7 @@ class PrincipalTest < ActiveSupport::TestCase
 
   test "kind accepts only known values" do
     Principal::KINDS.each do |kind|
-      attrs = { kind: kind }
-      attrs[:console_user_id] = users(:acme_admin).id if kind == "console_user"
-      assert Principal.new(default_attrs(attrs)).valid?, "expected #{kind.inspect} to be valid"
+      assert Principal.new(default_attrs(kind: kind)).valid?, "expected #{kind.inspect} to be valid"
     end
 
     %w[service future_platform].each do |kind|
@@ -173,7 +171,7 @@ class PrincipalTest < ActiveSupport::TestCase
     end
   end
 
-  test "console user principals require a console user id and valid email" do
+  test "console user principals permit missing user references but require valid email" do
     user = users(:acme_admin)
     principal = Principal.new(default_attrs(
       kind: "console_user",
@@ -183,10 +181,8 @@ class PrincipalTest < ActiveSupport::TestCase
     assert principal.valid?
 
     principal.console_user_id = nil
-    assert_not principal.valid?
-    assert_predicate principal.errors[:console_user_id], :any?
+    assert principal.valid?
 
-    principal.console_user_id = user.id
     principal.console_user_email = "not-an-email"
     assert_not principal.valid?
     assert_predicate principal.errors[:console_user_email], :any?

@@ -332,7 +332,6 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_02_170149) do
     t.index ["namespace", "slack_email"], name: "index_principals_on_namespace_and_slack_email"
     t.index ["namespace", "slack_team_id"], name: "index_principals_on_namespace_and_slack_team_id"
     t.index ["namespace", "slack_user_id"], name: "index_principals_on_namespace_and_slack_user_id"
-    t.check_constraint "kind::text <> 'console_user'::text OR console_user_id IS NOT NULL", name: "chk_principals_console_user_id"
   end
 
   create_table "proxies", force: :cascade do |t|

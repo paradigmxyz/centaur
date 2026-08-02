@@ -2,7 +2,7 @@ require "test_helper"
 require Rails.root.join("db/migrate/20260802170149_add_console_user_identity_fields_to_principals")
 
 class AddConsoleUserIdentityFieldsToPrincipalsTest < ActiveSupport::TestCase
-  test "decodes existing console user oids and rejects stale references" do
+  test "decodes existing console user oids and maps stale references to nil" do
     user = users(:acme_admin)
     stale_oid = User.new(id: User.maximum(:id) + 1_000).oid
     migration = AddConsoleUserIdentityFieldsToPrincipals.new
