@@ -23,17 +23,23 @@ class Principal < ApplicationRecord
 
   after_commit :auto_grant_matching_oauth_credentials, on: %i[create update]
   before_validation :apply_sandbox_repo_cache_label
+  before_validation :promote_identity_labels_to_fields
+  before_validation :normalize_identity_fields
+  before_validation :mirror_identity_fields_to_labels
   before_commit :bump_own_sync_config_cache_version, on: :update, if: :sync_config_fields_changed?
 
   URL_SAFE_FORMAT = /\A[A-Za-z0-9\-._~]+\z/
   URL_SAFE_MESSAGE = "must contain only URL-safe characters (A-Z, a-z, 0-9, -, ., _, ~)"
   SANDBOX_REPO_CACHE_LABEL = "centaur.sandbox_repo_cache".freeze
   SANDBOX_REPO_CACHE_VALUES = %w[none public all].freeze
+  UNKNOWN_KIND = "unknown".freeze
+  PROMOTED_LABEL_FIELDS = %w[kind slack_user_id slack_channel_id slack_team_id slack_email].freeze
 
   validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
   validates :foreign_id, uniqueness: { scope: :namespace, allow_nil: true },
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }, allow_nil: true
   validates :sandbox_repo_cache, inclusion: { in: SANDBOX_REPO_CACHE_VALUES }
+  validates :kind, presence: true
 
   # Stand-in for an inline secret value in redacted config: operator inspection
   # reports that a control_plane source carries a value without revealing it.
@@ -103,7 +109,14 @@ class Principal < ApplicationRecord
   end
 
   def labels_with_sandbox_capabilities
-    labels.to_h.merge(SANDBOX_REPO_CACHE_LABEL => sandbox_repo_cache)
+    labels.to_h
+      .merge(SANDBOX_REPO_CACHE_LABEL => sandbox_repo_cache, "kind" => kind)
+      .then { |value| slack_user_id.present? ? value.merge("slack_user_id" => slack_user_id) : value.except("slack_user_id") }
+      .then do |value|
+        slack_channel_id.present? ? value.merge("slack_channel_id" => slack_channel_id) : value.except("slack_channel_id")
+      end
+      .then { |value| slack_team_id.present? ? value.merge("slack_team_id" => slack_team_id) : value.except("slack_team_id") }
+      .then { |value| slack_email.present? ? value.merge("slack_email" => slack_email) : value.except("slack_email") }
   end
 
   def effective_slack_channel_permissions_payload
@@ -203,6 +216,40 @@ class Principal < ApplicationRecord
 
   def apply_sandbox_repo_cache_label
     self[:labels] = labels.to_h.merge(SANDBOX_REPO_CACHE_LABEL => sandbox_repo_cache)
+  end
+
+  # Legacy writers still send principal identity through labels. Promote only
+  # fields that were not assigned directly, then mirror the authoritative
+  # columns back into aliases below for legacy readers.
+  def promote_identity_labels_to_fields
+    return unless will_save_change_to_labels?
+
+    PROMOTED_LABEL_FIELDS.each do |field|
+      next if will_save_change_to_attribute?(field) || !labels.to_h.key?(field)
+
+      self[field] = labels.to_h[field]
+    end
+  end
+
+  def normalize_identity_fields
+    self.kind = kind.to_s.strip
+    self.slack_user_id = slack_user_id.to_s.strip.presence
+    self.slack_channel_id = slack_channel_id.to_s.strip.presence
+    self.slack_team_id = slack_team_id.to_s.strip.presence
+    self.slack_email = slack_email.to_s.strip.presence
+  end
+
+  # Compatibility-release dual write. New code treats the columns as
+  # authoritative; these aliases exist only for old Console instances during a
+  # rolling deploy and are removed by the contract release.
+  def mirror_identity_fields_to_labels
+    mirrored = labels.to_h.except(*PROMOTED_LABEL_FIELDS)
+    mirrored["kind"] = kind if kind.present? && kind != UNKNOWN_KIND
+    mirrored["slack_user_id"] = slack_user_id if slack_user_id.present?
+    mirrored["slack_channel_id"] = slack_channel_id if slack_channel_id.present?
+    mirrored["slack_team_id"] = slack_team_id if slack_team_id.present?
+    mirrored["slack_email"] = slack_email if slack_email.present?
+    self[:labels] = mirrored
   end
 
   def supplied_key?(attributes, key)

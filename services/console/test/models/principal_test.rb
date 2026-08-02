@@ -13,7 +13,57 @@ class PrincipalTest < ActiveSupport::TestCase
   test "namespace defaults to 'default'" do
     principal = Principal.new(default_attrs)
     assert_equal "default", principal.namespace
+    assert_equal Principal::UNKNOWN_KIND, principal.kind
     assert principal.valid?
+  end
+
+  test "identity fields are normalized and mirrored for compatibility" do
+    principal = Principal.create!(default_attrs(
+      kind: "custom_identity",
+      slack_user_id: "  U123  ",
+      slack_channel_id: "  C123  ",
+      slack_team_id: "  T123  ",
+      slack_email: "  ada@example.com  ",
+      labels: { "team" => "platform" }
+    ))
+
+    principal.reload
+    assert_equal "custom_identity", principal.kind
+    assert_equal "U123", principal.slack_user_id
+    assert_equal "C123", principal.slack_channel_id
+    assert_equal "T123", principal.slack_team_id
+    assert_equal "ada@example.com", principal.slack_email
+    assert_equal "custom_identity", principal.labels["kind"]
+    assert_equal "U123", principal.labels["slack_user_id"]
+    assert_equal "C123", principal.labels["slack_channel_id"]
+    assert_equal "T123", principal.labels["slack_team_id"]
+    assert_equal "ada@example.com", principal.labels["slack_email"]
+    assert_equal "platform", principal.labels["team"]
+  end
+
+  test "legacy identity labels are promoted into columns" do
+    principal = Principal.create!(default_attrs(
+      labels: {
+        "kind" => "slack_dm",
+        "slack_user_id" => "  U123  ",
+        "slack_team_id" => "  T123  ",
+        "slack_email" => "  ada@example.com  "
+      }
+    ))
+
+    principal.reload
+    assert_equal "slack_dm", principal.kind
+    assert_equal "U123", principal.slack_user_id
+    assert_equal "T123", principal.slack_team_id
+    assert_equal "ada@example.com", principal.slack_email
+  end
+
+  test "kind accepts custom values but rejects blanks" do
+    assert Principal.new(default_attrs(kind: "future_platform")).valid?
+
+    principal = Principal.new(default_attrs(kind: "  "))
+    assert_not principal.valid?
+    assert_includes principal.errors[:kind], "can't be blank"
   end
 
   test "is valid with only a name" do
@@ -318,6 +368,8 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_equal(
       {
         "changed" => "yes",
+        "kind" => "slack_channel",
+        "slack_channel_id" => "C0123456789",
         Principal::SANDBOX_REPO_CACHE_LABEL => "all"
       },
       principal.reload.labels
@@ -328,6 +380,15 @@ class PrincipalTest < ActiveSupport::TestCase
     principal = principals(:acme_channel)
     principal.update!(name: "Acme Slack channel")
     assert_equal "Acme Slack channel", principal.reload.name
+  end
+
+  test "identity field changes invalidate the sync config cache" do
+    principal = Principal.create!(default_attrs)
+    previous_version = principal.sync_config_cache_version
+
+    principal.update!(kind: "custom_identity", slack_user_id: "U123", slack_team_id: "T123", slack_email: "a@example.com")
+
+    assert_equal previous_version + 1, principal.reload.sync_config_cache_version
   end
 
   test "declares prn as its oid prefix" do

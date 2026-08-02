@@ -1,6 +1,8 @@
 acme_channel:
   namespace: acme
   foreign_id: C0123456789
+  kind: slack_channel
+  slack_channel_id: C0123456789
   labels:
     kind: slack_channel
     team: platform
@@ -10,6 +12,7 @@ acme_channel:
 globex_user:
   namespace: globex
   foreign_id: U987654321
+  kind: user
   labels:
     kind: user
     centaur.sandbox_repo_cache: all
@@ -18,6 +21,7 @@ globex_user:
 acme_user_alice:
   namespace: acme
   foreign_id: U-alice
+  kind: user
   labels:
     kind: user
     team: platform
@@ -27,6 +31,7 @@ acme_user_alice:
 acme_user_bob:
   namespace: acme
   foreign_id: U-bob
+  kind: user
   labels:
     kind: user
     team: ops
@@ -36,6 +41,7 @@ acme_user_bob:
 globex_user_overlap:
   namespace: globex
   foreign_id: U-overlap
+  kind: user
   labels:
     kind: user
     team: platform
