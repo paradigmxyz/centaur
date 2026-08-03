@@ -46,6 +46,7 @@ module Console
       fields = app_params.permit(:slug, :description, :provider, :client_id, :credential_namespace)
       app.assign_attributes(fields)
       app.enabled = app_params[:enabled] == "1"
+      app.always_available = app_params[:always_available] == "1"
       app.allowed_scopes = line_list(app_params[:allowed_scopes])
       app.labels = label_params
 

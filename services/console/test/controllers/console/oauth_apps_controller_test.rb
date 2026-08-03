@@ -30,7 +30,7 @@ module Console
           oauth_app: {
             slug: "new-google", description: "New Google integration",
             provider: "google", client_id: "cid", client_secret: "shh",
-            credential_namespace: "acme", enabled: "1",
+            credential_namespace: "acme", enabled: "1", always_available: "1",
             allowed_scopes: "https://www.googleapis.com/auth/gmail.readonly\nhttps://www.googleapis.com/auth/calendar.readonly\n"
           },
           labels: { "0" => { key: "team", value: "comms" } }
@@ -46,6 +46,7 @@ module Console
       assert_equal %w[https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/calendar.readonly], app.allowed_scopes
       assert_equal({ "team" => "comms" }, app.labels)
       assert app.enabled?
+      assert app.always_available?
       assert_equal @operator, app.created_by
     end
 
@@ -90,6 +91,28 @@ module Console
       assert_equal "new-cid", app.client_id
       refute app.enabled?
       assert_equal %w[https://www.googleapis.com/auth/gmail.readonly], app.allowed_scopes
+    end
+
+    test "PATCH update sets and clears always_available" do
+      app = oauth_apps(:acme_google)
+      app.update!(client_secret: "original")
+      base_params = {
+        slug: app.slug,
+        provider: "google", client_id: app.client_id,
+        credential_namespace: app.credential_namespace, enabled: "1",
+        allowed_scopes: Array(app.allowed_scopes).join("\n")
+      }
+
+      patch console_oauth_app_form_url(app.oid), params: {
+        oauth_app: base_params.merge(always_available: "1")
+      }
+      assert_redirected_to console_oauth_app_path(app.oid)
+      assert app.reload.always_available?
+
+      # An unchecked checkbox submits nothing, which must clear the flag.
+      patch console_oauth_app_form_url(app.oid), params: { oauth_app: base_params }
+      assert_redirected_to console_oauth_app_path(app.oid)
+      refute app.reload.always_available?
     end
 
     test "PATCH update with a blank client_secret keeps the stored value" do

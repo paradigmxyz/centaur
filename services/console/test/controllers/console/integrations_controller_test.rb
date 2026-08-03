@@ -94,6 +94,26 @@ class Console::IntegrationsControllerTest < ActionDispatch::IntegrationTest
     assert_no_match "Reconnect", response.body
   end
 
+  test "an integration that is not always available discloses DM-only use" do
+    post login_url, params: { email: users(:member_user).email, password: "password123456" }
+
+    get console_integrations_url
+    assert_response :ok
+    assert_match "Used only in your DMs with the bot", response.body
+    assert_no_match "Used automatically whenever you ask the bot", response.body
+  end
+
+  test "an always-available integration discloses automatic use" do
+    oauth_apps(:acme_google).update!(client_secret: "shh", always_available: true)
+    post login_url, params: { email: users(:member_user).email, password: "password123456" }
+
+    get console_integrations_url
+    assert_response :ok
+    assert_match "Used automatically whenever you ask the bot", response.body
+    # The other apps still disclose DM-only use.
+    assert_match "Used only in your DMs with the bot", response.body
+  end
+
   test "an admin sees the same page" do
     post login_url, params: { email: users(:acme_admin).email, password: "password123456" }
 

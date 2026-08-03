@@ -62,6 +62,12 @@ class OauthAppTest < ActiveSupport::TestCase
     assert_equal "shh", app.reload.client_secret
   end
 
+  test "always_available defaults to false" do
+    app = build_app
+    app.save!
+    refute_predicate app.reload, :always_available?
+  end
+
   # --- scopes_allowed? ------------------------------------------------------
 
   test "scopes_allowed? subset check" do

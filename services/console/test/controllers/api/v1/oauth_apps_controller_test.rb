@@ -43,6 +43,7 @@ module Api
         data = json_body.fetch("data")
         assert_equal "google", data["slug"]
         assert_equal "acme-google-client-id", data["client_id"]
+        assert_equal false, data["always_available"]
         refute data.key?("client_secret")
       end
 
@@ -67,6 +68,13 @@ module Api
         assert_equal "acme", created.credential_namespace
       end
 
+      test "create persists and serializes always_available" do
+        post api_v1_oauth_apps_url, params: valid_body(always_available: true).to_json, headers: auth_headers
+        assert_response :created
+        assert_equal true, json_body.dig("data", "always_available")
+        assert OauthApp.find_by_oid(json_body.dig("data", "id")).always_available?
+      end
+
       test "create rejects an unsupported provider" do
         assert_no_difference -> { OauthApp.count } do
           post api_v1_oauth_apps_url, params: valid_body(provider: "unsupported").to_json, headers: auth_headers
@@ -88,6 +96,18 @@ module Api
         app.reload
         assert_equal "Renamed", app.description
         assert_equal "the-secret", app.client_secret
+      end
+
+      test "PUT upsert round-trips always_available" do
+        put api_v1_oauth_app_url(id: "put-google"),
+            params: valid_body(slug: nil).to_json, headers: auth_headers
+        assert_response :created
+
+        put api_v1_oauth_app_url(id: "put-google"),
+            params: { data: { always_available: true } }.to_json, headers: auth_headers
+        assert_response :ok
+        assert_equal true, json_body.dig("data", "always_available")
+        assert OauthApp.find_by!(slug: "put-google").always_available?
       end
 
       test "destroy removes an app with no minted credentials" do
