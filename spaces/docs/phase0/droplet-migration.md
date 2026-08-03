@@ -11,7 +11,8 @@ Do this when always-on webhooks / OAuth callbacks / shared staff use are needed.
 
 ## Checklist
 
-1. Create Droplet; harden SSH; install Docker, k3s, tooling.
+1. Create Droplet; harden SSH; install Docker, k3s, and tooling with
+   [`../phase1/droplet-bootstrap.sh`](../phase1/droplet-bootstrap.sh).
 2. Configure k3s local registry mirror if using `just up k3s` (see Centaur mac-mini / quickstart docs).
 3. Clone the **same git commit** that passed Phase 0.
 4. Recreate secrets intentionally:

@@ -134,48 +134,99 @@ deploy:
     #!/usr/bin/env bash
     set -euo pipefail
     helm dependency update {{chart}} >/dev/null
-    extra_args=()
+    # Prefer -f values over --set for image repos: Helm --set always beats -f,
+    # which prevented CENTAUR_EXTRA_VALUES from pinning a local console image.
+    values_args=("-f" "{{dev_values}}")
     case "{{source}}" in
       local) ;;
-      ghcr)
-        extra_args+=(
-          --set apiRs.image.repository=ghcr.io/paradigmxyz/centaur/centaur-api-rs
-          --set ironProxy.image.repository=ghcr.io/paradigmxyz/centaur/centaur-iron-proxy
-          --set slackbotv2.image.repository=ghcr.io/paradigmxyz/centaur/centaur-slackbotv2
-          --set linearbot.image.repository=ghcr.io/paradigmxyz/centaur/centaur-linearbot
-          --set discordbot.image.repository=ghcr.io/paradigmxyz/centaur/centaur-discordbot
-          --set githubbot.image.repository=ghcr.io/paradigmxyz/centaur/centaur-githubbot
-          --set teamsbot.image.repository=ghcr.io/paradigmxyz/centaur/centaur-teamsbot
-          --set sandbox.image.repository=ghcr.io/paradigmxyz/centaur/centaur-agent
-          --set console.image.repository=ghcr.io/paradigmxyz/centaur/centaur-console
-        )
-        ;;
+      ghcr) values_args+=("-f" "contrib/chart/values.ghcr.yaml") ;;
       *) echo "unknown source: {{source}} (expected local or ghcr)" >&2; exit 2 ;;
     esac
+    extra_args=()
     if [[ -n "${OP_CONNECT_CREDENTIALS_FILE:-}" ]]; then
-      extra_args+=(
-        --set ironProxy.secretSource=onepassword-connect
-        --set onepasswordConnect.connect.create=true
-      )
+      extra_args+=("--set" "ironProxy.secretSource=onepassword-connect" "--set" "onepasswordConnect.connect.create=true")
     fi
     if [[ -n "${CODEX_AUTH_MODE:-}" ]]; then
-      extra_args+=(
-        --set sandbox.codexAuthMode=${CODEX_AUTH_MODE}
-      )
+      extra_args+=("--set" "sandbox.codexAuthMode=${CODEX_AUTH_MODE}")
     fi
     if [[ -n "${CLAUDE_CODE_AUTH_MODE:-}" ]]; then
-      extra_args+=(
-        --set sandbox.claudeCodeAuthMode=${CLAUDE_CODE_AUTH_MODE}
-      )
+      extra_args+=("--set" "sandbox.claudeCodeAuthMode=${CLAUDE_CODE_AUTH_MODE}")
     fi
-    # Layer an optional local-only values file (e.g. Tailscale Funnel ingress) on
-    # top of values.dev.yaml. Kept out of the shared dev values so teammates'
-    # `just up` is unaffected. Appended after -f {{dev_values}} so it wins
-    # (helm applies -f files left-to-right).
     if [[ -n "${CENTAUR_EXTRA_VALUES:-}" ]]; then
-      extra_args+=(-f "${CENTAUR_EXTRA_VALUES}")
+      IFS=',' read -r -a extra_values <<< "${CENTAUR_EXTRA_VALUES}"
+      for values_file in "${extra_values[@]}"; do
+        values_file="${values_file#"${values_file%%[![:space:]]*}"}"
+        values_file="${values_file%"${values_file##*[![:space:]]}"}"
+        [[ -n "${values_file}" ]] || continue
+        values_args+=("-f" "${values_file}")
+      done
     fi
-    helm upgrade --install {{release}} {{chart}} -n {{namespace}} --create-namespace -f {{dev_values}} ${extra_args[@]+"${extra_args[@]}"}
+    helm upgrade --install {{release}} {{chart}} -n {{namespace}} --create-namespace \
+      "${values_args[@]}" ${extra_args[@]+"${extra_args[@]}"}
+
+smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    namespace="${NAMESPACE:-{{namespace}}}"
+    release="${RELEASE:-{{release}}}"
+    api_deployment="${release}-centaur-api-rs"
+    prompt="Reply exactly PONG"
+
+    context="$(kubectl config current-context)"
+    [[ -n "${context}" ]] || { echo "SMOKE_ERROR: kubectl has no current context" >&2; exit 1; }
+    echo "Using kubectl context: ${context}"
+
+    # Slackbot authenticates to api-rs with this key. The smoke path executes
+    # curl inside api-rs, where localhost intentionally bypasses API-key auth.
+    # Read only the encoded Secret field so no credential is printed or passed
+    # to a process command line.
+    slackbot_api_key_b64="$(kubectl -n "${namespace}" get secret centaur-infra-env \
+      -o jsonpath='{.data.SLACKBOT_API_KEY}')"
+    [[ -n "${slackbot_api_key_b64}" ]] || {
+      echo "SMOKE_ERROR: secret centaur-infra-env is missing SLACKBOT_API_KEY" >&2
+      exit 1
+    }
+
+    kubectl -n "${namespace}" get deployment "${api_deployment}" >/dev/null
+    kubectl -n "${namespace}" exec "deploy/${api_deployment}" -- \
+      curl -fsS http://localhost:8080/healthz >/dev/null
+
+    thread_key="smoke:claudecode-$(date +%s)-${RANDOM}"
+    thread_path="$(jq -rn --arg value "${thread_key}" '$value | @uri')"
+    session_payload='{"harness_type":"claudecode","on_harness_conflict":"restart"}'
+    kubectl -n "${namespace}" exec "deploy/${api_deployment}" -- \
+      curl -fsS -X POST "http://localhost:8080/api/session/${thread_path}" \
+      -H "Content-Type: application/json" -d "${session_payload}" >/dev/null
+
+    message_payload="$(jq -nc --arg text "${prompt}" \
+      '{messages:[{role:"user",parts:[{type:"text",text:$text}]}]}')"
+    kubectl -n "${namespace}" exec "deploy/${api_deployment}" -- \
+      curl -fsS -X POST "http://localhost:8080/api/session/${thread_path}/messages" \
+      -H "Content-Type: application/json" -d "${message_payload}" >/dev/null
+
+    input_line="$(jq -nc --arg text "${prompt}" \
+      '{type:"user",message:{content:[{type:"text",text:$text}]}}')"
+    execute_payload="$(jq -nc --arg input "${input_line}" \
+      '{input_lines:[$input],idle_timeout_ms:60000,max_duration_ms:300000}')"
+    execute="$(kubectl -n "${namespace}" exec "deploy/${api_deployment}" -- \
+      curl -fsS -X POST "http://localhost:8080/api/session/${thread_path}/execute" \
+      -H "Content-Type: application/json" -d "${execute_payload}")"
+    execution_id="$(jq -er '.execution_id' <<< "${execute}")"
+
+    for _ in $(seq 1 90); do
+      events="$(kubectl -n "${namespace}" exec "deploy/${api_deployment}" -- \
+        curl -sS -N --max-time 3 \
+        "http://localhost:8080/api/session/${thread_path}/events?execution_id=${execution_id}&after_event_id=0" \
+        || true)"
+      if [[ "${events}" == *PONG* ]]; then
+        echo "SMOKE_OK"
+        exit 0
+      fi
+      sleep 2
+    done
+
+    echo "SMOKE_ERROR: timed out waiting for PONG (thread=${thread_key}, execution=${execution_id})" >&2
+    exit 1
 
 # Bring up the dev stack; pass `k3s` (just up k3s) to push local images to the
 # local registry (CENTAUR_LOCAL_REGISTRY, default localhost:5000) for k3s to pull.

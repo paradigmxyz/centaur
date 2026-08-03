@@ -4,6 +4,9 @@
 |-----|---------|
 | [`composio-spike.md`](composio-spike.md) | Evaluate Composio vs native HubSpot/M365 tools |
 | [`teamsbot-e2e.md`](teamsbot-e2e.md) | Checklist for two-user Teams identity proof |
+| [`oauth-app-registration.md`](oauth-app-registration.md) | HubSpot and Entra OAuth registration checklist |
+| [`droplet-bootstrap.sh`](droplet-bootstrap.sh) | Ubuntu LTS host bootstrap for the migration |
+| [`ci-status.md`](ci-status.md) | Fork PR Actions approval note |
 
 ## Landed in-repo
 

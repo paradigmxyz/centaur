@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "budget.schema.json",
+  "title": "Space budget",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "space_id", "period", "limit_usd", "soft_limit"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "space_id": { "type": "string", "minLength": 1 },
+    "period": {
+      "type": "string",
+      "enum": ["daily", "weekly", "monthly", "lifetime"]
+    },
+    "limit_usd": { "type": "number", "minimum": 0 },
+    "soft_limit": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Spend threshold that should warn before the hard limit."
+    }
+  }
+}
