@@ -644,6 +644,7 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     credential = BrokerCredential.create!(
       namespace: "acme",
       provider_subject: "manual-sub",
+      client_id: "manual-client-id",
       token_endpoint: "https://example.com/token",
       refresh_token: "refresh-manual",
       access_token: "access-manual",
