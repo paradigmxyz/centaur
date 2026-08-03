@@ -103,7 +103,7 @@ This change also creates and uses it from channel turns. On each execute:
 
 1. Read the requester (`slack_user_id`, `slack_team_id`) from the execute
    metadata. slackbotv2 already sends these on every execute.
-2. Upsert the requester's principal — the same foreign_id and labels that
+2. Upsert the requester's principal: the same foreign_id and labels that
    DM sessions produce today. A user therefore has exactly one principal,
    whether first seen in a DM or a channel. New principals receive the
    namespace's default roles console-side (`Role.assign_by_default`).
@@ -113,7 +113,7 @@ This change also creates and uses it from channel turns. On each execute:
    optional `requester_principal_id`. Clear the field when the metadata has
    no requester (console-driven runs, workflow executions).
 
-The session's own principal — the conversation — is untouched. No requester
+The session's own principal, the conversation, is untouched. No requester
 in the metadata means exactly today's behavior.
 
 ### 2. Grant union on the proxy (console)
@@ -195,5 +195,5 @@ matching.
 
 Isolation: the requester binding is applied through the config barrier before
 the turn's input runs, executions are thread-serialized, and the token only
-exists at proxy egress — the sandbox env carries a placeholder. Another
+exists at proxy egress; the sandbox env carries a placeholder. Another
 user's turn renders a config in which the credential is absent.
