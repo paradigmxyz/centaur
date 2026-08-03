@@ -1,0 +1,20 @@
+# Example CubePath / always-on VPS overlay (copy to values.local.yaml on the host;
+# values.local.yaml is gitignored and must not be committed).
+#
+# Apply with:
+#   export CENTAUR_IMAGE_SOURCE=ghcr
+#   export CENTAUR_EXTRA_VALUES=contrib/chart/values.local.yaml,contrib/chart/values.spaces.yaml
+#   just up
+#
+# Then put ANTHROPIC_API_KEY into centaur-infra-env (env secret source).
+
+secretManager:
+  existingSecretName: centaur-infra-env
+  envPrefix: ""
+
+ironProxy:
+  secretSource: env
+
+# 16 GB solo VPS: keep one warm sandbox instead of the chart default (3).
+apiRs:
+  sandboxWarmPoolSize: 1

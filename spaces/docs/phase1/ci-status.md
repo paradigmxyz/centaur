@@ -1,19 +1,16 @@
-# PR CI status (fork)
+# CI status (Spaces fork only)
 
-PR: https://github.com/paradigmxyz/centaur/pull/1254
+**Policy:** MagikDev does **not** contribute Spaces work to `paradigmxyz/centaur`.
+Development, CI, and deploys stay on the MagikDev fork / private remote.
 
-Workflow runs from the fork show `action_required`: upstream maintainers must
-**Approve and run workflows** for first-time contributors. Fork authors cannot
-call the approve API (`403 Must have admin rights`).
+An accidental PR against upstream (`paradigmxyz/centaur#1254`) is not part of
+this plan. Close it (or leave it idle). Do not ask upstream to approve Actions.
+Validate on the laptop / CubePath VPS with local commands instead.
 
-## What to ask a maintainer
-
-> Please approve Actions for PR #1254 so CI / Console CI / Docs can run.
-
-## Local validation already done (no CI required)
+## Local validation (source of truth)
 
 - Spaces import-boundary script
 - Adapter unit tests
 - HubSpot / Microsoft Graph mocked client tests
-- Console allowlist transform proven via local console-worker image
-  (`egress_allowlist_transform` returns the Spaces domain list)
+- Console allowlist transform + `just smoke` (Claude PONG) on kind **and** CubePath VPS
+- Teamsbot unit tests + simulate

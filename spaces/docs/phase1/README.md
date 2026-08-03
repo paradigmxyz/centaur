@@ -6,7 +6,8 @@
 | [`teamsbot-e2e.md`](teamsbot-e2e.md) | Checklist for two-user Teams identity proof |
 | [`oauth-app-registration.md`](oauth-app-registration.md) | HubSpot and Entra OAuth registration checklist |
 | [`droplet-bootstrap.sh`](droplet-bootstrap.sh) | Ubuntu LTS host bootstrap for the migration |
-| [`ci-status.md`](ci-status.md) | Fork PR Actions approval note |
+| [`vps-status.md`](vps-status.md) | Live CubePath host status + Cloudflare Tunnel tomorrow checklist |
+| [`ci-status.md`](ci-status.md) | Fork-only validation policy |
 
 ## Landed in-repo
 
@@ -17,8 +18,12 @@
 - Managed egress lock: `ironProxy.allowlistDomains` + [`values.spaces.yaml`](../../../contrib/chart/values.spaces.yaml)
 - Tools: `tools/business/hubspot`, `tools/business/microsoft_graph` (need real tokens for live calls)
 
-## Still blocked on always-on host + real apps
+## Host status
 
-- Public HTTPS for console OAuth callbacks and Teams `/api/messages`
-- HubSpot developer app + Entra app client secrets (after allowlist overlay is deployed)
+CubePath solo VPS is up; in-cluster Claude smoke passed. See [`vps-status.md`](vps-status.md).
+
+## Still blocked on public HTTPS + real apps
+
+- Cloudflare Tunnel (or Funnel) for console OAuth callbacks and Teams `/api/messages`
+- HubSpot developer app + Entra app client secrets (after tunnel URLs exist)
 - Teamsbot enablement and two-staff consent proof
