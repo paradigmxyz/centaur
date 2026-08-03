@@ -1193,13 +1193,20 @@ system-managed `default/infra` role.
 | `namespace`  | optional    | Defaults to `"default"`. Immutable. |
 | `foreign_id` | optional    | Unique per namespace. Immutable. |
 | `name`       | optional    | |
-| `labels`     | optional    | Identity values remain represented here in this API version. Reserved keys are `kind`, `slack_user_id`, `slack_channel_id`, `slack_team_id`, and `slack_email`. For `console_user` principals, `console-user-id` and `email` are also reserved. |
+| `kind`       | optional    | Defaults to `unknown`. See the known values below. |
+| `slack_user_id` | optional | First-class Slack user identity. |
+| `slack_channel_id` | optional | First-class Slack conversation identity. |
+| `slack_team_id` | optional | First-class Slack team or enterprise scope. |
+| `slack_email` | optional | First-class Slack email identity. |
+| `console_user_id` | optional | Database ID of the associated console user for a `console_user` principal. |
+| `console_user_email` | optional | Email identity for a `console_user` principal. |
+| `labels`     | optional    | Extensible metadata. Compatibility identity labels are still accepted and synthesized in responses during the transition. |
 | `slack_channel_permissions` | optional | Direct permissions owned by the principal. Full replacement when present on create or update. |
 | `effective_slack_channel_permissions` | response only | Direct permissions merged with permissions inherited from assigned roles. |
 
 Known kinds are `unknown`, `user`, `console_user`, `workflow`,
 `slack_channel`, `slack_dm`, `discord_channel`, `linear_issue`, `teams_user`,
-and `teams_conversation`. Use one of these values for the `kind` label.
+and `teams_conversation`. Use one of these values for the `kind` field.
 
 ### Operations
 
@@ -1236,15 +1243,17 @@ Returns `201`:
 | `GET`  | `/api/v1/principals/lookup/:namespace/:foreign_id/effective_config` | [Effective config](#effective-config) by namespace + foreign id. `404` if missing. |
 | `GET`  | `/api/v1/principals/:principal_id/grants` | [List the grants](#list-by-grantee) granted directly to the principal. |
 | `POST` | `/api/v1/principals/:id/slack_channel_permissions` | Idempotently create or update one direct Slack channel permission. Omitted flags default to enabled on create and remain unchanged on update. |
-| `PUT`/`PATCH` | `/api/v1/principals/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`. `name`, `labels`, and direct `slack_channel_permissions` are mutable on an existing record; `namespace` and `foreign_id` apply only when creating. |
+| `PUT`/`PATCH` | `/api/v1/principals/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`. `name`, first-class identity fields, `labels`, and direct `slack_channel_permissions` are mutable on an existing record. `namespace` and `foreign_id` apply only when creating. |
 
-The reserved identity labels are backed by authoritative principal columns but
-remain labels in this API version. They are synthesized in responses, accepted
-in writes, and translated to column filters. Sending a null, empty, or
-whitespace-only Slack identity label clears that value. A null or blank `kind`
-is rejected, as are unknown kind values and new or changed malformed nonblank
-Slack identities. Unchanged legacy values remain round-trip safe during the
-compatibility release.
+The first-class identity fields are authoritative. For compatibility, responses
+still synthesize `kind`, `slack_user_id`, `slack_channel_id`, `slack_team_id`,
+and `slack_email` in `labels`. A `console_user` response also synthesizes
+`console-user-id` and `email`. Writes may send the compatibility labels, but if
+a request sends both forms, their values must agree or the API returns `422`.
+Sending a null, empty, or whitespace-only Slack identity label clears that
+value. A null or blank `kind` is rejected, as are unknown kind values and new
+or changed malformed nonblank Slack identities. Unchanged legacy values remain
+round-trip safe during the compatibility release.
 
 See [Role assignments](#role-assignments) for attaching roles to a principal.
 

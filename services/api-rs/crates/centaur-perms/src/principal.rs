@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use centaur_iron_control::{IdentityInput, derive_principal};
+use centaur_iron_control::{PrincipalInput, derive_principal};
 
 /// Turn a `--principal` value (plus optional `--slack-user`) into the identity
 /// to upsert/look up.
@@ -16,17 +16,22 @@ pub fn resolve_principal(
     principal: &str,
     slack_user: Option<&str>,
     namespace: &str,
-) -> IdentityInput {
+) -> PrincipalInput {
     if principal.contains(':') {
         // The CLI has no resolved conversation name; the synthetic display name
         // is fine for operator-driven lookups.
-        derive_principal(principal, slack_user, None).to_identity_input(namespace)
+        derive_principal(principal, slack_user, None).to_principal_input(namespace)
     } else {
-        IdentityInput {
+        PrincipalInput {
             namespace: namespace.to_owned(),
             foreign_id: principal.to_owned(),
             name: principal.to_owned(),
             labels: BTreeMap::from([("managed-by".to_owned(), "centaur".to_owned())]),
+            kind: None,
+            slack_user_id: None,
+            slack_channel_id: None,
+            slack_team_id: None,
+            slack_email: None,
         }
     }
 }

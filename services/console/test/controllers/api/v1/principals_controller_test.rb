@@ -297,25 +297,141 @@ module Api
         assert_response :bad_request
       end
 
-      test "POST accepts identity only through labels" do
+      test "POST creates a Slack principal from first-class identity fields" do
         post api_v1_principals_url,
              params: {
                data: {
                  namespace: "acme",
-                 foreign_id: "mixed-identity",
+                 foreign_id: "direct-slack-identity",
+                 kind: "slack_dm",
+                 slack_user_id: "U0123456789",
+                 slack_team_id: "T0123456789",
                  slack_email: "ada@example.com",
-                 labels: { "kind" => "user" }
+                 labels: { "managed-by" => "centaur" }
                }
              }.to_json,
              headers: auth_headers
 
         assert_response :created
-        principal = Principal.find_by!(namespace: "acme", foreign_id: "mixed-identity")
-        assert_equal "user", principal.kind
-        assert_nil principal.slack_email
+        principal = Principal.find_by!(namespace: "acme", foreign_id: "direct-slack-identity")
+        assert_equal "slack_dm", principal.kind
+        assert_equal "U0123456789", principal.slack_user_id
+        assert_equal "T0123456789", principal.slack_team_id
+        assert_equal "ada@example.com", principal.slack_email
+        assert_equal "centaur", principal.labels["managed-by"]
         PrincipalIdentityLabels.columns.each do |field|
           assert_not json_body.fetch("data").key?(field)
         end
+      end
+
+      test "POST accepts matching first-class fields and compatibility labels" do
+        user = users(:acme_admin)
+
+        post api_v1_principals_url,
+             params: {
+               data: {
+                 namespace: "acme",
+                 foreign_id: "matching-console-user-identity",
+                 kind: "console_user",
+                 console_user_id: user.id,
+                 console_user_email: user.email,
+                 labels: {
+                   "kind" => "console_user",
+                   "console-user-id" => user.oid,
+                   "email" => user.email,
+                   "managed-by" => "centaur"
+                 }
+               }
+             }.to_json,
+             headers: auth_headers
+
+        assert_response :created
+        principal = Principal.find_by!(namespace: "acme", foreign_id: "matching-console-user-identity")
+        assert_equal user.id, principal.console_user_id
+        assert_equal user.email, principal.console_user_email
+        assert_equal "centaur", principal.labels["managed-by"]
+        assert_empty principal.labels.slice("kind", "console-user-id", "email")
+      end
+
+      test "POST returns 422 when first-class Slack fields disagree with compatibility labels" do
+        assert_no_difference -> { Principal.count } do
+          post api_v1_principals_url,
+               params: {
+                 data: {
+                   namespace: "acme",
+                   foreign_id: "conflicting-slack-identity",
+                   kind: "slack_dm",
+                   slack_user_id: "U0123456789",
+                   slack_channel_id: "D0123456789",
+                   slack_team_id: "T0123456789",
+                   slack_email: "ada@example.com",
+                   labels: {
+                     "kind" => "slack_channel",
+                     "slack_user_id" => "U9876543210",
+                     "slack_channel_id" => "D9876543210",
+                     "slack_team_id" => "T9876543210",
+                     "slack_email" => "grace@example.com"
+                   }
+                 }
+               }.to_json,
+               headers: auth_headers
+        end
+
+        assert_response :unprocessable_content
+        details = json_body.dig("error", "details")
+        %w[kind slack_user_id slack_channel_id slack_team_id slack_email].each do |field|
+          assert_includes details.fetch(field), "does not agree with labels.#{field}"
+        end
+      end
+
+      test "POST returns 422 when first-class console user fields disagree with compatibility labels" do
+        user = users(:acme_admin)
+        other_user = users(:globex_admin)
+
+        assert_no_difference -> { Principal.count } do
+          post api_v1_principals_url,
+               params: {
+                 data: {
+                   namespace: "acme",
+                   foreign_id: "conflicting-console-user-identity",
+                   kind: "console_user",
+                   console_user_id: user.id,
+                   console_user_email: user.email,
+                   labels: {
+                     "kind" => "console_user",
+                     "console-user-id" => other_user.oid,
+                     "email" => other_user.email
+                   }
+                 }
+               }.to_json,
+               headers: auth_headers
+        end
+
+        assert_response :unprocessable_content
+        details = json_body.dig("error", "details")
+        assert_includes details.fetch("console_user_id"), "does not agree with labels.console-user-id"
+        assert_includes details.fetch("console_user_email"), "does not agree with labels.email"
+      end
+
+      test "PUT returns 422 when an unchanged first-class field disagrees with a label" do
+        principal = principals(:acme_user_alice)
+
+        put api_v1_principal_url(id: principal.oid),
+            params: {
+              data: {
+                kind: principal.kind,
+                slack_user_id: principal.slack_user_id,
+                labels: {
+                  "kind" => principal.kind,
+                  "slack_user_id" => "U9876543210"
+                }
+              }
+            }.to_json,
+            headers: auth_headers
+
+        assert_response :unprocessable_content
+        assert_includes json_body.dig("error", "details", "slack_user_id"),
+                        "does not agree with labels.slack_user_id"
       end
 
       test "PUT updates labels" do

@@ -30,6 +30,7 @@ module Api
         principal = Principal.new(namespace: upsert_namespace, foreign_id: data_params[:foreign_id],
                                   created_by: current_user)
         ActiveRecord::Base.transaction do
+          validate_identity_consistency!(principal)
           principal.assign_attributes(principal_params)
           principal.apply_default_sandbox_capabilities!(principal_params)
           principal.save!
@@ -47,6 +48,7 @@ module Api
         principal = resolve_for_upsert(Principal)
         was_new = principal.new_record?
         ActiveRecord::Base.transaction do
+          validate_identity_consistency!(principal)
           principal.assign_attributes(principal_params)
           principal.apply_default_sandbox_capabilities!(principal_params) if was_new
           principal.save!
@@ -100,11 +102,23 @@ module Api
       def principal_params
         data_params.permit(
           :name,
+          :kind,
+          :slack_user_id,
+          :slack_channel_id,
+          :slack_team_id,
+          :slack_email,
+          :console_user_id,
+          :console_user_email,
           :sandbox_repo_cache,
           :sandbox_observability_enabled,
           :sandbox_api_server_enabled,
           labels: {}
         )
+      end
+
+      def validate_identity_consistency!(principal)
+        PrincipalIdentityLabels.validate_request_consistency(principal, data_params)
+        raise ActiveRecord::RecordInvalid.new(principal) if principal.errors.any?
       end
 
       def slack_channel_permission_owner

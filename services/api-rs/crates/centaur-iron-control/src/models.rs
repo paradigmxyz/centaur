@@ -455,8 +455,7 @@ pub struct BrokerCredentialRecord {
 // Principals and roles
 // ---------------------------------------------------------------------------
 
-/// Request body for ``POST``/``PUT /api/v1/principals`` and ``/roles`` — both
-/// take the same ``namespace``/``foreign_id``/``name``/``labels`` shape.
+/// Request body for ``POST``/``PUT /api/v1/roles``.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct IdentityInput {
     pub namespace: String,
@@ -464,6 +463,29 @@ pub struct IdentityInput {
     pub name: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
+}
+
+/// Request body for ``POST``/``PUT /api/v1/principals``.
+///
+/// Principal identity is stored in first-class iron-control fields. Labels are
+/// reserved for extensible metadata and must not carry copies of these values.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PrincipalInput {
+    pub namespace: String,
+    pub foreign_id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slack_user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slack_channel_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slack_team_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slack_email: Option<String>,
 }
 
 /// A principal as returned by iron-control. Unknown fields are ignored, so this

@@ -33,6 +33,41 @@ class PrincipalIdentityLabels
       end
     end
 
+    def validate_consistency(principal)
+      labels = principal.labels.to_h
+      kind = effective_kind(principal, labels)
+
+      fields_for(kind).each do |label, field|
+        column = field.fetch(:column)
+        next unless labels.key?(label) && principal.will_save_change_to_attribute?(column)
+
+        add_conflict_error(principal, column, label) unless principal.public_send(column) == decode_assignment_value(label, labels[label])
+      end
+    end
+
+    def validate_request_consistency(principal, attributes)
+      attributes = attributes.to_unsafe_h if attributes.respond_to?(:to_unsafe_h)
+      attributes = attributes.to_h.stringify_keys
+      raw_labels = attributes.fetch("labels", {})
+      labels = raw_labels.respond_to?(:to_h) ? raw_labels.to_h.stringify_keys : {}
+      kind = if attributes.key?("kind")
+        attributes["kind"]
+      elsif labels.key?("kind")
+        labels["kind"]
+      else
+        principal.kind
+      end
+
+      fields_for(kind).each do |label, field|
+        column = field.fetch(:column)
+        next unless attributes.key?(column) && labels.key?(label)
+
+        direct_value = principal.class.type_for_attribute(column).cast(attributes[column])
+        label_value = decode_assignment_value(label, labels[label])
+        add_conflict_error(principal, column, label) unless direct_value == label_value
+      end
+    end
+
     def strip(principal)
       principal[:labels] = principal.labels.to_h.except(*labels_for(principal.kind))
     end
@@ -68,6 +103,16 @@ class PrincipalIdentityLabels
     end
 
     private
+
+    def effective_kind(principal, labels)
+      return principal.kind if principal.will_save_change_to_kind? || !labels.key?("kind")
+
+      decode_assignment_value("kind", labels["kind"])
+    end
+
+    def add_conflict_error(principal, column, label)
+      principal.errors.add(column, "does not agree with labels.#{label}")
+    end
 
     def fields_for(kind)
       FIELDS.select { |_label, field| field[:kind].nil? || field[:kind] == kind }

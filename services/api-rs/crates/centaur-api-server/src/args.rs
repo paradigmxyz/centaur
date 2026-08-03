@@ -16,8 +16,8 @@ use centaur_api_server::{
     discover_tool_proxy_fragment,
 };
 use centaur_iron_control::{
-    IdentityInput, IronControlClient, IronControlError, RegisterError, RoleSpec, SessionRegistrar,
-    register_role,
+    IdentityInput, IronControlClient, IronControlError, PrincipalInput, RegisterError, RoleSpec,
+    SessionRegistrar, register_role,
 };
 use centaur_iron_proxy::{
     ProxyFragment, SourceKind, SourcePolicy, bedrock_enabled, harness_auth_fragment, infra_fragment,
@@ -706,7 +706,7 @@ impl SandboxArgs {
                 .await?;
         }
         let bootstrap = client
-            .upsert_principal(&IdentityInput {
+            .upsert_principal(&PrincipalInput {
                 namespace: namespace.clone(),
                 foreign_id: "warm-pool-bootstrap".to_owned(),
                 name: "Warm pool bootstrap".to_owned(),
@@ -714,10 +714,15 @@ impl SandboxArgs {
                     ("managed-by".to_owned(), "centaur".to_owned()),
                     ("purpose".to_owned(), "warm-pool-bootstrap".to_owned()),
                 ]),
+                kind: None,
+                slack_user_id: None,
+                slack_channel_id: None,
+                slack_team_id: None,
+                slack_email: None,
             })
             .await?;
         let workflow_host = client
-            .upsert_principal(&IdentityInput {
+            .upsert_principal(&PrincipalInput {
                 namespace: namespace.clone(),
                 foreign_id: "workflow-host".to_owned(),
                 name: "Workflow host".to_owned(),
@@ -725,6 +730,11 @@ impl SandboxArgs {
                     ("managed-by".to_owned(), "centaur".to_owned()),
                     ("purpose".to_owned(), "workflow-host".to_owned()),
                 ]),
+                kind: None,
+                slack_user_id: None,
+                slack_channel_id: None,
+                slack_team_id: None,
+                slack_email: None,
             })
             .await?;
         Ok(Some(IronControlRuntime {

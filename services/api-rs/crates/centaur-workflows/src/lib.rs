@@ -11,7 +11,7 @@ use absurd::{
     AwaitEventOptions, Client, ClientOptions, CreateQueueOptions, RetryKind, RetryStrategy,
     SpawnOptions, StepHandle, TaskContext, TaskRegistrationOptions, Worker, WorkerOptions,
 };
-use centaur_iron_control::{IdentityInput, IronControlClient, IronControlError, slugify};
+use centaur_iron_control::{IronControlClient, IronControlError, PrincipalInput, slugify};
 use centaur_sandbox_core::SandboxSpec;
 use centaur_session_core::{HarnessType, MessageRole, SessionMessageInput, ThreadKey};
 use centaur_session_runtime::{
@@ -312,11 +312,16 @@ impl WorkflowPrincipalRegistrar {
             let foreign_id = canonical_workflow_principal_foreign_id(workflow_name);
             let record = self
                 .client
-                .upsert_principal(&IdentityInput {
+                .upsert_principal(&PrincipalInput {
                     namespace: self.namespace.clone(),
                     foreign_id,
                     name: format!("Workflow {workflow_name}"),
                     labels: workflow_principal_labels(workflow_name),
+                    kind: Some("workflow".to_owned()),
+                    slack_user_id: None,
+                    slack_channel_id: None,
+                    slack_team_id: None,
+                    slack_email: None,
                 })
                 .await?;
             registered.insert(workflow_name.clone(), record.id);
@@ -331,7 +336,6 @@ fn canonical_workflow_principal_foreign_id(workflow_name: &str) -> String {
 
 fn workflow_principal_labels(workflow_name: &str) -> BTreeMap<String, String> {
     BTreeMap::from([
-        ("kind".to_owned(), "workflow".to_owned()),
         ("managed-by".to_owned(), "centaur".to_owned()),
         ("workflow_name".to_owned(), workflow_name.to_owned()),
     ])
@@ -4521,10 +4525,10 @@ mod tests {
     }
 
     #[test]
-    fn workflow_principal_labels_identify_workflow_kind() {
+    fn workflow_principal_labels_keep_extensible_metadata_only() {
         let labels = workflow_principal_labels("nightly_report");
 
-        assert_eq!(labels.get("kind").map(String::as_str), Some("workflow"));
+        assert!(!labels.contains_key("kind"));
         assert!(!labels.contains_key("purpose"));
         assert_eq!(
             labels.get("workflow_name").map(String::as_str),

@@ -15,8 +15,9 @@ use crate::error::{IronControlError, Result};
 use crate::models::{
     AwsAuthSecretInput, BrokerCredentialInput, BrokerCredentialRecord, DataEnvelope,
     EffectiveConfig, GcpAuthSecretInput, GcpIdTokenSecretInput, Grant, GrantSecret, Grantee,
-    HmacSecretInput, IdentityInput, OAuthTokenSecretInput, PgDsnSecretInput, Principal, Proxy,
-    ProxyInput, Role, SecretRecord, SlackChannelPermissionInput, StaticSecretInput,
+    HmacSecretInput, IdentityInput, OAuthTokenSecretInput, PgDsnSecretInput, Principal,
+    PrincipalInput, Proxy, ProxyInput, Role, SecretRecord, SlackChannelPermissionInput,
+    StaticSecretInput,
 };
 
 const API_PREFIX: &str = "/api/v1";
@@ -52,7 +53,7 @@ impl IronControlClient {
     // ----- principals & roles ---------------------------------------------
 
     /// Upsert a principal by ``foreign_id`` (create if absent, update if not).
-    pub async fn upsert_principal(&self, input: &IdentityInput) -> Result<Principal> {
+    pub async fn upsert_principal(&self, input: &PrincipalInput) -> Result<Principal> {
         self.write(
             Method::PUT,
             &upsert_path("principals", &input.foreign_id),

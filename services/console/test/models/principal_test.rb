@@ -69,6 +69,21 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_empty principal.labels.slice(*PrincipalIdentityLabels.labels_for(principal.kind))
   end
 
+  test "first-class identity fields must agree with compatibility labels" do
+    principal = Principal.new(default_attrs(
+      kind: "slack_dm",
+      slack_user_id: "U0123456789",
+      labels: {
+        "kind" => "slack_channel",
+        "slack_user_id" => "U9876543210"
+      }
+    ))
+
+    assert_not principal.valid?
+    assert_includes principal.errors[:kind], "does not agree with labels.kind"
+    assert_includes principal.errors[:slack_user_id], "does not agree with labels.slack_user_id"
+  end
+
   test "console user identity is stored only in columns and synthesized for compatibility" do
     user = users(:acme_admin)
     principal = Principal.create!(default_attrs(

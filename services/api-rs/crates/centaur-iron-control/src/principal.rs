@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-use crate::models::IdentityInput;
+use crate::models::PrincipalInput;
 use crate::util::{managed_labels, slugify};
 
 const KIND_LABEL: &str = "kind";
@@ -44,13 +44,18 @@ pub struct PrincipalRef {
 impl PrincipalRef {
     /// Build the upsert body for this principal in ``namespace``, tagging it as
     /// Centaur-managed.
-    pub fn to_identity_input(&self, namespace: &str) -> IdentityInput {
+    pub fn to_principal_input(&self, namespace: &str) -> PrincipalInput {
         let mut labels = managed_labels();
         labels.extend(self.labels.clone());
-        IdentityInput {
+        PrincipalInput {
             namespace: namespace.to_owned(),
             foreign_id: self.foreign_id.clone(),
             name: self.name.clone(),
+            kind: labels.remove(KIND_LABEL),
+            slack_user_id: labels.remove("slack_user_id"),
+            slack_channel_id: labels.remove("slack_channel_id"),
+            slack_team_id: labels.remove("slack_team_id"),
+            slack_email: labels.remove("slack_email"),
             labels,
         }
     }
@@ -615,21 +620,23 @@ mod tests {
     }
 
     #[test]
-    fn identity_input_carries_namespace_and_managed_label() {
-        let input = derive_principal("chat:C1:ts", None, None).to_identity_input("default");
+    fn principal_input_uses_first_class_slack_identity_fields() {
+        let input = derive_principal("chat:C1:ts", None, None).to_principal_input("default");
         assert_eq!(input.namespace, "default");
         assert_eq!(input.foreign_id, "slack-channel-c1");
         assert_eq!(
             input.labels.get("managed-by").map(String::as_str),
             Some("centaur")
         );
-        assert_eq!(
-            input.labels.get("slack_channel_id").map(String::as_str),
-            Some("C1")
-        );
-        assert_eq!(
-            input.labels.get("kind").map(String::as_str),
-            Some("slack_channel")
-        );
+        assert_eq!(input.slack_channel_id.as_deref(), Some("C1"));
+        assert_eq!(input.kind.as_deref(), Some("slack_channel"));
+        assert_eq!(input.labels.len(), 1);
+
+        let payload = serde_json::to_value(&input).unwrap();
+        assert_eq!(payload["kind"], "slack_channel");
+        assert_eq!(payload["slack_channel_id"], "C1");
+        assert_eq!(payload["labels"]["managed-by"], "centaur");
+        assert!(payload["labels"].get("kind").is_none());
+        assert!(payload["labels"].get("slack_channel_id").is_none());
     }
 }
