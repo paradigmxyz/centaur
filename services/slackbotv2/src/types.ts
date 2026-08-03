@@ -142,10 +142,12 @@ export type SlackbotV2Options = {
   /**
    * Public origin of the Console UI (same value the Console itself uses,
    * `CENTAUR_CONSOLE_PUBLIC_URL`). When set, the first assistant message in a
-   * Slack thread gets an "Open chat in Console" context link. Unset skips
-   * the block entirely.
+   * Slack thread gets an "Open chat in Console" context link. Unset skips the
+   * link; response metadata may still render when independently enabled.
    */
   consolePublicUrl?: string
+  /** Append model, harness, reasoning, and service-tier metadata to every live response. */
+  responseMetadataEnabled?: boolean
   /**
    * Per-channel default harness/model/provider/reasoning, keyed by Slack
    * conversation id (SLACKBOTV2_CHANNEL_DEFAULTS). See channel-defaults.ts.

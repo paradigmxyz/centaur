@@ -475,6 +475,9 @@ slackbotv2:
   # Join newly-created public channels after subscribed channel_created events.
   # Requires the Slack app to grant channels:read and channels:join.
   autoJoinCreatedChannels: false
+  # Append model, harness, reasoning effort, and service tier to every live
+  # streamed Slack assistant response. Independent of the optional Console link below.
+  responseMetadataEnabled: false
   # Public/local MCP endpoint shown in MCP SSO setup messages. The default
   # assumes users connect through `kubectl port-forward ... 3000:8080`.
   mcpPublicUrl: "http://localhost:3000"

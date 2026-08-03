@@ -358,6 +358,7 @@
       "type": "object",
       "properties": {
         "mcpPublicUrl": { "type": "string" },
+        "responseMetadataEnabled": { "type": "boolean" },
         "metrics": {
           "type": "object",
           "properties": {

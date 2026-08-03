@@ -46,6 +46,7 @@ const options: SlackbotV2Options = {
     consoleLogger.warn('slackbotv2 SLACKBOTV2_CHANNEL_DEFAULTS', { reason })
   ),
   consolePublicUrl: optionalEnv('CENTAUR_CONSOLE_PUBLIC_URL'),
+  responseMetadataEnabled: booleanEnv('SLACKBOTV2_RESPONSE_METADATA_ENABLED', false),
   defaultHarnessType: optionalEnv('SLACKBOTV2_DEFAULT_HARNESS'),
   // Same env vars deployers use to override the sandbox harness model
   // (sandbox.extraEnv); the chart mirrors them here so displayed defaults
@@ -98,6 +99,7 @@ console.log(
     message_overrides_strategy: messageOverridesStrategyMode,
     message_overrides_strategy_enabled:
       messageOverridesStrategyMode !== 'llm' || Boolean(messageOverridesStrategyApiKey),
+    response_metadata_enabled: options.responseMetadataEnabled,
     port: server.port,
     api_url: apiUrl
   })
