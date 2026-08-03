@@ -1,9 +1,5 @@
 {{- if .Values.apiRs.enabled }}
 {{- $console := include "centaur.consoleValues" . | fromYaml -}}
-{{- $apiRsIronProxy := .Values.apiRs.ironProxy | default dict -}}
-{{- if hasKey $apiRsIronProxy "mode" -}}
-{{- fail "apiRs.ironProxy.mode has been removed; iron-proxy is always enabled" -}}
-{{- end -}}
 {{- $mcpPublicUrl := default .Values.slackbotv2.mcpPublicUrl .Values.apiRs.mcpPublicUrl -}}
 {{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") -}}
 {{- $repoCacheStorageType := include "centaur.repoCacheStorageType" . -}}
