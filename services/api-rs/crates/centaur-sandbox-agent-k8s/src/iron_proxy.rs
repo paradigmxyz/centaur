@@ -133,6 +133,9 @@ pub(crate) struct ResolvedIronProxy {
     console_url: String,
     // iron-control principal OID this sandbox's proxy binds to.
     principal_id: String,
+    // Requesting user's principal OID bound to the proxy for the current turn,
+    // when the turn has one.
+    requester_principal_id: Option<String>,
     // Labels applied to the iron-control proxy row and used by proxy-specific
     // config rendering in the control plane.
     labels: BTreeMap<String, String>,
@@ -217,6 +220,7 @@ impl AgentSandboxBackend {
         Ok(Some(self.resolved_iron_proxy_for_principal(
             id,
             principal_id,
+            spec.iron_control_requester_principal.clone(),
             labels,
             ResolvedIronProxyRuntime {
                 pg,
@@ -283,15 +287,19 @@ impl AgentSandboxBackend {
             .get(id.as_str())
             .await
             .map_err(|err| map_kube_error("get sandbox for resume", err))?;
-        let principal_id = sandbox
-            .metadata
-            .annotations
-            .as_ref()
+        let annotations = sandbox.metadata.annotations.as_ref();
+        let principal_id = annotations
             .and_then(|annotations| annotations.get(crate::IRON_CONTROL_PRINCIPAL_ANNOTATION))
             .cloned();
         let Some(principal_id) = principal_id else {
             return Ok(None);
         };
+        // Carry the last turn's requester across the pause so the recreated
+        // proxy row does not silently drop it before the post-resume ensure
+        // call re-asserts the current turn's binding.
+        let requester_principal_id = annotations
+            .and_then(|annotations| annotations.get(crate::IRON_CONTROL_REQUESTER_ANNOTATION))
+            .cloned();
         let pg = self.resolved_pg_for_recreation(Some(&sandbox));
         let replace_placeholders = self.effective_replace_placeholders(&principal_id).await?;
         let observability_enabled = resolve_resume_capability(
@@ -311,6 +319,7 @@ impl AgentSandboxBackend {
         Ok(Some(self.resolved_iron_proxy_for_principal(
             id,
             principal_id,
+            requester_principal_id,
             BTreeMap::new(),
             ResolvedIronProxyRuntime {
                 pg,
@@ -325,6 +334,7 @@ impl AgentSandboxBackend {
         &self,
         id: &SandboxId,
         principal_id: String,
+        requester_principal_id: Option<String>,
         labels: BTreeMap<String, String>,
         runtime: ResolvedIronProxyRuntime,
     ) -> ResolvedIronProxy {
@@ -334,6 +344,7 @@ impl AgentSandboxBackend {
             proxy_port: PROXY_TUNNEL_PORT,
             console_url: self.config.iron_control.control_url.clone(),
             principal_id,
+            requester_principal_id,
             labels,
             pg: runtime.pg,
             replace_placeholders: runtime.replace_placeholders,
@@ -414,7 +425,12 @@ impl AgentSandboxBackend {
         let iron_control = &self.config.iron_control;
         let proxy = iron_control
             .client
-            .create_proxy(id.as_str(), &resolved.principal_id, resolved.labels.clone())
+            .create_proxy(
+                id.as_str(),
+                &resolved.principal_id,
+                resolved.requester_principal_id.clone(),
+                resolved.labels.clone(),
+            )
             .await
             .map_err(|err| SandboxError::backend_source("iron-control create proxy", err))?;
         let token = proxy
@@ -526,6 +542,7 @@ impl AgentSandboxBackend {
         &self,
         id: &SandboxId,
         principal_id: &str,
+        requester_principal_id: Option<&str>,
         labels: &BTreeMap<String, String>,
     ) -> SandboxResult<()> {
         let iron_control = &self.config.iron_control;
@@ -537,8 +554,13 @@ impl AgentSandboxBackend {
                 "iron-proxy resources are missing or not running; recreating before assignment"
             );
             proxy_id = Some(
-                self.recreate_iron_proxy_resources_for_principal(id, principal_id, labels)
-                    .await?,
+                self.recreate_iron_proxy_resources_for_principal(
+                    id,
+                    principal_id,
+                    requester_principal_id,
+                    labels,
+                )
+                .await?,
             );
         }
         let proxy_id = proxy_id.ok_or_else(|| {
@@ -549,14 +571,14 @@ impl AgentSandboxBackend {
         })?;
         let proxy = iron_control
             .client
-            .assign_proxy_principal(&proxy_id, principal_id, labels)
+            .assign_proxy_principal(&proxy_id, principal_id, requester_principal_id, labels)
             .await
             .map_err(|err| SandboxError::backend_source("iron-control assign proxy", err))?;
         self.proxy_ids
             .lock()
             .await
             .insert(id.as_str().to_owned(), proxy.id);
-        self.patch_iron_control_principal_annotation(id, principal_id)
+        self.patch_iron_control_principal_annotation(id, principal_id, requester_principal_id)
             .await?;
         self.wait_for_proxy_principal_applied(id, principal_id, proxy.config_hash.as_deref())
             .await;
@@ -567,6 +589,7 @@ impl AgentSandboxBackend {
         &self,
         id: &SandboxId,
         principal_id: &str,
+        requester_principal_id: Option<&str>,
         labels: &BTreeMap<String, String>,
     ) -> SandboxResult<()> {
         if self.config.iron_proxy.is_none() {
@@ -581,21 +604,23 @@ impl AgentSandboxBackend {
                 .get(id.as_str())
                 .await
                 .map_err(|err| map_kube_error("get sandbox for proxy principal check", err))?;
-            let assigned_principal = sandbox
-                .metadata
-                .annotations
-                .as_ref()
-                .and_then(|annotations| annotations.get(crate::IRON_CONTROL_PRINCIPAL_ANNOTATION));
-            if assigned_principal.map(String::as_str) == Some(principal_id) && labels.is_empty() {
+            if proxy_binding_matches(
+                sandbox.metadata.annotations.as_ref(),
+                principal_id,
+                requester_principal_id,
+                labels,
+            ) {
                 return Ok(());
             }
 
             let iron_control = &self.config.iron_control;
             let proxy = iron_control
                 .client
-                .assign_proxy_principal(&proxy_id, principal_id, labels)
+                .assign_proxy_principal(&proxy_id, principal_id, requester_principal_id, labels)
                 .await
                 .map_err(|err| SandboxError::backend_source("iron-control assign proxy", err))?;
+            self.patch_iron_control_principal_annotation(id, principal_id, requester_principal_id)
+                .await?;
             self.wait_for_proxy_principal_applied(id, principal_id, proxy.config_hash.as_deref())
                 .await;
             return Ok(());
@@ -606,9 +631,14 @@ impl AgentSandboxBackend {
             principal_id,
             "iron-proxy resources are missing or not running; recreating before reuse"
         );
-        self.recreate_iron_proxy_resources_for_principal(id, principal_id, labels)
-            .await?;
-        self.patch_iron_control_principal_annotation(id, principal_id)
+        self.recreate_iron_proxy_resources_for_principal(
+            id,
+            principal_id,
+            requester_principal_id,
+            labels,
+        )
+        .await?;
+        self.patch_iron_control_principal_annotation(id, principal_id, requester_principal_id)
             .await?;
         Ok(())
     }
@@ -617,6 +647,7 @@ impl AgentSandboxBackend {
         &self,
         id: &SandboxId,
         principal_id: &str,
+        requester_principal_id: Option<&str>,
         labels: &BTreeMap<String, String>,
     ) -> SandboxResult<String> {
         if self.config.iron_proxy.is_none() {
@@ -672,6 +703,7 @@ impl AgentSandboxBackend {
         let resolved = self.resolved_iron_proxy_for_principal(
             id,
             principal_id,
+            requester_principal_id.map(ToOwned::to_owned),
             labels.clone(),
             ResolvedIronProxyRuntime {
                 pg,
@@ -958,11 +990,16 @@ impl AgentSandboxBackend {
         &self,
         id: &SandboxId,
         principal_id: &str,
+        requester_principal_id: Option<&str>,
     ) -> SandboxResult<()> {
+        // A merge-patch null removes the requester annotation, so "no
+        // requester" and "absent annotation" stay indistinguishable for the
+        // binding comparison.
         let patch = Patch::Merge(json!({
             "metadata": {
                 "annotations": {
                     crate::IRON_CONTROL_PRINCIPAL_ANNOTATION: principal_id,
+                    crate::IRON_CONTROL_REQUESTER_ANNOTATION: requester_principal_id,
                 },
             },
         }));
@@ -2105,6 +2142,26 @@ fn iron_proxy_labels(
     labels
 }
 
+/// Whether a sandbox's annotations already record the requested proxy binding,
+/// so the ensure path can skip a redundant reassignment. An absent requester
+/// annotation means "no requester" and compares equal to `None`, keeping
+/// label-less sessions (tool-host, non-Slack) on the skip path. Any label
+/// refresh always reassigns, mirroring the pre-requester behavior.
+fn proxy_binding_matches(
+    annotations: Option<&BTreeMap<String, String>>,
+    principal_id: &str,
+    requester_principal_id: Option<&str>,
+    labels: &BTreeMap<String, String>,
+) -> bool {
+    let assigned_principal = annotations
+        .and_then(|annotations| annotations.get(crate::IRON_CONTROL_PRINCIPAL_ANNOTATION));
+    let assigned_requester = annotations
+        .and_then(|annotations| annotations.get(crate::IRON_CONTROL_REQUESTER_ANNOTATION));
+    assigned_principal.map(String::as_str) == Some(principal_id)
+        && assigned_requester.map(String::as_str) == requester_principal_id
+        && labels.is_empty()
+}
+
 fn unique_suffix() -> String {
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2124,6 +2181,7 @@ mod tests {
             proxy_port: 8080,
             console_url: "http://console:3000".to_owned(),
             principal_id: "principal".to_owned(),
+            requester_principal_id: None,
             labels: BTreeMap::new(),
             pg: None,
             replace_placeholders: BTreeMap::new(),
@@ -2142,6 +2200,84 @@ mod tests {
             api_server_enabled,
             ..resolved()
         }
+    }
+
+    fn binding_annotations(
+        principal: Option<&str>,
+        requester: Option<&str>,
+    ) -> BTreeMap<String, String> {
+        let mut annotations = BTreeMap::new();
+        if let Some(principal) = principal {
+            annotations.insert(
+                crate::IRON_CONTROL_PRINCIPAL_ANNOTATION.to_owned(),
+                principal.to_owned(),
+            );
+        }
+        if let Some(requester) = requester {
+            annotations.insert(
+                crate::IRON_CONTROL_REQUESTER_ANNOTATION.to_owned(),
+                requester.to_owned(),
+            );
+        }
+        annotations
+    }
+
+    #[test]
+    fn proxy_binding_matches_compares_principal_requester_and_labels() {
+        let no_labels = BTreeMap::new();
+        let labels = BTreeMap::from([("centaur.slack_channel_id".to_owned(), "C1".to_owned())]);
+
+        let both = binding_annotations(Some("prn_conv"), Some("prn_req"));
+        assert!(proxy_binding_matches(
+            Some(&both),
+            "prn_conv",
+            Some("prn_req"),
+            &no_labels
+        ));
+
+        let no_requester = binding_annotations(Some("prn_conv"), None);
+        assert!(proxy_binding_matches(
+            Some(&no_requester),
+            "prn_conv",
+            None,
+            &no_labels
+        ));
+
+        // A requester swap, a requester-to-none clear, and a none-to-requester
+        // bind must all fall through to reassignment.
+        assert!(!proxy_binding_matches(
+            Some(&both),
+            "prn_conv",
+            Some("prn_other"),
+            &no_labels
+        ));
+        assert!(!proxy_binding_matches(
+            Some(&both),
+            "prn_conv",
+            None,
+            &no_labels
+        ));
+        assert!(!proxy_binding_matches(
+            Some(&no_requester),
+            "prn_conv",
+            Some("prn_req"),
+            &no_labels
+        ));
+
+        // Principal mismatch and non-empty labels always reassign.
+        assert!(!proxy_binding_matches(
+            Some(&both),
+            "prn_else",
+            Some("prn_req"),
+            &no_labels
+        ));
+        assert!(!proxy_binding_matches(
+            Some(&both),
+            "prn_conv",
+            Some("prn_req"),
+            &labels
+        ));
+        assert!(!proxy_binding_matches(None, "prn_conv", None, &no_labels));
     }
 
     fn control_target() -> ControlPlaneEgressTarget {

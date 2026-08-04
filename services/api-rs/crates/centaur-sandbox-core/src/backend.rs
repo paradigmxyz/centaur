@@ -55,11 +55,13 @@ pub trait SandboxBackend: Send + Sync {
     async fn stop(&self, id: &SandboxId) -> SandboxResult<()>;
 
     /// Rebind a running sandbox's managed iron-proxy to a different
-    /// iron-control principal.
+    /// iron-control principal, together with the requesting user's principal
+    /// for the current turn (`None` clears a previous requester binding).
     async fn assign_iron_control_proxy_principal(
         &self,
         _id: &SandboxId,
         _principal_id: &str,
+        _requester_principal_id: Option<&str>,
         _labels: &BTreeMap<String, String>,
     ) -> SandboxResult<()> {
         Err(crate::SandboxError::Unsupported {
@@ -69,12 +71,13 @@ pub trait SandboxBackend: Send + Sync {
     }
 
     /// Ensure a running sandbox's managed iron-proxy resources are present and
-    /// usable for the supplied iron-control principal without otherwise
-    /// changing the sandbox lifecycle.
+    /// usable for the supplied iron-control principal and requester without
+    /// otherwise changing the sandbox lifecycle.
     async fn ensure_iron_control_proxy_resources(
         &self,
         _id: &SandboxId,
         _principal_id: &str,
+        _requester_principal_id: Option<&str>,
         _labels: &BTreeMap<String, String>,
     ) -> SandboxResult<()> {
         Ok(())

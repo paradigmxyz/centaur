@@ -60,6 +60,15 @@ mod tests {
             Ok(test_principal("prn_test"))
         }
 
+        async fn register_requester(
+            &self,
+            _thread_key: &str,
+            _metadata: Option<&Value>,
+        ) -> Result<Option<centaur_iron_control::Principal>, centaur_iron_control::IronControlError>
+        {
+            Ok(None)
+        }
+
         async fn get_principal(
             &self,
             principal: &str,

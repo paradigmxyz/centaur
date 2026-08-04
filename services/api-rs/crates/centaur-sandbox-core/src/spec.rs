@@ -69,6 +69,11 @@ pub struct SandboxSpec {
     /// proxy for the sandbox instead of rendering a static proxy config.
     #[serde(default)]
     pub iron_control_principal: Option<String>,
+    /// iron-control principal OID of the human requesting the turn that
+    /// creates this sandbox, bound to the proxy alongside
+    /// [`Self::iron_control_principal`].
+    #[serde(default)]
+    pub iron_control_requester_principal: Option<String>,
     /// Labels applied to the iron-control proxy registered for this sandbox.
     /// These are distinct from Kubernetes labels and are used by iron-control
     /// when rendering proxy-specific config.
@@ -90,6 +95,7 @@ impl SandboxSpec {
             mounts: Vec::new(),
             resources: None,
             iron_control_principal: None,
+            iron_control_requester_principal: None,
             iron_control_proxy_labels: std::collections::BTreeMap::new(),
             capabilities: SandboxCapabilities::default_enabled(),
         }

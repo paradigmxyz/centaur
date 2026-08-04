@@ -45,6 +45,10 @@ const MANAGED_BY_VALUE: &str = "api-rs";
 // so resume (which has only the sandbox id) can rebind without the spec or any
 // in-memory state. Survives pause and api-rs restarts.
 const IRON_CONTROL_PRINCIPAL_ANNOTATION: &str = "centaur.ai/iron-control-principal";
+// Requesting user's principal OID bound to the proxy for the current turn.
+// Absent when the turn has no requester, so an annotation-vs-binding
+// comparison treats "absent" and "no requester" as equal.
+const IRON_CONTROL_REQUESTER_ANNOTATION: &str = "centaur.ai/iron-control-requester-principal";
 // RFC 3339 instant stamped when the sandbox is paused for idleness and cleared
 // on resume. This keeps suspended status observable across api-rs restarts.
 const PAUSED_AT_ANNOTATION: &str = "centaur.ai/paused-at";
@@ -468,18 +472,21 @@ impl SandboxBackend for AgentSandboxBackend {
         &self,
         id: &SandboxId,
         principal_id: &str,
+        requester_principal_id: Option<&str>,
         labels: &BTreeMap<String, String>,
     ) -> SandboxResult<()> {
-        self.assign_proxy_principal(id, principal_id, labels).await
+        self.assign_proxy_principal(id, principal_id, requester_principal_id, labels)
+            .await
     }
 
     async fn ensure_iron_control_proxy_resources(
         &self,
         id: &SandboxId,
         principal_id: &str,
+        requester_principal_id: Option<&str>,
         labels: &BTreeMap<String, String>,
     ) -> SandboxResult<()> {
-        self.ensure_proxy_resources_for_principal(id, principal_id, labels)
+        self.ensure_proxy_resources_for_principal(id, principal_id, requester_principal_id, labels)
             .await
     }
 
@@ -862,6 +869,12 @@ fn build_agent_sandbox(
             principal.clone(),
         );
     }
+    if let Some(requester) = &spec.iron_control_requester_principal {
+        annotations.insert(
+            IRON_CONTROL_REQUESTER_ANNOTATION.to_owned(),
+            requester.clone(),
+        );
+    }
 
     let crd_spec = serde_json::from_value(agent_spec)
         .map_err(|err| SandboxError::InvalidSpec(format!("invalid Agent Sandbox spec: {err}")))?;
@@ -1152,6 +1165,36 @@ mod tests {
         assert!(pod_spec.node_selector.is_none());
         assert!(pod_spec.tolerations.is_none());
         assert!(pod_spec.runtime_class_name.is_none());
+    }
+
+    #[test]
+    fn stamps_requester_annotation_only_when_spec_carries_one() {
+        let config = AgentSandboxConfig::new("centaur", test_iron_control_settings());
+
+        let mut spec = SandboxSpec::new("centaur-agent:latest").iron_control_principal("prn_conv");
+        spec.iron_control_requester_principal = Some("prn_req".to_owned());
+        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+        let annotations = sandbox.metadata.annotations.as_ref().unwrap();
+        assert_eq!(
+            annotations
+                .get(IRON_CONTROL_PRINCIPAL_ANNOTATION)
+                .map(String::as_str),
+            Some("prn_conv")
+        );
+        assert_eq!(
+            annotations
+                .get(IRON_CONTROL_REQUESTER_ANNOTATION)
+                .map(String::as_str),
+            Some("prn_req")
+        );
+
+        let spec = SandboxSpec::new("centaur-agent:latest").iron_control_principal("prn_conv");
+        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+        assert!(
+            sandbox.metadata.annotations.as_ref().is_none_or(
+                |annotations| !annotations.contains_key(IRON_CONTROL_REQUESTER_ANNOTATION)
+            )
+        );
     }
 
     #[test]

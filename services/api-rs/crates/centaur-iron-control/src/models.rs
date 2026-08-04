@@ -693,6 +693,9 @@ impl Grant {
 pub struct ProxyInput {
     pub name: String,
     pub principal_id: String,
+    /// Always serialized (``null`` when absent) so create and assign share one
+    /// wire shape; the console treats an omitted key as "leave unchanged".
+    pub requester_principal_id: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
 }

@@ -400,17 +400,21 @@ impl IronControlClient {
 
     // ----- proxies ---------------------------------------------------------
 
-    /// Register a proxy owned by ``principal_id``. The returned [`Proxy::token`]
-    /// is the plaintext ``iprx_`` bearer and is only available here.
+    /// Register a proxy owned by ``principal_id``, optionally bound to the
+    /// requesting user's principal for the current turn. The returned
+    /// [`Proxy::token`] is the plaintext ``iprx_`` bearer and is only
+    /// available here.
     pub async fn create_proxy(
         &self,
         name: impl Into<String>,
         principal_id: impl Into<String>,
+        requester_principal_id: Option<String>,
         labels: std::collections::BTreeMap<String, String>,
     ) -> Result<Proxy> {
         let input = ProxyInput {
             name: name.into(),
             principal_id: principal_id.into(),
+            requester_principal_id,
             labels,
         };
         self.write(Method::POST, &collection_path("proxies"), &input)
@@ -421,15 +425,17 @@ impl IronControlClient {
     /// unchanged; the proxy picks up the new principal's grants on its next
     /// `/proxy/sync` (the config hash changes). This is how a warm-pool proxy,
     /// booted under a bootstrap principal, is bound to a session's principal at
-    /// checkout without a restart or token swap.
+    /// checkout without a restart or token swap. The requester principal is
+    /// re-bound (or cleared) on every assignment.
     pub async fn assign_proxy_principal(
         &self,
         id: &str,
         principal_id: &str,
+        requester_principal_id: Option<&str>,
         labels: &std::collections::BTreeMap<String, String>,
     ) -> Result<Proxy> {
         let path = format!("{API_PREFIX}/proxies/{}", urlencoding::encode(id));
-        let body = proxy_assignment_payload(principal_id, labels);
+        let body = proxy_assignment_payload(principal_id, requester_principal_id, labels);
         self.write(Method::PATCH, &path, &body).await
     }
 
@@ -488,12 +494,22 @@ impl IronControlClient {
 
 fn proxy_assignment_payload(
     principal_id: &str,
+    requester_principal_id: Option<&str>,
     labels: &std::collections::BTreeMap<String, String>,
 ) -> Value {
-    let mut body = serde_json::Map::from_iter([(
-        "principal_id".to_owned(),
-        Value::String(principal_id.to_owned()),
-    )]);
+    // The requester key is always sent: the console treats an omitted key as
+    // "leave unchanged", so only an explicit null clears a previous requester
+    // binding on a turn with no requester.
+    let mut body = serde_json::Map::from_iter([
+        (
+            "principal_id".to_owned(),
+            Value::String(principal_id.to_owned()),
+        ),
+        (
+            "requester_principal_id".to_owned(),
+            requester_principal_id.map_or(Value::Null, |id| Value::String(id.to_owned())),
+        ),
+    ]);
     if !labels.is_empty() {
         body.insert("labels".to_owned(), json!(labels));
     }
@@ -813,6 +829,7 @@ mod tests {
         let input = ProxyInput {
             name: "edge".to_owned(),
             principal_id: "prn_1".to_owned(),
+            requester_principal_id: None,
             labels: std::collections::BTreeMap::from([(
                 "centaur.slack_user_id".to_owned(),
                 "U1".to_owned(),
@@ -824,16 +841,38 @@ mod tests {
             json!({
                 "name": "edge",
                 "principal_id": "prn_1",
+                "requester_principal_id": null,
                 "labels": { "centaur.slack_user_id": "U1" }
             })
         );
     }
 
     #[test]
-    fn proxy_assignment_payload_omits_empty_labels() {
+    fn proxy_input_serializes_requester() {
+        let input = ProxyInput {
+            name: "edge".to_owned(),
+            principal_id: "prn_1".to_owned(),
+            requester_principal_id: Some("prn_req".to_owned()),
+            labels: std::collections::BTreeMap::new(),
+        };
+
         assert_eq!(
-            proxy_assignment_payload("prn_1", &std::collections::BTreeMap::new()),
-            json!({ "principal_id": "prn_1" })
+            serde_json::to_value(input).unwrap(),
+            json!({
+                "name": "edge",
+                "principal_id": "prn_1",
+                "requester_principal_id": "prn_req"
+            })
+        );
+    }
+
+    // The requester key stays present and null: the console leaves a binding
+    // unchanged when the key is absent, so only an explicit null clears it.
+    #[test]
+    fn proxy_assignment_payload_omits_empty_labels_and_nulls_absent_requester() {
+        assert_eq!(
+            proxy_assignment_payload("prn_1", None, &std::collections::BTreeMap::new()),
+            json!({ "principal_id": "prn_1", "requester_principal_id": null })
         );
     }
 
@@ -845,11 +884,20 @@ mod tests {
         )]);
 
         assert_eq!(
-            proxy_assignment_payload("prn_1", &labels),
+            proxy_assignment_payload("prn_1", None, &labels),
             json!({
                 "principal_id": "prn_1",
+                "requester_principal_id": null,
                 "labels": { "centaur.slack_user_id": "U1" }
             })
+        );
+    }
+
+    #[test]
+    fn proxy_assignment_payload_includes_requester_oid() {
+        assert_eq!(
+            proxy_assignment_payload("prn_1", Some("prn_req"), &std::collections::BTreeMap::new()),
+            json!({ "principal_id": "prn_1", "requester_principal_id": "prn_req" })
         );
     }
 }
