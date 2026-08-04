@@ -97,7 +97,6 @@ These are broadly useful across most deployments and are good candidates to conf
 | `googlenews` | Google News headlines, topics, and search | None |
 | `harmonic` | Startup discovery, company enrichment, people search, and saved searches | `HARMONIC_API_KEY` |
 | `invest_intake` | Normalize raw investment inputs into context packs | None |
-| `investmemos` | Search and read indexed investment memos | None |
 | `legistorm` | Congressional staff, offices, hearings, town halls, trips, and issue portfolios | `LEGISTORM_API_KEY`; optional: `LEGISTORM_ISSUES_ENDPOINT` |
 | `listennotes` | Podcast and episode search and metadata | `LISTENNOTES_KEY` |
 | `newsapi` | News headlines, article search, and source lists | `NEWSAPI_KEY` |
