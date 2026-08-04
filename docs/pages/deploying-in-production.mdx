@@ -294,6 +294,29 @@ helm upgrade --install centaur contrib/chart \
   -f values.production.yaml
 ```
 
+### Schedule sandboxes onto a dedicated node pool / RuntimeClass
+
+Agent sandboxes and their paired iron-proxy pods are created at runtime by
+`api-rs`. Set `sandbox.runtimeClassName`, `sandbox.nodeSelector`, and
+`sandbox.tolerations` to pin both onto a dedicated pool and/or RuntimeClass
+(e.g. gVisor). The chart passes them to api-rs as
+`SESSION_SANDBOX_RUNTIME_CLASS_NAME`, `SESSION_SANDBOX_NODE_SELECTOR`, and
+`SESSION_SANDBOX_TOLERATIONS`.
+
+```yaml
+sandbox:
+  runtimeClassName: gvisor
+  nodeSelector:
+    workload: centaur-sandbox
+  tolerations:
+    - key: centaur.ai/sandbox
+      operator: Exists
+      effect: NoSchedule
+```
+
+Malformed selector/toleration JSON fails api-rs startup. Empty values keep
+default scheduling.
+
 ## 6. Verify the deployment
 
 Check health from inside the api-rs deployment first:

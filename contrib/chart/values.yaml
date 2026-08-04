@@ -240,6 +240,22 @@ sandbox:
     repository: centaur-agent
     tag: latest
     pullPolicy: Always
+  # Node steering for sandbox pods **and** their paired iron-proxy pods. These
+  # reach the pod through the control plane, not through this chart's templates:
+  # api-rs creates them at runtime, so a Helm or kustomize patch cannot touch
+  # them. They are passed through to `Sandbox.spec.podTemplate.spec` and the
+  # iron-proxy PodSpec.
+  #
+  # Set these to keep untrusted agent workloads on a dedicated (usually tainted)
+  # node pool and/or under a stronger RuntimeClass such as gVisor. Empty leaves
+  # placement to the default scheduler.
+  nodeSelector: {}
+  #   workload: centaur-sandbox
+  tolerations: []
+  # - key: centaur.ai/sandbox
+  #   operator: Exists
+  #   effect: NoSchedule
+  # RuntimeClass for sandbox + iron-proxy pods, e.g. gVisor.
   runtimeClassName: ""
   reposPath: ""
   # How the in-sandbox harness authenticates upstream. Single source of truth:

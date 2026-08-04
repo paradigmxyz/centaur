@@ -27,6 +27,7 @@ use tokio::time::{Instant, sleep};
 
 pub use generated::agents_x_k8s_io as crd;
 pub use iron_proxy::IronProxyConfig;
+pub use k8s_openapi::api::core::v1::Toleration;
 pub use tools::{GitHubTokenRef, ToolSource, ToolsConfig};
 
 pub mod generated;
@@ -59,6 +60,17 @@ pub struct AgentSandboxConfig {
     pub annotations: BTreeMap<String, String>,
     pub image_pull_policy: Option<String>,
     pub image_pull_secrets: Vec<String>,
+    /// Node steering for every sandbox pod **and** its paired iron-proxy pod.
+    /// `Sandbox.spec.podTemplate.spec` already accepts `nodeSelector`,
+    /// `tolerations`, and `runtimeClassName`; without wiring these through
+    /// api-rs, chart values such as `sandbox.runtimeClassName` are inert
+    /// because sandbox pods are created at runtime rather than by Helm.
+    pub node_selector: BTreeMap<String, String>,
+    /// Tolerations applied with `node_selector` so sandboxes can land on a
+    /// tainted agents pool. Empty leaves default scheduling untouched.
+    pub tolerations: Vec<Toleration>,
+    /// RuntimeClass for sandbox and iron-proxy pods (e.g. `gvisor`).
+    pub runtime_class_name: Option<String>,
     pub state_volume: Option<StateVolumeConfig>,
     pub iron_proxy: Option<IronProxyConfig>,
     pub iron_control: Option<IronControlSettings>,
@@ -106,6 +118,9 @@ impl AgentSandboxConfig {
             annotations: BTreeMap::new(),
             image_pull_policy: None,
             image_pull_secrets: Vec::new(),
+            node_selector: BTreeMap::new(),
+            tolerations: Vec::new(),
+            runtime_class_name: None,
             state_volume: None,
             iron_proxy: None,
             iron_control: None,
@@ -721,6 +736,27 @@ fn build_agent_sandbox(
                 .collect::<Vec<_>>()
         }),
     );
+    // Node steering — passed through to the CRD podTemplate fields. Chart
+    // values alone cannot reach these pods; api-rs creates them at runtime.
+    insert_optional(
+        &mut pod_spec,
+        "nodeSelector",
+        (!config.node_selector.is_empty()).then(|| config.node_selector.clone()),
+    );
+    insert_optional(
+        &mut pod_spec,
+        "tolerations",
+        (!config.tolerations.is_empty()).then(|| config.tolerations.clone()),
+    );
+    insert_optional(
+        &mut pod_spec,
+        "runtimeClassName",
+        config
+            .runtime_class_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty()),
+    );
 
     let mut agent_spec = json!({
         "replicas": 1,
@@ -918,6 +954,54 @@ mod tests {
         assert_eq!(container.stdin, Some(true));
         assert_eq!(container.volume_mounts.as_ref().unwrap().len(), 2);
         assert!(container.resources.as_ref().unwrap().limits.is_some());
+    }
+
+    #[test]
+    fn node_steering_reaches_the_sandbox_pod_template() {
+        let spec = SandboxSpec::new("centaur-agent:latest");
+        let mut config = AgentSandboxConfig::new("centaur");
+        config.node_selector =
+            BTreeMap::from([("workload".to_owned(), "centaur-sandbox".to_owned())]);
+        config.tolerations = vec![Toleration {
+            key: Some("example.com/sandbox".to_owned()),
+            operator: Some("Exists".to_owned()),
+            effect: Some("NoSchedule".to_owned()),
+            ..Default::default()
+        }];
+        config.runtime_class_name = Some("gvisor".to_owned());
+
+        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+        let pod_spec = &sandbox.spec.pod_template.spec;
+
+        assert_eq!(
+            pod_spec
+                .node_selector
+                .as_ref()
+                .and_then(|selector| selector.get("workload"))
+                .map(String::as_str),
+            Some("centaur-sandbox")
+        );
+        let tolerations = pod_spec
+            .tolerations
+            .as_ref()
+            .expect("tolerations should be set");
+        assert_eq!(tolerations.len(), 1);
+        assert_eq!(tolerations[0].key.as_deref(), Some("example.com/sandbox"));
+        assert_eq!(tolerations[0].effect.as_deref(), Some("NoSchedule"));
+        assert_eq!(pod_spec.runtime_class_name.as_deref(), Some("gvisor"));
+    }
+
+    #[test]
+    fn node_steering_is_omitted_when_unset() {
+        let spec = SandboxSpec::new("centaur-agent:latest");
+        let config = AgentSandboxConfig::new("centaur");
+
+        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+        let pod_spec = &sandbox.spec.pod_template.spec;
+
+        assert!(pod_spec.node_selector.is_none());
+        assert!(pod_spec.tolerations.is_none());
+        assert!(pod_spec.runtime_class_name.is_none());
     }
 
     #[test]

@@ -24,7 +24,7 @@ use centaur_iron_proxy::{
 };
 use centaur_sandbox_agent_k8s::{
     AgentSandboxBackend, AgentSandboxConfig, GitHubTokenRef, IronControlSettings, IronProxyConfig,
-    OtlpEgressTarget, ToolSource, ToolsConfig,
+    OtlpEgressTarget, Toleration, ToolSource, ToolsConfig,
 };
 use centaur_sandbox_core::{Mount, MountKind, SandboxSpec};
 use centaur_sandbox_local::LocalSandboxBackend;
@@ -651,6 +651,34 @@ struct SandboxArgs {
     /// `OTEL_SERVICE_NAME`, NO_PROXY extras) into every codex sandbox.
     #[arg(long = "session-sandbox-extra-env", env = "SESSION_SANDBOX_EXTRA_ENV")]
     extra_env_json: Option<String>,
+    /// Node steering for sandbox **and** iron-proxy pods, as a JSON object of
+    /// label key/value pairs. The chart renders `sandbox.nodeSelector` into
+    /// this. Sandbox pods are created at runtime rather than by the chart, so a
+    /// Helm or kustomize patch cannot reach them — this is the only path.
+    ///
+    /// Unlike `SESSION_SANDBOX_EXTRA_ENV`, malformed input here is a hard error
+    /// rather than a warning: silently dropping node steering would place
+    /// sandboxes on whatever the default scheduler picks, which is exactly the
+    /// outcome an operator setting it is trying to prevent.
+    #[arg(
+        long = "session-sandbox-node-selector",
+        env = "SESSION_SANDBOX_NODE_SELECTOR"
+    )]
+    node_selector_json: Option<String>,
+    /// Sandbox/proxy pod tolerations as a JSON array in the Kubernetes
+    /// toleration shape. The chart renders `sandbox.tolerations` into this.
+    #[arg(
+        long = "session-sandbox-tolerations",
+        env = "SESSION_SANDBOX_TOLERATIONS"
+    )]
+    tolerations_json: Option<String>,
+    /// `runtimeClassName` for sandbox and iron-proxy pods, e.g. a gVisor class.
+    /// The chart renders `sandbox.runtimeClassName` into this.
+    #[arg(
+        long = "session-sandbox-runtime-class-name",
+        env = "SESSION_SANDBOX_RUNTIME_CLASS_NAME"
+    )]
+    runtime_class_name: Option<String>,
     #[command(flatten)]
     tools: ToolDiscoveryArgs,
     #[command(flatten)]
@@ -1061,6 +1089,49 @@ impl SandboxArgs {
         Ok(envs)
     }
 
+    /// `SESSION_SANDBOX_NODE_SELECTOR` parsed as a JSON object of label
+    /// key/value pairs. Empty or unset yields no selector.
+    ///
+    /// Invalid input fails startup rather than warning, unlike
+    /// [`Self::sandbox_extra_env`]: an ignored node selector silently schedules
+    /// sandboxes wherever the default scheduler chooses, and an operator setting
+    /// this is trying to prevent exactly that.
+    fn node_selector(&self) -> Result<BTreeMap<String, String>, ServerError> {
+        let Some(raw) = self
+            .node_selector_json
+            .as_deref()
+            .map(str::trim)
+            .filter(|raw| !raw.is_empty())
+        else {
+            return Ok(BTreeMap::new());
+        };
+        serde_json::from_str::<BTreeMap<String, String>>(raw).map_err(|error| {
+            ServerError::UnsupportedConfig(format!(
+                "SESSION_SANDBOX_NODE_SELECTOR must be a JSON object of string \
+                 key/value pairs: {error}"
+            ))
+        })
+    }
+
+    /// `SESSION_SANDBOX_TOLERATIONS` parsed as a JSON array of Kubernetes
+    /// tolerations. Invalid input fails startup for the same reason as
+    /// [`Self::node_selector`].
+    fn tolerations(&self) -> Result<Vec<Toleration>, ServerError> {
+        let Some(raw) = self
+            .tolerations_json
+            .as_deref()
+            .map(str::trim)
+            .filter(|raw| !raw.is_empty())
+        else {
+            return Ok(Vec::new());
+        };
+        serde_json::from_str::<Vec<Toleration>>(raw).map_err(|error| {
+            ServerError::UnsupportedConfig(format!(
+                "SESSION_SANDBOX_TOLERATIONS must be a JSON array of tolerations: {error}"
+            ))
+        })
+    }
+
     /// `SESSION_SANDBOX_EXTRA_ENV` parsed as a JSON list of `{"name","value"}`
     /// objects. Invalid JSON or shapes are ignored (with a warning) rather than
     /// failing startup, matching the Python control plane's behavior.
@@ -1375,6 +1446,14 @@ impl TryFrom<&SandboxArgs> for AgentSandboxConfig {
             .filter(|secret| !secret.is_empty())
             .map(str::to_owned)
             .collect();
+        config.node_selector = args.node_selector()?;
+        config.tolerations = args.tolerations()?;
+        config.runtime_class_name = args
+            .runtime_class_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned);
         config.ready_timeout = Duration::from_secs(args.ready_timeout_secs);
         let mut proxy = args.iron_proxy.to_config()?;
         let mut fragments = vec![args.iron_proxy.infra_fragment()?];
@@ -2677,6 +2756,68 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(mock.sandbox.sandbox_otlp_egress_target().unwrap(), None);
+    }
+
+    #[test]
+    fn node_steering_parses_from_json() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-node-selector",
+            r#"{"workload":"centaur-sandbox"}"#,
+            "--session-sandbox-tolerations",
+            r#"[{"key":"example.com/sandbox","operator":"Exists","effect":"NoSchedule"}]"#,
+            "--session-sandbox-runtime-class-name",
+            "gvisor",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            args.sandbox.node_selector().unwrap().get("workload"),
+            Some(&"centaur-sandbox".to_owned())
+        );
+        assert_eq!(args.sandbox.tolerations().unwrap().len(), 1);
+        assert_eq!(args.sandbox.runtime_class_name.as_deref(), Some("gvisor"));
+    }
+
+    #[test]
+    fn node_steering_is_empty_when_unset() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+        ])
+        .unwrap();
+
+        assert!(args.sandbox.node_selector().unwrap().is_empty());
+        assert!(args.sandbox.tolerations().unwrap().is_empty());
+    }
+
+    /// Unlike `SESSION_SANDBOX_EXTRA_ENV`, bad node steering fails startup:
+    /// silently ignoring it would schedule sandboxes wherever the default
+    /// scheduler chooses, which is what setting it is meant to prevent.
+    #[test]
+    fn invalid_node_steering_is_rejected() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-node-selector",
+            "not-json",
+        ])
+        .unwrap();
+        assert!(args.sandbox.node_selector().is_err());
+
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-tolerations",
+            r#"{"not":"an array"}"#,
+        ])
+        .unwrap();
+        assert!(args.sandbox.tolerations().is_err());
     }
 
     /// The only test that mutates the process-level OTLP env keys: keeps all
