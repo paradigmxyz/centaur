@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_08_03_120000) do
+ActiveRecord::Schema[8.1].define(version: 2026_08_03_130000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -342,9 +342,12 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_03_120000) do
     t.string "name", null: false
     t.datetime "principal_assigned_at"
     t.bigint "principal_id"
+    t.datetime "requester_principal_assigned_at"
+    t.bigint "requester_principal_id"
     t.datetime "updated_at", null: false
     t.index ["labels"], name: "index_proxies_on_labels", using: :gin
     t.index ["principal_id"], name: "index_proxies_on_principal_id"
+    t.index ["requester_principal_id"], name: "index_proxies_on_requester_principal_id"
   end
 
   create_table "request_rules", force: :cascade do |t|
@@ -523,6 +526,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_03_120000) do
   add_foreign_key "principal_sync_config_snapshots", "principals"
   add_foreign_key "principals", "users", column: "console_user_id"
   add_foreign_key "principals", "users", column: "created_by_id"
+  add_foreign_key "proxies", "principals", column: "requester_principal_id", on_delete: :nullify
   add_foreign_key "proxies", "principals", on_delete: :nullify
   add_foreign_key "request_rules", "aws_auth_secrets"
   add_foreign_key "request_rules", "gcp_auth_secrets"

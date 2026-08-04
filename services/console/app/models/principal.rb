@@ -11,6 +11,7 @@ class Principal < ApplicationRecord
   # Proxies outlive their principal: deleting a principal unassigns its proxies
   # rather than destroying them, leaving them ready for reassignment.
   has_many :proxies, dependent: :nullify
+  has_many :requester_proxies, class_name: "Proxy", foreign_key: :requester_principal_id, dependent: :nullify
   has_many :principal_roles, dependent: :destroy
   has_many :roles, through: :principal_roles
   has_many :slack_channel_permissions, dependent: :destroy
@@ -79,6 +80,27 @@ class Principal < ApplicationRecord
   # Static secrets this principal resolves to, via its effective grants.
   def granted_static_secrets
     granted_secrets_by_priority(StaticSecret, :static_secret_id, includes: %i[source rules])
+  end
+
+  # Static wrapper secrets this principal may carry into turns it starts as
+  # the requester: DIRECT grants only (never role grants, so shared role
+  # infrastructure cannot hoist), and only wrappers of broker credentials
+  # whose OAuth app an admin marked always_available. Starting from
+  # StaticSecret structurally excludes every other secret kind.
+  def always_available_static_secrets
+    priorities = grants
+      .where.not(static_secret_id: nil)
+      .group(:static_secret_id)
+      .select("static_secret_id AS secret_id, MAX(priority) AS effective_priority")
+
+    StaticSecret
+      .joins("INNER JOIN (#{priorities.to_sql}) granted_priorities " \
+             "ON granted_priorities.secret_id = static_secrets.id")
+      .joins(broker_credential: :oauth_app)
+      .where(oauth_apps: { always_available: true })
+      .select("static_secrets.*", "granted_priorities.effective_priority")
+      .includes(:source, :rules)
+      .order(Arel.sql("granted_priorities.effective_priority ASC, static_secrets.id ASC"))
   end
 
   # gcp_auth credentials this principal resolves to, via its effective grants.

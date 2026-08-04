@@ -68,6 +68,12 @@ class SecretSource < ApplicationRecord
     true
   end
 
+  # Whether the value this source delivers resolves from ``credential``. Lets a
+  # caller verify that a wrapper's linked credential is the one actually served.
+  def resolves_credential?(credential)
+    credential.present? && brokered_credential&.id == credential.id
+  end
+
   # token_broker sources that reference the given broker credential, by its oid or
   # by (namespace, foreign_id). Used to block deleting a credential still in use.
   def self.referencing_broker_credential(credential)

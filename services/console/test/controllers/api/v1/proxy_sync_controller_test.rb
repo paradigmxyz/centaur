@@ -454,6 +454,109 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
     refute_nil entry
   end
 
+  # --- requester principal union ------------------------------------------
+
+  def create_requester
+    Principal.create!(namespace: "acme", foreign_id: "requester-#{SecureRandom.hex(4)}",
+                      kind: "user", created_by: users(:acme_admin))
+  end
+
+  def create_requester_with_hoistable_wrapper(host: "api.github.com", header: "X-Requester-Token")
+    admin = users(:acme_admin)
+    requester = create_requester
+    app = OauthApp.create!(
+      slug: "hoist-#{SecureRandom.hex(4)}", provider: "github", client_id: "cid",
+      client_secret: "shh", credential_namespace: "acme",
+      allowed_scopes: [ "repo" ], always_available: true, created_by: admin
+    )
+    credential = BrokerCredential.create!(
+      namespace: "acme", foreign_id: "hoist-cred-#{SecureRandom.hex(4)}",
+      token_endpoint: "https://oauth.example.com/token", client_id: "cid",
+      refresh_token: "refresh", access_token: "hoisted-token",
+      expires_at: 1.hour.from_now, last_refresh: Time.current,
+      oauth_app: app, created_by: admin
+    )
+    secret = StaticSecret.new(
+      namespace: "acme", name: "hoist wrapper",
+      inject_config: { "header" => header, "formatter" => "Bearer {{ .Value }}" },
+      broker_credential: credential, created_by: admin
+    )
+    secret.build_source(source_type: "token_broker", config: { "credential_id" => credential.oid })
+    secret.rules.build(host: host, position: 0)
+    secret.save!
+    Grant.create!(principal: requester, static_secret: secret, created_by: admin)
+    requester
+  end
+
+  test "sync unions the requester's always_available wrapper with the conversation secrets" do
+    requester = create_requester_with_hoistable_wrapper
+    @proxy.update!(requester_principal: requester)
+
+    post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
+    assert_response :ok
+
+    secrets = json_body.fetch("secrets")
+    assert_equal 3, secrets.length
+    hoisted = secrets.find { |s| s.dig("source", "value") == "hoisted-token" }
+    refute_nil hoisted
+    assert_equal({ "header" => "X-Requester-Token", "formatter" => "Bearer {{ .Value }}" }, hoisted["inject"])
+    assert secrets.any? { |s| s.dig("source", "var") == "GITHUB_TOKEN" }
+    assert secrets.any? { |s| s.dig("source", "value") == "s3cr3t-db-pass" }
+  end
+
+  test "a requester with no hoistable grants changes only the config hash" do
+    post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
+    assert_response :ok
+    baseline = json_body
+
+    @proxy.update!(requester_principal: create_requester)
+
+    post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
+    assert_response :ok
+
+    body = json_body
+    refute_equal baseline.fetch("config_hash"), body.fetch("config_hash")
+    assert_equal baseline.fetch("secrets"), body.fetch("secrets")
+    assert_equal baseline.fetch("transforms"), body.fetch("transforms")
+    assert_equal baseline.fetch("postgres"), body.fetch("postgres")
+  end
+
+  test "a requester wrapper suppresses a conversation role-granted secret on the same host and header" do
+    prod = static_secrets(:acme_prod_api_key)
+    SecretSource.create!(source_type: "env", config: { "var" => "PROD_API_KEY" }, static_secret: prod)
+    RequestRule.create!(host: "internal.example.com", position: 0, static_secret: prod)
+
+    requester = create_requester_with_hoistable_wrapper(host: "internal.example.com", header: "X-Api-Key")
+    @proxy.update!(requester_principal: requester)
+
+    post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
+    assert_response :ok
+    served = json_body.fetch("secrets").map { |s| s.dig("source", "var") || s.dig("source", "value") }
+    refute_includes served, "PROD_API_KEY"
+    assert_includes served, "hoisted-token"
+
+    @proxy.update!(requester_principal: nil)
+    post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
+    assert_response :ok
+    served = json_body.fetch("secrets").map { |s| s.dig("source", "var") || s.dig("source", "value") }
+    assert_includes served, "PROD_API_KEY"
+    refute_includes served, "hoisted-token"
+  end
+
+  test "matching config_hash short-circuits on the requester path" do
+    requester = create_requester_with_hoistable_wrapper
+    @proxy.update!(requester_principal: requester)
+
+    post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
+    assert_response :ok
+    current = json_body.fetch("config_hash")
+
+    post api_v1_proxy_sync_url, params: { config_hash: current }.to_json, headers: auth_headers
+    assert_response :ok
+    assert_equal current, json_body.fetch("config_hash")
+    refute json_body.key?("secrets")
+  end
+
   def jwt_payload(token)
     _header, payload, _signature = token.split(".")
     JSON.parse(Base64.urlsafe_decode64(payload))
