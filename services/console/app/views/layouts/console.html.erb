@@ -1871,8 +1871,7 @@
 
           <%# New chat rides the thread-link machinery with the "new" sentinel
               key: plain click opens the full-page composer, Cmd/Ctrl-click
-              adds a composer pane to the split view (and re-clicking an open
-              one closes it). %>
+              adds a composer pane to the split view. %>
           <div class="console-thread-group">
             <a href="<%= console_threads_path(thread: Console::ThreadsController::NEW_PANE_KEY) %>"
                class="console-thread-group-title"
@@ -2293,7 +2292,8 @@
       (() => {
         // Sidebar thread clicks against the split-view grid. The thread param
         // carries up to PANEL_LIMIT comma-separated keys in grid order.
-        //   - click or Cmd/Ctrl-click on an already-open thread closes it
+        //   - Cmd/Ctrl-click on an already-open thread closes it
+        //   - plain click on an already-open thread is a no-op
         //   - Cmd/Ctrl-click on a closed thread adds it as a pane
         //   - plain click on a closed thread falls through to Turbo (replaces
         //     the selection with that single thread)
@@ -2315,6 +2315,12 @@
             : [];
           const isOpen = openKeys.includes(key);
           const modified = event.metaKey || event.ctrlKey;
+
+          if (isOpen && !modified) {
+            event.preventDefault();
+            event.stopPropagation();
+            return;
+          }
 
           let nextKeys;
           if (isOpen) {

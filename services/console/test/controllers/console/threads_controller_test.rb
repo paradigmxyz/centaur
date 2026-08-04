@@ -831,6 +831,7 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :ok
+    assert_select ".console-thread-detail-header", count: 1
   end
 
   test "renders the full-page composer without loading sessions" do
@@ -873,6 +874,17 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_response :ok
     assert_select "textarea[name=prompt]", count: 1
     assert_select "body", text: /No chats yet/, count: 0
+  end
+
+  test "an active execution renders a thinking indicator" do
+    skip_unless_session_table
+    insert_console_session("console:thinking-active")
+    insert_session_execution("console:thinking-active", status: "running")
+
+    get console_threads_url(thread: "console:thinking-active")
+
+    assert_response :ok
+    assert_select "[data-console-thinking-indicator]", count: 1
   end
 
   test "a completed execution renders no thinking indicator" do
@@ -943,6 +955,21 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     get console_thread_panel_url(thread_key: thread_key)
 
     assert_response :not_found
+  end
+
+  test "a new sentinel pane opens a composer panel alongside a thread" do
+    skip_unless_session_table
+    insert_console_session("console:with-new-pane")
+
+    with_composer do
+      get console_threads_url(thread: "console:with-new-pane,new")
+    end
+
+    assert_response :ok
+    assert_select "[data-thread-panel]", count: 2
+    assert_select "[data-thread-panel=new]", count: 1
+    assert_select "[data-thread-panel=new] textarea[name=prompt]", count: 1
+    assert_select "[data-thread-panel=new] [data-console-model-picker]", count: 1
   end
 
   test "the new sentinel alone renders the full-page new chat screen" do
@@ -1304,6 +1331,16 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     end
   end
 
+  test "sidebar action renders the empty thread list when the session DB is unavailable" do
+    with_recent_first_error do
+      get console_sidebar_threads_url
+    end
+
+    assert_response :ok
+    assert_select "turbo-frame#console_sidebar_threads"
+    assert_select ".console-thread-empty", text: /No recent chats/
+  end
+
   # Fix 5: selected_messages must return the NEWEST MESSAGE_LIMIT messages, in
   # oldest-first display order. A previous ascending order + limit returned the
   # oldest N and dropped the newest for long threads.
@@ -1652,6 +1689,21 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_equal %w[a b c d], controller.send(:requested_thread_keys)
   end
 
+  test "thinking trace renders as a collapsed disclosure in the transcript" do
+    skip_unless_session_table
+
+    thread_key = "console:thinking-#{SecureRandom.hex(8)}"
+    insert_console_session(thread_key)
+    insert_session_message(thread_key, index: 0)
+    insert_reasoning_event(thread_key, text: "I should compare the two schemas before answering.")
+
+    get console_threads_url(thread: thread_key)
+
+    assert_response :ok
+    assert_select "details.console-thinking summary", text: /Thinking/
+    assert_select "details.console-thinking", text: /compare the two schemas/
+  end
+
   test "tool trace renders as a collapsed disclosure in the transcript" do
     skip_unless_session_table
 
@@ -1671,6 +1723,49 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_select "details.console-thinking", text: /Status:/, count: 0
     assert_select "details.console-thinking", text: /pnpm test/
     assert_select "details.console-thinking", text: /ok/
+  end
+
+  test "thinking preview shows the activity summary covering its block" do
+    skip_unless_session_table
+
+    thread_key = "console:activity-#{SecureRandom.hex(8)}"
+    insert_console_session(thread_key)
+    insert_session_message(thread_key, index: 0)
+    source_event_id = insert_reasoning_event(thread_key, text: "I should compare the two schemas before answering.")
+    insert_activity_summary_event(
+      thread_key,
+      summary: "I'm comparing the two schemas",
+      source_event_id: source_event_id
+    )
+
+    get console_threads_url(thread: thread_key)
+
+    assert_response :ok
+    assert_select "details.console-thinking .console-thinking-preview",
+                  text: /I'm comparing the two schemas/
+    # The full thinking text stays available in the disclosure body.
+    assert_select "details.console-thinking", text: /compare the two schemas before answering/
+  end
+
+  test "command trace group shows the activity summary as its collapsed preview" do
+    skip_unless_session_table
+
+    thread_key = "console:activity-cmd-#{SecureRandom.hex(8)}"
+    insert_console_session(thread_key)
+    insert_session_message(thread_key, index: 0)
+    source_event_id = insert_command_trace_event(thread_key, command: "pnpm test", output: "ok\n")
+    insert_activity_summary_event(
+      thread_key,
+      summary: "I'm running the test suite",
+      source_event_id: source_event_id
+    )
+
+    get console_threads_url(thread: thread_key)
+
+    assert_response :ok
+    assert_select "details.console-thinking summary", text: /Ran 1 command/
+    assert_select "details.console-thinking .console-thinking-preview",
+                  text: /I'm running the test suite/
   end
 
   test "split view renders owned panes as panels and drops unowned keys" do
@@ -1694,6 +1789,18 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_select "[data-thread-panel] a[aria-label='Close panel']", count: 2
   end
 
+  test "split view caps the grid at four panels" do
+    skip_unless_session_table
+
+    keys = Array.new(5) { |i| "console:panel-cap-#{i}-#{SecureRandom.hex(4)}" }
+    keys.each { |key| insert_console_session(key) }
+
+    get console_threads_url(thread: keys.join(","))
+
+    assert_response :ok
+    assert_select "[data-thread-panel]", count: Console::ThreadsController::PANEL_LIMIT
+  end
+
   test "single thread view does not render the split grid" do
     skip_unless_session_table
 
@@ -1706,6 +1813,46 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_select "[data-thread-panel]", count: 0
     # column-reverse scroll container opens the thread at its newest message.
     assert_select "#thread-transcript-scroll.console-transcript-scroll"
+  end
+
+  test "sidebar thread links carry the cmd-click split view hook" do
+    skip_unless_session_table
+
+    thread_key = "console:sidebar-split-#{SecureRandom.hex(8)}"
+    insert_console_session(thread_key)
+
+    get console_sidebar_threads_url
+
+    assert_response :ok
+    # The layout's Cmd/Ctrl-click handler targets this attribute to add the
+    # thread to the split-view grid.
+    assert_select "a[data-console-thread-link][href=?]",
+                  console_threads_path(thread: thread_key)
+  end
+
+  test "sidebar keeps an already-open thread selected on plain click" do
+    get console_threads_url(thread: "console:sidebar-active")
+
+    assert_response :ok
+    assert_includes response.body, "if (isOpen && !modified) {"
+    assert_includes response.body, "event.preventDefault();"
+    assert_includes response.body, "event.stopPropagation();"
+  end
+
+  # The sidebar list loads out of band via a lazy Turbo Frame, so the page must
+  # forward the current thread selection on the frame src for the active
+  # highlight to render.
+  test "threads page forwards the thread selection to the sidebar frame src" do
+    skip_unless_session_table
+
+    thread_key = "console:sidebar-active-#{SecureRandom.hex(8)}"
+    insert_console_session(thread_key)
+
+    get console_threads_url(thread: thread_key)
+
+    assert_response :ok
+    assert_select "turbo-frame#console_sidebar_threads[src=?]",
+                  console_sidebar_threads_path(thread: thread_key)
   end
 
   test "sidebar highlights every open thread of a split view" do
@@ -1724,6 +1871,25 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_select "a.console-thread-link-open[data-console-pane-index='2'][href=?]",
                   console_threads_path(thread: keys.last)
     assert_select "a.console-thread-link-active", count: 0
+  end
+
+  test "split view close control drops one thread and keeps the rest open" do
+    skip_unless_session_table
+
+    keys = Array.new(3) { |i| "console:panel-close-#{i}-#{SecureRandom.hex(4)}" }
+    keys.each { |key| insert_console_session(key) }
+
+    get console_threads_url(thread: keys.join(","))
+
+    assert_response :ok
+    # Closing the middle panel keeps the primary and the last pane.
+    assert_select "[data-thread-panel=?] a[aria-label='Close panel'][href=?]",
+                  keys[1],
+                  console_threads_path(thread: [ keys[0], keys[2] ].join(","))
+    # Closing the primary panel promotes the next thread to primary.
+    assert_select "[data-thread-panel=?] a[aria-label='Close panel'][href=?]",
+                  keys[0],
+                  console_threads_path(thread: [ keys[1], keys[2] ].join(","))
   end
 
   private
