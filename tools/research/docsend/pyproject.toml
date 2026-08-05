@@ -28,4 +28,5 @@ packages = ["."]
 
 [tool.centaur]
 module = "client.py"
+hosts = ["track.pstmrk.it"]
 secrets = [{type = "http", name = "BROWSERBASE_API_KEY", mode = "inject", inject_header = "X-BB-API-Key", hosts = ["api.browserbase.com"]}]

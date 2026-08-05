@@ -30,6 +30,7 @@ BROWSERBASE_PROXY_COUNTRY = os.environ.get("BROWSERBASE_PROXY_COUNTRY", "")  # n
 BROWSERBASE_DEFAULT_SESSION_TIMEOUT_SECONDS = 600
 BROWSERBASE_MAX_SESSION_TIMEOUT_SECONDS = 1800
 BROWSERBASE_DOWNLOAD_TIMEOUT_SECONDS = 120
+POSTMARK_TRACKING_HOST = "track.pstmrk.it"
 MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
 CDP_MAX_MESSAGE_BYTES = 256 * 1024 * 1024
 LOGGER = logging.getLogger(__name__)
@@ -186,10 +187,17 @@ def _decode_session_url(value: str) -> str:
 
 
 def _normalize_verification_url(url: str) -> str:
-    normalized = _normalize_docsend_url(url)
+    normalized = url.strip().rstrip("/")
     parsed = urlparse(normalized)
-    if parsed.scheme != "https" or parsed.username or parsed.password:
-        raise ValueError("Verification URL must be an HTTPS DocSend URL")
+    hostname = (parsed.hostname or "").lower()
+    is_docsend = hostname == "docsend.com" or hostname.endswith(".docsend.com")
+    if (
+        parsed.scheme != "https"
+        or parsed.username
+        or parsed.password
+        or not (is_docsend or hostname == POSTMARK_TRACKING_HOST)
+    ):
+        raise ValueError("Verification URL must be an HTTPS DocSend or Postmark URL")
     return normalized
 
 
