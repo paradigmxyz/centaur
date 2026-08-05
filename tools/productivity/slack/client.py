@@ -495,6 +495,12 @@ class SlackClient:
             "reply_count": msg.get("reply_count", 0),
             "reply_users": msg.get("reply_users", []),
             "latest_reply": msg.get("latest_reply"),
+            # Rides along on the history/replies payload under channels:history,
+            # so no extra OAuth scope (feedback.py already reads it off the raw
+            # responses). Slack caps the per-reaction `users` array, so `count`
+            # can exceed `len(users)`; a caller needing the complete reactor
+            # list still wants reactions.get and its reactions:read scope.
+            "reactions": msg.get("reactions", []),
             "type": msg.get("type", "message"),
             "subtype": msg.get("subtype"),
             "parent_user_id": msg.get("parent_user_id"),

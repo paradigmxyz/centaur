@@ -144,6 +144,10 @@ export type GithubbotOptions = {
   autoMerge?: boolean;
   /** Max consecutive CI-fix attempts on an owned PR before escalating. Default 3. */
   ciFixMaxAttempts?: number;
+  /** Delay before confirming a settled-green rollup. Default 15000ms. */
+  ciSettleConfirmMs?: number;
+  /** Emit settled CI and submitted-review workflow events. Default false. */
+  workflowEvents?: boolean;
   /** Delete the head branch after the bot merges an owned PR. Default true. */
   deleteBranchOnMerge?: boolean;
   /** Fallback @handle to tag when the bot gives up and escalates. */

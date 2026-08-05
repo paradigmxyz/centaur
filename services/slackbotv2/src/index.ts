@@ -53,8 +53,9 @@ import {
   withSlackApiTimeout
 } from './session-api'
 import {
-  buildConsoleSessionContextBlock,
+  buildSlackResponseContextBlock,
   defaultModelForHarness,
+  defaultServiceTierForHarness,
   effectiveReasoningForHarness,
   reasoningForModel,
   type SlackContextBlock
@@ -1120,13 +1121,22 @@ async function syncThreadMessageToSession(
     resolvedReasoning,
     input.options.harnessDefaultReasoning
   )
-  let consoleSessionBlock = isFirstAssistantMessage
-    ? buildConsoleSessionContextBlock({
-        consoleBaseUrl: input.options.consolePublicUrl,
+  const responseMetadataMode = input.options.responseMetadataMode ?? 'first'
+  const includeResponseMetadata =
+    responseMetadataMode === 'always' ||
+    (responseMetadataMode === 'first' && isFirstAssistantMessage)
+  let responseContextBlock = isFirstAssistantMessage || includeResponseMetadata
+    ? buildSlackResponseContextBlock({
+        consoleBaseUrl: isFirstAssistantMessage ? input.options.consolePublicUrl : undefined,
         threadKey: thread.id,
         harnessType: effectiveHarnessType,
+        metadataEnabled: includeResponseMetadata,
         model: effectiveModel,
-        reasoning: effectiveReasoning
+        reasoning: effectiveReasoning,
+        serviceTier:
+          input.options.responseServiceTierEnabled === true && !resolvedProvider
+            ? defaultServiceTierForHarness(effectiveHarnessType)
+            : undefined
       })
     : undefined
   if (overrides.harnessType || overrides.model || overrides.provider || overrides.reasoning) {
@@ -1343,13 +1353,18 @@ async function syncThreadMessageToSession(
         )
         forwardInput.metadataModel = model
         forwardInput.reasoning = requestedReasoning
-        if (isFirstAssistantMessage) {
-          consoleSessionBlock = buildConsoleSessionContextBlock({
-            consoleBaseUrl: input.options.consolePublicUrl,
+        if (isFirstAssistantMessage || includeResponseMetadata) {
+          responseContextBlock = buildSlackResponseContextBlock({
+            consoleBaseUrl: isFirstAssistantMessage ? input.options.consolePublicUrl : undefined,
             threadKey: thread.id,
             harnessType,
+            metadataEnabled: includeResponseMetadata,
             model,
-            reasoning
+            reasoning,
+            serviceTier:
+              input.options.responseServiceTierEnabled === true && !resolvedProvider
+                ? defaultServiceTierForHarness(harnessType)
+                : undefined
           })
         }
         traceLog(input.options, 'slackbotv2_session_harness_resolved', trace, {
@@ -1371,7 +1386,7 @@ async function syncThreadMessageToSession(
       renderLease,
       assistantStatusVisible,
       trace,
-      consoleSessionBlock
+      responseContextBlock
     )
     traceLog(input.options, 'slackbotv2_forward_complete', trace, {
       last_event_id: lastEventId
@@ -1440,7 +1455,7 @@ function scheduleExecutionRender(
   renderLease: { release: (() => Promise<void>) | null },
   assistantStatusVisible: boolean,
   trace?: SlackbotV2Trace,
-  consoleSessionBlock?: SlackContextBlock
+  responseContextBlock?: SlackContextBlock
 ): void {
   const promise = (async () => {
     slackbotMetrics.activeLiveRenders.inc()
@@ -1455,7 +1470,7 @@ function scheduleExecutionRender(
           getLastEventId,
           assistantStatusVisible,
           trace,
-          consoleSessionBlock
+          responseContextBlock
         )
         if (result === 'complete') return
         const delayMs = renderRetryDelayMs(attempt)
@@ -1499,7 +1514,7 @@ async function renderExecutionAttempt(
   getLastEventId: () => number,
   assistantStatusVisible: boolean,
   trace?: SlackbotV2Trace,
-  consoleSessionBlock?: SlackContextBlock
+  responseContextBlock?: SlackContextBlock
 ): Promise<'complete' | 'retry'> {
   const renderStartedAtMs = nowMs()
   let outcome = 'failure'
@@ -1514,7 +1529,7 @@ async function renderExecutionAttempt(
       options,
       trace,
       assistantStatusVisible,
-      consoleSessionBlock
+      responseContextBlock
     )
     rendered = true
     outcome = 'complete'
@@ -2328,7 +2343,7 @@ async function renderExecutionStream(
   options: SlackbotV2Options,
   trace?: SlackbotV2Trace,
   assistantStatusVisible = false,
-  consoleSessionBlock?: SlackContextBlock
+  responseContextBlock?: SlackContextBlock
 ): Promise<{ diverged: boolean; messageId?: string }> {
   const promptText = slackMessagePromptText(message)
   if (isPlainTextOnlyRequest(promptText)) {
@@ -2378,9 +2393,9 @@ async function renderExecutionStream(
       recipientUserId: message.author.userId,
       ...(taskDisplayMode === 'none' ? {} : { taskDisplayMode }),
       // stopBlocks are appended to the end of the finalized Slack message via
-      // chat.stopStream. Present only for the first assistant message so the
-      // Console link renders once per thread.
-      ...(consoleSessionBlock ? { stopBlocks: [consoleSessionBlock] } : {})
+      // chat.stopStream. The Console link is only included on the first assistant
+      // message; optional response metadata may be appended on every live response.
+      ...(responseContextBlock ? { stopBlocks: [responseContextBlock] } : {})
     })
     return { diverged: capture.diverged, messageId: sent?.id }
   } finally {

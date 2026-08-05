@@ -16,6 +16,7 @@ import type {
 } from "./types";
 import {
   elapsedMs,
+  errorMessage,
   isJsonObject,
   noopLogger,
   nowMs,
@@ -55,7 +56,11 @@ export class SessionApiError extends Error {
 export function isRetryableSessionApiError(error: unknown): boolean {
   if (error instanceof SessionApiError) return error.retryable;
   if (!(error instanceof Error)) return false;
-  return error.name === "AbortError" || error.name === "TypeError";
+  return (
+    error.name === "AbortError" ||
+    error.name === "TimeoutError" ||
+    error.name === "TypeError"
+  );
 }
 
 type ForwardSessionApiCallbacks = {
@@ -591,6 +596,68 @@ async function streamSessionNotifications(
   await ensureApiOk(response, "stream events", options);
   if (!response.body) return toAsyncIterable([]);
   return parseSessionEventStream(response.body, onEventId);
+}
+
+export type EmitWorkflowEventInput = {
+  eventType: string;
+  correlationId: string;
+  payload: JsonObject;
+};
+
+const WORKFLOW_EVENT_MAX_RETRIES = 3;
+const WORKFLOW_EVENT_REQUEST_TIMEOUT_MS = 5_000;
+
+/** Emit an idempotent durable workflow event, retrying transient failures. */
+export async function emitWorkflowEvent(
+  options: GithubbotOptions,
+  input: EmitWorkflowEventInput,
+): Promise<void> {
+  const url = new URL(
+    "/api/workflows/events",
+    ensureTrailingSlash(options.apiUrl),
+  ).toString();
+  const fetchFn = options.fetch ?? fetch;
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= WORKFLOW_EVENT_MAX_RETRIES; attempt++) {
+    try {
+      const response = await fetchFn(url, {
+        method: "POST",
+        headers: apiHeaders(options),
+        body: JSON.stringify({
+          event_type: input.eventType,
+          correlation_id: input.correlationId,
+          payload: input.payload,
+        }),
+        signal: AbortSignal.timeout(WORKFLOW_EVENT_REQUEST_TIMEOUT_MS),
+      });
+      await ensureApiOk(response, "emit workflow event", options);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (
+        attempt === WORKFLOW_EVENT_MAX_RETRIES ||
+        !isRetryableSessionApiError(error)
+      ) {
+        break;
+      }
+      await sleep(workflowEventRetryDelayMs(attempt));
+    }
+  }
+
+  (options.logger ?? noopLogger).warn("githubbot_workflow_event_emit_failed", {
+    correlation_id: input.correlationId,
+    error: errorMessage(lastError),
+    event_type: input.eventType,
+  });
+  throw lastError;
+}
+
+function workflowEventRetryDelayMs(attempt: number): number {
+  return 250 * 4 ** attempt;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function apiSessionUrl(
