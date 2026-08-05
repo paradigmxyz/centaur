@@ -170,15 +170,18 @@ def _normalize_docsend_url(url: str) -> str:
 
 def _encode_session_url(url: str) -> str:
     """Encode a URL using characters accepted by Browserbase metadata."""
-    return f"hex{url.encode().hex()}"
+    encoded = base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
+    return f"b64{encoded}"
 
 
 def _decode_session_url(value: str) -> str:
     """Decode new metadata while accepting sessions created before encoding."""
-    if not value.startswith("hex"):
+    if not value.startswith("b64"):
         return _normalize_docsend_url(value)
     try:
-        url = bytes.fromhex(value[3:]).decode()
+        encoded = value[3:]
+        padding = "=" * (-len(encoded) % 4)
+        url = base64.urlsafe_b64decode(encoded + padding).decode()
     except (UnicodeDecodeError, ValueError) as exc:
         raise ValueError("Invalid DocSend URL in resumable session metadata") from exc
     return _normalize_docsend_url(url)
