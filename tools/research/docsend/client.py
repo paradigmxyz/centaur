@@ -179,9 +179,7 @@ def _decode_session_url(value: str) -> str:
     if not value.startswith("b64"):
         raise ValueError("Invalid DocSend URL in resumable session metadata")
     try:
-        encoded = value[3:]
-        padding = "=" * (-len(encoded) % 4)
-        url = base64.urlsafe_b64decode(encoded + padding).decode()
+        url = base64.urlsafe_b64decode(value[3:] + "===").decode()
     except (UnicodeDecodeError, ValueError) as exc:
         raise ValueError("Invalid DocSend URL in resumable session metadata") from exc
     return _normalize_docsend_url(url)
