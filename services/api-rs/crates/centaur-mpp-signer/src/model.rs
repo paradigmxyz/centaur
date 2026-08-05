@@ -133,6 +133,7 @@ impl CompletionOutcome {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct AuthorizeRequest {
+    pub scheme: String,
     pub host: String,
     pub method: String,
     pub path: String,

@@ -5,9 +5,6 @@ from collections.abc import Callable
 from typing import Any
 
 import typer
-from dotenv import load_dotenv
-
-load_dotenv()
 
 app = typer.Typer(
     name="mpp",

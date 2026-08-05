@@ -18,6 +18,7 @@ create table if not exists mpp_charge_attempts (
     currency text not null,
     sandbox_id text not null,
     execution_id text not null references session_executions(execution_id) on delete restrict,
+    budget_reserved boolean not null default false,
     status text not null check (
         status in (
             'reserving',

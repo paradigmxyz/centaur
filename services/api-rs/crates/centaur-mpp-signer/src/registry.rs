@@ -1,4 +1,4 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, sync::Arc, time::Duration as StdDuration};
 
 use anyhow::Context as _;
 use reqwest::{StatusCode, Url, header};
@@ -16,8 +16,18 @@ pub struct Registry {
     url: Url,
     cache_ttl: Duration,
     max_stale: Duration,
-    snapshot: Mutex<Option<RegistrySnapshot>>,
+    state: Mutex<RegistryState>,
 }
+
+#[derive(Default)]
+struct RegistryState {
+    snapshot: Option<RegistrySnapshot>,
+    retry_after: Option<OffsetDateTime>,
+}
+
+const REGISTRY_REQUEST_TIMEOUT: StdDuration = StdDuration::from_secs(3);
+const REGISTRY_CONNECT_TIMEOUT: StdDuration = StdDuration::from_secs(2);
+const REGISTRY_RETRY_BACKOFF: Duration = Duration::seconds(30);
 
 impl Registry {
     pub fn new(
@@ -26,9 +36,16 @@ impl Registry {
         cache_ttl: Duration,
         max_stale: Duration,
     ) -> anyhow::Result<Self> {
-        let url = Url::parse(url).context("parse MPP registry URL")?;
+        let raw_url = url;
+        let url = Url::parse(raw_url).context("parse MPP registry URL")?;
         anyhow::ensure!(
-            url.scheme() == "https" && url.host_str().is_some() && url.username().is_empty(),
+            url.scheme() == "https"
+                && url.host_str().is_some()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none()
+                && !has_dot_segments(raw_url),
             "MPP registry URL must be absolute HTTPS without credentials"
         );
         anyhow::ensure!(
@@ -37,6 +54,8 @@ impl Registry {
         );
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(REGISTRY_CONNECT_TIMEOUT)
+            .timeout(REGISTRY_REQUEST_TIMEOUT)
             .build()?;
         Ok(Self {
             store,
@@ -44,19 +63,28 @@ impl Registry {
             url,
             cache_ttl,
             max_stale,
-            snapshot: Mutex::new(None),
+            state: Mutex::new(RegistryState::default()),
         })
+    }
+
+    pub async fn warm(&self) -> anyhow::Result<()> {
+        self.snapshot().await.map(|_| ())
     }
 
     pub async fn route(
         &self,
+        scheme: &str,
         host: &str,
         method: &str,
         path_and_query: &str,
     ) -> anyhow::Result<RegisteredRoute> {
         let snapshot = self.snapshot().await?;
+        anyhow::ensure!(
+            scheme.eq_ignore_ascii_case("https"),
+            "invalid MPP request scheme"
+        );
         let authority =
-            Url::parse(&format!("https://{host}")).context("invalid MPP request authority")?;
+            Url::parse(&format!("{scheme}://{host}")).context("invalid MPP request authority")?;
         let hostname = authority
             .host_str()
             .context("MPP request authority has no hostname")?;
@@ -115,44 +143,64 @@ impl Registry {
     }
 
     pub async fn ready(&self) -> bool {
-        self.snapshot()
-            .await
-            .is_ok_and(|snapshot| OffsetDateTime::now_utc() - snapshot.fetched_at <= self.max_stale)
+        let Ok(state) = self.state.try_lock() else {
+            return false;
+        };
+        state.snapshot.as_ref().is_some_and(|snapshot| {
+            OffsetDateTime::now_utc() - snapshot.fetched_at <= self.max_stale
+        })
     }
 
     async fn snapshot(&self) -> anyhow::Result<RegistrySnapshot> {
-        let mut guard = self.snapshot.lock().await;
-        if guard.is_none()
+        let mut state = self.state.lock().await;
+        if state.snapshot.is_none()
             && let Some(cached) = self.store.load_registry_cache().await?
         {
             match validate_catalog(&cached.catalog) {
-                Ok(()) => *guard = Some(cached),
+                Ok(()) => state.snapshot = Some(cached),
                 Err(error) => {
                     tracing::warn!(error = %error, "discarding invalid cached MPP registry");
                 }
             }
         }
         let now = OffsetDateTime::now_utc();
-        if let Some(snapshot) = guard.as_ref()
+        if let Some(snapshot) = state.snapshot.as_ref()
             && now - snapshot.fetched_at <= self.cache_ttl
         {
             record_snapshot_metrics(snapshot, now);
             return Ok(snapshot.clone());
         }
 
-        match self.refresh(guard.as_ref(), now).await {
+        if state
+            .retry_after
+            .is_some_and(|retry_after| now < retry_after)
+        {
+            let snapshot = state
+                .snapshot
+                .as_ref()
+                .filter(|snapshot| now - snapshot.fetched_at <= self.max_stale)
+                .context("MPP registry cache expired while refresh is backed off")?;
+            metrics::counter!("centaur_mpp_registry_stale_uses_total").increment(1);
+            record_snapshot_metrics(snapshot, now);
+            return Ok(snapshot.clone());
+        }
+
+        match self.refresh(state.snapshot.as_ref(), now).await {
             Ok(snapshot) => {
                 self.store.save_registry_cache(&snapshot).await?;
                 metrics::counter!("centaur_mpp_registry_refresh_total", "outcome" => "success")
                     .increment(1);
                 record_snapshot_metrics(&snapshot, now);
-                *guard = Some(snapshot.clone());
+                state.snapshot = Some(snapshot.clone());
+                state.retry_after = None;
                 Ok(snapshot)
             }
             Err(error) => {
                 metrics::counter!("centaur_mpp_registry_refresh_total", "outcome" => "failure")
                     .increment(1);
-                if let Some(snapshot) = guard.as_ref()
+                state.retry_after =
+                    Some(now + std::cmp::min(self.cache_ttl, REGISTRY_RETRY_BACKOFF));
+                if let Some(snapshot) = state.snapshot.as_ref()
                     && now - snapshot.fetched_at <= self.max_stale
                 {
                     metrics::counter!("centaur_mpp_registry_stale_uses_total").increment(1);
@@ -229,6 +277,7 @@ fn header_string(
 
 fn validate_catalog(catalog: &Catalog) -> anyhow::Result<()> {
     let mut ids = HashSet::new();
+    let mut routes = Vec::<(String, u16, String, String)>::new();
     for service in &catalog.services {
         anyhow::ensure!(
             !service.id.is_empty() && ids.insert(service.id.as_str()),
@@ -245,7 +294,7 @@ fn validate_catalog(catalog: &Catalog) -> anyhow::Result<()> {
                 && url.password().is_none()
                 && url.query().is_none()
                 && url.fragment().is_none()
-                && !has_dot_segments(url.path()),
+                && !has_dot_segments(base_url),
             "MPP registry service URL must be absolute HTTPS without credentials"
         );
         anyhow::ensure!(
@@ -257,6 +306,23 @@ fn validate_catalog(catalog: &Catalog) -> anyhow::Result<()> {
         );
         for endpoint in &service.endpoints {
             validate_endpoint(endpoint)?;
+            let route = (
+                url.host_str().expect("validated host").to_ascii_lowercase(),
+                url.port_or_known_default()
+                    .expect("HTTPS has a default port"),
+                endpoint.method.to_ascii_uppercase(),
+                registered_path(&url, &endpoint.path),
+            );
+            anyhow::ensure!(
+                !routes.iter().any(|existing| {
+                    existing.0 == route.0
+                        && existing.1 == route.1
+                        && existing.2 == route.2
+                        && path_patterns_overlap(&existing.3, &route.3)
+                }),
+                "MPP registry contains overlapping authority, method, and path entries"
+            );
+            routes.push(route);
         }
     }
     Ok(())
@@ -286,10 +352,22 @@ fn path_matches(template: &str, concrete: &str) -> bool {
             .iter()
             .zip(concrete_segments)
             .all(|(expected, actual)| {
-                let parameter = expected.starts_with(':')
-                    || (expected.starts_with('{') && expected.ends_with('}'));
+                let parameter = is_path_parameter(expected);
                 (parameter && !actual.is_empty()) || expected == &actual
             })
+}
+
+fn path_patterns_overlap(first: &str, second: &str) -> bool {
+    let first = first.split('/').collect::<Vec<_>>();
+    let second = second.split('/').collect::<Vec<_>>();
+    first.len() == second.len()
+        && first.iter().zip(second).all(|(left, right)| {
+            left == &right || is_path_parameter(left) || is_path_parameter(right)
+        })
+}
+
+fn is_path_parameter(segment: &str) -> bool {
+    segment.starts_with(':') || (segment.starts_with('{') && segment.ends_with('}'))
 }
 
 fn registered_path(service_url: &Url, endpoint_path: &str) -> String {
@@ -332,7 +410,7 @@ mod tests {
     use tokio::net::TcpListener;
     use uuid::Uuid;
 
-    use super::{has_dot_segments, path_matches, registered_path};
+    use super::{RegistryState, has_dot_segments, path_matches, registered_path, validate_catalog};
     use crate::{
         model::{
             ActiveExecution, BeginAttempt, Catalog, CompletedAttempt, CompletionOutcome, Endpoint,
@@ -379,6 +457,10 @@ mod tests {
         }
 
         async fn active_reservation_count(&self) -> anyhow::Result<i64> {
+            Ok(0)
+        }
+
+        async fn reconcile_stale_reservations(&self, _max_age_seconds: i64) -> anyhow::Result<i64> {
             Ok(0)
         }
 
@@ -445,6 +527,10 @@ mod tests {
         match state.response.load(Ordering::SeqCst) {
             0 => StatusCode::NOT_MODIFIED.into_response(),
             1 => Json(serde_json::json!({"services": "invalid"})).into_response(),
+            3 => {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                Json(catalog()).into_response()
+            }
             _ => (StatusCode::SERVICE_UNAVAILABLE, "unavailable").into_response(),
         }
     }
@@ -506,12 +592,13 @@ mod tests {
             store,
             client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
+                .timeout(std::time::Duration::from_millis(50))
                 .build()
                 .expect("registry client"),
             url,
             cache_ttl: Duration::minutes(15),
             max_stale: Duration::hours(24),
-            snapshot: tokio::sync::Mutex::new(None),
+            state: tokio::sync::Mutex::new(RegistryState::default()),
         }
     }
 
@@ -533,6 +620,21 @@ mod tests {
     }
 
     #[test]
+    fn registry_url_rejects_credentials_queries_fragments_and_dot_segments() {
+        for url in [
+            "https://user:password@registry.example/services",
+            "https://registry.example/services?target=other",
+            "https://registry.example/services#fragment",
+            "https://registry.example/%2e%2e/services",
+        ] {
+            let store = Arc::new(MemoryStore::new(None));
+            let result =
+                super::Registry::new(store, url, Duration::minutes(15), Duration::hours(24));
+            assert!(result.is_err(), "accepted unsafe registry URL {url}");
+        }
+    }
+
+    #[test]
     fn service_base_paths_are_part_of_registered_routes() {
         let service = Url::parse("https://gateway.example/provider").unwrap();
         assert_eq!(
@@ -543,6 +645,23 @@ mod tests {
             &registered_path(&service, "/v1/:id"),
             "/provider/v1/record-1"
         ));
+    }
+
+    #[test]
+    fn catalog_routes_must_be_globally_unique() {
+        let mut catalog = catalog();
+        let mut duplicate = catalog.services[0].clone();
+        duplicate.id = "duplicate".to_owned();
+        duplicate.endpoints[0].path = "/v1/:resource".to_owned();
+        catalog.services.push(duplicate);
+
+        let error = validate_catalog(&catalog).expect_err("duplicate route must fail closed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("overlapping authority, method, and path")
+        );
     }
 
     #[tokio::test]
@@ -602,5 +721,32 @@ mod tests {
         assert!(error.to_string().contains("decode MPP registry JSON"));
         assert_eq!(expired_store.saves.load(Ordering::SeqCst), 0);
         assert_eq!(state.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn failed_refresh_is_bounded_and_backed_off_while_stale_cache_is_valid() {
+        let state = RegistryServerState {
+            response: Arc::new(AtomicUsize::new(3)),
+            calls: Arc::new(AtomicUsize::new(0)),
+            saw_conditions: Arc::new(AtomicBool::new(false)),
+        };
+        let url = registry_server(state.clone()).await;
+        let stale_at = OffsetDateTime::now_utc() - Duration::hours(1);
+        let store = Arc::new(MemoryStore::new(Some(snapshot(stale_at))));
+        let registry = registry(store, url);
+
+        let started = std::time::Instant::now();
+        let first = registry.snapshot().await.expect("stale fallback");
+        let second = registry
+            .snapshot()
+            .await
+            .expect("backed-off stale fallback");
+
+        assert!(started.elapsed() < std::time::Duration::from_millis(180));
+        assert_eq!(first.fetched_at, stale_at);
+        assert_eq!(second.fetched_at, stale_at);
+        assert_eq!(state.calls.load(Ordering::SeqCst), 1);
+        assert!(registry.ready().await);
+        assert_eq!(state.calls.load(Ordering::SeqCst), 1);
     }
 }

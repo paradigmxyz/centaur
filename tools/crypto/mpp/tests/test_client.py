@@ -340,10 +340,64 @@ def test_payment_402_is_concise_and_does_not_expose_challenge(tmp_path: Path) ->
     assert "secret-challenge" not in str(error.value)
 
 
+class ChunkedStream(httpx.SyncByteStream):
+    def __iter__(self):
+        yield b"1234"
+        yield b"5678"
+
+
+@pytest.mark.parametrize("advertise_size", [False, True])
+def test_response_size_limit_is_enforced_while_streaming(
+    tmp_path: Path, advertise_size: bool
+) -> None:
+    headers = {"Content-Length": "8"} if advertise_size else {}
+    client = make_client(tmp_path, lambda _: httpx.Response(200, json=CATALOG))
+    client.max_response_bytes = 5
+    client._service_http = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(200, headers=headers, stream=ChunkedStream())
+        )
+    )
+
+    with pytest.raises(MppRequestError, match="size limit"):
+        client.request("catalog", "GET", "/v1/records")
+
+
 @pytest.mark.parametrize("payload", [{}, {"services": {}}, {"services": ["bad"]}])
 def test_catalog_rejects_invalid_shapes(tmp_path: Path, payload: object) -> None:
     client = make_client(tmp_path, lambda _: httpx.Response(200, json=payload))
     with pytest.raises(MppCatalogError, match="invalid services list"):
+        client.list_services()
+
+
+def test_catalog_rejects_duplicate_authority_method_and_path(tmp_path: Path) -> None:
+    catalog = copy.deepcopy(CATALOG)
+    duplicate = copy.deepcopy(catalog["services"][0])
+    duplicate["id"] = "duplicate"
+    duplicate["endpoints"] = [copy.deepcopy(duplicate["endpoints"][0])]
+    duplicate["endpoints"][0]["path"] = "/v1/:resource"
+    catalog["services"].append(duplicate)
+    client = make_client(tmp_path, lambda _: httpx.Response(200, json=catalog))
+
+    with pytest.raises(MppCatalogError, match="overlapping authority"):
+        client.list_services()
+
+
+@pytest.mark.parametrize(
+    "service_url",
+    [
+        "https://api.catalog.example/base?target=other",
+        "https://api.catalog.example/base#fragment",
+        "https://api.catalog.example/base/%2e%2e/admin",
+        "https://api.catalog.example:invalid/base",
+    ],
+)
+def test_catalog_rejects_unsafe_service_base_urls(tmp_path: Path, service_url: str) -> None:
+    catalog = copy.deepcopy(CATALOG)
+    catalog["services"][0]["serviceUrl"] = service_url
+    client = make_client(tmp_path, lambda _: httpx.Response(200, json=catalog))
+
+    with pytest.raises(MppCatalogError, match="invalid URL"):
         client.list_services()
 
 

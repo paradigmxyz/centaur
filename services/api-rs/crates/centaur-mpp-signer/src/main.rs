@@ -30,6 +30,23 @@ async fn main() -> anyhow::Result<()> {
         TimeDuration::seconds(args.registry_cache_ttl_seconds),
         TimeDuration::seconds(args.registry_max_stale_seconds),
     )?);
+    if let Err(error) = registry.warm().await {
+        tracing::warn!(%error, "MPP registry is unavailable during startup");
+    }
+    let registry_refresh = {
+        let registry = registry.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if let Err(error) = registry.warm().await {
+                    tracing::warn!(%error, "MPP registry background refresh failed");
+                }
+            }
+        })
+    };
     let signer = Arc::new(TempoChargeSigner::new(
         args.signer()?,
         &args.rpc_url,
@@ -45,6 +62,7 @@ async fn main() -> anyhow::Result<()> {
         signer,
         args.max_per_charge_atomic,
         args.max_daily_atomic,
+        args.budget_currency,
     )?;
 
     if state.budgets_disabled() {
@@ -56,9 +74,12 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = TcpListener::bind(args.bind_addr).await?;
     info!(bind_addr = %args.bind_addr, "starting Centaur MPP signer");
-    axum::serve(listener, build_router(state))
+    let serve_result = axum::serve(listener, build_router(state))
         .with_graceful_shutdown(shutdown_signal())
-        .await?;
+        .await;
+    registry_refresh.abort();
+    let _ = registry_refresh.await;
+    serve_result?;
     telemetry.shutdown();
     Ok(())
 }

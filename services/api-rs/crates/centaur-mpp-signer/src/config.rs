@@ -59,6 +59,9 @@ pub struct Args {
     #[arg(long, env = "MPP_MAX_DAILY_ATOMIC")]
     pub max_daily_atomic: Option<i64>,
 
+    #[arg(long, env = "MPP_BUDGET_CURRENCY")]
+    pub budget_currency: Option<String>,
+
     #[arg(long, env = "MPP_RUN_MIGRATIONS", default_value_t = true)]
     pub run_migrations: bool,
 }
@@ -98,6 +101,59 @@ impl Args {
                 "{name} cannot be negative"
             );
         }
+        let budgets_configured =
+            self.max_per_charge_atomic.is_some() || self.max_daily_atomic.is_some();
+        anyhow::ensure!(
+            !budgets_configured
+                || self
+                    .budget_currency
+                    .as_deref()
+                    .is_some_and(|currency| !currency.trim().is_empty()),
+            "MPP_BUDGET_CURRENCY is required when a software budget is configured"
+        );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser as _;
+
+    use super::Args;
+
+    fn args(extra: &[&str]) -> Args {
+        let mut values = vec![
+            "centaur-mpp-signer",
+            "--database-url",
+            "postgres://example.invalid/test",
+            "--private-key",
+            "unused-in-validation",
+            "--signer-token",
+            "test-signer-token-that-is-at-least-32-bytes",
+        ];
+        values.extend_from_slice(extra);
+        Args::try_parse_from(values).expect("arguments")
+    }
+
+    #[test]
+    fn configured_budgets_require_one_currency() {
+        let error = args(&["--max-daily-atomic", "100"])
+            .validate()
+            .expect_err("currency must be required");
+        assert!(error.to_string().contains("MPP_BUDGET_CURRENCY"));
+
+        args(&[
+            "--max-per-charge-atomic",
+            "10",
+            "--budget-currency",
+            "0xtest",
+        ])
+        .validate()
+        .expect("single-currency budget");
+    }
+
+    #[test]
+    fn missing_budget_values_keep_software_caps_disabled() {
+        args(&[]).validate().expect("budgets are optional");
     }
 }

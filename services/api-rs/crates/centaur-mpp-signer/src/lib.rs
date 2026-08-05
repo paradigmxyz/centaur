@@ -34,7 +34,7 @@ use uuid::Uuid;
 
 pub use registry::Registry;
 pub use store::PgSignerStore;
-use store::SignerStore;
+use store::{RESERVATION_TIMEOUT_SECONDS, SignerStore};
 
 const AUTHORIZATIONS_TOTAL: &str = "centaur_mpp_authorizations_total";
 const CHARGES_TOTAL: &str = "centaur_mpp_charges_total";
@@ -48,6 +48,7 @@ const ACTIVE_RESERVATIONS: &str = "centaur_mpp_active_budget_reservations";
 const BUDGET_REJECTIONS_TOTAL: &str = "centaur_mpp_budget_rejections_total";
 const LEASE_CHECKS_TOTAL: &str = "centaur_mpp_execution_lease_checks_total";
 const ACTIVE_EXECUTION_LEASES: &str = "centaur_mpp_active_execution_leases";
+const RECONCILED_RESERVATIONS_TOTAL: &str = "centaur_mpp_budget_reservations_reconciled_total";
 
 #[async_trait]
 pub trait ChargeSigner: Send + Sync {
@@ -88,6 +89,7 @@ pub struct AppState {
     signer: Arc<dyn ChargeSigner>,
     max_per_charge_atomic: Option<i64>,
     max_daily_atomic: Option<i64>,
+    budget_currency: Option<String>,
 }
 
 impl AppState {
@@ -101,10 +103,19 @@ impl AppState {
         signer: Arc<dyn ChargeSigner>,
         max_per_charge_atomic: Option<i64>,
         max_daily_atomic: Option<i64>,
+        budget_currency: Option<String>,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             token.len() >= 32,
             "MPP signer token must be at least 32 bytes"
+        );
+        let budgets_configured = max_per_charge_atomic.is_some() || max_daily_atomic.is_some();
+        anyhow::ensure!(
+            !budgets_configured
+                || budget_currency
+                    .as_deref()
+                    .is_some_and(|currency| !currency.trim().is_empty()),
+            "MPP budget currency is required when a software budget is configured"
         );
         Ok(Self {
             token: Arc::new(token.into_bytes()),
@@ -114,6 +125,7 @@ impl AppState {
             signer,
             max_per_charge_atomic,
             max_daily_atomic,
+            budget_currency: budget_currency.map(|currency| currency.trim().to_owned()),
         })
     }
 
@@ -180,6 +192,10 @@ pub fn describe_metrics() {
         "MPP budget reservations currently awaiting completion."
     );
     metrics::describe_counter!(
+        RECONCILED_RESERVATIONS_TOTAL,
+        "MPP budget reservations conservatively reconciled after completion timeout."
+    );
+    metrics::describe_counter!(
         BUDGET_REJECTIONS_TOTAL,
         "MPP charges rejected by configured software budgets."
     );
@@ -221,6 +237,15 @@ async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 async fn metrics(State(state): State<AppState>) -> Result<String, ApiError> {
+    let reconciled = state
+        .store
+        .reconcile_stale_reservations(RESERVATION_TIMEOUT_SECONDS)
+        .await
+        .map_err(ApiError::internal)?;
+    if reconciled > 0 {
+        metrics::counter!(RECONCILED_RESERVATIONS_TOTAL).increment(reconciled as u64);
+        tracing::warn!(reconciled, "reconciled stale MPP budget reservations");
+    }
     let (leases, reservations) = tokio::try_join!(
         state.store.active_execution_lease_count(),
         state.store.active_reservation_count(),
@@ -301,6 +326,9 @@ async fn authorize_inner(
             &request.method,
         ));
     }
+    if !request.scheme.eq_ignore_ascii_case("https") {
+        return Ok(decline("scheme_not_allowed", "unknown", &request.method));
+    }
 
     let Some(execution) = execution else {
         metrics::counter!(LEASE_CHECKS_TOTAL, "outcome" => "rejected").increment(1);
@@ -334,7 +362,12 @@ async fn authorize_inner(
 
     let route = match state
         .registry
-        .route(&request.host, &request.method, &request.path)
+        .route(
+            &request.scheme,
+            &request.host,
+            &request.method,
+            &request.path,
+        )
         .await
     {
         Ok(route) => route,
@@ -410,8 +443,23 @@ async fn authorize_inner(
             &request.method,
         ));
     }
+    if state
+        .budget_currency
+        .as_deref()
+        .is_some_and(|currency| !charge.currency.eq_ignore_ascii_case(currency))
+    {
+        return Ok(decline(
+            "budget_currency_mismatch",
+            service_id,
+            &request.method,
+        ));
+    }
     Span::current().record("mpp.amount_atomic", amount);
     Span::current().record("mpp.currency", charge.currency.as_str());
+    let attempt_currency = state
+        .budget_currency
+        .clone()
+        .unwrap_or_else(|| charge.currency.clone());
 
     let challenge_hash = sha256_hex(&serde_json::to_vec(&challenge).map_err(ApiError::internal)?);
     let attempt_id = Uuid::new_v4();
@@ -422,7 +470,7 @@ async fn authorize_inner(
         method: route.endpoint.method.to_ascii_uppercase(),
         path_template: route.endpoint.path.clone(),
         amount_atomic: amount,
-        currency: charge.currency.clone(),
+        currency: attempt_currency,
         sandbox_id: execution.sandbox_id,
         execution_id: execution.execution_id,
     };
@@ -625,7 +673,7 @@ fn completion_outcome(
         return (CompletionOutcome::Released, Some("credential_rejected"));
     }
     if replay_status.is_some() {
-        return (CompletionOutcome::Released, Some("replay_failed"));
+        return (CompletionOutcome::Unknown, Some("ambiguous_replay_outcome"));
     }
     (CompletionOutcome::Unknown, Some("missing_replay_outcome"))
 }
@@ -778,7 +826,10 @@ mod tests {
         body::{Body, to_bytes},
         http::{Request, StatusCode},
     };
-    use mpp::{Base64UrlJson, PaymentChallenge, PrivateKeySigner, format_www_authenticate};
+    use mpp::{
+        Base64UrlJson, PaymentChallenge, PrivateKeySigner, Receipt, format_receipt,
+        format_www_authenticate,
+    };
     use serde_json::{Value, json};
     use time::{Duration, OffsetDateTime};
     use tower::ServiceExt as _;
@@ -824,6 +875,10 @@ mod tests {
         }
 
         async fn active_reservation_count(&self) -> anyhow::Result<i64> {
+            Ok(0)
+        }
+
+        async fn reconcile_stale_reservations(&self, _max_age_seconds: i64) -> anyhow::Result<i64> {
             Ok(0)
         }
 
@@ -1010,6 +1065,7 @@ mod tests {
             Arc::new(FakeSigner),
             None,
             None,
+            None,
         )
         .expect("state");
         (state, store)
@@ -1019,6 +1075,7 @@ mod tests {
         authorize_request_with(
             state,
             json!({
+                "scheme": "https",
                 "host": host,
                 "method": method,
                 "path": "/paid?query=kept",
@@ -1061,6 +1118,7 @@ mod tests {
             (
                 "/authorize",
                 json!({
+                    "scheme": "https",
                     "host": "service.example",
                     "method": "GET",
                     "path": "/paid",
@@ -1135,6 +1193,7 @@ mod tests {
         let (status, response) = authorize_request_with(
             state,
             json!({
+                "scheme": "https",
                 "host": "service.example",
                 "method": "GET",
                 "path": "/paid",
@@ -1163,6 +1222,40 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(response["retry"], false);
         assert_eq!(response["reason"], "no_active_execution");
+        assert_eq!(store.attempts.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn authorize_declines_plaintext_upstreams_before_attempt() {
+        let (state, store) = state(true).await;
+        let (_, response) = authorize_request_with(
+            state,
+            json!({
+                "scheme": "http",
+                "host": "service.example",
+                "method": "GET",
+                "path": "/paid",
+                "status": 402,
+                "response_headers": {"WWW-Authenticate": [challenge()]},
+                "replayable": true,
+                "sandbox_id": "sandbox-test"
+            }),
+        )
+        .await;
+
+        assert_eq!(response["reason"], "scheme_not_allowed");
+        assert_eq!(store.attempts.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn authorize_declines_charges_outside_the_budget_currency() {
+        let (mut state, store) = state(true).await;
+        state.max_daily_atomic = Some(10_000);
+        state.budget_currency = Some("other-token".to_owned());
+
+        let (_, response) = authorize_request(state, "GET", "service.example").await;
+
+        assert_eq!(response["reason"], "budget_currency_mismatch");
         assert_eq!(store.attempts.load(Ordering::SeqCst), 0);
     }
 
@@ -1208,6 +1301,7 @@ mod tests {
             let (_, response) = authorize_request_with(
                 state,
                 json!({
+                    "scheme": "https",
                     "host": "service.example",
                     "method": "GET",
                     "path": "/paid",
@@ -1233,6 +1327,7 @@ mod tests {
             let (_, response) = authorize_request_with(
                 state,
                 json!({
+                    "scheme": "https",
                     "host": "service.example",
                     "method": "GET",
                     "path": "/paid",
@@ -1307,7 +1402,7 @@ mod tests {
     }
 
     #[test]
-    fn completion_outcomes_settle_optional_receipts_and_release_failed_replays() {
+    fn completion_outcomes_are_conservative_for_ambiguous_replays() {
         for (status, transport_error, receipt, expected_outcome, expected_reason) in [
             (Some(200), None, None, CompletionOutcome::Settled, None),
             (
@@ -1328,8 +1423,15 @@ mod tests {
                 Some(500),
                 None,
                 None,
-                CompletionOutcome::Released,
-                Some("replay_failed"),
+                CompletionOutcome::Unknown,
+                Some("ambiguous_replay_outcome"),
+            ),
+            (
+                Some(302),
+                None,
+                None,
+                CompletionOutcome::Unknown,
+                Some("ambiguous_replay_outcome"),
             ),
             (
                 None,
@@ -1351,5 +1453,11 @@ mod tests {
                 (expected_outcome, expected_reason)
             );
         }
+
+        let receipt = format_receipt(&Receipt::success("tempo", "0xtest")).expect("receipt");
+        assert_eq!(
+            super::completion_outcome(Some(500), None, Some(&receipt)),
+            (CompletionOutcome::Settled, None)
+        );
     }
 }

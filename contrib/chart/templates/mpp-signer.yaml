@@ -3,6 +3,9 @@
 {{- $signerSecretName := required "mpp.signer.existingSecretName is required" .Values.mpp.signer.existingSecretName -}}
 {{- $cacheTtlSeconds := include "centaur.durationSeconds" .Values.mpp.registry.cacheTtl -}}
 {{- $maxStaleSeconds := include "centaur.durationSeconds" .Values.mpp.registry.maxStale -}}
+{{- if and (or (ne .Values.mpp.budget.maxPerChargeAtomic nil) (ne .Values.mpp.budget.maxDailyAtomic nil)) (not .Values.mpp.budget.currency) -}}
+{{- fail "mpp.budget.currency is required when an MPP software budget is configured" -}}
+{{- end -}}
 {{- $metricsAnnotations := dict -}}
 {{- if .Values.mpp.metrics.scrapeAnnotations -}}
 {{- $metricsAnnotations = dict "prometheus.io/scrape" "true" "prometheus.io/path" .Values.mpp.metrics.path "prometheus.io/port" (printf "%v" .Values.mpp.port) -}}
@@ -94,6 +97,10 @@ spec:
 {{- if ne .Values.mpp.budget.maxDailyAtomic nil }}
             - name: MPP_MAX_DAILY_ATOMIC
               value: {{ .Values.mpp.budget.maxDailyAtomic | quote }}
+{{- end }}
+{{- if .Values.mpp.budget.currency }}
+            - name: MPP_BUDGET_CURRENCY
+              value: {{ .Values.mpp.budget.currency | quote }}
 {{- end }}
           ports:
             - name: http

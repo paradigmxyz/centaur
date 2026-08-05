@@ -25,14 +25,6 @@ DEFAULT_CACHE_TTL_SECONDS = 15 * 60
 DEFAULT_MAX_STALE_SECONDS = 24 * 60 * 60
 DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024
 CACHE_SCHEMA_VERSION = 1
-SENSITIVE_HEADER_NAMES = {
-    "authorization",
-    "cookie",
-    "host",
-    "proxy-authorization",
-    "set-cookie",
-    "transfer-encoding",
-}
 PATH_PARAMETER = re.compile(r":([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
@@ -217,46 +209,65 @@ class MppClient:
         _validate_service_destination(url, base_url)
 
         try:
-            response = self.service_http.request(
+            with self.service_http.stream(
                 request_method,
                 url,
                 params=query,
                 json=body,
                 headers={"Accept": "application/json"},
-            )
+            ) as response:
+                if response.is_redirect:
+                    raise MppRequestError("MPP service redirects are not allowed")
+                if response.status_code == 402:
+                    raise MppRequestError(
+                        "MPP payment was not authorized; transparent payment may be disabled or denied"
+                    )
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    raise MppRequestError(
+                        f"MPP service returned HTTP {exc.response.status_code}"
+                    ) from exc
+
+                content_length = response.headers.get("content-length")
+                if content_length is not None:
+                    try:
+                        advertised_size = int(content_length)
+                    except ValueError as exc:
+                        raise MppRequestError(
+                            "MPP service returned an invalid Content-Length"
+                        ) from exc
+                    if advertised_size > self.max_response_bytes:
+                        raise MppRequestError(
+                            "MPP service response exceeded the configured size limit"
+                        )
+
+                content = bytearray()
+                for chunk in response.iter_bytes():
+                    content.extend(chunk)
+                    if len(content) > self.max_response_bytes:
+                        raise MppRequestError(
+                            "MPP service response exceeded the configured size limit"
+                        )
+                content_type = response.headers.get("content-type", "").lower()
+                if "json" in content_type:
+                    try:
+                        payload: Any = json.loads(content)
+                    except (TypeError, ValueError) as exc:
+                        raise MppRequestError("MPP service returned invalid JSON") from exc
+                else:
+                    payload = bytes(content).decode(response.encoding or "utf-8", errors="replace")
+                status_code = response.status_code
+                receipt_present = response.headers.get("Payment-Receipt") is not None
         except httpx.RequestError as exc:
             raise MppRequestError(f"MPP service request failed: {exc.__class__.__name__}") from exc
 
-        if response.is_redirect:
-            raise MppRequestError("MPP service redirects are not allowed")
-        if response.status_code == 402:
-            raise MppRequestError(
-                "MPP payment was not authorized; transparent payment may be disabled or denied"
-            )
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise MppRequestError(f"MPP service returned HTTP {exc.response.status_code}") from exc
-
-        content = response.content
-        if len(content) > self.max_response_bytes:
-            raise MppRequestError("MPP service response exceeded the configured size limit")
-        content_type = response.headers.get("content-type", "").lower()
-        if "json" in content_type:
-            try:
-                payload: Any = response.json()
-            except ValueError as exc:
-                raise MppRequestError("MPP service returned invalid JSON") from exc
-        else:
-            payload = response.text
-
-        receipt = response.headers.get("Payment-Receipt")
         return {
             "service": record["id"],
             "method": request_method,
             "path": resolved_path,
-            "status": response.status_code,
-            "payment_receipt_present": receipt is not None,
+            "status": status_code,
+            "payment_receipt_present": receipt_present,
             "data": payload,
         }
 
@@ -586,7 +597,19 @@ def _validate_https_url(value: str, label: str) -> None:
     if not isinstance(value, str):
         raise ValueError(f"{label} must be an absolute HTTPS URL without credentials")
     parsed = urlsplit(value)
-    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+    try:
+        _ = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"{label} must be an absolute HTTPS URL without credentials") from exc
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or _has_unsafe_path_segments(parsed.path)
+    ):
         raise ValueError(f"{label} must be an absolute HTTPS URL without credentials")
 
 
@@ -594,6 +617,7 @@ def _validate_catalog(payload: Any) -> None:
     if not isinstance(payload, dict) or not isinstance(payload.get("services"), list):
         raise MppCatalogError("MPP registry returned an invalid services list")
     service_ids: set[str] = set()
+    routes: list[tuple[str, int, str, str]] = []
     for service in payload["services"]:
         if (
             not isinstance(service, dict)
@@ -626,6 +650,21 @@ def _validate_catalog(payload: Any) -> None:
                 raise MppCatalogError(
                     f"MPP registry service {service['id']!r} has an invalid endpoint"
                 )
+            parsed_service_url = urlsplit(service_url)
+            route = (
+                parsed_service_url.hostname.casefold(),
+                parsed_service_url.port or 443,
+                endpoint["method"].upper(),
+                f"{parsed_service_url.path.rstrip('/')}{endpoint['path']}",
+            )
+            if any(
+                existing[:3] == route[:3] and _path_patterns_overlap(existing[3], route[3])
+                for existing in routes
+            ):
+                raise MppCatalogError(
+                    "MPP registry contains overlapping authority, method, and path entries"
+                )
+            routes.append(route)
 
 
 def _validate_policy_rules(rules: list[dict[str, Any]]) -> None:
@@ -692,6 +731,15 @@ def _resolve_path(template: str, path_params: dict[str, str]) -> str:
     if not resolved.startswith("/") or any(segment in {".", ".."} for segment in decoded_segments):
         raise ValueError("invalid MPP request path")
     return resolved
+
+
+def _path_patterns_overlap(first: str, second: str) -> bool:
+    first_segments = first.split("/")
+    second_segments = second.split("/")
+    return len(first_segments) == len(second_segments) and all(
+        left == right or PATH_PARAMETER.fullmatch(left) or PATH_PARAMETER.fullmatch(right)
+        for left, right in zip(first_segments, second_segments, strict=True)
+    )
 
 
 def _validate_service_destination(url: str, base_url: str) -> None:

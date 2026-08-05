@@ -9,6 +9,8 @@ use crate::model::{
     RegistrySnapshot,
 };
 
+pub const RESERVATION_TIMEOUT_SECONDS: i64 = 300;
+
 #[async_trait]
 pub trait SignerStore: Send + Sync {
     async fn load_registry_cache(&self) -> anyhow::Result<Option<RegistrySnapshot>>;
@@ -16,6 +18,7 @@ pub trait SignerStore: Send + Sync {
     async fn active_execution(&self, sandbox_id: &str) -> anyhow::Result<Option<ActiveExecution>>;
     async fn active_execution_lease_count(&self) -> anyhow::Result<i64>;
     async fn active_reservation_count(&self) -> anyhow::Result<i64>;
+    async fn reconcile_stale_reservations(&self, max_age_seconds: i64) -> anyhow::Result<i64>;
     async fn begin_attempt(
         &self,
         attempt: &NewAttempt,
@@ -153,16 +156,93 @@ impl SignerStore for PgSignerStore {
         .await?)
     }
 
+    async fn reconcile_stale_reservations(&self, max_age_seconds: i64) -> anyhow::Result<i64> {
+        anyhow::ensure!(max_age_seconds > 0, "reservation max age must be positive");
+        Ok(sqlx::query(
+            r#"
+            update mpp_charge_attempts
+            set status = 'unknown',
+                error_code = 'completion_timeout',
+                completed_at = now()
+            where budget_reserved
+              and status in ('reserving', 'authorized')
+              and created_at < now() - make_interval(secs => $1::double precision)
+            "#,
+        )
+        .bind(max_age_seconds)
+        .execute(&self.pool)
+        .await?
+        .rows_affected() as i64)
+    }
+
     async fn begin_attempt(
         &self,
         attempt: &NewAttempt,
         max_per_charge_atomic: Option<i64>,
         max_daily_atomic: Option<i64>,
     ) -> anyhow::Result<BeginAttempt> {
+        if max_per_charge_atomic.is_some_and(|maximum| attempt.amount_atomic > maximum) {
+            return Ok(BeginAttempt::BudgetDenied {
+                reason: "per_charge_budget_exceeded",
+            });
+        }
+        if max_daily_atomic.is_none() {
+            let inserted = sqlx::query(
+                r#"
+                insert into mpp_charge_attempts (
+                    attempt_id, challenge_hash, service_id, method, path_template,
+                    amount_atomic, currency, sandbox_id, execution_id, budget_reserved, status
+                )
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, false, 'reserving')
+                on conflict (challenge_hash) do nothing
+                "#,
+            )
+            .bind(attempt.attempt_id)
+            .bind(&attempt.challenge_hash)
+            .bind(&attempt.service_id)
+            .bind(&attempt.method)
+            .bind(&attempt.path_template)
+            .bind(attempt.amount_atomic)
+            .bind(&attempt.currency)
+            .bind(&attempt.sandbox_id)
+            .bind(&attempt.execution_id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+            if inserted == 1 {
+                return Ok(BeginAttempt::Created);
+            }
+            let existing = sqlx::query(
+                "select attempt_id, sandbox_id, execution_id from mpp_charge_attempts where challenge_hash = $1",
+            )
+            .bind(&attempt.challenge_hash)
+            .fetch_one(&self.pool)
+            .await?;
+            return Ok(BeginAttempt::Duplicate {
+                attempt_id: existing.get("attempt_id"),
+                sandbox_id: existing.get("sandbox_id"),
+                execution_id: existing.get("execution_id"),
+            });
+        }
+
         let mut transaction = self.pool.begin().await?;
         sqlx::query("select pg_advisory_xact_lock(hashtext('centaur-mpp-budget'))")
             .execute(&mut *transaction)
             .await?;
+        sqlx::query(
+            r#"
+            update mpp_charge_attempts
+            set status = 'unknown',
+                error_code = 'completion_timeout',
+                completed_at = now()
+            where budget_reserved
+              and status in ('reserving', 'authorized')
+              and created_at < now() - make_interval(secs => $1::double precision)
+            "#,
+        )
+        .bind(RESERVATION_TIMEOUT_SECONDS)
+        .execute(&mut *transaction)
+        .await?;
 
         if let Some(existing) = sqlx::query(
             "select attempt_id, sandbox_id, execution_id from mpp_charge_attempts where challenge_hash = $1",
@@ -179,12 +259,6 @@ impl SignerStore for PgSignerStore {
             });
         }
 
-        if max_per_charge_atomic.is_some_and(|maximum| attempt.amount_atomic > maximum) {
-            transaction.rollback().await?;
-            return Ok(BeginAttempt::BudgetDenied {
-                reason: "per_charge_budget_exceeded",
-            });
-        }
         if let Some(maximum) = max_daily_atomic {
             let spent = sqlx::query_scalar::<_, i64>(
                 r#"
@@ -192,8 +266,10 @@ impl SignerStore for PgSignerStore {
                 from mpp_charge_attempts
                 where created_at >= date_trunc('day', now() at time zone 'UTC') at time zone 'UTC'
                   and status in ('reserving', 'authorized', 'settled', 'unknown')
+                  and currency = $1
                 "#,
             )
+            .bind(&attempt.currency)
             .fetch_one(&mut *transaction)
             .await?;
             if spent.saturating_add(attempt.amount_atomic) > maximum {
@@ -231,7 +307,7 @@ impl SignerStore for PgSignerStore {
         .bind(&attempt.currency)
         .bind(&attempt.sandbox_id)
         .bind(&attempt.execution_id)
-        .bind(max_daily_atomic.is_some())
+        .bind(true)
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
@@ -416,6 +492,25 @@ mod tests {
         );
         assert_eq!(store.active_reservation_count().await.unwrap(), 1);
 
+        sqlx::query(
+            "update mpp_charge_attempts set created_at = now() - interval '10 minutes' where status = 'reserving'",
+        )
+        .execute(&pool)
+        .await
+        .expect("age reservation");
+        assert_eq!(store.reconcile_stale_reservations(300).await.unwrap(), 1);
+        assert_eq!(store.active_reservation_count().await.unwrap(), 0);
+        let after_timeout = attempt(&execution_id, "after-timeout");
+        assert!(matches!(
+            store
+                .begin_attempt(&after_timeout, None, Some(100))
+                .await
+                .unwrap(),
+            BeginAttempt::BudgetDenied {
+                reason: "daily_budget_exceeded"
+            }
+        ));
+
         sqlx::query("delete from mpp_charge_attempts")
             .execute(&pool)
             .await
@@ -430,6 +525,12 @@ mod tests {
         assert!(matches!(second_result.unwrap(), BeginAttempt::Created));
         assert_eq!(store.active_reservation_count().await.unwrap(), 0);
 
+        let duplicate = store
+            .begin_attempt(&unlimited_first, None, None)
+            .await
+            .expect("duplicate attempt");
+        assert!(matches!(duplicate, BeginAttempt::Duplicate { .. }));
+
         sqlx::query("delete from mpp_charge_attempts")
             .execute(&pool)
             .await
@@ -443,6 +544,29 @@ mod tests {
         assert!(matches!(first_result.unwrap(), BeginAttempt::Created));
         assert!(matches!(second_result.unwrap(), BeginAttempt::Created));
         assert_eq!(store.active_reservation_count().await.unwrap(), 0);
+
+        sqlx::query("delete from mpp_charge_attempts")
+            .execute(&pool)
+            .await
+            .expect("clear attempts");
+        let first_currency = attempt(&execution_id, "first-currency");
+        let mut second_currency = attempt(&execution_id, "second-currency");
+        second_currency.currency = "other-test-token".to_owned();
+        assert!(matches!(
+            store
+                .begin_attempt(&first_currency, None, Some(100))
+                .await
+                .unwrap(),
+            BeginAttempt::Created
+        ));
+        assert!(matches!(
+            store
+                .begin_attempt(&second_currency, None, Some(100))
+                .await
+                .unwrap(),
+            BeginAttempt::Created
+        ));
+        assert_eq!(store.active_reservation_count().await.unwrap(), 2);
 
         sqlx::query("delete from mpp_charge_attempts")
             .execute(&pool)

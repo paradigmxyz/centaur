@@ -488,6 +488,9 @@ mpp:
       - GET
     rules: []
   budget:
+    # Required when either cap is configured. Challenges in other currencies
+    # fail closed so one numeric cap never mixes incomparable atomic units.
+    currency:
     maxPerChargeAtomic:
     maxDailyAtomic:
   metrics:
