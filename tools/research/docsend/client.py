@@ -10,13 +10,19 @@ import logging
 import mimetypes
 import os
 import re
-from contextlib import suppress
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
+from functools import partial
 from io import BytesIO
 from urllib.parse import urlparse
 
 import httpx
 from browserbase import APIStatusError, AsyncBrowserbase
 from PIL import Image
+from websockets.asyncio.client import connect as websocket_connect
+from websockets.asyncio.server import serve as websocket_serve
+from websockets.proxy import get_proxy as get_websocket_proxy
+from websockets.uri import parse_uri as parse_websocket_uri
 
 from centaur_sdk import secret
 
@@ -25,6 +31,7 @@ BROWSERBASE_DEFAULT_SESSION_TIMEOUT_SECONDS = 600
 BROWSERBASE_MAX_SESSION_TIMEOUT_SECONDS = 1800
 BROWSERBASE_DOWNLOAD_TIMEOUT_SECONDS = 120
 MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
+CDP_MAX_MESSAGE_BYTES = 256 * 1024 * 1024
 LOGGER = logging.getLogger(__name__)
 if not LOGGER.handlers:
     handler = logging.StreamHandler()
@@ -41,13 +48,73 @@ def _browserbase_api_key() -> str:
     return secret("BROWSERBASE_API_KEY", "BROWSERBASE_API_KEY")
 
 
-def _prepare_playwright_tls() -> None:
+def _prepare_cdp_tls() -> None:
     cert_path = "/firewall-certs/ca-cert.pem"
-    if os.path.exists(cert_path) and not os.environ.get("NODE_EXTRA_CA_CERTS"):  # noqa: TID251
-        os.environ["NODE_EXTRA_CA_CERTS"] = cert_path
+    if os.path.exists(cert_path):
+        if not os.environ.get("NODE_EXTRA_CA_CERTS"):  # noqa: TID251
+            os.environ["NODE_EXTRA_CA_CERTS"] = cert_path
+        if not os.environ.get("SSL_CERT_FILE"):  # noqa: TID251
+            os.environ["SSL_CERT_FILE"] = cert_path
     node_options = os.environ.get("NODE_OPTIONS", "")  # noqa: TID251
     if "--use-system-ca" not in node_options.split():
         os.environ["NODE_OPTIONS"] = f"{node_options} --use-system-ca".strip()
+
+
+def _cdp_proxy_url(connect_url: str) -> str | None:
+    """Resolve the standard environment proxy for a Browserbase CDP WebSocket."""
+    return get_websocket_proxy(parse_websocket_uri(connect_url))
+
+
+async def _pump_websocket_messages(source, destination) -> None:
+    async for message in source:
+        await destination.send(message)
+
+
+async def _relay_cdp_connection(downstream, *, connect_url: str, proxy_url: str) -> None:
+    try:
+        async with websocket_connect(
+            connect_url,
+            proxy=proxy_url,
+            max_size=CDP_MAX_MESSAGE_BYTES,
+        ) as upstream:
+            pumps = {
+                asyncio.create_task(_pump_websocket_messages(downstream, upstream)),
+                asyncio.create_task(_pump_websocket_messages(upstream, downstream)),
+            }
+            _, pending = await asyncio.wait(pumps, return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pumps, return_exceptions=True)
+    except Exception as exc:
+        LOGGER.error("CDP proxy relay failed (%s)", type(exc).__name__)
+        with suppress(Exception):
+            await downstream.close(code=1011, reason="Upstream CDP connection failed")
+
+
+@asynccontextmanager
+async def _cdp_endpoint(connect_url: str) -> AsyncIterator[str]:
+    """Route the CDP WebSocket through the environment proxy when configured."""
+    proxy_url = _cdp_proxy_url(connect_url)
+    if proxy_url is None:
+        yield connect_url
+        return
+
+    handler = partial(
+        _relay_cdp_connection,
+        connect_url=connect_url,
+        proxy_url=proxy_url,
+    )
+    async with websocket_serve(
+        handler,
+        "127.0.0.1",
+        0,
+        max_size=CDP_MAX_MESSAGE_BYTES,
+    ) as relay:
+        sockets = relay.sockets
+        if not sockets:
+            raise RuntimeError("Failed to start the local CDP proxy relay")
+        port = sockets[0].getsockname()[1]
+        yield f"ws://127.0.0.1:{port}"
 
 
 def _browserbase_proxy_config() -> bool | list[dict]:
@@ -500,10 +567,10 @@ class DocsendClient:
         connect_url = str(session["connectUrl"])
         expires_at = session.get("expiresAt")
         try:
-            _prepare_playwright_tls()
-            async with async_playwright() as playwright:
+            _prepare_cdp_tls()
+            async with _cdp_endpoint(connect_url) as cdp_url, async_playwright() as playwright:
                 LOGGER.info("Attaching to DocSend Space session %s", session_id)
-                browser = await playwright.chromium.connect_over_cdp(connect_url)
+                browser = await playwright.chromium.connect_over_cdp(cdp_url)
                 context = browser.contexts[0] if browser.contexts else await browser.new_context()
                 page = _find_existing_space_page(context.pages, url)
                 if page is None:
@@ -606,10 +673,10 @@ class DocsendClient:
         LOGGER.info("Browserbase session %s is ready; expires at %s", session_id, expires_at)
 
         try:
-            _prepare_playwright_tls()
-            async with async_playwright() as p:
+            _prepare_cdp_tls()
+            async with _cdp_endpoint(connect_url) as cdp_url, async_playwright() as p:
                 LOGGER.info("Connecting Playwright to Browserbase session %s", session_id)
-                browser = await p.chromium.connect_over_cdp(connect_url)
+                browser = await p.chromium.connect_over_cdp(cdp_url)
                 ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
                 page = ctx.pages[0] if ctx.pages else await ctx.new_page()
 
