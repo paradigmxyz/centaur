@@ -1,12 +1,12 @@
 /**
- * Slack-only "Open chat in Console" context line.
+ * Slack-only response metadata and Console-link context line.
  *
- * On the first assistant message in a Slack thread, slackbotv2 appends a Block
- * Kit `context` block linking to the Console session view. The block is passed
- * to the chat adapter via `StreamOptions.stopBlocks`, which the adapter forwards
- * to Slack's `chat.stopStream` `blocks` argument ("Block formatted elements will
- * be appended to the end of the message"). This keeps the rendering Slack-only
- * and out of the shared `@centaur/rendering` package used by Discord/Teams.
+ * Slackbotv2 appends a Block Kit `context` block according to the configured
+ * metadata mode. The first assistant message may also link to the Console
+ * session view. The block is passed to the chat adapter via
+ * `StreamOptions.stopBlocks`, which the adapter forwards to Slack's
+ * `chat.stopStream` `blocks` argument. This keeps the rendering Slack-only and
+ * out of the shared `@centaur/rendering` package used by Discord/Teams.
  */
 
 import claudeSettings from '../../../harness/claude/settings.json'
@@ -221,8 +221,7 @@ export type SlackContextBlock = {
 
 /**
  * Builds a Slack context block containing the optional Console link and
- * response metadata. Metadata can be enabled independently of the Console URL;
- * the existing Console-link behavior continues to include it automatically.
+ * response metadata. Metadata inclusion is independent of the Console URL.
  */
 export function buildSlackResponseContextBlock(params: {
   consoleBaseUrl: string | null | undefined
@@ -234,7 +233,7 @@ export function buildSlackResponseContextBlock(params: {
   serviceTier?: string | null
 }): SlackContextBlock | undefined {
   const url = consoleSessionUrl(params.consoleBaseUrl, params.threadKey)
-  const includeMetadata = params.metadataEnabled === true || Boolean(url)
+  const includeMetadata = params.metadataEnabled === true
   if (!url && !includeMetadata) return undefined
   const segments: string[] = []
   if (url) segments.push(`<${url}|Open chat in Console>`)

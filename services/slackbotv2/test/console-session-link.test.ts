@@ -190,6 +190,7 @@ describe('buildSlackResponseContextBlock', () => {
       consoleBaseUrl: 'https://console.centaur.dev',
       threadKey: 'slack:C123:1700000000.000100',
       harnessType: 'codex',
+      metadataEnabled: true,
       model: 'gpt-5.2',
       reasoning: 'xhigh'
     })
@@ -209,7 +210,8 @@ describe('buildSlackResponseContextBlock', () => {
     const block = buildSlackResponseContextBlock({
       consoleBaseUrl: 'https://console.centaur.dev',
       threadKey: 'slack:C1:1',
-      harnessType: 'claudecode'
+      harnessType: 'claudecode',
+      metadataEnabled: true
     })
     expect(block?.elements[0]?.text).toBe(
       '<https://console.centaur.dev/console/threads?thread=slack%3AC1%3A1|Open chat in Console> · Claude Code'
@@ -221,6 +223,7 @@ describe('buildSlackResponseContextBlock', () => {
       consoleBaseUrl: 'https://console.centaur.dev',
       threadKey: 'slack:C1:1',
       harnessType: 'nanocodex',
+      metadataEnabled: true,
       model: 'gpt-5.6-sol',
       reasoning: 'low'
     })
@@ -239,6 +242,22 @@ describe('buildSlackResponseContextBlock', () => {
         model: 'gpt-5.2'
       })
     ).toBeUndefined()
+  })
+
+  test('builds a Console link without metadata when metadata is disabled', () => {
+    const block = buildSlackResponseContextBlock({
+      consoleBaseUrl: 'https://console.centaur.dev',
+      threadKey: 'slack:C1:1',
+      harnessType: 'codex',
+      metadataEnabled: false,
+      model: 'gpt-5.6-sol',
+      reasoning: 'low',
+      serviceTier: 'fast'
+    })
+
+    expect(block?.elements[0]?.text).toBe(
+      '<https://console.centaur.dev/console/threads?thread=slack%3AC1%3A1|Open chat in Console>'
+    )
   })
 
   test('builds metadata without a Console URL when independently enabled', () => {

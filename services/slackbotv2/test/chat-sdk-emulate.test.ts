@@ -927,10 +927,52 @@ describe('slackbotv2', () => {
     expect(consoleBlockTexts(slackApi.calls)).toHaveLength(0)
   })
 
+  it('keeps the first Console link but omits metadata in never mode', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({
+      consolePublicUrl: 'https://console.example.dev',
+      responseMetadataMode: 'never',
+      state: sharedState
+    })
+
+    const parent = await postUserMessage('Console link without response metadata.')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> start`, parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-response-metadata-never',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> start`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+
+    const footer = slackApi.calls
+      .filter(call => call.method === 'chat.stopStream')
+      .flatMap(call => (Array.isArray(call.body.blocks) ? (call.body.blocks as unknown[]) : []))
+      .map(block => JSON.stringify(block))
+      .find(text => text.includes('Open chat in Console'))
+    expect(footer).toContain('Open chat in Console')
+    expect(footer).not.toContain('GPT-5.6-SOL')
+    expect(footer).not.toContain('Codex')
+  })
+
   it('appends response metadata to every assistant message without a Console URL', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
-    bot = createTestBot({ responseMetadataEnabled: true, state: sharedState })
+    bot = createTestBot({ responseMetadataMode: 'always', state: sharedState })
 
     const metadataBlockTexts = (calls: StreamCall[]): string[] =>
       calls

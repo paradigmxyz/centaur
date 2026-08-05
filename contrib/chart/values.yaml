@@ -475,9 +475,10 @@ slackbotv2:
   # Join newly-created public channels after subscribed channel_created events.
   # Requires the Slack app to grant channels:read and channels:join.
   autoJoinCreatedChannels: false
-  # Append model, harness, and reasoning effort to every live
-  # streamed Slack assistant response. Independent of the optional Console link below.
-  responseMetadataEnabled: false
+  # Append model, harness, and reasoning effort to the first live streamed
+  # Slack assistant response, every response, or no responses. Independent of
+  # the optional Console link below.
+  responseMetadataMode: first
   # Include the Codex service tier when a response metadata footer is rendered.
   # This does not cause the footer to appear on additional responses.
   responseServiceTierEnabled: false

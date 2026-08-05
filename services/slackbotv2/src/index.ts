@@ -1121,13 +1121,16 @@ async function syncThreadMessageToSession(
     resolvedReasoning,
     input.options.harnessDefaultReasoning
   )
-  const responseMetadataEnabled = input.options.responseMetadataEnabled === true
-  let responseContextBlock = isFirstAssistantMessage || responseMetadataEnabled
+  const responseMetadataMode = input.options.responseMetadataMode ?? 'first'
+  const includeResponseMetadata =
+    responseMetadataMode === 'always' ||
+    (responseMetadataMode === 'first' && isFirstAssistantMessage)
+  let responseContextBlock = isFirstAssistantMessage || includeResponseMetadata
     ? buildSlackResponseContextBlock({
         consoleBaseUrl: isFirstAssistantMessage ? input.options.consolePublicUrl : undefined,
         threadKey: thread.id,
         harnessType: effectiveHarnessType,
-        metadataEnabled: responseMetadataEnabled,
+        metadataEnabled: includeResponseMetadata,
         model: effectiveModel,
         reasoning: effectiveReasoning,
         serviceTier:
@@ -1350,12 +1353,12 @@ async function syncThreadMessageToSession(
         )
         forwardInput.metadataModel = model
         forwardInput.reasoning = requestedReasoning
-        if (isFirstAssistantMessage || responseMetadataEnabled) {
+        if (isFirstAssistantMessage || includeResponseMetadata) {
           responseContextBlock = buildSlackResponseContextBlock({
             consoleBaseUrl: isFirstAssistantMessage ? input.options.consolePublicUrl : undefined,
             threadKey: thread.id,
             harnessType,
-            metadataEnabled: responseMetadataEnabled,
+            metadataEnabled: includeResponseMetadata,
             model,
             reasoning,
             serviceTier:
