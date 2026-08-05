@@ -175,9 +175,9 @@ def _encode_session_url(url: str) -> str:
 
 
 def _decode_session_url(value: str) -> str:
-    """Decode new metadata while accepting sessions created before encoding."""
+    """Decode a URL stored in Browserbase session metadata."""
     if not value.startswith("b64"):
-        return _normalize_docsend_url(value)
+        raise ValueError("Invalid DocSend URL in resumable session metadata")
     try:
         encoded = value[3:]
         padding = "=" * (-len(encoded) % 4)
