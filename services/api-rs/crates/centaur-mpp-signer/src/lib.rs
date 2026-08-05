@@ -59,8 +59,14 @@ pub struct TempoChargeSigner {
 }
 
 impl TempoChargeSigner {
-    pub fn new(signer: PrivateKeySigner, rpc_url: &str) -> anyhow::Result<Self> {
-        let provider = TempoProvider::new(signer, rpc_url)?.with_client_id("centaur");
+    pub fn new(
+        signer: PrivateKeySigner,
+        rpc_url: &str,
+        expected_chain_id: u64,
+    ) -> anyhow::Result<Self> {
+        let provider = TempoProvider::new(signer, rpc_url)?
+            .with_client_id("centaur")
+            .with_expected_chain_id(expected_chain_id);
         Ok(Self { provider })
     }
 }
@@ -772,14 +778,14 @@ mod tests {
         body::{Body, to_bytes},
         http::{Request, StatusCode},
     };
-    use mpp::{Base64UrlJson, PaymentChallenge, format_www_authenticate};
+    use mpp::{Base64UrlJson, PaymentChallenge, PrivateKeySigner, format_www_authenticate};
     use serde_json::{Value, json};
     use time::{Duration, OffsetDateTime};
     use tower::ServiceExt as _;
     use uuid::Uuid;
 
     use super::{
-        AppState, ChargeSigner, Registry, build_router,
+        AppState, ChargeSigner, Registry, TempoChargeSigner, build_router,
         model::{
             ActiveExecution, BeginAttempt, Catalog, CompletedAttempt, CompletionOutcome, Endpoint,
             NewAttempt, PaymentOffer, RegistrySnapshot, Service,
@@ -954,6 +960,34 @@ mod tests {
 
     fn challenge() -> String {
         challenge_for("payments.example", "charge", &mpp::expires::minutes(5))
+    }
+
+    #[tokio::test]
+    async fn tempo_signer_rejects_challenges_for_another_chain() {
+        let request = Base64UrlJson::from_value(&json!({
+            "amount": "0",
+            "currency": "0x20c000000000000000000000b9537d11c60e8b50",
+            "recipient": "0x0000000000000000000000000000000000000001",
+            "methodDetails": {"chainId": 42431}
+        }))
+        .expect("charge request");
+        let challenge = PaymentChallenge::new(
+            "challenge-with-at-least-128-bits-of-entropy",
+            "payments.example",
+            "tempo",
+            "charge",
+            request,
+        );
+        let signer =
+            TempoChargeSigner::new(PrivateKeySigner::random(), "https://rpc.example.com", 4217)
+                .expect("signer");
+
+        let error = signer
+            .authorization(&challenge)
+            .await
+            .expect_err("mismatched chain must fail closed");
+
+        assert!(error.to_string().contains("expected 4217, got 42431"));
     }
 
     async fn state(with_execution: bool) -> (AppState, Arc<FakeStore>) {

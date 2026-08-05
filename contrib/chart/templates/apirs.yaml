@@ -397,6 +397,10 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sMPP_SIGNER_TOKEN" .Values.secretManager.envPrefix }}
+{{- if .Values.mpp.signer.allowCidrs }}
+            - name: KUBERNETES_IRON_PROXY_RESPONSE_RETRY_HANDLER_ALLOW_CIDRS
+              value: {{ join "," .Values.mpp.signer.allowCidrs | quote }}
+{{- end }}
 {{- end }}
 {{- $sandboxEnvList := list }}
 {{- if and .Values.repoCache.enabled (gt (len $skillDirs) 0) }}

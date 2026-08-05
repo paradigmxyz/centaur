@@ -6,6 +6,7 @@ use mpp::PrivateKeySigner;
 use crate::model::PolicyRule;
 
 const DEFAULT_RPC_URL: &str = "https://rpc.tempo.xyz";
+const DEFAULT_CHAIN_ID: u64 = 4217;
 const DEFAULT_REGISTRY_URL: &str = "https://mpp.dev/api/services";
 
 #[derive(Parser)]
@@ -24,6 +25,9 @@ pub struct Args {
 
     #[arg(long, env = "MPP_RPC_URL", default_value = DEFAULT_RPC_URL)]
     pub rpc_url: String,
+
+    #[arg(long, env = "MPP_CHAIN_ID", default_value_t = DEFAULT_CHAIN_ID)]
+    pub chain_id: u64,
 
     #[arg(
         long,
@@ -84,6 +88,7 @@ impl Args {
                 && self.registry_max_stale_seconds >= self.registry_cache_ttl_seconds,
             "MPP registry cache durations are invalid"
         );
+        anyhow::ensure!(self.chain_id > 0, "MPP chain ID must be positive");
         for (name, value) in [
             ("MPP_MAX_PER_CHARGE_ATOMIC", self.max_per_charge_atomic),
             ("MPP_MAX_DAILY_ATOMIC", self.max_daily_atomic),

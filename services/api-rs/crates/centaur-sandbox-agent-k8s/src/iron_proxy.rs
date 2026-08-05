@@ -90,6 +90,7 @@ pub struct IronProxyConfig {
     pub response_retry_handler_url: Option<String>,
     pub response_retry_complete_url: Option<String>,
     pub response_retry_handler_token: Option<String>,
+    pub response_retry_handler_allow_cidrs: Vec<String>,
 }
 
 impl IronProxyConfig {
@@ -121,6 +122,7 @@ impl IronProxyConfig {
             response_retry_handler_url: None,
             response_retry_complete_url: None,
             response_retry_handler_token: None,
+            response_retry_handler_allow_cidrs: Vec::new(),
         }
     }
 }
@@ -1380,6 +1382,16 @@ fn iron_proxy_env_vars(
         ] {
             env.insert(name.to_owned(), env_var(name, value));
         }
+        if !iron_proxy.response_retry_handler_allow_cidrs.is_empty() {
+            let name = "IRON_RESPONSE_RETRY_HANDLER_ALLOW_CIDRS";
+            env.insert(
+                name.to_owned(),
+                env_var(
+                    name,
+                    &iron_proxy.response_retry_handler_allow_cidrs.join(","),
+                ),
+            );
+        }
     }
     for (name, value) in &iron_proxy.extra_env {
         env.insert(name.clone(), env_var(name, value));
@@ -2606,6 +2618,8 @@ mod tests {
         iron_proxy.response_retry_complete_url =
             Some("http://centaur-mpp-signer:8090/complete".to_owned());
         iron_proxy.response_retry_handler_token = Some("signer-token".to_owned());
+        iron_proxy.response_retry_handler_allow_cidrs =
+            vec!["10.43.0.0/16".to_owned(), "fd12:3456::/48".to_owned()];
         let sync = ProxySyncEnv {
             proxy_id: "proxy-id".to_owned(),
             control_url: "http://iron-control".to_owned(),
@@ -2646,6 +2660,11 @@ mod tests {
         assert_eq!(
             env.get("IRON_RESPONSE_RETRY_STATUSES").map(String::as_str),
             Some("402")
+        );
+        assert_eq!(
+            env.get("IRON_RESPONSE_RETRY_HANDLER_ALLOW_CIDRS")
+                .map(String::as_str),
+            Some("10.43.0.0/16,fd12:3456::/48")
         );
     }
 

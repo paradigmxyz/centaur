@@ -469,6 +469,8 @@ mpp:
   enabled: false
   port: 8090
   rpcUrl: https://rpc.tempo.xyz
+  # Tempo network the signer is permitted to authorize. Moderato is 42431.
+  chainId: 4217
   registry:
     url: https://mpp.dev/api/services
     cacheTtl: 15m
@@ -476,6 +478,11 @@ mpp:
   signer:
     existingSecretName: centaur-mpp-signer
     privateKeyKey: MPP_PRIVATE_KEY
+    # Private Service CIDRs containing the signer endpoint when those ranges
+    # are also blocked by ironProxy.upstreamDenyCidrs. The exception remains
+    # scoped to the exact configured authorize and complete URLs.
+    allowCidrs:
+      - "10.43.0.0/16"
   policy:
     defaultMethods:
       - GET

@@ -1633,6 +1633,12 @@ struct IronProxyArgs {
         env = "KUBERNETES_IRON_PROXY_RESPONSE_RETRY_HANDLER_TOKEN"
     )]
     response_retry_handler_token: Option<String>,
+    #[arg(
+        long = "kubernetes-iron-proxy-response-retry-handler-allow-cidrs",
+        env = "KUBERNETES_IRON_PROXY_RESPONSE_RETRY_HANDLER_ALLOW_CIDRS",
+        value_delimiter = ','
+    )]
+    response_retry_handler_allow_cidrs: Vec<String>,
 }
 
 impl IronProxyArgs {
@@ -1664,7 +1670,13 @@ impl IronProxyArgs {
             self.response_retry_complete_url.as_ref(),
             self.response_retry_handler_token.as_ref(),
         ];
-        if retry_parts.iter().any(|value| value.is_some()) {
+        let retry_allow_cidrs = self
+            .response_retry_handler_allow_cidrs
+            .iter()
+            .filter_map(|cidr| non_empty(Some(cidr.as_str())))
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        if retry_parts.iter().any(|value| value.is_some()) || !retry_allow_cidrs.is_empty() {
             if retry_parts.iter().any(|value| value.is_none()) {
                 return Err(ServerError::UnsupportedConfig(
                     "MPP response retry requires handler URL, completion URL, and token".to_owned(),
@@ -1673,6 +1685,7 @@ impl IronProxyArgs {
             config.response_retry_handler_url = self.response_retry_handler_url.clone();
             config.response_retry_complete_url = self.response_retry_complete_url.clone();
             config.response_retry_handler_token = self.response_retry_handler_token.clone();
+            config.response_retry_handler_allow_cidrs = retry_allow_cidrs;
         }
         Ok(config)
     }
@@ -2873,6 +2886,61 @@ mod tests {
                 "10.42.0.0/16".to_owned(),
                 "10.43.0.0/16".to_owned(),
             ]
+        );
+    }
+
+    #[test]
+    fn iron_proxy_response_retry_handler_allow_cidrs_are_parsed() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--kubernetes-sandbox-iron-proxy-mode",
+            "enabled",
+            "--kubernetes-firewall-ca-secret-name",
+            "centaur-firewall-ca",
+            "--kubernetes-firewall-ca-key-secret-name",
+            "centaur-firewall-ca-key",
+            "--kubernetes-iron-proxy-response-retry-handler-url",
+            "http://centaur-mpp-signer:8090/authorize",
+            "--kubernetes-iron-proxy-response-retry-complete-url",
+            "http://centaur-mpp-signer:8090/complete",
+            "--kubernetes-iron-proxy-response-retry-handler-token",
+            "signer-token",
+            "--kubernetes-iron-proxy-response-retry-handler-allow-cidrs",
+            "10.43.0.0/16,fd12:3456::/48",
+        ])
+        .unwrap();
+
+        let config = args.sandbox.iron_proxy.to_config().unwrap().unwrap();
+        assert_eq!(
+            config.response_retry_handler_allow_cidrs,
+            vec!["10.43.0.0/16".to_owned(), "fd12:3456::/48".to_owned()]
+        );
+    }
+
+    #[test]
+    fn iron_proxy_response_retry_allow_cidrs_require_handler_contract() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--kubernetes-sandbox-iron-proxy-mode",
+            "enabled",
+            "--kubernetes-firewall-ca-secret-name",
+            "centaur-firewall-ca",
+            "--kubernetes-firewall-ca-key-secret-name",
+            "centaur-firewall-ca-key",
+            "--kubernetes-iron-proxy-response-retry-handler-allow-cidrs",
+            "10.43.0.0/16",
+        ])
+        .unwrap();
+
+        let error = args.sandbox.iron_proxy.to_config().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("MPP response retry requires handler URL, completion URL, and token")
         );
     }
 

@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-ARG IRON_PROXY_BASE_IMAGE=ironsh/iron-proxy:0.49.0@sha256:c4628019c24f4cc8d77564a26b7c9cedb00accee6f93d06270e85fb8f9c6a7da
+ARG IRON_PROXY_BASE_IMAGE=ironsh/iron-proxy:0.50.0-rc.2@sha256:afff3a56cfe0cea8f2c93f2bae1e650722740ea3b626110448d7bb47e642be76
 FROM ${IRON_PROXY_BASE_IMAGE}
 
 USER root

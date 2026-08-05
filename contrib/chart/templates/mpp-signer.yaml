@@ -1,5 +1,6 @@
 {{- if .Values.mpp.enabled }}
 {{- $name := include "centaur.componentName" (dict "root" . "component" "mpp-signer") -}}
+{{- $signerSecretName := required "mpp.signer.existingSecretName is required" .Values.mpp.signer.existingSecretName -}}
 {{- $cacheTtlSeconds := include "centaur.durationSeconds" .Values.mpp.registry.cacheTtl -}}
 {{- $maxStaleSeconds := include "centaur.durationSeconds" .Values.mpp.registry.maxStale -}}
 {{- $metricsAnnotations := dict -}}
@@ -37,8 +38,10 @@ spec:
       labels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "mpp-signer") | nindent 8 }}
         centaur.ai/observability-enabled: "true"
-{{- with $metricsAnnotations }}
       annotations:
+        checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
+        checksum/mpp-signer-secret: {{ include "centaur.secretResourceVersion" (dict "root" . "name" $signerSecretName) | sha256sum }}
+{{- with $metricsAnnotations }}
 {{ toYaml . | nindent 8 }}
 {{- end }}
     spec:
@@ -61,7 +64,7 @@ spec:
             - name: MPP_PRIVATE_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ required "mpp.signer.existingSecretName is required" .Values.mpp.signer.existingSecretName }}
+                  name: {{ $signerSecretName }}
                   key: {{ .Values.mpp.signer.privateKeyKey }}
             - name: MPP_SIGNER_TOKEN
               valueFrom:
@@ -72,6 +75,8 @@ spec:
               value: {{ printf "0.0.0.0:%v" .Values.mpp.port | quote }}
             - name: MPP_RPC_URL
               value: {{ .Values.mpp.rpcUrl | quote }}
+            - name: MPP_CHAIN_ID
+              value: {{ .Values.mpp.chainId | quote }}
             - name: MPP_REGISTRY_URL
               value: {{ .Values.mpp.registry.url | quote }}
             - name: MPP_REGISTRY_CACHE_TTL_SECONDS

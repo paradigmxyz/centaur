@@ -30,7 +30,11 @@ async fn main() -> anyhow::Result<()> {
         TimeDuration::seconds(args.registry_cache_ttl_seconds),
         TimeDuration::seconds(args.registry_max_stale_seconds),
     )?);
-    let signer = Arc::new(TempoChargeSigner::new(args.signer()?, &args.rpc_url)?);
+    let signer = Arc::new(TempoChargeSigner::new(
+        args.signer()?,
+        &args.rpc_url,
+        args.chain_id,
+    )?);
     let policy_rules = args.policy_rules()?;
     let state = AppState::new(
         args.signer_token,
