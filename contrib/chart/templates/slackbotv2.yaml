@@ -81,6 +81,8 @@ spec:
               value: {{ .Values.slackbotv2.autoJoinCreatedChannels | quote }}
             - name: SLACKBOTV2_RESPONSE_METADATA_ENABLED
               value: {{ .Values.slackbotv2.responseMetadataEnabled | quote }}
+            - name: SLACKBOTV2_RESPONSE_SERVICE_TIER_ENABLED
+              value: {{ .Values.slackbotv2.responseServiceTierEnabled | quote }}
             - name: SLACKBOTV2_MESSAGE_OVERRIDES_STRATEGY
               value: {{ .Values.slackbotv2.messageOverridesStrategy.mode | quote }}
             - name: SLACKBOTV2_MESSAGE_OVERRIDES_MODEL

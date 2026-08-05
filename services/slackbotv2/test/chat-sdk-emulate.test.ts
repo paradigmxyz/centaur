@@ -964,7 +964,7 @@ describe('slackbotv2', () => {
     expect(metadataBlockTexts(slackApi.calls)).toHaveLength(1)
     expect(metadataBlockTexts(slackApi.calls)[0]).toContain('Codex')
     expect(metadataBlockTexts(slackApi.calls)[0]).toContain('Low')
-    expect(metadataBlockTexts(slackApi.calls)[0]).toContain('Fast')
+    expect(metadataBlockTexts(slackApi.calls)[0]).not.toContain('Fast')
     expect(metadataBlockTexts(slackApi.calls)[0]).not.toContain('Open chat in Console')
 
     slackApi.reset()
@@ -990,6 +990,73 @@ describe('slackbotv2', () => {
     expect(secondResponse.status).toBe(200)
     await Promise.all(secondWaits)
     expect(metadataBlockTexts(slackApi.calls)).toHaveLength(1)
+  })
+
+  it('adds the service tier without showing metadata on every response', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({
+      consolePublicUrl: 'https://console.example.dev',
+      responseServiceTierEnabled: true,
+      state: sharedState
+    })
+
+    const metadataBlockTexts = (calls: StreamCall[]): string[] =>
+      calls
+        .filter(call => call.method === 'chat.stopStream')
+        .flatMap(call => (Array.isArray(call.body.blocks) ? (call.body.blocks as unknown[]) : []))
+        .map(block => JSON.stringify(block))
+        .filter(text => text.includes('GPT-5.6-SOL'))
+
+    const parent = await postUserMessage('Service tier thread context.')
+    const firstMention = await postUserMessage(`<@${BOT_USER_ID}> start`, parent.ts)
+    const firstWaits: Promise<unknown>[] = []
+    const firstResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-service-tier-first',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: firstMention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> start`
+        }
+      }),
+      {},
+      waitUntilContext(firstWaits)
+    )
+    expect(firstResponse.status).toBe(200)
+    await Promise.all(firstWaits)
+    expect(metadataBlockTexts(slackApi.calls)).toHaveLength(1)
+    expect(metadataBlockTexts(slackApi.calls)[0]).toContain('Fast')
+    expect(metadataBlockTexts(slackApi.calls)[0]).toContain('Open chat in Console')
+
+    slackApi.reset()
+    const secondMention = await postUserMessage(`<@${BOT_USER_ID}> continue`, parent.ts)
+    const secondWaits: Promise<unknown>[] = []
+    const secondResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-service-tier-second',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: secondMention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> continue`
+        }
+      }),
+      {},
+      waitUntilContext(secondWaits)
+    )
+    expect(secondResponse.status).toBe(200)
+    await Promise.all(secondWaits)
+    expect(metadataBlockTexts(slackApi.calls)).toHaveLength(0)
   })
 
   it('shows the API-assigned harness in Slack and retains execution metadata', async () => {

@@ -1130,9 +1130,10 @@ async function syncThreadMessageToSession(
         metadataEnabled: responseMetadataEnabled,
         model: effectiveModel,
         reasoning: effectiveReasoning,
-        serviceTier: resolvedProvider
-          ? undefined
-          : defaultServiceTierForHarness(effectiveHarnessType)
+        serviceTier:
+          input.options.responseServiceTierEnabled === true && !resolvedProvider
+            ? defaultServiceTierForHarness(effectiveHarnessType)
+            : undefined
       })
     : undefined
   if (overrides.harnessType || overrides.model || overrides.provider || overrides.reasoning) {
@@ -1357,7 +1358,10 @@ async function syncThreadMessageToSession(
             metadataEnabled: responseMetadataEnabled,
             model,
             reasoning,
-            serviceTier: resolvedProvider ? undefined : defaultServiceTierForHarness(harnessType)
+            serviceTier:
+              input.options.responseServiceTierEnabled === true && !resolvedProvider
+                ? defaultServiceTierForHarness(harnessType)
+                : undefined
           })
         }
         traceLog(input.options, 'slackbotv2_session_harness_resolved', trace, {

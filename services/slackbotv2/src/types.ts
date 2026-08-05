@@ -146,8 +146,10 @@ export type SlackbotV2Options = {
    * link; response metadata may still render when independently enabled.
    */
   consolePublicUrl?: string
-  /** Append model, harness, reasoning, and service-tier metadata to every live response. */
+  /** Append model, harness, and reasoning metadata to every live response. */
   responseMetadataEnabled?: boolean
+  /** Include the Codex service tier in response metadata footers when they render. */
+  responseServiceTierEnabled?: boolean
   /**
    * Per-channel default harness/model/provider/reasoning, keyed by Slack
    * conversation id (SLACKBOTV2_CHANNEL_DEFAULTS). See channel-defaults.ts.
