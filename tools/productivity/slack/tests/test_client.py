@@ -342,6 +342,44 @@ def test_get_channel_history_page_paginates_with_date_window() -> None:
     assert result["messages"][1]["text"] == "hi @alice"
 
 
+def test_get_channel_history_page_preserves_reactions() -> None:
+    """Reactions ride along on the history payload; the serializer must keep them.
+
+    In channels where people answer by reacting rather than replying, the
+    reaction list is the signal and reply_count is close to noise. Dropping
+    reactions during serialization left callers with no way to tell the
+    difference between "nobody responded" and "everybody responded with an
+    emoji".
+    """
+    client, fake_web_client = _make_client()
+    client._get_user_cache = lambda: {"U1": "alice", "U2": "bob"}  # type: ignore[method-assign]
+    fake_web_client.history_pages = [
+        {
+            "messages": [
+                {
+                    "user": "U1",
+                    "text": "ship it?",
+                    "ts": "200.000000",
+                    "reactions": [
+                        {"name": "white_check_mark", "users": ["U1", "U2"], "count": 2},
+                    ],
+                },
+                {"user": "U2", "text": "no reactions here", "ts": "190.000000"},
+            ],
+            "response_metadata": {"next_cursor": ""},
+        },
+    ]
+
+    result = client.get_channel_history_page("paradigm-pulse", limit=2)
+
+    assert result["messages"][0]["reactions"] == [
+        {"name": "white_check_mark", "users": ["U1", "U2"], "count": 2},
+    ]
+    # A message with no reactions gets an empty list, matching how reply_users
+    # defaults, so callers can index without a guard.
+    assert result["messages"][1]["reactions"] == []
+
+
 def test_get_channel_history_page_surfaces_structured_auth_failure() -> None:
     client, fake_web_client = _make_client()
     client._get_user_cache = lambda: {}  # type: ignore[method-assign]

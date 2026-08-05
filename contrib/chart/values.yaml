@@ -491,6 +491,13 @@ slackbotv2:
   # Join newly-created public channels after subscribed channel_created events.
   # Requires the Slack app to grant channels:read and channels:join.
   autoJoinCreatedChannels: false
+  # Append model, harness, and reasoning effort to the first live streamed
+  # Slack assistant response, every response, or no responses. Independent of
+  # the optional Console link below.
+  responseMetadataMode: first
+  # Include the Codex service tier when a response metadata footer is rendered.
+  # This does not cause the footer to appear on additional responses.
+  responseServiceTierEnabled: false
   # Public/local MCP endpoint shown in MCP SSO setup messages. The default
   # assumes users connect through `kubectl port-forward ... 3000:8080`.
   mcpPublicUrl: "http://localhost:3000"
@@ -567,6 +574,8 @@ githubbot:
   # / draft status.
   autoMerge: true
   mergeMethod: squash
+  # Emit CI and review workflow events to api-rs.
+  workflowEvents: false
   # Fallback @handle (no leading @) the bot tags when it gives up; empty = none.
   escalationHandle: ""
   # Optional review / issue-work methodology overrides. When set, the chart writes

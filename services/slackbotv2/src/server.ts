@@ -46,6 +46,8 @@ const options: SlackbotV2Options = {
     consoleLogger.warn('slackbotv2 SLACKBOTV2_CHANNEL_DEFAULTS', { reason })
   ),
   consolePublicUrl: optionalEnv('CENTAUR_CONSOLE_PUBLIC_URL'),
+  responseMetadataMode: responseMetadataModeEnv('SLACKBOTV2_RESPONSE_METADATA_MODE'),
+  responseServiceTierEnabled: booleanEnv('SLACKBOTV2_RESPONSE_SERVICE_TIER_ENABLED', false),
   defaultHarnessType: optionalEnv('SLACKBOTV2_DEFAULT_HARNESS'),
   // Same env vars deployers use to override the sandbox harness model
   // (sandbox.extraEnv); the chart mirrors them here so displayed defaults
@@ -98,6 +100,8 @@ console.log(
     message_overrides_strategy: messageOverridesStrategyMode,
     message_overrides_strategy_enabled:
       messageOverridesStrategyMode !== 'llm' || Boolean(messageOverridesStrategyApiKey),
+    response_metadata_mode: options.responseMetadataMode,
+    response_service_tier_enabled: options.responseServiceTierEnabled,
     port: server.port,
     api_url: apiUrl
   })
@@ -137,6 +141,13 @@ function messageOverridesStrategyModeEnv(name: string): 'flags' | 'llm' {
   if (!value) return 'flags'
   if (value === 'flags' || value === 'llm') return value
   throw new Error(`${name} must be "flags" or "llm"`)
+}
+
+function responseMetadataModeEnv(name: string): 'first' | 'always' | 'never' {
+  const value = optionalEnv(name)?.toLowerCase()
+  if (!value) return 'first'
+  if (value === 'first' || value === 'always' || value === 'never') return value
+  throw new Error(`${name} must be "first", "always", or "never"`)
 }
 
 function createMessageOverridesStrategy(): SlackbotV2Options['messageOverridesStrategy'] {

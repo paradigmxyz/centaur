@@ -1,12 +1,12 @@
 /**
- * Slack-only "Open chat in Console" context line.
+ * Slack-only response metadata and Console-link context line.
  *
- * On the first assistant message in a Slack thread, slackbotv2 appends a Block
- * Kit `context` block linking to the Console session view. The block is passed
- * to the chat adapter via `StreamOptions.stopBlocks`, which the adapter forwards
- * to Slack's `chat.stopStream` `blocks` argument ("Block formatted elements will
- * be appended to the end of the message"). This keeps the rendering Slack-only
- * and out of the shared `@centaur/rendering` package used by Discord/Teams.
+ * Slackbotv2 appends a Block Kit `context` block according to the configured
+ * metadata mode. The first assistant message may also link to the Console
+ * session view. The block is passed to the chat adapter via
+ * `StreamOptions.stopBlocks`, which the adapter forwards to Slack's
+ * `chat.stopStream` `blocks` argument. This keeps the rendering Slack-only and
+ * out of the shared `@centaur/rendering` package used by Discord/Teams.
  */
 
 import claudeSettings from '../../../harness/claude/settings.json'
@@ -59,6 +59,7 @@ const CODEX_REASONING_EFFORTS_BY_MODEL: Record<string, ReadonlySet<string>> = {
 const CODEX_CONFIG = codexConfig as {
   model?: unknown
   model_reasoning_effort?: unknown
+  service_tier?: unknown
 }
 
 // Default model each harness runs when no --model/--opus/... override is set,
@@ -88,6 +89,10 @@ const BAKED_DEFAULT_REASONING: Record<string, string | undefined> = {
     typeof CODEX_CONFIG.model_reasoning_effort === 'string'
       ? CODEX_CONFIG.model_reasoning_effort
       : undefined
+}
+
+const BAKED_DEFAULT_SERVICE_TIERS: Record<string, string | undefined> = {
+  codex: typeof CODEX_CONFIG.service_tier === 'string' ? CODEX_CONFIG.service_tier : undefined
 }
 
 /** Slack mrkdwn requires `&`, `<`, `>` to be escaped in free text. */
@@ -139,6 +144,15 @@ export function defaultReasoningForHarness(
   if (!harnessType) return undefined
   const key = harnessType.trim().toLowerCase()
   return configured?.[key]?.trim().toLowerCase() || BAKED_DEFAULT_REASONING[key]
+}
+
+/** Returns the baked service tier for a harness that consumes Codex config.toml. */
+export function defaultServiceTierForHarness(
+  harnessType: string | null | undefined
+): string | undefined {
+  if (!harnessType) return undefined
+  const key = harnessType.trim().toLowerCase()
+  return BAKED_DEFAULT_SERVICE_TIERS[key]
 }
 
 /** Resolves the effort the selected harness actually runs for this turn. */
@@ -206,28 +220,34 @@ export type SlackContextBlock = {
 }
 
 /**
- * Builds the "Open chat in Console · {MODEL} · {Harness} · {Effort}"
- * context block, or
- * undefined when no Console base URL is configured (a bare "Open chat in
- * Console" with no link is pointless, so the whole block is skipped). The
- * model id is uppercased for display.
+ * Builds a Slack context block containing the optional Console link and
+ * response metadata. Metadata inclusion is independent of the Console URL.
  */
-export function buildConsoleSessionContextBlock(params: {
+export function buildSlackResponseContextBlock(params: {
   consoleBaseUrl: string | null | undefined
   threadKey: string
   harnessType?: string | null
+  metadataEnabled?: boolean
   model?: string | null
   reasoning?: string | null
+  serviceTier?: string | null
 }): SlackContextBlock | undefined {
   const url = consoleSessionUrl(params.consoleBaseUrl, params.threadKey)
-  if (!url) return undefined
-  const segments = [`<${url}|Open chat in Console>`]
-  const model = params.model?.trim()
-  if (model) segments.push(escapeSlackMrkdwn(model.toUpperCase()))
-  const harness = harnessDisplayName(params.harnessType)
-  if (harness) segments.push(escapeSlackMrkdwn(harness))
-  const reasoning = reasoningDisplayName(params.reasoning)
-  if (reasoning) segments.push(escapeSlackMrkdwn(reasoning))
+  const includeMetadata = params.metadataEnabled === true
+  if (!url && !includeMetadata) return undefined
+  const segments: string[] = []
+  if (url) segments.push(`<${url}|Open chat in Console>`)
+  if (includeMetadata) {
+    const model = params.model?.trim()
+    if (model) segments.push(escapeSlackMrkdwn(model.toUpperCase()))
+    const harness = harnessDisplayName(params.harnessType)
+    if (harness) segments.push(escapeSlackMrkdwn(harness))
+    const reasoning = reasoningDisplayName(params.reasoning)
+    if (reasoning) segments.push(escapeSlackMrkdwn(reasoning))
+    const serviceTier = params.serviceTier?.trim()
+    if (serviceTier) segments.push(escapeSlackMrkdwn(titleCase(serviceTier)))
+  }
+  if (segments.length === 0) return undefined
   // Middot (U+00B7) with a space on each side, matching the bot's other
   // context lines.
   return {

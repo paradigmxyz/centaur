@@ -216,6 +216,13 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
       agent-browser install; \
     fi
 
+# Keep Playwright in uv's image-backed cache so isolated tool environments do
+# not download its large Python driver package on first use. Browser binaries
+# are intentionally omitted because DocSend connects to Browserbase over CDP.
+ARG PLAYWRIGHT_VERSION=1.62.0
+RUN uv tool install "playwright==${PLAYWRIGHT_VERSION}" \
+    && playwright --version | grep -F "${PLAYWRIGHT_VERSION}"
+
 # ── Agent skills + workspace setup (rarely changes) ─────────────────────────
 RUN --mount=type=cache,target=/home/agent/.npm,uid=1001,gid=1001,sharing=locked \
     npx -y skills add vercel-labs/agent-browser
