@@ -39,7 +39,7 @@ module = "client.py"
 # deep_research even when the key was present on the proxy. ANTHROPIC synthesis
 # stays inject (optional; only needed when calling Anthropic directly).
 optional_secrets = [
-    {type = "http", name = "PARALLEL_API_KEY", mode = "replace", match_headers = ["Authorization"], hosts = ["api.parallel.ai", "search.parallel.ai"]},
+    {type = "http", name = "PARALLEL_API_KEY", mode = "replace", match_headers = ["Authorization", "x-api-key"], hosts = ["api.parallel.ai", "search.parallel.ai"]},
     {type = "http", name = "ANTHROPIC_API_KEY", mode = "inject", inject_header = "x-api-key", hosts = ["api.anthropic.com"]},
 ]
 hosts = ["api.parallel.ai", "search.parallel.ai"]
