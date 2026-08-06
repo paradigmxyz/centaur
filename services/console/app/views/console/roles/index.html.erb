@@ -4,7 +4,7 @@
 
 <%= render "console/page_header",
            title: "Roles",
-           subtitle: "#{pluralize(@roles.size, "role")} across all namespaces.",
+           subtitle: "#{pluralize(@roles.size, "role")}.",
            actions: link_to("Add Role", new_console_role_path, class: "btn-primary") %>
 
 <div class="console-panel">
