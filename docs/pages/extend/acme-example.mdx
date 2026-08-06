@@ -173,6 +173,10 @@ kubectl create secret generic centaur-infra-env \
   --from-literal=SLACKBOT_API_KEY=...
 ```
 
+`OP_SERVICE_ACCOUNT_TOKEN` and `OP_VAULT` apply to the chart's default
+`ironProxy.secretSource: onepassword`. Use `OP_CONNECT_TOKEN` and `OP_VAULT`
+for `onepassword-connect`, and omit all three for `env`.
+
 Model and tool credentials such as `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
 `AMP_API_KEY`, and `GITHUB_TOKEN` should be configured through Centaur's
 credential source. Sandboxes should receive placeholders; iron-proxy injects the
