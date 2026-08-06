@@ -27,10 +27,10 @@ That's the minimum — works with zero credentials via the free MCP. Add a `PARA
 
 ## Secrets
 
-Set in root `.env` (preferred) or `tools/research/websearch/.env`.
+Set in root `.env` (preferred) or `tools/research/websearch/.env` for local CLI use.
 
-- `PARALLEL_API_KEY` — optional. Get one at <https://platform.parallel.ai>. Unlocks the paid Search REST path (with source filters) and enables `deep_research` via the Task API.
-- `ANTHROPIC_API_KEY` — optional. Enables the Claude-backed synthesis pipeline on `search(synthesize=True)`.
+- `PARALLEL_API_KEY` — optional. Get one at <https://platform.parallel.ai>. Unlocks the paid Search REST path (with source filters) and enables `deep_research` via the Task API. In Centaur sandboxes this is a **replace**-mode secret (`Authorization`): grant it (e.g. `centaur-perms roles grant infra --tool websearch --secret-name PARALLEL_API_KEY`) so agents see the `PARALLEL_API_KEY=PARALLEL_API_KEY` placeholder and iron-proxy swaps the real value.
+- `ANTHROPIC_API_KEY` — optional. Enables the Claude-backed synthesis pipeline on `search(synthesize=True)` (inject-mode toward `api.anthropic.com`).
 
 Non-secret config (synthesis model, default Task processor, REST/MCP base URLs) is configured via `WebSearchClient(...)` constructor kwargs at instantiation time. Defaults: `synthesis_model="claude-opus-4-6"`, `parallel_deep_research_processor="ultra-fast"`, `parallel_api_base_url="https://api.parallel.ai"`, `parallel_mcp_url="https://search.parallel.ai/mcp"`.
 

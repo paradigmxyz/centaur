@@ -33,8 +33,13 @@ module = "client.py"
 # PARALLEL_API_KEY to use the paid REST path and unlock `deep_research`.
 # Set ANTHROPIC_API_KEY to enable the Claude-backed synthesis pipeline on
 # top of search results (reviewer → writer → citation repair).
+# PARALLEL uses replace (not inject): sandboxes get PARALLEL_API_KEY=PARALLEL_API_KEY
+# and iron-proxy swaps the real value into Authorization on Parallel hosts. Inject
+# never sets sandbox env, so the CLI `_is_configured()` check never enabled REST /
+# deep_research even when the key was present on the proxy. ANTHROPIC synthesis
+# stays inject (optional; only needed when calling Anthropic directly).
 optional_secrets = [
-    {type = "http", name = "PARALLEL_API_KEY", mode = "inject", inject_header = "Authorization", inject_formatter = "Bearer {{ .Value }}", hosts = ["api.parallel.ai", "search.parallel.ai"]},
+    {type = "http", name = "PARALLEL_API_KEY", mode = "replace", match_headers = ["Authorization"], hosts = ["api.parallel.ai", "search.parallel.ai"]},
     {type = "http", name = "ANTHROPIC_API_KEY", mode = "inject", inject_header = "x-api-key", hosts = ["api.anthropic.com"]},
 ]
 hosts = ["api.parallel.ai", "search.parallel.ai"]

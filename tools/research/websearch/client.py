@@ -17,6 +17,7 @@ returns raw Parallel results and records the skipped synthesis in
 from __future__ import annotations
 
 import json
+import os
 import re
 import warnings
 from collections.abc import Callable
@@ -48,14 +49,21 @@ def _is_configured(key: str) -> bool:
     - Server / tool-runtime: ToolManager populates ``ctx.secrets[key]``
       only for secrets it actually resolved, so dict membership is the
       authoritative signal.
-    - CLI / direct-invoke: no ToolContext is bound; fall through to
-      ``secret(key)`` and treat the value-equals-key stub case as
-      "not configured" (the firewall has nothing to swap into).
+    - CLI / direct-invoke: sandbox shims leave ``ToolContext.secrets`` empty.
+      Replace-mode secrets appear as env ``KEY=KEY`` (placeholder); that is
+      configured — iron-proxy swaps the real value on allowlisted hosts.
+      Treat non-empty env presence as configured. Only when the key is
+      absent from the environment do we fall through to StubBackend's
+      value-equals-key "not configured" rule (laptop / bare CLI without a
+      real ``.env`` value).
     """
     try:
         ctx = get_tool_context()
         return bool(ctx.secrets.get(key))
     except LookupError:
+        env_val = os.environ.get(key)
+        if env_val is not None and env_val != "":
+            return True
         try:
             val = secret(key)
         except KeyError:
