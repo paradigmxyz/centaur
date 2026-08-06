@@ -19,6 +19,10 @@ enable_fanout = false
 runtime_metrics = true
 
 [agents]
+# Codex 0.144+: features.multi_agent{,_v2}=false is not enough — model catalog
+# multi_agent_version (e.g. gpt-5.6-sol → v2) still enables spawn_agent while
+# agents.enabled defaults to true. This is the hard kill switch.
+enabled = false
 max_depth = 2
 job_max_runtime_seconds = 1800
 

@@ -194,6 +194,32 @@ else:
         rewritten.append(f"{name} = false")
     lines = lines[: features_start + 1] + rewritten + lines[features_end:]
 
+# Codex 0.144+: features.multi_agent{,_v2}=false alone does not disable
+# collaboration tools when the model catalog advertises multi_agent_version
+# (e.g. gpt-5.6-sol → v2) and agents.enabled defaults to true. Force the hard
+# kill switch here; CODEX_CONFIG_OVERLAY can still re-enable after this.
+agents_start = next((i for i, line in enumerate(lines) if line.strip() == "[agents]"), None)
+if agents_start is None:
+    lines.extend(["", "[agents]", "enabled = false"])
+else:
+    agents_end = next(
+        (i for i in range(agents_start + 1, len(lines)) if lines[i].lstrip().startswith("[")),
+        len(lines),
+    )
+    seen_enabled = False
+    rewritten = []
+    for line in lines[agents_start + 1 : agents_end]:
+        stripped = line.strip()
+        name = stripped.split("=", 1)[0].strip() if "=" in stripped else None
+        if name == "enabled":
+            rewritten.append("enabled = false")
+            seen_enabled = True
+        else:
+            rewritten.append(line)
+    if not seen_enabled:
+        rewritten.insert(0, "enabled = false")
+    lines = lines[: agents_start + 1] + rewritten + lines[agents_end:]
+
 # Optional deploy-time override of the codex reasoning effort. Lets a deployment
 # (e.g. an org overlay via sandbox.extraEnv) set the default without forking the
 # baked-in config.toml. Named after codex's own config key (model_reasoning_effort)
