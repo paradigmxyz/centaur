@@ -33,7 +33,7 @@ class PgDsnSecret < ApplicationRecord
   # to the principal oid and `console_user_id` to the associated user oid; raw
   # database primary keys are never exposed as setting values.
   PRINCIPAL_FIELDS = %w[
-    id namespace foreign_id name kind slack_user_id slack_channel_id slack_team_id slack_email
+    id foreign_id name kind slack_user_id slack_channel_id slack_team_id slack_email
     console_user_id console_user_email slack_history_channel_ids
   ].freeze
   # Legacy `principal_label` selectors that canonicalize to a first-class
@@ -97,7 +97,6 @@ class PgDsnSecret < ApplicationRecord
     end
   end
 
-  validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
   validates :foreign_id, presence: true, uniqueness: true,
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
   validates :database, presence: true
@@ -157,7 +156,6 @@ class PgDsnSecret < ApplicationRecord
 
     case ref[:principal_field].to_s
     when "id" then principal.oid
-    when "namespace" then principal.namespace.to_s
     when "foreign_id" then principal.foreign_id.to_s
     when "name" then principal.name.to_s
     when "kind" then principal.kind.to_s

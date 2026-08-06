@@ -23,7 +23,8 @@ module Console
       get console_new_principal_url
       assert_response :ok
       assert_select "form[action=?][method=?]", console_create_principal_path, "post" do
-        assert_select "input[name='principal[namespace]'][value=default]"
+        assert_select "input[name='principal[namespace]']", count: 0
+        assert_select ".form-label", text: "Namespace", count: 0
         assert_select "input[name='principal[foreign_id]']"
         assert_select "input[name='principal[name]']"
         assert_select "button", "Add label"
@@ -37,13 +38,14 @@ module Console
         default_sandbox_observability_enabled: false,
         default_sandbox_api_server_enabled: false
       )
+      Role.update_all(assign_by_default: false)
       roles(:acme_infra).update!(assign_by_default: true)
       roles(:globex_infra).update!(assign_by_default: true)
 
       assert_difference -> { Principal.count }, 1 do
         post console_create_principal_url,
              params: {
-               principal: { namespace: "acme", foreign_id: "C-new-console", name: "New console principal" },
+               principal: { foreign_id: "C-new-console", name: "New console principal" },
                labels: {
                  "0" => { key: "kind", value: "slack_channel" },
                  "1" => { key: "team", value: "platform" }
@@ -51,7 +53,7 @@ module Console
              }
       end
 
-      principal = Principal.find_by!(namespace: "acme", foreign_id: "C-new-console")
+      principal = Principal.find_by!(foreign_id: "C-new-console")
       assert_redirected_to console_principal_path(principal.oid)
       assert_equal "Principal created.", flash[:notice]
       assert_equal "New console principal", principal.name
@@ -66,17 +68,21 @@ module Console
       assert_equal "public", principal.sandbox_repo_cache
       assert_equal false, principal.sandbox_observability_enabled
       assert_equal false, principal.sandbox_api_server_enabled
-      assert_equal [ roles(:acme_infra) ], principal.roles
+      expected = [ roles(:acme_infra), roles(:globex_infra) ].sort_by(&:id)
+      assert_equal expected, principal.roles.order(:id).to_a
       assert_equal @operator, principal.created_by
     end
 
     test "create re-renders validation errors" do
-      existing = principals(:acme_channel)
+      existing = Principal.create!(
+        foreign_id: "duplicate-console-principal",
+        created_by: @operator
+      )
 
       assert_no_difference -> { Principal.count } do
         post console_create_principal_url,
              params: {
-               principal: { namespace: existing.namespace, foreign_id: existing.foreign_id, name: "Duplicate" }
+               principal: { foreign_id: existing.foreign_id, name: "Duplicate" }
              }
       end
 

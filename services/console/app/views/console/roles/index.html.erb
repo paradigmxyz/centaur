@@ -27,10 +27,9 @@
           <td class="console-td-nowrap">
             <% if role.foreign_id.present? %>
               <div class="text-centaur-400 group-hover:glow" title="<%= role.foreign_id %>"><%= truncate_middle(role.foreign_id) %></div>
-              <%= id_meta_line(role.namespace, oid: role.oid) %>
+              <%= id_meta_line(role.oid) %>
             <% else %>
               <span class="text-centaur-400 group-hover:glow"><%= role.oid %></span>
-              <%= id_meta_line(role.namespace) %>
             <% end %>
           </td>
           <td class="console-td-nowrap text-zinc-100">

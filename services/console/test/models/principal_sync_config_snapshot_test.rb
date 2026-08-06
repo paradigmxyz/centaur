@@ -35,7 +35,7 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
   # Builds a static secret injecting `header` on `host`, granted directly to
   # globex_user (priority 100).
   def grant_direct_static(host:, header:)
-    secret = StaticSecret.new(namespace: "globex", foreign_id: "static-#{SecureRandom.hex(4)}",
+    secret = StaticSecret.new(foreign_id: "static-#{SecureRandom.hex(4)}",
                               inject_config: { "header" => header, "formatter" => "Bearer {{ .Value }}" },
                               created_by: users(:globex_admin))
     secret.build_source(source_type: "control_plane", secret: "direct-token")
@@ -49,7 +49,7 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
   # globex_user through the globex_infra role (priority 0).
   def grant_role_gcp(host:)
     PrincipalRole.find_or_create_by!(principal: principals(:globex_user), role: roles(:globex_infra))
-    secret = GcpAuthSecret.new(namespace: "globex", foreign_id: "gcp-#{SecureRandom.hex(4)}",
+    secret = GcpAuthSecret.new(foreign_id: "gcp-#{SecureRandom.hex(4)}",
                                credentials_provider: { "type" => "workload_identity" },
                                scopes: [ "https://www.googleapis.com/auth/cloud-platform" ],
                                created_by: users(:globex_admin))
@@ -60,7 +60,7 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
   end
 
   def grant_direct_gcp(host:)
-    secret = GcpAuthSecret.new(namespace: "globex", foreign_id: "gcp-#{SecureRandom.hex(4)}",
+    secret = GcpAuthSecret.new(foreign_id: "gcp-#{SecureRandom.hex(4)}",
                                credentials_provider: { "type" => "workload_identity" },
                                scopes: [ "https://www.googleapis.com/auth/cloud-platform" ],
                                created_by: users(:globex_admin))
@@ -74,7 +74,6 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     PrincipalRole.find_or_create_by!(principal: principals(:globex_user), role: roles(:globex_infra))
     unless secret
       secret = OauthTokenSecret.new(
-        namespace: "globex",
         foreign_id: "oauth-#{SecureRandom.hex(4)}",
         name: "gmail",
         grant: "refresh_token",
@@ -161,11 +160,11 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
   end
 
   test "sync_secrets delivers a brokered token inline and omits it until minted" do
-    cred = BrokerCredential.create!(namespace: "default", foreign_id: "sync-#{SecureRandom.hex(4)}",
+    cred = BrokerCredential.create!(foreign_id: "sync-#{SecureRandom.hex(4)}",
                                     token_endpoint: "https://idp.example/token", client_id: "cid",
                                     created_by: users(:globex_admin), refresh_token: "seed")
 
-    secret = StaticSecret.new(namespace: "default", foreign_id: "brokered-#{SecureRandom.hex(4)}",
+    secret = StaticSecret.new(foreign_id: "brokered-#{SecureRandom.hex(4)}",
                               inject_config: { "header" => "Authorization" }, created_by: users(:globex_admin))
     secret.build_source(source_type: "token_broker", config: { "credential_id" => cred.oid })
     secret.rules.build(host: "api.example.com", position: 0)
@@ -261,7 +260,6 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     principal = principals(:globex_user)
     low = pg_dsn_secrets(:acme_analytics_pg)
     high = PgDsnSecret.new(
-      namespace: low.namespace,
       foreign_id: "pg-analytics-privileged",
       name: "analytics privileged",
       database: low.database,

@@ -4,7 +4,7 @@
 
 <%= render "console/page_header",
            title: "Principals",
-           subtitle: "#{pluralize(@total_principals, "principal")} across all namespaces.",
+           subtitle: "#{pluralize(@total_principals, "principal")} total.",
            actions: link_to("Add Principal", console_new_principal_path, class: "btn-primary") %>
 
 <%= form_with url: console_principals_path, method: :get, class: "mb-3 flex flex-wrap items-center gap-2" do %>

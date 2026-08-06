@@ -36,12 +36,10 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_11_120000) do
     t.string "foreign_id"
     t.jsonb "labels", default: {}, null: false
     t.string "name"
-    t.string "namespace", default: "default", null: false
     t.datetime "updated_at", null: false
     t.index ["created_by_id"], name: "index_aws_auth_secrets_on_created_by_id"
     t.index ["foreign_id"], name: "index_aws_auth_secrets_on_foreign_id", unique: true
     t.index ["labels"], name: "index_aws_auth_secrets_on_labels", using: :gin
-    t.index ["namespace", "foreign_id"], name: "index_aws_auth_secrets_on_namespace_and_foreign_id", unique: true
   end
 
   create_table "broker_credentials", force: :cascade do |t|
@@ -65,7 +63,6 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_11_120000) do
     t.datetime "last_refresh"
     t.integer "max_refresh_interval_seconds", default: 86400, null: false
     t.string "name"
-    t.string "namespace", default: "default", null: false
     t.datetime "next_attempt_at"
     t.bigint "oauth_app_id"
     t.text "password"
@@ -81,7 +78,6 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_11_120000) do
     t.index ["created_by_id"], name: "index_broker_credentials_on_created_by_id"
     t.index ["foreign_id"], name: "index_broker_credentials_on_foreign_id", unique: true
     t.index ["labels"], name: "index_broker_credentials_on_labels", using: :gin
-    t.index ["namespace", "foreign_id"], name: "index_broker_credentials_on_namespace_and_foreign_id", unique: true
     t.index ["next_attempt_at"], name: "index_broker_credentials_on_next_attempt_at"
     t.index ["oauth_app_id", "provider_subject"], name: "index_broker_credentials_on_oauth_app_id_and_provider_subject", unique: true, where: "(provider_subject IS NOT NULL)"
     t.index ["oauth_app_id"], name: "index_broker_credentials_on_oauth_app_id"
@@ -95,14 +91,12 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_11_120000) do
     t.string "foreign_id"
     t.jsonb "labels", default: {}, null: false
     t.string "name"
-    t.string "namespace", default: "default", null: false
     t.jsonb "scopes", default: [], null: false
     t.string "subject"
     t.datetime "updated_at", null: false
     t.index ["created_by_id"], name: "index_gcp_auth_secrets_on_created_by_id"
     t.index ["foreign_id"], name: "index_gcp_auth_secrets_on_foreign_id", unique: true
     t.index ["labels"], name: "index_gcp_auth_secrets_on_labels", using: :gin
-    t.index ["namespace", "foreign_id"], name: "index_gcp_auth_secrets_on_namespace_and_foreign_id", unique: true
   end
 
   create_table "gcp_id_token_secrets", force: :cascade do |t|
@@ -114,12 +108,10 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_11_120000) do
     t.string "header"
     t.jsonb "labels", default: {}, null: false
     t.string "name"
-    t.string "namespace", default: "default", null: false
     t.datetime "updated_at", null: false
     t.index ["created_by_id"], name: "index_gcp_id_token_secrets_on_created_by_id"
     t.index ["foreign_id"], name: "index_gcp_id_token_secrets_on_foreign_id", unique: true
     t.index ["labels"], name: "index_gcp_id_token_secrets_on_labels", using: :gin
-    t.index ["namespace", "foreign_id"], name: "index_gcp_id_token_secrets_on_namespace_and_foreign_id", unique: true
   end
 
   create_table "grants", force: :cascade do |t|
@@ -169,7 +161,6 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_11_120000) do
     t.jsonb "headers", default: [], null: false
     t.jsonb "labels", default: {}, null: false
     t.string "name"
-    t.string "namespace", default: "default", null: false
     t.string "signature_algorithm"
     t.string "signature_key_encoding"
     t.text "signature_message"
@@ -179,7 +170,6 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_11_120000) do
     t.index ["created_by_id"], name: "index_hmac_secrets_on_created_by_id"
     t.index ["foreign_id"], name: "index_hmac_secrets_on_foreign_id", unique: true
     t.index ["labels"], name: "index_hmac_secrets_on_labels", using: :gin
-    t.index ["namespace", "foreign_id"], name: "index_hmac_secrets_on_namespace_and_foreign_id", unique: true
   end
 
   create_table "mcp_oauth_authorization_codes", force: :cascade do |t|
@@ -240,7 +230,6 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_11_120000) do
     t.text "client_secret"
     t.datetime "created_at", null: false
     t.bigint "created_by_id", null: false
-    t.string "credential_namespace", default: "default", null: false
     t.string "description"
     t.boolean "enabled", default: true, null: false
     t.jsonb "labels", default: {}, null: false
@@ -262,7 +251,6 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_11_120000) do
     t.string "header"
     t.jsonb "labels", default: {}, null: false
     t.string "name"
-    t.string "namespace", default: "default", null: false
     t.jsonb "scopes", default: [], null: false
     t.string "token_endpoint"
     t.datetime "updated_at", null: false
@@ -270,7 +258,6 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_11_120000) do
     t.index ["created_by_id"], name: "index_oauth_token_secrets_on_created_by_id"
     t.index ["foreign_id"], name: "index_oauth_token_secrets_on_foreign_id", unique: true
     t.index ["labels"], name: "index_oauth_token_secrets_on_labels", using: :gin
-    t.index ["namespace", "foreign_id"], name: "index_oauth_token_secrets_on_namespace_and_foreign_id", unique: true
   end
 
   create_table "pg_dsn_secrets", force: :cascade do |t|
@@ -281,14 +268,12 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_11_120000) do
     t.string "foreign_id"
     t.jsonb "labels", default: {}, null: false
     t.string "name"
-    t.string "namespace", default: "default", null: false
     t.string "role"
     t.jsonb "settings", default: [], null: false
     t.datetime "updated_at", null: false
     t.index ["created_by_id"], name: "index_pg_dsn_secrets_on_created_by_id"
     t.index ["foreign_id"], name: "index_pg_dsn_secrets_on_foreign_id", unique: true
     t.index ["labels"], name: "index_pg_dsn_secrets_on_labels", using: :gin
-    t.index ["namespace", "foreign_id"], name: "index_pg_dsn_secrets_on_namespace_and_foreign_id", unique: true
   end
 
   create_table "principal_roles", force: :cascade do |t|
@@ -321,7 +306,6 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_11_120000) do
     t.string "kind", default: "unknown", null: false
     t.jsonb "labels", default: {}, null: false
     t.string "name"
-    t.string "namespace", default: "default", null: false
     t.boolean "sandbox_api_server_enabled", default: true, null: false
     t.boolean "sandbox_observability_enabled", default: true, null: false
     t.string "sandbox_repo_cache", default: "all", null: false
@@ -331,17 +315,16 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_11_120000) do
     t.string "slack_user_id"
     t.bigint "sync_config_cache_version", default: 0, null: false
     t.datetime "updated_at", null: false
+    t.index ["console_user_email"], name: "index_principals_on_console_user_email"
+    t.index ["console_user_id"], name: "index_principals_on_console_user_id"
     t.index ["created_by_id"], name: "index_principals_on_created_by_id"
     t.index ["foreign_id"], name: "index_principals_on_foreign_id", unique: true
+    t.index ["kind"], name: "index_principals_on_kind"
     t.index ["labels"], name: "index_principals_on_labels", using: :gin
-    t.index ["namespace", "console_user_email"], name: "index_principals_on_namespace_and_console_user_email"
-    t.index ["namespace", "console_user_id"], name: "index_principals_on_namespace_and_console_user_id"
-    t.index ["namespace", "foreign_id"], name: "index_principals_on_namespace_and_foreign_id", unique: true
-    t.index ["namespace", "kind"], name: "index_principals_on_namespace_and_kind"
-    t.index ["namespace", "slack_channel_id"], name: "index_principals_on_namespace_and_slack_channel_id"
-    t.index ["namespace", "slack_email"], name: "index_principals_on_namespace_and_slack_email"
-    t.index ["namespace", "slack_team_id"], name: "index_principals_on_namespace_and_slack_team_id"
-    t.index ["namespace", "slack_user_id"], name: "index_principals_on_namespace_and_slack_user_id"
+    t.index ["slack_channel_id"], name: "index_principals_on_slack_channel_id"
+    t.index ["slack_email"], name: "index_principals_on_slack_email"
+    t.index ["slack_team_id"], name: "index_principals_on_slack_team_id"
+    t.index ["slack_user_id"], name: "index_principals_on_slack_user_id"
   end
 
   create_table "proxies", force: :cascade do |t|
@@ -387,12 +370,10 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_11_120000) do
     t.string "foreign_id"
     t.jsonb "labels", default: {}, null: false
     t.string "name"
-    t.string "namespace", default: "default", null: false
     t.datetime "updated_at", null: false
     t.index ["created_by_id"], name: "index_roles_on_created_by_id"
     t.index ["foreign_id"], name: "index_roles_on_foreign_id", unique: true
     t.index ["labels"], name: "index_roles_on_labels", using: :gin
-    t.index ["namespace", "foreign_id"], name: "index_roles_on_namespace_and_foreign_id", unique: true
   end
 
   create_table "secret_sources", force: :cascade do |t|
@@ -464,14 +445,12 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_11_120000) do
     t.string "kind", default: "custom", null: false
     t.jsonb "labels", default: {}, null: false
     t.string "name"
-    t.string "namespace", default: "default", null: false
     t.jsonb "replace_config"
     t.datetime "updated_at", null: false
     t.index ["broker_credential_id"], name: "index_static_secrets_on_broker_credential_id", unique: true, where: "(broker_credential_id IS NOT NULL)"
     t.index ["created_by_id"], name: "index_static_secrets_on_created_by_id"
     t.index ["foreign_id"], name: "index_static_secrets_on_foreign_id", unique: true
     t.index ["labels"], name: "index_static_secrets_on_labels", using: :gin
-    t.index ["namespace", "foreign_id"], name: "index_static_secrets_on_namespace_and_foreign_id", unique: true
   end
 
   create_table "system_settings", force: :cascade do |t|

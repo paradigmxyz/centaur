@@ -29,7 +29,6 @@ class Console::IntegrationsControllerTest < ActionDispatch::IntegrationTest
 
     credential = BrokerCredential.create!(
       oauth_app: oauth_apps(:acme_google),
-      namespace: "acme",
       foreign_id: "google-google-member-sub",
       name: "Google – Member",
       token_endpoint: "https://oauth2.googleapis.com/token",
@@ -57,7 +56,6 @@ class Console::IntegrationsControllerTest < ActionDispatch::IntegrationTest
 
     BrokerCredential.create!(
       oauth_app: oauth_apps(:acme_google),
-      namespace: "acme",
       foreign_id: "google-google-personal-sub",
       name: "Google – Personal",
       token_endpoint: "https://oauth2.googleapis.com/token",
@@ -78,7 +76,6 @@ class Console::IntegrationsControllerTest < ActionDispatch::IntegrationTest
 
     BrokerCredential.create!(
       oauth_app: oauth_apps(:acme_google),
-      namespace: "acme",
       foreign_id: "google-google-other-sub",
       name: "Google – Other",
       token_endpoint: "https://oauth2.googleapis.com/token",

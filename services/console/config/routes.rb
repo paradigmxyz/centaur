@@ -159,32 +159,54 @@ Rails.application.routes.draw do
 
   namespace :api do
     namespace :v1 do
-      # Each secret type is addressable by opaque oid (member routes) or by an
-      # explicit namespace + foreign_id via the namespaced lookup route.
+      # Each secret type is addressable by opaque oid or globally unique foreign_id.
+      # The /lookup/default/... form is a temporary compatibility alias.
       resources :static_secrets, only: %i[index show create update destroy] do
-        collection { get "lookup/:namespace/:foreign_id", action: :lookup, as: :lookup }
+        collection do
+          get "lookup/default/:foreign_id", action: :lookup, as: :default_lookup
+          get "lookup/:foreign_id", action: :lookup, as: :lookup
+        end
       end
       resources :gcp_auth_secrets, only: %i[index show create update destroy] do
-        collection { get "lookup/:namespace/:foreign_id", action: :lookup, as: :lookup }
+        collection do
+          get "lookup/default/:foreign_id", action: :lookup, as: :default_lookup
+          get "lookup/:foreign_id", action: :lookup, as: :lookup
+        end
       end
       resources :gcp_id_token_secrets, only: %i[index show create update destroy] do
-        collection { get "lookup/:namespace/:foreign_id", action: :lookup, as: :lookup }
+        collection do
+          get "lookup/default/:foreign_id", action: :lookup, as: :default_lookup
+          get "lookup/:foreign_id", action: :lookup, as: :lookup
+        end
       end
       resources :aws_auth_secrets, only: %i[index show create update destroy] do
-        collection { get "lookup/:namespace/:foreign_id", action: :lookup, as: :lookup }
+        collection do
+          get "lookup/default/:foreign_id", action: :lookup, as: :default_lookup
+          get "lookup/:foreign_id", action: :lookup, as: :lookup
+        end
       end
       resources :oauth_token_secrets, only: %i[index show create update destroy] do
-        collection { get "lookup/:namespace/:foreign_id", action: :lookup, as: :lookup }
+        collection do
+          get "lookup/default/:foreign_id", action: :lookup, as: :default_lookup
+          get "lookup/:foreign_id", action: :lookup, as: :lookup
+        end
       end
       resources :pg_dsn_secrets, only: %i[index show create update destroy] do
-        collection { get "lookup/:namespace/:foreign_id", action: :lookup, as: :lookup }
+        collection do
+          get "lookup/default/:foreign_id", action: :lookup, as: :default_lookup
+          get "lookup/:foreign_id", action: :lookup, as: :lookup
+        end
       end
       resources :hmac_secrets, only: %i[index show create update destroy] do
-        collection { get "lookup/:namespace/:foreign_id", action: :lookup, as: :lookup }
+        collection do
+          get "lookup/default/:foreign_id", action: :lookup, as: :default_lookup
+          get "lookup/:foreign_id", action: :lookup, as: :lookup
+        end
       end
       resources :roles, only: %i[index show create update destroy] do
         collection do
-          get "lookup/:namespace/:foreign_id", action: :lookup, as: :lookup
+          get "lookup/default/:foreign_id", action: :lookup, as: :default_lookup
+          get "lookup/:foreign_id", action: :lookup, as: :lookup
         end
         member do
           post "slack_channel_permissions", action: :upsert_slack_channel_permission
@@ -194,9 +216,11 @@ Rails.application.routes.draw do
       end
       resources :principals, only: %i[index show create update] do
         collection do
-          get "lookup/:namespace/:foreign_id", action: :lookup, as: :lookup
-          get "lookup/:namespace/:foreign_id/effective_config",
-              action: :effective_config, as: :lookup_effective_config
+          get "lookup/default/:foreign_id/effective_config",
+              action: :effective_config, as: :default_lookup_effective_config
+          get "lookup/:foreign_id/effective_config", action: :effective_config, as: :lookup_effective_config
+          get "lookup/default/:foreign_id", action: :lookup, as: :default_lookup
+          get "lookup/:foreign_id", action: :lookup, as: :lookup
         end
         member do
           get "effective_config"
@@ -213,7 +237,10 @@ Rails.application.routes.draw do
       # Operator-managed broker credentials (ApiKey auth). CRUD + lookup; the
       # rotating token blob is never serialized back.
       resources :broker_credentials, only: %i[index show create update destroy] do
-        collection { get "lookup/:namespace/:foreign_id", action: :lookup, as: :lookup }
+        collection do
+          get "lookup/default/:foreign_id", action: :lookup, as: :default_lookup
+          get "lookup/:foreign_id", action: :lookup, as: :lookup
+        end
       end
 
       # Operator-managed OAuth apps (ApiKey auth). Addressed by oid or slug; CRUD

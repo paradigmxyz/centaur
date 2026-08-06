@@ -24,7 +24,6 @@ module Api
           { "name" => "centaur.slack_user_id", "value_from" => { "proxy_label" => "centaur.slack_user_id" } }
         ])
         credential = BrokerCredential.create!(
-          namespace: @proxy.principal.namespace,
           foreign_id: "google-personal",
           name: "Google - Personal User",
           token_endpoint: "https://oauth2.googleapis.com/token",
@@ -38,7 +37,6 @@ module Api
           last_refresh: Time.current
         )
         secret = StaticSecret.new(
-          namespace: @proxy.principal.namespace,
           name: "Google - Personal User token",
           broker_credential: credential,
           inject_config: { "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" }
@@ -57,7 +55,7 @@ module Api
         assert_equal @proxy.name, data.fetch("sandbox_id")
         assert_equal @proxy.oid, data.fetch("proxy_id")
         assert_equal @proxy.principal.oid, data.fetch("principal_id")
-        assert_equal @proxy.principal.namespace, data.dig("principal", "namespace")
+        refute data.fetch("principal").key?("namespace")
         assert_equal @proxy.principal.sandbox_repo_cache, data.dig("capabilities", "sandbox_repo_cache")
         assert_equal 1, data.fetch("slack_channel_permissions").length
         assert_equal [

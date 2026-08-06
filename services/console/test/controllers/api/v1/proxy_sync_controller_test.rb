@@ -190,7 +190,7 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
   test "secrets without a source are skipped" do
     # Grant a sourceless static secret to the same principal.
     sourceless = StaticSecret.create!(
-      namespace: "acme", name: "no-source",
+      name: "no-source",
       inject_config: { "header" => "X-Token" }, created_by: users(:acme_admin)
     )
     Grant.create!(principal: @proxy.principal, static_secret: sourceless, created_by: users(:acme_admin))
@@ -419,13 +419,13 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
   test "broker credential token changes bump reachable principal cache version" do
     admin = users(:acme_admin)
     credential = BrokerCredential.create!(
-      namespace: "acme", foreign_id: "sync-cache-#{SecureRandom.hex(4)}",
+      foreign_id: "sync-cache-#{SecureRandom.hex(4)}",
       name: "sync cache broker", token_endpoint: "https://oauth.example.com/token",
       client_id: "client", refresh_token: "refresh", access_token: "token-1",
       expires_at: 1.hour.from_now, last_refresh: Time.current, created_by: admin
     )
     secret = StaticSecret.new(
-      namespace: "acme", name: "brokered",
+      name: "brokered",
       inject_config: { "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" },
       created_by: admin
     )

@@ -13,14 +13,13 @@ module Api
         render json: { data: record_payload(role) }
       end
 
-      # GET /api/v1/roles/lookup/:namespace/:foreign_id
+      # GET /api/v1/roles/lookup/:foreign_id
       def lookup
         render json: { data: record_payload(find_by_foreign_id!(Role)) }
       end
 
       def create
-        role = Role.new(namespace: upsert_namespace, foreign_id: data_params[:foreign_id],
-                        created_by: current_user)
+        role = Role.new(foreign_id: data_params[:foreign_id], created_by: current_user)
         ActiveRecord::Base.transaction do
           role.assign_attributes(data_params.permit(:name, labels: {}))
           role.save!
@@ -32,8 +31,7 @@ module Api
       end
 
       # PUT/PATCH upserts: an opaque id updates that record, any other identifier
-      # is a foreign_id that is created when absent. namespace and foreign_id are
-      # immutable, so they only take effect when the record is created.
+      # is a foreign_id that is created when absent. foreign_id is immutable.
       def update
         role = resolve_for_upsert(Role)
         was_new = role.new_record?
@@ -58,7 +56,7 @@ module Api
       def record_payload(role)
         {
           id: role.oid,
-          namespace: role.namespace,
+          namespace: "default",
           foreign_id: role.foreign_id,
           name: role.name,
           labels: role.labels,

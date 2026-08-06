@@ -37,11 +37,19 @@ module Console
         assert_select "select[name=grantable][aria-label=?]", "Secret to grant"
         assert_select "option[value=?]", "static:#{static_secrets(:acme_staging_api_key).oid}"
         assert_select "option[value=?]", "static:#{static_secrets(:acme_prod_api_key).oid}", count: 0
-        assert_select "option[value=?]", "static:#{static_secrets(:globex_prod_secret).oid}", count: 0
+        assert_select "option[value=?]", "static:#{static_secrets(:globex_prod_secret).oid}", count: 1
       end
       assert_select "form[action=?]", revoke_grant_console_role_path(role.oid, grant.oid) do
         assert_select "button[type=submit]", "Revoke"
       end
+    end
+
+    test "new role fixes the namespace to default" do
+      get new_console_role_url
+
+      assert_response :ok
+      assert_select "input[name='role[namespace]']", count: 0
+      assert_select ".form-label", text: "Namespace", count: 0
     end
 
     test "update_slack_channel_permissions stores role permissions" do
@@ -211,7 +219,8 @@ module Console
       get new_console_role_url
       assert_response :ok
       assert_select "form[action=?]", console_roles_path
-      assert_select "input[name=?]", "role[namespace]"
+      assert_select "input[name=?]", "role[namespace]", count: 0
+      assert_select ".form-label", text: "Namespace", count: 0
       assert_select "input[name=?]", "role[foreign_id]"
 
       get edit_console_role_url(role.oid)
@@ -219,18 +228,19 @@ module Console
       assert_select "form[action=?]", console_role_path(role.oid)
       assert_select "input[name=?]", "role[name]"
       assert_select "input[name=?]", "role[namespace]", count: 0
+      assert_select ".form-label", text: "Namespace", count: 0
       assert_select "input[name=?]", "role[foreign_id]", count: 0
     end
 
     test "create persists role identity and labels" do
       assert_difference -> { Role.count }, 1 do
         post console_roles_url, params: {
-          role: { namespace: "acme", foreign_id: "payments", name: "Payments" },
+          role: { foreign_id: "payments", name: "Payments" },
           labels: { "0" => { key: "team", value: "finance" } }
         }
       end
 
-      role = Role.find_by!(namespace: "acme", foreign_id: "payments")
+      role = Role.find_by!(foreign_id: "payments")
       assert_redirected_to console_role_path(role.oid)
       assert_equal "Payments", role.name
       assert_equal({ "team" => "finance" }, role.labels)
@@ -239,7 +249,7 @@ module Console
     test "create rejects invalid role without writing" do
       assert_no_difference -> { Role.count } do
         post console_roles_url, params: {
-          role: { namespace: "bad namespace", foreign_id: "broken", name: "Broken" }
+          role: { foreign_id: "bad foreign id", name: "Broken" }
         }
       end
       assert_response :unprocessable_entity
@@ -248,14 +258,13 @@ module Console
     test "update changes mutable fields only" do
       role = roles(:acme_infra)
       patch console_role_url(role.oid), params: {
-        role: { namespace: "globex", foreign_id: "changed", name: "Infrastructure" },
+        role: { foreign_id: "changed", name: "Infrastructure" },
         labels: { "0" => { key: "kind", value: "platform" } }
       }
 
       assert_redirected_to console_role_path(role.oid)
       role.reload
       assert_equal "Infrastructure", role.name
-      assert_equal "acme", role.namespace
       assert_equal "acme-infra", role.foreign_id
       assert_equal({ "kind" => "platform" }, role.labels)
     end
@@ -285,16 +294,16 @@ module Console
       assert_redirected_to console_role_path(role.oid)
     end
 
-    test "grant_secret rejects a secret from another namespace" do
+    test "grant_secret allows any secret" do
       role = roles(:acme_admin_role)
       secret = static_secrets(:globex_prod_secret)
 
-      assert_no_difference -> { Grant.count } do
+      assert_difference -> { Grant.count } => 1 do
         post grant_secret_console_role_url(role.oid), params: { grantable: "static:#{secret.oid}" }
       end
 
       assert_redirected_to console_role_path(role.oid)
-      assert_equal "Secret must be in the same namespace as the role.", flash[:alert]
+      assert_equal "Granted prod-secret.", flash[:notice]
     end
 
     test "revoke_grant removes the role grant" do

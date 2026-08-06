@@ -53,7 +53,6 @@ class OauthTokenSecret < ApplicationRecord
     [ "header:#{(header.presence || "Authorization").downcase}" ]
   end
 
-  validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
   validates :foreign_id, uniqueness: { allow_nil: true },
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }, allow_nil: true
   validates :grant, inclusion: { in: GRANTS, message: "must be one of #{GRANTS.join(", ")}" }

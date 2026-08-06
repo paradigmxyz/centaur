@@ -164,7 +164,7 @@ class ProxyTest < ActiveSupport::TestCase
   end
 
   test "config_hash changes when a role grant becomes reachable" do
-    role = Role.create!(namespace: "acme", foreign_id: "extra", created_by: users(:acme_admin))
+    role = Role.create!(foreign_id: "extra", created_by: users(:acme_admin))
     proxy = proxies(:acme_proxy)
     before = proxy.config_hash
     Grant.create!(role: role, gcp_auth_secret: gcp_auth_secrets(:acme_bigquery),

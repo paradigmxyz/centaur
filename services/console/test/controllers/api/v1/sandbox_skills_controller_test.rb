@@ -3,7 +3,6 @@ require "test_helper"
 class Api::V1::SandboxSkillsControllerTest < ActionDispatch::IntegrationTest
   setup do
     principal = Principal.create!(
-      namespace: "sandbox-skill-test",
       foreign_id: "console-user-member",
       name: "Member User",
       kind: :console_user,

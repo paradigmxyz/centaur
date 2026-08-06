@@ -9,7 +9,6 @@ module SlackDm
         client_id: "slack-client-#{SecureRandom.hex(4)}",
         client_secret: "secret",
         allowed_scopes: SlackDm::SyncCredential::REQUIRED_SCOPES,
-        credential_namespace: "acme",
         created_by: users(:acme_admin)
       )
     end
@@ -22,7 +21,6 @@ module SlackDm
     )
       BrokerCredential.create!(
         oauth_app: app,
-        namespace: "acme",
         foreign_id: "slack-dms-#{SecureRandom.hex(6)}",
         token_endpoint: "https://slack.com/api/oauth.v2.access",
         access_token: access_token,

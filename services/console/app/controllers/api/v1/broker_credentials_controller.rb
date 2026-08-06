@@ -15,7 +15,7 @@ module Api
         render json: { data: record_payload(ref) }
       end
 
-      # GET /api/v1/broker_credentials/lookup/:namespace/:foreign_id
+      # GET /api/v1/broker_credentials/lookup/:foreign_id
       def lookup
         render json: { data: record_payload(find_by_foreign_id!(BrokerCredential)) }
       end
@@ -48,7 +48,7 @@ module Api
       private
 
       def assign_and_save!(ref, attrs)
-        base = attrs.permit(:namespace, :foreign_id, :name, :description, :token_endpoint,
+        base = attrs.permit(:foreign_id, :name, :description, :token_endpoint,
                             :grant, :client_id,
                             :early_refresh_slack_seconds, :early_refresh_fraction,
                             :max_refresh_interval_seconds, :refresh_timeout_seconds,
@@ -56,8 +56,6 @@ module Api
         # A PUT upsert by foreign_id sets identity before assignment; a blank body
         # value must not wipe it.
         base.delete(:foreign_id) if base[:foreign_id].blank? && ref.foreign_id.present?
-        base.delete(:namespace) if base[:namespace].blank? && ref.namespace.present?
-        base[:namespace] = "default" if base[:namespace].blank? && ref.namespace.blank?
 
         BrokerCredential.transaction do
           ref.assign_attributes(base)
@@ -121,7 +119,7 @@ module Api
       def record_payload(ref)
         {
           id: ref.oid,
-          namespace: ref.namespace,
+          namespace: "default",
           foreign_id: ref.foreign_id,
           name: ref.name,
           description: ref.description,

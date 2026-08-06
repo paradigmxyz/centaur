@@ -13,22 +13,19 @@ module Api
 
       # GET /api/v1/principals/:id
       #
-      # :id is an opaque oid. To read by foreign_id, use the namespaced lookup
-      # route (GET /api/v1/principals/lookup/:namespace/:foreign_id), which
-      # requires the namespace explicitly rather than defaulting it.
+      # :id is an opaque oid. To read by foreign_id, use the lookup route.
       def show
         principal = Principal.find_by_oid!(params[:id])
         render json: { data: record_payload(principal) }
       end
 
-      # GET /api/v1/principals/lookup/:namespace/:foreign_id
+      # GET /api/v1/principals/lookup/:foreign_id
       def lookup
         render json: { data: record_payload(find_by_foreign_id!(Principal)) }
       end
 
       def create
-        principal = Principal.new(namespace: upsert_namespace, foreign_id: data_params[:foreign_id],
-                                  created_by: current_user)
+        principal = Principal.new(foreign_id: data_params[:foreign_id], created_by: current_user)
         ActiveRecord::Base.transaction do
           validate_identity_consistency!(principal)
           principal.assign_attributes(principal_params)
@@ -42,8 +39,7 @@ module Api
       end
 
       # PUT/PATCH upserts: an opaque id updates that record, any other identifier
-      # is a foreign_id that is created when absent. namespace and foreign_id are
-      # immutable, so they only take effect when the record is created.
+      # is a foreign_id that is created when absent. foreign_id is immutable.
       def update
         principal = resolve_for_upsert(Principal)
         was_new = principal.new_record?
@@ -60,10 +56,9 @@ module Api
       end
 
       # GET /api/v1/principals/:id/effective_config
-      # GET /api/v1/principals/lookup/:namespace/:foreign_id/effective_config
+      # GET /api/v1/principals/lookup/:foreign_id/effective_config
       #
-      # Addressable by opaque oid (member route) or by an explicit namespace +
-      # foreign_id (namespaced lookup route).
+      # Addressable by opaque oid (member route) or by foreign_id (lookup route).
       #
       # The config this principal resolves to, in the same shape iron-proxy
       # receives on /sync, for operator inspection. Unlike /sync it never reveals
@@ -85,7 +80,7 @@ module Api
       def record_payload(principal)
         {
           id: principal.oid,
-          namespace: principal.namespace,
+          namespace: "default",
           foreign_id: principal.foreign_id,
           name: principal.name,
           labels: principal.labels_with_sandbox_capabilities,

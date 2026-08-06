@@ -4,8 +4,7 @@ class Principal < ApplicationRecord
   oid_prefix "prn"
 
   include ForeignIdCollisionGuard
-
-  attr_readonly :namespace, :foreign_id
+  attr_readonly :foreign_id
 
   has_many :grants, dependent: :destroy
   # Proxies outlive their principal: deleting a principal unassigns its proxies
@@ -43,7 +42,6 @@ class Principal < ApplicationRecord
   SLACK_CHANNEL_ID_FORMAT = /\A[CDG][A-Z0-9]{8,}\z/
   SLACK_TEAM_ID_FORMAT = /\A[TE][A-Z0-9]{8,}\z/
 
-  validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
   validates :foreign_id, uniqueness: { allow_nil: true },
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }, allow_nil: true
   validates :sandbox_repo_cache, inclusion: { in: SANDBOX_REPO_CACHE_VALUES }
@@ -229,7 +227,7 @@ class Principal < ApplicationRecord
   end
 
   def assign_default_roles
-    role_ids = Role.where(namespace: namespace, assign_by_default: true).ids
+    role_ids = Role.where(assign_by_default: true).ids
     return if role_ids.empty?
 
     # These assignments are part of the principal's initial state, so there is

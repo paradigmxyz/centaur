@@ -20,8 +20,11 @@ module Console
     test "GET new and edit render without error" do
       get new_console_oauth_app_form_url
       assert_response :ok
+      assert_select "input[name='oauth_app[credential_namespace]']", count: 0
+      assert_select ".form-label", text: "Credential namespace", count: 0
       get edit_console_oauth_app_form_url(oauth_apps(:acme_google).oid)
       assert_response :ok
+      assert_select ".form-label", text: "Credential namespace", count: 0
     end
 
     test "POST create builds an app with all fields" do
@@ -30,7 +33,7 @@ module Console
           oauth_app: {
             slug: "new-google", description: "New Google integration",
             provider: "google", client_id: "cid", client_secret: "shh",
-            credential_namespace: "acme", enabled: "1", always_available: "1",
+            enabled: "1", always_available: "1",
             allowed_scopes: "https://www.googleapis.com/auth/gmail.readonly\nhttps://www.googleapis.com/auth/calendar.readonly\n"
           },
           labels: { "0" => { key: "team", value: "comms" } }
@@ -47,6 +50,7 @@ module Console
       assert_equal({ "team" => "comms" }, app.labels)
       assert app.enabled?
       assert app.always_available?
+      assert_not app.has_attribute?(:credential_namespace)
       assert_equal @operator, app.created_by
     end
 
@@ -80,8 +84,7 @@ module Console
       patch console_oauth_app_form_url(app.oid), params: {
         oauth_app: {
           slug: app.slug, description: "Renamed",
-          provider: "google", client_id: "new-cid", credential_namespace: app.credential_namespace,
-          enabled: "0",
+          provider: "google", client_id: "new-cid",           enabled: "0",
           allowed_scopes: "https://www.googleapis.com/auth/gmail.readonly"
         }
       }
@@ -122,7 +125,7 @@ module Console
         oauth_app: {
           slug: app.slug,
           provider: "google", client_id: app.client_id, client_secret: "",
-          credential_namespace: app.credential_namespace, enabled: "1",
+          enabled: "1",
           allowed_scopes: Array(app.allowed_scopes).join("\n")
         }
       }

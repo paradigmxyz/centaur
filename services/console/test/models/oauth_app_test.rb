@@ -6,7 +6,7 @@ class OauthAppTest < ActiveSupport::TestCase
       provider: "google", slug: "slug-#{SecureRandom.hex(4)}",
       client_id: "cid", client_secret: "sec",
       allowed_scopes: %w[scope.a scope.b],
-      credential_namespace: "default", created_by: users(:acme_admin)
+      created_by: users(:acme_admin)
     }.merge(overrides))
   end
 
@@ -26,10 +26,6 @@ class OauthAppTest < ActiveSupport::TestCase
   test "client_id and client_secret are required" do
     refute build_app(client_id: nil).valid?
     refute build_app(client_secret: nil).valid?
-  end
-
-  test "credential_namespace must be url-safe" do
-    refute build_app(credential_namespace: "not/safe").valid?
   end
 
   test "slug is required, url-safe, and globally unique" do
@@ -82,7 +78,7 @@ class OauthAppTest < ActiveSupport::TestCase
   test "cannot be destroyed while it has minted credentials" do
     app = build_app
     app.save!
-    BrokerCredential.create!(namespace: "default", foreign_id: "minted-#{SecureRandom.hex(4)}",
+    BrokerCredential.create!(foreign_id: "minted-#{SecureRandom.hex(4)}",
                              token_endpoint: "https://oauth2.googleapis.com/token",
                              oauth_app: app, provider_subject: "sub-1")
     refute app.destroy

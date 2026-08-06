@@ -1954,7 +1954,6 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
 
   def create_slack_oauth_credential(app, subject:, email:, labels: {})
     BrokerCredential.create!(
-      namespace: app.credential_namespace,
       oauth_app: app,
       provider_subject: subject,
       provider_email: email,

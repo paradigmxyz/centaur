@@ -53,7 +53,7 @@ class PrincipalCredentialReconciliation
     user_principals.select { |principal| user_principal?(principal) }.filter_map do |principal|
       entry_for(principal, indexes: indexes)
     end.sort_by do |entry|
-      [ entry.principal.namespace, entry.principal.name.to_s, entry.principal.foreign_id.to_s ]
+      [ entry.principal.name.to_s, entry.principal.foreign_id.to_s ]
     end
   end
 
@@ -69,7 +69,7 @@ class PrincipalCredentialReconciliation
 
     requested = 0
     created = 0
-    user_principals.where(namespace: credential.namespace).find_each do |principal|
+    user_principals.find_each do |principal|
       next unless user_principal?(principal)
       next unless credential_matches_principal?(principal, credential)
 
@@ -172,10 +172,9 @@ class PrincipalCredentialReconciliation
   # after_commit. Negligible while C is in the hundreds. Add the optimization
   # when oauth-flow credential count reaches the low thousands or principal
   # writes show up in latency traces, whichever comes first: replace the
-  # single-principal path with a candidate query (namespace-scoped
-  # `LOWER(provider_email) IN (...) OR provider_subject IN (...)`, backed by
-  # indexes on (namespace, LOWER(provider_email)) and (namespace,
-  # provider_subject)), which is O(K) in the credentials of the one matched
+  # single-principal path with a candidate query
+  # (`LOWER(provider_email) IN (...) OR provider_subject IN (...)`, backed by
+  # indexes on LOWER(provider_email) and provider_subject), which is O(K) in the credentials of the one matched
   # human. Keep the SQL normalization identical to normalize_email /
   # normalize_key. entries/apply_all legitimately need the full load.
   def credential_indexes
@@ -195,12 +194,12 @@ class PrincipalCredentialReconciliation
       .joins(:oauth_app)
       .includes(:oauth_app, :static_secret)
       .where(oauth_apps: { provider: provider })
-      .order(:namespace, :id)
+      .order(:id)
       .to_a
   end
 
   def user_principals
-    Principal.order(:namespace, :id)
+    Principal.order(:id)
   end
 
   def user_principal?(principal)
@@ -270,7 +269,6 @@ class PrincipalCredentialReconciliation
   def credential_matches_principal?(principal, credential, provider = nil)
     provider ||= credential.oauth_app&.provider
     return false unless supported_provider?(credential)
-    return false unless credential.namespace == principal.namespace
     return false if provider == SLACK_PROVIDER && !slack_team_matches?(principal, credential)
     if console_user_principal?(principal)
       return principal_emails(principal).include?(normalize_email(credential.provider_email))
@@ -357,7 +355,7 @@ class PrincipalCredentialReconciliation
   end
 
   # Slack user ids are workspace-scoped. If either side carries a team identity,
-  # require both sides to agree; otherwise namespace scoping is the available
+  # require both sides to agree; otherwise global identity matching is the available
   # boundary for older credentials.
   def slack_team_matches?(principal, credential)
     principal_team = normalize_key(principal.slack_team_id)

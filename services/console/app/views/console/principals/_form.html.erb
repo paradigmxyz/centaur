@@ -5,11 +5,6 @@
     <h2 class="form-section-heading">Identity</h2>
     <div class="grid gap-5 sm:grid-cols-2">
       <div>
-        <label class="form-label" for="principal_namespace">Namespace</label>
-        <%= text_field_tag "principal[namespace]", principal.namespace.presence || "default", id: "principal_namespace", class: "form-input #{field_error_class(principal, :namespace)}" %>
-        <%= field_error(principal, :namespace) %>
-      </div>
-      <div>
         <label class="form-label" for="principal_foreign_id">Foreign ID</label>
         <%= text_field_tag "principal[foreign_id]", principal.foreign_id, id: "principal_foreign_id", class: "form-input #{field_error_class(principal, :foreign_id)}", placeholder: "slack-channel-T123-C456" %>
         <%= field_error(principal, :foreign_id) %>

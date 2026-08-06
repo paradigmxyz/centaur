@@ -42,12 +42,6 @@
           <%= field_error(app, :client_secret) %>
           <p class="form-hint">Stored encrypted.<%= " Leave blank to keep the current secret." unless app.new_record? %></p>
         </div>
-        <div>
-          <label class="form-label" for="oauth_app_credential_namespace">Credential namespace</label>
-          <%= text_field_tag "oauth_app[credential_namespace]", app.credential_namespace.presence || "default", id: "oauth_app_credential_namespace", class: "form-input #{field_error_class(app, :credential_namespace)}" %>
-          <%= field_error(app, :credential_namespace) %>
-          <p class="form-hint">Namespace for broker credentials minted by this app's flows.</p>
-        </div>
       </div>
     </section>
 

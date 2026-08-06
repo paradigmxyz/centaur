@@ -5,14 +5,14 @@ class PrincipalTest < ActiveSupport::TestCase
     { created_by: users(:acme_admin) }.merge(overrides)
   end
 
-  test "is valid with namespace and foreign_id" do
-    principal = Principal.new(default_attrs(namespace: "acme", foreign_id: "C-new-1"))
+  test "is valid with foreign_id" do
+    principal = Principal.new(default_attrs(foreign_id: "C-new-1"))
     assert principal.valid?
   end
 
-  test "namespace defaults to 'default'" do
+  test "does not persist a namespace" do
     principal = Principal.new(default_attrs)
-    assert_equal "default", principal.namespace
+    assert_not principal.has_attribute?(:namespace)
     assert_equal Principal::UNKNOWN_KIND, principal.kind
     assert principal.valid?
   end
@@ -227,38 +227,31 @@ class PrincipalTest < ActiveSupport::TestCase
   end
 
   test "rejects a foreign_id that starts with the opaque id prefix" do
-    principal = Principal.new(default_attrs(namespace: "acme", foreign_id: "prn_abc123"))
+    principal = Principal.new(default_attrs(foreign_id: "prn_abc123"))
     assert_not principal.valid?
     assert_includes principal.errors[:foreign_id], "must not start with \"prn_\", which is reserved for opaque ids"
   end
 
-  test "is invalid when namespace is blank" do
-    principal = Principal.new(default_attrs(namespace: "", foreign_id: "C-blank"))
-    assert_not principal.valid?
-    assert_includes principal.errors[:namespace], "can't be blank"
-  end
-
   test "foreign_id is globally unique" do
     existing = principals(:acme_channel)
-    dup = Principal.new(default_attrs(namespace: existing.namespace, foreign_id: existing.foreign_id))
+    dup = Principal.new(default_attrs(foreign_id: existing.foreign_id))
     assert_not dup.valid?
     assert_includes dup.errors[:foreign_id], "has already been taken"
   end
 
-  test "same foreign_id is rejected across different namespaces" do
+  test "same foreign_id is rejected globally" do
     existing = principals(:acme_channel)
-    other = Principal.new(default_attrs(namespace: "globex", foreign_id: existing.foreign_id))
+    other = Principal.new(default_attrs(foreign_id: existing.foreign_id))
     assert_not other.valid?
-    assert_includes other.errors[:foreign_id], "has already been taken"
   end
 
   test "labels include sandbox repo-cache projection by default" do
-    principal = Principal.create!(default_attrs(namespace: "acme", foreign_id: "C-default-labels"))
+    principal = Principal.create!(default_attrs(foreign_id: "C-default-labels"))
     assert_equal({ Principal::SANDBOX_REPO_CACHE_LABEL => "all" }, principal.reload.labels)
   end
 
   test "sandbox access defaults to enabled" do
-    principal = Principal.create!(default_attrs(namespace: "acme", foreign_id: "C-default-sandbox-access"))
+    principal = Principal.create!(default_attrs(foreign_id: "C-default-sandbox-access"))
     principal.reload
 
     assert_equal "all", principal.sandbox_repo_cache
@@ -266,20 +259,21 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_predicate principal, :sandbox_api_server_enabled
   end
 
-  test "new principals with no roles receive configured defaults from their namespace" do
+  test "new principals with no roles receive all configured defaults" do
     Role.update_all(assign_by_default: false)
     [ roles(:acme_infra), roles(:acme_admin_role), roles(:globex_infra) ].each do |role|
       role.update!(assign_by_default: true)
     end
 
-    principal = Principal.create!(default_attrs(namespace: "acme", foreign_id: "U-default-roles"))
+    principal = Principal.create!(default_attrs(foreign_id: "U-default-roles"))
 
-    assert_equal [ roles(:acme_infra), roles(:acme_admin_role) ].sort_by(&:id), principal.roles.order(:id)
+    expected = [ roles(:acme_infra), roles(:acme_admin_role), roles(:globex_infra) ].sort_by(&:id)
+    assert_equal expected, principal.roles.order(:id).to_a
   end
 
   test "preassigned roles suppress configured defaults" do
     roles(:acme_infra).update!(assign_by_default: true)
-    principal = Principal.new(default_attrs(namespace: "acme", foreign_id: "U-explicit-role"))
+    principal = Principal.new(default_attrs(foreign_id: "U-explicit-role"))
     principal.roles = [ roles(:acme_admin_role) ]
 
     principal.save!
@@ -298,7 +292,7 @@ class PrincipalTest < ActiveSupport::TestCase
   end
 
   test "default sandbox repo-cache overwrites explicit label assignment" do
-    principal = Principal.new(default_attrs(namespace: "acme", foreign_id: "C-explicit-repo-cache-label"))
+    principal = Principal.new(default_attrs(foreign_id: "C-explicit-repo-cache-label"))
 
     principal.apply_default_sandbox_capabilities!
     principal.assign_attributes(labels: { Principal::SANDBOX_REPO_CACHE_LABEL => "none" })
@@ -309,7 +303,7 @@ class PrincipalTest < ActiveSupport::TestCase
   end
 
   test "sandbox repo-cache stores canonical enum value" do
-    principal = Principal.create!(default_attrs(namespace: "acme", foreign_id: "C-repo-cache-setting"))
+    principal = Principal.create!(default_attrs(foreign_id: "C-repo-cache-setting"))
 
     principal.update!(sandbox_repo_cache: "public")
     principal.reload
@@ -319,7 +313,7 @@ class PrincipalTest < ActiveSupport::TestCase
   end
 
   test "sandbox repo-cache enum survives labels assigned in the same update" do
-    principal = Principal.create!(default_attrs(namespace: "acme", foreign_id: "C-repo-cache-label-order"))
+    principal = Principal.create!(default_attrs(foreign_id: "C-repo-cache-label-order"))
 
     principal.update!(sandbox_repo_cache: "public", labels: { "team" => "platform" })
     principal.reload
@@ -330,7 +324,7 @@ class PrincipalTest < ActiveSupport::TestCase
   end
 
   test "sandbox repo-cache overwrites label with canonical value" do
-    principal = Principal.create!(default_attrs(namespace: "acme", foreign_id: "C-repo-cache-label"))
+    principal = Principal.create!(default_attrs(foreign_id: "C-repo-cache-label"))
 
     principal.update!(labels: { Principal::SANDBOX_REPO_CACHE_LABEL => "public" })
     principal.reload
@@ -340,7 +334,7 @@ class PrincipalTest < ActiveSupport::TestCase
   end
 
   test "sandbox repo-cache param takes precedence over conflicting label" do
-    principal = Principal.create!(default_attrs(namespace: "acme", foreign_id: "C-repo-cache-param-wins"))
+    principal = Principal.create!(default_attrs(foreign_id: "C-repo-cache-param-wins"))
 
     principal.update!(
       sandbox_repo_cache: "public",
@@ -353,7 +347,7 @@ class PrincipalTest < ActiveSupport::TestCase
   end
 
   test "sandbox repo-cache rejects invalid enum values" do
-    principal = Principal.new(default_attrs(namespace: "acme", foreign_id: "C-repo-cache-invalid"))
+    principal = Principal.new(default_attrs(foreign_id: "C-repo-cache-invalid"))
     principal.sandbox_repo_cache = "pub"
 
     assert_not principal.valid?
@@ -362,7 +356,6 @@ class PrincipalTest < ActiveSupport::TestCase
 
   test "labels accepts arbitrary string map" do
     principal = Principal.create!(default_attrs(
-      namespace: "acme",
       foreign_id: "C-labels",
       labels: { "env" => "prod", "team" => "platform" }
     ))
@@ -486,7 +479,6 @@ class PrincipalTest < ActiveSupport::TestCase
     with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
       principal = Principal.create!(
         default_attrs(
-          namespace: "acme",
           foreign_id: "C-clear-slack-permissions"
         )
       )
@@ -536,13 +528,6 @@ class PrincipalTest < ActiveSupport::TestCase
     end
   end
 
-  test "namespace is immutable after creation" do
-    principal = principals(:acme_channel)
-    assert_raises(ActiveRecord::ReadonlyAttributeError) do
-      principal.update!(namespace: "other")
-    end
-  end
-
   test "foreign_id is immutable after creation" do
     principal = principals(:acme_channel)
     assert_raises(ActiveRecord::ReadonlyAttributeError) do
@@ -587,7 +572,7 @@ class PrincipalTest < ActiveSupport::TestCase
   end
 
   test "requires created_by" do
-    principal = Principal.new(namespace: "acme", foreign_id: "C-needs-key")
+    principal = Principal.new(foreign_id: "C-needs-key")
     assert_not principal.valid?
     assert_includes principal.errors[:created_by], "must exist"
   end
