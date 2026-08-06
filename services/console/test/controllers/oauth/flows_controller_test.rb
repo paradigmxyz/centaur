@@ -434,6 +434,7 @@ module Oauth
       assert_nil cred.next_attempt_at
       assert_equal [ "api.github.com", "github.com" ], cred.static_secret.rules.map(&:host)
       assert_equal "GitHub – Pending GitHub account token", cred.static_secret.name
+      assert_equal "github_token", cred.static_secret.kind
       assert_nil cred.static_secret.inject_config
       assert_equal(
         {

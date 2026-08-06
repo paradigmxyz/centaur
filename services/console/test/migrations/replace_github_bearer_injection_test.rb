@@ -9,8 +9,7 @@ class ReplaceGithubBearerInjectionTest < ActiveSupport::TestCase
       inject_config: { "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" },
       created_by: users(:acme_admin)
     )
-    rule = RequestRule.create!(host: "github.invalid", static_secret: secret)
-    rule.update_column(:host, "github.com")
+    RequestRule.create!(host: "github.com", static_secret: secret)
     principal = principals(:acme_channel)
     Grant.create!(principal: principal, static_secret: secret, created_by: users(:acme_admin))
     previous_version = principal.reload.sync_config_cache_version
@@ -19,14 +18,7 @@ class ReplaceGithubBearerInjectionTest < ActiveSupport::TestCase
 
     secret.reload
     assert_nil secret.inject_config
-    assert_equal(
-      {
-        "proxy_value" => "GITHUB_TOKEN",
-        "match_headers" => [ "Authorization" ],
-        "require" => false
-      },
-      secret.replace_config
-    )
+    assert_equal CredentialProfiles::GithubToken::REPLACE_CONFIG, secret.replace_config
     assert_equal previous_version + 1, principal.reload.sync_config_cache_version
   end
 
@@ -44,8 +36,7 @@ class ReplaceGithubBearerInjectionTest < ActiveSupport::TestCase
       inject_config: { "header" => "Authorization", "formatter" => "token {{ .Value }}" },
       created_by: users(:acme_admin)
     )
-    rule = RequestRule.create!(host: "github.invalid", static_secret: custom)
-    rule.update_column(:host, "github.com")
+    RequestRule.create!(host: "github.com", static_secret: custom)
 
     ReplaceGithubBearerInjection.new.up
 

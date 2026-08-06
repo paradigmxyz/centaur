@@ -28,6 +28,17 @@ class StaticSecretTest < ActiveSupport::TestCase
     assert StaticSecret.new(valid_replace_attrs).valid?
   end
 
+  test "kind defaults to custom" do
+    assert_equal "custom", StaticSecret.new.kind
+  end
+
+  test "rejects an unknown credential kind" do
+    ref = StaticSecret.new(valid_inject_attrs(kind: "githubish"))
+
+    assert_not ref.valid?
+    assert_includes ref.errors[:kind], "is not included in the list"
+  end
+
   test "rejects a foreign_id that starts with the opaque id prefix" do
     ref = StaticSecret.new(valid_inject_attrs(foreign_id: "ssr_abc123"))
     assert_not ref.valid?

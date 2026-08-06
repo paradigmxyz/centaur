@@ -249,11 +249,10 @@ module Oauth
     # Wraps a minted credential in a grantable static secret, so an operator can
     # grant the integration's token to a principal straight from the console (a
     # broker credential is not grantable on its own). Most providers inject the
-    # live access token as `Authorization: Bearer <token>`. Providers whose hosts
-    # support multiple authentication schemes can override that configuration;
-    # GitHub preserves API Bearer/token and Git HTTP Basic headers by replacing a
-    # placeholder instead. The token stays fresh because the source resolves the
-    # credential live at sync time.
+    # live access token as `Authorization: Bearer <token>`. A provider can select
+    # a credential profile when its clients need a different proxy contract. The
+    # token stays fresh because the source resolves the credential live at sync
+    # time.
     #
     # Created once per credential (keyed on the broker_credential association, which
     # a unique index enforces) and left untouched on re-consent, so any operator
@@ -267,13 +266,25 @@ module Oauth
 
       secret.namespace = credential.namespace
       secret.name = "#{credential.name} token"
-      secret.assign_attributes(wrapping_secret_config)
+      secret.kind = wrapping_secret_kind
+      secret.assign_attributes(wrapping_secret_config) if secret.kind == CredentialProfiles::Registry::CUSTOM_KIND
       secret.source = SecretSource.new(source_type: "token_broker", config: { "credential_id" => credential.oid })
-      secret.rules = Array(@provider.api_hosts).each_with_index.map do |host, position|
-        RequestRule.new(host: host, http_methods: [], paths: [], position: position)
+      rules = if secret.kind == CredentialProfiles::Registry::CUSTOM_KIND
+        Array(@provider.api_hosts).each_with_index.map do |host, position|
+          RequestRule.new(host: host, http_methods: [], paths: [], position: position)
+        end
+      else
+        []
       end
+      secret.rules = secret.apply_kind_defaults(rules: rules)
       secret.save!
       secret
+    end
+
+    def wrapping_secret_kind
+      return @provider.wrapping_secret_kind if @provider.respond_to?(:wrapping_secret_kind)
+
+      CredentialProfiles::Registry::CUSTOM_KIND
     end
 
     def wrapping_secret_config
