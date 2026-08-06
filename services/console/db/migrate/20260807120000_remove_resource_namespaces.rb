@@ -17,6 +17,7 @@ class RemoveResourceNamespaces < ActiveRecord::Migration[8.1]
     validate_namespace_removal!
     remove_token_broker_namespaces!
     replace_namespace_principal_fields!
+    invalidate_sync_config_snapshots!
 
     RESOURCE_TABLES.each do |table|
       remove_index table, name: "index_#{table}_on_namespace_and_foreign_id"
@@ -34,7 +35,7 @@ class RemoveResourceNamespaces < ActiveRecord::Migration[8.1]
   private
 
   def lock_namespace_tables!
-    tables = RESOURCE_TABLES + %i[oauth_apps secret_sources]
+    tables = RESOURCE_TABLES + %i[oauth_apps secret_sources principal_sync_config_snapshots]
     execute "LOCK TABLE #{tables.join(", ")} IN ACCESS EXCLUSIVE MODE"
   end
 
@@ -91,6 +92,13 @@ class RemoveResourceNamespaces < ActiveRecord::Migration[8.1]
         WHERE setting->'value_from'->>'principal_field' = 'namespace'
       )
     SQL
+  end
+
+  def invalidate_sync_config_snapshots!
+    # Existing snapshots may contain a rendered value from a
+    # principal_field=namespace Postgres setting. Force regeneration from the
+    # rewritten settings when proxies resume polling after the migration.
+    execute "DELETE FROM principal_sync_config_snapshots"
   end
 
   def add_global_principal_indexes!
