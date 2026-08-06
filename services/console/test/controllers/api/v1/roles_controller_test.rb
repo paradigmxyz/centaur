@@ -239,6 +239,26 @@ module Api
         assert_equal %w[acme-infra admin globex-infra infra].sort, foreign_ids.sort
       end
 
+      test "GET index filters by a label named namespace" do
+        matching = Role.create!(
+          foreign_id: "namespace-label-match",
+          labels: { "namespace" => "default" },
+          created_by: users(:acme_admin)
+        )
+        Role.create!(
+          foreign_id: "namespace-label-other",
+          labels: { "namespace" => "prod" },
+          created_by: users(:acme_admin)
+        )
+
+        get api_v1_roles_url,
+            params: { labels: { namespace: "default" } },
+            headers: auth_headers
+
+        assert_response :ok
+        assert_equal [ matching.oid ], json_body.fetch("data").pluck("id")
+      end
+
       test "GET index does not require a namespace" do
         get api_v1_roles_url, headers: auth_headers
         assert_response :ok

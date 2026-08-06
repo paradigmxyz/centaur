@@ -155,6 +155,30 @@ module Api
         assert_equal [ 0, 1 ], data["rules"].map { |r| r["position"] }
       end
 
+      test "POST accepts credential_namespace only in a token broker source config" do
+        credential = broker_credentials(:acme_managed_gmail)
+        body = {
+          data: {
+            foreign_id: "token-broker-compatibility",
+            inject_config: { "header" => "Authorization" },
+            source: {
+              source_type: "token_broker",
+              config: {
+                credential_id: credential.foreign_id,
+                credential_namespace: "default"
+              }
+            },
+            rules: [ { host: "api.example.com" } ]
+          }
+        }
+
+        post api_v1_static_secrets_url, params: body.to_json, headers: auth_headers
+
+        assert_response :created
+        source = StaticSecret.find_by!(foreign_id: "token-broker-compatibility").source
+        assert_equal({ "credential_id" => credential.foreign_id }, source.config)
+      end
+
       test "POST ignores client-supplied rule positions and uses the array index" do
         body = {
           data: {

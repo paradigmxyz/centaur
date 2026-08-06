@@ -134,28 +134,55 @@ module Api
     # removed fields. `default` is accepted and discarded; every other value is
     # a hard error. Non-default lookup paths do not route and therefore return 404.
     def normalize_namespace_compatibility!
-      invalid = scrub_namespace_fields!(params)
+      invalid = []
+      [ params, params[:data] ].compact.each do |container|
+        discard_legacy_namespace!(container, "namespace", invalid)
+        discard_legacy_namespace!(container, "credential_namespace", invalid)
+      end
+      discard_token_broker_namespaces!(params[:data], invalid)
       return if invalid.empty?
 
       render_error(status: :unprocessable_entity, message: NAMESPACE_ERROR)
     end
 
-    def scrub_namespace_fields!(value)
-      invalid = []
-      return invalid unless value.respond_to?(:each_pair)
+    LEGACY_SINGLE_SOURCE_FIELDS = %w[
+      source
+      keyfile
+      dsn
+      access_key_id
+      secret_access_key
+      session_token
+    ].freeze
+    LEGACY_SOURCE_COLLECTION_FIELDS = %w[credentials token_endpoint_headers].freeze
 
-      value.keys.each do |key|
-        child = value[key]
-        if %w[namespace credential_namespace].include?(key.to_s)
-          invalid << child unless child.blank? || child == "default"
-          value.delete(key)
-        elsif child.respond_to?(:each_pair)
-          invalid.concat(scrub_namespace_fields!(child))
-        elsif child.is_a?(Array)
-          child.each { |item| invalid.concat(scrub_namespace_fields!(item)) }
+    def discard_token_broker_namespaces!(data, invalid)
+      return unless data.respond_to?(:[])
+
+      LEGACY_SINGLE_SOURCE_FIELDS.each do |field|
+        discard_token_broker_namespace!(data[field], invalid)
+      end
+      LEGACY_SOURCE_COLLECTION_FIELDS.each do |field|
+        collection = data[field]
+        next unless collection.respond_to?(:each_value)
+
+        collection.each_value do |source|
+          discard_token_broker_namespace!(source, invalid)
         end
       end
-      invalid
+    end
+
+    def discard_token_broker_namespace!(source, invalid)
+      return unless source.respond_to?(:[])
+      return unless source["source_type"] == "token_broker"
+
+      discard_legacy_namespace!(source["config"], "credential_namespace", invalid)
+    end
+
+    def discard_legacy_namespace!(container, field, invalid)
+      return unless container.respond_to?(:key?) && container.key?(field)
+
+      value = container.delete(field)
+      invalid << value unless value.blank? || value == "default"
     end
 
     def label_filter_params

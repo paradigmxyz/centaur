@@ -119,6 +119,22 @@ module Api
         assert_equal true, data["sandbox_api_server_enabled"]
       end
 
+      test "POST preserves a label named namespace" do
+        post api_v1_principals_url,
+             params: {
+               data: {
+                 foreign_id: "namespace-label-create",
+                 labels: { "namespace" => "prod" }
+               }
+             }.to_json,
+             headers: auth_headers
+
+        assert_response :created
+        principal = Principal.find_by!(foreign_id: "namespace-label-create")
+        assert_equal "prod", principal.labels["namespace"]
+        assert_equal "prod", json_body.dig("data", "labels", "namespace")
+      end
+
       test "POST applies system sandbox defaults when omitted" do
         system_settings(:default).update!(
           default_sandbox_repo_cache: "public",
@@ -446,6 +462,18 @@ module Api
         )
         assert_equal "slack_channel", json_body.dig("data", "labels", "kind")
         assert_equal "C0123456789", json_body.dig("data", "labels", "slack_channel_id")
+      end
+
+      test "PUT preserves a label named namespace" do
+        principal = principals(:acme_channel)
+
+        put api_v1_principal_url(id: principal.oid),
+            params: { data: { labels: { "namespace" => "default" } } }.to_json,
+            headers: auth_headers
+
+        assert_response :ok
+        assert_equal "default", principal.reload.labels["namespace"]
+        assert_equal "default", json_body.dig("data", "labels", "namespace")
       end
 
       test "PUT promotes identity labels into columns and normalizes blank Slack values" do
