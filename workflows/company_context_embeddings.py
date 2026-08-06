@@ -1,0 +1,252 @@
+"""Experimental workflow: embed company context documents with OpenAI."""
+
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass, field
+from typing import Any, Protocol
+
+from api.workflow_engine import WorkflowContext
+from openai import AsyncOpenAI
+
+WORKFLOW_NAME = "company_context_embeddings"
+
+DEFAULT_BATCH_SIZE = 250
+DEFAULT_INTERVAL_SECONDS = 5 * 60
+DEFAULT_MAX_INPUT_CHARS = 24_000
+DEFAULT_MODEL = "text-embedding-3-small"
+EMBEDDING_DIMENSIONS = 1_536
+OPENAI_MAX_INPUT_TOKENS = 8_192
+OPENAI_MAX_BATCH_TOKENS = 300_000
+OPENAI_BATCH_SIZE = 25
+FALSE_ENV_VALUES = {"0", "false", "no", "off"}
+EMBEDDING_UPSERTS = {
+    "company_context": (
+        "INSERT INTO company_context_document_embeddings "
+        "  (company_context_document_id, model, content_hash, embedding) "
+        "VALUES ($1, $2, $3, $4::vector) "
+        "ON CONFLICT (company_context_document_id) DO UPDATE SET "
+        "  model = EXCLUDED.model, "
+        "  content_hash = EXCLUDED.content_hash, "
+        "  embedding = EXCLUDED.embedding, "
+        "  updated_at = NOW()"
+    ),
+    "google_docs": (
+        "INSERT INTO company_context_document_embeddings "
+        "  (google_docs_context_document_id, model, content_hash, embedding) "
+        "VALUES ($1, $2, $3, $4::vector) "
+        "ON CONFLICT (google_docs_context_document_id) DO UPDATE SET "
+        "  model = EXCLUDED.model, "
+        "  content_hash = EXCLUDED.content_hash, "
+        "  embedding = EXCLUDED.embedding, "
+        "  updated_at = NOW()"
+    ),
+    "granola": (
+        "INSERT INTO company_context_document_embeddings "
+        "  (granola_context_document_id, model, content_hash, embedding) "
+        "VALUES ($1, $2, $3, $4::vector) "
+        "ON CONFLICT (granola_context_document_id) DO UPDATE SET "
+        "  model = EXCLUDED.model, "
+        "  content_hash = EXCLUDED.content_hash, "
+        "  embedding = EXCLUDED.embedding, "
+        "  updated_at = NOW()"
+    ),
+}
+
+
+def _positive_int(value: int | str | None, default: int) -> int:
+    try:
+        parsed = int(value) if value is not None else default
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _env_flag_enabled(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in FALSE_ENV_VALUES
+
+
+SCHEDULE = {
+    "schedule_id": WORKFLOW_NAME,
+    "interval_seconds": _positive_int(
+        os.getenv("COMPANY_CONTEXT_EMBEDDINGS_INTERVAL_SECONDS"),
+        DEFAULT_INTERVAL_SECONDS,
+    ),
+    "enabled": _env_flag_enabled("COMPANY_CONTEXT_EMBEDDINGS_ENABLED"),
+    "no_delivery": True,
+}
+
+
+@dataclass
+class Input:
+    """Runtime options for one embedding batch."""
+
+    batch_size: int | None = None
+    model: str | None = None
+    max_input_chars: int | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+class EmbeddingsClient(Protocol):
+    embeddings: Any
+
+
+def _client() -> EmbeddingsClient:
+    return AsyncOpenAI()
+
+
+def _model(value: str | None) -> str:
+    configured = value or os.getenv("COMPANY_CONTEXT_EMBEDDINGS_MODEL") or DEFAULT_MODEL
+    return configured.strip() or DEFAULT_MODEL
+
+
+def _embedding_text(row: Any, max_chars: int) -> str:
+    parts = [str(row[key]).strip() for key in ("title", "body") if row[key]]
+    return "\n\n".join(parts)[:max_chars]
+
+
+def _batches(rows: list[Any], size: int) -> list[list[Any]]:
+    return [rows[start : start + size] for start in range(0, len(rows), size)]
+
+
+async def _load_documents(pool, *, model: str, batch_size: int) -> list[Any]:
+    return await pool.fetch(
+        "WITH pending_documents AS ("
+        "  SELECT 'company_context'::text AS source_kind, "
+        "    d.document_id, d.title, d.body, d.content_hash, d.updated_at "
+        "  FROM company_context_documents d "
+        "  LEFT JOIN company_context_document_embeddings e "
+        "    ON e.company_context_document_id = d.document_id "
+        "  WHERE (d.title <> '' OR d.body <> '') "
+        "    AND (e.embedding_id IS NULL OR e.model IS DISTINCT FROM $1 "
+        "      OR e.content_hash IS DISTINCT FROM d.content_hash) "
+        "  UNION ALL "
+        "  SELECT 'google_docs'::text AS source_kind, "
+        "    d.document_id, d.title, d.body, d.content_hash, d.updated_at "
+        "  FROM google_docs_context_documents d "
+        "  LEFT JOIN company_context_document_embeddings e "
+        "    ON e.google_docs_context_document_id = d.document_id "
+        "  WHERE (d.title <> '' OR d.body <> '') "
+        "    AND (e.embedding_id IS NULL OR e.model IS DISTINCT FROM $1 "
+        "      OR e.content_hash IS DISTINCT FROM d.content_hash) "
+        "  UNION ALL "
+        "  SELECT 'granola'::text AS source_kind, "
+        "    d.document_id, d.title, d.body, d.content_hash, d.updated_at "
+        "  FROM granola_context_documents d "
+        "  LEFT JOIN company_context_document_embeddings e "
+        "    ON e.granola_context_document_id = d.document_id "
+        "  WHERE (d.title <> '' OR d.body <> '') "
+        "    AND (e.embedding_id IS NULL OR e.model IS DISTINCT FROM $1 "
+        "      OR e.content_hash IS DISTINCT FROM d.content_hash)"
+        ") "
+        "SELECT source_kind, document_id, title, body, content_hash "
+        "FROM pending_documents "
+        "ORDER BY updated_at, source_kind, document_id "
+        "LIMIT $2",
+        model,
+        batch_size,
+    )
+
+
+async def _store_embeddings(
+    pool,
+    *,
+    rows: list[Any],
+    model: str,
+    embeddings: list[list[float]],
+) -> None:
+    values_by_source: dict[str, list[tuple[str, str, str, str]]] = {}
+    for row, embedding in zip(rows, embeddings, strict=True):
+        source_kind = str(row["source_kind"])
+        if source_kind not in EMBEDDING_UPSERTS:
+            raise ValueError(f"unsupported embedding source {source_kind!r}")
+        values_by_source.setdefault(source_kind, []).append(
+            (
+                str(row["document_id"]),
+                model,
+                str(row["content_hash"]),
+                json.dumps(embedding, separators=(",", ":")),
+            )
+        )
+
+    for source_kind, values in values_by_source.items():
+        await pool.executemany(EMBEDDING_UPSERTS[source_kind], values)
+
+
+async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
+    """Generate and store one batch of missing or stale document embeddings."""
+    if not _env_flag_enabled("COMPANY_CONTEXT_EMBEDDINGS_ENABLED"):
+        ctx.log("company_context_embeddings_skipped_disabled")
+        return {"status": "skipped", "reason": "company_context_embeddings_disabled"}
+
+    model = _model(inp.model)
+    batch_size = _positive_int(
+        inp.batch_size or os.getenv("COMPANY_CONTEXT_EMBEDDINGS_BATCH_SIZE"),
+        DEFAULT_BATCH_SIZE,
+    )
+    max_input_chars = _positive_int(
+        inp.max_input_chars or os.getenv("COMPANY_CONTEXT_EMBEDDINGS_MAX_INPUT_CHARS"),
+        DEFAULT_MAX_INPUT_CHARS,
+    )
+    rows = await _load_documents(ctx._pool, model=model, batch_size=batch_size)
+    if not rows:
+        result = {
+            "status": "completed",
+            "embedded": 0,
+            "model": model,
+            "requeued": False,
+        }
+        ctx.log("company_context_embeddings_completed", **result)
+        return result
+
+    client = _client()
+    for batch in _batches(rows, OPENAI_BATCH_SIZE):
+        response = await client.embeddings.create(
+            model=model,
+            input=[_embedding_text(row, max_input_chars) for row in batch],
+            dimensions=EMBEDDING_DIMENSIONS,
+            encoding_format="float",
+        )
+        embeddings_by_index = {item.index: item.embedding for item in response.data}
+        expected_indexes = set(range(len(batch)))
+        if set(embeddings_by_index) != expected_indexes:
+            raise RuntimeError("OpenAI returned an incomplete embedding batch")
+
+        embeddings = [embeddings_by_index[index] for index in range(len(batch))]
+        await _store_embeddings(
+            ctx._pool,
+            rows=batch,
+            model=model,
+            embeddings=embeddings,
+        )
+
+    next_run = None
+    if len(rows) == batch_size:
+        next_run = await ctx.start_workflow(
+            WORKFLOW_NAME,
+            {
+                "batch_size": batch_size,
+                "model": model,
+                "max_input_chars": max_input_chars,
+                "metadata": {
+                    **inp.metadata,
+                    "source": "company_context_embeddings_requeue",
+                },
+            },
+            idempotency_key=f"{WORKFLOW_NAME}:{ctx.run_id}:next",
+        )
+
+    result: dict[str, Any] = {
+        "status": "completed",
+        "embedded": len(rows),
+        "model": model,
+        "requeued": next_run is not None,
+    }
+    if next_run is not None:
+        result["next_run"] = next_run
+    ctx.log("company_context_embeddings_completed", **result)
+    return result
