@@ -6,12 +6,17 @@ import json
 import os
 from dataclasses import dataclass, field
 from typing import Any, Protocol
+from urllib.parse import urlparse, urlunparse
 
+import asyncpg
 from api.workflow_engine import WorkflowContext
 from openai import AsyncOpenAI
 
 WORKFLOW_NAME = "company_context_embeddings"
+WORKFLOW_PRINCIPAL = True
 
+CENTAUR_POSTGRES_DSN_ENV = "CENTAUR_POSTGRES_DSN"
+DEFAULT_POSTGRES_DATABASE = "ai_v2"
 DEFAULT_BATCH_SIZE = 250
 DEFAULT_INTERVAL_SECONDS = 5 * 60
 DEFAULT_MAX_INPUT_CHARS = 24_000
@@ -68,6 +73,24 @@ def _env_flag_enabled(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() not in FALSE_ENV_VALUES
+
+
+def _database_url_with_name(value: str, database: str) -> str:
+    parsed = urlparse(value)
+    if parsed.scheme and parsed.netloc and parsed.path in ("", "/"):
+        return urlunparse(parsed._replace(path=f"/{database}"))
+    return value
+
+
+def _centaur_database_url() -> str:
+    value = os.getenv(CENTAUR_POSTGRES_DSN_ENV, "").strip()
+    if not value or value == CENTAUR_POSTGRES_DSN_ENV:
+        raise RuntimeError(f"{CENTAUR_POSTGRES_DSN_ENV} is required")
+    return _database_url_with_name(value, DEFAULT_POSTGRES_DATABASE)
+
+
+async def _create_database_pool():
+    return await asyncpg.create_pool(_centaur_database_url())
 
 
 SCHEDULE = {
@@ -192,7 +215,35 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         inp.max_input_chars or os.getenv("COMPANY_CONTEXT_EMBEDDINGS_MAX_INPUT_CHARS"),
         DEFAULT_MAX_INPUT_CHARS,
     )
-    rows = await _load_documents(ctx._pool, model=model, batch_size=batch_size)
+    pool = await _create_database_pool()
+    try:
+        rows = await _load_documents(pool, model=model, batch_size=batch_size)
+        if rows:
+            client = _client()
+            for batch in _batches(rows, OPENAI_BATCH_SIZE):
+                response = await client.embeddings.create(
+                    model=model,
+                    input=[_embedding_text(row, max_input_chars) for row in batch],
+                    dimensions=EMBEDDING_DIMENSIONS,
+                    encoding_format="float",
+                )
+                embeddings_by_index = {
+                    item.index: item.embedding for item in response.data
+                }
+                expected_indexes = set(range(len(batch)))
+                if set(embeddings_by_index) != expected_indexes:
+                    raise RuntimeError("OpenAI returned an incomplete embedding batch")
+
+                embeddings = [embeddings_by_index[index] for index in range(len(batch))]
+                await _store_embeddings(
+                    pool,
+                    rows=batch,
+                    model=model,
+                    embeddings=embeddings,
+                )
+    finally:
+        await pool.close()
+
     if not rows:
         result = {
             "status": "completed",
@@ -202,27 +253,6 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         }
         ctx.log("company_context_embeddings_completed", **result)
         return result
-
-    client = _client()
-    for batch in _batches(rows, OPENAI_BATCH_SIZE):
-        response = await client.embeddings.create(
-            model=model,
-            input=[_embedding_text(row, max_input_chars) for row in batch],
-            dimensions=EMBEDDING_DIMENSIONS,
-            encoding_format="float",
-        )
-        embeddings_by_index = {item.index: item.embedding for item in response.data}
-        expected_indexes = set(range(len(batch)))
-        if set(embeddings_by_index) != expected_indexes:
-            raise RuntimeError("OpenAI returned an incomplete embedding batch")
-
-        embeddings = [embeddings_by_index[index] for index in range(len(batch))]
-        await _store_embeddings(
-            ctx._pool,
-            rows=batch,
-            model=model,
-            embeddings=embeddings,
-        )
 
     next_run = None
     if len(rows) == batch_size:

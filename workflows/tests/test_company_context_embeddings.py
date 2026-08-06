@@ -21,6 +21,7 @@ class FakePool:
         self.rows = rows
         self.fetch_args = None
         self.executemany_values = []
+        self.closed = False
 
     async def fetch(self, _query, *args):
         self.fetch_args = args
@@ -28,6 +29,9 @@ class FakePool:
 
     async def executemany(self, _query, values):
         self.executemany_values.append(values)
+
+    async def close(self):
+        self.closed = True
 
 
 class FakeEmbeddings:
@@ -41,6 +45,35 @@ class FakeEmbeddings:
     async def create(self, **kwargs):
         self.call = kwargs
         return types.SimpleNamespace(data=self.data)
+
+
+def _use_database_pool(monkeypatch, embeddings, pool):
+    monkeypatch.setenv(
+        "CENTAUR_POSTGRES_DSN",
+        "postgresql://workflow:secret@postgres-proxy:5432?sslmode=require",
+    )
+    database_urls = []
+
+    async def create_pool(database_url):
+        database_urls.append(database_url)
+        return pool
+
+    monkeypatch.setattr(embeddings.asyncpg, "create_pool", create_pool)
+    return database_urls
+
+
+def test_workflow_uses_a_scoped_principal_and_ai_v2_database(monkeypatch):
+    embeddings = _load()
+    pool = FakePool([])
+    database_urls = _use_database_pool(monkeypatch, embeddings, pool)
+
+    created_pool = asyncio.run(embeddings._create_database_pool())
+
+    assert embeddings.WORKFLOW_PRINCIPAL is True
+    assert created_pool is pool
+    assert database_urls == [
+        "postgresql://workflow:secret@postgres-proxy:5432/ai_v2?sslmode=require"
+    ]
 
 
 def test_handler_embeds_and_stores_one_batch(monkeypatch):
@@ -63,6 +96,7 @@ def test_handler_embeds_and_stores_one_batch(monkeypatch):
         },
     ]
     pool = FakePool(rows)
+    database_urls = _use_database_pool(monkeypatch, embeddings, pool)
     fake_embeddings = FakeEmbeddings()
     monkeypatch.setattr(
         embeddings,
@@ -78,7 +112,6 @@ def test_handler_embeds_and_stores_one_batch(monkeypatch):
 
     context = types.SimpleNamespace(
         run_id="run-1",
-        _pool=pool,
         log=lambda event, **fields: logs.append((event, fields)),
         start_workflow=start_workflow,
     )
@@ -98,6 +131,10 @@ def test_handler_embeds_and_stores_one_batch(monkeypatch):
         "next_run": {"run_id": "run-2", "task_id": "task-2"},
     }
     assert pool.fetch_args == ("text-embedding-3-small", 2)
+    assert database_urls == [
+        "postgresql://workflow:secret@postgres-proxy:5432/ai_v2?sslmode=require"
+    ]
+    assert pool.closed is True
     assert fake_embeddings.call == {
         "model": "text-embedding-3-small",
         "input": ["First\n\nFirst body", "Second\n\nSecond body"],
@@ -141,12 +178,13 @@ def test_handler_does_not_call_openai_when_batch_is_empty(monkeypatch):
     embeddings = _load()
     monkeypatch.setenv("COMPANY_CONTEXT_EMBEDDINGS_ENABLED", "true")
     pool = FakePool([])
+    _use_database_pool(monkeypatch, embeddings, pool)
     monkeypatch.setattr(
         embeddings,
         "_client",
         lambda: (_ for _ in ()).throw(AssertionError("client should not be created")),
     )
-    context = types.SimpleNamespace(_pool=pool, log=lambda *_args, **_kwargs: None)
+    context = types.SimpleNamespace(log=lambda *_args, **_kwargs: None)
 
     result = asyncio.run(embeddings.handler(embeddings.Input(), context))
 
@@ -157,6 +195,7 @@ def test_handler_does_not_call_openai_when_batch_is_empty(monkeypatch):
         "requeued": False,
     }
     assert pool.executemany_values == []
+    assert pool.closed is True
 
 
 def test_handler_does_not_requeue_a_partial_batch(monkeypatch):
@@ -173,6 +212,7 @@ def test_handler_does_not_requeue_a_partial_batch(monkeypatch):
             }
         ]
     )
+    _use_database_pool(monkeypatch, embeddings, pool)
     fake_embeddings = FakeEmbeddings(
         [types.SimpleNamespace(index=0, embedding=[0.1, 0.2])]
     )
@@ -187,7 +227,6 @@ def test_handler_does_not_requeue_a_partial_batch(monkeypatch):
 
     context = types.SimpleNamespace(
         run_id="run-1",
-        _pool=pool,
         log=lambda *_args, **_kwargs: None,
         start_workflow=unexpected_start,
     )
@@ -200,13 +239,13 @@ def test_handler_does_not_requeue_a_partial_batch(monkeypatch):
         "model": "text-embedding-3-small",
         "requeued": False,
     }
+    assert pool.closed is True
 
 
 def test_handler_is_disabled_by_default(monkeypatch):
     embeddings = _load()
     monkeypatch.delenv("COMPANY_CONTEXT_EMBEDDINGS_ENABLED", raising=False)
     context = types.SimpleNamespace(
-        _pool=object(),
         log=lambda *_args, **_kwargs: None,
     )
 
