@@ -100,6 +100,10 @@ is missing from API discovery, inspect `/var/lib/centaur/repos/...` in the API
 container. If a skill or workflow-host import is missing, inspect
 `/home/agent/github/...` in the sandbox.
 
+Both mounts are served by repo-cache, so overlays require `repoCache.enabled:
+true` (the default). If the cluster disallows writable hostPath volumes, set
+`repoCache.storage.type: persistentVolumeClaim` instead of disabling the cache.
+
 ## Discovery paths
 
 The chart renders API discovery paths from the ordered overlay list:
