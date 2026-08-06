@@ -48,7 +48,7 @@ class PgDsnSecretTest < ActiveSupport::TestCase
     assert with_dsn(PgDsnSecret.new(base_attrs(role: nil))).valid?
   end
 
-  test "foreign_id is unique within a namespace" do
+  test "foreign_id is globally unique" do
     with_dsn(PgDsnSecret.new(base_attrs(foreign_id: "shared-pg", database: "db-a"))).save!
     dup = with_dsn(PgDsnSecret.new(base_attrs(foreign_id: "shared-pg", database: "db-b")))
     assert_not dup.valid?

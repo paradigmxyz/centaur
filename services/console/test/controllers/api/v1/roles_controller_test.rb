@@ -26,7 +26,7 @@ module Api
         data = json_body.fetch("data")
         assert_equal role.oid, data["id"]
         assert_equal "acme", data["namespace"]
-        assert_equal "infra", data["foreign_id"]
+        assert_equal "acme-infra", data["foreign_id"]
         assert_equal "Infra", data["name"]
         assert_equal [], data["slack_channel_permissions"]
       end
@@ -79,7 +79,7 @@ module Api
         assert_equal "default", json_body.dig("data", "namespace")
       end
 
-      test "POST returns 422 when (namespace, foreign_id) already exists" do
+      test "POST returns 422 when foreign_id already exists" do
         existing = roles(:acme_infra)
         body = { data: { namespace: existing.namespace, foreign_id: existing.foreign_id } }
         assert_no_difference -> { Role.count } do
@@ -202,7 +202,7 @@ module Api
         role = roles(:acme_infra)
         body = { data: { namespace: "acme", name: "Renamed" } }
         assert_no_difference -> { Role.count } do
-          put api_v1_role_url(id: "infra"), params: body.to_json, headers: auth_headers
+          put api_v1_role_url(id: "acme-infra"), params: body.to_json, headers: auth_headers
         end
         assert_response :ok
         assert_equal "Renamed", role.reload.name
@@ -227,7 +227,7 @@ module Api
         get api_v1_roles_url, params: { namespace: "acme" }, headers: auth_headers
         assert_response :ok
         foreign_ids = json_body.fetch("data").map { |r| r["foreign_id"] }
-        assert_equal %w[admin infra].sort, foreign_ids.sort
+        assert_equal %w[acme-infra admin].sort, foreign_ids.sort
       end
 
       test "GET index requires a namespace" do
@@ -236,7 +236,7 @@ module Api
       end
 
       test "GET lookup finds a role by namespace and foreign_id" do
-        get lookup_api_v1_roles_url(namespace: "acme", foreign_id: "infra"), headers: auth_headers
+        get lookup_api_v1_roles_url(namespace: "acme", foreign_id: "acme-infra"), headers: auth_headers
         assert_response :ok
         assert_equal roles(:acme_infra).oid, json_body.dig("data", "id")
       end

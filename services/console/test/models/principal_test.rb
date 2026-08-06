@@ -238,17 +238,18 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_includes principal.errors[:namespace], "can't be blank"
   end
 
-  test "foreign_id is unique within a namespace" do
+  test "foreign_id is globally unique" do
     existing = principals(:acme_channel)
     dup = Principal.new(default_attrs(namespace: existing.namespace, foreign_id: existing.foreign_id))
     assert_not dup.valid?
     assert_includes dup.errors[:foreign_id], "has already been taken"
   end
 
-  test "same foreign_id is allowed across different namespaces" do
+  test "same foreign_id is rejected across different namespaces" do
     existing = principals(:acme_channel)
     other = Principal.new(default_attrs(namespace: "globex", foreign_id: existing.foreign_id))
-    assert other.valid?
+    assert_not other.valid?
+    assert_includes other.errors[:foreign_id], "has already been taken"
   end
 
   test "labels include sandbox repo-cache projection by default" do

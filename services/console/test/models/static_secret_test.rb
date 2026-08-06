@@ -65,7 +65,7 @@ class StaticSecretTest < ActiveSupport::TestCase
     assert ref.valid?, ref.errors.full_messages.inspect
   end
 
-  test "foreign_id is unique within a namespace" do
+  test "foreign_id is globally unique" do
     existing_attrs = valid_inject_attrs(foreign_id: "shared-fid")
     StaticSecret.create!(existing_attrs)
     dup = StaticSecret.new(existing_attrs.merge(name: "another label"))
@@ -73,10 +73,11 @@ class StaticSecretTest < ActiveSupport::TestCase
     assert_includes dup.errors[:foreign_id], "has already been taken"
   end
 
-  test "same foreign_id is allowed across different namespaces" do
+  test "same foreign_id is rejected across different namespaces" do
     StaticSecret.create!(valid_inject_attrs(foreign_id: "shared-fid"))
     other = StaticSecret.new(valid_inject_attrs(namespace: "globex", foreign_id: "shared-fid"))
-    assert other.valid?
+    assert_not other.valid?
+    assert_includes other.errors[:foreign_id], "has already been taken"
   end
 
   test "foreign_id rejects non-URL-safe characters" do

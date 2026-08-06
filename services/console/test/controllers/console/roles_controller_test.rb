@@ -256,7 +256,7 @@ module Console
       role.reload
       assert_equal "Infrastructure", role.name
       assert_equal "acme", role.namespace
-      assert_equal "infra", role.foreign_id
+      assert_equal "acme-infra", role.foreign_id
       assert_equal({ "kind" => "platform" }, role.labels)
     end
 

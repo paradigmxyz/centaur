@@ -72,14 +72,16 @@ class RoleTest < ActiveSupport::TestCase
     assert_includes role.errors[:namespace], Role::URL_SAFE_MESSAGE
   end
 
-  test "foreign_id is unique per namespace" do
-    dup = Role.new(valid_attrs(foreign_id: "infra"))
+  test "foreign_id is globally unique" do
+    dup = Role.new(valid_attrs(foreign_id: "acme-infra"))
     assert_not dup.valid?
     assert_includes dup.errors[:foreign_id], "has already been taken"
   end
 
-  test "allows the same foreign_id in different namespaces" do
-    assert Role.new(valid_attrs(namespace: "globex", foreign_id: "admin")).valid?
+  test "rejects the same foreign_id in different namespaces" do
+    role = Role.new(valid_attrs(namespace: "globex", foreign_id: "admin"))
+    assert_not role.valid?
+    assert_includes role.errors[:foreign_id], "has already been taken"
   end
 
   test "allows a nil foreign_id" do
