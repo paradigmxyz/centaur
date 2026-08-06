@@ -1,6 +1,7 @@
 import type { GitHubAdapter } from "@chat-adapter/github";
 import type { StateAdapter } from "chat";
 import { backgroundWaitUntil } from "./context";
+import { reactWorkingOnSubject, settleSubjectReaction } from "./reactions";
 import { runTurnStream } from "./turn";
 import {
   fetchCiEvaluation,
@@ -707,19 +708,40 @@ function fireManagementTurn(
     pr: `${owner}/${repo}#${pr.number}`,
     work: message.label,
   });
+  // Management turns have no triggering comment to react to, so ack on the PR
+  // itself — instant 👀, settled to 🚀/😕 when the turn finishes (same lifecycle
+  // as review-request and issue-work turns). Not awaited: the ack must not delay
+  // the turn, and a failed reaction is only a missing ack.
+  void reactWorkingOnSubject(ctx.octokit, owner, repo, pr.number, logger(ctx));
   backgroundWaitUntil(
     runTurnStream(ctx.options, forwardInput)
-      .then((result) => {
+      .then(async (result) => {
         traceLog(ctx.options, "githubbot_management_turn_complete", trace, {
           failed: result.failed,
           work: message.label,
         });
+        await settleSubjectReaction(
+          ctx.octokit,
+          owner,
+          repo,
+          pr.number,
+          result.failed,
+          logger(ctx),
+        );
       })
-      .catch((error) => {
+      .catch(async (error) => {
         logger(ctx).warn("githubbot_management_turn_failed", {
           error: errorMessage(error),
           work: message.label,
         });
+        await settleSubjectReaction(
+          ctx.octokit,
+          owner,
+          repo,
+          pr.number,
+          true,
+          logger(ctx),
+        );
       }),
   );
 }
