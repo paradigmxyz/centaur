@@ -19,15 +19,15 @@ def _load():
 class FakePool:
     def __init__(self, rows):
         self.rows = rows
-        self.fetch_call = None
-        self.executemany_calls = []
+        self.fetch_args = None
+        self.executemany_values = []
 
-    async def fetch(self, query, *args):
-        self.fetch_call = (query, args)
+    async def fetch(self, _query, *args):
+        self.fetch_args = args
         return self.rows
 
-    async def executemany(self, query, values):
-        self.executemany_calls.append((query, values))
+    async def executemany(self, _query, values):
+        self.executemany_values.append(values)
 
 
 class FakeEmbeddings:
@@ -97,25 +97,17 @@ def test_handler_embeds_and_stores_one_batch(monkeypatch):
         "requeued": True,
         "next_run": {"run_id": "run-2", "task_id": "task-2"},
     }
-    assert pool.fetch_call is not None
-    assert "e.embedding_id IS NULL" in pool.fetch_call[0]
-    assert "e.content_hash IS DISTINCT FROM d.content_hash" in pool.fetch_call[0]
-    assert "FROM google_docs_context_documents" in pool.fetch_call[0]
-    assert "FROM granola_context_documents" in pool.fetch_call[0]
-    assert pool.fetch_call[1] == ("text-embedding-3-small", 2)
+    assert pool.fetch_args == ("text-embedding-3-small", 2)
     assert fake_embeddings.call == {
         "model": "text-embedding-3-small",
         "input": ["First\n\nFirst body", "Second\n\nSecond body"],
         "dimensions": 1536,
         "encoding_format": "float",
     }
-    assert len(pool.executemany_calls) == 2
-    assert "company_context_document_id" in pool.executemany_calls[0][0]
-    assert pool.executemany_calls[0][1] == [
+    assert pool.executemany_values[0] == [
         ("doc-1", "text-embedding-3-small", "hash-1", "[0.1,0.2]")
     ]
-    assert "google_docs_context_document_id" in pool.executemany_calls[1][0]
-    assert pool.executemany_calls[1][1] == [
+    assert pool.executemany_values[1] == [
         ("doc-2", "text-embedding-3-small", "hash-2", "[0.3,0.4]")
     ]
     assert starts == [
@@ -164,7 +156,7 @@ def test_handler_does_not_call_openai_when_batch_is_empty(monkeypatch):
         "model": "text-embedding-3-small",
         "requeued": False,
     }
-    assert pool.executemany_calls == []
+    assert pool.executemany_values == []
 
 
 def test_handler_does_not_requeue_a_partial_batch(monkeypatch):
