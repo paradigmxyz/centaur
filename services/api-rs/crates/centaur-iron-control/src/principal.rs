@@ -42,13 +42,11 @@ pub struct PrincipalRef {
 }
 
 impl PrincipalRef {
-    /// Build the upsert body for this principal in ``namespace``, tagging it as
-    /// Centaur-managed.
-    pub fn to_principal_input(&self, namespace: &str) -> PrincipalInput {
+    /// Build the upsert body for this principal, tagging it as Centaur-managed.
+    pub fn to_principal_input(&self) -> PrincipalInput {
         let mut labels = managed_labels();
         labels.extend(self.labels.clone());
         PrincipalInput {
-            namespace: namespace.to_owned(),
             foreign_id: self.foreign_id.clone(),
             name: self.name.clone(),
             kind: labels.remove(KIND_LABEL),
@@ -621,8 +619,7 @@ mod tests {
 
     #[test]
     fn principal_input_uses_first_class_slack_identity_fields() {
-        let input = derive_principal("chat:C1:ts", None, None).to_principal_input("default");
-        assert_eq!(input.namespace, "default");
+        let input = derive_principal("chat:C1:ts", None, None).to_principal_input();
         assert_eq!(input.foreign_id, "slack-channel-c1");
         assert_eq!(
             input.labels.get("managed-by").map(String::as_str),

@@ -427,12 +427,6 @@ struct IronControlArgs {
     url: Option<String>,
     #[arg(long = "iron-control-api-key", env = "IRON_CONTROL_API_KEY")]
     api_key: Option<String>,
-    #[arg(
-        long = "iron-control-namespace",
-        env = "IRON_CONTROL_NAMESPACE",
-        default_value = "default"
-    )]
-    namespace: String,
 }
 
 impl IronControlArgs {
@@ -459,7 +453,6 @@ impl IronControlArgs {
         Ok(IronControlSettings {
             client,
             control_url: url.to_owned(),
-            namespace: self.namespace.clone(),
         })
     }
 }
@@ -733,18 +726,16 @@ impl SandboxArgs {
     /// stays roleless until claim-time reassignment binds the session principal.
     async fn iron_control_runtime(&self) -> Result<IronControlRuntime, ServerError> {
         let client = self.iron_control.required_client()?;
-        let namespace = self.iron_control.namespace.clone();
         if self.iron_control_sync_infra_secrets {
             let policy = self.iron_proxy.source_policy();
             let roles = self.iron_proxy.roles_to_register()?;
             for (spec, fragment) in &roles {
-                register_role_with_retry(&client, &namespace, spec, fragment, &policy).await?;
+                register_role_with_retry(&client, spec, fragment, &policy).await?;
             }
         } else {
             let spec = RoleSpec::infra();
             client
                 .upsert_role(&IdentityInput {
-                    namespace: namespace.clone(),
                     foreign_id: spec.foreign_id,
                     name: spec.name,
                     labels: BTreeMap::from([("managed-by".to_owned(), "centaur".to_owned())]),
@@ -753,7 +744,6 @@ impl SandboxArgs {
         }
         let bootstrap = client
             .upsert_principal(&PrincipalInput {
-                namespace: namespace.clone(),
                 foreign_id: "warm-pool-bootstrap".to_owned(),
                 name: "Warm pool bootstrap".to_owned(),
                 labels: BTreeMap::from([
@@ -769,7 +759,6 @@ impl SandboxArgs {
             .await?;
         let workflow_host = client
             .upsert_principal(&PrincipalInput {
-                namespace: namespace.clone(),
                 foreign_id: "workflow-host".to_owned(),
                 name: "Workflow host".to_owned(),
                 labels: BTreeMap::from([
@@ -784,10 +773,10 @@ impl SandboxArgs {
             })
             .await?;
         Ok(IronControlRuntime {
-            registrar: SessionRegistrar::new(client.clone(), namespace.clone()),
+            registrar: SessionRegistrar::new(client.clone()),
             warm_pool_bootstrap_principal: bootstrap.id,
             workflow_host_principal: workflow_host.id,
-            workflow_principal_registrar: WorkflowPrincipalRegistrar::new(client, namespace),
+            workflow_principal_registrar: WorkflowPrincipalRegistrar::new(client),
         })
     }
 
@@ -1378,14 +1367,13 @@ const IRON_CONTROL_REGISTER_INITIAL_BACKOFF: Duration = Duration::from_millis(25
 
 async fn register_role_with_retry(
     client: &IronControlClient,
-    namespace: &str,
     spec: &RoleSpec,
     fragment: &ProxyFragment,
     policy: &SourcePolicy,
 ) -> Result<String, RegisterError> {
     let mut backoff = IRON_CONTROL_REGISTER_INITIAL_BACKOFF;
     for attempt in 1..=IRON_CONTROL_REGISTER_MAX_ATTEMPTS {
-        match register_role(client, namespace, spec, fragment, policy).await {
+        match register_role(client, spec, fragment, policy).await {
             Ok(role_id) => return Ok(role_id),
             Err(error)
                 if attempt < IRON_CONTROL_REGISTER_MAX_ATTEMPTS
