@@ -123,4 +123,36 @@ class RequestRuleTest < ActiveSupport::TestCase
     assert_not r.valid?
     assert_includes r.errors[:base], "must belong to at most one of static_secret, gcp_auth_secret, gcp_id_token_secret, aws_auth_secret, oauth_token_secret, hmac_secret"
   end
+
+  test "rejects Bearer injection for github.com" do
+    r = new_rule(host: "github.com", static_secret: static_secrets(:github_token_inject))
+
+    assert_not r.valid?
+    assert_includes(
+      r.errors[:base],
+      "github.com Bearer credentials must replace a placeholder so Git can preserve HTTP Basic authentication"
+    )
+  end
+
+  test "accepts Authorization placeholder replacement for github.com" do
+    r = new_rule(host: "github.com", static_secret: static_secrets(:db_password_replace))
+
+    assert r.valid?, r.errors.full_messages.inspect
+  end
+
+  test "allows API-only GitHub Bearer injection" do
+    r = new_rule(host: "api.github.com", static_secret: static_secrets(:github_token_inject))
+
+    assert r.valid?, r.errors.full_messages.inspect
+  end
+
+  test "does not reinterpret custom github.com Authorization formats" do
+    secret = StaticSecret.new(
+      namespace: "acme",
+      inject_config: { "header" => "Authorization", "formatter" => "Basic {{ .Value }}" }
+    )
+    r = new_rule(host: "github.com", static_secret: secret)
+
+    assert r.valid?, r.errors.full_messages.inspect
+  end
 end

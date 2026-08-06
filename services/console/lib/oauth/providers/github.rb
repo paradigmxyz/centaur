@@ -26,6 +26,19 @@ module Oauth
       def extra_authorization_params = {}
       def refreshable? = false
 
+      # GitHub API clients send token/Bearer authorization while Git-over-HTTPS
+      # sends HTTP Basic. Replace only the placeholder value so each client keeps
+      # the authentication scheme its endpoint expects.
+      def wrapping_secret_config
+        {
+          replace_config: {
+            "proxy_value" => "GITHUB_TOKEN",
+            "match_headers" => [ "Authorization" ],
+            "require" => false
+          }
+        }
+      end
+
       def parse_granted_scopes(scope)
         scope.to_s.split(/[,\s]+/).reject(&:blank?)
       end

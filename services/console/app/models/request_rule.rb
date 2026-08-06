@@ -41,6 +41,7 @@ class RequestRule < ApplicationRecord
   validate :http_methods_are_valid
   validate :paths_are_valid
   validate :at_most_one_owner
+  validate :github_authorization_preserves_client_scheme
 
   private
 
@@ -52,6 +53,19 @@ class RequestRule < ApplicationRecord
     set = OWNER_ASSOCIATIONS.count { |assoc| send(assoc).present? }
     return if set <= 1
     errors.add(:base, "must belong to at most one of #{OWNER_ASSOCIATIONS.join(", ")}")
+  end
+
+  def github_authorization_preserves_client_scheme
+    return unless host.to_s.casecmp?("github.com")
+
+    inject = static_secret&.inject_config
+    return unless inject.is_a?(Hash) && inject["header"].to_s.casecmp?("Authorization")
+    return unless inject["formatter"] == "Bearer {{ .Value }}"
+
+    errors.add(
+      :base,
+      "github.com Bearer credentials must replace a placeholder so Git can preserve HTTP Basic authentication"
+    )
   end
 
   def host_xor_cidr

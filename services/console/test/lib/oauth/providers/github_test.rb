@@ -37,6 +37,17 @@ module Oauth
         assert_equal "https://github.com/login/oauth/authorize", strategy.authorization_endpoint
         assert_equal "https://github.com/login/oauth/access_token", strategy.token_endpoint
         assert_equal [], strategy.identity_scopes
+        assert_equal %w[api.github.com github.com], strategy.api_hosts
+        assert_equal(
+          {
+            replace_config: {
+              "proxy_value" => "GITHUB_TOKEN",
+              "match_headers" => [ "Authorization" ],
+              "require" => false
+            }
+          },
+          strategy.wrapping_secret_config
+        )
         assert_equal "scope", strategy.authorization_scope_param
         assert_equal " ", strategy.scope_separator
         refute strategy.refreshable?
