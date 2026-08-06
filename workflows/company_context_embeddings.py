@@ -9,8 +9,9 @@ from typing import Any, Protocol
 from urllib.parse import urlparse, urlunparse
 
 import asyncpg
+import tiktoken
 from api.workflow_engine import WorkflowContext
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, BadRequestError
 
 WORKFLOW_NAME = "company_context_embeddings"
 WORKFLOW_PRINCIPAL = True
@@ -55,6 +56,41 @@ EMBEDDING_UPSERTS = {
         "  model = EXCLUDED.model, "
         "  content_hash = EXCLUDED.content_hash, "
         "  embedding = EXCLUDED.embedding, "
+        "  updated_at = NOW()"
+    ),
+}
+EMBEDDING_FAILURE_UPSERTS = {
+    "company_context": (
+        "INSERT INTO company_context_document_embedding_failures "
+        "  (company_context_document_id, model, content_hash, error_type, error_message) "
+        "VALUES ($1, $2, $3, $4, $5) "
+        "ON CONFLICT (company_context_document_id) DO UPDATE SET "
+        "  model = EXCLUDED.model, "
+        "  content_hash = EXCLUDED.content_hash, "
+        "  error_type = EXCLUDED.error_type, "
+        "  error_message = EXCLUDED.error_message, "
+        "  updated_at = NOW()"
+    ),
+    "google_docs": (
+        "INSERT INTO company_context_document_embedding_failures "
+        "  (google_docs_context_document_id, model, content_hash, error_type, error_message) "
+        "VALUES ($1, $2, $3, $4, $5) "
+        "ON CONFLICT (google_docs_context_document_id) DO UPDATE SET "
+        "  model = EXCLUDED.model, "
+        "  content_hash = EXCLUDED.content_hash, "
+        "  error_type = EXCLUDED.error_type, "
+        "  error_message = EXCLUDED.error_message, "
+        "  updated_at = NOW()"
+    ),
+    "granola": (
+        "INSERT INTO company_context_document_embedding_failures "
+        "  (granola_context_document_id, model, content_hash, error_type, error_message) "
+        "VALUES ($1, $2, $3, $4, $5) "
+        "ON CONFLICT (granola_context_document_id) DO UPDATE SET "
+        "  model = EXCLUDED.model, "
+        "  content_hash = EXCLUDED.content_hash, "
+        "  error_type = EXCLUDED.error_type, "
+        "  error_message = EXCLUDED.error_message, "
         "  updated_at = NOW()"
     ),
 }
@@ -132,8 +168,19 @@ def _model(value: str | None) -> str:
 
 
 def _embedding_text(row: Any, max_chars: int) -> str:
-    parts = [str(row[key]).strip() for key in ("title", "body") if row[key]]
-    return "\n\n".join(parts)[:max_chars]
+    parts = [
+        text
+        for key in ("title", "body")
+        if row[key] and (text := str(row[key]).strip())
+    ]
+    text = "\n\n".join(parts)[:max_chars]
+    if not text:
+        return ""
+    encoding = tiktoken.get_encoding("cl100k_base")
+    tokens = encoding.encode(text, disallowed_special=())
+    if len(tokens) > OPENAI_MAX_INPUT_TOKENS:
+        return encoding.decode(tokens[:OPENAI_MAX_INPUT_TOKENS])
+    return text
 
 
 def _batches(rows: list[Any], size: int) -> list[list[Any]]:
@@ -148,27 +195,39 @@ async def _load_documents(pool, *, model: str, batch_size: int) -> list[Any]:
         "  FROM company_context_documents d "
         "  LEFT JOIN company_context_document_embeddings e "
         "    ON e.company_context_document_id = d.document_id "
-        "  WHERE (d.title <> '' OR d.body <> '') "
+        "  LEFT JOIN company_context_document_embedding_failures f "
+        "    ON f.company_context_document_id = d.document_id "
+        "  WHERE (btrim(d.title) <> '' OR btrim(d.body) <> '') "
         "    AND (e.embedding_id IS NULL OR e.model IS DISTINCT FROM $1 "
         "      OR e.content_hash IS DISTINCT FROM d.content_hash) "
+        "    AND (f.failure_id IS NULL OR f.model IS DISTINCT FROM $1 "
+        "      OR f.content_hash IS DISTINCT FROM d.content_hash) "
         "  UNION ALL "
         "  SELECT 'google_docs'::text AS source_kind, "
         "    d.document_id, d.title, d.body, d.content_hash, d.updated_at "
         "  FROM google_docs_context_documents d "
         "  LEFT JOIN company_context_document_embeddings e "
         "    ON e.google_docs_context_document_id = d.document_id "
-        "  WHERE (d.title <> '' OR d.body <> '') "
+        "  LEFT JOIN company_context_document_embedding_failures f "
+        "    ON f.google_docs_context_document_id = d.document_id "
+        "  WHERE (btrim(d.title) <> '' OR btrim(d.body) <> '') "
         "    AND (e.embedding_id IS NULL OR e.model IS DISTINCT FROM $1 "
         "      OR e.content_hash IS DISTINCT FROM d.content_hash) "
+        "    AND (f.failure_id IS NULL OR f.model IS DISTINCT FROM $1 "
+        "      OR f.content_hash IS DISTINCT FROM d.content_hash) "
         "  UNION ALL "
         "  SELECT 'granola'::text AS source_kind, "
         "    d.document_id, d.title, d.body, d.content_hash, d.updated_at "
         "  FROM granola_context_documents d "
         "  LEFT JOIN company_context_document_embeddings e "
         "    ON e.granola_context_document_id = d.document_id "
-        "  WHERE (d.title <> '' OR d.body <> '') "
+        "  LEFT JOIN company_context_document_embedding_failures f "
+        "    ON f.granola_context_document_id = d.document_id "
+        "  WHERE (btrim(d.title) <> '' OR btrim(d.body) <> '') "
         "    AND (e.embedding_id IS NULL OR e.model IS DISTINCT FROM $1 "
-        "      OR e.content_hash IS DISTINCT FROM d.content_hash)"
+        "      OR e.content_hash IS DISTINCT FROM d.content_hash) "
+        "    AND (f.failure_id IS NULL OR f.model IS DISTINCT FROM $1 "
+        "      OR f.content_hash IS DISTINCT FROM d.content_hash)"
         ") "
         "SELECT source_kind, document_id, title, body, content_hash "
         "FROM pending_documents "
@@ -204,6 +263,46 @@ async def _store_embeddings(
         await pool.executemany(EMBEDDING_UPSERTS[source_kind], values)
 
 
+async def _store_embedding_failure(
+    pool,
+    *,
+    row: Any,
+    model: str,
+    error_type: str,
+    error_message: str,
+) -> None:
+    source_kind = str(row["source_kind"])
+    if source_kind not in EMBEDDING_FAILURE_UPSERTS:
+        raise ValueError(f"unsupported embedding source {source_kind!r}")
+    await pool.execute(
+        EMBEDDING_FAILURE_UPSERTS[source_kind],
+        str(row["document_id"]),
+        model,
+        str(row["content_hash"]),
+        error_type,
+        error_message[:1_000],
+    )
+
+
+async def _generate_embeddings(
+    client: EmbeddingsClient,
+    *,
+    model: str,
+    inputs: list[str],
+) -> list[list[float]]:
+    response = await client.embeddings.create(
+        model=model,
+        input=inputs,
+        dimensions=EMBEDDING_DIMENSIONS,
+        encoding_format="float",
+    )
+    embeddings_by_index = {item.index: item.embedding for item in response.data}
+    expected_indexes = set(range(len(inputs)))
+    if set(embeddings_by_index) != expected_indexes:
+        raise RuntimeError("OpenAI returned an incomplete embedding batch")
+    return [embeddings_by_index[index] for index in range(len(inputs))]
+
+
 async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     """Generate and store one batch of missing or stale document embeddings."""
     if not _env_flag_enabled("COMPANY_CONTEXT_EMBEDDINGS_ENABLED"):
@@ -220,31 +319,87 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         DEFAULT_MAX_INPUT_CHARS,
     )
     pool = await _create_database_pool()
+    embedded_count = 0
+    failed_count = 0
     try:
         rows = await _load_documents(pool, model=model, batch_size=batch_size)
         if rows:
             client = _client()
-            for batch in _batches(rows, OPENAI_BATCH_SIZE):
-                response = await client.embeddings.create(
+            prepared_rows: list[tuple[Any, str]] = []
+            for row in rows:
+                text = _embedding_text(row, max_input_chars)
+                if text:
+                    prepared_rows.append((row, text))
+                    continue
+                await _store_embedding_failure(
+                    pool,
+                    row=row,
                     model=model,
-                    input=[_embedding_text(row, max_input_chars) for row in batch],
-                    dimensions=EMBEDDING_DIMENSIONS,
-                    encoding_format="float",
+                    error_type="empty_input",
+                    error_message="document contains no non-whitespace text",
                 )
-                embeddings_by_index = {
-                    item.index: item.embedding for item in response.data
-                }
-                expected_indexes = set(range(len(batch)))
-                if set(embeddings_by_index) != expected_indexes:
-                    raise RuntimeError("OpenAI returned an incomplete embedding batch")
+                failed_count += 1
+                ctx.log(
+                    "company_context_embedding_document_failed",
+                    source_kind=str(row["source_kind"]),
+                    document_id=str(row["document_id"]),
+                    error_type="empty_input",
+                )
 
-                embeddings = [embeddings_by_index[index] for index in range(len(batch))]
+            for batch in _batches(prepared_rows, OPENAI_BATCH_SIZE):
+                batch_rows = [row for row, _text in batch]
+                batch_inputs = [text for _row, text in batch]
+                try:
+                    embeddings = await _generate_embeddings(
+                        client,
+                        model=model,
+                        inputs=batch_inputs,
+                    )
+                except BadRequestError as batch_error:
+                    ctx.log(
+                        "company_context_embedding_batch_rejected",
+                        documents=len(batch),
+                        error_type=type(batch_error).__name__,
+                    )
+                    for row, text in batch:
+                        try:
+                            document_embeddings = await _generate_embeddings(
+                                client,
+                                model=model,
+                                inputs=[text],
+                            )
+                        except BadRequestError as document_error:
+                            await _store_embedding_failure(
+                                pool,
+                                row=row,
+                                model=model,
+                                error_type=type(document_error).__name__,
+                                error_message=str(document_error),
+                            )
+                            failed_count += 1
+                            ctx.log(
+                                "company_context_embedding_document_failed",
+                                source_kind=str(row["source_kind"]),
+                                document_id=str(row["document_id"]),
+                                error_type=type(document_error).__name__,
+                            )
+                            continue
+                        await _store_embeddings(
+                            pool,
+                            rows=[row],
+                            model=model,
+                            embeddings=document_embeddings,
+                        )
+                        embedded_count += 1
+                    continue
+
                 await _store_embeddings(
                     pool,
-                    rows=batch,
+                    rows=batch_rows,
                     model=model,
                     embeddings=embeddings,
                 )
+                embedded_count += len(batch_rows)
     finally:
         await pool.close()
 
@@ -252,6 +407,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         result = {
             "status": "completed",
             "embedded": 0,
+            "failed": 0,
             "model": model,
             "requeued": False,
         }
@@ -276,7 +432,8 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
 
     result: dict[str, Any] = {
         "status": "completed",
-        "embedded": len(rows),
+        "embedded": embedded_count,
+        "failed": failed_count,
         "model": model,
         "requeued": next_run is not None,
     }

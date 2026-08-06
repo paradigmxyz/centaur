@@ -21,6 +21,7 @@ class FakePool:
         self.rows = rows
         self.fetch_args = None
         self.executemany_values = []
+        self.execute_values = []
         self.closed = False
 
     async def fetch(self, _query, *args):
@@ -29,6 +30,9 @@ class FakePool:
 
     async def executemany(self, _query, values):
         self.executemany_values.append(values)
+
+    async def execute(self, _query, *values):
+        self.execute_values.append(values)
 
     async def close(self):
         self.closed = True
@@ -129,6 +133,7 @@ def test_handler_embeds_and_stores_one_batch(monkeypatch):
     assert result == {
         "status": "completed",
         "embedded": 2,
+        "failed": 0,
         "model": "text-embedding-3-small",
         "requeued": True,
         "next_run": {"run_id": "run-2", "task_id": "task-2"},
@@ -180,6 +185,130 @@ def test_openai_batches_stay_below_the_aggregate_token_limit():
     )
 
 
+def test_embedding_text_enforces_the_model_token_limit():
+    embeddings = _load()
+    row = {"title": "密" * 24_000, "body": ""}
+
+    text = embeddings._embedding_text(row, 24_000)
+    token_count = len(
+        embeddings.tiktoken.get_encoding("cl100k_base").encode(
+            text,
+            disallowed_special=(),
+        )
+    )
+
+    assert token_count <= embeddings.OPENAI_MAX_INPUT_TOKENS
+
+
+def test_handler_records_whitespace_only_documents_without_calling_openai(monkeypatch):
+    embeddings = _load()
+    monkeypatch.setenv("COMPANY_CONTEXT_EMBEDDINGS_ENABLED", "true")
+    pool = FakePool(
+        [
+            {
+                "source_kind": "company_context",
+                "document_id": "empty-doc",
+                "title": " \t ",
+                "body": "\n",
+                "content_hash": "empty-hash",
+            }
+        ]
+    )
+    _use_database_pool(monkeypatch, embeddings, pool)
+    monkeypatch.setattr(
+        embeddings,
+        "_client",
+        lambda: types.SimpleNamespace(
+            embeddings=FakeEmbeddings(),
+        ),
+    )
+    context = types.SimpleNamespace(log=lambda *_args, **_kwargs: None)
+
+    result = asyncio.run(embeddings.handler(embeddings.Input(), context))
+
+    assert result == {
+        "status": "completed",
+        "embedded": 0,
+        "failed": 1,
+        "model": "text-embedding-3-small",
+        "requeued": False,
+    }
+    assert pool.execute_values == [
+        (
+            "empty-doc",
+            "text-embedding-3-small",
+            "empty-hash",
+            "empty_input",
+            "document contains no non-whitespace text",
+        )
+    ]
+
+
+def test_handler_isolates_and_records_a_rejected_document(monkeypatch):
+    embeddings = _load()
+    monkeypatch.setenv("COMPANY_CONTEXT_EMBEDDINGS_ENABLED", "true")
+    rows = [
+        {
+            "source_kind": "company_context",
+            "document_id": "good-doc",
+            "title": "Good",
+            "body": "Body",
+            "content_hash": "good-hash",
+        },
+        {
+            "source_kind": "company_context",
+            "document_id": "bad-doc",
+            "title": "Rejected",
+            "body": "Body",
+            "content_hash": "bad-hash",
+        },
+    ]
+    pool = FakePool(rows)
+    _use_database_pool(monkeypatch, embeddings, pool)
+
+    class RejectedInput(Exception):
+        pass
+
+    class SelectiveEmbeddings:
+        async def create(self, **kwargs):
+            inputs = kwargs["input"]
+            if len(inputs) > 1 or inputs[0].startswith("Rejected"):
+                raise RejectedInput("input rejected")
+            return types.SimpleNamespace(
+                data=[types.SimpleNamespace(index=0, embedding=[0.1, 0.2])]
+            )
+
+    monkeypatch.setattr(embeddings, "BadRequestError", RejectedInput)
+    monkeypatch.setattr(
+        embeddings,
+        "_client",
+        lambda: types.SimpleNamespace(embeddings=SelectiveEmbeddings()),
+    )
+    context = types.SimpleNamespace(log=lambda *_args, **_kwargs: None)
+
+    result = asyncio.run(embeddings.handler(embeddings.Input(batch_size=3), context))
+
+    assert result == {
+        "status": "completed",
+        "embedded": 1,
+        "failed": 1,
+        "model": "text-embedding-3-small",
+        "requeued": False,
+    }
+    assert pool.executemany_values == [
+        [("good-doc", "text-embedding-3-small", "good-hash", "[0.1,0.2]")]
+    ]
+    assert pool.execute_values == [
+        (
+            "bad-doc",
+            "text-embedding-3-small",
+            "bad-hash",
+            "RejectedInput",
+            "input rejected",
+        )
+    ]
+
+
 def test_handler_does_not_call_openai_when_batch_is_empty(monkeypatch):
     embeddings = _load()
     monkeypatch.setenv("COMPANY_CONTEXT_EMBEDDINGS_ENABLED", "true")
@@ -197,6 +326,7 @@ def test_handler_does_not_call_openai_when_batch_is_empty(monkeypatch):
     assert result == {
         "status": "completed",
         "embedded": 0,
+        "failed": 0,
         "model": "text-embedding-3-small",
         "requeued": False,
     }
@@ -242,6 +372,7 @@ def test_handler_does_not_requeue_a_partial_batch(monkeypatch):
     assert result == {
         "status": "completed",
         "embedded": 1,
+        "failed": 0,
         "model": "text-embedding-3-small",
         "requeued": False,
     }
