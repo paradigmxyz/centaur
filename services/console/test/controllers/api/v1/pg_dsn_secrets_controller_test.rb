@@ -24,6 +24,7 @@ module Api
         assert_response :ok
 
         data = json_body.fetch("data")
+        refute data.key?("namespace")
         assert_equal secret.oid, data["id"]
         assert_equal "analytics", data["database"]
         assert_equal "readonly", data["role"]
@@ -52,7 +53,7 @@ module Api
         assert_equal secret.oid, json_body.dig("data", "id")
       end
 
-      test "GET lookup scopes a pg_dsn secret by namespace" do
+      test "GET lookup rejects a non-default compatibility path" do
         secret = pg_dsn_secrets(:acme_analytics_pg)
         get "/api/v1/pg_dsn_secrets/lookup/other/#{secret.foreign_id}", headers: auth_headers
         assert_response :not_found
@@ -341,7 +342,7 @@ module Api
         assert_equal existing.database, json_body.dig("data", "database")
       end
 
-      test "GET index is scoped by namespace" do
+      test "GET index returns pg_dsn secrets" do
         get api_v1_pg_dsn_secrets_url, params: {}.to_json, headers: auth_headers
         assert_response :ok
         ids = json_body.fetch("data").map { |r| r["id"] }

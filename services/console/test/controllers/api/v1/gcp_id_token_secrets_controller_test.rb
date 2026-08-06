@@ -24,6 +24,7 @@ module Api
         assert_response :ok
 
         data = json_body.fetch("data")
+        refute data.key?("namespace")
         assert_equal secret.oid, data["id"]
         assert_equal "https://my-service-abc123-uc.a.run.app", data["audience"]
         assert_equal "x-serverless-authorization", data["header"]
@@ -153,7 +154,7 @@ module Api
         assert_equal "cloud-run-upsert", json_body.dig("data", "foreign_id")
       end
 
-      test "GET index is scoped by namespace" do
+      test "GET index returns gcp_id_token secrets" do
         get api_v1_gcp_id_token_secrets_url, params: {}.to_json, headers: auth_headers
         assert_response :ok
         ids = json_body.fetch("data").map { |r| r["id"] }

@@ -38,8 +38,8 @@ module Api
         assert_response :ok
 
         data = json_body.fetch("data")
+        refute data.key?("namespace")
         assert_equal principal.oid, data["id"]
-        assert_equal "default", data["namespace"]
         assert_equal "C0123456789", data["foreign_id"]
         PrincipalIdentityLabels.columns.each { |field| assert_not data.key?(field) }
         assert_equal(
@@ -92,7 +92,6 @@ module Api
 
         data = json_body.fetch("data")
         assert_match(/\Aprn_/, data["id"])
-        assert_equal "default", data["namespace"]
         assert_equal "U-new-id", data["foreign_id"]
         assert_equal(
           {
@@ -245,7 +244,6 @@ module Api
 
         data = json_body.fetch("data")
         assert_equal "Just a label", data["name"]
-        assert_equal "default", data["namespace"]
         assert_nil data["foreign_id"]
       end
 
@@ -915,25 +913,21 @@ module Api
         assert_predicate permission, :history_enabled
       end
 
-      test "PUT rejects a non-default compatibility namespace and keeps foreign_id immutable" do
+      test "PUT keeps foreign_id immutable" do
         principal = principals(:acme_channel)
-        original_namespace = "default"
         original_foreign_id = principal.foreign_id
 
         body = {
           data: {
-            namespace: "other",
             foreign_id: "different-foreign-id",
             labels: { "kind" => "slack_channel" }
           }
         }
 
         put api_v1_principal_url(id: principal.oid), params: body.to_json, headers: auth_headers
-        assert_response :unprocessable_content
-        assert_equal Api::BaseController::NAMESPACE_ERROR, json_body.dig("error", "message")
+        assert_response :ok
 
         principal.reload
-        assert_equal original_namespace, "default"
         assert_equal original_foreign_id, principal.foreign_id
       end
 
@@ -957,7 +951,6 @@ module Api
         assert_response :created
 
         data = json_body.fetch("data")
-        assert_equal "default", data["namespace"]
         assert_equal "U-upsert", data["foreign_id"]
         assert_equal "Upserted", data["name"]
         assert_equal "public", data["sandbox_repo_cache"]
@@ -988,11 +981,11 @@ module Api
       end
 
       test "GET index rejects requests without an Authorization header" do
-        get api_v1_principals_url, params: { namespace: "default" }
+        get api_v1_principals_url
         assert_response :unauthorized
       end
 
-      test "GET index does not require a namespace" do
+      test "GET index returns principals" do
         get api_v1_principals_url, headers: auth_headers
         assert_response :ok
       end
@@ -1005,7 +998,6 @@ module Api
         ids = body.fetch("data").map { |p| p["id"] }
         expected = Principal.pluck(:id).map { |id| Principal.find(id).oid }
         assert_equal expected.sort, ids.sort
-        assert body["data"].all? { |p| p["namespace"] == "default" }
         assert_equal expected.length, body.dig("meta", "total")
       end
 
@@ -1100,15 +1092,6 @@ module Api
         assert_equal %w[U-alice U-overlap].sort, foreign_ids.sort
       end
 
-      test "GET index returns compatibility namespace values" do
-        get api_v1_principals_url,
-            params: { labels: { kind: "user", team: "platform" } },
-            headers: auth_headers
-        assert_response :ok
-
-        assert json_body.fetch("data").all? { |p| p["namespace"] == "default" }
-      end
-
       test "GET index returns an empty array when no labels match" do
         get api_v1_principals_url,
             params: { labels: { kind: "nonexistent" } },
@@ -1142,7 +1125,6 @@ module Api
 
         data = json_body.fetch("data")
         assert_equal principal.oid, data["id"]
-        assert_equal "default", data["namespace"]
         assert_equal principal.foreign_id, data["foreign_id"]
       end
 
@@ -1157,21 +1139,13 @@ module Api
         assert_response :unauthorized
       end
 
-      test "GET lookup scopes by namespace" do
+      test "GET lookup rejects a non-default compatibility path" do
         get "/api/v1/principals/lookup/other/U-alice", headers: auth_headers
         assert_response :not_found
       end
 
       test "POST rejects a non-URL-safe foreign_id" do
         body = { data: { foreign_id: "bad/value" } }
-        assert_no_difference -> { Principal.count } do
-          post api_v1_principals_url, params: body.to_json, headers: auth_headers
-        end
-        assert_response :unprocessable_content
-      end
-
-      test "POST rejects a non-default namespace" do
-        body = { data: { namespace: "bad/value", foreign_id: "U-ok" } }
         assert_no_difference -> { Principal.count } do
           post api_v1_principals_url, params: body.to_json, headers: auth_headers
         end

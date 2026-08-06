@@ -23,7 +23,9 @@ module Api
         get api_v1_principal_roles_url(principal_id: principal.oid), headers: auth_headers
         assert_response :ok
 
-        ids = json_body.fetch("data").map { |r| r["id"] }
+        data = json_body.fetch("data")
+        assert data.none? { |role| role.key?("namespace") }
+        ids = data.map { |r| r["id"] }
         assert_equal [ roles(:acme_infra).oid ], ids
       end
 

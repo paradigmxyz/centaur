@@ -36,6 +36,7 @@ module Api
         assert_response :ok
 
         data = json_body.fetch("data")
+        refute data.key?("namespace")
         assert_equal({ "source_type" => "env", "config" => { "var" => "AWS_ACCESS_KEY_ID" } }, data["access_key_id"])
         assert_equal({ "source_type" => "env", "config" => { "var" => "AWS_SECRET_ACCESS_KEY" } }, data["secret_access_key"])
         assert_nil data["session_token"]

@@ -40,6 +40,7 @@ module Api
         assert_response :ok
 
         data = json_body.fetch("data")
+        refute data.key?("namespace")
         assert_equal "sha256", data["signature_algorithm"]
         assert_equal({ "source_type" => "env", "config" => { "var" => "WEBHOOK_HMAC_KEY" } },
                      data.dig("credentials", "secret"))
@@ -91,7 +92,7 @@ module Api
         assert_equal secret.oid, json_body.dig("data", "id")
       end
 
-      test "GET lookup scopes an hmac secret by namespace" do
+      test "GET lookup rejects a non-default compatibility path" do
         secret = hmac_secrets(:acme_webhook_hmac)
         get "/api/v1/hmac_secrets/lookup/other/#{secret.foreign_id}", headers: auth_headers
         assert_response :not_found
@@ -172,7 +173,7 @@ module Api
         assert_nil secret.name
       end
 
-      test "GET index is scoped by namespace" do
+      test "GET index returns hmac secrets" do
         get api_v1_hmac_secrets_url, params: {}.to_json, headers: auth_headers
         assert_response :ok
         ids = json_body.fetch("data").map { |r| r["id"] }

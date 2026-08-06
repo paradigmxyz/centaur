@@ -12,14 +12,15 @@ module Api
       def json_body = JSON.parse(response.body)
 
       test "rejects requests without an API key" do
-        get api_v1_broker_credentials_url(namespace: "default")
+        get api_v1_broker_credentials_url
         assert_response :unauthorized
       end
 
-      test "index lists credentials in a namespace without token material" do
+      test "index lists credentials without token material" do
         get api_v1_broker_credentials_url, headers: auth_headers
         assert_response :ok
         row = json_body.fetch("data").first
+        refute row.key?("namespace")
         assert_equal "bootstrapping", row["status"]
         refute row.key?("access_token")
         refute row.key?("refresh_token")

@@ -24,6 +24,7 @@ module Api
         assert_response :ok
 
         data = json_body.fetch("data")
+        refute data.key?("namespace")
         assert_equal "refresh_token", data["grant"]
         assert_equal({ "source_type" => "env", "config" => { "var" => "GMAIL_CLIENT_ID" } },
                      data.dig("credentials", "client_id"))
@@ -52,7 +53,7 @@ module Api
         assert_equal secret.oid, json_body.dig("data", "id")
       end
 
-      test "GET lookup scopes an oauth_token secret by namespace" do
+      test "GET lookup rejects a non-default compatibility path" do
         secret = oauth_token_secrets(:acme_gmail_oauth)
         get "/api/v1/oauth_token_secrets/lookup/other/#{secret.foreign_id}", headers: auth_headers
         assert_response :not_found
@@ -200,7 +201,7 @@ module Api
         assert_equal "cc-upsert", json_body.dig("data", "foreign_id")
       end
 
-      test "GET index is scoped by namespace" do
+      test "GET index returns oauth_token secrets" do
         get api_v1_oauth_token_secrets_url, params: {}.to_json, headers: auth_headers
         assert_response :ok
         ids = json_body.fetch("data").map { |r| r["id"] }

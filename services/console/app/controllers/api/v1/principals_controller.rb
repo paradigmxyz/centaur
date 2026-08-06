@@ -80,7 +80,6 @@ module Api
       def record_payload(principal)
         {
           id: principal.oid,
-          namespace: "default",
           foreign_id: principal.foreign_id,
           name: principal.name,
           labels: principal.labels_with_sandbox_capabilities,

@@ -24,8 +24,8 @@ module Api
         assert_response :ok
 
         data = json_body.fetch("data")
+        refute data.key?("namespace")
         assert_equal role.oid, data["id"]
-        assert_equal "default", data["namespace"]
         assert_equal "acme-infra", data["foreign_id"]
         assert_equal "Infra", data["name"]
         assert_equal [], data["slack_channel_permissions"]
@@ -69,13 +69,6 @@ module Api
         assert_equal [ "C0123456789" ], role.slack_channel_permissions.pluck(:channel_id)
         assert_equal role.slack_channel_permissions_payload,
                      json_body.dig("data", "slack_channel_permissions")
-      end
-
-      test "POST defaults the namespace" do
-        body = { data: { name: "No namespace" } }
-        post api_v1_roles_url, params: body.to_json, headers: auth_headers
-        assert_response :created
-        assert_equal "default", json_body.dig("data", "namespace")
       end
 
       test "POST returns 422 when foreign_id already exists" do
@@ -191,7 +184,6 @@ module Api
 
         data = json_body.fetch("data")
         assert_match(/\Arole_/, data["id"])
-        assert_equal "default", data["namespace"]
         assert_equal "edge", data["foreign_id"]
         assert_equal "Edge", data["name"]
       end
@@ -204,24 +196,6 @@ module Api
         end
         assert_response :ok
         assert_equal "Renamed", role.reload.name
-      end
-
-      test "POST rejects a non-default compatibility namespace" do
-        body = { data: { namespace: "other", foreign_id: "blocked" } }
-
-        assert_no_difference -> { Role.count } do
-          post api_v1_roles_url, params: body.to_json, headers: auth_headers
-        end
-
-        assert_response :unprocessable_content
-        assert_equal Api::BaseController::NAMESPACE_ERROR, json_body.dig("error", "message")
-      end
-
-      test "PUT upsert defaults the namespace when omitted" do
-        body = { data: { name: "Defaulted" } }
-        put api_v1_role_url(id: "defaulted"), params: body.to_json, headers: auth_headers
-        assert_response :created
-        assert_equal "default", json_body.dig("data", "namespace")
       end
 
       test "DELETE removes a role" do
@@ -259,7 +233,7 @@ module Api
         assert_equal [ matching.oid ], json_body.fetch("data").pluck("id")
       end
 
-      test "GET index does not require a namespace" do
+      test "GET index returns roles" do
         get api_v1_roles_url, headers: auth_headers
         assert_response :ok
       end

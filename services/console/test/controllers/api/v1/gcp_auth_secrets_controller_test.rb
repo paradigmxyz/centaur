@@ -24,6 +24,7 @@ module Api
         assert_response :ok
 
         data = json_body.fetch("data")
+        refute data.key?("namespace")
         assert_equal secret.oid, data["id"]
         assert_equal({ "source_type" => "env", "config" => { "var" => "GCP_SA_KEYFILE" } }, data["keyfile"])
         assert_equal "storage-bot@acme.example", data["subject"]
@@ -65,7 +66,7 @@ module Api
         assert_equal secret.oid, json_body.dig("data", "id")
       end
 
-      test "GET lookup scopes a gcp_auth secret by namespace" do
+      test "GET lookup rejects a non-default compatibility path" do
         secret = gcp_auth_secrets(:acme_gcs_keyfile)
         get "/api/v1/gcp_auth_secrets/lookup/other/#{secret.foreign_id}", headers: auth_headers
         assert_response :not_found
@@ -220,7 +221,7 @@ module Api
         assert_equal "wif-upsert", json_body.dig("data", "foreign_id")
       end
 
-      test "GET index is scoped by namespace" do
+      test "GET index returns gcp_auth secrets" do
         get api_v1_gcp_auth_secrets_url, params: {}.to_json, headers: auth_headers
         assert_response :ok
         ids = json_body.fetch("data").map { |r| r["id"] }

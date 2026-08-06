@@ -94,7 +94,6 @@ module Api
         headers = ref.sources.select(&:endpoint_header?)
         {
           id: ref.oid,
-          namespace: "default",
           foreign_id: ref.foreign_id,
           name: ref.name,
           description: ref.description,

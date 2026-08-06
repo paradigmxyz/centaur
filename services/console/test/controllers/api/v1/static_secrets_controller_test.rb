@@ -42,8 +42,8 @@ module Api
         assert_response :ok
 
         data = json_body.fetch("data")
+        refute data.key?("namespace")
         assert_equal ref.oid, data["id"]
-        assert_equal "default", data["namespace"]
         assert_equal ref.name, data["name"]
         assert_equal "custom", data["kind"]
         assert_equal({ "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" },
@@ -114,7 +114,7 @@ module Api
         assert_equal ref.oid, json_body.dig("data", "id")
       end
 
-      test "GET lookup scopes a static secret by namespace" do
+      test "GET lookup rejects a non-default compatibility path" do
         ref = static_secrets(:acme_prod_api_key)
         get "/api/v1/static_secrets/lookup/other/#{ref.foreign_id}", headers: auth_headers
         assert_response :not_found
@@ -155,7 +155,7 @@ module Api
         assert_equal [ 0, 1 ], data["rules"].map { |r| r["position"] }
       end
 
-      test "POST accepts credential_namespace only in a token broker source config" do
+      test "POST rejects credential_namespace in a token broker source config" do
         credential = broker_credentials(:acme_managed_gmail)
         body = {
           data: {
@@ -172,11 +172,11 @@ module Api
           }
         }
 
-        post api_v1_static_secrets_url, params: body.to_json, headers: auth_headers
+        assert_no_difference -> { StaticSecret.count } do
+          post api_v1_static_secrets_url, params: body.to_json, headers: auth_headers
+        end
 
-        assert_response :created
-        source = StaticSecret.find_by!(foreign_id: "token-broker-compatibility").source
-        assert_equal({ "credential_id" => credential.foreign_id }, source.config)
+        assert_response :unprocessable_content
       end
 
       test "POST ignores client-supplied rule positions and uses the array index" do
@@ -259,7 +259,6 @@ module Api
 
         data = json_body.fetch("data")
         assert_equal "upserted-ref", data["foreign_id"]
-        assert_equal "default", data["namespace"]
         assert_equal "upserted", data["name"]
       end
 
@@ -540,11 +539,11 @@ module Api
       end
 
       test "GET index rejects requests without an Authorization header" do
-        get api_v1_static_secrets_url, params: { namespace: "default" }
+        get api_v1_static_secrets_url
         assert_response :unauthorized
       end
 
-      test "GET index does not require a namespace" do
+      test "GET index returns static secrets" do
         get api_v1_static_secrets_url, headers: auth_headers
         assert_response :ok
       end
@@ -557,7 +556,6 @@ module Api
         names = body.fetch("data").map { |r| r["name"] }
         expected = StaticSecret.pluck(:name)
         assert_equal expected.sort, names.sort
-        assert body["data"].all? { |r| r["namespace"] == "default" }
         assert_equal expected.length, body.dig("meta", "total")
       end
 

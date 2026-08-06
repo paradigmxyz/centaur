@@ -55,14 +55,14 @@ module Api
       test "create persists the app and redacts the secret" do
         assert_difference -> { OauthApp.count } => 1 do
           post api_v1_oauth_apps_url,
-               params: valid_body(credential_namespace: "default").to_json,
+               params: valid_body.to_json,
                headers: auth_headers
         end
         assert_response :created
         data = json_body.fetch("data")
         assert_equal "google", data["provider"]
         assert_equal "api-google", data["slug"]
-        assert_equal "default", data["credential_namespace"]
+        refute data.key?("credential_namespace")
         refute data.key?("client_secret")
 
         created = OauthApp.find_by_oid(data["id"])
