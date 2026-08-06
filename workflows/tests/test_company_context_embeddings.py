@@ -54,8 +54,8 @@ def _use_database_pool(monkeypatch, embeddings, pool):
     )
     database_urls = []
 
-    async def create_pool(database_url):
-        database_urls.append(database_url)
+    async def create_pool(database_url, **options):
+        database_urls.append((database_url, options))
         return pool
 
     monkeypatch.setattr(embeddings.asyncpg, "create_pool", create_pool)
@@ -72,7 +72,10 @@ def test_workflow_uses_a_scoped_principal_and_ai_v2_database(monkeypatch):
     assert embeddings.WORKFLOW_PRINCIPAL is True
     assert created_pool is pool
     assert database_urls == [
-        "postgresql://workflow:secret@postgres-proxy:5432/ai_v2?sslmode=require"
+        (
+            "postgresql://workflow:secret@postgres-proxy:5432/ai_v2?sslmode=require",
+            {"min_size": 1, "max_size": 2},
+        )
     ]
 
 
@@ -132,7 +135,10 @@ def test_handler_embeds_and_stores_one_batch(monkeypatch):
     }
     assert pool.fetch_args == ("text-embedding-3-small", 2)
     assert database_urls == [
-        "postgresql://workflow:secret@postgres-proxy:5432/ai_v2?sslmode=require"
+        (
+            "postgresql://workflow:secret@postgres-proxy:5432/ai_v2?sslmode=require",
+            {"min_size": 1, "max_size": 2},
+        )
     ]
     assert pool.closed is True
     assert fake_embeddings.call == {

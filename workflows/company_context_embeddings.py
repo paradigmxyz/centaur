@@ -90,7 +90,11 @@ def _centaur_database_url() -> str:
 
 
 async def _create_database_pool():
-    return await asyncpg.create_pool(_centaur_database_url())
+    return await asyncpg.create_pool(
+        _centaur_database_url(),
+        min_size=1,
+        max_size=2,
+    )
 
 
 SCHEDULE = {
