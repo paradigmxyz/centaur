@@ -43,6 +43,16 @@
 {{- end -}}
 {{- $toolsUseRepoCache := and .Values.repoCache.enabled (gt (len $toolSources) 0) -}}
 {{- $useOverlayRepoCache := and .Values.repoCache.enabled (gt (len $overlaySources) 0) -}}
+{{- /*
+Every overlay discovery path is served by the repo-cache mount. With the cache
+disabled the chart renders no mount for api-rs and no repos mount for sandboxes,
+so overlay tools, workflows, and skills vanish from discovery and the workflow
+host resolves WORKFLOW_DIRS against a path that does not exist. Reject the
+combination here instead of letting it fail at runtime.
+*/ -}}
+{{- if and (not .Values.repoCache.enabled) .Values.overlays.sources }}
+{{- fail "overlays.sources requires repoCache.enabled=true: overlay tools, workflows, and skills are served from the repo-cache mount, which is not rendered when repoCache.enabled=false" }}
+{{- end }}
 {{- $toolDirs := list "/app/tools" -}}
 {{- $workflowDirs := "/app/workflows" -}}
 {{- if $toolsUseRepoCache -}}

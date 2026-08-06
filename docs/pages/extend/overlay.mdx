@@ -100,6 +100,16 @@ is missing from API discovery, inspect `/var/lib/centaur/repos/...` in the API
 container. If a skill or workflow-host import is missing, inspect
 `/home/agent/github/...` in the sandbox.
 
+Both mounts are served by repo-cache, so overlays require `repoCache.enabled:
+true` (the default). With `repoCache.enabled: false` the chart renders neither
+mount: api-rs falls back to the image's own `/app/tools` and `/app/workflows`,
+sandboxes lose `CENTAUR_SKILL_DIRS` and the `/home/agent/github` repos mount,
+and the workflow host resolves `WORKFLOW_DIRS` against a path that does not
+exist. Overlay tools, workflows, and skills silently disappear from discovery.
+The chart rejects that combination when `overlays.sources` is set, so the
+failure surfaces at `helm install` rather than as a missing-file error at
+runtime.
+
 ## Discovery paths
 
 The chart renders API discovery paths from the ordered overlay list:
