@@ -1,7 +1,7 @@
 # RFC 0005: Per-Turn Requester Credentials
 
 Status: Draft
-Owner: Dune (ivan@dune.com)
+Owner: TBD
 Target: `services/api-rs`, `services/console`
 
 ## Summary
