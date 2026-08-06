@@ -307,26 +307,26 @@ async fn main() -> Result<()> {
 
     match &cli.command {
         Command::Principals(cmd) => match cmd {
-            PrincipalsCmd::List(args) => principals_list(&cli, &client, args).await,
-            PrincipalsCmd::Show(args) => principals_show(&cli, &client, args).await,
+            PrincipalsCmd::List(args) => principals_list(&client, args).await,
+            PrincipalsCmd::Show(args) => principals_show(&client, args).await,
             PrincipalsCmd::Grant(args) => principals_grant(&cli, &client, args).await,
-            PrincipalsCmd::Revoke(args) => principals_revoke(&cli, &client, args).await,
+            PrincipalsCmd::Revoke(args) => principals_revoke(&client, args).await,
         },
         Command::Roles(cmd) => match cmd {
-            RolesCmd::List(args) => roles_list(&cli, &client, args).await,
-            RolesCmd::Show(args) => roles_show(&cli, &client, args).await,
+            RolesCmd::List(args) => roles_list(&client, args).await,
+            RolesCmd::Show(args) => roles_show(&client, args).await,
             RolesCmd::Grant(args) => roles_grant(&cli, &client, args).await,
-            RolesCmd::Revoke(args) => roles_revoke(&cli, &client, args).await,
+            RolesCmd::Revoke(args) => roles_revoke(&client, args).await,
         },
         Command::Secrets(cmd) => match cmd {
-            SecretsCmd::List(args) => secrets_list(&cli, &client, args).await,
-            SecretsCmd::Show(args) => secrets_show(&cli, &client, args).await,
+            SecretsCmd::List(args) => secrets_list(&client, args).await,
+            SecretsCmd::Show(args) => secrets_show(&client, args).await,
         },
         Command::Broker(cmd) => match cmd {
-            BrokerCmd::Create(args) => broker_create(&cli, &client, args).await,
-            BrokerCmd::List(args) => broker_list(&cli, &client, args).await,
-            BrokerCmd::Show(args) => broker_show(&cli, &client, args).await,
-            BrokerCmd::Delete(args) => broker_delete(&cli, &client, args).await,
+            BrokerCmd::Create(args) => broker_create(&client, args).await,
+            BrokerCmd::List(args) => broker_list(&client, args).await,
+            BrokerCmd::Show(args) => broker_show(&client, args).await,
+            BrokerCmd::Delete(args) => broker_delete(&client, args).await,
         },
     }
 }
@@ -335,7 +335,7 @@ async fn main() -> Result<()> {
 // principals
 // ---------------------------------------------------------------------------
 
-async fn principals_list(_cli: &Cli, client: &IronControlClient, args: &FilterArgs) -> Result<()> {
+async fn principals_list(client: &IronControlClient, args: &FilterArgs) -> Result<()> {
     let labels = filter_labels(args)?;
     let mut found = client.list_principals(&labels).await?;
     apply_filter(&mut found, args.filter.as_deref(), |p| {
@@ -371,11 +371,7 @@ async fn describe_grant(client: &IronControlClient, grant: &Grant) -> Option<Str
     Some(format!("{kind} {label} ({oid})"))
 }
 
-async fn principals_show(
-    _cli: &Cli,
-    client: &IronControlClient,
-    args: &PrincipalSelector,
-) -> Result<()> {
+async fn principals_show(client: &IronControlClient, args: &PrincipalSelector) -> Result<()> {
     let identity = principal::resolve_principal(&args.principal, args.slack_user.as_deref());
     let principal = get_principal_or_fail(client, &identity.foreign_id).await?;
     println!(
@@ -488,11 +484,7 @@ async fn principals_grant(
     Ok(())
 }
 
-async fn principals_revoke(
-    _cli: &Cli,
-    client: &IronControlClient,
-    args: &PrincipalGrantArgs,
-) -> Result<()> {
+async fn principals_revoke(client: &IronControlClient, args: &PrincipalGrantArgs) -> Result<()> {
     if args.tools.is_empty()
         && args.roles.is_empty()
         && args.secrets.is_empty()
@@ -545,7 +537,7 @@ async fn principals_revoke(
 // roles
 // ---------------------------------------------------------------------------
 
-async fn roles_list(_cli: &Cli, client: &IronControlClient, args: &FilterArgs) -> Result<()> {
+async fn roles_list(client: &IronControlClient, args: &FilterArgs) -> Result<()> {
     let labels = filter_labels(args)?;
     let mut found = client.list_roles(&labels).await?;
     apply_filter(&mut found, args.filter.as_deref(), |r| {
@@ -561,7 +553,7 @@ async fn roles_list(_cli: &Cli, client: &IronControlClient, args: &FilterArgs) -
     Ok(())
 }
 
-async fn roles_show(_cli: &Cli, client: &IronControlClient, args: &RoleSelector) -> Result<()> {
+async fn roles_show(client: &IronControlClient, args: &RoleSelector) -> Result<()> {
     let role = get_role_or_fail(client, &args.role).await?;
     println!(
         "role: {} ({}) — {}",
@@ -646,7 +638,7 @@ fn select_secrets(all: Vec<ParsedSecret>, names: &[String]) -> Result<Vec<Parsed
     Ok(selected)
 }
 
-async fn roles_revoke(_cli: &Cli, client: &IronControlClient, args: &RoleSecretArgs) -> Result<()> {
+async fn roles_revoke(client: &IronControlClient, args: &RoleSecretArgs) -> Result<()> {
     let role = get_role_or_fail(client, &args.role).await?;
     println!(
         "role: {} ({})",
@@ -668,7 +660,7 @@ async fn roles_revoke(_cli: &Cli, client: &IronControlClient, args: &RoleSecretA
 // secrets
 // ---------------------------------------------------------------------------
 
-async fn secrets_list(_cli: &Cli, client: &IronControlClient, args: &FilterArgs) -> Result<()> {
+async fn secrets_list(client: &IronControlClient, args: &FilterArgs) -> Result<()> {
     let labels = filter_labels(args)?;
     // One row per secret across every type: (type, foreign_id, oid, name).
     let mut rows: Vec<(&'static str, Option<String>, String, String)> = Vec::new();
@@ -692,7 +684,7 @@ async fn secrets_list(_cli: &Cli, client: &IronControlClient, args: &FilterArgs)
     Ok(())
 }
 
-async fn secrets_show(_cli: &Cli, client: &IronControlClient, args: &SecretSelector) -> Result<()> {
+async fn secrets_show(client: &IronControlClient, args: &SecretSelector) -> Result<()> {
     let (label, detail) = fetch_secret_detail(client, &args.secret).await?;
     println!("secret: {} (type {label})", args.secret);
     println!("{}", serde_json::to_string_pretty(&detail)?);
@@ -760,11 +752,7 @@ fn print_secrets(rows: &[(&str, Option<String>, String, String)]) {
 // broker credentials
 // ---------------------------------------------------------------------------
 
-async fn broker_create(
-    _cli: &Cli,
-    client: &IronControlClient,
-    args: &BrokerCreateArgs,
-) -> Result<()> {
+async fn broker_create(client: &IronControlClient, args: &BrokerCreateArgs) -> Result<()> {
     let token_endpoint_headers = args
         .token_endpoint_headers
         .iter()
@@ -800,7 +788,7 @@ async fn broker_create(
     Ok(())
 }
 
-async fn broker_list(_cli: &Cli, client: &IronControlClient, args: &FilterArgs) -> Result<()> {
+async fn broker_list(client: &IronControlClient, args: &FilterArgs) -> Result<()> {
     let labels = filter_labels(args)?;
     let mut found = client.list_broker_credentials(&labels).await?;
     apply_filter(&mut found, args.filter.as_deref(), |c| {
@@ -833,7 +821,7 @@ async fn broker_list(_cli: &Cli, client: &IronControlClient, args: &FilterArgs) 
     Ok(())
 }
 
-async fn broker_show(_cli: &Cli, client: &IronControlClient, args: &BrokerSelector) -> Result<()> {
+async fn broker_show(client: &IronControlClient, args: &BrokerSelector) -> Result<()> {
     let detail = client
         .get_broker_credential_detail(&args.credential)
         .await?;
@@ -842,11 +830,7 @@ async fn broker_show(_cli: &Cli, client: &IronControlClient, args: &BrokerSelect
     Ok(())
 }
 
-async fn broker_delete(
-    _cli: &Cli,
-    client: &IronControlClient,
-    args: &BrokerSelector,
-) -> Result<()> {
+async fn broker_delete(client: &IronControlClient, args: &BrokerSelector) -> Result<()> {
     client.delete_broker_credential(&args.credential).await?;
     println!("broker credential {}: deleted", args.credential);
     Ok(())
