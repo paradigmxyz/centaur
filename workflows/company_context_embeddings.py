@@ -14,6 +14,7 @@ from openai import AsyncOpenAI, BadRequestError
 
 WORKFLOW_NAME = "company_context_embeddings"
 WORKFLOW_PRINCIPAL = True
+WORKFLOW_DATABASE = False
 
 CENTAUR_POSTGRES_DSN_ENV = "CENTAUR_POSTGRES_DSN"
 DEFAULT_POSTGRES_DATABASE = "ai_v2"
