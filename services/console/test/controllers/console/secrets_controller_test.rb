@@ -87,13 +87,13 @@ module Console
       assert_difference -> { StaticSecret.count } => 1,
                         -> { RequestRule.count } => 2 do
         post console_static_secrets_url, params: {
-          secret: { namespace: "acme", name: "GitHub token", foreign_id: "github-token" },
+          secret: { name: "GitHub token", foreign_id: "github-token" },
           static: { kind: "github_token", mode: "inject" },
           source: { source_type: "env", reference: "GITHUB_TOKEN" }
         }
       end
 
-      secret = StaticSecret.find_by!(namespace: "acme", foreign_id: "github-token")
+      secret = StaticSecret.find_by!(foreign_id: "github-token")
       assert_equal "github_token", secret.kind
       assert_nil secret.inject_config
       assert_equal CredentialProfiles::GithubToken::REPLACE_CONFIG, secret.replace_config
@@ -102,7 +102,6 @@ module Console
 
     test "PATCH preserves a GitHub token profile through the form representation" do
       secret = StaticSecret.create!(
-        namespace: "acme",
         name: "GitHub token",
         kind: "github_token",
         replace_config: CredentialProfiles::GithubToken::REPLACE_CONFIG,
@@ -110,7 +109,7 @@ module Console
       )
 
       patch console_static_secret_url(secret.oid), params: {
-        secret: { namespace: "acme", name: "renamed GitHub token" },
+        secret: { name: "renamed GitHub token" },
         static: {
           kind: "github_token", mode: "replace", proxy_value: "GITHUB_TOKEN",
           match_headers: "Authorization"

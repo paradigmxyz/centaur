@@ -61,7 +61,6 @@ module Api
       test "POST resolves a github_token profile into explicit configuration and rules" do
         body = {
           data: {
-            namespace: "acme",
             name: "GitHub token",
             kind: "github_token",
             source: { source_type: "env", config: { "var" => "GITHUB_TOKEN" } }
@@ -84,7 +83,6 @@ module Api
       test "POST rejects configuration that conflicts with the selected profile" do
         body = {
           data: {
-            namespace: "acme",
             name: "misconfigured GitHub token",
             kind: "github_token",
             inject_config: { "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" },
@@ -387,7 +385,6 @@ module Api
 
       test "PUT preserves an omitted kind and resolves the profile before the no-op check" do
         ref = StaticSecret.create!(
-          namespace: "acme",
           name: "GitHub token",
           kind: "github_token",
           replace_config: CredentialProfiles::GithubToken::REPLACE_CONFIG,
@@ -403,7 +400,6 @@ module Api
 
         body = {
           data: {
-            namespace: ref.namespace,
             name: ref.name,
             source: { source_type: "control_plane", secret: "same-secret" }
           }
@@ -421,7 +417,6 @@ module Api
 
       test "PUT replaces an existing profile kind when custom is explicit" do
         ref = StaticSecret.create!(
-          namespace: "acme",
           name: "GitHub token",
           kind: "github_token",
           replace_config: CredentialProfiles::GithubToken::REPLACE_CONFIG,
@@ -431,7 +426,6 @@ module Api
 
         body = {
           data: {
-            namespace: ref.namespace,
             name: ref.name,
             kind: "custom",
             inject_config: { "header" => "X-Token" },
