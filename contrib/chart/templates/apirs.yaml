@@ -332,6 +332,10 @@ spec:
               value: {{ printf "%s:%s" .Values.sandbox.image.repository .Values.sandbox.image.tag | quote }}
             - name: SESSION_SANDBOX_IMAGE_PULL_POLICY
               value: {{ .Values.sandbox.image.pullPolicy | quote }}
+{{- with .Values.sandbox.runtimeClassName }}
+            - name: SESSION_SANDBOX_RUNTIME_CLASS_NAME
+              value: {{ . | quote }}
+{{- end }}
 {{- if .Values.global.imagePullSecrets }}
             - name: SESSION_SANDBOX_IMAGE_PULL_SECRETS
               value: "{{- range $index, $secret := .Values.global.imagePullSecrets }}{{- if $index }},{{ end -}}{{ $secret.name }}{{- end }}"

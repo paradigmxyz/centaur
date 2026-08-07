@@ -558,6 +558,11 @@ struct SandboxArgs {
     )]
     image_pull_secrets: Vec<String>,
     #[arg(
+        long = "session-sandbox-runtime-class-name",
+        env = "SESSION_SANDBOX_RUNTIME_CLASS_NAME"
+    )]
+    runtime_class_name: Option<String>,
+    #[arg(
         long = "session-sandbox-ready-timeout-secs",
         alias = "kubernetes-sandbox-ready-timeout-s",
         env = "SESSION_SANDBOX_READY_TIMEOUT_SECS",
@@ -1375,6 +1380,7 @@ impl TryFrom<&SandboxArgs> for AgentSandboxConfig {
             .filter(|secret| !secret.is_empty())
             .map(str::to_owned)
             .collect();
+        config.runtime_class_name = clean_optional_value(args.runtime_class_name.as_deref());
         config.ready_timeout = Duration::from_secs(args.ready_timeout_secs);
         let mut proxy = args.iron_proxy.to_config()?;
         let mut fragments = vec![args.iron_proxy.infra_fragment()?];
@@ -2116,6 +2122,8 @@ mod tests {
             "centaur-test",
             "--session-sandbox-image",
             "centaur-agent:test",
+            "--session-sandbox-runtime-class-name",
+            "gvisor",
             "--session-sandbox-ready-timeout-secs",
             "17",
             "--session-sandbox-k8s-context",
@@ -2126,6 +2134,7 @@ mod tests {
         assert_eq!(args.sandbox.backend, SandboxBackendKind::AgentK8s);
         assert_eq!(args.sandbox.workload, SandboxWorkloadKind::CodexAppServer);
         assert_eq!(args.sandbox.k8s_namespace, "centaur-test");
+        assert_eq!(args.sandbox.runtime_class_name.as_deref(), Some("gvisor"));
         assert_eq!(args.sandbox.ready_timeout_secs, 17);
         assert_eq!(args.sandbox.k8s_context.as_deref(), Some("kind-test"));
     }
@@ -2259,6 +2268,8 @@ mod tests {
             "IfNotPresent",
             "--session-sandbox-image-pull-secrets",
             "github-access-token-read-packages, extra-secret ",
+            "--session-sandbox-runtime-class-name",
+            " gvisor ",
             "--session-sandbox-ready-timeout-secs",
             "42",
             "--iron-control-url",
@@ -2275,8 +2286,47 @@ mod tests {
             config.image_pull_secrets,
             vec!["github-access-token-read-packages", "extra-secret"]
         );
+        assert_eq!(config.runtime_class_name.as_deref(), Some("gvisor"));
         assert_eq!(config.ready_timeout, Duration::from_secs(42));
         assert!(config.iron_proxy.is_some());
+    }
+
+    #[test]
+    fn runtime_class_name_is_read_from_environment() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[("SESSION_SANDBOX_RUNTIME_CLASS_NAME", "gvisor")]);
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--iron-control-url",
+            "http://console.local",
+            "--iron-control-api-key",
+            "iak_test",
+        ])
+        .unwrap();
+
+        let config = AgentSandboxConfig::try_from(&args.sandbox).unwrap();
+        assert_eq!(config.runtime_class_name.as_deref(), Some("gvisor"));
+    }
+
+    #[test]
+    fn empty_runtime_class_name_is_omitted() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-runtime-class-name",
+            "  ",
+            "--iron-control-url",
+            "http://console.local",
+            "--iron-control-api-key",
+            "iak_test",
+        ])
+        .unwrap();
+
+        let config = AgentSandboxConfig::try_from(&args.sandbox).unwrap();
+        assert_eq!(config.runtime_class_name, None);
     }
 
     #[test]

@@ -240,6 +240,8 @@ sandbox:
     repository: centaur-agent
     tag: latest
     pullPolicy: Always
+  # Optional Kubernetes RuntimeClass applied to every dynamic sandbox pod
+  # created by api-rs (for example, "gvisor" on a sandbox-enabled GKE pool).
   runtimeClassName: ""
   reposPath: ""
   # How the in-sandbox harness authenticates upstream. Single source of truth:

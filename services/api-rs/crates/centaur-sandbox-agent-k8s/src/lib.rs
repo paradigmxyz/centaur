@@ -59,6 +59,7 @@ pub struct AgentSandboxConfig {
     pub annotations: BTreeMap<String, String>,
     pub image_pull_policy: Option<String>,
     pub image_pull_secrets: Vec<String>,
+    pub runtime_class_name: Option<String>,
     pub state_volume: Option<StateVolumeConfig>,
     pub iron_proxy: Option<IronProxyConfig>,
     pub iron_control: Option<IronControlSettings>,
@@ -106,6 +107,7 @@ impl AgentSandboxConfig {
             annotations: BTreeMap::new(),
             image_pull_policy: None,
             image_pull_secrets: Vec::new(),
+            runtime_class_name: None,
             state_volume: None,
             iron_proxy: None,
             iron_control: None,
@@ -113,6 +115,11 @@ impl AgentSandboxConfig {
             otlp_egress: None,
             ready_timeout: Duration::from_secs(60),
         }
+    }
+
+    pub fn runtime_class_name(mut self, runtime_class_name: impl Into<String>) -> Self {
+        self.runtime_class_name = Some(runtime_class_name.into());
+        self
     }
 
     pub fn state_volume(mut self, state_volume: StateVolumeConfig) -> Self {
@@ -702,6 +709,11 @@ fn build_agent_sandbox(
     }
     insert_optional(
         &mut pod_spec,
+        "runtimeClassName",
+        config.runtime_class_name.clone(),
+    );
+    insert_optional(
+        &mut pod_spec,
         "initContainers",
         (!init_containers.is_empty()).then_some(init_containers),
     );
@@ -914,10 +926,24 @@ mod tests {
             sandbox.spec.pod_template.spec.enable_service_links,
             Some(false)
         );
+        assert_eq!(sandbox.spec.pod_template.spec.runtime_class_name, None);
         assert_eq!(container.image.as_deref(), Some("centaur-agent:latest"));
         assert_eq!(container.stdin, Some(true));
         assert_eq!(container.volume_mounts.as_ref().unwrap().len(), 2);
         assert!(container.resources.as_ref().unwrap().limits.is_some());
+    }
+
+    #[test]
+    fn applies_configured_runtime_class_to_sandbox_pod_template() {
+        let spec = SandboxSpec::new("centaur-agent:latest");
+        let config = AgentSandboxConfig::new("centaur").runtime_class_name("gvisor");
+
+        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+
+        assert_eq!(
+            sandbox.spec.pod_template.spec.runtime_class_name.as_deref(),
+            Some("gvisor")
+        );
     }
 
     #[test]
