@@ -1,5 +1,5 @@
 require "test_helper"
-require Rails.root.join("db/migrate/20260806180000_enforce_globally_unique_foreign_ids")
+require Rails.root.join("db/migrate/20260807091441_enforce_globally_unique_foreign_ids")
 
 class EnforceGloballyUniqueForeignIdsTest < ActiveSupport::TestCase
   test "reports every colliding foreign id before adding indexes" do
