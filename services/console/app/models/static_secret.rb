@@ -48,6 +48,16 @@ class StaticSecret < ApplicationRecord
   # proxy resolves at sync; this association is the console-level link.
   belongs_to :broker_credential, optional: true
 
+  def apply_kind_defaults(rules: self.rules)
+    CredentialProfiles::Registry.apply_defaults(self, rules: rules)
+  end
+
+  attr_writer :kind_rules_for_validation
+
+  def validate_kind_rules(rules: self.rules)
+    CredentialProfiles::Registry.validate_rules(self, rules: rules)
+  end
+
   after_commit :auto_grant_wrapped_oauth_credential,
                on: %i[create update],
                if: :broker_credential_id?
@@ -86,12 +96,15 @@ class StaticSecret < ApplicationRecord
   end
 
   validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
-  validates :foreign_id, uniqueness: { scope: :namespace, allow_nil: true },
+  validates :kind, presence: true, inclusion: { in: CredentialProfiles::Registry.kinds }
+  validates :foreign_id, uniqueness: { allow_nil: true },
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }, allow_nil: true
   validate :labels_is_a_hash
   validate :exactly_one_of_inject_or_replace
   validate :inject_config_matches_schema
   validate :replace_config_matches_schema
+  validate :kind_config_matches_profile
+  validate :kind_rules_match_profile
 
   private
 
@@ -118,6 +131,14 @@ class StaticSecret < ApplicationRecord
 
   def replace_config_matches_schema
     validate_against_schema(:replace_config, replace_config, REPLACE_CONFIG_SCHEMA)
+  end
+
+  def kind_config_matches_profile
+    CredentialProfiles::Registry.validate_config(self)
+  end
+
+  def kind_rules_match_profile
+    validate_kind_rules(rules: @kind_rules_for_validation || rules)
   end
 
   def validate_against_schema(attr, value, schema)

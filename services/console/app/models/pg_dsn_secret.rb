@@ -79,7 +79,7 @@ class PgDsnSecret < ApplicationRecord
   end
 
   validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
-  validates :foreign_id, presence: true, uniqueness: { scope: :namespace },
+  validates :foreign_id, presence: true, uniqueness: true,
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
   validates :database, presence: true
   validate :labels_is_a_hash

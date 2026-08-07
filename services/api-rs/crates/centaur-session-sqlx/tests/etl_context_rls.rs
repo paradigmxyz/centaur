@@ -93,6 +93,26 @@ async fn company_context_reader_preserves_scoped_search_behavior() -> Result<(),
 }
 
 #[tokio::test]
+async fn company_context_reader_scores_multiterm_granola_keyword_results()
+-> Result<(), Box<dyn Error>> {
+    let Some(mut fixture) = RlsTestFixture::create().await? else {
+        return Ok(());
+    };
+    let result = assert_multiterm_granola_keyword_score(&mut fixture.conn).await;
+    fixture.finish(result).await
+}
+
+#[tokio::test]
+async fn company_context_reader_scopes_multiterm_granola_keyword_results()
+-> Result<(), Box<dyn Error>> {
+    let Some(mut fixture) = RlsTestFixture::create().await? else {
+        return Ok(());
+    };
+    let result = assert_multiterm_granola_keyword_scope(&mut fixture.conn).await;
+    fixture.finish(result).await
+}
+
+#[tokio::test]
 async fn company_context_reader_denies_unauthorized_user_data() -> Result<(), Box<dyn Error>> {
     let Some(mut fixture) = RlsTestFixture::create().await? else {
         return Ok(());
@@ -265,7 +285,10 @@ async fn assert_company_context_reader_search_behavior(
                 "doc_slack_private".to_owned(),
             ],
             google_docs: vec!["gdocs_doc".to_owned()],
-            granola_docs: vec!["granola:note:granola_note".to_owned()],
+            granola_docs: vec![
+                "granola:note:granola_note".to_owned(),
+                "granola:note:granola_note_old".to_owned(),
+            ],
             slack_private_docs: vec!["slack_dm:T_HOME:D_VISIBLE:2000.000001".to_owned()],
             slack_private_conversation_docs: vec![
                 "slack_dm_conversation:T_HOME:D_VISIBLE".to_owned(),
@@ -274,6 +297,39 @@ async fn assert_company_context_reader_search_behavior(
         }
     );
 
+    Ok(())
+}
+
+async fn assert_multiterm_granola_keyword_score(
+    conn: &mut PgConnection,
+) -> Result<(), Box<dyn Error>> {
+    let rows = granola_keyword_search_rows(conn, "viewer@example.com").await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, "granola:note:granola_note");
+    assert!(rows[0].1 > 0.0, "matching document must have a BM25 score");
+    Ok(())
+}
+
+async fn assert_multiterm_granola_keyword_scope(
+    conn: &mut PgConnection,
+) -> Result<(), Box<dyn Error>> {
+    let viewer_rows = granola_keyword_search_rows(conn, "viewer@example.com").await?;
+    assert_eq!(
+        viewer_rows
+            .iter()
+            .map(|(document_id, _score)| document_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["granola:note:granola_note"]
+    );
+
+    let other_rows = granola_keyword_search_rows(conn, "other@example.com").await?;
+    assert_eq!(
+        other_rows
+            .iter()
+            .map(|(document_id, _score)| document_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["granola:note:granola_note_other"]
+    );
     Ok(())
 }
 
@@ -793,7 +849,10 @@ async fn assert_company_context_reader_denies_unauthorized_rows(
             company_context_docs: vec!["doc_slack_private".to_owned()],
             google_docs_observations: vec!["gdocs_observed_file".to_owned()],
             google_docs: vec!["gdocs_doc".to_owned()],
-            granola_docs: vec!["granola:note:granola_note".to_owned()],
+            granola_docs: vec![
+                "granola:note:granola_note".to_owned(),
+                "granola:note:granola_note_old".to_owned(),
+            ],
             slack_private_docs: vec!["slack_dm:T_HOME:D_VISIBLE:2000.000001".to_owned()],
             slack_private_conversation_docs: vec![
                 "slack_dm_conversation:T_HOME:D_VISIBLE".to_owned(),
@@ -1074,11 +1133,12 @@ async fn insert_fixture_rows(conn: &mut PgConnection) -> Result<(), sqlx::Error>
             ('gdocs_doc_blank_email', 'gdocs_file_blank_email', 'chunk_1', 'Blank Email Google Doc', 'Blank Email Google Doc body');
 
         insert into granola_sync_notes
-            (note_id, title, access_emails)
+            (note_id, title, access_emails, source_created_at)
         values
-            ('granola_note', 'Granola note', array['viewer@example.com']),
-            ('granola_note_other', 'Other Granola note', array['other@example.com']),
-            ('granola_note_no_access', 'No-access Granola note', array[]::text[]);
+            ('granola_note', 'Project planning', array['viewer@example.com'], '2026-06-01'),
+            ('granola_note_old', 'Project planning', array['viewer@example.com'], '2026-04-01'),
+            ('granola_note_other', 'Project planning', array['other@example.com'], '2026-06-01'),
+            ('granola_note_no_access', 'Project planning', array[]::text[], '2026-06-01');
 
         insert into slack_private_sync_conversations
             (home_team_id, conversation_id, conversation_type)
@@ -1209,6 +1269,56 @@ async fn company_context_docs(
         &mut tx,
         "select coalesce(array_agg(document_id order by document_id), '{}') from company_context_documents",
     )
+    .await?;
+
+    tx.execute("reset role").await?;
+    tx.rollback().await?;
+    Ok(rows)
+}
+
+async fn granola_keyword_search_rows(
+    conn: &mut PgConnection,
+    user_email: &str,
+) -> Result<Vec<(String, f32)>, sqlx::Error> {
+    let mut tx = conn.begin().await?;
+    tx.execute("set local search_path to public").await?;
+    tx.execute("set role centaur_company_context_reader")
+        .await?;
+    sqlx::query("select set_config('centaur.user_email', $1, true)")
+        .bind(user_email)
+        .execute(&mut *tx)
+        .await?;
+    let occurred_after = time::Date::from_calendar_date(2026, time::Month::May, 1)
+        .expect("2026-05-01 must be a valid date")
+        .midnight()
+        .assume_utc();
+    let occurred_before = time::Date::from_calendar_date(2026, time::Month::July, 1)
+        .expect("2026-07-01 must be a valid date")
+        .midnight()
+        .assume_utc();
+
+    let rows = sqlx::query_as(
+        r#"
+        select document_id, paradedb.score(document_id) as score
+        from granola_context_documents
+        where (
+            (title ||| $1::text::pdb.boost(8) or body ||| $1::text::pdb.boost(2))
+            or (title ||| $2::text::pdb.boost(4) or body ||| $2::text)
+            or (title ||| $3::text::pdb.boost(4) or body ||| $3::text)
+        )
+        and ($4::timestamptz is null or occurred_at >= $4)
+        and ($5::timestamptz is null or occurred_at < $5)
+        order by paradedb.score(document_id) desc
+        limit $6
+        "#,
+    )
+    .bind("project planning")
+    .bind("project")
+    .bind("planning")
+    .bind(occurred_after)
+    .bind(occurred_before)
+    .bind(10_i64)
+    .fetch_all(&mut *tx)
     .await?;
 
     tx.execute("reset role").await?;

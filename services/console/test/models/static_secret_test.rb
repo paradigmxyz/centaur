@@ -28,6 +28,17 @@ class StaticSecretTest < ActiveSupport::TestCase
     assert StaticSecret.new(valid_replace_attrs).valid?
   end
 
+  test "kind defaults to custom" do
+    assert_equal "custom", StaticSecret.new.kind
+  end
+
+  test "rejects an unknown credential kind" do
+    ref = StaticSecret.new(valid_inject_attrs(kind: "githubish"))
+
+    assert_not ref.valid?
+    assert_includes ref.errors[:kind], "is not included in the list"
+  end
+
   test "rejects a foreign_id that starts with the opaque id prefix" do
     ref = StaticSecret.new(valid_inject_attrs(foreign_id: "ssr_abc123"))
     assert_not ref.valid?
@@ -54,7 +65,7 @@ class StaticSecretTest < ActiveSupport::TestCase
     assert ref.valid?, ref.errors.full_messages.inspect
   end
 
-  test "foreign_id is unique within a namespace" do
+  test "foreign_id is globally unique" do
     existing_attrs = valid_inject_attrs(foreign_id: "shared-fid")
     StaticSecret.create!(existing_attrs)
     dup = StaticSecret.new(existing_attrs.merge(name: "another label"))
@@ -62,10 +73,11 @@ class StaticSecretTest < ActiveSupport::TestCase
     assert_includes dup.errors[:foreign_id], "has already been taken"
   end
 
-  test "same foreign_id is allowed across different namespaces" do
+  test "same foreign_id is rejected across different namespaces" do
     StaticSecret.create!(valid_inject_attrs(foreign_id: "shared-fid"))
     other = StaticSecret.new(valid_inject_attrs(namespace: "globex", foreign_id: "shared-fid"))
-    assert other.valid?
+    assert_not other.valid?
+    assert_includes other.errors[:foreign_id], "has already been taken"
   end
 
   test "foreign_id rejects non-URL-safe characters" do

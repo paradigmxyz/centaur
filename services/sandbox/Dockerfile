@@ -23,6 +23,20 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
     && rm -rf /usr/share/doc /usr/share/man /usr/share/info
 
+# reth's default JIT build uses revmc, which depends on llvm-sys 221.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key \
+      | gpg --dearmor -o /usr/share/keyrings/llvm-snapshot.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-22 main" \
+      | tee /etc/apt/sources.list.d/llvm-22.list > /dev/null \
+    && apt-get update && apt-get install -y --no-install-recommends \
+      clang-22 lld-22 llvm-22-dev libclang-22-dev libpolly-22-dev \
+    && rm -rf /usr/share/doc /usr/share/man /usr/share/info
+
+ENV LLVM_SYS_221_PREFIX=/usr/lib/llvm-22
+ENV LIBCLANG_PATH=/usr/lib/llvm-22/lib
+
 # ── Python deps ──────────────────────────────────────────────────────────────
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     pip3 install --break-system-packages --no-compile --ignore-installed "packaging>=24.2.0" \
@@ -40,6 +54,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     feedparser>=6.0.0 \
     httplib2>=0.20.0 \
     httpx>=0.28.0 \
+    "openai>=2.53.0" \
     opentelemetry-proto==1.42.1 \
     "psycopg[binary]>=3.2.0" \
     pysocks>=1.7.1 \

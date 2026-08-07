@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_08_02_170149) do
+ActiveRecord::Schema[8.1].define(version: 2026_08_07_091441) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -38,6 +38,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_02_170149) do
     t.string "namespace", default: "default", null: false
     t.datetime "updated_at", null: false
     t.index ["created_by_id"], name: "index_aws_auth_secrets_on_created_by_id"
+    t.index ["foreign_id"], name: "index_aws_auth_secrets_on_foreign_id", unique: true
     t.index ["labels"], name: "index_aws_auth_secrets_on_labels", using: :gin
     t.index ["namespace", "foreign_id"], name: "index_aws_auth_secrets_on_namespace_and_foreign_id", unique: true
   end
@@ -77,6 +78,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_02_170149) do
     t.datetime "updated_at", null: false
     t.text "username"
     t.index ["created_by_id"], name: "index_broker_credentials_on_created_by_id"
+    t.index ["foreign_id"], name: "index_broker_credentials_on_foreign_id", unique: true
     t.index ["labels"], name: "index_broker_credentials_on_labels", using: :gin
     t.index ["namespace", "foreign_id"], name: "index_broker_credentials_on_namespace_and_foreign_id", unique: true
     t.index ["next_attempt_at"], name: "index_broker_credentials_on_next_attempt_at"
@@ -97,6 +99,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_02_170149) do
     t.string "subject"
     t.datetime "updated_at", null: false
     t.index ["created_by_id"], name: "index_gcp_auth_secrets_on_created_by_id"
+    t.index ["foreign_id"], name: "index_gcp_auth_secrets_on_foreign_id", unique: true
     t.index ["labels"], name: "index_gcp_auth_secrets_on_labels", using: :gin
     t.index ["namespace", "foreign_id"], name: "index_gcp_auth_secrets_on_namespace_and_foreign_id", unique: true
   end
@@ -113,6 +116,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_02_170149) do
     t.string "namespace", default: "default", null: false
     t.datetime "updated_at", null: false
     t.index ["created_by_id"], name: "index_gcp_id_token_secrets_on_created_by_id"
+    t.index ["foreign_id"], name: "index_gcp_id_token_secrets_on_foreign_id", unique: true
     t.index ["labels"], name: "index_gcp_id_token_secrets_on_labels", using: :gin
     t.index ["namespace", "foreign_id"], name: "index_gcp_id_token_secrets_on_namespace_and_foreign_id", unique: true
   end
@@ -172,6 +176,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_02_170149) do
     t.string "timestamp_format"
     t.datetime "updated_at", null: false
     t.index ["created_by_id"], name: "index_hmac_secrets_on_created_by_id"
+    t.index ["foreign_id"], name: "index_hmac_secrets_on_foreign_id", unique: true
     t.index ["labels"], name: "index_hmac_secrets_on_labels", using: :gin
     t.index ["namespace", "foreign_id"], name: "index_hmac_secrets_on_namespace_and_foreign_id", unique: true
   end
@@ -261,6 +266,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_02_170149) do
     t.datetime "updated_at", null: false
     t.string "value_prefix"
     t.index ["created_by_id"], name: "index_oauth_token_secrets_on_created_by_id"
+    t.index ["foreign_id"], name: "index_oauth_token_secrets_on_foreign_id", unique: true
     t.index ["labels"], name: "index_oauth_token_secrets_on_labels", using: :gin
     t.index ["namespace", "foreign_id"], name: "index_oauth_token_secrets_on_namespace_and_foreign_id", unique: true
   end
@@ -278,6 +284,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_02_170149) do
     t.jsonb "settings", default: [], null: false
     t.datetime "updated_at", null: false
     t.index ["created_by_id"], name: "index_pg_dsn_secrets_on_created_by_id"
+    t.index ["foreign_id"], name: "index_pg_dsn_secrets_on_foreign_id", unique: true
     t.index ["labels"], name: "index_pg_dsn_secrets_on_labels", using: :gin
     t.index ["namespace", "foreign_id"], name: "index_pg_dsn_secrets_on_namespace_and_foreign_id", unique: true
   end
@@ -323,6 +330,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_02_170149) do
     t.bigint "sync_config_cache_version", default: 0, null: false
     t.datetime "updated_at", null: false
     t.index ["created_by_id"], name: "index_principals_on_created_by_id"
+    t.index ["foreign_id"], name: "index_principals_on_foreign_id", unique: true
     t.index ["labels"], name: "index_principals_on_labels", using: :gin
     t.index ["namespace", "console_user_email"], name: "index_principals_on_namespace_and_console_user_email"
     t.index ["namespace", "console_user_id"], name: "index_principals_on_namespace_and_console_user_id"
@@ -380,6 +388,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_02_170149) do
     t.string "namespace", default: "default", null: false
     t.datetime "updated_at", null: false
     t.index ["created_by_id"], name: "index_roles_on_created_by_id"
+    t.index ["foreign_id"], name: "index_roles_on_foreign_id", unique: true
     t.index ["labels"], name: "index_roles_on_labels", using: :gin
     t.index ["namespace", "foreign_id"], name: "index_roles_on_namespace_and_foreign_id", unique: true
   end
@@ -434,6 +443,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_02_170149) do
     t.string "description"
     t.string "foreign_id"
     t.jsonb "inject_config"
+    t.string "kind", default: "custom", null: false
     t.jsonb "labels", default: {}, null: false
     t.string "name"
     t.string "namespace", default: "default", null: false
@@ -441,6 +451,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_02_170149) do
     t.datetime "updated_at", null: false
     t.index ["broker_credential_id"], name: "index_static_secrets_on_broker_credential_id", unique: true, where: "(broker_credential_id IS NOT NULL)"
     t.index ["created_by_id"], name: "index_static_secrets_on_created_by_id"
+    t.index ["foreign_id"], name: "index_static_secrets_on_foreign_id", unique: true
     t.index ["labels"], name: "index_static_secrets_on_labels", using: :gin
     t.index ["namespace", "foreign_id"], name: "index_static_secrets_on_namespace_and_foreign_id", unique: true
   end

@@ -124,6 +124,13 @@ Inspect it:
 curl -s "$CENTAUR_API_URL/api/workflows/runs/$RUN_ID" | jq
 ```
 
+List recent runs, optionally filtering by exact workflow name. The default
+limit is 50 and the maximum is 1000:
+
+```bash
+curl -s "$CENTAUR_API_URL/api/workflows/runs?workflow_name=nightly_report&limit=1000" | jq
+```
+
 ## Schedule a workflow
 
 Workflows can run from schedule metadata declared beside the handler. Use this
