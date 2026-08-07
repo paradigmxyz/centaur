@@ -374,7 +374,7 @@ module Api
         assert_equal version, principal.reload.sync_config_cache_version
       end
 
-      test "PUT resolves an abbreviated unchanged profile before the no-op check" do
+      test "PUT preserves an omitted kind and resolves the profile before the no-op check" do
         ref = StaticSecret.create!(
           namespace: "acme",
           name: "GitHub token",
@@ -394,7 +394,6 @@ module Api
           data: {
             namespace: ref.namespace,
             name: ref.name,
-            kind: "github_token",
             source: { source_type: "control_plane", secret: "same-secret" }
           }
         }
@@ -403,9 +402,39 @@ module Api
         assert_response :ok
 
         ref.reload
+        assert_equal "github_token", ref.kind
         assert_equal source.id, ref.source.id
         assert_equal rule_ids, ref.rules.pluck(:id)
         assert_equal version, principal.reload.sync_config_cache_version
+      end
+
+      test "PUT replaces an existing profile kind when custom is explicit" do
+        ref = StaticSecret.create!(
+          namespace: "acme",
+          name: "GitHub token",
+          kind: "github_token",
+          replace_config: CredentialProfiles::GithubToken::REPLACE_CONFIG,
+          created_by: users(:acme_admin),
+          rules: CredentialProfiles::GithubToken::RULE_ATTRIBUTES.map { |attrs| RequestRule.new(attrs) }
+        )
+
+        body = {
+          data: {
+            namespace: ref.namespace,
+            name: ref.name,
+            kind: "custom",
+            inject_config: { "header" => "X-Token" },
+            rules: [ { host: "example.com" } ]
+          }
+        }
+
+        put api_v1_static_secret_url(id: ref.oid), params: body.to_json, headers: auth_headers
+        assert_response :ok
+
+        ref.reload
+        assert_equal "custom", ref.kind
+        assert_equal({ "header" => "X-Token" }, ref.inject_config)
+        assert_equal [ "example.com" ], ref.rules.map(&:host)
       end
 
       test "PUT does not retain omitted source fields" do

@@ -66,6 +66,10 @@ module Api
           ref, attrs, :name, :description, :kind,
           labels: {}, inject_config: {}, replace_config: {}
         )
+        # Older clients do not know about kind. Preserve it on update when the
+        # field is absent, while creates still receive the database default and
+        # an explicitly supplied kind still replaces the existing value.
+        ss_attrs[:kind] = ref.kind if ref.persisted? && !attrs.key?(:kind)
 
         source_attrs = if attrs.key?(:source) && attrs[:source].present?
           attrs.require(:source).permit(:source_type, :secret, config: {})
