@@ -26,6 +26,7 @@ DEFAULT_MAX_STALE_SECONDS = 24 * 60 * 60
 DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024
 CACHE_SCHEMA_VERSION = 1
 PATH_PARAMETER = re.compile(r":([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\}")
+AMBIGUOUS_ROUTE_REASON = "route overlaps another equally specific registry entry"
 
 
 class MppCatalogError(RuntimeError):
@@ -144,6 +145,7 @@ class MppClient:
         """List registry services and route availability under the local policy."""
         _validate_limit(limit)
         snapshot = self._catalog()
+        ambiguous_routes = _ambiguous_route_keys(snapshot.catalog["services"])
         services = self._filter_services(
             snapshot.catalog["services"],
             query=query,
@@ -152,7 +154,7 @@ class MppClient:
             limit=limit,
         )
         return {
-            "services": [self._service_summary(service) for service in services],
+            "services": [self._service_summary(service, ambiguous_routes) for service in services],
             "cache": snapshot.metadata(self._now()),
         }
 
@@ -172,11 +174,12 @@ class MppClient:
         """Show one service with an availability decision for every endpoint."""
         snapshot = self._catalog()
         record = self._find_service(snapshot.catalog["services"], service)
+        ambiguous_routes = _ambiguous_route_keys(snapshot.catalog["services"])
         result = dict(record)
         result["endpoints"] = [
             {
                 **endpoint,
-                "availability": self._endpoint_availability(record, endpoint),
+                "availability": self._endpoint_availability(record, endpoint, ambiguous_routes),
             }
             for endpoint in record.get("endpoints", [])
         ]
@@ -196,7 +199,11 @@ class MppClient:
         snapshot = self._catalog()
         record = self._find_service_by_id(snapshot.catalog["services"], service)
         endpoint = self._find_endpoint(record, method, path)
-        availability = self._endpoint_availability(record, endpoint)
+        availability = self._endpoint_availability(
+            record,
+            endpoint,
+            _ambiguous_route_keys(snapshot.catalog["services"]),
+        )
         if not availability["executable"]:
             raise MppPolicyError(availability["reason"])
 
@@ -447,13 +454,17 @@ class MppClient:
                 break
         return matches
 
-    def _service_summary(self, service: dict[str, Any]) -> dict[str, Any]:
+    def _service_summary(
+        self,
+        service: dict[str, Any],
+        ambiguous_routes: set[tuple[str, str, str]],
+    ) -> dict[str, Any]:
         endpoints = service.get("endpoints", [])
         endpoint_availability = [
             {
                 "method": endpoint["method"].upper(),
                 "path": endpoint["path"],
-                **self._endpoint_availability(service, endpoint),
+                **self._endpoint_availability(service, endpoint, ambiguous_routes),
             }
             for endpoint in endpoints
         ]
@@ -515,11 +526,16 @@ class MppClient:
         return matches[0]
 
     def _endpoint_availability(
-        self, service: dict[str, Any], endpoint: dict[str, Any]
+        self,
+        service: dict[str, Any],
+        endpoint: dict[str, Any],
+        ambiguous_routes: set[tuple[str, str, str]],
     ) -> dict[str, Any]:
         status = service.get("status")
         if status not in {None, "active"}:
             return {"executable": False, "reason": f"service status is {status!r}"}
+        if _route_key(service, endpoint) in ambiguous_routes:
+            return {"executable": False, "reason": AMBIGUOUS_ROUTE_REASON}
         decision = self._policy_decision(service, endpoint)
         payment = endpoint.get("payment") or {}
         intent = payment.get("intent")
@@ -617,7 +633,6 @@ def _validate_catalog(payload: Any) -> None:
     if not isinstance(payload, dict) or not isinstance(payload.get("services"), list):
         raise MppCatalogError("MPP registry returned an invalid services list")
     service_ids: set[str] = set()
-    routes: list[tuple[str, int, str, str]] = []
     for service in payload["services"]:
         if (
             not isinstance(service, dict)
@@ -650,21 +665,6 @@ def _validate_catalog(payload: Any) -> None:
                 raise MppCatalogError(
                     f"MPP registry service {service['id']!r} has an invalid endpoint"
                 )
-            parsed_service_url = urlsplit(service_url)
-            route = (
-                parsed_service_url.hostname.casefold(),
-                parsed_service_url.port or 443,
-                endpoint["method"].upper(),
-                f"{parsed_service_url.path.rstrip('/')}{endpoint['path']}",
-            )
-            if any(
-                existing[:3] == route[:3] and _path_patterns_overlap(existing[3], route[3])
-                for existing in routes
-            ):
-                raise MppCatalogError(
-                    "MPP registry contains overlapping authority, method, and path entries"
-                )
-            routes.append(route)
 
 
 def _validate_policy_rules(rules: list[dict[str, Any]]) -> None:
@@ -737,9 +737,52 @@ def _path_patterns_overlap(first: str, second: str) -> bool:
     first_segments = first.split("/")
     second_segments = second.split("/")
     return len(first_segments) == len(second_segments) and all(
-        left == right or PATH_PARAMETER.fullmatch(left) or PATH_PARAMETER.fullmatch(right)
+        left == right
+        or (bool(PATH_PARAMETER.fullmatch(left)) and bool(right))
+        or (bool(PATH_PARAMETER.fullmatch(right)) and bool(left))
         for left, right in zip(first_segments, second_segments, strict=True)
     )
+
+
+def _path_specificity(path: str) -> int:
+    return sum(
+        1 for segment in path.split("/") if segment and not PATH_PARAMETER.fullmatch(segment)
+    )
+
+
+def _route_key(service: dict[str, Any], endpoint: dict[str, Any]) -> tuple[str, str, str]:
+    return service["id"], endpoint["method"].upper(), endpoint["path"]
+
+
+def _ambiguous_route_keys(
+    services: list[dict[str, Any]],
+) -> set[tuple[str, str, str]]:
+    groups: dict[
+        tuple[str, int, str, int, int],
+        list[tuple[str, tuple[str, str, str]]],
+    ] = {}
+    for service in services:
+        if service.get("status") not in {None, "active"}:
+            continue
+        parsed = urlsplit(_service_url(service))
+        for endpoint in service.get("endpoints", []):
+            path = f"{parsed.path.rstrip('/')}{endpoint['path']}"
+            group = (
+                parsed.hostname.casefold(),
+                parsed.port or 443,
+                endpoint["method"].upper(),
+                len(path.split("/")),
+                _path_specificity(path),
+            )
+            groups.setdefault(group, []).append((path, _route_key(service, endpoint)))
+
+    ambiguous: set[tuple[str, str, str]] = set()
+    for routes in groups.values():
+        for index, (path, key) in enumerate(routes):
+            for other_path, other_key in routes[index + 1 :]:
+                if _path_patterns_overlap(path, other_path):
+                    ambiguous.update((key, other_key))
+    return ambiguous
 
 
 def _validate_service_destination(url: str, base_url: str) -> None:

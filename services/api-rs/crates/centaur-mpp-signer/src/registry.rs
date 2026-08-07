@@ -124,10 +124,13 @@ impl Registry {
                 if endpoint.method.eq_ignore_ascii_case(method)
                     && path_matches(&registered_path, concrete_path)
                 {
-                    matches.push(RegisteredRoute {
-                        service: service.clone(),
-                        endpoint: endpoint.clone(),
-                    });
+                    matches.push((
+                        path_specificity(&registered_path),
+                        RegisteredRoute {
+                            service: service.clone(),
+                            endpoint: endpoint.clone(),
+                        },
+                    ));
                 }
             }
         }
@@ -135,11 +138,17 @@ impl Registry {
             !matches.is_empty(),
             "request route is not in the MPP registry"
         );
+        let highest_specificity = matches
+            .iter()
+            .map(|(specificity, _)| *specificity)
+            .max()
+            .expect("non-empty matches");
+        matches.retain(|(specificity, _)| *specificity == highest_specificity);
         anyhow::ensure!(
             matches.len() == 1,
-            "request route matches multiple MPP registry entries"
+            "request route matches multiple equally specific MPP registry entries"
         );
-        Ok(matches.remove(0))
+        Ok(matches.remove(0).1)
     }
 
     pub async fn ready(&self) -> bool {
@@ -277,7 +286,6 @@ fn header_string(
 
 fn validate_catalog(catalog: &Catalog) -> anyhow::Result<()> {
     let mut ids = HashSet::new();
-    let mut routes = Vec::<(String, u16, String, String)>::new();
     for service in &catalog.services {
         anyhow::ensure!(
             !service.id.is_empty() && ids.insert(service.id.as_str()),
@@ -306,23 +314,6 @@ fn validate_catalog(catalog: &Catalog) -> anyhow::Result<()> {
         );
         for endpoint in &service.endpoints {
             validate_endpoint(endpoint)?;
-            let route = (
-                url.host_str().expect("validated host").to_ascii_lowercase(),
-                url.port_or_known_default()
-                    .expect("HTTPS has a default port"),
-                endpoint.method.to_ascii_uppercase(),
-                registered_path(&url, &endpoint.path),
-            );
-            anyhow::ensure!(
-                !routes.iter().any(|existing| {
-                    existing.0 == route.0
-                        && existing.1 == route.1
-                        && existing.2 == route.2
-                        && path_patterns_overlap(&existing.3, &route.3)
-                }),
-                "MPP registry contains overlapping authority, method, and path entries"
-            );
-            routes.push(route);
         }
     }
     Ok(())
@@ -357,13 +348,10 @@ fn path_matches(template: &str, concrete: &str) -> bool {
             })
 }
 
-fn path_patterns_overlap(first: &str, second: &str) -> bool {
-    let first = first.split('/').collect::<Vec<_>>();
-    let second = second.split('/').collect::<Vec<_>>();
-    first.len() == second.len()
-        && first.iter().zip(second).all(|(left, right)| {
-            left == &right || is_path_parameter(left) || is_path_parameter(right)
-        })
+fn path_specificity(path: &str) -> usize {
+    path.split('/')
+        .filter(|segment| !segment.is_empty() && !is_path_parameter(segment))
+        .count()
 }
 
 fn is_path_parameter(segment: &str) -> bool {
@@ -579,8 +567,12 @@ mod tests {
     }
 
     fn snapshot(fetched_at: OffsetDateTime) -> RegistrySnapshot {
+        snapshot_with_catalog(catalog(), fetched_at)
+    }
+
+    fn snapshot_with_catalog(catalog: Catalog, fetched_at: OffsetDateTime) -> RegistrySnapshot {
         RegistrySnapshot {
-            catalog: catalog(),
+            catalog,
             fetched_at,
             etag: Some("\"catalog-v1\"".to_owned()),
             last_modified: Some("Thu, 30 Jul 2026 00:00:00 GMT".to_owned()),
@@ -648,20 +640,79 @@ mod tests {
     }
 
     #[test]
-    fn catalog_routes_must_be_globally_unique() {
+    fn catalog_allows_overlapping_route_templates() {
         let mut catalog = catalog();
         let mut duplicate = catalog.services[0].clone();
         duplicate.id = "duplicate".to_owned();
         duplicate.endpoints[0].path = "/v1/:resource".to_owned();
         catalog.services.push(duplicate);
 
-        let error = validate_catalog(&catalog).expect_err("duplicate route must fail closed");
+        validate_catalog(&catalog).expect("overlapping templates are resolved per request");
+    }
 
-        assert!(
-            error
-                .to_string()
-                .contains("overlapping authority, method, and path")
-        );
+    #[tokio::test]
+    async fn route_prefers_the_template_with_more_literal_segments() {
+        let mut routes = catalog();
+        routes.services[0].id = "specific".to_owned();
+        let mut generic = routes.services[0].clone();
+        generic.id = "generic".to_owned();
+        generic.endpoints[0].path = "/v1/:resource".to_owned();
+        routes.services.push(generic);
+        let store = Arc::new(MemoryStore::new(Some(snapshot_with_catalog(
+            routes,
+            OffsetDateTime::now_utc(),
+        ))));
+
+        let selected = registry(store, Url::parse("http://unused.example/registry").unwrap())
+            .route("https", "api.example", "GET", "/v1/records")
+            .await
+            .expect("specific route");
+
+        assert_eq!(selected.service.id, "specific");
+    }
+
+    #[tokio::test]
+    async fn route_rejects_equal_specificity_matches() {
+        let mut routes = catalog();
+        routes.services[0].id = "first".to_owned();
+        routes.services[0].endpoints[0].path = "/v1/:collection/fixed".to_owned();
+        let mut second = routes.services[0].clone();
+        second.id = "second".to_owned();
+        second.endpoints[0].path = "/v1/records/:id".to_owned();
+        routes.services.push(second);
+        let store = Arc::new(MemoryStore::new(Some(snapshot_with_catalog(
+            routes,
+            OffsetDateTime::now_utc(),
+        ))));
+
+        let error = registry(store, Url::parse("http://unused.example/registry").unwrap())
+            .route("https", "api.example", "GET", "/v1/records/fixed")
+            .await
+            .expect_err("equal-specificity route must fail closed");
+
+        assert!(error.to_string().contains("multiple equally specific"));
+    }
+
+    #[tokio::test]
+    async fn empty_path_segment_does_not_match_a_parameter() {
+        let mut routes = catalog();
+        routes.services[0].id = "root".to_owned();
+        routes.services[0].endpoints[0].path = "/".to_owned();
+        let mut keyed = routes.services[0].clone();
+        keyed.id = "keyed".to_owned();
+        keyed.endpoints[0].path = "/:key".to_owned();
+        routes.services.push(keyed);
+        let store = Arc::new(MemoryStore::new(Some(snapshot_with_catalog(
+            routes,
+            OffsetDateTime::now_utc(),
+        ))));
+
+        let selected = registry(store, Url::parse("http://unused.example/registry").unwrap())
+            .route("https", "api.example", "GET", "/")
+            .await
+            .expect("root route");
+
+        assert_eq!(selected.service.id, "root");
     }
 
     #[tokio::test]

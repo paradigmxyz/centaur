@@ -370,17 +370,72 @@ def test_catalog_rejects_invalid_shapes(tmp_path: Path, payload: object) -> None
         client.list_services()
 
 
-def test_catalog_rejects_duplicate_authority_method_and_path(tmp_path: Path) -> None:
+def test_catalog_keeps_specific_and_generic_routes_available(tmp_path: Path) -> None:
     catalog = copy.deepcopy(CATALOG)
-    duplicate = copy.deepcopy(catalog["services"][0])
-    duplicate["id"] = "duplicate"
-    duplicate["endpoints"] = [copy.deepcopy(duplicate["endpoints"][0])]
-    duplicate["endpoints"][0]["path"] = "/v1/:resource"
-    catalog["services"].append(duplicate)
+    generic = copy.deepcopy(catalog["services"][0])
+    generic["id"] = "generic"
+    generic["endpoints"] = [copy.deepcopy(generic["endpoints"][0])]
+    generic["endpoints"][0]["path"] = "/v1/:resource"
+    catalog["services"].append(generic)
     client = make_client(tmp_path, lambda _: httpx.Response(200, json=catalog))
 
-    with pytest.raises(MppCatalogError, match="overlapping authority"):
-        client.list_services()
+    listed = client.list_services()
+
+    services = {service["id"]: service for service in listed["services"]}
+    assert services["catalog"]["available"] is True
+    assert services["generic"]["available"] is True
+
+
+def test_equal_specificity_routes_are_unavailable_but_catalog_remains_usable(
+    tmp_path: Path,
+) -> None:
+    catalog = copy.deepcopy(CATALOG)
+    ambiguous = copy.deepcopy(catalog["services"][0])
+    ambiguous["id"] = "ambiguous"
+    ambiguous["endpoints"] = [copy.deepcopy(ambiguous["endpoints"][1])]
+    ambiguous["endpoints"][0]["path"] = "/v1/records/:record"
+    catalog["services"].append(ambiguous)
+    client = make_client(tmp_path, lambda _: httpx.Response(200, json=catalog))
+
+    shown = client.show_service("catalog")
+    route = next(endpoint for endpoint in shown["endpoints"] if endpoint["path"].endswith(":id"))
+
+    assert route["availability"] == {
+        "executable": False,
+        "reason": "route overlaps another equally specific registry entry",
+    }
+    assert shown["endpoints"][0]["availability"]["executable"] is True
+    with pytest.raises(MppPolicyError, match="equally specific"):
+        client.request("catalog", "GET", "/v1/records/:id", {"id": "record-1"})
+
+
+def test_root_route_does_not_overlap_nonempty_parameter(tmp_path: Path) -> None:
+    catalog = {
+        "services": [
+            {
+                "id": "storage",
+                "serviceUrl": "https://storage.example",
+                "status": "active",
+                "endpoints": [
+                    {
+                        "method": "GET",
+                        "path": "/",
+                        "payment": {"intent": "charge", "method": "tempo"},
+                    },
+                    {
+                        "method": "GET",
+                        "path": "/:key",
+                        "payment": {"intent": "charge", "method": "tempo"},
+                    },
+                ],
+            }
+        ]
+    }
+    client = make_client(tmp_path, lambda _: httpx.Response(200, json=catalog))
+
+    shown = client.show_service("storage")
+
+    assert all(endpoint["availability"]["executable"] for endpoint in shown["endpoints"])
 
 
 @pytest.mark.parametrize(
