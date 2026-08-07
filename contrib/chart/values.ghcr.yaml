@@ -1,0 +1,29 @@
+# Image repositories for CENTAUR_IMAGE_SOURCE=ghcr. Applied as a values file
+# (not --set) so CENTAUR_EXTRA_VALUES can override individual images.
+apiRs:
+  image:
+    repository: ghcr.io/paradigmxyz/centaur/centaur-api-rs
+ironProxy:
+  image:
+    repository: ghcr.io/paradigmxyz/centaur/centaur-iron-proxy
+slackbotv2:
+  image:
+    repository: ghcr.io/paradigmxyz/centaur/centaur-slackbotv2
+linearbot:
+  image:
+    repository: ghcr.io/paradigmxyz/centaur/centaur-linearbot
+discordbot:
+  image:
+    repository: ghcr.io/paradigmxyz/centaur/centaur-discordbot
+githubbot:
+  image:
+    repository: ghcr.io/paradigmxyz/centaur/centaur-githubbot
+teamsbot:
+  image:
+    repository: ghcr.io/paradigmxyz/centaur/centaur-teamsbot
+sandbox:
+  image:
+    repository: ghcr.io/paradigmxyz/centaur/centaur-agent
+console:
+  image:
+    repository: ghcr.io/paradigmxyz/centaur/centaur-console

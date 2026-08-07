@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "audit_event.schema.json",
+  "title": "Space audit event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "ts", "actor_principal_id", "action", "resource", "metadata"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "ts": { "type": "string", "format": "date-time" },
+    "actor_principal_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Opaque Centaur principal identifier."
+    },
+    "action": { "type": "string", "minLength": 1 },
+    "resource": { "type": "string", "minLength": 1 },
+    "metadata": { "type": "object", "additionalProperties": true }
+  }
+}

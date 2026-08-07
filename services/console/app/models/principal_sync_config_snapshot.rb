@@ -339,7 +339,14 @@ class PrincipalSyncConfigSnapshot < ApplicationRecord
   private_class_method :api_server_hosts_for
 
   def self.proxy_transforms_for(served)
-    transforms = served[:gcp_auth].map(&:to_proxy_transform)
+    # Allowlist first: iron-proxy docs recommend placing it ahead of credential
+    # transforms so rejected hosts never reach secret injection.
+    transforms = []
+    if (allowlist = egress_allowlist_transform)
+      transforms << allowlist
+    end
+
+    transforms += served[:gcp_auth].map(&:to_proxy_transform)
     transforms += served[:gcp_id_token].map(&:to_proxy_transform)
     transforms += served[:aws_auth].map(&:to_proxy_transform)
     transforms += served[:hmac].map(&:to_proxy_transform)
@@ -350,6 +357,19 @@ class PrincipalSyncConfigSnapshot < ApplicationRecord
     transforms
   end
   private_class_method :proxy_transforms_for
+
+  # Managed-mode iron-proxy has no local proxy.yaml, so the domain allowlist must
+  # ride the control-plane sync payload. When CENTAUR_IRON_PROXY_ALLOWLIST_DOMAINS
+  # is unset or blank, omit the transform (open egress, today's default). Set it
+  # to a comma/whitespace-separated host list (or a single "*") to lock egress.
+  def self.egress_allowlist_transform
+    raw = ENV["CENTAUR_IRON_PROXY_ALLOWLIST_DOMAINS"].to_s
+    domains = raw.split(/[,\s]+/).map(&:strip).reject(&:blank?)
+    return nil if domains.empty?
+
+    { "name" => "allowlist", "config" => { "domains" => domains } }
+  end
+  private_class_method :egress_allowlist_transform
 
   # Cross-type conflict resolution. The wire protocol applies the `secrets` array
   # (static secrets) before the `transforms` array (gcp_auth, aws_auth, hmac_sign,

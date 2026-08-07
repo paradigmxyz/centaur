@@ -223,8 +223,33 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     assert_equal "refresh_token", tokens.first["grant"]
   end
 
+  test "sync_transforms prepends allowlist when CENTAUR_IRON_PROXY_ALLOWLIST_DOMAINS is set" do
+    with_env("CENTAUR_IRON_PROXY_ALLOWLIST_DOMAINS" => "api.anthropic.com, *.anthropic.com,api.hubapi.com") do
+      transforms = PrincipalSyncConfigSnapshot.sync_transforms_for(
+        principal_with_grants(gcp_auth_secrets(:acme_bigquery))
+      )
+      assert_equal "allowlist", transforms.first["name"]
+      assert_equal(
+        %w[api.anthropic.com *.anthropic.com api.hubapi.com],
+        transforms.first.dig("config", "domains")
+      )
+      assert_equal "gcp_auth", transforms[1]["name"]
+    end
+  end
+
+  test "sync_transforms omits allowlist when allowlist env is blank" do
+    with_env("CENTAUR_IRON_PROXY_ALLOWLIST_DOMAINS" => nil) do
+      transforms = PrincipalSyncConfigSnapshot.sync_transforms_for(
+        principal_with_grants(gcp_auth_secrets(:acme_bigquery))
+      )
+      assert_nil transforms.find { |t| t["name"] == "allowlist" }
+    end
+  end
+
   test "sync_transforms is empty without transform grants" do
-    assert_empty PrincipalSyncConfigSnapshot.sync_transforms_for(principals(:globex_user))
+    with_env("CENTAUR_IRON_PROXY_ALLOWLIST_DOMAINS" => nil) do
+      assert_empty PrincipalSyncConfigSnapshot.sync_transforms_for(principals(:globex_user))
+    end
   end
 
   test "sync_postgres emits a DSN entry per granted PgDsnSecret with foreign_id" do

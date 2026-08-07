@@ -68,6 +68,9 @@ The open-source tool inventory lives in this `tools/` tree and changes over time
   read-only with `DD_API_KEY` and `DD_APP_KEY`.
 - `preqin`: query Preqin Operational API fund and fund-manager data, with
   redacted auth diagnostics for `PREQIN_*` credentials.
+- `hubspot`: HubSpot CRM contacts/companies via OAuth or `HUBSPOT_ACCESS_TOKEN`.
+- `microsoft_graph`: Microsoft Graph profile/mail via delegated
+  `MICROSOFT_GRAPH_TOKEN` / console Microsoft OAuth grant.
 
 ## Sandbox Tool Paths
 

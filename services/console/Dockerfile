@@ -51,6 +51,9 @@ COPY . .
 # -j 1 disable parallel compilation to avoid a QEMU bug: https://github.com/rails/bootsnap/issues/495
 RUN bundle exec bootsnap precompile -j 1 app/ lib/
 
+# Normalize Windows CRLF shebangs from checkout before invoking bin/* scripts.
+RUN find bin -type f -exec sed -i 's/\r$//' {} +
+
 # Precompiling assets for production without requiring secret RAILS_MASTER_KEY
 RUN SECRET_KEY_BASE_DUMMY=1 ./bin/rails assets:precompile
 
@@ -63,11 +66,17 @@ FROM base
 # Run and own only the runtime files as a non-root user for security
 RUN groupadd --system --gid 1000 rails && \
     useradd rails --uid 1000 --gid 1000 --create-home --shell /bin/bash
-USER 1000:1000
 
 # Copy built artifacts: gems, application
 COPY --chown=rails:rails --from=build "${BUNDLE_PATH}" "${BUNDLE_PATH}"
 COPY --chown=rails:rails --from=build /rails /rails
+
+# Ensure runtime-writable dirs exist: WORKDIR /rails is root-owned, so the
+# rails user cannot mkdir under it unless we create these ahead of time.
+RUN mkdir -p tmp/cache tmp/pids tmp/sockets log storage && \
+    chown -R rails:rails tmp log storage
+
+USER 1000:1000
 
 # Entrypoint prepares the database.
 ENTRYPOINT ["/rails/bin/docker-entrypoint"]

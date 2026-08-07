@@ -1,0 +1,32 @@
+[project]
+name = "microsoft_graph"
+description = "Microsoft Graph — profile, mail, and calendar (delegated OAuth)"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27.0",
+    "typer>=0.12.0",
+    "rich>=13.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+microsoft-graph = "centaur_tool_microsoft_graph.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_microsoft_graph"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.centaur]
+module = "client.py"
+# Prefer granting the console Microsoft OAuth wrapper secret for
+# graph.microsoft.com. MICROSOFT_GRAPH_TOKEN is for local .env / tests.
+secrets = [
+    {type = "http", name = "MICROSOFT_GRAPH_TOKEN", mode = "inject", inject_header = "Authorization", inject_formatter = "Bearer {{ .Value }}", hosts = ["graph.microsoft.com"]},
+]

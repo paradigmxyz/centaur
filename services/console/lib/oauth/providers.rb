@@ -14,7 +14,9 @@ module Oauth
         Github::KEY => Github.new,
         Google::KEY => Google.new,
         Granola::KEY => Granola.new,
+        Hubspot::KEY => Hubspot.new,
         Linear::KEY => Linear.new,
+        Microsoft::KEY => Microsoft.new,
         Slack::KEY => Slack.new
       }.freeze
     end

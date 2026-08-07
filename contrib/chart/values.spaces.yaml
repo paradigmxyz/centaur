@@ -1,0 +1,18 @@
+# Spaces Phase 1 egress lock for local / Droplet overlays.
+# Merge with CENTAUR_EXTRA_VALUES, e.g.:
+#   CENTAUR_EXTRA_VALUES=contrib/chart/values.local.yaml,contrib/chart/values.spaces.yaml
+#
+# Managed iron-proxy ignores the baked iron-proxy.yaml allowlist; this chart
+# value is what console emits on every proxy sync.
+ironProxy:
+  allowlistDomains:
+    - "api.anthropic.com"
+    - "*.anthropic.com"
+    - "api.openai.com"
+    - "*.openai.com"
+    - "api.hubapi.com"
+    - "api.hubspot.com"
+    - "graph.microsoft.com"
+    - "github.com"
+    - "api.github.com"
+    - "*.githubusercontent.com"

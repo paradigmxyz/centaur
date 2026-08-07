@@ -198,6 +198,11 @@ spec:
             - name: CENTAUR_CONSOLE_SSO_EMAIL_DOMAINS
               value: {{ join "," . | quote }}
 {{- end }}
+{{- with .Values.ironProxy.allowlistDomains }}
+            # Managed iron-proxy egress allowlist (synced on every proxy poll).
+            - name: CENTAUR_IRON_PROXY_ALLOWLIST_DOMAINS
+              value: {{ join "," . | quote }}
+{{- end }}
 {{- if $console.googleOauth.enabled }}
             # Google OAuth app credentials (sign-in + brokered token refresh).
             # Gated on console.googleOauth.enabled; the keys must exist in the

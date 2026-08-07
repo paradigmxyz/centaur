@@ -62,6 +62,30 @@ acme_github:
   enabled: true
   created_by: acme_admin
 
+acme_hubspot:
+  slug: hubspot
+  description: Acme HubSpot integration
+  provider: hubspot
+  client_id: acme-hubspot-client-id
+  allowed_scopes:
+    - oauth
+    - crm.objects.contacts.read
+  credential_namespace: acme
+  enabled: true
+  created_by: acme_admin
+
+acme_microsoft:
+  slug: microsoft
+  description: Acme Microsoft Graph integration
+  provider: microsoft
+  client_id: acme-microsoft-client-id
+  allowed_scopes:
+    - User.Read
+    - Mail.Read
+  credential_namespace: acme
+  enabled: true
+  created_by: acme_admin
+
 acme_linear:
   slug: linear
   description: Acme Linear integration

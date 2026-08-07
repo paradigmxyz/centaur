@@ -131,3 +131,34 @@ fn shipped_proxy_allowlist_preserves_integration_headers() {
             .any(|header| header.as_str() == Some("version"))
     );
 }
+
+#[test]
+fn shipped_proxy_domain_allowlist_is_not_wildcard_open() {
+    let config: serde_yaml::Value =
+        serde_yaml::from_str(include_str!("../../../../iron-proxy/iron-proxy.yaml")).unwrap();
+    let transforms = config["transforms"].as_sequence().unwrap();
+    let allowlist = transforms
+        .iter()
+        .find(|transform| transform["name"].as_str() == Some("allowlist"))
+        .unwrap();
+    let domains = allowlist["config"]["domains"].as_sequence().unwrap();
+    assert!(
+        !domains.iter().any(|domain| domain.as_str() == Some("*")),
+        "unmanaged iron-proxy.yaml must not ship domains: [\"*\"]"
+    );
+    assert!(
+        domains
+            .iter()
+            .any(|domain| domain.as_str() == Some("api.anthropic.com"))
+    );
+    assert!(
+        domains
+            .iter()
+            .any(|domain| domain.as_str() == Some("api.hubapi.com"))
+    );
+    assert!(
+        domains
+            .iter()
+            .any(|domain| domain.as_str() == Some("graph.microsoft.com"))
+    );
+}

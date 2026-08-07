@@ -22,6 +22,8 @@ Centaur Console.
 | `granola` | Granola MCP tokens for `mcp.granola.ai`. |
 | `linear` | Linear tokens for `api.linear.app`. |
 | `attio` | Attio workspace tokens for `api.attio.com`. |
+| `hubspot` | HubSpot private-app OAuth tokens for `api.hubapi.com`. |
+| `microsoft` | Microsoft Graph user tokens for `graph.microsoft.com`. |
 
 ## Set Up An App
 
@@ -61,6 +63,28 @@ curl -sS -X POST https://mcp-auth.granola.ai/oauth2/register \
 ```
 
 Use `mcp` as the allowed scope for the app.
+
+### HubSpot
+
+Create a HubSpot app with OAuth enabled and register the Centaur callback URL.
+Include every required scope in both the HubSpot app Auth settings and the
+console app's allowed scopes (HubSpot treats dashboard-checked scopes as
+required on the authorize URL). The `oauth` scope is always present. After
+consent, Centaur enriches the credential from HubSpot's access-token metadata
+endpoint so the subject is `{hub_id}:{user_id}`.
+
+### Microsoft
+
+Register an Entra ID app registration that allows the authorization-code flow
+with a client secret, and add the Centaur callback URL. Request Microsoft Graph
+delegated permissions as allowed scopes (for example `User.Read`, `Mail.Read`).
+Centaur always adds `openid profile email offline_access` so the token response
+carries an id_token and a refresh token. The strategy uses the `common` tenant
+endpoints; single-tenant apps still work when the id_token issuer is
+`https://login.microsoftonline.com/<tenant-id>/v2.0`.
+
+Do not reuse a Teams bot's app-only Graph credential for user-scoped Microsoft
+OAuth — each staff member consents their own Graph access.
 
 ## Grant The Credential
 

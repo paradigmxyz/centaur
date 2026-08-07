@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Internal Agent Platform — Local-First Plan v3 | MagikDev</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  :root{--red:#C8102E;--navy:#0A2540;--slate:#5C6B7A;--fog:#F4F6F8;--white:#FFFFFF;--amber:#E8B500;--rule:#DDE3E9;}
+  *{box-sizing:border-box;}
+  html{-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+  body{margin:0;background:var(--white);color:var(--slate);
+    font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;
+    font-size:15px;line-height:1.5;}
+  .page{max-width:880px;margin:0 auto;padding:50px 46px 60px;}
+
+  .masthead{border-bottom:3px solid var(--navy);padding-bottom:16px;margin-bottom:14px;}
+  .eyebrow{font-size:11.5px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--red);margin:0 0 7px;}
+  h1{font-family:'Inter Tight','Inter',sans-serif;font-weight:700;font-size:37px;line-height:1.08;
+     letter-spacing:-.02em;color:var(--navy);margin:0 0 10px;}
+  .standfirst{font-size:16px;max-width:70ch;margin:0 0 12px;}
+  .meta{margin:0;font-size:12px;display:flex;flex-wrap:wrap;gap:4px 20px;}
+  .meta strong{color:var(--navy);font-weight:600;}
+
+  h2{font-family:'Inter',sans-serif;font-weight:600;font-size:23px;letter-spacing:-.01em;
+     color:var(--navy);margin:0 0 12px;padding-top:4px;break-after:avoid;page-break-after:avoid;}
+  h2 .num{color:var(--red);font-variant-numeric:tabular-nums;margin-right:10px;font-size:19px;}
+  h3{font-family:'Inter',sans-serif;font-weight:600;font-size:16px;color:var(--navy);
+     margin:0 0 7px;break-after:avoid;page-break-after:avoid;}
+  h4{font-family:'Inter',sans-serif;font-weight:600;font-size:14px;color:var(--navy);margin:0 0 5px;
+     break-after:avoid;page-break-after:avoid;}
+
+  section{margin-bottom:30px;break-inside:avoid;page-break-inside:avoid;}
+  section.long{break-inside:auto;page-break-inside:auto;}
+
+  p{margin:0 0 10px;max-width:72ch;}
+  p:last-child{margin-bottom:0;}
+  strong{color:var(--navy);font-weight:600;}
+
+  ul{margin:0 0 10px;padding-left:0;list-style:none;}
+  ul li{position:relative;padding-left:16px;margin-bottom:6px;max-width:70ch;}
+  ul li:last-child{margin-bottom:0;}
+  ul li::before{content:"";position:absolute;left:0;top:.58em;width:5px;height:5px;background:var(--navy);}
+  ul.risk li::before{background:var(--red);}
+
+  ol.rules{counter-reset:rl;list-style:none;padding-left:0;margin:0;}
+  ol.rules li{counter-increment:rl;position:relative;padding-left:34px;margin-bottom:10px;max-width:70ch;
+    break-inside:avoid;page-break-inside:avoid;}
+  ol.rules li::before{content:"R" counter(rl);position:absolute;left:0;top:0;font-weight:700;
+    font-size:12px;color:var(--red);font-variant-numeric:tabular-nums;letter-spacing:.03em;}
+
+  table{width:100%;border-collapse:collapse;font-size:13px;margin-bottom:10px;}
+  th{text-align:left;font-weight:600;color:var(--navy);font-size:10.5px;letter-spacing:.08em;
+     text-transform:uppercase;border-bottom:2px solid var(--navy);padding:0 10px 6px 0;vertical-align:bottom;}
+  td{padding:7px 10px 7px 0;border-bottom:1px solid var(--rule);vertical-align:top;}
+  td:first-child{color:var(--navy);font-weight:500;}
+  tr{break-inside:avoid;page-break-inside:avoid;}
+  .mono{font-family:'JetBrains Mono','SF Mono',Consolas,monospace;font-size:12px;color:var(--navy);}
+  .num-cell{font-variant-numeric:tabular-nums;}
+
+  .c{display:inline-block;font-size:9.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+    padding:2px 7px;white-space:nowrap;}
+  .c-src{background:var(--navy);color:var(--white);}
+  .c-doc{background:var(--fog);color:var(--navy);border:1px solid var(--navy);}
+  .c-unk{background:var(--red);color:var(--white);}
+
+  pre.diagram{font-family:'JetBrains Mono','SF Mono',Consolas,monospace;font-size:11px;line-height:1.5;
+    color:var(--navy);background:var(--fog);border-left:3px solid var(--navy);padding:16px 18px;
+    margin:0 0 12px;overflow-x:auto;break-inside:avoid;page-break-inside:avoid;}
+
+  .panel{background:var(--fog);border-left:3px solid var(--navy);padding:16px 20px;margin-bottom:16px;
+    break-inside:avoid;page-break-inside:avoid;}
+  .panel.alert{border-left-color:var(--red);}
+  .panel.note{border-left-color:var(--amber);}
+  .panel h3{margin-bottom:6px;}
+  .panel p,.panel ul{font-size:14px;}
+
+  .callout{border:2px solid var(--navy);padding:20px 24px;break-inside:avoid;page-break-inside:avoid;}
+  .callout h2{margin-bottom:8px;}
+
+  .phase{border-top:2px solid var(--navy);padding:14px 0 4px;margin-bottom:6px;
+    break-inside:avoid;page-break-inside:avoid;}
+  .phase .ph-head{display:flex;gap:12px;align-items:baseline;margin-bottom:6px;flex-wrap:wrap;}
+  .phase .ph-num{font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;
+    background:var(--navy);color:var(--white);padding:3px 9px;}
+  .phase .ph-num.az{background:var(--red);}
+  .phase h3{margin:0;}
+  .phase .dur{font-size:12px;color:var(--slate);}
+  .gate{background:var(--fog);border-left:3px solid var(--amber);padding:9px 13px;margin-top:9px;font-size:13.5px;}
+  .kill{background:var(--fog);border-left:3px solid var(--red);padding:9px 13px;margin-top:7px;font-size:13.5px;}
+
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:24px;}
+
+  .footer{margin-top:28px;padding-top:12px;border-top:3px solid var(--navy);
+    font-size:11.5px;display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;}
+  .footer strong{font-weight:600;}
+
+  @page{size:letter;margin:15mm 13mm;}
+  @media print{
+    body{font-size:9.6pt;line-height:1.4;}
+    .page{max-width:none;margin:0;padding:0;}
+    h1{font-size:24pt;}h2{font-size:13.5pt;}h3{font-size:10.5pt;}h4{font-size:9.6pt;}
+    .standfirst{font-size:10.2pt;}
+    table{font-size:8.2pt;}th{font-size:7pt;}
+    .c{font-size:6.4pt;}
+    pre.diagram{font-size:7.2pt;}
+    .panel p,.panel ul{font-size:9pt;}
+    .gate,.kill{font-size:8.6pt;}
+    .meta,.footer{font-size:7.8pt;}
+    section{margin-bottom:18px;}
+    a{color:var(--navy);text-decoration:none;}
+  }
+  @media (max-width:680px){
+    .page{padding:28px 18px 40px;}
+    h1{font-size:26px;}h2{font-size:19px;}
+    .two{grid-template-columns:1fr;gap:14px;}
+    table,thead,tbody,th,td,tr{display:block;}
+    thead{display:none;}
+    td{border-bottom:none;padding:2px 0;}
+    td:first-child{border-top:1px solid var(--rule);padding-top:8px;margin-top:6px;font-weight:600;}
+    pre.diagram{font-size:9px;}
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+<header class="masthead">
+  <p class="eyebrow">Technical Plan v3 — Researched. Supersedes v1 and v2.</p>
+  <h1>Internal Agent Platform: local-first plan, verified against source</h1>
+  <p class="standfirst">Built from direct reading of the Centaur repository and its documentation, not from summaries. Every claim below carries a confidence marker. We run local until the platform earns a cloud budget; Azure arrives only when the whole company does.</p>
+  <p class="meta">
+    <span><strong>Date:</strong> 31 July 2026</span>
+    <span><strong>Method:</strong> Source and docs inspection</span>
+    <span><strong>Supersedes:</strong> Plans v1, v2</span>
+  </p>
+</header>
+
+<div class="panel note">
+  <h3>Why the earlier plans were wrong, and what changed in method</h3>
+  <p>Versions 1 and 2 were built from search results, launch coverage, and inference. Six material claims turned out to be wrong — the licence, the Teams adapter, the web console, the control-plane language, the credential model, and the secrets backend. Every correction came from reading the actual repository.</p>
+  <p>This version reads the source first. Each claim is marked:</p>
+  <p style="margin-top:8px;">
+    <span class="c c-src">Source</span> verified in the repository code or chart &nbsp;·&nbsp;
+    <span class="c c-doc">Docs</span> stated in official documentation, not yet executed &nbsp;·&nbsp;
+    <span class="c c-unk">Unknown</span> must be tested
+  </p>
+  <p style="margin-top:8px;"><strong>Nothing marked Docs or Unknown should be treated as a commitment.</strong> Phase 0 exists to convert them.</p>
+</div>
+
+<!-- 01 CONTRADICTION -->
+<section class="long">
+  <h2><span class="num">01</span>The finding that governs everything</h2>
+
+  <div class="panel alert">
+    <h3>🔴 Centaur's own documentation contradicts itself on per-user credentials</h3>
+    <p><strong>The security page says it does not work.</strong> Under "What this does not protect against": credentials are deployment-scoped, <em>not yet</em> user-scoped. Tool and harness secrets live in a single vault every sandbox draws from, so a tool's reach is the same regardless of which user invokes it. Per-user and per-channel scoping is described as <em>on the roadmap</em>.</p>
+    <p><strong>The permissions page says it does work.</strong> A page titled "Per-User Permissions" documents principals, roles, direct grants, and effective grants — with console UI paths and working <span class="mono">centaur-perms</span> CLI commands for grant, show, and revoke. It calls per-user permissions "the normal production model for shared workspaces."</p>
+    <p><strong>The code sides with the permissions page.</strong> <span class="c c-src">Source</span> The <span class="mono">centaur-perms</span> crate exists with a principal model and tests. The console has <span class="mono">OauthApp</span> and <span class="mono">BrokerCredential</span> models with per-user consent flows. Teams principals derive from tenant and user IDs.</p>
+    <p><strong>Most likely explanation:</strong> the security page is stale and was not updated when the feature shipped. But "most likely" is exactly the reasoning that produced three wrong plans.</p>
+    <p><strong>Resolution: test it, do not read more about it.</strong> This is the first task of Phase 0 and the whole project turns on it.</p>
+  </div>
+</section>
+
+<!-- 02 INVENTORY -->
+<section class="long">
+  <h2><span class="num">02</span>What ships, what we build</h2>
+
+  <h3>Ships and covers our need</h3>
+  <table>
+    <thead><tr><th>Capability</th><th>Detail</th><th>Confidence</th></tr></thead>
+    <tbody>
+      <tr><td>Licence</td><td>Apache-2.0 OR MIT, dual. Full commercial internal use, private modification, permanent right to fork or freeze</td><td><span class="c c-src">Source</span></td></tr>
+      <tr><td>Local deployment</td><td>Documented first-class path. k3s, kind, minikube, or Docker Desktop. <span class="mono">just up</span> then <span class="mono">just smoke</span></td><td><span class="c c-doc">Docs</span></td></tr>
+      <tr><td>Teams</td><td><span class="mono">teamsbot</span> service + ingress in the chart. Principal <span class="mono">teams-user-&lt;tenant&gt;-&lt;user&gt;</span></td><td><span class="c c-src">Source</span></td></tr>
+      <tr><td>Web console</td><td>Rails app: <span class="mono">console</span>, <span class="mono">console-worker</span>, <span class="mono">console-ingress</span>. Has Principals, Roles, Grants, OAuth Apps UI</td><td><span class="c c-src">Source</span></td></tr>
+      <tr><td>Per-user OAuth flow</td><td>Operator registers client; users self-consent via a link; console refreshes tokens; refresh tokens never leave the console; iron-proxy injects Bearer</td><td><span class="c c-doc">Docs</span></td></tr>
+      <tr><td>Credential binding</td><td>Secrets bound to specific hosts and to specific headers, query params, or paths. Placeholder cannot be redirected or smuggled</td><td><span class="c c-doc">Docs</span></td></tr>
+      <tr><td>Audit trail</td><td>Every turn persisted in Postgres. iron-proxy logs each outbound request including which secret was substituted</td><td><span class="c c-doc">Docs</span></td></tr>
+      <tr><td>Model agnostic</td><td>Harness selectable per message: codex default, amp, claude, pi</td><td><span class="c c-doc">Docs</span></td></tr>
+      <tr><td>Tool contract</td><td>REST, not MCP. Secrets declared in <span class="mono">pyproject.toml</span> under <span class="mono">[tool.centaur]</span></td><td><span class="c c-src">Source</span></td></tr>
+    </tbody>
+  </table>
+
+  <h3>Gaps we must close</h3>
+  <table>
+    <thead><tr><th>Gap</th><th>What exists</th><th>Our work</th><th>Confidence</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><strong>HubSpot OAuth provider</strong></td>
+        <td>Providers are google, slack, github, granola, linear, attio. No HubSpot</td>
+        <td>New strategy class + registry entry. Existing strategies run 49–93 lines. Registry comment states adding a provider is "a new strategy class plus a registry entry — not a migration"</td>
+        <td><span class="c c-src">Source</span></td>
+      </tr>
+      <tr>
+        <td><strong>Microsoft OAuth provider</strong></td>
+        <td>Google has a strategy and a <span class="mono">gcp_auth</span> secret type. Microsoft has neither</td>
+        <td>Same pattern. Graph via the generic <span class="mono">oauth_token</span> type</td>
+        <td><span class="c c-src">Source</span></td>
+      </tr>
+      <tr>
+        <td><strong>HubSpot tool</strong></td>
+        <td>CRM tools shipped are Attio and Pylon</td>
+        <td>Write a HubSpot tool, or shortcut through the shipped <span class="mono">composio</span> tool</td>
+        <td><span class="c c-src">Source</span></td>
+      </tr>
+      <tr>
+        <td><strong>Microsoft 365 tool</strong></td>
+        <td><span class="mono">gsuite</span> covers Gmail, Calendar, Drive, Docs, Sheets. No M365 equivalent</td>
+        <td>Write it, or use Composio</td>
+        <td><span class="c c-src">Source</span></td>
+      </tr>
+      <tr>
+        <td><strong>SharePoint knowledge base</strong></td>
+        <td><span class="mono">company_context</span> indexes Slack history and Google Docs</td>
+        <td>SharePoint ingestion, embedding, citation, staleness. Ours entirely</td>
+        <td><span class="c c-src">Source</span></td>
+      </tr>
+      <tr>
+        <td><strong>Azure Key Vault backend</strong></td>
+        <td>Source policies are <span class="mono">env</span>, <span class="mono">onepassword</span>, <span class="mono">onepassword-connect</span>. Docs also cover AWS KMS and GCP Secret Manager. No Azure</td>
+        <td>Use 1Password, or write an Azure provider later</td>
+        <td><span class="c c-src">Source</span></td>
+      </tr>
+      <tr>
+        <td>Spaces layer</td><td>Overlay and app-repo extension pattern exists</td>
+        <td>Definitions, prompts, tool grants, knowledge scoping, approval gates, budgets</td><td><span class="c c-doc">Docs</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="panel">
+    <h3>What this does to the plan</h3>
+    <p>Phase 1 in v2 was "the decisive phase, our largest build item." It is now two OAuth strategy classes of roughly fifty to ninety lines each, following a documented extension pattern, plus tests. That is days of work, not months — <em>if</em> the contradiction in section 01 resolves in our favour.</p>
+    <p>The real remaining work moved to the tools and the knowledge base. Those are ours to write regardless of platform, and they are portable by construction.</p>
+  </div>
+</section>
+
+<!-- 03 LOCAL SPEC -->
+<section class="long">
+  <h2><span class="num">03</span>Local platform specification</h2>
+
+  <h3>Host</h3>
+  <table>
+    <thead><tr><th>Item</th><th>Specification</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td>Machine</td><td>Always-on Linux host — spare box, Mac Mini running Linux, or small VPS</td><td>Documented path. Not a laptop for shared use</td></tr>
+      <tr><td>CPU / RAM</td><td class="mono">8 vCPU / 32 GB recommended · 16 GB minimum</td><td>Control plane + console + Postgres + one sandbox pod per active conversation</td></tr>
+      <tr><td>Disk</td><td class="mono">200 GB SSD</td><td>Images, Postgres, repo cache, sandbox workspaces</td></tr>
+      <tr><td>Kubernetes</td><td>k3s (Linux) · kind or Docker Desktop for laptop evaluation</td><td>Full production Kubernetes explicitly not required</td></tr>
+      <tr><td>Architecture</td><td><strong>x86 strongly preferred</strong></td><td>Published GHCR images are x86 only. Apple Silicon must build images locally</td></tr>
+      <tr><td>Tooling</td><td class="mono">just · kubectl · helm · jq · docker</td><td>Plus <span class="mono">cloudflared</span> or Tailscale Funnel for webhook ingress</td></tr>
+      <tr><td>Public ingress</td><td>Cloudflare Tunnel or Tailscale Funnel</td><td>Required for Teams and OAuth callbacks. No inbound firewall changes</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Boot requirements</h3>
+  <ul>
+    <li><strong>1Password service account</strong> — <span class="mono">OP_SERVICE_ACCOUNT_TOKEN</span> and <span class="mono">OP_VAULT</span>. The default secret source. <span class="c c-doc">Docs</span></li>
+    <li><strong>Slack app credentials</strong> — <span class="mono">SLACK_SIGNING_SECRET</span> and <span class="mono">SLACKBOT_API_KEY</span> are API boot requirements in the current chart even if Slack is unused. <span class="c c-doc">Docs</span></li>
+    <li><strong>Model key</strong> — default harness is codex, so <span class="mono">OPENAI_API_KEY</span> must exist before agent turns complete. Selectors switch to amp, claude, or pi. <span class="c c-doc">Docs</span></li>
+    <li><strong>Console public URL</strong> — OAuth callbacks resolve to <span class="mono">&lt;console&gt;/oauth/&lt;slug&gt;/callback</span>. <span class="c c-doc">Docs</span></li>
+  </ul>
+
+  <div class="panel note">
+    <h3>🟡 Two security defaults to change immediately</h3>
+    <p><strong>The egress allowlist ships permissive on purpose</strong> — a deliberate usability choice, with the docs advising that maximal security means locking it down up front. We lock it down before any real credential is registered.</p>
+    <p><strong>Containment is at the sandbox boundary, not inside it.</strong> Agents can read and write the sandbox filesystem, run shell commands, and call any tool their token allows. Tool design for destructive operations must assume the agent will sometimes do the wrong thing. That is an argument for write-approval gates in our layer, not a reason to hesitate.</p>
+  </div>
+
+  <p><strong>Chart resource limits are unset by default</strong> <span class="c c-src">Source</span> — the chart ships <span class="mono">resources: {}</span> for most services. There are no published minimums. Sizing must be measured during Phase 0, not estimated. That is why no cloud SKU table appears in this document.</p>
+</section>
+
+<!-- 04 PORTABILITY -->
+<section class="long">
+  <h2><span class="num">04</span>Portability doctrine</h2>
+  <p>Standing test: <strong>if we replaced Centaur tomorrow, what would we rewrite?</strong> The acceptable answer is "the adapter and two OAuth strategies."</p>
+
+<pre class="diagram">
+┌──────────────────────────────────────────────────────────────────────┐
+│  OURS — portable, zero Centaur imports                               │
+│  Spaces layer · Knowledge base · Audit ledger · Budgets              │
+│  Tools (plain HTTP, REST contract)                                   │
+└─────────────────────────────┬────────────────────────────────────────┘
+                              │  our interface
+┌─────────────────────────────▼────────────────────────────────────────┐
+│  ADAPTER — the only code that knows Centaur exists                   │
+│  spawn → message → execute · durable events · principal grants       │
+└─────────────────────────────┬────────────────────────────────────────┘
+                              │
+┌─────────────────────────────▼────────────────────────────────────────┐
+│  CENTAUR — pinned. Two added files (OAuth strategies), else untouched│
+└──────────────────────────────────────────────────────────────────────┘
+</pre>
+
+  <ol class="rules">
+    <li><strong>Never modify kernel files.</strong> The OAuth providers are the single exception, and they are <em>new files</em> plus one registry line — the cheapest possible divergence.</li>
+    <li><strong>Upstream the providers.</strong> HubSpot and Microsoft are broadly useful. Offer them to Paradigm. If accepted, our divergence returns to zero.</li>
+    <li><strong>Our own schema.</strong> Knowledge base, audit ledger, space definitions in a <span class="mono">magik</span> schema with its own migrations.</li>
+    <li><strong>No foreign keys into their tables.</strong> Opaque IDs only.</li>
+    <li><strong>Tools stay plain HTTP.</strong> The REST contract makes them portable to any runtime. No Centaur SDK in tool code.</li>
+    <li><strong>One import boundary, enforced in CI.</strong> Nothing outside the adapter may import Centaur packages. A violation fails the build.</li>
+    <li><strong>Audit written by us at the decision point,</strong> never derived from their event stream.</li>
+    <li><strong>Pin upstream by commit and digest.</strong> Scheduled merges, full test run before landing.</li>
+    <li><strong>Write the escape hatch on day one</strong> — what any replacement runtime must provide.</li>
+    <li><strong>Track three metrics:</strong> adapter size, time-to-merge on upstream sync, import-boundary violations. Plus a quarterly one-page replacement drill.</li>
+  </ol>
+
+  <div class="panel">
+    <h3>Abandonment is already survivable</h3>
+    <p>Dual Apache-2.0 / MIT means the code cannot be withdrawn. If Paradigm stops maintaining Centaur or takes it somewhere we dislike, we pin to the last good commit and self-maintain at our own pace. The risk is cost, never a forced march.</p>
+  </div>
+</section>
+
+<!-- 05 PHASES -->
+<section class="long">
+  <h2><span class="num">05</span>Phases</h2>
+  <p>Local through Phase 4. Azure only when the whole company adopts it. Every phase has an exit condition; the first two have kill conditions.</p>
+
+  <div class="phase">
+    <div class="ph-head"><span class="ph-num">Phase 0</span><h3>Resolve the contradiction</h3><span class="dur">1–2 weeks, part time · local</span></div>
+    <ul>
+      <li>Provision the host. Install k3s and tooling. Clone, <span class="mono">just up</span>, <span class="mono">just smoke</span> until PONG returns.</li>
+      <li><strong>Test per-user credential isolation directly.</strong> Two principals, two secrets, grant each to one principal only. Confirm principal A's session cannot resolve principal B's secret. This settles section 01.</li>
+      <li>Exercise the console: Principals, Roles, Direct Grants, Effective Grants, OAuth Apps.</li>
+      <li>Measure the real resource footprint of control plane, console, Postgres, and one sandbox.</li>
+      <li>Assess console coverage against our web and profile requirements.</li>
+      <li>Lock down the egress allowlist. Confirm default-deny behaves as documented.</li>
+      <li>Write the escape-hatch document.</li>
+    </ul>
+    <div class="gate"><strong>Exit:</strong> isolation proven or disproven with evidence; footprint measured; console coverage assessed.</div>
+    <div class="kill"><strong>Kill:</strong> the security page is right and per-user scoping genuinely does not exist. Stop and reassess platform choice before writing any of our code.</div>
+  </div>
+
+  <div class="phase">
+    <div class="ph-head"><span class="ph-num">Phase 1</span><h3>Our identities, our tools</h3><span class="dur">local</span></div>
+    <ul>
+      <li>HubSpot OAuth strategy class + registry entry + tests. Offer upstream.</li>
+      <li>Microsoft OAuth strategy for Graph. Same pattern.</li>
+      <li>HubSpot tool and Microsoft 365 tool — or evaluate Composio as a shortcut first.</li>
+      <li>Teams bot against our tenant, through a tunnel. Confirm AAD principal derivation.</li>
+      <li>Import-boundary CI rule active from the first commit.</li>
+    </ul>
+    <div class="gate"><strong>Exit:</strong> two real staff members connect their own HubSpot accounts by consent link, and each agent session acts as the correct person with the correct permissions.</div>
+    <div class="kill"><strong>Kill:</strong> per-user identity cannot be preserved end to end. Do not proceed to real client data.</div>
+  </div>
+
+  <div class="phase">
+    <div class="ph-head"><span class="ph-num">Phase 2</span><h3>The knowledge base</h3><span class="dur">local · our highest-value asset</span></div>
+    <ul>
+      <li>SharePoint ingestion, chunking, embedding, source and owner metadata.</li>
+      <li>Mandatory citation on every answer. Staleness flagged in-response, never served silently.</li>
+      <li>Named curator and review cadence per collection.</li>
+      <li>Spaces layer: definitions, prompts, tool grants, knowledge scoping, write-approval gates.</li>
+      <li>Audit ledger and per-space budgets.</li>
+    </ul>
+    <div class="gate"><strong>Exit:</strong> a document produced in a space cites current, correct company sources, and every write is logged and approved.</div>
+  </div>
+
+  <div class="phase">
+    <div class="ph-head"><span class="ph-num">Phase 3</span><h3>Sales Scout, small group</h3><span class="dur">local · real work, limited blast radius</span></div>
+    <ul>
+      <li>Two or three volunteers from sales. Real HubSpot, real email.</li>
+      <li>Measure time saved. Collect what breaks.</li>
+      <li>Backups and a documented rebuild path for the host — it now holds real tokens.</li>
+    </ul>
+    <div class="gate"><strong>Exit:</strong> measured time saved justifies continuing. If not, we learned it for the cost of one machine.</div>
+  </div>
+
+  <div class="phase">
+    <div class="ph-head"><span class="ph-num">Phase 4</span><h3>More spaces, still local</h3><span class="dur">local</span></div>
+    <ul>
+      <li>Add spaces in the order the team asks for them.</li>
+      <li>Watch for the ceiling: concurrency limits, single-host availability, patch windows people notice.</li>
+    </ul>
+    <div class="gate"><strong>Exit — the Azure trigger:</strong> the platform is depended on daily, the host cannot carry concurrent load, or an outage genuinely hurts. Not a date. A symptom.</div>
+  </div>
+
+  <div class="phase">
+    <div class="ph-head"><span class="ph-num az">Phase 5</span><h3>Azure, company-wide</h3><span class="dur">when Phase 4 exits</span></div>
+    <ul>
+      <li>Activate ISV credits <em>then</em> — the 12-month clock starts on activation, and every idle month is waste.</li>
+      <li>AKS with the sandbox pool on separate nodes from the control plane, sized from Phase 0 measurements.</li>
+      <li>Managed Postgres with HA and geo-redundant backup, Canada Central.</li>
+      <li>Entra SSO, WAF ingress, NAT egress with a static IP, private endpoints.</li>
+      <li>Secrets: 1Password Connect carried forward, or an Azure provider written by then.</li>
+      <li>Paid subscription for production — credits can be revoked when programme membership changes.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- 06 COST -->
+<section>
+  <h2><span class="num">06</span>Cost</h2>
+  <table>
+    <thead><tr><th>Line</th><th>Phases 0–4 (local)</th><th>Phase 5 (Azure)</th></tr></thead>
+    <tbody>
+      <tr><td>Infrastructure</td><td class="num-cell">$0 if a spare host exists; ~$600–1,200 one-time for a machine</td><td class="num-cell">Sized from Phase 0 measurements</td></tr>
+      <tr><td>1Password</td><td class="num-cell">Existing or ~$20/mo</td><td class="num-cell">Same</td></tr>
+      <tr><td>LLM tokens</td><td class="num-cell">$100–600/mo, scaling with adoption</td><td class="num-cell">The dominant line. Never credit-funded</td></tr>
+      <tr><td>Azure credits</td><td class="num-cell">Untouched — clock not started</td><td class="num-cell">$5,000 / 12 months</td></tr>
+    </tbody>
+  </table>
+  <p>Running local through Phase 4 preserves the full credit allocation for the phase that actually needs it, and keeps the entire evaluation inside a rounding error of the business.</p>
+</section>
+
+<!-- 07 OPEN -->
+<section>
+  <h2><span class="num">07</span>Open questions</h2>
+  <ul class="risk">
+    <li><strong>The contradiction in section 01.</strong> Everything depends on it. First task, before any of our code.</li>
+    <li><strong>ISV credit terms.</strong> Programme is aimed at ISVs publishing to Marketplace; we are building internal tooling. Confirm eligibility for our use before relying on it in Phase 5.</li>
+    <li><strong>Composio versus native tools.</strong> May remove two build items or add a dependency. Evaluate in Phase 1 before writing anything.</li>
+    <li><strong>Console coverage.</strong> Determines whether we build a web surface at all.</li>
+    <li><strong>Named owner.</strong> Still unassigned. Required before Phase 0 starts.</li>
+  </ul>
+</section>
+
+<section>
+  <div class="callout">
+    <h2>What this asks for</h2>
+    <p>One always-on x86 Linux machine, a 1Password service account, an OpenAI key, and a named owner.</p>
+    <p style="margin-top:10px;">No cloud spend. No credit clock. No commitment beyond the first two weeks — which exist to answer one question the documentation cannot answer for us: whether Centaur can hold our team's identities separately. Everything else in this plan waits on that.</p>
+  </div>
+</section>
+
+<div class="footer">
+  <span><strong>MagikDev.ca</strong> — Internal technical plan v3. Claims marked Source verified in repository; Docs claims not yet executed.</span>
+  <span>Confidential.</span>
+</div>
+
+</div>
+</body>
+</html>
