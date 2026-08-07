@@ -294,10 +294,6 @@ async def _generate_embeddings(
 
 async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     """Generate and store one batch of missing or stale document embeddings."""
-    if not _env_flag_enabled("COMPANY_CONTEXT_EMBEDDINGS_ENABLED"):
-        ctx.log("company_context_embeddings_skipped_disabled")
-        return {"status": "skipped", "reason": "company_context_embeddings_disabled"}
-
     model = _model(inp.model)
     batch_size = _positive_int(
         inp.batch_size or os.getenv("COMPANY_CONTEXT_EMBEDDINGS_BATCH_SIZE"),

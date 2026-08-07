@@ -84,7 +84,7 @@ def test_workflow_uses_a_scoped_principal_and_ai_v2_database(monkeypatch):
 
 def test_handler_embeds_and_stores_one_batch(monkeypatch):
     embeddings = _load()
-    monkeypatch.setenv("COMPANY_CONTEXT_EMBEDDINGS_ENABLED", "true")
+    monkeypatch.delenv("COMPANY_CONTEXT_EMBEDDINGS_ENABLED", raising=False)
     rows = [
         {
             "source_kind": "company_context",
@@ -175,7 +175,6 @@ def test_embedding_text_enforces_the_character_limit():
 
 def test_handler_records_whitespace_only_documents_without_calling_openai(monkeypatch):
     embeddings = _load()
-    monkeypatch.setenv("COMPANY_CONTEXT_EMBEDDINGS_ENABLED", "true")
     pool = FakePool(
         [
             {
@@ -221,7 +220,6 @@ def test_handler_records_whitespace_only_documents_without_calling_openai(monkey
 
 def test_handler_isolates_and_records_a_rejected_document(monkeypatch):
     embeddings = _load()
-    monkeypatch.setenv("COMPANY_CONTEXT_EMBEDDINGS_ENABLED", "true")
     rows = [
         {
             "source_kind": "company_context",
@@ -285,7 +283,6 @@ def test_handler_isolates_and_records_a_rejected_document(monkeypatch):
 
 def test_handler_does_not_call_openai_when_batch_is_empty(monkeypatch):
     embeddings = _load()
-    monkeypatch.setenv("COMPANY_CONTEXT_EMBEDDINGS_ENABLED", "true")
     pool = FakePool([])
     _use_database_pool(monkeypatch, embeddings, pool)
     monkeypatch.setattr(
@@ -309,7 +306,6 @@ def test_handler_does_not_call_openai_when_batch_is_empty(monkeypatch):
 
 def test_handler_does_not_requeue_a_partial_batch(monkeypatch):
     embeddings = _load()
-    monkeypatch.setenv("COMPANY_CONTEXT_EMBEDDINGS_ENABLED", "true")
     pool = FakePool(
         [
             {
@@ -348,19 +344,4 @@ def test_handler_does_not_requeue_a_partial_batch(monkeypatch):
         "failed": 0,
         "model": "text-embedding-3-small",
         "requeued": False,
-    }
-
-
-def test_handler_is_disabled_by_default(monkeypatch):
-    embeddings = _load()
-    monkeypatch.delenv("COMPANY_CONTEXT_EMBEDDINGS_ENABLED", raising=False)
-    context = types.SimpleNamespace(
-        log=lambda *_args, **_kwargs: None,
-    )
-
-    result = asyncio.run(embeddings.handler(embeddings.Input(), context))
-
-    assert result == {
-        "status": "skipped",
-        "reason": "company_context_embeddings_disabled",
     }
