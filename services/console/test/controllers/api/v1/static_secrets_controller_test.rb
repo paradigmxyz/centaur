@@ -45,6 +45,7 @@ module Api
         assert_equal ref.oid, data["id"]
         assert_equal ref.namespace, data["namespace"]
         assert_equal ref.name, data["name"]
+        assert_equal "custom", data["kind"]
         assert_equal({ "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" },
                      data["inject_config"])
         assert_equal "env", data.dig("source", "source_type")
@@ -55,6 +56,50 @@ module Api
         assert_equal "api.github.com", rule["host"]
         assert_equal %w[GET POST], rule["http_methods"]
         assert_nil rule["id"], "rule should not expose its own id"
+      end
+
+      test "POST resolves a github_token profile into explicit configuration and rules" do
+        body = {
+          data: {
+            namespace: "acme",
+            name: "GitHub token",
+            kind: "github_token",
+            source: { source_type: "env", config: { "var" => "GITHUB_TOKEN" } }
+          }
+        }
+
+        assert_difference -> { StaticSecret.count } => 1,
+                          -> { RequestRule.count } => 2 do
+          post api_v1_static_secrets_url, params: body.to_json, headers: auth_headers
+        end
+        assert_response :created
+
+        data = json_body.fetch("data")
+        assert_equal "github_token", data["kind"]
+        assert_nil data["inject_config"]
+        assert_equal CredentialProfiles::GithubToken::REPLACE_CONFIG, data["replace_config"]
+        assert_equal %w[api.github.com github.com], data["rules"].map { |rule| rule["host"] }
+      end
+
+      test "POST rejects configuration that conflicts with the selected profile" do
+        body = {
+          data: {
+            namespace: "acme",
+            name: "misconfigured GitHub token",
+            kind: "github_token",
+            inject_config: { "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" },
+            rules: [ { host: "github.com" } ]
+          }
+        }
+
+        assert_no_difference [ "StaticSecret.count", "RequestRule.count" ] do
+          post api_v1_static_secrets_url, params: body.to_json, headers: auth_headers
+        end
+        assert_response :unprocessable_content
+        assert_includes json_body.dig("error", "details", "base"),
+                        "github_token credentials must use the canonical Authorization placeholder replacement"
+        assert_includes json_body.dig("error", "details", "rules"),
+                        "github_token credentials must target only api.github.com and github.com"
       end
 
       test "GET returns 404 for an unknown oid" do
@@ -327,6 +372,69 @@ module Api
         assert_equal source.id, ref.source.id
         assert_equal [ rule.id ], ref.rules.pluck(:id)
         assert_equal version, principal.reload.sync_config_cache_version
+      end
+
+      test "PUT preserves an omitted kind and resolves the profile before the no-op check" do
+        ref = StaticSecret.create!(
+          namespace: "acme",
+          name: "GitHub token",
+          kind: "github_token",
+          replace_config: CredentialProfiles::GithubToken::REPLACE_CONFIG,
+          created_by: users(:acme_admin),
+          rules: CredentialProfiles::GithubToken::RULE_ATTRIBUTES.map { |attrs| RequestRule.new(attrs) }
+        )
+        source = SecretSource.create!(source_type: "control_plane", secret: "same-secret",
+                                      static_secret: ref)
+        rule_ids = ref.rules.pluck(:id)
+        principal = principals(:acme_channel)
+        Grant.create!(principal: principal, static_secret: ref, created_by: users(:acme_admin))
+        version = principal.reload.sync_config_cache_version
+
+        body = {
+          data: {
+            namespace: ref.namespace,
+            name: ref.name,
+            source: { source_type: "control_plane", secret: "same-secret" }
+          }
+        }
+
+        put api_v1_static_secret_url(id: ref.oid), params: body.to_json, headers: auth_headers
+        assert_response :ok
+
+        ref.reload
+        assert_equal "github_token", ref.kind
+        assert_equal source.id, ref.source.id
+        assert_equal rule_ids, ref.rules.pluck(:id)
+        assert_equal version, principal.reload.sync_config_cache_version
+      end
+
+      test "PUT replaces an existing profile kind when custom is explicit" do
+        ref = StaticSecret.create!(
+          namespace: "acme",
+          name: "GitHub token",
+          kind: "github_token",
+          replace_config: CredentialProfiles::GithubToken::REPLACE_CONFIG,
+          created_by: users(:acme_admin),
+          rules: CredentialProfiles::GithubToken::RULE_ATTRIBUTES.map { |attrs| RequestRule.new(attrs) }
+        )
+
+        body = {
+          data: {
+            namespace: ref.namespace,
+            name: ref.name,
+            kind: "custom",
+            inject_config: { "header" => "X-Token" },
+            rules: [ { host: "example.com" } ]
+          }
+        }
+
+        put api_v1_static_secret_url(id: ref.oid), params: body.to_json, headers: auth_headers
+        assert_response :ok
+
+        ref.reload
+        assert_equal "custom", ref.kind
+        assert_equal({ "header" => "X-Token" }, ref.inject_config)
+        assert_equal [ "example.com" ], ref.rules.map(&:host)
       end
 
       test "PUT does not retain omitted source fields" do

@@ -1,5 +1,7 @@
 """Attio API client."""
 
+import mimetypes
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -28,7 +30,6 @@ class AttioClient:
             base_url="https://api.attio.com/v2",
             headers={
                 "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
             },
             timeout=30.0,
         )
@@ -234,6 +235,36 @@ class AttioClient:
             params={"parent_object": parent_object, "parent_record_id": parent_record_id},
         )
         return data.get("data", [])
+
+    def upload_file(
+        self,
+        object_slug: str,
+        record_id: str,
+        file_path: str,
+        parent_folder_id: str | None = None,
+    ) -> dict:
+        """Upload a local file to an Attio record's native file storage."""
+        path = Path(file_path)
+        if not path.is_file():
+            raise ValueError(f"File does not exist or is not a regular file: {file_path}")
+
+        max_size = 50 * 1024 * 1024
+        if path.stat().st_size > max_size:
+            raise ValueError("Attio files must be 50 MB or smaller")
+
+        form = {"object": object_slug, "record_id": record_id}
+        if parent_folder_id:
+            form["parent_folder_id"] = parent_folder_id
+
+        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        with path.open("rb") as file_handle:
+            data = self._request(
+                "POST",
+                "/files/upload",
+                data=form,
+                files={"file": (path.name, file_handle, content_type)},
+            )
+        return data.get("data", {})
 
     def list_threads(
         self,

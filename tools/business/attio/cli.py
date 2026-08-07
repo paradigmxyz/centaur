@@ -617,6 +617,26 @@ def add_note(
     console.print(f"[cyan]ID:[/] {note_id}")
 
 
+@app.command("upload-file")
+def upload_file(
+    object_slug: str = typer.Argument(..., help="Object slug (e.g., 'people', 'companies')"),
+    record_id: str = typer.Argument(..., help="Record ID to attach the file to"),
+    file_path: str = typer.Argument(..., help="Path to the local file (maximum 50 MB)"),
+    parent_folder_id: str = typer.Option(None, "--parent-folder", help="Optional folder ID"),
+):
+    """Upload a file, including a PDF, to an Attio record."""
+    client = _get_client()
+    uploaded = client.upload_file(
+        object_slug,
+        record_id,
+        file_path,
+        parent_folder_id=parent_folder_id,
+    )
+    file_id = uploaded.get("id", {}).get("file_id", "")
+    console.print(f"[green]✓ Uploaded {uploaded.get('name', file_path)}[/]")
+    console.print(f"[cyan]ID:[/] {file_id}")
+
+
 @app.command()
 def tasks(
     object_slug: str = typer.Option(None, "--object", "-o", help="Filter by linked object"),

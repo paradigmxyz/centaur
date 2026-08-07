@@ -40,6 +40,10 @@ transforms:
         - "openai-organization"
         - "openai-project"
         - "chatgpt-account-id"
+        # Codex uses this non-secret client marker when resolving model routes.
+        - "originator"
+        # Codex pairs the marker with its client version for model routing.
+        - "version"
         - "x-request-id"
         - "x-stainless-arch"
         - "x-stainless-os"
