@@ -134,11 +134,10 @@ def _centaur_database_url() -> str:
     return _database_url_with_name(value, DEFAULT_POSTGRES_DATABASE)
 
 
-async def _create_database_pool():
-    return await asyncpg.create_pool(
+async def _connect_database():
+    return await asyncpg.connect(
         _centaur_database_url(),
-        min_size=1,
-        max_size=2,
+        command_timeout=30,
     )
 
 
@@ -189,8 +188,8 @@ def _batches(rows: list[Any], size: int) -> list[list[Any]]:
     return [rows[start : start + size] for start in range(0, len(rows), size)]
 
 
-async def _load_documents(pool, *, model: str, batch_size: int) -> list[Any]:
-    return await pool.fetch(
+async def _load_documents(connection, *, model: str, batch_size: int) -> list[Any]:
+    return await connection.fetch(
         "WITH pending_documents AS ("
         "  SELECT 'company_context'::text AS source_kind, "
         "    d.document_id, d.title, d.body, d.content_hash, d.updated_at "
@@ -229,7 +228,7 @@ async def _load_documents(pool, *, model: str, batch_size: int) -> list[Any]:
 
 
 async def _store_embeddings(
-    pool,
+    connection,
     *,
     rows: list[Any],
     model: str,
@@ -250,11 +249,11 @@ async def _store_embeddings(
         )
 
     for source_kind, values in values_by_source.items():
-        await pool.executemany(EMBEDDING_UPSERTS[source_kind], values)
+        await connection.executemany(EMBEDDING_UPSERTS[source_kind], values)
 
 
 async def _store_embedding_failure(
-    pool,
+    connection,
     *,
     row: Any,
     model: str,
@@ -264,7 +263,7 @@ async def _store_embedding_failure(
     source_kind = str(row["source_kind"])
     if source_kind not in EMBEDDING_FAILURE_UPSERTS:
         raise ValueError(f"unsupported embedding source {source_kind!r}")
-    await pool.execute(
+    await connection.execute(
         EMBEDDING_FAILURE_UPSERTS[source_kind],
         str(row["document_id"]),
         model,
@@ -303,11 +302,11 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         inp.max_input_chars or os.getenv("COMPANY_CONTEXT_EMBEDDINGS_MAX_INPUT_CHARS"),
         DEFAULT_MAX_INPUT_CHARS,
     )
-    pool = await _create_database_pool()
+    connection = await _connect_database()
     embedded_count = 0
     failed_count = 0
     try:
-        rows = await _load_documents(pool, model=model, batch_size=batch_size)
+        rows = await _load_documents(connection, model=model, batch_size=batch_size)
         if rows:
             client = _client()
             prepared_rows: list[tuple[Any, str]] = []
@@ -317,7 +316,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                     prepared_rows.append((row, text))
                     continue
                 await _store_embedding_failure(
-                    pool,
+                    connection,
                     row=row,
                     model=model,
                     error_type="empty_input",
@@ -355,7 +354,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                             )
                         except BadRequestError as document_error:
                             await _store_embedding_failure(
-                                pool,
+                                connection,
                                 row=row,
                                 model=model,
                                 error_type=type(document_error).__name__,
@@ -370,7 +369,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                             )
                             continue
                         await _store_embeddings(
-                            pool,
+                            connection,
                             rows=[row],
                             model=model,
                             embeddings=document_embeddings,
@@ -379,14 +378,14 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                     continue
 
                 await _store_embeddings(
-                    pool,
+                    connection,
                     rows=batch_rows,
                     model=model,
                     embeddings=embeddings,
                 )
                 embedded_count += len(batch_rows)
     finally:
-        await pool.close()
+        await connection.close()
 
     if not rows:
         result = {

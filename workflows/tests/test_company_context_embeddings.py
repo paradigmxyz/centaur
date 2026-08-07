@@ -16,7 +16,7 @@ def _load():
     return importlib.import_module("workflows.company_context_embeddings")
 
 
-class FakePool:
+class FakeConnection:
     def __init__(self, rows):
         self.rows = rows
         self.fetch_args = None
@@ -51,35 +51,35 @@ class FakeEmbeddings:
         return types.SimpleNamespace(data=self.data)
 
 
-def _use_database_pool(monkeypatch, embeddings, pool):
+def _use_database_connection(monkeypatch, embeddings, connection):
     monkeypatch.setenv(
         "CENTAUR_POSTGRES_DSN",
         "postgresql://workflow:secret@postgres-proxy:5432?sslmode=require",
     )
     database_urls = []
 
-    async def create_pool(database_url, **options):
+    async def connect(database_url, **options):
         database_urls.append((database_url, options))
-        return pool
+        return connection
 
-    monkeypatch.setattr(embeddings.asyncpg, "create_pool", create_pool)
+    monkeypatch.setattr(embeddings.asyncpg, "connect", connect)
     return database_urls
 
 
 def test_workflow_uses_a_scoped_principal_and_ai_v2_database(monkeypatch):
     embeddings = _load()
-    pool = FakePool([])
-    database_urls = _use_database_pool(monkeypatch, embeddings, pool)
+    connection = FakeConnection([])
+    database_urls = _use_database_connection(monkeypatch, embeddings, connection)
 
-    asyncio.run(embeddings._create_database_pool())
+    asyncio.run(embeddings._connect_database())
 
     assert embeddings.WORKFLOW_PRINCIPAL is True
-    assert database_urls == [
-        (
-            "postgresql://workflow:secret@postgres-proxy:5432/ai_v2?sslmode=require",
-            {"min_size": 1, "max_size": 2},
-        )
-    ]
+    assert len(database_urls) == 1
+    database_url, options = database_urls[0]
+    assert database_url == (
+        "postgresql://workflow:secret@postgres-proxy:5432/ai_v2?sslmode=require"
+    )
+    assert options == {"command_timeout": 30}
 
 
 def test_handler_embeds_and_stores_one_batch(monkeypatch):
@@ -101,8 +101,8 @@ def test_handler_embeds_and_stores_one_batch(monkeypatch):
             "content_hash": "hash-2",
         },
     ]
-    pool = FakePool(rows)
-    _use_database_pool(monkeypatch, embeddings, pool)
+    connection = FakeConnection(rows)
+    _use_database_connection(monkeypatch, embeddings, connection)
     fake_embeddings = FakeEmbeddings()
     monkeypatch.setattr(
         embeddings,
@@ -136,18 +136,18 @@ def test_handler_embeds_and_stores_one_batch(monkeypatch):
         "requeued": True,
         "next_run": {"run_id": "run-2", "task_id": "task-2"},
     }
-    assert pool.fetch_args == ("text-embedding-3-small", 2)
-    assert pool.closed is True
+    assert connection.fetch_args == ("text-embedding-3-small", 2)
+    assert connection.closed is True
     assert fake_embeddings.call == {
         "model": "text-embedding-3-small",
         "input": ["First\n\nFirst body", "Second\n\nSecond body"],
         "dimensions": 1536,
         "encoding_format": "float",
     }
-    assert pool.executemany_values[0] == [
+    assert connection.executemany_values[0] == [
         ("doc-1", "text-embedding-3-small", "hash-1", "[0.1,0.2]")
     ]
-    assert pool.executemany_values[1] == [
+    assert connection.executemany_values[1] == [
         ("doc-2", "text-embedding-3-small", "hash-2", "[0.3,0.4]")
     ]
     assert starts == [
@@ -175,7 +175,7 @@ def test_embedding_text_enforces_the_character_limit():
 
 def test_handler_records_whitespace_only_documents_without_calling_openai(monkeypatch):
     embeddings = _load()
-    pool = FakePool(
+    connection = FakeConnection(
         [
             {
                 "source_kind": "company_context",
@@ -186,7 +186,7 @@ def test_handler_records_whitespace_only_documents_without_calling_openai(monkey
             }
         ]
     )
-    _use_database_pool(monkeypatch, embeddings, pool)
+    _use_database_connection(monkeypatch, embeddings, connection)
 
     class UnexpectedEmbeddings:
         async def create(self, **_kwargs):
@@ -208,7 +208,7 @@ def test_handler_records_whitespace_only_documents_without_calling_openai(monkey
         "model": "text-embedding-3-small",
         "requeued": False,
     }
-    assert pool.execute_values == [
+    assert connection.execute_values == [
         (
             "empty-doc",
             "text-embedding-3-small",
@@ -236,8 +236,8 @@ def test_handler_isolates_and_records_a_rejected_document(monkeypatch):
             "content_hash": "bad-hash",
         },
     ]
-    pool = FakePool(rows)
-    _use_database_pool(monkeypatch, embeddings, pool)
+    connection = FakeConnection(rows)
+    _use_database_connection(monkeypatch, embeddings, connection)
 
     class RejectedInput(Exception):
         pass
@@ -268,10 +268,10 @@ def test_handler_isolates_and_records_a_rejected_document(monkeypatch):
         "model": "text-embedding-3-small",
         "requeued": False,
     }
-    assert pool.executemany_values == [
+    assert connection.executemany_values == [
         [("good-doc", "text-embedding-3-small", "good-hash", "[0.1,0.2]")]
     ]
-    assert pool.execute_values == [
+    assert connection.execute_values == [
         (
             "bad-doc",
             "text-embedding-3-small",
@@ -283,8 +283,8 @@ def test_handler_isolates_and_records_a_rejected_document(monkeypatch):
 
 def test_handler_does_not_call_openai_when_batch_is_empty(monkeypatch):
     embeddings = _load()
-    pool = FakePool([])
-    _use_database_pool(monkeypatch, embeddings, pool)
+    connection = FakeConnection([])
+    _use_database_connection(monkeypatch, embeddings, connection)
     monkeypatch.setattr(
         embeddings,
         "_client",
@@ -301,12 +301,12 @@ def test_handler_does_not_call_openai_when_batch_is_empty(monkeypatch):
         "model": "text-embedding-3-small",
         "requeued": False,
     }
-    assert pool.closed is True
+    assert connection.closed is True
 
 
 def test_handler_does_not_requeue_a_partial_batch(monkeypatch):
     embeddings = _load()
-    pool = FakePool(
+    connection = FakeConnection(
         [
             {
                 "source_kind": "granola",
@@ -317,7 +317,7 @@ def test_handler_does_not_requeue_a_partial_batch(monkeypatch):
             }
         ]
     )
-    _use_database_pool(monkeypatch, embeddings, pool)
+    _use_database_connection(monkeypatch, embeddings, connection)
     fake_embeddings = FakeEmbeddings(
         [types.SimpleNamespace(index=0, embedding=[0.1, 0.2])]
     )
