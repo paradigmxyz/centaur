@@ -334,6 +334,15 @@
                 "maxWindowSeconds": { "type": "integer" },
                 "batchSize": { "type": "integer", "minimum": 1 }
               }
+            },
+            "companyContextEmbeddings": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "intervalSeconds": { "type": "integer", "minimum": 1 },
+                "batchSize": { "type": "integer", "minimum": 1 },
+                "model": { "type": "string", "minLength": 1 }
+              }
             }
           }
         },
