@@ -13,31 +13,9 @@ create table if not exists company_context_document_embeddings (
         references granola_context_documents(document_id) on delete cascade,
     model text not null,
     content_hash text not null,
-    embedding vector(1536) not null,
-    created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now(),
-    check (
-        num_nonnulls(
-            company_context_document_id,
-            google_docs_context_document_id,
-            granola_context_document_id
-        ) = 1
-    ),
-    check (model <> '')
-);
-
-create table if not exists company_context_document_embedding_failures (
-    failure_id bigint generated always as identity primary key,
-    company_context_document_id text unique
-        references company_context_documents(document_id) on delete cascade,
-    google_docs_context_document_id text unique
-        references google_docs_context_documents(document_id) on delete cascade,
-    granola_context_document_id text unique
-        references granola_context_documents(document_id) on delete cascade,
-    model text not null,
-    content_hash text not null,
-    error_type text not null,
-    error_message text not null,
+    embedding vector(1536),
+    embedding_failed boolean not null default false,
+    failure_reason text,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
     check (
@@ -48,7 +26,19 @@ create table if not exists company_context_document_embedding_failures (
         ) = 1
     ),
     check (model <> ''),
-    check (error_type <> '')
+    check (
+        (
+            not embedding_failed
+            and embedding is not null
+            and failure_reason is null
+        )
+        or (
+            embedding_failed
+            and embedding is null
+            and failure_reason is not null
+            and failure_reason <> ''
+        )
+    )
 );
 
 do $$
@@ -77,15 +67,11 @@ grant select on company_context_document_embeddings
        centaur_company_context_embedding_writer;
 grant insert, update on company_context_document_embeddings
     to centaur_company_context_embedding_writer;
-grant select, insert, update on company_context_document_embedding_failures
-    to centaur_company_context_embedding_writer;
 grant usage, select on sequence
-    company_context_document_embeddings_embedding_id_seq,
-    company_context_document_embedding_failures_failure_id_seq
+    company_context_document_embeddings_embedding_id_seq
     to centaur_company_context_embedding_writer;
 
 alter table company_context_document_embeddings enable row level security;
-alter table company_context_document_embedding_failures enable row level security;
 
 drop policy if exists centaur_cc_embedding_writer_documents_select
     on company_context_documents;
@@ -195,55 +181,6 @@ drop policy if exists centaur_cc_embeddings_writer_update
     on company_context_document_embeddings;
 create policy centaur_cc_embeddings_writer_update
     on company_context_document_embeddings
-    for update
-    to centaur_company_context_embedding_writer
-    using (
-        centaur_company_context_embedding_document_visible(
-            company_context_document_id,
-            google_docs_context_document_id,
-            granola_context_document_id
-        )
-    )
-    with check (
-        centaur_company_context_embedding_document_visible(
-            company_context_document_id,
-            google_docs_context_document_id,
-            granola_context_document_id
-        )
-    );
-
-drop policy if exists centaur_cc_embedding_failures_writer_select
-    on company_context_document_embedding_failures;
-create policy centaur_cc_embedding_failures_writer_select
-    on company_context_document_embedding_failures
-    for select
-    to centaur_company_context_embedding_writer
-    using (
-        centaur_company_context_embedding_document_visible(
-            company_context_document_id,
-            google_docs_context_document_id,
-            granola_context_document_id
-        )
-    );
-
-drop policy if exists centaur_cc_embedding_failures_writer_insert
-    on company_context_document_embedding_failures;
-create policy centaur_cc_embedding_failures_writer_insert
-    on company_context_document_embedding_failures
-    for insert
-    to centaur_company_context_embedding_writer
-    with check (
-        centaur_company_context_embedding_document_visible(
-            company_context_document_id,
-            google_docs_context_document_id,
-            granola_context_document_id
-        )
-    );
-
-drop policy if exists centaur_cc_embedding_failures_writer_update
-    on company_context_document_embedding_failures;
-create policy centaur_cc_embedding_failures_writer_update
-    on company_context_document_embedding_failures
     for update
     to centaur_company_context_embedding_writer
     using (

@@ -33,6 +33,8 @@ EMBEDDING_UPSERTS = {
         "  model = EXCLUDED.model, "
         "  content_hash = EXCLUDED.content_hash, "
         "  embedding = EXCLUDED.embedding, "
+        "  embedding_failed = FALSE, "
+        "  failure_reason = NULL, "
         "  updated_at = NOW()"
     ),
     "google_docs": (
@@ -43,6 +45,8 @@ EMBEDDING_UPSERTS = {
         "  model = EXCLUDED.model, "
         "  content_hash = EXCLUDED.content_hash, "
         "  embedding = EXCLUDED.embedding, "
+        "  embedding_failed = FALSE, "
+        "  failure_reason = NULL, "
         "  updated_at = NOW()"
     ),
     "granola": (
@@ -53,41 +57,49 @@ EMBEDDING_UPSERTS = {
         "  model = EXCLUDED.model, "
         "  content_hash = EXCLUDED.content_hash, "
         "  embedding = EXCLUDED.embedding, "
+        "  embedding_failed = FALSE, "
+        "  failure_reason = NULL, "
         "  updated_at = NOW()"
     ),
 }
 EMBEDDING_FAILURE_UPSERTS = {
     "company_context": (
-        "INSERT INTO company_context_document_embedding_failures "
-        "  (company_context_document_id, model, content_hash, error_type, error_message) "
-        "VALUES ($1, $2, $3, $4, $5) "
+        "INSERT INTO company_context_document_embeddings "
+        "  (company_context_document_id, model, content_hash, "
+        "   embedding_failed, failure_reason) "
+        "VALUES ($1, $2, $3, TRUE, $4) "
         "ON CONFLICT (company_context_document_id) DO UPDATE SET "
         "  model = EXCLUDED.model, "
         "  content_hash = EXCLUDED.content_hash, "
-        "  error_type = EXCLUDED.error_type, "
-        "  error_message = EXCLUDED.error_message, "
+        "  embedding = NULL, "
+        "  embedding_failed = TRUE, "
+        "  failure_reason = EXCLUDED.failure_reason, "
         "  updated_at = NOW()"
     ),
     "google_docs": (
-        "INSERT INTO company_context_document_embedding_failures "
-        "  (google_docs_context_document_id, model, content_hash, error_type, error_message) "
-        "VALUES ($1, $2, $3, $4, $5) "
+        "INSERT INTO company_context_document_embeddings "
+        "  (google_docs_context_document_id, model, content_hash, "
+        "   embedding_failed, failure_reason) "
+        "VALUES ($1, $2, $3, TRUE, $4) "
         "ON CONFLICT (google_docs_context_document_id) DO UPDATE SET "
         "  model = EXCLUDED.model, "
         "  content_hash = EXCLUDED.content_hash, "
-        "  error_type = EXCLUDED.error_type, "
-        "  error_message = EXCLUDED.error_message, "
+        "  embedding = NULL, "
+        "  embedding_failed = TRUE, "
+        "  failure_reason = EXCLUDED.failure_reason, "
         "  updated_at = NOW()"
     ),
     "granola": (
-        "INSERT INTO company_context_document_embedding_failures "
-        "  (granola_context_document_id, model, content_hash, error_type, error_message) "
-        "VALUES ($1, $2, $3, $4, $5) "
+        "INSERT INTO company_context_document_embeddings "
+        "  (granola_context_document_id, model, content_hash, "
+        "   embedding_failed, failure_reason) "
+        "VALUES ($1, $2, $3, TRUE, $4) "
         "ON CONFLICT (granola_context_document_id) DO UPDATE SET "
         "  model = EXCLUDED.model, "
         "  content_hash = EXCLUDED.content_hash, "
-        "  error_type = EXCLUDED.error_type, "
-        "  error_message = EXCLUDED.error_message, "
+        "  embedding = NULL, "
+        "  embedding_failed = TRUE, "
+        "  failure_reason = EXCLUDED.failure_reason, "
         "  updated_at = NOW()"
     ),
 }
@@ -185,39 +197,27 @@ async def _load_documents(pool, *, model: str, batch_size: int) -> list[Any]:
         "  FROM company_context_documents d "
         "  LEFT JOIN company_context_document_embeddings e "
         "    ON e.company_context_document_id = d.document_id "
-        "  LEFT JOIN company_context_document_embedding_failures f "
-        "    ON f.company_context_document_id = d.document_id "
         "  WHERE (btrim(d.title) <> '' OR btrim(d.body) <> '') "
         "    AND (e.embedding_id IS NULL OR e.model IS DISTINCT FROM $1 "
         "      OR e.content_hash IS DISTINCT FROM d.content_hash) "
-        "    AND (f.failure_id IS NULL OR f.model IS DISTINCT FROM $1 "
-        "      OR f.content_hash IS DISTINCT FROM d.content_hash) "
         "  UNION ALL "
         "  SELECT 'google_docs'::text AS source_kind, "
         "    d.document_id, d.title, d.body, d.content_hash, d.updated_at "
         "  FROM google_docs_context_documents d "
         "  LEFT JOIN company_context_document_embeddings e "
         "    ON e.google_docs_context_document_id = d.document_id "
-        "  LEFT JOIN company_context_document_embedding_failures f "
-        "    ON f.google_docs_context_document_id = d.document_id "
         "  WHERE (btrim(d.title) <> '' OR btrim(d.body) <> '') "
         "    AND (e.embedding_id IS NULL OR e.model IS DISTINCT FROM $1 "
         "      OR e.content_hash IS DISTINCT FROM d.content_hash) "
-        "    AND (f.failure_id IS NULL OR f.model IS DISTINCT FROM $1 "
-        "      OR f.content_hash IS DISTINCT FROM d.content_hash) "
         "  UNION ALL "
         "  SELECT 'granola'::text AS source_kind, "
         "    d.document_id, d.title, d.body, d.content_hash, d.updated_at "
         "  FROM granola_context_documents d "
         "  LEFT JOIN company_context_document_embeddings e "
         "    ON e.granola_context_document_id = d.document_id "
-        "  LEFT JOIN company_context_document_embedding_failures f "
-        "    ON f.granola_context_document_id = d.document_id "
         "  WHERE (btrim(d.title) <> '' OR btrim(d.body) <> '') "
         "    AND (e.embedding_id IS NULL OR e.model IS DISTINCT FROM $1 "
-        "      OR e.content_hash IS DISTINCT FROM d.content_hash) "
-        "    AND (f.failure_id IS NULL OR f.model IS DISTINCT FROM $1 "
-        "      OR f.content_hash IS DISTINCT FROM d.content_hash)"
+        "      OR e.content_hash IS DISTINCT FROM d.content_hash)"
         ") "
         "SELECT source_kind, document_id, title, body, content_hash "
         "FROM pending_documents "
@@ -269,8 +269,7 @@ async def _store_embedding_failure(
         str(row["document_id"]),
         model,
         str(row["content_hash"]),
-        error_type,
-        error_message[:1_000],
+        f"{error_type}: {error_message}"[:1_000],
     )
 
 

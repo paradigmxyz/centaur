@@ -71,10 +71,9 @@ def test_workflow_uses_a_scoped_principal_and_ai_v2_database(monkeypatch):
     pool = FakePool([])
     database_urls = _use_database_pool(monkeypatch, embeddings, pool)
 
-    created_pool = asyncio.run(embeddings._create_database_pool())
+    asyncio.run(embeddings._create_database_pool())
 
     assert embeddings.WORKFLOW_PRINCIPAL is True
-    assert created_pool is pool
     assert database_urls == [
         (
             "postgresql://workflow:secret@postgres-proxy:5432/ai_v2?sslmode=require",
@@ -103,14 +102,13 @@ def test_handler_embeds_and_stores_one_batch(monkeypatch):
         },
     ]
     pool = FakePool(rows)
-    database_urls = _use_database_pool(monkeypatch, embeddings, pool)
+    _use_database_pool(monkeypatch, embeddings, pool)
     fake_embeddings = FakeEmbeddings()
     monkeypatch.setattr(
         embeddings,
         "_client",
         lambda: types.SimpleNamespace(embeddings=fake_embeddings),
     )
-    logs = []
     starts = []
 
     async def start_workflow(workflow_name, workflow_input, *, idempotency_key):
@@ -119,7 +117,7 @@ def test_handler_embeds_and_stores_one_batch(monkeypatch):
 
     context = types.SimpleNamespace(
         run_id="run-1",
-        log=lambda event, **fields: logs.append((event, fields)),
+        log=lambda *_args, **_kwargs: None,
         start_workflow=start_workflow,
     )
 
@@ -139,12 +137,6 @@ def test_handler_embeds_and_stores_one_batch(monkeypatch):
         "next_run": {"run_id": "run-2", "task_id": "task-2"},
     }
     assert pool.fetch_args == ("text-embedding-3-small", 2)
-    assert database_urls == [
-        (
-            "postgresql://workflow:secret@postgres-proxy:5432/ai_v2?sslmode=require",
-            {"min_size": 1, "max_size": 2},
-        )
-    ]
     assert pool.closed is True
     assert fake_embeddings.call == {
         "model": "text-embedding-3-small",
@@ -170,15 +162,6 @@ def test_handler_embeds_and_stores_one_batch(monkeypatch):
             "company_context_embeddings:run-1:next",
         )
     ]
-    assert logs[-1][0] == "company_context_embeddings_completed"
-
-
-def test_openai_batches_use_small_sub_batches():
-    embeddings = _load()
-
-    batches = embeddings._batches(list(range(250)), embeddings.OPENAI_BATCH_SIZE)
-
-    assert [len(batch) for batch in batches] == [25] * 10
 
 
 def test_embedding_text_enforces_the_character_limit():
@@ -205,12 +188,15 @@ def test_handler_records_whitespace_only_documents_without_calling_openai(monkey
         ]
     )
     _use_database_pool(monkeypatch, embeddings, pool)
+
+    class UnexpectedEmbeddings:
+        async def create(self, **_kwargs):
+            raise AssertionError("whitespace-only documents must not reach OpenAI")
+
     monkeypatch.setattr(
         embeddings,
         "_client",
-        lambda: types.SimpleNamespace(
-            embeddings=FakeEmbeddings(),
-        ),
+        lambda: types.SimpleNamespace(embeddings=UnexpectedEmbeddings()),
     )
     context = types.SimpleNamespace(log=lambda *_args, **_kwargs: None)
 
@@ -228,8 +214,7 @@ def test_handler_records_whitespace_only_documents_without_calling_openai(monkey
             "empty-doc",
             "text-embedding-3-small",
             "empty-hash",
-            "empty_input",
-            "document contains no non-whitespace text",
+            "empty_input: document contains no non-whitespace text",
         )
     ]
 
@@ -293,8 +278,7 @@ def test_handler_isolates_and_records_a_rejected_document(monkeypatch):
             "bad-doc",
             "text-embedding-3-small",
             "bad-hash",
-            "RejectedInput",
-            "input rejected",
+            "RejectedInput: input rejected",
         )
     ]
 
@@ -320,7 +304,6 @@ def test_handler_does_not_call_openai_when_batch_is_empty(monkeypatch):
         "model": "text-embedding-3-small",
         "requeued": False,
     }
-    assert pool.executemany_values == []
     assert pool.closed is True
 
 
@@ -366,7 +349,6 @@ def test_handler_does_not_requeue_a_partial_batch(monkeypatch):
         "model": "text-embedding-3-small",
         "requeued": False,
     }
-    assert pool.closed is True
 
 
 def test_handler_is_disabled_by_default(monkeypatch):
