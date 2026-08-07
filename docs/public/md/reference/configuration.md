@@ -179,7 +179,8 @@ Kubernetes backend:
 | --- | --- | --- |
 | `KUBERNETES_NAMESPACE`, `POD_NAMESPACE`, `KUBERNETES_KUBECONFIG` | Chart namespace, downward API, or `api.extraEnv`. | Kubernetes client namespace/config. |
 | `KUBERNETES_AGENT_IMAGE_PULL_POLICY`, `KUBERNETES_SANDBOX_IMAGE_PULL_SECRETS` | `sandbox.image.pullPolicy`, `global.imagePullSecrets`. | Sandbox image pull behavior. |
-| `KUBERNETES_SANDBOX_RUNTIME_CLASS_NAME`, `KUBERNETES_SANDBOX_SERVICE_ACCOUNT_NAME` | `sandbox.runtimeClassName`, `api.extraEnv`. | Pod runtime class and service account. |
+| `SESSION_SANDBOX_RUNTIME_CLASS_NAME` (preferred), `KUBERNETES_SANDBOX_RUNTIME_CLASS_NAME` (legacy) | `sandbox.runtimeClassName` or `apiRs.extraEnv`. | Runtime class for newly created Sandbox pod templates. The preferred name wins when both are set. |
+| `KUBERNETES_SANDBOX_SERVICE_ACCOUNT_NAME` | `api.extraEnv`. | Sandbox pod service account. |
 | `KUBERNETES_SANDBOX_CPU_LIMIT`, `KUBERNETES_SANDBOX_MEMORY_LIMIT`, `KUBERNETES_SANDBOX_CPU_REQUEST`, `KUBERNETES_SANDBOX_MEMORY_REQUEST` | `sandbox.resources.*`. | Sandbox pod resources. |
 | `KUBERNETES_SANDBOX_READY_TIMEOUT_S`, `KUBERNETES_ATTACH_LOG_TAIL_LINES` | `api.extraEnv`. | Sandbox readiness and attach diagnostics. |
 | `SESSION_SANDBOX_CLEANUP_INTERVAL_SECS`, `SESSION_SANDBOX_IDLE_CLEANUP_BACKSTOP_SECS` | `apiRs.sandboxCleanupIntervalSecs`, `apiRs.sandboxIdleCleanupBackstopSecs`. | DB-aware cleanup of unreferenced sandboxes and restart recovery for idle pauses. Persisted `idle_timeout_ms` is honored after restart; the backstop is the fallback for older execution rows without that metadata. |

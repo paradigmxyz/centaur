@@ -563,6 +563,12 @@ struct SandboxArgs {
     )]
     runtime_class_name: Option<String>,
     #[arg(
+        long = "kubernetes-sandbox-runtime-class-name",
+        env = "KUBERNETES_SANDBOX_RUNTIME_CLASS_NAME",
+        hide = true
+    )]
+    legacy_runtime_class_name: Option<String>,
+    #[arg(
         long = "session-sandbox-ready-timeout-secs",
         alias = "kubernetes-sandbox-ready-timeout-s",
         env = "SESSION_SANDBOX_READY_TIMEOUT_SECS",
@@ -1380,7 +1386,10 @@ impl TryFrom<&SandboxArgs> for AgentSandboxConfig {
             .filter(|secret| !secret.is_empty())
             .map(str::to_owned)
             .collect();
-        config.runtime_class_name = clean_optional_value(args.runtime_class_name.as_deref());
+        // Prefer the session-scoped name while preserving the documented legacy
+        // Kubernetes environment variable for existing deployments.
+        config.runtime_class_name = clean_optional_value(args.runtime_class_name.as_deref())
+            .or_else(|| clean_optional_value(args.legacy_runtime_class_name.as_deref()));
         config.ready_timeout = Duration::from_secs(args.ready_timeout_secs);
         let mut proxy = args.iron_proxy.to_config()?;
         let mut fragments = vec![args.iron_proxy.infra_fragment()?];
@@ -2292,9 +2301,12 @@ mod tests {
     }
 
     #[test]
-    fn runtime_class_name_is_read_from_environment() {
+    fn legacy_runtime_class_name_is_read_from_environment() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let _env = EnvGuard::set(&[("SESSION_SANDBOX_RUNTIME_CLASS_NAME", "gvisor")]);
+        let _env = EnvGuard::set(&[
+            ("SESSION_SANDBOX_RUNTIME_CLASS_NAME", ""),
+            ("KUBERNETES_SANDBOX_RUNTIME_CLASS_NAME", "gvisor"),
+        ]);
         let args = Args::try_parse_from([
             "centaur-api-server",
             "--database-url",
@@ -2311,13 +2323,38 @@ mod tests {
     }
 
     #[test]
-    fn empty_runtime_class_name_is_omitted() {
+    fn preferred_runtime_class_name_takes_precedence_over_legacy_environment() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[
+            ("SESSION_SANDBOX_RUNTIME_CLASS_NAME", "kata"),
+            ("KUBERNETES_SANDBOX_RUNTIME_CLASS_NAME", "gvisor"),
+        ]);
         let args = Args::try_parse_from([
             "centaur-api-server",
             "--database-url",
             "postgres://postgres:postgres@localhost/centaur",
-            "--session-sandbox-runtime-class-name",
-            "  ",
+            "--iron-control-url",
+            "http://console.local",
+            "--iron-control-api-key",
+            "iak_test",
+        ])
+        .unwrap();
+
+        let config = AgentSandboxConfig::try_from(&args.sandbox).unwrap();
+        assert_eq!(config.runtime_class_name.as_deref(), Some("kata"));
+    }
+
+    #[test]
+    fn empty_runtime_class_names_are_omitted() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[
+            ("SESSION_SANDBOX_RUNTIME_CLASS_NAME", ""),
+            ("KUBERNETES_SANDBOX_RUNTIME_CLASS_NAME", "  "),
+        ]);
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
             "--iron-control-url",
             "http://console.local",
             "--iron-control-api-key",

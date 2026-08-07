@@ -264,6 +264,29 @@ sandbox:
   runtimeClassName: gvisor
 ```
 
+:::warning[RuntimeClass changes require recreating sandboxes]
+`runtimeClassName` is copied into the pod template only when api-rs creates a
+new `Sandbox` resource. Existing running, paused, and warm sandboxes keep their
+old pod template and can resume under the previous runtime.
+
+When enabling or changing the runtime class, schedule a maintenance window and
+drain active executions first. Complete the Helm upgrade, wait for the new
+api-rs deployment, then delete the existing api-rs-managed Sandbox resources so
+sessions and the warm pool recreate them with the new runtime:
+
+```bash
+kubectl rollout status -n centaur-system deploy/centaur-centaur-api-rs
+kubectl get sandboxes.agents.x-k8s.io -n centaur-system \
+  -l centaur.ai/managed-by=api-rs
+kubectl delete sandboxes.agents.x-k8s.io -n centaur-system \
+  -l centaur.ai/managed-by=api-rs --wait=true
+```
+
+The delete command interrupts any execution that was not drained. The Sandbox
+resources use `centaur.ai/managed-by=api-rs`; child pods may also carry
+controller-specific management labels.
+:::
+
 The Kubernetes sandbox backend is the active runtime backend; there is no chart
 switch named `api.sandboxBackend`.
 

@@ -181,7 +181,8 @@ Kubernetes backend:
 | --- | --- | --- |
 | `KUBERNETES_NAMESPACE`, `POD_NAMESPACE`, `KUBERNETES_KUBECONFIG` | Chart namespace, downward API, or `api.extraEnv`. | Kubernetes client namespace/config. |
 | `KUBERNETES_AGENT_IMAGE_PULL_POLICY`, `KUBERNETES_SANDBOX_IMAGE_PULL_SECRETS` | `sandbox.image.pullPolicy`, `global.imagePullSecrets`. | Sandbox image pull behavior. |
-| `KUBERNETES_SANDBOX_RUNTIME_CLASS_NAME`, `KUBERNETES_SANDBOX_SERVICE_ACCOUNT_NAME` | `sandbox.runtimeClassName`, `api.extraEnv`. | Pod runtime class and service account. |
+| `SESSION_SANDBOX_RUNTIME_CLASS_NAME` (preferred), `KUBERNETES_SANDBOX_RUNTIME_CLASS_NAME` (legacy) | `sandbox.runtimeClassName` or `apiRs.extraEnv`. | Runtime class for newly created Sandbox pod templates. The preferred name wins when both are set. |
+| `KUBERNETES_SANDBOX_SERVICE_ACCOUNT_NAME` | `api.extraEnv`. | Sandbox pod service account. |
 | `KUBERNETES_SANDBOX_CPU_LIMIT`, `KUBERNETES_SANDBOX_MEMORY_LIMIT`, `KUBERNETES_SANDBOX_CPU_REQUEST`, `KUBERNETES_SANDBOX_MEMORY_REQUEST` | `sandbox.resources.*`. | Sandbox pod resources. |
 | `KUBERNETES_SANDBOX_READY_TIMEOUT_S`, `KUBERNETES_ATTACH_LOG_TAIL_LINES` | `api.extraEnv`. | Sandbox readiness and attach diagnostics. |
 | `SESSION_SANDBOX_RUNNING_LIMIT`, `SESSION_SANDBOX_HOT_IDLE_GRACE_SECS` | `apiRs.sandboxRunningLimit`, `apiRs.sandboxHotIdleGraceSecs`. | Capacity admission for running-like sandboxes; discards ready warm sandboxes first, then pauses least-recently-active idle sessions outside the grace window. |
