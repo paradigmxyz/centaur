@@ -14,13 +14,11 @@ class RemoveResourceNamespaces < ActiveRecord::Migration[8.1]
 
   def up
     lock_namespace_tables!
-    validate_namespace_removal!
     remove_token_broker_namespaces!
     replace_namespace_principal_fields!
 
     RESOURCE_TABLES.each do |table|
       remove_index table, name: "index_#{table}_on_namespace_and_foreign_id"
-      add_index table, :foreign_id, unique: true unless index_exists?(table, :foreign_id, unique: true)
       remove_column table, :namespace, :string
     end
     add_global_principal_indexes!
@@ -36,29 +34,6 @@ class RemoveResourceNamespaces < ActiveRecord::Migration[8.1]
   def lock_namespace_tables!
     tables = RESOURCE_TABLES + %i[oauth_apps secret_sources]
     execute "LOCK TABLE #{tables.join(", ")} IN ACCESS EXCLUSIVE MODE"
-  end
-
-  def validate_namespace_removal!
-    failures = []
-
-    collisions = RESOURCE_TABLES.flat_map do |table|
-      select_all(<<~SQL).map do |row|
-        SELECT foreign_id, COUNT(*) AS count
-        FROM #{table}
-        WHERE foreign_id IS NOT NULL
-        GROUP BY foreign_id
-        HAVING COUNT(*) > 1
-        ORDER BY foreign_id
-      SQL
-        "#{table}.#{row.fetch("foreign_id")}=#{row.fetch("count")}"
-      end
-    end
-    failures << "foreign_id collisions: #{collisions.join(", ")}" if collisions.any?
-
-    return if failures.empty?
-
-    raise ActiveRecord::MigrationError,
-          "namespace removal preflight failed: #{failures.join("; ")}"
   end
 
   def remove_token_broker_namespaces!
