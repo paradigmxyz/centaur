@@ -173,31 +173,21 @@ def test_handler_embeds_and_stores_one_batch(monkeypatch):
     assert logs[-1][0] == "company_context_embeddings_completed"
 
 
-def test_openai_batches_stay_below_the_aggregate_token_limit():
+def test_openai_batches_use_small_sub_batches():
     embeddings = _load()
 
     batches = embeddings._batches(list(range(250)), embeddings.OPENAI_BATCH_SIZE)
 
     assert [len(batch) for batch in batches] == [25] * 10
-    assert (
-        embeddings.OPENAI_BATCH_SIZE * embeddings.OPENAI_MAX_INPUT_TOKENS
-        < embeddings.OPENAI_MAX_BATCH_TOKENS
-    )
 
 
-def test_embedding_text_enforces_the_model_token_limit():
+def test_embedding_text_enforces_the_character_limit():
     embeddings = _load()
     row = {"title": "密" * 24_000, "body": ""}
 
     text = embeddings._embedding_text(row, 24_000)
-    token_count = len(
-        embeddings.tiktoken.get_encoding("cl100k_base").encode(
-            text,
-            disallowed_special=(),
-        )
-    )
 
-    assert token_count <= embeddings.OPENAI_MAX_INPUT_TOKENS
+    assert text == "密" * 8_192
 
 
 def test_handler_records_whitespace_only_documents_without_calling_openai(monkeypatch):

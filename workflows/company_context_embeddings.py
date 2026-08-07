@@ -9,7 +9,6 @@ from typing import Any, Protocol
 from urllib.parse import urlparse, urlunparse
 
 import asyncpg
-import tiktoken
 from api.workflow_engine import WorkflowContext
 from openai import AsyncOpenAI, BadRequestError
 
@@ -20,11 +19,9 @@ CENTAUR_POSTGRES_DSN_ENV = "CENTAUR_POSTGRES_DSN"
 DEFAULT_POSTGRES_DATABASE = "ai_v2"
 DEFAULT_BATCH_SIZE = 250
 DEFAULT_INTERVAL_SECONDS = 5 * 60
-DEFAULT_MAX_INPUT_CHARS = 24_000
+DEFAULT_MAX_INPUT_CHARS = 8_192
 DEFAULT_MODEL = "text-embedding-3-small"
 EMBEDDING_DIMENSIONS = 1_536
-OPENAI_MAX_INPUT_TOKENS = 8_192
-OPENAI_MAX_BATCH_TOKENS = 300_000
 OPENAI_BATCH_SIZE = 25
 FALSE_ENV_VALUES = {"0", "false", "no", "off"}
 EMBEDDING_UPSERTS = {
@@ -173,14 +170,7 @@ def _embedding_text(row: Any, max_chars: int) -> str:
         for key in ("title", "body")
         if row[key] and (text := str(row[key]).strip())
     ]
-    text = "\n\n".join(parts)[:max_chars]
-    if not text:
-        return ""
-    encoding = tiktoken.get_encoding("cl100k_base")
-    tokens = encoding.encode(text, disallowed_special=())
-    if len(tokens) > OPENAI_MAX_INPUT_TOKENS:
-        return encoding.decode(tokens[:OPENAI_MAX_INPUT_TOKENS])
-    return text
+    return "\n\n".join(parts)[: min(max_chars, DEFAULT_MAX_INPUT_CHARS)]
 
 
 def _batches(rows: list[Any], size: int) -> list[list[Any]]:
