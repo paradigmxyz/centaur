@@ -54,6 +54,7 @@ const MAX_AGENT_BATCH_SIZE: usize = 32;
 const MAX_AGENT_BATCH_NAME_BYTES: usize = 128;
 const WORKFLOW_HOST_CLAIM_EXTENSION: Duration = Duration::from_secs(5 * 60);
 const WORKFLOW_HOST_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
+const WORKFLOW_HOST_ERROR_STDERR_DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
 const WORKFLOW_RECONCILE_INTERVAL_SECS_ENV: &str = "WORKFLOW_RECONCILE_INTERVAL_SECS";
 const DEFAULT_WORKFLOW_RECONCILE_INTERVAL_SECS: u64 = 60;
 const WORKFLOW_ENABLE_MODE_ENV: &str = "WORKFLOW_ENABLE_MODE";
@@ -1846,16 +1847,12 @@ async fn discover_python_workflow_metadata() -> Result<PythonWorkflowMetadata, W
                 return Ok(metadata);
             }
             Some("host.error") | Some("workflow.error") => {
-                let stderr = stderr_task.await.unwrap_or_default();
-                return Err(WorkflowRuntimeError::Internal(format!(
-                    "Python workflow discovery error: {}{}{}",
-                    message
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown error"),
-                    if stderr.is_empty() { "" } else { "\nstderr:\n" },
-                    stderr,
-                )));
+                return Err(python_workflow_host_structured_error(
+                    "Python workflow discovery error",
+                    &message,
+                    stderr_task,
+                )
+                .await);
             }
             other => {
                 return Err(WorkflowRuntimeError::Internal(format!(
@@ -2977,16 +2974,12 @@ async fn run_python_workflow_host_local(
                 return Ok(message.get("result").cloned().unwrap_or(Value::Null));
             }
             Some("workflow.error") | Some("host.error") => {
-                let stderr = stderr_task.await.unwrap_or_default();
-                return Err(WorkflowRuntimeError::Internal(format!(
-                    "Python workflow host error: {}{}{}",
-                    message
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown error"),
-                    if stderr.is_empty() { "" } else { "\nstderr:\n" },
-                    stderr,
-                )));
+                return Err(python_workflow_host_structured_error(
+                    "Python workflow host error",
+                    &message,
+                    stderr_task,
+                )
+                .await);
             }
             Some("ctx.log") => {
                 let workflow_log = message
@@ -3127,16 +3120,12 @@ where
                 return Ok(message.get("result").cloned().unwrap_or(Value::Null));
             }
             Some("workflow.error") | Some("host.error") => {
-                let stderr = stderr_task.await.unwrap_or_default();
-                return Err(WorkflowRuntimeError::Internal(format!(
-                    "Python workflow host error: {}{}{}",
-                    message
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown error"),
-                    if stderr.is_empty() { "" } else { "\nstderr:\n" },
-                    stderr,
-                )));
+                return Err(python_workflow_host_structured_error(
+                    "Python workflow host error",
+                    &message,
+                    stderr_task,
+                )
+                .await);
             }
             Some("ctx.log") => {
                 let workflow_log = message
@@ -3177,6 +3166,48 @@ where
     Err(WorkflowRuntimeError::Internal(format!(
         "Python workflow host exited before workflow.result: stderr={stderr}"
     )))
+}
+
+async fn python_workflow_host_structured_error(
+    prefix: &str,
+    message: &Value,
+    mut stderr_task: JoinHandle<String>,
+) -> WorkflowRuntimeError {
+    let stderr = match tokio::time::timeout(
+        WORKFLOW_HOST_ERROR_STDERR_DRAIN_TIMEOUT,
+        &mut stderr_task,
+    )
+    .await
+    {
+        Ok(Ok(stderr)) => stderr,
+        Ok(Err(_)) => String::new(),
+        Err(_) => {
+            stderr_task.abort();
+            let _ = stderr_task.await;
+            String::new()
+        }
+    };
+
+    let mut detail = format!(
+        "{prefix}: {}",
+        message
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown error")
+    );
+    if let Some(traceback) = message
+        .get("traceback")
+        .and_then(Value::as_str)
+        .filter(|traceback| !traceback.is_empty())
+    {
+        detail.push_str("\ntraceback:\n");
+        detail.push_str(traceback);
+    }
+    if !stderr.is_empty() {
+        detail.push_str("\nstderr:\n");
+        detail.push_str(&stderr);
+    }
+    WorkflowRuntimeError::Internal(detail)
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -4500,6 +4531,45 @@ pub enum WorkflowRuntimeError {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    async fn assert_structured_host_error_is_bounded(message_type: &str) {
+        let stderr_task = tokio::spawn(async {
+            std::future::pending::<()>().await;
+            String::new()
+        });
+        let started_at = tokio::time::Instant::now();
+
+        let error = python_workflow_host_structured_error(
+            "Python workflow host error",
+            &json!({
+                "type": message_type,
+                "message": "structured failure",
+                "traceback": "Traceback (most recent call last):\n  exact-line\n",
+            }),
+            stderr_task,
+        )
+        .await;
+
+        assert!(
+            started_at.elapsed() < Duration::from_millis(500),
+            "structured host error exceeded its bounded stderr drain"
+        );
+        assert_eq!(
+            error.to_string(),
+            "Python workflow host error: structured failure\ntraceback:\n\
+             Traceback (most recent call last):\n  exact-line\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn workflow_error_does_not_wait_for_never_closing_stderr() {
+        assert_structured_host_error_is_bounded("workflow.error").await;
+    }
+
+    #[tokio::test]
+    async fn host_error_does_not_wait_for_never_closing_stderr() {
+        assert_structured_host_error_is_bounded("host.error").await;
+    }
 
     #[test]
     fn python_event_names_are_collision_free() {
