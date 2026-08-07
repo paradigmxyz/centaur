@@ -124,7 +124,7 @@ fn openai_auth(
     codex_home: PathBuf,
 ) -> Result<OpenAiAuth> {
     match auth_mode.unwrap_or("api_key").trim() {
-        "access_token" | "chatgpt" => load_chatgpt_auth(codex_home.join("auth.json"))
+        "access_token" => load_chatgpt_auth(codex_home.join("auth.json"))
             .map_err(|error| HarnessServerError::Nanocodex(error.to_string())),
         "api_key" | "" => api_key
             .filter(|value| !value.trim().is_empty())
@@ -683,22 +683,12 @@ mod tests {
     }
 
     #[test]
-    fn chatgpt_auth_mode_alias_loads_the_shared_codex_login() {
-        let codex_home = env::temp_dir().join(format!(
-            "centaur-nanocodex-auth-{}",
-            Uuid::new_v4().simple()
-        ));
-        std::fs::create_dir_all(&codex_home).unwrap();
-        std::fs::write(
-            codex_home.join("auth.json"),
-            include_str!("../../../services/sandbox/codex-auth.json"),
-        )
-        .unwrap();
+    fn rejects_unsupported_auth_modes() {
+        let error = openai_auth(Some("chatgpt"), None, PathBuf::new()).unwrap_err();
 
-        let auth = openai_auth(Some("chatgpt"), None, codex_home.clone()).unwrap();
-
-        assert_eq!(auth.mode(), OpenAiAuthMode::ChatGpt);
-        std::fs::remove_dir_all(codex_home).unwrap();
+        assert!(
+            matches!(error, HarnessServerError::Nanocodex(message) if message.contains("unsupported CODEX_AUTH_MODE `chatgpt`"))
+        );
     }
 
     #[test]
