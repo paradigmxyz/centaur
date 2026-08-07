@@ -346,7 +346,7 @@ def _search_where_clause(term_count: int) -> str:
         clauses.append(
             f"(title ||| ${index}::text::pdb.boost({TITLE_MATCH_BOOST}) OR body ||| ${index}::text)"
         )
-    return " OR ".join(clauses)
+    return f"({' OR '.join(clauses)})"
 
 
 def _body_preview(body: str, *, query: str, max_chars: int = DEFAULT_PREVIEW_CHARS) -> str:

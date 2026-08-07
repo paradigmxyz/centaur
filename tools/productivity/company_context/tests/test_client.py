@@ -781,7 +781,8 @@ def test_search_uses_or_terms_and_drops_stop_words(monkeypatch):
 
     assert result["status"] == "ok"
     query, args = fake.fetch_calls[0]
-    assert "WHERE (title ||| $1::text::pdb.boost(8) OR body ||| $1::text::pdb.boost(2))" in query
+    keyword_clause = company_context_client._search_where_clause(4)
+    assert f"WHERE {keyword_clause}" in query
     assert "OR (title ||| $2::text::pdb.boost(4) OR body ||| $2::text)" in query
     assert "OR (title ||| $3::text::pdb.boost(4) OR body ||| $3::text)" in query
     assert "OR (title ||| $4::text::pdb.boost(4) OR body ||| $4::text)" in query
@@ -825,6 +826,10 @@ def test_search_applies_occurred_at_filters(monkeypatch):
     assert result["occurred_after"] == "2026-05-01T00:00:00+00:00"
     assert result["occurred_before"] == "2026-05-08T12:30:00+00:00"
     query, args = fake.fetch_calls[0]
+    keyword_clause = company_context_client._search_where_clause(1)
+    assert keyword_clause.startswith("((")
+    assert keyword_clause.endswith("))")
+    assert f"WHERE {keyword_clause}" in query
     assert "OR occurred_at >= $5" in query
     assert "OR occurred_at < $6" in query
     assert "metadata ->> 'channel_id'" not in query
