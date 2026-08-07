@@ -86,7 +86,6 @@ class RegisteredWorkflow:
     schedule: Any
     principal: Any = None
     agent_defaults: dict[str, Any] | None = None
-    database: bool = True
 
 
 def workflow_dirs() -> list[Path]:
@@ -148,9 +147,6 @@ def load_workflow_file(path: Path) -> RegisteredWorkflow | None:
     agent_defaults = getattr(module, "AGENT_DEFAULTS", None)
     if not isinstance(agent_defaults, dict):
         agent_defaults = None
-    database = getattr(module, "WORKFLOW_DATABASE", True)
-    if not isinstance(database, bool):
-        database = True
     return RegisteredWorkflow(
         workflow_name=workflow_name,
         source_path=str(path),
@@ -160,7 +156,6 @@ def load_workflow_file(path: Path) -> RegisteredWorkflow | None:
         schedule=getattr(module, "SCHEDULE", None),
         principal=getattr(module, "WORKFLOW_PRINCIPAL", None),
         agent_defaults=agent_defaults,
-        database=database,
     )
 
 
@@ -345,7 +340,7 @@ async def run_workflow(message: dict[str, Any], rpc: RpcClient) -> dict[str, Any
     if registered is None:
         raise RuntimeError(f"unknown workflow_name {workflow_name!r}")
 
-    pool = await create_pool() if registered.database else None
+    pool = await create_pool()
     ctx = WorkflowContext(
         rpc,
         run_id=str(message.get("run_id") or ""),

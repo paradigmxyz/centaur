@@ -414,50 +414,6 @@ class WorkflowHostTests(unittest.TestCase):
         self.assertTrue(rpc.drained)
         self.assertTrue(pool.closed)
 
-    def test_run_workflow_can_skip_the_context_database_pool(self) -> None:
-        host = load_workflow_host()
-        rpc = FakeRpc()
-
-        async def handler(_inp, ctx):
-            return {"context_pool_is_none": ctx._pool is None}
-
-        registered = host.RegisteredWorkflow(
-            workflow_name="scoped_database_workflow",
-            source_path="workflows/scoped_database.py",
-            handler=handler,
-            input_cls=None,
-            webhooks=None,
-            schedule=None,
-            database=False,
-        )
-
-        async def unexpected_create_pool():
-            raise AssertionError("context database pool should not be created")
-
-        with (
-            patch.object(
-                host,
-                "discover_workflows",
-                return_value={"scoped_database_workflow": registered},
-            ),
-            patch.object(host, "create_pool", unexpected_create_pool),
-        ):
-            payload = asyncio.run(
-                host.run_workflow(
-                    {
-                        "type": "workflow.start",
-                        "workflow_name": "scoped_database_workflow",
-                        "run_id": "run-123",
-                        "task_id": "task-456",
-                        "input": {},
-                    },
-                    rpc,
-                )
-            )
-
-        self.assertEqual(payload["result"], {"context_pool_is_none": True})
-        self.assertTrue(rpc.drained)
-
     def test_run_workflow_threads_agent_defaults_into_context(self) -> None:
         host = load_workflow_host()
         rpc = RequestRpc()
@@ -522,14 +478,13 @@ class WorkflowHostTests(unittest.TestCase):
             {"model": "claude-opus-4-8", "reasoning": "high"},
         )
 
-    def test_load_workflow_file_reads_workflow_runtime_flags(self) -> None:
+    def test_load_workflow_file_reads_workflow_principal(self) -> None:
         host = load_workflow_host()
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "principal_workflow.py"
             path.write_text(
                 "WORKFLOW_NAME = 'principal_workflow'\n"
                 "WORKFLOW_PRINCIPAL = True\n"
-                "WORKFLOW_DATABASE = False\n"
                 "def handler(inp, ctx):\n"
                 "    return None\n"
             )
@@ -537,7 +492,6 @@ class WorkflowHostTests(unittest.TestCase):
 
         assert registered is not None
         self.assertEqual(host.normalize_principal(registered), True)
-        self.assertFalse(registered.database)
 
     def test_failed_workflow_host_exits_with_stdin_open(self) -> None:
         source = (
