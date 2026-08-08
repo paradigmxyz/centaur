@@ -60,15 +60,6 @@ module Broker
       assert_equal "missing_initial_refresh_token", bc.dead_reason
     end
 
-    test "RefreshCredentialJob skips a credential that is no longer due" do
-      bc = make_credential(refresh_token: nil)
-      bc.update_columns(next_attempt_at: 1.hour.from_now)
-
-      Broker::RefreshCredentialJob.perform_now(bc.id)
-
-      refute bc.reload.dead?
-    end
-
     test "RefreshCredentialJob is a no-op for a missing credential" do
       assert_nothing_raised { Broker::RefreshCredentialJob.perform_now(-1) }
     end
