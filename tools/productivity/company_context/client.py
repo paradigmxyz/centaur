@@ -20,6 +20,13 @@ from centaur_sdk.tool_sdk import secret
 
 DEFAULT_SEARCH_LIMIT = 10
 MAX_SEARCH_LIMIT = 50
+MIN_HYBRID_CANDIDATE_LIMIT = 30
+RRF_K = 60
+DEFAULT_EMBEDDINGS_MODEL = "text-embedding-3-small"
+EMBEDDINGS_DIMENSIONS = 1_536
+OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
+COMPANY_CONTEXT_EMBEDDINGS_ENABLED_ENV = "COMPANY_CONTEXT_EMBEDDINGS_ENABLED"
+COMPANY_CONTEXT_EMBEDDINGS_MODEL_ENV = "COMPANY_CONTEXT_EMBEDDINGS_MODEL"
 DEFAULT_QUERY_LIMIT = 100
 MAX_QUERY_LIMIT = 1_000
 DEFAULT_QUERY_TIMEOUT_SECONDS = 10
@@ -339,7 +346,7 @@ def _search_where_clause(term_count: int) -> str:
         clauses.append(
             f"(title ||| ${index}::text::pdb.boost({TITLE_MATCH_BOOST}) OR body ||| ${index}::text)"
         )
-    return " OR ".join(clauses)
+    return f"({' OR '.join(clauses)})"
 
 
 def _body_preview(body: str, *, query: str, max_chars: int = DEFAULT_PREVIEW_CHARS) -> str:
@@ -552,11 +559,61 @@ def _company_context_filters_for_source(
     return source, source_type
 
 
+def _hybrid_candidate_limit(limit: int) -> int:
+    """Retrieve enough candidates for rank fusion without exceeding tool bounds."""
+    return min(MAX_SEARCH_LIMIT, max(limit, MIN_HYBRID_CANDIDATE_LIMIT))
+
+
+def _reciprocal_rank_fusion(
+    keyword_results: list[dict[str, Any]],
+    vector_results: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Fuse lexical and semantic ranks with equal-weight reciprocal rank fusion."""
+    fused: dict[str, dict[str, Any]] = {}
+
+    for lane, results in (("keyword", keyword_results), ("vector", vector_results)):
+        for rank, result in enumerate(results, start=1):
+            document_id = str(result.get("document_id") or "")
+            if not document_id:
+                continue
+            item = fused.setdefault(document_id, dict(result))
+            item["fusion_score"] = float(item.get("fusion_score") or 0.0) + 1.0 / (RRF_K + rank)
+            item[f"{lane}_rank"] = rank
+            if lane == "keyword":
+                item["keyword_score"] = float(result.get("score") or 0.0)
+            else:
+                item["vector_similarity"] = float(result.get("vector_similarity") or 0.0)
+
+    for item in fused.values():
+        lanes = [lane for lane in ("keyword", "vector") if f"{lane}_rank" in item]
+        item["lane"] = "hybrid" if len(lanes) == 2 else lanes[0]
+        item["matched_lanes"] = lanes
+        item["score"] = float(item["fusion_score"])
+
+    return sorted(
+        fused.values(),
+        key=lambda item: (
+            float(item.get("fusion_score") or 0.0),
+            str(item.get("source_updated_at") or ""),
+            str(item.get("document_id") or ""),
+        ),
+        reverse=True,
+    )[:limit]
+
+
 class CompanyContextClient:
     """Query the shared company context document table."""
 
-    def __init__(self, database_url: str | None = None) -> None:
+    def __init__(
+        self,
+        database_url: str | None = None,
+        *,
+        embeddings_client: Any | None = None,
+    ) -> None:
         self._database_url = (database_url or _scoped_database_url()).strip()
+        self._embeddings_client = embeddings_client
 
     def _require_database_url(self) -> str:
         if not self._database_url:
@@ -567,6 +624,38 @@ class CompanyContextClient:
         return await asyncpg.connect(
             _database_url_with_name(self._require_database_url(), _postgres_database_name()),
             command_timeout=30,
+        )
+
+    async def _query_embedding_async(self, query: str) -> str:
+        client = self._embeddings_client
+        if client is None:
+            api_key = secret(OPENAI_API_KEY_ENV, default="").strip()
+            if not api_key:
+                raise RuntimeError(f"{OPENAI_API_KEY_ENV} is not configured")
+            from openai import AsyncOpenAI
+
+            client = AsyncOpenAI(api_key=api_key)
+            self._embeddings_client = client
+
+        response = await client.embeddings.create(
+            model=self._embeddings_model(),
+            input=query,
+            dimensions=EMBEDDINGS_DIMENSIONS,
+            encoding_format="float",
+        )
+        data = list(response.data or [])
+        if not data or not data[0].embedding:
+            raise RuntimeError("OpenAI returned no query embedding")
+        return json.dumps(data[0].embedding, separators=(",", ":"))
+
+    @staticmethod
+    def _embeddings_model() -> str:
+        return (
+            os.getenv(  # noqa: TID251 - non-secret model configuration
+                COMPANY_CONTEXT_EMBEDDINGS_MODEL_ENV,
+                DEFAULT_EMBEDDINGS_MODEL,
+            ).strip()
+            or DEFAULT_EMBEDDINGS_MODEL
         )
 
     async def _query_async(
@@ -641,6 +730,7 @@ class CompanyContextClient:
         *,
         query: str,
         limit: int,
+        hybrid: bool,
         source: str | None,
         source_type: str | None,
         occurred_after: datetime | None,
@@ -648,6 +738,10 @@ class CompanyContextClient:
     ) -> dict[str, Any]:
         conn = await self._connect()
         try:
+            embeddings_available = hybrid and _env_flag_enabled(
+                COMPANY_CONTEXT_EMBEDDINGS_ENABLED_ENV, default=False
+            )
+            candidate_limit = _hybrid_candidate_limit(limit) if embeddings_available else limit
             terms = _search_terms(query)
             search_terms = [query, *terms]
             results = []
@@ -703,7 +797,7 @@ class CompanyContextClient:
                 company_source_type,
                 occurred_after,
                 occurred_before,
-                limit,
+                candidate_limit,
             )
             for row in rows:
                 result = _document_summary(row)
@@ -722,7 +816,7 @@ class CompanyContextClient:
                         conn,
                         search_terms=search_terms,
                         term_count=len(terms),
-                        limit=limit,
+                        limit=candidate_limit,
                         modified_after=occurred_after,
                         modified_before=occurred_before,
                     )
@@ -745,7 +839,7 @@ class CompanyContextClient:
                         conn,
                         search_terms=search_terms,
                         term_count=len(terms),
-                        limit=limit,
+                        limit=candidate_limit,
                         occurred_after=occurred_after,
                         occurred_before=occurred_before,
                     )
@@ -769,7 +863,36 @@ class CompanyContextClient:
                 ),
                 reverse=True,
             )
-            results = results[:limit]
+            keyword_results = results[:candidate_limit]
+            vector_results: list[dict[str, Any]] = []
+            if embeddings_available:
+                try:
+                    query_embedding = await self._query_embedding_async(query)
+                    vector_results = await self._search_vectors_async(
+                        conn,
+                        query=query,
+                        query_embedding=query_embedding,
+                        limit=candidate_limit,
+                        source=source,
+                        source_type=source_type,
+                        occurred_after=occurred_after,
+                        occurred_before=occurred_before,
+                    )
+                except Exception:
+                    # Embedding generation and the experimental vector schema are
+                    # both optional. Any incompatibility falls back to lexical.
+                    vector_results = []
+
+            if vector_results:
+                results = _reciprocal_rank_fusion(
+                    keyword_results,
+                    vector_results,
+                    limit=limit,
+                )
+                search_mode = "hybrid"
+            else:
+                results = keyword_results[:limit]
+                search_mode = "keyword"
 
             _emit_company_context_lookup_metrics(
                 status="ok",
@@ -787,8 +910,10 @@ class CompanyContextClient:
                 "source_type": source_type,
                 "occurred_after": _isoformat(occurred_after),
                 "occurred_before": _isoformat(occurred_before),
+                "search_mode": search_mode,
                 "count": len(results),
                 "indexed_count": len(results),
+                "vector_count": len(vector_results),
                 "results": results,
             }
             if google_docs_error:
@@ -893,6 +1018,197 @@ class CompanyContextClient:
             occurred_before,
             limit,
         )
+
+    async def _search_vectors_async(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        query: str,
+        query_embedding: str,
+        limit: int,
+        source: str | None,
+        source_type: str | None,
+        occurred_after: datetime | None,
+        occurred_before: datetime | None,
+    ) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        company_source, company_source_type = _company_context_filters_for_source(
+            source,
+            source_type,
+        )
+        rows = await conn.fetch(
+            """
+            SELECT
+                d.document_id,
+                d.source,
+                d.source_type,
+                d.source_document_id,
+                d.source_chunk_id,
+                d.parent_document_id,
+                d.title,
+                d.url,
+                d.author_name,
+                d.access_scope,
+                d.body,
+                d.occurred_at,
+                d.source_updated_at,
+                d.metadata,
+                1 - (e.embedding <=> $1::vector) AS vector_similarity
+            FROM company_context_document_embeddings e
+            JOIN company_context_documents d
+              ON d.document_id = e.company_context_document_id
+            WHERE e.embedding IS NOT NULL
+              AND NOT e.embedding_failed
+              AND e.model = $2
+              AND ($3::text IS NULL OR d.source = $3)
+              AND ($4::text IS NULL OR d.source_type = $4)
+              AND ($5::timestamptz IS NULL OR d.occurred_at >= $5)
+              AND ($6::timestamptz IS NULL OR d.occurred_at < $6)
+            ORDER BY e.embedding <=> $1::vector,
+                     d.source_updated_at DESC NULLS LAST,
+                     d.document_id ASC
+            LIMIT $7
+            """,
+            query_embedding,
+            self._embeddings_model(),
+            company_source,
+            company_source_type,
+            occurred_after,
+            occurred_before,
+            limit,
+        )
+        for row in rows:
+            result = _document_summary(row)
+            result["vector_similarity"] = float(_row_value(row, "vector_similarity", 0.0) or 0.0)
+            result["score"] = result["vector_similarity"]
+            result["preview"] = _body_preview(
+                str(_row_value(row, "body", "") or ""),
+                query=query,
+            )
+            result["lane"] = "vector"
+            result["result_type"] = str(result["source_type"] or "indexed_document")
+            results.append(result)
+
+        if _include_google_docs_source(source, source_type):
+            try:
+                google_rows = await conn.fetch(
+                    """
+                    SELECT
+                        d.document_id,
+                        d.file_id,
+                        d.chunk_id,
+                        d.title,
+                        d.body,
+                        d.url,
+                        d.provider_author_id,
+                        d.provider_author_name,
+                        d.mime_type,
+                        d.drive_id,
+                        d.source_created_at,
+                        d.source_modified_at,
+                        d.metadata,
+                        1 - (e.embedding <=> $1::vector) AS vector_similarity
+                    FROM company_context_document_embeddings e
+                    JOIN google_docs_context_documents d
+                      ON d.document_id = e.google_docs_context_document_id
+                    WHERE e.embedding IS NOT NULL
+                      AND NOT e.embedding_failed
+                      AND e.model = $2
+                      AND ($3::timestamptz IS NULL OR d.source_modified_at >= $3)
+                      AND ($4::timestamptz IS NULL OR d.source_modified_at < $4)
+                    ORDER BY e.embedding <=> $1::vector,
+                             d.source_modified_at DESC NULLS LAST,
+                             d.document_id ASC
+                    LIMIT $5
+                    """,
+                    query_embedding,
+                    self._embeddings_model(),
+                    occurred_after,
+                    occurred_before,
+                    limit,
+                )
+                for row in google_rows:
+                    result = _google_doc_summary(row)
+                    result["vector_similarity"] = float(
+                        _row_value(row, "vector_similarity", 0.0) or 0.0
+                    )
+                    result["score"] = result["vector_similarity"]
+                    result["preview"] = _body_preview(
+                        str(_row_value(row, "body", "") or ""),
+                        query=query,
+                    )
+                    result["lane"] = "vector"
+                    result["result_type"] = GOOGLE_DOCS_SOURCE_TYPE
+                    results.append(result)
+            except Exception:
+                # Optional projections may lag the embedding experiment schema.
+                pass
+
+        if _include_granola_source(source, source_type):
+            try:
+                granola_rows = await conn.fetch(
+                    """
+                    SELECT
+                        d.document_id,
+                        d.note_id,
+                        d.title,
+                        d.body,
+                        d.url,
+                        d.owner_id,
+                        d.owner_email,
+                        d.owner_name,
+                        d.access_emails,
+                        d.attendee_labels,
+                        d.occurred_at,
+                        d.source_updated_at,
+                        d.metadata,
+                        1 - (e.embedding <=> $1::vector) AS vector_similarity
+                    FROM company_context_document_embeddings e
+                    JOIN granola_context_documents d
+                      ON d.document_id = e.granola_context_document_id
+                    WHERE e.embedding IS NOT NULL
+                      AND NOT e.embedding_failed
+                      AND e.model = $2
+                      AND ($3::timestamptz IS NULL OR d.occurred_at >= $3)
+                      AND ($4::timestamptz IS NULL OR d.occurred_at < $4)
+                    ORDER BY e.embedding <=> $1::vector,
+                             d.occurred_at DESC NULLS LAST,
+                             d.source_updated_at DESC NULLS LAST,
+                             d.document_id ASC
+                    LIMIT $5
+                    """,
+                    query_embedding,
+                    self._embeddings_model(),
+                    occurred_after,
+                    occurred_before,
+                    limit,
+                )
+                for row in granola_rows:
+                    result = _granola_doc_summary(row)
+                    result["vector_similarity"] = float(
+                        _row_value(row, "vector_similarity", 0.0) or 0.0
+                    )
+                    result["score"] = result["vector_similarity"]
+                    result["preview"] = _body_preview(
+                        str(_row_value(row, "body", "") or ""),
+                        query=query,
+                    )
+                    result["lane"] = "vector"
+                    result["result_type"] = GRANOLA_SOURCE_TYPE
+                    results.append(result)
+            except Exception:
+                # Optional projections may lag the embedding experiment schema.
+                pass
+
+        results.sort(
+            key=lambda item: (
+                float(item.get("vector_similarity") or 0.0),
+                str(item.get("source_updated_at") or ""),
+                str(item.get("document_id") or ""),
+            ),
+            reverse=True,
+        )
+        return results[:limit]
 
     async def _latest_date_for_connection(
         self,
@@ -1139,6 +1455,7 @@ class CompanyContextClient:
         source_type: str | None = None,
         occurred_after: str | datetime | None = None,
         occurred_before: str | datetime | None = None,
+        hybrid: bool = True,
     ) -> dict:
         """Search indexed company context documents and return candidate document ids."""
         normalized_query = query.strip()
@@ -1161,6 +1478,7 @@ class CompanyContextClient:
                 self._search_async(
                     query=normalized_query,
                     limit=_clamp(limit, minimum=1, maximum=MAX_SEARCH_LIMIT),
+                    hybrid=hybrid,
                     source=normalized_source,
                     source_type=normalized_source_type,
                     occurred_after=parsed_occurred_after,

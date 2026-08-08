@@ -53,6 +53,7 @@ const WORKFLOW_RECONCILE_INTERVAL_SECS_ENV: &str = "WORKFLOW_RECONCILE_INTERVAL_
 const DEFAULT_WORKFLOW_RECONCILE_INTERVAL_SECS: u64 = 60;
 const WORKFLOW_ENABLE_MODE_ENV: &str = "WORKFLOW_ENABLE_MODE";
 const WORKFLOW_ALLOWED_NAMES_ENV: &str = "WORKFLOW_ALLOWED_NAMES";
+const MAX_LIST_RUNS_LIMIT: i64 = 1_000;
 /// How many consecutive reconcile passes a workflow must be missing from
 /// discovery before its active tasks are cancelled. 0 disables reaping.
 const WORKFLOW_REAP_REMOVED_AFTER_TICKS_ENV: &str = "WORKFLOW_REAP_REMOVED_AFTER_TICKS";
@@ -521,6 +522,10 @@ struct ToolResult {
     output: Value,
 }
 
+fn list_runs_limit(limit: i64) -> i64 {
+    limit.clamp(1, MAX_LIST_RUNS_LIMIT)
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct SlackPostResult {
     channel: String,
@@ -875,17 +880,27 @@ impl WorkflowRuntime {
         })
     }
 
-    pub async fn list_runs(&self, limit: i64) -> Result<Vec<WorkflowRun>, WorkflowRuntimeError> {
-        let limit = limit.clamp(1, 200);
+    pub async fn list_runs(
+        &self,
+        limit: i64,
+        workflow_name: Option<&str>,
+    ) -> Result<Vec<WorkflowRun>, WorkflowRuntimeError> {
+        let limit = list_runs_limit(limit);
         let mut runs = Vec::new();
-        runs.extend(self.list_runs_for_queue(WORKFLOW_QUEUE, limit).await?);
         runs.extend(
-            self.list_runs_for_queue(WORKFLOW_SLACK_LIVE_QUEUE, limit)
+            self.list_runs_for_queue(WORKFLOW_QUEUE, limit, workflow_name)
                 .await?,
         );
-        runs.extend(self.list_runs_for_queue(WORKFLOW_ETL_QUEUE, limit).await?);
         runs.extend(
-            self.list_runs_for_queue(WORKFLOW_ETL_BACKFILL_QUEUE, limit)
+            self.list_runs_for_queue(WORKFLOW_SLACK_LIVE_QUEUE, limit, workflow_name)
+                .await?,
+        );
+        runs.extend(
+            self.list_runs_for_queue(WORKFLOW_ETL_QUEUE, limit, workflow_name)
+                .await?,
+        );
+        runs.extend(
+            self.list_runs_for_queue(WORKFLOW_ETL_BACKFILL_QUEUE, limit, workflow_name)
                 .await?,
         );
         runs.sort_by(|a, b| {
@@ -901,6 +916,7 @@ impl WorkflowRuntime {
         &self,
         queue_name: &str,
         limit: i64,
+        workflow_name: Option<&str>,
     ) -> Result<Vec<WorkflowRun>, WorkflowRuntimeError> {
         let (task_table, run_table) = absurd_queue_tables(queue_name)?;
         let rows = sqlx::query(&format!(
@@ -918,11 +934,16 @@ impl WorkflowRuntime {
                 greatest(t.enqueue_at, coalesce(r.available_at, t.enqueue_at)) as updated_at
             from {task_table} t
             join {run_table} r on r.run_id = t.last_attempt_run
+            where (
+                $2::text is null
+                or coalesce(t.params->>'workflow_name', '{WORKFLOW_TASK}') = $2
+            )
             order by t.enqueue_at desc, t.task_id desc
             limit $1
             "#,
         ))
         .bind(limit)
+        .bind(workflow_name)
         .fetch_all(self.inner.client.pool())
         .await?;
 
@@ -4233,6 +4254,14 @@ mod tests {
         assert_eq!(parse_worker_concurrency(Some("lots"), 4), 4);
         assert_eq!(parse_worker_concurrency(Some("0"), 4), 4);
         assert_eq!(parse_worker_concurrency(Some("-2"), 1), 1);
+    }
+
+    #[test]
+    fn list_runs_limit_is_clamped_to_supported_range() {
+        assert_eq!(list_runs_limit(-1), 1);
+        assert_eq!(list_runs_limit(50), 50);
+        assert_eq!(list_runs_limit(1_000), 1_000);
+        assert_eq!(list_runs_limit(10_000), 1_000);
     }
 
     #[test]

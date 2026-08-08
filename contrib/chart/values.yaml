@@ -433,9 +433,11 @@ apiRs:
       maxWindowSeconds: 21600
       batchSize: 50
     companyContextEmbeddings:
+      # Enables the embedding workflow and hybrid search in agent sandboxes.
       enabled: false
       intervalSeconds: 300
       batchSize: 250
+      # Shared by the embedding workflow and company-context searches in agent sandboxes.
       model: text-embedding-3-small
   # Reaper: stop sandboxes older than the max lifetime, regardless of whether
   # they are running or suspended. 0 disables the sweep. Interval must be >= 1.
