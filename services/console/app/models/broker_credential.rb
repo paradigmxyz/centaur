@@ -150,6 +150,11 @@ class BrokerCredential < ApplicationRecord
   def refresh!(now: Time.current)
     with_lock do
       return if dead?
+      # Poll ticks can enqueue the same credential more than once while an
+      # earlier refresh job is still waiting. Re-check the schedule after
+      # taking the row lock so jobs queued before a successful refresh become
+      # no-ops instead of rotating the newly issued token again.
+      return if next_attempt_at.present? && next_attempt_at > now
 
       outcome = perform_refresh
       if outcome.dead_reason
