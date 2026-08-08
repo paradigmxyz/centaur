@@ -115,6 +115,31 @@ module Granola
       assert_includes failed[:run][:error_text], "rate limited"
     end
 
+    test "records a successful sync when there are no new meetings" do
+      checkpoint_time = "2026-07-08T12:00:00Z"
+      api_client = FakeApiClient.new(
+        checkpoint: { "watermark_time" => checkpoint_time }
+      )
+      mcp_http = lambda do |tool:, **|
+        case tool
+        when "get_account_info"
+          { email: "owner@example.com" }.to_json
+        when "list_meetings"
+          ""
+        else
+          flunk "unexpected Granola MCP tool #{tool}"
+        end
+      end
+
+      SyncCredential.new(credential, api_client: api_client, mcp_http: mcp_http).call
+
+      batch = api_client.batches.fetch(0)
+      assert_equal "completed", batch[:run][:status]
+      assert_equal 0, batch[:run][:notes_seen]
+      assert_empty batch[:notes]
+      assert_equal checkpoint_time, batch[:checkpoint][:watermark_time]
+    end
+
     test "includes MCP tool error content in the raised error" do
       sync = SyncCredential.new(credential, api_client: FakeApiClient.new)
       sync.instance_variable_set(:@mcp_initialized, true)

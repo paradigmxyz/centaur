@@ -94,6 +94,8 @@ module Granola
         )
       ).first(self.class.max_notes)
 
+      return [] if meetings.empty?
+
       details = parse_meetings(
         mcp_tool("get_meetings", "meeting_ids" => meetings.map { |meeting| meeting.fetch("id") })
       ).index_by { |meeting| meeting.fetch("id") }
