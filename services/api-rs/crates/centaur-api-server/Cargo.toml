@@ -48,7 +48,6 @@ uuid.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
-centaur-session-runtime = { workspace = true, features = ["test-support"] }
 tower.workspace = true
 
 [lints]

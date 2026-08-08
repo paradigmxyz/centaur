@@ -34,7 +34,7 @@ mod tests {
         ObservedSandbox, SandboxBackend, SandboxError, SandboxHandle, SandboxId, SandboxIo,
         SandboxResult, SandboxSpec, SandboxStatus,
     };
-    use centaur_session_runtime::{SandboxRuntime, test_support::FakeSessionPrincipalRegistrar};
+    use centaur_session_runtime::{SandboxRuntime, SessionPrincipalRegistrar};
     use centaur_session_sqlx::PgSessionStore;
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
     use serde_json::{Value, json};
@@ -46,11 +46,46 @@ mod tests {
         build_router_with_runtime as build_router_with_iron_control,
     };
 
+    #[derive(Clone, Copy)]
+    struct TestSessionPrincipalRegistrar;
+
+    #[async_trait]
+    impl SessionPrincipalRegistrar for TestSessionPrincipalRegistrar {
+        async fn register_session(
+            &self,
+            _thread_key: &str,
+            _metadata: Option<&Value>,
+        ) -> Result<centaur_iron_control::Principal, centaur_iron_control::IronControlError>
+        {
+            Ok(test_principal("prn_test"))
+        }
+
+        async fn get_principal(
+            &self,
+            principal: &str,
+        ) -> Result<centaur_iron_control::Principal, centaur_iron_control::IronControlError>
+        {
+            Ok(test_principal(principal))
+        }
+    }
+
+    fn test_principal(id: &str) -> centaur_iron_control::Principal {
+        centaur_iron_control::Principal {
+            id: id.to_owned(),
+            namespace: "default".to_owned(),
+            foreign_id: Some("test".to_owned()),
+            name: "Test".to_owned(),
+            labels: Default::default(),
+            sandbox_observability_enabled: true,
+            sandbox_api_server_enabled: true,
+        }
+    }
+
     fn build_router_with_runtime(
         store: PgSessionStore,
         sandbox_runtime: SandboxRuntime,
     ) -> axum::Router {
-        build_router_with_iron_control(store, sandbox_runtime, FakeSessionPrincipalRegistrar)
+        build_router_with_iron_control(store, sandbox_runtime, TestSessionPrincipalRegistrar)
     }
 
     #[tokio::test]
@@ -205,7 +240,7 @@ mod tests {
             centaur_session_runtime::SessionRuntime::new(
                 PgSessionStore::new(pool),
                 SandboxRuntime::backend(Arc::new(TestBackend::default()), SandboxSpec::new("test")),
-                FakeSessionPrincipalRegistrar,
+                TestSessionPrincipalRegistrar,
             ),
             None,
             None,

@@ -121,41 +121,6 @@ impl SessionPrincipalRegistrar for SessionRegistrar {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
-pub mod test_support {
-    use super::*;
-
-    #[derive(Clone, Copy, Debug, Default)]
-    pub struct FakeSessionPrincipalRegistrar;
-
-    #[async_trait::async_trait]
-    impl SessionPrincipalRegistrar for FakeSessionPrincipalRegistrar {
-        async fn register_session(
-            &self,
-            _thread_key: &str,
-            _metadata: Option<&Value>,
-        ) -> Result<Principal, IronControlError> {
-            Ok(principal("prn_test"))
-        }
-
-        async fn get_principal(&self, principal_id: &str) -> Result<Principal, IronControlError> {
-            Ok(principal(principal_id))
-        }
-    }
-
-    fn principal(id: &str) -> Principal {
-        Principal {
-            id: id.to_owned(),
-            namespace: "default".to_owned(),
-            foreign_id: Some("test".to_owned()),
-            name: "Test".to_owned(),
-            labels: BTreeMap::new(),
-            sandbox_observability_enabled: true,
-            sandbox_api_server_enabled: true,
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct SessionRuntime {
     store: PgSessionStore,
@@ -8450,6 +8415,36 @@ mod adoption_tests {
     /// fully terminalizes its own executions before releasing the lock.
     static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
+    #[derive(Clone, Copy)]
+    struct TestSessionPrincipalRegistrar;
+
+    #[async_trait::async_trait]
+    impl SessionPrincipalRegistrar for TestSessionPrincipalRegistrar {
+        async fn register_session(
+            &self,
+            _thread_key: &str,
+            _metadata: Option<&Value>,
+        ) -> Result<Principal, IronControlError> {
+            Ok(test_principal("prn_test"))
+        }
+
+        async fn get_principal(&self, principal: &str) -> Result<Principal, IronControlError> {
+            Ok(test_principal(principal))
+        }
+    }
+
+    fn test_principal(id: &str) -> Principal {
+        Principal {
+            id: id.to_owned(),
+            namespace: "default".to_owned(),
+            foreign_id: Some("test".to_owned()),
+            name: "Test".to_owned(),
+            labels: BTreeMap::new(),
+            sandbox_observability_enabled: true,
+            sandbox_api_server_enabled: true,
+        }
+    }
+
     type ProxyEnsure = (String, String, BTreeMap<String, String>);
 
     struct MockBackend {
@@ -8790,7 +8785,7 @@ mod adoption_tests {
         SessionRuntime::new(
             store.clone(),
             SandboxRuntime::backend(backend, SandboxSpec::new("mock")),
-            test_support::FakeSessionPrincipalRegistrar,
+            TestSessionPrincipalRegistrar,
         )
     }
 
@@ -9031,7 +9026,7 @@ mod adoption_tests {
                 },
                 move || SandboxSpec::new("mock").env("WARM_POOL_TEST_MARKER", warm_marker.as_str()),
             ),
-            test_support::FakeSessionPrincipalRegistrar,
+            TestSessionPrincipalRegistrar,
         );
         let warm_pool = Arc::new(WarmPoolManager::new(
             runtime.sandbox_runtime.manager.clone(),
