@@ -16,6 +16,7 @@ import json
 import re
 from datetime import datetime
 from typing import Any
+from xml.etree import ElementTree
 
 import httpx
 from centaur_sdk import secret
@@ -127,14 +128,6 @@ class GranolaClient:
         return [n for n in all_notes if query_lower in (n.get("title") or "").lower()][:limit]
 
 
-# Matches one <meeting ...>...</meeting> block in MCP meetings_data output.
-_MEETING_RE = re.compile(
-    r'<meeting id="(?P<id>[^"]+)" title="(?P<title>[^"]*)" date="(?P<date>[^"]*)">'
-    r"(?P<body>.*?)</meeting>",
-    re.DOTALL,
-)
-_PARTICIPANTS_RE = re.compile(r"<known_participants>(.*?)</known_participants>", re.DOTALL)
-_SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.DOTALL)
 # "Zygimantas (note creator) from Tempo <z@tempo.xyz>" -> name + email
 _PARTICIPANT_RE = re.compile(r"(?P<name>[^,<]+?)\s*<(?P<email>[^>]+)>")
 
@@ -154,13 +147,19 @@ def _parse_meeting_date(raw: str) -> str:
 
 def _parse_meetings(text: str) -> list[dict[str, Any]]:
     """Parse MCP meetings_data text into REST-shaped note dicts."""
+    try:
+        root = ElementTree.fromstring(f"<granola_response>{text}</granola_response>")
+    except ElementTree.ParseError as error:
+        raise RuntimeError("Granola MCP returned malformed meeting XML") from error
+
     notes = []
-    for m in _MEETING_RE.finditer(text):
-        body = m.group("body")
+    for meeting in root.findall(".//meeting"):
+        if not all(meeting.get(name) for name in ("id", "title", "date")):
+            continue
         attendees = []
-        pm = _PARTICIPANTS_RE.search(body)
-        if pm:
-            for p in _PARTICIPANT_RE.finditer(pm.group(1)):
+        participants = meeting.findtext("known_participants", default="")
+        if participants:
+            for p in _PARTICIPANT_RE.finditer(participants):
                 attendees.append({"name": p.group("name").strip(), "email": p.group("email")})
         owner = next(
             (a for a in attendees if "(note creator)" in a["name"]),
@@ -168,15 +167,15 @@ def _parse_meetings(text: str) -> list[dict[str, Any]]:
         )
         if owner:
             owner = {**owner, "name": owner["name"].replace("(note creator)", "").split(" from ")[0].strip()}
-        sm = _SUMMARY_RE.search(body)
+        summary = meeting.findtext("summary")
         notes.append(
             {
-                "id": m.group("id"),
-                "title": m.group("title"),
-                "created_at": _parse_meeting_date(m.group("date")),
+                "id": meeting.get("id"),
+                "title": meeting.get("title"),
+                "created_at": _parse_meeting_date(meeting.get("date", "")),
                 "owner": owner,
                 "attendees": attendees,
-                "summary_markdown": sm.group(1).strip() if sm else None,
+                "summary_markdown": summary.strip() if summary else None,
             }
         )
     return notes

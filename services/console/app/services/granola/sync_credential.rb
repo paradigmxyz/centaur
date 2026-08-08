@@ -1,6 +1,6 @@
-require "cgi"
 require "date"
 require "json"
+require "nokogiri"
 require "time"
 
 module Granola
@@ -17,9 +17,6 @@ module Granola
     DEFAULT_MAX_NOTES = 50
     WATERMARK_OVERLAP_SECONDS = 5 * 60
 
-    MEETING_RE = /<meeting\s+id="(?<id>[^"]+)"\s+title="(?<title>[^"]*)"\s+date="(?<date>[^"]*)">(?<body>.*?)<\/meeting>/m
-    PARTICIPANTS_RE = /<known_participants>(?<participants>.*?)<\/known_participants>/m
-    SUMMARY_RE = /<summary>(?<summary>.*?)<\/summary>/m
     PARTICIPANT_RE = /(?<name>[^,<]+?)\s*<(?<email>[^>]+)>/
     MCP_DATE_RE = /\A(?<date>\w+ \d+, \d+ \d+:\d+ [AP]M) GMT(?<offset>[+-]\d+)?\z/
 
@@ -85,20 +82,26 @@ module Granola
     end
 
     def sync_notes(checkpoint)
-      meetings = parse_meetings(
-        mcp_tool(
-          "list_meetings",
-          "time_range" => "custom",
-          "custom_start" => range_start(checkpoint),
-          "custom_end" => Time.current.utc.to_date.iso8601
-        )
-      ).first(self.class.max_notes)
+      response = mcp_tool(
+        "list_meetings",
+        "time_range" => "custom",
+        "custom_start" => range_start(checkpoint),
+        "custom_end" => Time.current.utc.to_date.iso8601
+      )
+      document = parse_meeting_document(response)
+      meetings = parse_meetings(document).first(self.class.max_notes)
+      reported_count = document.at_xpath("//meetings_data")&.[]("count").to_i
+      if meetings.empty? && reported_count.positive?
+        raise GranolaApiError, "Granola MCP reported meetings that could not be parsed"
+      end
 
       return [] if meetings.empty?
 
-      details = parse_meetings(
-        mcp_tool("get_meetings", "meeting_ids" => meetings.map { |meeting| meeting.fetch("id") })
-      ).index_by { |meeting| meeting.fetch("id") }
+      details = meetings.each_slice(10).flat_map do |batch|
+        parse_meetings(
+          mcp_tool("get_meetings", "meeting_ids" => batch.map { |meeting| meeting.fetch("id") })
+        )
+      end.index_by { |meeting| meeting.fetch("id") }
 
       meetings.filter_map do |meeting|
         detailed = details.fetch(meeting.fetch("id"), meeting)
@@ -216,28 +219,35 @@ module Granola
     end
 
     def parse_meetings(text)
-      text.to_s.scan(MEETING_RE).filter_map do |id, title, date, body|
-        participants = participant_list(body)
+      document = text.is_a?(Nokogiri::XML::Node) ? text : parse_meeting_document(text)
+      document.xpath("//meeting").filter_map do |meeting|
+        next unless meeting.values_at("id", "title", "date").all?(&:present?)
+
+        participants = participant_list(meeting.at_xpath("./known_participants")&.text)
         owner = participants.find { |participant| participant["name"].include?("(note creator)") } || participants.first || {}
         owner = owner.merge(
           "name" => owner.fetch("name", "").sub("(note creator)", "").split(" from ", 2).first.strip
         ) unless owner.empty?
-        summary_match = body.match(SUMMARY_RE)
         {
-          "id" => CGI.unescapeHTML(id),
-          "title" => CGI.unescapeHTML(title),
-          "date" => CGI.unescapeHTML(date),
+          "id" => meeting["id"],
+          "title" => meeting["title"],
+          "date" => meeting["date"],
           "owner" => owner,
           "attendees" => participants,
-          "summary_markdown" => CGI.unescapeHTML(summary_match&.[](:summary).to_s.strip)
+          "summary_markdown" => meeting.at_xpath("./summary")&.text.to_s.strip
         }
       end
     end
 
-    def participant_list(body)
-      participants = CGI.unescapeHTML(body.match(PARTICIPANTS_RE)&.[](:participants).to_s)
-      participants.scan(PARTICIPANT_RE).map do |name, email|
-        { "name" => CGI.unescapeHTML(name).strip, "email" => email.strip.downcase }
+    def parse_meeting_document(text)
+      Nokogiri::XML("<granola_response>#{text}</granola_response>") { |config| config.strict.nonet }
+    rescue Nokogiri::XML::SyntaxError => error
+      raise GranolaApiError, "Granola MCP returned malformed meeting XML: #{error.message}"
+    end
+
+    def participant_list(text)
+      text.to_s.scan(PARTICIPANT_RE).map do |name, email|
+        { "name" => name.strip, "email" => email.strip.downcase }
       end
     end
 
