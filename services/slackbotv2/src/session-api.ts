@@ -2005,8 +2005,12 @@ async function* parseSessionEventStream(
       continue
     }
     if (event.event === 'session.execution_failed' || event.event === 'session.stream_error') {
+      const failureClass = sessionFailureClass(event)
       yield {
-        data: { error: sessionErrorMessage(event) },
+        data: {
+          error: sessionErrorMessage(event),
+          ...(failureClass ? { failureClass } : {})
+        },
         event: event.event,
         eventId: event.id,
         eventKind: event.event
@@ -2165,6 +2169,19 @@ function sessionEventData(event: ParsedSessionEvent): unknown {
   } catch {
     return event.data
   }
+}
+
+// api-rs stamps a machine-readable failure taxonomy ("quota", "timeout", ...)
+// on session.execution_failed events; surface it so consumers can react (e.g.
+// quota-driven harness fallback) without matching human-readable error prose.
+function sessionFailureClass(event: ParsedSessionEvent): string | undefined {
+  try {
+    const payload = JSON.parse(event.data)
+    if (isJsonObject(payload)) return stringValue(payload.failure_class)
+  } catch {
+    // Non-JSON payloads carry no taxonomy.
+  }
+  return undefined
 }
 
 function sessionErrorMessage(event: ParsedSessionEvent, fallback?: string): string {

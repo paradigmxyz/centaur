@@ -254,6 +254,11 @@ export const slackbotMetrics = {
     labelNames: ['outcome'],
     name: 'slackbotv2_handoff_retries_total'
   }),
+  quotaHarnessFallbacks: counter({
+    help: 'Automatic harness switches after provider quota exhaustion.',
+    labelNames: ['outcome'],
+    name: 'slackbotv2_quota_harness_fallbacks_total'
+  }),
   info: gauge({
     help: 'Static Slackbot v2 service info.',
     name: 'slackbotv2_info'

@@ -63,6 +63,7 @@ const options: SlackbotV2Options = {
   responseMetadataMode: responseMetadataModeEnv('SLACKBOTV2_RESPONSE_METADATA_MODE'),
   responseServiceTierEnabled: booleanEnv('SLACKBOTV2_RESPONSE_SERVICE_TIER_ENABLED', false),
   defaultHarnessType: optionalEnv('SLACKBOTV2_DEFAULT_HARNESS'),
+  quotaFallbackHarness: optionalEnv('SLACKBOTV2_QUOTA_FALLBACK_HARNESS'),
   // Same env vars deployers use to override the sandbox harness model
   // (sandbox.extraEnv); the chart mirrors them here so displayed defaults
   // track the deployment instead of the baked harness config.

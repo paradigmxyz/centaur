@@ -46,6 +46,11 @@ spec:
             # --nanocodex flag run the deployment's default harness.
             - name: SLACKBOTV2_DEFAULT_HARNESS
               value: {{ .Values.sandbox.harnessEngine | quote }}
+            {{- if .Values.slackbotv2.quotaFallbackHarness }}
+            # Automatic harness fallback after provider quota exhaustion.
+            - name: SLACKBOTV2_QUOTA_FALLBACK_HARNESS
+              value: {{ .Values.slackbotv2.quotaFallbackHarness | quote }}
+            {{- end }}
             - name: SLACKBOTV2_CODEX_NANOCODEX_ROLLOUT_PERCENT
               value: {{ .Values.slackbotv2.codexNanocodexRolloutPercent | quote }}
             - name: SLACK_BOT_TOKEN

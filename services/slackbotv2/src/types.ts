@@ -167,6 +167,15 @@ export type SlackbotV2Options = {
   defaultHarnessType?: string
   fetch?: SlackbotV2Fetch
   /**
+   * Harness to restart a thread onto after the active harness fails an
+   * execution with the "quota" failure class (provider credits exhausted),
+   * e.g. "claudecode" to fall back from Codex to Claude Code
+   * (SLACKBOTV2_QUOTA_FALLBACK_HARNESS). The switch is sticky for the
+   * thread, mirrors an explicit --claude/--codex flag, and is attempted at
+   * most once per message. Unset disables automatic fallback.
+   */
+  quotaFallbackHarness?: string
+  /**
    * Deployment-configured default model per harness wire value (claudecode |
    * codex), from the CLAUDE_MODEL / CODEX_MODEL env vars the chart mirrors
    * out of sandbox.extraEnv. Display/metadata only — never forwarded to the
@@ -249,6 +258,11 @@ export type SlackbotV2ThreadState = {
   model?: string | null
   /** Persona pinned by the session API. Null means the thread is pinned without a persona. */
   personaId?: string | null
+  /**
+   * Message id whose quota-exhaustion failure already triggered an automatic
+   * harness fallback, so a fallback that itself fails never loops.
+   */
+  quotaFallbackMessageId?: string | null
   /** Last thread-level model provider selected by Slack flags. Null clears persisted state. */
   provider?: string | null
   renderObligation?: SlackbotV2RenderObligation | null
