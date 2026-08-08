@@ -7869,8 +7869,8 @@ mod tests {
     #[test]
     fn codex_workload_applies_resources_to_session_and_warm_specs() {
         let resources = ResourceRequirements::new()
-            .cpu_request("500m")
-            .memory_limit("4Gi");
+            .request("cpu", "500m")
+            .limit("memory", "4Gi");
         let workload = SandboxWorkloadMode::codex_app_server(
             "centaur-agent:latest",
             Vec::new(),

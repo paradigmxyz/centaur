@@ -904,26 +904,7 @@ fn mount_json(spec: &SandboxSpec) -> (Vec<Value>, Vec<Value>) {
 
 fn resources_json(spec: &SandboxSpec) -> Option<Value> {
     let resources = spec.resources.as_ref()?;
-    let quantities = |cpu: &Option<String>, memory: &Option<String>| {
-        let mut map = serde_json::Map::new();
-        if let Some(cpu) = cpu {
-            map.insert("cpu".to_owned(), json!(cpu));
-        }
-        if let Some(memory) = memory {
-            map.insert("memory".to_owned(), json!(memory));
-        }
-        map
-    };
-    let requests = quantities(&resources.cpu_request, &resources.memory_request);
-    let limits = quantities(&resources.cpu_limit, &resources.memory_limit);
-    let mut out = serde_json::Map::new();
-    if !requests.is_empty() {
-        out.insert("requests".to_owned(), Value::Object(requests));
-    }
-    if !limits.is_empty() {
-        out.insert("limits".to_owned(), Value::Object(limits));
-    }
-    (!out.is_empty()).then_some(Value::Object(out))
+    (!resources.is_empty()).then(|| json!(resources))
 }
 
 fn state_volume_claim_json(state_volume: &StateVolumeConfig) -> Vec<Value> {
@@ -1014,10 +995,12 @@ mod tests {
             ))
             .resources(
                 ResourceRequirements::new()
-                    .cpu_request("250m")
-                    .cpu_limit("500m")
-                    .memory_request("256Mi")
-                    .memory_limit("512Mi"),
+                    .request("cpu", "250m")
+                    .request("memory", "256Mi")
+                    .request("ephemeral-storage", "1Gi")
+                    .limit("cpu", "500m")
+                    .limit("memory", "512Mi")
+                    .limit("example.com/gpu", "1"),
             );
         let config = AgentSandboxConfig::new("centaur")
             .state_volume(StateVolumeConfig::new("/home/agent/state", "10Gi"));
@@ -1053,6 +1036,14 @@ mod tests {
             Some(&quantity("256Mi"))
         );
         assert_eq!(
+            resources
+                .requests
+                .as_ref()
+                .unwrap()
+                .get("ephemeral-storage"),
+            Some(&quantity("1Gi"))
+        );
+        assert_eq!(
             resources.limits.as_ref().unwrap().get("cpu"),
             Some(&quantity("500m"))
         );
@@ -1060,14 +1051,18 @@ mod tests {
             resources.limits.as_ref().unwrap().get("memory"),
             Some(&quantity("512Mi"))
         );
+        assert_eq!(
+            resources.limits.as_ref().unwrap().get("example.com/gpu"),
+            Some(&quantity("1"))
+        );
     }
 
     #[test]
     fn renders_partial_sandbox_resources() {
         let spec = SandboxSpec::new("centaur-agent:latest").resources(
             ResourceRequirements::new()
-                .memory_request("4Gi")
-                .memory_limit("4Gi"),
+                .request("memory", "4Gi")
+                .limit("memory", "4Gi"),
         );
         let config = AgentSandboxConfig::new("centaur");
 

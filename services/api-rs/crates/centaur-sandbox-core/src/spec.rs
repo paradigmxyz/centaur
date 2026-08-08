@@ -1,4 +1,6 @@
-use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -191,14 +193,27 @@ pub enum MountKind {
     Bind { source_path: String },
 }
 
-/// Container resource requests/limits as Kubernetes quantity strings
-/// (`"100m"`, `"4Gi"`).
+/// Container resources in the Kubernetes `ResourceRequirements` shape.
+/// Quantity values are retained as strings and resource names are not limited
+/// to CPU and memory, so extended and ephemeral-storage resources survive the
+/// backend-neutral sandbox boundary.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResourceRequirements {
-    pub cpu_request: Option<String>,
-    pub cpu_limit: Option<String>,
-    pub memory_request: Option<String>,
-    pub memory_limit: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claims: Vec<ResourceClaim>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_quantity_map",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub limits: BTreeMap<String, String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_quantity_map",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub requests: BTreeMap<String, String>,
 }
 
 impl ResourceRequirements {
@@ -206,30 +221,65 @@ impl ResourceRequirements {
         Self::default()
     }
 
-    pub fn cpu_request(mut self, cpu_request: impl Into<String>) -> Self {
-        self.cpu_request = Some(cpu_request.into());
+    pub fn request(mut self, name: impl Into<String>, quantity: impl Into<String>) -> Self {
+        self.requests.insert(name.into(), quantity.into());
         self
     }
 
-    pub fn cpu_limit(mut self, cpu_limit: impl Into<String>) -> Self {
-        self.cpu_limit = Some(cpu_limit.into());
+    pub fn limit(mut self, name: impl Into<String>, quantity: impl Into<String>) -> Self {
+        self.limits.insert(name.into(), quantity.into());
         self
     }
 
-    pub fn memory_request(mut self, memory_request: impl Into<String>) -> Self {
-        self.memory_request = Some(memory_request.into());
-        self
-    }
-
-    pub fn memory_limit(mut self, memory_limit: impl Into<String>) -> Self {
-        self.memory_limit = Some(memory_limit.into());
+    pub fn claim(mut self, name: impl Into<String>, request: Option<String>) -> Self {
+        self.claims.push(ResourceClaim {
+            name: name.into(),
+            request,
+        });
         self
     }
 
     pub fn is_empty(&self) -> bool {
-        self.cpu_request.is_none()
-            && self.cpu_limit.is_none()
-            && self.memory_request.is_none()
-            && self.memory_limit.is_none()
+        self.claims.is_empty() && self.limits.is_empty() && self.requests.is_empty()
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceClaim {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ResourceQuantity {
+    String(String),
+    Signed(i64),
+    Unsigned(u64),
+    Float(f64),
+}
+
+impl ResourceQuantity {
+    fn into_string(self) -> String {
+        match self {
+            Self::String(value) => value,
+            Self::Signed(value) => value.to_string(),
+            Self::Unsigned(value) => value.to_string(),
+            Self::Float(value) => value.to_string(),
+        }
+    }
+}
+
+fn deserialize_quantity_map<'de, D>(deserializer: D) -> Result<BTreeMap<String, String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let quantities = Option::<BTreeMap<String, ResourceQuantity>>::deserialize(deserializer)?
+        .unwrap_or_default();
+    Ok(quantities
+        .into_iter()
+        .map(|(name, quantity)| (name, quantity.into_string()))
+        .collect())
 }

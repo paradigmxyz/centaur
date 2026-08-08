@@ -7,7 +7,7 @@ use centaur_sandbox_core::{
 };
 use k8s_openapi::api::core::v1::{
     Capabilities, Container, ContainerPort, EmptyDirVolumeSource, EnvFromSource,
-    EnvVar as K8sEnvVar, HTTPGetAction, Pod, PodSpec, Probe,
+    EnvVar as K8sEnvVar, HTTPGetAction, Pod, PodSpec, Probe, ResourceClaim as K8sResourceClaim,
     ResourceRequirements as K8sResourceRequirements, SecretEnvSource, SecretVolumeSource,
     SecurityContext, Service, ServicePort, ServiceSpec, Volume, VolumeMount,
 };
@@ -1336,22 +1336,31 @@ fn iron_proxy_container(
 }
 
 fn container_resources(resources: &ResourceRequirements) -> Option<K8sResourceRequirements> {
-    let quantities = |cpu: &Option<String>, memory: &Option<String>| {
-        let mut map = BTreeMap::new();
-        if let Some(cpu) = cpu {
-            map.insert("cpu".to_owned(), Quantity(cpu.clone()));
-        }
-        if let Some(memory) = memory {
-            map.insert("memory".to_owned(), Quantity(memory.clone()));
-        }
-        (!map.is_empty()).then_some(map)
-    };
-    let requests = quantities(&resources.cpu_request, &resources.memory_request);
-    let limits = quantities(&resources.cpu_limit, &resources.memory_limit);
-    (requests.is_some() || limits.is_some()).then(|| K8sResourceRequirements {
-        requests,
-        limits,
-        ..Default::default()
+    (!resources.is_empty()).then(|| K8sResourceRequirements {
+        claims: (!resources.claims.is_empty()).then(|| {
+            resources
+                .claims
+                .iter()
+                .map(|claim| K8sResourceClaim {
+                    name: claim.name.clone(),
+                    request: claim.request.clone(),
+                })
+                .collect()
+        }),
+        limits: (!resources.limits.is_empty()).then(|| {
+            resources
+                .limits
+                .iter()
+                .map(|(name, quantity)| (name.clone(), Quantity(quantity.clone())))
+                .collect()
+        }),
+        requests: (!resources.requests.is_empty()).then(|| {
+            resources
+                .requests
+                .iter()
+                .map(|(name, quantity)| (name.clone(), Quantity(quantity.clone())))
+                .collect()
+        }),
     })
 }
 
@@ -2289,9 +2298,11 @@ mod tests {
         let mut iron_proxy = IronProxyConfig::new("proxy:test", "ca-cert", "ca-key");
         iron_proxy.resources = Some(
             ResourceRequirements::new()
-                .cpu_request("50m")
-                .memory_request("128Mi")
-                .memory_limit("256Mi"),
+                .request("cpu", "50m")
+                .request("memory", "128Mi")
+                .request("ephemeral-storage", "1Gi")
+                .limit("memory", "256Mi")
+                .limit("example.com/gpu", "1"),
         );
         let sync = ProxySyncEnv {
             proxy_id: "iprx_test".to_owned(),
@@ -2317,8 +2328,16 @@ mod tests {
         let requests = resources.requests.as_ref().unwrap();
         assert_eq!(requests.get("cpu"), Some(&Quantity("50m".to_owned())));
         assert_eq!(requests.get("memory"), Some(&Quantity("128Mi".to_owned())));
+        assert_eq!(
+            requests.get("ephemeral-storage"),
+            Some(&Quantity("1Gi".to_owned()))
+        );
         let limits = resources.limits.as_ref().unwrap();
         assert_eq!(limits.get("memory"), Some(&Quantity("256Mi".to_owned())));
+        assert_eq!(
+            limits.get("example.com/gpu"),
+            Some(&Quantity("1".to_owned()))
+        );
         assert!(!limits.contains_key("cpu"));
     }
 

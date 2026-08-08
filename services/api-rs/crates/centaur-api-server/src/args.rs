@@ -557,8 +557,11 @@ struct SandboxArgs {
         value_delimiter = ','
     )]
     image_pull_secrets: Vec<String>,
-    #[command(flatten)]
-    sandbox_resources: SandboxResourceArgs,
+    /// Session sandbox container resources as a JSON Kubernetes
+    /// `ResourceRequirements` object. The chart renders `sandbox.resources`
+    /// into this because api-rs creates these pods at runtime.
+    #[arg(long = "session-sandbox-resources", env = "SESSION_SANDBOX_RESOURCES")]
+    sandbox_resources_json: Option<String>,
     #[arg(
         long = "session-sandbox-ready-timeout-secs",
         alias = "kubernetes-sandbox-ready-timeout-s",
@@ -704,8 +707,10 @@ struct SandboxArgs {
     workflow_host_image: Option<String>,
     #[arg(long = "workflow-host-command", env = "WORKFLOW_HOST_COMMAND")]
     workflow_host_command: Option<String>,
-    #[command(flatten)]
-    workflow_host_resources: WorkflowHostResourceArgs,
+    /// Workflow-host container resources as a JSON Kubernetes
+    /// `ResourceRequirements` object.
+    #[arg(long = "workflow-host-resources", env = "WORKFLOW_HOST_RESOURCES")]
+    workflow_host_resources_json: Option<String>,
     #[arg(long = "kubernetes-workflow-dirs", env = "KUBERNETES_WORKFLOW_DIRS")]
     kubernetes_workflow_dirs: Option<String>,
     #[command(flatten)]
@@ -853,7 +858,10 @@ impl SandboxArgs {
         let mut spec = SandboxSpec::new(image)
             .label("centaur.ai/component", "workflow-run")
             .env("CENTAUR_WORKLOAD", "workflow-host");
-        if let Some(resources) = self.workflow_host_resources.to_resources() {
+        if let Some(resources) = resource_requirements(
+            self.workflow_host_resources_json.as_deref(),
+            "WORKFLOW_HOST_RESOURCES",
+        )? {
             spec = spec.resources(resources);
         }
         spec = match self.backend {
@@ -970,7 +978,10 @@ impl SandboxArgs {
                     self.codex_app_server_env_template()?,
                     self.default_harness.clone(),
                 );
-                if let Some(resources) = self.sandbox_resources.to_resources() {
+                if let Some(resources) = resource_requirements(
+                    self.sandbox_resources_json.as_deref(),
+                    "SESSION_SANDBOX_RESOURCES",
+                )? {
                     workload = workload.resources(resources);
                 }
                 if let Some(repos_path) = clean_optional_value(self.repos_path.as_deref()) {
@@ -1689,8 +1700,13 @@ struct IronProxyArgs {
         value_delimiter = ','
     )]
     upstream_deny_cidrs: Vec<String>,
-    #[command(flatten)]
-    resources: IronProxyResourceArgs,
+    /// Per-sandbox iron-proxy container resources as a JSON Kubernetes
+    /// `ResourceRequirements` object.
+    #[arg(
+        long = "kubernetes-iron-proxy-resources",
+        env = "KUBERNETES_IRON_PROXY_RESOURCES"
+    )]
+    resources_json: Option<String>,
     #[command(flatten)]
     ca: IronProxyCaArgs,
     #[command(flatten)]
@@ -1719,7 +1735,10 @@ impl IronProxyArgs {
         let mut config =
             IronProxyConfig::new(self.image.clone(), ca_cert_secret_name, ca_key_secret_name);
         config.image_pull_policy = self.image_pull_policy.clone();
-        config.resources = self.resources.to_resources();
+        config.resources = resource_requirements(
+            self.resources_json.as_deref(),
+            "KUBERNETES_IRON_PROXY_RESOURCES",
+        )?;
         config.upstream_deny_cidrs = self
             .upstream_deny_cidrs
             .iter()
@@ -1790,115 +1809,19 @@ impl IronProxyArgs {
     }
 }
 
-#[derive(Debug, ClapArgs)]
-struct SandboxResourceArgs {
-    #[arg(
-        long = "session-sandbox-cpu-request",
-        env = "SESSION_SANDBOX_CPU_REQUEST"
-    )]
-    sandbox_cpu_request: Option<String>,
-    #[arg(long = "session-sandbox-cpu-limit", env = "SESSION_SANDBOX_CPU_LIMIT")]
-    sandbox_cpu_limit: Option<String>,
-    #[arg(
-        long = "session-sandbox-memory-request",
-        env = "SESSION_SANDBOX_MEMORY_REQUEST"
-    )]
-    sandbox_memory_request: Option<String>,
-    #[arg(
-        long = "session-sandbox-memory-limit",
-        env = "SESSION_SANDBOX_MEMORY_LIMIT"
-    )]
-    sandbox_memory_limit: Option<String>,
-}
-
-impl SandboxResourceArgs {
-    fn to_resources(&self) -> Option<ResourceRequirements> {
-        resource_requirements(
-            self.sandbox_cpu_request.as_deref(),
-            self.sandbox_cpu_limit.as_deref(),
-            self.sandbox_memory_request.as_deref(),
-            self.sandbox_memory_limit.as_deref(),
-        )
-    }
-}
-
-#[derive(Debug, ClapArgs)]
-struct WorkflowHostResourceArgs {
-    #[arg(long = "workflow-host-cpu-request", env = "WORKFLOW_HOST_CPU_REQUEST")]
-    workflow_host_cpu_request: Option<String>,
-    #[arg(long = "workflow-host-cpu-limit", env = "WORKFLOW_HOST_CPU_LIMIT")]
-    workflow_host_cpu_limit: Option<String>,
-    #[arg(
-        long = "workflow-host-memory-request",
-        env = "WORKFLOW_HOST_MEMORY_REQUEST"
-    )]
-    workflow_host_memory_request: Option<String>,
-    #[arg(
-        long = "workflow-host-memory-limit",
-        env = "WORKFLOW_HOST_MEMORY_LIMIT"
-    )]
-    workflow_host_memory_limit: Option<String>,
-}
-
-impl WorkflowHostResourceArgs {
-    fn to_resources(&self) -> Option<ResourceRequirements> {
-        resource_requirements(
-            self.workflow_host_cpu_request.as_deref(),
-            self.workflow_host_cpu_limit.as_deref(),
-            self.workflow_host_memory_request.as_deref(),
-            self.workflow_host_memory_limit.as_deref(),
-        )
-    }
-}
-
-#[derive(Debug, ClapArgs)]
-struct IronProxyResourceArgs {
-    #[arg(
-        long = "kubernetes-iron-proxy-cpu-request",
-        env = "KUBERNETES_IRON_PROXY_CPU_REQUEST"
-    )]
-    iron_proxy_cpu_request: Option<String>,
-    #[arg(
-        long = "kubernetes-iron-proxy-cpu-limit",
-        env = "KUBERNETES_IRON_PROXY_CPU_LIMIT"
-    )]
-    iron_proxy_cpu_limit: Option<String>,
-    #[arg(
-        long = "kubernetes-iron-proxy-memory-request",
-        env = "KUBERNETES_IRON_PROXY_MEMORY_REQUEST"
-    )]
-    iron_proxy_memory_request: Option<String>,
-    #[arg(
-        long = "kubernetes-iron-proxy-memory-limit",
-        env = "KUBERNETES_IRON_PROXY_MEMORY_LIMIT"
-    )]
-    iron_proxy_memory_limit: Option<String>,
-}
-
-impl IronProxyResourceArgs {
-    fn to_resources(&self) -> Option<ResourceRequirements> {
-        resource_requirements(
-            self.iron_proxy_cpu_request.as_deref(),
-            self.iron_proxy_cpu_limit.as_deref(),
-            self.iron_proxy_memory_request.as_deref(),
-            self.iron_proxy_memory_limit.as_deref(),
-        )
-    }
-}
-
 fn resource_requirements(
-    cpu_request: Option<&str>,
-    cpu_limit: Option<&str>,
-    memory_request: Option<&str>,
-    memory_limit: Option<&str>,
-) -> Option<ResourceRequirements> {
-    let resources = ResourceRequirements {
-        cpu_request: clean_optional_value(cpu_request),
-        cpu_limit: clean_optional_value(cpu_limit),
-        memory_request: clean_optional_value(memory_request),
-        memory_limit: clean_optional_value(memory_limit),
+    raw: Option<&str>,
+    env_name: &str,
+) -> Result<Option<ResourceRequirements>, ServerError> {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return Ok(None);
     };
-    (!resources.is_empty()).then_some(resources)
+    let resources = serde_json::from_str::<ResourceRequirements>(raw).map_err(|error| {
+        ServerError::UnsupportedConfig(format!(
+            "{env_name} must be a JSON Kubernetes ResourceRequirements object: {error}"
+        ))
+    })?;
+    Ok((!resources.is_empty()).then_some(resources))
 }
 
 #[derive(Debug, ClapArgs)]
@@ -3170,23 +3093,19 @@ mod tests {
     }
 
     #[test]
-    fn parses_pod_resource_flags_for_all_managed_pods() {
+    fn parses_pod_resource_json_for_all_managed_pods() {
         let args = Args::try_parse_from([
             "centaur-api-server",
             "--database-url",
             "postgres://postgres:postgres@localhost/centaur",
             "--session-sandbox-workload",
             "codex-app-server",
-            "--session-sandbox-cpu-request",
-            "500m",
-            "--session-sandbox-memory-limit",
-            "4Gi",
-            "--workflow-host-memory-request",
-            "1Gi",
-            "--workflow-host-memory-limit",
-            "1Gi",
-            "--kubernetes-iron-proxy-cpu-request",
-            "50m",
+            "--session-sandbox-resources",
+            r#"{"requests":{"cpu":0.5,"ephemeral-storage":"2Gi"},"limits":{"memory":"4Gi","example.com/gpu":1}}"#,
+            "--workflow-host-resources",
+            r#"{"requests":{"memory":"1Gi"},"limits":{"memory":"1Gi"}}"#,
+            "--kubernetes-iron-proxy-resources",
+            r#"{"requests":{"cpu":"50m"}}"#,
         ])
         .unwrap();
 
@@ -3198,8 +3117,10 @@ mod tests {
             resources,
             Some(
                 ResourceRequirements::new()
-                    .cpu_request("500m")
-                    .memory_limit("4Gi")
+                    .request("cpu", "0.5")
+                    .request("ephemeral-storage", "2Gi")
+                    .limit("memory", "4Gi")
+                    .limit("example.com/gpu", "1")
             )
         );
 
@@ -3208,15 +3129,15 @@ mod tests {
             spec.resources,
             Some(
                 ResourceRequirements::new()
-                    .memory_request("1Gi")
-                    .memory_limit("1Gi")
+                    .request("memory", "1Gi")
+                    .limit("memory", "1Gi")
             )
         );
 
         let proxy = args.sandbox.iron_proxy.to_config().unwrap();
         assert_eq!(
             proxy.resources,
-            Some(ResourceRequirements::new().cpu_request("50m"))
+            Some(ResourceRequirements::new().request("cpu", "50m"))
         );
     }
 
@@ -3228,10 +3149,8 @@ mod tests {
             "postgres://postgres:postgres@localhost/centaur",
             "--session-sandbox-workload",
             "codex-app-server",
-            "--session-sandbox-cpu-request",
+            "--session-sandbox-resources",
             "",
-            "--session-sandbox-memory-limit",
-            " ",
         ])
         .unwrap();
 
@@ -3245,6 +3164,24 @@ mod tests {
             args.sandbox.workflow_host_spec(None).unwrap().resources,
             None
         );
+    }
+
+    #[test]
+    fn rejects_malformed_pod_resource_json() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-workload",
+            "codex-app-server",
+            "--session-sandbox-resources",
+            r#"{"request":{"cpu":"500m"}}"#,
+        ])
+        .unwrap();
+
+        let error = args.sandbox.container_workload_mode().unwrap_err();
+        assert!(error.to_string().contains("SESSION_SANDBOX_RESOURCES"));
+        assert!(error.to_string().contains("unknown field `request`"));
     }
 
     #[test]
