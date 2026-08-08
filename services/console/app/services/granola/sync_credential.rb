@@ -80,7 +80,7 @@ module Granola
       )
       document = parse_meeting_document(response)
       meetings = parse_meetings(document)
-      reported_count = document.at_xpath("//meetings_data")&.[]("count").to_i
+      reported_count = document.at_xpath(".//meetings_data")&.[]("count").to_i
       if meetings.empty? && reported_count.positive?
         raise GranolaApiError, "Granola MCP reported meetings that could not be parsed"
       end
@@ -210,7 +210,7 @@ module Granola
 
     def parse_meetings(text)
       document = text.is_a?(Nokogiri::XML::Node) ? text : parse_meeting_document(text)
-      document.xpath("//meeting").filter_map do |meeting|
+      document.xpath(".//meeting").filter_map do |meeting|
         next unless %w[id title date].all? { |attribute| meeting[attribute].present? }
 
         participants = participant_list(meeting.at_xpath("./known_participants")&.text)
@@ -230,7 +230,7 @@ module Granola
     end
 
     def parse_meeting_document(text)
-      Nokogiri::XML("<granola_response>#{text}</granola_response>") { |config| config.strict.nonet }
+      Nokogiri::XML::DocumentFragment.parse(text.to_s) { |config| config.strict.nonet }
     rescue Nokogiri::XML::SyntaxError => error
       raise GranolaApiError, "Granola MCP returned malformed meeting XML: #{error.message}"
     end
