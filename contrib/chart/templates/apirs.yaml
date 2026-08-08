@@ -339,17 +339,17 @@ spec:
             # Node steering for sandbox + iron-proxy pods. Passed to the control
             # plane rather than templated onto a pod: api-rs creates those pods
             # at runtime, so nothing this chart renders can reach them.
-{{- with .Values.sandbox.nodeSelector }}
+{{- if and .Values.sandbox.nodeSelector (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_NODE_SELECTOR")) }}
             - name: SESSION_SANDBOX_NODE_SELECTOR
-              value: {{ toJson . | quote }}
+              value: {{ toJson .Values.sandbox.nodeSelector | quote }}
 {{- end }}
-{{- with .Values.sandbox.tolerations }}
+{{- if and .Values.sandbox.tolerations (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_TOLERATIONS")) }}
             - name: SESSION_SANDBOX_TOLERATIONS
-              value: {{ toJson . | quote }}
+              value: {{ toJson .Values.sandbox.tolerations | quote }}
 {{- end }}
-{{- with .Values.sandbox.runtimeClassName }}
+{{- if and .Values.sandbox.runtimeClassName (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_RUNTIME_CLASS_NAME")) }}
             - name: SESSION_SANDBOX_RUNTIME_CLASS_NAME
-              value: {{ . | quote }}
+              value: {{ .Values.sandbox.runtimeClassName | quote }}
 {{- end }}
             # Sandboxes call back into this control plane via the in-cluster Service.
             - name: SESSION_SANDBOX_CENTAUR_API_URL
