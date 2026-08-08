@@ -93,7 +93,7 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
         .workflow_host_sandbox_runtime(&iron_control.workflow_host_principal)
         .await?;
     let workflows = Some(
-        WorkflowRuntime::new_with_workflow_host_sandbox_and_principal_registrar(
+        WorkflowRuntime::new(
             store,
             runtime.clone(),
             workflow_host_sandbox,

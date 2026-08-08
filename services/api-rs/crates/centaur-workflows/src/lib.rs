@@ -524,7 +524,7 @@ struct SlackPostResult {
 }
 
 impl WorkflowRuntime {
-    pub async fn new_with_workflow_host_sandbox_and_principal_registrar(
+    pub async fn new(
         store: PgSessionStore,
         session_runtime: SessionRuntime,
         workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
