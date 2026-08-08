@@ -7,20 +7,12 @@ repository.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-async-trait.workspace = true
-axum.workspace = true
-centaur-api-server.workspace = true
-centaur-iron-control.workspace = true
-centaur-sandbox-local.workspace = true
 centaur-session-core.workspace = true
-centaur-session-runtime.workspace = true
-centaur-session-sqlx.workspace = true
-centaur-workflows.workspace = true
 eventsource-stream.workspace = true
 futures-util.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 uuid.workspace = true
 
 [lints]

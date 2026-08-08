@@ -139,6 +139,15 @@ jobs:
       - name: Start Test Postgres
         run: .github/scripts/start-paradedb-postgres.sh centaur-api-test-postgres 5432 centaur
 
+      - name: Install Console packages
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libvips libpq-dev
+
+      - name: Set up Console Ruby
+        uses: ruby/setup-ruby@12fd324f1d0b43274fdc8130f6980590a667c455 # v1.312.0
+        with:
+          working-directory: services/console
+          bundler-cache: true
+
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: stable
@@ -167,8 +176,18 @@ jobs:
         env:
           API_INTEGRATION_WORKFLOW_DIR: ${{ runner.temp }}/api-integration-workflows
           BIND_ADDR: 127.0.0.1:18080
+          CENTAUR_CONSOLE_DB_HOST: 127.0.0.1
+          CENTAUR_CONSOLE_DB_PASSWORD: postgres
+          CENTAUR_CONSOLE_DB_PORT: "5432"
+          CENTAUR_CONSOLE_DB_USERNAME: postgres
+          CENTAUR_CONSOLE_INITIAL_API_KEY: iak_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          CENTAUR_CONSOLE_INITIAL_USER_EMAIL: api-integration@example.com
+          CENTAUR_CONSOLE_INITIAL_USER_PASSWORD: api-integration-password
           CENTAUR_API_URL: http://127.0.0.1:18080
           DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/centaur?sslmode=disable
+          IRON_CONTROL_API_KEY: iak_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          IRON_CONTROL_URL: http://127.0.0.1:18081
+          RAILS_ENV: test
           RUN_MIGRATIONS: "true"
           RUST_LOG: info
           WORKFLOW_DIRS: ${{ runner.temp }}/api-integration-workflows
@@ -179,10 +198,33 @@ jobs:
           mkdir -p "$API_INTEGRATION_WORKFLOW_DIR"
           cargo build --locked -p centaur-api-server -p centaur-api-integration-test
 
-          ./target/debug/centaur-api-integration-test --api-server > "$RUNNER_TEMP/centaur-api-server.log" 2>&1 &
+          pushd ../console
+          bin/rails db:prepare
+          bin/rails runner 'Iron::Bootstrap.run!'
+          bin/rails server --binding 127.0.0.1 --port 18081 > "$RUNNER_TEMP/iron-control.log" 2>&1 &
+          iron_control_pid="$!"
+          echo "$iron_control_pid" > "$RUNNER_TEMP/iron-control.pid"
+          popd
+
+          for attempt in {1..120}; do
+            if curl --fail --silent "$IRON_CONTROL_URL/up" > /dev/null; then
+              break
+            fi
+            if ! kill -0 "$iron_control_pid" 2>/dev/null; then
+              cat "$RUNNER_TEMP/iron-control.log"
+              exit 1
+            fi
+            if [[ "$attempt" == "120" ]]; then
+              cat "$RUNNER_TEMP/iron-control.log"
+              exit 1
+            fi
+            sleep 0.25
+          done
+
+          ./target/debug/centaur-api-server > "$RUNNER_TEMP/centaur-api-server.log" 2>&1 &
           api_pid="$!"
           echo "$api_pid" > "$RUNNER_TEMP/centaur-api-server.pid"
-          trap 'kill "$api_pid" 2>/dev/null || true' EXIT
+          trap 'kill "$api_pid" "$iron_control_pid" 2>/dev/null || true' EXIT
 
           ./target/debug/centaur-api-integration-test
 
@@ -190,6 +232,7 @@ jobs:
         if: ${{ failure() }}
         run: |
           cat "$RUNNER_TEMP/centaur-api-server.log" || true
+          cat "$RUNNER_TEMP/iron-control.log" || true
           docker logs centaur-api-test-postgres || true
 
       - name: Cleanup API integration test dependencies
@@ -197,6 +240,9 @@ jobs:
         run: |
           if [ -f "$RUNNER_TEMP/centaur-api-server.pid" ]; then
             kill "$(cat "$RUNNER_TEMP/centaur-api-server.pid")" 2>/dev/null || true
+          fi
+          if [ -f "$RUNNER_TEMP/iron-control.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/iron-control.pid")" 2>/dev/null || true
           fi
           docker rm -f centaur-api-test-postgres || true
 

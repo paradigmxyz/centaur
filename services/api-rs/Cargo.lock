@@ -860,15 +860,7 @@ name = "centaur-api-integration-test"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
- "axum",
- "centaur-api-server",
- "centaur-iron-control",
- "centaur-sandbox-local",
  "centaur-session-core",
- "centaur-session-runtime",
- "centaur-session-sqlx",
- "centaur-workflows",
  "eventsource-stream",
  "futures-util",
  "reqwest",
