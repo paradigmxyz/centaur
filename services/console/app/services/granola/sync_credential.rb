@@ -243,23 +243,11 @@ module Granola
     end
 
     def participant_list(text)
-      remaining = text.to_s
-      participants = []
-
-      loop do
-        email_start = remaining.index("<")
-        break unless email_start
-
-        email_end = remaining.index(">", email_start + 1)
-        break unless email_end
-
-        name = remaining[...email_start].strip.delete_prefix(",").strip
-        email = remaining[(email_start + 1)...email_end].strip.downcase
-        participants << { "name" => name, "email" => email } if name.present? && email.present?
-        remaining = remaining[(email_end + 1)..]
+      Nokogiri::HTML5.fragment(text.to_s).css("*").filter_map do |email_node|
+        name = email_node.previous_sibling&.text.to_s.strip.delete_prefix(",").strip
+        email = email_node.name.downcase
+        { "name" => name, "email" => email } if name.present? && email.present?
       end
-
-      participants
     end
 
     def parse_mcp_date(value)
