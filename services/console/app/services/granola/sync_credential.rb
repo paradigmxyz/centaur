@@ -10,11 +10,6 @@ module Granola
   class SyncCredential
     MCP_URL = "https://mcp.granola.ai/mcp"
     DEFAULT_INITIAL_LOOKBACK_DAYS = 365
-    # The MCP service currently advertises an average limit of about 100
-    # requests/minute. One run issues a list call, a batched detail call, and
-    # at most one transcript call per note, so fifty keeps a normal run well
-    # inside that envelope.
-    DEFAULT_MAX_NOTES = 50
     WATERMARK_OVERLAP_SECONDS = 5 * 60
 
     PARTICIPANT_RE = /(?<name>[^,<]+?)\s*<(?<email>[^>]+)>/
@@ -36,10 +31,6 @@ module Granola
 
       def initial_lookback_days
         positive_int(ConsoleEnv["GRANOLA_SYNC_INITIAL_LOOKBACK_DAYS"], DEFAULT_INITIAL_LOOKBACK_DAYS)
-      end
-
-      def max_notes
-        positive_int(ConsoleEnv["GRANOLA_SYNC_MAX_NOTES"], DEFAULT_MAX_NOTES)
       end
 
       def positive_int(value, default)
@@ -88,7 +79,7 @@ module Granola
         "custom_end" => Time.current.utc.to_date.iso8601
       )
       document = parse_meeting_document(response)
-      meetings = parse_meetings(document).first(self.class.max_notes)
+      meetings = parse_meetings(document)
       reported_count = document.at_xpath("//meetings_data")&.[]("count").to_i
       if meetings.empty? && reported_count.positive?
         raise GranolaApiError, "Granola MCP reported meetings that could not be parsed"

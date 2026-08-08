@@ -161,9 +161,9 @@ module Granola
       assert_nil api_client.batches.fetch(0)[:checkpoint][:watermark_time]
     end
 
-    test "fetches meeting details in batches of ten" do
+    test "fetches all meeting details in batches of ten" do
       api_client = FakeApiClient.new
-      meetings = 11.times.map { |index| meeting_xml(id: "meeting-#{index}") }
+      meetings = 51.times.map { |index| meeting_xml(id: "meeting-#{index}") }
       detail_batches = []
       mcp_http = lambda do |tool:, arguments: {}, **|
         case tool
@@ -184,8 +184,8 @@ module Granola
 
       SyncCredential.new(credential, api_client: api_client, mcp_http: mcp_http).call
 
-      assert_equal [ 10, 1 ], detail_batches.map(&:length)
-      assert_equal 11, api_client.batches.fetch(0)[:notes].length
+      assert_equal [ 10, 10, 10, 10, 10, 1 ], detail_batches.map(&:length)
+      assert_equal 51, api_client.batches.fetch(0)[:notes].length
     end
 
     test "includes MCP tool error content in the raised error" do
