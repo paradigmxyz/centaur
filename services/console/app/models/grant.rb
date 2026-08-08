@@ -50,11 +50,11 @@ class Grant < ApplicationRecord
 
   private
 
-  def sync_config_affected_principal_ids
-    ids = []
-    ids << principal_id if principal_id.present?
-    ids += PrincipalRole.where(role_id: role_id).pluck(:principal_id) if role_id.present?
-    ids
+  def sync_config_affected_principals
+    return Principal.where(id: principal_id) if principal_id.present?
+    return Principal.where(id: PrincipalRole.where(role_id: role_id).select(:principal_id)) if role_id.present?
+
+    Principal.none
   end
 
   # A grant left without an explicit priority defaults by grantee: direct grants

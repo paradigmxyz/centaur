@@ -79,7 +79,7 @@ class PgDsnSecret < ApplicationRecord
   end
 
   validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
-  validates :foreign_id, presence: true, uniqueness: { scope: :namespace },
+  validates :foreign_id, presence: true, uniqueness: true,
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
   validates :database, presence: true
   validate :labels_is_a_hash
@@ -102,7 +102,13 @@ class PgDsnSecret < ApplicationRecord
     return (setting["value"] || setting[:value]).to_s unless ref.is_a?(Hash)
 
     label = ref["principal_label"] || ref[:principal_label]
-    return principal&.labels&.fetch(label.to_s, "").to_s if label.present?
+    if label.present?
+      if PrincipalIdentityLabels.promoted?(principal, label)
+        return PrincipalIdentityLabels.value(principal, label).to_s
+      end
+
+      return principal&.labels&.fetch(label.to_s, "").to_s
+    end
 
     proxy_label = ref["proxy_label"] || ref[:proxy_label]
     return proxy&.labels&.fetch(proxy_label.to_s, "").to_s if proxy_label.present?

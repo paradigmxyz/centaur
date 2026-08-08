@@ -11,7 +11,8 @@ use std::path::PathBuf;
 
 use centaur_iron_control::{
     BrokerCredentialInput, Grant, GrantSecret, Grantee, IdentityInput, IronControlClient,
-    IronControlError, Role, RoleSpec, SECRET_TYPES, grant_inputs_to_role, managed_labels,
+    IronControlError, PrincipalInput, Role, RoleSpec, SECRET_TYPES, grant_inputs_to_role,
+    managed_labels,
 };
 use centaur_iron_proxy::SourcePolicy;
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -1026,7 +1027,7 @@ fn parse_kv(raw: &str, flag: &str) -> Result<(String, String)> {
 /// Ensure the principal exists, returning its OID. Looks it up first so an
 /// existing principal (e.g. one a session created) is never clobbered; creates
 /// it only when absent.
-async fn ensure_principal(client: &IronControlClient, identity: &IdentityInput) -> Result<String> {
+async fn ensure_principal(client: &IronControlClient, identity: &PrincipalInput) -> Result<String> {
     match client
         .get_principal(&identity.namespace, &identity.foreign_id)
         .await

@@ -1,5 +1,4 @@
 {{- $console := include "centaur.consoleValues" . | fromYaml }}
-{{- if $console.enabled }}
 {{- $secretEnv := include "centaur.secretEnvName" . }}
 {{- $prefix := .Values.secretManager.envPrefix }}
 {{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") }}
@@ -216,5 +215,4 @@ spec:
         - protocol: TCP
           port: 443
     # DNS egress is provided by the namespace-wide allow-dns policy.
-{{- end }}
 {{- end }}

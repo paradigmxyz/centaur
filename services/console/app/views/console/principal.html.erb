@@ -21,9 +21,10 @@
       <span class="text-zinc-400">foreign_id: <span class="text-zinc-200"><%= @principal.foreign_id %></span></span>
     <% end %>
   </div>
-  <% if @principal.labels.present? %>
+  <% display_labels = @principal.labels_with_sandbox_capabilities %>
+  <% if display_labels.present? %>
     <div class="mt-3 flex flex-wrap gap-1">
-      <% @principal.labels.each do |k, v| %>
+      <% display_labels.each do |k, v| %>
         <span class="label-chip"><%= k %>=<%= v %></span>
       <% end %>
     </div>

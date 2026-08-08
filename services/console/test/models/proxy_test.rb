@@ -138,20 +138,28 @@ class ProxyTest < ActiveSupport::TestCase
   test "config_hash changes when a pg_dsn grant is added" do
     proxy = Proxy.create!(name: "pg-hashing", principal: principals(:globex_user))
     before = proxy.config_hash
-    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob) do
-      Grant.create!(principal: proxy.principal, pg_dsn_secret: pg_dsn_secrets(:acme_analytics_pg),
-                    created_by: users(:globex_admin))
+    Grant.create!(principal: proxy.principal, pg_dsn_secret: pg_dsn_secrets(:acme_analytics_pg),
+                  created_by: users(:globex_admin))
+
+    assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ proxy.principal.id ]) do
+      assert_equal before, proxy.reload.config_hash
     end
+
+    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob)
     refute_equal before, proxy.reload.config_hash
   end
 
   test "config_hash changes when a transform grant is added" do
     proxy = Proxy.create!(name: "hashing", principal: principals(:globex_user))
     before = proxy.config_hash
-    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob) do
-      Grant.create!(principal: proxy.principal, gcp_auth_secret: gcp_auth_secrets(:acme_bigquery),
-                    created_by: users(:globex_admin))
+    Grant.create!(principal: proxy.principal, gcp_auth_secret: gcp_auth_secrets(:acme_bigquery),
+                  created_by: users(:globex_admin))
+
+    assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ proxy.principal.id ]) do
+      assert_equal before, proxy.reload.config_hash
     end
+
+    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob)
     refute_equal before, proxy.reload.config_hash
   end
 
@@ -159,11 +167,15 @@ class ProxyTest < ActiveSupport::TestCase
     role = Role.create!(namespace: "acme", foreign_id: "extra", created_by: users(:acme_admin))
     proxy = proxies(:acme_proxy)
     before = proxy.config_hash
-    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob) do
-      Grant.create!(role: role, gcp_auth_secret: gcp_auth_secrets(:acme_bigquery),
-                    created_by: users(:acme_admin))
-      principals(:acme_channel).principal_roles.create!(role: role)
+    Grant.create!(role: role, gcp_auth_secret: gcp_auth_secrets(:acme_bigquery),
+                  created_by: users(:acme_admin))
+    principals(:acme_channel).principal_roles.create!(role: role)
+
+    assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ proxy.principal.id ]) do
+      assert_equal before, proxy.reload.config_hash
     end
+
+    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob)
     refute_equal before, proxy.reload.config_hash
   end
 end

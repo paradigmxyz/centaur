@@ -1,6 +1,6 @@
 [project]
 name = "attio"
-description = "Attio CRM — objects, records, lists, notes, tasks"
+description = "Attio CRM — objects, records, lists, notes, files, tasks"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [

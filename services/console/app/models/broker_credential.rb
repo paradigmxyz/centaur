@@ -77,7 +77,7 @@ class BrokerCredential < ApplicationRecord
 
   validates :grant, inclusion: { in: GRANTS, message: "must be one of #{GRANTS.join(", ")}" }
   validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
-  validates :foreign_id, uniqueness: { scope: :namespace, allow_nil: true },
+  validates :foreign_id, uniqueness: { allow_nil: true },
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }, allow_nil: true
   validates :token_endpoint, presence: true
   # client_id is sourced from the linked OauthApp for flow-minted credentials, so
@@ -234,11 +234,11 @@ class BrokerCredential < ApplicationRecord
   end
 
   def bump_referencing_principal_sync_config_versions
-    ids = SecretSource.referencing_broker_credential(self).flat_map do |source|
+    scopes = SecretSource.referencing_broker_credential(self).filter_map do |source|
       owner = source.sync_config_owner
-      owner ? Principal.effective_grantee_ids_for_grantable(owner) : []
+      Principal.effective_grantees_for_grantable(owner) if owner
     end
-    Principal.bump_sync_config_cache_versions(ids)
+    Principal.bump_sync_config_cache_versions(Principal.combine_scopes(scopes))
   end
 
   def labels_is_a_hash

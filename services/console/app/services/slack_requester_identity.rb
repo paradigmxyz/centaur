@@ -1,7 +1,3 @@
-require "json"
-require "net/http"
-require "uri"
-
 # Resolves a Console user's GitHub handle through the same authoritative source
 # as slackbotv2: the GitHub custom field on the human requester's Slack profile.
 class SlackRequesterIdentity
@@ -21,9 +17,10 @@ class SlackRequesterIdentity
       Result.new(handle: nil, source: nil, reason: "no GitHub custom field found on Slack profile")
   end
 
-  def initialize(token:, api_url:)
+  def initialize(token:, api_url:, api: nil)
     @token = token
     @api_url = api_url.to_s.delete_suffix("/")
+    @api = api || HttpClient.new
   end
 
   def resolve(user_id)
@@ -39,14 +36,11 @@ class SlackRequesterIdentity
   private
 
   def slack_get(method, params)
-    uri = URI("#{@api_url}/#{method}")
-    uri.query = URI.encode_www_form(params)
-    request = Net::HTTP::Get.new(uri)
-    request["Authorization"] = "Bearer #{@token}"
-    request["Accept"] = "application/json"
-    response = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == "https",
-                               open_timeout: 2, read_timeout: 5) { |http| http.request(request) }
-    JSON.parse(response.body)
+    @api.get(
+      "#{@api_url}/#{method}",
+      params: params,
+      headers: { "Authorization" => "Bearer #{@token}" }
+    ).json
   end
 
   def github_field(profile)

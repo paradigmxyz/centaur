@@ -1,5 +1,4 @@
 {{- $console := include "centaur.consoleValues" . | fromYaml }}
-{{- if $console.enabled }}
 {{- $secretEnv := include "centaur.secretEnvName" . }}
 {{- $prefix := .Values.secretManager.envPrefix }}
 {{- $dbName := $console.database.name }}
@@ -348,5 +347,4 @@ spec:
     - ports:
         - protocol: TCP
           port: 443
-{{- end }}
 {{- end }}

@@ -5,7 +5,6 @@
     "consoleConfig": {
       "type": "object",
       "properties": {
-        "enabled": { "type": "boolean" },
         "replicaCount": { "type": "integer" },
         "publicUrl": { "type": "string" },
         "railsEnv": { "type": "string" },
@@ -165,6 +164,8 @@
     "sandbox": {
       "type": "object",
       "properties": {
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
         "runtimeClassName": { "type": "string" },
         "reposPath": { "type": "string" },
         "resources": { "type": "object" }
@@ -337,6 +338,15 @@
                 "maxWindowSeconds": { "type": "integer" },
                 "batchSize": { "type": "integer", "minimum": 1 }
               }
+            },
+            "companyContextEmbeddings": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "intervalSeconds": { "type": "integer", "minimum": 1 },
+                "batchSize": { "type": "integer", "minimum": 1 },
+                "model": { "type": "string", "minLength": 1 }
+              }
             }
           }
         },
@@ -361,6 +371,11 @@
       "type": "object",
       "properties": {
         "mcpPublicUrl": { "type": "string" },
+        "responseMetadataMode": {
+          "type": "string",
+          "enum": ["first", "always", "never"]
+        },
+        "responseServiceTierEnabled": { "type": "boolean" },
         "metrics": {
           "type": "object",
           "properties": {

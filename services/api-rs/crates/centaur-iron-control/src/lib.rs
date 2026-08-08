@@ -21,8 +21,8 @@ pub use models::{
     EffectivePgDsn, EffectiveReplace, EffectiveSecret, GCP_ID_TOKEN_ALLOWED_HEADERS,
     GcpAuthSecretInput, GcpIdTokenSecretInput, Grant, GrantSecret, Grantee, HmacSecretHeader,
     HmacSecretInput, IdentityInput, InjectConfig, OAuthTokenSecretInput, PgDsnSecretInput,
-    PgDsnSettingInput, PgDsnSettingValueFromInput, Principal, Proxy, ProxyInput, ReplaceConfig,
-    RequestRule, Role, SECRET_TYPES, SecretRecord, SecretSource, StaticSecretInput,
+    PgDsnSettingInput, PgDsnSettingValueFromInput, Principal, PrincipalInput, Proxy, ProxyInput,
+    ReplaceConfig, RequestRule, Role, SECRET_TYPES, SecretRecord, SecretSource, StaticSecretInput,
     normalize_gcp_id_token_header,
 };
 pub use principal::{PrincipalRef, derive_principal};

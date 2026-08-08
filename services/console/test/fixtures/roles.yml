@@ -1,6 +1,15 @@
+default_infra:
+  namespace: default
+  foreign_id: infra
+  name: Infra
+  labels:
+    managed-by: centaur
+  assign_by_default: true
+  created_by: acme_admin
+
 acme_infra:
   namespace: acme
-  foreign_id: infra
+  foreign_id: acme-infra
   name: Infra
   labels:
     kind: shared
@@ -16,6 +25,6 @@ acme_admin_role:
 
 globex_infra:
   namespace: globex
-  foreign_id: infra
+  foreign_id: globex-infra
   name: Infra
   created_by: globex_admin

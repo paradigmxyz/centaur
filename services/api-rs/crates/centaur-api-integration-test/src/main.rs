@@ -70,6 +70,14 @@ async fn main() -> Result<()> {
     let line = line!() + 1;
     record_result(
         &mut results,
+        "Python workflows call agent turns and durable context methods",
+        line,
+        test_python_workflow_durable_methods(&http, &base_url).await,
+    );
+
+    let line = line!() + 1;
+    record_result(
+        &mut results,
         "Metrics expose API request counters",
         line,
         test_metrics(&http, &base_url).await,
@@ -501,6 +509,7 @@ async fn test_workflows_api(http: &HttpClient, base_url: &str) -> Result<()> {
     let sentinel_name = format!("api_integration_sentinel_{unique}");
     let workflow_name = format!("api_integration_workflow_{unique}");
     let workflow_path = workflow_dir.join(format!("{workflow_name}.py"));
+    let workflow_started_path = workflow_dir.join(format!("{workflow_name}.started"));
 
     write_sentinel_workflow(&workflow_dir, &sentinel_name)?;
     write_test_workflow(&workflow_path, &workflow_name)?;
@@ -541,13 +550,16 @@ async fn test_workflows_api(http: &HttpClient, base_url: &str) -> Result<()> {
         json!({
             "case": "removed-workflow-run",
             "sleep_ms": 60_000,
+            "started_path": workflow_started_path,
         }),
     )
     .await
     .context("create long-running workflow run")?;
-    wait_for_workflow_run_status(http, base_url, &removed_run_id, &["running"])
+    // The queue marks a run as running before the Python host has loaded its
+    // module. Wait for handler entry so removing the file cannot race loading.
+    wait_for_workflow_handler_start(http, base_url, &removed_run_id, &workflow_started_path)
         .await
-        .context("wait for long-running workflow run to start")?;
+        .context("wait for long-running workflow handler to start")?;
 
     fs::remove_file(&workflow_path)
         .with_context(|| format!("remove workflow file {}", workflow_path.display()))?;
@@ -558,6 +570,105 @@ async fn test_workflows_api(http: &HttpClient, base_url: &str) -> Result<()> {
     wait_for_workflow_run_status(http, base_url, &removed_run_id, &["cancelled"])
         .await
         .context("wait for removed workflow run to be cancelled")?;
+
+    Ok(())
+}
+
+async fn test_python_workflow_durable_methods(http: &HttpClient, base_url: &str) -> Result<()> {
+    let workflow_dir = integration_workflow_dir()?;
+    fs::create_dir_all(&workflow_dir)
+        .with_context(|| format!("create workflow dir {}", workflow_dir.display()))?;
+
+    let unique = Uuid::new_v4().simple().to_string();
+    let workflow_name = format!("api_integration_durable_{unique}");
+    let child_workflow_name = format!("api_integration_child_{unique}");
+    let correlation_id = format!("api-integration-event-{unique}");
+    let workflow_path = workflow_dir.join(format!("{workflow_name}.py"));
+    let child_workflow_path = workflow_dir.join(format!("{child_workflow_name}.py"));
+
+    write_child_workflow(&child_workflow_path, &child_workflow_name)?;
+    write_durable_context_workflow(&workflow_path, &workflow_name)?;
+
+    wait_for_workflow_schedule(http, base_url, &workflow_name, true)
+        .await
+        .context("wait for durable context workflow to be discovered")?;
+
+    let run_id = create_workflow_run(
+        http,
+        base_url,
+        &workflow_name,
+        json!({
+            "child_workflow_name": child_workflow_name,
+            "correlation_id": correlation_id,
+            "model": TEST_MODEL,
+        }),
+    )
+    .await
+    .context("create durable context workflow run")?;
+
+    post_json_ok(
+        http,
+        format!("{base_url}/api/workflows/events"),
+        json!({
+            "event_type": "integration_test",
+            "correlation_id": correlation_id,
+            "payload": {"approved": true},
+        }),
+    )
+    .await
+    .context("emit durable workflow event")?;
+
+    let completed_run = wait_for_workflow_run_status(http, base_url, &run_id, &["completed"])
+        .await
+        .context("wait for durable context workflow completion")?;
+    let output = completed_run
+        .pointer("/result/output")
+        .context("durable context workflow missing result output")?;
+
+    let checkpoint_host = output
+        .pointer("/checkpoint/host_instance_id")
+        .and_then(Value::as_str)
+        .context("durable step output missing host instance id")?;
+    let result_host = output
+        .get("result_host_instance_id")
+        .and_then(Value::as_str)
+        .context("workflow output missing result host instance id")?;
+    if checkpoint_host == result_host {
+        bail!("checkpointed step was recomputed after durable sleep instead of replayed: {output}");
+    }
+    if output.pointer("/event/approved").and_then(Value::as_bool) != Some(true) {
+        bail!("workflow did not receive the durable event: {output}");
+    }
+    if output.pointer("/agent/status").and_then(Value::as_str) != Some("completed") {
+        bail!("workflow agent turn did not complete: {output}");
+    }
+    let result_text = output
+        .pointer("/agent/result_text")
+        .and_then(Value::as_str)
+        .context("workflow agent turn missing result text")?;
+    if !result_text.contains("PONG")
+        || !result_text.contains(&format!("model={TEST_MODEL}"))
+        || !result_text.contains("harness=codex")
+    {
+        bail!("workflow agent turn returned unexpected output: {result_text:?}");
+    }
+    if output.pointer("/child/created").and_then(Value::as_bool) != Some(true) {
+        bail!("workflow did not create its durable child: {output}");
+    }
+    let child_run_id = output
+        .pointer("/child/run_id")
+        .and_then(Value::as_str)
+        .context("durable child result missing run id")?;
+    let child_run = wait_for_workflow_run_status(http, base_url, child_run_id, &["completed"])
+        .await
+        .context("wait for durable child workflow completion")?;
+    if child_run
+        .pointer("/result/output/received/from_parent")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        bail!("durable child workflow did not receive parent input: {child_run}");
+    }
 
     Ok(())
 }
@@ -590,6 +701,7 @@ fn write_test_workflow(path: &Path, workflow_name: &str) -> Result<()> {
     let source = format!(
         r#"
 import asyncio
+from pathlib import Path
 
 WORKFLOW_NAME = "{workflow_name}"
 SCHEDULE = {{
@@ -602,6 +714,9 @@ SCHEDULE = {{
 
 
 async def handler(params, ctx):
+    started_path = params.get("started_path")
+    if started_path:
+        Path(started_path).touch()
     sleep_ms = int(params.get("sleep_ms") or 0)
     if sleep_ms:
         await asyncio.sleep(sleep_ms / 1000)
@@ -614,6 +729,71 @@ async def handler(params, ctx):
 "#
     );
     fs::write(path, source).with_context(|| format!("write test workflow {}", path.display()))
+}
+
+fn write_child_workflow(path: &Path, workflow_name: &str) -> Result<()> {
+    let source = format!(
+        r#"
+WORKFLOW_NAME = "{workflow_name}"
+
+
+async def handler(params, ctx):
+    return {{"workflow_name": ctx.workflow_name, "received": params}}
+"#
+    );
+    fs::write(path, source).with_context(|| format!("write child workflow {}", path.display()))
+}
+
+fn write_durable_context_workflow(path: &Path, workflow_name: &str) -> Result<()> {
+    let source = format!(
+        r#"
+import uuid
+
+WORKFLOW_NAME = "{workflow_name}"
+HOST_INSTANCE_ID = uuid.uuid4().hex
+SCHEDULE = {{
+    "schedule_id": "{workflow_name}",
+    "interval_seconds": 3600,
+    "enabled": True,
+    "no_delivery": True,
+    "input": {{"source": "centaur-api-integration-test"}},
+}}
+
+
+async def handler(params, ctx):
+    checkpoint = await ctx.step(
+        "checkpoint_before_sleep",
+        lambda: {{"host_instance_id": HOST_INSTANCE_ID}},
+    )
+    await ctx.sleep("durable_sleep", 0.05)
+    event = await ctx.wait_for_event(
+        "durable_event",
+        "integration_test",
+        params["correlation_id"],
+        timeout=10,
+    )
+    agent = await ctx.agent_turn(
+        "Reply with PONG, the model, and the harness.",
+        model=params["model"],
+        idle_timeout_ms=5_000,
+        max_duration_ms=15_000,
+    )
+    child = await ctx.start_workflow(
+        params["child_workflow_name"],
+        {{"from_parent": True}},
+        idempotency_key=f"{{ctx.run_id}}:child",
+    )
+    return {{
+        "checkpoint": checkpoint,
+        "result_host_instance_id": HOST_INSTANCE_ID,
+        "event": event,
+        "agent": agent,
+        "child": child,
+    }}
+"#
+    );
+    fs::write(path, source)
+        .with_context(|| format!("write durable context workflow {}", path.display()))
 }
 
 async fn create_workflow_run(
@@ -683,6 +863,41 @@ async fn wait_for_workflow_run_status(
         "workflow run {run_id} did not reach one of {:?} before timeout; last run: {last_run}",
         expected_statuses
     )
+}
+
+async fn wait_for_workflow_handler_start(
+    http: &HttpClient,
+    base_url: &str,
+    run_id: &str,
+    started_path: &Path,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(25);
+    let mut last_run = Value::Null;
+
+    while Instant::now() < deadline {
+        if started_path.is_file() {
+            return Ok(());
+        }
+
+        let body = get_json_ok(http, format!("{base_url}/api/workflows/runs/{run_id}")).await?;
+        let run = body
+            .get("run")
+            .cloned()
+            .context("workflow run response missing run")?;
+        let status = run
+            .get("status")
+            .and_then(Value::as_str)
+            .context("workflow run missing status")?;
+        if matches!(status, "completed" | "failed" | "cancelled") {
+            bail!(
+                "workflow run {run_id} reached terminal status {status} before its handler started: {run}"
+            );
+        }
+        last_run = run;
+        sleep(Duration::from_millis(250)).await;
+    }
+
+    bail!("workflow run {run_id} handler did not start before timeout; last run: {last_run}")
 }
 
 async fn wait_for_workflow_schedule(

@@ -6,7 +6,7 @@ class SystemSettingTest < ActiveSupport::TestCase
   end
 
   test "defaults enable all sandbox capabilities" do
-    SystemSetting.delete_all
+    SystemSetting.destroy_all
 
     settings = SystemSetting.current
 

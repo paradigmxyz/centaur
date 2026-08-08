@@ -1830,6 +1830,15 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
                   console_threads_path(thread: thread_key)
   end
 
+  test "sidebar keeps an already-open thread selected on plain click" do
+    get console_threads_url(thread: "console:sidebar-active")
+
+    assert_response :ok
+    assert_includes response.body, "if (isOpen && !modified) {"
+    assert_includes response.body, "event.preventDefault();"
+    assert_includes response.body, "event.stopPropagation();"
+  end
+
   # The sidebar list loads out of band via a lazy Turbo Frame, so the page must
   # forward the current thread selection on the frame src for the active
   # highlight to render.
@@ -1916,16 +1925,6 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     yield client
   ensure
     Console::ThreadsController.client_factory = original_factory
-  end
-
-  # Sets each env var for the block (nil deletes) and restores the previous
-  # values afterwards.
-  def with_env(overrides)
-    previous = overrides.keys.index_with { |name| ENV[name] }
-    overrides.each { |name, value| value.nil? ? ENV.delete(name) : ENV[name] = value }
-    yield
-  ensure
-    previous.each { |name, value| value.nil? ? ENV.delete(name) : ENV[name] = value }
   end
 
   def with_recent_first_error

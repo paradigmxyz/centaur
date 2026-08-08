@@ -582,8 +582,9 @@ module ApplicationHelper
     text = text.gsub(/(?<!\*)\*([^*\n]+)\*(?!\*)/, '<em>\1</em>')
     text = text.gsub(/(?<!_)_([^_\n]+)_(?!_)/, '<em>\1</em>')
 
-    placeholders.each_with_index do |html, offset|
-      text = text.gsub(markdown_token(offset), html)
+    text = text.gsub(/%%MDPH(\d+)%%/) do |token|
+      offset = token.delete_prefix("%%MDPH").delete_suffix("%%").to_i
+      placeholders[offset] || token
     end
 
     text

@@ -1,9 +1,7 @@
 require "cgi"
 require "date"
 require "json"
-require "net/http"
 require "time"
-require "uri"
 
 module Granola
   # Syncs one user's connected Granola MCP account. This runs in the console so
@@ -315,24 +313,22 @@ module Granola
 
     def mcp_request(method, params, session_id: nil, notification: false)
       @rpc_id += 1 unless notification
-      uri = URI.parse(MCP_URL)
-      request = Net::HTTP::Post.new(uri)
-      request["Authorization"] = "Bearer #{@credential.access_token}"
-      request["Content-Type"] = "application/json"
-      request["Accept"] = "application/json, text/event-stream"
-      request["MCP-Protocol-Version"] = "2025-03-26" if session_id.present?
-      request["MCP-Session-Id"] = session_id if session_id.present?
+      headers = {
+        "Authorization" => "Bearer #{@credential.access_token}",
+        "Accept" => "application/json, text/event-stream"
+      }
+      headers["MCP-Protocol-Version"] = "2025-03-26" if session_id.present?
+      headers["MCP-Session-Id"] = session_id if session_id.present?
       payload = { jsonrpc: "2.0", method: method, params: params }
       payload[:id] = @rpc_id unless notification
-      request.body = payload.to_json
 
-      http = Net::HTTP.new(uri.host, uri.port)
-      http.use_ssl = true
-      http.open_timeout = 30
-      http.read_timeout = 60
-      response = http.request(request)
-      unless response.code.to_i.between?(200, 299)
-        raise GranolaApiError, "Granola MCP returned HTTP #{response.code}"
+      response = HttpClient.new(open_timeout: 30, read_timeout: 60).post(
+        MCP_URL,
+        json: payload,
+        headers: headers
+      )
+      unless response.success?
+        raise GranolaApiError, "Granola MCP returned HTTP #{response.status}"
       end
 
       response

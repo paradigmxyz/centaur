@@ -75,7 +75,7 @@ class GcpAuthSecretTest < ActiveSupport::TestCase
     assert secret.errors[:credentials_provider].any?
   end
 
-  test "foreign_id is unique within a namespace" do
+  test "foreign_id is globally unique" do
     with_keyfile(GcpAuthSecret.new(base_attrs(foreign_id: "shared-gcp"))).save!
     dup = with_keyfile(GcpAuthSecret.new(base_attrs(foreign_id: "shared-gcp")))
     assert_not dup.valid?

@@ -33,16 +33,14 @@ class PrincipalCredentialReconciliation
   # provider-subject labels, which would widen the trust boundary beyond the
   # authenticated user.
   CONSOLE_USER_KIND = "console_user"
-  CONSOLE_USER_ID_LABEL = "console-user-id"
   SLACK_PROVIDER = Oauth::Providers::Slack::KEY
   GOOGLE_PROVIDER = Oauth::Providers::Google::KEY
-  EMAIL_LABELS = %w[email google_email slack_email].freeze
-  # Principal labels carrying a provider-native identity. When a principal has
-  # one for a provider, it takes precedence over email matching for that
-  # provider's credentials. Providers without an entry (for example github)
-  # match by email only.
+  EMAIL_LABELS = %w[email google_email].freeze
+  # Ordinary principal labels carrying a provider-native identity. Slack uses
+  # first-class columns instead. When a principal has a native identity, it
+  # takes precedence over email matching for that provider's credentials.
+  # Providers without an entry (for example github) match by email only.
   PROVIDER_SUBJECT_LABELS = {
-    SLACK_PROVIDER => %w[slack_user_id],
     GOOGLE_PROVIDER => %w[google_subject]
   }.freeze
   SLACK_TEAM_LABEL = "slack_team_id"
@@ -109,7 +107,7 @@ class PrincipalCredentialReconciliation
 
   def sync_principal_provider_labels(principal, credentials)
     if console_user_principal?(principal)
-      sync_console_user_slack_labels(principal, credentials)
+      sync_console_user_slack_identity(principal, credentials)
       return
     end
 
@@ -198,7 +196,8 @@ class PrincipalCredentialReconciliation
 
   def user_principal?(principal)
     labels = principal.labels || {}
-    return true if [ USER_KIND, CONSOLE_USER_KIND ].include?(labels["kind"])
+    return true if [ USER_KIND, CONSOLE_USER_KIND ].include?(principal.kind)
+    return true if principal.slack_user_id.present? || principal.slack_email.present?
 
     (EMAIL_LABELS + PROVIDER_SUBJECT_LABELS.values.flatten).any? do |key|
       labels[key].present?
@@ -229,8 +228,7 @@ class PrincipalCredentialReconciliation
   def credentials_for_subject_labels(principal, provider, subject_index)
     return [] if console_user_principal?(principal)
 
-    labels = principal.labels || {}
-    subjects = subject_label_keys(provider).filter_map { |key| normalize_key(labels[key]) }.uniq
+    subjects = principal_subjects(principal, provider)
     subjects
       .flat_map { |subject| subject_index[subject] || [] }
       .select { |credential| credential_matches_principal?(principal, credential, provider) }
@@ -253,9 +251,7 @@ class PrincipalCredentialReconciliation
       return principal_emails(principal).include?(normalize_email(credential.provider_email))
     end
 
-    subjects = subject_label_keys(provider)
-      .filter_map { |key| normalize_key(principal.labels&.[](key)) }
-      .uniq
+    subjects = principal_subjects(principal, provider)
     if subjects.any?
       subjects.include?(normalize_key(credential.provider_subject))
     else
@@ -267,15 +263,25 @@ class PrincipalCredentialReconciliation
     PROVIDER_SUBJECT_LABELS.fetch(provider, [])
   end
 
+  def principal_subjects(principal, provider)
+    if provider == SLACK_PROVIDER
+      return [ normalize_key(principal.slack_user_id) ].compact
+    end
+
+    subject_label_keys(provider)
+      .filter_map { |key| normalize_key(principal.labels&.[](key)) }
+      .uniq
+  end
+
   def supported_provider?(credential)
     providers.include?(credential.oauth_app&.provider)
   end
 
-  # Slack user ids are workspace-scoped. If either side carries a team label,
+  # Slack user ids are workspace-scoped. If either side carries a team identity,
   # require both sides to agree; otherwise namespace scoping is the available
   # boundary for older credentials.
   def slack_team_matches?(principal, credential)
-    principal_team = normalize_key(principal.labels&.[](SLACK_TEAM_LABEL))
+    principal_team = normalize_key(principal.slack_team_id)
     credential_team = normalize_key(credential.labels&.[](SLACK_TEAM_LABEL)) ||
                       normalize_key(credential.oauth_app&.labels&.[](SLACK_TEAM_LABEL))
     return true if console_user_principal?(principal) && principal_team.blank?
@@ -284,7 +290,7 @@ class PrincipalCredentialReconciliation
     principal_team.present? && principal_team == credential_team
   end
 
-  def sync_console_user_slack_labels(principal, credentials)
+  def sync_console_user_slack_identity(principal, credentials)
     slack_credentials = credentials.select do |credential|
       credential.oauth_app&.provider == SLACK_PROVIDER
     end
@@ -293,15 +299,16 @@ class PrincipalCredentialReconciliation
     slack_user_id = unique_present_value(slack_credentials.map(&:provider_subject))
     slack_team_id = unique_present_value(slack_credentials.map { |credential| slack_team_for(credential) })
     return unless slack_user_id && slack_team_id
+    return unless Principal::SLACK_USER_ID_FORMAT.match?(slack_user_id)
+    return unless Principal::SLACK_TEAM_ID_FORMAT.match?(slack_team_id)
 
-    labels = principal.labels || {}
     updates = {
-      "slack_user_id" => slack_user_id,
-      SLACK_TEAM_LABEL => slack_team_id
+      slack_user_id: slack_user_id,
+      slack_team_id: slack_team_id
     }
-    return if updates.all? { |key, value| labels[key] == value }
+    return if updates.all? { |field, value| principal.public_send(field) == value }
 
-    principal.update!(labels: labels.merge(updates))
+    principal.update!(updates)
   end
 
   def slack_team_for(credential)
@@ -310,7 +317,7 @@ class PrincipalCredentialReconciliation
   end
 
   def console_user_principal?(principal)
-    (principal.labels || {})["kind"] == CONSOLE_USER_KIND
+    principal.kind == CONSOLE_USER_KIND
   end
 
   def principal_emails(principal)
@@ -319,29 +326,29 @@ class PrincipalCredentialReconciliation
     end
 
     labels = principal.labels || {}
-    EMAIL_LABELS.map { |key| labels[key] }
+    (EMAIL_LABELS.map { |key| labels[key] } + [ principal.slack_email ])
       .filter_map { |email| normalize_email(email) }
       .uniq
   end
 
-  # Console-user principals carry the console user's oid, so every verified
+  # Console-user principals reference the console user's database row, so every verified
   # identity email of that user participates in matching -- a credential
   # registered under a secondary verified email still reaches the principal.
   # Unverified emails are excluded: an unverified address must not adopt
   # someone else's credentials.
   def console_user_emails(principal)
-    user_oid = principal.labels&.[](CONSOLE_USER_ID_LABEL)
-    return [] if user_oid.blank?
+    user_id = principal.console_user_id
+    return [] if user_id.blank?
 
     @console_user_emails ||= {}
-    @console_user_emails.fetch(user_oid) do
-      user = User.find_by_oid(user_oid)
+    @console_user_emails.fetch(user_id) do
+      user = User.find_by(id: user_id)
       emails = if user
         [ user.email ] + user.user_identities.where(email_verified: true).pluck(:email)
       else
         []
       end
-      @console_user_emails[user_oid] = emails
+      @console_user_emails[user_id] = emails
     end
   end
 

@@ -434,7 +434,7 @@ describe('slackbotv2', () => {
     expect(codexApi.workflowEvents).toHaveLength(1)
   })
 
-  it('syncs thread context, forwards subscribed messages, and renders execute streams', async () => {
+  it('collects ignored subscribed messages when the bot is next mentioned', async () => {
     const parent = await postUserMessage('The deploy context is above.')
     const firstMention = await postUserMessage(
       `<@${BOT_USER_ID}> run with this screenshot`,
@@ -496,6 +496,8 @@ describe('slackbotv2', () => {
 
     expect(followUpResponse.status).toBe(200)
     await Promise.all(followUpWaits)
+    expect(codexApi.appends).toHaveLength(1)
+    expect(codexApi.executes).toHaveLength(1)
 
     const secondMention = await postUserMessage(`<@${BOT_USER_ID}> now execute with the latest`, parent.ts)
     const secondMentionWaits: Promise<unknown>[] = []
@@ -520,9 +522,8 @@ describe('slackbotv2', () => {
     expect(secondMentionResponse.status).toBe(200)
     await Promise.all(secondMentionWaits)
 
-    expect(codexApi.appends).toHaveLength(3)
+    expect(codexApi.appends).toHaveLength(2)
     expect(codexApi.creates.map(create => create.threadKey)).toEqual([
-      threadKey(parent.ts),
       threadKey(parent.ts),
       threadKey(parent.ts)
     ])
@@ -579,15 +580,16 @@ describe('slackbotv2', () => {
     )
     expect(JSON.stringify(firstInputLine)).not.toContain('data:image/png;base64')
 
-    const followUpAppend = codexApi.appends[1]!
-    expect(followUpAppend.threadKey).toBe(threadKey(parent.ts))
-    expect(followUpAppend.body.messages[0]?.client_message_id).toBe(followUp.ts)
-    expect(sessionMessageTexts(followUpAppend.body.messages)).toEqual([
-      'Additional detail for the subscribed thread.'
+    const secondMentionAppend = codexApi.appends[1]!
+    expect(secondMentionAppend.threadKey).toBe(threadKey(parent.ts))
+    expect(secondMentionAppend.body.messages.map(message => message.client_message_id)).toEqual([
+      followUp.ts,
+      secondMention.ts
     ])
-
-    const secondMentionAppend = codexApi.appends[2]!
-    expect(sessionMessageTexts(secondMentionAppend.body.messages)[0]).toContain(
+    expect(sessionMessageTexts(secondMentionAppend.body.messages)[0]).toBe(
+      'Additional detail for the subscribed thread.'
+    )
+    expect(sessionMessageTexts(secondMentionAppend.body.messages)[1]).toContain(
       'now execute with the latest'
     )
     const secondExecute = codexApi.executes[1]!
@@ -749,7 +751,7 @@ describe('slackbotv2', () => {
                       harness: strategyRequestCount === 1 ? 'codex' : null,
                       model: strategyRequestCount === 1 ? 'gpt-5.6-sol' : null,
                       provider: strategyRequestCount === 1 ? 'responses' : null,
-                      reasoning: strategyRequestCount === 1 ? 'high' : null
+                      reasoning: 'max'
                     })
                   }
                 ]
@@ -824,9 +826,14 @@ describe('slackbotv2', () => {
     ) as Record<string, unknown>
     expect(followUpInput.model).toBeUndefined()
     expect(followUpInput.provider).toBeUndefined()
-    // Reasoning remains a per-turn setting; only the sticky harness/model/
-    // provider selection is protected by the root flag.
-    expect(followUpInput.reasoning).toBe('high')
+    // Nanocodex supports Max on its default GPT-5.6 Sol model.
+    expect(followUpInput.reasoning).toBe('max')
+    const defaultInput = JSON.parse(
+      codexApi.executes[2]!.body.input_lines.at(-1)!
+    ) as Record<string, unknown>
+    // The same inferred effort is incompatible with the currently selected
+    // Claude model and is therefore dropped.
+    expect(defaultInput.reasoning).toBeUndefined()
 
     const nanocodexState = await sharedState.get<Record<string, unknown>>(
       `thread-state:${threadKey(nanocodexRoot.ts)}`
@@ -918,6 +925,180 @@ describe('slackbotv2', () => {
 
     expect(slackApi.calls.some(call => call.method === 'chat.stopStream')).toBe(true)
     expect(consoleBlockTexts(slackApi.calls)).toHaveLength(0)
+  })
+
+  it('keeps the first Console link but omits metadata in never mode', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({
+      consolePublicUrl: 'https://console.example.dev',
+      responseMetadataMode: 'never',
+      state: sharedState
+    })
+
+    const parent = await postUserMessage('Console link without response metadata.')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> start`, parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-response-metadata-never',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> start`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+
+    const footer = slackApi.calls
+      .filter(call => call.method === 'chat.stopStream')
+      .flatMap(call => (Array.isArray(call.body.blocks) ? (call.body.blocks as unknown[]) : []))
+      .map(block => JSON.stringify(block))
+      .find(text => text.includes('Open chat in Console'))
+    expect(footer).toContain('Open chat in Console')
+    expect(footer).not.toContain('GPT-5.6-SOL')
+    expect(footer).not.toContain('Codex')
+  })
+
+  it('appends response metadata to every assistant message without a Console URL', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({ responseMetadataMode: 'always', state: sharedState })
+
+    const metadataBlockTexts = (calls: StreamCall[]): string[] =>
+      calls
+        .filter(call => call.method === 'chat.stopStream')
+        .flatMap(call => (Array.isArray(call.body.blocks) ? (call.body.blocks as unknown[]) : []))
+        .map(block => JSON.stringify(block))
+        .filter(text => text.includes('GPT-5.6-SOL'))
+
+    const parent = await postUserMessage('Response metadata thread context.')
+    const firstMention = await postUserMessage(`<@${BOT_USER_ID}> start`, parent.ts)
+    const firstWaits: Promise<unknown>[] = []
+    const firstResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-response-metadata-first',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: firstMention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> start`
+        }
+      }),
+      {},
+      waitUntilContext(firstWaits)
+    )
+    expect(firstResponse.status).toBe(200)
+    await Promise.all(firstWaits)
+    expect(metadataBlockTexts(slackApi.calls)).toHaveLength(1)
+    expect(metadataBlockTexts(slackApi.calls)[0]).toContain('Codex')
+    expect(metadataBlockTexts(slackApi.calls)[0]).toContain('Low')
+    expect(metadataBlockTexts(slackApi.calls)[0]).not.toContain('Fast')
+    expect(metadataBlockTexts(slackApi.calls)[0]).not.toContain('Open chat in Console')
+
+    slackApi.reset()
+    const secondMention = await postUserMessage(`<@${BOT_USER_ID}> continue`, parent.ts)
+    const secondWaits: Promise<unknown>[] = []
+    const secondResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-response-metadata-second',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: secondMention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> continue`
+        }
+      }),
+      {},
+      waitUntilContext(secondWaits)
+    )
+    expect(secondResponse.status).toBe(200)
+    await Promise.all(secondWaits)
+    expect(metadataBlockTexts(slackApi.calls)).toHaveLength(1)
+  })
+
+  it('adds the service tier without showing metadata on every response', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({
+      consolePublicUrl: 'https://console.example.dev',
+      responseServiceTierEnabled: true,
+      state: sharedState
+    })
+
+    const metadataBlockTexts = (calls: StreamCall[]): string[] =>
+      calls
+        .filter(call => call.method === 'chat.stopStream')
+        .flatMap(call => (Array.isArray(call.body.blocks) ? (call.body.blocks as unknown[]) : []))
+        .map(block => JSON.stringify(block))
+        .filter(text => text.includes('GPT-5.6-SOL'))
+
+    const parent = await postUserMessage('Service tier thread context.')
+    const firstMention = await postUserMessage(`<@${BOT_USER_ID}> start`, parent.ts)
+    const firstWaits: Promise<unknown>[] = []
+    const firstResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-service-tier-first',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: firstMention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> start`
+        }
+      }),
+      {},
+      waitUntilContext(firstWaits)
+    )
+    expect(firstResponse.status).toBe(200)
+    await Promise.all(firstWaits)
+    expect(metadataBlockTexts(slackApi.calls)).toHaveLength(1)
+    expect(metadataBlockTexts(slackApi.calls)[0]).toContain('Fast')
+    expect(metadataBlockTexts(slackApi.calls)[0]).toContain('Open chat in Console')
+
+    slackApi.reset()
+    const secondMention = await postUserMessage(`<@${BOT_USER_ID}> continue`, parent.ts)
+    const secondWaits: Promise<unknown>[] = []
+    const secondResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-service-tier-second',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: secondMention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> continue`
+        }
+      }),
+      {},
+      waitUntilContext(secondWaits)
+    )
+    expect(secondResponse.status).toBe(200)
+    await Promise.all(secondWaits)
+    expect(metadataBlockTexts(slackApi.calls)).toHaveLength(0)
   })
 
   it('shows the API-assigned harness in Slack and retains execution metadata', async () => {
@@ -1025,13 +1206,12 @@ describe('slackbotv2', () => {
     expect(JSON.parse(executeBody.input_lines.at(-1)!).model).toBeUndefined()
   })
 
-  it('forwards a per-channel default harness + model + reasoning onto the turn', async () => {
+  it('drops a per-channel reasoning default incompatible with its selected model', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
     bot = createTestBot({
       state: sharedState,
-      // The channel pins the harness and its model together (as `--claude
-      // --model opus -rsn high` would parse), so the pair can't mismatch.
+      // The channel pins Claude and also carries an incompatible Codex effort.
       channelDefaults: {
         [CHANNEL_ID]: { harnessType: 'claudecode', model: 'claude-opus-4-8', reasoning: 'high' }
       }
@@ -1068,7 +1248,7 @@ describe('slackbotv2', () => {
     const executeBody = codexApi.executes[0]!.body
     const inputLine = JSON.parse(executeBody.input_lines.at(-1)!) as Record<string, unknown>
     expect(inputLine.model).toBe('claude-opus-4-8')
-    expect(inputLine.reasoning).toBe('high')
+    expect(inputLine.reasoning).toBeUndefined()
     expect(executeBody.metadata.model).toBe('claude-opus-4-8')
   })
 
@@ -2065,7 +2245,7 @@ describe('slackbotv2', () => {
     )
   })
 
-  it('forwards subscribed messages to /messages without executing during a stream', async () => {
+  it('ignores unmentioned subscribed messages during a stream, including stop', async () => {
     codexApi.autoRespond = false
 
     const parent = await postUserMessage('Context before the long run.')
@@ -2115,11 +2295,32 @@ describe('slackbotv2', () => {
 
     expect(followUpResponse.status).toBe(200)
     await Promise.all(followUpWaits)
-    expect(codexApi.appends).toHaveLength(2)
+
+    const stop = await postUserMessage('stop', parent.ts)
+    const stopWaits: Promise<unknown>[] = []
+    const stopResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-unmentioned-stop-during-stream',
+        event: {
+          type: 'message',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: stop.ts,
+          thread_ts: parent.ts,
+          text: 'stop'
+        }
+      }),
+      {},
+      waitUntilContext(stopWaits)
+    )
+
+    expect(stopResponse.status).toBe(200)
+    await Promise.all(stopWaits)
+    expect(codexApi.creates).toHaveLength(1)
+    expect(codexApi.appends).toHaveLength(1)
     expect(codexApi.executes).toHaveLength(1)
-    expect(sessionMessageTexts(codexApi.appends[1]!.body.messages)).toEqual([
-      'Actually queue this extra constraint.'
-    ])
 
     codexApi.closeStreams()
     await Promise.all(firstWaits)

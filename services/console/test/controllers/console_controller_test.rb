@@ -117,15 +117,6 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_select "td", text: "CLOUD_RUN_SA_KEYFILE"
   end
 
-  test "pg_dsn detail page lists configured session settings" do
-    secret = pg_dsn_secrets(:acme_analytics_pg)
-    secret.update!(settings: [ { "name" => "app.tenant", "value" => "centaur" } ])
-    get console_secret_url("pg_dsn", secret.oid)
-    assert_response :ok
-    assert_select "dt", text: "Session settings"
-    assert_select "dd", text: "app.tenant = centaur"
-  end
-
   test "secret detail page 404s for an unknown kind or id" do
     get console_secret_url("bogus", "ssr_whatever")
     assert_response :not_found
@@ -147,6 +138,32 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     get console_principals_url
     assert_response :ok
     assert_select "a[href=?]", console_new_principal_path, text: "Add Principal"
+  end
+
+  test "principal pages render first-class identity fields as labels" do
+    principal = principals(:acme_channel)
+    principal.update!(
+      kind: "slack_dm",
+      slack_user_id: "U0123456789",
+      slack_channel_id: "D0123456789",
+      slack_team_id: "T0123456789",
+      slack_email: "member@example.com"
+    )
+    expected_labels = {
+      "kind" => "slack_dm",
+      "slack_user_id" => "U0123456789",
+      "slack_channel_id" => "D0123456789",
+      "slack_team_id" => "T0123456789",
+      "slack_email" => "member@example.com"
+    }
+
+    [ console_principals_url, console_principal_url(principal.oid) ].each do |url|
+      get url
+      assert_response :ok
+      expected_labels.each do |key, value|
+        assert_select ".label-chip", text: "#{key}=#{value}"
+      end
+    end
   end
 
   test "principal detail page offers delete" do

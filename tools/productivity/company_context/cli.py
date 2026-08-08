@@ -17,7 +17,7 @@ load_dotenv()
 
 app = typer.Typer(
     name="company_context",
-    help="Search indexed company history, Slack DMs, Google Docs, and Granola notes.",
+    help="Search or run scoped SQL over company history, Slack DMs, Google Docs, and Granola notes.",
 )
 
 
@@ -68,6 +68,51 @@ def _add_result_rows(table: Table, results: list[dict[str, Any]]) -> None:
         )
 
 
+@app.command("query")
+def query(
+    sql: str = typer.Argument(..., help="Read-only SQL query to execute."),
+    limit: int = typer.Option(100, "--limit", "-n", help="Maximum rows to return."),
+    timeout_seconds: int = typer.Option(
+        10,
+        "--timeout-seconds",
+        help="Query timeout in seconds, capped at 30.",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Output raw JSON."),
+) -> None:
+    """Run raw read-only SQL against the scoped company-context database."""
+    result = CompanyContextClient().query(
+        sql=sql,
+        limit=limit,
+        timeout_seconds=timeout_seconds,
+    )
+    _require_ok(result)
+    if json_output:
+        _print_json(result)
+        return
+
+    rows = result.get("rows") or []
+    columns = result.get("columns") or []
+    if not rows:
+        console.print("[yellow]Query returned no rows.[/yellow]")
+        return
+
+    table = Table(title=f"Company Context Query ({len(rows)})")
+    for column in columns:
+        table.add_column(str(column), overflow="fold")
+    for row in rows:
+        table.add_row(
+            *[
+                json.dumps(row.get(column), default=str)
+                if isinstance(row.get(column), (dict, list))
+                else str(row.get(column))
+                for column in columns
+            ]
+        )
+    console.print(table)
+    if result.get("truncated"):
+        console.print(f"[yellow]Results truncated at {result.get('limit')} rows.[/yellow]")
+
+
 @app.command("search")
 def search(
     query: str = typer.Argument(..., help="Search query."),
@@ -84,6 +129,11 @@ def search(
     occurred_before: str | None = typer.Option(
         None, "--before", help="Only results before this time."
     ),
+    hybrid: bool = typer.Option(
+        True,
+        "--hybrid/--no-hybrid",
+        help="Fuse keyword and vector results when embeddings are enabled.",
+    ),
     json_output: bool = typer.Option(False, "--json", help="Output raw JSON."),
 ) -> None:
     """Search indexed company context, including Google Docs and Granola notes."""
@@ -94,6 +144,7 @@ def search(
         source_type=source_type,
         occurred_after=occurred_after,
         occurred_before=occurred_before,
+        hybrid=hybrid,
     )
     _require_ok(result)
     if json_output:

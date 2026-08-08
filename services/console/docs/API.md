@@ -58,7 +58,7 @@ A missing or invalid token returns `401`:
 - **Namespaced list filtering** (static secrets, GCP auth secrets, GCP ID token secrets, OAuth token secrets, principals, roles) requires a `namespace` query parameter and accepts an optional `labels[key]=value` filter that matches by JSONB containment (all supplied pairs must be present). Label values must be scalars.
 - **Object IDs** are prefixed by type: `ssr_` (static secret), `gas_` (GCP auth secret), `gid_` (GCP ID token secret), `ots_` (OAuth token secret), `prn_` (principal), `role_` (role), `grant_` (grant), `ak_` (API key), `prx_` (proxy).
 - **`namespace`** defaults to `"default"` when omitted on create. Once set, `namespace` and `foreign_id` are immutable.
-- **`namespace` and `foreign_id`** must be URL-safe: only `A-Z a-z 0-9 - . _ ~`. `foreign_id` is optional and, when set, must be unique within its namespace. A `foreign_id` may not start with the resource's opaque-id prefix (e.g. `ssr_`), so it can never be mistaken for an OID.
+- **`namespace` and `foreign_id`** must be URL-safe: only `A-Z a-z 0-9 - . _ ~`. `foreign_id` is optional and, when set, must be globally unique within its resource type. A `foreign_id` may not start with the resource's opaque-id prefix (e.g. `ssr_`), so it can never be mistaken for an OID.
 
 ### Upsert (`PUT` / `PATCH`)
 
@@ -67,7 +67,7 @@ For the resources with a `foreign_id` (static secrets, GCP auth secrets, GCP ID 
 - **`:id` is an OID** (it starts with the resource's prefix, e.g. `ssr_…`): updates that record. `404` if it does not exist — an OID is server-assigned, so it can't be created at a chosen value.
 - **`:id` is anything else**: it is treated as a `foreign_id` within the body `namespace` (default `"default"`). The record is **updated if it exists, created if it does not**. Creation responds `201`; update responds `200`.
 
-This makes provisioning idempotent: `PUT /api/v1/roles/infra` with `{"data":{"namespace":"acme", …}}` converges the `acme/infra` role whether or not it already exists, in one call. On the foreign-id form the namespace and foreign_id come from the URL/body, so omitting `foreign_id` from the body does not clear it.
+This makes provisioning idempotent: `PUT /api/v1/roles/acme-infra` with `{"data":{"namespace":"acme", …}}` converges the `acme/acme-infra` role whether or not it already exists, in one call. On the foreign-id form the namespace and foreign_id come from the URL/body, so omitting `foreign_id` from the body does not clear it.
 - **`labels`** is an arbitrary string-keyed object (defaults to `{}`).
 - **Timestamps** are ISO 8601 UTC.
 
@@ -178,7 +178,7 @@ A static secret injects or replaces a fixed credential value on matching request
 | Field            | In requests | Notes |
 | ---------------- | ----------- | ----- |
 | `namespace`      | optional    | Defaults to `"default"`. Immutable after create. |
-| `foreign_id`     | optional    | Unique per namespace. Immutable after create. |
+| `foreign_id`     | optional    | Globally unique within this resource type. Immutable after create. |
 | `name`           | optional    | |
 | `description`    | optional    | |
 | `labels`         | optional    | Object; defaults to `{}`. |
@@ -277,7 +277,7 @@ A GCP auth secret mints short-lived GCP OAuth2 access tokens and injects them as
 | Field                  | In requests | Notes |
 | ---------------------- | ----------- | ----- |
 | `namespace`            | optional    | Defaults to `"default"`. Immutable. |
-| `foreign_id`           | optional    | Unique per namespace. Immutable. |
+| `foreign_id`           | optional    | Globally unique within this resource type. Immutable. |
 | `name`, `description`  | optional    | |
 | `labels`               | optional    | |
 | `scopes`               | required    | Non-empty array of non-empty strings (GCP OAuth scopes). |
@@ -361,7 +361,7 @@ A GCP ID token secret mints Google-signed OIDC ID tokens for an audience and inj
 | Field                 | In requests | Notes |
 | --------------------- | ----------- | ----- |
 | `namespace`           | optional    | Defaults to `"default"`. Immutable. |
-| `foreign_id`          | optional    | Unique per namespace. Immutable. |
+| `foreign_id`          | optional    | Globally unique within this resource type. Immutable. |
 | `name`, `description` | optional    | |
 | `labels`              | optional    | Object; defaults to `{}`. |
 | `audience`            | required    | ID token `aud` claim. For Cloud Run, use the service URL or configured custom audience. |
@@ -434,7 +434,7 @@ Each granted AWS auth secret is delivered to `iron-proxy` as its own `aws_auth` 
 | Field               | In requests | Notes |
 | ------------------- | ----------- | ----- |
 | `namespace`         | optional    | Defaults to `"default"`. Immutable. |
-| `foreign_id`        | optional    | Unique per namespace. Immutable. |
+| `foreign_id`        | optional    | Globally unique within this resource type. Immutable. |
 | `name`, `description` | optional  | |
 | `labels`            | optional    | Object; defaults to `{}`. |
 | `allowed_regions`   | optional    | Array of non-empty strings; defaults to `[]` (no region scoping). |
@@ -519,7 +519,7 @@ An OAuth token secret mints OAuth2 access tokens for a single grant and injects 
 | Field                    | In requests | Notes |
 | ------------------------ | ----------- | ----- |
 | `namespace`              | optional    | Defaults to `"default"`. Immutable. |
-| `foreign_id`             | optional    | Unique per namespace. Immutable. |
+| `foreign_id`             | optional    | Globally unique within this resource type. Immutable. |
 | `name`, `description`    | optional    | |
 | `labels`                 | optional    | |
 | `grant`                  | required    | One of `refresh_token`, `client_credentials`, `password`, `jwt_bearer`. |
@@ -624,7 +624,7 @@ Listener and client knobs (bind address, client auth) are deliberately not model
 | Field         | In requests | Notes |
 | ------------- | ----------- | ----- |
 | `namespace`   | optional    | Defaults to `"default"`. Immutable after create. |
-| `foreign_id`  | required    | Unique per namespace. Immutable after create. |
+| `foreign_id`  | required    | Globally unique within this resource type. Immutable after create. |
 | `name`        | optional    | |
 | `description` | optional    | |
 | `labels`      | optional    | Object; defaults to `{}`. |
@@ -689,7 +689,7 @@ labels instead of storing a literal, by replacing `value` with `value_from`:
 
 | Key               | Resolves to |
 | ----------------- | ----------- |
-| `principal_label` | The named label on the assigned principal. A label the principal does not carry resolves to an empty string, so RLS-style policies fail closed. |
+| `principal_label` | The named label on the assigned principal. Reserved identity labels resolve through their authoritative columns. A label the principal does not carry resolves to an empty string, so RLS-style policies fail closed. |
 | `principal_field` | One of the principal's fields: `id` (the opaque `prn_...` id), `namespace`, `foreign_id`, `name`, or `slack_history_channel_ids` (JSON array of Slack channel IDs with history permission). |
 | `proxy_label`     | The named label on the proxy. A label the proxy does not carry resolves to an empty string, so RLS-style policies fail closed. |
 
@@ -720,7 +720,7 @@ Each granted HMAC secret is delivered to `iron-proxy` as its own `hmac_sign` tra
 | Field                       | In requests | Notes |
 | --------------------------- | ----------- | ----- |
 | `namespace`                 | optional    | Defaults to `"default"`. Immutable. |
-| `foreign_id`                | optional    | Unique per namespace. Immutable. |
+| `foreign_id`                | optional    | Globally unique within this resource type. Immutable. |
 | `name`, `description`       | optional    | |
 | `labels`                    | optional    | Object; defaults to `{}`. |
 | `timestamp_format`          | required    | One of `unix_seconds`, `unix_millis`, `unix_nanos`, `rfc3339`. |
@@ -814,7 +814,7 @@ The token credentials it refreshes with are fields on the credential, resolved b
 | Field                          | In requests | Notes |
 | ------------------------------ | ----------- | ----- |
 | `namespace`                    | optional    | Defaults to `"default"`. Immutable. |
-| `foreign_id`                   | optional    | Unique per namespace. Immutable. |
+| `foreign_id`                   | optional    | Globally unique within this resource type. Immutable. |
 | `name`, `description`          | optional    | |
 | `labels`                       | optional    | |
 | `grant`                        | optional    | One of `refresh_token`, `client_credentials`, `password`, or `preqin`. Defaults to `refresh_token`. |
@@ -1180,16 +1180,33 @@ Slack OAuth apps should use normal Slack API scopes such as `channels:history`, 
 
 A principal is an identity (an application, service, or proxy owner) that can be granted secrets.
 
+When a principal is created with no preassigned roles, the console assigns the
+system default roles configured for that principal's namespace. Defaults apply
+only during initial creation. Updating an existing roleless principal does not
+restore roles that an operator removed. The default configuration assigns the
+system-managed `default/infra` role.
+
 ### Attributes
 
 | Field        | In requests | Notes |
 | ------------ | ----------- | ----- |
 | `namespace`  | optional    | Defaults to `"default"`. Immutable. |
-| `foreign_id` | optional    | Unique per namespace. Immutable. |
+| `foreign_id` | optional    | Globally unique within this resource type. Immutable. |
 | `name`       | optional    | |
-| `labels`     | optional    | |
+| `kind`       | optional    | Defaults to `unknown`. See the known values below. |
+| `slack_user_id` | optional | First-class Slack user identity. |
+| `slack_channel_id` | optional | First-class Slack conversation identity. |
+| `slack_team_id` | optional | First-class Slack team or enterprise scope. |
+| `slack_email` | optional | First-class Slack email identity. |
+| `console_user_id` | optional | Database ID of the associated console user for a `console_user` principal. |
+| `console_user_email` | optional | Email identity for a `console_user` principal. |
+| `labels`     | optional    | Extensible metadata. Compatibility identity labels are still accepted and synthesized in responses during the transition. |
 | `slack_channel_permissions` | optional | Direct permissions owned by the principal. Full replacement when present on create or update. |
 | `effective_slack_channel_permissions` | response only | Direct permissions merged with permissions inherited from assigned roles. |
+
+Known kinds are `unknown`, `user`, `console_user`, `workflow`,
+`slack_channel`, `slack_dm`, `discord_channel`, `linear_issue`, `teams_user`,
+and `teams_conversation`. Use one of these values for the `kind` field.
 
 ### Operations
 
@@ -1208,7 +1225,7 @@ Returns `201`:
     "namespace": "default",
     "foreign_id": "api-service",
     "name": "API Service",
-    "labels": { "tier": "backend" },
+    "labels": { "tier": "backend", "kind": "unknown" },
     "slack_channel_permissions": [],
     "effective_slack_channel_permissions": [],
     "created_at": "2026-06-01T10:00:00Z",
@@ -1219,14 +1236,24 @@ Returns `201`:
 
 | Method | Path | Notes |
 | ------ | ---- | ----- |
-| `GET`  | `/api/v1/principals?namespace=default` | List. |
+| `GET`  | `/api/v1/principals?namespace=default` | List. Accepts exact-match label filters, including the reserved identity labels. |
 | `GET`  | `/api/v1/principals/:id` | Fetch one by OID. To fetch by `foreign_id`, use the lookup route below. |
 | `GET`  | `/api/v1/principals/lookup/:namespace/:foreign_id` | Fetch by namespace + foreign id. `404` if missing. |
 | `GET`  | `/api/v1/principals/:id/effective_config` | [Effective config](#effective-config) the principal resolves to. `:id` is an OID. |
 | `GET`  | `/api/v1/principals/lookup/:namespace/:foreign_id/effective_config` | [Effective config](#effective-config) by namespace + foreign id. `404` if missing. |
 | `GET`  | `/api/v1/principals/:principal_id/grants` | [List the grants](#list-by-grantee) granted directly to the principal. |
 | `POST` | `/api/v1/principals/:id/slack_channel_permissions` | Idempotently create or update one direct Slack channel permission. Omitted flags default to enabled on create and remain unchanged on update. |
-| `PUT`/`PATCH` | `/api/v1/principals/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`. `name`, `labels`, and direct `slack_channel_permissions` are mutable on an existing record; `namespace` and `foreign_id` apply only when creating. |
+| `PUT`/`PATCH` | `/api/v1/principals/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`. `name`, first-class identity fields, `labels`, and direct `slack_channel_permissions` are mutable on an existing record. `namespace` and `foreign_id` apply only when creating. |
+
+The first-class identity fields are authoritative. For compatibility, responses
+still synthesize `kind`, `slack_user_id`, `slack_channel_id`, `slack_team_id`,
+and `slack_email` in `labels`. A `console_user` response also synthesizes
+`console-user-id` and `email`. Writes may send the compatibility labels, but if
+a request sends both forms, their values must agree or the API returns `422`.
+Sending a null, empty, or whitespace-only Slack identity label clears that
+value. A null or blank `kind` is rejected, as are unknown kind values and new
+or changed malformed nonblank Slack identities. Unchanged legacy values remain
+round-trip safe during the compatibility release.
 
 See [Role assignments](#role-assignments) for attaching roles to a principal.
 
@@ -1280,7 +1307,7 @@ Roles are namespaced. A principal may only be assigned roles in its own namespac
 | Field        | In requests | Notes |
 | ------------ | ----------- | ----- |
 | `namespace`  | optional    | Defaults to `"default"`. Immutable. |
-| `foreign_id` | optional    | Unique per namespace. Immutable. Handy for idempotent provisioning. |
+| `foreign_id` | optional    | Globally unique within this resource type. Immutable. Handy for idempotent provisioning. |
 | `name`       | optional    | |
 | `labels`     | optional    | |
 | `slack_channel_permissions` | optional | Full replacement when present on create or update. Each row accepts `channel_id` and the `upload_enabled`, `download_enabled`, and `history_enabled` flags. |

@@ -63,32 +63,53 @@ module Api
 
       def assign_and_save!(ref, attrs)
         ss_attrs = permit_document(
-          ref, attrs, :name, :description,
+          ref, attrs, :name, :description, :kind,
           labels: {}, inject_config: {}, replace_config: {}
         )
+        # Older clients do not know about kind. Preserve it on update when the
+        # field is absent, while creates still receive the database default and
+        # an explicitly supplied kind still replaces the existing value.
+        ss_attrs[:kind] = ref.kind if ref.persisted? && !attrs.key?(:kind)
 
         source_attrs = if attrs.key?(:source) && attrs[:source].present?
           attrs.require(:source).permit(:source_type, :secret, config: {})
         end
 
-        rules_attrs = request_rule_attributes(attrs)
+        source = source_attrs ? SecretSource.new(source_attrs.to_h) : nil
+        rules = build_rules(attrs)
+
+        # Resolve profile defaults before the replacement guard so a repeated
+        # write compares the effective persisted document, not the abbreviated
+        # client request.
+        candidate = ref.dup
+        candidate.assign_attributes(ss_attrs)
+        rules = candidate.apply_kind_defaults(rules: rules)
+        ss_attrs = ss_attrs.merge(
+          kind: candidate.kind,
+          inject_config: candidate.inject_config,
+          replace_config: candidate.replace_config
+        )
 
         StaticSecret.transaction do
-          ref.lock! unless ref.new_record?
-          ref.assign_attributes(ss_attrs)
-          ref.save!
+          with_sync_config_replacement_guard(ref, ss_attrs, source: source, rules: rules) do
+            ref.assign_attributes(ss_attrs)
+            ref.kind_rules_for_validation = rules
+            ref.save!
 
-          ref.source&.destroy!
-          if source_attrs
-            SecretSource.create!(source_attrs.to_h.merge(static_secret: ref))
+            ref.source&.destroy!
+            if source
+              source.static_secret = ref
+              source.save!
+            end
+
+            ref.rules.destroy_all
+            rules.each do |rule|
+              rule.static_secret = ref
+              rule.save!
+            end
+
+            ref.reload
           end
-
-          ref.rules.destroy_all
-          rules_attrs.each do |r|
-            RequestRule.create!(r.merge(static_secret: ref))
-          end
-
-          ref.reload
         end
       end
 
@@ -99,6 +120,7 @@ module Api
           foreign_id: ref.foreign_id,
           name: ref.name,
           description: ref.description,
+          kind: ref.kind,
           labels: ref.labels,
           inject_config: ref.inject_config,
           replace_config: ref.replace_config,

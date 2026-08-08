@@ -48,7 +48,7 @@ class PgDsnSecretTest < ActiveSupport::TestCase
     assert with_dsn(PgDsnSecret.new(base_attrs(role: nil))).valid?
   end
 
-  test "foreign_id is unique within a namespace" do
+  test "foreign_id is globally unique" do
     with_dsn(PgDsnSecret.new(base_attrs(foreign_id: "shared-pg", database: "db-a"))).save!
     dup = with_dsn(PgDsnSecret.new(base_attrs(foreign_id: "shared-pg", database: "db-b")))
     assert_not dup.valid?
@@ -134,6 +134,7 @@ class PgDsnSecretTest < ActiveSupport::TestCase
         "google_subject" => "google-sub-alice"
       }
     )
+    assert_not principal.reload.labels.key?("slack_channel_id")
     secret = with_dsn(PgDsnSecret.new(base_attrs(settings: [
       {
         "name" => "centaur.slack_channel_id",
@@ -161,6 +162,29 @@ class PgDsnSecretTest < ActiveSupport::TestCase
         { "name" => "centaur.principal_id", "value" => principal.oid },
         { "name" => "centaur.slack_history_channel_ids", "value" => "[]" },
         { "name" => "app.tenant", "value" => "centaur" }
+      ],
+      secret.to_proxy_dsn(principal: principal)["settings"]
+    )
+  end
+
+  test "to_proxy_dsn resolves console user compatibility labels from columns" do
+    user = users(:acme_admin)
+    principal = Principal.create!(
+      namespace: "acme",
+      kind: "console_user",
+      console_user_id: user.id,
+      console_user_email: user.email,
+      created_by: user
+    )
+    secret = with_dsn(PgDsnSecret.new(base_attrs(settings: [
+      { "name" => "app.user_id", "value_from" => { "principal_label" => "console-user-id" } },
+      { "name" => "app.email", "value_from" => { "principal_label" => "email" } }
+    ])))
+
+    assert_equal(
+      [
+        { "name" => "app.user_id", "value" => user.oid },
+        { "name" => "app.email", "value" => user.email }
       ],
       secret.to_proxy_dsn(principal: principal)["settings"]
     )

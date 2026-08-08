@@ -22,12 +22,16 @@ use std::collections::BTreeMap;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-use crate::models::IdentityInput;
+use crate::models::PrincipalInput;
 use crate::util::{managed_labels, slugify};
 
 const KIND_LABEL: &str = "kind";
 const SLACK_DM_KIND: &str = "slack_dm";
 const SLACK_CHANNEL_KIND: &str = "slack_channel";
+const DISCORD_CHANNEL_KIND: &str = "discord_channel";
+const LINEAR_ISSUE_KIND: &str = "linear_issue";
+const TEAMS_USER_KIND: &str = "teams_user";
+const TEAMS_CONVERSATION_KIND: &str = "teams_conversation";
 
 /// The principal a session resolves to, as a stable upsert key plus a label.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,13 +44,18 @@ pub struct PrincipalRef {
 impl PrincipalRef {
     /// Build the upsert body for this principal in ``namespace``, tagging it as
     /// Centaur-managed.
-    pub fn to_identity_input(&self, namespace: &str) -> IdentityInput {
+    pub fn to_principal_input(&self, namespace: &str) -> PrincipalInput {
         let mut labels = managed_labels();
         labels.extend(self.labels.clone());
-        IdentityInput {
+        PrincipalInput {
             namespace: namespace.to_owned(),
             foreign_id: self.foreign_id.clone(),
             name: self.name.clone(),
+            kind: labels.remove(KIND_LABEL),
+            slack_user_id: labels.remove("slack_user_id"),
+            slack_channel_id: labels.remove("slack_channel_id"),
+            slack_team_id: labels.remove("slack_team_id"),
+            slack_email: labels.remove("slack_email"),
             labels,
         }
     }
@@ -95,6 +104,7 @@ pub fn derive_principal_with_slack_team(
     // into the key so the same channel id in two guilds never collides.
     if let Some((guild_id, channel_id)) = parse_discord_segments(thread_key) {
         let mut labels = BTreeMap::new();
+        labels.insert(KIND_LABEL.to_owned(), DISCORD_CHANNEL_KIND.to_owned());
         labels.insert("discord_guild_id".to_owned(), guild_id.to_owned());
         let scope = format!("{}-", slugify(guild_id));
         let key_id = channel_id.unwrap_or(guild_id);
@@ -116,6 +126,7 @@ pub fn derive_principal_with_slack_team(
     // linearbot resolves — cosmetic, since the key stays derived from the id.
     if let Some(issue_id) = parse_linear_issue(thread_key) {
         let mut labels = BTreeMap::new();
+        labels.insert(KIND_LABEL.to_owned(), LINEAR_ISSUE_KIND.to_owned());
         labels.insert("linear_issue_id".to_owned(), issue_id.to_owned());
         return PrincipalRef {
             foreign_id: format!("linear-issue-{}", slugify(issue_id)),
@@ -141,6 +152,7 @@ pub fn derive_principal_with_slack_team(
         if let Some(user) = actor_user_id.map(str::trim).filter(|user| !user.is_empty())
             && !conversation_id.starts_with("19:")
         {
+            labels.insert(KIND_LABEL.to_owned(), TEAMS_USER_KIND.to_owned());
             labels.insert("teams_user_id".to_owned(), user.to_owned());
             return PrincipalRef {
                 foreign_id: format!("teams-user-{}", slugify(user)),
@@ -150,6 +162,7 @@ pub fn derive_principal_with_slack_team(
                 labels,
             };
         }
+        labels.insert(KIND_LABEL.to_owned(), TEAMS_CONVERSATION_KIND.to_owned());
         return PrincipalRef {
             foreign_id: format!("teams-conversation-{}", slugify(&conversation_id)),
             name: display_name
@@ -478,6 +491,10 @@ mod tests {
             thread_a.labels.get("discord_guild_id").map(String::as_str),
             Some("111")
         );
+        assert_eq!(
+            thread_a.labels.get("kind").map(String::as_str),
+            Some("discord_channel")
+        );
     }
 
     #[test]
@@ -491,6 +508,10 @@ mod tests {
         assert_eq!(
             session_a.labels.get("linear_issue_id").map(String::as_str),
             Some("issue-1")
+        );
+        assert_eq!(
+            session_a.labels.get("kind").map(String::as_str),
+            Some("linear_issue")
         );
     }
 
@@ -544,6 +565,10 @@ mod tests {
                 .map(String::as_str),
             Some("https://smba.trafficmanager.net/amer/")
         );
+        assert_eq!(
+            principal.labels.get("kind").map(String::as_str),
+            Some("teams_conversation")
+        );
     }
 
     #[test]
@@ -588,24 +613,30 @@ mod tests {
             principal.labels.get("teams_user_id").map(String::as_str),
             Some("aad-user-1")
         );
+        assert_eq!(
+            principal.labels.get("kind").map(String::as_str),
+            Some("teams_user")
+        );
     }
 
     #[test]
-    fn identity_input_carries_namespace_and_managed_label() {
-        let input = derive_principal("chat:C1:ts", None, None).to_identity_input("default");
+    fn principal_input_uses_first_class_slack_identity_fields() {
+        let input = derive_principal("chat:C1:ts", None, None).to_principal_input("default");
         assert_eq!(input.namespace, "default");
         assert_eq!(input.foreign_id, "slack-channel-c1");
         assert_eq!(
             input.labels.get("managed-by").map(String::as_str),
             Some("centaur")
         );
-        assert_eq!(
-            input.labels.get("slack_channel_id").map(String::as_str),
-            Some("C1")
-        );
-        assert_eq!(
-            input.labels.get("kind").map(String::as_str),
-            Some("slack_channel")
-        );
+        assert_eq!(input.slack_channel_id.as_deref(), Some("C1"));
+        assert_eq!(input.kind.as_deref(), Some("slack_channel"));
+        assert_eq!(input.labels.len(), 1);
+
+        let payload = serde_json::to_value(&input).unwrap();
+        assert_eq!(payload["kind"], "slack_channel");
+        assert_eq!(payload["slack_channel_id"], "C1");
+        assert_eq!(payload["labels"]["managed-by"], "centaur");
+        assert!(payload["labels"].get("kind").is_none());
+        assert!(payload["labels"].get("slack_channel_id").is_none());
     }
 }

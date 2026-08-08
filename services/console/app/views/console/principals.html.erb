@@ -41,9 +41,10 @@
             <% end %>
           </td>
           <td class="console-td">
-            <% if p.labels.present? %>
+            <% display_labels = p.labels_with_sandbox_capabilities %>
+            <% if display_labels.present? %>
               <div class="flex flex-wrap gap-1">
-                <% p.labels.each do |k, v| %>
+                <% display_labels.each do |k, v| %>
                   <span class="label-chip"><%= k %>=<%= v %></span>
                 <% end %>
               </div>

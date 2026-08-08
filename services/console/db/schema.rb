@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_07_27_233739) do
+ActiveRecord::Schema[8.1].define(version: 2026_08_07_091441) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -38,6 +38,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_27_233739) do
     t.string "namespace", default: "default", null: false
     t.datetime "updated_at", null: false
     t.index ["created_by_id"], name: "index_aws_auth_secrets_on_created_by_id"
+    t.index ["foreign_id"], name: "index_aws_auth_secrets_on_foreign_id", unique: true
     t.index ["labels"], name: "index_aws_auth_secrets_on_labels", using: :gin
     t.index ["namespace", "foreign_id"], name: "index_aws_auth_secrets_on_namespace_and_foreign_id", unique: true
   end
@@ -77,6 +78,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_27_233739) do
     t.datetime "updated_at", null: false
     t.text "username"
     t.index ["created_by_id"], name: "index_broker_credentials_on_created_by_id"
+    t.index ["foreign_id"], name: "index_broker_credentials_on_foreign_id", unique: true
     t.index ["labels"], name: "index_broker_credentials_on_labels", using: :gin
     t.index ["namespace", "foreign_id"], name: "index_broker_credentials_on_namespace_and_foreign_id", unique: true
     t.index ["next_attempt_at"], name: "index_broker_credentials_on_next_attempt_at"
@@ -97,6 +99,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_27_233739) do
     t.string "subject"
     t.datetime "updated_at", null: false
     t.index ["created_by_id"], name: "index_gcp_auth_secrets_on_created_by_id"
+    t.index ["foreign_id"], name: "index_gcp_auth_secrets_on_foreign_id", unique: true
     t.index ["labels"], name: "index_gcp_auth_secrets_on_labels", using: :gin
     t.index ["namespace", "foreign_id"], name: "index_gcp_auth_secrets_on_namespace_and_foreign_id", unique: true
   end
@@ -113,6 +116,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_27_233739) do
     t.string "namespace", default: "default", null: false
     t.datetime "updated_at", null: false
     t.index ["created_by_id"], name: "index_gcp_id_token_secrets_on_created_by_id"
+    t.index ["foreign_id"], name: "index_gcp_id_token_secrets_on_foreign_id", unique: true
     t.index ["labels"], name: "index_gcp_id_token_secrets_on_labels", using: :gin
     t.index ["namespace", "foreign_id"], name: "index_gcp_id_token_secrets_on_namespace_and_foreign_id", unique: true
   end
@@ -172,6 +176,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_27_233739) do
     t.string "timestamp_format"
     t.datetime "updated_at", null: false
     t.index ["created_by_id"], name: "index_hmac_secrets_on_created_by_id"
+    t.index ["foreign_id"], name: "index_hmac_secrets_on_foreign_id", unique: true
     t.index ["labels"], name: "index_hmac_secrets_on_labels", using: :gin
     t.index ["namespace", "foreign_id"], name: "index_hmac_secrets_on_namespace_and_foreign_id", unique: true
   end
@@ -261,6 +266,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_27_233739) do
     t.datetime "updated_at", null: false
     t.string "value_prefix"
     t.index ["created_by_id"], name: "index_oauth_token_secrets_on_created_by_id"
+    t.index ["foreign_id"], name: "index_oauth_token_secrets_on_foreign_id", unique: true
     t.index ["labels"], name: "index_oauth_token_secrets_on_labels", using: :gin
     t.index ["namespace", "foreign_id"], name: "index_oauth_token_secrets_on_namespace_and_foreign_id", unique: true
   end
@@ -278,6 +284,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_27_233739) do
     t.jsonb "settings", default: [], null: false
     t.datetime "updated_at", null: false
     t.index ["created_by_id"], name: "index_pg_dsn_secrets_on_created_by_id"
+    t.index ["foreign_id"], name: "index_pg_dsn_secrets_on_foreign_id", unique: true
     t.index ["labels"], name: "index_pg_dsn_secrets_on_labels", using: :gin
     t.index ["namespace", "foreign_id"], name: "index_pg_dsn_secrets_on_namespace_and_foreign_id", unique: true
   end
@@ -304,20 +311,35 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_27_233739) do
   end
 
   create_table "principals", force: :cascade do |t|
+    t.string "console_user_email"
+    t.bigint "console_user_id"
     t.datetime "created_at", null: false
     t.bigint "created_by_id", null: false
     t.string "foreign_id"
+    t.string "kind", default: "unknown", null: false
     t.jsonb "labels", default: {}, null: false
     t.string "name"
     t.string "namespace", default: "default", null: false
     t.boolean "sandbox_api_server_enabled", default: true, null: false
     t.boolean "sandbox_observability_enabled", default: true, null: false
     t.string "sandbox_repo_cache", default: "all", null: false
+    t.string "slack_channel_id"
+    t.string "slack_email"
+    t.string "slack_team_id"
+    t.string "slack_user_id"
     t.bigint "sync_config_cache_version", default: 0, null: false
     t.datetime "updated_at", null: false
     t.index ["created_by_id"], name: "index_principals_on_created_by_id"
+    t.index ["foreign_id"], name: "index_principals_on_foreign_id", unique: true
     t.index ["labels"], name: "index_principals_on_labels", using: :gin
+    t.index ["namespace", "console_user_email"], name: "index_principals_on_namespace_and_console_user_email"
+    t.index ["namespace", "console_user_id"], name: "index_principals_on_namespace_and_console_user_id"
     t.index ["namespace", "foreign_id"], name: "index_principals_on_namespace_and_foreign_id", unique: true
+    t.index ["namespace", "kind"], name: "index_principals_on_namespace_and_kind"
+    t.index ["namespace", "slack_channel_id"], name: "index_principals_on_namespace_and_slack_channel_id"
+    t.index ["namespace", "slack_email"], name: "index_principals_on_namespace_and_slack_email"
+    t.index ["namespace", "slack_team_id"], name: "index_principals_on_namespace_and_slack_team_id"
+    t.index ["namespace", "slack_user_id"], name: "index_principals_on_namespace_and_slack_user_id"
   end
 
   create_table "proxies", force: :cascade do |t|
@@ -357,6 +379,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_27_233739) do
   end
 
   create_table "roles", force: :cascade do |t|
+    t.boolean "assign_by_default", default: false, null: false
     t.datetime "created_at", null: false
     t.bigint "created_by_id", null: false
     t.string "foreign_id"
@@ -365,6 +388,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_27_233739) do
     t.string "namespace", default: "default", null: false
     t.datetime "updated_at", null: false
     t.index ["created_by_id"], name: "index_roles_on_created_by_id"
+    t.index ["foreign_id"], name: "index_roles_on_foreign_id", unique: true
     t.index ["labels"], name: "index_roles_on_labels", using: :gin
     t.index ["namespace", "foreign_id"], name: "index_roles_on_namespace_and_foreign_id", unique: true
   end
@@ -419,6 +443,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_27_233739) do
     t.string "description"
     t.string "foreign_id"
     t.jsonb "inject_config"
+    t.string "kind", default: "custom", null: false
     t.jsonb "labels", default: {}, null: false
     t.string "name"
     t.string "namespace", default: "default", null: false
@@ -426,6 +451,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_27_233739) do
     t.datetime "updated_at", null: false
     t.index ["broker_credential_id"], name: "index_static_secrets_on_broker_credential_id", unique: true, where: "(broker_credential_id IS NOT NULL)"
     t.index ["created_by_id"], name: "index_static_secrets_on_created_by_id"
+    t.index ["foreign_id"], name: "index_static_secrets_on_foreign_id", unique: true
     t.index ["labels"], name: "index_static_secrets_on_labels", using: :gin
     t.index ["namespace", "foreign_id"], name: "index_static_secrets_on_namespace_and_foreign_id", unique: true
   end
@@ -505,6 +531,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_27_233739) do
   add_foreign_key "principal_roles", "principals"
   add_foreign_key "principal_roles", "roles"
   add_foreign_key "principal_sync_config_snapshots", "principals"
+  add_foreign_key "principals", "users", column: "console_user_id"
   add_foreign_key "principals", "users", column: "created_by_id"
   add_foreign_key "proxies", "principals", on_delete: :nullify
   add_foreign_key "request_rules", "aws_auth_secrets"

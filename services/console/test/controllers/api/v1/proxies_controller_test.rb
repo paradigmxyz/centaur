@@ -251,18 +251,6 @@ class ProxiesControllerTest < ActionDispatch::IntegrationTest
     assert_response :no_content
   end
 
-  def with_env(values)
-    previous = values.keys.to_h { |key| [ key, ENV[key] ] }
-    values.each do |key, value|
-      value.nil? ? ENV.delete(key) : ENV[key] = value
-    end
-    yield
-  ensure
-    previous.each do |key, value|
-      value.nil? ? ENV.delete(key) : ENV[key] = value
-    end
-  end
-
   def proxy_auth_headers(token)
     { "Authorization" => "Bearer #{token}", "Content-Type" => "application/json" }
   end

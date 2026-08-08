@@ -74,7 +74,7 @@ Optional Teams ingress bootstrap (consumed when teamsbot.enabled=true):
   TEAMSBOT_API_KEY             bearer the bot sends to api-rs; auto-generated
                                once when absent (never rotated in place)
 
-Optional iron-control bootstrap (consumed when ironControl.enabled=true):
+Console bootstrap:
   IRON_CONTROL_DATABASE_URL    overrides the derived DSN (default points at the
                                bundled Postgres server with no database path, so
                                Rails resolves db names from its database.yml)
