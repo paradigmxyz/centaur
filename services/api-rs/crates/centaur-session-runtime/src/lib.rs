@@ -11,7 +11,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use centaur_iron_control::SessionRegistrar;
+use centaur_iron_control::{IronControlError, Principal, SessionRegistrar};
 use centaur_sandbox_core::{
     Mount, RepoCacheAccess, ResourceRequirements, SandboxBackend,
     SandboxCapabilities as BackendSandboxCapabilities, SandboxError, SandboxId, SandboxIoGuard,
@@ -95,6 +95,67 @@ type SessionTitleGenerator = Arc<
     dyn Fn(String) -> BoxFuture<'static, Result<String, SessionTitleGenerationError>> + Send + Sync,
 >;
 
+#[async_trait::async_trait]
+pub trait SessionPrincipalRegistrar: Send + Sync {
+    async fn register_session(
+        &self,
+        thread_key: &str,
+        metadata: Option<&Value>,
+    ) -> Result<Principal, IronControlError>;
+
+    async fn get_principal(&self, principal: &str) -> Result<Principal, IronControlError>;
+}
+
+#[async_trait::async_trait]
+impl SessionPrincipalRegistrar for SessionRegistrar {
+    async fn register_session(
+        &self,
+        thread_key: &str,
+        metadata: Option<&Value>,
+    ) -> Result<Principal, IronControlError> {
+        SessionRegistrar::register_session(self, thread_key, metadata).await
+    }
+
+    async fn get_principal(&self, principal: &str) -> Result<Principal, IronControlError> {
+        SessionRegistrar::get_principal(self, principal).await
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    use super::*;
+
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct FakeSessionPrincipalRegistrar;
+
+    #[async_trait::async_trait]
+    impl SessionPrincipalRegistrar for FakeSessionPrincipalRegistrar {
+        async fn register_session(
+            &self,
+            _thread_key: &str,
+            _metadata: Option<&Value>,
+        ) -> Result<Principal, IronControlError> {
+            Ok(principal("prn_test"))
+        }
+
+        async fn get_principal(&self, principal_id: &str) -> Result<Principal, IronControlError> {
+            Ok(principal(principal_id))
+        }
+    }
+
+    fn principal(id: &str) -> Principal {
+        Principal {
+            id: id.to_owned(),
+            namespace: "default".to_owned(),
+            foreign_id: Some("test".to_owned()),
+            name: "Test".to_owned(),
+            labels: BTreeMap::new(),
+            sandbox_observability_enabled: true,
+            sandbox_api_server_enabled: true,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct SessionRuntime {
     store: PgSessionStore,
@@ -103,7 +164,7 @@ pub struct SessionRuntime {
     sandbox_pipe_open_locks: SessionPipeOpenLocks,
     tool_host_call_locks: ToolHostCallLocks,
     execution_spans: ExecutionSpanRegistry,
-    iron_control: Option<SessionRegistrar>,
+    iron_control: Arc<dyn SessionPrincipalRegistrar>,
     warm_pool: Option<Arc<WarmPoolManager>>,
     personas: Option<Arc<PersonaRegistry>>,
     session_title_generator: Option<SessionTitleGenerator>,
@@ -794,7 +855,11 @@ struct PersonaResolution {
 }
 
 impl SessionRuntime {
-    pub fn new(store: PgSessionStore, sandbox_runtime: SandboxRuntime) -> Self {
+    pub fn new(
+        store: PgSessionStore,
+        sandbox_runtime: SandboxRuntime,
+        iron_control: impl SessionPrincipalRegistrar + 'static,
+    ) -> Self {
         Self {
             store,
             sandbox_runtime,
@@ -802,7 +867,7 @@ impl SessionRuntime {
             sandbox_pipe_open_locks: Arc::new(DashMap::new()),
             tool_host_call_locks: Arc::new(DashMap::new()),
             execution_spans: Arc::new(Mutex::new(HashMap::new())),
-            iron_control: None,
+            iron_control: Arc::new(iron_control),
             warm_pool: None,
             personas: None,
             session_title_generator: None,
@@ -1060,9 +1125,7 @@ impl SessionRuntime {
             .store
             .create_or_get_session(thread_key, &harness, None, metadata, BTreeMap::new())
             .await?;
-        if self.iron_control.is_some()
-            && session.iron_control_principal.as_deref() != Some(principal_id)
-        {
+        if session.iron_control_principal.as_deref() != Some(principal_id) {
             self.store
                 .set_iron_control_principal(thread_key, Some(principal_id))
                 .await?;
@@ -1216,16 +1279,9 @@ impl SessionRuntime {
         Ok(claimed)
     }
 
-    /// Attach an iron-control registrar so each new session upserts its
-    /// principal. Iron-control applies configured default roles on creation.
-    pub fn with_iron_control(mut self, registrar: SessionRegistrar) -> Self {
-        self.iron_control = Some(registrar);
-        self
-    }
-
-    /// Register the shared unauthenticated MCP tool-host principal when
-    /// iron-control is enabled, so proxy-backed tool calls can resolve an
-    /// effective config without minting per-user credentials in this layer.
+    /// Register the shared unauthenticated MCP tool-host principal so
+    /// proxy-backed tool calls can resolve an effective config without minting
+    /// per-user credentials in this layer.
     pub async fn register_mcp_tool_host_principal(
         &self,
         principal_id: &str,
@@ -1242,18 +1298,16 @@ impl SessionRuntime {
             ));
         }
         let thread_key = tool_host_thread_key(principal_id)?;
-        if let Some(registrar) = &self.iron_control {
-            // Serialize with run_tool_host_call so concurrent registrations
-            // for the same principal cannot interleave with session setup.
-            let call_lock = self.tool_host_call_lock(&thread_key);
-            let _call_guard = call_lock.lock().await;
-            let metadata = tool_host_session_metadata(principal_id);
-            let principal = registrar
-                .register_session(thread_key.as_str(), Some(&metadata))
-                .await?;
-            return Ok(principal.id);
-        }
-        Ok(principal_id.to_owned())
+        // Serialize with run_tool_host_call so concurrent registrations for the
+        // same principal cannot interleave with session setup.
+        let call_lock = self.tool_host_call_lock(&thread_key);
+        let _call_guard = call_lock.lock().await;
+        let metadata = tool_host_session_metadata(principal_id);
+        let principal = self
+            .iron_control
+            .register_session(thread_key.as_str(), Some(&metadata))
+            .await?;
+        Ok(principal.id)
     }
 
     pub fn with_warm_pool(mut self, config: WarmPoolConfig) -> Self {
@@ -1354,7 +1408,6 @@ impl SessionRuntime {
             "centaur.harness_type" = %harness_type,
             thread_key = %thread_key,
             harness_type = %harness_type,
-            iron_control_enabled = self.iron_control.is_some(),
         );
         set_span_parent_trace(
             &span,
@@ -1368,22 +1421,16 @@ impl SessionRuntime {
                 event = "session_create_or_get_started",
                 thread_key = %thread_key,
                 harness_type = %harness_type,
-                iron_control_enabled = self.iron_control.is_some(),
                 "creating or loading session"
             );
             let mut harness_switched = false;
             let mut session_metadata = default_metadata(metadata);
             let proxy_labels = proxy_labels_from_session_metadata(thread_key, &session_metadata);
-            let (registered_principal, desired_capabilities) =
-                if let Some(registrar) = &self.iron_control {
-                    let principal = registrar
-                        .register_session(thread_key.as_str(), Some(&session_metadata))
-                        .await?;
-                    let desired_capabilities = sandbox_capabilities_from_principal(&principal);
-                    (Some(principal), desired_capabilities)
-                } else {
-                    (None, SessionSandboxCapabilities::default_enabled())
-                };
+            let registered_principal = self
+                .iron_control
+                .register_session(thread_key.as_str(), Some(&session_metadata))
+                .await?;
+            let desired_capabilities = sandbox_capabilities_from_principal(&registered_principal);
             let persona_resolution =
                 self.resolve_persona_for_create(persona_id, &desired_capabilities)?;
             if let Some(context) = persona_resolution.context.as_ref() {
@@ -1443,35 +1490,19 @@ impl SessionRuntime {
                     )
                     .await?;
             }
-            if let Some(principal) = registered_principal {
-                // Persist the principal OID on the session row so a resumed session
-                // can recreate its sandbox after a restart without re-deriving it.
-                let session = self
-                    .store
-                    .set_iron_control_principal(thread_key, Some(&principal.id))
-                    .await?;
-                info!(
-                    component = COMPONENT_SESSION_RUNTIME,
-                    event = "session_create_or_get_completed",
-                    thread_key = %thread_key,
-                    harness_type = %harness_type,
-                    status = %session.status,
-                    iron_control_principal_persisted = true,
-                    harness_switched,
-                    "session ready"
-                );
-                return Ok(CreateOrGetSessionOutcome {
-                    session,
-                    harness_switched,
-                });
-            }
+            // Persist the principal OID on the session row so a resumed session
+            // can recreate its sandbox after a restart without re-deriving it.
+            let session = self
+                .store
+                .set_iron_control_principal(thread_key, Some(&registered_principal.id))
+                .await?;
             info!(
                 component = COMPONENT_SESSION_RUNTIME,
                 event = "session_create_or_get_completed",
                 thread_key = %thread_key,
                 harness_type = %harness_type,
                 status = %session.status,
-                iron_control_principal_persisted = session.iron_control_principal.is_some(),
+                iron_control_principal_persisted = true,
                 harness_switched,
                 "session ready"
             );
@@ -2740,10 +2771,7 @@ impl SessionRuntime {
         let Some(principal_id) = iron_control_principal else {
             return Ok(SessionSandboxCapabilities::default_enabled());
         };
-        let Some(registrar) = &self.iron_control else {
-            return Ok(SessionSandboxCapabilities::default_enabled());
-        };
-        let principal = registrar.get_principal(principal_id).await?;
+        let principal = self.iron_control.get_principal(principal_id).await?;
         Ok(sandbox_capabilities_from_principal(&principal))
     }
 
@@ -8762,6 +8790,7 @@ mod adoption_tests {
         SessionRuntime::new(
             store.clone(),
             SandboxRuntime::backend(backend, SandboxSpec::new("mock")),
+            test_support::FakeSessionPrincipalRegistrar,
         )
     }
 
@@ -9002,6 +9031,7 @@ mod adoption_tests {
                 },
                 move || SandboxSpec::new("mock").env("WARM_POOL_TEST_MARKER", warm_marker.as_str()),
             ),
+            test_support::FakeSessionPrincipalRegistrar,
         );
         let warm_pool = Arc::new(WarmPoolManager::new(
             runtime.sandbox_runtime.manager.clone(),
@@ -9011,7 +9041,7 @@ mod adoption_tests {
             WarmPoolConfig {
                 target_size: 1,
                 replenish_interval: Duration::from_secs(60),
-                bootstrap_iron_control_principal: None,
+                bootstrap_iron_control_principal: "prn_test_bootstrap".to_owned(),
                 max_running_sandboxes: None,
             },
         ));

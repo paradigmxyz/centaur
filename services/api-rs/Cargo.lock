@@ -989,6 +989,7 @@ dependencies = [
 name = "centaur-sandbox-e2e"
 version = "0.1.0"
 dependencies = [
+ "centaur-iron-control",
  "centaur-sandbox-agent-k8s",
  "centaur-sandbox-core",
  "centaur-sandbox-local",

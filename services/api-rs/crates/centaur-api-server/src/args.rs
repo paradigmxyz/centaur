@@ -70,9 +70,7 @@ impl Args {
         self.sandbox.runtime().await
     }
 
-    pub(crate) async fn iron_control_runtime(
-        &self,
-    ) -> Result<Option<IronControlRuntime>, ServerError> {
+    pub(crate) async fn iron_control_runtime(&self) -> Result<IronControlRuntime, ServerError> {
         self.sandbox.iron_control_runtime().await
     }
 
@@ -80,8 +78,12 @@ impl Args {
         self.sandbox.persona_registry()
     }
 
-    pub(crate) fn warm_pool_config(&self) -> Option<WarmPoolConfig> {
-        self.sandbox.warm_pool_config()
+    pub(crate) fn warm_pool_config(
+        &self,
+        bootstrap_iron_control_principal: &str,
+    ) -> Option<WarmPoolConfig> {
+        self.sandbox
+            .warm_pool_config(bootstrap_iron_control_principal)
     }
 
     pub(crate) fn sandbox_capacity_config(&self) -> Option<SandboxCapacityConfig> {
@@ -98,7 +100,7 @@ impl Args {
 
     pub(crate) async fn workflow_host_sandbox_runtime(
         &self,
-        bootstrap_iron_control_principal: Option<&str>,
+        bootstrap_iron_control_principal: &str,
     ) -> Result<Option<WorkflowHostSandboxRuntime>, ServerError> {
         self.sandbox
             .workflow_host_sandbox_runtime(bootstrap_iron_control_principal)
@@ -441,12 +443,21 @@ impl IronControlArgs {
         Some(IronControlClient::new(url, api_key))
     }
 
-    /// Backend sync settings (admin client + control-plane URL) when iron-control
-    /// is configured.
-    fn settings(&self) -> Option<IronControlSettings> {
-        let url = non_empty(self.url.as_deref())?;
-        Some(IronControlSettings {
-            client: self.client()?,
+    fn required_client(&self) -> Result<IronControlClient, ServerError> {
+        self.client().ok_or_else(|| {
+            ServerError::UnsupportedConfig(
+                "iron-control is required: set IRON_CONTROL_URL and IRON_CONTROL_API_KEY"
+                    .to_owned(),
+            )
+        })
+    }
+
+    /// Required backend sync settings (admin client + control-plane URL).
+    fn settings(&self) -> Result<IronControlSettings, ServerError> {
+        let client = self.required_client()?;
+        let url = non_empty(self.url.as_deref()).expect("required client validates URL");
+        Ok(IronControlSettings {
+            client,
             control_url: url.to_owned(),
             namespace: self.namespace.clone(),
         })
@@ -720,10 +731,8 @@ struct SandboxArgs {
 impl SandboxArgs {
     /// Build the iron-control registrar. The warm-pool bootstrap principal
     /// stays roleless until claim-time reassignment binds the session principal.
-    async fn iron_control_runtime(&self) -> Result<Option<IronControlRuntime>, ServerError> {
-        let Some(client) = self.iron_control.client() else {
-            return Ok(None);
-        };
+    async fn iron_control_runtime(&self) -> Result<IronControlRuntime, ServerError> {
+        let client = self.iron_control.required_client()?;
         let namespace = self.iron_control.namespace.clone();
         if self.iron_control_sync_infra_secrets {
             let policy = self.iron_proxy.source_policy();
@@ -774,12 +783,12 @@ impl SandboxArgs {
                 slack_email: None,
             })
             .await?;
-        Ok(Some(IronControlRuntime {
+        Ok(IronControlRuntime {
             registrar: SessionRegistrar::new(client.clone(), namespace.clone()),
             warm_pool_bootstrap_principal: bootstrap.id,
             workflow_host_principal: workflow_host.id,
             workflow_principal_registrar: WorkflowPrincipalRegistrar::new(client, namespace),
-        }))
+        })
     }
 
     fn persona_registry(&self) -> Result<PersonaRegistry, ServerError> {
@@ -815,7 +824,7 @@ impl SandboxArgs {
 
     async fn workflow_host_sandbox_runtime(
         &self,
-        bootstrap_iron_control_principal: Option<&str>,
+        bootstrap_iron_control_principal: &str,
     ) -> Result<Option<WorkflowHostSandboxRuntime>, ServerError> {
         if !self.workflow_host_sandbox {
             return Ok(None);
@@ -838,7 +847,7 @@ impl SandboxArgs {
 
     fn workflow_host_spec(
         &self,
-        bootstrap_iron_control_principal: Option<&str>,
+        bootstrap_iron_control_principal: &str,
     ) -> Result<SandboxSpec, ServerError> {
         let image = self
             .workflow_host_image
@@ -911,9 +920,7 @@ impl SandboxArgs {
         for (name, value) in self.workflow_host_env_template()? {
             upsert_spec_env(&mut spec, name, value);
         }
-        if let Some(principal) = bootstrap_iron_control_principal {
-            spec = spec.iron_control_principal(principal);
-        }
+        spec = spec.iron_control_principal(bootstrap_iron_control_principal);
         Ok(spec)
     }
 
@@ -1332,11 +1339,11 @@ impl SandboxArgs {
         self.tools.resolve_tool_dirs()
     }
 
-    fn warm_pool_config(&self) -> Option<WarmPoolConfig> {
+    fn warm_pool_config(&self, bootstrap_iron_control_principal: &str) -> Option<WarmPoolConfig> {
         (self.warm_pool_size > 0).then(|| WarmPoolConfig {
             target_size: self.warm_pool_size,
             replenish_interval: Duration::from_secs(self.warm_pool_replenish_interval_secs),
-            bootstrap_iron_control_principal: None,
+            bootstrap_iron_control_principal: bootstrap_iron_control_principal.to_owned(),
             max_running_sandboxes: (self.sandbox_running_limit > 0)
                 .then_some(self.sandbox_running_limit),
         })
@@ -1458,7 +1465,8 @@ impl TryFrom<&SandboxArgs> for AgentSandboxConfig {
     type Error = ServerError;
 
     fn try_from(args: &SandboxArgs) -> Result<Self, Self::Error> {
-        let mut config = AgentSandboxConfig::new(args.k8s_namespace.clone());
+        let mut config =
+            AgentSandboxConfig::new(args.k8s_namespace.clone(), args.iron_control.settings()?);
         config.image_pull_policy = args.agent_image_pull_policy.clone();
         config.image_pull_secrets = args
             .image_pull_secrets
@@ -1484,20 +1492,10 @@ impl TryFrom<&SandboxArgs> for AgentSandboxConfig {
         fragments.append(&mut proxy.fragments);
         proxy.fragments = fragments;
         config.iron_proxy = Some(proxy);
-        config.iron_control = args.iron_control.settings();
         config.tools = args.tools_source.to_config();
         // The chart label policy handles sandbox OTLP egress; keep the
         // per-sandbox proxy's own in-cluster OTLP egress explicit.
         config.otlp_egress = args.sandbox_otlp_egress_target()?;
-        // iron-control is the only proxy mode: a per-sandbox proxy syncs its
-        // secrets from the control plane, so configuring iron-proxy without
-        // iron-control would produce a non-functional proxy. Fail fast.
-        if config.iron_control.is_none() {
-            return Err(ServerError::UnsupportedConfig(
-                "iron-proxy requires iron-control: set IRON_CONTROL_URL and IRON_CONTROL_API_KEY"
-                    .to_owned(),
-            ));
-        }
         Ok(config)
     }
 }
@@ -2539,7 +2537,7 @@ mod tests {
         ])
         .unwrap();
 
-        let spec = args.sandbox.workflow_host_spec(None).unwrap();
+        let spec = args.sandbox.workflow_host_spec("prn_test").unwrap();
 
         assert!(spec.mounts.iter().any(|mount| {
             mount.target_path == SANDBOX_REPOS_MOUNT_PATH
@@ -2589,7 +2587,7 @@ mod tests {
         ])
         .unwrap();
 
-        let spec = args.sandbox.workflow_host_spec(None).unwrap();
+        let spec = args.sandbox.workflow_host_spec("prn_test").unwrap();
 
         assert!(spec.mounts.iter().any(|mount| {
             mount.target_path == SANDBOX_REPOS_MOUNT_PATH
@@ -2620,7 +2618,7 @@ mod tests {
         ])
         .unwrap();
 
-        let spec = args.sandbox.workflow_host_spec(None).unwrap();
+        let spec = args.sandbox.workflow_host_spec("prn_test").unwrap();
 
         assert_eq!(
             spec.env
@@ -3124,7 +3122,7 @@ mod tests {
             )
         );
 
-        let spec = args.sandbox.workflow_host_spec(None).unwrap();
+        let spec = args.sandbox.workflow_host_spec("prn_test").unwrap();
         assert_eq!(
             spec.resources,
             Some(
@@ -3161,7 +3159,10 @@ mod tests {
         assert_eq!(resources, None);
 
         assert_eq!(
-            args.sandbox.workflow_host_spec(None).unwrap().resources,
+            args.sandbox
+                .workflow_host_spec("prn_test")
+                .unwrap()
+                .resources,
             None
         );
     }

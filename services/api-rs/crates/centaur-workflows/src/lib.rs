@@ -241,15 +241,6 @@ impl WorkflowPrincipalAssignments {
     }
 }
 
-fn workflow_principals_require_iron_control_error(
-    principals: &BTreeSet<String>,
-) -> WorkflowRuntimeError {
-    let workflow_names = principals.iter().cloned().collect::<Vec<_>>().join(", ");
-    WorkflowRuntimeError::BadRequest(format!(
-        "WORKFLOW_PRINCIPAL requires Iron Control, but Iron Control is disabled for workflows: {workflow_names}"
-    ))
-}
-
 impl WorkflowHostSandboxRuntime {
     pub fn new(runtime: SandboxRuntime, spec: SandboxSpec) -> Self {
         Self {
@@ -533,32 +524,11 @@ struct SlackPostResult {
 }
 
 impl WorkflowRuntime {
-    pub async fn new(
-        store: PgSessionStore,
-        session_runtime: SessionRuntime,
-    ) -> Result<Self, WorkflowRuntimeError> {
-        Self::new_with_workflow_host_sandbox(store, session_runtime, None).await
-    }
-
-    pub async fn new_with_workflow_host_sandbox(
-        store: PgSessionStore,
-        session_runtime: SessionRuntime,
-        workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
-    ) -> Result<Self, WorkflowRuntimeError> {
-        Self::new_with_workflow_host_sandbox_and_principal_registrar(
-            store,
-            session_runtime,
-            workflow_host_sandbox,
-            None,
-        )
-        .await
-    }
-
     pub async fn new_with_workflow_host_sandbox_and_principal_registrar(
         store: PgSessionStore,
         session_runtime: SessionRuntime,
         workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
-        workflow_principal_registrar: Option<WorkflowPrincipalRegistrar>,
+        workflow_principal_registrar: WorkflowPrincipalRegistrar,
     ) -> Result<Self, WorkflowRuntimeError> {
         let client = Client::from_pool_with_options(
             store.pool().clone(),
@@ -1732,7 +1702,7 @@ fn metadata_from_discovery_payload(
 
 async fn prepare_workflow_host_sandbox(
     workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
-    workflow_principal_registrar: Option<WorkflowPrincipalRegistrar>,
+    workflow_principal_registrar: WorkflowPrincipalRegistrar,
     discovery: &PythonWorkflowMetadata,
     enablement: &WorkflowEnablement,
 ) -> Result<Option<WorkflowHostSandboxRuntime>, WorkflowRuntimeError> {
@@ -1752,7 +1722,7 @@ async fn prepare_workflow_host_sandbox(
     };
     reconcile_workflow_principals(
         &sandbox,
-        workflow_principal_registrar.as_ref(),
+        &workflow_principal_registrar,
         discovery,
         enablement,
     )
@@ -1762,20 +1732,12 @@ async fn prepare_workflow_host_sandbox(
 
 async fn reconcile_workflow_principals(
     sandbox: &WorkflowHostSandboxRuntime,
-    registrar: Option<&WorkflowPrincipalRegistrar>,
+    registrar: &WorkflowPrincipalRegistrar,
     discovery: &PythonWorkflowMetadata,
     enablement: &WorkflowEnablement,
 ) -> Result<(), WorkflowRuntimeError> {
     let mut principals = discovery.principals.clone();
     principals.retain(|workflow_name| enablement.is_enabled(workflow_name));
-    let Some(registrar) = registrar else {
-        if !principals.is_empty() {
-            sandbox.update_workflow_principals(BTreeMap::new(), principals.clone());
-            return Err(workflow_principals_require_iron_control_error(&principals));
-        }
-        sandbox.update_workflow_principals(BTreeMap::new(), BTreeSet::new());
-        return Ok(());
-    };
     let registered = match registrar.register_workflow_principals(&principals).await {
         Ok(registered) => registered,
         Err(error) => {
@@ -1919,7 +1881,7 @@ fn spawn_workflow_metadata_reconciler(
     webhook_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
     schedule_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
     workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
-    workflow_principal_registrar: Option<WorkflowPrincipalRegistrar>,
+    workflow_principal_registrar: WorkflowPrincipalRegistrar,
     interval: Duration,
 ) {
     tokio::spawn(async move {
@@ -1935,7 +1897,7 @@ fn spawn_workflow_metadata_reconciler(
                 &webhook_registry,
                 &schedule_registry,
                 workflow_host_sandbox.as_ref(),
-                workflow_principal_registrar.as_ref(),
+                &workflow_principal_registrar,
             )
             .await
             {
@@ -1972,7 +1934,7 @@ async fn reconcile_workflow_metadata_once(
     webhook_registry: &Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
     schedule_registry: &Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
     workflow_host_sandbox: Option<&WorkflowHostSandboxRuntime>,
-    workflow_principal_registrar: Option<&WorkflowPrincipalRegistrar>,
+    workflow_principal_registrar: &WorkflowPrincipalRegistrar,
 ) -> Result<
     (
         PythonWorkflowMetadata,
@@ -4593,17 +4555,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn workflow_principal_requires_iron_control() {
-        let error = workflow_principals_require_iron_control_error(&BTreeSet::from([
-            "nightly_report".to_owned(),
-        ]));
-
-        assert!(matches!(error, WorkflowRuntimeError::BadRequest(_)));
-        assert!(error.to_string().contains("Iron Control"));
-        assert!(error.to_string().contains("nightly_report"));
-    }
-
     #[tokio::test]
     async fn workflow_principal_requires_workflow_host_sandbox() {
         let discovery = PythonWorkflowMetadata {
@@ -4612,13 +4563,21 @@ mod tests {
             ..PythonWorkflowMetadata::default()
         };
 
-        let error =
-            match prepare_workflow_host_sandbox(None, None, &discovery, &WorkflowEnablement::all())
-                .await
-            {
-                Ok(_) => panic!("workflow principal should require workflow-host sandboxing"),
-                Err(error) => error,
-            };
+        let registrar = WorkflowPrincipalRegistrar::new(
+            IronControlClient::new("http://127.0.0.1:1", "test-key"),
+            "default",
+        );
+        let error = match prepare_workflow_host_sandbox(
+            None,
+            registrar,
+            &discovery,
+            &WorkflowEnablement::all(),
+        )
+        .await
+        {
+            Ok(_) => panic!("workflow principal should require workflow-host sandboxing"),
+            Err(error) => error,
+        };
 
         assert!(matches!(error, WorkflowRuntimeError::BadRequest(_)));
         assert!(error.to_string().contains("WORKFLOW_HOST_SANDBOX"));

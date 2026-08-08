@@ -205,11 +205,6 @@ impl AgentSandboxBackend {
         // config from iron-control over `/proxy/sync`, so no config is rendered
         // locally — the remaining local settings are passed as IRON_* env vars
         // on the pod. The sandbox must carry the principal its proxy binds to.
-        if self.config.iron_control.is_none() {
-            return Err(SandboxError::InvalidSpec(
-                "iron-proxy requires iron-control to be configured".to_owned(),
-            ));
-        }
         let principal_id = spec.iron_control_principal.clone().ok_or_else(|| {
             SandboxError::InvalidSpec(
                 "iron-proxy sandbox spec is missing its iron-control principal".to_owned(),
@@ -240,9 +235,7 @@ impl AgentSandboxBackend {
         &self,
         principal: &str,
     ) -> SandboxResult<BTreeMap<String, String>> {
-        let Some(iron_control) = self.config.iron_control.as_ref() else {
-            return Ok(BTreeMap::new());
-        };
+        let iron_control = &self.config.iron_control;
         let effective = iron_control
             .client
             .effective_config(&iron_control.namespace, principal)
@@ -339,12 +332,7 @@ impl AgentSandboxBackend {
             proxy_host: iron_proxy_service_name(id),
             proxy_pod_name: new_iron_proxy_pod_name(id),
             proxy_port: PROXY_TUNNEL_PORT,
-            console_url: self
-                .config
-                .iron_control
-                .as_ref()
-                .map(|settings| settings.control_url.clone())
-                .unwrap_or_default(),
+            console_url: self.config.iron_control.control_url.clone(),
             principal_id,
             labels,
             pg: runtime.pg,
@@ -423,9 +411,7 @@ impl AgentSandboxBackend {
         id: &SandboxId,
         resolved: &ResolvedIronProxy,
     ) -> SandboxResult<ProxySyncEnv> {
-        let iron_control = self.config.iron_control.as_ref().ok_or_else(|| {
-            SandboxError::backend("iron-proxy requires iron-control to be configured")
-        })?;
+        let iron_control = &self.config.iron_control;
         let proxy = iron_control
             .client
             .create_proxy(id.as_str(), &resolved.principal_id, resolved.labels.clone())
@@ -511,10 +497,13 @@ impl AgentSandboxBackend {
         //
         // Deregister the iron-control proxy first (best-effort): once the pod is
         // gone the token is useless, and a stale proxy row just fails to sync.
-        if let Some(iron_control) = self.config.iron_control.as_ref()
-            && let Some(proxy_id) = self.proxy_ids.lock().await.remove(id.as_str())
-        {
-            let _ = iron_control.client.delete_proxy(&proxy_id).await;
+        if let Some(proxy_id) = self.proxy_ids.lock().await.remove(id.as_str()) {
+            let _ = self
+                .config
+                .iron_control
+                .client
+                .delete_proxy(&proxy_id)
+                .await;
         }
         let _ = self.delete_iron_proxy_pods_for_sandbox(id).await;
         let _ = self
@@ -539,14 +528,7 @@ impl AgentSandboxBackend {
         principal_id: &str,
         labels: &BTreeMap<String, String>,
     ) -> SandboxResult<()> {
-        let iron_control = self
-            .config
-            .iron_control
-            .as_ref()
-            .ok_or(SandboxError::Unsupported {
-                backend: crate::BACKEND_NAME,
-                operation: "assign_iron_control_proxy_principal",
-            })?;
+        let iron_control = &self.config.iron_control;
         let mut proxy_id = self.proxy_id_for_sandbox(id).await?;
         if proxy_id.is_none() || !self.has_usable_iron_proxy_resources(id).await? {
             tracing::warn!(
@@ -590,12 +572,6 @@ impl AgentSandboxBackend {
         if self.config.iron_proxy.is_none() {
             return Ok(());
         }
-        if self.config.iron_control.is_none() {
-            return Err(SandboxError::Unsupported {
-                backend: crate::BACKEND_NAME,
-                operation: "ensure_iron_control_proxy_resources",
-            });
-        }
         let proxy_id = self.proxy_id_for_sandbox(id).await?;
         if let Some(proxy_id) = proxy_id
             && self.has_usable_iron_proxy_resources(id).await?
@@ -614,9 +590,7 @@ impl AgentSandboxBackend {
                 return Ok(());
             }
 
-            let iron_control = self.config.iron_control.as_ref().ok_or_else(|| {
-                SandboxError::backend("iron-proxy requires iron-control to be configured")
-            })?;
+            let iron_control = &self.config.iron_control;
             let proxy = iron_control
                 .client
                 .assign_proxy_principal(&proxy_id, principal_id, labels)
@@ -2870,7 +2844,7 @@ mod tests {
         let sandbox = crate::build_agent_sandbox(
             &SandboxId::new("asbx-test"),
             &SandboxSpec::new("agent:test").env(CENTAUR_POSTGRES_DSN_ENV, dsn),
-            &crate::AgentSandboxConfig::new("test"),
+            &crate::AgentSandboxConfig::new("test", crate::test_iron_control_settings()),
         )
         .unwrap();
 

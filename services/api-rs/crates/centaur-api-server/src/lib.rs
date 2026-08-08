@@ -34,14 +34,24 @@ mod tests {
         ObservedSandbox, SandboxBackend, SandboxError, SandboxHandle, SandboxId, SandboxIo,
         SandboxResult, SandboxSpec, SandboxStatus,
     };
-    use centaur_session_runtime::SandboxRuntime;
+    use centaur_session_runtime::{SandboxRuntime, test_support::FakeSessionPrincipalRegistrar};
     use centaur_session_sqlx::PgSessionStore;
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
     use serde_json::{Value, json};
     use sqlx::PgPool;
     use tower::ServiceExt;
 
-    use super::{AppState, build_router_with_app_state, build_router_with_runtime};
+    use super::{
+        AppState, build_router_with_app_state,
+        build_router_with_runtime as build_router_with_iron_control,
+    };
+
+    fn build_router_with_runtime(
+        store: PgSessionStore,
+        sandbox_runtime: SandboxRuntime,
+    ) -> axum::Router {
+        build_router_with_iron_control(store, sandbox_runtime, FakeSessionPrincipalRegistrar)
+    }
 
     #[tokio::test]
     async fn router_builds() {
@@ -195,6 +205,7 @@ mod tests {
             centaur_session_runtime::SessionRuntime::new(
                 PgSessionStore::new(pool),
                 SandboxRuntime::backend(Arc::new(TestBackend::default()), SandboxSpec::new("test")),
+                FakeSessionPrincipalRegistrar,
             ),
             None,
             None,
