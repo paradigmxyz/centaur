@@ -1,11 +1,22 @@
 use std::{
     env, fs,
+    net::SocketAddr,
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
+use async_trait::async_trait;
+use centaur_api_server::{AppState, build_router_with_app_state};
+use centaur_iron_control::{IronControlClient, IronControlError, Principal};
+use centaur_sandbox_local::LocalSandboxBackend;
 use centaur_session_core::HarnessType;
+use centaur_session_runtime::{
+    SandboxRuntime, SandboxWorkloadMode, SessionPrincipalRegistrar, SessionRuntime,
+};
+use centaur_session_sqlx::PgSessionStore;
+use centaur_workflows::{WorkflowPrincipalRegistrar, WorkflowRuntime};
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 use reqwest::{Client as HttpClient, StatusCode};
@@ -19,6 +30,10 @@ const TEST_MODEL: &str = "gpt-api-integration-test";
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if env::args().nth(1).as_deref() == Some("--api-server") {
+        return run_api_server().await;
+    }
+
     let base_url = env::var("CENTAUR_API_URL")
         .unwrap_or_else(|_| DEFAULT_API_URL.to_owned())
         .trim_end_matches('/')
@@ -90,6 +105,73 @@ async fn main() -> Result<()> {
         Ok(())
     } else {
         bail!("centaur-api integration test failed")
+    }
+}
+
+async fn run_api_server() -> Result<()> {
+    let bind_addr = env::var("BIND_ADDR")
+        .unwrap_or_else(|_| "127.0.0.1:18080".to_owned())
+        .parse::<SocketAddr>()
+        .context("parse BIND_ADDR")?;
+    let database_url = env::var("DATABASE_URL").context("DATABASE_URL is required")?;
+    let store = PgSessionStore::connect(&database_url).await?;
+    store.run_migrations().await?;
+
+    let sandbox_runtime = SandboxRuntime::backend_with_workload(
+        Arc::new(LocalSandboxBackend::new()),
+        SandboxWorkloadMode::mock_app_server("api-integration-test"),
+    );
+    let runtime = SessionRuntime::new(store.clone(), sandbox_runtime, NoopPrincipalRegistrar);
+    let workflows = WorkflowRuntime::new(
+        store.clone(),
+        runtime.clone(),
+        None,
+        WorkflowPrincipalRegistrar::new(
+            IronControlClient::new("http://unused.invalid", "unused"),
+            "default",
+        ),
+    )
+    .await?;
+    let app = build_router_with_app_state(AppState::ready_with_pool(
+        runtime,
+        Some(workflows),
+        Some(store.pool().clone()),
+    ));
+    let listener = tokio::net::TcpListener::bind(bind_addr)
+        .await
+        .context("bind API integration-test server")?;
+    axum::serve(listener, app)
+        .await
+        .context("serve API integration-test server")
+}
+
+#[derive(Clone, Copy)]
+struct NoopPrincipalRegistrar;
+
+#[async_trait]
+impl SessionPrincipalRegistrar for NoopPrincipalRegistrar {
+    async fn register_session(
+        &self,
+        _thread_key: &str,
+        _metadata: Option<&Value>,
+    ) -> Result<Principal, IronControlError> {
+        Ok(integration_test_principal("prn_api_integration_test"))
+    }
+
+    async fn get_principal(&self, principal: &str) -> Result<Principal, IronControlError> {
+        Ok(integration_test_principal(principal))
+    }
+}
+
+fn integration_test_principal(id: &str) -> Principal {
+    Principal {
+        id: id.to_owned(),
+        namespace: "default".to_owned(),
+        foreign_id: Some("api-integration-test".to_owned()),
+        name: "API integration test".to_owned(),
+        labels: Default::default(),
+        sandbox_observability_enabled: true,
+        sandbox_api_server_enabled: true,
     }
 }
 

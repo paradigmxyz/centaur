@@ -179,7 +179,7 @@ jobs:
           mkdir -p "$API_INTEGRATION_WORKFLOW_DIR"
           cargo build --locked -p centaur-api-server -p centaur-api-integration-test
 
-          ./target/debug/centaur-api-server > "$RUNNER_TEMP/centaur-api-server.log" 2>&1 &
+          ./target/debug/centaur-api-integration-test --api-server > "$RUNNER_TEMP/centaur-api-server.log" 2>&1 &
           api_pid="$!"
           echo "$api_pid" > "$RUNNER_TEMP/centaur-api-server.pid"
           trap 'kill "$api_pid" 2>/dev/null || true' EXIT
