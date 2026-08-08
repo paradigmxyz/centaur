@@ -198,6 +198,11 @@ jobs:
           mkdir -p "$API_INTEGRATION_WORKFLOW_DIR"
           cargo build --locked -p centaur-api-server -p centaur-api-integration-test
 
+          PGPASSWORD="$CENTAUR_CONSOLE_DB_PASSWORD" createdb \
+            --host "$CENTAUR_CONSOLE_DB_HOST" \
+            --port "$CENTAUR_CONSOLE_DB_PORT" \
+            --username "$CENTAUR_CONSOLE_DB_USERNAME" \
+            iron_control_test
           pushd ../console
           bin/rails db:prepare
           bin/rails runner 'Iron::Bootstrap.run!'
