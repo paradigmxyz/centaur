@@ -17,9 +17,6 @@ module Granola
     DEFAULT_MAX_NOTES = 50
     WATERMARK_OVERLAP_SECONDS = 5 * 60
 
-    PARTICIPANT_RE = /(?<name>[^,<]+?)\s*<(?<email>[^>]+)>/
-    MCP_DATE_RE = /\A(?<date>\w+ \d+, \d+ \d+:\d+ [AP]M) GMT(?<offset>[+-]\d+)?\z/
-
     GranolaApiError = Class.new(StandardError)
 
     class << self
@@ -221,7 +218,7 @@ module Granola
     def parse_meetings(text)
       document = text.is_a?(Nokogiri::XML::Node) ? text : parse_meeting_document(text)
       document.xpath("//meeting").filter_map do |meeting|
-        next unless meeting.values_at("id", "title", "date").all?(&:present?)
+        next unless %w[id title date].all? { |attribute| meeting[attribute].present? }
 
         participants = participant_list(meeting.at_xpath("./known_participants")&.text)
         owner = participants.find { |participant| participant["name"].include?("(note creator)") } || participants.first || {}
@@ -246,18 +243,35 @@ module Granola
     end
 
     def participant_list(text)
-      text.to_s.scan(PARTICIPANT_RE).map do |name, email|
-        { "name" => name.strip, "email" => email.strip.downcase }
+      remaining = text.to_s
+      participants = []
+
+      loop do
+        email_start = remaining.index("<")
+        break unless email_start
+
+        email_end = remaining.index(">", email_start + 1)
+        break unless email_end
+
+        name = remaining[...email_start].strip.delete_prefix(",").strip
+        email = remaining[(email_start + 1)...email_end].strip.downcase
+        participants << { "name" => name, "email" => email } if name.present? && email.present?
+        remaining = remaining[(email_end + 1)..]
       end
+
+      participants
     end
 
     def parse_mcp_date(value)
-      match = value.to_s.match(MCP_DATE_RE)
-      return nil unless match
+      date, separator, offset_text = value.to_s.rpartition(" GMT")
+      return nil if separator.empty?
 
-      offset = format("%+03d00", (match[:offset].presence || "+0").to_i)
-      Time.strptime("#{match[:date]} #{offset}", "%b %d, %Y %I:%M %p %z").iso8601
-    rescue ArgumentError
+      offset_hours = Integer(offset_text.presence || "0", 10)
+      return nil unless (-23..23).cover?(offset_hours)
+
+      offset = format("%+03d00", offset_hours)
+      Time.strptime("#{date} #{offset}", "%b %d, %Y %I:%M %p %z").iso8601
+    rescue ArgumentError, TypeError
       nil
     end
 

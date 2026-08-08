@@ -13,8 +13,7 @@ GRANOLA_BACKEND=mcp|rest.
 """
 
 import json
-import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from xml.etree import ElementTree
 
@@ -128,21 +127,35 @@ class GranolaClient:
         return [n for n in all_notes if query_lower in (n.get("title") or "").lower()][:limit]
 
 
-# "Zygimantas (note creator) from Tempo <z@tempo.xyz>" -> name + email
-_PARTICIPANT_RE = re.compile(r"(?P<name>[^,<]+?)\s*<(?P<email>[^>]+)>")
-
-
 def _parse_meeting_date(raw: str) -> str:
     """Convert MCP dates like 'Jul 8, 2026 5:30 PM GMT+2' to ISO, best effort."""
-    m = re.match(r"(\w+ \d+, \d+ \d+:\d+ [AP]M) GMT(?P<off>[+-]\d+)?", raw)
-    if not m:
+    date_text, separator, offset_text = raw.rpartition(" GMT")
+    if not separator:
         return raw
     try:
-        dt = datetime.strptime(m.group(1), "%b %d, %Y %I:%M %p")
-        off = m.group("off")
-        return dt.isoformat() + (f"{int(off):+03d}:00" if off else "")
+        offset_hours = int(offset_text or "0")
+        if not -23 <= offset_hours <= 23:
+            return raw
+        dt = datetime.strptime(date_text, "%b %d, %Y %I:%M %p")
+        return dt.replace(tzinfo=timezone(timedelta(hours=offset_hours))).isoformat()
     except ValueError:
         return raw
+
+
+def _parse_participants(text: str) -> list[dict[str, str]]:
+    """Parse Granola's display-name/email participant text using its delimiters."""
+    attendees = []
+    remaining = text
+    while "<" in remaining:
+        name_text, _, email_text = remaining.partition("<")
+        email, separator, remaining = email_text.partition(">")
+        if not separator:
+            break
+        name = name_text.strip().removeprefix(",").strip()
+        email = email.strip().lower()
+        if name and email:
+            attendees.append({"name": name, "email": email})
+    return attendees
 
 
 def _parse_meetings(text: str) -> list[dict[str, Any]]:
@@ -156,11 +169,8 @@ def _parse_meetings(text: str) -> list[dict[str, Any]]:
     for meeting in root.findall(".//meeting"):
         if not all(meeting.get(name) for name in ("id", "title", "date")):
             continue
-        attendees = []
         participants = meeting.findtext("known_participants", default="")
-        if participants:
-            for p in _PARTICIPANT_RE.finditer(participants):
-                attendees.append({"name": p.group("name").strip(), "email": p.group("email")})
+        attendees = _parse_participants(participants)
         owner = next(
             (a for a in attendees if "(note creator)" in a["name"]),
             attendees[0] if attendees else {},
