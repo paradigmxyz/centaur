@@ -204,7 +204,7 @@ jobs:
             --username "$CENTAUR_CONSOLE_DB_USERNAME" \
             iron_control_test
           pushd ../console
-          bin/rails db:prepare
+          bin/rails db:migrate
           bin/rails runner 'Iron::Bootstrap.run!'
           bin/rails server --binding 127.0.0.1 --port 18081 > "$RUNNER_TEMP/iron-control.log" 2>&1 &
           iron_control_pid="$!"
