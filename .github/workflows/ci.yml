@@ -187,7 +187,7 @@ jobs:
           DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/centaur?sslmode=disable
           IRON_CONTROL_API_KEY: iak_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
           IRON_CONTROL_URL: http://127.0.0.1:18081
-          RAILS_ENV: test
+          RAILS_ENV: development
           RUN_MIGRATIONS: "true"
           RUST_LOG: info
           WORKFLOW_DIRS: ${{ runner.temp }}/api-integration-workflows
@@ -202,9 +202,9 @@ jobs:
             --host "$CENTAUR_CONSOLE_DB_HOST" \
             --port "$CENTAUR_CONSOLE_DB_PORT" \
             --username "$CENTAUR_CONSOLE_DB_USERNAME" \
-            iron_control_test
+            iron_control_development
           pushd ../console
-          bin/rails db:migrate
+          bin/rails db:schema:load
           bin/rails runner 'Iron::Bootstrap.run!'
           bin/rails server --binding 127.0.0.1 --port 18081 > "$RUNNER_TEMP/iron-control.log" 2>&1 &
           iron_control_pid="$!"
