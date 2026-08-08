@@ -17,6 +17,8 @@ module Granola
     DEFAULT_MAX_NOTES = 50
     WATERMARK_OVERLAP_SECONDS = 5 * 60
 
+    PARTICIPANT_RE = /(?<name>[^,<]+?)\s*<(?<email>[^>]+)>/
+
     GranolaApiError = Class.new(StandardError)
 
     class << self
@@ -243,10 +245,8 @@ module Granola
     end
 
     def participant_list(text)
-      Nokogiri::HTML5.fragment(text.to_s).css("*").filter_map do |email_node|
-        name = email_node.previous_sibling&.text.to_s.strip.delete_prefix(",").strip
-        email = email_node.name.downcase
-        { "name" => name, "email" => email } if name.present? && email.present?
+      text.to_s.scan(PARTICIPANT_RE).map do |name, email|
+        { "name" => name.strip, "email" => email.strip.downcase }
       end
     end
 

@@ -13,6 +13,7 @@ GRANOLA_BACKEND=mcp|rest.
 """
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from xml.etree import ElementTree
@@ -127,6 +128,9 @@ class GranolaClient:
         return [n for n in all_notes if query_lower in (n.get("title") or "").lower()][:limit]
 
 
+_PARTICIPANT_RE = re.compile(r"(?P<name>[^,<]+?)\s*<(?P<email>[^>]+)>")
+
+
 def _parse_meeting_date(raw: str) -> str:
     """Convert MCP dates like 'Jul 8, 2026 5:30 PM GMT+2' to ISO, best effort."""
     date_text, separator, offset_text = raw.rpartition(" GMT")
@@ -143,19 +147,14 @@ def _parse_meeting_date(raw: str) -> str:
 
 
 def _parse_participants(text: str) -> list[dict[str, str]]:
-    """Parse Granola's display-name/email participant text using its delimiters."""
-    attendees = []
-    remaining = text
-    while "<" in remaining:
-        name_text, _, email_text = remaining.partition("<")
-        email, separator, remaining = email_text.partition(">")
-        if not separator:
-            break
-        name = name_text.strip().removeprefix(",").strip()
-        email = email.strip().lower()
-        if name and email:
-            attendees.append({"name": name, "email": email})
-    return attendees
+    """Parse Granola's display-name/email participant text."""
+    return [
+        {
+            "name": participant.group("name").strip(),
+            "email": participant.group("email").strip().lower(),
+        }
+        for participant in _PARTICIPANT_RE.finditer(text)
+    ]
 
 
 def _parse_meetings(text: str) -> list[dict[str, Any]]:
