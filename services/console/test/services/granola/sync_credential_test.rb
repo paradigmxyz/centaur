@@ -115,6 +115,30 @@ module Granola
       assert_includes failed[:run][:error_text], "rate limited"
     end
 
+    test "parses meeting dates with timezone abbreviations" do
+      api_client = FakeApiClient.new
+      cst_meeting = meeting_xml(date: "Aug 5, 2026 5:00 PM CST")
+      mcp_http = lambda do |tool:, **|
+        case tool
+        when "get_account_info"
+          { email: "owner@example.com" }.to_json
+        when "list_meetings", "get_meetings"
+          cst_meeting
+        when "get_meeting_transcript"
+          ""
+        else
+          flunk "unexpected Granola MCP tool #{tool}"
+        end
+      end
+
+      SyncCredential.new(credential, api_client: api_client, mcp_http: mcp_http).call
+
+      batch = api_client.batches.fetch(0)
+      assert_equal "2026-08-05T17:00:00-06:00", batch[:notes].fetch(0)["source_created_at"]
+      assert_equal "2026-08-05T17:00:00-06:00", batch[:notes].fetch(0)["source_updated_at"]
+      assert_equal "2026-08-05T17:00:00-06:00", batch[:checkpoint][:watermark_time]
+    end
+
     test "records a successful sync when there are no new meetings" do
       checkpoint_time = "2026-07-08T12:00:00Z"
       api_client = FakeApiClient.new(
@@ -223,9 +247,9 @@ module Granola
 
     private
 
-    def meeting_xml(id: "meeting-1")
+    def meeting_xml(id: "meeting-1", date: "Jul 8, 2026 5:30 PM GMT+2")
       <<~XML
-        <meeting id="#{id}" title="Planning" date="Jul 8, 2026 5:30 PM GMT+2" captured_by_me="true" listed_as_participant="true" is_workspace_visible="false">
+        <meeting id="#{id}" title="Planning" date="#{date}" captured_by_me="true" listed_as_participant="true" is_workspace_visible="false">
           <known_participants>Ada (note creator) from Acme &lt;ada@example.com&gt;
           Bob &lt;bob@example.com&gt;</known_participants>
           <summary>Ship the Granola sync.</summary>

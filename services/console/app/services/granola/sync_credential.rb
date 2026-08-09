@@ -242,15 +242,19 @@ module Granola
     end
 
     def parse_mcp_date(value)
-      date, separator, offset_text = value.to_s.rpartition(" GMT")
-      return nil if separator.empty?
+      parts = Date._strptime(value.to_s, "%b %d, %Y %I:%M %p %Z")
+      return nil if parts.empty? || parts[:leftover].present? || parts[:offset].nil?
 
-      offset_hours = Integer(offset_text.presence || "0", 10)
-      return nil unless (-23..23).cover?(offset_hours)
-
-      offset = format("%+03d00", offset_hours)
-      Time.strptime("#{date} #{offset}", "%b %d, %Y %I:%M %p %z").iso8601
-    rescue ArgumentError, TypeError
+      Time.new(
+        parts.fetch(:year),
+        parts.fetch(:mon),
+        parts.fetch(:mday),
+        parts.fetch(:hour),
+        parts.fetch(:min),
+        parts.fetch(:sec, 0),
+        parts.fetch(:offset)
+      ).iso8601
+    rescue ArgumentError, KeyError, TypeError
       nil
     end
 
