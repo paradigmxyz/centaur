@@ -139,6 +139,10 @@
     @apply rounded bg-centaur-500/10 px-1.5 py-0.5 text-xs text-centaur-300/90 ring-1 ring-centaur-500/20;
   }
 
+  .role-pill {
+    @apply inline-flex rounded-full bg-sky-500/10 px-2 py-0.5 text-xs font-medium text-sky-300 ring-1 ring-sky-500/25;
+  }
+
   .empty-state {
     @apply rounded-lg border border-dashed border-ink-600 bg-ink-850/40 px-5 py-6 text-sm text-zinc-600;
   }

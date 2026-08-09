@@ -90,7 +90,7 @@
   </table>
 
   <% unless @workflow_db_unavailable %>
-    <%= render "pagination",
+    <%= render "console/pagination",
                page: @page,
                total_pages: @total_pages,
                total_count: @total_workflows.to_i,

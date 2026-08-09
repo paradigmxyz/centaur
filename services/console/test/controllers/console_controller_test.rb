@@ -124,14 +124,51 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_response :not_found
   end
 
-  test "principals table combines id with foreign_id over the oid" do
+  test "principals search matches names and foreign ids case insensitively" do
     principal = principals(:acme_channel)
-    get console_principals_url
+    principal.update!(name: "Platform Release Captain")
+
+    get console_principals_url, params: { q: "release captain" }
+
     assert_response :ok
-    # foreign_id is the primary line (with a hover tooltip); the oid and
-    # namespace sit beneath it.
-    assert_select "div[title=?]", principal.foreign_id, text: principal.foreign_id
-    assert_select "div", text: /#{Regexp.escape(principal.oid)}.*#{Regexp.escape(principal.namespace)}/
+    assert_select "input[type=search][name=q][value=?]", "release captain"
+    assert_select "tbody a[href=?]", console_principal_path(principal.oid), count: 1
+    assert_select "tbody tr", count: 1
+
+    get console_principals_url, params: { q: "c012345" }
+
+    assert_response :ok
+    assert_select "tbody a[href=?]", console_principal_path(principal.oid), count: 1
+    assert_select "tbody tr", count: 1
+  end
+
+  test "principals table paginates fifty records per page" do
+    now = Time.current
+    Principal.insert_all!((1..46).map do |number|
+      {
+        created_at: now,
+        updated_at: now,
+        created_by_id: @operator.id,
+        namespace: "pagination",
+        foreign_id: "pagination-#{number}",
+        kind: "user",
+        name: "Pagination principal #{number}"
+      }
+    end)
+
+    get console_principals_url
+
+    assert_response :ok
+    assert_select "tbody tr", count: 50
+    assert_select "a[href*='page=2']", text: "Next"
+    assert_select "div", text: /51 principals.*page 1 of 2/
+
+    get console_principals_url, params: { page: 2 }
+
+    assert_response :ok
+    assert_select "tbody tr", count: 1
+    assert_select "tbody a", text: "Pagination principal 46"
+    assert_select "a[href*='page=1']", text: "Previous"
   end
 
   test "principals table links to add principal" do
@@ -157,12 +194,10 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
       "slack_email" => "member@example.com"
     }
 
-    [ console_principals_url, console_principal_url(principal.oid) ].each do |url|
-      get url
-      assert_response :ok
-      expected_labels.each do |key, value|
-        assert_select ".label-chip", text: "#{key}=#{value}"
-      end
+    get console_principal_url(principal.oid)
+    assert_response :ok
+    expected_labels.each do |key, value|
+      assert_select ".label-chip", text: "#{key}=#{value}"
     end
   end
 
