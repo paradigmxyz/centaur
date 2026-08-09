@@ -24,7 +24,9 @@ class ConsoleController < ApplicationController
 
   def principals
     @search_query = params[:q].to_s.strip
-    scope = Principal.order(created_at: :asc, id: :asc)
+    name_column = Principal.arel_table[:name]
+    name_order = Arel::Nodes::NamedFunction.new("LOWER", [ name_column ]).asc.nulls_last
+    scope = Principal.order(name_order, created_at: :asc)
     @total_principals = scope.count
 
     if @search_query.present?

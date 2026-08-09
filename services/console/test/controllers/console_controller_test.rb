@@ -142,6 +142,32 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_select "tbody tr", count: 1
   end
 
+  test "principals are ordered alphabetically by name with unnamed principals last" do
+    principals(:acme_channel).update!(name: "zulu")
+    principals(:globex_user).update!(name: "Alpha")
+    principals(:acme_user_alice).update!(name: "bravo")
+
+    get console_principals_url
+
+    assert_response :ok
+    names = css_select("tbody td:first-child a").map { |link| link.text.strip }
+    assert_equal [ "Alpha", "bravo", "zulu", "unnamed", "unnamed" ], names
+  end
+
+  test "principals use creation time as secondary ordering" do
+    common = { namespace: "sort-order", kind: "user", name: "same", created_by: @operator }
+    newer = Principal.create!(common.merge(foreign_id: "Alpha-sort", created_at: 1.day.ago))
+    older = Principal.create!(common.merge(foreign_id: "zeta-sort", created_at: 2.days.ago))
+
+    get console_principals_url
+
+    assert_response :ok
+    same_name_paths = css_select("tbody td:first-child a")
+      .select { |link| link.text.strip == "same" }
+      .map { |link| link["href"] }
+    assert_equal [ older, newer ].map { |principal| console_principal_path(principal.oid) }, same_name_paths
+  end
+
   test "principals table paginates fifty records per page" do
     now = Time.current
     Principal.insert_all!((1..46).map do |number|
@@ -167,7 +193,7 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :ok
     assert_select "tbody tr", count: 1
-    assert_select "tbody a", text: "Pagination principal 46"
+    assert_select "tbody a", text: "unnamed"
     assert_select "a[href*='page=1']", text: "Previous"
   end
 
