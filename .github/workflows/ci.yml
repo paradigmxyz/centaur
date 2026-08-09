@@ -18,6 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       migration_order: ${{ steps.filter.outputs.migration_order }}
+      harness_server_checks: ${{ steps.filter.outputs.harness_server_checks }}
       rust_api: ${{ steps.filter.outputs.rust_api }}
       sandbox_tests: ${{ steps.filter.outputs.sandbox_tests }}
       workflow_python_tests: ${{ steps.filter.outputs.workflow_python_tests }}
@@ -69,6 +70,9 @@ jobs:
             '^services/api-rs/crates/centaur-session-sqlx/migrations/' \
             '^services/console/db/migrate/' \
             '^\.github/scripts/check-migration-order\.sh$' \
+            '^\.github/workflows/ci\.yml$'
+          set_output harness_server_checks \
+            '^crates/harness-server/' \
             '^\.github/workflows/ci\.yml$'
           set_output rust_api \
             '^services/api-rs/' \
@@ -125,6 +129,37 @@ jobs:
 
       - name: Check migration versions
         run: .github/scripts/check-migration-order.sh "origin/${{ github.base_ref || 'main' }}"
+
+  harness-server-checks:
+    name: Harness server fmt, clippy, and tests
+    runs-on: depot-ubuntu-24.04-16
+    needs: ci_changes
+    if: needs.ci_changes.outputs.harness_server_checks == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: crates/harness-server
+
+      - name: Format
+        working-directory: crates/harness-server
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        working-directory: crates/harness-server
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Test
+        working-directory: crates/harness-server
+        run: cargo test --locked
 
   rust-api:
     name: Rust API fmt, clippy, and tests
@@ -491,6 +526,7 @@ jobs:
     needs:
       - ci_changes
       - migration-order
+      - harness-server-checks
       - rust-api
       - sandbox-tests
       - workflow-python-tests
@@ -504,5 +540,5 @@ jobs:
       - name: Decide whether the needed jobs succeeded or failed
         uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # v1.2.2
         with:
-          allowed-skips: migration-order, rust-api, sandbox-tests, workflow-python-tests, tool-tests, slackbotv2-tests, discordbot-checks, githubbot-checks, teamsbot-checks
+          allowed-skips: migration-order, harness-server-checks, rust-api, sandbox-tests, workflow-python-tests, tool-tests, slackbotv2-tests, discordbot-checks, githubbot-checks, teamsbot-checks
           jobs: ${{ toJSON(needs) }}
