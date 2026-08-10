@@ -121,6 +121,19 @@ The workflow host sandbox is separate from the agent sandbox. The workflow
 handler coordinates the run; the agent turn runs through the normal Centaur
 session runtime.
 
+`ctx.agent_turn(...)` resolves to the execution record, not to the answer. Read
+`result_text` for the agent's final text:
+
+```python
+{
+    "thread_key": "wf:<task-id>:agent:<workflow-name>",
+    "execution_id": "...",
+    "status": "completed",
+    "output_lines": [...],
+    "result_text": "the agent's final text",
+}
+```
+
 #### Declare Workflow-Host Permissions
 
 When a workflow calls tools directly from the workflow host with
