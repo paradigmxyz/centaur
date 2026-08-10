@@ -395,6 +395,73 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_select "a[href=?]", console_secret_path("static", static_secrets(:github_token_inject).oid)
   end
 
+  test "principal detail paginates roles, direct grants, and effective grants independently" do
+    principal = principals(:acme_channel)
+    now = Time.current
+    role_ids = Role.insert_all!((1..50).map do |number|
+      {
+        namespace: principal.namespace,
+        foreign_id: "detail-page-role-#{number}",
+        name: "Detail page role #{number}",
+        labels: {},
+        assign_by_default: false,
+        created_by_id: @operator.id,
+        created_at: now,
+        updated_at: now
+      }
+    end, returning: %w[id]).rows.flatten
+    PrincipalRole.insert_all!(role_ids.map do |role_id|
+      { principal_id: principal.id, role_id: role_id, created_at: now, updated_at: now }
+    end)
+
+    secret_ids = StaticSecret.insert_all!((1..50).map do |number|
+      {
+        namespace: principal.namespace,
+        foreign_id: "detail-page-secret-#{number}",
+        name: "Detail page secret #{number}",
+        kind: "custom",
+        labels: {},
+        inject_config: { "header" => "X-Detail-Page-#{number}" },
+        created_by_id: @operator.id,
+        created_at: now,
+        updated_at: now
+      }
+    end, returning: %w[id]).rows.flatten
+    Grant.insert_all!(secret_ids.map do |secret_id|
+      {
+        principal_id: principal.id,
+        static_secret_id: secret_id,
+        priority: Grant::DEFAULT_DIRECT_PRIORITY,
+        created_by_id: @operator.id,
+        created_at: now,
+        updated_at: now
+      }
+    end)
+
+    get console_principal_url(principal.oid), params: {
+      roles_page: 2,
+      direct_grants_page: 2,
+      effective_grants_page: 2
+    }
+
+    assert_response :ok
+    assert_select "section#roles" do
+      assert_select "tbody tr", count: 1
+      assert_select "a[href*='roles_page=1'][href$='#roles']", text: "Previous"
+      assert_select "div", text: /51 roles.*page 2 of 2/
+    end
+    assert_select "section#direct-grants" do
+      assert_select "tbody tr", count: 3
+      assert_select "a[href*='direct_grants_page=1'][href$='#direct-grants']", text: "Previous"
+      assert_select "div", text: /53 direct grants.*page 2 of 2/
+    end
+    assert_select "section#effective-grants" do
+      assert_select "tbody tr", count: 4
+      assert_select "a[href*='effective_grants_page=1'][href$='#effective-grants']", text: "Previous"
+      assert_select "div", text: /54 effective grants.*page 2 of 2/
+    end
+  end
+
   test "effective grants table sources each secret as direct or via a role" do
     principal = principals(:acme_channel) # direct grants + acme_prod_api_key via the acme_infra role
     get console_principal_url(principal.oid)
