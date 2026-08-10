@@ -16,6 +16,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 
+MISSING_ERROR_CODE = object()
+
+
 def load_workflow_host():
     module_path = Path(__file__).resolve().parents[1] / "workflow_host.py"
     sys.path.insert(0, str(module_path.parent))
@@ -136,6 +139,33 @@ class WorkflowHostTests(unittest.TestCase):
         for stream in (proc.stdin, proc.stdout, proc.stderr):
             if stream is not None and not stream.closed:
                 stream.close()
+
+    def failed_context_response_error(
+        self,
+        *,
+        message: str = "workflow is disabled",
+        error_code: object = MISSING_ERROR_CODE,
+    ) -> RuntimeError:
+        host = load_workflow_host()
+
+        async def resolve_failure() -> RuntimeError:
+            rpc = host.RpcClient()
+            future = asyncio.get_running_loop().create_future()
+            rpc._pending["child-start"] = future
+            response = {
+                "type": "ctx.response",
+                "request_id": "child-start",
+                "ok": False,
+                "error": message,
+            }
+            if error_code is not MISSING_ERROR_CODE:
+                response["error_code"] = error_code
+            rpc.resolve(response)
+            with self.assertRaises(RuntimeError) as raised:
+                await future
+            return raised.exception
+
+        return asyncio.run(resolve_failure())
 
     def test_workflow_api_modules_are_importable(self) -> None:
         load_workflow_host()
@@ -692,139 +722,30 @@ class WorkflowHostTests(unittest.TestCase):
             assert proc.stderr is not None
             self.assertEqual(proc.stderr.read(), "")
 
-    def test_failed_context_response_exposes_rejected_before_spawn_code(self) -> None:
-        host = load_workflow_host()
-
-        async def resolve_failure() -> RuntimeError:
-            rpc = host.RpcClient()
-            future = asyncio.get_running_loop().create_future()
-            rpc._pending["child-start"] = future
-            rpc.resolve(
-                {
-                    "type": "ctx.response",
-                    "request_id": "child-start",
-                    "ok": False,
-                    "error": "workflow is disabled",
-                    "error_code": "workflow_start_rejected_before_spawn",
-                }
-            )
-            with self.assertRaises(RuntimeError) as raised:
-                await future
-            return raised.exception
-
-        error = asyncio.run(resolve_failure())
-
-        self.assertEqual(type(error).__name__, "ContextRpcError")
-        self.assertEqual(str(error), "workflow is disabled")
-        self.assertEqual(
-            getattr(error, "error_code", None),
-            "workflow_start_rejected_before_spawn",
-        )
-
-    def test_failed_context_response_exposes_unknown_start_outcome_code(self) -> None:
-        host = load_workflow_host()
-
-        async def resolve_failure() -> RuntimeError:
-            rpc = host.RpcClient()
-            future = asyncio.get_running_loop().create_future()
-            rpc._pending["child-start"] = future
-            rpc.resolve(
-                {
-                    "type": "ctx.response",
-                    "request_id": "child-start",
-                    "ok": False,
-                    "error": "queue response timed out",
-                    "error_code": "workflow_start_outcome_unknown",
-                }
-            )
-            with self.assertRaises(RuntimeError) as raised:
-                await future
-            return raised.exception
-
-        error = asyncio.run(resolve_failure())
-
-        self.assertEqual(type(error).__name__, "ContextRpcError")
-        self.assertEqual(str(error), "queue response timed out")
-        self.assertEqual(
-            getattr(error, "error_code", None),
-            "workflow_start_outcome_unknown",
-        )
-
     def test_failed_context_response_exposes_any_nonempty_string_error_code(self) -> None:
-        host = load_workflow_host()
+        for error_code, message in (
+            ("workflow_start_rejected_before_spawn", "workflow is disabled"),
+            ("workflow_start_outcome_unknown", "queue response timed out"),
+            (" ", "workflow is disabled"),
+        ):
+            with self.subTest(error_code=error_code):
+                error = self.failed_context_response_error(
+                    error_code=error_code,
+                    message=message,
+                )
 
-        async def resolve_failure() -> RuntimeError:
-            rpc = host.RpcClient()
-            future = asyncio.get_running_loop().create_future()
-            rpc._pending["child-start"] = future
-            rpc.resolve(
-                {
-                    "type": "ctx.response",
-                    "request_id": "child-start",
-                    "ok": False,
-                    "error": "workflow is disabled",
-                    "error_code": " ",
-                }
-            )
-            with self.assertRaises(RuntimeError) as raised:
-                await future
-            return raised.exception
+                self.assertEqual(type(error).__name__, "ContextRpcError")
+                self.assertEqual(str(error), message)
+                self.assertEqual(getattr(error, "error_code", None), error_code)
 
-        error = asyncio.run(resolve_failure())
+    def test_failed_context_response_ignores_absent_or_invalid_error_codes(self) -> None:
+        for error_code in (MISSING_ERROR_CODE, "", 7, None, {}):
+            with self.subTest(error_code=error_code):
+                error = self.failed_context_response_error(error_code=error_code)
 
-        self.assertEqual(type(error).__name__, "ContextRpcError")
-        self.assertEqual(str(error), "workflow is disabled")
-        self.assertEqual(getattr(error, "error_code", None), " ")
-
-    def test_failed_context_response_ignores_empty_or_non_string_error_codes(self) -> None:
-        host = load_workflow_host()
-
-        async def resolve_failure(error_code: object) -> RuntimeError:
-            rpc = host.RpcClient()
-            future = asyncio.get_running_loop().create_future()
-            rpc._pending["child-start"] = future
-            rpc.resolve(
-                {
-                    "type": "ctx.response",
-                    "request_id": "child-start",
-                    "ok": False,
-                    "error": "workflow is disabled",
-                    "error_code": error_code,
-                }
-            )
-            with self.assertRaises(RuntimeError) as raised:
-                await future
-            return raised.exception
-
-        for error_code in ("", 7, None, {}):
-            error = asyncio.run(resolve_failure(error_code))
-            self.assertIs(type(error), RuntimeError)
-            self.assertEqual(str(error), "workflow is disabled")
-            self.assertFalse(hasattr(error, "error_code"))
-
-    def test_failed_context_response_without_error_code_remains_runtime_error(self) -> None:
-        host = load_workflow_host()
-
-        async def resolve_failure() -> RuntimeError:
-            rpc = host.RpcClient()
-            future = asyncio.get_running_loop().create_future()
-            rpc._pending["child-start"] = future
-            rpc.resolve(
-                {
-                    "type": "ctx.response",
-                    "request_id": "child-start",
-                    "ok": False,
-                    "error": "workflow is disabled",
-                }
-            )
-            with self.assertRaises(RuntimeError) as raised:
-                await future
-            return raised.exception
-
-        error = asyncio.run(resolve_failure())
-
-        self.assertIs(type(error), RuntimeError)
-        self.assertEqual(str(error), "workflow is disabled")
+                self.assertIs(type(error), RuntimeError)
+                self.assertEqual(str(error), "workflow is disabled")
+                self.assertFalse(hasattr(error, "error_code"))
 
     def test_workflow_host_finishes_active_workflow_after_stdin_eof(self) -> None:
         source = (
