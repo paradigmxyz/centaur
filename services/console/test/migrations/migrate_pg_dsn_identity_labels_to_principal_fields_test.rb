@@ -10,6 +10,8 @@ class MigratePgDsnIdentityLabelsToPrincipalFieldsTest < ActiveSupport::TestCase
       { "name" => "app.channel_id", "value_from" => { "principal_label" => "slack_channel_id" } },
       { "name" => "app.team_id", "value_from" => { "principal_label" => "slack_team_id" } },
       { "name" => "app.email", "value_from" => { "principal_label" => "slack_email" } },
+      { "name" => "app.console_user_id", "value_from" => { "principal_label" => "console-user-id" } },
+      { "name" => "app.console_email", "value_from" => { "principal_label" => "email" } },
       { "name" => "app.tenant", "value_from" => { "principal_label" => "tenant" } },
       { "name" => "app.literal", "value" => "preserved" }
     ])
@@ -22,6 +24,8 @@ class MigratePgDsnIdentityLabelsToPrincipalFieldsTest < ActiveSupport::TestCase
       { "name" => "app.channel_id", "value_from" => { "principal_field" => "slack_channel_id" } },
       { "name" => "app.team_id", "value_from" => { "principal_field" => "slack_team_id" } },
       { "name" => "app.email", "value_from" => { "principal_field" => "slack_email" } },
+      { "name" => "app.console_user_id", "value_from" => { "principal_field" => "console_user_id" } },
+      { "name" => "app.console_email", "value_from" => { "principal_label" => "email" } },
       { "name" => "app.tenant", "value_from" => { "principal_label" => "tenant" } },
       { "name" => "app.literal", "value" => "preserved" }
     ], secret.reload.settings
@@ -31,6 +35,7 @@ class MigratePgDsnIdentityLabelsToPrincipalFieldsTest < ActiveSupport::TestCase
     secret = pg_dsn_secrets(:acme_analytics_pg)
     secret.update_columns(settings: [
       { "name" => "app.channel_id", "value_from" => { "principal_field" => "slack_channel_id" } },
+      { "name" => "app.console_user_id", "value_from" => { "principal_field" => "console_user_id" } },
       { "name" => "app.principal", "value_from" => { "principal_field" => "foreign_id" } }
     ])
 
@@ -38,6 +43,7 @@ class MigratePgDsnIdentityLabelsToPrincipalFieldsTest < ActiveSupport::TestCase
 
     assert_equal [
       { "name" => "app.channel_id", "value_from" => { "principal_label" => "slack_channel_id" } },
+      { "name" => "app.console_user_id", "value_from" => { "principal_label" => "console-user-id" } },
       { "name" => "app.principal", "value_from" => { "principal_field" => "foreign_id" } }
     ], secret.reload.settings
   end

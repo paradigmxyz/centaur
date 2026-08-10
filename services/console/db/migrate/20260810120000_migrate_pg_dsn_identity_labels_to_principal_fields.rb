@@ -1,42 +1,50 @@
 class MigratePgDsnIdentityLabelsToPrincipalFields < ActiveRecord::Migration[8.1]
-  IDENTITY_FIELDS = %w[
-    kind slack_user_id slack_channel_id slack_team_id slack_email
-  ].freeze
+  # Legacy identity label => first-class principal field. The `email` label is
+  # deliberately not migrated: it is plausible as a custom label on principals
+  # of other kinds, where a rewrite would change what it resolves to.
+  LABEL_FIELDS = {
+    "kind" => "kind",
+    "slack_user_id" => "slack_user_id",
+    "slack_channel_id" => "slack_channel_id",
+    "slack_team_id" => "slack_team_id",
+    "slack_email" => "slack_email",
+    "console-user-id" => "console_user_id"
+  }.freeze
 
   class MigrationPgDsnSecret < ActiveRecord::Base
     self.table_name = "pg_dsn_secrets"
   end
 
   def up
-    rewrite_settings(from: "principal_label", to: "principal_field")
+    rewrite_settings(from: "principal_label", to: "principal_field", mapping: LABEL_FIELDS)
   end
 
   def down
-    rewrite_settings(from: "principal_field", to: "principal_label")
+    rewrite_settings(from: "principal_field", to: "principal_label", mapping: LABEL_FIELDS.invert)
   end
 
   private
 
-  def rewrite_settings(from:, to:)
+  def rewrite_settings(from:, to:, mapping:)
     MigrationPgDsnSecret.find_each do |secret|
-      rewritten = rewrite_secret_settings(secret.settings, from:, to:)
+      rewritten = rewrite_secret_settings(secret.settings, from:, to:, mapping:)
       next if rewritten == secret.settings
 
       secret.update_columns(settings: rewritten, updated_at: Time.current)
     end
   end
 
-  def rewrite_secret_settings(settings, from:, to:)
+  def rewrite_secret_settings(settings, from:, to:, mapping:)
     Array(settings).map do |setting|
       next setting unless setting.is_a?(Hash)
 
       value_from = setting["value_from"]
       next setting unless value_from.is_a?(Hash)
 
-      field = value_from[from]
-      next setting unless IDENTITY_FIELDS.include?(field)
+      mapped = mapping[value_from[from]]
+      next setting unless mapped
 
-      setting.merge("value_from" => value_from.except(from).merge(to => field))
+      setting.merge("value_from" => value_from.except(from).merge(to => mapped))
     end
   end
 end

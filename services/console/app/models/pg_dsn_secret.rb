@@ -36,9 +36,18 @@ class PgDsnSecret < ApplicationRecord
     id namespace foreign_id name kind slack_user_id slack_channel_id slack_team_id slack_email
     console_user_id console_user_email slack_history_channel_ids
   ].freeze
-  IDENTITY_PRINCIPAL_FIELDS = %w[
-    kind slack_user_id slack_channel_id slack_team_id slack_email
-  ].freeze
+  # Legacy `principal_label` selectors that canonicalize to a first-class
+  # `principal_field` on save. The `email` label stays on the compatibility
+  # shim: unlike these names, it is plausible as a custom label on principals
+  # of other kinds, where a rewrite would change what it resolves to.
+  IDENTITY_PRINCIPAL_LABEL_FIELDS = {
+    "kind" => "kind",
+    "slack_user_id" => "slack_user_id",
+    "slack_channel_id" => "slack_channel_id",
+    "slack_team_id" => "slack_team_id",
+    "slack_email" => "slack_email",
+    "console-user-id" => "console_user_id"
+  }.freeze
 
   has_one :dsn_source, class_name: "SecretSource", dependent: :destroy
   has_many :grants, dependent: :destroy
@@ -108,13 +117,13 @@ class PgDsnSecret < ApplicationRecord
       next setting unless value_from.is_a?(Hash)
 
       label = value_from["principal_label"] || value_from[:principal_label]
-      label = label.to_s
-      next setting unless IDENTITY_PRINCIPAL_FIELDS.include?(label)
+      field = IDENTITY_PRINCIPAL_LABEL_FIELDS[label.to_s]
+      next setting unless field
 
       normalized_value_from = value_from.dup
       normalized_value_from.delete("principal_label")
       normalized_value_from.delete(:principal_label)
-      normalized_value_from["principal_field"] = label
+      normalized_value_from["principal_field"] = field
 
       normalized_setting = setting.dup
       normalized_setting.delete(:value_from)
