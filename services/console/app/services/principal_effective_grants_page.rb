@@ -38,16 +38,11 @@ class PrincipalEffectiveGrantsPage
 
   def effective_secret_counts
     kinds = relations.keys
-    unique_ids = kinds.to_h { |kind| [ kind, {} ] }
     columns = kinds.map { |kind| GRANT_COLUMN_BY_KIND.fetch(kind) }
+    aggregates = columns.map { |column| Grant.arel_table[column].count(true) }
+    counts = principal.effective_grants.pick(*aggregates)
 
-    principal.effective_grants.pluck(*columns).each do |ids|
-      ids.each_with_index do |id, index|
-        unique_ids.fetch(kinds.fetch(index))[id] = true if id
-      end
-    end
-
-    unique_ids.transform_values(&:size)
+    kinds.zip(Array(counts)).to_h
   end
 
   def page_records(counts, offset:)
