@@ -35,16 +35,16 @@ class MigratePgDsnIdentityLabelsToPrincipalFields < ActiveRecord::Migration[8.1]
   end
 
   def rewrite_secret_settings(settings, from:, to:, mapping:)
-    Array(settings).map do |setting|
-      next setting unless setting.is_a?(Hash)
+    Array(settings).map { |setting| rewrite_setting(setting, from:, to:, mapping:) }
+  end
 
-      value_from = setting["value_from"]
-      next setting unless value_from.is_a?(Hash)
+  def rewrite_setting(setting, from:, to:, mapping:)
+    return setting unless setting.is_a?(Hash) && setting["value_from"].is_a?(Hash)
 
-      mapped = mapping[value_from[from]]
-      next setting unless mapped
+    value_from = setting.fetch("value_from")
+    mapped = mapping[value_from[from]]
+    return setting unless mapped
 
-      setting.merge("value_from" => value_from.except(from).merge(to => mapped))
-    end
+    setting.merge("value_from" => value_from.except(from).merge(to => mapped))
   end
 end
