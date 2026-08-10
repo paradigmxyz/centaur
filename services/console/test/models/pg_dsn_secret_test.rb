@@ -249,7 +249,7 @@ class PgDsnSecretTest < ActiveSupport::TestCase
     assert secret.valid?
     assert_equal(
       [
-        { "name" => "app.user_id", "value" => user.id.to_s },
+        { "name" => "app.user_id", "value" => user.oid },
         { "name" => "app.email", "value" => user.email }
       ],
       secret.to_proxy_dsn(principal: principal)["settings"]

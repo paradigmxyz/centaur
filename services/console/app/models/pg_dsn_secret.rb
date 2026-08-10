@@ -30,7 +30,8 @@ class PgDsnSecret < ApplicationRecord
   # A setting's `value_from` reference takes exactly one of these keys.
   VALUE_FROM_KEYS = %w[principal_label principal_field proxy_label].freeze
   # Principal attributes a `principal_field` reference may name. `id` resolves
-  # to the opaque oid rather than the database primary key.
+  # to the principal oid and `console_user_id` to the associated user oid; raw
+  # database primary keys are never exposed as setting values.
   PRINCIPAL_FIELDS = %w[
     id namespace foreign_id name kind slack_user_id slack_channel_id slack_team_id slack_email
     console_user_id console_user_email slack_history_channel_ids
@@ -159,7 +160,7 @@ class PgDsnSecret < ApplicationRecord
     when "slack_channel_id" then principal.slack_channel_id.to_s
     when "slack_team_id" then principal.slack_team_id.to_s
     when "slack_email" then principal.slack_email.to_s
-    when "console_user_id" then principal.console_user_id.to_s
+    when "console_user_id" then principal.console_user&.oid.to_s
     when "console_user_email" then principal.console_user_email.to_s
     when "slack_history_channel_ids" then JSON.generate(principal.slack_history_channel_ids)
     else "" # Invalid persisted or unsaved settings fail closed.
