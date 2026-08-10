@@ -9,7 +9,7 @@ name = "harness-server"
 path = "src/main.rs"
 
 [dependencies]
-allocative = "=0.3.6"
+allocative = "=0.3.4"
 base64 = "0.23"
 clap = { version = "4.5", features = ["derive"] }
 codex-app-server-protocol = { git = "https://github.com/openai/codex", rev = "e93dc98a48d597df322436ffe8d03bfd7ec63b3b", package = "codex-app-server-protocol" }
