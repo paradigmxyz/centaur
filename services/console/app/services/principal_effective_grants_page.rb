@@ -1,5 +1,8 @@
 class PrincipalEffectiveGrantsPage
   Result = Data.define(:records_by_kind, :sources_by_key, :page, :total_pages, :total_count)
+  GRANT_COLUMN_BY_KIND = Grant::GRANTABLE_ASSOCIATIONS.to_h do |association|
+    [ association.to_s.delete_suffix("_secret"), :"#{association}_id" ]
+  end.freeze
 
   def initialize(principal:, relations:, page:, per_page:)
     @principal = principal
@@ -36,7 +39,7 @@ class PrincipalEffectiveGrantsPage
   def effective_secret_counts
     kinds = relations.keys
     unique_ids = kinds.to_h { |kind| [ kind, {} ] }
-    columns = kinds.map { |kind| "#{kind}_secret_id" }
+    columns = kinds.map { |kind| GRANT_COLUMN_BY_KIND.fetch(kind) }
 
     principal.effective_grants.pluck(*columns).each do |ids|
       ids.each_with_index do |id, index|
@@ -82,7 +85,7 @@ class PrincipalEffectiveGrantsPage
     return {} if selected.empty?
 
     selected_scope = selected.reduce(Grant.none) do |scope, (kind, ids)|
-      scope.or(Grant.where("#{kind}_secret_id" => ids))
+      scope.or(Grant.where(GRANT_COLUMN_BY_KIND.fetch(kind) => ids))
     end
     grants = principal.effective_grants.merge(selected_scope).includes(:role)
 
