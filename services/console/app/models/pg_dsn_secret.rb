@@ -29,13 +29,31 @@ class PgDsnSecret < ApplicationRecord
 
   # A setting's `value_from` reference takes exactly one of these keys.
   VALUE_FROM_KEYS = %w[principal_label principal_field proxy_label].freeze
-  # Principal attributes a `principal_field` reference may name, matching how
-  # the API serializes principals (`id` is the opaque oid).
-  PRINCIPAL_FIELDS = %w[id namespace foreign_id name slack_history_channel_ids].freeze
+  # Principal attributes a `principal_field` reference may name. `id` resolves
+  # to the principal oid and `console_user_id` to the associated user oid; raw
+  # database primary keys are never exposed as setting values.
+  PRINCIPAL_FIELDS = %w[
+    id namespace foreign_id name kind slack_user_id slack_channel_id slack_team_id slack_email
+    console_user_id console_user_email slack_history_channel_ids
+  ].freeze
+  # Legacy `principal_label` selectors that canonicalize to a first-class
+  # `principal_field` on save. The `email` label stays on the compatibility
+  # shim: unlike these names, it is plausible as a custom label on principals
+  # of other kinds, where a rewrite would change what it resolves to.
+  IDENTITY_PRINCIPAL_LABEL_FIELDS = {
+    "kind" => "kind",
+    "slack_user_id" => "slack_user_id",
+    "slack_channel_id" => "slack_channel_id",
+    "slack_team_id" => "slack_team_id",
+    "slack_email" => "slack_email",
+    "console-user-id" => "console_user_id"
+  }.freeze
 
   has_one :dsn_source, class_name: "SecretSource", dependent: :destroy
   has_many :grants, dependent: :destroy
   belongs_to :created_by, class_name: "User"
+
+  before_validation :normalize_identity_principal_label_settings
 
   # One entry in the proxy's synced `postgres` list, keyed for routing by
   # `database`. The opaque id is carried too so the proxy can refer back to the
@@ -61,7 +79,8 @@ class PgDsnSecret < ApplicationRecord
   def proxy_settings(principal: nil, proxy: nil)
     Array(settings).filter_map do |s|
       next unless s.is_a?(Hash)
-      name = s["name"].presence || s[:name].presence
+
+      name = s.with_indifferent_access[:name].presence
       next if name.blank?
       { "name" => name, "value" => setting_value(s, principal, proxy) }
     end
@@ -71,10 +90,10 @@ class PgDsnSecret < ApplicationRecord
     Array(settings).any? do |setting|
       next false unless setting.is_a?(Hash)
 
-      ref = setting["value_from"] || setting[:value_from]
+      ref = setting.with_indifferent_access[:value_from]
       next false unless ref.is_a?(Hash)
 
-      (ref["proxy_label"] || ref[:proxy_label]).present?
+      ref[:proxy_label].present?
     end
   end
 
@@ -89,6 +108,26 @@ class PgDsnSecret < ApplicationRecord
 
   private
 
+  def normalize_identity_principal_label_settings
+    return unless settings.is_a?(Array)
+
+    normalized = settings.map do |setting|
+      next setting unless setting.is_a?(Hash)
+
+      indifferent_setting = setting.with_indifferent_access
+      value_from = indifferent_setting[:value_from]
+      next setting unless value_from.is_a?(Hash)
+
+      field = IDENTITY_PRINCIPAL_LABEL_FIELDS[value_from[:principal_label].to_s]
+      next setting unless field
+
+      indifferent_setting.except(:value_from).merge(
+        value_from: value_from.except(:principal_label).merge(principal_field: field)
+      ).to_h
+    end
+    self.settings = normalized unless normalized == settings
+  end
+
   def labels_is_a_hash
     errors.add(:labels, "must be a hash") unless labels.is_a?(Hash)
   end
@@ -98,10 +137,11 @@ class PgDsnSecret < ApplicationRecord
   # resolve to "" when no principal/proxy is given or the label is absent, so
   # RLS-style policies fail closed rather than seeing a literal placeholder.
   def setting_value(setting, principal, proxy)
-    ref = setting["value_from"] || setting[:value_from]
-    return (setting["value"] || setting[:value]).to_s unless ref.is_a?(Hash)
+    setting = setting.with_indifferent_access
+    ref = setting[:value_from]
+    return setting[:value].to_s unless ref.is_a?(Hash)
 
-    label = ref["principal_label"] || ref[:principal_label]
+    label = ref[:principal_label]
     if label.present?
       if PrincipalIdentityLabels.promoted?(principal, label)
         return PrincipalIdentityLabels.value(principal, label).to_s
@@ -110,18 +150,25 @@ class PgDsnSecret < ApplicationRecord
       return principal&.labels&.fetch(label.to_s, "").to_s
     end
 
-    proxy_label = ref["proxy_label"] || ref[:proxy_label]
+    proxy_label = ref[:proxy_label]
     return proxy&.labels&.fetch(proxy_label.to_s, "").to_s if proxy_label.present?
 
     return "" unless principal
 
-    case (ref["principal_field"] || ref[:principal_field]).to_s
+    case ref[:principal_field].to_s
     when "id" then principal.oid
     when "namespace" then principal.namespace.to_s
     when "foreign_id" then principal.foreign_id.to_s
     when "name" then principal.name.to_s
+    when "kind" then principal.kind.to_s
+    when "slack_user_id" then principal.slack_user_id.to_s
+    when "slack_channel_id" then principal.slack_channel_id.to_s
+    when "slack_team_id" then principal.slack_team_id.to_s
+    when "slack_email" then principal.slack_email.to_s
+    when "console_user_id" then principal.console_user&.oid.to_s
+    when "console_user_email" then principal.console_user_email.to_s
     when "slack_history_channel_ids" then JSON.generate(principal.slack_history_channel_ids)
-    else "" # unreachable for saved records; settings_are_valid rejects others
+    else "" # Invalid persisted or unsaved settings fail closed.
     end
   end
 
@@ -144,7 +191,8 @@ class PgDsnSecret < ApplicationRecord
   def setting_error(setting, seen)
     return "must be an object" unless setting.is_a?(Hash)
 
-    name = (setting["name"] || setting[:name]).to_s
+    setting = setting.with_indifferent_access
+    name = setting[:name].to_s
     return "name is required" if name.blank?
     return "invalid setting name #{name.inspect}" unless name.match?(GUC_NAME_FORMAT)
 
@@ -160,9 +208,10 @@ class PgDsnSecret < ApplicationRecord
   # structured shape: a typo'd field is an error here, not an empty string the
   # proxy quietly pins at sync time.
   def value_from_error(setting)
-    ref = setting["value_from"] || setting[:value_from]
+    setting = setting.with_indifferent_access
+    ref = setting[:value_from]
     return nil if ref.nil?
-    return "value and value_from are mutually exclusive" unless (setting["value"] || setting[:value]).nil?
+    return "value and value_from are mutually exclusive" unless setting[:value].nil?
     return "value_from must be an object" unless ref.is_a?(Hash)
 
     keys = ref.keys.map(&:to_s)
@@ -170,10 +219,10 @@ class PgDsnSecret < ApplicationRecord
       return "value_from must have exactly one of #{VALUE_FROM_KEYS.join(" or ")}"
     end
 
-    label = ref["principal_label"] || ref[:principal_label]
-    field = ref["principal_field"] || ref[:principal_field]
+    label = ref[:principal_label]
+    field = ref[:principal_field]
     return "principal_label can't be blank" if keys.first == "principal_label" && label.to_s.blank?
-    proxy_label = ref["proxy_label"] || ref[:proxy_label]
+    proxy_label = ref[:proxy_label]
     return "proxy_label can't be blank" if keys.first == "proxy_label" && proxy_label.to_s.blank?
     if keys.first == "principal_field" && !PRINCIPAL_FIELDS.include?(field.to_s)
       return "unknown principal_field #{field.to_s.inspect} (one of: #{PRINCIPAL_FIELDS.join(", ")})"

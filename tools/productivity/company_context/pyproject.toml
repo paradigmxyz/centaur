@@ -34,7 +34,7 @@ database = "centaur"
 secret_ref = "CENTAUR_POSTGRES_DSN"
 role = "centaur_slack_reader"
 settings = [
-    { name = "centaur.slack_channel_id", value_from = { principal_label = "slack_channel_id" } },
-    { name = "centaur.slack_team_id", value_from = { principal_label = "slack_team_id" } },
-    { name = "centaur.slack_user_id", value_from = { principal_label = "slack_user_id" } },
+    { name = "centaur.slack_channel_id", value_from = { principal_field = "slack_channel_id" } },
+    { name = "centaur.slack_team_id", value_from = { principal_field = "slack_team_id" } },
+    { name = "centaur.slack_user_id", value_from = { principal_field = "slack_user_id" } },
 ]

@@ -246,7 +246,7 @@ module Console
       post console_pg_dsn_secrets_url, params: {
         secret: { namespace: "acme", foreign_id: "ui-value-from", database: "valuefromdb" },
         settings: {
-          "0" => { name: "centaur.slack_channel_id", kind: "principal_label", value: "slack_channel_id" },
+          "0" => { name: "centaur.slack_channel_id", kind: "principal_field", value: "slack_channel_id" },
           "1" => { name: "centaur.principal", kind: "principal_field", value: "foreign_id" },
           "2" => { name: "app.tenant", kind: "literal", value: "centaur" }
         },
@@ -256,7 +256,7 @@ module Console
       assert_redirected_to console_secret_path("pg_dsn", secret.oid)
       assert_equal(
         [
-          { "name" => "centaur.slack_channel_id", "value_from" => { "principal_label" => "slack_channel_id" } },
+          { "name" => "centaur.slack_channel_id", "value_from" => { "principal_field" => "slack_channel_id" } },
           { "name" => "centaur.principal", "value_from" => { "principal_field" => "foreign_id" } },
           { "name" => "app.tenant", "value" => "centaur" }
         ],

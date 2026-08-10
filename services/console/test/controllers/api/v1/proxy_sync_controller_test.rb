@@ -323,12 +323,12 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
   end
 
   test "postgres entries resolve value_from settings against the proxy principal" do
-    @proxy.principal.update!(labels: { "slack_channel_id" => "C0123456789" })
+    @proxy.principal.update!(slack_channel_id: "C0123456789")
     pg = pg_dsn_secrets(:acme_analytics_pg)
     pg.update!(settings: [
       {
         "name" => "centaur.slack_channel_id",
-        "value_from" => { "principal_label" => "slack_channel_id" }
+        "value_from" => { "principal_field" => "slack_channel_id" }
       }
     ])
 

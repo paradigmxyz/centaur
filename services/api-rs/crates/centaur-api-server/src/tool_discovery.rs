@@ -1635,8 +1635,8 @@ mod tests {
                     name: "centaur.slack_channel_id".to_owned(),
                     value: None,
                     value_from: Some(PgDsnSettingValueFrom {
-                        principal_label: Some("slack_channel_id".to_owned()),
-                        principal_field: None,
+                        principal_label: None,
+                        principal_field: Some("slack_channel_id".to_owned()),
                         proxy_label: None,
                     }),
                 },
