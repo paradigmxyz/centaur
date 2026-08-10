@@ -35,10 +35,15 @@ class PgDsnSecret < ApplicationRecord
     id namespace foreign_id name kind slack_user_id slack_channel_id slack_team_id slack_email
     console_user_id console_user_email slack_history_channel_ids
   ].freeze
+  IDENTITY_PRINCIPAL_FIELDS = %w[
+    kind slack_user_id slack_channel_id slack_team_id slack_email
+  ].freeze
 
   has_one :dsn_source, class_name: "SecretSource", dependent: :destroy
   has_many :grants, dependent: :destroy
   belongs_to :created_by, class_name: "User"
+
+  before_validation :normalize_identity_principal_label_settings
 
   # One entry in the proxy's synced `postgres` list, keyed for routing by
   # `database`. The opaque id is carried too so the proxy can refer back to the
@@ -91,6 +96,32 @@ class PgDsnSecret < ApplicationRecord
   validate :database_matches_inline_dsn
 
   private
+
+  def normalize_identity_principal_label_settings
+    return unless settings.is_a?(Array)
+
+    normalized = settings.map do |setting|
+      next setting unless setting.is_a?(Hash)
+
+      value_from = setting["value_from"] || setting[:value_from]
+      next setting unless value_from.is_a?(Hash)
+
+      label = value_from["principal_label"] || value_from[:principal_label]
+      label = label.to_s
+      next setting unless IDENTITY_PRINCIPAL_FIELDS.include?(label)
+
+      normalized_value_from = value_from.dup
+      normalized_value_from.delete("principal_label")
+      normalized_value_from.delete(:principal_label)
+      normalized_value_from["principal_field"] = label
+
+      normalized_setting = setting.dup
+      normalized_setting.delete(:value_from)
+      normalized_setting["value_from"] = normalized_value_from
+      normalized_setting
+    end
+    self.settings = normalized unless normalized == settings
+  end
 
   def labels_is_a_hash
     errors.add(:labels, "must be a hash") unless labels.is_a?(Hash)

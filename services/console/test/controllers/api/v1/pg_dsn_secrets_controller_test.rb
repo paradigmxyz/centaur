@@ -222,6 +222,32 @@ module Api
         )
       end
 
+      test "POST canonicalizes legacy identity labels without changing custom labels" do
+        body = {
+          data: {
+            namespace: "acme",
+            foreign_id: "legacy-value-from-pg",
+            database: "legacy-value-from-db",
+            settings: [
+              { name: "centaur.slack_channel_id", value_from: { principal_label: "slack_channel_id" } },
+              { name: "app.tenant", value_from: { principal_label: "tenant" } }
+            ],
+            dsn: { source_type: "env", config: { var: "LEGACY_VALUE_FROM_DSN" } }
+          }
+        }
+
+        post api_v1_pg_dsn_secrets_url, params: body.to_json, headers: auth_headers
+        assert_response :created
+
+        assert_equal(
+          [
+            { "name" => "centaur.slack_channel_id", "value_from" => { "principal_field" => "slack_channel_id" } },
+            { "name" => "app.tenant", "value_from" => { "principal_label" => "tenant" } }
+          ],
+          json_body.dig("data", "settings")
+        )
+      end
+
       test "POST with an invalid value_from is rejected" do
         body = {
           data: {
