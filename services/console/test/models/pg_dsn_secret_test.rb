@@ -128,7 +128,7 @@ class PgDsnSecretTest < ActiveSupport::TestCase
 
   test "identity principal labels are normalized to fields before persistence" do
     secret = with_dsn(PgDsnSecret.new(base_attrs(settings: [
-      { "name" => "app.user_id", "value_from" => { "principal_label" => "slack_user_id" } },
+      { name: "app.user_id", value_from: { principal_label: "slack_user_id" } },
       { "name" => "app.console_user_id", "value_from" => { "principal_label" => "console-user-id" } },
       { "name" => "app.console_email", "value_from" => { "principal_label" => "email" } },
       { "name" => "app.tenant", "value_from" => { "principal_label" => "tenant" } }

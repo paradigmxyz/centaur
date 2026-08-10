@@ -79,7 +79,8 @@ class PgDsnSecret < ApplicationRecord
   def proxy_settings(principal: nil, proxy: nil)
     Array(settings).filter_map do |s|
       next unless s.is_a?(Hash)
-      name = s["name"].presence || s[:name].presence
+
+      name = s.with_indifferent_access[:name].presence
       next if name.blank?
       { "name" => name, "value" => setting_value(s, principal, proxy) }
     end
@@ -89,10 +90,10 @@ class PgDsnSecret < ApplicationRecord
     Array(settings).any? do |setting|
       next false unless setting.is_a?(Hash)
 
-      ref = setting["value_from"] || setting[:value_from]
+      ref = setting.with_indifferent_access[:value_from]
       next false unless ref.is_a?(Hash)
 
-      (ref["proxy_label"] || ref[:proxy_label]).present?
+      ref[:proxy_label].present?
     end
   end
 
@@ -113,22 +114,16 @@ class PgDsnSecret < ApplicationRecord
     normalized = settings.map do |setting|
       next setting unless setting.is_a?(Hash)
 
-      value_from = setting["value_from"] || setting[:value_from]
+      indifferent_setting = setting.with_indifferent_access
+      value_from = indifferent_setting[:value_from]
       next setting unless value_from.is_a?(Hash)
 
-      label = value_from["principal_label"] || value_from[:principal_label]
-      field = IDENTITY_PRINCIPAL_LABEL_FIELDS[label.to_s]
+      field = IDENTITY_PRINCIPAL_LABEL_FIELDS[value_from[:principal_label].to_s]
       next setting unless field
 
-      normalized_value_from = value_from.dup
-      normalized_value_from.delete("principal_label")
-      normalized_value_from.delete(:principal_label)
-      normalized_value_from["principal_field"] = field
-
-      normalized_setting = setting.dup
-      normalized_setting.delete(:value_from)
-      normalized_setting["value_from"] = normalized_value_from
-      normalized_setting
+      indifferent_setting.except(:value_from).merge(
+        value_from: value_from.except(:principal_label).merge(principal_field: field)
+      ).to_h
     end
     self.settings = normalized unless normalized == settings
   end
@@ -142,10 +137,11 @@ class PgDsnSecret < ApplicationRecord
   # resolve to "" when no principal/proxy is given or the label is absent, so
   # RLS-style policies fail closed rather than seeing a literal placeholder.
   def setting_value(setting, principal, proxy)
-    ref = setting["value_from"] || setting[:value_from]
-    return (setting["value"] || setting[:value]).to_s unless ref.is_a?(Hash)
+    setting = setting.with_indifferent_access
+    ref = setting[:value_from]
+    return setting[:value].to_s unless ref.is_a?(Hash)
 
-    label = ref["principal_label"] || ref[:principal_label]
+    label = ref[:principal_label]
     if label.present?
       if PrincipalIdentityLabels.promoted?(principal, label)
         return PrincipalIdentityLabels.value(principal, label).to_s
@@ -154,12 +150,12 @@ class PgDsnSecret < ApplicationRecord
       return principal&.labels&.fetch(label.to_s, "").to_s
     end
 
-    proxy_label = ref["proxy_label"] || ref[:proxy_label]
+    proxy_label = ref[:proxy_label]
     return proxy&.labels&.fetch(proxy_label.to_s, "").to_s if proxy_label.present?
 
     return "" unless principal
 
-    case (ref["principal_field"] || ref[:principal_field]).to_s
+    case ref[:principal_field].to_s
     when "id" then principal.oid
     when "namespace" then principal.namespace.to_s
     when "foreign_id" then principal.foreign_id.to_s
@@ -195,7 +191,8 @@ class PgDsnSecret < ApplicationRecord
   def setting_error(setting, seen)
     return "must be an object" unless setting.is_a?(Hash)
 
-    name = (setting["name"] || setting[:name]).to_s
+    setting = setting.with_indifferent_access
+    name = setting[:name].to_s
     return "name is required" if name.blank?
     return "invalid setting name #{name.inspect}" unless name.match?(GUC_NAME_FORMAT)
 
@@ -211,9 +208,10 @@ class PgDsnSecret < ApplicationRecord
   # structured shape: a typo'd field is an error here, not an empty string the
   # proxy quietly pins at sync time.
   def value_from_error(setting)
-    ref = setting["value_from"] || setting[:value_from]
+    setting = setting.with_indifferent_access
+    ref = setting[:value_from]
     return nil if ref.nil?
-    return "value and value_from are mutually exclusive" unless (setting["value"] || setting[:value]).nil?
+    return "value and value_from are mutually exclusive" unless setting[:value].nil?
     return "value_from must be an object" unless ref.is_a?(Hash)
 
     keys = ref.keys.map(&:to_s)
@@ -221,10 +219,10 @@ class PgDsnSecret < ApplicationRecord
       return "value_from must have exactly one of #{VALUE_FROM_KEYS.join(" or ")}"
     end
 
-    label = ref["principal_label"] || ref[:principal_label]
-    field = ref["principal_field"] || ref[:principal_field]
+    label = ref[:principal_label]
+    field = ref[:principal_field]
     return "principal_label can't be blank" if keys.first == "principal_label" && label.to_s.blank?
-    proxy_label = ref["proxy_label"] || ref[:proxy_label]
+    proxy_label = ref[:proxy_label]
     return "proxy_label can't be blank" if keys.first == "proxy_label" && proxy_label.to_s.blank?
     if keys.first == "principal_field" && !PRINCIPAL_FIELDS.include?(field.to_s)
       return "unknown principal_field #{field.to_s.inspect} (one of: #{PRINCIPAL_FIELDS.join(", ")})"
