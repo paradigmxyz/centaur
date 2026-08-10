@@ -385,6 +385,16 @@ class PgDsnSecretTest < ActiveSupport::TestCase
       %([0] unknown principal_field "labels" (one of: #{PgDsnSecret::PRINCIPAL_FIELDS.join(", ")}))
   end
 
+  test "an unknown principal_field cannot invoke a principal method while rendering" do
+    principal = principals(:acme_channel)
+    secret = with_dsn(PgDsnSecret.new(base_attrs(settings: [
+      { "name" => "app.tenant", "value_from" => { "principal_field" => "destroy" } }
+    ])))
+
+    assert_equal "", secret.to_proxy_dsn(principal: principal).dig("settings", 0, "value")
+    assert Principal.exists?(principal.id)
+  end
+
   test "settings with a valid empty value are accepted and stringified" do
     secret = with_dsn(PgDsnSecret.new(base_attrs(settings: [ { "name" => "app.tenant", "value" => "" } ])))
     assert secret.valid?

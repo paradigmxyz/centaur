@@ -123,8 +123,15 @@ class PgDsnSecret < ApplicationRecord
     when "namespace" then principal.namespace.to_s
     when "foreign_id" then principal.foreign_id.to_s
     when "name" then principal.name.to_s
+    when "kind" then principal.kind.to_s
+    when "slack_user_id" then principal.slack_user_id.to_s
+    when "slack_channel_id" then principal.slack_channel_id.to_s
+    when "slack_team_id" then principal.slack_team_id.to_s
+    when "slack_email" then principal.slack_email.to_s
+    when "console_user_id" then principal.console_user_id.to_s
+    when "console_user_email" then principal.console_user_email.to_s
     when "slack_history_channel_ids" then JSON.generate(principal.slack_history_channel_ids)
-    else principal.public_send(ref["principal_field"] || ref[:principal_field]).to_s
+    else "" # Invalid persisted or unsaved settings fail closed.
     end
   end
 
