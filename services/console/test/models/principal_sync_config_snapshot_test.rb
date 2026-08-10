@@ -236,12 +236,12 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
 
   test "sync_postgres resolves value_from settings against the principal" do
     principal = principals(:globex_user)
-    principal.update!(labels: { "slack_channel_id" => "C9999999999" })
+    principal.update!(slack_channel_id: "C9999999999")
     pg = pg_dsn_secrets(:acme_analytics_pg)
     pg.update!(settings: [
       {
         "name" => "centaur.slack_channel_id",
-        "value_from" => { "principal_label" => "slack_channel_id" }
+        "value_from" => { "principal_field" => "slack_channel_id" }
       },
       { "name" => "centaur.principal", "value_from" => { "principal_field" => "foreign_id" } }
     ])

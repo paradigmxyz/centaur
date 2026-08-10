@@ -159,21 +159,41 @@ def load_workflow_file(path: Path) -> RegisteredWorkflow | None:
     )
 
 
-def has_workflow_name_assignment(path: Path) -> bool:
+def _constant_string(node: ast.AST | None) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def workflow_name_from_source(path: Path) -> str | None:
+    """Return ``WORKFLOW_NAME`` when it is a top-level string constant.
+
+    Discovery uses this so ``WORKFLOW_ENABLE_MODE=allowlist`` can reject modules
+    before ``exec_module`` runs their top-level code.
+    """
     try:
         tree = ast.parse(path.read_text())
     except Exception:
-        return False
+        return None
+    name: str | None = None
+    saw_assignment = False
     for node in tree.body:
+        value: ast.AST | None = None
         if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == "WORKFLOW_NAME":
-                    return True
+            if any(isinstance(target, ast.Name) and target.id == "WORKFLOW_NAME" for target in node.targets):
+                value = node.value
         elif isinstance(node, ast.AnnAssign):
             target = node.target
             if isinstance(target, ast.Name) and target.id == "WORKFLOW_NAME":
-                return True
-    return False
+                value = node.value
+        if value is None:
+            continue
+        saw_assignment = True
+        # Last assignment wins, matching Python module semantics.
+        name = _constant_string(value)
+    if not saw_assignment:
+        return None
+    return name
 
 
 def discover_workflows() -> dict[str, RegisteredWorkflow]:
@@ -184,7 +204,10 @@ def discover_workflows() -> dict[str, RegisteredWorkflow]:
         for path in sorted(directory.rglob("*.py")):
             if path.name == "__init__.py" or path.name.startswith("_"):
                 continue
-            if not has_workflow_name_assignment(path):
+            workflow_name = workflow_name_from_source(path)
+            if workflow_name is None:
+                continue
+            if not workflow_enabled(workflow_name):
                 continue
             try:
                 registered = load_workflow_file(path)
@@ -193,7 +216,12 @@ def discover_workflows() -> dict[str, RegisteredWorkflow]:
                 continue
             if registered is None:
                 continue
-            if not workflow_enabled(registered.workflow_name):
+            if registered.workflow_name != workflow_name:
+                print(
+                    f"workflow_name_mismatch path={path} "
+                    f"declared={workflow_name!r} loaded={registered.workflow_name!r}",
+                    file=sys.stderr,
+                )
                 continue
             if registered.workflow_name in discovered:
                 raise RuntimeError(f"duplicate workflow name {registered.workflow_name!r}")

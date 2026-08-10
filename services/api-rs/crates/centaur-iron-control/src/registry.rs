@@ -1121,7 +1121,7 @@ postgres:
     settings:
       - name: centaur.slack_channel_id
         value_from:
-          principal_label: slack_channel_id
+          principal_field: slack_channel_id
       - name: centaur.slack_user_id
         value_from:
           proxy_label: centaur.slack_user_id
@@ -1144,7 +1144,7 @@ postgres:
             input.settings[0]
                 .value_from
                 .as_ref()
-                .and_then(|value_from| value_from.principal_label.as_deref()),
+                .and_then(|value_from| value_from.principal_field.as_deref()),
             Some("slack_channel_id")
         );
         assert_eq!(input.settings[1].name, "centaur.slack_user_id");

@@ -10,7 +10,7 @@ Postgres, sandbox pods for agent execution, and [iron-proxy](https://docs.iron.s
 injection. The goal is a small working deployment with a clear operator before
 you add more tools, workflows, harnesses, or overlays.
 
-## Production shape
+## Production Shape
 
 The API saves threads, runs, and events in Postgres. The Kubernetes backend
 creates sandbox pods for agent work. [iron-proxy](https://docs.iron.sh) handles outbound requests that
@@ -25,7 +25,7 @@ Each pod receives the prompt files, environment, proxy CA, proxy settings, and
 command it needs for one assigned thread. It should not receive raw model keys
 or third-party API keys.
 
-## 1. Choose the operating boundary
+## 1. Choose the Operating Boundary
 
 Before installing, decide:
 
@@ -40,7 +40,7 @@ Before installing, decide:
 Good first deployments have one narrow engineering, research, support, security,
 data, or operations workflow where agents can call real tools.
 
-## 2. Create the infra secret
+## 2. Create the Infra Secret
 
 The Helm chart reads infrastructure values from an existing Kubernetes Secret.
 By default that Secret is named `centaur-infra-env`:
@@ -60,6 +60,7 @@ Minimum keys:
 | Secret | Required for | Notes |
 |--------|--------------|-------|
 | `DATABASE_URL` | API | Postgres connection string. |
+| `POSTGRES_PASSWORD` | Bundled Postgres | Password used when the chart manages Postgres. |
 | `IRON_MANAGEMENT_API_KEY` | [iron-proxy](https://docs.iron.sh) management API | Generate with `openssl rand -hex 32`. |
 | `SANDBOX_SIGNING_KEY` | Sandbox API tokens | Generate with `openssl rand -hex 32`; keeps sandbox tokens valid across API restarts. |
 | `SLACK_BOT_TOKEN` | Slackbot/API | Bot User OAuth Token from the Slack app. |
@@ -69,11 +70,30 @@ Minimum keys:
 | `OP_SERVICE_ACCOUNT_TOKEN` | [iron-proxy](https://docs.iron.sh) 1Password service-account source | Needed when `ironProxy.secretSource` is `onepassword`. |
 | `OP_VAULT` | [iron-proxy](https://docs.iron.sh) 1Password source | Vault name or id used for `op://` references (either mode). |
 
+The Centaur Console is the permission control plane and is a required chart
+component. Add these keys to the same infra Secret:
+
+| Secret | Required for | Notes |
+|--------|--------------|-------|
+| `IRON_CONTROL_DATABASE_URL` | Console database | May use the bundled Postgres server. Keep the Console in its own logical database. |
+| `IRON_CONTROL_INITIAL_USER_EMAIL` | Initial Console admin | Used only to create the first user when no user exists. |
+| `IRON_CONTROL_INITIAL_USER_PASSWORD` | Initial Console admin | Minimum 12 characters. Use a generated break-glass password. |
+| `IRON_CONTROL_INITIAL_API_KEY` | api-rs and `centaur-perms` | Must be `iak_` followed by 64 lowercase hexadecimal characters. |
+| `IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY` | Console encryption at rest | Generate a long random value and keep it stable. |
+| `IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY` | Console encryption at rest | Generate a separate long random value and keep it stable. |
+| `IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT` | Console encryption at rest | Generate a separate long random value and keep it stable. |
+| `IRON_CONTROL_SECRET_KEY_BASE` | Console sessions and signing | Generate at least 64 random bytes. |
+| `CENTAUR_JWT_SIGNING_SECRET` | Console-issued MCP access tokens | Generate at least 64 random bytes. |
+
+The bootstrap user is created only when the Console has no users. Do not rotate
+the ActiveRecord encryption keys as an ordinary credential rotation: existing
+encrypted records become unreadable without an explicit key-migration plan.
+
 `SLACKBOT_API_KEY` is not created with the admin API during initial boot, because
 the API process requires it before it can start. Generate a high-entropy value,
 store it in the infra Secret, and reuse the same value in Slackbot.
 
-## 3. Configure harness credentials
+## 3. Configure Harness Credentials
 
 Store one secret per enabled harness credential:
 
@@ -104,10 +124,12 @@ To run Codex through Meta AI direct, store `META_AI_API_KEY` and select the
 provider with `--meta`. Pair it with `--model <model-id>` when choosing a
 provider-specific model for a turn.
 
-Whatever source you pick, the vault is shared across the whole deployment,
-so any thread can use any configured credential. Per-user and per-channel
-scoping is on the roadmap; until then, scope tool and harness access
-accordingly. See [Security](/security) for the full threat model.
+The backing vault can be shared across the deployment, but access is not. The
+Centaur Console grants each user, channel, issue, or workflow principal only
+the roles and secrets it should use. The `infra` role is assigned to new
+principals by default so they can run a model harness. Tool credentials are
+separate and should be granted deliberately. Configure that baseline in
+[Advanced Permissioning](/secrets/advanced-permissioning).
 
 ### Codex Auth Modes
 
@@ -199,7 +221,28 @@ To bootstrap, run `claude login` locally, then copy the refresh token from
 item on macOS) into `CLAUDE_CODE_BLOB`. Use the constant above for
 `CLAUDE_CODE_CLIENT_ID`.
 
-## 4. Configure Slack
+## 4. Configure Advanced Permissioning
+
+Set `console.publicUrl` and configure `console.ingress` if operators need to
+reach the Console outside the cluster. Sign in as the bootstrap admin, then
+open **System Settings** before creating user sessions:
+
+- Keep `infra` as a default role if every admitted user may run an agent.
+- Clear default roles if even harness access must be explicitly approved.
+- Set default repo-cache access to `none`, `public`, or `all`.
+- Decide whether new sandboxes may reach observability and the api-rs control
+  plane.
+
+Defaults apply only to principals created later. After users or channels start
+their first session, assign tool roles or direct secret grants from
+**Principals**. For automated provisioning, use `centaur-perms` with the same
+secret-source policy and tool directories as api-rs.
+
+Follow [Advanced Permissioning](/secrets/advanced-permissioning) for principal
+mapping, tool registration, role design, revocation, and end-to-end
+verification.
+
+## 5. Configure Slack
 
 Create the Slackbot app at [api.slack.com/apps](https://api.slack.com/apps).
 Use the app page to install the bot, copy the Bot User OAuth Token for
@@ -234,7 +277,7 @@ The Slackbot accepts Slack events at `/api/webhooks/slack`. It also registers
 compatibility paths for `/api/slack/events`, `/api/slack/actions`,
 `/api/slack/options`, and `/api/slack/commands`.
 
-## 5. Deploy with Helm
+## 6. Deploy With Helm
 
 The chart lives at `contrib/chart`. Select service images, [iron-proxy](https://docs.iron.sh) secret
 source, sandbox image, and optional runtime class in your values file:
@@ -294,7 +337,30 @@ helm upgrade --install centaur contrib/chart \
   -f values.production.yaml
 ```
 
-## 6. Verify the deployment
+### Schedule Sandboxes Onto a Dedicated Node Pool / RuntimeClass
+
+Agent sandboxes and their paired iron-proxy pods are created at runtime by
+`api-rs`. Set `sandbox.runtimeClassName`, `sandbox.nodeSelector`, and
+`sandbox.tolerations` to pin both onto a dedicated pool and/or RuntimeClass
+(e.g. gVisor). The chart passes them to api-rs as
+`SESSION_SANDBOX_RUNTIME_CLASS_NAME`, `SESSION_SANDBOX_NODE_SELECTOR`, and
+`SESSION_SANDBOX_TOLERATIONS`.
+
+```yaml
+sandbox:
+  runtimeClassName: gvisor
+  nodeSelector:
+    workload: centaur-sandbox
+  tolerations:
+    - key: centaur.ai/sandbox
+      operator: Exists
+      effect: NoSchedule
+```
+
+Malformed selector/toleration JSON fails api-rs startup. Empty values keep
+default scheduling.
+
+## 7. Verify the Deployment
 
 Check health from inside the api-rs deployment first:
 
@@ -360,7 +426,7 @@ Centaur preserves the execution row and event trail; retry by starting a new
 turn after you understand whether the failure was credentials, image pull,
 network policy, harness startup, or the upstream model/tool call.
 
-## 7. Keep the operating loop small
+## 8. Keep the Operating Loop Small
 
 Before expanding the deployment, record:
 

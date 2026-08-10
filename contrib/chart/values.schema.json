@@ -96,7 +96,8 @@
         "upstreamDenyCidrs": {
           "type": "array",
           "items": { "type": "string" }
-        }
+        },
+        "resources": { "type": "object" }
       }
     },
     "toolServer": {
@@ -163,6 +164,8 @@
     "sandbox": {
       "type": "object",
       "properties": {
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
         "runtimeClassName": { "type": "string" },
         "reposPath": { "type": "string" },
         "resources": { "type": "object" }
@@ -266,6 +269,7 @@
         "sandboxRunningLimit": { "type": "integer", "minimum": 0 },
         "sandboxHotIdleGraceSecs": { "type": "integer", "minimum": 0 },
         "workflowHostSandbox": { "type": "boolean" },
+        "workflowHostResources": { "type": "object" },
         "etl": {
           "type": "object",
           "properties": {
@@ -333,6 +337,15 @@
                 "intervalSeconds": { "type": "integer" },
                 "maxWindowSeconds": { "type": "integer" },
                 "batchSize": { "type": "integer", "minimum": 1 }
+              }
+            },
+            "companyContextEmbeddings": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "intervalSeconds": { "type": "integer", "minimum": 1 },
+                "batchSize": { "type": "integer", "minimum": 1 },
+                "model": { "type": "string", "minLength": 1 }
               }
             }
           }

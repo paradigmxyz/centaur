@@ -44,7 +44,7 @@ class Principal < ApplicationRecord
   SLACK_TEAM_ID_FORMAT = /\A[TE][A-Z0-9]{8,}\z/
 
   validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
-  validates :foreign_id, uniqueness: { scope: :namespace, allow_nil: true },
+  validates :foreign_id, uniqueness: { allow_nil: true },
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }, allow_nil: true
   validates :sandbox_repo_cache, inclusion: { in: SANDBOX_REPO_CACHE_VALUES }
   validates :kind, presence: true,

@@ -10,6 +10,8 @@ class ConsoleController < ApplicationController
 
   before_action :require_admin
 
+  PRINCIPALS_PER_PAGE = 50
+
   # Friendly labels for the source backend (and the gcp_auth credentials_provider
   # type). The secrets table shows only this -- the full reference lives on the
   # secret detail page.
@@ -21,7 +23,22 @@ class ConsoleController < ApplicationController
   }.freeze
 
   def principals
-    @principals = Principal.includes(:console_user).order(created_at: :asc, id: :asc)
+    @search_query = params[:q].to_s.strip
+    scope = Principal.order(name: :asc, created_at: :asc)
+    @total_principals = scope.count
+
+    if @search_query.present?
+      pattern = "%#{Principal.sanitize_sql_like(@search_query)}%"
+      scope = scope.where("name ILIKE :pattern OR foreign_id ILIKE :pattern", pattern: pattern)
+    end
+
+    @total_count = scope.count
+    @total_pages = [ (@total_count.to_f / PRINCIPALS_PER_PAGE).ceil, 1 ].max
+    @page = [ page_param, @total_pages ].min
+    @principals = scope
+      .limit(PRINCIPALS_PER_PAGE)
+      .offset((@page - 1) * PRINCIPALS_PER_PAGE)
+      .includes(:roles)
   end
 
   def principal
@@ -193,6 +210,11 @@ class ConsoleController < ApplicationController
   end
 
   private
+
+  def page_param
+    page = Integer(params[:page].to_s, 10, exception: false) || 1
+    page < 1 ? 1 : page
+  end
 
   def source_segment(source, role: nil)
     return nil unless source

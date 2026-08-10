@@ -372,7 +372,7 @@ fn aws_auth_requires_hosts() {
 #[test]
 fn parses_pg_dsn_secret() {
     let parsed = tools::parse_secret(
-        &entry(r#"{ type = "pg_dsn", name = "RESHIFT_DSN", database = "pmadmin", secret_ref = "RESHIFT_DSN", role = "centaur_slack_reader", settings = [{ name = "centaur.slack_channel_id", value_from = { principal_label = "slack_channel_id" } }, { name = "centaur.slack_user_id", value_from = { proxy_label = "centaur.slack_user_id" } }] }"#),
+        &entry(r#"{ type = "pg_dsn", name = "RESHIFT_DSN", database = "pmadmin", secret_ref = "RESHIFT_DSN", role = "centaur_slack_reader", settings = [{ name = "centaur.slack_channel_id", value_from = { principal_field = "slack_channel_id" } }, { name = "centaur.slack_user_id", value_from = { proxy_label = "centaur.slack_user_id" } }] }"#),
         &[],
     )
     .unwrap();
@@ -389,7 +389,7 @@ fn parses_pg_dsn_secret() {
         pg.settings[0]
             .value_from
             .as_ref()
-            .and_then(|value_from| value_from.principal_label.as_deref()),
+            .and_then(|value_from| value_from.principal_field.as_deref()),
         Some("slack_channel_id")
     );
     assert_eq!(pg.settings[1].name, "centaur.slack_user_id");
@@ -563,7 +563,7 @@ fn translates_oauth_with_json_key_fields() {
 fn translates_pg_dsn_to_input_with_roundtrip_foreign_id() {
     let secrets = vec![
         tools::parse_secret(
-            &entry(r#"{ type = "pg_dsn", name = "RESHIFT_DSN", database = "pmadmin", secret_ref = "RESHIFT_DSN", role = "centaur_slack_reader", settings = [{ name = "centaur.slack_channel_id", value_from = { principal_label = "slack_channel_id" } }, { name = "centaur.slack_user_id", value_from = { proxy_label = "centaur.slack_user_id" } }] }"#),
+            &entry(r#"{ type = "pg_dsn", name = "RESHIFT_DSN", database = "pmadmin", secret_ref = "RESHIFT_DSN", role = "centaur_slack_reader", settings = [{ name = "centaur.slack_channel_id", value_from = { principal_field = "slack_channel_id" } }, { name = "centaur.slack_user_id", value_from = { proxy_label = "centaur.slack_user_id" } }] }"#),
             &[],
         )
         .unwrap(),
@@ -584,7 +584,7 @@ fn translates_pg_dsn_to_input_with_roundtrip_foreign_id() {
         input.settings[0]
             .value_from
             .as_ref()
-            .and_then(|value_from| value_from.principal_label.as_deref()),
+            .and_then(|value_from| value_from.principal_field.as_deref()),
         Some("slack_channel_id")
     );
     assert_eq!(

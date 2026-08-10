@@ -132,10 +132,9 @@ class ParallelBackend:
         # per backend instance so callers who omit it still get continuity
         # within a process.
         self._default_session_id = f"centaur-websearch-{uuid.uuid4().hex}"
-        # Set once a REST search fails auth — i.e. the configured "key" was an
-        # un-swapped placeholder (centaur replace-mode secret that iron-proxy
-        # had nothing to resolve). Subsequent searches skip REST and use the
-        # anonymous MCP path (see the fallback in `search`).
+        # Set once a REST search fails auth — i.e. iron-proxy did not inject a
+        # granted key or the configured key was invalid. Subsequent searches
+        # skip REST and use the anonymous MCP path (see `search`).
         self._rest_auth_failed = False
 
     @property
@@ -144,7 +143,7 @@ class ParallelBackend:
 
     @property
     def search_mode(self) -> str:
-        return "api" if self._api_key else "mcp"
+        return "api" if self._api_key and not self._rest_auth_failed else "mcp"
 
     def _sdk_client(self, *, timeout_seconds: float) -> AsyncParallel:
         if not self._api_key:
@@ -205,9 +204,9 @@ class ParallelBackend:
                 )
                 backend_label = "parallel:api"
             except AuthenticationError:
-                # The configured key was an un-swapped placeholder (centaur
-                # replace-mode secret with no real value in the vault). Fall
-                # back to the anonymous MCP path and skip REST from now on.
+                # No granted inject secret (or an invalid configured value)
+                # left the SDK placeholder in x-api-key. Fall back to the
+                # anonymous MCP path and skip REST from now on.
                 self._rest_auth_failed = True
                 use_rest = False
                 partial_failures.append(
@@ -344,25 +343,28 @@ class ParallelBackend:
 
         started = time.perf_counter()
         progress(f"creating task ({effective_processor}, timeout={int(effective_timeout)}s)")
-        client = self._sdk_client(timeout_seconds=effective_timeout)
         # Use auto schema (Parallel's default for pro/ultra processors), which
         # returns a structured JSON report with per-field basis grounding. The
         # canonical Deep Research example in the docs uses this — text mode
         # gives looser, less reliably-cited output.
-        async with client:
-            task = await client.task_run.create(
-                input=normalized,
-                processor=effective_processor,
-                enable_events=True,
-            )
-            run_id = task.run_id
-            progress(f"queued {run_id}")
+        try:
+            client = self._sdk_client(timeout_seconds=effective_timeout)
+            async with client:
+                task = await client.task_run.create(
+                    input=normalized,
+                    processor=effective_processor,
+                    enable_events=True,
+                )
+                run_id = task.run_id
+                progress(f"queued {run_id}")
 
-            await _stream_progress(client, run_id, progress)
+                await _stream_progress(client, run_id, progress)
 
-            result = await _await_task_result(
-                client, run_id=run_id, deadline=started + effective_timeout
-            )
+                result = await _await_task_result(
+                    client, run_id=run_id, deadline=started + effective_timeout
+                )
+        except AuthenticationError as exc:
+            raise RuntimeError("deep_research requires a valid, granted PARALLEL_API_KEY.") from exc
 
         sources, answer_markdown = _normalize_task_result(result, max_report_chars=max_report_chars)
         if not answer_markdown:
@@ -556,10 +558,9 @@ class ParallelBackend:
         }
         if session_id:
             headers["Mcp-Session-Id"] = session_id
-        # Only attach a Bearer token when we hold a key that actually
-        # authenticates. If REST already failed auth (placeholder/un-swapped
-        # replacer), the MCP fallback must stay anonymous — sending the bogus
-        # token would get the free endpoint to 401 as well.
+        # Only attach a Bearer token when REST has not rejected the candidate
+        # credential. After a failed inject attempt, the MCP fallback must stay
+        # anonymous or the placeholder would make the free endpoint return 401.
         if self._api_key and not self._rest_auth_failed:
             headers["Authorization"] = f"Bearer {self._api_key}"
         return headers

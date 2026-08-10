@@ -52,6 +52,31 @@ Optional required-by-mode variables:
 | `TEAMS_BOT_APP_ID`, `TEAMS_BOT_APP_PASSWORD`, `TEAMS_BOT_APP_TENANT_ID` | Local shell before `just bootstrap-secrets`; production Secret. | Required by Teamsbot when `teamsbot.enabled=true`. |
 | `TEAMSBOT_API_KEY` | `secretManager.existingSecretName`; local bootstrap generates it when Teams credentials are present and it is omitted. | Static API key used by Teamsbot. |
 
+## Console and Permission Control Plane
+
+The Console stores principals, roles, grants, sandbox capabilities, and
+encrypted secret-source configuration. The chart renders its internal URL and
+admin API key into api-rs. See [Advanced Permissioning](/secrets/advanced-permissioning)
+for the operator workflow.
+
+| Env var or value | Set from | Controls |
+| --- | --- | --- |
+| `IRON_CONTROL_DATABASE_URL` | `secretManager.existingSecretName`. | Console database connection. Keep it separate from the api-rs logical database. |
+| `IRON_CONTROL_INITIAL_USER_EMAIL`, `IRON_CONTROL_INITIAL_USER_PASSWORD` | `secretManager.existingSecretName`; local bootstrap generates defaults when absent. | Creates the initial Console admin when no user exists. |
+| `IRON_CONTROL_INITIAL_API_KEY` | `secretManager.existingSecretName`; local bootstrap generates it when absent. | Admin API key used by api-rs and `centaur-perms`. |
+| `IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY`, `IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY`, `IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT` | `secretManager.existingSecretName`; local bootstrap generates them when absent. | Encrypts credential material at rest. Keep these stable after first boot. |
+| `IRON_CONTROL_SECRET_KEY_BASE` | `secretManager.existingSecretName`; local bootstrap generates it when absent. | Console session and application signing secret. |
+| `CENTAUR_JWT_SIGNING_SECRET` | `secretManager.existingSecretName`; local bootstrap generates it when absent. | Signs Console-issued MCP access tokens. |
+| `console.publicUrl` | Helm value. | Public Console origin used for links and MCP authorization metadata. |
+| `console.passwordLoginEnabled` | Helm value, default `true`. | Enables the break-glass email and password login. Disable after SSO is configured for a public Console. |
+| `console.ssoEmailDomains` | Helm value. | Limits Google or Slack SSO admission by email domain. Empty accepts any IdP-authenticated email. |
+| `apiRs.syncInfraSecrets`, `IRON_CONTROL_SYNC_INFRA_SECRETS` | Helm value, default `true`. | Upserts the shared `infra` role and its harness/platform secrets. Set false only when another process owns that shared Console state. |
+| `IRON_CONTROL_URL`, `IRON_CONTROL_API_KEY`, `IRON_CONTROL_NAMESPACE` | Chart-rendered for api-rs; operator shell for `centaur-perms`. | Connects the runtime or CLI to the same Console namespace. |
+
+Default roles and default sandbox capabilities are stored in the Console, not
+as Helm values. Configure them in **System Settings** before new principals are
+created. Changing a default does not rewrite existing principals.
+
 ## API
 
 | Env var | Set from | Controls |
@@ -182,7 +207,9 @@ Kubernetes backend:
 | `KUBERNETES_NAMESPACE`, `POD_NAMESPACE`, `KUBERNETES_KUBECONFIG` | Chart namespace, downward API, or `api.extraEnv`. | Kubernetes client namespace/config. |
 | `KUBERNETES_AGENT_IMAGE_PULL_POLICY`, `KUBERNETES_SANDBOX_IMAGE_PULL_SECRETS` | `sandbox.image.pullPolicy`, `global.imagePullSecrets`. | Sandbox image pull behavior. |
 | `KUBERNETES_SANDBOX_RUNTIME_CLASS_NAME`, `KUBERNETES_SANDBOX_SERVICE_ACCOUNT_NAME` | `sandbox.runtimeClassName`, `api.extraEnv`. | Pod runtime class and service account. |
-| `KUBERNETES_SANDBOX_CPU_LIMIT`, `KUBERNETES_SANDBOX_MEMORY_LIMIT`, `KUBERNETES_SANDBOX_CPU_REQUEST`, `KUBERNETES_SANDBOX_MEMORY_REQUEST` | `sandbox.resources.*`. | Sandbox pod resources. |
+| `SESSION_SANDBOX_RESOURCES` | `sandbox.resources`. | Session sandbox pod resources (per-session and warm) as a JSON Kubernetes `ResourceRequirements` object. Arbitrary resource names are preserved, and malformed input fails startup. |
+| `WORKFLOW_HOST_RESOURCES` | `apiRs.workflowHostResources`. | Workflow-host sandbox pod resources as a JSON Kubernetes `ResourceRequirements` object, sized independently of session sandboxes. |
+| `KUBERNETES_IRON_PROXY_RESOURCES` | `ironProxy.resources`. | Per-sandbox iron-proxy pod resources as a JSON Kubernetes `ResourceRequirements` object. |
 | `KUBERNETES_SANDBOX_READY_TIMEOUT_S`, `KUBERNETES_ATTACH_LOG_TAIL_LINES` | `api.extraEnv`. | Sandbox readiness and attach diagnostics. |
 | `SESSION_SANDBOX_RUNNING_LIMIT`, `SESSION_SANDBOX_HOT_IDLE_GRACE_SECS` | `apiRs.sandboxRunningLimit`, `apiRs.sandboxHotIdleGraceSecs`. | Capacity admission for running-like sandboxes; discards ready warm sandboxes first, then pauses least-recently-active idle sessions outside the grace window. |
 | `SESSION_SANDBOX_CLEANUP_INTERVAL_SECS`, `SESSION_SANDBOX_IDLE_CLEANUP_BACKSTOP_SECS` | `apiRs.sandboxCleanupIntervalSecs`, `apiRs.sandboxIdleCleanupBackstopSecs`. | DB-aware cleanup of unreferenced sandboxes and restart recovery for idle pauses. Persisted `idle_timeout_ms` is honored after restart; the backstop is the fallback for older execution rows without that metadata. |
