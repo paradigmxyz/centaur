@@ -3361,10 +3361,13 @@ async fn handle_python_context_request(
             }
         }
         Some("ctx.workflow.start") => {
-            match start_python_child_workflow(message, input, workflow_clients).await {
-                Ok(value) => Ok(value),
-                Err(error) => Err(error.to_string()),
-            }
+            return Ok(handle_python_child_start_context_request(
+                &request_id,
+                message,
+                input,
+                workflow_clients,
+            )
+            .await);
         }
         Some("ctx.call_tool") => match call_python_workflow_tool(message).await {
             Ok(value) => Ok(value),
@@ -3378,27 +3381,86 @@ async fn handle_python_context_request(
         }
         other => Err(format!("unsupported context request type {other:?}")),
     };
-    Ok(match result {
+    Ok(python_context_response(&request_id, result, None))
+}
+
+async fn handle_python_child_start_context_request(
+    request_id: &str,
+    message: &Value,
+    input: &WorkflowTaskInput,
+    workflow_clients: &WorkflowQueueClients,
+) -> Value {
+    match start_python_child_workflow(message, input, workflow_clients).await {
+        Ok(value) => python_context_response(request_id, Ok(value), None),
+        Err(error) => {
+            python_context_response(request_id, Err(error.to_string()), Some(error.error_code()))
+        }
+    }
+}
+
+fn python_context_response(
+    request_id: &str,
+    result: Result<Value, String>,
+    error_code: Option<&str>,
+) -> Value {
+    match result {
         Ok(value) => json!({
             "type": "ctx.response",
             "request_id": request_id,
             "ok": true,
             "value": value,
         }),
-        Err(error) => json!({
-            "type": "ctx.response",
-            "request_id": request_id,
-            "ok": false,
-            "error": error,
-        }),
-    })
+        Err(error) => {
+            let mut response = json!({
+                "type": "ctx.response",
+                "request_id": request_id,
+                "ok": false,
+                "error": error,
+            });
+            if let Some(error_code) = error_code.filter(|code| !code.is_empty()) {
+                response["error_code"] = json!(error_code);
+            }
+            response
+        }
+    }
+}
+
+struct ChildWorkflowStartError {
+    error: WorkflowRuntimeError,
+    error_code: &'static str,
+}
+
+impl ChildWorkflowStartError {
+    fn rejected_before_spawn(error: WorkflowRuntimeError) -> Self {
+        Self {
+            error,
+            error_code: "workflow_start_rejected_before_spawn",
+        }
+    }
+
+    fn outcome_unknown(error: WorkflowRuntimeError) -> Self {
+        Self {
+            error,
+            error_code: "workflow_start_outcome_unknown",
+        }
+    }
+
+    fn error_code(&self) -> &'static str {
+        self.error_code
+    }
+}
+
+impl std::fmt::Display for ChildWorkflowStartError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(formatter)
+    }
 }
 
 async fn start_python_child_workflow(
     message: &Value,
     parent: &WorkflowTaskInput,
     workflow_clients: &WorkflowQueueClients,
-) -> Result<Value, WorkflowRuntimeError> {
+) -> Result<Value, ChildWorkflowStartError> {
     let workflow_name = message
         .get("workflow_name")
         .and_then(Value::as_str)
@@ -3408,12 +3470,17 @@ async fn start_python_child_workflow(
             WorkflowRuntimeError::BadRequest(
                 "ctx.workflow.start requires a non-empty workflow_name".to_owned(),
             )
-        })?;
-    WorkflowEnablement::from_env()?.ensure_enabled(workflow_name)?;
+        })
+        .map_err(ChildWorkflowStartError::rejected_before_spawn)?;
+    WorkflowEnablement::from_env()
+        .and_then(|enablement| enablement.ensure_enabled(workflow_name))
+        .map_err(ChildWorkflowStartError::rejected_before_spawn)?;
     let child_input = message.get("input").cloned().unwrap_or_else(|| json!({}));
     if !child_input.is_object() {
-        return Err(WorkflowRuntimeError::BadRequest(
-            "ctx.workflow.start input must be an object".to_owned(),
+        return Err(ChildWorkflowStartError::rejected_before_spawn(
+            WorkflowRuntimeError::BadRequest(
+                "ctx.workflow.start input must be an object".to_owned(),
+            ),
         ));
     }
     let idempotency_key = message
@@ -3441,7 +3508,8 @@ async fn start_python_child_workflow(
                 ..SpawnOptions::default()
             },
         )
-        .await?;
+        .await
+        .map_err(|error| ChildWorkflowStartError::outcome_unknown(error.into()))?;
     Ok(json!({
         "workflow_name": workflow_name,
         "task_id": spawn.task_id,
@@ -4151,6 +4219,93 @@ pub enum WorkflowRuntimeError {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use sqlx::postgres::PgPoolOptions;
+
+    fn child_start_test_clients() -> WorkflowQueueClients {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/absurd")
+            .expect("test URL should be valid without connecting");
+        let client = Client::from_pool(pool).expect("client should accept a lazy pool");
+        WorkflowQueueClients {
+            standard: client.clone(),
+            slack_live: client.clone(),
+            etl: client.clone(),
+            etl_backfill: client,
+        }
+    }
+
+    fn child_start_test_parent() -> WorkflowTaskInput {
+        WorkflowTaskInput {
+            workflow_name: "parent".to_owned(),
+            input: json!({}),
+            harness_type: HarnessType::Codex,
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_child_start_includes_rejected_before_spawn_code_in_context_response() {
+        let response = handle_python_child_start_context_request(
+            "child-start",
+            &json!({"type": "ctx.workflow.start", "request_id": "child-start"}),
+            &child_start_test_parent(),
+            &child_start_test_clients(),
+        )
+        .await;
+
+        assert_eq!(response["ok"], json!(false));
+        assert_eq!(
+            response["error"],
+            json!("ctx.workflow.start requires a non-empty workflow_name")
+        );
+        assert_eq!(
+            response["error_code"],
+            json!("workflow_start_rejected_before_spawn")
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_child_spawn_includes_unknown_outcome_code_in_context_response() {
+        let response = handle_python_child_start_context_request(
+            "child-start",
+            &json!({
+                "type": "ctx.workflow.start",
+                "workflow_name": "child",
+                "input": {},
+            }),
+            &child_start_test_parent(),
+            &child_start_test_clients(),
+        )
+        .await;
+
+        assert_eq!(response["ok"], json!(false));
+        assert_eq!(
+            response["error_code"],
+            json!("workflow_start_outcome_unknown")
+        );
+    }
+
+    #[test]
+    fn non_start_context_failure_keeps_legacy_response_shape() {
+        let response =
+            python_context_response("agent-turn", Err("agent unavailable".to_owned()), None);
+
+        assert_eq!(response["ok"], json!(false));
+        assert_eq!(response["error"], json!("agent unavailable"));
+        assert!(response.get("error_code").is_none());
+    }
+
+    #[test]
+    fn successful_context_response_never_includes_an_error_code() {
+        let response = python_context_response(
+            "child-start",
+            Ok(json!({"created": true})),
+            Some("workflow_start_outcome_unknown"),
+        );
+
+        assert_eq!(response["ok"], json!(true));
+        assert_eq!(response["value"], json!({"created": true}));
+        assert!(response.get("error_code").is_none());
+    }
 
     #[test]
     fn python_event_names_are_collision_free() {

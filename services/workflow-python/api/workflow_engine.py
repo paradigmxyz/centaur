@@ -8,6 +8,12 @@ from typing import Any
 from api.app import WorkflowToolManager, WorkflowTools, bind_context_rpc, reset_context_rpc
 
 
+class ContextRpcError(RuntimeError):
+    def __init__(self, message: str, *, error_code: str) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+
+
 @dataclasses.dataclass
 class Delivery:
     channel: str = ""

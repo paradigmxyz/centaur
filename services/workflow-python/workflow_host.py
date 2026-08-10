@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from api import metrics
-from api.workflow_engine import WorkflowContext
+from api.workflow_engine import ContextRpcError, WorkflowContext
 
 DATABASE_CONNECT_ATTEMPTS = 5
 DATABASE_CONNECT_BACKOFF_SECONDS = 0.25
@@ -73,7 +73,12 @@ class RpcClient:
         if response.get("ok"):
             fut.set_result(response.get("value"))
         else:
-            fut.set_exception(RuntimeError(str(response.get("error") or "context RPC failed")))
+            message = str(response.get("error") or "context RPC failed")
+            error_code = response.get("error_code")
+            if isinstance(error_code, str) and error_code:
+                fut.set_exception(ContextRpcError(message, error_code=error_code))
+            else:
+                fut.set_exception(RuntimeError(message))
 
 
 @dataclasses.dataclass
