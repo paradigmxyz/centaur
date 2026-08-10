@@ -190,6 +190,58 @@ class PgDsnSecretTest < ActiveSupport::TestCase
     )
   end
 
+  test "to_proxy_dsn resolves first-class identity fields while compatibility labels remain supported" do
+    principal = principals(:acme_channel)
+    principal.update!(
+      slack_user_id: "U0123456789",
+      slack_team_id: "T0123456789",
+      slack_email: "ada@example.com"
+    )
+    secret = with_dsn(PgDsnSecret.new(base_attrs(settings: [
+      { "name" => "app.kind", "value_from" => { "principal_field" => "kind" } },
+      { "name" => "app.user_id", "value_from" => { "principal_field" => "slack_user_id" } },
+      { "name" => "app.channel_id", "value_from" => { "principal_field" => "slack_channel_id" } },
+      { "name" => "app.team_id", "value_from" => { "principal_field" => "slack_team_id" } },
+      { "name" => "app.email", "value_from" => { "principal_field" => "slack_email" } }
+    ])))
+
+    assert secret.valid?
+    assert_equal(
+      [
+        { "name" => "app.kind", "value" => "slack_channel" },
+        { "name" => "app.user_id", "value" => "U0123456789" },
+        { "name" => "app.channel_id", "value" => "C0123456789" },
+        { "name" => "app.team_id", "value" => "T0123456789" },
+        { "name" => "app.email", "value" => "ada@example.com" }
+      ],
+      secret.to_proxy_dsn(principal: principal)["settings"]
+    )
+  end
+
+  test "to_proxy_dsn resolves first-class console user fields" do
+    user = users(:acme_admin)
+    principal = Principal.create!(
+      namespace: "acme",
+      kind: "console_user",
+      console_user_id: user.id,
+      console_user_email: user.email,
+      created_by: user
+    )
+    secret = with_dsn(PgDsnSecret.new(base_attrs(settings: [
+      { "name" => "app.user_id", "value_from" => { "principal_field" => "console_user_id" } },
+      { "name" => "app.email", "value_from" => { "principal_field" => "console_user_email" } }
+    ])))
+
+    assert secret.valid?
+    assert_equal(
+      [
+        { "name" => "app.user_id", "value" => user.id.to_s },
+        { "name" => "app.email", "value" => user.email }
+      ],
+      secret.to_proxy_dsn(principal: principal)["settings"]
+    )
+  end
+
   test "to_proxy_dsn resolves Slack history channel ids from permission rows" do
     principal = principals(:acme_channel)
     SlackChannelPermission.create!(
@@ -330,7 +382,7 @@ class PgDsnSecretTest < ActiveSupport::TestCase
     ])))
     assert_not secret.valid?
     assert_includes secret.errors[:settings],
-      %([0] unknown principal_field "labels" (one of: id, namespace, foreign_id, name, slack_history_channel_ids))
+      %([0] unknown principal_field "labels" (one of: #{PgDsnSecret::PRINCIPAL_FIELDS.join(", ")}))
   end
 
   test "settings with a valid empty value are accepted and stringified" do

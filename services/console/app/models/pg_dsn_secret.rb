@@ -29,9 +29,12 @@ class PgDsnSecret < ApplicationRecord
 
   # A setting's `value_from` reference takes exactly one of these keys.
   VALUE_FROM_KEYS = %w[principal_label principal_field proxy_label].freeze
-  # Principal attributes a `principal_field` reference may name, matching how
-  # the API serializes principals (`id` is the opaque oid).
-  PRINCIPAL_FIELDS = %w[id namespace foreign_id name slack_history_channel_ids].freeze
+  # Principal attributes a `principal_field` reference may name. `id` resolves
+  # to the opaque oid rather than the database primary key.
+  PRINCIPAL_FIELDS = %w[
+    id namespace foreign_id name kind slack_user_id slack_channel_id slack_team_id slack_email
+    console_user_id console_user_email slack_history_channel_ids
+  ].freeze
 
   has_one :dsn_source, class_name: "SecretSource", dependent: :destroy
   has_many :grants, dependent: :destroy
@@ -121,7 +124,7 @@ class PgDsnSecret < ApplicationRecord
     when "foreign_id" then principal.foreign_id.to_s
     when "name" then principal.name.to_s
     when "slack_history_channel_ids" then JSON.generate(principal.slack_history_channel_ids)
-    else "" # unreachable for saved records; settings_are_valid rejects others
+    else principal.public_send(ref["principal_field"] || ref[:principal_field]).to_s
     end
   end
 
