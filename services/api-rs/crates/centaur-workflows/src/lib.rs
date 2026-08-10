@@ -3361,13 +3361,10 @@ async fn handle_python_context_request(
             }
         }
         Some("ctx.workflow.start") => {
-            return Ok(handle_python_child_start_context_request(
+            return Ok(python_child_start_context_response(
                 &request_id,
-                message,
-                input,
-                workflow_clients,
-            )
-            .await);
+                start_python_child_workflow(message, input, workflow_clients).await,
+            ));
         }
         Some("ctx.call_tool") => match call_python_workflow_tool(message).await {
             Ok(value) => Ok(value),
@@ -3384,13 +3381,11 @@ async fn handle_python_context_request(
     Ok(python_context_response(&request_id, result, None))
 }
 
-async fn handle_python_child_start_context_request(
+fn python_child_start_context_response(
     request_id: &str,
-    message: &Value,
-    input: &WorkflowTaskInput,
-    workflow_clients: &WorkflowQueueClients,
+    result: Result<Value, ChildWorkflowStartError>,
 ) -> Value {
-    match start_python_child_workflow(message, input, workflow_clients).await {
+    match result {
         Ok(value) => python_context_response(request_id, Ok(value), None),
         Err(error) => {
             python_context_response(request_id, Err(error.to_string()), Some(error.error_code()))
@@ -4219,38 +4214,17 @@ pub enum WorkflowRuntimeError {
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use sqlx::postgres::PgPoolOptions;
 
-    fn child_start_test_clients() -> WorkflowQueueClients {
-        let pool = PgPoolOptions::new()
-            .connect_lazy("postgres://localhost/absurd")
-            .expect("test URL should be valid without connecting");
-        let client = Client::from_pool(pool).expect("client should accept a lazy pool");
-        WorkflowQueueClients {
-            standard: client.clone(),
-            slack_live: client.clone(),
-            etl: client.clone(),
-            etl_backfill: client,
-        }
-    }
-
-    fn child_start_test_parent() -> WorkflowTaskInput {
-        WorkflowTaskInput {
-            workflow_name: "parent".to_owned(),
-            input: json!({}),
-            harness_type: HarnessType::Codex,
-        }
-    }
-
-    #[tokio::test]
-    async fn rejected_child_start_includes_rejected_before_spawn_code_in_context_response() {
-        let response = handle_python_child_start_context_request(
+    #[test]
+    fn rejected_child_start_includes_rejected_before_spawn_code_in_context_response() {
+        let response = python_child_start_context_response(
             "child-start",
-            &json!({"type": "ctx.workflow.start", "request_id": "child-start"}),
-            &child_start_test_parent(),
-            &child_start_test_clients(),
-        )
-        .await;
+            Err(ChildWorkflowStartError::rejected_before_spawn(
+                WorkflowRuntimeError::BadRequest(
+                    "ctx.workflow.start requires a non-empty workflow_name".to_owned(),
+                ),
+            )),
+        );
 
         assert_eq!(response["ok"], json!(false));
         assert_eq!(
@@ -4263,19 +4237,14 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn failed_child_spawn_includes_unknown_outcome_code_in_context_response() {
-        let response = handle_python_child_start_context_request(
+    #[test]
+    fn failed_child_spawn_includes_unknown_outcome_code_in_context_response() {
+        let response = python_child_start_context_response(
             "child-start",
-            &json!({
-                "type": "ctx.workflow.start",
-                "workflow_name": "child",
-                "input": {},
-            }),
-            &child_start_test_parent(),
-            &child_start_test_clients(),
-        )
-        .await;
+            Err(ChildWorkflowStartError::outcome_unknown(
+                WorkflowRuntimeError::Internal("queue response timed out".to_owned()),
+            )),
+        );
 
         assert_eq!(response["ok"], json!(false));
         assert_eq!(
@@ -4296,11 +4265,8 @@ mod tests {
 
     #[test]
     fn successful_context_response_never_includes_an_error_code() {
-        let response = python_context_response(
-            "child-start",
-            Ok(json!({"created": true})),
-            Some("workflow_start_outcome_unknown"),
-        );
+        let response =
+            python_child_start_context_response("child-start", Ok(json!({"created": true})));
 
         assert_eq!(response["ok"], json!(true));
         assert_eq!(response["value"], json!({"created": true}));
