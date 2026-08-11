@@ -2,6 +2,7 @@ import httpx
 import pytest
 from cli import read
 from client import SANDBOX_SKILLS_PATH, SkillsClient
+from rich.markdown import Markdown
 
 
 def json_response(payload, status_code=200):
@@ -73,7 +74,7 @@ def test_requests_wrap_http_errors_without_exposing_credentials():
         make_client(handler, bearer_token="secret-token").search("anything")
 
 
-def test_cli_read_fetches_console_skill_by_name(monkeypatch, capsys):
+def test_cli_read_markdown_outputs_skill_source(monkeypatch, capsys):
     class StubClient:
         def __enter__(self):
             return self
@@ -87,6 +88,28 @@ def test_cli_read_fetches_console_skill_by_name(monkeypatch, capsys):
 
     monkeypatch.setattr("cli.get_client", StubClient)
 
-    read("incident-response", json_output=False, markdown_output=False)
+    read("incident-response", json_output=False, markdown_output=True)
 
     assert capsys.readouterr().out == "# Incident Response\n"
+
+
+def test_cli_read_renders_skill_by_default(monkeypatch):
+    class StubClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _identifier):
+            return {"document": "# Incident Response\n"}
+
+    rendered = []
+    monkeypatch.setattr("cli.get_client", StubClient)
+    monkeypatch.setattr("cli.console.print", rendered.append)
+
+    read("incident-response", json_output=False, markdown_output=False)
+
+    assert len(rendered) == 1
+    assert isinstance(rendered[0], Markdown)
+    assert rendered[0].markup == "# Incident Response\n"

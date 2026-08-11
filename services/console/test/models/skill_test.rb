@@ -61,6 +61,13 @@ class SkillTest < ActiveSupport::TestCase
     assert_includes skill.errors[:name], "is invalid"
   end
 
+  test "reserves names used by sandbox skill routes" do
+    skill = users(:member_user).skills.new(attributes(name: "search"))
+
+    assert_not skill.valid?
+    assert_includes skill.errors[:name], "is reserved"
+  end
+
   test "enforces globally unique active names" do
     duplicate = users(:member_user).skills.new(attributes(name: skills(:member_private).name))
     assert_not duplicate.valid?

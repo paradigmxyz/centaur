@@ -152,6 +152,31 @@ class Api::V1::SandboxSkillsControllerTest < ActionDispatch::IntegrationTest
     assert_response :forbidden
   end
 
+  test "duplicate-name create races return a validation response" do
+    duplicate_race = lambda do |skill|
+      raise ActiveRecord::RecordNotUnique, "duplicate skill name" if skill.name == "duplicate-skill"
+    end
+    Skill.set_callback(:validation, :after, duplicate_race)
+
+    with_token(@member_proxy) do |headers|
+      post "/api/v1/sandbox/skills",
+           params: {
+             data: {
+               name: "duplicate-skill",
+               description: "Conflicts with a concurrent create.",
+               instructions: "# Instructions"
+             }
+           },
+           headers: headers,
+           as: :json
+    end
+
+    assert_response :unprocessable_entity
+    assert_equal "record conflicts with an existing record", json_body.dig("error", "message")
+  ensure
+    Skill.skip_callback(:validation, :after, duplicate_race) if duplicate_race
+  end
+
   test "rejects a token after its proxy principal changes" do
     with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
       token = SandboxEntitlements::Jwt.encode_for_proxy(@member_proxy)

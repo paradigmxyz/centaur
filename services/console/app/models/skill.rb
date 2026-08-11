@@ -6,6 +6,7 @@ class Skill < ApplicationRecord
 
   MAX_DOCUMENT_BYTES = 64.kilobytes
   NAME_FORMAT = /\A[a-z0-9]+(?:-[a-z0-9]+)*\z/
+  RESERVED_NAMES = %w[search].freeze
 
   belongs_to :user
 
@@ -25,6 +26,7 @@ class Skill < ApplicationRecord
 
   validates :content, presence: true
   validates :name, presence: true, length: { maximum: 64 }, format: { with: NAME_FORMAT }
+  validates :name, exclusion: { in: RESERVED_NAMES, message: "is reserved" }
   validates :description, presence: true
   validates :name, uniqueness: {
     conditions: -> { active },

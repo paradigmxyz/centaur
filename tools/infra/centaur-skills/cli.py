@@ -8,6 +8,7 @@ from typing import Any
 import typer
 from dotenv import load_dotenv
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.table import Table
 
 load_dotenv()
@@ -107,9 +108,12 @@ def read(
 
     if json_output:
         print(json.dumps({"data": result}, indent=2, default=str))
-    else:
+    elif markdown_output:
         document = str(result.get("document") or "")
         print(document, end="" if document.endswith("\n") else "\n")
+    else:
+        document = str(result.get("document") or "")
+        console.print(Markdown(document))
 
 
 if __name__ == "__main__":

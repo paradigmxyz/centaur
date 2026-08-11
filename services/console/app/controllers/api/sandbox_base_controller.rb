@@ -6,6 +6,7 @@ module Api
 
     rescue_from ActiveRecord::RecordNotFound, with: :render_not_found
     rescue_from ActiveRecord::RecordInvalid, with: :render_record_invalid
+    rescue_from ActiveRecord::RecordNotUnique, with: :render_record_not_unique
     rescue_from ActiveRecord::StaleObjectError, with: :render_stale_object
 
     attr_reader :current_proxy, :sandbox_claims
@@ -38,6 +39,10 @@ module Api
         message: "validation failed",
         details: error.record.errors.as_json
       )
+    end
+
+    def render_record_not_unique(_error)
+      render_error(status: :unprocessable_entity, message: "record conflicts with an existing record")
     end
 
     def render_stale_object(_error)
