@@ -78,6 +78,23 @@ class SkillTest < ActiveSupport::TestCase
     assert_not_includes results, skills(:other_private)
   end
 
+  test "search boosts names over descriptions and instructions" do
+    name_match = users(:member_user).skills.create!(
+      attributes(name: "deploy-runbook").merge(description: "Check release readiness.", content: "# Steps\n\nReview the checklist.")
+    )
+    description_match = users(:member_user).skills.create!(
+      attributes(name: "release-runbook").merge(description: "Deploy releases safely.", content: "# Steps\n\nReview the checklist.")
+    )
+    instructions_match = users(:member_user).skills.create!(
+      attributes(name: "operations-runbook").merge(description: "Operate services safely.", content: "# Steps\n\nDeploy releases safely.")
+    )
+
+    results = Skill.search("deploy").to_a
+
+    assert_operator results.index(name_match), :<, results.index(description_match)
+    assert_operator results.index(description_match), :<, results.index(instructions_match)
+  end
+
   test "sharing and archiving mutate the current document" do
     skill = skills(:member_private)
     skill.share!

@@ -13,6 +13,7 @@
 ActiveRecord::Schema[8.1].define(version: 2026_08_10_194508) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
+  enable_extension "pg_search"
 
   create_table "api_keys", force: :cascade do |t|
     t.datetime "created_at", null: false
@@ -432,7 +433,6 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_10_194508) do
     t.datetime "updated_at", null: false
     t.bigint "user_id", null: false
     t.string "visibility", default: "shared", null: false
-    t.index "to_tsvector('simple'::regconfig, (((((COALESCE(name, ''::character varying))::text || ' '::text) || COALESCE(description, ''::text)) || ' '::text) || COALESCE(content, ''::text)))", name: "index_skills_on_search_document", using: :gin
     t.index ["name"], name: "index_active_skills_on_name", unique: true, where: "(archived_at IS NULL)"
     t.index ["user_id"], name: "index_skills_on_user_id"
     t.index ["visibility", "updated_at"], name: "index_active_skills_for_catalog", where: "(archived_at IS NULL)"
@@ -573,4 +573,6 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_10_194508) do
   add_foreign_key "thread_shares", "users", column: "created_by_id"
   add_foreign_key "user_identities", "users"
   add_foreign_key "users", "users", column: "approved_by_id"
+
+  add_bm25_index :skills, fields: { id: {}, name: {}, description: {}, content: {} }, key_field: :id, name: "index_skills_on_search_document"
 end

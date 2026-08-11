@@ -6,9 +6,6 @@ class Skill < ApplicationRecord
 
   MAX_DOCUMENT_BYTES = 64.kilobytes
   NAME_FORMAT = /\A[a-z0-9]+(?:-[a-z0-9]+)*\z/
-  SEARCH_DOCUMENT_SQL = <<~SQL.squish.freeze
-    to_tsvector('simple', coalesce(name, '') || ' ' || coalesce(description, '') || ' ' || coalesce(content, ''))
-  SQL
 
   belongs_to :user
 
@@ -40,10 +37,13 @@ class Skill < ApplicationRecord
     return none if normalized.blank?
 
     quoted = connection.quote(normalized)
-    tsquery = "websearch_to_tsquery('simple', #{quoted})"
-    where("#{SEARCH_DOCUMENT_SQL} @@ #{tsquery}")
-      .order(Arel.sql("(lower(name) = lower(#{quoted})) DESC"))
-      .order(Arel.sql("ts_rank_cd(#{SEARCH_DOCUMENT_SQL}, #{tsquery}) DESC"))
+    where(<<~SQL.squish)
+      skills.name ||| #{quoted}::text::pdb.boost(8)
+      OR skills.description ||| #{quoted}::text::pdb.boost(4)
+      OR skills.content ||| #{quoted}
+    SQL
+      .order(Arel.sql("(lower(skills.name) = lower(#{quoted})) DESC"))
+      .order(Arel.sql("paradedb.score(skills.id) DESC"))
       .order(updated_at: :desc, id: :asc)
   end
 
