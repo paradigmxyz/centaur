@@ -55,11 +55,22 @@ class Api::V1::SandboxSkillsControllerTest < ActionDispatch::IntegrationTest
     assert_response :ok
     assert_equal skills(:member_private).skill_document, json_body.dig("data", "document")
     assert_equal "no-store", response.headers["Cache-Control"]
+
+    with_token(@member_proxy) do |headers|
+      get "/api/v1/sandbox/skills/#{skills(:member_private).name}", headers: headers
+    end
+    assert_response :ok
+    assert_equal skills(:member_private).oid, json_body.dig("data", "id")
   end
 
   test "does not leak private skills" do
     with_token(@channel_proxy) do |headers|
       get "/api/v1/sandbox/skills/#{skills(:member_private).oid}", headers: headers
+    end
+    assert_response :not_found
+
+    with_token(@channel_proxy) do |headers|
+      get "/api/v1/sandbox/skills/#{skills(:member_private).name}", headers: headers
     end
     assert_response :not_found
 

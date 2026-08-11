@@ -1,12 +1,6 @@
 import httpx
 import pytest
-from cli import (
-    _catalog_metadata,
-    _merge_skill_results,
-    _parse_builtin,
-    _skill_document,
-    skills_read,
-)
+from cli import skills_read
 from client import (
     SANDBOX_OAUTH_APPS_PATH,
     SANDBOX_PERMISSIONS_PATH,
@@ -130,9 +124,10 @@ def test_skills_list_and_search_use_sandbox_catalog_endpoints():
     assert dict(requests[1].url.params) == {"q": "incident response", "limit": "3"}
 
 
-def test_skill_read_uses_skill_id_and_returns_document():
+@pytest.mark.parametrize("identifier", ["skl_123", "incident-triage"])
+def test_skill_read_uses_skill_name_or_oid_and_returns_document(identifier):
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == f"{SANDBOX_SKILLS_PATH}/skl_123"
+        assert request.url.path == f"{SANDBOX_SKILLS_PATH}/{identifier}"
         return json_response(
             {
                 "data": {
@@ -143,7 +138,7 @@ def test_skill_read_uses_skill_id_and_returns_document():
             }
         )
 
-    result = make_client(handler).skill_read("skl_123")
+    result = make_client(handler).skill_read(identifier)
 
     assert result["id"] == "skl_123"
     assert result["document"].startswith("---\n")
@@ -157,63 +152,23 @@ def test_skills_wrap_http_errors_without_exposing_credentials():
         make_client(handler, bearer_token="secret-token").skills_search("anything")
 
 
-def test_builtin_skill_parsing_and_catalog_metadata(tmp_path):
-    skill_dir = tmp_path / "incident-triage"
-    skill_dir.mkdir()
-    skill_file = skill_dir / "SKILL.md"
-    skill_file.write_text(
-        "---\nname: incident-triage\ndescription: Triage incidents.\n---\n\nDo it.\n",
-        encoding="utf-8",
-    )
+def test_skills_read_fetches_console_skill_by_name(monkeypatch, capsys):
+    class StubClient:
+        def __enter__(self):
+            return self
 
-    parsed = _parse_builtin(skill_file)
+        def __exit__(self, *_args):
+            return None
 
-    assert parsed is not None
-    assert parsed["name"] == "incident-triage"
-    assert "ref" not in parsed
-    assert len(parsed["checksum"]) == 64
-    assert _catalog_metadata(parsed) == {
-        key: value for key, value in parsed.items() if key not in {"content", "path"}
-    }
+        def skill_read(self, identifier):
+            assert identifier == "incident-response"
+            return {"document": "# Incident Response\n"}
 
-
-def test_builtin_skill_name_cannot_conflict_with_console_oid(tmp_path):
-    skill_dir = tmp_path / "invalid"
-    skill_dir.mkdir()
-    skill_file = skill_dir / "SKILL.md"
-    skill_file.write_text(
-        "---\nname: skl_123\ndescription: Looks like an OID.\n---\n\nDo it.\n",
-        encoding="utf-8",
-    )
-
-    assert _parse_builtin(skill_file) is None
-
-
-def test_skills_read_accepts_builtin_name(monkeypatch, capsys):
-    monkeypatch.setattr(
-        "cli._builtin_skills",
-        lambda: [{"name": "incident-response", "content": "# Incident Response\n"}],
-    )
+    monkeypatch.setattr("cli.get_client", StubClient)
 
     skills_read("incident-response", json_output=False, markdown_output=False)
 
     assert capsys.readouterr().out == "# Incident Response\n"
-
-
-def test_catalog_merge_interleaves_builtin_and_remote_results():
-    builtin = [{"name": "one"}, {"name": "two"}]
-    remote = [{"id": "skl_one"}, {"id": "skl_two"}]
-
-    assert [item.get("id") or item.get("name") for item in _merge_skill_results(builtin, remote, limit=3)] == [
-        "one",
-        "skl_one",
-        "two",
-    ]
-
-
-def test_skill_document_supports_builtin_and_console_payloads():
-    assert _skill_document({"content": "builtin document"}) == "builtin document"
-    assert _skill_document({"document": "Console document"}) == "Console document"
 
 
 def test_health_returns_identity_details():

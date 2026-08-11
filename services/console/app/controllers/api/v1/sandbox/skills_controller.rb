@@ -20,7 +20,7 @@ module Api
         end
 
         def show
-          skill = visible_skills.find_by_oid!(params[:id])
+          skill = visible_skill
           response.headers["Cache-Control"] = "no-store"
           render json: { data: skill.catalog_payload(include_document: true) }
         end
@@ -63,6 +63,12 @@ module Api
 
         def visible_skills
           Skill.catalog_visible_to(linked_console_user).includes(:user)
+        end
+
+        def visible_skill
+          return visible_skills.find_by_oid!(params[:id]) if params[:id].start_with?("skl_")
+
+          visible_skills.find_by!(name: params[:id])
         end
 
         def linked_console_user

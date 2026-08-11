@@ -1489,7 +1489,7 @@ These endpoints use the existing sandbox entitlement JWT injected by `iron-proxy
 | ------ | ---- | ----- |
 | `GET` | `/api/v1/sandbox/skills` | List visible skills. Optional `scope=private|shared` and `limit` up to 20. |
 | `GET` | `/api/v1/sandbox/skills/search?q=...` | Full-text search visible skills. |
-| `GET` | `/api/v1/sandbox/skills/:id` | Read a visible skill by its `skl_...` ID. |
+| `GET` | `/api/v1/sandbox/skills/:id` | Read a visible skill by its exact name or `skl_...` OID. |
 | `POST` | `/api/v1/sandbox/skills` | Create a public skill from `data.name`, `data.description`, and `data.instructions`. |
 | `PUT`/`PATCH` | `/api/v1/sandbox/skills/:id` | Update an owned skill using those fields; optional `data.lock_version` detects concurrent edits. |
 | `DELETE` | `/api/v1/sandbox/skills/:id` | Archive an owned skill. |

@@ -2,16 +2,10 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
-import os
-import re
-import sys
-from pathlib import Path
 from typing import Any
 
 import typer
-import yaml
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.table import Table
@@ -25,12 +19,9 @@ app = typer.Typer(
 console = Console()
 skills_app = typer.Typer(
     name="centaur-skills",
-    help="Discover builtin and Console-authored skills available to this agent",
+    help="Discover Console-authored skills available to this agent",
     no_args_is_help=True,
 )
-
-SKILL_NAME_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
-MAX_SKILL_NAME_LENGTH = 64
 
 
 def get_client(
@@ -92,115 +83,13 @@ def health(
         raise typer.Exit(1)
 
 
-def _builtin_skill_dirs() -> list[Path]:
-    configured = os.getenv("WORKSPACE_DIR", "").strip()
-    candidates = [Path(configured)] if configured else []
-    candidates.extend([Path("/workspace"), Path.cwd()])
-    result: list[Path] = []
-    for root in candidates:
-        skill_dir = root / ".agents" / "skills"
-        if skill_dir.is_dir() and skill_dir not in result:
-            result.append(skill_dir)
-    return result
-
-
-def _parse_builtin(path: Path) -> dict[str, Any] | None:
-    try:
-        content = path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-    if not content.startswith("---\n"):
-        return None
-    try:
-        frontmatter, _body = content[4:].split("\n---", 1)
-        metadata = yaml.safe_load(frontmatter)
-    except (ValueError, yaml.YAMLError):
-        return None
-    if not isinstance(metadata, dict):
-        return None
-    name = str(metadata.get("name") or path.parent.name).strip()
-    description = str(metadata.get("description") or "").strip()
-    if len(name) > MAX_SKILL_NAME_LENGTH or not SKILL_NAME_PATTERN.fullmatch(name):
-        return None
-    return {
-        "name": name,
-        "description": description,
-        "visibility": "builtin",
-        "author": "deployment",
-        "updated_at": None,
-        "checksum": hashlib.sha256(content.encode()).hexdigest(),
-        "content": content,
-        "path": str(path),
-    }
-
-
-def _builtin_skills() -> list[dict[str, Any]]:
-    skills: dict[str, dict[str, Any]] = {}
-    for directory in _builtin_skill_dirs():
-        for skill_file in sorted(directory.glob("*/SKILL.md")):
-            parsed = _parse_builtin(skill_file)
-            if parsed:
-                skills[parsed["name"]] = parsed
-    return sorted(skills.values(), key=lambda item: str(item["name"]))
-
-
-def _builtin_search(query: str, limit: int) -> list[dict[str, Any]]:
-    terms = [term for term in query.lower().split() if term]
-
-    def score(skill: dict[str, Any]) -> tuple[int, str]:
-        name = str(skill.get("name") or "").lower()
-        description = str(skill.get("description") or "").lower()
-        content = str(skill.get("content") or "").lower()
-        value = sum(8 for term in terms if term == name)
-        value += sum(4 for term in terms if term in name)
-        value += sum(2 for term in terms if term in description)
-        value += sum(1 for term in terms if term in content)
-        return value, name
-
-    ranked = [(score(skill), skill) for skill in _builtin_skills()]
-    ranked = [item for item in ranked if item[0][0] > 0]
-    ranked.sort(key=lambda item: (-item[0][0], item[0][1]))
-    return [skill for _score, skill in ranked[:limit]]
-
-
-def _catalog_metadata(skill: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in skill.items() if key not in {"content", "path"}}
-
-
 def _validate_output_flags(json_output: bool, markdown_output: bool) -> None:
     if json_output and markdown_output:
         raise typer.BadParameter("choose either --json or --markdown")
 
 
 def _skill_identifier(skill: dict[str, Any]) -> str:
-    return str(skill.get("id") or skill.get("name") or "")
-
-
-def _skill_document(skill: dict[str, Any]) -> str:
-    return str(skill.get("document") or skill.get("content") or "")
-
-
-def _merge_skill_results(*groups: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
-    merged: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    offset = 0
-    while len(merged) < limit:
-        added = False
-        for group in groups:
-            if offset >= len(group):
-                continue
-            added = True
-            skill = group[offset]
-            ref = _skill_identifier(skill)
-            if ref and ref not in seen:
-                seen.add(ref)
-                merged.append(skill)
-                if len(merged) == limit:
-                    break
-        if not added:
-            break
-        offset += 1
-    return merged
+    return str(skill.get("id") or "")
 
 
 def _print_skill_results(
@@ -242,22 +131,16 @@ def skills_search(
     json_output: bool = typer.Option(False, "--json", help="Output JSON"),
     markdown_output: bool = typer.Option(False, "--markdown", help="Output a Markdown table"),
 ) -> None:
-    """Search builtin and Console-authored skills relevant to a task."""
+    """Search Console-authored skills relevant to a task."""
     _validate_output_flags(json_output, markdown_output)
-    builtin = [_catalog_metadata(skill) for skill in _builtin_search(query, limit)]
-    try:
-        with get_client() as client:
-            remote = client.skills_search(query, limit=limit)
-    except RuntimeError as exc:
-        remote = []
-        print(f"warning: Console skill search unavailable: {exc}", file=sys.stderr)
-    results = _merge_skill_results(builtin, remote, limit=limit)
+    with get_client() as client:
+        results = client.skills_search(query, limit=limit)
     _print_skill_results(results, json_output=json_output, markdown_output=markdown_output)
 
 
 @skills_app.command("list")
 def skills_list(
-    scope: str | None = typer.Option(None, "--scope", help="private, shared, or builtin"),
+    scope: str | None = typer.Option(None, "--scope", help="private or shared"),
     limit: int = typer.Option(20, "--limit", "-n", min=1, max=20),
     json_output: bool = typer.Option(False, "--json", help="Output JSON"),
     markdown_output: bool = typer.Option(False, "--markdown", help="Output a Markdown table"),
@@ -265,46 +148,28 @@ def skills_list(
     """List skills available to the current sandbox principal."""
     _validate_output_flags(json_output, markdown_output)
     normalized_scope = scope.strip().lower() if scope else None
-    if normalized_scope not in {None, "private", "shared", "builtin"}:
-        raise typer.BadParameter("scope must be private, shared, or builtin")
-    builtin = (
-        [_catalog_metadata(skill) for skill in _builtin_skills()[:limit]]
-        if normalized_scope in {None, "builtin"}
-        else []
-    )
-    remote: list[dict[str, Any]] = []
-    if normalized_scope != "builtin":
-        try:
-            with get_client() as client:
-                remote = client.skills_list(scope=normalized_scope, limit=limit)
-        except RuntimeError as exc:
-            if normalized_scope is not None:
-                raise
-            print(f"warning: Console skill catalog unavailable: {exc}", file=sys.stderr)
-    results = _merge_skill_results(builtin, remote, limit=limit)
+    if normalized_scope not in {None, "private", "shared"}:
+        raise typer.BadParameter("scope must be private or shared")
+    with get_client() as client:
+        results = client.skills_list(scope=normalized_scope, limit=limit)
     _print_skill_results(results, json_output=json_output, markdown_output=markdown_output)
 
 
 @skills_app.command("read")
 def skills_read(
-    identifier: str = typer.Argument(..., help="Builtin skill name or Console skill OID"),
+    identifier: str = typer.Argument(..., help="Skill name or OID"),
     json_output: bool = typer.Option(False, "--json", help="Output JSON"),
     markdown_output: bool = typer.Option(False, "--markdown", help="Output the SKILL.md content"),
 ) -> None:
     """Read the complete current SKILL.md for one skill."""
     _validate_output_flags(json_output, markdown_output)
-    if identifier.startswith("skl_"):
-        with get_client() as client:
-            result = client.skill_read(identifier)
-    else:
-        result = next((skill for skill in _builtin_skills() if skill["name"] == identifier), None)
-        if result is None:
-            raise typer.BadParameter(f"unknown builtin skill name: {identifier}")
+    with get_client() as client:
+        result = client.skill_read(identifier)
 
     if json_output:
         print(json.dumps({"data": result}, indent=2, default=str))
     else:
-        document = _skill_document(result)
+        document = str(result.get("document") or "")
         print(document, end="" if document.endswith("\n") else "\n")
 
 
