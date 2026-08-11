@@ -162,9 +162,15 @@ RUN --mount=type=cache,target=/root/.npm,sharing=locked \
 # The hermes harness drives `python -m tui_gateway.entry` (see
 # crates/harness-server/src/hermes.rs). HERMES_PYTHON points the harness at
 # this venv's interpreter; the `hermes` shim serves cron ticks + CLI use.
-RUN python3 -m venv /opt/hermes \
-    && /opt/hermes/bin/pip install --no-cache-dir \
-      "hermes-agent @ git+https://github.com/NousResearch/hermes-agent@${HERMES_AGENT_REF}" \
+# Hermes intentionally rejects wheel builds because its runtime assets depend
+# on the source-checkout layout, so install the pinned checkout editable.
+RUN git init /opt/hermes-agent \
+    && git -C /opt/hermes-agent remote add origin https://github.com/NousResearch/hermes-agent.git \
+    && git -C /opt/hermes-agent fetch --depth 1 origin "${HERMES_AGENT_REF}" \
+    && git -C /opt/hermes-agent checkout --detach FETCH_HEAD \
+    && python3 -m venv /opt/hermes \
+    && /opt/hermes/bin/pip install --no-cache-dir --editable /opt/hermes-agent \
+    && rm -rf /opt/hermes-agent/.git \
     && ln -s /opt/hermes/bin/hermes /usr/local/bin/hermes \
     && hermes version
 ENV HERMES_PYTHON=/opt/hermes/bin/python3
