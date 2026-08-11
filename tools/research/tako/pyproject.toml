@@ -34,14 +34,7 @@ module = "client.py"
 # Optional: without a key, search/answer/available-data fall back to Tako's
 # free rate-limited hosted MCP at mcp.tako.com (anonymous; no secret bound to
 # that host). contents requires the key.
-#
-# SLACK_BOT_TOKEN is bound only so `slack-card --post` can put a rendered card
-# into the Slack thread the turn belongs to. It widens this tool's egress to
-# slack.com, which is deliberate and worth noticing in review: no other command
-# here contacts Slack, and dropping the token and the host below disables only
-# `--post` (the command still prints its payload for another tool to send).
 optional_secrets = [
     {type = "http", name = "TAKO_API_KEY", match_headers = ["X-API-Key"], hosts = ["tako.com"]},
-    {type = "http", name = "SLACK_BOT_TOKEN", match_headers = ["Authorization"], hosts = ["slack.com"]},
 ]
-hosts = ["tako.com", "mcp.tako.com", "slack.com"]
+hosts = ["tako.com", "mcp.tako.com"]

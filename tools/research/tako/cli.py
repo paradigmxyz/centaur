@@ -59,24 +59,7 @@ def emit(data) -> None:
     print(json.dumps(data, indent=2, ensure_ascii=False, default=str))
 
 
-# The prompt names the Slack destination for the turn under these keys, the same
-# ones the `slack upload` example uses. A sandbox does NOT carry the thread in
-# its environment: warm-pool pods are started before any thread claims them and
-# pod env cannot be changed afterwards, so CENTAUR_THREAD_KEY is unset in
-# practice. The caller passes the destination; env is only a fallback for a
-# dedicated sandbox that happens to have it.
-SESSION_CONTEXT_CHANNEL = "session_context.slack.channel_id"
-SESSION_CONTEXT_THREAD = "session_context.slack.thread_ts"
-
-
-def emit_or_reject(
-    call,
-    *,
-    slack_card: bool = False,
-    flat: bool = False,
-    channel: str | None = None,
-    thread: str | None = None,
-) -> None:
+def emit_or_reject(call, *, slack_card: bool = False, flat: bool = False) -> None:
     """Run a client call and print its result.
 
     The client pre-validates option contracts (enum choices, count ranges,
@@ -85,9 +68,8 @@ def emit_or_reject(
     Surface all of these as one-line CLI errors instead of tracebacks.
 
     When the result carries a card, the payload gains a `slack_card` entry: the
-    post outcome with `slack_card=True`, otherwise a hint naming the command that
-    renders it. The result is printed either way, because a failed post must not
-    lose the data that was retrieved.
+    ready-to-post message with `slack_card=True`, otherwise a hint naming the
+    pipeline that posts it.
     """
     from ._mcp import McpAuthRequired, McpRateLimited
 
@@ -100,7 +82,7 @@ def emit_or_reject(
         raise typer.Exit(1) from exc
 
     if isinstance(payload, dict):
-        note = _slack_card_note(payload, post=slack_card, flat=flat, channel=channel, thread=thread)
+        note = _slack_card_note(payload, include_message=slack_card, flat=flat)
         if note:
             # First key, not last. A search result runs well past a hundred lines
             # of JSON, and callers routinely pipe this through `head -N`, so
@@ -109,90 +91,32 @@ def emit_or_reject(
     emit(payload)
 
 
-def _slack_destination(channel: str | None, thread: str | None):
-    """The channel/thread to post into: explicit values first, then the env key.
-
-    Returns None when neither is available, which is the normal case in a
-    warm-pool sandbox and is why the hint tells the caller to pass them.
-    """
-    from ._slack import ThreadTarget, thread_target
-
-    if channel:
-        return ThreadTarget(channel=channel, thread_ts=thread or "")
-    target = thread_target()
-    if target is None:
-        return None
-    return ThreadTarget(channel=target.channel, thread_ts=thread or target.thread_ts)
-
-
-def _slack_card_note(
-    payload: dict, *, post: bool, flat: bool, channel: str | None, thread: str | None
-) -> dict | None:
-    """Post the lead card, or hint at how to.
+def _slack_card_note(payload: dict, *, include_message: bool, flat: bool) -> dict | None:
+    """The lead card's Slack message, or a hint naming how to post it.
 
     Returns None when the result has no renderable card, so web-only results stay
-    unchanged. It cannot tell which chat surface the turn belongs to (the sandbox
-    is not told), so the hint is phrased conditionally rather than suppressed,
-    which would mean never showing it at all.
+    unchanged. This tool renders but never posts, so `include_message` only
+    decides whether the payload rides along; either way the hint names the
+    pipeline. It cannot tell which chat surface the turn belongs to (the sandbox
+    is not told), so the hint is phrased conditionally.
     """
-    from ._slack import (
-        SlackPostError,
-        card_message,
-        cards_from_payload,
-        post_message,
-        pub_id_of,
-    )
+    from ._slack import card_message, cards_from_payload, pub_id_of
 
     cards = cards_from_payload(payload)
     if not cards:
         return None
     pub_id = pub_id_of(cards[0])
-    target = _slack_destination(channel, thread)
-
-    if not post:
-        if target is None:
-            hint = (
-                "if this turn is in a Slack thread, show this chart with: "
-                f"{TOOL_COMMAND} slack-card {pub_id} --post "
-                f"--channel <{SESSION_CONTEXT_CHANNEL}> --thread <{SESSION_CONTEXT_THREAD}>"
-                " (or re-run this command with --slack-card and the same two options)"
-            )
-        else:
-            hint = (
-                "to show this chart in the thread, re-run with --slack-card, or: "
-                f"{TOOL_COMMAND} slack-card {pub_id} --post"
-            )
-        return {"posted": False, "hint": hint}
-
-    if target is None:
-        return {
-            "posted": False,
-            "error": (
-                "no Slack destination: pass --channel "
-                f"<{SESSION_CONTEXT_CHANNEL}> and --thread <{SESSION_CONTEXT_THREAD}> "
-                "from the Slack Session Context in this turn's prompt"
-            ),
-        }
-
-    body = card_message(
-        cards[0],
-        channel=target.channel,
-        thread_ts=target.thread_ts or None,
-        layout="flat" if flat else "container",
-    )
-    if body is None:  # pragma: no cover - cards_from_payload already validated
-        return {"posted": False, "error": "the lead card cannot be rendered"}
-    try:
-        result = post_message(body)
-    except SlackPostError as exc:
-        # Non-fatal: the retrieved data is still worth printing.
-        return {"posted": False, "error": str(exc)}
-    return {
-        "posted": True,
-        "channel": result.get("channel") or target.channel,
-        "ts": result.get("ts"),
-        "layout": "flat" if flat else "container",
+    note: dict = {
+        "hint": (
+            "if this turn is in a Slack thread, post this chart with: "
+            f"{TOOL_COMMAND} slack-card {pub_id}"
+            ' | slack send <session_context.slack.channel_id> "<fallback text>"'
+            " --thread <session_context.slack.thread_ts> --blocks-json -"
+        )
     }
+    if include_message:
+        note["message"] = card_message(cards[0], layout="flat" if flat else "container")
+    return note
 
 
 @app.command()
@@ -214,16 +138,10 @@ def search(
     slack_card: bool = typer.Option(
         False,
         "--slack-card",
-        help="Also post the top card's chart into a Slack thread (needs --channel/--thread)",
+        help="Include the top card rendered as a Slack message, ready to pipe to `slack send`",
     ),
     flat: bool = typer.Option(
         False, "--flat", help="With --slack-card: use flat blocks instead of a container"
-    ),
-    channel: str = typer.Option(
-        None, help="Slack channel id for --slack-card (session_context.slack.channel_id)"
-    ),
-    thread: str = typer.Option(
-        None, help="Slack thread ts for --slack-card (session_context.slack.thread_ts)"
     ),
 ):
     """Search Tako for structured data cards and web results."""
@@ -240,8 +158,6 @@ def search(
         ),
         slack_card=slack_card,
         flat=flat,
-        channel=channel,
-        thread=thread,
     )
 
 
@@ -262,16 +178,10 @@ def answer(
     slack_card: bool = typer.Option(
         False,
         "--slack-card",
-        help="Also post the top card's chart into a Slack thread (needs --channel/--thread)",
+        help="Include the top card rendered as a Slack message, ready to pipe to `slack send`",
     ),
     flat: bool = typer.Option(
         False, "--flat", help="With --slack-card: use flat blocks instead of a container"
-    ),
-    channel: str = typer.Option(
-        None, help="Slack channel id for --slack-card (session_context.slack.channel_id)"
-    ),
-    thread: str = typer.Option(
-        None, help="Slack thread ts for --slack-card (session_context.slack.thread_ts)"
     ),
 ):
     """Get a synthesized answer with the cards that support it."""
@@ -288,8 +198,6 @@ def answer(
         ),
         slack_card=slack_card,
         flat=flat,
-        channel=channel,
-        thread=thread,
     )
 
 
@@ -357,47 +265,32 @@ def slack_card(
         None, help="A card's pub id or URL. Omit to read a search result from stdin"
     ),
     index: int = typer.Option(0, help="Which card to render when several were piped in"),
-    post: bool = typer.Option(
-        False, "--post", help="Post into the current Slack thread instead of printing"
-    ),
     flat: bool = typer.Option(
         False,
         "--flat",
         help="Use top-level image/context/actions blocks instead of a container",
     ),
-    channel: str = typer.Option(None, help="Override the channel (defaults to this thread)"),
-    thread: str = typer.Option(None, help="Override the thread timestamp"),
 ):
-    """Render a Tako card as a Slack message.
+    """Render a Tako card as a Slack message and print it.
 
-    Presentation only: the chart image already exists on every card, so this
-    makes no Tako API call. Slack image blocks scale to the message width and
-    preserve aspect ratio, so the chart is never cropped, and the headline
-    numbers and "Open in Tako" button sit outside the image where they cost no
-    image height.
+    Rendering only: the chart image already exists on every card, so this makes
+    no Tako API call, and it never posts. Pipe the payload to the `slack` tool,
+    which owns the Slack credential:
+
+        datasearch slack-card <card> | slack send <channel> "<fallback>" --blocks-json -
 
     Pipe a `search` or `answer` result in to keep the card's title, headline, and
-    sources:
+    sources; a bare pub id also works but renders without that text:
 
-        datasearch search "nvidia revenue" | datasearch slack-card --post
+        datasearch search "nvidia revenue" | datasearch slack-card
 
-    A bare pub id also works, but renders without that text. Prints the
-    `chat.postMessage` payload unless `--post` is given, which sends into the
-    Slack thread this turn belongs to and needs only `chat:write`
-    (`chat:write.public` for public channels the bot has not joined; private
-    channels need the bot invited). Use `--flat` if the container block renders
-    badly on any client.
+    Slack image blocks scale to the message width and preserve aspect ratio, so
+    the chart is never cropped, and the headline and "Open in Tako" button sit
+    outside the image where they cost no image height. Use `--flat` if the
+    container block renders badly on any client.
     """
-    from ._slack import (
-        SlackPostError,
-        card_message,
-        cards_from_payload,
-        post_message,
-        pub_id_of,
-        thread_target,
-    )
+    from ._slack import card_message, cards_from_payload, pub_id_of
 
-    source_card: dict | None = None
     if card:
         pub_id = pub_id_of({"card_id": card, "webpage_url": card})
         if not pub_id:
@@ -422,45 +315,10 @@ def slack_card(
             raise typer.BadParameter(f"--index {index} out of range: {len(cards)} card(s) piped in")
         source_card = cards[index]
 
-    body = card_message(
-        source_card,
-        channel=channel,
-        thread_ts=thread,
-        layout="flat" if flat else "container",
-    )
+    body = card_message(source_card, layout="flat" if flat else "container")
     if body is None:  # pragma: no cover - the card id was already validated
         raise typer.BadParameter("card cannot be rendered")
-
-    if not post:
-        emit(body)
-        return
-
-    if not body.get("channel"):
-        target = thread_target()
-        if target is None:
-            console.print(
-                "[red]No Slack destination. Pass --channel "
-                f"<{SESSION_CONTEXT_CHANNEL}> and --thread <{SESSION_CONTEXT_THREAD}> from the "
-                "Slack Session Context in this turn's prompt, or drop --post to print the "
-                "payload.[/]"
-            )
-            raise typer.Exit(1)
-        body["channel"] = target.channel
-        body.setdefault("thread_ts", target.thread_ts)
-
-    try:
-        result = post_message(body)
-    except SlackPostError as exc:
-        console.print(f"[red]{exc}[/]")
-        raise typer.Exit(1) from exc
-    emit(
-        {
-            "ok": True,
-            "channel": result.get("channel") or body["channel"],
-            "ts": result.get("ts"),
-            "layout": "flat" if flat else "container",
-        }
-    )
+    emit(body)
 
 
 if __name__ == "__main__":

@@ -1,18 +1,13 @@
 """Unit tests for rendering a Tako card as a Slack message. No network."""
 
-import json
 import sys
 from pathlib import Path
-
-import httpx
-import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 
 from tools.research.tako._slack import (
     MAX_CONTAINER_CHILDREN,
     MAX_TITLE_CHARS,
-    SlackPostError,
     ThreadTarget,
     card_blocks,
     card_child_blocks,
@@ -21,7 +16,6 @@ from tools.research.tako._slack import (
     card_title,
     card_urls,
     cards_from_payload,
-    post_message,
     pub_id_of,
     thread_target,
 )
@@ -129,8 +123,6 @@ MCP_PRE_187 = {
     "image_url": f"https://tako.com/api/v1/image/{PUB}/",
     "meta": {"backend": "tako:mcp", "partial_failures": []},
 }
-
-POST_BODY = {"channel": "C1", "text": "t", "blocks": [{"type": "image"}]}
 
 
 class TestBackendConsistency:
@@ -299,83 +291,6 @@ class TestCardMessage:
 
     def test_returns_none_for_an_unrenderable_card(self):
         assert card_message({"title": "no id"}) is None
-
-
-class TestPostMessage:
-    """The post path, driven through httpx.MockTransport. No network."""
-
-    def _transport(self, status=200, payload=None, headers=None):
-        def handler(request):
-            self.seen = request
-            return httpx.Response(
-                status, json=payload if payload is not None else {}, headers=headers
-            )
-
-        return httpx.MockTransport(handler)
-
-    def test_posts_to_chat_postmessage_with_the_bearer_token(self):
-        result = post_message(
-            POST_BODY,
-            token="xoxb-test",
-            transport=self._transport(payload={"ok": True, "ts": "1.2"}),
-        )
-        assert result["ts"] == "1.2"
-        assert str(self.seen.url) == "https://slack.com/api/chat.postMessage"
-        assert self.seen.headers["authorization"] == "Bearer xoxb-test"
-        assert json.loads(self.seen.content) == POST_BODY
-
-    def test_rejects_a_missing_token_before_any_request(self):
-        with pytest.raises(SlackPostError, match="SLACK_BOT_TOKEN is not configured"):
-            post_message(POST_BODY, token="   ", transport=self._transport())
-
-    def test_raises_on_ok_false_with_slacks_error_code(self):
-        with pytest.raises(SlackPostError, match="invalid_blocks"):
-            post_message(
-                POST_BODY,
-                token="xoxb-test",
-                transport=self._transport(payload={"ok": False, "error": "invalid_blocks"}),
-            )
-
-    def test_surfaces_the_block_pointer_slack_returns(self):
-        payload = {
-            "ok": False,
-            "error": "invalid_blocks",
-            "response_metadata": {"messages": ["[ERROR] missing required field: alt_text"]},
-        }
-        with pytest.raises(SlackPostError, match="alt_text"):
-            post_message(POST_BODY, token="xoxb-test", transport=self._transport(payload=payload))
-
-    def test_explains_the_common_membership_errors(self):
-        for error, hint in (
-            ("not_in_channel", "invite the bot"),
-            ("channel_not_found", "not a member"),
-            ("missing_scope", "chat:write"),
-        ):
-            with pytest.raises(SlackPostError, match=hint):
-                post_message(
-                    POST_BODY,
-                    token="xoxb-test",
-                    transport=self._transport(payload={"ok": False, "error": error}),
-                )
-
-    def test_reports_a_rate_limit_without_silently_retrying(self):
-        with pytest.raises(SlackPostError, match=r"rate-limited.*retry after 30"):
-            post_message(
-                POST_BODY,
-                token="xoxb-test",
-                transport=self._transport(status=429, headers={"Retry-After": "30"}),
-            )
-
-    def test_reports_an_http_error(self):
-        with pytest.raises(SlackPostError, match="HTTP 500"):
-            post_message(POST_BODY, token="xoxb-test", transport=self._transport(status=500))
-
-    def test_reports_a_transport_failure(self):
-        def boom(request):
-            raise httpx.ConnectError("no route")
-
-        with pytest.raises(SlackPostError, match="could not reach Slack"):
-            post_message(POST_BODY, token="xoxb-test", transport=httpx.MockTransport(boom))
 
 
 class TestClipping:

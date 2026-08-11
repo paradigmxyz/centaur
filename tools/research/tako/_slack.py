@@ -1,8 +1,14 @@
 """Render a Tako search card as a Slack message.
 
-Presentation only. Every card in a search response already carries the rendered
-chart (`image_url`), so turning one into a Slack message needs no extra API call
-and no auth beyond `chat:write` on the posting side.
+Rendering only: this module builds a `chat.postMessage` body and never sends it.
+Posting belongs to the `slack` tool, which already holds the Slack credential;
+tool secrets are scoped per tool, so a Tako tool carrying a Slack bot token would
+cut against that. Pipe the payload there:
+
+    datasearch slack-card <card> | slack send <channel> "<fallback>" --blocks-json -
+
+Every card in a search response already carries its rendered chart
+(`image_url`), so building the message needs no extra Tako API call either.
 
 Always use the card's own `image_url`. Tako has already chosen the axes, units,
 currency, and time spacing for that series, so reusing its render is both free and
@@ -304,102 +310,6 @@ def card_message(
     if thread_ts:
         body["thread_ts"] = thread_ts
     return body
-
-
-class SlackPostError(RuntimeError):
-    """Slack refused the post, or could not be reached."""
-
-
-def post_message(
-    body: dict[str, Any],
-    *,
-    token: str | None = None,
-    transport: Any = None,
-    timeout_seconds: float = 20.0,
-) -> dict[str, Any]:
-    """Post a prepared message with `chat.postMessage`.
-
-    Posts directly rather than delegating to the `slack` tool, because tools run
-    under `uvx --from <project_dir>`: each gets an isolated environment holding
-    only its own project and declared dependencies, so a sibling tool's package
-    is not importable. httpx is already a dependency here, and it honors
-    HTTPS_PROXY and SSL_CERT_FILE from the environment, so this needs no explicit
-    iron-proxy wiring (same reasoning as the MCP backend).
-
-    The token is read through `secret()`, which inside a sandbox hands back a
-    placeholder that iron-proxy swaps for the real value on the Authorization
-    header. That swap only happens because this tool declares SLACK_BOT_TOKEN
-    against slack.com in its `[tool.centaur]` manifest.
-
-    `transport` is a test seam for httpx.MockTransport.
-
-    Raises SlackPostError on a transport failure, a non-2xx, or `ok: false`.
-    """
-    import httpx
-
-    if token is None:
-        from centaur_sdk import secret
-
-        token = secret("SLACK_BOT_TOKEN", default="")
-    token = (token or "").strip()
-    if not token:
-        raise SlackPostError(
-            "SLACK_BOT_TOKEN is not configured, so the card cannot be posted. "
-            "Drop --post to print the payload instead."
-        )
-
-    try:
-        with httpx.Client(timeout=timeout_seconds, transport=transport) as client:
-            response = client.post(
-                "https://slack.com/api/chat.postMessage",
-                json=body,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json; charset=utf-8",
-                },
-            )
-    except httpx.HTTPError as exc:
-        raise SlackPostError(f"could not reach Slack: {exc}") from exc
-
-    if response.status_code == 429:
-        # Not retried here: one card per answer is well inside Slack's limits,
-        # and a silent retry would hide a real problem behind a delay.
-        retry_after = response.headers.get("Retry-After", "unknown")
-        raise SlackPostError(f"Slack rate-limited the post; retry after {retry_after}s")
-    if response.status_code >= 400:
-        raise SlackPostError(f"Slack returned HTTP {response.status_code}")
-
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise SlackPostError("Slack returned a non-JSON response") from exc
-
-    if not payload.get("ok"):
-        raise SlackPostError(_post_error_message(payload))
-    return payload
-
-
-def _post_error_message(payload: dict[str, Any]) -> str:
-    error = str(payload.get("error") or "unknown_error")
-    hints = {
-        "not_in_channel": "invite the bot to the channel first (/invite)",
-        "channel_not_found": (
-            "the channel is private or the bot is not a member; invite it, or "
-            "grant chat:write.public for public channels"
-        ),
-        "invalid_blocks": "Slack rejected the blocks; try --flat",
-        "missing_scope": "the bot token needs chat:write",
-        "invalid_auth": "the bot token is invalid or revoked",
-    }
-    detail = hints.get(error)
-    # Slack names the offending block here, which is the only way to find it.
-    messages = (payload.get("response_metadata") or {}).get("messages") or []
-    parts = [f"Slack rejected the post: {error}"]
-    if detail:
-        parts.append(f"({detail})")
-    if messages:
-        parts.append("; ".join(str(message) for message in messages))
-    return " ".join(parts)
 
 
 def _one_line(value: str) -> str:
