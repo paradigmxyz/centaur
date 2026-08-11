@@ -1,8 +1,9 @@
+import json
+
 import httpx
 import pytest
-from cli import read
+from cli import list_skills, read, search
 from client import SANDBOX_SKILLS_PATH, SkillsClient
-from rich.markdown import Markdown
 
 
 def json_response(payload, status_code=200):
@@ -74,7 +75,38 @@ def test_requests_wrap_http_errors_without_exposing_credentials():
         make_client(handler, bearer_token="secret-token").search("anything")
 
 
-def test_cli_read_markdown_outputs_skill_source(monkeypatch, capsys):
+def test_cli_search_and_list_output_json(monkeypatch, capsys):
+    class StubClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def search(self, query, *, limit):
+            assert query == "incident response"
+            assert limit == 3
+            return [{"id": "skl_123", "name": "incident-triage"}]
+
+        def list(self, *, scope, limit):
+            assert scope == "private"
+            assert limit == 5
+            return [{"id": "skl_456", "name": "private-skill"}]
+
+    monkeypatch.setattr("cli.get_client", StubClient)
+
+    search("incident response", limit=3)
+    assert json.loads(capsys.readouterr().out) == {
+        "data": [{"id": "skl_123", "name": "incident-triage"}]
+    }
+
+    list_skills(scope="private", limit=5)
+    assert json.loads(capsys.readouterr().out) == {
+        "data": [{"id": "skl_456", "name": "private-skill"}]
+    }
+
+
+def test_cli_read_outputs_raw_skill_markdown(monkeypatch, capsys):
     class StubClient:
         def __enter__(self):
             return self
@@ -88,28 +120,6 @@ def test_cli_read_markdown_outputs_skill_source(monkeypatch, capsys):
 
     monkeypatch.setattr("cli.get_client", StubClient)
 
-    read("incident-response", json_output=False, markdown_output=True)
+    read("incident-response")
 
     assert capsys.readouterr().out == "# Incident Response\n"
-
-
-def test_cli_read_renders_skill_by_default(monkeypatch):
-    class StubClient:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return None
-
-        def read(self, _identifier):
-            return {"document": "# Incident Response\n"}
-
-    rendered = []
-    monkeypatch.setattr("cli.get_client", StubClient)
-    monkeypatch.setattr("cli.console.print", rendered.append)
-
-    read("incident-response", json_output=False, markdown_output=False)
-
-    assert len(rendered) == 1
-    assert isinstance(rendered[0], Markdown)
-    assert rendered[0].markup == "# Incident Response\n"
