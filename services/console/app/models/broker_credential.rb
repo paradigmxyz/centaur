@@ -77,7 +77,7 @@ class BrokerCredential < ApplicationRecord
 
   validates :grant, inclusion: { in: GRANTS, message: "must be one of #{GRANTS.join(", ")}" }
   validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
-  validates :foreign_id, uniqueness: { scope: :namespace, allow_nil: true },
+  validates :foreign_id, uniqueness: { allow_nil: true },
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }, allow_nil: true
   validates :token_endpoint, presence: true
   # client_id is sourced from the linked OauthApp for flow-minted credentials, so
@@ -150,6 +150,11 @@ class BrokerCredential < ApplicationRecord
   def refresh!(now: Time.current)
     with_lock do
       return if dead?
+      # Poll ticks can enqueue the same credential more than once while an
+      # earlier refresh job is still waiting. Re-check the schedule after
+      # taking the row lock so jobs queued before a successful refresh become
+      # no-ops instead of rotating the newly issued token again.
+      return if next_attempt_at.present? && next_attempt_at > now
 
       outcome = perform_refresh
       if outcome.dead_reason

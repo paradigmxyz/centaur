@@ -470,6 +470,224 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     assert principal.grants.exists?(static_secret: secret)
   end
 
+  test "grants a GitHub credential to the owner's Slack user principal via SSO identity" do
+    user = users(:member_user)
+    user.user_identities.create!(provider: "slack", subject: "U0123456789", team_id: "T0123456789")
+    principal = create_slack_user_principal(
+      foreign_id: "slack-user-t0123456789-u0123456789",
+      slack_user_id: "U0123456789",
+      slack_team_id: "T0123456789"
+    )
+    credential = create_credential(oauth_apps(:acme_github), "gh-12345", nil, created_by: user)
+
+    secret = nil
+    assert_difference -> { principal.grants.count }, 1 do
+      secret = wrap(credential)
+    end
+    assert principal.grants.exists?(static_secret: secret)
+  end
+
+  test "grants an existing GitHub credential when the Slack user principal appears" do
+    user = users(:member_user)
+    user.user_identities.create!(provider: "slack", subject: "U0223456789", team_id: "T0223456789")
+    credential = create_credential(oauth_apps(:acme_github), "gh-22345", nil, created_by: user)
+    secret = wrap(credential)
+
+    principal = create_slack_user_principal(
+      foreign_id: "slack-user-t0223456789-u0223456789",
+      slack_user_id: "U0223456789",
+      slack_team_id: "T0223456789"
+    )
+
+    assert principal.grants.exists?(static_secret: secret)
+    entry = PrincipalCredentialReconciliation.new.entries.find do |candidate|
+      candidate.principal == principal
+    end
+    assert_equal [ credential ], entry.credentials_for("github")
+  end
+
+  test "grants owner credentials when the Slack SSO identity arrives last" do
+    user = users(:member_user)
+    principal = create_slack_user_principal(
+      foreign_id: "slack-user-t0323456789-u0323456789",
+      slack_user_id: "U0323456789",
+      slack_team_id: "T0323456789"
+    )
+    credential = create_credential(oauth_apps(:acme_github), "gh-32345", nil, created_by: user)
+    secret = wrap(credential)
+    refute principal.grants.exists?(static_secret: secret)
+
+    assert_difference -> { principal.grants.count }, 1 do
+      user.user_identities.create!(provider: "slack", subject: "U0323456789", team_id: "T0323456789")
+    end
+    assert principal.grants.exists?(static_secret: secret)
+  end
+
+  test "does not match through an ambiguous owner Slack identity" do
+    user = users(:member_user)
+    user.user_identities.create!(provider: "slack", subject: "U0423456789", team_id: "T0423456789")
+    user.user_identities.create!(provider: "slack", subject: "U0523456789", team_id: "T0523456789")
+    principal = create_slack_user_principal(
+      foreign_id: "slack-user-t0423456789-u0423456789",
+      slack_user_id: "U0423456789",
+      slack_team_id: "T0423456789"
+    )
+    credential = create_credential(oauth_apps(:acme_github), "gh-42345", nil, created_by: user)
+    secret = wrap(credential)
+
+    refute principal.grants.exists?(static_secret: secret)
+  end
+
+  test "does not match through an owner Slack identity missing its team" do
+    user = users(:member_user)
+    user.user_identities.create!(provider: "slack", subject: "U0623456789")
+    principal = create_slack_user_principal(
+      foreign_id: "slack-user-u0623456789",
+      slack_user_id: "U0623456789",
+      slack_team_id: "T0623456789"
+    )
+    credential = create_credential(oauth_apps(:acme_github), "gh-52345", nil, created_by: user)
+    secret = wrap(credential)
+
+    refute principal.grants.exists?(static_secret: secret)
+  end
+
+  test "requires the owner identity team to match the principal" do
+    user = users(:member_user)
+    user.user_identities.create!(provider: "slack", subject: "U0723456789", team_id: "T0723456789")
+    principal = create_slack_user_principal(
+      foreign_id: "slack-user-t9923456789-u0723456789",
+      slack_user_id: "U0723456789",
+      slack_team_id: "T9923456789"
+    )
+    credential = create_credential(oauth_apps(:acme_github), "gh-62345", nil, created_by: user)
+    secret = wrap(credential)
+
+    refute principal.grants.exists?(static_secret: secret)
+  end
+
+  test "does not match owner identities across namespaces" do
+    user = users(:member_user)
+    user.user_identities.create!(provider: "slack", subject: "U0823456789", team_id: "T0823456789")
+    principal = create_slack_user_principal(
+      namespace: "globex",
+      foreign_id: "globex-slack-user-t0823456789-u0823456789",
+      slack_user_id: "U0823456789",
+      slack_team_id: "T0823456789",
+      created_by: users(:globex_admin)
+    )
+    credential = create_credential(oauth_apps(:acme_github), "gh-72345", nil, created_by: user)
+    secret = wrap(credential)
+
+    refute principal.grants.exists?(static_secret: secret)
+  end
+
+  test "native provider subject still outranks the owner identity" do
+    user = users(:member_user)
+    user.user_identities.create!(provider: "slack", subject: "U0923456789", team_id: "T0923456789")
+    principal = create_slack_user_principal(
+      foreign_id: "slack-user-t0923456789-u0923456789",
+      slack_user_id: "U0923456789",
+      slack_team_id: "T0923456789"
+    )
+    principal.update!(labels: principal.labels.merge("google_subject" => "google-sub-elsewhere"))
+    credential = create_credential(oauth_apps(:acme_google), "google-sub-owner", nil, created_by: user)
+    secret = wrap(credential)
+
+    refute principal.grants.exists?(static_secret: secret)
+  end
+
+  test "console user principals do not match through the owner identity" do
+    user = users(:member_user)
+    user.user_identities.create!(provider: "slack", subject: "U1023456789", team_id: "T1023456789")
+    credential = create_credential(oauth_apps(:acme_github), "gh-82345", nil, created_by: user)
+    secret = wrap(credential)
+
+    principal = create_console_user_principal(user, foreign_id: "console-user-owner-identity")
+
+    refute principal.grants.exists?(static_secret: secret)
+  end
+
+  test "requires the owner identity subject to match the principal" do
+    user = users(:member_user)
+    user.user_identities.create!(provider: "slack", subject: "U1123456780", team_id: "T1123456780")
+    principal = create_slack_user_principal(
+      foreign_id: "slack-user-t1123456780-u9923456780",
+      slack_user_id: "U9923456780",
+      slack_team_id: "T1123456780"
+    )
+    credential = create_credential(oauth_apps(:acme_github), "gh-92345", nil, created_by: user)
+    secret = wrap(credential)
+
+    refute principal.grants.exists?(static_secret: secret)
+  end
+
+  test "a credential without an owner does not match through the owner identity" do
+    principal = create_slack_user_principal(
+      foreign_id: "slack-user-t1223456780-u1223456780",
+      slack_user_id: "U1223456780",
+      slack_team_id: "T1223456780"
+    )
+    credential = create_credential(oauth_apps(:acme_github), "gh-a2345", nil)
+    secret = wrap(credential)
+
+    refute principal.grants.exists?(static_secret: secret)
+  end
+
+  test "identity creation ignores credentials without an oauth app" do
+    user = users(:member_user)
+    principal = create_slack_user_principal(
+      foreign_id: "slack-user-t1423456780-u1423456780",
+      slack_user_id: "U1423456780",
+      slack_team_id: "T1423456780"
+    )
+    credential = BrokerCredential.create!(
+      namespace: "acme",
+      provider_subject: "manual-sub",
+      client_id: "manual-client-id",
+      token_endpoint: "https://example.com/token",
+      refresh_token: "refresh-manual",
+      access_token: "access-manual",
+      expires_at: 1.hour.from_now,
+      last_refresh: Time.current,
+      external_user_key: "user-manual",
+      created_by: user
+    )
+    secret = wrap(credential)
+
+    assert_no_difference -> { Grant.count } do
+      user.user_identities.create!(provider: "slack", subject: "U1423456780", team_id: "T1423456780")
+    end
+    refute principal.grants.exists?(static_secret: secret)
+  end
+
+  test "identity creation for other providers does not run reconciliation" do
+    user = users(:member_user)
+    principal = create_slack_user_principal(
+      foreign_id: "slack-user-t1523456780-u1523456780",
+      slack_user_id: "U1523456780",
+      slack_team_id: "T1523456780"
+    )
+    credential = create_credential(oauth_apps(:acme_github), "gh-c2345", nil, created_by: user)
+    secret = wrap(credential)
+
+    assert_no_difference -> { Grant.count } do
+      user.user_identities.create!(provider: "google", subject: "google-sub-noop")
+    end
+    refute principal.grants.exists?(static_secret: secret)
+  end
+
+  test "identity creation survives reconciliation failures" do
+    user = users(:member_user)
+    boom = proc { raise "boom" }
+
+    PrincipalCredentialReconciliation.stub(:new, boom) do
+      assert_difference -> { user.user_identities.count }, 1 do
+        user.user_identities.create!(provider: "slack", subject: "U1623456780", team_id: "T1623456780")
+      end
+    end
+  end
+
   private
 
   # Mirrors the principal shape minted by Mcp::OauthController#principal_for_current_user.
@@ -507,7 +725,7 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     )
   end
 
-  def create_credential(app, subject, email)
+  def create_credential(app, subject, email, created_by: nil)
     BrokerCredential.create!(
       namespace: app.credential_namespace,
       oauth_app: app,
@@ -518,7 +736,8 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
       access_token: "access-#{subject}",
       expires_at: 1.hour.from_now,
       last_refresh: Time.current,
-      external_user_key: "user-#{subject}"
+      external_user_key: "user-#{subject}",
+      created_by: created_by
     )
   end
 

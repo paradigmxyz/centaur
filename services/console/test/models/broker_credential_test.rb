@@ -244,6 +244,24 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     assert bc.next_attempt_at > now
   end
 
+  test "refresh skips a queued attempt made stale by a successful refresh" do
+    now = Time.current
+    client = Minitest::Mock.new
+    expect_refresh(client, returns: result(access_token: "AT-1", refresh_token: "RT-2", expires_in: 3600))
+    bc = create_credential
+    bc.update!(next_attempt_at: now)
+    bc.refresh_client = client
+
+    bc.refresh!(now: now)
+    bc.refresh!(now: now + 1.minute)
+
+    client.verify
+    bc.reload
+    assert_equal "AT-1", bc.access_token
+    assert_equal "RT-2", bc.refresh_token
+    assert_operator bc.next_attempt_at, :>, now + 1.minute
+  end
+
   test "refresh carries the previous refresh_token forward when the IdP omits it" do
     client = Minitest::Mock.new
     expect_refresh(client, returns: result(refresh_token: nil, expires_in: nil))

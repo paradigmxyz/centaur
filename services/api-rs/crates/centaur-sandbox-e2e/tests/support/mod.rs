@@ -3,7 +3,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use centaur_sandbox_agent_k8s::{AgentSandboxBackend, AgentSandboxConfig};
+use centaur_iron_control::IronControlClient;
+use centaur_sandbox_agent_k8s::{AgentSandboxBackend, AgentSandboxConfig, IronControlSettings};
 use centaur_sandbox_core::{SandboxBackend, SandboxId, SandboxSpec, SandboxStatus, SandboxWrite};
 use centaur_sandbox_local::LocalSandboxBackend;
 use centaur_sandbox_manager::{DriftReason, ReconcileOutcome, SandboxManager};
@@ -380,7 +381,14 @@ async fn agent_k8s_implementation() -> SandboxImplementation {
     .await
     .expect("load e2e kube config");
     let client = Client::try_from(kube_config).expect("create e2e kube client");
-    let mut config = AgentSandboxConfig::new(namespace);
+    let mut config = AgentSandboxConfig::new(
+        namespace,
+        IronControlSettings {
+            client: IronControlClient::new("http://127.0.0.1:1", "test-key"),
+            control_url: "http://iron-control".to_owned(),
+            namespace: "default".to_owned(),
+        },
+    );
     config.ready_timeout = Duration::from_secs(90);
     let backend = Arc::new(AgentSandboxBackend::new(client.clone(), config.clone()));
 

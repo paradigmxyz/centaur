@@ -489,17 +489,10 @@ module Mcp
     # Slack identity. Refuse an ambiguous account rather than guessing which
     # workspace should determine company-context RLS.
     def slack_identity_fields_for(user)
-      identities = user.user_identities.where(provider: UserIdentity::SLACK_PROVIDER).order(:id)
-      identities = identities.filter_map do |identity|
-        next if identity.subject.blank? || identity.team_id.blank?
-
-        [ identity.subject, identity.team_id ]
-      end.uniq
-      return {} unless identities.one?
-
-      slack_user_id, slack_team_id = identities.first
-      return {} unless Principal::SLACK_USER_ID_FORMAT.match?(slack_user_id)
-      return {} unless Principal::SLACK_TEAM_ID_FORMAT.match?(slack_team_id)
+      slack_user_id, slack_team_id = UserIdentity.unambiguous_slack_identity(
+        user.user_identities.slack.order(:id)
+      )
+      return {} unless slack_user_id
 
       { "slack_user_id" => slack_user_id, "slack_team_id" => slack_team_id }
     end

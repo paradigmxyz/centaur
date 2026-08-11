@@ -39,6 +39,7 @@ module Console
       assert_includes response.body, "prefers-color-scheme: light"
       assert_includes response.body, "localStorage.removeItem(storageKey)"
       assert_includes response.body, "centaur-console-theme-source"
+      assert_includes response.body, 'html[data-console-theme="light"] .bg-ink-950\\/80'
     end
 
     test "the index shows IdP chips for linked identities and a password chip otherwise" do

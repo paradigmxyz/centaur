@@ -7,31 +7,22 @@ Run from this directory:
 from __future__ import annotations
 
 import importlib.util
-import sys
-import types
 from pathlib import Path
 from typing import Any
 
-# cli.py imports Table from the packaged SDK and reaches into .client only at
-# call time. Stub the SDK so the module loads as a standalone file; the recorded
-# rows let us assert on what the command would render.
+# Record the rows added to Rich's table without depending on its rendering.
 RECORDED_ROWS: list[tuple[str, ...]] = []
 
-if "centaur_sdk" not in sys.modules:
-    sdk_mod = types.ModuleType("centaur_sdk")
 
-    class Table:
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            pass
+class RecordingTable:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        pass
 
-        def add_column(self, *args: Any, **kwargs: Any) -> None:
-            pass
+    def add_column(self, *args: Any, **kwargs: Any) -> None:
+        pass
 
-        def add_row(self, *cells: str) -> None:
-            RECORDED_ROWS.append(cells)
-
-    sdk_mod.Table = Table
-    sys.modules["centaur_sdk"] = sdk_mod
+    def add_row(self, *cells: str) -> None:
+        RECORDED_ROWS.append(cells)
 
 spec = importlib.util.spec_from_file_location(
     "linear_cli", Path(__file__).with_name("cli.py")
@@ -53,6 +44,7 @@ def _run_labels(monkeypatch, labels: list[dict[str, Any]]):
     from typer.testing import CliRunner
 
     RECORDED_ROWS.clear()
+    monkeypatch.setattr(cli, "Table", RecordingTable)
     monkeypatch.setattr(cli, "get_client", lambda: FakeClient(labels))
     return CliRunner().invoke(cli.app, ["labels"])
 

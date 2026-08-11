@@ -4,57 +4,90 @@
 
 <%= render "console/page_header",
            title: "Principals",
-           subtitle: "#{pluralize(@principals.size, "principal")} across all namespaces. Click a row to inspect its grants.",
+           subtitle: "#{pluralize(@total_principals, "principal")} across all namespaces.",
            actions: link_to("Add Principal", console_new_principal_path, class: "btn-primary") %>
 
+<%= form_with url: console_principals_path, method: :get, class: "mb-3 flex flex-wrap items-center gap-2" do %>
+  <div class="relative w-full max-w-md">
+    <span class="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-zinc-500">
+      <%= console_icon("magnifying-glass", classes: "size-4") %>
+    </span>
+    <%= search_field_tag :q,
+                         @search_query,
+                         placeholder: "Search names or foreign IDs",
+                         aria: { label: "Search principals" },
+                         class: "form-input py-2 pl-9" %>
+  </div>
+  <%= submit_tag "Search", class: "btn-secondary py-2" %>
+  <% if @search_query.present? %>
+    <%= link_to "Clear", console_principals_path, class: "px-2 py-2 text-sm text-zinc-500 hover:text-centaur-300" %>
+  <% end %>
+<% end %>
+
 <div class="console-panel">
-  <table class="console-table">
+  <table class="console-table console-table-fixed">
+    <colgroup>
+      <col class="w-[28%]">
+      <col class="w-[14%]">
+      <col class="w-[32%]">
+      <col class="w-[13%]">
+      <col class="w-[13%]">
+    </colgroup>
     <thead class="console-table-head">
       <tr>
-        <th class="console-th">ID</th>
-        <th class="console-th">Display Name</th>
-        <th class="console-th">Labels</th>
-        <th class="console-th text-right"></th>
+        <th class="px-5 py-2.5 font-medium">Name</th>
+        <th class="px-5 py-2.5 font-medium">Kind</th>
+        <th class="px-5 py-2.5 font-medium">Roles</th>
+        <th class="px-5 py-2.5 font-medium">Created</th>
+        <th class="px-5 py-2.5 font-medium">Updated</th>
       </tr>
     </thead>
     <tbody class="divide-y divide-ink-700">
       <% if @principals.empty? %>
-        <tr><td colspan="4" class="px-5 py-10 text-center text-zinc-600">No principals yet.</td></tr>
+        <tr>
+          <td colspan="5" class="px-5 py-10 text-center text-zinc-600">
+            <%= @search_query.present? ? "No principals match “#{@search_query}”." : "No principals yet." %>
+          </td>
+        </tr>
       <% end %>
       <% @principals.each do |p| %>
-        <tr class="group cursor-pointer console-row-hover"
-            onclick="window.location='<%= console_principal_path(p.oid) %>'">
-          <td class="console-td-nowrap">
-            <% if p.foreign_id.present? %>
-              <div class="text-centaur-400 group-hover:glow" title="<%= p.foreign_id %>"><%= truncate_middle(p.foreign_id) %></div>
-              <%= id_meta_line(p.namespace, oid: p.oid) %>
-            <% else %>
-              <span class="text-centaur-400 group-hover:glow"><%= p.oid %></span>
-              <%= id_meta_line(p.namespace) %>
-            <% end %>
+        <% display_name = p.name.presence || "unnamed" %>
+        <tr id="<%= dom_id(p) %>" class="console-row-hover">
+          <td class="min-w-0 overflow-hidden px-5 py-2 text-zinc-100">
+            <%= link_to truncate_middle(display_name, max: 64),
+                        console_principal_path(p.oid),
+                        class: "console-link console-cell-truncate #{'text-zinc-600' if p.name.blank?}",
+                        title: display_name %>
           </td>
-          <td class="console-td-nowrap text-zinc-100">
-            <% if p.name.presence %>
-              <span title="<%= p.name %>"><%= truncate_middle(p.name) %></span>
-            <% else %>
-              <span class="text-zinc-600">unnamed</span>
-            <% end %>
+          <td class="min-w-0 overflow-hidden px-5 py-2 whitespace-nowrap">
+            <span class="resource-badge console-cell-inline-truncate" title="<%= p.kind %>"><%= p.kind.upcase %></span>
           </td>
-          <td class="console-td">
-            <% display_labels = p.labels_with_sandbox_capabilities %>
-            <% if display_labels.present? %>
-              <div class="flex flex-wrap gap-1">
-                <% display_labels.each do |k, v| %>
-                  <span class="label-chip"><%= k %>=<%= v %></span>
+          <td class="min-w-0 overflow-hidden px-5 py-2">
+            <% if p.roles.any? %>
+              <div class="flex min-w-0 flex-wrap gap-1">
+                <% p.roles.sort_by { |role| role.name.presence || role.foreign_id.presence || role.oid }.each do |role| %>
+                  <% role_label = role.name.presence || role.foreign_id.presence || role.oid %>
+                  <span class="role-pill console-cell-inline-truncate" title="<%= role_label %>"><%= truncate_middle(role_label, max: 30) %></span>
                 <% end %>
               </div>
             <% else %>
               <span class="text-zinc-600">—</span>
             <% end %>
           </td>
-          <td class="console-td text-right text-zinc-600 group-hover:text-centaur-400">→</td>
+          <td class="overflow-hidden px-5 py-2 whitespace-nowrap text-xs text-zinc-500">
+            <span class="console-cell-truncate"><%= local_time(p.created_at, relative: true, format: :compact) %></span>
+          </td>
+          <td class="overflow-hidden px-5 py-2 whitespace-nowrap text-xs text-zinc-500">
+            <span class="console-cell-truncate"><%= local_time(p.updated_at, relative: true, format: :compact) %></span>
+          </td>
         </tr>
       <% end %>
     </tbody>
   </table>
+
+  <%= render "console/pagination",
+             page: @page,
+             total_pages: @total_pages,
+             total_count: @total_count,
+             unit: "principal" %>
 </div>

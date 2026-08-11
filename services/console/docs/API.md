@@ -20,6 +20,7 @@
 - [Roles](#roles)
 - [Grants](#grants)
 - [API keys](#api-keys)
+- [Skills](#skills)
 - [Proxies](#proxies)
 - [Proxy sync](#proxy-sync)
 
@@ -41,6 +42,8 @@ A missing or invalid token returns `401`:
 
 `iron-proxy` instances authenticate to [`POST /api/v1/proxy/sync`](#proxy-sync) with their own token (`iprx_` followed by 64 lowercase hex characters), issued once when the proxy is created. An invalid proxy token returns `401` with `"invalid or missing proxy token"`.
 
+Sandbox skill catalog endpoints use the existing sandbox entitlement JWT injected by `iron-proxy`.
+
 ## Conventions
 
 - **Request bodies** wrap attributes in a top-level `data` object. A missing `data` key returns `400`.
@@ -58,7 +61,7 @@ A missing or invalid token returns `401`:
 - **Namespaced list filtering** (static secrets, GCP auth secrets, GCP ID token secrets, OAuth token secrets, principals, roles) requires a `namespace` query parameter and accepts an optional `labels[key]=value` filter that matches by JSONB containment (all supplied pairs must be present). Label values must be scalars.
 - **Object IDs** are prefixed by type: `ssr_` (static secret), `gas_` (GCP auth secret), `gid_` (GCP ID token secret), `ots_` (OAuth token secret), `prn_` (principal), `role_` (role), `grant_` (grant), `ak_` (API key), `prx_` (proxy).
 - **`namespace`** defaults to `"default"` when omitted on create. Once set, `namespace` and `foreign_id` are immutable.
-- **`namespace` and `foreign_id`** must be URL-safe: only `A-Z a-z 0-9 - . _ ~`. `foreign_id` is optional and, when set, must be unique within its namespace. A `foreign_id` may not start with the resource's opaque-id prefix (e.g. `ssr_`), so it can never be mistaken for an OID.
+- **`namespace` and `foreign_id`** must be URL-safe: only `A-Z a-z 0-9 - . _ ~`. `foreign_id` is optional and, when set, must be globally unique within its resource type. A `foreign_id` may not start with the resource's opaque-id prefix (e.g. `ssr_`), so it can never be mistaken for an OID.
 
 ### Upsert (`PUT` / `PATCH`)
 
@@ -67,7 +70,7 @@ For the resources with a `foreign_id` (static secrets, GCP auth secrets, GCP ID 
 - **`:id` is an OID** (it starts with the resource's prefix, e.g. `ssr_…`): updates that record. `404` if it does not exist — an OID is server-assigned, so it can't be created at a chosen value.
 - **`:id` is anything else**: it is treated as a `foreign_id` within the body `namespace` (default `"default"`). The record is **updated if it exists, created if it does not**. Creation responds `201`; update responds `200`.
 
-This makes provisioning idempotent: `PUT /api/v1/roles/infra` with `{"data":{"namespace":"acme", …}}` converges the `acme/infra` role whether or not it already exists, in one call. On the foreign-id form the namespace and foreign_id come from the URL/body, so omitting `foreign_id` from the body does not clear it.
+This makes provisioning idempotent: `PUT /api/v1/roles/acme-infra` with `{"data":{"namespace":"acme", …}}` converges the `acme/acme-infra` role whether or not it already exists, in one call. On the foreign-id form the namespace and foreign_id come from the URL/body, so omitting `foreign_id` from the body does not clear it.
 - **`labels`** is an arbitrary string-keyed object (defaults to `{}`).
 - **Timestamps** are ISO 8601 UTC.
 
@@ -178,7 +181,7 @@ A static secret injects or replaces a fixed credential value on matching request
 | Field            | In requests | Notes |
 | ---------------- | ----------- | ----- |
 | `namespace`      | optional    | Defaults to `"default"`. Immutable after create. |
-| `foreign_id`     | optional    | Unique per namespace. Immutable after create. |
+| `foreign_id`     | optional    | Globally unique within this resource type. Immutable after create. |
 | `name`           | optional    | |
 | `description`    | optional    | |
 | `labels`         | optional    | Object; defaults to `{}`. |
@@ -277,7 +280,7 @@ A GCP auth secret mints short-lived GCP OAuth2 access tokens and injects them as
 | Field                  | In requests | Notes |
 | ---------------------- | ----------- | ----- |
 | `namespace`            | optional    | Defaults to `"default"`. Immutable. |
-| `foreign_id`           | optional    | Unique per namespace. Immutable. |
+| `foreign_id`           | optional    | Globally unique within this resource type. Immutable. |
 | `name`, `description`  | optional    | |
 | `labels`               | optional    | |
 | `scopes`               | required    | Non-empty array of non-empty strings (GCP OAuth scopes). |
@@ -361,7 +364,7 @@ A GCP ID token secret mints Google-signed OIDC ID tokens for an audience and inj
 | Field                 | In requests | Notes |
 | --------------------- | ----------- | ----- |
 | `namespace`           | optional    | Defaults to `"default"`. Immutable. |
-| `foreign_id`          | optional    | Unique per namespace. Immutable. |
+| `foreign_id`          | optional    | Globally unique within this resource type. Immutable. |
 | `name`, `description` | optional    | |
 | `labels`              | optional    | Object; defaults to `{}`. |
 | `audience`            | required    | ID token `aud` claim. For Cloud Run, use the service URL or configured custom audience. |
@@ -434,7 +437,7 @@ Each granted AWS auth secret is delivered to `iron-proxy` as its own `aws_auth` 
 | Field               | In requests | Notes |
 | ------------------- | ----------- | ----- |
 | `namespace`         | optional    | Defaults to `"default"`. Immutable. |
-| `foreign_id`        | optional    | Unique per namespace. Immutable. |
+| `foreign_id`        | optional    | Globally unique within this resource type. Immutable. |
 | `name`, `description` | optional  | |
 | `labels`            | optional    | Object; defaults to `{}`. |
 | `allowed_regions`   | optional    | Array of non-empty strings; defaults to `[]` (no region scoping). |
@@ -519,7 +522,7 @@ An OAuth token secret mints OAuth2 access tokens for a single grant and injects 
 | Field                    | In requests | Notes |
 | ------------------------ | ----------- | ----- |
 | `namespace`              | optional    | Defaults to `"default"`. Immutable. |
-| `foreign_id`             | optional    | Unique per namespace. Immutable. |
+| `foreign_id`             | optional    | Globally unique within this resource type. Immutable. |
 | `name`, `description`    | optional    | |
 | `labels`                 | optional    | |
 | `grant`                  | required    | One of `refresh_token`, `client_credentials`, `password`, `jwt_bearer`. |
@@ -624,7 +627,7 @@ Listener and client knobs (bind address, client auth) are deliberately not model
 | Field         | In requests | Notes |
 | ------------- | ----------- | ----- |
 | `namespace`   | optional    | Defaults to `"default"`. Immutable after create. |
-| `foreign_id`  | required    | Unique per namespace. Immutable after create. |
+| `foreign_id`  | required    | Globally unique within this resource type. Immutable after create. |
 | `name`        | optional    | |
 | `description` | optional    | |
 | `labels`      | optional    | Object; defaults to `{}`. |
@@ -720,7 +723,7 @@ Each granted HMAC secret is delivered to `iron-proxy` as its own `hmac_sign` tra
 | Field                       | In requests | Notes |
 | --------------------------- | ----------- | ----- |
 | `namespace`                 | optional    | Defaults to `"default"`. Immutable. |
-| `foreign_id`                | optional    | Unique per namespace. Immutable. |
+| `foreign_id`                | optional    | Globally unique within this resource type. Immutable. |
 | `name`, `description`       | optional    | |
 | `labels`                    | optional    | Object; defaults to `{}`. |
 | `timestamp_format`          | required    | One of `unix_seconds`, `unix_millis`, `unix_nanos`, `rfc3339`. |
@@ -814,7 +817,7 @@ The token credentials it refreshes with are fields on the credential, resolved b
 | Field                          | In requests | Notes |
 | ------------------------------ | ----------- | ----- |
 | `namespace`                    | optional    | Defaults to `"default"`. Immutable. |
-| `foreign_id`                   | optional    | Unique per namespace. Immutable. |
+| `foreign_id`                   | optional    | Globally unique within this resource type. Immutable. |
 | `name`, `description`          | optional    | |
 | `labels`                       | optional    | |
 | `grant`                        | optional    | One of `refresh_token`, `client_credentials`, `password`, or `preqin`. Defaults to `refresh_token`. |
@@ -1191,7 +1194,7 @@ system-managed `default/infra` role.
 | Field        | In requests | Notes |
 | ------------ | ----------- | ----- |
 | `namespace`  | optional    | Defaults to `"default"`. Immutable. |
-| `foreign_id` | optional    | Unique per namespace. Immutable. |
+| `foreign_id` | optional    | Globally unique within this resource type. Immutable. |
 | `name`       | optional    | |
 | `kind`       | optional    | Defaults to `unknown`. See the known values below. |
 | `slack_user_id` | optional | First-class Slack user identity. |
@@ -1307,7 +1310,7 @@ Roles are namespaced. A principal may only be assigned roles in its own namespac
 | Field        | In requests | Notes |
 | ------------ | ----------- | ----- |
 | `namespace`  | optional    | Defaults to `"default"`. Immutable. |
-| `foreign_id` | optional    | Unique per namespace. Immutable. Handy for idempotent provisioning. |
+| `foreign_id` | optional    | Globally unique within this resource type. Immutable. Handy for idempotent provisioning. |
 | `name`       | optional    | |
 | `labels`     | optional    | |
 | `slack_channel_permissions` | optional | Full replacement when present on create or update. Each row accepts `channel_id` and the `upload_enabled`, `download_enabled`, and `history_enabled` flags. |
@@ -1471,6 +1474,29 @@ Returns `201`. The plaintext `token` is included **only** in this create respons
 | `GET`    | `/api/v1/api_keys` | List your keys (paginated; no `namespace`). Tokens are never returned. |
 | `GET`    | `/api/v1/api_keys/:id` | Fetch one (no token). |
 | `DELETE` | `/api/v1/api_keys/:id` | Revoke (soft delete). Returns `204`. Revoking the key used for the current request returns `422` with `"cannot revoke the API key used for this request"`. |
+
+## Skills
+
+Skills are mutable `SKILL.md` documents authored by signed-in users in Console. There is no revision or draft resource: updating a public skill changes the document returned to agents immediately. Skill IDs use the `skl_` prefix.
+
+Console stores and validates `name`, `description`, and Markdown `instructions` as separate fields, then generates `SKILL.md`. Active skill names are globally unique, use lowercase letters, numbers, and hyphens, and are limited to 64 characters. The name `search` is reserved for the catalog search route. Because names cannot contain underscores, they cannot conflict with `skl_` OIDs. Archived names may be reused. Generated documents are limited to 64 KiB.
+
+### Sandbox Operations
+
+These endpoints use the existing sandbox entitlement JWT injected by `iron-proxy`. Console-user principals can see their own private skills and every public skill. Other principal kinds can see public skills only. Mutations require an active Console user linked to the sandbox principal and can change only that user's skills.
+
+| Method | Path | Notes |
+| ------ | ---- | ----- |
+| `GET` | `/api/v1/sandbox/skills` | List visible skills. Optional `scope=private|shared` and `limit` up to 20. |
+| `GET` | `/api/v1/sandbox/skills/search?q=...` | Full-text search visible skills. |
+| `GET` | `/api/v1/sandbox/skills/:id` | Read a visible skill by its exact name or `skl_...` OID. |
+| `POST` | `/api/v1/sandbox/skills` | Create a public skill from `data.name`, `data.description`, and `data.instructions`. |
+| `PUT`/`PATCH` | `/api/v1/sandbox/skills/:id` | Update an owned skill using those fields; optional `data.lock_version` detects concurrent edits. |
+| `DELETE` | `/api/v1/sandbox/skills/:id` | Archive an owned skill. |
+| `POST` | `/api/v1/sandbox/skills/:id/share` | Make an owned skill public. |
+| `POST` | `/api/v1/sandbox/skills/:id/unshare` | Make an owned skill private. |
+
+Catalog responses include the skill ID and a checksum over the generated document. Read responses set `Cache-Control: no-store`.
 
 ## Proxies
 

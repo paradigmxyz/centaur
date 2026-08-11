@@ -1502,6 +1502,12 @@
         border-bottom-color: #e6e5de;
       }
 
+      html[data-console-theme="light"] .role-pill {
+        background: #eaf6ff;
+        color: #0369a1;
+        --tw-ring-color: rgb(14 165 233 / 0.3);
+      }
+
       html[data-console-theme="light"] .form-input {
         border-color: #d2d3cc;
         background: #ffffff;
@@ -1564,6 +1570,7 @@
       html[data-console-theme="light"] .bg-ink-950,
       html[data-console-theme="light"] .bg-ink-950\/15,
       html[data-console-theme="light"] .bg-ink-950\/35,
+      html[data-console-theme="light"] .bg-ink-950\/80,
       html[data-console-theme="light"] .bg-ink-900,
       html[data-console-theme="light"] .bg-ink-900\/25,
       html[data-console-theme="light"] .bg-ink-900\/35,
@@ -1809,6 +1816,7 @@
 
   <% threads_view = request.path.start_with?("/console/threads") %>
   <% workflows_view = request.path.start_with?("/console/workflows") %>
+  <% skills_view = request.path.start_with?("/console/skills") %>
   <%# The Control and Data Sync sections are admin-only (each controller enforces
       require_admin server-side); Integrations is for everyone -- it lists the
       public consent start links any team member can use. %>
@@ -1857,6 +1865,15 @@
               </a>
             <% end %>
           </nav>
+
+          <div class="console-thread-group">
+            <a href="<%= console_skills_path %>"
+               class="console-thread-group-title <%= "console-thread-group-title-active" if skills_view %>"
+               title="Skills">
+              <span class="console-nav-icon"><%= console_icon("workflow", classes: "size-4") %></span>
+              <span class="console-nav-label">Skills</span>
+            </a>
+          </div>
 
           <% if acting_admin? %>
             <div class="console-thread-group">

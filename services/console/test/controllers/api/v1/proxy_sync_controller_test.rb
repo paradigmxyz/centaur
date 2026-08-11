@@ -76,7 +76,7 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
     refute_nil entry
     assert_equal "Bearer {{ .Value }}", entry.dig("inject", "formatter")
     assert_equal(
-      { "host" => "centaur-console", "methods" => [ "GET" ], "paths" => [ Proxy::SANDBOX_ENTITLEMENTS_PATH_PATTERN ] },
+      { "host" => "centaur-console", "methods" => %w[GET POST PUT PATCH DELETE], "paths" => [ Proxy::SANDBOX_ENTITLEMENTS_PATH_PATTERN ] },
       entry.fetch("rules").first
     )
 
@@ -323,12 +323,12 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
   end
 
   test "postgres entries resolve value_from settings against the proxy principal" do
-    @proxy.principal.update!(labels: { "slack_channel_id" => "C0123456789" })
+    @proxy.principal.update!(slack_channel_id: "C0123456789")
     pg = pg_dsn_secrets(:acme_analytics_pg)
     pg.update!(settings: [
       {
         "name" => "centaur.slack_channel_id",
-        "value_from" => { "principal_label" => "slack_channel_id" }
+        "value_from" => { "principal_field" => "slack_channel_id" }
       }
     ])
 

@@ -53,6 +53,7 @@ const WORKFLOW_RECONCILE_INTERVAL_SECS_ENV: &str = "WORKFLOW_RECONCILE_INTERVAL_
 const DEFAULT_WORKFLOW_RECONCILE_INTERVAL_SECS: u64 = 60;
 const WORKFLOW_ENABLE_MODE_ENV: &str = "WORKFLOW_ENABLE_MODE";
 const WORKFLOW_ALLOWED_NAMES_ENV: &str = "WORKFLOW_ALLOWED_NAMES";
+const MAX_LIST_RUNS_LIMIT: i64 = 1_000;
 /// How many consecutive reconcile passes a workflow must be missing from
 /// discovery before its active tasks are cancelled. 0 disables reaping.
 const WORKFLOW_REAP_REMOVED_AFTER_TICKS_ENV: &str = "WORKFLOW_REAP_REMOVED_AFTER_TICKS";
@@ -238,15 +239,6 @@ impl WorkflowPrincipalAssignments {
         }
         Ok(None)
     }
-}
-
-fn workflow_principals_require_iron_control_error(
-    principals: &BTreeSet<String>,
-) -> WorkflowRuntimeError {
-    let workflow_names = principals.iter().cloned().collect::<Vec<_>>().join(", ");
-    WorkflowRuntimeError::BadRequest(format!(
-        "WORKFLOW_PRINCIPAL requires Iron Control, but Iron Control is disabled for workflows: {workflow_names}"
-    ))
 }
 
 impl WorkflowHostSandboxRuntime {
@@ -521,6 +513,10 @@ struct ToolResult {
     output: Value,
 }
 
+fn list_runs_limit(limit: i64) -> i64 {
+    limit.clamp(1, MAX_LIST_RUNS_LIMIT)
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct SlackPostResult {
     channel: String,
@@ -531,29 +527,8 @@ impl WorkflowRuntime {
     pub async fn new(
         store: PgSessionStore,
         session_runtime: SessionRuntime,
-    ) -> Result<Self, WorkflowRuntimeError> {
-        Self::new_with_workflow_host_sandbox(store, session_runtime, None).await
-    }
-
-    pub async fn new_with_workflow_host_sandbox(
-        store: PgSessionStore,
-        session_runtime: SessionRuntime,
         workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
-    ) -> Result<Self, WorkflowRuntimeError> {
-        Self::new_with_workflow_host_sandbox_and_principal_registrar(
-            store,
-            session_runtime,
-            workflow_host_sandbox,
-            None,
-        )
-        .await
-    }
-
-    pub async fn new_with_workflow_host_sandbox_and_principal_registrar(
-        store: PgSessionStore,
-        session_runtime: SessionRuntime,
-        workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
-        workflow_principal_registrar: Option<WorkflowPrincipalRegistrar>,
+        workflow_principal_registrar: WorkflowPrincipalRegistrar,
     ) -> Result<Self, WorkflowRuntimeError> {
         let client = Client::from_pool_with_options(
             store.pool().clone(),
@@ -875,17 +850,27 @@ impl WorkflowRuntime {
         })
     }
 
-    pub async fn list_runs(&self, limit: i64) -> Result<Vec<WorkflowRun>, WorkflowRuntimeError> {
-        let limit = limit.clamp(1, 200);
+    pub async fn list_runs(
+        &self,
+        limit: i64,
+        workflow_name: Option<&str>,
+    ) -> Result<Vec<WorkflowRun>, WorkflowRuntimeError> {
+        let limit = list_runs_limit(limit);
         let mut runs = Vec::new();
-        runs.extend(self.list_runs_for_queue(WORKFLOW_QUEUE, limit).await?);
         runs.extend(
-            self.list_runs_for_queue(WORKFLOW_SLACK_LIVE_QUEUE, limit)
+            self.list_runs_for_queue(WORKFLOW_QUEUE, limit, workflow_name)
                 .await?,
         );
-        runs.extend(self.list_runs_for_queue(WORKFLOW_ETL_QUEUE, limit).await?);
         runs.extend(
-            self.list_runs_for_queue(WORKFLOW_ETL_BACKFILL_QUEUE, limit)
+            self.list_runs_for_queue(WORKFLOW_SLACK_LIVE_QUEUE, limit, workflow_name)
+                .await?,
+        );
+        runs.extend(
+            self.list_runs_for_queue(WORKFLOW_ETL_QUEUE, limit, workflow_name)
+                .await?,
+        );
+        runs.extend(
+            self.list_runs_for_queue(WORKFLOW_ETL_BACKFILL_QUEUE, limit, workflow_name)
                 .await?,
         );
         runs.sort_by(|a, b| {
@@ -901,6 +886,7 @@ impl WorkflowRuntime {
         &self,
         queue_name: &str,
         limit: i64,
+        workflow_name: Option<&str>,
     ) -> Result<Vec<WorkflowRun>, WorkflowRuntimeError> {
         let (task_table, run_table) = absurd_queue_tables(queue_name)?;
         let rows = sqlx::query(&format!(
@@ -918,11 +904,16 @@ impl WorkflowRuntime {
                 greatest(t.enqueue_at, coalesce(r.available_at, t.enqueue_at)) as updated_at
             from {task_table} t
             join {run_table} r on r.run_id = t.last_attempt_run
+            where (
+                $2::text is null
+                or coalesce(t.params->>'workflow_name', '{WORKFLOW_TASK}') = $2
+            )
             order by t.enqueue_at desc, t.task_id desc
             limit $1
             "#,
         ))
         .bind(limit)
+        .bind(workflow_name)
         .fetch_all(self.inner.client.pool())
         .await?;
 
@@ -1711,7 +1702,7 @@ fn metadata_from_discovery_payload(
 
 async fn prepare_workflow_host_sandbox(
     workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
-    workflow_principal_registrar: Option<WorkflowPrincipalRegistrar>,
+    workflow_principal_registrar: WorkflowPrincipalRegistrar,
     discovery: &PythonWorkflowMetadata,
     enablement: &WorkflowEnablement,
 ) -> Result<Option<WorkflowHostSandboxRuntime>, WorkflowRuntimeError> {
@@ -1731,7 +1722,7 @@ async fn prepare_workflow_host_sandbox(
     };
     reconcile_workflow_principals(
         &sandbox,
-        workflow_principal_registrar.as_ref(),
+        &workflow_principal_registrar,
         discovery,
         enablement,
     )
@@ -1741,20 +1732,12 @@ async fn prepare_workflow_host_sandbox(
 
 async fn reconcile_workflow_principals(
     sandbox: &WorkflowHostSandboxRuntime,
-    registrar: Option<&WorkflowPrincipalRegistrar>,
+    registrar: &WorkflowPrincipalRegistrar,
     discovery: &PythonWorkflowMetadata,
     enablement: &WorkflowEnablement,
 ) -> Result<(), WorkflowRuntimeError> {
     let mut principals = discovery.principals.clone();
     principals.retain(|workflow_name| enablement.is_enabled(workflow_name));
-    let Some(registrar) = registrar else {
-        if !principals.is_empty() {
-            sandbox.update_workflow_principals(BTreeMap::new(), principals.clone());
-            return Err(workflow_principals_require_iron_control_error(&principals));
-        }
-        sandbox.update_workflow_principals(BTreeMap::new(), BTreeSet::new());
-        return Ok(());
-    };
     let registered = match registrar.register_workflow_principals(&principals).await {
         Ok(registered) => registered,
         Err(error) => {
@@ -1898,7 +1881,7 @@ fn spawn_workflow_metadata_reconciler(
     webhook_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
     schedule_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
     workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
-    workflow_principal_registrar: Option<WorkflowPrincipalRegistrar>,
+    workflow_principal_registrar: WorkflowPrincipalRegistrar,
     interval: Duration,
 ) {
     tokio::spawn(async move {
@@ -1914,7 +1897,7 @@ fn spawn_workflow_metadata_reconciler(
                 &webhook_registry,
                 &schedule_registry,
                 workflow_host_sandbox.as_ref(),
-                workflow_principal_registrar.as_ref(),
+                &workflow_principal_registrar,
             )
             .await
             {
@@ -1951,7 +1934,7 @@ async fn reconcile_workflow_metadata_once(
     webhook_registry: &Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
     schedule_registry: &Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
     workflow_host_sandbox: Option<&WorkflowHostSandboxRuntime>,
-    workflow_principal_registrar: Option<&WorkflowPrincipalRegistrar>,
+    workflow_principal_registrar: &WorkflowPrincipalRegistrar,
 ) -> Result<
     (
         PythonWorkflowMetadata,
@@ -4236,6 +4219,14 @@ mod tests {
     }
 
     #[test]
+    fn list_runs_limit_is_clamped_to_supported_range() {
+        assert_eq!(list_runs_limit(-1), 1);
+        assert_eq!(list_runs_limit(50), 50);
+        assert_eq!(list_runs_limit(1_000), 1_000);
+        assert_eq!(list_runs_limit(10_000), 1_000);
+    }
+
+    #[test]
     fn normalizes_interval_schedule_with_delivery_metadata() {
         let schedule = normalize_schedule(json!({
             "workflow_name": "slack_sync",
@@ -4564,17 +4555,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn workflow_principal_requires_iron_control() {
-        let error = workflow_principals_require_iron_control_error(&BTreeSet::from([
-            "nightly_report".to_owned(),
-        ]));
-
-        assert!(matches!(error, WorkflowRuntimeError::BadRequest(_)));
-        assert!(error.to_string().contains("Iron Control"));
-        assert!(error.to_string().contains("nightly_report"));
-    }
-
     #[tokio::test]
     async fn workflow_principal_requires_workflow_host_sandbox() {
         let discovery = PythonWorkflowMetadata {
@@ -4583,13 +4563,21 @@ mod tests {
             ..PythonWorkflowMetadata::default()
         };
 
-        let error =
-            match prepare_workflow_host_sandbox(None, None, &discovery, &WorkflowEnablement::all())
-                .await
-            {
-                Ok(_) => panic!("workflow principal should require workflow-host sandboxing"),
-                Err(error) => error,
-            };
+        let registrar = WorkflowPrincipalRegistrar::new(
+            IronControlClient::new("http://127.0.0.1:1", "test-key"),
+            "default",
+        );
+        let error = match prepare_workflow_host_sandbox(
+            None,
+            registrar,
+            &discovery,
+            &WorkflowEnablement::all(),
+        )
+        .await
+        {
+            Ok(_) => panic!("workflow principal should require workflow-host sandboxing"),
+            Err(error) => error,
+        };
 
         assert!(matches!(error, WorkflowRuntimeError::BadRequest(_)));
         assert!(error.to_string().contains("WORKFLOW_HOST_SANDBOX"));
