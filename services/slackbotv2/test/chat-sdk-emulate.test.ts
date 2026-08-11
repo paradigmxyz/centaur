@@ -60,6 +60,7 @@ let slackApi: PatchedSlackApi
 let codexApi: MockSessionApi
 let slack: WebClient
 let slackB: WebClient
+let slackBot: WebClient
 let slackApiUrl: string
 let bot: SlackbotV2
 
@@ -105,6 +106,7 @@ beforeAll(async () => {
   slackApiUrl = `${slackApi.url}/api/`
   slack = new WebClient(USER_TOKEN, { slackApiUrl })
   slackB = new WebClient(USER_B_TOKEN, { slackApiUrl })
+  slackBot = new WebClient(BOT_TOKEN, { slackApiUrl })
 })
 
 beforeEach(() => {
@@ -2057,6 +2059,11 @@ describe('slackbotv2', () => {
     expect(rootResponse.status).toBe(200)
     await Promise.all(rootWaits)
 
+    await slackBot.chat.postMessage({
+      channel: CHANNEL_ID,
+      text: 'Prior assistant reply that must not be imported.',
+      thread_ts: rootMention.ts
+    })
     await postUserMessage('Important reply between mentions.', rootMention.ts)
     const replyMention = await postUserMessage(
       `<@${BOT_USER_ID}> now use the full thread`,
@@ -2091,6 +2098,10 @@ describe('slackbotv2', () => {
     expect(sessionMessageTexts(codexApi.appends[1]!.body.messages)).toEqual([
       'Important reply between mentions.',
       `@${BOT_USER_ID} now use the full thread`
+    ])
+    expect(codexApi.appends[1]!.body.messages.map(message => message.role)).toEqual([
+      'user',
+      'user'
     ])
     expect(codexApi.executes.map(execute => execute.body.idempotency_key)).toEqual([
       rootMention.ts,
