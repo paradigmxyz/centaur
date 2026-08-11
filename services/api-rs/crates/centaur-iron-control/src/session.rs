@@ -7,15 +7,13 @@
 //! in console or ``centaur-perms`` remain sticky. The principal is derived from
 //! the thread key (see [`crate::derive_principal`]).
 
-use serde_json::Value;
-use std::collections::BTreeMap;
-
 use crate::IronControlClient;
 use crate::error::{IronControlError, Result};
 use crate::models::{Principal, SlackChannelPermissionInput};
 use crate::principal::{
     derive_principal_with_slack_team, is_direct_message, slack_conversation_id,
 };
+use serde_json::Value;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct SessionPrincipalMetadata<'a> {
@@ -91,7 +89,6 @@ impl SessionRegistrar {
         let exists = existing.is_some();
         if let Some(existing) = existing {
             let mut labels = existing.labels;
-            strip_compatibility_identity_labels(&mut labels);
             labels.extend(input.labels);
             input.labels = labels;
         }
@@ -150,18 +147,6 @@ fn apply_slack_dm_email(
     };
     if is_direct_message(Some(conversation_id)) && input.slack_user_id.is_some() {
         input.slack_email = Some(email.to_owned());
-    }
-}
-
-fn strip_compatibility_identity_labels(labels: &mut BTreeMap<String, String>) {
-    for label in [
-        "kind",
-        "slack_user_id",
-        "slack_channel_id",
-        "slack_team_id",
-        "slack_email",
-    ] {
-        labels.remove(label);
     }
 }
 
@@ -398,27 +383,6 @@ mod tests {
         assert_eq!(
             slack_permission_for_thread("slack:D123:ts", Some("D123"), None),
             None
-        );
-    }
-
-    #[test]
-    fn compatibility_identity_labels_are_not_merged_back_into_writes() {
-        let mut labels = BTreeMap::from([
-            ("kind".to_owned(), "slack_dm".to_owned()),
-            ("slack_user_id".to_owned(), "U0123456789".to_owned()),
-            ("slack_team_id".to_owned(), "T0123456789".to_owned()),
-            ("managed-by".to_owned(), "centaur".to_owned()),
-            ("team".to_owned(), "platform".to_owned()),
-        ]);
-
-        strip_compatibility_identity_labels(&mut labels);
-
-        assert_eq!(
-            labels,
-            BTreeMap::from([
-                ("managed-by".to_owned(), "centaur".to_owned()),
-                ("team".to_owned(), "platform".to_owned()),
-            ])
         );
     }
 

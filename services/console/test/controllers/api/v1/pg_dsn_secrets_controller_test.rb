@@ -214,7 +214,7 @@ module Api
         )
       end
 
-      test "POST canonicalizes legacy identity labels without changing custom labels" do
+      test "POST preserves principal label references" do
         body = {
           data: {
             foreign_id: "legacy-value-from-pg",
@@ -232,7 +232,7 @@ module Api
 
         assert_equal(
           [
-            { "name" => "centaur.slack_channel_id", "value_from" => { "principal_field" => "slack_channel_id" } },
+            { "name" => "centaur.slack_channel_id", "value_from" => { "principal_label" => "slack_channel_id" } },
             { "name" => "app.tenant", "value_from" => { "principal_label" => "tenant" } }
           ],
           json_body.dig("data", "settings")

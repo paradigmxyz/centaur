@@ -24,9 +24,6 @@ class Principal < ApplicationRecord
   after_commit :auto_grant_matching_oauth_credentials, on: %i[create update]
   after_create :assign_default_roles, if: :roles_blank_for_defaulting?
   before_validation :apply_sandbox_repo_cache_label
-  before_validation :validate_identity_label_consistency
-  before_validation :promote_identity_labels_to_fields
-  before_validation :strip_identity_labels
   before_commit :bump_own_sync_config_cache_version, on: :update, if: :sync_config_fields_changed?
 
   URL_SAFE_FORMAT = /\A[A-Za-z0-9\-._~]+\z/
@@ -126,7 +123,6 @@ class Principal < ApplicationRecord
 
   def labels_with_sandbox_capabilities
     labels.to_h.merge(
-      PrincipalIdentityLabels.serialize(self),
       SANDBOX_REPO_CACHE_LABEL => sandbox_repo_cache
     )
   end
@@ -243,22 +239,6 @@ class Principal < ApplicationRecord
     self[:labels] = labels.to_h.merge(SANDBOX_REPO_CACHE_LABEL => sandbox_repo_cache)
   end
 
-  def validate_identity_label_consistency
-    PrincipalIdentityLabels.validate_consistency(self)
-  end
-
-  # Legacy API writers may still send principal identity through labels during
-  # the compatibility release. Promote only fields that were not assigned
-  # directly. Reserved identity labels are stripped below so columns remain
-  # authoritative.
-  def promote_identity_labels_to_fields
-    PrincipalIdentityLabels.assign(self)
-  end
-
-  def strip_identity_labels
-    PrincipalIdentityLabels.strip(self)
-  end
-
   def supplied_key?(attributes, key)
     attributes.key?(key) || attributes.key?(key.to_s)
   end
@@ -351,8 +331,10 @@ class Principal < ApplicationRecord
   end
 
   def sync_config_fields_changed?
-    identity_fields = PrincipalIdentityLabels.columns
-    ([ "name", "labels", "sandbox_api_server_enabled" ] + identity_fields).any? do |field|
+    %w[
+      name labels sandbox_api_server_enabled kind slack_user_id slack_channel_id slack_team_id slack_email
+      console_user_id console_user_email
+    ].any? do |field|
       previous_changes.key?(field)
     end
   end

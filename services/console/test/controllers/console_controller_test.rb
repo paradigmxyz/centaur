@@ -202,7 +202,7 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_select "a[href=?]", console_new_principal_path, text: "Add Principal"
   end
 
-  test "principal pages render first-class identity fields as labels" do
+  test "principal pages do not render first-class identity fields as labels" do
     principal = principals(:acme_channel)
     principal.update!(
       kind: "slack_dm",
@@ -222,7 +222,7 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     get console_principal_url(principal.oid)
     assert_response :ok
     expected_labels.each do |key, value|
-      assert_select ".label-chip", text: "#{key}=#{value}"
+      assert_select ".label-chip", text: "#{key}=#{value}", count: 0
     end
   end
 

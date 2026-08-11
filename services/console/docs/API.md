@@ -671,15 +671,15 @@ A setting may take its value from the proxy's assigned principal or proxy
 labels instead of storing a literal, by replacing `value` with `value_from`:
 
 ```json
-{ "name": "centaur.slack_channel_id", "value_from": { "principal_label": "slack_channel_id" } }
+{ "name": "centaur.slack_channel_id", "value_from": { "principal_field": "slack_channel_id" } }
 ```
 
 `value_from` contains exactly one of:
 
 | Key               | Resolves to |
 | ----------------- | ----------- |
-| `principal_label` | The named label on the assigned principal. Reserved identity labels resolve through their authoritative columns. A label the principal does not carry resolves to an empty string, so RLS-style policies fail closed. |
-| `principal_field` | One of the principal's fields: `id` (the opaque `prn_...` id), `foreign_id`, `name`, or `slack_history_channel_ids` (JSON array of Slack channel IDs with history permission). |
+| `principal_label` | The named label on the assigned principal. A label the principal does not carry resolves to an empty string, so RLS-style policies fail closed. |
+| `principal_field` | One of the principal's fields: `id` (the opaque `prn_...` id), `foreign_id`, `name`, `kind`, `slack_user_id`, `slack_channel_id`, `slack_team_id`, `slack_email`, `console_user_id`, `console_user_email`, or `slack_history_channel_ids` (JSON array of Slack channel IDs with history permission). |
 | `proxy_label`     | The named label on the proxy. A label the proxy does not carry resolves to an empty string, so RLS-style policies fail closed. |
 
 A setting has either `value` or `value_from`, never both; unknown
@@ -1176,7 +1176,7 @@ system-managed `infra` role.
 | `slack_email` | optional | First-class Slack email identity. |
 | `console_user_id` | optional | Database ID of the associated console user for a `console_user` principal. |
 | `console_user_email` | optional | Email identity for a `console_user` principal. |
-| `labels`     | optional    | Extensible metadata. Compatibility identity labels are still accepted and synthesized in responses during the transition. |
+| `labels`     | optional    | Extensible metadata. Identity is read from the first-class fields, not from labels with matching names. |
 | `slack_channel_permissions` | optional | Direct permissions owned by the principal. Full replacement when present on create or update. |
 | `effective_slack_channel_permissions` | response only | Direct permissions merged with permissions inherited from assigned roles. |
 
@@ -1200,7 +1200,7 @@ Returns `201`:
     "id": "prn_...",
     "foreign_id": "api-service",
     "name": "API Service",
-    "labels": { "tier": "backend", "kind": "unknown" },
+    "labels": { "tier": "backend" },
     "slack_channel_permissions": [],
     "effective_slack_channel_permissions": [],
     "created_at": "2026-06-01T10:00:00Z",
@@ -1211,7 +1211,7 @@ Returns `201`:
 
 | Method | Path | Notes |
 | ------ | ---- | ----- |
-| `GET`  | `/api/v1/principals` | List. Accepts exact-match label filters, including the reserved identity labels. |
+| `GET`  | `/api/v1/principals` | List. Accepts exact-match label filters. |
 | `GET`  | `/api/v1/principals/:id` | Fetch one by OID. To fetch by `foreign_id`, use the lookup route below. |
 | `GET`  | `/api/v1/principals/lookup/:foreign_id` | Fetch by foreign id. `404` if missing. |
 | `GET`  | `/api/v1/principals/:id/effective_config` | [Effective config](#effective-config) the principal resolves to. `:id` is an OID. |
@@ -1220,15 +1220,11 @@ Returns `201`:
 | `POST` | `/api/v1/principals/:id/slack_channel_permissions` | Idempotently create or update one direct Slack channel permission. Omitted flags default to enabled on create and remain unchanged on update. |
 | `PUT`/`PATCH` | `/api/v1/principals/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`. `name`, first-class identity fields, `labels`, and direct `slack_channel_permissions` are mutable on an existing record. `foreign_id` applies only when creating. |
 
-The first-class identity fields are authoritative. For compatibility, responses
-still synthesize `kind`, `slack_user_id`, `slack_channel_id`, `slack_team_id`,
-and `slack_email` in `labels`. A `console_user` response also synthesizes
-`console-user-id` and `email`. Writes may send the compatibility labels, but if
-a request sends both forms, their values must agree or the API returns `422`.
-Sending a null, empty, or whitespace-only Slack identity label clears that
-value. A null or blank `kind` is rejected, as are unknown kind values and new
-or changed malformed nonblank Slack identities. Unchanged legacy values remain
-round-trip safe during the compatibility release.
+Identity values must be sent through the first-class fields. Labels with the
+same names are ordinary metadata and do not change or mirror identity fields.
+A null or blank `kind` is rejected, as are unknown kind values and new or
+changed malformed nonblank Slack identities. Unchanged migrated values remain
+round-trip safe.
 
 See [Role assignments](#role-assignments) for attaching roles to a principal.
 

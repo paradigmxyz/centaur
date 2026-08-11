@@ -17,7 +17,7 @@ class PrincipalTest < ActiveSupport::TestCase
     assert principal.valid?
   end
 
-  test "identity fields are stored only in columns and synthesized for compatibility" do
+  test "identity fields are stored only in columns" do
     principal = Principal.create!(default_attrs(
       kind: "slack_dm",
       slack_user_id: "U0123456789",
@@ -40,22 +40,19 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_equal(
       {
         "team" => "platform",
-        Principal::SANDBOX_REPO_CACHE_LABEL => "all",
-        "kind" => "slack_dm",
-        "slack_user_id" => "U0123456789",
-        "slack_channel_id" => "D0123456789",
-        "slack_team_id" => "T0123456789",
-        "slack_email" => "ada@example.com"
+        Principal::SANDBOX_REPO_CACHE_LABEL => "all"
       },
       principal.labels_with_sandbox_capabilities
     )
   end
 
-  test "legacy identity labels are promoted into columns" do
+  test "identity-named labels remain ordinary metadata" do
     principal = Principal.create!(default_attrs(
+      kind: "slack_dm",
+      slack_user_id: "U0123456789",
       labels: {
-        "kind" => "slack_dm",
-        "slack_user_id" => "U0123456789",
+        "kind" => "custom",
+        "slack_user_id" => "custom-user",
         "slack_team_id" => "T0123456789",
         "slack_email" => "ada@example.com"
       }
@@ -64,27 +61,13 @@ class PrincipalTest < ActiveSupport::TestCase
     principal.reload
     assert_equal "slack_dm", principal.kind
     assert_equal "U0123456789", principal.slack_user_id
-    assert_equal "T0123456789", principal.slack_team_id
-    assert_equal "ada@example.com", principal.slack_email
-    assert_empty principal.labels.slice(*PrincipalIdentityLabels.labels_for(principal.kind))
+    assert_nil principal.slack_team_id
+    assert_nil principal.slack_email
+    assert_equal "custom", principal.labels["kind"]
+    assert_equal "custom-user", principal.labels["slack_user_id"]
   end
 
-  test "first-class identity fields must agree with compatibility labels" do
-    principal = Principal.new(default_attrs(
-      kind: "slack_dm",
-      slack_user_id: "U0123456789",
-      labels: {
-        "kind" => "slack_channel",
-        "slack_user_id" => "U9876543210"
-      }
-    ))
-
-    assert_not principal.valid?
-    assert_includes principal.errors[:kind], "does not agree with labels.kind"
-    assert_includes principal.errors[:slack_user_id], "does not agree with labels.slack_user_id"
-  end
-
-  test "console user identity is stored only in columns and synthesized for compatibility" do
+  test "console user identity is stored only in columns" do
     user = users(:acme_admin)
     principal = Principal.create!(default_attrs(
       kind: "console_user",
@@ -97,53 +80,8 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_equal user.id, principal.console_user_id
     assert_equal user.email, principal.console_user_email
     assert_empty principal.labels.slice("console-user-id", "email")
-    assert_equal user.oid, principal.labels_with_sandbox_capabilities["console-user-id"]
-    assert_equal user.email, principal.labels_with_sandbox_capabilities["email"]
-  end
-
-  test "legacy console user identity labels are promoted only for console users" do
-    user = users(:acme_admin)
-    console_user = Principal.create!(default_attrs(
-      labels: {
-        "kind" => "console_user",
-        "console-user-id" => user.oid,
-        "email" => user.email
-      }
-    ))
-    ordinary_user = Principal.create!(default_attrs(
-      labels: { "kind" => "user", "email" => user.email }
-    ))
-
-    assert_equal user.id, console_user.reload.console_user_id
-    assert_equal user.email, console_user.console_user_email
-    assert_empty console_user.labels.slice("console-user-id", "email")
-    assert_nil ordinary_user.reload.console_user_id
-    assert_nil ordinary_user.console_user_email
-    assert_equal user.email, ordinary_user.labels["email"]
-  end
-
-  test "blank legacy Slack identity labels clear columns" do
-    principal = Principal.create!(default_attrs(
-      kind: "slack_dm",
-      slack_user_id: "U0123456789",
-      slack_channel_id: "D0123456789",
-      slack_team_id: "T0123456789",
-      slack_email: "ada@example.com"
-    ))
-
-    principal.update!(labels: {
-      "kind" => "slack_dm",
-      "slack_user_id" => "",
-      "slack_channel_id" => "  ",
-      "slack_team_id" => nil,
-      "slack_email" => "\t"
-    })
-
-    principal.reload
-    assert_nil principal.slack_user_id
-    assert_nil principal.slack_channel_id
-    assert_nil principal.slack_team_id
-    assert_nil principal.slack_email
+    assert_nil principal.labels_with_sandbox_capabilities["console-user-id"]
+    assert_nil principal.labels_with_sandbox_capabilities["email"]
   end
 
   test "kind accepts only known values" do
