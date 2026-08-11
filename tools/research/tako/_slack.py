@@ -55,9 +55,7 @@ Verified against production on 2026-08-11:
 
 from __future__ import annotations
 
-import os
 import re
-from dataclasses import dataclass
 from typing import Any, Literal
 
 from ._theme import light_mode_url
@@ -78,51 +76,7 @@ MAX_FALLBACK_TEXT_CHARS = 300
 #: interpolated into any URL.
 PUB_ID = re.compile(r"^[A-Za-z0-9_-]{4,64}$")
 
-#: `CENTAUR_THREAD_KEY`, e.g. `slack:T0123ABC:C0456DEF:1754870000.001200`. The
-#: team segment is optional; non-Slack sources (Discord, Teams, direct API) do
-#: not match and yield no target.
-THREAD_KEY = re.compile(
-    r"^(?P<source>[A-Za-z][A-Za-z0-9_.-]*):"
-    r"(?:(?P<team>T[A-Z0-9]+):)?"
-    r"(?P<channel>[CDG][A-Z0-9]+):"
-    r"(?P<thread_ts>\d{10}\.\d{1,6})$"
-)
-
 Layout = Literal["container", "flat"]
-
-
-@dataclass(frozen=True)
-class ThreadTarget:
-    """Where in Slack a card should be posted."""
-
-    channel: str
-    thread_ts: str
-    team: str | None = None
-
-
-def thread_target(thread_key: str | None = None) -> ThreadTarget | None:
-    """Resolve the Slack thread the current sandbox turn belongs to.
-
-    Reads `CENTAUR_THREAD_KEY` when no key is given. Returns None when the key is
-    absent, malformed, or belongs to a non-Slack source, so callers can degrade
-    to printing the payload instead of failing.
-    """
-    # CENTAUR_THREAD_KEY is thread identity, not a secret: the session runtime
-    # sets it on the sandbox spec, so it is a plain env read like the proxy and
-    # CA-bundle lookups in client.py.
-    if thread_key is None:
-        thread_key = os.environ.get("CENTAUR_THREAD_KEY", "")  # noqa: TID251
-    raw = thread_key.strip()
-    if not raw:
-        return None
-    match = THREAD_KEY.match(raw)
-    if not match or match.group("source").lower() != "slack":
-        return None
-    return ThreadTarget(
-        channel=match.group("channel"),
-        thread_ts=match.group("thread_ts"),
-        team=match.group("team"),
-    )
 
 
 def cards_from_payload(payload: Any) -> list[dict[str, Any]]:

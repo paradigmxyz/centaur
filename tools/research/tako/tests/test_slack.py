@@ -8,7 +8,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 from tools.research.tako._slack import (
     MAX_CONTAINER_CHILDREN,
     MAX_TITLE_CHARS,
-    ThreadTarget,
     card_blocks,
     card_child_blocks,
     card_message,
@@ -17,7 +16,6 @@ from tools.research.tako._slack import (
     card_urls,
     cards_from_payload,
     pub_id_of,
-    thread_target,
 )
 
 PUB = "m-p-JX5qxsBStJgywrqI"
@@ -31,35 +29,6 @@ CARD = {
     "embed_url": f"https://tako.com/embed/{PUB}/",
     "sources": [{"source_name": "Fiscal.ai", "source_index": "data"}],
 }
-
-
-class TestThreadTarget:
-    def test_parses_a_slack_thread_key_with_team(self):
-        assert thread_target("slack:T0123ABC:C0456DEF:1754870000.001200") == ThreadTarget(
-            channel="C0456DEF", thread_ts="1754870000.001200", team="T0123ABC"
-        )
-
-    def test_parses_a_slack_thread_key_without_team(self):
-        target = thread_target("slack:C0456DEF:1754870000.001200")
-        assert target == ThreadTarget(channel="C0456DEF", thread_ts="1754870000.001200", team=None)
-
-    def test_accepts_dm_and_group_channels(self):
-        for channel in ("D0456DEF", "G0456DEF"):
-            assert thread_target(f"slack:{channel}:1754870000.001200").channel == channel
-
-    def test_rejects_non_slack_sources(self):
-        assert thread_target("discord:C0456DEF:1754870000.001200") is None
-        assert thread_target("teams:C0456DEF:1754870000.001200") is None
-
-    def test_rejects_malformed_or_absent_keys(self):
-        for key in ("", "   ", "slack:", "slack:C0456DEF", "slack:C0456DEF:nope", "garbage"):
-            assert thread_target(key) is None
-
-    def test_reads_the_environment_when_no_key_is_given(self, monkeypatch):
-        monkeypatch.setenv("CENTAUR_THREAD_KEY", "slack:C0456DEF:1754870000.001200")
-        assert thread_target().channel == "C0456DEF"
-        monkeypatch.delenv("CENTAUR_THREAD_KEY")
-        assert thread_target() is None
 
 
 class TestCardsFromPayload:
