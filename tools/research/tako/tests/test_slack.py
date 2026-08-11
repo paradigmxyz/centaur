@@ -153,7 +153,7 @@ class TestBackendConsistency:
         assert body is not None
         assert body["blocks"][0]["type"] == "container"
         image = body["blocks"][0]["child_blocks"][0]
-        assert image["image_url"] == MCP_PRE_187["image_url"]
+        assert image["image_url"] == f"{MCP_PRE_187['image_url']}?dark_mode=false"
 
     def test_a_response_with_neither_cards_nor_pointer_renders_nothing(self):
         assert cards_from_payload({"cards": [], "web_results": [], "meta": {}}) == []
@@ -183,20 +183,23 @@ class TestPubId:
 
 
 class TestCardUrls:
+    # Every image URL below is pinned to `dark_mode=false`: a Slack message
+    # renders on the reader's own theme, so the chart is fixed to light rather
+    # than left to Tako's dark default. See `_theme.py`.
     def test_prefers_the_urls_the_api_returned(self):
         card = {**CARD, "image_url": f"https://tako.com/api/v1/image/{PUB}/?dark_mode=true"}
         image, webpage = card_urls(card)
-        assert image == f"https://tako.com/api/v1/image/{PUB}/?dark_mode=true"
+        assert image == f"https://tako.com/api/v1/image/{PUB}/?dark_mode=false"
         assert webpage == f"https://tako.com/card/{PUB}/"
 
     def test_builds_urls_when_the_card_omits_them(self):
         image, webpage = card_urls({"card_id": PUB})
-        assert image == f"https://tako.com/api/v1/image/{PUB}/"
+        assert image == f"https://tako.com/api/v1/image/{PUB}/?dark_mode=false"
         assert webpage == f"https://tako.com/card/{PUB}/"
 
     def test_replaces_a_non_tako_url(self):
         image, webpage = card_urls({"card_id": PUB, "image_url": "https://evil.example/x.png"})
-        assert image == f"https://tako.com/api/v1/image/{PUB}/"
+        assert image == f"https://tako.com/api/v1/image/{PUB}/?dark_mode=false"
         assert webpage == f"https://tako.com/card/{PUB}/"
 
     def test_returns_none_without_a_usable_id(self):
@@ -213,7 +216,7 @@ class TestChildBlocks:
 
     def test_image_carries_alt_text(self):
         image = card_child_blocks(CARD)[0]
-        assert image["image_url"] == CARD["image_url"]
+        assert image["image_url"] == f"{CARD['image_url']}?dark_mode=false"
         assert image["alt_text"] == CARD["title"]
 
     def test_headline_reuses_the_card_description_verbatim(self):
@@ -225,10 +228,14 @@ class TestChildBlocks:
         assert context["elements"][0]["text"] == CARD["description"]
 
     def test_uses_takos_own_rendered_image_never_a_rebuilt_one(self):
-        # The card's image_url is the authoritative render; only whitespace and
-        # length are ever touched anywhere in this module.
+        # The card's image_url is the authoritative render: this module never
+        # points at a different chart, and never rescales or re-renders one. The
+        # only thing it may rewrite is the `dark_mode` theme parameter, so the
+        # host, path, and card id must survive untouched.
         card = {**CARD, "image_url": f"https://tako.com/api/v1/image/{PUB}/?dark_mode=true"}
-        assert card_child_blocks(card)[0]["image_url"] == card["image_url"]
+        rendered = card_child_blocks(card)[0]["image_url"]
+        assert rendered.split("?")[0] == card["image_url"].split("?")[0]
+        assert rendered == f"https://tako.com/api/v1/image/{PUB}/?dark_mode=false"
 
     def test_omits_the_headline_when_there_is_no_description(self):
         card = {key: value for key, value in CARD.items() if key != "description"}

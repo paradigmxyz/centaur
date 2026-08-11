@@ -45,9 +45,12 @@ Verified against production on 2026-08-11:
 - `/api/v1/image/<pub_id>/` answers anonymously (200 image/png), which is what
   lets Slack's image fetcher retrieve it.
 - Images are 2400px wide, so they stay sharp on retina displays.
-- The image already renders dark. `?dark_mode=true` returns byte-identical
-  output, so this module passes the card's own `image_url` through untouched
-  rather than appending a parameter that does nothing.
+- The endpoint renders dark by default, and `?dark_mode=true` returns
+  byte-identical output. `?dark_mode=false` returns a genuinely light image, so
+  this module pins every chart it embeds to light -- a Slack message renders on
+  the reader's own theme, and a dark chart in a light thread reads as a black
+  box. Note this means the parameter must be *added* to an unparameterized URL,
+  not merely overwritten. See `_theme.py`.
 """
 
 from __future__ import annotations
@@ -56,6 +59,8 @@ import os
 import re
 from dataclasses import dataclass
 from typing import Any, Literal
+
+from ._theme import light_mode_url
 
 TAKO_HOST = "tako.com"
 
@@ -184,7 +189,12 @@ def card_urls(card: dict[str, Any]) -> tuple[str, str] | None:
         image = f"https://{TAKO_HOST}/api/v1/image/{pub_id}/"
     if not _is_tako_https(webpage):
         webpage = f"https://{TAKO_HOST}/card/{pub_id}/"
-    return image, webpage
+    # Pin the embedded chart to light here as well as at the response boundary:
+    # a card built from a bare pub id never went through that pass, and an
+    # unparameterized image URL renders dark. Idempotent, so the already-light
+    # URLs a search returns come through untouched. `webpage` is the link out to
+    # tako.com and keeps the visitor's own theme.
+    return light_mode_url(image), webpage
 
 
 def _is_tako_https(url: str) -> bool:

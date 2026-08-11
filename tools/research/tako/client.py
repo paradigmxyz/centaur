@@ -20,6 +20,9 @@ key's value, since inside a sandbox the tool only holds placeholders):
 Responses carry `meta.backend` ("tako:sdk" | "tako:mcp") and
 `meta.partial_failures` for knobs a backend cannot honor.
 
+Card renderings leave here pinned to light mode regardless of backend; see
+`_theme.py` for why, and for the server-side gap that makes it a no-op today.
+
 API docs: https://docs.tako.com
 """
 
@@ -61,6 +64,7 @@ from ._coverage import (
     unavailable_match,
 )
 from ._mcp import MCP_URL, TakoMcpBackend
+from ._theme import apply_light_mode
 
 logger = logging.getLogger(__name__)
 
@@ -346,15 +350,19 @@ class TakoClient:
         _validate_source_args(data_count, web_count, node_ids, strict)
 
         def via_mcp() -> dict:
-            return self._mcp.search(
-                query,
-                effort=effort,
-                data_count=data_count,
-                web_count=web_count,
-                node_ids=node_ids,
-                strict=strict,
-                country_code=country_code,
-                locale=locale,
+            # Wrapped here rather than at each call site so the keyless path and
+            # the 401-fallback path are pinned to light by one edit.
+            return apply_light_mode(
+                self._mcp.search(
+                    query,
+                    effort=effort,
+                    data_count=data_count,
+                    web_count=web_count,
+                    node_ids=node_ids,
+                    strict=strict,
+                    country_code=country_code,
+                    locale=locale,
+                )
             )
 
         if self._mcp is not None:
@@ -367,9 +375,11 @@ class TakoClient:
             locale=locale,
         )
         return self._with_fallback(
-            lambda: _with_meta(
-                _add_search_markdown(
-                    _dump(self._client._api.search(request, _request_timeout=self._timeout))
+            lambda: apply_light_mode(
+                _with_meta(
+                    _add_search_markdown(
+                        _dump(self._client._api.search(request, _request_timeout=self._timeout))
+                    )
                 )
             ),
             via_mcp,
@@ -395,15 +405,17 @@ class TakoClient:
         _validate_source_args(data_count, web_count, node_ids, strict)
 
         def via_mcp() -> dict:
-            return self._mcp.answer(
-                query,
-                effort=effort,
-                data_count=data_count,
-                web_count=web_count,
-                node_ids=node_ids,
-                strict=strict,
-                country_code=country_code,
-                locale=locale,
+            return apply_light_mode(
+                self._mcp.answer(
+                    query,
+                    effort=effort,
+                    data_count=data_count,
+                    web_count=web_count,
+                    node_ids=node_ids,
+                    strict=strict,
+                    country_code=country_code,
+                    locale=locale,
+                )
             )
 
         if self._mcp is not None:
@@ -416,8 +428,8 @@ class TakoClient:
             locale=locale,
         )
         return self._with_fallback(
-            lambda: _with_meta(
-                _dump(self._client._api.answer(request, _request_timeout=self._timeout))
+            lambda: apply_light_mode(
+                _with_meta(_dump(self._client._api.answer(request, _request_timeout=self._timeout)))
             ),
             via_mcp,
         )
