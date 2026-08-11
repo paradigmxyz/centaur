@@ -1,15 +1,14 @@
 """CLI for the Tako API."""
 
-from dotenv import load_dotenv
-
-load_dotenv()
-
 import json
 
 import typer
+from dotenv import load_dotenv
 from rich.console import Console
 
 from ._coverage import NER_LABELS, NODE_TYPES, TOOL_COMMAND
+
+load_dotenv()
 
 app = typer.Typer(
     name=TOOL_COMMAND,
