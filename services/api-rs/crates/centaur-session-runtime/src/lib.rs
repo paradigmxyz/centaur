@@ -41,6 +41,7 @@ use futures_util::{FutureExt, SinkExt, Stream, StreamExt, future::BoxFuture, str
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use sqlx::PgPool;
 use thiserror::Error;
 use tokio::{
     io,
@@ -874,6 +875,14 @@ impl SessionRuntime {
             .as_ref()
             .map(|personas| personas.summaries())
             .unwrap_or_default()
+    }
+
+    /// The Postgres pool backing this runtime's session store. Exposed so
+    /// callers that already share this runtime's store (e.g. workflow-tier
+    /// agent turns) can persist their own rows against the same database
+    /// without opening a second connection pool.
+    pub fn pool(&self) -> &PgPool {
+        self.store.pool()
     }
 
     pub async fn session_title(
