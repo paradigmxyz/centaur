@@ -54,6 +54,13 @@ class SkillTest < ActiveSupport::TestCase
     assert_includes skill.errors[:content], "can't be blank"
   end
 
+  test "reserves the OID namespace for skill IDs" do
+    skill = users(:member_user).skills.new(attributes(name: "skl_example"))
+
+    assert_not skill.valid?
+    assert_includes skill.errors[:name], "is invalid"
+  end
+
   test "enforces globally unique active names" do
     duplicate = users(:member_user).skills.new(attributes(name: skills(:member_private).name))
     assert_not duplicate.valid?

@@ -1479,7 +1479,7 @@ Returns `201`. The plaintext `token` is included **only** in this create respons
 
 Skills are mutable `SKILL.md` documents authored by signed-in users in Console. There is no revision or draft resource: updating a public skill changes the document returned to agents immediately. Skill IDs use the `skl_` prefix.
 
-Console stores and validates `name`, `description`, and Markdown `instructions` as separate fields, then generates `SKILL.md`. Active skill names are globally unique, use lowercase letters, numbers, and hyphens, and are limited to 64 characters. Archived names may be reused. Generated documents are limited to 64 KiB.
+Console stores and validates `name`, `description`, and Markdown `instructions` as separate fields, then generates `SKILL.md`. Active skill names are globally unique, use lowercase letters, numbers, and hyphens, and are limited to 64 characters. Because names cannot contain underscores, they cannot conflict with `skl_` OIDs. Archived names may be reused. Generated documents are limited to 64 KiB.
 
 ### Sandbox Operations
 

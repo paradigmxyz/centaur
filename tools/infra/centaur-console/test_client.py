@@ -5,6 +5,7 @@ from cli import (
     _merge_skill_results,
     _parse_builtin,
     _skill_document,
+    skills_read,
 )
 from client import (
     SANDBOX_OAUTH_APPS_PATH,
@@ -168,21 +169,45 @@ def test_builtin_skill_parsing_and_catalog_metadata(tmp_path):
     parsed = _parse_builtin(skill_file)
 
     assert parsed is not None
-    assert parsed["ref"] == "builtin:incident-triage"
+    assert parsed["name"] == "incident-triage"
+    assert "ref" not in parsed
     assert len(parsed["checksum"]) == 64
     assert _catalog_metadata(parsed) == {
         key: value for key, value in parsed.items() if key not in {"content", "path"}
     }
 
 
+def test_builtin_skill_name_cannot_conflict_with_console_oid(tmp_path):
+    skill_dir = tmp_path / "invalid"
+    skill_dir.mkdir()
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text(
+        "---\nname: skl_123\ndescription: Looks like an OID.\n---\n\nDo it.\n",
+        encoding="utf-8",
+    )
+
+    assert _parse_builtin(skill_file) is None
+
+
+def test_skills_read_accepts_builtin_name(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "cli._builtin_skills",
+        lambda: [{"name": "incident-response", "content": "# Incident Response\n"}],
+    )
+
+    skills_read("incident-response", json_output=False, markdown_output=False)
+
+    assert capsys.readouterr().out == "# Incident Response\n"
+
+
 def test_catalog_merge_interleaves_builtin_and_remote_results():
-    builtin = [{"ref": "builtin:one"}, {"ref": "builtin:two"}]
+    builtin = [{"name": "one"}, {"name": "two"}]
     remote = [{"id": "skl_one"}, {"id": "skl_two"}]
 
-    assert [item.get("id") or item.get("ref") for item in _merge_skill_results(builtin, remote, limit=3)] == [
-        "builtin:one",
+    assert [item.get("id") or item.get("name") for item in _merge_skill_results(builtin, remote, limit=3)] == [
+        "one",
         "skl_one",
-        "builtin:two",
+        "two",
     ]
 
 

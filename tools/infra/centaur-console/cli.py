@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,9 @@ skills_app = typer.Typer(
     help="Discover builtin and Console-authored skills available to this agent",
     no_args_is_help=True,
 )
+
+SKILL_NAME_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+MAX_SKILL_NAME_LENGTH = 64
 
 
 def get_client(
@@ -116,8 +120,9 @@ def _parse_builtin(path: Path) -> dict[str, Any] | None:
         return None
     name = str(metadata.get("name") or path.parent.name).strip()
     description = str(metadata.get("description") or "").strip()
+    if len(name) > MAX_SKILL_NAME_LENGTH or not SKILL_NAME_PATTERN.fullmatch(name):
+        return None
     return {
-        "ref": f"builtin:{path.parent.name}",
         "name": name,
         "description": description,
         "visibility": "builtin",
@@ -135,7 +140,7 @@ def _builtin_skills() -> list[dict[str, Any]]:
         for skill_file in sorted(directory.glob("*/SKILL.md")):
             parsed = _parse_builtin(skill_file)
             if parsed:
-                skills[parsed["ref"]] = parsed
+                skills[parsed["name"]] = parsed
     return sorted(skills.values(), key=lambda item: str(item["name"]))
 
 
@@ -168,7 +173,7 @@ def _validate_output_flags(json_output: bool, markdown_output: bool) -> None:
 
 
 def _skill_identifier(skill: dict[str, Any]) -> str:
-    return str(skill.get("id") or skill.get("ref") or "")
+    return str(skill.get("id") or skill.get("name") or "")
 
 
 def _skill_document(skill: dict[str, Any]) -> str:
@@ -208,7 +213,7 @@ def _print_skill_results(
         print(json.dumps({"data": results}, indent=2, default=str))
         return
     if markdown_output:
-        print("| ID | Name | Visibility | Description |")
+        print("| Identifier | Name | Visibility | Description |")
         print("| --- | --- | --- | --- |")
         for skill in results:
             description = str(skill.get("description") or "").replace("|", "\\|")
@@ -216,7 +221,7 @@ def _print_skill_results(
         return
 
     table = Table(show_header=True, header_style="bold")
-    table.add_column("ID", style="cyan", overflow="fold")
+    table.add_column("Identifier", style="cyan", overflow="fold")
     table.add_column("Name", style="bold")
     table.add_column("Scope")
     table.add_column("Description", overflow="fold")
@@ -282,21 +287,19 @@ def skills_list(
 
 @skills_app.command("read")
 def skills_read(
-    ref: str = typer.Argument(..., help="Builtin reference or Console skill ID"),
+    identifier: str = typer.Argument(..., help="Builtin skill name or Console skill OID"),
     json_output: bool = typer.Option(False, "--json", help="Output JSON"),
     markdown_output: bool = typer.Option(False, "--markdown", help="Output the SKILL.md content"),
 ) -> None:
     """Read the complete current SKILL.md for one skill."""
     _validate_output_flags(json_output, markdown_output)
-    if ref.startswith("builtin:"):
-        result = next((skill for skill in _builtin_skills() if skill["ref"] == ref), None)
-        if result is None:
-            raise typer.BadParameter(f"unknown builtin skill: {ref}")
-    elif ref.startswith("skl_"):
+    if identifier.startswith("skl_"):
         with get_client() as client:
-            result = client.skill_read(ref)
+            result = client.skill_read(identifier)
     else:
-        raise typer.BadParameter("ref must be a builtin: reference or skl_ Console skill ID")
+        result = next((skill for skill in _builtin_skills() if skill["name"] == identifier), None)
+        if result is None:
+            raise typer.BadParameter(f"unknown builtin skill name: {identifier}")
 
     if json_output:
         print(json.dumps({"data": result}, indent=2, default=str))
