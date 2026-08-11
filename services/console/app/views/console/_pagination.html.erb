@@ -1,6 +1,12 @@
-<%# Prev/next pager footer. Locals: page, total_pages, total_count, unit.
+<%# Prev/next pager footer. Locals: page, total_pages, total_count, unit,
+    optional page_param (defaults to "page") and anchor.
     Preserves the current query params (filters) while swapping the page. %>
-<% page_url = ->(n) { "#{request.path}?#{request.query_parameters.merge("page" => n).to_query}" } %>
+<% page_param = local_assigns.fetch(:page_param, "page").to_s %>
+<% anchor = local_assigns[:anchor].presence %>
+<% page_url = ->(n) do
+     query = request.query_parameters.merge(page_param => n).to_query
+     "#{request.path}?#{query}#{"##{anchor}" if anchor}"
+   end %>
 <div class="flex items-center justify-between gap-4 border-t border-ink-700 px-5 py-3 text-xs text-zinc-500">
   <div>
     <%= number_with_delimiter(total_count) %> <%= unit.pluralize(total_count) %>
