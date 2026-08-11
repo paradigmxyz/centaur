@@ -732,6 +732,74 @@ describe('slackbotv2', () => {
     )
   })
 
+  it('clears a sticky model rejected by the harness and accepts a later override', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({ state: sharedState })
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('Thread default context.')
+    const runTurn = async (eventId: string, text: string, terminalEvent: string, data: unknown) => {
+      const mention = await postUserMessage(`<@${BOT_USER_ID}> ${text}`, parent.ts)
+      const waits: Promise<unknown>[] = []
+      const response = await bot.app.request(
+        '/api/webhooks/slack',
+        signedSlackEvent({
+          event_id: eventId,
+          event: {
+            type: 'app_mention',
+            user: USER_ID,
+            channel: CHANNEL_ID,
+            team: TEAM_ID,
+            ts: mention.ts,
+            thread_ts: parent.ts,
+            text: `<@${BOT_USER_ID}> ${text}`
+          }
+        }),
+        {},
+        waitUntilContext(waits)
+      )
+      expect(response.status).toBe(200)
+      await waitFor(() => codexApi.eventRequests.length === codexApi.executes.length, 3000)
+      codexApi.emitSessionEvent(threadKey(parent.ts), terminalEvent, data)
+      await Promise.all(waits)
+    }
+
+    await runTurn('Ev-invalid-sticky-model', '--model 5.6-sol first', 'session.execution_failed', {
+      error: JSON.stringify({
+        type: 'invalid_request_error',
+        code: 'model_not_found',
+        message: "The requested model '5.6-sol' does not exist.",
+        param: 'model'
+      })
+    })
+    expect(
+      await sharedState.get<Record<string, unknown>>(`thread-state:${threadKey(parent.ts)}`)
+    ).toEqual(expect.objectContaining({ model: null }))
+
+    await runTurn(
+      'Ev-after-invalid-sticky-model',
+      'continue without flags',
+      'session.execution_completed',
+      { result_text: 'Recovered on the default model.' }
+    )
+    await runTurn(
+      'Ev-replace-invalid-sticky-model',
+      '--model gpt-5.4 use this model',
+      'session.execution_completed',
+      { result_text: 'Accepted the replacement model.' }
+    )
+
+    const models = codexApi.executes.map(execute => {
+      const input = JSON.parse(execute.body.input_lines.at(-1) ?? '{}') as Record<string, unknown>
+      return input.model
+    })
+    expect(models).toEqual(['5.6-sol', undefined, 'gpt-5.4'])
+    expect(
+      await sharedState.get<Record<string, unknown>>(`thread-state:${threadKey(parent.ts)}`)
+    ).toEqual(expect.objectContaining({ model: 'gpt-5.4' }))
+  })
+
   it('keeps a top-level harness flag pinned when the LLM strategy guesses another harness', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
