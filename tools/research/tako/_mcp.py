@@ -157,6 +157,7 @@ class TakoMcpBackend:
             "cards": structured.get("cards", []),
             "web_results": structured.get("web_results", []),
             "request_id": structured.get("request_id"),
+            **_top_card_pointer(structured),
             "meta": {"backend": "tako:mcp", "partial_failures": partial_failures},
         }
 
@@ -313,6 +314,21 @@ class TakoMcpBackend:
 
 def _drop_none(mapping: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in mapping.items() if v is not None}
+
+
+#: Top-level pointer to the response's lead card, which the hosted tool returns
+#: alongside `cards`. The SDK path passes the whole /v3/search body through, so
+#: it keeps these; this backend rebuilds its response dict and would otherwise
+#: drop them, leaving the free tier unable to render a chart that the paid tier
+#: can. Kept so both backends expose the same pointer, and so a response whose
+#: `cards` are empty (the pre-187 shape) still names its chart.
+TOP_CARD_POINTER_KEYS = ("pub_id", "image_url", "embed_url", "webpage_url")
+
+
+def _top_card_pointer(structured: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: structured[key] for key in TOP_CARD_POINTER_KEYS if structured.get(key) is not None
+    }
 
 
 def _raise_for_auth(response: httpx.Response) -> None:

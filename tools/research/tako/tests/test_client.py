@@ -708,6 +708,32 @@ class TestMcpBackend:
         assert call["arguments"]["sources"] == ["data"]
         assert call["arguments"]["effort"] == "instant"
 
+    def test_search_keeps_the_top_level_card_pointer(self):
+        # The SDK path returns the whole /v3/search body, which carries a
+        # top-level pointer to the lead card. This backend rebuilds its response
+        # dict, so the pointer has to be copied through or the free tier loses a
+        # chart the paid tier keeps (see _mcp._top_card_pointer).
+        structured = {
+            "cards": [{"card_id": "m-p-abc123", "title": "T"}],
+            "web_results": [],
+            "request_id": "r",
+            "pub_id": "m-p-abc123",
+            "image_url": "https://tako.com/api/v1/image/m-p-abc123/",
+            "embed_url": "https://tako.com/embed/m-p-abc123/",
+        }
+        backend = TakoMcpBackend(transport=_mcp_transport({"tako_search": (structured, "md")}))
+        result = backend.search("nvidia revenue")
+        assert result["pub_id"] == "m-p-abc123"
+        assert result["image_url"] == "https://tako.com/api/v1/image/m-p-abc123/"
+        assert result["embed_url"] == "https://tako.com/embed/m-p-abc123/"
+
+    def test_search_omits_the_pointer_when_the_server_sends_none(self):
+        structured = {"cards": [], "web_results": [], "request_id": "r"}
+        backend = TakoMcpBackend(transport=_mcp_transport({"tako_search": (structured, "md")}))
+        result = backend.search("nvidia revenue")
+        for key in ("pub_id", "image_url", "embed_url", "webpage_url"):
+            assert key not in result
+
     def test_search_works_pre_187_shape(self):
         # Before tako-mcp#187, structuredContent lacks cards and the rows live
         # in the text. The backend must still return usable content (the
