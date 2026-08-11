@@ -31,6 +31,12 @@ def in_slack_thread(monkeypatch):
 
 
 @pytest.fixture
+def no_thread_env(monkeypatch):
+    """A warm-pool sandbox: no thread identity in the environment."""
+    monkeypatch.delenv("CENTAUR_THREAD_KEY", raising=False)
+
+
+@pytest.fixture
 def posted(monkeypatch):
     """Capture what would have been posted instead of calling Slack."""
     sent = {}
@@ -44,22 +50,27 @@ def posted(monkeypatch):
 
 
 class TestHint:
-    def test_hint_appears_in_a_slack_thread_with_a_card(self, in_slack_thread, capsys):
+    def test_hint_appears_with_a_card_and_a_known_destination(self, in_slack_thread, capsys):
         cli.emit_or_reject(lambda: RESULT)
         note = _emitted(capsys)["slack_card"]
         assert note["posted"] is False
         assert "--slack-card" in note["hint"]
         assert f"{TOOL_COMMAND} slack-card {PUB} --post" in note["hint"]
 
-    def test_no_hint_outside_a_slack_thread(self, monkeypatch, capsys):
-        monkeypatch.delenv("CENTAUR_THREAD_KEY", raising=False)
+    def test_hint_still_appears_without_a_destination(self, no_thread_env, capsys):
+        # A warm-pool sandbox has no CENTAUR_THREAD_KEY, which is the normal case.
+        # Suppressing the hint here would mean never showing it at all, so it is
+        # shown conditionally and names the options the caller must pass.
         cli.emit_or_reject(lambda: RESULT)
-        assert "slack_card" not in _emitted(capsys)
+        hint = _emitted(capsys)["slack_card"]["hint"]
+        assert "if this turn is in a Slack thread" in hint
+        assert f"--channel <{cli.SESSION_CONTEXT_CHANNEL}>" in hint
+        assert f"--thread <{cli.SESSION_CONTEXT_THREAD}>" in hint
 
-    def test_no_hint_for_a_non_slack_source(self, monkeypatch, capsys):
+    def test_a_non_slack_thread_key_falls_back_to_the_generic_hint(self, monkeypatch, capsys):
         monkeypatch.setenv("CENTAUR_THREAD_KEY", "discord:C0456DEF:1754870000.001200")
         cli.emit_or_reject(lambda: RESULT)
-        assert "slack_card" not in _emitted(capsys)
+        assert "if this turn is in a Slack thread" in _emitted(capsys)["slack_card"]["hint"]
 
     def test_no_hint_when_there_is_no_card(self, in_slack_thread, capsys):
         cli.emit_or_reject(lambda: WEB_ONLY)
@@ -70,6 +81,40 @@ class TestHint:
         emitted = _emitted(capsys)
         assert emitted["cards"] == RESULT["cards"]
         assert emitted["meta"] == RESULT["meta"]
+
+
+class TestExplicitDestination:
+    """The real path: the caller passes the IDs from the turn's prompt."""
+
+    def test_channel_and_thread_options_target_the_post(self, no_thread_env, posted, capsys):
+        cli.emit_or_reject(
+            lambda: RESULT,
+            slack_card=True,
+            channel="C0BL2RK9329",
+            thread="1786469053.584729",
+        )
+        note = _emitted(capsys)["slack_card"]
+        assert note["posted"] is True
+        body = posted["body"]
+        assert body["channel"] == "C0BL2RK9329"
+        assert body["thread_ts"] == "1786469053.584729"
+
+    def test_explicit_channel_overrides_the_environment(self, in_slack_thread, posted, capsys):
+        cli.emit_or_reject(lambda: RESULT, slack_card=True, channel="C_OVERRIDE")
+        assert posted["body"]["channel"] == "C_OVERRIDE"
+
+    def test_channel_without_thread_posts_to_the_channel(self, no_thread_env, posted, capsys):
+        cli.emit_or_reject(lambda: RESULT, slack_card=True, channel="C0BL2RK9329")
+        body = posted["body"]
+        assert body["channel"] == "C0BL2RK9329"
+        assert "thread_ts" not in body
+
+    def test_post_without_a_destination_explains_what_to_pass(self, no_thread_env, capsys):
+        cli.emit_or_reject(lambda: RESULT, slack_card=True)
+        note = _emitted(capsys)["slack_card"]
+        assert note["posted"] is False
+        assert cli.SESSION_CONTEXT_CHANNEL in note["error"]
+        assert cli.SESSION_CONTEXT_THREAD in note["error"]
 
 
 class TestSlackCardFlag:
@@ -103,14 +148,13 @@ class TestSlackCardFlag:
         assert emitted["slack_card"]["posted"] is False
         assert "not_in_channel" in emitted["slack_card"]["error"]
 
-    def test_the_flag_is_inert_outside_a_slack_thread(self, monkeypatch, capsys):
-        monkeypatch.delenv("CENTAUR_THREAD_KEY", raising=False)
+    def test_the_flag_does_not_post_without_a_destination(self, no_thread_env, monkeypatch, capsys):
         monkeypatch.setattr(
             "tools.research.tako._slack.post_message",
-            lambda *a, **k: pytest.fail("must not post without a Slack thread"),
+            lambda *a, **k: pytest.fail("must not post without a destination"),
         )
         cli.emit_or_reject(lambda: RESULT, slack_card=True)
-        assert "slack_card" not in _emitted(capsys)
+        assert _emitted(capsys)["slack_card"]["posted"] is False
 
     def test_the_flag_does_nothing_for_web_only_results(self, in_slack_thread, monkeypatch, capsys):
         monkeypatch.setattr(

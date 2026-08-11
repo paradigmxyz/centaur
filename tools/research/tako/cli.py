@@ -59,7 +59,24 @@ def emit(data) -> None:
     print(json.dumps(data, indent=2, ensure_ascii=False, default=str))
 
 
-def emit_or_reject(call, *, slack_card: bool = False, flat: bool = False) -> None:
+# The prompt names the Slack destination for the turn under these keys, the same
+# ones the `slack upload` example uses. A sandbox does NOT carry the thread in
+# its environment: warm-pool pods are started before any thread claims them and
+# pod env cannot be changed afterwards, so CENTAUR_THREAD_KEY is unset in
+# practice. The caller passes the destination; env is only a fallback for a
+# dedicated sandbox that happens to have it.
+SESSION_CONTEXT_CHANNEL = "session_context.slack.channel_id"
+SESSION_CONTEXT_THREAD = "session_context.slack.thread_ts"
+
+
+def emit_or_reject(
+    call,
+    *,
+    slack_card: bool = False,
+    flat: bool = False,
+    channel: str | None = None,
+    thread: str | None = None,
+) -> None:
     """Run a client call and print its result.
 
     The client pre-validates option contracts (enum choices, count ranges,
@@ -67,10 +84,10 @@ def emit_or_reject(call, *, slack_card: bool = False, flat: bool = False) -> Non
     MCP tier raises McpAuthRequired/McpRateLimited with actionable messages.
     Surface all of these as one-line CLI errors instead of tracebacks.
 
-    When the result carries a card and the turn is in a Slack thread, the
-    payload gains a `slack_card` entry: the post outcome with `slack_card=True`,
-    otherwise a hint naming the command that renders it. The result is printed
-    either way, because a failed post must not lose the data that was retrieved.
+    When the result carries a card, the payload gains a `slack_card` entry: the
+    post outcome with `slack_card=True`, otherwise a hint naming the command that
+    renders it. The result is printed either way, because a failed post must not
+    lose the data that was retrieved.
     """
     from ._mcp import McpAuthRequired, McpRateLimited
 
@@ -83,17 +100,37 @@ def emit_or_reject(call, *, slack_card: bool = False, flat: bool = False) -> Non
         raise typer.Exit(1) from exc
 
     if isinstance(payload, dict):
-        note = _slack_card_note(payload, post=slack_card, flat=flat)
+        note = _slack_card_note(payload, post=slack_card, flat=flat, channel=channel, thread=thread)
         if note:
             payload = {**payload, "slack_card": note}
     emit(payload)
 
 
-def _slack_card_note(payload: dict, *, post: bool, flat: bool) -> dict | None:
-    """Post the lead card, or hint at how to, for a Slack turn.
+def _slack_destination(channel: str | None, thread: str | None):
+    """The channel/thread to post into: explicit values first, then the env key.
 
-    Returns None outside a Slack thread and when the result has no renderable
-    card, so non-Slack surfaces and web-only results stay unchanged.
+    Returns None when neither is available, which is the normal case in a
+    warm-pool sandbox and is why the hint tells the caller to pass them.
+    """
+    from ._slack import ThreadTarget, thread_target
+
+    if channel:
+        return ThreadTarget(channel=channel, thread_ts=thread or "")
+    target = thread_target()
+    if target is None:
+        return None
+    return ThreadTarget(channel=target.channel, thread_ts=thread or target.thread_ts)
+
+
+def _slack_card_note(
+    payload: dict, *, post: bool, flat: bool, channel: str | None, thread: str | None
+) -> dict | None:
+    """Post the lead card, or hint at how to.
+
+    Returns None when the result has no renderable card, so web-only results stay
+    unchanged. It cannot tell which chat surface the turn belongs to (the sandbox
+    is not told), so the hint is phrased conditionally rather than suppressed,
+    which would mean never showing it at all.
     """
     from ._slack import (
         SlackPostError,
@@ -101,29 +138,43 @@ def _slack_card_note(payload: dict, *, post: bool, flat: bool) -> dict | None:
         cards_from_payload,
         post_message,
         pub_id_of,
-        thread_target,
     )
 
-    target = thread_target()
-    if target is None:
-        return None
     cards = cards_from_payload(payload)
     if not cards:
         return None
+    pub_id = pub_id_of(cards[0])
+    target = _slack_destination(channel, thread)
 
     if not post:
+        if target is None:
+            hint = (
+                "if this turn is in a Slack thread, show this chart with: "
+                f"{TOOL_COMMAND} slack-card {pub_id} --post "
+                f"--channel <{SESSION_CONTEXT_CHANNEL}> --thread <{SESSION_CONTEXT_THREAD}>"
+                " (or re-run this command with --slack-card and the same two options)"
+            )
+        else:
+            hint = (
+                "to show this chart in the thread, re-run with --slack-card, or: "
+                f"{TOOL_COMMAND} slack-card {pub_id} --post"
+            )
+        return {"posted": False, "hint": hint}
+
+    if target is None:
         return {
             "posted": False,
-            "hint": (
-                f"to show this chart in the thread, re-run with --slack-card, or: "
-                f"{TOOL_COMMAND} slack-card {pub_id_of(cards[0])} --post"
+            "error": (
+                "no Slack destination: pass --channel "
+                f"<{SESSION_CONTEXT_CHANNEL}> and --thread <{SESSION_CONTEXT_THREAD}> "
+                "from the Slack Session Context in this turn's prompt"
             ),
         }
 
     body = card_message(
         cards[0],
         channel=target.channel,
-        thread_ts=target.thread_ts,
+        thread_ts=target.thread_ts or None,
         layout="flat" if flat else "container",
     )
     if body is None:  # pragma: no cover - cards_from_payload already validated
@@ -160,10 +211,16 @@ def search(
     slack_card: bool = typer.Option(
         False,
         "--slack-card",
-        help="Also post the top card's chart into the current Slack thread",
+        help="Also post the top card's chart into a Slack thread (needs --channel/--thread)",
     ),
     flat: bool = typer.Option(
         False, "--flat", help="With --slack-card: use flat blocks instead of a container"
+    ),
+    channel: str = typer.Option(
+        None, help="Slack channel id for --slack-card (session_context.slack.channel_id)"
+    ),
+    thread: str = typer.Option(
+        None, help="Slack thread ts for --slack-card (session_context.slack.thread_ts)"
     ),
 ):
     """Search Tako for structured data cards and web results."""
@@ -180,6 +237,8 @@ def search(
         ),
         slack_card=slack_card,
         flat=flat,
+        channel=channel,
+        thread=thread,
     )
 
 
@@ -200,10 +259,16 @@ def answer(
     slack_card: bool = typer.Option(
         False,
         "--slack-card",
-        help="Also post the top card's chart into the current Slack thread",
+        help="Also post the top card's chart into a Slack thread (needs --channel/--thread)",
     ),
     flat: bool = typer.Option(
         False, "--flat", help="With --slack-card: use flat blocks instead of a container"
+    ),
+    channel: str = typer.Option(
+        None, help="Slack channel id for --slack-card (session_context.slack.channel_id)"
+    ),
+    thread: str = typer.Option(
+        None, help="Slack thread ts for --slack-card (session_context.slack.thread_ts)"
     ),
 ):
     """Get a synthesized answer with the cards that support it."""
@@ -220,6 +285,8 @@ def answer(
         ),
         slack_card=slack_card,
         flat=flat,
+        channel=channel,
+        thread=thread,
     )
 
 
@@ -369,8 +436,10 @@ def slack_card(
         target = thread_target()
         if target is None:
             console.print(
-                "[red]No Slack thread to post into: CENTAUR_THREAD_KEY is unset or not a "
-                "Slack thread. Pass --channel/--thread, or drop --post to print the payload.[/]"
+                "[red]No Slack destination. Pass --channel "
+                f"<{SESSION_CONTEXT_CHANNEL}> and --thread <{SESSION_CONTEXT_THREAD}> from the "
+                "Slack Session Context in this turn's prompt, or drop --post to print the "
+                "payload.[/]"
             )
             raise typer.Exit(1)
         body["channel"] = target.channel
