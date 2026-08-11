@@ -7,6 +7,7 @@ import {
   harnessRestartPreamble,
   interruptSessionExecution,
   openSessionEventStream,
+  resolveSlackHomeTeamId,
   serializeAttachment,
   serializeMessage
 } from '../src/session-api'
@@ -145,6 +146,50 @@ function textPartIncludes(part: JsonObject, text: string): boolean {
 function isJsonRecord(value: JsonValue | undefined): value is JsonObject {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }
+
+describe('Slack home team resolution', () => {
+  test('resolves the home team ID from auth.test', async () => {
+    const realFetch = globalThis.fetch
+    let request: Request | undefined
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      request = new Request(input, init)
+      return Response.json({ ok: true, team_id: 'T_HOME' })
+    }) as typeof fetch
+    try {
+      const teamId = await resolveSlackHomeTeamId({
+        apiUrl: 'http://api.test',
+        botToken: 'xoxb-test',
+        signingSecret: 'secret',
+        slackApiUrl: 'https://slack.test/api/'
+      })
+
+      expect(teamId).toBe('T_HOME')
+      expect(request?.url).toBe('https://slack.test/api/auth.test')
+      expect(request?.method).toBe('GET')
+      expect(request?.headers.get('authorization')).toBe('Bearer xoxb-test')
+    } finally {
+      globalThis.fetch = realFetch
+    }
+  })
+
+  test('rejects startup when auth.test cannot resolve a home team ID', async () => {
+    const realFetch = globalThis.fetch
+    globalThis.fetch = (async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      Response.json({ error: 'invalid_auth', ok: false }, { status: 401 })) as typeof fetch
+    try {
+      await expect(
+        resolveSlackHomeTeamId({
+          apiUrl: 'http://api.test',
+          botToken: 'xoxb-test',
+          signingSecret: 'secret',
+          slackApiUrl: 'https://slack.test/api/'
+        })
+      ).rejects.toThrow('Slack auth.test failed to resolve the bot home team ID')
+    } finally {
+      globalThis.fetch = realFetch
+    }
+  })
+})
 
 describe('session event streaming', () => {
   test('passes activity summary events through to the renderer source stream', async () => {

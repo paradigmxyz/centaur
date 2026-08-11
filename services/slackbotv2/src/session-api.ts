@@ -1153,9 +1153,13 @@ async function fetchSlackChannelName(
 
 export async function resolveSlackHomeTeamId(
   options: SlackbotV2Options
-): Promise<string | undefined> {
+): Promise<string> {
   const payload = await slackApiGet(options, 'auth.test', {})
-  return stringValue(payload?.team_id)
+  const teamId = stringValue(payload?.team_id)
+  if (!teamId) {
+    throw new Error('Slack auth.test failed to resolve the bot home team ID')
+  }
+  return teamId
 }
 
 async function slackApiGet(
