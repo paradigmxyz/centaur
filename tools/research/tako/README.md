@@ -169,6 +169,23 @@ a `meta.partial_failures` entry client-side; a disabled tier 401s
 (`McpAuthRequired`), an over-limit IP 429s (`McpRateLimited`, surfacing the
 server's own message and Retry-After).
 
+Card renderings are pinned to light mode in `_theme.py`, applied to every
+`search`/`answer` response regardless of backend. Tako renders dark by default
+(`image_url` arrives with `dark_mode=true`, `embed_url` with `dark_mode=auto`,
+and a bare URL with no parameter also renders dark), but a Slack message renders
+on each reader's own theme, so a dark chart in a light thread reads as a black
+box and `auto` resolves against the fetcher rather than the reader. The pass
+rewrites `image_url`/`embed_url` on each card, the MCP's top-level lead-card
+pointer, and the URLs quoted inside `answer_markdown` — that last one matters
+because the SDK path writes `chart: <image_url>` into the prose and the keyless
+path forwards the hosted document, which names image URLs with no parameter at
+all. `webpage_url` is left alone: it opens the live card on tako.com, which
+should follow the visitor's own theme. `_slack.py` pins the URL a second time
+when it reconstructs one from a bare pub id, since `slack-card <id>` never went
+through the response pass. Verified against production on 2026-08-11: no
+parameter and `dark_mode=true` return byte-identical dark PNGs, `dark_mode=false`
+returns a light one.
+
 Three SDK workarounds worth knowing about, all in `client.py`:
 
 - **Graph auth.** The SDK's OpenAPI spec is missing security declarations on

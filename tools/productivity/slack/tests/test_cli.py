@@ -582,3 +582,73 @@ def test_thread_direct_calls_direct_client(monkeypatch) -> None:
             },
         )
     ]
+
+
+# --- --blocks-json parsing -------------------------------------------------
+
+
+def _write(tmp_path: Path, body: str) -> str:
+    path = tmp_path / "blocks.json"
+    path.write_text(body)
+    return str(path)
+
+
+def test_read_blocks_accepts_a_bare_array(tmp_path) -> None:
+    from slack.cli import _read_blocks
+
+    assert _read_blocks(_write(tmp_path, '[{"type": "divider"}]')) == [{"type": "divider"}]
+
+
+def test_read_blocks_accepts_a_whole_post_message_body(tmp_path) -> None:
+    # So `datasearch slack-card` output, which is a full chat.postMessage body,
+    # can be piped straight in.
+    from slack.cli import _read_blocks
+
+    body = '{"channel": "C1", "text": "fallback", "blocks": [{"type": "divider"}]}'
+    assert _read_blocks(_write(tmp_path, body)) == [{"type": "divider"}]
+
+
+def test_read_blocks_reads_stdin_for_dash(monkeypatch) -> None:
+    import io
+
+    from slack.cli import _read_blocks
+
+    monkeypatch.setattr("sys.stdin", io.StringIO('[{"type": "divider"}]'))
+    assert _read_blocks("-") == [{"type": "divider"}]
+
+
+def test_read_blocks_rejects_empty_input(tmp_path) -> None:
+    import typer
+    from slack.cli import _read_blocks
+
+    try:
+        _read_blocks(_write(tmp_path, "   \n"))
+    except typer.BadParameter as exc:
+        assert "no input" in str(exc)
+    else:
+        raise AssertionError("expected BadParameter")
+
+
+def test_read_blocks_rejects_invalid_json(tmp_path) -> None:
+    import typer
+    from slack.cli import _read_blocks
+
+    try:
+        _read_blocks(_write(tmp_path, "{not json"))
+    except typer.BadParameter as exc:
+        assert "not valid JSON" in str(exc)
+    else:
+        raise AssertionError("expected BadParameter")
+
+
+def test_read_blocks_rejects_a_payload_without_blocks(tmp_path) -> None:
+    import typer
+    from slack.cli import _read_blocks
+
+    for body in ('{"text": "no blocks here"}', "[]", '{"blocks": []}', '{"blocks": "nope"}'):
+        try:
+            _read_blocks(_write(tmp_path, body))
+        except typer.BadParameter as exc:
+            assert "no blocks array" in str(exc)
+        else:
+            raise AssertionError(f"expected BadParameter for {body}")

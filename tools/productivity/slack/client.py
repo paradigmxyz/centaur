@@ -1846,10 +1846,19 @@ class SlackClient:
         channel_id = self._resolve_message_destination(channel)
 
         message_text = self._normalize_message_text(text)
-        if not no_attribution:
-            attribution = self._format_requester_attribution()
-            if attribution:
-                message_text += attribution
+        attribution = "" if no_attribution else self._format_requester_attribution()
+        if attribution:
+            message_text += attribution
+
+        # Slack renders `blocks` when they are present and demotes `text` to
+        # notification/fallback, so attribution appended to `text` alone would be
+        # invisible in the message body. Carry it as a trailing context block too,
+        # on a copy so the caller's list is not mutated.
+        if blocks and attribution:
+            blocks = [
+                *blocks,
+                {"type": "context", "elements": [{"type": "mrkdwn", "text": attribution.strip()}]},
+            ]
 
         try:
             kwargs = {"channel": channel_id, "text": message_text}

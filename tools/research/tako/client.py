@@ -375,9 +375,13 @@ class TakoClient:
             locale=locale,
         )
         return self._with_fallback(
-            lambda: apply_light_mode(
-                _with_meta(
-                    _add_search_markdown(
+            # apply_light_mode runs INSIDE _add_search_markdown, not around it:
+            # the markdown is rendered from these cards and quotes their
+            # image_url, so pinning after the render would leave the prose
+            # pointing at a dark chart while cards[] said light.
+            lambda: _with_meta(
+                _add_search_markdown(
+                    apply_light_mode(
                         _dump(self._client._api.search(request, _request_timeout=self._timeout))
                     )
                 )

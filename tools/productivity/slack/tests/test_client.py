@@ -1604,3 +1604,57 @@ def test_list_users_paginates_and_skips_deleted_by_default() -> None:
         {"limit": 10},
         {"limit": 9, "cursor": "cursor-2"},
     ]
+
+
+# --- Block Kit sends -------------------------------------------------------
+# `blocks` was reachable only from Python until `slack send --blocks-json` landed.
+# Slack renders `blocks` and demotes `text` to notification/fallback, so requester
+# attribution appended to `text` is invisible in the message body. These pin that
+# provenance survives the blocks path.
+
+_BLOCKS = [{"type": "image", "image_url": "https://tako.com/i/1/", "alt_text": "chart"}]
+
+
+def test_send_message_with_blocks_keeps_attribution_visible() -> None:
+    client, fake_web_client = _make_client()
+    client._format_requester_attribution = lambda: "\n\n_(requested by <@U9>)_"  # type: ignore[method-assign]
+
+    client.send_message("C123", "Apple revenue", blocks=list(_BLOCKS))
+
+    sent = fake_web_client.last_kwargs
+    # Fallback text still carries it, for the notification.
+    assert "_(requested by <@U9>)_" in sent["text"]
+    # And the rendered message does too, as a trailing context block.
+    assert sent["blocks"][-1]["type"] == "context"
+    assert "_(requested by <@U9>)_" in sent["blocks"][-1]["elements"][0]["text"]
+    # The caller's own blocks are untouched and still lead.
+    assert sent["blocks"][0] == _BLOCKS[0]
+
+
+def test_send_message_with_blocks_honors_no_attribution() -> None:
+    client, fake_web_client = _make_client()
+    client._format_requester_attribution = lambda: "\n\n_(requested by <@U9>)_"  # type: ignore[method-assign]
+
+    client.send_message("C123", "Apple revenue", blocks=list(_BLOCKS), no_attribution=True)
+
+    sent = fake_web_client.last_kwargs
+    assert sent["blocks"] == _BLOCKS
+    assert "requested by" not in sent["text"]
+
+
+def test_send_message_with_blocks_adds_nothing_without_a_requester() -> None:
+    client, fake_web_client = _make_client()  # attribution stubbed to "" by default
+
+    client.send_message("C123", "Apple revenue", blocks=list(_BLOCKS))
+
+    assert fake_web_client.last_kwargs["blocks"] == _BLOCKS
+
+
+def test_send_message_does_not_mutate_the_callers_block_list() -> None:
+    client, _ = _make_client()
+    client._format_requester_attribution = lambda: "\n\n_(requested by <@U9>)_"  # type: ignore[method-assign]
+    caller_blocks = list(_BLOCKS)
+
+    client.send_message("C123", "Apple revenue", blocks=caller_blocks)
+
+    assert caller_blocks == _BLOCKS

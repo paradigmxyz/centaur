@@ -32,12 +32,26 @@ not "fix" it by reverting to `dark_mode=true`; re-check the endpoint first.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 #: The query parameter Tako's renderer reads, and the value that means light.
 DARK_MODE_PARAM = "dark_mode"
 LIGHT_MODE_VALUE = "false"
+
+#: The response key carrying the MCP's own theme report. Spelled the same as the
+#: query parameter but a different thing -- a payload field, not a URL knob --
+#: so it gets its own name rather than reusing DARK_MODE_PARAM.
+DARK_MODE_FIELD = "dark_mode"
+
+#: Prose fields that can quote a chart URL as plain text, so they need the
+#: rewrite too (see `light_mode_markdown`). `answer_markdown` is the readable
+#: document rendered alongside the structured cards. `answer` is normally a
+#: one-line synthesis with no URLs, but `_mcp.answer` falls back to the whole
+#: text channel when the server predates tako-mcp#187, and that document does
+#: name image URLs -- so it is covered rather than assumed clean.
+TEXT_FIELDS = ("answer_markdown", "answer")
 
 #: Hosts whose URLs this module is allowed to rewrite. Deliberately a local
 #: constant rather than an import from the Slack renderer: that module is
@@ -90,12 +104,38 @@ def _drop_repeats(pairs: list[tuple[str, str]], key: str) -> list[tuple[str, str
     return out
 
 
+#: Tako rendering URLs as they appear inside a markdown document. Only the
+#: image and embed endpoints are matched -- `/card/` is the live page and keeps
+#: the visitor's theme, exactly as `webpage_url` does. The terminating class
+#: excludes markdown and sentence punctuation so a URL inside `[text](url)` or
+#: followed by a comma is not swallowed along with its delimiter.
+_MARKDOWN_URL_RE = re.compile(
+    r"https?://(?:www\.)?tako\.com/(?:api/v1/image|embed)/[A-Za-z0-9_-]{4,64}/?"
+    r"(?:\?[^\s)\]\"'<>]*)?"
+)
+
+
+def light_mode_markdown(text: str | None) -> str | None:
+    """Return `text` with every Tako image/embed URL in it pinned to light.
+
+    `answer_markdown` reaches a model as prose, and a URL there is as much a
+    rendering as one in `cards[]`: the SDK path writes `chart: <image_url>`
+    itself, and the keyless path forwards the hosted tool's document, which names
+    image URLs with no `dark_mode` at all (so they would render dark). Rewriting
+    the text keeps it from contradicting the structured cards beside it.
+    """
+    if not text or not isinstance(text, str):
+        return text
+    return _MARKDOWN_URL_RE.sub(lambda m: light_mode_url(m.group(0)) or m.group(0), text)
+
+
 def apply_light_mode(payload: Any) -> Any:
     """Return a copy of a search/answer payload with every rendering set to light.
 
     Rewrites `image_url`/`embed_url` on each card and on the MCP-shaped
-    top-level lead-card pointer, and clears the `dark_mode` flag the MCP reports
-    alongside them so the payload does not contradict its own URLs.
+    top-level lead-card pointer, clears the `dark_mode` flag the MCP reports
+    alongside them, and pins the URLs named inside the prose fields, so no part
+    of the payload contradicts another.
 
     Never mutates its argument, and passes anything that is not a dict straight
     through, so it is safe to wrap around a backend result of any shape.
@@ -107,8 +147,11 @@ def apply_light_mode(payload: Any) -> Any:
     for key in RENDERING_KEYS:
         if key in out:
             out[key] = light_mode_url(out[key])
-    if DARK_MODE_PARAM in out:
-        out[DARK_MODE_PARAM] = False
+    if DARK_MODE_FIELD in out:
+        out[DARK_MODE_FIELD] = False
+    for key in TEXT_FIELDS:
+        if key in out:
+            out[key] = light_mode_markdown(out[key])
 
     cards = out.get("cards")
     if isinstance(cards, list):

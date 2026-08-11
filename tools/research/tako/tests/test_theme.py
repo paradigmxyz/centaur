@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 
-from tools.research.tako._theme import apply_light_mode, light_mode_url
+from tools.research.tako._theme import apply_light_mode, light_mode_markdown, light_mode_url
 
 PUB = "m-p-JX5qxsBStJgywrqI"
 
@@ -134,6 +134,85 @@ class TestApplyLightMode:
     def test_passes_a_non_dict_payload_through(self):
         assert apply_light_mode(None) is None
         assert apply_light_mode([1, 2]) == [1, 2]
+
+
+class TestLightModeMarkdown:
+    """`answer_markdown` embeds chart URLs as text, so it needs the same pass.
+
+    The SDK path renders `chart: <image_url>` itself; the keyless path passes
+    through the hosted tool's own document, which names each card's image URL
+    with no `dark_mode` at all. Either way a reader following that URL would get
+    a dark chart while `cards[]` said light.
+    """
+
+    def test_pins_a_bare_image_url(self):
+        md = f"chart: https://tako.com/api/v1/image/{PUB}/"
+        assert (
+            light_mode_markdown(md)
+            == f"chart: https://tako.com/api/v1/image/{PUB}/?dark_mode=false"
+        )
+
+    def test_pins_an_already_dark_image_url(self):
+        md = f"chart: https://tako.com/api/v1/image/{PUB}/?dark_mode=true"
+        assert "dark_mode=false" in light_mode_markdown(md)
+        assert "dark_mode=true" not in light_mode_markdown(md)
+
+    def test_pins_an_embed_url(self):
+        md = f"embed: https://tako.com/embed/{PUB}/?dark_mode=auto"
+        assert light_mode_markdown(md) == f"embed: https://tako.com/embed/{PUB}/?dark_mode=false"
+
+    def test_leaves_the_live_card_link_alone(self):
+        md = f"see https://tako.com/card/{PUB}/ for the live chart"
+        assert light_mode_markdown(md) == md
+
+    def test_leaves_web_result_links_alone(self):
+        md = "1. [Apple](https://example.com/apple?dark_mode=true)"
+        assert light_mode_markdown(md) == md
+
+    def test_survives_a_markdown_link_without_eating_the_paren(self):
+        md = f"[chart](https://tako.com/api/v1/image/{PUB}/)"
+        assert (
+            light_mode_markdown(md)
+            == f"[chart](https://tako.com/api/v1/image/{PUB}/?dark_mode=false)"
+        )
+
+    def test_rewrites_every_occurrence(self):
+        md = (
+            f"a https://tako.com/api/v1/image/{PUB}/ b https://tako.com/embed/{PUB}/?dark_mode=true"
+        )
+        assert light_mode_markdown(md).count("dark_mode=false") == 2
+
+    def test_passes_through_blank_and_non_string(self):
+        assert light_mode_markdown("") == ""
+        assert light_mode_markdown(None) is None
+
+    def test_apply_light_mode_pins_the_markdown_field(self):
+        payload = {
+            "answer_markdown": f"chart: https://tako.com/api/v1/image/{PUB}/?dark_mode=true",
+            "cards": [CARD],
+        }
+        out = apply_light_mode(payload)
+        assert "dark_mode=false" in out["answer_markdown"]
+        assert "dark_mode=true" not in out["answer_markdown"]
+
+    def test_apply_light_mode_pins_the_answer_field(self):
+        # `_mcp.answer` falls back to the whole text channel on servers predating
+        # tako-mcp#187, and that document names image URLs.
+        payload = {"answer": f"see https://tako.com/api/v1/image/{PUB}/", "cards": []}
+        assert apply_light_mode(payload)["answer"].endswith("?dark_mode=false")
+
+    def test_a_plain_answer_is_left_alone(self):
+        payload = {"answer": "Apple's fiscal 2025 revenue was $416.2 billion."}
+        assert apply_light_mode(payload)["answer"] == payload["answer"]
+
+    def test_markdown_and_cards_agree(self):
+        # The failure this guards: cards[] light, answer_markdown dark.
+        payload = {
+            "answer_markdown": f"chart: https://tako.com/api/v1/image/{PUB}/",
+            "cards": [{"card_id": PUB, "image_url": f"https://tako.com/api/v1/image/{PUB}/"}],
+        }
+        out = apply_light_mode(payload)
+        assert out["cards"][0]["image_url"] in out["answer_markdown"]
 
 
 class TestRenderedCardIsLight:
