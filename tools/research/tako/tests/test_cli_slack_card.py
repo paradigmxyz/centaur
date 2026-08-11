@@ -11,7 +11,7 @@ from tools.research.tako import cli
 from tools.research.tako._coverage import DOMAINS, TOOL_COMMAND
 
 PUB = "m-p-JX5qxsBStJgywrqI"
-THREAD_KEY = "slack:T03322H91D4:C0BL2RK9329:1786469053.584729"
+THREAD_KEY = "slack:T0123ABC:C0456DEF:1754870000.001200"
 
 CARD = {
     "card_id": PUB,
@@ -43,7 +43,7 @@ def posted(monkeypatch):
 
     def fake_post(body, **kwargs):
         sent["body"] = body
-        return {"ok": True, "channel": body["channel"], "ts": "1786470000.000100"}
+        return {"ok": True, "channel": body["channel"], "ts": "1754870100.002200"}
 
     monkeypatch.setattr("tools.research.tako._slack.post_message", fake_post)
     return sent
@@ -101,23 +101,23 @@ class TestExplicitDestination:
         cli.emit_or_reject(
             lambda: RESULT,
             slack_card=True,
-            channel="C0BL2RK9329",
-            thread="1786469053.584729",
+            channel="C0456DEF",
+            thread="1754870000.001200",
         )
         note = _emitted(capsys)["slack_card"]
         assert note["posted"] is True
         body = posted["body"]
-        assert body["channel"] == "C0BL2RK9329"
-        assert body["thread_ts"] == "1786469053.584729"
+        assert body["channel"] == "C0456DEF"
+        assert body["thread_ts"] == "1754870000.001200"
 
     def test_explicit_channel_overrides_the_environment(self, in_slack_thread, posted, capsys):
         cli.emit_or_reject(lambda: RESULT, slack_card=True, channel="C_OVERRIDE")
         assert posted["body"]["channel"] == "C_OVERRIDE"
 
     def test_channel_without_thread_posts_to_the_channel(self, no_thread_env, posted, capsys):
-        cli.emit_or_reject(lambda: RESULT, slack_card=True, channel="C0BL2RK9329")
+        cli.emit_or_reject(lambda: RESULT, slack_card=True, channel="C0456DEF")
         body = posted["body"]
-        assert body["channel"] == "C0BL2RK9329"
+        assert body["channel"] == "C0456DEF"
         assert "thread_ts" not in body
 
     def test_post_without_a_destination_explains_what_to_pass(self, no_thread_env, capsys):
@@ -133,11 +133,11 @@ class TestSlackCardFlag:
         cli.emit_or_reject(lambda: RESULT, slack_card=True)
         note = _emitted(capsys)["slack_card"]
         assert note["posted"] is True
-        assert note["ts"] == "1786470000.000100"
+        assert note["ts"] == "1754870100.002200"
         assert note["layout"] == "container"
         body = posted["body"]
-        assert body["channel"] == "C0BL2RK9329"
-        assert body["thread_ts"] == "1786469053.584729"
+        assert body["channel"] == "C0456DEF"
+        assert body["thread_ts"] == "1754870000.001200"
         assert body["blocks"][0]["type"] == "container"
 
     def test_flat_switches_the_layout(self, in_slack_thread, posted, capsys):
