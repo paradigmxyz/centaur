@@ -82,6 +82,17 @@ class TestHint:
         assert emitted["cards"] == RESULT["cards"]
         assert emitted["meta"] == RESULT["meta"]
 
+    def test_the_note_is_the_first_key(self, in_slack_thread, capsys):
+        cli.emit_or_reject(lambda: RESULT)
+        assert next(iter(_emitted(capsys))) == "slack_card"
+
+    def test_the_note_survives_head_truncation(self, in_slack_thread, capsys):
+        # Callers pipe this through `head -N`. A search result is well over a
+        # hundred lines of JSON, so a note appended at the end is never read.
+        cli.emit_or_reject(lambda: _big_result())
+        first_lines = capsys.readouterr().out.splitlines()[:6]
+        assert any("slack_card" in line for line in first_lines)
+
 
 class TestExplicitDestination:
     """The real path: the caller passes the IDs from the turn's prompt."""
@@ -180,6 +191,31 @@ class TestHelpDescribesDomainsNotSources:
 
     def test_help_points_at_the_free_coverage_probe(self):
         assert f"{TOOL_COMMAND} available-data" in cli.app.info.help
+
+
+def _big_result() -> dict:
+    """A realistic multi-card search result: ~160 lines of JSON when emitted."""
+
+    def card(i):
+        pub = f"m-p-CARD{i:04d}exampleid"
+        return {
+            "card_id": pub,
+            "title": f"Card {i} Total Revenues (Annual)",
+            "description": "latest value was $416.2B on Sep 27, 2025, up 6.4%.",
+            "exportable": True,
+            "card_type": "chart",
+            "webpage_url": f"https://tako.com/card/{pub}/",
+            "image_url": f"https://tako.com/api/v1/image/{pub}/",
+            "embed_url": f"https://tako.com/embed/{pub}/",
+            "sources": [{"source_name": "Fiscal.ai", "source_index": "data"}],
+            "data_freshness": {"data_as_of": "2025-09-27", "last_updated": "2026-08-05"},
+        }
+
+    return {
+        "cards": [card(i) for i in range(1, 6)],
+        "web_results": [{"title": f"R{i}", "url": f"https://example.com/{i}"} for i in range(1, 6)],
+        "meta": {"backend": "tako:sdk", "partial_failures": []},
+    }
 
 
 def _emitted(capsys) -> dict:

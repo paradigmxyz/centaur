@@ -102,7 +102,10 @@ def emit_or_reject(
     if isinstance(payload, dict):
         note = _slack_card_note(payload, post=slack_card, flat=flat, channel=channel, thread=thread)
         if note:
-            payload = {**payload, "slack_card": note}
+            # First key, not last. A search result runs well past a hundred lines
+            # of JSON, and callers routinely pipe this through `head -N`, so
+            # anything appended to the end is truncated away before it is read.
+            payload = {"slack_card": note, **payload}
     emit(payload)
 
 
