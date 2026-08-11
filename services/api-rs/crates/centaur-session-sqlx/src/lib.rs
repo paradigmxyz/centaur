@@ -18,11 +18,16 @@ use thiserror::Error;
 use time::{Duration as TimeDuration, OffsetDateTime};
 use uuid::Uuid;
 
-// The API binary embeds these migrations at compile time.
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
-
 pub const SESSION_EVENTS_CHANNEL: &str = "centaur_session_events";
 const DEFAULT_MAX_CONNECTIONS: u32 = 500;
+
+fn embedded_migrator() -> sqlx::migrate::Migrator {
+    let mut migrator = sqlx::migrate!("./migrations");
+    // A rollback binary must accept schema versions introduced by the release
+    // it replaces while SQLx continues to verify every migration it knows.
+    migrator.set_ignore_missing(true);
+    migrator
+}
 
 #[derive(Clone, Debug)]
 pub struct CreateExecutionResult {
@@ -106,7 +111,7 @@ impl PgSessionStore {
     }
 
     pub async fn run_migrations(&self) -> Result<(), SessionStoreError> {
-        MIGRATOR.run(&self.pool).await?;
+        embedded_migrator().run(&self.pool).await?;
         Ok(())
     }
 
@@ -2110,7 +2115,14 @@ mod tests {
     use time::{Duration as TimeDuration, OffsetDateTime};
     use uuid::Uuid;
 
-    use super::{IdleSandboxCandidateRow, PgSessionStore, SessionEventNotification};
+    use super::{
+        IdleSandboxCandidateRow, PgSessionStore, SessionEventNotification, embedded_migrator,
+    };
+
+    #[test]
+    fn embedded_migrations_allow_forward_schema_versions_for_rollback() {
+        assert!(embedded_migrator().ignore_missing);
+    }
 
     async fn test_store() -> Option<PgSessionStore> {
         let Ok(url) = std::env::var("SESSION_RUNTIME_TEST_DATABASE_URL") else {
