@@ -1,9 +1,16 @@
 # datasearch (Tako)
 
-Web search plus structured, cited data from [Tako](https://tako.com): company
-financials (S&P Global), macro indicators (FRED), website traffic (SimilarWeb),
-synthesized answers, and free data-coverage discovery. Installed as the
+Web search plus structured, cited data from [Tako](https://tako.com) across
+companies & financial markets, macroeconomics & government data, digital &
+industry intelligence, sports, polling & live events, and weather & climate,
+with synthesized answers and free data-coverage discovery. Installed as the
 `datasearch` CLI; the package and directory keep the `tako` name.
+
+Coverage is described by domain rather than by the licensed sources behind it:
+sources change without the coverage changing, and each card carries its own
+attribution. `available-data` is the authority on whether a specific entity or
+metric is covered, and it is free. The domain list has one definition,
+`DOMAINS` in `_coverage.py`, which the CLI help renders from.
 
 Where `websearch` retrieves prose from web pages, Tako returns typed series and
 comparable metrics with sources attached. The two complement each other. Use

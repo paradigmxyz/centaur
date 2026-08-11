@@ -44,6 +44,22 @@ LOW_SIGNAL_METRIC = re.compile(r"\(Normalized\)|^Account Code\b", re.IGNORECASE)
 # model-facing summary strings so a rename stays consistent everywhere.
 TOOL_COMMAND = "datasearch"
 
+# What the tool can answer about, stated as domains rather than as the licensed
+# sources behind them. Sources are an implementation detail that changes without
+# the coverage changing, and naming three of them made the tool read as narrower
+# than it is, which mis-routes questions this tool should take. `available-data`
+# stays the authority on whether a specific entity or metric is covered.
+#
+# Single definition on purpose: the CLI help and the README both render from it,
+# so the two cannot drift.
+DOMAINS = (
+    "companies & financial markets",
+    "macroeconomics & government data",
+    "digital & industry intelligence",
+    "sports, polling & live events",
+    "weather & climate",
+)
+
 # Valid values, derived from the SDK enums so an upstream addition is accepted
 # here the moment the dependency updates (the pin is open: tako-sdk>=2.2.6).
 # The API, not this tool, is the authority on what these accept.
@@ -206,7 +222,9 @@ def _empty_clause(kind: str) -> str:
 def _match_line(match: CoverageMatch) -> str:
     head = f"**{match.name}{_label_suffix(match)}**"
     if match.unavailable:
-        return f"{head} — resolved, but Tako couldn't load its coverage right now (temporary); retry."
+        return (
+            f"{head} — resolved, but Tako couldn't load its coverage right now (temporary); retry."
+        )
     if match.coverage.total == 0:
         return f"{head} — {_empty_clause(match.coverage.kind)}."
     return f"{head} — {_coverage_clause(match.coverage)}."
@@ -275,7 +293,7 @@ def build_summary(
                 [
                     "",
                     f"Only the top {n} {_plural(n, 'match was', 'matches were')} "
-                    "coverage-checked; the \"Also matched\" hits were not, so this "
+                    'coverage-checked; the "Also matched" hits were not, so this '
                     "is not proof Tako lacks data for them. If one of them is the "
                     "intended entity or metric, rerun with `--types`/`--label` to "
                     "narrow resolution, or pin its node_id directly in "
