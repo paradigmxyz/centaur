@@ -49,8 +49,8 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
   test "matches provider subjects before falling back to email labels" do
     principal = principals(:acme_user_alice)
     principal.update!(
+      slack_user_id: "U0123456789",
       labels: principal.labels.merge(
-        "slack_user_id" => "U0123456789",
         "google_subject" => "google-sub-alice",
         "email" => "alice@example.com"
       )
@@ -167,13 +167,11 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     end
   end
 
-  test "requires matching Slack team labels when either side carries one" do
+  test "requires matching Slack team identity when either side carries one" do
     principal = principals(:acme_user_alice)
     principal.update!(
-      labels: principal.labels.merge(
-        "slack_team_id" => "T0123456789",
-        "slack_user_id" => "U0123456789"
-      )
+      slack_team_id: "T0123456789",
+      slack_user_id: "U0123456789"
     )
     mismatched = create_credential(oauth_apps(:acme_slack), "U0123456789", "alice-alt@example.com")
     mismatched.update!(labels: { "slack_team_id" => "T9999999999" })
