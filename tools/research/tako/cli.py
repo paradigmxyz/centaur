@@ -7,17 +7,17 @@ import typer
 from dotenv import load_dotenv
 from rich.console import Console
 
-from ._coverage import NER_LABELS, NODE_TYPES, TOOL_COMMAND
+from ._coverage import DOMAINS, NER_LABELS, NODE_TYPES, TOOL_COMMAND
 
 load_dotenv()
 
 app = typer.Typer(
     name=TOOL_COMMAND,
     help=(
-        "Web search along with structured data from licensed sources: company "
-        "financials (S&P Global), macro indicators like CPI/GDP/rates (FRED), "
-        "website traffic (SimilarWeb), and more. Instant, cited, chart-backed "
-        "answers via Tako."
+        "Web search along with structured, cited, chart-backed data across "
+        f"{'; '.join(DOMAINS)}. Instant answers via Tako. Run "
+        f"`{TOOL_COMMAND} available-data <name>` to check coverage of a specific "
+        "entity or metric; it is free."
     ),
 )
 
@@ -59,23 +59,86 @@ def emit(data) -> None:
     print(json.dumps(data, indent=2, ensure_ascii=False, default=str))
 
 
-def emit_or_reject(call) -> None:
+def emit_or_reject(call, *, slack_card: bool = False, flat: bool = False) -> None:
     """Run a client call and print its result.
 
     The client pre-validates option contracts (enum choices, count ranges,
     strict/node_ids) and raises ValueError before any network call; the free
     MCP tier raises McpAuthRequired/McpRateLimited with actionable messages.
     Surface all of these as one-line CLI errors instead of tracebacks.
+
+    When the result carries a card and the turn is in a Slack thread, the
+    payload gains a `slack_card` entry: the post outcome with `slack_card=True`,
+    otherwise a hint naming the command that renders it. The result is printed
+    either way, because a failed post must not lose the data that was retrieved.
     """
     from ._mcp import McpAuthRequired, McpRateLimited
 
     try:
-        emit(call())
+        payload = call()
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
     except (McpAuthRequired, McpRateLimited) as exc:
         console.print(f"[red]{exc}[/]")
         raise typer.Exit(1) from exc
+
+    if isinstance(payload, dict):
+        note = _slack_card_note(payload, post=slack_card, flat=flat)
+        if note:
+            payload = {**payload, "slack_card": note}
+    emit(payload)
+
+
+def _slack_card_note(payload: dict, *, post: bool, flat: bool) -> dict | None:
+    """Post the lead card, or hint at how to, for a Slack turn.
+
+    Returns None outside a Slack thread and when the result has no renderable
+    card, so non-Slack surfaces and web-only results stay unchanged.
+    """
+    from ._slack import (
+        SlackPostError,
+        card_message,
+        cards_from_payload,
+        post_message,
+        pub_id_of,
+        thread_target,
+    )
+
+    target = thread_target()
+    if target is None:
+        return None
+    cards = cards_from_payload(payload)
+    if not cards:
+        return None
+
+    if not post:
+        return {
+            "posted": False,
+            "hint": (
+                f"to show this chart in the thread, re-run with --slack-card, or: "
+                f"{TOOL_COMMAND} slack-card {pub_id_of(cards[0])} --post"
+            ),
+        }
+
+    body = card_message(
+        cards[0],
+        channel=target.channel,
+        thread_ts=target.thread_ts,
+        layout="flat" if flat else "container",
+    )
+    if body is None:  # pragma: no cover - cards_from_payload already validated
+        return {"posted": False, "error": "the lead card cannot be rendered"}
+    try:
+        result = post_message(body)
+    except SlackPostError as exc:
+        # Non-fatal: the retrieved data is still worth printing.
+        return {"posted": False, "error": str(exc)}
+    return {
+        "posted": True,
+        "channel": result.get("channel") or target.channel,
+        "ts": result.get("ts"),
+        "layout": "flat" if flat else "container",
+    }
 
 
 @app.command()
@@ -94,6 +157,14 @@ def search(
     strict: bool = typer.Option(False, help="Return only cards matching --node-id"),
     country_code: str = typer.Option(None, help="ISO 3166-1 alpha-2 code"),
     locale: str = typer.Option(None, help="BCP-47 locale tag"),
+    slack_card: bool = typer.Option(
+        False,
+        "--slack-card",
+        help="Also post the top card's chart into the current Slack thread",
+    ),
+    flat: bool = typer.Option(
+        False, "--flat", help="With --slack-card: use flat blocks instead of a container"
+    ),
 ):
     """Search Tako for structured data cards and web results."""
     emit_or_reject(
@@ -106,7 +177,9 @@ def search(
             strict=strict,
             country_code=country_code,
             locale=locale,
-        )
+        ),
+        slack_card=slack_card,
+        flat=flat,
     )
 
 
@@ -124,6 +197,14 @@ def answer(
     strict: bool = typer.Option(False, help="Return only cards matching --node-id"),
     country_code: str = typer.Option(None, help="ISO 3166-1 alpha-2 code"),
     locale: str = typer.Option(None, help="BCP-47 locale tag"),
+    slack_card: bool = typer.Option(
+        False,
+        "--slack-card",
+        help="Also post the top card's chart into the current Slack thread",
+    ),
+    flat: bool = typer.Option(
+        False, "--flat", help="With --slack-card: use flat blocks instead of a container"
+    ),
 ):
     """Get a synthesized answer with the cards that support it."""
     emit_or_reject(
@@ -136,7 +217,9 @@ def answer(
             strict=strict,
             country_code=country_code,
             locale=locale,
-        )
+        ),
+        slack_card=slack_card,
+        flat=flat,
     )
 
 
