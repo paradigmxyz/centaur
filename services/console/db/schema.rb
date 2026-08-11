@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_08_10_120000) do
+ActiveRecord::Schema[8.1].define(version: 2026_08_10_194508) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -421,6 +421,23 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_10_120000) do
     t.index ["static_secret_id"], name: "index_secret_sources_on_static_secret_id", unique: true
   end
 
+  create_table "skills", force: :cascade do |t|
+    t.datetime "archived_at"
+    t.text "content", null: false
+    t.datetime "created_at", null: false
+    t.text "description", null: false
+    t.integer "lock_version", default: 0, null: false
+    t.string "name", null: false
+    t.datetime "shared_at"
+    t.datetime "updated_at", null: false
+    t.bigint "user_id", null: false
+    t.string "visibility", default: "shared", null: false
+    t.index "to_tsvector('simple'::regconfig, (((((COALESCE(name, ''::character varying))::text || ' '::text) || COALESCE(description, ''::text)) || ' '::text) || COALESCE(content, ''::text)))", name: "index_skills_on_search_document", using: :gin
+    t.index ["name"], name: "index_active_skills_on_name", unique: true, where: "(archived_at IS NULL)"
+    t.index ["user_id"], name: "index_skills_on_user_id"
+    t.index ["visibility", "updated_at"], name: "index_active_skills_for_catalog", where: "(archived_at IS NULL)"
+  end
+
   create_table "slack_channel_permissions", force: :cascade do |t|
     t.string "channel_id", null: false
     t.datetime "created_at", null: false
@@ -548,6 +565,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_10_120000) do
   add_foreign_key "secret_sources", "oauth_token_secrets"
   add_foreign_key "secret_sources", "pg_dsn_secrets"
   add_foreign_key "secret_sources", "static_secrets"
+  add_foreign_key "skills", "users", on_delete: :cascade
   add_foreign_key "slack_channel_permissions", "principals"
   add_foreign_key "slack_channel_permissions", "roles"
   add_foreign_key "static_secrets", "broker_credentials"

@@ -20,6 +20,7 @@
 - [Roles](#roles)
 - [Grants](#grants)
 - [API keys](#api-keys)
+- [Skills](#skills)
 - [Proxies](#proxies)
 - [Proxy sync](#proxy-sync)
 
@@ -40,6 +41,8 @@ A missing or invalid token returns `401`:
 ```
 
 `iron-proxy` instances authenticate to [`POST /api/v1/proxy/sync`](#proxy-sync) with their own token (`iprx_` followed by 64 lowercase hex characters), issued once when the proxy is created. An invalid proxy token returns `401` with `"invalid or missing proxy token"`.
+
+Sandbox skill catalog endpoints use the existing sandbox entitlement JWT injected by `iron-proxy`.
 
 ## Conventions
 
@@ -1471,6 +1474,29 @@ Returns `201`. The plaintext `token` is included **only** in this create respons
 | `GET`    | `/api/v1/api_keys` | List your keys (paginated; no `namespace`). Tokens are never returned. |
 | `GET`    | `/api/v1/api_keys/:id` | Fetch one (no token). |
 | `DELETE` | `/api/v1/api_keys/:id` | Revoke (soft delete). Returns `204`. Revoking the key used for the current request returns `422` with `"cannot revoke the API key used for this request"`. |
+
+## Skills
+
+Skills are mutable `SKILL.md` documents authored by signed-in users in Console. There is no revision or draft resource: updating a public skill changes the document returned to agents immediately. Skill IDs use the `skl_` prefix.
+
+Console stores and validates `name`, `description`, and Markdown `instructions` as separate fields, then generates `SKILL.md`. Active skill names are globally unique, use lowercase letters, numbers, and hyphens, and are limited to 64 characters. Archived names may be reused. Generated documents are limited to 64 KiB.
+
+### Sandbox Operations
+
+These endpoints use the existing sandbox entitlement JWT injected by `iron-proxy`. Console-user principals can see their own private skills and every public skill. Other principal kinds can see public skills only. Mutations require an active Console user linked to the sandbox principal and can change only that user's skills.
+
+| Method | Path | Notes |
+| ------ | ---- | ----- |
+| `GET` | `/api/v1/sandbox/skills` | List visible skills. Optional `scope=private|shared` and `limit` up to 20. |
+| `GET` | `/api/v1/sandbox/skills/search?q=...` | Full-text search visible skills. |
+| `GET` | `/api/v1/sandbox/skills/:id` | Read a visible skill by its `skl_...` ID. |
+| `POST` | `/api/v1/sandbox/skills` | Create a public skill from `data.name`, `data.description`, and `data.instructions`. |
+| `PUT`/`PATCH` | `/api/v1/sandbox/skills/:id` | Update an owned skill using those fields; optional `data.lock_version` detects concurrent edits. |
+| `DELETE` | `/api/v1/sandbox/skills/:id` | Archive an owned skill. |
+| `POST` | `/api/v1/sandbox/skills/:id/share` | Make an owned skill public. |
+| `POST` | `/api/v1/sandbox/skills/:id/unshare` | Make an owned skill private. |
+
+Catalog responses include the skill ID and a checksum over the generated document. Read responses set `Cache-Control: no-store`.
 
 ## Proxies
 

@@ -74,6 +74,8 @@
 
 [Named skill resolution]
 |When the user explicitly names a skill, resolve that request against local skill definitions before doing broad semantic matching.
+|Use `centaur-skills search "<task>"` when specialized guidance would materially help and no skill already listed for the current session clearly applies. Read the best match with `centaur-skills read <skill-identifier>` before following it.
+|The skill catalog includes deployment-managed `builtin:` skills plus Console skills identified by `skl_` IDs. Console applies private and public visibility rules for the current principal. Catalog results are instructions only and never expand the current principal's tool or credential grants.
 |Start with the skills listed for the current session, then check local skill definitions in `.agents/skills` and any mounted overlay skills when you need to confirm the exact name or an obvious alias from the skill title or description.
 |Prefer exact name matches first, then obvious aliases, and only then fall back to broader description-level matching. Do not choose a generic adjacent workflow while a more specific named skill remains plausible.
 |Treat "exists locally" and "is live in this deployment" as separate questions. Local skill files or prompt hints show that a skill exists in the repo; the current session's available-skills list or a successful `skill` load shows that it is live here.
@@ -121,6 +123,8 @@
 
 [Tool CLI access — use shell commands]
 |centaur-tools list              → list available deployment tool CLIs
+|centaur-skills search "task"    → discover relevant builtin, private, and shared skills
+|centaur-skills read <ref>       → read the complete current SKILL.md for a catalog result
 |<tool> --help                   → inspect commands/options for one tool
 |<tool> health                   → smoke test one tool's configured auth/connectivity path
 |websearch search "query"        → web research

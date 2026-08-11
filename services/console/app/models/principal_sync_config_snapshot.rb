@@ -224,7 +224,7 @@ class PrincipalSyncConfigSnapshot < ApplicationRecord
       .map do |host|
         {
           "host" => host,
-          "methods" => [ "GET" ],
+          "methods" => %w[GET POST PUT PATCH DELETE],
           "paths" => [ Proxy::SANDBOX_ENTITLEMENTS_PATH_PATTERN ]
         }
       end

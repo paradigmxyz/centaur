@@ -76,7 +76,7 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
     refute_nil entry
     assert_equal "Bearer {{ .Value }}", entry.dig("inject", "formatter")
     assert_equal(
-      { "host" => "centaur-console", "methods" => [ "GET" ], "paths" => [ Proxy::SANDBOX_ENTITLEMENTS_PATH_PATTERN ] },
+      { "host" => "centaur-console", "methods" => %w[GET POST PUT PATCH DELETE], "paths" => [ Proxy::SANDBOX_ENTITLEMENTS_PATH_PATTERN ] },
       entry.fetch("rules").first
     )
 

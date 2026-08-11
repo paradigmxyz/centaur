@@ -1,6 +1,17 @@
 import httpx
 import pytest
-from client import SANDBOX_OAUTH_APPS_PATH, SANDBOX_PERMISSIONS_PATH, ConsoleClient
+from cli import (
+    _catalog_metadata,
+    _merge_skill_results,
+    _parse_builtin,
+    _skill_document,
+)
+from client import (
+    SANDBOX_OAUTH_APPS_PATH,
+    SANDBOX_PERMISSIONS_PATH,
+    SANDBOX_SKILLS_PATH,
+    ConsoleClient,
+)
 
 
 def json_response(payload, status_code=200):
@@ -87,6 +98,97 @@ def test_sandbox_oauth_apps_wraps_http_errors():
 
     with pytest.raises(RuntimeError, match="HTTP 401"):
         make_client(handler).sandbox_oauth_apps()
+
+
+def test_skills_list_and_search_use_sandbox_catalog_endpoints():
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return json_response(
+            {
+                "data": [
+                    {
+                        "id": "skl_123",
+                        "name": "incident-triage",
+                        "visibility": "private",
+                    }
+                ]
+            }
+        )
+
+    client = make_client(handler)
+    listed = client.skills_list(scope="private", limit=5)
+    searched = client.skills_search("incident response", limit=3)
+
+    assert listed[0]["id"] == "skl_123"
+    assert searched[0]["name"] == "incident-triage"
+    assert requests[0].url.path == SANDBOX_SKILLS_PATH
+    assert dict(requests[0].url.params) == {"limit": "5", "scope": "private"}
+    assert requests[1].url.path == f"{SANDBOX_SKILLS_PATH}/search"
+    assert dict(requests[1].url.params) == {"q": "incident response", "limit": "3"}
+
+
+def test_skill_read_uses_skill_id_and_returns_document():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == f"{SANDBOX_SKILLS_PATH}/skl_123"
+        return json_response(
+            {
+                "data": {
+                    "id": "skl_123",
+                    "name": "incident-triage",
+                    "document": "---\nname: incident-triage\ndescription: Triage incidents.\n---\n\nDo it.\n",
+                }
+            }
+        )
+
+    result = make_client(handler).skill_read("skl_123")
+
+    assert result["id"] == "skl_123"
+    assert result["document"].startswith("---\n")
+
+
+def test_skills_wrap_http_errors_without_exposing_credentials():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return json_response({"error": {"message": "invalid sandbox token"}}, status_code=401)
+
+    with pytest.raises(RuntimeError, match="HTTP 401"):
+        make_client(handler, bearer_token="secret-token").skills_search("anything")
+
+
+def test_builtin_skill_parsing_and_catalog_metadata(tmp_path):
+    skill_dir = tmp_path / "incident-triage"
+    skill_dir.mkdir()
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text(
+        "---\nname: incident-triage\ndescription: Triage incidents.\n---\n\nDo it.\n",
+        encoding="utf-8",
+    )
+
+    parsed = _parse_builtin(skill_file)
+
+    assert parsed is not None
+    assert parsed["ref"] == "builtin:incident-triage"
+    assert len(parsed["checksum"]) == 64
+    assert _catalog_metadata(parsed) == {
+        key: value for key, value in parsed.items() if key not in {"content", "path"}
+    }
+
+
+def test_catalog_merge_interleaves_builtin_and_remote_results():
+    builtin = [{"ref": "builtin:one"}, {"ref": "builtin:two"}]
+    remote = [{"id": "skl_one"}, {"id": "skl_two"}]
+
+    assert [item.get("id") or item.get("ref") for item in _merge_skill_results(builtin, remote, limit=3)] == [
+        "builtin:one",
+        "skl_one",
+        "builtin:two",
+    ]
+
+
+def test_skill_document_supports_builtin_and_console_payloads():
+    assert _skill_document({"content": "builtin document"}) == "builtin document"
+    assert _skill_document({"document": "Console document"}) == "Console document"
 
 
 def test_health_returns_identity_details():

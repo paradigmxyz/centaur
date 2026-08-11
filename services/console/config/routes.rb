@@ -57,6 +57,15 @@ Rails.application.routes.draw do
         post :run, action: :force_start
       end
     end
+    resources :skills do
+      collection do
+        get :mine
+      end
+      member do
+        post :share
+        post :unshare
+      end
+    end
     # Lazily-loaded sidebar thread list (Turbo Frame src). Kept off the main
     # page render so the unindexed cross-database sessions query does not block
     # every console page. See ApplicationController#load_console_sidebar_threads.
@@ -201,7 +210,6 @@ Rails.application.routes.draw do
       resources :grants, only: %i[show create destroy]
       resources :api_keys, only: %i[index show create destroy]
       resources :proxies, only: %i[index show create update destroy]
-
       # Operator-managed broker credentials (ApiKey auth). CRUD + lookup; the
       # rotating token blob is never serialized back.
       resources :broker_credentials, only: %i[index show create update destroy] do
@@ -219,8 +227,17 @@ Rails.application.routes.draw do
 
       # Called from inside sandboxes through their assigned iron-proxy. The
       # proxy injects a short-lived sandbox entitlement JWT scoped to these paths.
-      get "sandbox/permissions", to: "sandbox_permissions#show"
-      get "sandbox/oauth_apps", to: "sandbox_oauth_apps#index"
+      namespace :sandbox do
+        resource :permissions, only: :show
+        resources :oauth_apps, only: :index
+        resources :skills, only: %i[index show create update destroy] do
+          collection { get :search }
+          member do
+            post :share
+            post :unshare
+          end
+        end
+      end
     end
   end
 
