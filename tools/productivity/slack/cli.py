@@ -2,6 +2,7 @@
 
 import json
 import re
+from pathlib import Path
 
 import typer
 from dotenv import load_dotenv
@@ -11,6 +12,29 @@ from rich.table import Table
 load_dotenv()
 
 app = typer.Typer(name="slack", help="Slack CLI for AI agents")
+
+
+def _read_blocks(source: str) -> list:
+    """Block Kit blocks from a JSON file, or from stdin when source is `-`.
+
+    Accepts either a bare array of blocks or an object carrying them under
+    `blocks`, so the output of a tool that emits a whole `chat.postMessage`
+    body can be piped straight in.
+    """
+    import sys
+
+    raw = sys.stdin.read() if source == "-" else Path(source).read_text()
+    if not raw.strip():
+        raise typer.BadParameter("--blocks-json got no input")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise typer.BadParameter(f"--blocks-json is not valid JSON: {exc}") from exc
+
+    blocks = payload.get("blocks") if isinstance(payload, dict) else payload
+    if not isinstance(blocks, list) or not blocks:
+        raise typer.BadParameter("--blocks-json has no blocks array")
+    return blocks
 
 
 @app.command("health")
@@ -58,18 +82,35 @@ def send(
         "--no-attribution",
         help="Skip auto-adding requester attribution (from SLACK_REQUESTER_ID)",
     ),
+    blocks_json: str = typer.Option(
+        None,
+        "--blocks-json",
+        help="Path to a JSON file of Block Kit blocks, or - to read them from stdin",
+    ),
 ):
     """Send a message to a channel or Slack user DM.
+
+    `message` is the notification and fallback text; with --blocks-json it is
+    what Slack shows where the blocks cannot render, so keep it meaningful.
 
     Examples:
         slack send "#eng-ai" "Hello from the CLI!"
         slack send eng-ai "Reply in thread" --thread 1234567890.123456
         slack send U12345678 "Direct follow-up"
+        datasearch slack-card <card> | slack send eng-ai "Apple revenue" --blocks-json -
     """
     from .client import send_message
 
+    blocks = _read_blocks(blocks_json) if blocks_json else None
+
     try:
-        result = send_message(channel, message, thread_ts=thread, no_attribution=no_attribution)
+        result = send_message(
+            channel,
+            message,
+            thread_ts=thread,
+            no_attribution=no_attribution,
+            blocks=blocks,
+        )
         console.print("[green]✓ Message sent[/]")
         console.print(f"[dim]{result['permalink']}[/]")
     except RuntimeError as e:
