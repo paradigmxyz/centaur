@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import os
 from typing import Any
-from urllib.parse import quote
 
 import httpx
 
 SANDBOX_PERMISSIONS_PATH = "/api/v1/sandbox/permissions"
 SANDBOX_OAUTH_APPS_PATH = "/api/v1/sandbox/oauth_apps"
-SANDBOX_SKILLS_PATH = "/api/v1/sandbox/skills"
 
 
 class ConsoleClient:
@@ -91,54 +89,9 @@ class ConsoleClient:
             raise RuntimeError("centaur-console OAuth apps response did not include a data array")
         return data
 
-    def skills_list(
-        self,
-        scope: str | None = None,
-        limit: int = 20,
-    ) -> list[dict[str, Any]]:
-        """List Console skills visible to the current sandbox principal."""
-        params: dict[str, str | int] = {"limit": limit}
-        if scope:
-            params["scope"] = scope
-        return self._skills_request(SANDBOX_SKILLS_PATH, params=params)
-
-    def skills_search(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
-        """Search Console skills visible to the current sandbox principal."""
-        return self._skills_request(
-            f"{SANDBOX_SKILLS_PATH}/search",
-            params={"q": query, "limit": limit},
-        )
-
-    def skill_read(self, skill_id: str) -> dict[str, Any]:
-        """Read one visible Console skill by ID."""
-        results = self._skills_request(f"{SANDBOX_SKILLS_PATH}/{quote(skill_id, safe='')}")
-        if not isinstance(results, dict):
-            raise RuntimeError("centaur-console skill response did not include a data object")
-        return results
-
     def oauth_apps(self) -> list[dict[str, Any]]:
         """Alias for tool bridge calls."""
         return self.sandbox_oauth_apps()
-
-    def _skills_request(
-        self,
-        path: str,
-        params: dict[str, str | int] | None = None,
-    ) -> dict[str, Any] | list[dict[str, Any]]:
-        response = self.client.get(path, params=params)
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            detail = _response_error_detail(exc.response)
-            raise RuntimeError(f"centaur-console skills request failed: {detail}") from exc
-        except httpx.RequestError as exc:
-            raise RuntimeError(f"centaur-console skills request failed: {exc}") from exc
-
-        payload = response.json()
-        data = payload.get("data")
-        if not isinstance(data, (dict, list)):
-            raise RuntimeError("centaur-console skills response did not include data")
-        return data
 
     def health(self) -> dict[str, Any]:
         """Assert the sandbox permissions endpoint is reachable and authorized."""
