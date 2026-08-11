@@ -4558,10 +4558,10 @@ mod tests {
             ..PythonWorkflowMetadata::default()
         };
 
-        let registrar = WorkflowPrincipalRegistrar::new(
-            IronControlClient::new("http://127.0.0.1:1", "test-key"),
-            "default",
-        );
+        let registrar = WorkflowPrincipalRegistrar::new(IronControlClient::new(
+            "http://127.0.0.1:1",
+            "test-key",
+        ));
         let error = match prepare_workflow_host_sandbox(
             None,
             registrar,

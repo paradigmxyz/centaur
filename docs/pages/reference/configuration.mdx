@@ -71,7 +71,7 @@ for the operator workflow.
 | `console.passwordLoginEnabled` | Helm value, default `true`. | Enables the break-glass email and password login. Disable after SSO is configured for a public Console. |
 | `console.ssoEmailDomains` | Helm value. | Limits Google or Slack SSO admission by email domain. Empty accepts any IdP-authenticated email. |
 | `apiRs.syncInfraSecrets`, `IRON_CONTROL_SYNC_INFRA_SECRETS` | Helm value, default `true`. | Upserts the shared `infra` role and its harness/platform secrets. Set false only when another process owns that shared Console state. |
-| `IRON_CONTROL_URL`, `IRON_CONTROL_API_KEY`, `IRON_CONTROL_NAMESPACE` | Chart-rendered for api-rs; operator shell for `centaur-perms`. | Connects the runtime or CLI to the same Console namespace. |
+| `IRON_CONTROL_URL`, `IRON_CONTROL_API_KEY` | Chart-rendered for api-rs; operator shell for `centaur-perms`. | Connects the runtime or CLI to the Console. |
 
 Default roles and default sandbox capabilities are stored in the Console, not
 as Helm values. Configure them in **System Settings** before new principals are

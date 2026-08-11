@@ -111,7 +111,6 @@ fn test_iron_control_settings() -> IronControlSettings {
     IronControlSettings {
         client: IronControlClient::new("http://127.0.0.1:1", "test-key"),
         control_url: "http://iron-control".to_owned(),
-        namespace: "default".to_owned(),
     }
 }
 

@@ -8435,7 +8435,6 @@ mod adoption_tests {
     fn test_principal(id: &str) -> Principal {
         Principal {
             id: id.to_owned(),
-            namespace: "default".to_owned(),
             foreign_id: Some("test".to_owned()),
             name: "Test".to_owned(),
             labels: BTreeMap::new(),

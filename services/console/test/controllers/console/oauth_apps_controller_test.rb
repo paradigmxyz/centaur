@@ -102,7 +102,7 @@ module Console
       base_params = {
         slug: app.slug,
         provider: "google", client_id: app.client_id,
-        credential_namespace: app.credential_namespace, enabled: "1",
+        enabled: "1",
         allowed_scopes: Array(app.allowed_scopes).join("\n")
       }
 

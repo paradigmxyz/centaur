@@ -217,7 +217,6 @@ module Api
       test "POST canonicalizes legacy identity labels without changing custom labels" do
         body = {
           data: {
-            namespace: "acme",
             foreign_id: "legacy-value-from-pg",
             database: "legacy-value-from-db",
             settings: [
