@@ -1,5 +1,6 @@
 import { createSlackbotV2, type SlackbotV2Options } from './index'
 import { parseChannelDefaults } from './channel-defaults'
+import { resolveSlackHomeTeamId } from './session-api'
 import { resolveSlackBotUserId } from './slack-user'
 import {
   createFlagMessageOverridesStrategy,
@@ -91,6 +92,7 @@ const options: SlackbotV2Options = {
   userName: stringEnv('SLACKBOTV2_USER_NAME', 'centaur'),
   logger: consoleLogger
 }
+options.slackHomeTeamId = await resolveSlackHomeTeamId(options)
 
 const { app } = createSlackbotV2(options)
 const server = Bun.serve({

@@ -201,6 +201,8 @@ export type SlackbotV2Options = {
   sessionApiTimeoutMs?: number
   signingSecret: string
   slackApiUrl?: string
+  /** Bot workspace team ID resolved once from Slack's auth.test response. */
+  slackHomeTeamId?: string
   /** Deadline for optional Slack Web API metadata lookups. */
   slackApiTimeoutMs?: number
   state?: StateAdapter

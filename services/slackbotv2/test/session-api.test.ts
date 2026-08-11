@@ -1004,7 +1004,7 @@ describe('session principal display name', () => {
     expect(requests.some(request => request.url.endsWith('/execute'))).toBe(true)
   })
 
-  test('DM sessions name the principal after the DM partner', async () => {
+  test('DM sessions include the email of a home-team partner', async () => {
     const { fetchFn, requests } = fakeApi()
     const dm = apiMessage('hi')
     dm.threadId = 'slack:D9:1700000000.000100'
@@ -1014,7 +1014,11 @@ describe('session principal display name', () => {
         if (url.includes('users.info')) {
           return Response.json({
             ok: true,
-            user: { profile: { display_name: 'Ada Lovelace', email: 'ada@example.com' } }
+            user: {
+              is_stranger: false,
+              profile: { display_name: 'Ada Lovelace', email: 'ada@example.com' },
+              team_id: 'T1'
+            }
           })
         }
         return Response.json({
@@ -1023,13 +1027,51 @@ describe('session principal display name', () => {
         })
       },
       async () => {
-        await forwardToSessionApi(slackOptions(fetchFn), forwardInput(dm))
+        await forwardToSessionApi(
+          { ...slackOptions(fetchFn), slackHomeTeamId: 'T1' },
+          forwardInput(dm)
+        )
       }
-	    )
-	    expect(createBody(requests).metadata?.slack_conversation_name).toBe('Ada Lovelace')
-	    expect(createBody(requests).metadata?.slack_channel_id).toBe('D9')
-	    expect(createBody(requests).metadata?.slack_team_id).toBe('T1')
+    )
+    expect(createBody(requests).metadata?.slack_conversation_name).toBe('Ada Lovelace')
+    expect(createBody(requests).metadata?.slack_channel_id).toBe('D9')
+    expect(createBody(requests).metadata?.slack_team_id).toBe('T1')
     expect(createBody(requests).metadata?.slack_user_email).toBe('ada@example.com')
+    expect(createBody(requests).metadata?.slack_user_id).toBe('U1')
+  })
+
+  test('DM sessions omit the email of an external-team partner', async () => {
+    const { fetchFn, requests } = fakeApi()
+    const dm = apiMessage('hi')
+    dm.threadId = 'slack:D9:1700000000.000100'
+    dm.raw = { channel: 'D9' }
+    await withSlackStub(
+      url => {
+        if (url.includes('users.info')) {
+          return Response.json({
+            ok: true,
+            user: {
+              is_stranger: true,
+              profile: { display_name: 'Grace Hopper', email: 'grace@example.com' },
+              team_id: 'T2'
+            }
+          })
+        }
+        return Response.json({
+          ok: true,
+          profile: { display_name: 'Grace Hopper' }
+        })
+      },
+      async () => {
+        await forwardToSessionApi(
+          { ...slackOptions(fetchFn), slackHomeTeamId: 'T1' },
+          forwardInput(dm)
+        )
+      }
+    )
+
+    expect(createBody(requests).metadata?.slack_conversation_name).toBe('Grace Hopper')
+    expect(createBody(requests).metadata?.slack_user_email).toBeUndefined()
     expect(createBody(requests).metadata?.slack_user_id).toBe('U1')
   })
 
