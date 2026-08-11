@@ -1,6 +1,7 @@
 """CLI for the Tako API."""
 
 import json
+import sys
 
 import typer
 from dotenv import load_dotenv
@@ -195,6 +196,116 @@ def available_data(
     if label is not None and label not in NER_LABELS:
         raise typer.BadParameter(f"--label must be one of: {', '.join(NER_LABELS)}")
     emit_or_reject(lambda: get_client().available_data(q, types=types, label=label))
+
+
+@app.command("slack-card")
+def slack_card(
+    card: str = typer.Argument(
+        None, help="A card's pub id or URL. Omit to read a search result from stdin"
+    ),
+    index: int = typer.Option(0, help="Which card to render when several were piped in"),
+    post: bool = typer.Option(
+        False, "--post", help="Post into the current Slack thread instead of printing"
+    ),
+    flat: bool = typer.Option(
+        False,
+        "--flat",
+        help="Use top-level image/context/actions blocks instead of a container",
+    ),
+    channel: str = typer.Option(None, help="Override the channel (defaults to this thread)"),
+    thread: str = typer.Option(None, help="Override the thread timestamp"),
+):
+    """Render a Tako card as a Slack message.
+
+    Presentation only: the chart image already exists on every card, so this
+    makes no Tako API call. Slack image blocks scale to the message width and
+    preserve aspect ratio, so the chart is never cropped, and the headline
+    numbers and "Open in Tako" button sit outside the image where they cost no
+    image height.
+
+    Pipe a `search` or `answer` result in to keep the card's title, headline, and
+    sources:
+
+        datasearch search "nvidia revenue" | datasearch slack-card --post
+
+    A bare pub id also works, but renders without that text. Prints the
+    `chat.postMessage` payload unless `--post` is given, which sends into the
+    Slack thread this turn belongs to and needs only `chat:write`
+    (`chat:write.public` for public channels the bot has not joined; private
+    channels need the bot invited). Use `--flat` if the container block renders
+    badly on any client.
+    """
+    from ._slack import (
+        SlackPostError,
+        card_message,
+        cards_from_payload,
+        post_message,
+        pub_id_of,
+        thread_target,
+    )
+
+    source_card: dict | None = None
+    if card:
+        pub_id = pub_id_of({"card_id": card, "webpage_url": card})
+        if not pub_id:
+            raise typer.BadParameter(f"not a Tako card id or URL: {card}")
+        source_card = {"card_id": pub_id}
+    else:
+        if sys.stdin.isatty():
+            raise typer.BadParameter(
+                "pass a card id or URL, or pipe a `search`/`answer` result on stdin"
+            )
+        raw = sys.stdin.read().strip()
+        if not raw:
+            raise typer.BadParameter("no card given and stdin was empty")
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise typer.BadParameter(f"stdin is not valid JSON: {exc}") from exc
+        cards = cards_from_payload(payload)
+        if not cards:
+            raise typer.BadParameter("no renderable Tako cards in the piped result")
+        if not 0 <= index < len(cards):
+            raise typer.BadParameter(f"--index {index} out of range: {len(cards)} card(s) piped in")
+        source_card = cards[index]
+
+    body = card_message(
+        source_card,
+        channel=channel,
+        thread_ts=thread,
+        layout="flat" if flat else "container",
+    )
+    if body is None:  # pragma: no cover - the card id was already validated
+        raise typer.BadParameter("card cannot be rendered")
+
+    if not post:
+        emit(body)
+        return
+
+    if not body.get("channel"):
+        target = thread_target()
+        if target is None:
+            console.print(
+                "[red]No Slack thread to post into: CENTAUR_THREAD_KEY is unset or not a "
+                "Slack thread. Pass --channel/--thread, or drop --post to print the payload.[/]"
+            )
+            raise typer.Exit(1)
+        body["channel"] = target.channel
+        body.setdefault("thread_ts", target.thread_ts)
+
+    try:
+        result = post_message(body)
+    except SlackPostError as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(1) from exc
+    emit(
+        {
+            "ok": True,
+            "channel": result.get("channel") or body["channel"],
+            "ts": result.get("ts"),
+            "layout": "flat" if flat else "container",
+        }
+    )
 
 
 if __name__ == "__main__":
