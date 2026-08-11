@@ -42,7 +42,7 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_select "td span", text: "Env"
     assert_select "body", text: /GITHUB_TOKEN/, count: 0
     # The foreign_id links to the detail page (full value as a hover tooltip),
-  # with the opaque oid shown beneath it.
+    # with the opaque oid shown beneath it.
     assert_select "a[href=?][title=?]", console_secret_path("static", secret.oid), secret.foreign_id
     assert_select "div", text: secret.oid
     # The name is plain text (not a link) with the full value as a tooltip.
