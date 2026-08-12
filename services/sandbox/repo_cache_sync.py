@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import glob
+import hashlib
+import json
 import os
 from pathlib import Path
 import shlex
@@ -12,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import time
+from urllib.parse import urlsplit
 
 REPOSITORY_VISIBILITIES = {"private", "public"}
 PUBLIC_REPOSITORY_VISIBILITY = "public"
@@ -49,6 +52,22 @@ def _repository_visibilities(value: str, repositories: list[str]) -> dict[str, s
     return visibilities
 
 
+def _repository_clone_urls(value: str) -> dict[str, str]:
+    if not value.strip():
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError("REPOSITORY_CLONE_URLS must be a JSON object") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("REPOSITORY_CLONE_URLS must be a JSON object")
+    return {
+        str(repo).strip(): str(clone_url).strip()
+        for repo, clone_url in parsed.items()
+        if str(repo).strip() and str(clone_url).strip()
+    }
+
+
 def _atomic_write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.tmp")
@@ -75,15 +94,19 @@ class RepoCacheSync:
         repositories: list[str],
         repository_refs: dict[str, str],
         repository_visibilities: dict[str, str],
+        repository_clone_urls: dict[str, str],
         sync_interval_seconds: float,
-        github_token_file: Path,
+        git_username: str,
+        git_token_file: Path,
     ) -> None:
         self.cache_dir = cache_dir
         self.repositories = repositories
         self.repository_refs = repository_refs
         self.repository_visibilities = repository_visibilities
+        self.repository_clone_urls = repository_clone_urls
         self.sync_interval_seconds = sync_interval_seconds
-        self.github_token_file = github_token_file
+        self.git_username = git_username
+        self.git_token_file = git_token_file
         self.git_env: dict[str, str] | None = None
         self.ready_file = self.cache_dir / ".repo-cache-ready"
 
@@ -155,25 +178,41 @@ class RepoCacheSync:
             repository_visibilities=_repository_visibilities(
                 os.environ.get("REPOSITORY_VISIBILITIES", ""), repositories
             ),
+            repository_clone_urls=_repository_clone_urls(
+                os.environ.get("REPOSITORY_CLONE_URLS", "")
+            ),
             sync_interval_seconds=sync_interval_seconds,
-            github_token_file=Path(
-                os.environ.get("GITHUB_TOKEN_FILE", "/github-token/token")
+            git_username=(
+                os.environ.get("GIT_USERNAME", "").strip() or "x-access-token"
+            ),
+            git_token_file=Path(
+                os.environ.get("GIT_TOKEN_FILE", "").strip()
+                or os.environ.get("GITHUB_TOKEN_FILE", "/github-token/token")
             ),
         )
+
+    def repository_clone_url(self, repo: str) -> str:
+        clone_url = self.repository_clone_urls.get(repo) or f"https://github.com/{repo}.git"
+        parsed = urlsplit(clone_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError(f"clone URL for {repo} must be an HTTP or HTTPS URL")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError(f"clone URL for {repo} must not contain credentials")
+        return clone_url
 
     def _git_env(self) -> dict[str, str]:
         env = os.environ.copy()
         env["GIT_TERMINAL_PROMPT"] = "0"
         if (
-            self.github_token_file.is_file()
-            and self.github_token_file.stat().st_size > 0
+            self.git_token_file.is_file()
+            and self.git_token_file.stat().st_size > 0
         ):
             askpass = Path("/tmp/git-askpass")
             askpass.write_text(
                 "#!/bin/sh\n"
                 'case "$1" in\n'
-                "  *Username*) printf '%s\\n' x-access-token ;;\n"
-                f"  *Password*) cat {shlex.quote(str(self.github_token_file))} ;;\n"
+                f"  *Username*) printf '%s\\n' {shlex.quote(self.git_username)} ;;\n"
+                f"  *Password*) cat {shlex.quote(str(self.git_token_file))} ;;\n"
                 "  *) printf '\\n' ;;\n"
                 "esac\n"
             )
@@ -298,7 +337,7 @@ class RepoCacheSync:
         )
 
     def sync_repo(self, repo: str) -> None:
-        repo_url = f"https://github.com/{repo}.git"
+        repo_url = self.repository_clone_url(repo)
         target = self.repository_target(repo)
         tmp = target.with_name(f"{target.name}.tmp")
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -355,10 +394,15 @@ class RepoCacheSync:
             f"{repo}={self.repository_visibilities.get(repo, 'private')}"
             for repo in self.repositories
         )
+        clone_url_hashes = " ".join(
+            f"{repo}={hashlib.sha256(self.repository_clone_url(repo).encode()).hexdigest()}"
+            for repo in self.repositories
+        )
         return (
             f"repositories={' '.join(self.repositories)}\n"
             f"repository_refs={refs}\n"
             f"repository_visibilities={visibilities}\n"
+            f"repository_clone_url_hashes={clone_url_hashes}\n"
         )
 
     def write_ready(self) -> None:

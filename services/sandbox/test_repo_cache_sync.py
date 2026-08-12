@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import tempfile
 import unittest
@@ -9,6 +11,25 @@ import repo_cache_sync
 
 
 class RepoCacheSyncTest(unittest.TestCase):
+    def make_sync(
+        self,
+        root: Path,
+        *,
+        repositories: list[str] | None = None,
+        repository_clone_urls: dict[str, str] | None = None,
+        git_username: str = "x-access-token",
+    ) -> repo_cache_sync.RepoCacheSync:
+        return repo_cache_sync.RepoCacheSync(
+            cache_dir=root / "cache",
+            repositories=repositories or ["acme/centaur"],
+            repository_refs={},
+            repository_visibilities={},
+            repository_clone_urls=repository_clone_urls or {},
+            sync_interval_seconds=30,
+            git_username=git_username,
+            git_token_file=root / "missing-token",
+        )
+
     def test_repository_refs_parse_nonempty_entries(self) -> None:
         self.assertEqual(
             repo_cache_sync._repository_refs("acme/one=main bad acme/two=abc123"),
@@ -35,7 +56,14 @@ class RepoCacheSyncTest(unittest.TestCase):
             os.environ.update(
                 {
                     "REPOSITORIES": "acme/public acme/private",
+                    "REPOSITORY_CLONE_URLS": json.dumps(
+                        {
+                            "acme/public": "http://git.example.test:82/acme/public.git",
+                        }
+                    ),
                     "REPOSITORY_VISIBILITIES": "acme/public=public acme/private=bogus",
+                    "GIT_USERNAME": "oauth2",
+                    "GIT_TOKEN_FILE": "/git-credentials/token",
                     "SYNC_INTERVAL_SECONDS": "10",
                 }
             )
@@ -46,9 +74,102 @@ class RepoCacheSyncTest(unittest.TestCase):
                 sync.repository_visibilities,
                 {"acme/public": "public", "acme/private": "private"},
             )
+            self.assertEqual(
+                sync.repository_clone_urls,
+                {"acme/public": "http://git.example.test:82/acme/public.git"},
+            )
+            self.assertEqual(sync.git_username, "oauth2")
+            self.assertEqual(sync.git_token_file, Path("/git-credentials/token"))
         finally:
             os.environ.clear()
             os.environ.update(old_env)
+
+    def test_repository_clone_url_uses_explicit_http_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sync = self.make_sync(
+                root,
+                repository_clone_urls={
+                    "acme/centaur": "http://git.example.test:82/acme/centaur.git",
+                },
+            )
+
+            self.assertEqual(
+                sync.repository_clone_url("acme/centaur"),
+                "http://git.example.test:82/acme/centaur.git",
+            )
+
+    def test_repository_clone_url_falls_back_to_github(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sync = self.make_sync(Path(tmp))
+
+            self.assertEqual(
+                sync.repository_clone_url("acme/centaur"),
+                "https://github.com/acme/centaur.git",
+            )
+
+    def test_repository_clone_url_rejects_embedded_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sync = self.make_sync(
+                Path(tmp),
+                repository_clone_urls={
+                    "acme/centaur": "http://oauth2:secret@git.example.test/acme/centaur.git",
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "must not contain credentials"):
+                sync.repository_clone_url("acme/centaur")
+
+    def test_repository_clone_url_rejects_non_http_transport(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sync = self.make_sync(
+                Path(tmp),
+                repository_clone_urls={
+                    "acme/centaur": "ssh://git@git.example.test/acme/centaur.git",
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "must be an HTTP or HTTPS URL"):
+                sync.repository_clone_url("acme/centaur")
+
+    def test_git_askpass_uses_configured_username_and_token_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            token_file = root / "token"
+            token_file.write_text("not-a-real-token")
+            sync = repo_cache_sync.RepoCacheSync(
+                cache_dir=root / "cache",
+                repositories=["acme/centaur"],
+                repository_refs={},
+                repository_visibilities={},
+                repository_clone_urls={},
+                sync_interval_seconds=30,
+                git_username="gitlab-deploy-token",
+                git_token_file=token_file,
+            )
+
+            env = sync._git_env()
+            askpass = Path(env["GIT_ASKPASS"])
+            self.addCleanup(askpass.unlink, missing_ok=True)
+            content = askpass.read_text()
+
+            self.assertIn("gitlab-deploy-token", content)
+            self.assertIn(str(token_file), content)
+            self.assertNotIn("not-a-real-token", content)
+
+    def test_readiness_fingerprint_hashes_clone_urls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clone_url = "http://git.example.test:82/acme/centaur.git"
+            sync = self.make_sync(
+                root,
+                repository_clone_urls={"acme/centaur": clone_url},
+            )
+
+            fingerprint = sync.repository_fingerprint()
+
+            self.assertIn(hashlib.sha256(clone_url.encode()).hexdigest(), fingerprint)
+            self.assertNotIn(clone_url, fingerprint)
 
     def test_write_ready_preserves_readiness_format(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -59,8 +180,10 @@ class RepoCacheSyncTest(unittest.TestCase):
                 repositories=["acme/centaur"],
                 repository_refs={"acme/centaur": "main"},
                 repository_visibilities={"acme/centaur": "public"},
+                repository_clone_urls={},
                 sync_interval_seconds=30,
-                github_token_file=root / "missing-token",
+                git_username="x-access-token",
+                git_token_file=root / "missing-token",
             )
 
             sync.write_ready()
@@ -69,7 +192,10 @@ class RepoCacheSyncTest(unittest.TestCase):
             self.assertEqual(lines[0], "repositories=acme/centaur")
             self.assertEqual(lines[1], "repository_refs=acme/centaur=main")
             self.assertEqual(lines[2], "repository_visibilities=acme/centaur=public")
-            self.assertRegex(lines[3], r"^synced_at=\d{4}-\d{2}-\d{2}T")
+            self.assertRegex(
+                lines[3], r"^repository_clone_url_hashes=acme/centaur=[0-9a-f]{64}$"
+            )
+            self.assertRegex(lines[4], r"^synced_at=\d{4}-\d{2}-\d{2}T")
 
     def test_check_ready_validates_fingerprint_and_repos(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -83,8 +209,10 @@ class RepoCacheSyncTest(unittest.TestCase):
                 repositories=["acme/centaur"],
                 repository_refs={"acme/centaur": "main"},
                 repository_visibilities={"acme/centaur": "private"},
+                repository_clone_urls={},
                 sync_interval_seconds=30,
-                github_token_file=root / "missing-token",
+                git_username="x-access-token",
+                git_token_file=root / "missing-token",
             )
             sync.write_ready()
 
@@ -107,8 +235,10 @@ class RepoCacheSyncTest(unittest.TestCase):
                     "acme/public": "public",
                     "acme/private": "private",
                 },
+                repository_clone_urls={},
                 sync_interval_seconds=30,
-                github_token_file=root / "missing-token",
+                git_username="x-access-token",
+                git_token_file=root / "missing-token",
             )
 
             self.assertEqual(
@@ -130,8 +260,10 @@ class RepoCacheSyncTest(unittest.TestCase):
                 repositories=["acme/docs"],
                 repository_refs={},
                 repository_visibilities={"acme/docs": "public"},
+                repository_clone_urls={},
                 sync_interval_seconds=30,
-                github_token_file=root / "missing-token",
+                git_username="x-access-token",
+                git_token_file=root / "missing-token",
             )
 
             sync.update_legacy_link("acme/docs", target)
@@ -150,8 +282,10 @@ class RepoCacheSyncTest(unittest.TestCase):
                 repositories=["acme/docs"],
                 repository_refs={},
                 repository_visibilities={"acme/docs": "public"},
+                repository_clone_urls={},
                 sync_interval_seconds=30,
-                github_token_file=root / "missing-token",
+                git_username="x-access-token",
+                git_token_file=root / "missing-token",
             )
 
             target = sync.repository_target("acme/docs")
@@ -172,8 +306,10 @@ class RepoCacheSyncTest(unittest.TestCase):
                 repositories=["acme/centaur"],
                 repository_refs={},
                 repository_visibilities={},
+                repository_clone_urls={},
                 sync_interval_seconds=30,
-                github_token_file=Path("/tmp/missing-token"),
+                git_username="x-access-token",
+                git_token_file=Path("/tmp/missing-token"),
             )
             with self.assertRaises(RuntimeError):
                 sync.run_forever()
