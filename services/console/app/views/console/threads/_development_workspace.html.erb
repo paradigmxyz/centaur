@@ -1,0 +1,34 @@
+<%= turbo_frame_tag development_workspace_frame_id(session) do %>
+  <div class="development-workspace-bar">
+    <div class="development-workspace-repositories" aria-label="Selected projects">
+      <% if workspace.fetch("repositories", []).empty? %>
+        <span class="development-workspace-empty">No project selected</span>
+      <% else %>
+        <% workspace.fetch("repositories").each do |repository| %>
+          <span class="development-workspace-chip" title="<%= repository.fetch("path_with_namespace") %>">
+            <%= console_icon("folder", classes: "size-3.5") %>
+            <span><%= repository.fetch("display_name") %></span>
+            <span class="development-workspace-state"><%= repository.fetch("state").humanize %></span>
+          </span>
+        <% end %>
+      <% end %>
+    </div>
+    <% if (changeset = workspace["latest_changeset"]) %>
+      <%= link_to console_changeset_path(changeset.fetch("changeset_id")),
+                  class: "development-workspace-review" do %>
+        Review changes
+        <span><%= changeset.fetch("state").humanize %></span>
+      <% end %>
+    <% end %>
+    <% if workspace["state"] == "ready" && !active && thread_owned?(session) %>
+      <%= form_with url: console_thread_projects_path, method: :post,
+                    class: "development-workspace-add" do |form| %>
+        <%= form.hidden_field :thread_key, value: session.thread_key %>
+        <%= render "console/threads/repository_picker",
+                   allow_no_project: false,
+                   label: "Add projects" %>
+        <button type="submit" class="development-workspace-add-submit">Add</button>
+      <% end %>
+    <% end %>
+  </div>
+<% end %>

@@ -19,6 +19,8 @@ pub struct AcceptDevelopmentTaskRequest {
     pub message: SessionMessageInput,
     #[serde(default)]
     pub session_metadata: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_ids: Option<Vec<RepositoryId>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

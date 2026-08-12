@@ -1,0 +1,59 @@
+<div class="repository-picker"
+     data-controller="repository-picker"
+     data-repository-picker-url-value="<%= console_thread_repositories_path %>">
+  <div data-repository-picker-target="inputs">
+    <input type="hidden" name="repository_ids[]" value="">
+  </div>
+  <button type="button"
+          class="console-composer-tool"
+          data-action="repository-picker#toggle"
+          aria-label="Choose projects"
+          title="Choose projects">
+    <%= console_icon("folder", classes: "size-4") %>
+    <span data-repository-picker-target="label"><%= local_assigns.fetch(:label, "Projects") %></span>
+  </button>
+  <div class="repository-picker-panel" data-repository-picker-target="panel" hidden>
+    <div class="repository-picker-search">
+      <input type="search"
+             placeholder="Search projects"
+             autocomplete="off"
+             data-repository-picker-target="query"
+             data-action="keydown->repository-picker#keydown">
+      <button type="button" data-action="repository-picker#search" aria-label="Search" title="Search">
+        <%= console_icon("search", classes: "size-4") %>
+      </button>
+    </div>
+    <div class="repository-picker-selected" data-repository-picker-target="selected"></div>
+    <div class="repository-picker-results" data-repository-picker-target="results"></div>
+    <div class="repository-picker-status" data-repository-picker-target="status" aria-live="polite"></div>
+    <div class="repository-picker-footer">
+      <% if local_assigns.fetch(:allow_no_project, true) %>
+      <label class="repository-picker-none">
+        <input type="checkbox"
+               name="no_project"
+               value="1"
+               data-repository-picker-target="noProject"
+               data-action="repository-picker#noProject">
+        <span>No project</span>
+      </label>
+      <% end %>
+      <span class="flex-1"></span>
+      <button type="button"
+              data-repository-picker-target="previous"
+              data-action="repository-picker#previous"
+              aria-label="Previous page"
+              title="Previous page"
+              disabled>
+        <%= console_icon("chevron-left", classes: "size-4") %>
+      </button>
+      <button type="button"
+              data-repository-picker-target="next"
+              data-action="repository-picker#next"
+              aria-label="Next page"
+              title="Next page"
+              disabled>
+        <%= console_icon("chevron-right", classes: "size-4") %>
+      </button>
+    </div>
+  </div>
+</div>

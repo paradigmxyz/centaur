@@ -172,8 +172,27 @@ pub(crate) fn development_router() -> Router<AppState> {
         )
         .route(
             "/api/development/sessions/{thread_key}/repositories",
-            post(create_add_repository_selection),
+            get(get_development_workspace).post(create_add_repository_selection),
         )
+}
+
+async fn get_development_workspace(
+    State(state): State<AppState>,
+    Path(raw_thread_key): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<centaur_session_core::development::DevelopmentWorkspaceView>, ApiError> {
+    let principal = state.development_authorizer().authorize(&headers)?;
+    let thread_key = ThreadKey::try_from(raw_thread_key)?;
+    Ok(Json(
+        state
+            .runtime()?
+            .get_development_workspace_view(
+                &thread_key,
+                &principal.principal_id,
+                principal.is_admin,
+            )
+            .await?,
+    ))
 }
 
 async fn list_pending_feishu_deliveries(
@@ -546,6 +565,20 @@ async fn accept_development_task(
         &request.channel,
         &request.initiator.principal_id,
     )?;
+    let repository_ids = request.repository_ids.clone();
+    let repositories = match repository_ids.as_ref() {
+        Some(repository_ids) => {
+            let repositories = state
+                .repository_resolver()?
+                .resolve(repository_ids)
+                .await
+                .map_err(repository_resolve_error)?;
+            validate_resolved_repositories(repository_ids, &repositories)?;
+            Some(repositories)
+        }
+        None => None,
+    };
+    let initiator_principal_id = request.initiator.principal_id.clone();
     let accepted = state
         .runtime()?
         .accept_development_task(AcceptDevelopmentTask {
@@ -558,6 +591,41 @@ async fn accept_development_task(
             session_metadata: request.session_metadata,
         })
         .await?;
+    if let (Some(repository_ids), Some(repositories)) = (repository_ids, repositories) {
+        let selection = state
+            .runtime()?
+            .get_repository_selection_view(
+                &accepted.selection_flow_id,
+                &initiator_principal_id,
+                false,
+            )
+            .await?;
+        match selection.state {
+            centaur_session_core::development::SelectionFlowState::Pending => {
+                state
+                    .runtime()?
+                    .confirm_repository_selection(&ConfirmRepositorySelection {
+                        selection_flow_id: accepted.selection_flow_id.clone(),
+                        expected_version: selection.version,
+                        decided_by_principal_id: initiator_principal_id,
+                        repositories,
+                    })
+                    .await?;
+            }
+            centaur_session_core::development::SelectionFlowState::Confirmed
+                if selection.selected_repository_ids == repository_ids => {}
+            centaur_session_core::development::SelectionFlowState::Confirmed => {
+                return Err(ApiError::BadRequest(
+                    "replayed task repository selection does not match".to_owned(),
+                ));
+            }
+            centaur_session_core::development::SelectionFlowState::Cancelled => {
+                return Err(ApiError::BadRequest(
+                    "replayed task repository selection was cancelled".to_owned(),
+                ));
+            }
+        }
+    }
     Ok(Json(accepted))
 }
 
@@ -729,6 +797,14 @@ fn validate_resolved_repositories(
     requested: &[RepositoryId],
     resolved: &[ResolvedRepository],
 ) -> Result<(), ApiError> {
+    if requested
+        .iter()
+        .any(|repository_id| i64::try_from(repository_id.project_id()).is_err())
+    {
+        return Err(ApiError::BadRequest(
+            "repository project ID exceeds the supported range".to_owned(),
+        ));
+    }
     let requested = requested.iter().collect::<HashSet<_>>();
     let resolved = resolved
         .iter()
@@ -775,7 +851,7 @@ mod tests {
     use centaur_session_core::development::{
         CollectedChangeSetRepositoryState, CompleteChangeSetCollection,
         CompleteChangeSetRepository, CompleteWorkspacePreparation, ConfirmRepositorySelection,
-        PreparedRepositorySnapshot, RepositoryId, ResolvedRepository,
+        PreparedRepositorySnapshot, RepositoryId, ResolvedRepository, SelectionFlowState,
     };
     use centaur_session_runtime::{SandboxRuntime, SessionPrincipalRegistrar, SessionRuntime};
     use centaur_session_sqlx::PgSessionStore;
@@ -1122,6 +1198,136 @@ mod tests {
         assert_eq!(replay["created"], false);
         assert_eq!(created["thread_key"], replay["thread_key"]);
         assert_eq!(created["execution_id"], replay["execution_id"]);
+    }
+
+    #[tokio::test]
+    async fn development_task_route_confirms_web_repositories_in_one_idempotent_request() {
+        let Some((app, store)) = test_app().await else {
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4().to_string();
+        let mut body = intake_body(&suffix);
+        body["repository_ids"] = json!(["gitlab:42", "gitlab:84"]);
+        body["message"]["metadata"] = json!({
+            "source": "console",
+            "model": "gpt-5.6-sol",
+            "reasoning": "high",
+            "execution_context": [
+                {"type": "text", "text": "# Requester Context\nPrompted by: @ada"}
+            ]
+        });
+
+        let (created_status, created) =
+            post(app.clone(), "/api/development/tasks", body.clone()).await;
+        let (replay_status, replay) = post(app, "/api/development/tasks", body).await;
+
+        assert_eq!(created_status, StatusCode::OK);
+        assert_eq!(replay_status, StatusCode::OK);
+        assert_eq!(created["created"], true);
+        assert_eq!(replay["created"], false);
+        assert_eq!(created["thread_key"], replay["thread_key"]);
+        let view = store
+            .get_repository_selection_view(
+                created["selection_flow_id"].as_str().unwrap(),
+                "principal-1",
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(view.state, SelectionFlowState::Confirmed);
+        assert_eq!(
+            view.selected_repository_ids,
+            vec!["gitlab:42".parse().unwrap(), "gitlab:84".parse().unwrap()]
+        );
+        let execution = store
+            .latest_execution_for_thread(&view.thread_key)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(execution.metadata["model"], "gpt-5.6-sol");
+        assert_eq!(execution.metadata["reasoning"], "high");
+        let input = &execution.metadata["development_input_line"];
+        assert_eq!(input["model"], "gpt-5.6-sol");
+        assert_eq!(input["reasoning"], "high");
+        assert_eq!(
+            input["message"]["content"][0]["text"],
+            "# Requester Context\nPrompted by: @ada"
+        );
+        assert_eq!(input["message"]["content"][1]["text"], "Fix the test");
+        let messages = store.list_messages(&view.thread_key).await.unwrap();
+        assert_eq!(messages[0].parts[0]["text"], "Fix the test");
+        assert_eq!(messages[0].parts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn development_workspace_route_is_owner_scoped_and_redacts_clone_details() {
+        let Some((app, _store)) = test_app().await else {
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4().to_string();
+        let mut body = intake_body(&suffix);
+        body["repository_ids"] = json!(["gitlab:42"]);
+        let (_, accepted) = post(app.clone(), "/api/development/tasks", body).await;
+        let uri = format!(
+            "/api/development/sessions/{}/repositories",
+            urlencoding::encode(accepted["thread_key"].as_str().unwrap())
+        );
+
+        assert_eq!(
+            get(app.clone(), &uri, Some("principal-2")).await.0,
+            StatusCode::FORBIDDEN
+        );
+        for bearer in ["principal-1", "admin-1"] {
+            let (status, _, bytes) = get(app.clone(), &uri, Some(bearer)).await;
+            assert_eq!(status, StatusCode::OK);
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["repositories"][0]["repository_id"], "gitlab:42");
+            assert_eq!(body["repositories"][0]["display_name"], "project-42");
+            assert_eq!(body["latest_changeset"], Value::Null);
+            assert!(body.to_string().find("clone_url").is_none());
+            assert!(body.to_string().find("base_sha").is_none());
+            assert!(body.to_string().find("default_branch").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn development_task_route_bounds_execution_context() {
+        let Some((app, _store)) = test_app().await else {
+            return;
+        };
+        let mut invalid = intake_body(&uuid::Uuid::new_v4().to_string());
+        invalid["message"]["metadata"] = json!({
+            "model": {"untrusted": true},
+            "execution_context": [{"type": "image", "url": "https://example.invalid"}]
+        });
+        assert_eq!(
+            post(app, "/api/development/tasks", invalid).await.0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn development_task_does_not_persist_before_repository_resolution_succeeds() {
+        let Some((app, store)) = test_app().await else {
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4().to_string();
+        let mut invalid = intake_body(&suffix);
+        invalid["repository_ids"] = json!(["gitlab:18446744073709551615"]);
+
+        assert_eq!(
+            post(app, "/api/development/tasks", invalid).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        let count = sqlx::query_scalar::<_, i64>(
+            "select count(*) from development_platform_events where tenant_key = $1 and event_id = $2",
+        )
+        .bind(format!("tenant-{suffix}"))
+        .bind(format!("event-{suffix}"))
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]

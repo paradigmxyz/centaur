@@ -3,6 +3,12 @@ class Console::ThreadsController < ApplicationController
 
   # Injectable for tests, mirroring Console::WorkflowsController.
   class_attribute :client_factory, default: -> { CentaurApiClient.new }
+  class_attribute :development_client_factory, default: lambda { |user, admin|
+    token = ApiServer::Jwt.encode_for_console_user(user, admin: admin)
+    raise CentaurApiClient::Error, "Console API JWT signing is not configured" if token.blank?
+
+    CentaurApiClient.new(api_key: token)
+  }
 
   THREAD_LIMIT = 250
   MESSAGE_LIMIT = 80
@@ -150,7 +156,8 @@ class Console::ThreadsController < ApplicationController
                 :composer_agents_json,
                 :thread_execution_active?,
                 :thread_owned?,
-                :thread_writable?
+                :thread_writable?,
+                :development_workspace_frame_id
 
   def index
     @query = params[:q].to_s.strip
@@ -208,6 +215,114 @@ class Console::ThreadsController < ApplicationController
   def sidebar
     load_console_sidebar_threads
     render partial: "console/threads/sidebar_threads", layout: false
+  end
+
+  def repositories
+    page = development_api_client.search_development_repositories(
+      query: params[:query].to_s.strip.presence,
+      cursor: params[:cursor].to_s.strip.presence
+    )
+    render json: page
+  rescue CentaurApiClient::Error => e
+    render json: { error: e.message }, status: :service_unavailable
+  end
+
+  def workspace
+    session = readable_thread(params[:thread_key].to_s.strip)
+    unless session && development_thread?(session) && (thread_owned?(session) || acting_admin?)
+      head :not_found
+      return
+    end
+    workspace = development_api_client.get_development_workspace(session.thread_key)
+    active = latest_executions_for([ session.thread_key ])[session.thread_key].then do |execution|
+      execution.present? && %w[queued running executing].include?(execution.status.to_s)
+    end
+    render partial: "console/threads/development_workspace",
+           locals: {
+             workspace: workspace,
+             session: session,
+             active: active
+           },
+           layout: false
+  rescue CentaurApiClient::Error => e
+    Rails.logger.warn("console_development_workspace_failed error=#{e.class}: #{e.message}")
+    head :service_unavailable
+  end
+
+  def add_projects
+    session = owned_thread_scope.where(thread_key: params[:thread_key].to_s.strip).first
+    unless session && development_thread?(session)
+      redirect_to console_threads_path, alert: "Development chat not found."
+      return
+    end
+    if latest_executions_for([ session.thread_key ])[session.thread_key].then { |execution|
+         execution.present? && %w[queued running executing].include?(execution.status.to_s)
+       }
+      redirect_to console_threads_path(thread: session.thread_key),
+                  alert: "Wait for the current task to finish before adding projects."
+      return
+    end
+    repository_ids = selected_add_repository_ids(session.thread_key)
+    return if performed?
+    draft = development_api_client.create_add_repository_selection(
+      thread_key: session.thread_key,
+      principal_id: current_user.oid
+    )
+    development_api_client.confirm_development_selection(
+      selection_flow_id: draft.fetch("selection_flow_id"),
+      expected_version: draft.fetch("version"),
+      principal_id: current_user.oid,
+      repository_ids: repository_ids
+    )
+    redirect_to console_threads_path(thread: session.thread_key), notice: "Projects are being prepared."
+  rescue CentaurApiClient::Error, KeyError => e
+    redirect_to console_threads_path(thread: params[:thread_key]),
+                alert: "Could not add projects: #{e.message}"
+  end
+
+  def changeset
+    @changeset = development_api_client.get_development_changeset(params[:changeset_id])
+    @publish_batch = params[:publish_batch_id].present? ?
+      development_api_client.get_development_publish_batch(params[:publish_batch_id]) : nil
+  rescue CentaurApiClient::Error => e
+    redirect_to console_threads_path, alert: "Could not load the change set: #{e.message}"
+  end
+
+  def changeset_artifact
+    artifact = development_api_client.get_development_changeset_artifact(
+      params[:changeset_id], params[:artifact_ref]
+    )
+    send_data artifact.body,
+              type: artifact.headers&.fetch("content-type", "text/x-diff; charset=utf-8"),
+              disposition: "inline",
+              filename: "#{params[:changeset_id]}.diff"
+  rescue CentaurApiClient::Error => e
+    redirect_to console_changeset_path(params[:changeset_id]),
+                alert: "Could not load the immutable diff: #{e.message}"
+  end
+
+  def publish_changeset
+    batch = development_api_client.approve_development_changeset(
+      params[:changeset_id], idempotency_key: SecureRandom.uuid
+    )
+    redirect_to console_changeset_path(
+      params[:changeset_id], publish_batch_id: batch.fetch("publish_batch_id")
+    ), notice: "Merge request publication started."
+  rescue CentaurApiClient::Error, KeyError => e
+    redirect_to console_changeset_path(params[:changeset_id]),
+                alert: "Could not create merge requests: #{e.message}"
+  end
+
+  def retry_publish_batch
+    batch = development_api_client.retry_development_publish_batch(
+      params[:publish_batch_id], idempotency_key: SecureRandom.uuid
+    )
+    redirect_to console_changeset_path(
+      batch.fetch("changeset_id"), publish_batch_id: batch.fetch("publish_batch_id")
+    ), notice: "Failed repositories are being retried."
+  rescue CentaurApiClient::Error, KeyError => e
+    redirect_back fallback_location: console_threads_path,
+                  alert: "Could not retry publication: #{e.message}"
   end
 
   # Single-panel transcript refresh, polled by thread_poller_controller.js
@@ -272,6 +387,14 @@ class Console::ThreadsController < ApplicationController
 
   def api_client
     @api_client ||= client_factory.call
+  end
+
+  def development_api_client
+    @development_api_client ||= development_client_factory.call(current_user, acting_admin?)
+  end
+
+  def development_workspace_frame_id(session)
+    "development-workspace-#{session.thread_key.to_s.gsub(/[^a-zA-Z0-9_-]/, "-")}"
   end
 
   # Whether the thread's newest execution is still running — drives the
@@ -353,13 +476,36 @@ class Console::ThreadsController < ApplicationController
     # A model-variant effort is already encoded in the model slug. Only Codex
     # consumes the blocks protocol's reasoning field.
     reasoning = agent.harness == "codex" ? effort : nil
-    thread_key = "console:#{SecureRandom.uuid}"
-    api_client.create_session(
-      thread_key: thread_key,
+    repository_ids = selected_repository_ids
+    return if performed?
+
+    message_id = SecureRandom.uuid
+    channel = {
+      platform: "web",
+      tenant_key: "console",
+      conversation_key: current_user.oid,
+      root_message_id: message_id
+    }
+    session_metadata = console_actor_metadata.merge(
+      development_channel: channel,
+      model: model
+    ).compact
+    execution_metadata = console_actor_metadata.merge(
+      model: model,
+      reasoning: reasoning,
+      execution_context: [ { type: "text", text: console_requester_context } ]
+    ).compact
+    accepted = development_api_client.start_development_task(
+      event_id: SecureRandom.uuid,
+      message_id: message_id,
       harness_type: agent.harness,
-      metadata: console_actor_metadata.merge(model.present? ? { model: model } : {})
+      principal_id: current_user.oid,
+      prompt: prompt,
+      session_metadata: session_metadata,
+      execution_metadata: execution_metadata,
+      repository_ids: repository_ids
     )
-    send_prompt(thread_key, prompt, model: model, effort: reasoning)
+    thread_key = accepted.fetch("thread_key")
     # A new-chat pane in a split view swaps the sentinel for the created
     # thread so the other panes stay open.
     open_keys = params[:open_threads].to_s.split(",").map(&:strip).reject(&:blank?)
@@ -368,6 +514,42 @@ class Console::ThreadsController < ApplicationController
     redirect_to console_threads_path(thread: redirect_keys.uniq.first(PANEL_LIMIT).join(","))
   rescue CentaurApiClient::Error => e
     redirect_to console_threads_path(new: 1), alert: "Could not start the chat: #{e.message}"
+  end
+
+  def selected_repository_ids
+    repository_ids = Array(params[:repository_ids])
+      .map { |value| value.to_s.strip }
+      .reject(&:blank?)
+      .uniq
+    if params[:no_project] == "1"
+      if repository_ids.any?
+        redirect_to console_threads_path(new: 1), alert: "Choose projects or No project, not both."
+        return
+      end
+      return []
+    end
+    unless repository_ids.any?
+      redirect_to console_threads_path(new: 1), alert: "Choose at least one project or select No project."
+      return
+    end
+    if repository_ids.length > 50 || repository_ids.any? { |id| !id.match?(/\Agitlab:[1-9][0-9]*\z/) }
+      redirect_to console_threads_path(new: 1), alert: "Invalid project selection."
+      return
+    end
+    repository_ids
+  end
+
+  def selected_add_repository_ids(thread_key)
+    repository_ids = Array(params[:repository_ids])
+      .map { |value| value.to_s.strip }
+      .reject(&:blank?)
+      .uniq
+    if repository_ids.empty? || repository_ids.length > 50 ||
+       repository_ids.any? { |id| !id.match?(/\Agitlab:[1-9][0-9]*\z/) }
+      redirect_to console_threads_path(thread: thread_key), alert: "Choose at least one valid project."
+      return
+    end
+    repository_ids
   end
 
   def reply_to_thread(thread_key, prompt)
@@ -380,6 +562,33 @@ class Console::ThreadsController < ApplicationController
       return
     end
 
+    if development_thread?(session)
+      unless thread_owned?(session)
+        redirect_to console_threads_path, alert: "Chat not found."
+        return
+      end
+      channel = session.metadata_hash["development_channel"]
+      unless channel.is_a?(Hash)
+        redirect_to console_threads_path(thread: reply_redirect_keys(thread_key)),
+                    alert: "This development chat cannot be continued."
+        return
+      end
+      message_id = SecureRandom.uuid
+      development_api_client.continue_development_task(
+        channel: channel,
+        event_id: SecureRandom.uuid,
+        message_id: message_id,
+        principal_id: current_user.oid,
+        prompt: prompt,
+        metadata: console_actor_metadata.merge(
+          execution_context: [ { type: "text", text: console_requester_context } ],
+          model: reply_model_for(session)
+        ).compact
+      )
+      redirect_to console_threads_path(thread: reply_redirect_keys(session.thread_key))
+      return
+    end
+
     send_prompt(session.thread_key, prompt, model: reply_model_for(session))
     redirect_to console_threads_path(thread: reply_redirect_keys(session.thread_key))
   rescue CentaurApiClient::Error => e
@@ -388,6 +597,10 @@ class Console::ThreadsController < ApplicationController
   rescue ActiveRecord::ActiveRecordError, PG::Error => e
     Rails.logger.warn("console_threads_reply_lookup_failed error=#{e.class}: #{e.message}")
     redirect_to console_threads_path, alert: "Chat database is unavailable."
+  end
+
+  def development_thread?(session)
+    session.thread_key.to_s.start_with?("development:")
   end
 
   # Append persists the turn in conversation history; execute runs it. The

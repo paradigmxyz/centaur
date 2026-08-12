@@ -30,6 +30,7 @@
                        class: "console-composer-input",
                        data: { console_composer_input: true } %>
     <div class="console-composer-controls">
+      <%= render "console/threads/repository_picker" unless thread_mode %>
       <span class="console-composer-spacer"></span>
       <% unless thread_mode %>
         <% default_value = composer_default_agent_value %>

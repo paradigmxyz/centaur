@@ -217,6 +217,29 @@ pub struct WorkspaceRepositorySnapshot {
     pub head_sha: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DevelopmentWorkspaceView {
+    pub workspace_id: String,
+    pub thread_key: ThreadKey,
+    pub state: WorkspaceState,
+    pub repositories: Vec<DevelopmentWorkspaceRepository>,
+    pub latest_changeset: Option<DevelopmentWorkspaceChangeSet>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DevelopmentWorkspaceRepository {
+    pub repository_id: RepositoryId,
+    pub display_name: String,
+    pub path_with_namespace: String,
+    pub state: RepositoryState,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DevelopmentWorkspaceChangeSet {
+    pub changeset_id: String,
+    pub state: ChangeSetState,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompleteWorkspacePreparation {
     pub workspace_id: String,

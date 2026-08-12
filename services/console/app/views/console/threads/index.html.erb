@@ -57,6 +57,13 @@
                      class: "mb-0 min-h-16 items-center" %>
         </div>
       </div>
+      <% if @selected_session && @selected_session.thread_key.to_s.start_with?("development:") %>
+        <div class="console-thread-content">
+          <%= turbo_frame_tag development_workspace_frame_id(@selected_session),
+                              src: console_thread_workspace_path(thread_key: @selected_session.thread_key),
+                              loading: "lazy" %>
+        </div>
+      <% end %>
       <% end %>
 
       <%# An empty selection IS the new-chat screen — both the explicit ?new=1

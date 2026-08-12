@@ -170,6 +170,107 @@ class CentaurApiClientTest < ActiveSupport::TestCase
     http.verify
   end
 
+  test "uses authenticated opaque development workflow contracts" do
+    http = Minitest::Mock.new
+    expect_request(http, status: 200, body: { items: [], next_cursor: nil }.to_json) do |request|
+      assert_equal :get, request[:method]
+      assert_equal(
+        "http://api.internal:8080/api/development/repositories?cursor=next%2Bpage&query=api+service",
+        request[:url]
+      )
+      assert_equal "Bearer user-jwt", request[:headers]["Authorization"]
+    end
+    expect_request(http, status: 200, body: { thread_key: "development:1" }.to_json) do |request|
+      assert_equal :post, request[:method]
+      assert_equal "http://api.internal:8080/api/development/tasks", request[:url]
+      body = JSON.parse(request[:body])
+      assert_equal "web", body.dig("channel", "platform")
+      assert_equal "usr_1", body.dig("initiator", "principal_id")
+      assert_equal [ "gitlab:42", "gitlab:84" ], body["repository_ids"]
+      assert_equal "Fix both services", body.dig("message", "parts", 0, "text")
+      assert_nil body["clone_url"]
+      assert_nil body["branch"]
+      assert_nil body["role"]
+    end
+    expect_request(http, status: 200, body: { selection_flow_id: "sel_1" }.to_json) do |request|
+      assert_equal :post, request[:method]
+      assert_equal(
+        "http://api.internal:8080/api/development/sessions/development%3A1/repositories",
+        request[:url]
+      )
+      assert_equal({ "requested_by_principal_id" => "usr_1" }, JSON.parse(request[:body]))
+    end
+    expect_request(http, status: 200, body: { workspace_id: "wsp_1", repositories: [] }.to_json) do |request|
+      assert_equal :get, request[:method]
+      assert_equal(
+        "http://api.internal:8080/api/development/sessions/development%3A1/repositories",
+        request[:url]
+      )
+    end
+    expect_request(http, status: 200, body: { state: "confirmed" }.to_json) do |request|
+      assert_equal :post, request[:method]
+      assert_equal(
+        "http://api.internal:8080/api/development/selections/sel_1/confirm",
+        request[:url]
+      )
+      assert_equal(
+        {
+          "expected_version" => 1,
+          "decided_by_principal_id" => "usr_1",
+          "repository_ids" => [ "gitlab:84" ]
+        },
+        JSON.parse(request[:body])
+      )
+    end
+    expect_request(http, status: 200, body: { changeset_id: "chg_1" }.to_json) do |request|
+      assert_equal :get, request[:method]
+      assert_equal "http://api.internal:8080/api/development/changesets/chg_1", request[:url]
+    end
+    expect_request(http, status: 200, body: { publish_batch_id: "pub_1" }.to_json) do |request|
+      assert_equal :post, request[:method]
+      assert_equal "http://api.internal:8080/api/development/changesets/chg_1/publish", request[:url]
+      assert_equal({ "idempotency_key" => "approve-1" }, JSON.parse(request[:body]))
+    end
+    expect_request(http, status: 200, body: { publish_batch_id: "pub_2" }.to_json) do |request|
+      assert_equal :post, request[:method]
+      assert_equal(
+        "http://api.internal:8080/api/development/publish-batches/pub_1/retry",
+        request[:url]
+      )
+      assert_equal({ "idempotency_key" => "retry-1" }, JSON.parse(request[:body]))
+    end
+    client = CentaurApiClient.new(
+      base_url: "http://api.internal:8080",
+      api_key: "user-jwt",
+      http: http
+    )
+
+    client.search_development_repositories(query: "api service", cursor: "next+page")
+    client.start_development_task(
+      event_id: "evt-1",
+      message_id: "msg-1",
+      harness_type: "codex",
+      principal_id: "usr_1",
+      prompt: "Fix both services",
+      session_metadata: { source: "console", model: "gpt-5.6-sol" },
+      execution_metadata: { source: "console", model: "gpt-5.6-sol" },
+      repository_ids: [ "gitlab:42", "gitlab:84" ]
+    )
+    client.create_add_repository_selection(thread_key: "development:1", principal_id: "usr_1")
+    client.get_development_workspace("development:1")
+    client.confirm_development_selection(
+      selection_flow_id: "sel_1",
+      expected_version: 1,
+      principal_id: "usr_1",
+      repository_ids: [ "gitlab:84" ]
+    )
+    client.get_development_changeset("chg_1")
+    client.approve_development_changeset("chg_1", idempotency_key: "approve-1")
+    client.retry_development_publish_batch("pub_1", idempotency_key: "retry-1")
+
+    http.verify
+  end
+
   test "lists workflow schedules and fetches run details" do
     http = Minitest::Mock.new
     expect_request(http, status: 200, body: { ok: true, schedules: [] }.to_json) do |request|

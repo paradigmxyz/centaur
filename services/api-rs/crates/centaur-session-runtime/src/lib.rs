@@ -1627,6 +1627,19 @@ impl SessionRuntime {
             .await?)
     }
 
+    pub async fn get_development_workspace_view(
+        &self,
+        thread_key: &ThreadKey,
+        requested_by_principal_id: &str,
+        is_admin: bool,
+    ) -> Result<centaur_session_core::development::DevelopmentWorkspaceView, SessionRuntimeError>
+    {
+        Ok(self
+            .store
+            .get_development_workspace_view(thread_key, requested_by_principal_id, is_admin)
+            .await?)
+    }
+
     /// Restart an existing session on a different harness: stop its sandbox
     /// (killing any in-flight execution), clear the harness thread state, and
     /// flip the session row to the requested harness. Stored messages and

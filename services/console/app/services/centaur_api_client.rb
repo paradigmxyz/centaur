@@ -99,6 +99,104 @@ class CentaurApiClient
     post("/api/session/#{escape_path(thread_key)}/execute", payload)
   end
 
+  def search_development_repositories(query: nil, cursor: nil)
+    get("/api/development/repositories", cursor: cursor, query: query)
+  end
+
+  def start_development_task(event_id:, message_id:, harness_type:, principal_id:, prompt:,
+                             session_metadata:, execution_metadata:, repository_ids: nil)
+    payload = {
+      channel: {
+        platform: "web",
+        tenant_key: "console",
+        conversation_key: principal_id,
+        root_message_id: message_id
+      },
+      platform_event_id: event_id,
+      platform_message_id: message_id,
+      harness_type: harness_type,
+      initiator: { principal_id: principal_id },
+      message: {
+        client_message_id: message_id,
+        role: "user",
+        parts: [ { type: "text", text: prompt } ],
+        metadata: execution_metadata
+      },
+      session_metadata: session_metadata
+    }
+    payload[:repository_ids] = repository_ids unless repository_ids.nil?
+    post("/api/development/tasks", payload)
+  end
+
+  def continue_development_task(channel:, event_id:, message_id:, principal_id:, prompt:, metadata:)
+    post(
+      "/api/development/tasks/continue",
+      {
+        channel: channel,
+        platform_event_id: event_id,
+        platform_message_id: message_id,
+        sender_principal_id: principal_id,
+        message: {
+          client_message_id: message_id,
+          role: "user",
+          parts: [ { type: "text", text: prompt } ],
+          metadata: metadata
+        }
+      }
+    )
+  end
+
+  def create_add_repository_selection(thread_key:, principal_id:)
+    post(
+      "/api/development/sessions/#{escape_path(thread_key)}/repositories",
+      { requested_by_principal_id: principal_id }
+    )
+  end
+
+  def get_development_workspace(thread_key)
+    get("/api/development/sessions/#{escape_path(thread_key)}/repositories")
+  end
+
+  def confirm_development_selection(selection_flow_id:, expected_version:, principal_id:, repository_ids:)
+    post(
+      "/api/development/selections/#{escape_path(selection_flow_id)}/confirm",
+      {
+        expected_version: expected_version,
+        decided_by_principal_id: principal_id,
+        repository_ids: repository_ids
+      }
+    )
+  end
+
+  def get_development_changeset(changeset_id)
+    get("/api/development/changesets/#{escape_path(changeset_id)}")
+  end
+
+  def get_development_changeset_artifact(changeset_id, artifact_ref)
+    request_raw(
+      :get,
+      "/api/development/changesets/#{escape_path(changeset_id)}/artifacts/#{escape_path(artifact_ref)}"
+    )
+  end
+
+  def approve_development_changeset(changeset_id, idempotency_key:)
+    post(
+      "/api/development/changesets/#{escape_path(changeset_id)}/publish",
+      { idempotency_key: idempotency_key }
+    )
+  end
+
+  def get_development_publish_batch(publish_batch_id)
+    get("/api/development/publish-batches/#{escape_path(publish_batch_id)}")
+  end
+
+  def retry_development_publish_batch(publish_batch_id, idempotency_key:)
+    post(
+      "/api/development/publish-batches/#{escape_path(publish_batch_id)}/retry",
+      { idempotency_key: idempotency_key }
+    )
+  end
+
   def list_workflow_schedules
     get("/api/workflows/schedules")
   end
@@ -126,15 +224,24 @@ class CentaurApiClient
   end
 
   def request(method, path, payload = nil)
+    response = request_raw(method, path, payload)
+    parsed = parse_body(response.body)
+    return parsed if response.status.between?(200, 299)
+
+    message = parsed.is_a?(Hash) ? parsed["error"] || parsed["message"] || parsed["detail"] : nil
+    raise Error, message.presence || "Centaur API returned HTTP #{response.status}"
+  end
+
+  def request_raw(method, path, payload = nil)
     response = @api.request(
       method: method,
       url: URI.join("#{@base_url}/", path.delete_prefix("/")).to_s,
       json: payload,
       headers: request_headers
     )
-    parsed = parse_body(response.body)
-    return parsed if response.status.between?(200, 299)
+    return response if response.status.between?(200, 299)
 
+    parsed = parse_body(response.body)
     message = parsed.is_a?(Hash) ? parsed["error"] || parsed["message"] || parsed["detail"] : nil
     raise Error, message.presence || "Centaur API returned HTTP #{response.status}"
   end

@@ -1,0 +1,79 @@
+<% content_for :title, "Review changes · Centaur Console" %>
+
+<div class="mx-auto w-full max-w-5xl px-5 py-6">
+  <%= render "console/page_header",
+             title: "Review changes",
+             subtitle: "Immutable change set #{@changeset.fetch("changeset_id")}",
+             class: "mb-6" %>
+
+  <div class="changeset-summary">
+    <div>
+      <span class="changeset-label">Status</span>
+      <strong><%= @changeset.fetch("state").humanize %></strong>
+    </div>
+    <div>
+      <span class="changeset-label">Repositories</span>
+      <strong><%= @changeset.fetch("repositories").length %></strong>
+    </div>
+    <% if @changeset["summary"].present? %>
+      <p><%= @changeset["summary"] %></p>
+    <% end %>
+  </div>
+
+  <div class="changeset-repositories">
+    <% @changeset.fetch("repositories").each do |repository| %>
+      <section class="changeset-repository">
+        <header>
+          <div class="min-w-0">
+            <h2><%= repository.fetch("display_name") %></h2>
+            <p><%= repository.fetch("path_with_namespace") %></p>
+          </div>
+          <span><%= repository.fetch("state").humanize %></span>
+        </header>
+        <dl>
+          <div><dt>Files</dt><dd><%= repository.fetch("changed_file_count") %></dd></div>
+          <div><dt>Additions</dt><dd>+<%= repository.fetch("additions") %></dd></div>
+          <div><dt>Deletions</dt><dd>-<%= repository.fetch("deletions") %></dd></div>
+        </dl>
+        <% if repository["patch_artifact_ref"].present? %>
+          <%= link_to "Open immutable diff",
+                      console_changeset_artifact_path(
+                        @changeset.fetch("changeset_id"), repository.fetch("patch_artifact_ref")
+                      ),
+                      class: "changeset-diff-link" %>
+        <% end %>
+        <% if repository["failure_message"].present? %>
+          <p class="changeset-failure"><%= repository["failure_message"] %></p>
+        <% end %>
+      </section>
+    <% end %>
+  </div>
+
+  <% if @publish_batch %>
+    <section class="publish-batch">
+      <h2>Publication <span><%= @publish_batch.fetch("state").humanize %></span></h2>
+      <% @publish_batch.fetch("items").each do |item| %>
+        <div class="publish-item">
+          <span><%= item.fetch("repository_id") %></span>
+          <span><%= item.fetch("state").humanize %></span>
+          <% if item["merge_request_url"].present? %>
+            <%= link_to "Merge request", item["merge_request_url"], target: "_blank", rel: "noopener" %>
+          <% elsif item["failure_message"].present? %>
+            <span class="changeset-failure"><%= item["failure_message"] %></span>
+          <% end %>
+        </div>
+      <% end %>
+      <% if %w[partially_succeeded failed].include?(@publish_batch["state"]) %>
+        <%= button_to "Retry failed repositories",
+                      console_retry_publish_batch_path(@publish_batch.fetch("publish_batch_id")),
+                      method: :post,
+                      class: "changeset-primary-action" %>
+      <% end %>
+    </section>
+  <% elsif @changeset["state"] == "ready" %>
+    <%= button_to "Create merge requests",
+                  console_publish_changeset_path(@changeset.fetch("changeset_id")),
+                  method: :post,
+                  class: "changeset-primary-action" %>
+  <% end %>
+</div>

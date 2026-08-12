@@ -32,6 +32,21 @@ module ApiServer
       )
     end
 
+    def encode_for_console_user(user, admin: false, now: Time.current)
+      CentaurJwt::WindowedToken.encode(
+        subject_oid: user.oid,
+        audience: audience,
+        issuer: issuer,
+        window_seconds: DEFAULT_WINDOW_SECONDS,
+        ttl_seconds: DEFAULT_TTL_SECONDS,
+        now: now,
+        claims: {
+          "sub" => user.oid,
+          "centaur_admin" => admin == true
+        }
+      )
+    end
+
     # Kept for callers that reason about rotation boundaries directly
     # (snapshot staleness checks, tests).
     def window_start_for(principal, timestamp)

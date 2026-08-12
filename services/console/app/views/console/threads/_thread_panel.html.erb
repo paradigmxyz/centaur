@@ -61,6 +61,11 @@
       <%= console_icon("x-mark", classes: "size-4") %>
     </a>
   </header>
+  <% if session.thread_key.to_s.start_with?("development:") %>
+    <%= turbo_frame_tag development_workspace_frame_id(session),
+                        src: console_thread_workspace_path(thread_key: session.thread_key),
+                        loading: "lazy" %>
+  <% end %>
   <div class="console-transcript-scroll min-h-0 flex-1 overflow-y-auto px-4 py-4"
        data-controller="thread-poller"
        data-thread-poller-url-value="<%= console_thread_panel_path(thread_key: session.thread_key) %>"

@@ -11,6 +11,7 @@ use centaur_session_core::{
         CloseDevelopmentBinding, CompleteChangeSetCollection, CompleteWorkspacePreparation,
         CompletedDevelopmentExecution, ConfirmRepositorySelection, ContinueDevelopmentTask,
         ContinuedDevelopmentTask, DevelopmentChangeSet, DevelopmentChangeSetRepository,
+        DevelopmentWorkspaceChangeSet, DevelopmentWorkspaceRepository, DevelopmentWorkspaceView,
         ExecutionBlocker, FeishuDelivery, RecordFeishuDelivery, RepositoryId,
         RepositorySelectionDraft, RepositorySelectionOutcome, RepositorySelectionView,
         RepositoryState, SelectionFlowState, SelectionKind, SessionWorkspace,
@@ -173,22 +174,13 @@ impl PgSessionStore {
             .execute(&mut *tx)
             .await?;
         }
-        let input_line = json!({
-            "type": "user",
-            "thread_key": thread_key.as_str(),
-            "client_user_message_id": request.platform_message_id,
-            "trace_metadata": {
-                "source": request.channel.platform,
-                "action": "execute",
-                "platform_event_id": request.platform_event_id,
-                "sender_principal_id": request.sender_principal_id,
-                "message_metadata": request.message.metadata,
-            },
-            "message": {
-                "role": "user",
-                "content": request.message.parts,
-            },
-        });
+        let input_line = development_input_line(
+            &thread_key,
+            &request.platform_event_id,
+            &request.platform_message_id,
+            &request.channel.platform,
+            &request.message,
+        );
         sqlx::query(
             r#"
             insert into session_executions
@@ -199,11 +191,12 @@ impl PgSessionStore {
         .bind(&execution_id)
         .bind(thread_key.as_str())
         .bind(&request.platform_event_id)
-        .bind(json!({
-            "source": request.channel.platform,
-            "platform_event_id": request.platform_event_id,
-            "development_input_line": input_line,
-        }))
+        .bind(development_execution_metadata(
+            &request.channel.platform,
+            &request.platform_event_id,
+            &request.message.metadata,
+            input_line,
+        ))
         .execute(&mut *tx)
         .await?;
         sqlx::query(
@@ -449,25 +442,23 @@ impl PgSessionStore {
         .bind(&request.platform_event_id)
         .bind(ExecutionStatus::Queued.as_ref())
         .bind(ExecutionBlocker::AwaitingProjectSelection.as_str())
-        .bind(json!({
-            "source": request.channel.platform,
-            "platform_event_id": request.platform_event_id,
-            "development_input_line": {
-                "type": "user",
-                "thread_key": thread_key.as_str(),
-                "client_user_message_id": request.message.client_message_id,
-                "trace_metadata": {
-                    "source": request.channel.platform,
-                    "action": "execute",
-                    "platform_event_id": request.platform_event_id,
-                    "message_metadata": request.message.metadata,
-                },
-                "message": {
-                    "role": request.message.role.as_ref(),
-                    "content": request.message.parts,
-                },
-            },
-        }))
+        .bind(development_execution_metadata(
+            &request.channel.platform,
+            &request.platform_event_id,
+            &request.message.metadata,
+            development_input_line(
+                &thread_key,
+                &request.platform_event_id,
+                request
+                    .message
+                    .client_message_id
+                    .as_deref()
+                    .or(request.platform_message_id.as_deref())
+                    .unwrap_or(&request.platform_event_id),
+                &request.channel.platform,
+                &request.message,
+            ),
+        ))
         .execute(&mut *tx)
         .await?;
 
@@ -1311,6 +1302,76 @@ impl PgSessionStore {
         .fetch_optional(&self.pool)
         .await?;
         row.map(TryInto::try_into).transpose()
+    }
+
+    pub async fn get_development_workspace_view(
+        &self,
+        thread_key: &ThreadKey,
+        requested_by_principal_id: &str,
+        is_admin: bool,
+    ) -> Result<DevelopmentWorkspaceView, SessionStoreError> {
+        let workspace = self
+            .workspace_for_session(thread_key)
+            .await?
+            .ok_or_else(|| SessionStoreError::DevelopmentNotFound {
+                message: "development workspace was not found".to_owned(),
+            })?;
+        let initiator = sqlx::query_scalar::<_, String>(
+            "select initiator_principal_id from development_channel_bindings where thread_key = $1",
+        )
+        .bind(thread_key.as_str())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| SessionStoreError::DevelopmentNotFound {
+            message: "development channel binding was not found".to_owned(),
+        })?;
+        if !is_admin && initiator != requested_by_principal_id {
+            return Err(SessionStoreError::DevelopmentForbidden {
+                message: "development workspace is not owned by the requester".to_owned(),
+            });
+        }
+        let repositories = sqlx::query_as::<_, DevelopmentWorkspaceRepositoryRow>(
+            r#"
+            select repository_id, display_name, path_with_namespace, state
+              from session_repositories
+             where workspace_id = $1
+             order by gitlab_project_id, repository_id
+            "#,
+        )
+        .bind(&workspace.workspace_id)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(TryInto::try_into)
+        .collect::<Result<Vec<_>, _>>()?;
+        let latest_changeset = sqlx::query_as::<_, (String, String)>(
+            r#"
+            select changeset_id, state
+              from development_change_sets
+             where workspace_id = $1
+             order by created_at desc, changeset_id desc
+             limit 1
+            "#,
+        )
+        .bind(&workspace.workspace_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(|(changeset_id, state)| {
+            Ok::<DevelopmentWorkspaceChangeSet, SessionStoreError>(DevelopmentWorkspaceChangeSet {
+                changeset_id,
+                state: state.parse().map_err(|error| {
+                    SessionStoreError::InvalidPersistedValue(format!("{error}"))
+                })?,
+            })
+        })
+        .transpose()?;
+        Ok(DevelopmentWorkspaceView {
+            workspace_id: workspace.workspace_id,
+            thread_key: workspace.thread_key,
+            state: workspace.state,
+            repositories,
+            latest_changeset,
+        })
     }
 
     pub async fn list_provisioning_workspace_ids(&self) -> Result<Vec<String>, SessionStoreError> {
@@ -2319,6 +2380,7 @@ fn validate_development_task(request: &AcceptDevelopmentTask) -> Result<(), Sess
             message: "development task message role must be user".to_owned(),
         });
     }
+    validate_development_execution_metadata(&request.message.metadata)?;
     if let (Some(platform_message_id), Some(client_message_id)) = (
         request.platform_message_id.as_deref(),
         request.message.client_message_id.as_deref(),
@@ -2359,6 +2421,69 @@ fn validate_continued_task(request: &ContinueDevelopmentTask) -> Result<(), Sess
     {
         return Err(SessionStoreError::InvalidDevelopmentRequest {
             message: "continued development message must be a matching user message".to_owned(),
+        });
+    }
+    validate_development_execution_metadata(&request.message.metadata)?;
+    Ok(())
+}
+
+fn validate_development_execution_metadata(metadata: &Value) -> Result<(), SessionStoreError> {
+    for key in ["model", "reasoning"] {
+        if let Some(value) = metadata.get(key) {
+            let value =
+                value
+                    .as_str()
+                    .ok_or_else(|| SessionStoreError::InvalidDevelopmentRequest {
+                        message: format!("{key} must be a string"),
+                    })?;
+            if value.trim().is_empty() || value.len() > 256 {
+                return Err(SessionStoreError::InvalidDevelopmentRequest {
+                    message: format!("{key} must be between 1 and 256 bytes"),
+                });
+            }
+        }
+    }
+    let Some(context) = metadata.get("execution_context") else {
+        return Ok(());
+    };
+    let context =
+        context
+            .as_array()
+            .ok_or_else(|| SessionStoreError::InvalidDevelopmentRequest {
+                message: "execution_context must be an array".to_owned(),
+            })?;
+    if context.len() > 8 {
+        return Err(SessionStoreError::InvalidDevelopmentRequest {
+            message: "execution_context may contain at most 8 text parts".to_owned(),
+        });
+    }
+    let mut total_bytes = 0usize;
+    for part in context {
+        let object =
+            part.as_object()
+                .ok_or_else(|| SessionStoreError::InvalidDevelopmentRequest {
+                    message: "execution_context parts must be objects".to_owned(),
+                })?;
+        if object.len() != 2 || object.get("type").and_then(Value::as_str) != Some("text") {
+            return Err(SessionStoreError::InvalidDevelopmentRequest {
+                message: "execution_context supports text parts only".to_owned(),
+            });
+        }
+        let text = object.get("text").and_then(Value::as_str).ok_or_else(|| {
+            SessionStoreError::InvalidDevelopmentRequest {
+                message: "execution_context text is required".to_owned(),
+            }
+        })?;
+        if text.trim().is_empty() {
+            return Err(SessionStoreError::InvalidDevelopmentRequest {
+                message: "execution_context text must not be empty".to_owned(),
+            });
+        }
+        total_bytes = total_bytes.saturating_add(text.len());
+    }
+    if total_bytes > 20_000 {
+        return Err(SessionStoreError::InvalidDevelopmentRequest {
+            message: "execution_context exceeds 20000 bytes".to_owned(),
         });
     }
     Ok(())
@@ -2433,6 +2558,83 @@ fn development_task_excerpt(parts: &[Value]) -> String {
         .chars()
         .take(500)
         .collect()
+}
+
+fn development_input_line(
+    thread_key: &ThreadKey,
+    platform_event_id: &str,
+    client_message_id: &str,
+    source: &str,
+    message: &centaur_session_core::SessionMessageInput,
+) -> Value {
+    let mut content = message
+        .metadata
+        .get("execution_context")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    content.extend(message.parts.iter().cloned());
+    let mut line = serde_json::Map::from_iter([
+        ("type".to_owned(), Value::String("user".to_owned())),
+        (
+            "thread_key".to_owned(),
+            Value::String(thread_key.to_string()),
+        ),
+        (
+            "client_user_message_id".to_owned(),
+            Value::String(client_message_id.to_owned()),
+        ),
+        (
+            "trace_metadata".to_owned(),
+            json!({
+                "source": source,
+                "action": "execute",
+                "platform_event_id": platform_event_id,
+                "message_metadata": message.metadata,
+            }),
+        ),
+        (
+            "message".to_owned(),
+            json!({"role": message.role.as_ref(), "content": content}),
+        ),
+    ]);
+    for key in ["model", "reasoning"] {
+        if let Some(value) = message
+            .metadata
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        {
+            line.insert(key.to_owned(), Value::String(value.to_owned()));
+        }
+    }
+    Value::Object(line)
+}
+
+fn development_execution_metadata(
+    source: &str,
+    platform_event_id: &str,
+    message_metadata: &Value,
+    input_line: Value,
+) -> Value {
+    let mut metadata = serde_json::Map::from_iter([
+        ("source".to_owned(), Value::String(source.to_owned())),
+        (
+            "platform_event_id".to_owned(),
+            Value::String(platform_event_id.to_owned()),
+        ),
+        ("development_input_line".to_owned(), input_line),
+    ]);
+    for key in ["model", "reasoning"] {
+        if let Some(value) = message_metadata
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        {
+            metadata.insert(key.to_owned(), Value::String(value.to_owned()));
+        }
+    }
+    Value::Object(metadata)
 }
 
 fn parse_selection_kind(value: &str) -> Result<SelectionKind, SessionStoreError> {
@@ -2766,6 +2968,33 @@ struct WorkspaceRepositorySnapshotRow {
     base_sha: Option<String>,
     local_branch: Option<String>,
     head_sha: Option<String>,
+}
+
+#[derive(Debug, FromRow)]
+struct DevelopmentWorkspaceRepositoryRow {
+    repository_id: String,
+    display_name: String,
+    path_with_namespace: String,
+    state: String,
+}
+
+impl TryFrom<DevelopmentWorkspaceRepositoryRow> for DevelopmentWorkspaceRepository {
+    type Error = SessionStoreError;
+
+    fn try_from(row: DevelopmentWorkspaceRepositoryRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            repository_id: row
+                .repository_id
+                .parse()
+                .map_err(|error| SessionStoreError::InvalidPersistedValue(format!("{error}")))?,
+            display_name: row.display_name,
+            path_with_namespace: row.path_with_namespace,
+            state: row
+                .state
+                .parse()
+                .map_err(|error| SessionStoreError::InvalidPersistedValue(format!("{error}")))?,
+        })
+    }
 }
 
 impl TryFrom<WorkspaceRepositorySnapshotRow> for WorkspaceRepositorySnapshot {

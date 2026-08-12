@@ -47,6 +47,16 @@ Rails.application.routes.draw do
   get "console/principals/:id", to: "console#principal", as: :console_principal
   namespace :console do
     resources :threads, only: %i[index create]
+    get "threads/repositories", to: "threads#repositories", as: :thread_repositories
+    get "threads/workspace", to: "threads#workspace", as: :thread_workspace
+    post "threads/projects", to: "threads#add_projects", as: :thread_projects
+    get "changesets/:changeset_id", to: "threads#changeset", as: :changeset
+    get "changesets/:changeset_id/artifacts/:artifact_ref", to: "threads#changeset_artifact",
+        as: :changeset_artifact
+    post "changesets/:changeset_id/publish", to: "threads#publish_changeset",
+         as: :publish_changeset
+    post "publish-batches/:publish_batch_id/retry", to: "threads#retry_publish_batch",
+         as: :retry_publish_batch
     post "threads/share", to: "threads#share", as: :thread_share
     # Single-panel transcript refresh polled by thread_poller_controller.js
     # while a turn is running. thread_key rides as a query param: keys carry

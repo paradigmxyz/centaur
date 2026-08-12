@@ -997,11 +997,12 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
            params: {
              prompt: "Reply with PONG.",
              model: "gpt-5.5",
+             no_project: "1",
              open_threads: "console:other,new"
            }
     end
 
-    thread_key = client.calls[0].last[:thread_key]
+    thread_key = "development:recorded"
     assert_redirected_to console_threads_path(thread: "console:other,#{thread_key}")
   end
 
@@ -1025,7 +1026,7 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_includes response.body, 'form.addEventListener("formdata"'
   end
 
-  test "starting a chat creates a session, appends the prompt, and executes it" do
+  test "starting a chat creates one durable development task with selected repositories" do
     @operator.update!(name: "Ada Admin")
     UserIdentity.create!(user: @operator, provider: "slack", subject: "UADA")
     client = RecordingApiClient.new
@@ -1039,47 +1040,175 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     }) do
       with_composer(client: client) do
         post console_threads_url,
-             params: { prompt: "Reply with PONG.", model: "claude-opus-4-8" }
+             params: {
+               prompt: "Reply with PONG.",
+               model: "claude-opus-4-8",
+               repository_ids: [ "gitlab:42", "gitlab:84" ]
+             }
       end
     end
 
-    assert_equal %i[create_session append_session_messages execute_session], client.calls.map(&:first)
+    assert_equal [ :start_development_task ], client.calls.map(&:first)
 
-    create = client.calls[0].last
-    assert create[:thread_key].start_with?("console:"), "expected a console:-namespaced thread key"
-    assert_equal "claudecode", create[:harness_type]
-    assert_equal "console", create[:metadata][:platform]
-    assert_equal "console", create[:metadata][:source]
-    assert_equal @operator.email, create[:metadata][:actor_email]
-    assert_equal "@ada", create[:metadata][:github_handle]
-    assert_equal "claude-opus-4-8", create[:metadata][:model]
-
-    append = client.calls[1].last
-    assert_equal create[:thread_key], append[:thread_key]
-    message = append[:messages].first
-    assert_equal "user", message[:role]
-    assert_equal "Reply with PONG.", message[:parts].first[:text]
-    assert_equal @operator.email, message[:metadata][:user_email]
-    assert_equal "@ada", message[:metadata][:github_handle]
-
-    execute = client.calls[2].last
-    assert_equal create[:thread_key], execute[:thread_key]
-    assert execute[:idempotency_key].present?
-    assert_equal "claude-opus-4-8", execute[:metadata][:model]
-    assert_equal "@ada", execute[:metadata][:github_handle]
-    line = JSON.parse(execute[:input_lines].first)
-    assert_equal "user", line["type"]
-    assert_equal create[:thread_key], line["thread_key"]
-    assert_equal "claude-opus-4-8", line["model"]
-    assert_equal message[:client_message_id], line["client_user_message_id"]
-    requester_context = line.dig("message", "content", 0, "text")
+    task = client.calls[0].last
+    assert_equal "claudecode", task[:harness_type]
+    assert_equal @operator.oid, task[:principal_id]
+    assert_equal "Reply with PONG.", task[:prompt]
+    assert_equal [ "gitlab:42", "gitlab:84" ], task[:repository_ids]
+    assert_equal "console", task[:session_metadata][:platform]
+    assert_equal @operator.email, task[:session_metadata][:actor_email]
+    assert_equal "@ada", task[:session_metadata][:github_handle]
+    assert_equal "claude-opus-4-8", task[:session_metadata][:model]
+    assert_equal "claude-opus-4-8", task[:execution_metadata][:model]
+    requester_context = task[:execution_metadata][:execution_context].first[:text]
     assert_includes requester_context, "# Requester Context"
     assert_includes requester_context, "Prompted by: @ada"
     assert_includes requester_context, 'GitHub handle source: Slack profile custom field "GitHub"'
     assert_includes requester_context, "GitHub handle verified: yes"
-    assert_equal "Reply with PONG.", line.dig("message", "content", 1, "text")
 
-    assert_redirected_to console_threads_path(thread: create[:thread_key])
+    assert_redirected_to console_threads_path(thread: "development:recorded")
+  end
+
+  test "new chat renders a repository picker and proxies authenticated catalog search" do
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      get console_threads_url(new: 1)
+      get "/console/threads/repositories", params: { query: "api service", cursor: "next-page" }, as: :json
+    end
+
+    assert_response :success
+    assert_equal [ :search_development_repositories ], client.calls.map(&:first)
+    assert_equal({ query: "api service", cursor: "next-page" }, client.calls.first.last)
+
+    with_composer(client: RecordingApiClient.new) do
+      get console_threads_url(new: 1)
+    end
+    assert_select "[data-controller='repository-picker']", count: 1
+    assert_select "input[name='repository_ids[]'][type=hidden]", count: 1
+    assert_select "input[name=no_project][type=checkbox]", count: 1
+    assert_not_includes response.body, "PRIVATE-TOKEN"
+    assert_not_includes response.body, "clone_url"
+  end
+
+  test "development workspace bar shows safe project data and immutable review link" do
+    skip_unless_session_table
+    thread_key = "development:workspace-bar-#{SecureRandom.hex(4)}"
+    insert_development_session(thread_key)
+    client = RecordingApiClient.new
+    client.workspace_response = {
+      "workspace_id" => "wsp_safe",
+      "state" => "ready",
+      "repositories" => [
+        {
+          "repository_id" => "gitlab:42",
+          "display_name" => "api",
+          "path_with_namespace" => "group/api",
+          "state" => "ready"
+        }
+      ],
+      "latest_changeset" => { "changeset_id" => "chg_safe", "state" => "ready" }
+    }
+
+    with_composer(client: client) do
+      get console_thread_workspace_url(thread_key: thread_key)
+    end
+
+    assert_response :ok
+    assert_select ".development-workspace-chip", text: /api/
+    assert_select "a[href=?]", console_changeset_path("chg_safe"), text: /Review changes/
+    assert_select "form[action=?]", console_thread_projects_path
+    assert_not_includes response.body, "clone_url"
+    assert_not_includes response.body, "PRIVATE-TOKEN"
+    assert_not_includes response.body, "base_sha"
+  end
+
+  test "development workspace bar hides add projects while execution is active" do
+    skip_unless_session_table
+    thread_key = "development:workspace-active-#{SecureRandom.hex(4)}"
+    insert_development_session(thread_key)
+    insert_session_execution(thread_key, status: "running")
+
+    with_composer do
+      get console_thread_workspace_url(thread_key: thread_key)
+    end
+
+    assert_response :ok
+    assert_select "form[action=?]", console_thread_projects_path, count: 0
+  end
+
+  test "idle development thread adds selected projects through versioned API flow" do
+    skip_unless_session_table
+    thread_key = "development:add-projects-#{SecureRandom.hex(4)}"
+    insert_development_session(thread_key)
+    insert_session_execution(thread_key, status: "completed")
+    client = RecordingApiClient.new
+
+    with_composer(client: client) do
+      post console_thread_projects_url,
+           params: { thread_key: thread_key, repository_ids: [ "gitlab:42", "gitlab:84" ] }
+    end
+
+    assert_redirected_to console_threads_path(thread: thread_key)
+    assert_equal %i[create_add_repository_selection confirm_development_selection],
+                 client.calls.map(&:first)
+    confirmation = client.calls.last.last
+    assert_equal "sel_recorded", confirmation[:selection_flow_id]
+    assert_equal 1, confirmation[:expected_version]
+    assert_equal [ "gitlab:42", "gitlab:84" ], confirmation[:repository_ids]
+  end
+
+  test "active development thread rejects add projects before API mutation" do
+    skip_unless_session_table
+    thread_key = "development:add-active-#{SecureRandom.hex(4)}"
+    insert_development_session(thread_key)
+    insert_session_execution(thread_key, status: "running")
+    client = RecordingApiClient.new
+
+    with_composer(client: client) do
+      post console_thread_projects_url,
+           params: { thread_key: thread_key, repository_ids: [ "gitlab:42" ] }
+    end
+
+    assert_redirected_to console_threads_path(thread: thread_key)
+    assert_empty client.calls
+    assert_match(/current task/, flash[:alert])
+  end
+
+  test "change set review exposes approval and partial retry controls" do
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      get console_changeset_url("chg_recorded")
+    end
+    assert_response :ok
+    assert_select "form[action=?]", console_publish_changeset_path("chg_recorded")
+
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      get console_changeset_url("chg_recorded", publish_batch_id: "pub_partial")
+    end
+    assert_response :ok
+    assert_select "form[action=?]", console_retry_publish_batch_path("pub_partial")
+  end
+
+  test "change set approval and retry use opaque idempotent API mutations" do
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      post console_publish_changeset_url("chg_recorded")
+    end
+    assert_redirected_to console_changeset_path(
+      "chg_recorded", publish_batch_id: "pub_recorded"
+    )
+    assert_match(/\A[0-9a-f-]{36}\z/,
+                 client.calls.first.last.fetch(:idempotency_key))
+
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      post console_retry_publish_batch_url("pub_partial")
+    end
+    assert_redirected_to console_changeset_path(
+      "chg_recorded", publish_batch_id: "pub_partial"
+    )
+    assert_equal :retry_development_publish_batch, client.calls.first.first
   end
 
   test "starting a chat prefers the Console user's connected GitHub login" do
@@ -1098,13 +1227,13 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
         flunk("Slack fallback should not run when GitHub is connected")
       }) do
         with_composer(client: client) do
-          post console_threads_url, params: { prompt: "Open the PR.", model: "gpt-5.5" }
+          post console_threads_url,
+               params: { prompt: "Open the PR.", model: "gpt-5.5", no_project: "1" }
         end
       end
     end
 
-    line = JSON.parse(client.calls[2].last[:input_lines].first)
-    requester_context = line.dig("message", "content", 0, "text")
+    requester_context = client.calls.first.last[:execution_metadata][:execution_context].first[:text]
     assert_includes requester_context, "Prompted by: @goksu"
     assert_includes requester_context, "GitHub handle source: connected GitHub account"
     refute_includes requester_context, "Prompted by: Goksu Toprak"
@@ -1113,17 +1242,14 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
   test "picking Amp starts an amp chat and sends no model" do
     client = RecordingApiClient.new
     with_composer(client: client) do
-      post console_threads_url, params: { prompt: "Reply with PONG.", model: "amp" }
+      post console_threads_url,
+           params: { prompt: "Reply with PONG.", model: "amp", no_project: "1" }
     end
 
-    create = client.calls[0].last
-    assert_equal "amp", create[:harness_type]
-    assert_not create[:metadata].key?(:model)
-
-    execute = client.calls[2].last
-    assert_not execute[:metadata].key?(:model)
-    line = JSON.parse(execute[:input_lines].first)
-    assert_not line.key?("model")
+    task = client.calls.first.last
+    assert_equal "amp", task[:harness_type]
+    assert_not task[:session_metadata].key?(:model)
+    assert_not task[:execution_metadata].key?(:model)
   end
 
   test "starting a chat with an unknown model is rejected" do
@@ -1140,61 +1266,57 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
   test "a gpt model pick starts a codex chat" do
     client = RecordingApiClient.new
     with_composer(client: client) do
-      post console_threads_url, params: { prompt: "Reply with PONG.", model: "gpt-5.5" }
+      post console_threads_url,
+           params: { prompt: "Reply with PONG.", model: "gpt-5.5", no_project: "1" }
     end
 
-    create = client.calls[0].last
-    assert_equal "codex", create[:harness_type]
-    assert_equal "gpt-5.5", create[:metadata][:model]
+    task = client.calls.first.last
+    assert_equal "codex", task[:harness_type]
+    assert_equal "gpt-5.5", task[:session_metadata][:model]
   end
 
   test "a codex chat carries the picked reasoning effort" do
     client = RecordingApiClient.new
     with_composer(client: client) do
       post console_threads_url,
-           params: { prompt: "Reply with PONG.", model: "gpt-5.6-sol", effort: "max" }
+           params: {
+             prompt: "Reply with PONG.", model: "gpt-5.6-sol", effort: "max", no_project: "1"
+           }
     end
 
-    execute = client.calls[2].last
-    assert_equal "max", execute[:metadata][:reasoning]
-    line = JSON.parse(execute[:input_lines].first)
-    assert_equal "max", line["reasoning"]
+    task = client.calls.first.last
+    assert_equal "max", task[:execution_metadata][:reasoning]
   end
 
   test "Claude Opus 5 Fast selects the native fast model variant" do
     client = RecordingApiClient.new
     with_composer(client: client) do
       post console_threads_url,
-           params: { prompt: "Reply with PONG.", model: "claude-opus-5", effort: "fast" }
+           params: {
+             prompt: "Reply with PONG.", model: "claude-opus-5", effort: "fast", no_project: "1"
+           }
     end
 
-    create = client.calls[0].last
-    assert_equal "claudecode", create[:harness_type]
-    assert_equal "claude-opus-5-fast", create[:metadata][:model]
-
-    execute = client.calls[2].last
-    assert_equal "claude-opus-5-fast", execute[:metadata][:model]
-    assert_not execute[:metadata].key?(:reasoning)
-    line = JSON.parse(execute[:input_lines].first)
-    assert_equal "claude-opus-5-fast", line["model"]
-    assert_not line.key?("reasoning")
+    task = client.calls.first.last
+    assert_equal "claudecode", task[:harness_type]
+    assert_equal "claude-opus-5-fast", task[:session_metadata][:model]
+    assert_equal "claude-opus-5-fast", task[:execution_metadata][:model]
+    assert_not task[:execution_metadata].key?(:reasoning)
   end
 
   test "Claude Opus 5 uses the standard model by default" do
     client = RecordingApiClient.new
     with_composer(client: client) do
       post console_threads_url,
-           params: { prompt: "Reply with PONG.", model: "claude-opus-5" }
+           params: {
+             prompt: "Reply with PONG.", model: "claude-opus-5", no_project: "1"
+           }
     end
 
-    create = client.calls[0].last
-    assert_equal "claudecode", create[:harness_type]
-    assert_equal "claude-opus-5", create[:metadata][:model]
-
-    execute = client.calls[2].last
-    assert_equal "claude-opus-5", execute[:metadata][:model]
-    line = JSON.parse(execute[:input_lines].first)
-    assert_equal "claude-opus-5", line["model"]
+    task = client.calls.first.last
+    assert_equal "claudecode", task[:harness_type]
+    assert_equal "claude-opus-5", task[:session_metadata][:model]
+    assert_equal "claude-opus-5", task[:execution_metadata][:model]
   end
 
   test "an effort the model does not offer is dropped" do
@@ -1202,15 +1324,17 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     with_composer(client: client) do
       # max is 5.6-only; Opus 4.8 does not offer model-variant efforts.
       post console_threads_url,
-           params: { prompt: "Reply with PONG.", model: "gpt-5.5", effort: "max" }
+           params: {
+             prompt: "Reply with PONG.", model: "gpt-5.5", effort: "max", no_project: "1"
+           }
       post console_threads_url,
-           params: { prompt: "Reply with PONG.", model: "claude-opus-4-8", effort: "high" }
+           params: {
+             prompt: "Reply with PONG.", model: "claude-opus-4-8", effort: "high", no_project: "1"
+           }
     end
 
-    [ 2, 5 ].each do |index|
-      execute = client.calls[index].last
-      assert_not execute[:metadata].key?(:reasoning)
-      assert_not JSON.parse(execute[:input_lines].first).key?("reasoning")
+    client.calls.each do |_name, task|
+      assert_not task[:execution_metadata].key?(:reasoning)
     end
   end
 
@@ -1242,6 +1366,26 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_equal %i[append_session_messages execute_session], client.calls.map(&:first)
     assert_equal "console:composer-reply", client.calls[0].last[:thread_key]
     assert_redirected_to console_threads_path(thread: "console:composer-reply,console:other")
+  end
+
+  test "replying to an owned development chat reuses its durable workspace" do
+    skip_unless_session_table
+    thread_key = "development:#{SecureRandom.hex(8)}"
+    insert_development_session(thread_key)
+
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      post console_threads_url,
+           params: { prompt: "Continue from here.", thread_key: thread_key }
+    end
+
+    assert_equal [ :continue_development_task ], client.calls.map(&:first)
+    continued = client.calls.first.last
+    assert_equal @operator.oid, continued[:principal_id]
+    assert_equal "Continue from here.", continued[:prompt]
+    assert_equal "web", continued[:channel]["platform"]
+    assert_not continued.key?(:repository_ids)
+    assert_redirected_to console_threads_path(thread: thread_key)
   end
 
   test "replying appends and executes on a deployment-public chat" do
@@ -1303,7 +1447,8 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
   test "a session api error surfaces as a flash alert" do
     client = RecordingApiClient.new(error: CentaurApiClient::Error.new("boom"))
     with_composer(client: client) do
-      post console_threads_url, params: { prompt: "Reply with PONG.", harness_type: "codex" }
+      post console_threads_url,
+           params: { prompt: "Reply with PONG.", harness_type: "codex", no_project: "1" }
     end
 
     assert_redirected_to console_threads_path(new: 1)
@@ -1863,7 +2008,11 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
   end
 
   test "sidebar keeps an already-open thread selected on plain click" do
-    get console_threads_url(thread: "console:sidebar-active")
+    skip_unless_session_table
+    thread_key = "console:sidebar-active-#{SecureRandom.hex(4)}"
+    insert_console_session(thread_key)
+
+    get console_threads_url(thread: thread_key)
 
     assert_response :ok
     assert_includes response.body, "if (isOpen && !modified) {"
@@ -1930,6 +2079,7 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
   # each method instead when given, to exercise the failure paths.
   class RecordingApiClient
     attr_reader :calls
+    attr_writer :workspace_response
 
     def initialize(error: nil)
       @calls = []
@@ -1939,6 +2089,67 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     def create_session(**kwargs) = record(:create_session, kwargs)
     def append_session_messages(**kwargs) = record(:append_session_messages, kwargs)
     def execute_session(**kwargs) = record(:execute_session, kwargs)
+    def continue_development_task(**kwargs) = record(:continue_development_task, kwargs)
+    def start_development_task(**kwargs)
+      record(:start_development_task, kwargs)
+      { "thread_key" => "development:recorded" }
+    end
+    def search_development_repositories(**kwargs)
+      record(:search_development_repositories, kwargs)
+      {
+        "items" => [
+          {
+            "repository_id" => "gitlab:42",
+            "display_name" => "api",
+            "path_with_namespace" => "group/api",
+            "default_branch" => "main",
+            "archived" => false
+          }
+        ],
+        "next_cursor" => nil
+      }
+    end
+    def get_development_workspace(thread_key)
+      record(:get_development_workspace, thread_key: thread_key)
+      @workspace_response || {
+        "workspace_id" => "wsp_recorded",
+        "state" => "ready",
+        "repositories" => [],
+        "latest_changeset" => nil
+      }
+    end
+    def create_add_repository_selection(**kwargs)
+      record(:create_add_repository_selection, kwargs)
+      { "selection_flow_id" => "sel_recorded", "version" => 1 }
+    end
+    def confirm_development_selection(**kwargs) = record(:confirm_development_selection, kwargs)
+    def get_development_changeset(changeset_id)
+      record(:get_development_changeset, changeset_id: changeset_id)
+      { "changeset_id" => changeset_id, "state" => "ready", "repositories" => [] }
+    end
+    def get_development_publish_batch(publish_batch_id)
+      record(:get_development_publish_batch, publish_batch_id: publish_batch_id)
+      { "publish_batch_id" => publish_batch_id, "state" => "partially_succeeded", "items" => [] }
+    end
+    def get_development_changeset_artifact(changeset_id, artifact_ref)
+      record(:get_development_changeset_artifact,
+             changeset_id: changeset_id, artifact_ref: artifact_ref)
+      HttpClient::Response.new(
+        status: 200,
+        body: "diff --git a/file b/file\n",
+        headers: { "content-type" => "text/x-diff; charset=utf-8" }
+      )
+    end
+    def approve_development_changeset(changeset_id, idempotency_key:)
+      record(:approve_development_changeset,
+             changeset_id: changeset_id, idempotency_key: idempotency_key)
+      { "publish_batch_id" => "pub_recorded" }
+    end
+    def retry_development_publish_batch(publish_batch_id, idempotency_key:)
+      record(:retry_development_publish_batch,
+             publish_batch_id: publish_batch_id, idempotency_key: idempotency_key)
+      { "changeset_id" => "chg_recorded", "publish_batch_id" => publish_batch_id }
+    end
 
     private
 
@@ -1953,10 +2164,13 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
   # Runs the block with the injected fake session client.
   def with_composer(client: RecordingApiClient.new)
     original_factory = Console::ThreadsController.client_factory
+    original_development_factory = Console::ThreadsController.development_client_factory
     Console::ThreadsController.client_factory = -> { client }
+    Console::ThreadsController.development_client_factory = ->(_user, _admin) { client }
     yield client
   ensure
     Console::ThreadsController.client_factory = original_factory
+    Console::ThreadsController.development_client_factory = original_development_factory
   end
 
   def with_recent_first_error
@@ -2002,6 +2216,21 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
   def insert_console_session(thread_key)
     connection = CentaurSession.connection
     metadata = { platform: "console", actor_email: @operator.email }.to_json
+    insert_session(thread_key, metadata)
+  end
+
+  def insert_development_session(thread_key)
+    message_id = "message-#{SecureRandom.hex(8)}"
+    metadata = {
+      platform: "console",
+      actor_email: @operator.email,
+      development_channel: {
+        platform: "web",
+        tenant_key: "console",
+        conversation_key: @operator.oid,
+        root_message_id: message_id
+      }
+    }.to_json
     insert_session(thread_key, metadata)
   end
 
