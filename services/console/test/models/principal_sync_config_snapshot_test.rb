@@ -104,7 +104,7 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
   end
 
   def build_requester
-    Principal.create!(namespace: "globex", foreign_id: "requester-#{SecureRandom.hex(4)}",
+    Principal.create!(foreign_id: "requester-#{SecureRandom.hex(4)}",
                       kind: "user", created_by: users(:globex_admin))
   end
 
@@ -115,17 +115,17 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
                               minted: true, via_role: nil)
     app = OauthApp.create!(
       slug: "wrapper-#{SecureRandom.hex(4)}", provider: "github", client_id: "wrapper-client-id",
-      client_secret: "wrapper-client-secret", credential_namespace: granted_to.namespace,
+      client_secret: "wrapper-client-secret",
       allowed_scopes: [ "repo" ], always_available: always_available, created_by: users(:globex_admin)
     )
     cred = BrokerCredential.create!(
-      namespace: granted_to.namespace, foreign_id: "wrapper-cred-#{SecureRandom.hex(4)}",
+      foreign_id: "wrapper-cred-#{SecureRandom.hex(4)}",
       token_endpoint: "https://idp.example/token", client_id: "wrapper-client-id",
       refresh_token: "seed", oauth_app: app, created_by: users(:globex_admin)
     )
     cred.update!(access_token: "hoisted-token", expires_at: 1.hour.from_now, last_refresh: Time.current) if minted
     secret = StaticSecret.new(
-      namespace: granted_to.namespace, foreign_id: "wrapper-#{SecureRandom.hex(4)}",
+      foreign_id: "wrapper-#{SecureRandom.hex(4)}",
       inject_config: { "header" => header, "formatter" => "Bearer {{ .Value }}" },
       broker_credential: cred, created_by: users(:globex_admin)
     )
@@ -785,7 +785,7 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
   test "a plain static secret directly granted to the requester does not hoist" do
     requester = build_requester
     secret = StaticSecret.new(
-      namespace: requester.namespace, foreign_id: "plain-#{SecureRandom.hex(4)}",
+      foreign_id: "plain-#{SecureRandom.hex(4)}",
       inject_config: { "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" },
       created_by: users(:globex_admin)
     )
@@ -802,7 +802,7 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     requester = build_requester
     secret = build_hoistable_wrapper(granted_to: requester, host: "github.com")
     other = BrokerCredential.create!(
-      namespace: requester.namespace, foreign_id: "other-cred-#{SecureRandom.hex(4)}",
+      foreign_id: "other-cred-#{SecureRandom.hex(4)}",
       token_endpoint: "https://idp.example/token", client_id: "other-client-id",
       refresh_token: "seed", created_by: users(:globex_admin)
     )

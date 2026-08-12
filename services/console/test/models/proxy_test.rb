@@ -206,26 +206,26 @@ class ProxyTest < ActiveSupport::TestCase
   # --- requester principal ------------------------------------------------
 
   def build_requester
-    Principal.create!(namespace: "acme", foreign_id: "requester-#{SecureRandom.hex(4)}",
+    Principal.create!(foreign_id: "requester-#{SecureRandom.hex(4)}",
                       kind: "user", created_by: users(:acme_admin))
   end
 
-  def build_hoistable_wrapper_secret(namespace:)
+  def build_hoistable_wrapper_secret
     admin = users(:acme_admin)
     app = OauthApp.create!(
       slug: "hoist-#{SecureRandom.hex(4)}", provider: "github", client_id: "cid",
-      client_secret: "shh", credential_namespace: namespace,
+      client_secret: "shh",
       allowed_scopes: [ "repo" ], always_available: true, created_by: admin
     )
     credential = BrokerCredential.create!(
-      namespace: namespace, foreign_id: "hoist-cred-#{SecureRandom.hex(4)}",
+      foreign_id: "hoist-cred-#{SecureRandom.hex(4)}",
       token_endpoint: "https://oauth.example.com/token", client_id: "cid",
       refresh_token: "refresh", access_token: "hoisted-token",
       expires_at: 1.hour.from_now, last_refresh: Time.current,
       oauth_app: app, created_by: admin
     )
     secret = StaticSecret.new(
-      namespace: namespace, name: "hoist wrapper",
+      name: "hoist wrapper",
       inject_config: { "header" => "X-Requester-Token", "formatter" => "Bearer {{ .Value }}" },
       broker_credential: credential, created_by: admin
     )
@@ -255,7 +255,7 @@ class ProxyTest < ActiveSupport::TestCase
     requester = build_requester
     proxy = Proxy.create!(name: "requester-grants", principal: principals(:acme_channel),
                           requester_principal: requester)
-    secret = build_hoistable_wrapper_secret(namespace: "acme")
+    secret = build_hoistable_wrapper_secret
     before = proxy.config_hash
 
     grant = Grant.create!(principal: requester, static_secret: secret, created_by: users(:acme_admin))

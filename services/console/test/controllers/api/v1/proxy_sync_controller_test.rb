@@ -457,7 +457,7 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
   # --- requester principal union ------------------------------------------
 
   def create_requester
-    Principal.create!(namespace: "acme", foreign_id: "requester-#{SecureRandom.hex(4)}",
+    Principal.create!(foreign_id: "requester-#{SecureRandom.hex(4)}",
                       kind: "user", created_by: users(:acme_admin))
   end
 
@@ -466,18 +466,18 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
     requester = create_requester
     app = OauthApp.create!(
       slug: "hoist-#{SecureRandom.hex(4)}", provider: "github", client_id: "cid",
-      client_secret: "shh", credential_namespace: "acme",
+      client_secret: "shh",
       allowed_scopes: [ "repo" ], always_available: true, created_by: admin
     )
     credential = BrokerCredential.create!(
-      namespace: "acme", foreign_id: "hoist-cred-#{SecureRandom.hex(4)}",
+      foreign_id: "hoist-cred-#{SecureRandom.hex(4)}",
       token_endpoint: "https://oauth.example.com/token", client_id: "cid",
       refresh_token: "refresh", access_token: "hoisted-token",
       expires_at: 1.hour.from_now, last_refresh: Time.current,
       oauth_app: app, created_by: admin
     )
     secret = StaticSecret.new(
-      namespace: "acme", name: "hoist wrapper",
+      name: "hoist wrapper",
       inject_config: { "header" => header, "formatter" => "Bearer {{ .Value }}" },
       broker_credential: credential, created_by: admin
     )
