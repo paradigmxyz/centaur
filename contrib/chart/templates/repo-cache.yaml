@@ -1,8 +1,9 @@
 {{- if .Values.repoCache.enabled }}
 {{- $overlaySources := include "centaur.overlaySources" . | fromJsonArray -}}
+{{- $repositoryCloneUrls := include "centaur.repositoryCloneUrls" . | fromJson -}}
 {{- $repoCacheRepositories := list -}}
 {{- $repoCacheRepositoryVisibilities := dict -}}
-{{- $repoCacheRepositoryCloneUrls := dict -}}
+{{- $repoCacheRepositoryCloneUrls := deepCopy $repositoryCloneUrls -}}
 {{- $repoCacheRepositoryRefs := list -}}
 {{- $repoCacheRepositoryRefRepos := list -}}
 {{- range $repo, $ref := .Values.repoCache.repositoryRefs }}

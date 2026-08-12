@@ -131,8 +131,9 @@ For a personal, project, or group access token, GitLab accepts any non-empty
 username; the example keeps the conventional `oauth2` value.
 The generic `gitCredentials` setting takes precedence over the legacy
 `githubToken` setting. Do not put a username or token in `cloneUrl`; Centaur
-rejects URLs containing user-info and supplies credentials through
-`GIT_ASKPASS` from the mounted Secret.
+rejects URL user-info, query strings, and fragments, and supplies credentials
+through `GIT_ASKPASS` from the mounted Secret. For direct clones the Secret is
+available to the bootstrap init container, not the long-running agent.
 
 :::warning[Plain HTTP exposes repository data and credentials]
 An `http://` remote sends the Git username, token, and repository contents
@@ -145,8 +146,12 @@ grant unrestricted sandbox network access.
 The recommended GitLab setup keeps `repoCache.enabled: true`, as above. If you
 disable repo-cache, direct clones run through each sandbox's iron-proxy. Centaur
 grants an exact target rule for a literal IP and scopes it to that sandbox's
-repository access. It does not open a broad custom-port rule for a DNS name;
-use repo-cache for private DNS remotes or DNS remotes on non-HTTPS ports.
+repository access; api-rs receives the same exact rule for startup discovery.
+The target is recorded with the Sandbox so resume and proxy repair do not use a
+later release value. It does not open a broad custom-port rule for a DNS name;
+use repo-cache for private DNS remotes or DNS remotes on non-HTTPS ports. Since
+the long-running agent never receives the Git Secret, authenticated direct
+clones do not auto-refresh; create a fresh sandbox to bootstrap the new ref.
 
 ## Mount paths
 

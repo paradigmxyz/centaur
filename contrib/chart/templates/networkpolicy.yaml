@@ -1,6 +1,7 @@
 {{- if .Values.networkPolicy.enabled }}
 {{- $ingressSourceNamespaces := default .Values.networkPolicy.ingressControllerNamespaces .Values.networkPolicy.ingressSourceNamespaces }}
 {{- $console := include "centaur.consoleValues" . | fromYaml }}
+{{- $apiRsDirectCloneEgressTargets := include "centaur.apiRsDirectCloneEgressTargets" . | fromJsonArray }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -338,6 +339,16 @@ spec:
     - ports:
         - protocol: TCP
           port: 443
+{{- range $target := $apiRsDirectCloneEgressTargets }}
+    # An explicitly configured literal-IP Git remote authorizes only this
+    # destination and port while api-rs performs direct source discovery.
+    - to:
+        - ipBlock:
+            cidr: {{ get $target "cidr" | quote }}
+      ports:
+        - protocol: TCP
+          port: {{ get $target "port" }}
+{{- end }}
     # Kubernetes API egress. The kubernetes.default ClusterIP (:443) is DNAT'd
     # to the real endpoint port (6443 on k3s/kubeadm); enforcing CNIs match
     # egress post-DNAT, so allow that port or api-rs can't manage sandboxes.

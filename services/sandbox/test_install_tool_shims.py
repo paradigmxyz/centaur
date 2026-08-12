@@ -15,7 +15,7 @@ import install_tool_shims
 
 
 class GitEnvTest(unittest.TestCase):
-    def test_uses_generic_git_credentials(self) -> None:
+    def test_does_not_use_credentials_from_agent_environment(self) -> None:
         with mock.patch.dict(
             "os.environ",
             {
@@ -25,27 +25,10 @@ class GitEnvTest(unittest.TestCase):
             clear=True,
         ):
             env, temp_dir = install_tool_shims._git_env()
-        self.addCleanup(temp_dir.cleanup if temp_dir else lambda: None)
 
-        self.assertIsNotNone(temp_dir)
-        content = Path(env["GIT_ASKPASS"]).read_text()
-        self.assertIn("gitlab-deploy-token", content)
-        self.assertIn("/tools-git-credentials/token", content)
+        self.assertIsNone(temp_dir)
+        self.assertNotIn("GIT_ASKPASS", env)
         self.assertEqual(env["GIT_TERMINAL_PROMPT"], "0")
-
-    def test_legacy_github_token_file_uses_github_username(self) -> None:
-        with mock.patch.dict(
-            "os.environ",
-            {"CENTAUR_TOOLS_GITHUB_TOKEN_FILE": "/tools-github-token/token"},
-            clear=True,
-        ):
-            env, temp_dir = install_tool_shims._git_env()
-        self.addCleanup(temp_dir.cleanup if temp_dir else lambda: None)
-
-        self.assertIsNotNone(temp_dir)
-        content = Path(env["GIT_ASKPASS"]).read_text()
-        self.assertIn("x-access-token", content)
-        self.assertIn("/tools-github-token/token", content)
 
 
 class CopyPublishedToolsTest(unittest.TestCase):

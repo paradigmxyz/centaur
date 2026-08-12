@@ -1786,6 +1786,11 @@ fn validated_clone_url(repo: &str, value: String) -> Result<String, ServerError>
             "clone URL for {repo} must not contain credentials"
         )));
     }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(ServerError::UnsupportedConfig(format!(
+            "clone URL for {repo} must not contain a query or fragment"
+        )));
+    }
     Ok(value)
 }
 
@@ -2709,6 +2714,36 @@ mod tests {
             ServerError::UnsupportedConfig(message)
                 if message == "clone URL for acme/tools must not contain credentials"
         ));
+    }
+
+    #[test]
+    fn tools_config_rejects_clone_url_query_and_fragment() {
+        for clone_url in [
+            "https://git.example.test/acme/tools.git?access_token=secret",
+            "https://git.example.test/acme/tools.git#secret",
+        ] {
+            let args = Args::try_parse_from([
+                "centaur-api-server",
+                "--database-url",
+                "postgres://postgres:postgres@localhost/centaur",
+                "--session-sandbox-backend",
+                "agent-k8s",
+                "--kubernetes-tools-repo",
+                "acme/tools",
+                "--kubernetes-tools-clone-url",
+                clone_url,
+                "--kubernetes-tools-runner-image",
+                "centaur-agent:test",
+            ])
+            .unwrap();
+
+            let error = args.sandbox.tools_source.to_config().unwrap_err();
+            assert!(matches!(
+                error,
+                ServerError::UnsupportedConfig(message)
+                    if message == "clone URL for acme/tools must not contain a query or fragment"
+            ));
+        }
     }
 
     #[test]

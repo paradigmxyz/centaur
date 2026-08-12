@@ -92,7 +92,7 @@ app.kubernetes.io/component: {{ .component }}
 {{- $repo := .repo -}}
 {{- $cloneUrl := .cloneUrl | default "" -}}
 {{- if $cloneUrl -}}
-{{- $validCloneUrl := regexMatch `^https?://(?:\[[0-9A-Fa-f:.]+\]|[^/@:?#[:space:]]+)(?::[0-9]+)?(?:[/?#].*)?$` $cloneUrl -}}
+{{- $validCloneUrl := regexMatch `^https?://(?:\[[0-9A-Fa-f:.]+\]|[^/@:?#[:space:]]+)(?::[0-9]+)?(?:/[^?#]*)?$` $cloneUrl -}}
 {{- if not $validCloneUrl -}}
 {{- fail (printf "cloneUrl for repo %s must be an HTTP(S) URL with a host and no credentials" $repo) -}}
 {{- end -}}
@@ -115,7 +115,35 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 {{- end -}}
 
+{{- define "centaur.repositoryCloneUrls" -}}
+{{- $cloneUrls := dict -}}
+{{- if .Values.toolServer.cloneUrl -}}
+{{- $_ := include "centaur.registerCloneUrl" (dict "cloneUrls" $cloneUrls "repo" .Values.toolServer.repo "repoLabel" "toolServer.repo" "cloneUrl" .Values.toolServer.cloneUrl) -}}
+{{- end -}}
+{{- range .Values.toolServer.extraSources -}}
+{{- if .cloneUrl -}}
+{{- $_ := include "centaur.registerCloneUrl" (dict "cloneUrls" $cloneUrls "repo" .repo "repoLabel" "toolServer.extraSources[].repo" "cloneUrl" .cloneUrl) -}}
+{{- end -}}
+{{- end -}}
+{{- range .Values.overlays.sources -}}
+{{- if .cloneUrl -}}
+{{- $_ := include "centaur.registerCloneUrl" (dict "cloneUrls" $cloneUrls "repo" .repo "repoLabel" "overlays.sources[].repo" "cloneUrl" .cloneUrl) -}}
+{{- end -}}
+{{- end -}}
+{{- range .Values.repoCache.repositories -}}
+{{- if not (kindIs "string" .) -}}
+{{- $repo := get . "repo" | default "" -}}
+{{- $cloneUrl := get . "cloneUrl" | default "" -}}
+{{- if $cloneUrl -}}
+{{- $_ := include "centaur.registerCloneUrl" (dict "cloneUrls" $cloneUrls "repo" $repo "repoLabel" "repoCache.repositories[].repo" "cloneUrl" $cloneUrl) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- toJson $cloneUrls -}}
+{{- end -}}
+
 {{- define "centaur.overlaySources" -}}
+{{- $repositoryCloneUrls := include "centaur.repositoryCloneUrls" . | fromJson -}}
 {{- $sources := list -}}
 {{- with .Values.overlays.sources -}}
 {{- range . -}}
@@ -168,51 +196,55 @@ so the defaults are safe for repos that only carry some surfaces.
 {{- end -}}
 {{- end -}}
 {{- end -}}
-{{- $cloneUrls := dict -}}
 {{- range $source := $sources -}}
 {{- $repo := get $source "repo" | default "" -}}
-{{- $cloneUrl := get $source "cloneUrl" | default "" -}}
-{{- if $cloneUrl -}}
-{{- $_ := include "centaur.validateCloneUrl" (dict "repo" $repo "cloneUrl" $cloneUrl) -}}
-{{- $existingCloneUrl := get $cloneUrls $repo | default "" -}}
-{{- if and $existingCloneUrl (ne $existingCloneUrl $cloneUrl) -}}
-{{- fail (printf "conflicting cloneUrl values for repo %s" $repo) -}}
-{{- end -}}
-{{- $_ := set $cloneUrls $repo $cloneUrl -}}
-{{- end -}}
-{{- end -}}
-{{- range $source := $sources -}}
-{{- $repo := get $source "repo" | default "" -}}
-{{- $cloneUrl := get $cloneUrls $repo | default "" -}}
+{{- $cloneUrl := get $repositoryCloneUrls $repo | default "" -}}
 {{- if $cloneUrl -}}{{- $_ := set $source "cloneUrl" $cloneUrl -}}{{- end -}}
 {{- end -}}
 {{- toJson $sources -}}
 {{- end -}}
 
 {{- define "centaur.validateGitConfiguration" -}}
-{{- $cloneUrls := dict -}}
-{{- if .Values.toolServer.cloneUrl -}}
-{{- $_ := include "centaur.registerCloneUrl" (dict "cloneUrls" $cloneUrls "repo" .Values.toolServer.repo "repoLabel" "toolServer.repo" "cloneUrl" .Values.toolServer.cloneUrl) -}}
+{{- $_ := include "centaur.repositoryCloneUrls" . -}}
 {{- end -}}
-{{- range .Values.toolServer.extraSources -}}
-{{- if .cloneUrl -}}
-{{- $_ := include "centaur.registerCloneUrl" (dict "cloneUrls" $cloneUrls "repo" .repo "repoLabel" "toolServer.extraSources[].repo" "cloneUrl" .cloneUrl) -}}
+
+{{- define "centaur.apiRsDirectCloneEgressTargets" -}}
+{{- $targets := dict -}}
+{{- if not .Values.repoCache.enabled -}}
+{{- $sources := include "centaur.overlaySources" . | fromJsonArray -}}
+{{- range $source := $sources -}}
+{{- $cloneUrl := get $source "cloneUrl" | default "" -}}
+{{- if and $cloneUrl (get $source "toolsSubdir") -}}
+{{- $parsed := urlParse $cloneUrl -}}
+{{- $hostname := get $parsed "hostname" | default "" -}}
+{{- $host := get $parsed "host" | default "" -}}
+{{- $scheme := get $parsed "scheme" | default "" -}}
+{{- $port := ternary 443 80 (eq $scheme "https") -}}
+{{- $explicitPort := regexFind `:[0-9]+$` $host | trimPrefix ":" -}}
+{{- if $explicitPort -}}{{- $port = atoi $explicitPort -}}{{- end -}}
+{{- $cidr := "" -}}
+{{- if regexMatch `^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$` $hostname -}}
+{{- $validIpv4 := true -}}
+{{- range $octet := splitList "." $hostname -}}
+{{- if or (not (regexMatch `^[0-9]{1,3}$` $octet)) (gt (atoi $octet) 255) -}}
+{{- $validIpv4 = false -}}
 {{- end -}}
 {{- end -}}
-{{- range .Values.overlays.sources -}}
-{{- if .cloneUrl -}}
-{{- $_ := include "centaur.registerCloneUrl" (dict "cloneUrls" $cloneUrls "repo" .repo "repoLabel" "overlays.sources[].repo" "cloneUrl" .cloneUrl) -}}
+{{- if $validIpv4 -}}{{- $cidr = printf "%s/32" $hostname -}}{{- end -}}
+{{- else if contains ":" $hostname -}}
+{{- $cidr = printf "%s/128" $hostname -}}
 {{- end -}}
-{{- end -}}
-{{- range .Values.repoCache.repositories -}}
-{{- if not (kindIs "string" .) -}}
-{{- $repo := get . "repo" | default "" -}}
-{{- $cloneUrl := get . "cloneUrl" | default "" -}}
-{{- if $cloneUrl -}}
-{{- $_ := include "centaur.registerCloneUrl" (dict "cloneUrls" $cloneUrls "repo" $repo "repoLabel" "repoCache.repositories[].repo" "cloneUrl" $cloneUrl) -}}
+{{- if and $cidr (gt $port 0) (le $port 65535) -}}
+{{- $_ := set $targets (printf "%s:%d" $cidr $port) (dict "cidr" $cidr "port" $port) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
+{{- end -}}
+{{- $orderedTargets := list -}}
+{{- range $key := keys $targets | sortAlpha -}}
+{{- $orderedTargets = append $orderedTargets (get $targets $key) -}}
+{{- end -}}
+{{- toJson $orderedTargets -}}
 {{- end -}}
 
 {{- define "centaur.httpRouteName" -}}

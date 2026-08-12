@@ -77,7 +77,7 @@ repoCache:
 toolServer:
   enabled: true
   repo: group/tools
-  cloneUrl: http://git.example.test:82/group/tools.git
+  cloneUrl: http://192.0.2.10:82/group/tools.git
   gitCredentials:
     username: deploy-user
     existingSecretName: direct-git-token
@@ -94,7 +94,7 @@ api = documents.find do |doc|
 end or abort "api-rs deployment missing"
 container = api.dig("spec", "template", "spec", "containers").find { |item| item["name"] == "api-rs" }
 env = container.fetch("env").to_h { |item| [item["name"], item["value"]] }
-abort "direct clone URL missing" unless env["KUBERNETES_TOOLS_CLONE_URL"] == "http://git.example.test:82/group/tools.git"
+abort "direct clone URL missing" unless env["KUBERNETES_TOOLS_CLONE_URL"] == "http://192.0.2.10:82/group/tools.git"
 abort "direct credential secret missing" unless env["KUBERNETES_TOOLS_GIT_CREDENTIALS_SECRET"] == "direct-git-token"
 abort "direct credential key missing" unless env["KUBERNETES_TOOLS_GIT_CREDENTIALS_SECRET_KEY"] == "password"
 abort "direct credential username missing" unless env["KUBERNETES_TOOLS_GIT_USERNAME"] == "deploy-user"
@@ -102,6 +102,15 @@ mount = container.fetch("volumeMounts").find { |item| item["mountPath"] == "/too
 abort "direct credential mount missing" unless mount && mount["readOnly"] == true
 volume = api.dig("spec", "template", "spec", "volumes").find { |item| item["name"] == mount["name"] }
 abort "direct credential volume missing" unless volume.dig("secret", "secretName") == "direct-git-token"
+
+policy = documents.find do |doc|
+  doc["kind"] == "NetworkPolicy" && doc.dig("metadata", "name") == "centaur-centaur-api-rs-egress"
+end or abort "api-rs egress network policy missing"
+clone_rule = policy.dig("spec", "egress").find do |rule|
+  rule.dig("to", 0, "ipBlock", "cidr") == "192.0.2.10/32" &&
+    rule.fetch("ports", []).any? { |entry| entry["port"] == 82 }
+end
+abort "direct clone IP and port missing from api-rs egress policy" unless clone_rule
 RUBY
 
 cat >"$tmp_dir/legacy.yaml" <<'YAML'
@@ -220,6 +229,33 @@ extra_sources = JSON.parse(env.fetch("KUBERNETES_TOOLS_EXTRA_SOURCES"))
 abort "explicit clone URL did not propagate to duplicate source" unless extra_sources.fetch(0).fetch("cloneUrl") == expected
 RUBY
 
+cat >"$tmp_dir/cross-shape-explicit-wins.yaml" <<'YAML'
+repoCache:
+  enabled: true
+  repositories:
+    - repo: group/project
+      cloneUrl: http://git.example.test:82/group/project.git
+toolServer:
+  enabled: false
+overlays:
+  sources:
+    - repo: group/project
+      toolsSubdir: tools
+YAML
+
+helm template centaur "$chart" -f "$tmp_dir/cross-shape-explicit-wins.yaml" >"$tmp_dir/cross-shape-explicit-wins-rendered.yaml"
+ruby - "$tmp_dir/cross-shape-explicit-wins-rendered.yaml" <<'RUBY'
+require "yaml"
+
+documents = YAML.load_stream(File.read(ARGV.fetch(0))).compact
+api = documents.find do |doc|
+  doc["kind"] == "Deployment" && doc.dig("metadata", "name") == "centaur-centaur-api-rs"
+end or abort "api-rs deployment missing"
+container = api.dig("spec", "template", "spec", "containers").find { |item| item["name"] == "api-rs" }
+env = container.fetch("env").to_h { |item| [item["name"], item["value"]] }
+abort "repo-cache clone URL did not propagate to active overlay source" unless env["KUBERNETES_TOOLS_CLONE_URL"] == "http://git.example.test:82/group/project.git"
+RUBY
+
 cat >"$tmp_dir/credential-url.yaml" <<'YAML'
 repoCache:
   enabled: false
@@ -238,6 +274,29 @@ if grep -q "do-not-print" "$tmp_dir/credential-url.err"; then
   echo "credential-bearing clone URL leaked into Helm error" >&2
   exit 1
 fi
+
+for clone_url in \
+  'https://git.example.test/group/project.git?access_token=do-not-print' \
+  'https://git.example.test/group/project.git#do-not-print'; do
+  cat >"$tmp_dir/query-fragment-url.yaml" <<YAML
+repoCache:
+  enabled: false
+toolServer:
+  enabled: true
+  repo: group/project
+  cloneUrl: "${clone_url}"
+YAML
+
+  if helm template centaur "$chart" -f "$tmp_dir/query-fragment-url.yaml" >"$tmp_dir/query-fragment-url.out" 2>"$tmp_dir/query-fragment-url.err"; then
+    echo "expected clone URL query or fragment to fail Helm rendering" >&2
+    exit 1
+  fi
+  grep -q "cloneUrl for repo group/project must be an HTTP(S) URL with a host and no credentials" "$tmp_dir/query-fragment-url.err"
+  if grep -q "do-not-print" "$tmp_dir/query-fragment-url.err"; then
+    echo "clone URL query or fragment leaked into Helm error" >&2
+    exit 1
+  fi
+done
 
 cat >"$tmp_dir/ssh-url.yaml" <<'YAML'
 repoCache:

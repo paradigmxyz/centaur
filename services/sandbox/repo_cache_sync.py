@@ -212,6 +212,8 @@ class RepoCacheSync:
             raise ValueError(f"clone URL for {repo} must be an HTTP or HTTPS URL")
         if parsed.username is not None or parsed.password is not None:
             raise ValueError(f"clone URL for {repo} must not contain credentials")
+        if parsed.query or parsed.fragment:
+            raise ValueError(f"clone URL for {repo} must not contain a query or fragment")
         return clone_url
 
     def _git_env(self) -> dict[str, str]:

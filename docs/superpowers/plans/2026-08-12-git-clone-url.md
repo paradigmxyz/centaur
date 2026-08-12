@@ -242,12 +242,40 @@ convert a DNS clone host into a broad public custom-port rule.
 
 - [x] **Step 3: Preserve fail-closed behavior across lifecycle paths**
 
-Record repository access in the Sandbox CR container environment and restore
-it for resume and proxy repair. Missing or invalid state disables extra clone
-egress.
+Record the resolved clone CIDR/port targets in the Sandbox CR container
+environment and restore them for resume and proxy repair. Missing or invalid
+state disables extra clone egress.
 
 - [x] **Step 4: Re-run broad verification**
 
 Run the Helm feature tests and lint, all sandbox Python tests, the complete
 `centaur-sandbox-agent-k8s` and `centaur-api-server` suites, Rust formatting and
 Clippy, default/dev Helm rendering, the docs build, and `git diff --check`.
+
+### Task 7: Final Security Review Findings
+
+- [x] **Step 1: Use one release-wide clone URL registry**
+
+Propagate an explicit URL to every active source with the same stable `repo`,
+including URLs declared only in `repoCache.repositories`.
+
+- [x] **Step 2: Reject query and fragment credential channels**
+
+Apply the same no-query/no-fragment rule in Helm, api-rs, and repo-cache parsing
+so tokens cannot enter rendered environment or command arguments.
+
+- [x] **Step 3: Keep sandbox Git credentials init-only**
+
+Mount the Git Secret into `tools-bootstrap` but omit its mount, path, and
+username from the long-running agent. Direct private refreshes require a fresh
+bootstrap; repo-cache-backed refresh remains supported without agent secrets.
+
+- [x] **Step 4: Permit api-rs direct clone startup narrowly**
+
+Render an exact `/32` or `/128` and port rule for each active literal-IP direct
+tool source so api-rs metadata discovery works with HTTP/custom-port remotes.
+
+- [x] **Step 5: Persist effective direct-clone targets across lifecycle paths**
+
+Store the create-time CIDR/port list in the Sandbox CR and use only that list
+for resume and repair. Reject non-host CIDRs, zero ports, and malformed JSON.

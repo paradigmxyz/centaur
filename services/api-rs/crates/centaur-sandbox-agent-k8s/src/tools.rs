@@ -43,7 +43,6 @@ const TOOLS_BOOTSTRAP_DIR: &str = "/tools-bootstrap";
 const GIT_CREDENTIALS_VOLUME: &str = "tools-git-credentials";
 const GIT_CREDENTIALS_DIR: &str = "/tools-git-credentials";
 const GIT_CREDENTIALS_FILE: &str = "token";
-const GIT_CREDENTIALS_FILE_PATH: &str = "/tools-git-credentials/token";
 const REPO_CACHE_VOLUME: &str = "tools-repo-cache";
 const PUBLIC_VISIBILITY: &str = "public";
 const PRIVATE_VISIBILITY: &str = "private";
@@ -124,7 +123,7 @@ pub struct GitCredentialsRef {
     pub secret_key: String,
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize)]
 pub(crate) struct CloneEgressTarget {
     pub cidr: String,
     pub port: u16,
@@ -285,30 +284,22 @@ pub(crate) fn baked_base_tool_dirs() -> String {
     BAKED_BASE_TOOL_DIR.to_owned()
 }
 
-/// Agent env added for tools wiring.
+/// Agent env added for tools wiring. Git credentials are deliberately absent;
+/// they are mounted only into the bootstrap init container.
 pub(crate) fn agent_env(tools: Option<&ToolsConfig>) -> Vec<(String, String)> {
     let mut env = vec![("TOOL_DIRS".to_owned(), agent_tool_dirs())];
     if let Some(tools) = tools {
+        let auto_reload = tools.auto_reload
+            && (tools.repo_cache_path.is_some() || tools.git_credentials.is_none());
         env.push((
             "CENTAUR_TOOLS_AUTO_RELOAD".to_owned(),
-            tools.auto_reload.to_string(),
-        ));
-    }
-    if let Some(credentials) = tools.and_then(|tools| tools.git_credentials.as_ref()) {
-        env.push((
-            "CENTAUR_TOOLS_GIT_TOKEN_FILE".to_owned(),
-            GIT_CREDENTIALS_FILE_PATH.to_owned(),
-        ));
-        env.push((
-            "CENTAUR_TOOLS_GIT_USERNAME".to_owned(),
-            credentials.username.clone(),
+            auto_reload.to_string(),
         ));
     }
     env
 }
 
-/// Agent env for baked base tools only. No GitHub token is exposed because
-/// restricted sandboxes do not refresh from git or repo-cache.
+/// Agent env for baked base tools only.
 pub(crate) fn baked_base_agent_env() -> Vec<(String, String)> {
     vec![("TOOL_DIRS".to_owned(), baked_base_tool_dirs())]
 }
@@ -546,21 +537,15 @@ pub(crate) fn volumes_json(tools: Option<&ToolsConfig>) -> Vec<Value> {
     volumes
 }
 
-/// Volume mounts added to the AGENT container: the tools tree at `/app/tools`.
+/// Volume mounts added to the agent container: the tools tree at `/app/tools`.
 /// It is writable so `centaur-tools refresh` can publish a freshly fetched tree
-/// into the same emptyDir and reinstall shims without restarting the pod.
+/// from repo-cache, or an unauthenticated direct source, and reinstall shims
+/// without restarting the pod. Git credentials stay init-only.
 pub(crate) fn agent_volume_mounts_json(tools: Option<&ToolsConfig>) -> Vec<Value> {
     let Some(tools) = tools else {
         return Vec::new();
     };
     let mut mounts = vec![json!({"name": TOOLS_VOLUME, "mountPath": BASE_TOOL_DIR})];
-    if tools.git_credentials.is_some() {
-        mounts.push(json!({
-            "name": GIT_CREDENTIALS_VOLUME,
-            "mountPath": GIT_CREDENTIALS_DIR,
-            "readOnly": true,
-        }));
-    }
     if let Some(mount) = tools.repo_cache_volume_mount() {
         mounts.push(mount);
     }
@@ -1020,7 +1005,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_mounts_token_for_private_repo_refresh() {
+    fn agent_does_not_receive_direct_clone_credentials() {
         let mut tools = ToolsConfig::new("paradigmxyz/centaur", "centaur-agent:test");
         tools.git_credentials = Some(GitCredentialsRef {
             username: "oauth2".to_owned(),
@@ -1029,16 +1014,19 @@ mod tests {
         });
 
         let env = agent_env(Some(&tools));
-        assert!(env.contains(&("CENTAUR_TOOLS_AUTO_RELOAD".to_owned(), "true".to_owned())));
-        assert!(env.contains(&(
-            "CENTAUR_TOOLS_GIT_TOKEN_FILE".to_owned(),
-            "/tools-git-credentials/token".to_owned()
-        )));
-        assert!(env.contains(&("CENTAUR_TOOLS_GIT_USERNAME".to_owned(), "oauth2".to_owned())));
+        assert!(env.contains(&("CENTAUR_TOOLS_AUTO_RELOAD".to_owned(), "false".to_owned())));
+        assert!(!env.iter().any(|(name, _)| name.contains("GIT_TOKEN")));
+        assert!(!env.iter().any(|(name, _)| name.contains("GIT_USERNAME")));
         let mounts = agent_volume_mounts_json(Some(&tools));
-        assert_eq!(mounts.len(), 2);
-        assert!(mounts.iter().any(|mount| {
-            mount["mountPath"] == "/tools-git-credentials" && mount["readOnly"] == true
-        }));
+        assert_eq!(mounts.len(), 1);
+        assert!(
+            !mounts
+                .iter()
+                .any(|mount| mount["mountPath"] == "/tools-git-credentials")
+        );
+
+        tools.repo_cache_path = Some("/repo-cache/paradigmxyz/centaur".to_owned());
+        let cached_env = agent_env(Some(&tools));
+        assert!(cached_env.contains(&("CENTAUR_TOOLS_AUTO_RELOAD".to_owned(), "true".to_owned())));
     }
 }

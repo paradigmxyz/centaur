@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::net::IpAddr;
 use std::time::Duration;
 
 use centaur_iron_proxy::{ProxyFragment, SourceKind, SourcePolicy};
 use centaur_sandbox_core::{
-    RepoCacheAccess, ResourceRequirements, SandboxError, SandboxId, SandboxResult, SandboxSpec,
+    ResourceRequirements, SandboxError, SandboxId, SandboxResult, SandboxSpec,
 };
 use k8s_openapi::api::core::v1::{
     Capabilities, Container, ContainerPort, EmptyDirVolumeSource, EnvFromSource,
@@ -56,6 +57,7 @@ const PROXY_LOG_LEVEL: &str = "info";
 const PG_LISTENER_PORT: u16 = 5432;
 const CENTAUR_POSTGRES_DSN_ENV: &str = "CENTAUR_POSTGRES_DSN";
 const CENTAUR_CONSOLE_URL_ENV: &str = "CENTAUR_CONSOLE_URL";
+const CENTAUR_SANDBOX_CLONE_EGRESS_TARGETS_ENV: &str = "CENTAUR_SANDBOX_CLONE_EGRESS_TARGETS";
 const PG_LISTEN_ENV: &str = "IRON_PROXY_PG_LISTEN";
 const PG_CLIENT_USER_ENV: &str = "IRON_PROXY_PG_CLIENT_USER";
 const PG_CLIENT_PASSWORD_ENV: &str = "IRON_PROXY_PG_CLIENT_PASSWORD";
@@ -153,7 +155,7 @@ pub(crate) struct ResolvedIronProxy {
     management_api_key: String,
     observability_enabled: bool,
     api_server_enabled: bool,
-    repo_cache_access: RepoCacheAccess,
+    clone_egress_targets: Vec<CloneEgressTarget>,
 }
 
 struct ResolvedIronProxyRuntime {
@@ -161,7 +163,7 @@ struct ResolvedIronProxyRuntime {
     replace_placeholders: BTreeMap<String, String>,
     observability_enabled: bool,
     api_server_enabled: bool,
-    repo_cache_access: RepoCacheAccess,
+    clone_egress_targets: Vec<CloneEgressTarget>,
 }
 
 /// The single Postgres listener the proxy multiplexes every upstream through.
@@ -216,6 +218,8 @@ impl AgentSandboxBackend {
         let pg = self.resolved_pg();
         let replace_placeholders = self.effective_replace_placeholders(&principal_id).await?;
         let labels = spec.iron_control_proxy_labels.clone();
+        let clone_egress_targets =
+            tools::clone_egress_targets(self.config.tools.as_ref(), &spec.capabilities.repo_cache);
 
         Ok(Some(self.resolved_iron_proxy_for_principal(
             id,
@@ -226,7 +230,7 @@ impl AgentSandboxBackend {
                 replace_placeholders,
                 observability_enabled: spec.capabilities.observability_enabled,
                 api_server_enabled: spec.capabilities.api_server_enabled,
-                repo_cache_access: spec.capabilities.repo_cache.clone(),
+                clone_egress_targets,
             },
         )))
     }
@@ -312,8 +316,8 @@ impl AgentSandboxBackend {
             "api_server",
             id.as_str(),
         );
-        let repo_cache_access = resolve_resume_repo_cache_access(
-            sandbox_repo_cache_access(&sandbox, &self.config.container_name),
+        let clone_egress_targets = resolve_resume_clone_egress_targets(
+            sandbox_clone_egress_targets(&sandbox, &self.config.container_name),
             id.as_str(),
         );
         Ok(Some(self.resolved_iron_proxy_for_principal(
@@ -325,7 +329,7 @@ impl AgentSandboxBackend {
                 replace_placeholders,
                 observability_enabled,
                 api_server_enabled,
-                repo_cache_access,
+                clone_egress_targets,
             },
         )))
     }
@@ -349,7 +353,7 @@ impl AgentSandboxBackend {
             management_api_key: new_proxy_management_api_key(),
             observability_enabled: runtime.observability_enabled,
             api_server_enabled: runtime.api_server_enabled,
-            repo_cache_access: runtime.repo_cache_access,
+            clone_egress_targets: runtime.clone_egress_targets,
         }
     }
 
@@ -375,8 +379,6 @@ impl AgentSandboxBackend {
             &self.config.namespace,
             iron_proxy.control_plane_pod_labels.clone(),
         );
-        let clone_egress_targets =
-            tools::clone_egress_targets(self.config.tools.as_ref(), &resolved.repo_cache_access);
         for policy in build_iron_proxy_network_policies_with_clone_egress(
             id,
             resolved,
@@ -384,7 +386,7 @@ impl AgentSandboxBackend {
             &control_target,
             self.config.otlp_egress.as_ref(),
             resolved.observability_enabled,
-            &clone_egress_targets,
+            &resolved.clone_egress_targets,
         ) {
             self.network_policies()
                 .create(&PostParams::default(), &policy)
@@ -682,20 +684,20 @@ impl AgentSandboxBackend {
                 );
                 false
             });
-        let repo_cache_access = sandbox
+        let clone_egress_targets = sandbox
             .as_ref()
             .map(|sandbox| {
-                resolve_resume_repo_cache_access(
-                    sandbox_repo_cache_access(sandbox, &self.config.container_name),
+                resolve_resume_clone_egress_targets(
+                    sandbox_clone_egress_targets(sandbox, &self.config.container_name),
                     id.as_str(),
                 )
             })
             .unwrap_or_else(|| {
                 tracing::warn!(
                     sandbox_id = id.as_str(),
-                    "sandbox CR missing during proxy repair; failing closed for repository clone egress"
+                    "sandbox CR missing during proxy repair; disabling direct clone egress"
                 );
-                RepoCacheAccess::None
+                Vec::new()
             });
         let resolved = self.resolved_iron_proxy_for_principal(
             id,
@@ -706,7 +708,7 @@ impl AgentSandboxBackend {
                 replace_placeholders,
                 observability_enabled,
                 api_server_enabled,
-                repo_cache_access,
+                clone_egress_targets,
             },
         );
         self.create_iron_proxy_resources(id, Some(&resolved))
@@ -1204,6 +1206,13 @@ fn new_proxy_management_api_key() -> String {
 }
 
 pub(crate) fn apply_proxy_env(spec: &mut SandboxSpec, resolved: &ResolvedIronProxy) {
+    let clone_egress_targets =
+        serde_json::to_string(&resolved.clone_egress_targets).unwrap_or_else(|_| "[]".to_owned());
+    set_env(
+        spec,
+        CENTAUR_SANDBOX_CLONE_EGRESS_TARGETS_ENV,
+        &clone_egress_targets,
+    );
     let mut no_proxy_extra = current_env_values(spec, ["NO_PROXY", "no_proxy"]);
     // The harness exports OTLP traces (usage/cost spans) straight to the
     // collector; routing them through iron-proxy fails (plain-HTTP forwards
@@ -1863,36 +1872,47 @@ pub(crate) fn sandbox_api_server_enabled(
     .and_then(|value| value.parse().ok())
 }
 
-fn sandbox_repo_cache_access(
+fn sandbox_clone_egress_targets(
     sandbox: &crate::crd::Sandbox,
     container_name: &str,
-) -> Option<RepoCacheAccess> {
-    parse_repo_cache_access(&sandbox_env_value(
+) -> Option<Vec<CloneEgressTarget>> {
+    parse_clone_egress_targets(&sandbox_env_value(
         sandbox,
-        "CENTAUR_SANDBOX_REPO_CACHE_ACCESS",
+        CENTAUR_SANDBOX_CLONE_EGRESS_TARGETS_ENV,
         container_name,
     )?)
 }
 
-fn parse_repo_cache_access(value: &str) -> Option<RepoCacheAccess> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "none" => Some(RepoCacheAccess::None),
-        "public" => Some(RepoCacheAccess::Public),
-        "all" => Some(RepoCacheAccess::All),
-        _ => None,
+fn parse_clone_egress_targets(value: &str) -> Option<Vec<CloneEgressTarget>> {
+    let targets = serde_json::from_str::<Vec<CloneEgressTarget>>(value).ok()?;
+    if targets.iter().all(|target| {
+        if target.port == 0 {
+            return false;
+        }
+        let Some((address, prefix)) = target.cidr.rsplit_once('/') else {
+            return false;
+        };
+        matches!(
+            (address.parse::<IpAddr>(), prefix),
+            (Ok(IpAddr::V4(_)), "32") | (Ok(IpAddr::V6(_)), "128")
+        )
+    }) {
+        Some(targets)
+    } else {
+        None
     }
 }
 
-fn resolve_resume_repo_cache_access(
-    access: Option<RepoCacheAccess>,
+fn resolve_resume_clone_egress_targets(
+    targets: Option<Vec<CloneEgressTarget>>,
     sandbox_id: &str,
-) -> RepoCacheAccess {
-    access.unwrap_or_else(|| {
+) -> Vec<CloneEgressTarget> {
+    targets.unwrap_or_else(|| {
         tracing::warn!(
             sandbox_id,
-            "sandbox repository access env missing or invalid; disabling direct clone egress"
+            "sandbox clone egress target record missing or invalid; disabling direct clone egress"
         );
-        RepoCacheAccess::None
+        Vec::new()
     })
 }
 
@@ -2219,6 +2239,7 @@ fn unique_suffix() -> String {
 mod tests {
     use super::*;
     use crate::ToolsConfig;
+    use centaur_sandbox_core::RepoCacheAccess;
 
     fn resolved() -> ResolvedIronProxy {
         ResolvedIronProxy {
@@ -2233,7 +2254,7 @@ mod tests {
             management_api_key: "test-management-key".to_owned(),
             observability_enabled: true,
             api_server_enabled: true,
-            repo_cache_access: RepoCacheAccess::All,
+            clone_egress_targets: Vec::new(),
         }
     }
 
@@ -2805,25 +2826,34 @@ mod tests {
     }
 
     #[test]
-    fn resume_repo_cache_access_prefers_valid_env_and_fails_closed_without_it() {
-        assert_eq!(parse_repo_cache_access(" all "), Some(RepoCacheAccess::All));
+    fn clone_egress_targets_round_trip_through_sandbox_env() {
+        let mut spec = SandboxSpec::new("centaur-agent:latest");
+        let mut resolved = resolved();
+        resolved.clone_egress_targets = vec![CloneEgressTarget {
+            cidr: "192.0.2.10/32".to_owned(),
+            port: 82,
+        }];
+
+        apply_proxy_env(&mut spec, &resolved);
+
+        let recorded = env_value(&spec, CENTAUR_SANDBOX_CLONE_EGRESS_TARGETS_ENV)
+            .expect("clone egress targets should be persisted");
         assert_eq!(
-            parse_repo_cache_access("PUBLIC"),
-            Some(RepoCacheAccess::Public)
+            parse_clone_egress_targets(&recorded),
+            Some(resolved.clone_egress_targets)
         );
-        assert_eq!(parse_repo_cache_access("unexpected"), None);
-        assert_eq!(
-            resolve_resume_repo_cache_access(Some(RepoCacheAccess::All), "asbx-test"),
-            RepoCacheAccess::All
-        );
-        assert_eq!(
-            resolve_resume_repo_cache_access(Some(RepoCacheAccess::Public), "asbx-test"),
-            RepoCacheAccess::Public
-        );
-        assert_eq!(
-            resolve_resume_repo_cache_access(None, "asbx-test"),
-            RepoCacheAccess::None
-        );
+    }
+
+    #[test]
+    fn clone_egress_target_record_rejects_non_exact_or_invalid_targets() {
+        for value in [
+            r#"[{"cidr":"192.0.2.0/24","port":82}]"#,
+            r#"[{"cidr":"192.0.2.10/32","port":0}]"#,
+            r#"[{"cidr":"not-an-ip/32","port":82}]"#,
+            "not-json",
+        ] {
+            assert_eq!(parse_clone_egress_targets(value), None, "{value}");
+        }
     }
 
     #[test]

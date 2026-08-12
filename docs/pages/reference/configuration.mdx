@@ -86,7 +86,7 @@ created. Changing a default does not rewrite existing principals.
 `AGENT_REPO`. When `cloneUrl` is empty, Centaur derives
 `https://github.com/<repo>.git`; an explicit `cloneUrl` may use `http://` or
 `https://` and may point to GitLab or another Git server. URLs containing a
-username or password are rejected.
+username, password, query string, or fragment are rejected.
 
 | Helm value or env var | Set from | Controls |
 | --- | --- | --- |
@@ -96,7 +96,7 @@ username or password are rejected.
 | `repoCache.repositories[*].cloneUrl` | Helm value on object entries. | Git remote for a cache-only repository. |
 | `repoCache.gitCredentials.username` | Helm value; default `oauth2`. | Username returned by `GIT_ASKPASS`. GitLab deploy tokens require their generated username. |
 | `repoCache.gitCredentials.existingSecretName`, `secretKey` | Kubernetes Secret reference. | Token/password mounted into repo-cache; generic credentials take precedence over `repoCache.githubToken`. |
-| `toolServer.gitCredentials.*` | Kubernetes Secret reference. | Direct-clone credential used only when repo-cache is disabled; generic credentials take precedence over `toolServer.githubToken`. |
+| `toolServer.gitCredentials.*` | Kubernetes Secret reference. | Direct-clone credential used only when repo-cache is disabled and mounted only into bootstrap cloning surfaces, not the long-running agent; generic credentials take precedence over `toolServer.githubToken`. |
 | `repoCache.egressPorts` | Helm value; default `[443]`. | Destination TCP ports allowed for repo-cache. Add a custom HTTP port such as `82` when required. |
 | `REPOSITORY_CLONE_URLS` | Chart-rendered JSON for repo-cache. | Mapping from stable repository identity to resolved explicit remotes. Readiness stores SHA-256 URL hashes, not raw URLs. |
 | `KUBERNETES_TOOLS_CLONE_URL`, `KUBERNETES_TOOLS_EXTRA_SOURCES` | Chart-rendered for api-rs. | Primary and additional remotes propagated to sandbox init containers. |
@@ -110,9 +110,13 @@ available. Never embed credentials in `cloneUrl`.
 With `repoCache.enabled: false`, direct tool clones pass through each sandbox's
 iron-proxy. A literal IP such as `192.168.50.10` receives only an exact `/32`
 (IPv4) or `/128` (IPv6) rule for the clone port, scoped to that sandbox's
-repository access. DNS names do not add broad public custom-port rules. Use
-repo-cache for private DNS remotes or DNS remotes on ports other than the
-proxy's baseline HTTPS port.
+repository access. The api-rs startup checkout receives the same exact target
+rule. Sandbox resume and proxy repair reuse the CIDR/port targets recorded at
+creation, even if the release configuration later changes. DNS names do not
+add broad public custom-port rules. Use repo-cache for private DNS remotes or
+DNS remotes on ports other than the proxy's baseline HTTPS port. Authenticated
+direct clones run only during sandbox bootstrap; background refresh is disabled
+because the long-running agent does not receive the Git Secret.
 
 ## API
 

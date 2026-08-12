@@ -134,6 +134,20 @@ class RepoCacheSyncTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "must be an HTTP or HTTPS URL"):
                 sync.repository_clone_url("acme/centaur")
 
+    def test_repository_clone_url_rejects_query_and_fragment(self) -> None:
+        for clone_url in (
+            "https://git.example.test/acme/centaur.git?access_token=secret",
+            "https://git.example.test/acme/centaur.git#secret",
+        ):
+            with self.subTest(clone_url=clone_url), tempfile.TemporaryDirectory() as tmp:
+                sync = self.make_sync(
+                    Path(tmp),
+                    repository_clone_urls={"acme/centaur": clone_url},
+                )
+
+                with self.assertRaisesRegex(ValueError, "must not contain a query or fragment"):
+                    sync.repository_clone_url("acme/centaur")
+
     def test_git_askpass_uses_configured_username_and_token_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

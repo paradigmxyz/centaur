@@ -67,25 +67,7 @@ def _workspace_dir() -> Path:
 def _git_env() -> tuple[dict[str, str], tempfile.TemporaryDirectory[str] | None]:
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
-    token_file = os.environ.get("CENTAUR_TOOLS_GIT_TOKEN_FILE") or os.environ.get(
-        "CENTAUR_TOOLS_GITHUB_TOKEN_FILE"
-    )
-    if not token_file:
-        return env, None
-    username = os.environ.get("CENTAUR_TOOLS_GIT_USERNAME") or "x-access-token"
-    temp_dir = tempfile.TemporaryDirectory(prefix="centaur-tools-askpass-")
-    askpass = Path(temp_dir.name) / "askpass.sh"
-    askpass.write_text(
-        "#!/bin/sh\n"
-        "case \"$1\" in\n"
-        f"  *Username*) printf '%s\\n' {shlex.quote(username)};;\n"
-        f"  *Password*) cat {shlex.quote(token_file)};;\n"
-        "  *) printf '\\n';;\n"
-        "esac\n"
-    )
-    askpass.chmod(0o700)
-    env["GIT_ASKPASS"] = str(askpass)
-    return env, temp_dir
+    return env, None
 
 
 def _sorted_children(path: Path) -> list[Path]:

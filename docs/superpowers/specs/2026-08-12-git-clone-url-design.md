@@ -83,10 +83,11 @@ supported. When the corresponding `gitCredentials.existingSecretName` is set,
 the generic configuration takes precedence. Legacy GitHub credentials use the
 username `x-access-token`.
 
-Centaur rejects clone URLs containing URL user-info, for example
-`http://user:token@host/repo.git`, because those URLs are persisted in Helm
-release data and can appear in Git errors. Operators must use the Secret-backed
-credential interface.
+Centaur rejects clone URLs containing URL user-info, query strings, or
+fragments, for example `http://user:token@host/repo.git` or
+`https://host/repo.git?access_token=...`, because those URLs are persisted in
+Helm release data and can appear in process arguments or Git errors. Operators
+must use the Secret-backed credential interface.
 
 ## Data Flow
 
@@ -114,8 +115,12 @@ credential interface.
 1. Helm sends the primary tool source clone URL and additional source JSON to
    api-rs.
 2. api-rs uses the clone URL for its tool metadata checkout.
+   For a literal-IP remote, the chart adds that exact `/32` or `/128` and port
+   to the api-rs NetworkPolicy so HTTP and custom-port startup discovery works
+   without opening a broad destination range.
 3. api-rs passes the same clone URL and generic credential reference into each
-   sandbox tools configuration.
+   sandbox tools configuration. The credential Secret is mounted only into the
+   `tools-bootstrap` init container, never into the long-running agent.
 4. The sandbox `tools-bootstrap` init container clones through the paired
    iron-proxy. Both `HTTP_PROXY` and `HTTPS_PROXY` are set so HTTP and HTTPS
    remotes follow the same egress path.
@@ -125,14 +130,23 @@ credential interface.
    custom-port rules. Private DNS remotes, and DNS remotes on ports other than
    the proxy's baseline HTTPS port, require repo-cache because their changing
    addresses cannot be represented by a stable narrow rule.
+6. api-rs records the resolved clone egress targets as CIDR/port pairs in the
+   Sandbox CR. Resume and proxy repair restore this immutable record instead of
+   recalculating from current Helm configuration; missing or invalid records
+   fail closed with no extra clone egress.
 
 ## Security And Error Handling
 
 - Plain HTTP is allowed only because the operator explicitly supplies an
   `http://` URL. Documentation states that the token and code are observable on
   the network.
-- The token file is mounted read-only with mode `0400` and never copied into
-  the published tool tree.
+- The token file is mounted read-only with mode `0400` only where cloning is
+  performed: repo-cache, the api-rs source checkout, and the sandbox bootstrap
+  init container. It is never mounted into the long-running agent or copied
+  into the published tool tree.
+- Direct private clones disable in-session auto-refresh because the running
+  agent has no Git credential. A fresh sandbox bootstrap performs the next
+  authenticated clone. Repo-cache-backed refresh remains available.
 - Generated shell scripts quote clone URLs as data. A URL cannot inject shell
   syntax.
 - Error messages identify the stable `repo`, not the clone URL.

@@ -1409,6 +1409,51 @@ mod tests {
     }
 
     #[test]
+    fn direct_git_credentials_are_mounted_only_into_bootstrap() {
+        let spec = SandboxSpec::new("centaur-agent:latest");
+        let mut tools = ToolsConfig::new("group/tools", "api:test");
+        tools.clone_url = Some("http://192.0.2.10:82/group/tools.git".to_owned());
+        tools.git_credentials = Some(GitCredentialsRef {
+            username: "deploy-user".to_owned(),
+            secret_name: "direct-git-token".to_owned(),
+            secret_key: "password".to_owned(),
+        });
+        let config = AgentSandboxConfig::new("centaur", test_iron_control_settings()).tools(tools);
+
+        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+        let pod_spec = &sandbox.spec.pod_template.spec;
+        let bootstrap = &pod_spec.init_containers.as_ref().unwrap()[0];
+        assert!(
+            bootstrap
+                .volume_mounts
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|mount| mount.name == "tools-git-credentials")
+        );
+
+        let agent = &pod_spec.containers[0];
+        assert!(agent.volume_mounts.as_ref().is_none_or(|mounts| {
+            !mounts
+                .iter()
+                .any(|mount| mount.name == "tools-git-credentials")
+        }));
+        let agent_env = agent
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|env| (env.name.as_str(), env.value.as_deref()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            agent_env.get("CENTAUR_TOOLS_AUTO_RELOAD"),
+            Some(&Some("false"))
+        );
+        assert!(!agent_env.keys().any(|name| name.contains("GIT_TOKEN")));
+        assert!(!agent_env.keys().any(|name| name.contains("GIT_USERNAME")));
+    }
+
+    #[test]
     fn disabled_repo_cache_uses_baked_base_tools_without_bootstrap() {
         let spec = SandboxSpec::new("centaur-agent:latest").capabilities(SandboxCapabilities {
             repo_cache: RepoCacheAccess::None,
