@@ -20,6 +20,7 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+sqlx.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "sync", "time"] }
 tokio-util = { workspace = true, features = ["codec"] }
@@ -27,7 +28,6 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-sqlx.workspace = true
 time.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "rt-multi-thread", "sync", "time"] }
 uuid.workspace = true

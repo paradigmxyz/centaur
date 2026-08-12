@@ -4026,6 +4026,17 @@ async fn run_agent_session_turn(
                 }
             }
             "session.execution_completed" => {
+                if telemetry_export_enabled() {
+                    record_agent_turn_usage(
+                        session_runtime.pool(),
+                        thread_key.as_str(),
+                        &execution.execution_id,
+                        &harness_type,
+                        model.as_deref(),
+                        &output_lines,
+                    )
+                    .await;
+                }
                 return Ok(AgentTurnResult {
                     thread_key: thread_key.into_string(),
                     execution_id: execution.execution_id,
@@ -4069,6 +4080,90 @@ fn result_text_from_output_lines(lines: &[String]) -> String {
         })
         .collect::<Vec<_>>()
         .join("")
+}
+
+/// Per-turn usage parsed from a harness `turn.completed` event's `usage`
+/// object (see `mock_app_server_script` in centaur-session-runtime for the
+/// wire shape). Workflow-tier agent turns already receive the same
+/// output-line stream session-tier turns do, so extracting usage here
+/// mirrors that path instead of introducing a separate accounting mechanism.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TurnUsage {
+    input_tokens: i64,
+    output_tokens: i64,
+}
+
+fn turn_usage_from_output_line(value: &Value) -> Option<TurnUsage> {
+    let method = value.get("method").and_then(Value::as_str);
+    let event_type = value.get("type").and_then(Value::as_str);
+    if method != Some("turn/completed") && event_type != Some("turn.completed") {
+        return None;
+    }
+    let usage = value
+        .get("usage")
+        .or_else(|| value.pointer("/params/usage"))?;
+    let input_tokens = usage.get("input_tokens").and_then(Value::as_i64)?;
+    let output_tokens = usage.get("output_tokens").and_then(Value::as_i64)?;
+    Some(TurnUsage {
+        input_tokens,
+        output_tokens,
+    })
+}
+
+fn turn_usages_from_output_lines(lines: &[String]) -> Vec<TurnUsage> {
+    lines
+        .iter()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|value| turn_usage_from_output_line(&value))
+        .collect()
+}
+
+/// Whether the deployment's existing telemetry config has trace export
+/// turned on. Usage-record writes are gated behind this same switch, so an
+/// operator who has disabled telemetry export doesn't get a second,
+/// independent form of it via `usage_records`.
+fn telemetry_export_enabled() -> bool {
+    centaur_telemetry::TelemetryConfig::from_env().traces_exporter
+        != centaur_telemetry::TraceExporter::None
+}
+
+/// Persists one `usage_records` row per turn-completion usage observation in
+/// `output_lines`, closing the parity gap where workflow-tier agent turns
+/// (unlike session-tier turns) produced no usage record at all. Best-effort:
+/// a write failure is logged, never propagated, so usage accounting can't
+/// fail a workflow's actual agent turn. Callers are expected to check
+/// `telemetry_export_enabled()` first.
+async fn record_agent_turn_usage(
+    pool: &sqlx::PgPool,
+    thread_key: &str,
+    execution_id: &str,
+    harness: &HarnessType,
+    model: Option<&str>,
+    output_lines: &[String],
+) {
+    for usage in turn_usages_from_output_lines(output_lines) {
+        let result = sqlx::query(
+            "insert into usage_records \
+             (execution_id, thread_key, harness, model, input_tokens, output_tokens) \
+             values ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(execution_id)
+        .bind(thread_key)
+        .bind(harness.as_ref())
+        .bind(model)
+        .bind(usage.input_tokens)
+        .bind(usage.output_tokens)
+        .execute(pool)
+        .await;
+        if let Err(error) = result {
+            warn!(
+                %error,
+                thread_key,
+                execution_id,
+                "failed to persist workflow agent turn usage record"
+            );
+        }
+    }
 }
 
 fn workflow_run_from_row(row: sqlx::postgres::PgRow) -> Result<WorkflowRun, WorkflowRuntimeError> {
@@ -4187,6 +4282,65 @@ mod tests {
         assert_eq!(value.get("provider"), Some(&json!("amazon-bedrock")));
         assert_eq!(value.get("reasoning"), Some(&json!("high")));
         assert_eq!(value.pointer("/message/content"), Some(&json!(parts)));
+    }
+
+    #[test]
+    fn turn_usage_is_extracted_from_a_type_tagged_turn_completed_line() {
+        let lines = vec![
+            json!({"type": "item.agentMessage.delta", "delta": "PONG"}).to_string(),
+            json!({
+                "type": "turn.completed",
+                "turn": {"id": "turn-1"},
+                "usage": {"input_tokens": 12, "output_tokens": 34},
+            })
+            .to_string(),
+        ];
+        let usages = turn_usages_from_output_lines(&lines);
+        assert_eq!(
+            usages,
+            vec![TurnUsage {
+                input_tokens: 12,
+                output_tokens: 34,
+            }]
+        );
+    }
+
+    #[test]
+    fn turn_usage_is_extracted_from_a_method_tagged_turn_completed_line() {
+        let lines = vec![
+            json!({
+                "method": "turn/completed",
+                "params": {"usage": {"input_tokens": 5, "output_tokens": 7}},
+            })
+            .to_string(),
+        ];
+        let usages = turn_usages_from_output_lines(&lines);
+        assert_eq!(
+            usages,
+            vec![TurnUsage {
+                input_tokens: 5,
+                output_tokens: 7,
+            }]
+        );
+    }
+
+    #[test]
+    fn turn_usage_is_skipped_when_usage_is_null_or_missing() {
+        let lines = vec![
+            json!({"type": "turn.completed", "turn": {"id": "turn-1"}, "usage": null}).to_string(),
+            json!({"type": "turn.completed", "turn": {"id": "turn-2"}}).to_string(),
+            json!({"type": "item.agentMessage.delta", "delta": "not a turn"}).to_string(),
+        ];
+        assert_eq!(turn_usages_from_output_lines(&lines), Vec::new());
+    }
+
+    #[test]
+    fn turn_usage_counts_one_row_per_completed_turn() {
+        let lines = vec![
+            json!({"type": "turn.completed", "turn": {"id": "turn-1"}, "usage": {"input_tokens": 1, "output_tokens": 1}}).to_string(),
+            json!({"type": "turn.completed", "turn": {"id": "turn-2"}, "usage": {"input_tokens": 2, "output_tokens": 2}}).to_string(),
+        ];
+        assert_eq!(turn_usages_from_output_lines(&lines).len(), 2);
     }
 
     #[test]
@@ -4876,5 +5030,83 @@ mod tests {
             select_stale_cancellations(&active, &BTreeSet::new(), &mut counts, 1),
             vec!["task-1".to_owned()]
         );
+    }
+
+    // Exercises the real `usage_records` table against Postgres; set
+    // SESSION_SQLX_TEST_DATABASE_URL (or SESSION_RUNTIME_TEST_DATABASE_URL)
+    // to run it. Mirrors the DB-gated test convention used across
+    // centaur-session-sqlx and centaur-session-runtime.
+    #[tokio::test]
+    async fn workflow_agent_turn_persists_exactly_one_usage_row_per_completed_turn() {
+        let Some(store) = usage_record_test_store().await else {
+            return;
+        };
+        let execution_id = unique_test_execution_id();
+        let output_lines = vec![
+            json!({"type": "item.agentMessage.delta", "delta": "PONG"}).to_string(),
+            json!({
+                "type": "turn.completed",
+                "turn": {"id": "turn-1"},
+                "usage": {"input_tokens": 12, "output_tokens": 34},
+            })
+            .to_string(),
+        ];
+
+        record_agent_turn_usage(
+            store.pool(),
+            "test:usage-record-thread",
+            &execution_id,
+            &HarnessType::Codex,
+            Some("test-model"),
+            &output_lines,
+        )
+        .await;
+
+        let rows = sqlx::query(
+            "select input_tokens, output_tokens, model, harness, thread_key \
+             from usage_records where execution_id = $1",
+        )
+        .bind(&execution_id)
+        .fetch_all(store.pool())
+        .await
+        .expect("query usage_records");
+
+        assert_eq!(rows.len(), 1, "expected exactly one usage row for the turn");
+        let row = &rows[0];
+        assert_eq!(row.try_get::<i64, _>("input_tokens").unwrap(), 12);
+        assert_eq!(row.try_get::<i64, _>("output_tokens").unwrap(), 34);
+        assert_eq!(
+            row.try_get::<Option<String>, _>("model").unwrap(),
+            Some("test-model".to_owned())
+        );
+        assert_eq!(row.try_get::<String, _>("harness").unwrap(), "codex");
+        assert_eq!(
+            row.try_get::<String, _>("thread_key").unwrap(),
+            "test:usage-record-thread"
+        );
+    }
+
+    fn unique_test_execution_id() -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        format!("test-execution-{}-{nanos}", std::process::id())
+    }
+
+    async fn usage_record_test_store() -> Option<PgSessionStore> {
+        let Ok(url) = std::env::var("SESSION_SQLX_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("SESSION_RUNTIME_TEST_DATABASE_URL"))
+        else {
+            eprintln!(
+                "skipping: set SESSION_SQLX_TEST_DATABASE_URL to run workflow usage-record tests"
+            );
+            return None;
+        };
+        let store = PgSessionStore::connect(&url)
+            .await
+            .expect("connect test db");
+        store.run_migrations().await.expect("run migrations");
+        Some(store)
     }
 }
