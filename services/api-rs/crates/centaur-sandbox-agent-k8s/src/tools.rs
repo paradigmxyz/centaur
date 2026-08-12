@@ -38,11 +38,11 @@ const TOOLS_VOLUME: &str = "tools-root";
 /// Staging path where `tools-bootstrap` mounts the tools emptyDir. The agent
 /// container mounts the same volume read-only at `BASE_TOOL_DIR`.
 const TOOLS_BOOTSTRAP_DIR: &str = "/tools-bootstrap";
-/// Volume + mount carrying the GitHub token for private-repo clones (askpass).
-const GITHUB_TOKEN_VOLUME: &str = "tools-github-token";
-const GITHUB_TOKEN_DIR: &str = "/tools-github-token";
-const GITHUB_TOKEN_FILE: &str = "token";
-const GITHUB_TOKEN_FILE_PATH: &str = "/tools-github-token/token";
+/// Volume + mount carrying a Git password/token for private-repo clones.
+const GIT_CREDENTIALS_VOLUME: &str = "tools-git-credentials";
+const GIT_CREDENTIALS_DIR: &str = "/tools-git-credentials";
+const GIT_CREDENTIALS_FILE: &str = "token";
+const GIT_CREDENTIALS_FILE_PATH: &str = "/tools-git-credentials/token";
 const REPO_CACHE_VOLUME: &str = "tools-repo-cache";
 const PUBLIC_VISIBILITY: &str = "public";
 const PRIVATE_VISIBILITY: &str = "private";
@@ -53,8 +53,10 @@ const PRIVATE_VISIBILITY: &str = "private";
 /// tool is a push to the repo, not an image rebuild.
 #[derive(Clone, Debug)]
 pub struct ToolsConfig {
-    /// `owner/name` GitHub repo carrying the tools tree.
+    /// Stable repo identity used for cache and mount paths.
     pub repo: String,
+    /// Optional HTTP(S) Git remote. `None` derives the GitHub URL from `repo`.
+    pub clone_url: Option<String>,
     /// Branch, tag, or commit to check out. `None` => the repo's default branch.
     pub git_ref: Option<String>,
     /// Subdirectory within the repo holding the tools (published to `/app/tools`).
@@ -65,8 +67,8 @@ pub struct ToolsConfig {
     /// `install-tool-shims` (the default sandbox image does).
     pub image: String,
     pub image_pull_policy: Option<String>,
-    /// GitHub token secret for private-repo clones. `None` => unauthenticated clone.
-    pub github_token: Option<GitHubTokenRef>,
+    /// Secret-backed username/password supplied to Git through `GIT_ASKPASS`.
+    pub git_credentials: Option<GitCredentialsRef>,
     /// Optional repo-cache root path mounted into the sandbox. When set,
     /// tools-bootstrap publishes from `<repo_cache_path>/<repo>/<source_subdir>`
     /// and `centaur-tools refresh` republishes from the same cache instead of
@@ -91,6 +93,7 @@ pub struct ToolsConfig {
 #[derive(Clone, Debug)]
 pub struct ToolSource {
     pub repo: String,
+    pub clone_url: Option<String>,
     pub git_ref: Option<String>,
     pub source_subdir: String,
     pub visibility: String,
@@ -100,11 +103,22 @@ impl ToolSource {
     fn is_public(&self) -> bool {
         self.visibility == PUBLIC_VISIBILITY
     }
+
+    fn resolved_clone_url(&self) -> String {
+        self.clone_url
+            .clone()
+            .unwrap_or_else(|| format!("https://github.com/{}.git", self.repo))
+    }
 }
 
-/// A Kubernetes Secret key holding a GitHub token, fed to `git` via `GIT_ASKPASS`.
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r#"'\''"#))
+}
+
+/// A Kubernetes Secret key holding a Git password/token for `GIT_ASKPASS`.
 #[derive(Clone, Debug)]
-pub struct GitHubTokenRef {
+pub struct GitCredentialsRef {
+    pub username: String,
     pub secret_name: String,
     pub secret_key: String,
 }
@@ -113,12 +127,13 @@ impl ToolsConfig {
     pub fn new(repo: impl Into<String>, image: impl Into<String>) -> Self {
         Self {
             repo: repo.into(),
+            clone_url: None,
             git_ref: None,
             source_subdir: "tools".to_owned(),
             visibility: PRIVATE_VISIBILITY.to_owned(),
             image: image.into(),
             image_pull_policy: None,
-            github_token: None,
+            git_credentials: None,
             repo_cache_path: None,
             repo_cache_pvc: None,
             repo_cache_sub_path: None,
@@ -130,6 +145,7 @@ impl ToolsConfig {
     fn sources(&self) -> Vec<ToolSource> {
         let mut sources = vec![ToolSource {
             repo: self.repo.clone(),
+            clone_url: self.clone_url.clone(),
             git_ref: self.git_ref.clone(),
             source_subdir: self.source_subdir.clone(),
             visibility: self.visibility.clone(),
@@ -153,6 +169,7 @@ impl ToolsConfig {
             if scoped.visibility != PUBLIC_VISIBILITY {
                 if let Some(first_public) = scoped.extra_sources.first().cloned() {
                     scoped.repo = first_public.repo;
+                    scoped.clone_url = first_public.clone_url;
                     scoped.git_ref = first_public.git_ref;
                     scoped.source_subdir = first_public.source_subdir;
                     scoped.visibility = first_public.visibility;
@@ -235,13 +252,14 @@ pub(crate) fn agent_env(tools: Option<&ToolsConfig>) -> Vec<(String, String)> {
             tools.auto_reload.to_string(),
         ));
     }
-    if tools
-        .and_then(|tools| tools.github_token.as_ref())
-        .is_some()
-    {
+    if let Some(credentials) = tools.and_then(|tools| tools.git_credentials.as_ref()) {
         env.push((
-            "CENTAUR_TOOLS_GITHUB_TOKEN_FILE".to_owned(),
-            GITHUB_TOKEN_FILE_PATH.to_owned(),
+            "CENTAUR_TOOLS_GIT_TOKEN_FILE".to_owned(),
+            GIT_CREDENTIALS_FILE_PATH.to_owned(),
+        ));
+        env.push((
+            "CENTAUR_TOOLS_GIT_USERNAME".to_owned(),
+            credentials.username.clone(),
         ));
     }
     env
@@ -280,6 +298,8 @@ pub(crate) fn tools_init_container_json(
         Some(proxy) => format!(
             "export HTTPS_PROXY=\"{https_proxy}\"\n\
              export https_proxy=\"{https_proxy}\"\n\
+             export HTTP_PROXY=\"{https_proxy}\"\n\
+             export http_proxy=\"{https_proxy}\"\n\
              export GIT_SSL_CAINFO=\"{ca_cert_path}\"\n",
             https_proxy = proxy.https_proxy,
             ca_cert_path = proxy.ca_cert_path,
@@ -287,15 +307,19 @@ pub(crate) fn tools_init_container_json(
         None => String::new(),
     };
 
-    // GIT_ASKPASS feeds the token as the HTTPS password (user x-access-token),
-    // matching the repo-cache DaemonSet. Wired only when a token secret is mounted.
-    let askpass = if tools.github_token.is_some() {
+    let askpass = if let Some(credentials) = &tools.git_credentials {
         format!(
-            "printf '#!/bin/sh\\ncase \"$1\" in *Username*) echo x-access-token;; \
-             *Password*) cat {GITHUB_TOKEN_DIR}/{GITHUB_TOKEN_FILE};; *) echo;; esac\\n' \
-             > /tmp/git-askpass\n\
+            "cat > /tmp/git-askpass <<'CENTAUR_GIT_ASKPASS'\n\
+             #!/bin/sh\n\
+             case \"$1\" in\n\
+               *Username*) printf '%s\\n' {username};;\n\
+               *Password*) cat {GIT_CREDENTIALS_DIR}/{GIT_CREDENTIALS_FILE};;\n\
+               *) printf '\\n';;\n\
+             esac\n\
+             CENTAUR_GIT_ASKPASS\n\
              chmod 0700 /tmp/git-askpass\n\
-             export GIT_ASKPASS=/tmp/git-askpass\n"
+             export GIT_ASKPASS=/tmp/git-askpass\n",
+            username = shell_quote(&credentials.username),
         )
     } else {
         String::new()
@@ -342,7 +366,7 @@ pub(crate) fn tools_init_container_json(
                 "repo_cache_repo_path": repo_cache_repo_path,
             }));
         } else {
-            let repo_url = format!("https://github.com/{}.git", source.repo);
+            let repo_url = shell_quote(&source.resolved_clone_url());
             let source_path = if index == 0 {
                 ".centaur-source".to_owned()
             } else {
@@ -364,7 +388,7 @@ pub(crate) fn tools_init_container_json(
                 "source=\"{source_target_path}\"\n\
                  rm -rf \"$source\"\n\
                  attempt=0\n\
-                 until git clone --quiet --filter=blob:none --no-checkout \"{repo_url}\" \"$source\" && \
+                 until git clone --quiet --filter=blob:none --no-checkout {repo_url} \"$source\" && \
                  git -C \"$source\" sparse-checkout set \"{subdir}\" && \
                  {checkout}; do\n\
                  attempt=$((attempt + 1))\n\
@@ -414,10 +438,10 @@ CENTAUR_TOOLS_METADATA"
     );
 
     let mut volume_mounts = vec![json!({"name": TOOLS_VOLUME, "mountPath": TOOLS_BOOTSTRAP_DIR})];
-    if tools.github_token.is_some() {
+    if tools.git_credentials.is_some() {
         volume_mounts.push(json!({
-            "name": GITHUB_TOKEN_VOLUME,
-            "mountPath": GITHUB_TOKEN_DIR,
+            "name": GIT_CREDENTIALS_VOLUME,
+            "mountPath": GIT_CREDENTIALS_DIR,
             "readOnly": true,
         }));
     }
@@ -446,13 +470,13 @@ pub(crate) fn volumes_json(tools: Option<&ToolsConfig>) -> Vec<Value> {
     let mut volumes = Vec::new();
     if let Some(tools) = tools {
         volumes.push(json!({"name": TOOLS_VOLUME, "emptyDir": {}}));
-        if let Some(token) = &tools.github_token {
+        if let Some(credentials) = &tools.git_credentials {
             volumes.push(json!({
-                "name": GITHUB_TOKEN_VOLUME,
+                "name": GIT_CREDENTIALS_VOLUME,
                 "secret": {
-                    "secretName": token.secret_name,
+                    "secretName": credentials.secret_name,
                     "defaultMode": 0o400,
-                    "items": [{"key": token.secret_key, "path": GITHUB_TOKEN_FILE}],
+                    "items": [{"key": credentials.secret_key, "path": GIT_CREDENTIALS_FILE}],
                 },
             }));
         }
@@ -487,10 +511,10 @@ pub(crate) fn agent_volume_mounts_json(tools: Option<&ToolsConfig>) -> Vec<Value
         return Vec::new();
     };
     let mut mounts = vec![json!({"name": TOOLS_VOLUME, "mountPath": BASE_TOOL_DIR})];
-    if tools.github_token.is_some() {
+    if tools.git_credentials.is_some() {
         mounts.push(json!({
-            "name": GITHUB_TOKEN_VOLUME,
-            "mountPath": GITHUB_TOKEN_DIR,
+            "name": GIT_CREDENTIALS_VOLUME,
+            "mountPath": GIT_CREDENTIALS_DIR,
             "readOnly": true,
         }));
     }
@@ -548,7 +572,7 @@ mod tests {
         assert_eq!(c["image"], "centaur-agent:test");
         let script = c["command"][2].as_str().unwrap();
         assert!(script.contains(
-            "git clone --quiet --filter=blob:none --no-checkout \"https://github.com/paradigmxyz/centaur.git\""
+            "git clone --quiet --filter=blob:none --no-checkout 'https://github.com/paradigmxyz/centaur.git'"
         ));
         assert!(script.contains("sparse-checkout set \"tools\""));
         assert!(script.contains("fetch --quiet origin \"main\""));
@@ -565,6 +589,35 @@ mod tests {
         assert!(!script.contains("GIT_ASKPASS"));
         assert_eq!(c["volumeMounts"].as_array().unwrap().len(), 1);
         assert_eq!(c["volumeMounts"][0]["mountPath"], "/tools-bootstrap");
+    }
+
+    #[test]
+    fn tools_init_uses_custom_http_clone_url() {
+        let mut tools = ToolsConfig::new("group/tools", "centaur-agent:test");
+        tools.clone_url = Some("http://git.example.test:82/group/tools.git".to_owned());
+
+        let script = tools_init_container_json(&tools, None)["command"][2]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        assert!(script.contains(
+            "git clone --quiet --filter=blob:none --no-checkout 'http://git.example.test:82/group/tools.git'"
+        ));
+        assert!(!script.contains("https://github.com/group/tools.git"));
+    }
+
+    #[test]
+    fn tools_init_shell_quotes_custom_clone_url() {
+        let mut tools = ToolsConfig::new("group/tools", "centaur-agent:test");
+        tools.clone_url = Some("http://git.example.test/group/it's-tools.git".to_owned());
+
+        let script = tools_init_container_json(&tools, None)["command"][2]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        assert!(script.contains("'http://git.example.test/group/it'\\''s-tools.git'"));
     }
 
     #[test]
@@ -606,6 +659,8 @@ mod tests {
         // and trusts the CA it re-signs TLS with.
         assert!(script.contains("export HTTPS_PROXY=\"http://asbx-test-iron-proxy:8080\""));
         assert!(script.contains("export https_proxy=\"http://asbx-test-iron-proxy:8080\""));
+        assert!(script.contains("export HTTP_PROXY=\"http://asbx-test-iron-proxy:8080\""));
+        assert!(script.contains("export http_proxy=\"http://asbx-test-iron-proxy:8080\""));
         assert!(script.contains("export GIT_SSL_CAINFO=\"/firewall-certs/ca-cert.pem\""));
         assert!(script.find("export HTTPS_PROXY").unwrap() < script.find("git clone").unwrap());
         let mounts = c["volumeMounts"].as_array().unwrap();
@@ -758,12 +813,14 @@ mod tests {
         tools.repo_cache_path = Some("/var/lib/centaur/repos".to_owned());
         tools.extra_sources.push(ToolSource {
             repo: "acme/public-tools".to_owned(),
+            clone_url: Some("http://git.example.test/acme/public-tools.git".to_owned()),
             git_ref: Some("docs".to_owned()),
             source_subdir: "tools".to_owned(),
             visibility: "public".to_owned(),
         });
         tools.extra_sources.push(ToolSource {
             repo: "acme/other-private-tools".to_owned(),
+            clone_url: None,
             git_ref: None,
             source_subdir: "tools".to_owned(),
             visibility: "private".to_owned(),
@@ -772,6 +829,10 @@ mod tests {
         let scoped = tools.scoped_for_repo_cache_access(&RepoCacheAccess::Public);
 
         assert_eq!(scoped.repo, "acme/public-tools");
+        assert_eq!(
+            scoped.clone_url.as_deref(),
+            Some("http://git.example.test/acme/public-tools.git")
+        );
         assert_eq!(scoped.git_ref.as_deref(), Some("docs"));
         assert!(scoped.extra_sources.is_empty());
         let script = tools_init_container_json(&scoped, None)["command"][2]
@@ -784,33 +845,35 @@ mod tests {
     }
 
     #[test]
-    fn tools_init_with_token_wires_askpass_and_secret_volume() {
+    fn tools_init_with_credentials_wires_username_askpass_and_secret_volume() {
         let mut tools = ToolsConfig::new("paradigmxyz/centaur", "centaur-agent:test");
-        tools.github_token = Some(GitHubTokenRef {
-            secret_name: "centaur-repo-cache-github-token".to_owned(),
+        tools.git_credentials = Some(GitCredentialsRef {
+            username: "deploy-user".to_owned(),
+            secret_name: "centaur-repo-cache-git-credentials".to_owned(),
             secret_key: "token".to_owned(),
         });
         let c = tools_init_container_json(&tools, None);
         let script = c["command"][2].as_str().unwrap();
         assert!(script.contains("GIT_ASKPASS=/tmp/git-askpass"));
-        assert!(script.contains("/tools-github-token/token"));
+        assert!(script.contains("deploy-user"));
+        assert!(script.contains("/tools-git-credentials/token"));
         let mounts = c["volumeMounts"].as_array().unwrap();
         assert_eq!(mounts.len(), 2);
         assert!(
             mounts
                 .iter()
-                .any(|m| m["mountPath"] == "/tools-github-token")
+                .any(|m| m["mountPath"] == "/tools-git-credentials")
         );
 
         // The pod gets a secret-backed volume projecting the token to `token`.
         let volumes = volumes_json(Some(&tools));
         let token_vol = volumes
             .iter()
-            .find(|v| v["name"] == GITHUB_TOKEN_VOLUME)
+            .find(|v| v["name"] == GIT_CREDENTIALS_VOLUME)
             .expect("token volume");
         assert_eq!(
             token_vol["secret"]["secretName"],
-            "centaur-repo-cache-github-token"
+            "centaur-repo-cache-git-credentials"
         );
         assert_eq!(token_vol["secret"]["items"][0]["path"], "token");
     }
@@ -838,7 +901,8 @@ mod tests {
     #[test]
     fn agent_mounts_token_for_private_repo_refresh() {
         let mut tools = ToolsConfig::new("paradigmxyz/centaur", "centaur-agent:test");
-        tools.github_token = Some(GitHubTokenRef {
+        tools.git_credentials = Some(GitCredentialsRef {
+            username: "oauth2".to_owned(),
             secret_name: "centaur-repo-cache-github-token".to_owned(),
             secret_key: "token".to_owned(),
         });
@@ -846,13 +910,14 @@ mod tests {
         let env = agent_env(Some(&tools));
         assert!(env.contains(&("CENTAUR_TOOLS_AUTO_RELOAD".to_owned(), "true".to_owned())));
         assert!(env.contains(&(
-            "CENTAUR_TOOLS_GITHUB_TOKEN_FILE".to_owned(),
-            "/tools-github-token/token".to_owned()
+            "CENTAUR_TOOLS_GIT_TOKEN_FILE".to_owned(),
+            "/tools-git-credentials/token".to_owned()
         )));
+        assert!(env.contains(&("CENTAUR_TOOLS_GIT_USERNAME".to_owned(), "oauth2".to_owned())));
         let mounts = agent_volume_mounts_json(Some(&tools));
         assert_eq!(mounts.len(), 2);
         assert!(mounts.iter().any(|mount| {
-            mount["mountPath"] == "/tools-github-token" && mount["readOnly"] == true
+            mount["mountPath"] == "/tools-git-credentials" && mount["readOnly"] == true
         }));
     }
 }

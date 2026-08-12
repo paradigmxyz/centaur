@@ -28,7 +28,7 @@ use tokio::time::{Instant, sleep};
 pub use generated::agents_x_k8s_io as crd;
 pub use iron_proxy::IronProxyConfig;
 pub use k8s_openapi::api::core::v1::Toleration;
-pub use tools::{GitHubTokenRef, ToolSource, ToolsConfig};
+pub use tools::{GitCredentialsRef, ToolSource, ToolsConfig};
 
 pub mod generated;
 mod iron_proxy;

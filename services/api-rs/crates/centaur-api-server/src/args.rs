@@ -23,8 +23,8 @@ use centaur_iron_proxy::{
     ProxyFragment, SourceKind, SourcePolicy, bedrock_enabled, harness_auth_fragment, infra_fragment,
 };
 use centaur_sandbox_agent_k8s::{
-    AgentSandboxBackend, AgentSandboxConfig, GitHubTokenRef, IronControlSettings, IronProxyConfig,
-    OtlpEgressTarget, Toleration, ToolSource, ToolsConfig,
+    AgentSandboxBackend, AgentSandboxConfig, GitCredentialsRef, IronControlSettings,
+    IronProxyConfig, OtlpEgressTarget, Toleration, ToolSource, ToolsConfig,
 };
 use centaur_sandbox_core::{Mount, MountKind, ResourceRequirements, SandboxSpec};
 use centaur_sandbox_local::LocalSandboxBackend;
@@ -211,6 +211,7 @@ impl ActivitySummaryArgs {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ToolGitSource {
     repo: String,
+    clone_url: Option<String>,
     git_ref: Option<String>,
     source_subdir: String,
     cache_dir: PathBuf,
@@ -222,6 +223,7 @@ impl ToolGitSource {
         let mut sources = vec![Self::from_source(
             &ToolSource {
                 repo: tools.repo.clone(),
+                clone_url: tools.clone_url.clone(),
                 git_ref: tools.git_ref.clone(),
                 source_subdir: tools.source_subdir.clone(),
                 visibility: tools.visibility.clone(),
@@ -240,6 +242,7 @@ impl ToolGitSource {
     fn from_source(source: &ToolSource, repo_cache_path: Option<String>) -> Self {
         Self {
             repo: source.repo.clone(),
+            clone_url: source.clone_url.clone(),
             git_ref: source.git_ref.clone(),
             source_subdir: source.source_subdir.clone(),
             cache_dir: env::temp_dir()
@@ -270,7 +273,10 @@ impl ToolGitSource {
     }
 
     fn sync_locked(&self) -> Result<(), ServerError> {
-        let repo_url = format!("https://github.com/{}.git", self.repo);
+        let repo_url = self
+            .clone_url
+            .clone()
+            .unwrap_or_else(|| format!("https://github.com/{}.git", self.repo));
         if !self.cache_dir.join(".git").is_dir() {
             if self.cache_dir.exists() {
                 fs::remove_dir_all(&self.cache_dir)?;
@@ -287,6 +293,8 @@ impl ToolGitSource {
                     .arg(&repo_url)
                     .arg(&self.cache_dir),
                 "clone api-rs tools repo",
+                &self.repo,
+                &repo_url,
             )?;
             run_git(
                 Command::new("git")
@@ -296,6 +304,21 @@ impl ToolGitSource {
                     .arg("set")
                     .arg(&self.source_subdir),
                 "configure api-rs tools sparse checkout",
+                &self.repo,
+                &repo_url,
+            )?;
+        } else {
+            run_git(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(&self.cache_dir)
+                    .arg("remote")
+                    .arg("set-url")
+                    .arg("origin")
+                    .arg(&repo_url),
+                "update api-rs tools repo origin",
+                &self.repo,
+                &repo_url,
             )?;
         }
 
@@ -312,6 +335,8 @@ impl ToolGitSource {
                         .arg("origin")
                         .arg(git_ref),
                     "fetch api-rs tools ref",
+                    &self.repo,
+                    &repo_url,
                 )?;
                 run_git(
                     Command::new("git")
@@ -322,6 +347,8 @@ impl ToolGitSource {
                         .arg("--detach")
                         .arg("FETCH_HEAD"),
                     "checkout api-rs tools ref",
+                    &self.repo,
+                    &repo_url,
                 )?;
             }
             None => {
@@ -332,6 +359,8 @@ impl ToolGitSource {
                         .arg("checkout")
                         .arg("--quiet"),
                     "checkout api-rs tools default branch",
+                    &self.repo,
+                    &repo_url,
                 )?;
                 run_git(
                     Command::new("git")
@@ -341,6 +370,8 @@ impl ToolGitSource {
                         .arg("--ff-only")
                         .arg("--quiet"),
                     "pull api-rs tools default branch",
+                    &self.repo,
+                    &repo_url,
                 )?;
             }
         }
@@ -359,7 +390,12 @@ impl ToolGitSource {
     }
 }
 
-fn run_git(command: &mut Command, operation: &str) -> Result<(), ServerError> {
+fn run_git(
+    command: &mut Command,
+    operation: &str,
+    repo: &str,
+    clone_url: &str,
+) -> Result<(), ServerError> {
     command.env("GIT_TERMINAL_PROMPT", "0");
     let askpass = configure_git_askpass(command)?;
     let output = command.output()?;
@@ -369,9 +405,9 @@ fn run_git(command: &mut Command, operation: &str) -> Result<(), ServerError> {
     if output.status.success() {
         return Ok(());
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = String::from_utf8_lossy(&output.stderr).replace(clone_url, "<redacted-clone-url>");
     Err(ServerError::ToolSource(format!(
-        "{operation} failed with status {}: {}",
+        "{operation} for {repo} failed with status {}: {}",
         output.status,
         stderr.trim()
     )))
@@ -381,12 +417,21 @@ fn configure_git_askpass(command: &mut Command) -> Result<Option<PathBuf>, Serve
     let token = env::var("GITHUB_TOKEN")
         .ok()
         .filter(|value| !value.trim().is_empty());
-    let token_file = env::var("CENTAUR_TOOLS_GITHUB_TOKEN_FILE")
+    let token_file = env::var("CENTAUR_TOOLS_GIT_TOKEN_FILE")
         .ok()
-        .filter(|value| !value.trim().is_empty());
-    let Some(password_command) = token
-        .map(|token| format!("echo {}", shell_quote(&token)))
-        .or_else(|| token_file.map(|path| format!("cat {}", shell_quote(&path))))
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            env::var("CENTAUR_TOOLS_GITHUB_TOKEN_FILE")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        });
+    let username = env::var("CENTAUR_TOOLS_GIT_USERNAME")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "x-access-token".to_owned());
+    let Some(password_command) = token_file
+        .map(|path| format!("cat {}", shell_quote(&path)))
+        .or_else(|| token.map(|token| format!("echo {}", shell_quote(&token))))
     else {
         return Ok(None);
     };
@@ -401,7 +446,8 @@ fn configure_git_askpass(command: &mut Command) -> Result<Option<PathBuf>, Serve
     fs::write(
         &path,
         format!(
-            "#!/bin/sh\ncase \"$1\" in\n  *Username*) echo x-access-token;;\n  *Password*) {password_command};;\n  *) echo;;\nesac\n"
+            "#!/bin/sh\ncase \"$1\" in\n  *Username*) printf '%s\\n' {};;\n  *Password*) {password_command};;\n  *) printf '\\n';;\nesac\n",
+            shell_quote(&username),
         ),
     )?;
     #[cfg(unix)]
@@ -1321,7 +1367,7 @@ impl SandboxArgs {
     }
 
     fn tool_proxy_dirs(&self) -> Result<Vec<PathBuf>, ServerError> {
-        if let Some(tools) = self.tools_source.to_config() {
+        if let Some(tools) = self.tools_source.to_config()? {
             let sources = ToolGitSource::from_config(&tools);
             let mut dirs = Vec::with_capacity(sources.len());
             for source in sources {
@@ -1492,7 +1538,7 @@ impl TryFrom<&SandboxArgs> for AgentSandboxConfig {
         fragments.append(&mut proxy.fragments);
         proxy.fragments = fragments;
         config.iron_proxy = Some(proxy);
-        config.tools = args.tools_source.to_config();
+        config.tools = args.tools_source.to_config()?;
         // The chart label policy handles sandbox OTLP egress; keep the
         // per-sandbox proxy's own in-cluster OTLP egress explicit.
         config.otlp_egress = args.sandbox_otlp_egress_target()?;
@@ -1512,6 +1558,12 @@ struct ToolsArgs {
         env = "KUBERNETES_TOOLS_REPO"
     )]
     repo: Option<String>,
+    #[arg(
+        id = "tools_source_clone_url",
+        long = "kubernetes-tools-clone-url",
+        env = "KUBERNETES_TOOLS_CLONE_URL"
+    )]
+    clone_url: Option<String>,
     #[arg(
         id = "tools_source_ref",
         long = "kubernetes-tools-ref",
@@ -1552,6 +1604,26 @@ struct ToolsArgs {
         default_value = "token"
     )]
     github_token_secret_key: String,
+    #[arg(
+        id = "tools_git_credentials_secret",
+        long = "kubernetes-tools-git-credentials-secret",
+        env = "KUBERNETES_TOOLS_GIT_CREDENTIALS_SECRET"
+    )]
+    git_credentials_secret: Option<String>,
+    #[arg(
+        id = "tools_git_credentials_secret_key",
+        long = "kubernetes-tools-git-credentials-secret-key",
+        env = "KUBERNETES_TOOLS_GIT_CREDENTIALS_SECRET_KEY",
+        default_value = "token"
+    )]
+    git_credentials_secret_key: String,
+    #[arg(
+        id = "tools_git_username",
+        long = "kubernetes-tools-git-username",
+        env = "KUBERNETES_TOOLS_GIT_USERNAME",
+        default_value = "oauth2"
+    )]
+    git_username: String,
     // Optional mounted repo-cache root. When present, sandboxes and api-rs copy
     // tools from `<path>/<repo>/<subdir>` instead of fetching GitHub directly.
     #[arg(
@@ -1597,39 +1669,61 @@ impl ToolsArgs {
             return Vec::new();
         };
         let mut repos = vec![repo];
-        repos.extend(self.extra_sources().into_iter().map(|source| source.repo));
+        match self.extra_sources() {
+            Ok(sources) => repos.extend(sources.into_iter().map(|source| source.repo)),
+            Err(error) => {
+                tracing::warn!(%error, "invalid extra tool sources; ignoring workflow paths")
+            }
+        }
         repos
     }
 
-    fn extra_sources(&self) -> Vec<ToolSource> {
+    fn extra_sources(&self) -> Result<Vec<ToolSource>, ServerError> {
         let Some(value) = clean_optional_value(self.extra_sources.as_deref()) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        match serde_json::from_str::<Vec<ToolSourceArg>>(&value) {
-            Ok(sources) => sources
-                .into_iter()
-                .filter_map(ToolSourceArg::into_source)
-                .collect(),
-            Err(err) => {
-                tracing::warn!(error = %err, "invalid KUBERNETES_TOOLS_EXTRA_SOURCES; ignoring extra tool sources");
-                Vec::new()
-            }
-        }
+        let sources = serde_json::from_str::<Vec<ToolSourceArg>>(&value).map_err(|error| {
+            ServerError::UnsupportedConfig(format!(
+                "KUBERNETES_TOOLS_EXTRA_SOURCES must be a JSON array: {error}"
+            ))
+        })?;
+        sources
+            .into_iter()
+            .filter_map(ToolSourceArg::into_source)
+            .collect()
     }
 
     /// `None` when no repo or runner image is configured (tools disabled).
-    fn to_config(&self) -> Option<ToolsConfig> {
-        let repo = clean_optional_value(self.repo.as_deref())?;
-        let image = clean_optional_value(self.image.as_deref())?;
+    fn to_config(&self) -> Result<Option<ToolsConfig>, ServerError> {
+        let Some(repo) = clean_optional_value(self.repo.as_deref()) else {
+            return Ok(None);
+        };
+        let Some(image) = clean_optional_value(self.image.as_deref()) else {
+            return Ok(None);
+        };
+        let clone_url = clean_optional_value(self.clone_url.as_deref())
+            .map(|value| validated_clone_url(repo.as_str(), value))
+            .transpose()?;
         let mut config = ToolsConfig::new(repo, image);
+        config.clone_url = clone_url;
         config.image_pull_policy = self.image_pull_policy.clone();
         config.git_ref = clean_optional_value(self.git_ref.as_deref());
         config.visibility = repository_visibility(self.visibility.as_deref());
         if let Some(subdir) = clean_optional_value(Some(self.source_subdir.as_str())) {
             config.source_subdir = subdir;
         }
-        if let Some(secret_name) = clean_optional_value(self.github_token_secret.as_deref()) {
-            config.github_token = Some(GitHubTokenRef {
+        if let Some(secret_name) = clean_optional_value(self.git_credentials_secret.as_deref()) {
+            config.git_credentials = Some(GitCredentialsRef {
+                username: clean_optional_value(Some(self.git_username.as_str()))
+                    .unwrap_or_else(|| "oauth2".to_owned()),
+                secret_name,
+                secret_key: clean_optional_value(Some(self.git_credentials_secret_key.as_str()))
+                    .unwrap_or_else(|| "token".to_owned()),
+            });
+        } else if let Some(secret_name) = clean_optional_value(self.github_token_secret.as_deref())
+        {
+            config.git_credentials = Some(GitCredentialsRef {
+                username: "x-access-token".to_owned(),
                 secret_name,
                 secret_key: clean_optional_value(Some(self.github_token_secret_key.as_str()))
                     .unwrap_or_else(|| "token".to_owned()),
@@ -1638,14 +1732,16 @@ impl ToolsArgs {
         config.repo_cache_path = clean_optional_value(self.repo_cache_path.as_deref());
         config.repo_cache_pvc = clean_optional_value(self.repo_cache_pvc.as_deref());
         config.auto_reload = self.auto_reload;
-        config.extra_sources = self.extra_sources();
-        Some(config)
+        config.extra_sources = self.extra_sources()?;
+        Ok(Some(config))
     }
 }
 
 #[derive(Debug, serde::Deserialize)]
 struct ToolSourceArg {
     repo: String,
+    #[serde(default, rename = "cloneUrl")]
+    clone_url: Option<String>,
     #[serde(default, rename = "ref")]
     git_ref: Option<String>,
     #[serde(default)]
@@ -1655,9 +1751,17 @@ struct ToolSourceArg {
 }
 
 impl ToolSourceArg {
-    fn into_source(self) -> Option<ToolSource> {
-        Some(ToolSource {
-            repo: clean_optional_value(Some(self.repo.as_str()))?,
+    fn into_source(self) -> Option<Result<ToolSource, ServerError>> {
+        let repo = clean_optional_value(Some(self.repo.as_str()))?;
+        Some(Ok(ToolSource {
+            clone_url: match clean_optional_value(self.clone_url.as_deref()) {
+                Some(value) => match validated_clone_url(repo.as_str(), value) {
+                    Ok(value) => Some(value),
+                    Err(error) => return Some(Err(error)),
+                },
+                None => None,
+            },
+            repo,
             git_ref: self
                 .git_ref
                 .as_deref()
@@ -1668,8 +1772,25 @@ impl ToolSourceArg {
                 .and_then(|value| clean_optional_value(Some(value)))
                 .unwrap_or_else(|| "tools".to_owned()),
             visibility: repository_visibility(self.visibility.as_deref()),
-        })
+        }))
     }
+}
+
+fn validated_clone_url(repo: &str, value: String) -> Result<String, ServerError> {
+    let parsed = reqwest::Url::parse(&value).map_err(|_| invalid_clone_url(repo))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(invalid_clone_url(repo));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(ServerError::UnsupportedConfig(format!(
+            "clone URL for {repo} must not contain credentials"
+        )));
+    }
+    Ok(value)
+}
+
+fn invalid_clone_url(repo: &str) -> ServerError {
+    ServerError::UnsupportedConfig(format!("clone URL for {repo} must be an HTTP or HTTPS URL"))
 }
 
 fn repository_visibility(value: Option<&str>) -> String {
@@ -2417,6 +2538,8 @@ mod tests {
             "iak_test",
             "--kubernetes-tools-repo",
             "paradigmxyz/centaur",
+            "--kubernetes-tools-clone-url",
+            "http://git.example.test:82/paradigmxyz/centaur.git",
             "--kubernetes-tools-ref",
             "main",
             "--kubernetes-tools-runner-image",
@@ -2425,13 +2548,19 @@ mod tests {
             "/var/lib/centaur/repos",
             "--kubernetes-tools-visibility",
             "public",
-            "--kubernetes-tools-github-token-secret",
-            "centaur-repo-cache-github-token",
+            "--kubernetes-tools-git-credentials-secret",
+            "centaur-repo-cache-git-credentials",
+            "--kubernetes-tools-git-username",
+            "deploy-user",
         ])
         .unwrap();
         let config = AgentSandboxConfig::try_from(&args.sandbox).unwrap();
         let tools = config.tools.expect("tools should be Some");
         assert_eq!(tools.repo, "paradigmxyz/centaur");
+        assert_eq!(
+            tools.clone_url.as_deref(),
+            Some("http://git.example.test:82/paradigmxyz/centaur.git")
+        );
         assert_eq!(tools.git_ref.as_deref(), Some("main"));
         assert_eq!(tools.source_subdir, "tools");
         assert_eq!(tools.visibility, "public");
@@ -2441,9 +2570,145 @@ mod tests {
             Some("/var/lib/centaur/repos")
         );
         assert!(tools.auto_reload);
-        let token = tools.github_token.expect("token should be Some");
-        assert_eq!(token.secret_name, "centaur-repo-cache-github-token");
-        assert_eq!(token.secret_key, "token");
+        let credential = tools.git_credentials.expect("credential should be Some");
+        assert_eq!(credential.username, "deploy-user");
+        assert_eq!(credential.secret_name, "centaur-repo-cache-git-credentials");
+        assert_eq!(credential.secret_key, "token");
+    }
+
+    #[test]
+    fn git_askpass_prefers_generic_token_file_and_username() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[
+            ("CENTAUR_TOOLS_GIT_TOKEN_FILE", "/gitlab/token"),
+            ("CENTAUR_TOOLS_GIT_USERNAME", "gitlab-deploy-token"),
+            ("CENTAUR_TOOLS_GITHUB_TOKEN_FILE", "/github/token"),
+            ("GITHUB_TOKEN", "legacy-environment-token"),
+        ]);
+        let mut command = Command::new("git");
+
+        let askpass = configure_git_askpass(&mut command)
+            .unwrap()
+            .expect("askpass should be configured");
+        let content = fs::read_to_string(&askpass).unwrap();
+        fs::remove_file(askpass).unwrap();
+
+        assert!(content.contains("gitlab-deploy-token"));
+        assert!(content.contains("/gitlab/token"));
+        assert!(!content.contains("/github/token"));
+        assert!(!content.contains("legacy-environment-token"));
+    }
+
+    #[test]
+    fn tools_config_maps_legacy_github_token_to_generic_credentials() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-backend",
+            "agent-k8s",
+            "--iron-control-url",
+            "http://console.local",
+            "--iron-control-api-key",
+            "iak_test",
+            "--kubernetes-tools-repo",
+            "paradigmxyz/centaur",
+            "--kubernetes-tools-runner-image",
+            "centaur-agent:test",
+            "--kubernetes-tools-github-token-secret",
+            "legacy-github-token",
+        ])
+        .unwrap();
+
+        let config = AgentSandboxConfig::try_from(&args.sandbox).unwrap();
+        let credential = config
+            .tools
+            .expect("tools should be Some")
+            .git_credentials
+            .expect("credential should be Some");
+        assert_eq!(credential.username, "x-access-token");
+        assert_eq!(credential.secret_name, "legacy-github-token");
+        assert_eq!(credential.secret_key, "token");
+    }
+
+    #[test]
+    fn tools_config_propagates_extra_source_clone_url() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-backend",
+            "agent-k8s",
+            "--iron-control-url",
+            "http://console.local",
+            "--iron-control-api-key",
+            "iak_test",
+            "--kubernetes-tools-repo",
+            "paradigmxyz/centaur",
+            "--kubernetes-tools-runner-image",
+            "centaur-agent:test",
+            "--kubernetes-tools-extra-sources",
+            r#"[{"repo":"acme/tools","cloneUrl":"http://git.example.test:82/acme/tools.git"}]"#,
+        ])
+        .unwrap();
+
+        let config = args.sandbox.tools_source.to_config().unwrap().unwrap();
+        let source = &config.extra_sources[0];
+        assert_eq!(source.repo, "acme/tools");
+        assert_eq!(
+            source.clone_url.as_deref(),
+            Some("http://git.example.test:82/acme/tools.git")
+        );
+    }
+
+    #[test]
+    fn tools_config_rejects_non_http_clone_url() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-backend",
+            "agent-k8s",
+            "--kubernetes-tools-repo",
+            "acme/tools",
+            "--kubernetes-tools-clone-url",
+            "git@git.example.test:acme/tools.git",
+            "--kubernetes-tools-runner-image",
+            "centaur-agent:test",
+        ])
+        .unwrap();
+
+        let error = args.sandbox.tools_source.to_config().unwrap_err();
+        assert!(matches!(
+            error,
+            ServerError::UnsupportedConfig(message)
+                if message == "clone URL for acme/tools must be an HTTP or HTTPS URL"
+        ));
+    }
+
+    #[test]
+    fn tools_config_rejects_clone_url_credentials() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-backend",
+            "agent-k8s",
+            "--kubernetes-tools-repo",
+            "acme/tools",
+            "--kubernetes-tools-clone-url",
+            "http://oauth2:secret@git.example.test:82/acme/tools.git",
+            "--kubernetes-tools-runner-image",
+            "centaur-agent:test",
+        ])
+        .unwrap();
+
+        let error = args.sandbox.tools_source.to_config().unwrap_err();
+        assert!(matches!(
+            error,
+            ServerError::UnsupportedConfig(message)
+                if message == "clone URL for acme/tools must not contain credentials"
+        ));
     }
 
     #[test]
