@@ -106,8 +106,10 @@ impl SessionRegistrar {
     /// Upsert the principal of the human requesting a Slack channel turn,
     /// derived from the execute metadata (``slack_user_id`` and friends).
     /// Returns ``Ok(None)`` for DM threads (the conversation principal already
-    /// is the user's), for non-Slack threads, and when the metadata carries no
-    /// ``slack_user_id``.
+    /// is the user's), for non-Slack threads, when the metadata carries no
+    /// ``slack_user_id``, and when the requester is not proven to belong to the
+    /// Slack app's home team. This prevents Slack Connect users from supplying
+    /// requester credentials to a shared channel turn.
     ///
     /// Unlike [`Self::register_session`], this never writes Slack channel
     /// permissions: the requester principal only scopes proxy credentials, and
@@ -121,13 +123,16 @@ impl SessionRegistrar {
         let Some(metadata) = metadata else {
             return Ok(None);
         };
+        let Some(slack_team_id) = eligible_slack_requester_team(metadata) else {
+            return Ok(None);
+        };
         let Some(slack_user_id) = metadata.get("slack_user_id").and_then(Value::as_str) else {
             return Ok(None);
         };
         let Some(principal) = derive_slack_requester_principal(
             thread_key,
             slack_user_id,
-            metadata.get("slack_team_id").and_then(Value::as_str),
+            Some(slack_team_id),
             metadata.get("slack_display_name").and_then(Value::as_str),
         ) else {
             return Ok(None);
@@ -163,6 +168,20 @@ impl SessionRegistrar {
         input.labels = labels;
         Ok(true)
     }
+}
+
+fn eligible_slack_requester_team(metadata: &Value) -> Option<&str> {
+    let requester_team = metadata
+        .get("slack_team_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|team| !team.is_empty())?;
+    let home_team = metadata
+        .get("slack_home_team_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|team| !team.is_empty())?;
+    (requester_team == home_team).then_some(requester_team)
 }
 
 fn slack_permission_for_thread(
@@ -474,6 +493,7 @@ mod tests {
         let metadata = json!({
             "slack_user_id": "U123",
             "slack_team_id": "T123",
+            "slack_home_team_id": "T123",
             "slack_display_name": "Ada Lovelace",
             "slack_user_email": "ada@example.com"
         });
@@ -511,7 +531,8 @@ mod tests {
         let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
         let metadata = json!({
             "slack_user_id": "U123",
-            "slack_team_id": "T123"
+            "slack_team_id": "T123",
+            "slack_home_team_id": "T123"
         });
 
         let principal = registrar
@@ -544,7 +565,8 @@ mod tests {
         let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
         let metadata = json!({
             "slack_user_id": "U123",
-            "slack_team_id": "T123"
+            "slack_team_id": "T123",
+            "slack_home_team_id": "T123"
         });
 
         let principal = registrar
@@ -564,7 +586,8 @@ mod tests {
         let metadata = json!({
             "aad_object_id": "aad-user-1",
             "user_id": "teams-user-1",
-            "slack_team_id": "T123"
+            "slack_team_id": "T123",
+            "slack_home_team_id": "T123"
         });
 
         let principal = registrar
@@ -583,7 +606,8 @@ mod tests {
         let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
         let metadata = json!({
             "slack_user_id": "U123",
-            "slack_team_id": "T123"
+            "slack_team_id": "T123",
+            "slack_home_team_id": "T123"
         });
 
         let principal = registrar
@@ -594,6 +618,66 @@ mod tests {
         assert_eq!(principal, None);
         assert!(requests.lock().unwrap().is_empty());
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn register_requester_returns_none_for_external_slack_team() {
+        let (base_url, requests, server) = spawn_iron_control_stub(false).await;
+        let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
+        let metadata = json!({
+            "slack_user_id": "U123",
+            "slack_team_id": "T_EXTERNAL",
+            "slack_home_team_id": "T_HOME"
+        });
+
+        let principal = registrar
+            .register_requester("slack:T_HOME:C123:1773364194.179929", Some(&metadata))
+            .await
+            .unwrap();
+
+        assert_eq!(principal, None);
+        assert!(requests.lock().unwrap().is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn register_requester_returns_none_without_home_team() {
+        let (base_url, requests, server) = spawn_iron_control_stub(false).await;
+        let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
+        let metadata = json!({
+            "slack_user_id": "U123",
+            "slack_team_id": "T123"
+        });
+
+        let principal = registrar
+            .register_requester("slack:T123:C123:1773364194.179929", Some(&metadata))
+            .await
+            .unwrap();
+
+        assert_eq!(principal, None);
+        assert!(requests.lock().unwrap().is_empty());
+        server.abort();
+    }
+
+    #[test]
+    fn requester_team_eligibility_requires_matching_non_blank_teams() {
+        for metadata in [
+            json!({"slack_home_team_id": "T123"}),
+            json!({"slack_team_id": "T123"}),
+            json!({"slack_team_id": "", "slack_home_team_id": "T123"}),
+            json!({"slack_team_id": "T123", "slack_home_team_id": "   "}),
+            json!({"slack_team_id": "T_EXTERNAL", "slack_home_team_id": "T_HOME"}),
+        ] {
+            assert_eq!(eligible_slack_requester_team(&metadata), None);
+        }
+
+        assert_eq!(
+            eligible_slack_requester_team(&json!({
+                "slack_team_id": " T123 ",
+                "slack_home_team_id": "T123"
+            })),
+            Some("T123")
+        );
     }
 
     #[test]

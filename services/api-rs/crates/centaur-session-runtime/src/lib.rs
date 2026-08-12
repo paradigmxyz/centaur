@@ -9520,7 +9520,11 @@ mod adoption_tests {
         let first = execute_with_metadata(
             &runtime,
             &thread_key,
-            json!({"slack_user_id": "U1", "slack_team_id": "T123"}),
+            json!({
+                "slack_user_id": "U1",
+                "slack_team_id": "T123",
+                "slack_home_team_id": "T123"
+            }),
         )
         .await;
         store
@@ -9543,7 +9547,11 @@ mod adoption_tests {
         let second = execute_with_metadata(
             &runtime,
             &thread_key,
-            json!({"slack_user_id": "U2", "slack_team_id": "T123"}),
+            json!({
+                "slack_user_id": "U2",
+                "slack_team_id": "T123",
+                "slack_home_team_id": "T123"
+            }),
         )
         .await;
         store
@@ -9562,6 +9570,64 @@ mod adoption_tests {
                     ("centaur.slack_team_id".to_owned(), "T123".to_owned()),
                 ])
             )]
+        );
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn slack_connect_channel_execute_binds_no_requester() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let (base_url, requests, server) = spawn_execute_iron_control_stub().await;
+        let thread_key =
+            ThreadKey::parse(format!("slack:T_HOME:C123:{}", uuid::Uuid::new_v4())).unwrap();
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let (io, _stdout, _stdin) = mock_io();
+        backend.push_io(io).await;
+        let runtime =
+            runtime_with_registrar(&store, backend.clone(), requester_test_registrar(base_url));
+
+        runtime
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                Some(json!({
+                    "slack_team_id": "T_HOME",
+                    "slack_channel_id": "C123"
+                })),
+                HarnessConflictPolicy::Reject,
+            )
+            .await
+            .expect("create session");
+
+        let execution = execute_with_metadata(
+            &runtime,
+            &thread_key,
+            json!({
+                "slack_user_id": "U_EXTERNAL",
+                "slack_team_id": "T_EXTERNAL",
+                "slack_home_team_id": "T_HOME"
+            }),
+        )
+        .await;
+        store
+            .complete_execution(&execution.execution_id)
+            .await
+            .expect("complete execution");
+
+        let spec = backend.created_specs().pop().expect("created cold spec");
+        assert_eq!(spec.iron_control_requester_principal, None);
+        assert!(
+            !requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|request| request.contains("slack-user")),
+            "Slack Connect executes must not upsert a requester principal"
         );
         server.abort();
     }

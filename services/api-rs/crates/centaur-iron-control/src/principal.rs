@@ -250,7 +250,7 @@ pub fn derive_slack_requester_principal(
     let metadata_team_id = slack_team_id.map(str::trim).filter(|team| !team.is_empty());
     Some(slack_user_principal(
         user,
-        thread_team_id.or(metadata_team_id),
+        metadata_team_id.or(thread_team_id),
         display_name.map(str::trim).filter(|name| !name.is_empty()),
     ))
 }
@@ -743,7 +743,7 @@ mod tests {
     }
 
     #[test]
-    fn requester_thread_key_team_wins_over_metadata_team() {
+    fn requester_metadata_team_wins_over_thread_key_team() {
         let principal = derive_slack_requester_principal(
             "slack:T_FROM_KEY:C456:ts",
             "U1",
@@ -751,10 +751,10 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(principal.foreign_id, "slack-user-t-from-key-u1");
+        assert_eq!(principal.foreign_id, "slack-user-t-from-metadata-u1");
         assert_eq!(
             principal.labels.get("slack_team_id").map(String::as_str),
-            Some("T_FROM_KEY")
+            Some("T_FROM_METADATA")
         );
     }
 
