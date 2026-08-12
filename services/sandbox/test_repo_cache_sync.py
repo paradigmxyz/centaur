@@ -138,6 +138,8 @@ class RepoCacheSyncTest(unittest.TestCase):
         for clone_url in (
             "https://git.example.test/acme/centaur.git?access_token=secret",
             "https://git.example.test/acme/centaur.git#secret",
+            "https://git.example.test/acme/centaur.git?",
+            "https://git.example.test/acme/centaur.git#",
         ):
             with self.subTest(clone_url=clone_url), tempfile.TemporaryDirectory() as tmp:
                 sync = self.make_sync(
