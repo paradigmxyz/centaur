@@ -2,6 +2,7 @@
 {{- $overlaySources := include "centaur.overlaySources" . | fromJsonArray -}}
 {{- $repoCacheRepositories := list -}}
 {{- $repoCacheRepositoryVisibilities := dict -}}
+{{- $repoCacheRepositoryCloneUrls := dict -}}
 {{- $repoCacheRepositoryRefs := list -}}
 {{- $repoCacheRepositoryRefRepos := list -}}
 {{- range $repo, $ref := .Values.repoCache.repositoryRefs }}
@@ -20,6 +21,14 @@
 {{- if $repo -}}
 {{- $repoCacheRepositories = append $repoCacheRepositories $repo -}}
 {{- $_ := set $repoCacheRepositoryVisibilities $repo (include "centaur.repositoryVisibility" (get . "visibility")) -}}
+{{- $cloneUrl := get . "cloneUrl" | default "" -}}
+{{- if $cloneUrl -}}
+{{- $existingCloneUrl := get $repoCacheRepositoryCloneUrls $repo | default "" -}}
+{{- if and $existingCloneUrl (ne $existingCloneUrl $cloneUrl) -}}
+{{- fail (printf "conflicting cloneUrl values for repo %s" $repo) -}}
+{{- end -}}
+{{- $_ := set $repoCacheRepositoryCloneUrls $repo $cloneUrl -}}
+{{- end -}}
 {{- $ref := get . "ref" | default "" -}}
 {{- if and $ref (not (has $repo $repoCacheRepositoryRefRepos)) -}}
 {{- $repoCacheRepositoryRefs = append $repoCacheRepositoryRefs (printf "%s=%s" $repo $ref) -}}
@@ -29,14 +38,27 @@
 {{- end -}}
 {{- end }}
 {{- range $source := $overlaySources }}
-{{- with (get $source "repo") }}
-{{- $repoCacheRepositories = append $repoCacheRepositories . -}}
-{{- $_ := set $repoCacheRepositoryVisibilities . (get $source "visibility" | default "private") -}}
-{{- end }}
+{{- $repo := get $source "repo" | default "" -}}
+{{- if $repo -}}
+{{- $repoCacheRepositories = append $repoCacheRepositories $repo -}}
+{{- $_ := set $repoCacheRepositoryVisibilities $repo (get $source "visibility" | default "private") -}}
+{{- $cloneUrl := get $source "cloneUrl" | default "" -}}
+{{- if $cloneUrl -}}
+{{- $existingCloneUrl := get $repoCacheRepositoryCloneUrls $repo | default "" -}}
+{{- if and $existingCloneUrl (ne $existingCloneUrl $cloneUrl) -}}
+{{- fail (printf "conflicting cloneUrl values for repo %s" $repo) -}}
+{{- end -}}
+{{- $_ := set $repoCacheRepositoryCloneUrls $repo $cloneUrl -}}
+{{- end -}}
+{{- end -}}
 {{- end }}
 {{- $repoCacheRepositories = uniq $repoCacheRepositories -}}
 {{- if $repoCacheRepositories }}
 {{- $repoCacheHasGithubToken := or .Values.repoCache.githubToken.existingSecretName .Values.repoCache.githubToken.token -}}
+{{- $repoCacheHasGenericCredential := .Values.repoCache.gitCredentials.existingSecretName -}}
+{{- $repoCacheHasGitCredential := or $repoCacheHasGenericCredential $repoCacheHasGithubToken -}}
+{{- $repoCacheGitUsername := ternary .Values.repoCache.gitCredentials.username "x-access-token" (not (empty $repoCacheHasGenericCredential)) -}}
+{{- $repoCacheGitSecretKey := ternary .Values.repoCache.gitCredentials.secretKey .Values.repoCache.githubToken.secretKey (not (empty $repoCacheHasGenericCredential)) -}}
 {{- $repoCacheImageRepository := default .Values.sandbox.image.repository .Values.repoCache.image.repository -}}
 {{- $repoCacheImageTag := default .Values.sandbox.image.tag .Values.repoCache.image.tag -}}
 {{- $repoCacheImagePullPolicy := default .Values.sandbox.image.pullPolicy .Values.repoCache.image.pullPolicy -}}
@@ -118,12 +140,20 @@ spec:
           env:
             - name: REPOSITORIES
               value: {{ join " " $repoCacheRepositories | quote }}
+            - name: REPOSITORY_CLONE_URLS
+              value: {{ toJson $repoCacheRepositoryCloneUrls | quote }}
             - name: REPOSITORY_REFS
               value: {{ join " " $repoCacheRepositoryRefs | quote }}
             - name: REPOSITORY_VISIBILITIES
               value: {{ join " " $repoCacheRepositoryVisibilityEntries | quote }}
             - name: SYNC_INTERVAL_SECONDS
               value: {{ .Values.repoCache.syncIntervalSeconds | quote }}
+{{- if $repoCacheHasGitCredential }}
+            - name: GIT_USERNAME
+              value: {{ $repoCacheGitUsername | quote }}
+            - name: GIT_TOKEN_FILE
+              value: /git-credentials/token
+{{- end }}
             - name: GIT_TERMINAL_PROMPT
               value: "0"
           readinessProbe:
@@ -149,9 +179,9 @@ spec:
           volumeMounts:
             - name: repo-cache
               mountPath: /cache
-{{- if $repoCacheHasGithubToken }}
-            - name: github-token
-              mountPath: /github-token
+{{- if $repoCacheHasGitCredential }}
+            - name: git-credentials
+              mountPath: /git-credentials
               readOnly: true
 {{- end }}
       volumes:
@@ -164,13 +194,13 @@ spec:
             path: {{ .Values.repoCache.hostPath | quote }}
             type: DirectoryOrCreate
 {{- end }}
-{{- if $repoCacheHasGithubToken }}
-        - name: github-token
+{{- if $repoCacheHasGitCredential }}
+        - name: git-credentials
           secret:
-            secretName: {{ include "centaur.repoCacheGithubTokenSecretName" . }}
+            secretName: {{ include "centaur.repoCacheGitCredentialsSecretName" . }}
             defaultMode: 256
             items:
-              - key: {{ .Values.repoCache.githubToken.secretKey | quote }}
+              - key: {{ $repoCacheGitSecretKey | quote }}
                 path: token
 {{- end }}
 {{- end }}

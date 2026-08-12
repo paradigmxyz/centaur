@@ -59,6 +59,14 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 {{- end -}}
 
+{{- define "centaur.repoCacheGitCredentialsSecretName" -}}
+{{- if .Values.repoCache.gitCredentials.existingSecretName -}}
+{{- .Values.repoCache.gitCredentials.existingSecretName | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- include "centaur.repoCacheGithubTokenSecretName" . -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "centaur.repoCachePvcName" -}}
 {{- if .Values.repoCache.storage.persistentVolumeClaim.existingClaim -}}
 {{- .Values.repoCache.storage.persistentVolumeClaim.existingClaim | trunc 63 | trimSuffix "-" -}}
@@ -86,6 +94,7 @@ app.kubernetes.io/component: {{ .component }}
 {{- range . -}}
 {{- if .repo -}}
 {{- $source := dict "repo" .repo -}}
+{{- with .cloneUrl }}{{- $_ := set $source "cloneUrl" . -}}{{- end -}}
 {{- with .ref }}{{- $_ := set $source "ref" . -}}{{- end -}}
 {{- $_ := set $source "visibility" (include "centaur.repositoryVisibility" .visibility) -}}
 {{- /*
@@ -117,12 +126,14 @@ so the defaults are safe for repos that only carry some surfaces.
 {{- else -}}
 {{- if and .Values.toolServer.enabled .Values.toolServer.repo -}}
 {{- $source := dict "repo" .Values.toolServer.repo "toolsSubdir" (default "tools" .Values.toolServer.subdir) "workflowsSubdir" "workflows" "skillsSubdir" ".agents/skills" -}}
+{{- with .Values.toolServer.cloneUrl }}{{- $_ := set $source "cloneUrl" . -}}{{- end -}}
 {{- with .Values.toolServer.ref }}{{- $_ := set $source "ref" . -}}{{- end -}}
 {{- $_ := set $source "visibility" (include "centaur.repositoryVisibility" .Values.toolServer.visibility) -}}
 {{- $sources = append $sources $source -}}
 {{- range .Values.toolServer.extraSources -}}
 {{- if .repo -}}
 {{- $source := dict "repo" .repo "toolsSubdir" (default "tools" .subdir) "workflowsSubdir" (default "workflows" .workflowsSubdir) "skillsSubdir" (default ".agents/skills" .skillsSubdir) -}}
+{{- with .cloneUrl }}{{- $_ := set $source "cloneUrl" . -}}{{- end -}}
 {{- with .ref }}{{- $_ := set $source "ref" . -}}{{- end -}}
 {{- $_ := set $source "visibility" (include "centaur.repositoryVisibility" .visibility) -}}
 {{- $sources = append $sources $source -}}

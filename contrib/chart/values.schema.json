@@ -106,6 +106,7 @@
         "enabled": { "type": "boolean" },
         "port": { "type": "integer" },
         "repo": { "type": "string" },
+        "cloneUrl": { "type": "string" },
         "ref": { "type": "string" },
         "visibility": { "type": "string" },
         "subdir": { "type": "string" },
@@ -115,11 +116,20 @@
             "type": "object",
             "properties": {
               "repo": { "type": "string" },
+              "cloneUrl": { "type": "string" },
               "ref": { "type": "string" },
               "visibility": { "type": "string" },
               "subdir": { "type": "string" }
             },
             "required": ["repo"]
+          }
+        },
+        "gitCredentials": {
+          "type": "object",
+          "properties": {
+            "username": { "type": "string" },
+            "existingSecretName": { "type": "string" },
+            "secretKey": { "type": "string" }
           }
         }
       }
@@ -148,6 +158,7 @@
             "type": "object",
             "properties": {
               "repo": { "type": "string" },
+              "cloneUrl": { "type": "string" },
               "ref": { "type": "string" },
               "visibility": { "type": "string" },
               "toolsSubdir": { "type": "string" },
@@ -186,6 +197,7 @@
                 "type": "object",
                 "properties": {
                   "repo": { "type": "string" },
+                  "cloneUrl": { "type": "string" },
                   "ref": { "type": "string" },
                   "visibility": { "type": "string" }
                 },
@@ -213,6 +225,14 @@
             "existingSecretName": { "type": "string" },
             "secretKey": { "type": "string" },
             "token": { "type": "string" }
+          }
+        },
+        "gitCredentials": {
+          "type": "object",
+          "properties": {
+            "username": { "type": "string" },
+            "existingSecretName": { "type": "string" },
+            "secretKey": { "type": "string" }
           }
         },
         "egressPorts": {

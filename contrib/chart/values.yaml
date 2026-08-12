@@ -54,9 +54,11 @@ ironProxy:
 toolServer:
   enabled: true
   port: 8001
-  # owner/name of the GitHub repo carrying the tools tree. REQUIRED when enabled;
-  # override for forks. Private repos additionally need githubToken below.
+  # Stable owner/name identity for the repo carrying the tools tree. REQUIRED
+  # when enabled; it remains the cache and mount path even with cloneUrl.
   repo: paradigmxyz/centaur
+  # Optional HTTP(S) Git remote. Empty preserves the GitHub owner/name fallback.
+  cloneUrl: ""
   # Branch, tag, or commit to check out; empty = the repo's default branch. Pin
   # this to the tool set the api-rs image was built with so the creds api-rs
   # grants match the tools the sandbox installs.
@@ -71,6 +73,7 @@ toolServer:
   # automatically when repoCache.enabled=true.
   extraSources: []
   # - repo: tempoxyz/centaur-tempo
+  #   cloneUrl: https://git.example.com/tempoxyz/centaur-tempo.git
   #   ref: ""
   #   visibility: private
   #   subdir: tools
@@ -83,6 +86,12 @@ toolServer:
   # GitHub token for direct private-repo clones when repoCache.enabled=false.
   # With the default repo-cache path, configure repoCache.githubToken instead.
   githubToken:
+    existingSecretName: ""
+    secretKey: token
+  # Generic credential for a custom Git remote. Takes precedence over
+  # githubToken and is provided to git through GIT_ASKPASS.
+  gitCredentials:
+    username: oauth2
     existingSecretName: ""
     secretKey: token
 
@@ -225,6 +234,7 @@ overlay:
 overlays:
   sources: []
   # - repo: paradigmxyz/centaur
+  #   cloneUrl: https://github.com/paradigmxyz/centaur.git
   #   ref: ""
   #   visibility: public
   # - repo: your-org/centaur-overlay
@@ -310,11 +320,12 @@ repoCache:
       storageClassName: ""
       size: 20Gi
   # Additional repos to cache. Entries can be strings (visibility defaults to
-  # private) or objects with repo/ref/visibility. toolServer.repo is cached
-  # automatically when the tool server is enabled.
+  # private) or objects with repo/cloneUrl/ref/visibility. toolServer.repo is
+  # cached automatically when the tool server is enabled.
   repositories: []
   # - paradigmxyz/public-docs
   # - repo: your-org/public-docs
+  #   cloneUrl: https://git.example.com/your-org/public-docs.git
   #   ref: main
   #   visibility: public
   repositoryRefs: {}
@@ -328,6 +339,12 @@ repoCache:
     existingSecretName: ""
     secretKey: token
     token: ""
+  # Generic credential for custom HTTP(S) Git remotes. Takes precedence over
+  # githubToken. Plain HTTP sends this credential unencrypted over the network.
+  gitCredentials:
+    username: oauth2
+    existingSecretName: ""
+    secretKey: token
   egressPorts:
     - 443
   readinessProbe:

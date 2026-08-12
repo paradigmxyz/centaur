@@ -22,6 +22,7 @@
 {{- if $repo -}}
 {{- with (get $source "toolsSubdir") -}}
 {{- $toolSource := dict "repo" $repo "subdir" . "visibility" $visibility -}}
+{{- with (get $source "cloneUrl") }}{{- $_ := set $toolSource "cloneUrl" . -}}{{- end -}}
 {{- with (get $source "ref") }}{{- $_ := set $toolSource "ref" . -}}{{- end -}}
 {{- $toolSources = append $toolSources $toolSource -}}
 {{- if eq $visibility "public" -}}
@@ -43,6 +44,12 @@
 {{- end -}}
 {{- $toolsUseRepoCache := and .Values.repoCache.enabled (gt (len $toolSources) 0) -}}
 {{- $useOverlayRepoCache := and .Values.repoCache.enabled (gt (len $overlaySources) 0) -}}
+{{- $toolsGenericCredential := .Values.toolServer.gitCredentials.existingSecretName -}}
+{{- $toolsLegacyCredential := .Values.toolServer.githubToken.existingSecretName -}}
+{{- $toolsDirectCredential := and (not $toolsUseRepoCache) (or $toolsGenericCredential $toolsLegacyCredential) -}}
+{{- $toolsCredentialSecretName := ternary .Values.toolServer.gitCredentials.existingSecretName .Values.toolServer.githubToken.existingSecretName (not (empty $toolsGenericCredential)) -}}
+{{- $toolsCredentialSecretKey := ternary .Values.toolServer.gitCredentials.secretKey .Values.toolServer.githubToken.secretKey (not (empty $toolsGenericCredential)) -}}
+{{- $toolsCredentialUsername := ternary .Values.toolServer.gitCredentials.username "x-access-token" (not (empty $toolsGenericCredential)) -}}
 {{- $toolDirs := list "/app/tools" -}}
 {{- $workflowDirs := "/app/workflows" -}}
 {{- if $toolsUseRepoCache -}}
@@ -472,6 +479,10 @@ spec:
             # in-process.
             - name: KUBERNETES_TOOLS_REPO
               value: {{ get $firstToolSource "repo" | quote }}
+{{- with (get $firstToolSource "cloneUrl") }}
+            - name: KUBERNETES_TOOLS_CLONE_URL
+              value: {{ . | quote }}
+{{- end }}
 {{- with (get $firstToolSource "ref") }}
             - name: KUBERNETES_TOOLS_REF
               value: {{ . | quote }}
@@ -498,11 +509,23 @@ spec:
               value: {{ printf "%s:%s" (default .Values.sandbox.image.repository .Values.toolServer.runnerImage.repository) (default .Values.sandbox.image.tag .Values.toolServer.runnerImage.tag) | quote }}
             - name: KUBERNETES_TOOLS_RUNNER_IMAGE_PULL_POLICY
               value: {{ default .Values.sandbox.image.pullPolicy .Values.toolServer.runnerImage.pullPolicy | quote }}
-{{- if and .Values.toolServer.githubToken.existingSecretName (not $toolsUseRepoCache) }}
+{{- if and .Values.toolServer.githubToken.existingSecretName (not $toolsUseRepoCache) (not $toolsGenericCredential) }}
             - name: KUBERNETES_TOOLS_GITHUB_TOKEN_SECRET
               value: {{ .Values.toolServer.githubToken.existingSecretName | quote }}
             - name: KUBERNETES_TOOLS_GITHUB_TOKEN_SECRET_KEY
               value: {{ .Values.toolServer.githubToken.secretKey | quote }}
+{{- end }}
+{{- if $toolsDirectCredential }}
+            - name: KUBERNETES_TOOLS_GIT_CREDENTIALS_SECRET
+              value: {{ $toolsCredentialSecretName | quote }}
+            - name: KUBERNETES_TOOLS_GIT_CREDENTIALS_SECRET_KEY
+              value: {{ $toolsCredentialSecretKey | quote }}
+            - name: KUBERNETES_TOOLS_GIT_USERNAME
+              value: {{ $toolsCredentialUsername | quote }}
+            - name: CENTAUR_TOOLS_GIT_TOKEN_FILE
+              value: /tools-git-credentials/token
+            - name: CENTAUR_TOOLS_GIT_USERNAME
+              value: {{ $toolsCredentialUsername | quote }}
 {{- end }}
 {{- end }}
 {{- range $name, $value := .Values.apiRs.extraEnv }}
@@ -546,14 +569,22 @@ spec:
 {{ toYaml .Values.containerSecurityContext | nindent 12 }}
           resources:
 {{ toYaml .Values.apiRs.resources | nindent 12 }}
-{{- if $useOverlayRepoCache }}
+{{- if or $useOverlayRepoCache $toolsDirectCredential }}
           volumeMounts:
+{{- if $useOverlayRepoCache }}
             - name: repo-cache
               mountPath: {{ .Values.repoCache.hostPath | quote }}
               readOnly: true
 {{- end }}
-{{- if $useOverlayRepoCache }}
+{{- if $toolsDirectCredential }}
+            - name: tools-git-credentials
+              mountPath: /tools-git-credentials
+              readOnly: true
+{{- end }}
+{{- end }}
+{{- if or $useOverlayRepoCache $toolsDirectCredential }}
       volumes:
+{{- if $useOverlayRepoCache }}
         - name: repo-cache
 {{- if $repoCacheUsePvc }}
           persistentVolumeClaim:
@@ -563,6 +594,16 @@ spec:
           hostPath:
             path: {{ .Values.repoCache.hostPath | quote }}
             type: DirectoryOrCreate
+{{- end }}
+{{- end }}
+{{- if $toolsDirectCredential }}
+        - name: tools-git-credentials
+          secret:
+            secretName: {{ $toolsCredentialSecretName | quote }}
+            defaultMode: 256
+            items:
+              - key: {{ $toolsCredentialSecretKey | quote }}
+                path: token
 {{- end }}
 {{- end }}
 ---
