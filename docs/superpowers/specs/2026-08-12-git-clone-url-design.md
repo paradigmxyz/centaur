@@ -119,9 +119,12 @@ credential interface.
 4. The sandbox `tools-bootstrap` init container clones through the paired
    iron-proxy. Both `HTTP_PROXY` and `HTTPS_PROXY` are set so HTTP and HTTPS
    remotes follow the same egress path.
-5. Centaur adds the configured clone port to iron-proxy egress. A literal IP
-   gets an exact host CIDR; private DNS remotes require repo-cache because their
-   changing private addresses cannot be represented by a stable narrow rule.
+5. For a clone URL with a literal IP, Centaur adds an exact host CIDR and the
+   configured port to iron-proxy egress, scoped to the sandbox's repository
+   access (`none`, `public`, or `all`). DNS names do not create broad public
+   custom-port rules. Private DNS remotes, and DNS remotes on ports other than
+   the proxy's baseline HTTPS port, require repo-cache because their changing
+   addresses cannot be represented by a stable narrow rule.
 
 ## Security And Error Handling
 

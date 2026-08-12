@@ -220,3 +220,34 @@ git diff origin/main...HEAD --check
 ```
 
 Expected: only scoped feature/docs changes are present and all checks pass.
+
+### Task 6: Review Hardening
+
+**Files:**
+- Modify: `contrib/chart/templates/_helpers.tpl`
+- Modify: `contrib/chart/tests/test_git_clone_url.sh`
+- Modify: `services/api-rs/crates/centaur-sandbox-agent-k8s/src/{lib,tools,iron_proxy}.rs`
+- Modify: operator and design documentation where direct-clone policy is described.
+
+- [x] **Step 1: Reject delimiter-only URL authorities**
+
+Require a real host before `?`, `#`, path, or port delimiters and cover the
+`http://?missing-host` and `http://#missing-host` cases.
+
+- [x] **Step 2: Scope direct-clone egress to sandbox capabilities**
+
+Derive clone targets from the sandbox's `none`, `public`, or `all` repository
+access. Add only exact `/32` or `/128` rules for literal-IP clone URLs; never
+convert a DNS clone host into a broad public custom-port rule.
+
+- [x] **Step 3: Preserve fail-closed behavior across lifecycle paths**
+
+Record repository access in the Sandbox CR container environment and restore
+it for resume and proxy repair. Missing or invalid state disables extra clone
+egress.
+
+- [x] **Step 4: Re-run broad verification**
+
+Run the Helm feature tests and lint, all sandbox Python tests, the complete
+`centaur-sandbox-agent-k8s` and `centaur-api-server` suites, Rust formatting and
+Clippy, default/dev Helm rendering, the docs build, and `git diff --check`.

@@ -273,3 +273,20 @@ if helm template centaur "$chart" -f "$tmp_dir/missing-host.yaml" >"$tmp_dir/mis
   exit 1
 fi
 grep -q "cloneUrl for repo group/project must be an HTTP(S) URL with a host and no credentials" "$tmp_dir/missing-host.err"
+
+for clone_url in 'http://?missing-host' 'http://#missing-host'; do
+  cat >"$tmp_dir/missing-host-delimiter.yaml" <<YAML
+repoCache:
+  enabled: false
+toolServer:
+  enabled: true
+  repo: group/project
+  cloneUrl: ${clone_url}
+YAML
+
+  if helm template centaur "$chart" -f "$tmp_dir/missing-host-delimiter.yaml" >"$tmp_dir/missing-host-delimiter.out" 2>"$tmp_dir/missing-host-delimiter.err"; then
+    echo "expected clone URL without a host to fail Helm rendering" >&2
+    exit 1
+  fi
+  grep -q "cloneUrl for repo group/project must be an HTTP(S) URL with a host and no credentials" "$tmp_dir/missing-host-delimiter.err"
+done

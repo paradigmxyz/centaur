@@ -710,6 +710,11 @@ fn build_agent_sandbox(
         .iter()
         .map(|env| (env.name.clone(), env.value.clone()))
         .collect();
+    upsert_env(
+        &mut agent_env,
+        "CENTAUR_SANDBOX_REPO_CACHE_ACCESS",
+        spec.capabilities.repo_cache.as_str().to_owned(),
+    );
     let repo_cache_enabled = spec.capabilities.repo_cache.enabled();
     let scoped_tools = config
         .tools
@@ -1425,6 +1430,14 @@ mod tests {
             .find(|env| env.name == "TOOL_DIRS")
             .and_then(|env| env.value.as_deref());
         assert_eq!(tool_dirs, Some("/opt/centaur/tools"));
+        let repo_cache_access = pod_spec.containers[0]
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|env| env.name == "CENTAUR_SANDBOX_REPO_CACHE_ACCESS")
+            .and_then(|env| env.value.as_deref());
+        assert_eq!(repo_cache_access, Some("none"));
         assert!(
             pod_spec.containers[0]
                 .volume_mounts

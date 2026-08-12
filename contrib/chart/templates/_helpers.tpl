@@ -92,7 +92,7 @@ app.kubernetes.io/component: {{ .component }}
 {{- $repo := .repo -}}
 {{- $cloneUrl := .cloneUrl | default "" -}}
 {{- if $cloneUrl -}}
-{{- $validCloneUrl := regexMatch `^https?://(?:\[[0-9A-Fa-f:.]+\]|[^/@:[:space:]]+)(?::[0-9]+)?(?:[/?#].*)?$` $cloneUrl -}}
+{{- $validCloneUrl := regexMatch `^https?://(?:\[[0-9A-Fa-f:.]+\]|[^/@:?#[:space:]]+)(?::[0-9]+)?(?:[/?#].*)?$` $cloneUrl -}}
 {{- if not $validCloneUrl -}}
 {{- fail (printf "cloneUrl for repo %s must be an HTTP(S) URL with a host and no credentials" $repo) -}}
 {{- end -}}

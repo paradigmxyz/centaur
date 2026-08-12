@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use centaur_iron_proxy::{ProxyFragment, SourceKind, SourcePolicy};
 use centaur_sandbox_core::{
-    ResourceRequirements, SandboxError, SandboxId, SandboxResult, SandboxSpec,
+    RepoCacheAccess, ResourceRequirements, SandboxError, SandboxId, SandboxResult, SandboxSpec,
 };
 use k8s_openapi::api::core::v1::{
     Capabilities, Container, ContainerPort, EmptyDirVolumeSource, EnvFromSource,
@@ -153,6 +153,7 @@ pub(crate) struct ResolvedIronProxy {
     management_api_key: String,
     observability_enabled: bool,
     api_server_enabled: bool,
+    repo_cache_access: RepoCacheAccess,
 }
 
 struct ResolvedIronProxyRuntime {
@@ -160,6 +161,7 @@ struct ResolvedIronProxyRuntime {
     replace_placeholders: BTreeMap<String, String>,
     observability_enabled: bool,
     api_server_enabled: bool,
+    repo_cache_access: RepoCacheAccess,
 }
 
 /// The single Postgres listener the proxy multiplexes every upstream through.
@@ -224,6 +226,7 @@ impl AgentSandboxBackend {
                 replace_placeholders,
                 observability_enabled: spec.capabilities.observability_enabled,
                 api_server_enabled: spec.capabilities.api_server_enabled,
+                repo_cache_access: spec.capabilities.repo_cache.clone(),
             },
         )))
     }
@@ -309,6 +312,10 @@ impl AgentSandboxBackend {
             "api_server",
             id.as_str(),
         );
+        let repo_cache_access = resolve_resume_repo_cache_access(
+            sandbox_repo_cache_access(&sandbox, &self.config.container_name),
+            id.as_str(),
+        );
         Ok(Some(self.resolved_iron_proxy_for_principal(
             id,
             principal_id,
@@ -318,6 +325,7 @@ impl AgentSandboxBackend {
                 replace_placeholders,
                 observability_enabled,
                 api_server_enabled,
+                repo_cache_access,
             },
         )))
     }
@@ -341,6 +349,7 @@ impl AgentSandboxBackend {
             management_api_key: new_proxy_management_api_key(),
             observability_enabled: runtime.observability_enabled,
             api_server_enabled: runtime.api_server_enabled,
+            repo_cache_access: runtime.repo_cache_access,
         }
     }
 
@@ -366,7 +375,8 @@ impl AgentSandboxBackend {
             &self.config.namespace,
             iron_proxy.control_plane_pod_labels.clone(),
         );
-        let clone_egress_targets = tools::clone_egress_targets(self.config.tools.as_ref());
+        let clone_egress_targets =
+            tools::clone_egress_targets(self.config.tools.as_ref(), &resolved.repo_cache_access);
         for policy in build_iron_proxy_network_policies_with_clone_egress(
             id,
             resolved,
@@ -672,6 +682,21 @@ impl AgentSandboxBackend {
                 );
                 false
             });
+        let repo_cache_access = sandbox
+            .as_ref()
+            .map(|sandbox| {
+                resolve_resume_repo_cache_access(
+                    sandbox_repo_cache_access(sandbox, &self.config.container_name),
+                    id.as_str(),
+                )
+            })
+            .unwrap_or_else(|| {
+                tracing::warn!(
+                    sandbox_id = id.as_str(),
+                    "sandbox CR missing during proxy repair; failing closed for repository clone egress"
+                );
+                RepoCacheAccess::None
+            });
         let resolved = self.resolved_iron_proxy_for_principal(
             id,
             principal_id,
@@ -681,6 +706,7 @@ impl AgentSandboxBackend {
                 replace_placeholders,
                 observability_enabled,
                 api_server_enabled,
+                repo_cache_access,
             },
         );
         self.create_iron_proxy_resources(id, Some(&resolved))
@@ -1584,8 +1610,8 @@ fn proxy_egress_rules(
     // Upstream egress: 443/5432 for normal traffic, plus the iron-control port
     // (deduped) so a sync-mode proxy can reach the control plane. Public
     // upstreams are constrained away from private/cluster CIDRs. Explicit
-    // direct-clone targets add their custom public port, or a single-host CIDR
-    // and port when the clone URL uses a literal IP.
+    // direct-clone targets add only a single-host CIDR and port when the clone
+    // URL uses a literal IP.
     let upstream_ports = vec![network_port(443), network_port(5432)];
     let mut rules = vec![dns_egress_rule()];
     rules.push(egress_to(
@@ -1598,12 +1624,10 @@ fn proxy_egress_rules(
     ));
     rules.push(egress_to(vec![public_ipv4_peer()], upstream_ports));
     for target in clone_egress_targets {
-        let peer = target
-            .cidr
-            .as_deref()
-            .map(ip_block_peer)
-            .unwrap_or_else(public_ipv4_peer);
-        rules.push(egress_to(vec![peer], vec![network_port(target.port)]));
+        rules.push(egress_to(
+            vec![ip_block_peer(&target.cidr)],
+            vec![network_port(target.port)],
+        ));
     }
     if observability_enabled {
         rules.push(egress_to(
@@ -1837,6 +1861,39 @@ pub(crate) fn sandbox_api_server_enabled(
         container_name,
     )
     .and_then(|value| value.parse().ok())
+}
+
+fn sandbox_repo_cache_access(
+    sandbox: &crate::crd::Sandbox,
+    container_name: &str,
+) -> Option<RepoCacheAccess> {
+    parse_repo_cache_access(&sandbox_env_value(
+        sandbox,
+        "CENTAUR_SANDBOX_REPO_CACHE_ACCESS",
+        container_name,
+    )?)
+}
+
+fn parse_repo_cache_access(value: &str) -> Option<RepoCacheAccess> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "none" => Some(RepoCacheAccess::None),
+        "public" => Some(RepoCacheAccess::Public),
+        "all" => Some(RepoCacheAccess::All),
+        _ => None,
+    }
+}
+
+fn resolve_resume_repo_cache_access(
+    access: Option<RepoCacheAccess>,
+    sandbox_id: &str,
+) -> RepoCacheAccess {
+    access.unwrap_or_else(|| {
+        tracing::warn!(
+            sandbox_id,
+            "sandbox repository access env missing or invalid; disabling direct clone egress"
+        );
+        RepoCacheAccess::None
+    })
 }
 
 /// Prefer a present, parseable capability env. When env is missing/invalid,
@@ -2176,6 +2233,7 @@ mod tests {
             management_api_key: "test-management-key".to_owned(),
             observability_enabled: true,
             api_server_enabled: true,
+            repo_cache_access: RepoCacheAccess::All,
         }
     }
 
@@ -2303,7 +2361,7 @@ mod tests {
             visibility: "private".to_owned(),
         });
         let iron_proxy = IronProxyConfig::new("proxy:test", "ca-cert", "ca-key");
-        let targets = tools::clone_egress_targets(Some(&tools));
+        let targets = tools::clone_egress_targets(Some(&tools), &RepoCacheAccess::All);
         let policies = build_iron_proxy_network_policies_with_clone_egress(
             &id,
             &resolved(),
@@ -2321,9 +2379,9 @@ mod tests {
             82
         )));
         assert!(
-            proxy_egress
+            !proxy_egress
                 .iter()
-                .any(|rule| rule_allows_cidr_port(rule, "0.0.0.0/0", 8443))
+                .any(|rule| rule_allows_public_port(rule, 8443))
         );
     }
 
@@ -2744,6 +2802,28 @@ mod tests {
             "api_server",
             "asbx-test",
         ));
+    }
+
+    #[test]
+    fn resume_repo_cache_access_prefers_valid_env_and_fails_closed_without_it() {
+        assert_eq!(parse_repo_cache_access(" all "), Some(RepoCacheAccess::All));
+        assert_eq!(
+            parse_repo_cache_access("PUBLIC"),
+            Some(RepoCacheAccess::Public)
+        );
+        assert_eq!(parse_repo_cache_access("unexpected"), None);
+        assert_eq!(
+            resolve_resume_repo_cache_access(Some(RepoCacheAccess::All), "asbx-test"),
+            RepoCacheAccess::All
+        );
+        assert_eq!(
+            resolve_resume_repo_cache_access(Some(RepoCacheAccess::Public), "asbx-test"),
+            RepoCacheAccess::Public
+        );
+        assert_eq!(
+            resolve_resume_repo_cache_access(None, "asbx-test"),
+            RepoCacheAccess::None
+        );
     }
 
     #[test]

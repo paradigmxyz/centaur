@@ -126,28 +126,38 @@ pub struct GitCredentialsRef {
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct CloneEgressTarget {
-    pub cidr: Option<String>,
+    pub cidr: String,
     pub port: u16,
 }
 
-pub(crate) fn clone_egress_targets(tools: Option<&ToolsConfig>) -> Vec<CloneEgressTarget> {
-    let Some(tools) = tools.filter(|tools| tools.repo_cache_path.is_none()) else {
+pub(crate) fn clone_egress_targets(
+    tools: Option<&ToolsConfig>,
+    access: &RepoCacheAccess,
+) -> Vec<CloneEgressTarget> {
+    let Some(tools) = tools
+        .filter(|tools| tools.repo_cache_path.is_none())
+        .filter(|_| access.enabled())
+    else {
         return Vec::new();
     };
     tools
+        .scoped_for_repo_cache_access(access)
         .sources()
         .into_iter()
+        .filter(|source| !source.repo.is_empty())
         .filter_map(|source| source.clone_url)
         .filter_map(|clone_url| reqwest::Url::parse(&clone_url).ok())
         .filter_map(|clone_url| {
             let port = clone_url.port_or_known_default()?;
-            let cidr = clone_url
-                .host_str()
-                .and_then(|host| host.parse::<IpAddr>().ok())
-                .map(|ip| match ip {
-                    IpAddr::V4(ip) => format!("{ip}/32"),
-                    IpAddr::V6(ip) => format!("{ip}/128"),
-                });
+            let host = clone_url.host_str()?;
+            let host = host
+                .strip_prefix('[')
+                .and_then(|host| host.strip_suffix(']'))
+                .unwrap_or(host);
+            let cidr = match host.parse::<IpAddr>().ok()? {
+                IpAddr::V4(ip) => format!("{ip}/32"),
+                IpAddr::V6(ip) => format!("{ip}/128"),
+            };
             Some(CloneEgressTarget { cidr, port })
         })
         .collect::<BTreeSet<_>>()
@@ -658,28 +668,65 @@ mod tests {
     }
 
     #[test]
-    fn direct_clone_egress_targets_include_custom_ports_and_literal_ips() {
+    fn direct_clone_egress_targets_are_literal_ips_scoped_by_capability() {
         let mut tools = ToolsConfig::new("group/tools", "centaur-agent:test");
         tools.clone_url = Some("http://192.168.50.10:82/group/tools.git".to_owned());
         tools.extra_sources.push(ToolSource {
             repo: "group/public-tools".to_owned(),
-            clone_url: Some("https://git.example.test:8443/group/public-tools.git".to_owned()),
+            clone_url: Some("https://198.51.100.10:8443/group/public-tools.git".to_owned()),
+            git_ref: None,
+            source_subdir: "tools".to_owned(),
+            visibility: "public".to_owned(),
+        });
+        tools.extra_sources.push(ToolSource {
+            repo: "group/dns-tools".to_owned(),
+            clone_url: Some("https://git.example.test:9443/group/dns-tools.git".to_owned()),
+            git_ref: None,
+            source_subdir: "tools".to_owned(),
+            visibility: "public".to_owned(),
+        });
+        tools.extra_sources.push(ToolSource {
+            repo: "group/ipv6-tools".to_owned(),
+            clone_url: Some("http://[2001:db8::10]:8081/group/ipv6-tools.git".to_owned()),
             git_ref: None,
             source_subdir: "tools".to_owned(),
             visibility: "private".to_owned(),
         });
 
+        assert!(
+            clone_egress_targets(Some(&tools), &RepoCacheAccess::None).is_empty(),
+            "disabled repo access must not inherit global source egress"
+        );
+        let private_only = ToolsConfig {
+            extra_sources: Vec::new(),
+            ..tools.clone()
+        };
+        assert!(
+            clone_egress_targets(Some(&private_only), &RepoCacheAccess::Public).is_empty(),
+            "public-only access must not inherit a private primary source"
+        );
         assert_eq!(
-            clone_egress_targets(Some(&tools)),
+            clone_egress_targets(Some(&tools), &RepoCacheAccess::Public),
+            vec![CloneEgressTarget {
+                cidr: "198.51.100.10/32".to_owned(),
+                port: 8443,
+            }]
+        );
+        assert_eq!(
+            clone_egress_targets(Some(&tools), &RepoCacheAccess::All),
             vec![
                 CloneEgressTarget {
-                    cidr: None,
+                    cidr: "192.168.50.10/32".to_owned(),
+                    port: 82,
+                },
+                CloneEgressTarget {
+                    cidr: "198.51.100.10/32".to_owned(),
                     port: 8443,
                 },
                 CloneEgressTarget {
-                    cidr: Some("192.168.50.10/32".to_owned()),
-                    port: 82,
-                },
+                    cidr: "2001:db8::10/128".to_owned(),
+                    port: 8081,
+                }
             ]
         );
     }
@@ -690,7 +737,7 @@ mod tests {
         tools.clone_url = Some("http://192.168.50.10:82/group/tools.git".to_owned());
         tools.repo_cache_path = Some("/var/lib/centaur/repos".to_owned());
 
-        assert!(clone_egress_targets(Some(&tools)).is_empty());
+        assert!(clone_egress_targets(Some(&tools), &RepoCacheAccess::All).is_empty());
     }
 
     #[test]
