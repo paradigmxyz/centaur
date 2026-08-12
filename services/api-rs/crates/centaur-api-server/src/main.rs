@@ -85,6 +85,7 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
     if let Some((manager, credential_ref, reconcile_interval)) = args.workspace_manager().await? {
         runtime = runtime.with_workspace_manager(manager, credential_ref);
         runtime.spawn_workspace_reconciliation(reconcile_interval);
+        runtime.spawn_changeset_reconciliation(reconcile_interval);
     }
     runtime = runtime.with_personas(args.persona_registry()?);
     let sandbox_capacity_config = args.sandbox_capacity_config();

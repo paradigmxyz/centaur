@@ -1,15 +1,22 @@
-use std::{collections::HashSet, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
 use centaur_session_core::{
     ExecutionStatus, MessageRole, SessionStatus, ThreadKey,
     development::{
-        AcceptDevelopmentTask, AcceptedDevelopmentTask, CompleteWorkspacePreparation,
-        ConfirmRepositorySelection, ExecutionBlocker, RepositorySelectionDraft,
-        RepositorySelectionOutcome, SelectionFlowState, SelectionKind, SessionWorkspace,
-        WorkspacePreparationClaim, WorkspaceRepositorySnapshot, WorkspaceState,
+        AcceptDevelopmentTask, AcceptedDevelopmentTask, ChangeSetCollectionClaim,
+        ChangeSetRepositoryState, ChangeSetState, CompleteChangeSetCollection,
+        CompleteWorkspacePreparation, CompletedDevelopmentExecution, ConfirmRepositorySelection,
+        DevelopmentChangeSet, DevelopmentChangeSetRepository, ExecutionBlocker,
+        RepositorySelectionDraft, RepositorySelectionOutcome, RepositoryState, SelectionFlowState,
+        SelectionKind, SessionWorkspace, WorkspacePreparationClaim, WorkspaceRepositorySnapshot,
+        WorkspaceState,
     },
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use sqlx::FromRow;
 use time::OffsetDateTime;
 
@@ -895,6 +902,792 @@ impl PgSessionStore {
         .fetch_all(&self.pool)
         .await?)
     }
+
+    pub async fn begin_changeset_collection(
+        &self,
+        execution_id: &str,
+        owner_id: &str,
+    ) -> Result<Option<DevelopmentChangeSet>, SessionStoreError> {
+        if execution_id.trim().is_empty() || owner_id.trim().is_empty() {
+            return Err(SessionStoreError::InvalidDevelopmentRequest {
+                message: "execution_id and collection owner are required".to_owned(),
+            });
+        }
+        let mut tx = self.pool.begin().await?;
+        crate::lock_development_execution_boundary_for_update(&mut tx, execution_id).await?;
+        #[derive(FromRow)]
+        struct ContextRow {
+            workspace_id: String,
+            initiator_principal_id: String,
+            execution_status: String,
+            workspace_state: String,
+        }
+        let context = sqlx::query_as::<_, ContextRow>(
+            r#"
+            select workspace.workspace_id,
+                   binding.initiator_principal_id,
+                   execution.status as execution_status,
+                   workspace.state as workspace_state
+              from session_executions execution
+              join session_workspaces workspace using (thread_key)
+              join development_channel_bindings binding
+                on binding.thread_key = execution.thread_key and binding.active
+             where execution.execution_id = $1
+             for update of execution, workspace
+            "#,
+        )
+        .bind(execution_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(context) = context else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        if context.execution_status != ExecutionStatus::Completed.as_ref() {
+            return Err(SessionStoreError::DevelopmentConflict {
+                message: "only a completed execution can be collected".to_owned(),
+            });
+        }
+        if let Some(existing) = load_changeset_by_execution(&mut tx, execution_id).await? {
+            tx.commit().await?;
+            return Ok(Some(existing));
+        }
+        if context.workspace_state != WorkspaceState::Ready.as_ref() {
+            return Err(SessionStoreError::DevelopmentConflict {
+                message: format!(
+                    "workspace is {} and cannot begin collection",
+                    context.workspace_state
+                ),
+            });
+        }
+        let changeset_id = prefixed_id("chg");
+        sqlx::query(
+            r#"
+            insert into development_change_sets
+                (changeset_id, workspace_id, execution_id, initiator_principal_id,
+                 state, lease_owner, lease_expires_at)
+            values ($1, $2, $3, $4, 'collecting', $5, now() + interval '10 minutes')
+            "#,
+        )
+        .bind(&changeset_id)
+        .bind(&context.workspace_id)
+        .bind(execution_id)
+        .bind(&context.initiator_principal_id)
+        .bind(owner_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "update session_workspaces set state = 'collecting', updated_at = now() where workspace_id = $1 and state = 'ready'",
+        )
+        .bind(&context.workspace_id)
+        .execute(&mut *tx)
+        .await?;
+        let changeset = load_changeset(&mut tx, &changeset_id)
+            .await?
+            .expect("inserted changeset is visible");
+        tx.commit().await?;
+        Ok(Some(changeset))
+    }
+
+    pub async fn complete_development_execution_and_begin_collection(
+        &self,
+        execution_id: &str,
+        stdout_owner_id: &str,
+        collection_owner_id: &str,
+    ) -> Result<Option<CompletedDevelopmentExecution>, SessionStoreError> {
+        if execution_id.trim().is_empty()
+            || stdout_owner_id.trim().is_empty()
+            || collection_owner_id.trim().is_empty()
+        {
+            return Err(SessionStoreError::InvalidDevelopmentRequest {
+                message: "execution and collection owners are required".to_owned(),
+            });
+        }
+        let mut tx = self.pool.begin().await?;
+        crate::lock_development_execution_boundary_for_update(&mut tx, execution_id).await?;
+        let row = sqlx::query_as::<_, crate::SessionExecutionRow>(
+            r#"
+            update session_executions
+               set status = 'completed', completed_at = coalesce(completed_at, now()),
+                   stdout_owner_id = null, stdout_owner_lease_expires_at = null,
+                   updated_at = now()
+             where execution_id = $1 and status in ('queued', 'running')
+               and stdout_owner_id = $2
+            returning execution_id, idempotency_key, thread_key, status, blocking_reason,
+                      metadata, error, created_at, updated_at, started_at, completed_at
+            "#,
+        )
+        .bind(execution_id)
+        .bind(stdout_owner_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(row) = row else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let workspace = sqlx::query_as::<_, (String, String, String)>(
+            r#"
+            select workspace.workspace_id, workspace.state, binding.initiator_principal_id
+              from session_workspaces workspace
+              join development_channel_bindings binding
+                on binding.thread_key = workspace.thread_key and binding.active
+             where workspace.thread_key = $1
+             for update of workspace
+            "#,
+        )
+        .bind(&row.thread_key)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let mut changeset_id = None;
+        if let Some((workspace_id, workspace_state, initiator)) = workspace {
+            if workspace_state != WorkspaceState::Ready.as_ref() {
+                return Err(SessionStoreError::DevelopmentConflict {
+                    message: format!("workspace is {workspace_state} when execution completed"),
+                });
+            }
+            let id = prefixed_id("chg");
+            sqlx::query(
+                r#"
+                insert into development_change_sets
+                    (changeset_id, workspace_id, execution_id, initiator_principal_id,
+                     state, lease_owner, lease_expires_at)
+                values ($1, $2, $3, $4, 'collecting', $5, now() + interval '10 minutes')
+                "#,
+            )
+            .bind(&id)
+            .bind(&workspace_id)
+            .bind(execution_id)
+            .bind(initiator)
+            .bind(collection_owner_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "update session_workspaces set state = 'collecting', updated_at = now() where workspace_id = $1",
+            )
+            .bind(workspace_id)
+            .execute(&mut *tx)
+            .await?;
+            changeset_id = Some(id);
+        }
+        sqlx::query(
+            "update sessions set status = 'idle', updated_at = now() where thread_key = $1",
+        )
+        .bind(&row.thread_key)
+        .execute(&mut *tx)
+        .await?;
+        let execution = row.try_into()?;
+        tx.commit().await?;
+        Ok(Some(CompletedDevelopmentExecution {
+            execution,
+            changeset_id,
+        }))
+    }
+
+    pub async fn claim_changeset_collection(
+        &self,
+        changeset_id: &str,
+        lease_owner: &str,
+        lease: Duration,
+    ) -> Result<ChangeSetCollectionClaim, SessionStoreError> {
+        if changeset_id.trim().is_empty() || lease_owner.trim().is_empty() || lease.is_zero() {
+            return Err(SessionStoreError::InvalidDevelopmentRequest {
+                message: "changeset_id, lease_owner, and positive lease are required".to_owned(),
+            });
+        }
+        let lease_expires_at = OffsetDateTime::now_utc()
+            + time::Duration::try_from(lease).map_err(|_| {
+                SessionStoreError::InvalidDevelopmentRequest {
+                    message: "changeset collection lease is too large".to_owned(),
+                }
+            })?;
+        let mut tx = self.pool.begin().await?;
+        let changeset_id = sqlx::query_scalar::<_, String>(
+            r#"
+            update development_change_sets
+               set lease_owner = $2, lease_expires_at = $3, updated_at = now()
+             where changeset_id = $1 and state = 'collecting'
+               and (lease_owner is null or lease_owner = $2 or lease_expires_at < now())
+            returning changeset_id
+            "#,
+        )
+        .bind(changeset_id)
+        .bind(lease_owner)
+        .bind(lease_expires_at)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| SessionStoreError::DevelopmentConflict {
+            message: "changeset is not claimable for collection".to_owned(),
+        })?;
+        let changeset = load_changeset(&mut tx, &changeset_id)
+            .await?
+            .expect("claimed changeset exists");
+        let workspace = sqlx::query_as::<_, SessionWorkspaceRow>(
+            r#"
+            select workspace_id, thread_key, state, storage_ref,
+                   preparation_attempt, created_at, updated_at
+              from session_workspaces where workspace_id = $1
+            "#,
+        )
+        .bind(&changeset.workspace_id)
+        .fetch_one(&mut *tx)
+        .await?
+        .try_into()?;
+        let repositories = load_workspace_repositories(&mut tx, &changeset.workspace_id).await?;
+        let execution_metadata = sqlx::query_scalar::<_, Value>(
+            "select metadata from session_executions where execution_id = $1",
+        )
+        .bind(&changeset.execution_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(ChangeSetCollectionClaim {
+            changeset,
+            workspace,
+            repositories,
+            execution_metadata,
+        })
+    }
+
+    pub async fn complete_changeset_collection(
+        &self,
+        result: &CompleteChangeSetCollection,
+    ) -> Result<Option<DevelopmentChangeSet>, SessionStoreError> {
+        validate_complete_changeset(result)?;
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query_as::<_, (String, String)>(
+            r#"
+            select changeset.workspace_id, changeset.state
+              from development_change_sets changeset
+             where changeset.changeset_id = $1 and changeset.lease_owner = $2
+               and changeset.state = 'collecting'
+             for update
+            "#,
+        )
+        .bind(&result.changeset_id)
+        .bind(&result.lease_owner)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| SessionStoreError::DevelopmentConflict {
+            message: "changeset collection lease is stale".to_owned(),
+        })?;
+        let expected_repositories = sqlx::query_as::<_, (String, Option<String>, Option<String>, String)>(
+            "select repository_id, base_sha, head_sha, state from session_repositories where workspace_id = $1 order by repository_id for update",
+        )
+        .bind(&row.0)
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .map(|(repository_id, base_sha, head_sha, state)| {
+            let repository_id = repository_id.parse::<centaur_session_core::development::RepositoryId>().map_err(|error| {
+                SessionStoreError::InvalidPersistedValue(format!("{error}"))
+            })?;
+            Ok((repository_id, (base_sha, head_sha, state)))
+        })
+        .collect::<Result<HashMap<_, _>, SessionStoreError>>()?;
+        let result_ids = result
+            .repositories
+            .iter()
+            .map(|repository| repository.repository_id.clone())
+            .collect::<HashSet<_>>();
+        if expected_repositories.len() != result_ids.len()
+            || !result_ids
+                .iter()
+                .all(|repository_id| expected_repositories.contains_key(repository_id))
+        {
+            return Err(SessionStoreError::DevelopmentConflict {
+                message: "changeset result does not match the workspace repository set".to_owned(),
+            });
+        }
+        for repository in &result.repositories {
+            let (expected_base, expected_head, state) =
+                &expected_repositories[&repository.repository_id];
+            if state != RepositoryState::Ready.as_ref()
+                || expected_base.as_deref() != Some(repository.base_sha.as_str())
+                || expected_head.as_deref() != Some(repository.recorded_head_sha.as_str())
+            {
+                return Err(SessionStoreError::DevelopmentConflict {
+                    message: format!(
+                        "repository {} no longer matches the collection input",
+                        repository.repository_id
+                    ),
+                });
+            }
+        }
+        let changed_count = result
+            .repositories
+            .iter()
+            .filter(|repository| {
+                !matches!(
+                    repository.state,
+                    centaur_session_core::development::CollectedChangeSetRepositoryState::Unchanged
+                )
+            })
+            .count();
+        if changed_count == 0 {
+            sqlx::query("delete from development_change_sets where changeset_id = $1")
+                .bind(&result.changeset_id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query(
+                "update session_workspaces set state = 'ready', updated_at = now() where workspace_id = $1 and state = 'collecting'",
+            )
+            .bind(&row.0)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            return Ok(None);
+        }
+
+        let mut has_needs_completion = false;
+        let mut has_failure = false;
+        for repository in &result.repositories {
+            use centaur_session_core::development::CollectedChangeSetRepositoryState;
+            if repository.state == CollectedChangeSetRepositoryState::Unchanged {
+                continue;
+            }
+            let persisted_state = match repository.state {
+                CollectedChangeSetRepositoryState::Changed => ChangeSetRepositoryState::Changed,
+                CollectedChangeSetRepositoryState::NeedsAgentCompletion => {
+                    has_needs_completion = true;
+                    ChangeSetRepositoryState::NeedsAgentCompletion
+                }
+                CollectedChangeSetRepositoryState::Failed => {
+                    has_failure = true;
+                    ChangeSetRepositoryState::Failed
+                }
+                CollectedChangeSetRepositoryState::Unchanged => unreachable!(),
+            };
+            let artifact_ref = if let (Some(hash), false) = (
+                repository.patch_hash.as_deref(),
+                repository.patch.is_empty(),
+            ) {
+                Some(
+                    put_development_artifact(&mut tx, hash, "text/x-diff", &repository.patch)
+                        .await?,
+                )
+            } else {
+                None
+            };
+            sqlx::query(
+                r#"
+                insert into development_change_set_repositories
+                    (changeset_repository_id, changeset_id, workspace_id, repository_id,
+                     state, base_sha, recorded_head_sha, head_sha, commit_metadata,
+                     changed_file_count, additions, deletions, patch_hash,
+                     patch_artifact_ref, test_evidence, failure_code, failure_message)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                        $13, $14, $15, $16, $17)
+                "#,
+            )
+            .bind(prefixed_id("cgr"))
+            .bind(&result.changeset_id)
+            .bind(&row.0)
+            .bind(repository.repository_id.as_str())
+            .bind(persisted_state.as_ref())
+            .bind(&repository.base_sha)
+            .bind(&repository.recorded_head_sha)
+            .bind(&repository.head_sha)
+            .bind(&repository.commit_metadata)
+            .bind(repository.changed_file_count)
+            .bind(repository.additions)
+            .bind(repository.deletions)
+            .bind(&repository.patch_hash)
+            .bind(&artifact_ref)
+            .bind(&repository.test_evidence)
+            .bind(&repository.failure_code)
+            .bind(&repository.failure_message)
+            .execute(&mut *tx)
+            .await?;
+            if repository.state == CollectedChangeSetRepositoryState::Changed {
+                let updated = sqlx::query(
+                    r#"
+                    update session_repositories
+                       set head_sha = $3, updated_at = now()
+                     where workspace_id = $1 and repository_id = $2
+                       and head_sha = $4 and state = 'ready'
+                    "#,
+                )
+                .bind(&row.0)
+                .bind(repository.repository_id.as_str())
+                .bind(&repository.head_sha)
+                .bind(&repository.recorded_head_sha)
+                .execute(&mut *tx)
+                .await?;
+                if updated.rows_affected() != 1 {
+                    return Err(SessionStoreError::DevelopmentConflict {
+                        message: format!(
+                            "repository {} changed while its changeset was collected",
+                            repository.repository_id
+                        ),
+                    });
+                }
+            }
+        }
+        let final_state = if has_failure {
+            ChangeSetState::Failed
+        } else if has_needs_completion {
+            ChangeSetState::NeedsAgentCompletion
+        } else {
+            ChangeSetState::Ready
+        };
+        let summary = format!("{changed_count} repository result(s)");
+        sqlx::query(
+            r#"
+            update development_change_sets
+               set state = $2, summary = $3, lease_owner = null,
+                   lease_expires_at = null, updated_at = now()
+             where changeset_id = $1
+            "#,
+        )
+        .bind(&result.changeset_id)
+        .bind(final_state.as_ref())
+        .bind(summary)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "update session_workspaces set state = 'ready', updated_at = now() where workspace_id = $1 and state = 'collecting'",
+        )
+        .bind(&row.0)
+        .execute(&mut *tx)
+        .await?;
+        let changeset = load_changeset(&mut tx, &result.changeset_id)
+            .await?
+            .expect("completed changeset exists");
+        tx.commit().await?;
+        Ok(Some(changeset))
+    }
+
+    pub async fn get_changeset(
+        &self,
+        changeset_id: &str,
+        principal_id: &str,
+        is_admin: bool,
+    ) -> Result<DevelopmentChangeSet, SessionStoreError> {
+        let mut tx = self.pool.begin().await?;
+        let changeset = load_changeset(&mut tx, changeset_id)
+            .await?
+            .ok_or_else(|| SessionStoreError::DevelopmentNotFound {
+                message: format!("changeset {changeset_id}"),
+            })?;
+        if !is_admin && changeset.initiator_principal_id != principal_id {
+            return Err(SessionStoreError::DevelopmentForbidden {
+                message: "changeset is not accessible to this principal".to_owned(),
+            });
+        }
+        tx.commit().await?;
+        Ok(changeset)
+    }
+
+    pub async fn get_changeset_artifact(
+        &self,
+        changeset_id: &str,
+        artifact_ref: &str,
+        principal_id: &str,
+        is_admin: bool,
+    ) -> Result<Vec<u8>, SessionStoreError> {
+        let changeset = self
+            .get_changeset(changeset_id, principal_id, is_admin)
+            .await?;
+        if !changeset
+            .repositories
+            .iter()
+            .any(|repository| repository.patch_artifact_ref.as_deref() == Some(artifact_ref))
+        {
+            return Err(SessionStoreError::DevelopmentNotFound {
+                message: "changeset artifact".to_owned(),
+            });
+        }
+        sqlx::query_scalar("select content from development_artifacts where artifact_ref = $1")
+            .bind(artifact_ref)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or_else(|| SessionStoreError::DevelopmentNotFound {
+                message: "changeset artifact".to_owned(),
+            })
+    }
+
+    pub async fn list_collecting_changeset_ids(&self) -> Result<Vec<String>, SessionStoreError> {
+        Ok(sqlx::query_scalar(
+            r#"
+            select changeset_id from development_change_sets
+             where state = 'collecting'
+               and (lease_owner is null or lease_expires_at < now())
+             order by updated_at, changeset_id
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct DevelopmentChangeSetRow {
+    changeset_id: String,
+    workspace_id: String,
+    execution_id: String,
+    initiator_principal_id: String,
+    state: String,
+    summary: Option<String>,
+    failure_code: Option<String>,
+    failure_message: Option<String>,
+    created_at: OffsetDateTime,
+    updated_at: OffsetDateTime,
+}
+
+#[derive(Debug, FromRow)]
+struct DevelopmentChangeSetRepositoryRow {
+    changeset_repository_id: String,
+    repository_id: String,
+    display_name: String,
+    path_with_namespace: String,
+    default_branch: String,
+    state: String,
+    base_sha: String,
+    recorded_head_sha: String,
+    head_sha: Option<String>,
+    commit_metadata: Value,
+    changed_file_count: i32,
+    additions: i32,
+    deletions: i32,
+    patch_hash: Option<String>,
+    patch_artifact_ref: Option<String>,
+    test_evidence: Value,
+    failure_code: Option<String>,
+    failure_message: Option<String>,
+}
+
+async fn load_changeset_by_execution(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    execution_id: &str,
+) -> Result<Option<DevelopmentChangeSet>, SessionStoreError> {
+    let changeset_id = sqlx::query_scalar::<_, String>(
+        "select changeset_id from development_change_sets where execution_id = $1",
+    )
+    .bind(execution_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(changeset_id) = changeset_id else {
+        return Ok(None);
+    };
+    load_changeset(tx, &changeset_id).await
+}
+
+async fn load_changeset(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    changeset_id: &str,
+) -> Result<Option<DevelopmentChangeSet>, SessionStoreError> {
+    let row = sqlx::query_as::<_, DevelopmentChangeSetRow>(
+        r#"
+        select changeset_id, workspace_id, execution_id, initiator_principal_id,
+               state, summary, failure_code, failure_message, created_at, updated_at
+          from development_change_sets where changeset_id = $1
+        "#,
+    )
+    .bind(changeset_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let repositories = sqlx::query_as::<_, DevelopmentChangeSetRepositoryRow>(
+        r#"
+        select collected.changeset_repository_id, collected.repository_id,
+               repository.display_name, repository.path_with_namespace,
+               repository.default_branch, collected.state, collected.base_sha,
+               collected.recorded_head_sha, collected.head_sha,
+               collected.commit_metadata, collected.changed_file_count,
+               collected.additions, collected.deletions, collected.patch_hash,
+               collected.patch_artifact_ref, collected.test_evidence,
+               collected.failure_code, collected.failure_message
+          from development_change_set_repositories collected
+          join session_repositories repository
+            on repository.workspace_id = collected.workspace_id
+           and repository.repository_id = collected.repository_id
+         where collected.changeset_id = $1
+         order by repository.gitlab_project_id, repository.repository_id
+        "#,
+    )
+    .bind(changeset_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(Some(DevelopmentChangeSet {
+        changeset_id: row.changeset_id,
+        workspace_id: row.workspace_id,
+        execution_id: row.execution_id,
+        initiator_principal_id: row.initiator_principal_id,
+        state: parse_development_value(row.state)?,
+        summary: row.summary,
+        failure_code: row.failure_code,
+        failure_message: row.failure_message,
+        repositories: repositories
+            .into_iter()
+            .map(|repository| {
+                Ok(DevelopmentChangeSetRepository {
+                    changeset_repository_id: repository.changeset_repository_id,
+                    repository_id: parse_development_value(repository.repository_id)?,
+                    display_name: repository.display_name,
+                    path_with_namespace: repository.path_with_namespace,
+                    default_branch: repository.default_branch,
+                    state: parse_development_value(repository.state)?,
+                    base_sha: repository.base_sha,
+                    recorded_head_sha: repository.recorded_head_sha,
+                    head_sha: repository.head_sha,
+                    commit_metadata: repository.commit_metadata,
+                    changed_file_count: repository.changed_file_count,
+                    additions: repository.additions,
+                    deletions: repository.deletions,
+                    patch_hash: repository.patch_hash,
+                    patch_artifact_ref: repository.patch_artifact_ref,
+                    test_evidence: repository.test_evidence,
+                    failure_code: repository.failure_code,
+                    failure_message: repository.failure_message,
+                })
+            })
+            .collect::<Result<Vec<_>, SessionStoreError>>()?,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    }))
+}
+
+async fn load_workspace_repositories(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: &str,
+) -> Result<Vec<WorkspaceRepositorySnapshot>, SessionStoreError> {
+    sqlx::query_as::<_, WorkspaceRepositorySnapshotRow>(
+        r#"
+        select repository_id, display_name, path_with_namespace, default_branch,
+               clone_url, relative_path, state, base_sha, local_branch, head_sha
+          from session_repositories where workspace_id = $1
+         order by gitlab_project_id, repository_id
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(&mut **tx)
+    .await?
+    .into_iter()
+    .map(TryInto::try_into)
+    .collect()
+}
+
+async fn put_development_artifact(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    expected_hash: &str,
+    media_type: &str,
+    content: &[u8],
+) -> Result<String, SessionStoreError> {
+    let actual_hash = format!("sha256:{}", hex::encode(Sha256::digest(content)));
+    if actual_hash != expected_hash {
+        return Err(SessionStoreError::InvalidDevelopmentRequest {
+            message: "changeset patch hash does not match its content".to_owned(),
+        });
+    }
+    let byte_length =
+        i32::try_from(content.len()).map_err(|_| SessionStoreError::InvalidDevelopmentRequest {
+            message: "changeset patch exceeds the artifact size limit".to_owned(),
+        })?;
+    let artifact_ref = format!("artifact:{actual_hash}");
+    sqlx::query(
+        r#"
+        insert into development_artifacts
+            (artifact_ref, sha256, media_type, byte_length, content)
+        values ($1, $2, $3, $4, $5)
+        on conflict (artifact_ref) do nothing
+        "#,
+    )
+    .bind(&artifact_ref)
+    .bind(&actual_hash)
+    .bind(media_type)
+    .bind(byte_length)
+    .bind(content)
+    .execute(&mut **tx)
+    .await?;
+    Ok(artifact_ref)
+}
+
+fn validate_complete_changeset(
+    result: &CompleteChangeSetCollection,
+) -> Result<(), SessionStoreError> {
+    use centaur_session_core::development::CollectedChangeSetRepositoryState;
+    if result.changeset_id.trim().is_empty() || result.lease_owner.trim().is_empty() {
+        return Err(SessionStoreError::InvalidDevelopmentRequest {
+            message: "changeset_id and lease_owner are required".to_owned(),
+        });
+    }
+    let mut ids = HashSet::with_capacity(result.repositories.len());
+    for repository in &result.repositories {
+        if !ids.insert(repository.repository_id.clone())
+            || repository.changed_file_count < 0
+            || repository.additions < 0
+            || repository.deletions < 0
+            || !valid_git_sha(&repository.base_sha)
+            || !valid_git_sha(&repository.recorded_head_sha)
+            || repository
+                .head_sha
+                .as_deref()
+                .is_some_and(|sha| !valid_git_sha(sha))
+        {
+            return Err(SessionStoreError::InvalidDevelopmentRequest {
+                message: "changeset contains invalid repository metadata".to_owned(),
+            });
+        }
+        let valid_state = match repository.state {
+            CollectedChangeSetRepositoryState::Unchanged => {
+                repository.head_sha.is_some()
+                    && repository.patch_hash.is_none()
+                    && repository.patch.is_empty()
+                    && repository.failure_code.is_none()
+            }
+            CollectedChangeSetRepositoryState::Changed => {
+                repository.head_sha.is_some()
+                    && repository.patch_hash.is_some()
+                    && !repository.patch.is_empty()
+                    && repository.changed_file_count > 0
+                    && repository.failure_code.is_none()
+            }
+            CollectedChangeSetRepositoryState::NeedsAgentCompletion
+            | CollectedChangeSetRepositoryState::Failed => {
+                repository.patch_hash.is_none()
+                    && repository.patch.is_empty()
+                    && repository
+                        .failure_code
+                        .as_deref()
+                        .is_some_and(|code| !code.trim().is_empty())
+            }
+        };
+        if !valid_state {
+            return Err(SessionStoreError::InvalidDevelopmentRequest {
+                message: "changeset repository state does not match its artifacts".to_owned(),
+            });
+        }
+        if let Some(hash) = &repository.patch_hash {
+            let actual = format!("sha256:{}", hex::encode(Sha256::digest(&repository.patch)));
+            if hash != &actual {
+                return Err(SessionStoreError::InvalidDevelopmentRequest {
+                    message: "changeset patch hash does not match its content".to_owned(),
+                });
+            }
+        }
+        if !repository.test_evidence.is_array() {
+            return Err(SessionStoreError::InvalidDevelopmentRequest {
+                message: "changeset test evidence must be an array".to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn valid_git_sha(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn parse_development_value<T>(value: String) -> Result<T, SessionStoreError>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    value
+        .parse()
+        .map_err(|error| SessionStoreError::InvalidPersistedValue(format!("{error}")))
 }
 
 #[derive(Debug)]
@@ -1252,12 +2045,12 @@ impl TryFrom<SessionWorkspaceRow> for SessionWorkspace {
 #[cfg(test)]
 mod tests {
     use centaur_session_core::{
-        HarnessType, MessageRole, SessionMessageInput, ThreadKey,
+        ExecutionStatus, HarnessType, MessageRole, SessionMessageInput, ThreadKey,
         development::{
-            AcceptDevelopmentTask, CompleteWorkspacePreparation, ConfirmRepositorySelection,
-            DevelopmentChannel, DevelopmentInitiator, ExecutionBlocker, FailedRepositorySnapshot,
-            PreparedRepositorySnapshot, ResolvedRepository, SelectionFlowState, SelectionKind,
-            WorkspaceState,
+            AcceptDevelopmentTask, ChangeSetState, CompleteWorkspacePreparation,
+            ConfirmRepositorySelection, DevelopmentChannel, DevelopmentInitiator, ExecutionBlocker,
+            FailedRepositorySnapshot, PreparedRepositorySnapshot, ResolvedRepository,
+            SelectionFlowState, SelectionKind, WorkspaceState,
         },
     };
     use serde_json::json;
@@ -1872,6 +2665,345 @@ mod tests {
             execution.blocking_reason,
             Some(ExecutionBlocker::WorkspaceProvisioning)
         );
+    }
+
+    #[tokio::test]
+    async fn changeset_collection_is_leased_and_persists_immutable_artifacts() {
+        use centaur_session_core::development::{
+            CollectedChangeSetRepositoryState, CompleteChangeSetCollection,
+            CompleteChangeSetRepository,
+        };
+        use sha2::{Digest, Sha256};
+
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let accepted = store
+            .accept_development_task(&development_task("changeset-persist"))
+            .await
+            .expect("accept task");
+        store
+            .confirm_repository_selection(&ConfirmRepositorySelection {
+                selection_flow_id: accepted.selection_flow_id,
+                expected_version: 1,
+                decided_by_principal_id: "principal-1".to_owned(),
+                repositories: vec![resolved_repository(42)],
+            })
+            .await
+            .expect("confirm repository");
+        let claim = store
+            .claim_workspace_preparation(
+                &accepted.workspace_id,
+                "workspace-owner",
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .expect("claim workspace");
+        let base_sha = "a".repeat(40);
+        store
+            .complete_workspace_preparation(&CompleteWorkspacePreparation {
+                workspace_id: accepted.workspace_id.clone(),
+                attempt: claim.workspace.preparation_attempt,
+                lease_owner: "workspace-owner".to_owned(),
+                storage_ref: "workspace-test".to_owned(),
+                prepared: vec![PreparedRepositorySnapshot {
+                    repository_id: "gitlab:42".parse().unwrap(),
+                    base_sha: base_sha.clone(),
+                    local_branch: "centaur/test".to_owned(),
+                    head_sha: base_sha.clone(),
+                }],
+                failed: Vec::new(),
+            })
+            .await
+            .expect("ready workspace");
+        store
+            .complete_execution(&accepted.execution_id)
+            .await
+            .expect("complete execution");
+        let collecting = store
+            .begin_changeset_collection(&accepted.execution_id, "collector-a")
+            .await
+            .expect("begin collection")
+            .expect("development execution has workspace");
+        let duplicate = store
+            .begin_changeset_collection(&accepted.execution_id, "collector-b")
+            .await
+            .expect("idempotent begin")
+            .expect("same changeset");
+        assert_eq!(collecting.changeset_id, duplicate.changeset_id);
+        assert_eq!(collecting.state, ChangeSetState::Collecting);
+        assert!(matches!(
+            store
+                .claim_changeset_collection(
+                    &collecting.changeset_id,
+                    "collector-b",
+                    std::time::Duration::from_secs(30),
+                )
+                .await,
+            Err(crate::SessionStoreError::DevelopmentConflict { .. })
+        ));
+        let claim = store
+            .claim_changeset_collection(
+                &collecting.changeset_id,
+                "collector-a",
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .expect("renew owned collection");
+        assert_eq!(claim.repositories.len(), 1);
+
+        let head_sha = "b".repeat(40);
+        let patch = b"diff --git a/README.md b/README.md\n".to_vec();
+        let patch_hash = format!("sha256:{}", hex::encode(Sha256::digest(&patch)));
+        let changed_repository = CompleteChangeSetRepository {
+            repository_id: "gitlab:42".parse().unwrap(),
+            state: CollectedChangeSetRepositoryState::Changed,
+            base_sha: base_sha.clone(),
+            recorded_head_sha: base_sha.clone(),
+            head_sha: Some(head_sha.clone()),
+            commit_metadata: json!([{"sha": head_sha}]),
+            changed_file_count: 1,
+            additions: 1,
+            deletions: 0,
+            patch_hash: Some(patch_hash.clone()),
+            patch: patch.clone(),
+            test_evidence: json!([{"command": "cargo test", "status": "passed"}]),
+            failure_code: None,
+            failure_message: None,
+        };
+        let mut mismatched_repository = changed_repository.clone();
+        mismatched_repository.base_sha = "c".repeat(40);
+        assert!(matches!(
+            store
+                .complete_changeset_collection(&CompleteChangeSetCollection {
+                    changeset_id: collecting.changeset_id.clone(),
+                    lease_owner: "collector-a".to_owned(),
+                    repositories: vec![mismatched_repository],
+                })
+                .await,
+            Err(crate::SessionStoreError::DevelopmentConflict { .. })
+        ));
+        let completed = store
+            .complete_changeset_collection(&CompleteChangeSetCollection {
+                changeset_id: collecting.changeset_id.clone(),
+                lease_owner: "collector-a".to_owned(),
+                repositories: vec![changed_repository],
+            })
+            .await
+            .expect("complete collection")
+            .expect("changed workspace creates review");
+        assert_eq!(completed.state, ChangeSetState::Ready);
+        assert_eq!(completed.repositories.len(), 1);
+        assert_eq!(
+            completed.repositories[0].patch_hash.as_deref(),
+            Some(patch_hash.as_str())
+        );
+        assert_eq!(
+            completed.repositories[0].test_evidence,
+            json!([{"command": "cargo test", "status": "passed"}])
+        );
+        let artifact_ref = completed.repositories[0]
+            .patch_artifact_ref
+            .as_deref()
+            .unwrap();
+        assert_eq!(
+            store
+                .get_changeset_artifact(
+                    &completed.changeset_id,
+                    artifact_ref,
+                    "principal-1",
+                    false,
+                )
+                .await
+                .unwrap(),
+            patch
+        );
+        assert!(matches!(
+            store
+                .get_changeset(&completed.changeset_id, "principal-2", false)
+                .await,
+            Err(crate::SessionStoreError::DevelopmentForbidden { .. })
+        ));
+        assert_eq!(
+            store
+                .workspace_for_session(&accepted.thread_key)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            WorkspaceState::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn execution_completion_atomically_starts_collection_and_fences_next_execution() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let accepted = store
+            .accept_development_task(&development_task("changeset-atomic"))
+            .await
+            .expect("accept task");
+        store
+            .confirm_repository_selection(&ConfirmRepositorySelection {
+                selection_flow_id: accepted.selection_flow_id,
+                expected_version: 1,
+                decided_by_principal_id: "principal-1".to_owned(),
+                repositories: Vec::new(),
+            })
+            .await
+            .expect("confirm no repository");
+        let workspace_claim = store
+            .claim_workspace_preparation(
+                &accepted.workspace_id,
+                "workspace-owner",
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .expect("claim workspace");
+        store
+            .complete_workspace_preparation(&CompleteWorkspacePreparation {
+                workspace_id: accepted.workspace_id,
+                attempt: workspace_claim.workspace.preparation_attempt,
+                lease_owner: "workspace-owner".to_owned(),
+                storage_ref: "workspace-atomic".to_owned(),
+                prepared: Vec::new(),
+                failed: Vec::new(),
+            })
+            .await
+            .expect("ready workspace");
+        assert!(
+            store
+                .mark_execution_running(&accepted.execution_id)
+                .await
+                .expect("mark running")
+                .claimed
+        );
+        assert!(
+            store
+                .claim_stdout_owner(
+                    &accepted.execution_id,
+                    "stdout-owner",
+                    std::time::Duration::from_secs(30),
+                )
+                .await
+                .expect("claim stdout")
+        );
+
+        let completed = store
+            .complete_development_execution_and_begin_collection(
+                &accepted.execution_id,
+                "stdout-owner",
+                "collector-owner",
+            )
+            .await
+            .expect("complete and collect")
+            .expect("owned execution completes");
+        let changeset_id = completed
+            .changeset_id
+            .expect("development execution creates changeset");
+        assert_eq!(completed.execution.status, ExecutionStatus::Completed);
+        assert_eq!(
+            store
+                .get_changeset(&changeset_id, "principal-1", false)
+                .await
+                .expect("load changeset")
+                .state,
+            ChangeSetState::Collecting
+        );
+        assert_eq!(
+            store
+                .workspace_for_session(&accepted.thread_key)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            WorkspaceState::Collecting
+        );
+        assert!(matches!(
+            store
+                .create_execution(&accepted.thread_key, None, json!({}))
+                .await,
+            Err(crate::SessionStoreError::DevelopmentConflict { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn unchanged_collection_creates_no_review_and_releases_workspace() {
+        use centaur_session_core::development::{
+            CollectedChangeSetRepositoryState, CompleteChangeSetCollection,
+            CompleteChangeSetRepository,
+        };
+
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let accepted = store
+            .accept_development_task(&development_task("changeset-empty"))
+            .await
+            .expect("accept task");
+        store
+            .confirm_repository_selection(&ConfirmRepositorySelection {
+                selection_flow_id: accepted.selection_flow_id,
+                expected_version: 1,
+                decided_by_principal_id: "principal-1".to_owned(),
+                repositories: Vec::new(),
+            })
+            .await
+            .expect("confirm no repository");
+        let workspace_claim = store
+            .claim_workspace_preparation(
+                &accepted.workspace_id,
+                "workspace-owner",
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .expect("claim workspace");
+        store
+            .complete_workspace_preparation(&CompleteWorkspacePreparation {
+                workspace_id: accepted.workspace_id,
+                attempt: workspace_claim.workspace.preparation_attempt,
+                lease_owner: "workspace-owner".to_owned(),
+                storage_ref: "workspace-empty".to_owned(),
+                prepared: Vec::new(),
+                failed: Vec::new(),
+            })
+            .await
+            .expect("ready empty workspace");
+        store
+            .complete_execution(&accepted.execution_id)
+            .await
+            .expect("complete execution");
+        let changeset = store
+            .begin_changeset_collection(&accepted.execution_id, "collector")
+            .await
+            .unwrap()
+            .unwrap();
+        let completed = store
+            .complete_changeset_collection(&CompleteChangeSetCollection {
+                changeset_id: changeset.changeset_id.clone(),
+                lease_owner: "collector".to_owned(),
+                repositories: Vec::<CompleteChangeSetRepository>::new(),
+            })
+            .await
+            .expect("complete empty collection");
+        assert!(completed.is_none());
+        assert!(matches!(
+            store
+                .get_changeset(&changeset.changeset_id, "principal-1", false)
+                .await,
+            Err(crate::SessionStoreError::DevelopmentNotFound { .. })
+        ));
+        assert_eq!(
+            store
+                .workspace_for_session(&accepted.thread_key)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            WorkspaceState::Ready
+        );
+        let _ = CollectedChangeSetRepositoryState::Unchanged;
     }
 
     fn development_task(label: &str) -> AcceptDevelopmentTask {

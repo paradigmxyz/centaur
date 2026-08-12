@@ -75,6 +75,7 @@ pub struct AppState {
     codex_nanocodex_rollout_percent: u8,
     repository_resolver: Option<Arc<dyn RepositoryResolver>>,
     repository_catalog: Option<Arc<dyn RepositoryCatalog>>,
+    development_authorizer: Arc<dyn crate::development::DevelopmentAuthorizer>,
 }
 
 #[derive(Clone)]
@@ -92,6 +93,7 @@ impl AppState {
             codex_nanocodex_rollout_percent: 0,
             repository_resolver: None,
             repository_catalog: None,
+            development_authorizer: Arc::new(crate::development::ConsoleJwtDevelopmentAuthorizer),
         }
     }
 
@@ -112,6 +114,20 @@ impl AppState {
         self.repository_resolver = Some(catalog.clone());
         self.repository_catalog = Some(catalog);
         self
+    }
+
+    pub fn with_development_authorizer(
+        mut self,
+        authorizer: Arc<dyn crate::development::DevelopmentAuthorizer>,
+    ) -> Self {
+        self.development_authorizer = authorizer;
+        self
+    }
+
+    pub(crate) fn development_authorizer(
+        &self,
+    ) -> Arc<dyn crate::development::DevelopmentAuthorizer> {
+        self.development_authorizer.clone()
     }
 
     pub(crate) fn repository_resolver(&self) -> Result<Arc<dyn RepositoryResolver>, ApiError> {

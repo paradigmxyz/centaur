@@ -19,9 +19,9 @@ const WORKSPACE_PREPARATION_LEASE: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Clone)]
 pub(super) struct WorkspaceRuntime {
-    manager: Arc<dyn WorkspaceManager>,
+    pub(super) manager: Arc<dyn WorkspaceManager>,
     credential_ref: String,
-    lease_owner: String,
+    pub(super) lease_owner: String,
 }
 
 impl WorkspaceRuntime {
@@ -293,8 +293,8 @@ mod workspace_preparation_tests {
     use centaur_iron_control::{IronControlError, Principal};
     use centaur_sandbox_core::{
         ObservedSandbox, SandboxBackend, SandboxError, SandboxHandle, SandboxId, SandboxIo,
-        SandboxResult, SandboxSpec, SandboxStatus, WorkspaceManager, WorkspacePreparation,
-        WorkspacePreparationRequest,
+        SandboxResult, SandboxSpec, SandboxStatus, WorkspaceCollection, WorkspaceCollectionRequest,
+        WorkspaceManager, WorkspacePreparation, WorkspacePreparationRequest,
     };
     use centaur_session_core::{
         HarnessType, MessageRole, SessionMessageInput,
@@ -339,6 +339,17 @@ mod workspace_preparation_tests {
                 storage_ref: "workspace-test-pvc".to_owned(),
                 prepared,
                 failed: Vec::new(),
+            })
+        }
+
+        async fn collect(
+            &self,
+            request: WorkspaceCollectionRequest,
+        ) -> Result<WorkspaceCollection, centaur_sandbox_core::WorkspaceError> {
+            Ok(WorkspaceCollection {
+                workspace_id: request.workspace_id,
+                execution_id: request.execution_id,
+                repositories: Vec::new(),
             })
         }
     }

@@ -7,7 +7,7 @@ use std::{collections::BTreeMap, str::FromStr, time::Duration};
 use centaur_session_core::{
     ExecutionStatus, HarnessType, MessageRole, SandboxCapabilities, SandboxRepoCacheAccess,
     Session, SessionEvent, SessionExecution, SessionMessage, SessionMessageInput, SessionStatus,
-    ThreadKey, empty_object,
+    ThreadKey, development::WorkspaceState, empty_object,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -25,6 +25,37 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 pub const SESSION_EVENTS_CHANNEL: &str = "centaur_session_events";
 const DEFAULT_MAX_CONNECTIONS: u32 = 500;
+const DEVELOPMENT_EXECUTION_LOCK_SEED: i64 = 749_203;
+
+async fn lock_development_execution_boundary(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    thread_key: &ThreadKey,
+) -> Result<(), SessionStoreError> {
+    sqlx::query("select pg_advisory_xact_lock(hashtextextended($1, $2))")
+        .bind(thread_key.as_str())
+        .bind(DEVELOPMENT_EXECUTION_LOCK_SEED)
+        .fetch_one(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+pub(crate) async fn lock_development_execution_boundary_for_update(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    execution_id: &str,
+) -> Result<(), SessionStoreError> {
+    let thread_key = sqlx::query_scalar::<_, String>(
+        "select thread_key from session_executions where execution_id = $1",
+    )
+    .bind(execution_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(thread_key) = thread_key {
+        let thread_key = ThreadKey::parse(thread_key)
+            .map_err(|error| SessionStoreError::InvalidPersistedValue(format!("{error}")))?;
+        lock_development_execution_boundary(tx, &thread_key).await?;
+    }
+    Ok(())
+}
 
 #[derive(Clone, Debug)]
 pub struct CreateExecutionResult {
@@ -326,6 +357,43 @@ impl PgSessionStore {
         idempotency_key: Option<&str>,
         metadata: Value,
     ) -> Result<CreateExecutionResult, SessionStoreError> {
+        let mut tx = self.pool.begin().await?;
+        lock_development_execution_boundary(&mut tx, thread_key).await?;
+        if let Some(idempotency_key) = idempotency_key
+            && let Some(row) = sqlx::query_as::<_, CreateExecutionRow>(
+                r#"
+                select false as created, execution_id, idempotency_key, thread_key,
+                       status, blocking_reason, metadata, error, created_at, updated_at,
+                       started_at, completed_at
+                  from session_executions
+                 where thread_key = $1 and idempotency_key = $2
+                "#,
+            )
+            .bind(thread_key.as_str())
+            .bind(idempotency_key)
+            .fetch_optional(&mut *tx)
+            .await?
+        {
+            tx.commit().await?;
+            return row.try_into();
+        }
+        let workspace_state = sqlx::query_scalar::<_, String>(
+            "select state from session_workspaces where thread_key = $1",
+        )
+        .bind(thread_key.as_str())
+        .fetch_optional(&mut *tx)
+        .await?;
+        if workspace_state
+            .as_deref()
+            .is_some_and(|state| state != WorkspaceState::Ready.as_ref())
+        {
+            return Err(SessionStoreError::DevelopmentConflict {
+                message: format!(
+                    "development workspace is {} and cannot start an execution",
+                    workspace_state.as_deref().unwrap_or("unavailable")
+                ),
+            });
+        }
         let execution_id = prefixed_id("exe");
         let row = sqlx::query_as::<_, CreateExecutionRow>(
             r#"
@@ -355,9 +423,9 @@ impl PgSessionStore {
         .bind(idempotency_key)
         .bind(ExecutionStatus::Queued.as_ref())
         .bind(metadata)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await?;
-
+        tx.commit().await?;
         row.try_into()
     }
 

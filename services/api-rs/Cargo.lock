@@ -1059,6 +1059,7 @@ name = "centaur-session-runtime"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.23.1",
  "centaur-iron-control",
  "centaur-sandbox-core",
  "centaur-sandbox-manager",
@@ -1086,8 +1087,10 @@ name = "centaur-session-sqlx"
 version = "0.1.0"
 dependencies = [
  "centaur-session-core",
+ "hex",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "sqlx",
  "thiserror 2.0.19",
  "time",

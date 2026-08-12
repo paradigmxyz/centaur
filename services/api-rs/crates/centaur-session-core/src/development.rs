@@ -5,7 +5,7 @@ use strum::{AsRefStr, Display, EnumString};
 use thiserror::Error;
 use time::OffsetDateTime;
 
-use crate::{HarnessType, SessionMessageInput, ThreadKey};
+use crate::{HarnessType, SessionExecution, SessionMessageInput, ThreadKey};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -157,6 +157,90 @@ pub struct FailedRepositorySnapshot {
     pub failure_message: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DevelopmentChangeSet {
+    pub changeset_id: String,
+    pub workspace_id: String,
+    pub execution_id: String,
+    pub initiator_principal_id: String,
+    pub state: ChangeSetState,
+    pub summary: Option<String>,
+    pub failure_code: Option<String>,
+    pub failure_message: Option<String>,
+    pub repositories: Vec<DevelopmentChangeSetRepository>,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DevelopmentChangeSetRepository {
+    pub changeset_repository_id: String,
+    pub repository_id: RepositoryId,
+    pub display_name: String,
+    pub path_with_namespace: String,
+    pub default_branch: String,
+    pub state: ChangeSetRepositoryState,
+    pub base_sha: String,
+    pub recorded_head_sha: String,
+    pub head_sha: Option<String>,
+    pub commit_metadata: serde_json::Value,
+    pub changed_file_count: i32,
+    pub additions: i32,
+    pub deletions: i32,
+    pub patch_hash: Option<String>,
+    pub patch_artifact_ref: Option<String>,
+    pub test_evidence: serde_json::Value,
+    pub failure_code: Option<String>,
+    pub failure_message: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChangeSetCollectionClaim {
+    pub changeset: DevelopmentChangeSet,
+    pub workspace: SessionWorkspace,
+    pub repositories: Vec<WorkspaceRepositorySnapshot>,
+    pub execution_metadata: serde_json::Value,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompletedDevelopmentExecution {
+    pub execution: SessionExecution,
+    pub changeset_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompleteChangeSetCollection {
+    pub changeset_id: String,
+    pub lease_owner: String,
+    pub repositories: Vec<CompleteChangeSetRepository>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompleteChangeSetRepository {
+    pub repository_id: RepositoryId,
+    pub state: CollectedChangeSetRepositoryState,
+    pub base_sha: String,
+    pub recorded_head_sha: String,
+    pub head_sha: Option<String>,
+    pub commit_metadata: serde_json::Value,
+    pub changed_file_count: i32,
+    pub additions: i32,
+    pub deletions: i32,
+    pub patch_hash: Option<String>,
+    pub patch: Vec<u8>,
+    pub test_evidence: serde_json::Value,
+    pub failure_code: Option<String>,
+    pub failure_message: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CollectedChangeSetRepositoryState {
+    Unchanged,
+    Changed,
+    NeedsAgentCompletion,
+    Failed,
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct RepositoryId(String);
 
@@ -269,6 +353,7 @@ macro_rules! state_enum {
 state_enum!(WorkspaceState {
     AwaitingSelection,
     Provisioning,
+    Collecting,
     Ready,
     Failed,
 });
@@ -298,6 +383,8 @@ impl WorkspaceState {
             (Self::AwaitingSelection, Self::Provisioning)
                 | (Self::Provisioning, Self::Ready | Self::Failed)
                 | (Self::Failed | Self::Ready, Self::Provisioning)
+                | (Self::Ready, Self::Collecting)
+                | (Self::Collecting, Self::Ready)
         );
         allowed
             .then_some(next)
@@ -362,6 +449,12 @@ impl ExecutionBlocker {
 state_enum!(ChangeSetState {
     Collecting,
     Ready,
+    NeedsAgentCompletion,
+    Failed,
+});
+
+state_enum!(ChangeSetRepositoryState {
+    Changed,
     NeedsAgentCompletion,
     Failed,
 });

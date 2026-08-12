@@ -296,29 +296,29 @@ git commit -m "feat: provision persistent session workspaces"
 - Produces `ChangeSetCollector::collect(execution, workspace) -> ChangeSet`.
 - Produces authenticated ChangeSet summary/artifact endpoints.
 
-- [ ] **Step 1: Write failing real-Git tests**
+- [x] **Step 1: Write failing real-Git tests**
 
 Create temporary repositories and prove clean committed changes yield exact base/head SHAs and stable patch hashes; empty changes yield no ChangeSet; dirty/untracked/staged trees, non-descendant heads, missing objects, and rewritten recorded history are non-publishable.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 ```bash
 cargo test -p centaur-session-runtime changeset
 ```
 
-- [ ] **Step 3: Implement a read-only Git command runner**
+- [x] **Step 3: Implement a read-only Git command runner**
 
 Use explicit `git -C <validated-path>` arguments, bounded stdout/stderr, `--no-ext-diff`, and no shell interpolation. Collect `status --porcelain=v1 -z`, `merge-base --is-ancestor`, commit metadata, `diff --binary`, and SHA-256 artifact hashes. The module exposes no stage/commit/reset methods.
 
-- [ ] **Step 4: Persist immutable review state**
+- [x] **Step 4: Persist immutable review state**
 
 Write the ChangeSet and per-repository entries transactionally. Link structured test evidence from Execution metadata/events and store bounded artifacts through an `ArtifactStore` abstraction. Mark incomplete commit contracts `needs_agent_completion`.
 
-- [ ] **Step 5: Add review route authorization tests**
+- [x] **Step 5: Add review route authorization tests**
 
 Require Session owner/shared access for summary and artifact reads. Verify a signed link still returns `403` for an authenticated user without Session access and never follows mutable Workspace HEAD.
 
-- [ ] **Step 6: Verify and commit**
+- [x] **Step 6: Verify and commit**
 
 ```bash
 cargo +nightly fmt --all --check

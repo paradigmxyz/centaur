@@ -3,17 +3,20 @@ use std::{collections::BTreeMap, time::Duration};
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use centaur_sandbox_core::{
-    PreparedWorkspaceRepository, WorkspaceError, WorkspaceManager, WorkspacePreparation,
-    WorkspacePreparationRequest,
+    PreparedWorkspaceRepository, WorkspaceCollection, WorkspaceCollectionRequest, WorkspaceError,
+    WorkspaceManager, WorkspacePreparation, WorkspacePreparationRequest,
 };
 use k8s_openapi::api::{batch::v1::Job, core::v1::PersistentVolumeClaim};
 use kube::{
     Api, Client, Error,
-    api::{ListParams, LogParams, Patch, PatchParams, PostParams},
+    api::{AttachParams, DeleteParams, ListParams, LogParams, Patch, PatchParams, PostParams},
 };
 use serde::Serialize;
 use serde_json::json;
-use tokio::time::{Instant, sleep};
+use tokio::{
+    io::AsyncReadExt,
+    time::{Instant, sleep},
+};
 
 const MANAGED_BY_LABEL: &str = "centaur.ai/managed-by";
 const WORKSPACE_ID_LABEL: &str = "centaur.ai/workspace-id";
@@ -24,6 +27,8 @@ const TOKEN_VOLUME: &str = "gitlab-token";
 const TOKEN_MOUNT_PATH: &str = "/var/run/secrets/centaur-gitlab";
 const TOKEN_FILE_PATH: &str = "/var/run/secrets/centaur-gitlab/token";
 const RESULT_PREFIX: &str = "CENTAUR_WORKSPACE_RESULT=";
+const COLLECTION_READY_MARKER: &str = "CENTAUR_CHANGESET_READY";
+const MAX_COLLECTION_RESULT_BYTES: usize = 3 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct KubeWorkspaceConfig {
@@ -201,6 +206,136 @@ impl WorkspaceManager for KubeWorkspaceManager {
         let job_name = self.ensure_job(&request, &storage_ref).await?;
         self.wait_for_result(&request, &job_name).await
     }
+
+    async fn collect(
+        &self,
+        request: WorkspaceCollectionRequest,
+    ) -> Result<WorkspaceCollection, WorkspaceError> {
+        request.validate()?;
+        let job_name = collection_job_name(&request.execution_id);
+        match self.jobs().get(&job_name).await {
+            Ok(_) => {}
+            Err(error) if is_not_found(&error) => {
+                let job = build_collection_job(&request, &self.config)?;
+                match self.jobs().create(&PostParams::default(), &job).await {
+                    Ok(_) => {}
+                    Err(Error::Api(error)) if error.code == 409 => {}
+                    Err(_) => {
+                        return Err(WorkspaceError::Backend(
+                            "workspace collector could not start".to_owned(),
+                        ));
+                    }
+                }
+            }
+            Err(_) => {
+                return Err(WorkspaceError::Backend(
+                    "workspace collector lookup failed".to_owned(),
+                ));
+            }
+        }
+        let deadline = Instant::now() + self.config.ready_timeout;
+        loop {
+            let status = self
+                .jobs()
+                .get(&job_name)
+                .await
+                .map_err(|_| WorkspaceError::Backend("workspace collector disappeared".to_owned()))?
+                .status
+                .unwrap_or_default();
+            if status.failed.unwrap_or_default() > 0 {
+                let _ = self
+                    .jobs()
+                    .delete(&job_name, &DeleteParams::default())
+                    .await;
+                return Err(WorkspaceError::Backend(
+                    "workspace collector failed".to_owned(),
+                ));
+            }
+            if let Some(result) = self.collection_result_if_ready(&request, &job_name).await? {
+                return Ok(result);
+            }
+            if Instant::now() >= deadline {
+                return Err(WorkspaceError::Backend(
+                    "workspace collector timed out".to_owned(),
+                ));
+            }
+            sleep(Duration::from_millis(500)).await;
+        }
+    }
+}
+
+impl KubeWorkspaceManager {
+    async fn collection_result_if_ready(
+        &self,
+        request: &WorkspaceCollectionRequest,
+        job_name: &str,
+    ) -> Result<Option<WorkspaceCollection>, WorkspaceError> {
+        let pods: Api<k8s_openapi::api::core::v1::Pod> =
+            Api::namespaced(self.client.clone(), &self.config.namespace);
+        let listed = pods
+            .list(&ListParams::default().labels(&format!("job-name={job_name}")))
+            .await
+            .map_err(|_| WorkspaceError::Backend("collection result is unavailable".to_owned()))?;
+        let Some(pod_name) = listed.items.into_iter().find_map(|pod| pod.metadata.name) else {
+            return Ok(None);
+        };
+        let logs = pods
+            .logs(
+                &pod_name,
+                &LogParams {
+                    container: Some("collector".to_owned()),
+                    tail_lines: Some(5),
+                    ..LogParams::default()
+                },
+            )
+            .await
+            .map_err(|_| WorkspaceError::Backend("collection result is unavailable".to_owned()))?;
+        if !logs.lines().any(|line| line == COLLECTION_READY_MARKER) {
+            return Ok(None);
+        }
+        let params = AttachParams::default()
+            .container("collector".to_owned())
+            .stdout(true)
+            .stderr(false)
+            .stdin(false)
+            .tty(false);
+        let mut attached = pods
+            .exec(
+                &pod_name,
+                [
+                    "python3",
+                    "-c",
+                    "import sys;sys.stdout.buffer.write(open('/result/result.json','rb').read())",
+                ],
+                &params,
+            )
+            .await
+            .map_err(|_| WorkspaceError::Backend("collection result is unavailable".to_owned()))?;
+        let mut stdout = attached
+            .stdout()
+            .ok_or_else(|| WorkspaceError::Backend("collection result is unavailable".to_owned()))?
+            .take((MAX_COLLECTION_RESULT_BYTES + 1) as u64);
+        let mut bytes = Vec::new();
+        stdout
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|_| WorkspaceError::Backend("collection result is unavailable".to_owned()))?;
+        if bytes.len() > MAX_COLLECTION_RESULT_BYTES {
+            return Err(WorkspaceError::Backend(
+                "collection result exceeds the size limit".to_owned(),
+            ));
+        }
+        let result = serde_json::from_slice::<WorkspaceCollection>(&bytes)
+            .map_err(|_| WorkspaceError::Backend("collection result is invalid".to_owned()))?;
+        if result.workspace_id != request.workspace_id
+            || result.execution_id != request.execution_id
+        {
+            return Err(WorkspaceError::Backend(
+                "collection result does not match the request".to_owned(),
+            ));
+        }
+        Ok(Some(result))
+    }
 }
 
 #[derive(Serialize)]
@@ -352,6 +487,80 @@ fn build_workspace_job(
     .map_err(|error| WorkspaceError::Invalid(format!("workspace Job: {error}")))
 }
 
+fn build_collection_job(
+    request: &WorkspaceCollectionRequest,
+    config: &KubeWorkspaceConfig,
+) -> Result<Job, WorkspaceError> {
+    let name = collection_job_name(&request.execution_id);
+    let encoded = STANDARD.encode(
+        serde_json::to_vec(request)
+            .map_err(|error| WorkspaceError::Invalid(format!("collection input: {error}")))?,
+    );
+    serde_json::from_value(json!({
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {
+            "name": name,
+            "namespace": config.namespace,
+            "labels": collection_labels(request),
+        },
+        "spec": {
+            "backoffLimit": 0,
+            "activeDeadlineSeconds": 3660,
+            "ttlSecondsAfterFinished": 3600,
+            "template": {
+                "metadata": {"labels": collection_labels(request)},
+                "spec": {
+                    "restartPolicy": "Never",
+                    "serviceAccountName": config.service_account_name,
+                    "automountServiceAccountToken": false,
+                    "securityContext": {"fsGroup": 1000},
+                    "containers": [{
+                        "name": "collector",
+                        "image": config.provisioner_image,
+                        "imagePullPolicy": config.image_pull_policy,
+                        "command": ["python3", "-c", COLLECTION_SCRIPT],
+                        "env": [
+                            {"name": "CENTAUR_CHANGESET_REQUEST_B64", "value": encoded},
+                            {"name": "GIT_TERMINAL_PROMPT", "value": "0"},
+                            {"name": "GIT_OPTIONAL_LOCKS", "value": "0"},
+                            {"name": "GIT_CONFIG_NOSYSTEM", "value": "1"},
+                            {"name": "GIT_CONFIG_GLOBAL", "value": "/dev/null"}
+                        ],
+                    "volumeMounts": [{
+                        "name": WORKSPACE_VOLUME,
+                        "mountPath": "/workspace",
+                        "readOnly": true
+                    }, {
+                        "name": "result",
+                        "mountPath": "/result"
+                    }],
+                        "securityContext": {
+                            "allowPrivilegeEscalation": false,
+                            "readOnlyRootFilesystem": true,
+                            "runAsNonRoot": true,
+                            "runAsUser": 1000,
+                            "capabilities": {"drop": ["ALL"]}
+                        },
+                        "resources": {
+                            "requests": {"cpu": "25m", "memory": "64Mi"},
+                            "limits": {"cpu": "1", "memory": "256Mi"}
+                        }
+                    }],
+                    "volumes": [{
+                        "name": WORKSPACE_VOLUME,
+                        "persistentVolumeClaim": {"claimName": request.storage_ref}
+                    }, {
+                        "name": "result",
+                        "emptyDir": {"sizeLimit": "4Mi"}
+                    }]
+                }
+            }
+        }
+    }))
+    .map_err(|error| WorkspaceError::Invalid(format!("collection Job: {error}")))
+}
+
 fn workspace_labels(request: &WorkspacePreparationRequest) -> BTreeMap<String, String> {
     BTreeMap::from([
         (MANAGED_BY_LABEL.to_owned(), MANAGED_BY_VALUE.to_owned()),
@@ -366,12 +575,30 @@ fn workspace_labels(request: &WorkspacePreparationRequest) -> BTreeMap<String, S
     ])
 }
 
+fn collection_labels(request: &WorkspaceCollectionRequest) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (MANAGED_BY_LABEL.to_owned(), MANAGED_BY_VALUE.to_owned()),
+        (
+            WORKSPACE_ID_LABEL.to_owned(),
+            label_value(&request.workspace_id),
+        ),
+        (
+            "centaur.ai/execution-id".to_owned(),
+            label_value(&request.execution_id),
+        ),
+    ])
+}
+
 fn workspace_pvc_name(workspace_id: &str) -> String {
     resource_name("workspace", workspace_id, None)
 }
 
 fn workspace_job_name(workspace_id: &str, attempt: u32) -> String {
     resource_name("workspace", workspace_id, Some(attempt))
+}
+
+fn collection_job_name(execution_id: &str) -> String {
+    resource_name("changeset", execution_id, None)
 }
 
 fn resource_name(prefix: &str, workspace_id: &str, attempt: Option<u32>) -> String {
@@ -522,9 +749,131 @@ encoded = base64.b64encode(json.dumps(result, separators=(",", ":")).encode()).d
 print("CENTAUR_WORKSPACE_RESULT=" + encoded)
 "##;
 
+const COLLECTION_SCRIPT: &str = r##"
+import base64, hashlib, json, os, pathlib, subprocess, time
+
+request = json.loads(base64.b64decode(os.environ["CENTAUR_CHANGESET_REQUEST_B64"]))
+workspace = pathlib.Path("/workspace").resolve()
+results = []
+total_patch_bytes = 0
+
+def git(repo, *args, check=True):
+    completed = subprocess.run(
+        ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "-c", "diff.external=", *args],
+        cwd=repo,
+        env=dict(os.environ),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        timeout=30,
+        check=False,
+    )
+    if check and completed.returncode != 0:
+        raise RuntimeError("git command failed")
+    if len(completed.stdout) > 2 * 1024 * 1024:
+        raise RuntimeError("git output too large")
+    return completed
+
+def failed(repository, state, code, message, head=None):
+    return {
+        "repository_id": repository["repository_id"],
+        "state": state,
+        "base_sha": repository["base_sha"],
+        "recorded_head_sha": repository["recorded_head_sha"],
+        "head_sha": head,
+        "commit_metadata": [],
+        "changed_file_count": 0,
+        "additions": 0,
+        "deletions": 0,
+        "patch_hash": None,
+        "patch_base64": None,
+        "failure_code": code,
+        "failure_message": message,
+    }
+
+for repository in request["repositories"]:
+    try:
+        repo = (workspace / repository["relative_path"]).resolve()
+        if workspace not in repo.parents or not (repo / ".git").is_dir():
+            results.append(failed(repository, "failed", "repository_missing", "repository is unavailable"))
+            continue
+        base = repository["base_sha"]
+        recorded = repository["recorded_head_sha"]
+        if git(repo, "cat-file", "-e", base + "^{commit}", check=False).returncode != 0:
+            results.append(failed(repository, "failed", "base_object_missing", "recorded base commit is unavailable"))
+            continue
+        if git(repo, "cat-file", "-e", recorded + "^{commit}", check=False).returncode != 0:
+            results.append(failed(repository, "failed", "recorded_head_object_missing", "recorded repository head is unavailable"))
+            continue
+        head = git(repo, "rev-parse", "--verify", "HEAD^{commit}").stdout.decode().strip()
+        branch = git(repo, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
+        if branch.returncode != 0 or branch.stdout.decode().strip() != repository["local_branch"]:
+            results.append(failed(repository, "needs_agent_completion", "branch_mismatch", "repository is not on its recorded branch", head))
+            continue
+        if git(repo, "merge-base", "--is-ancestor", base, head, check=False).returncode != 0:
+            results.append(failed(repository, "failed", "head_not_descendant", "repository head does not descend from the recorded base", head))
+            continue
+        if git(repo, "merge-base", "--is-ancestor", recorded, head, check=False).returncode != 0:
+            results.append(failed(repository, "failed", "recorded_history_rewritten", "repository head rewrites recorded history", head))
+            continue
+        if git(repo, "status", "--porcelain=v1", "-z").stdout:
+            results.append(failed(repository, "needs_agent_completion", "working_tree_dirty", "repository has uncommitted changes", head))
+            continue
+        if head == recorded:
+            result = failed(repository, "unchanged", None, None, head)
+            result["failure_code"] = None
+            result["failure_message"] = None
+            results.append(result)
+            continue
+        patch = git(repo, "diff", "--binary", "--no-ext-diff", "--no-textconv", base, head, "--").stdout
+        total_patch_bytes += len(patch)
+        if not patch or total_patch_bytes > 2 * 1024 * 1024:
+            results.append(failed(repository, "failed", "patch_too_large", "review patch exceeds the size limit", head))
+            continue
+        names = [item for item in git(repo, "diff", "--name-only", "-z", base, head, "--").stdout.split(b"\0") if item]
+        additions = deletions = 0
+        for line in git(repo, "diff", "--numstat", base, head, "--").stdout.decode(errors="replace").splitlines():
+            fields = line.split("\t", 2)
+            if len(fields) >= 2:
+                additions += int(fields[0]) if fields[0].isdigit() else 0
+                deletions += int(fields[1]) if fields[1].isdigit() else 0
+        log = git(repo, "log", "--reverse", "--format=%H%x1f%an%x1f%ae%x1f%aI%x1f%s%x1e", base + ".." + head, "--").stdout.decode(errors="replace")
+        commits = []
+        for record in log.split("\x1e"):
+            fields = record.strip().split("\x1f", 4)
+            if len(fields) == 5:
+                commits.append({"sha": fields[0], "author_name": fields[1], "author_email": fields[2], "authored_at": fields[3], "subject": fields[4]})
+        results.append({
+            "repository_id": repository["repository_id"],
+            "state": "changed",
+            "base_sha": base,
+            "recorded_head_sha": recorded,
+            "head_sha": head,
+            "commit_metadata": commits,
+            "changed_file_count": len(names),
+            "additions": additions,
+            "deletions": deletions,
+            "patch_hash": "sha256:" + hashlib.sha256(patch).hexdigest(),
+            "patch_base64": base64.b64encode(patch).decode(),
+            "failure_code": None,
+            "failure_message": None,
+        })
+    except Exception:
+        results.append(failed(repository, "failed", "collection_failed", "repository collection failed"))
+
+result = {"workspace_id": request["workspace_id"], "execution_id": request["execution_id"], "repositories": results}
+result_path = pathlib.Path("/result/result.json")
+result_path.write_text(json.dumps(result, separators=(",", ":")))
+print("CENTAUR_CHANGESET_READY", flush=True)
+time.sleep(3600)
+"##;
+
 #[cfg(test)]
 mod tests {
-    use centaur_sandbox_core::{PreparedWorkspaceRepository, WorkspaceRepository};
+    use centaur_sandbox_core::{
+        PreparedWorkspaceRepository, WorkspaceCollectionRepository, WorkspaceCollectionRequest,
+        WorkspaceRepository,
+    };
 
     use super::*;
 
@@ -635,5 +984,50 @@ mod tests {
                 .all(|item| item["name"] != "CENTAUR_GIT_TOKEN_FILE")
         );
         assert!(volumes.iter().all(|item| item["name"] != TOKEN_VOLUME));
+    }
+
+    #[test]
+    fn changeset_collector_is_read_only_and_has_no_credentials() {
+        let config = KubeWorkspaceConfig::new("centaur", "centaur-api:latest");
+        let request = WorkspaceCollectionRequest {
+            workspace_id: "wsp_abc_123".to_owned(),
+            execution_id: "exe_abc_123".to_owned(),
+            storage_ref: "workspace-wsp-abc-123".to_owned(),
+            repositories: vec![WorkspaceCollectionRepository {
+                repository_id: "gitlab:42".to_owned(),
+                path_with_namespace: "platform/project".to_owned(),
+                relative_path: "repos/42-project".to_owned(),
+                base_sha: "a".repeat(40),
+                recorded_head_sha: "b".repeat(40),
+                local_branch: "centaur/test".to_owned(),
+            }],
+        };
+        let job = build_collection_job(&request, &config).unwrap();
+        let value = serde_json::to_value(job).unwrap();
+        assert_eq!(value["metadata"]["name"], "changeset-exe-abc-123");
+        let pod = &value["spec"]["template"]["spec"];
+        assert_eq!(pod["automountServiceAccountToken"], false);
+        assert_eq!(pod["containers"][0]["volumeMounts"][0]["readOnly"], true);
+        assert_eq!(pod["volumes"].as_array().unwrap().len(), 2);
+        assert_eq!(pod["volumes"][1]["emptyDir"]["sizeLimit"], "4Mi");
+        let rendered = serde_json::to_string(&value).unwrap();
+        assert!(!rendered.contains("secretName"));
+        assert!(!rendered.contains("GIT_ASKPASS"));
+        for command in [
+            "\"add\"",
+            "\"commit\"",
+            "\"reset\"",
+            "\"checkout\"",
+            "\"push\"",
+        ] {
+            assert!(
+                !COLLECTION_SCRIPT.contains(command),
+                "found mutating git command {command}"
+            );
+        }
+        assert!(rendered.contains("GIT_OPTIONAL_LOCKS"));
+        assert!(COLLECTION_SCRIPT.contains("core.fsmonitor=false"));
+        assert!(COLLECTION_SCRIPT.contains("core.untrackedCache=false"));
+        assert!(COLLECTION_SCRIPT.contains("--no-ext-diff"));
     }
 }

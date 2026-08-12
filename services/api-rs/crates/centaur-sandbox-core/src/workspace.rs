@@ -170,6 +170,96 @@ pub struct WorkspacePreparation {
     pub failed: Vec<FailedWorkspaceRepository>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceCollectionRequest {
+    pub workspace_id: String,
+    pub execution_id: String,
+    pub storage_ref: String,
+    pub repositories: Vec<WorkspaceCollectionRepository>,
+}
+
+impl WorkspaceCollectionRequest {
+    pub fn validate(&self) -> Result<(), WorkspaceError> {
+        for (name, value) in [
+            ("workspace_id", self.workspace_id.as_str()),
+            ("execution_id", self.execution_id.as_str()),
+            ("storage_ref", self.storage_ref.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return Err(WorkspaceError::Invalid(format!("{name} must not be empty")));
+            }
+        }
+        let mut repository_ids = HashSet::with_capacity(self.repositories.len());
+        let mut relative_paths = HashSet::with_capacity(self.repositories.len());
+        for repository in &self.repositories {
+            let project_id = gitlab_project_id(&repository.repository_id)?;
+            if repository.relative_path
+                != repository_relative_path(project_id, &repository.path_with_namespace)
+            {
+                return Err(WorkspaceError::Invalid(format!(
+                    "repository {} has an invalid collection path",
+                    repository.repository_id
+                )));
+            }
+            validate_git_sha(&repository.base_sha)?;
+            validate_git_sha(&repository.recorded_head_sha)?;
+            if repository.local_branch.trim().is_empty()
+                || !repository_ids.insert(repository.repository_id.as_str())
+                || !relative_paths.insert(repository.relative_path.as_str())
+            {
+                return Err(WorkspaceError::Invalid(
+                    "workspace collection contains invalid repository metadata".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceCollectionRepository {
+    pub repository_id: String,
+    pub path_with_namespace: String,
+    pub relative_path: String,
+    pub base_sha: String,
+    pub recorded_head_sha: String,
+    pub local_branch: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceCollection {
+    pub workspace_id: String,
+    pub execution_id: String,
+    pub repositories: Vec<CollectedWorkspaceRepository>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CollectedWorkspaceRepository {
+    pub repository_id: String,
+    pub state: WorkspaceCollectionState,
+    pub base_sha: String,
+    pub recorded_head_sha: String,
+    pub head_sha: Option<String>,
+    #[serde(default)]
+    pub commit_metadata: Vec<serde_json::Value>,
+    pub changed_file_count: u32,
+    pub additions: u32,
+    pub deletions: u32,
+    pub patch_hash: Option<String>,
+    pub patch_base64: Option<String>,
+    pub failure_code: Option<String>,
+    pub failure_message: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceCollectionState {
+    Unchanged,
+    Changed,
+    NeedsAgentCompletion,
+    Failed,
+}
+
 impl WorkspacePreparation {
     pub fn is_ready(&self) -> bool {
         self.failed.is_empty()
@@ -206,6 +296,11 @@ pub trait WorkspaceManager: Send + Sync {
         &self,
         request: WorkspacePreparationRequest,
     ) -> Result<WorkspacePreparation, WorkspaceError>;
+
+    async fn collect(
+        &self,
+        request: WorkspaceCollectionRequest,
+    ) -> Result<WorkspaceCollection, WorkspaceError>;
 }
 
 #[derive(Debug, Error)]
@@ -255,6 +350,15 @@ fn gitlab_project_id(repository_id: &str) -> Result<u64, WorkspaceError> {
         )));
     }
     Ok(project_id)
+}
+
+fn validate_git_sha(value: &str) -> Result<(), WorkspaceError> {
+    if value.len() != 40 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(WorkspaceError::Invalid(
+            "workspace collection contains an invalid Git SHA".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 pub fn repository_relative_path(project_id: u64, path_with_namespace: &str) -> String {
@@ -365,5 +469,46 @@ mod tests {
         let serialized = serde_json::to_string(&spec).unwrap();
         assert!(!serialized.contains("token"));
         assert!(!serialized.contains("credential"));
+    }
+
+    #[test]
+    fn workspace_collection_requires_exact_repository_snapshot_metadata() {
+        let valid = WorkspaceCollectionRequest {
+            workspace_id: "wsp_123".to_owned(),
+            execution_id: "exe_123".to_owned(),
+            storage_ref: "workspace-wsp-123".to_owned(),
+            repositories: vec![WorkspaceCollectionRepository {
+                repository_id: "gitlab:42".to_owned(),
+                path_with_namespace: "platform/project".to_owned(),
+                relative_path: "repos/42-project".to_owned(),
+                base_sha: "a".repeat(40),
+                recorded_head_sha: "b".repeat(40),
+                local_branch: "centaur/wsp-123".to_owned(),
+            }],
+        };
+        assert!(valid.validate().is_ok());
+
+        for invalid in [
+            WorkspaceCollectionRequest {
+                repositories: vec![WorkspaceCollectionRepository {
+                    base_sha: "not-a-sha".to_owned(),
+                    ..valid.repositories[0].clone()
+                }],
+                ..valid.clone()
+            },
+            WorkspaceCollectionRequest {
+                repositories: vec![WorkspaceCollectionRepository {
+                    relative_path: "../escape".to_owned(),
+                    ..valid.repositories[0].clone()
+                }],
+                ..valid.clone()
+            },
+            WorkspaceCollectionRequest {
+                repositories: vec![valid.repositories[0].clone(), valid.repositories[0].clone()],
+                ..valid.clone()
+            },
+        ] {
+            assert!(invalid.validate().is_err());
+        }
     }
 }

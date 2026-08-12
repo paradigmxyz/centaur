@@ -2,7 +2,10 @@ use std::{collections::HashSet, future::Future, pin::Pin};
 
 use axum::{
     Json, Router,
+    body::Body,
     extract::{Path, Query, State, rejection::JsonRejection},
+    http::{HeaderMap, HeaderValue, header},
+    response::Response,
     routing::{get, post},
 };
 use centaur_session_core::{
@@ -16,6 +19,7 @@ use thiserror::Error;
 
 use crate::{
     ApiError,
+    api_jwt::{bearer_token, verify_console_jwt},
     gitlab::{GitLabCatalogError, RepositoryPage},
     routes::AppState,
     types::{
@@ -23,6 +27,37 @@ use crate::{
         CreateAddRepositorySelectionRequest, DecideDevelopmentSelectionRequest,
     },
 };
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DevelopmentPrincipal {
+    pub principal_id: String,
+    pub is_admin: bool,
+}
+
+pub trait DevelopmentAuthorizer: Send + Sync {
+    fn authorize(&self, headers: &HeaderMap) -> Result<DevelopmentPrincipal, ApiError>;
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ConsoleJwtDevelopmentAuthorizer;
+
+#[derive(serde::Deserialize)]
+struct DevelopmentJwtClaims {
+    sub: String,
+    #[serde(default)]
+    centaur_admin: bool,
+}
+
+impl DevelopmentAuthorizer for ConsoleJwtDevelopmentAuthorizer {
+    fn authorize(&self, headers: &HeaderMap) -> Result<DevelopmentPrincipal, ApiError> {
+        let token = bearer_token(headers)?;
+        let claims = verify_console_jwt::<DevelopmentJwtClaims>(token)?;
+        Ok(DevelopmentPrincipal {
+            principal_id: claims.sub,
+            is_admin: claims.centaur_admin,
+        })
+    }
+}
 
 pub type ResolveRepositoriesFuture<'a> = Pin<
     Box<dyn Future<Output = Result<Vec<ResolvedRepository>, RepositoryResolveError>> + Send + 'a>,
@@ -58,6 +93,14 @@ pub(crate) fn development_router() -> Router<AppState> {
         .route("/api/development/repositories", get(search_repositories))
         .route("/api/development/tasks", post(accept_development_task))
         .route(
+            "/api/development/changesets/{changeset_id}",
+            get(get_changeset),
+        )
+        .route(
+            "/api/development/changesets/{changeset_id}/artifacts/{artifact_ref}",
+            get(get_changeset_artifact),
+        )
+        .route(
             "/api/development/selections/{selection_flow_id}/confirm",
             post(confirm_development_selection),
         )
@@ -73,6 +116,50 @@ pub(crate) fn development_router() -> Router<AppState> {
             "/api/development/sessions/{thread_key}/repositories",
             post(create_add_repository_selection),
         )
+}
+
+async fn get_changeset(
+    State(state): State<AppState>,
+    Path(changeset_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<centaur_session_core::development::DevelopmentChangeSet>, ApiError> {
+    let principal = state.development_authorizer().authorize(&headers)?;
+    let changeset = state
+        .runtime()?
+        .get_changeset(&changeset_id, &principal.principal_id, principal.is_admin)
+        .await?;
+    Ok(Json(changeset))
+}
+
+async fn get_changeset_artifact(
+    State(state): State<AppState>,
+    Path((changeset_id, artifact_ref)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let principal = state.development_authorizer().authorize(&headers)?;
+    let content = state
+        .runtime()?
+        .get_changeset_artifact(
+            &changeset_id,
+            &artifact_ref,
+            &principal.principal_id,
+            principal.is_admin,
+        )
+        .await?;
+    let mut response = Response::new(Body::from(content));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/x-diff; charset=utf-8"),
+    );
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    Ok(response)
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -242,14 +329,21 @@ mod tests {
         ObservedSandbox, SandboxBackend, SandboxError, SandboxHandle, SandboxId, SandboxIo,
         SandboxResult, SandboxSpec, SandboxStatus,
     };
-    use centaur_session_core::development::{RepositoryId, ResolvedRepository};
+    use centaur_session_core::development::{
+        CollectedChangeSetRepositoryState, CompleteChangeSetCollection,
+        CompleteChangeSetRepository, CompleteWorkspacePreparation, ConfirmRepositorySelection,
+        PreparedRepositorySnapshot, RepositoryId, ResolvedRepository,
+    };
     use centaur_session_runtime::{SandboxRuntime, SessionPrincipalRegistrar, SessionRuntime};
     use centaur_session_sqlx::PgSessionStore;
     use serde_json::{Value, json};
     use tower::ServiceExt;
 
-    use super::{RepositoryResolveError, RepositoryResolver, ResolveRepositoriesFuture};
-    use crate::{AppState, build_router_with_app_state};
+    use super::{
+        DevelopmentAuthorizer, DevelopmentPrincipal, RepositoryResolveError, RepositoryResolver,
+        ResolveRepositoriesFuture,
+    };
+    use crate::{ApiError, AppState, build_router_with_app_state};
 
     #[derive(Clone, Copy)]
     struct TestRegistrar;
@@ -330,6 +424,31 @@ mod tests {
 
     struct TestResolver;
 
+    struct TestAuthorizer;
+
+    impl DevelopmentAuthorizer for TestAuthorizer {
+        fn authorize(
+            &self,
+            headers: &axum::http::HeaderMap,
+        ) -> Result<DevelopmentPrincipal, ApiError> {
+            let value = headers
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+                .ok_or_else(|| ApiError::Unauthorized("missing bearer token".to_owned()))?;
+            let (principal_id, is_admin) = match value {
+                "principal-1" => ("principal-1", false),
+                "principal-2" => ("principal-2", false),
+                "admin-1" => ("admin-1", true),
+                _ => return Err(ApiError::Unauthorized("invalid bearer token".to_owned())),
+            };
+            Ok(DevelopmentPrincipal {
+                principal_id: principal_id.to_owned(),
+                is_admin,
+            })
+        }
+    }
+
     impl RepositoryResolver for TestResolver {
         fn resolve<'a>(
             &'a self,
@@ -374,7 +493,8 @@ mod tests {
         Some((
             build_router_with_app_state(
                 AppState::ready_with_pool(runtime, None, Some(pool))
-                    .with_repository_resolver(Arc::new(TestResolver)),
+                    .with_repository_resolver(Arc::new(TestResolver))
+                    .with_development_authorizer(Arc::new(TestAuthorizer)),
             ),
             store,
         ))
@@ -418,6 +538,28 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body = serde_json::from_slice(&body).unwrap_or(Value::Null);
         (status, body)
+    }
+
+    async fn get(
+        app: axum::Router,
+        uri: &str,
+        bearer: Option<&str>,
+    ) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+        let mut request = Request::builder().method("GET").uri(uri);
+        if let Some(bearer) = bearer {
+            request = request.header(header::AUTHORIZATION, format!("Bearer {bearer}"));
+        }
+        let response = app
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec();
+        (status, headers, body)
     }
 
     #[tokio::test]
@@ -574,5 +716,135 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(added["repository_ids"], json!(["gitlab:84"]));
         assert_eq!(added["execution_blocker"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn changeset_routes_require_owner_or_admin_and_serve_immutable_artifact() {
+        use sha2::{Digest, Sha256};
+
+        let Some((app, store)) = test_app().await else {
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4().to_string();
+        let (_, accepted) = post(app.clone(), "/api/development/tasks", intake_body(&suffix)).await;
+        let flow_id = accepted["selection_flow_id"].as_str().unwrap();
+        let workspace_id = accepted["workspace_id"].as_str().unwrap();
+        let execution_id = accepted["execution_id"].as_str().unwrap();
+        store
+            .confirm_repository_selection(&ConfirmRepositorySelection {
+                selection_flow_id: flow_id.to_owned(),
+                expected_version: 1,
+                decided_by_principal_id: "principal-1".to_owned(),
+                repositories: vec![ResolvedRepository {
+                    repository_id: "gitlab:42".parse().unwrap(),
+                    display_name: "Project".to_owned(),
+                    path_with_namespace: "group/project".to_owned(),
+                    default_branch: "main".to_owned(),
+                    clone_url: "http://git.example.internal:82/group/project.git".to_owned(),
+                    relative_path: "repos/42-project".to_owned(),
+                }],
+            })
+            .await
+            .unwrap();
+        let workspace_claim = store
+            .claim_workspace_preparation(
+                workspace_id,
+                "workspace-owner",
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        let base_sha = "a".repeat(40);
+        store
+            .complete_workspace_preparation(&CompleteWorkspacePreparation {
+                workspace_id: workspace_id.to_owned(),
+                attempt: workspace_claim.workspace.preparation_attempt,
+                lease_owner: "workspace-owner".to_owned(),
+                storage_ref: "workspace-api-review".to_owned(),
+                prepared: vec![PreparedRepositorySnapshot {
+                    repository_id: "gitlab:42".parse().unwrap(),
+                    base_sha: base_sha.clone(),
+                    local_branch: "centaur/review".to_owned(),
+                    head_sha: base_sha.clone(),
+                }],
+                failed: Vec::new(),
+            })
+            .await
+            .unwrap();
+        store.complete_execution(execution_id).await.unwrap();
+        let changeset = store
+            .begin_changeset_collection(execution_id, "collector")
+            .await
+            .unwrap()
+            .unwrap();
+        let patch = b"diff --git a/README.md b/README.md\n".to_vec();
+        let head_sha = "b".repeat(40);
+        let patch_hash = format!("sha256:{}", hex::encode(Sha256::digest(&patch)));
+        let completed = store
+            .complete_changeset_collection(&CompleteChangeSetCollection {
+                changeset_id: changeset.changeset_id.clone(),
+                lease_owner: "collector".to_owned(),
+                repositories: vec![CompleteChangeSetRepository {
+                    repository_id: "gitlab:42".parse().unwrap(),
+                    state: CollectedChangeSetRepositoryState::Changed,
+                    base_sha: base_sha.clone(),
+                    recorded_head_sha: base_sha,
+                    head_sha: Some(head_sha.clone()),
+                    commit_metadata: json!([{"sha": head_sha}]),
+                    changed_file_count: 1,
+                    additions: 1,
+                    deletions: 0,
+                    patch_hash: Some(patch_hash),
+                    patch: patch.clone(),
+                    test_evidence: json!([]),
+                    failure_code: None,
+                    failure_message: None,
+                }],
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let summary_uri = format!("/api/development/changesets/{}", completed.changeset_id);
+
+        assert_eq!(
+            get(app.clone(), &summary_uri, None).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            get(
+                app.clone(),
+                &format!("{summary_uri}?signature=not-authority"),
+                Some("principal-2"),
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        for bearer in ["principal-1", "admin-1"] {
+            let (status, _, body) = get(app.clone(), &summary_uri, Some(bearer)).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                serde_json::from_slice::<Value>(&body).unwrap()["changeset_id"],
+                completed.changeset_id
+            );
+        }
+
+        let artifact_ref = completed.repositories[0]
+            .patch_artifact_ref
+            .as_deref()
+            .unwrap();
+        let artifact_uri = format!(
+            "/api/development/changesets/{}/artifacts/{}",
+            completed.changeset_id,
+            urlencoding::encode(artifact_ref)
+        );
+        assert_eq!(
+            get(app.clone(), &artifact_uri, Some("principal-2")).await.0,
+            StatusCode::FORBIDDEN
+        );
+        let (status, headers, body) = get(app, &artifact_uri, Some("principal-1")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[header::CONTENT_TYPE], "text/x-diff; charset=utf-8");
+        assert_eq!(body, patch);
     }
 }

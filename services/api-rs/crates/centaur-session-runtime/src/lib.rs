@@ -1,3 +1,4 @@
+mod changeset;
 mod cleanup;
 mod development;
 mod title_generator;
@@ -441,6 +442,7 @@ struct RuntimeContext {
     sandbox_pipes: SessionPipeMap,
     execution_spans: ExecutionSpanRegistry,
     stdout_owner_id: String,
+    workspace: Option<development::WorkspaceRuntime>,
 }
 
 struct SandboxCapacityController {
@@ -971,6 +973,7 @@ impl SessionRuntime {
             sandbox_pipes: self.sandbox_pipes.clone(),
             execution_spans: self.execution_spans.clone(),
             stdout_owner_id: self.stdout_owner_id.clone(),
+            workspace: self.workspace.clone(),
         }
     }
 
@@ -5205,12 +5208,32 @@ async fn record_terminal_output(
             reason,
             result_text,
         } => {
-            let Some(execution) = ctx
-                .store
-                .complete_execution_if_active_and_stdout_owner(execution_id, &ctx.stdout_owner_id)
-                .await?
-            else {
-                return Ok(());
+            let (execution, changeset_id) = if let Some(workspace) = &ctx.workspace {
+                let collection_owner_id = &workspace.lease_owner;
+                let Some(completed) = ctx
+                    .store
+                    .complete_development_execution_and_begin_collection(
+                        execution_id,
+                        &ctx.stdout_owner_id,
+                        collection_owner_id,
+                    )
+                    .await?
+                else {
+                    return Ok(());
+                };
+                (completed.execution, completed.changeset_id)
+            } else {
+                let Some(execution) = ctx
+                    .store
+                    .complete_execution_if_active_and_stdout_owner(
+                        execution_id,
+                        &ctx.stdout_owner_id,
+                    )
+                    .await?
+                else {
+                    return Ok(());
+                };
+                (execution, None)
             };
             let mut payload = json!({
                 "execution_id": execution_id,
@@ -5230,6 +5253,9 @@ async fn record_terminal_output(
                     payload,
                 )
                 .await?;
+            if let Some(changeset_id) = changeset_id {
+                SessionRuntime::spawn_changeset_collection_from_context(ctx.clone(), changeset_id);
+            }
             (execution, "completed")
         }
         TerminalOutput::Cancelled { reason } => {

@@ -22,7 +22,9 @@ pub use spec::{
     SandboxCapabilities, SandboxSpec,
 };
 pub use workspace::{
-    FailedWorkspaceRepository, PreparedWorkspaceRepository, WorkspaceError, WorkspaceManager,
-    WorkspaceMount, WorkspacePreparation, WorkspacePreparationRequest, WorkspaceRepository,
+    CollectedWorkspaceRepository, FailedWorkspaceRepository, PreparedWorkspaceRepository,
+    WorkspaceCollection, WorkspaceCollectionRepository, WorkspaceCollectionRequest,
+    WorkspaceCollectionState, WorkspaceError, WorkspaceManager, WorkspaceMount,
+    WorkspacePreparation, WorkspacePreparationRequest, WorkspaceRepository,
     repository_relative_path,
 };
