@@ -833,6 +833,7 @@ async function postCreateSession(
       source: 'slackbotv2',
       platform: 'slack',
       thread_id: threadId,
+      ...slackHomeTeamMetadata(options),
       ...sessionRequesterMetadata(message, requesterIdentity),
       ...(conversationName ? { slack_conversation_name: conversationName } : {})
     },
@@ -1310,6 +1311,7 @@ async function executeSession(
     // it. Metadata only; the harness receives `model` via input_lines and only
     // when explicitly overridden.
     metadata: sessionMetadata(
+      options,
       message,
       {
         action: 'execute',
@@ -1329,6 +1331,7 @@ async function executeSession(
       requesterIdentity
     ),
     input_lines: toCodexInputLines(
+      options,
       message,
       threadId,
       model,
@@ -1458,7 +1461,7 @@ async function toSessionMessage(
     client_message_id: message.id,
     role: message.author.isMe ? 'assistant' : 'user',
     parts: sessionMessageParts(message, requesterIdentity),
-    metadata: sessionMetadata(message, {}, requesterIdentity)
+    metadata: sessionMetadata(options, message, {}, requesterIdentity)
   }
 }
 
@@ -1494,6 +1497,7 @@ function sessionAttachmentPart(attachment: SlackbotV2ApiAttachment): JsonObject 
 }
 
 function sessionMetadata(
+  options: SlackbotV2Options,
   message: SlackbotV2ApiMessage,
   extra: JsonObject = {},
   requesterIdentity?: RequesterIdentity
@@ -1508,9 +1512,15 @@ function sessionMetadata(
     user_id: message.author.userId,
     user_name: message.author.userName,
     ...sessionSlackTextMetadata(message),
+    ...slackHomeTeamMetadata(options),
     ...sessionRequesterMetadata(message, requesterIdentity),
     ...extra
   }
+}
+
+function slackHomeTeamMetadata(options: SlackbotV2Options): JsonObject {
+  const slackHomeTeamId = stringValue(options.slackHomeTeamId)
+  return slackHomeTeamId ? { slack_home_team_id: slackHomeTeamId } : {}
 }
 
 function sessionSlackTextMetadata(message: SlackbotV2ApiMessage): JsonObject {
@@ -1529,6 +1539,7 @@ function sessionSlackTextMetadata(message: SlackbotV2ApiMessage): JsonObject {
 }
 
 function toCodexInputLines(
+  options: SlackbotV2Options,
   message: SlackbotV2ApiMessage,
   threadId: string,
   model?: string,
@@ -1543,6 +1554,7 @@ function toCodexInputLines(
   for (const attachment of executableAttachments(message, contextMessages)) {
     if (!attachment.dataBase64) continue
     const inlineLine = toCodexInputLineWithStaged(
+      options,
       message,
       threadId,
       staged,
@@ -1565,6 +1577,7 @@ function toCodexInputLines(
   }
   lines.push(
     toCodexInputLineWithStaged(
+      options,
       message,
       threadId,
       staged,
@@ -1593,6 +1606,7 @@ function executableAttachments(
 }
 
 function toCodexInputLineWithStaged(
+  options: SlackbotV2Options,
   message: SlackbotV2ApiMessage,
   threadId: string,
   staged: Map<SlackbotV2ApiAttachment, string>,
@@ -1606,7 +1620,7 @@ function toCodexInputLineWithStaged(
   return JSON.stringify({
     type: 'user',
     thread_key: threadId,
-    trace_metadata: sessionMetadata(message, { action: 'execute' }, requesterIdentity),
+    trace_metadata: sessionMetadata(options, message, { action: 'execute' }, requesterIdentity),
     ...(model ? { model } : {}),
     ...(provider ? { provider } : {}),
     ...(reasoning ? { reasoning } : {}),
