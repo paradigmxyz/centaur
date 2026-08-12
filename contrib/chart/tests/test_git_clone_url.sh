@@ -150,3 +150,126 @@ if helm template centaur "$chart" -f "$tmp_dir/conflict.yaml" >"$tmp_dir/conflic
   exit 1
 fi
 grep -q "conflicting cloneUrl values for repo group/project" "$tmp_dir/conflict.err"
+
+cat >"$tmp_dir/direct-conflict.yaml" <<'YAML'
+repoCache:
+  enabled: false
+toolServer:
+  enabled: false
+overlays:
+  sources:
+    - repo: group/project
+      cloneUrl: http://git-a.example.test/group/project.git
+    - repo: group/project
+      cloneUrl: http://git-b.example.test/group/project.git
+YAML
+
+if helm template centaur "$chart" -f "$tmp_dir/direct-conflict.yaml" >"$tmp_dir/direct-conflict.out" 2>"$tmp_dir/direct-conflict.err"; then
+  echo "expected direct conflicting clone URLs to fail Helm rendering" >&2
+  exit 1
+fi
+grep -q "conflicting cloneUrl values for repo group/project" "$tmp_dir/direct-conflict.err"
+
+cat >"$tmp_dir/disabled-source-conflict.yaml" <<'YAML'
+repoCache:
+  enabled: false
+toolServer:
+  enabled: false
+  repo: group/project
+  cloneUrl: http://git-a.example.test/group/project.git
+overlays:
+  sources:
+    - repo: group/project
+      cloneUrl: http://git-b.example.test/group/project.git
+YAML
+
+if helm template centaur "$chart" -f "$tmp_dir/disabled-source-conflict.yaml" >"$tmp_dir/disabled-source-conflict.out" 2>"$tmp_dir/disabled-source-conflict.err"; then
+  echo "expected conflicting disabled source URL to fail Helm rendering" >&2
+  exit 1
+fi
+grep -q "conflicting cloneUrl values for repo group/project" "$tmp_dir/disabled-source-conflict.err"
+
+cat >"$tmp_dir/explicit-wins.yaml" <<'YAML'
+repoCache:
+  enabled: false
+toolServer:
+  enabled: false
+overlays:
+  sources:
+    - repo: group/project
+      toolsSubdir: tools
+    - repo: group/project
+      cloneUrl: http://git.example.test:82/group/project.git
+      toolsSubdir: extra-tools
+YAML
+
+helm template centaur "$chart" -f "$tmp_dir/explicit-wins.yaml" >"$tmp_dir/explicit-wins-rendered.yaml"
+ruby - "$tmp_dir/explicit-wins-rendered.yaml" <<'RUBY'
+require "json"
+require "yaml"
+
+documents = YAML.load_stream(File.read(ARGV.fetch(0))).compact
+api = documents.find do |doc|
+  doc["kind"] == "Deployment" && doc.dig("metadata", "name") == "centaur-centaur-api-rs"
+end or abort "api-rs deployment missing"
+container = api.dig("spec", "template", "spec", "containers").find { |item| item["name"] == "api-rs" }
+env = container.fetch("env").to_h { |item| [item["name"], item["value"]] }
+expected = "http://git.example.test:82/group/project.git"
+abort "explicit clone URL did not win for the primary source" unless env["KUBERNETES_TOOLS_CLONE_URL"] == expected
+extra_sources = JSON.parse(env.fetch("KUBERNETES_TOOLS_EXTRA_SOURCES"))
+abort "explicit clone URL did not propagate to duplicate source" unless extra_sources.fetch(0).fetch("cloneUrl") == expected
+RUBY
+
+cat >"$tmp_dir/credential-url.yaml" <<'YAML'
+repoCache:
+  enabled: false
+toolServer:
+  enabled: false
+  repo: group/project
+  cloneUrl: http://oauth2:do-not-print@git.example.test/group/project.git
+YAML
+
+if helm template centaur "$chart" -f "$tmp_dir/credential-url.yaml" >"$tmp_dir/credential-url.out" 2>"$tmp_dir/credential-url.err"; then
+  echo "expected credential-bearing clone URL to fail Helm rendering" >&2
+  exit 1
+fi
+grep -q "cloneUrl for repo group/project must be an HTTP(S) URL with a host and no credentials" "$tmp_dir/credential-url.err"
+if grep -q "do-not-print" "$tmp_dir/credential-url.err"; then
+  echo "credential-bearing clone URL leaked into Helm error" >&2
+  exit 1
+fi
+
+cat >"$tmp_dir/ssh-url.yaml" <<'YAML'
+repoCache:
+  enabled: true
+  repositories:
+    - repo: group/project
+      cloneUrl: ssh://git:do-not-print@git.example.test/group/project.git
+toolServer:
+  enabled: false
+YAML
+
+if helm template centaur "$chart" -f "$tmp_dir/ssh-url.yaml" >"$tmp_dir/ssh-url.out" 2>"$tmp_dir/ssh-url.err"; then
+  echo "expected non-HTTP clone URL to fail Helm rendering" >&2
+  exit 1
+fi
+grep -Eq "cloneUrl for repo group/project must be an HTTP\(S\) URL|does not match pattern" "$tmp_dir/ssh-url.err"
+if grep -q "do-not-print" "$tmp_dir/ssh-url.err"; then
+  echo "non-HTTP credential-bearing clone URL leaked into Helm error" >&2
+  exit 1
+fi
+
+cat >"$tmp_dir/missing-host.yaml" <<'YAML'
+repoCache:
+  enabled: false
+toolServer:
+  enabled: true
+  repo: group/project
+  cloneUrl: http://:82/group/project.git
+YAML
+
+if helm template centaur "$chart" -f "$tmp_dir/missing-host.yaml" >"$tmp_dir/missing-host.out" 2>"$tmp_dir/missing-host.err"; then
+  echo "expected clone URL without a host to fail Helm rendering" >&2
+  exit 1
+fi
+grep -q "cloneUrl for repo group/project must be an HTTP(S) URL with a host and no credentials" "$tmp_dir/missing-host.err"

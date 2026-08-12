@@ -23,6 +23,7 @@
 {{- $_ := set $repoCacheRepositoryVisibilities $repo (include "centaur.repositoryVisibility" (get . "visibility")) -}}
 {{- $cloneUrl := get . "cloneUrl" | default "" -}}
 {{- if $cloneUrl -}}
+{{- $_ := include "centaur.validateCloneUrl" (dict "repo" $repo "cloneUrl" $cloneUrl) -}}
 {{- $existingCloneUrl := get $repoCacheRepositoryCloneUrls $repo | default "" -}}
 {{- if and $existingCloneUrl (ne $existingCloneUrl $cloneUrl) -}}
 {{- fail (printf "conflicting cloneUrl values for repo %s" $repo) -}}

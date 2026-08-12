@@ -107,6 +107,13 @@ plaintext. Restrict it to trusted isolated networks and use HTTPS when
 available. Never embed credentials in `cloneUrl`.
 :::
 
+With `repoCache.enabled: false`, direct tool clones pass through each sandbox's
+iron-proxy. Centaur adds the clone URL's port to that proxy's public egress; a
+literal IP such as `192.168.50.10` receives only an exact `/32` (IPv4) or `/128`
+(IPv6) rule. Use a literal IP for a private-network direct clone. Private DNS
+names should use repo-cache so the sandbox policy does not need broad,
+DNS-dependent private-network access.
+
 ## API
 
 | Env var | Set from | Controls |

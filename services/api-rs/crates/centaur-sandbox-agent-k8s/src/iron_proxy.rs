@@ -26,6 +26,7 @@ use tokio::time::{Instant, sleep};
 use crate::{
     API_SERVER_ENABLED_LABEL, AgentSandboxBackend, MANAGED_BY_LABEL, MANAGED_BY_VALUE,
     OBSERVABILITY_ENABLED_LABEL, OtlpEgressTarget, SANDBOX_ID_LABEL, is_not_found, map_kube_error,
+    tools::{self, CloneEgressTarget},
 };
 
 const IRON_PROXY_LABEL: &str = "centaur.ai/iron-proxy";
@@ -365,13 +366,15 @@ impl AgentSandboxBackend {
             &self.config.namespace,
             iron_proxy.control_plane_pod_labels.clone(),
         );
-        for policy in build_iron_proxy_network_policies(
+        let clone_egress_targets = tools::clone_egress_targets(self.config.tools.as_ref());
+        for policy in build_iron_proxy_network_policies_with_clone_egress(
             id,
             resolved,
             iron_proxy,
             &control_target,
             self.config.otlp_egress.as_ref(),
             resolved.observability_enabled,
+            &clone_egress_targets,
         ) {
             self.network_policies()
                 .create(&PostParams::default(), &policy)
@@ -1475,6 +1478,7 @@ fn build_iron_proxy_service(id: &SandboxId, resolved: &ResolvedIronProxy) -> Ser
     }
 }
 
+#[cfg(test)]
 fn build_iron_proxy_network_policies(
     id: &SandboxId,
     resolved: &ResolvedIronProxy,
@@ -1482,6 +1486,26 @@ fn build_iron_proxy_network_policies(
     control_target: &ControlPlaneEgressTarget,
     otlp_egress: Option<&OtlpEgressTarget>,
     observability_enabled: bool,
+) -> Vec<NetworkPolicy> {
+    build_iron_proxy_network_policies_with_clone_egress(
+        id,
+        resolved,
+        iron_proxy,
+        control_target,
+        otlp_egress,
+        observability_enabled,
+        &[],
+    )
+}
+
+fn build_iron_proxy_network_policies_with_clone_egress(
+    id: &SandboxId,
+    resolved: &ResolvedIronProxy,
+    iron_proxy: &IronProxyConfig,
+    control_target: &ControlPlaneEgressTarget,
+    otlp_egress: Option<&OtlpEgressTarget>,
+    observability_enabled: bool,
+    clone_egress_targets: &[CloneEgressTarget],
 ) -> Vec<NetworkPolicy> {
     let sandbox_to_proxy_ports = sandbox_to_proxy_ports(resolved);
     let sandbox_egress = vec![
@@ -1537,6 +1561,7 @@ fn build_iron_proxy_network_policies(
                     control_target,
                     otlp_egress,
                     observability_enabled,
+                    clone_egress_targets,
                 )),
             }),
         },
@@ -1554,11 +1579,13 @@ fn proxy_egress_rules(
     control_target: &ControlPlaneEgressTarget,
     otlp_egress: Option<&OtlpEgressTarget>,
     observability_enabled: bool,
+    clone_egress_targets: &[CloneEgressTarget],
 ) -> Vec<NetworkPolicyEgressRule> {
     // Upstream egress: 443/5432 for normal traffic, plus the iron-control port
     // (deduped) so a sync-mode proxy can reach the control plane. Public
-    // upstreams are always constrained away from private/cluster CIDRs; any
-    // intra-cluster destination must be added as an explicit rule below.
+    // upstreams are constrained away from private/cluster CIDRs. Explicit
+    // direct-clone targets add their custom public port, or a single-host CIDR
+    // and port when the clone URL uses a literal IP.
     let upstream_ports = vec![network_port(443), network_port(5432)];
     let mut rules = vec![dns_egress_rule()];
     rules.push(egress_to(
@@ -1570,6 +1597,14 @@ fn proxy_egress_rules(
         vec![network_port(PG_LISTENER_PORT)],
     ));
     rules.push(egress_to(vec![public_ipv4_peer()], upstream_ports));
+    for target in clone_egress_targets {
+        let peer = target
+            .cidr
+            .as_deref()
+            .map(ip_block_peer)
+            .unwrap_or_else(public_ipv4_peer);
+        rules.push(egress_to(vec![peer], vec![network_port(target.port)]));
+    }
     if observability_enabled {
         rules.push(egress_to(
             vec![pod_peer(iron_proxy.api_pod_labels.clone())],
@@ -1652,6 +1687,16 @@ fn public_ipv4_peer() -> NetworkPolicyPeer {
                 "224.0.0.0/4".to_owned(),
                 "240.0.0.0/4".to_owned(),
             ]),
+        }),
+        ..Default::default()
+    }
+}
+
+fn ip_block_peer(cidr: &str) -> NetworkPolicyPeer {
+    NetworkPolicyPeer {
+        ip_block: Some(IPBlock {
+            cidr: cidr.to_owned(),
+            except: None,
         }),
         ..Default::default()
     }
@@ -2116,6 +2161,7 @@ fn unique_suffix() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ToolsConfig;
 
     fn resolved() -> ResolvedIronProxy {
         ResolvedIronProxy {
@@ -2228,6 +2274,57 @@ mod tests {
                 .iter()
                 .any(|policy_port| policy_port.port == Some(IntOrString::Int(i32::from(port))))
         })
+    }
+
+    fn rule_allows_cidr_port(rule: &NetworkPolicyEgressRule, cidr: &str, port: u16) -> bool {
+        rule.to.as_ref().is_some_and(|peers| {
+            peers.iter().any(|peer| {
+                peer.ip_block
+                    .as_ref()
+                    .is_some_and(|block| block.cidr == cidr)
+            })
+        }) && rule.ports.as_ref().is_some_and(|ports| {
+            ports
+                .iter()
+                .any(|policy_port| policy_port.port == Some(IntOrString::Int(i32::from(port))))
+        })
+    }
+
+    #[test]
+    fn proxy_policy_allows_direct_clone_custom_ports_and_literal_ip() {
+        let id = SandboxId::new("asbx-test");
+        let mut tools = ToolsConfig::new("group/tools", "centaur-agent:test");
+        tools.clone_url = Some("http://192.168.50.10:82/group/tools.git".to_owned());
+        tools.extra_sources.push(crate::ToolSource {
+            repo: "group/public-tools".to_owned(),
+            clone_url: Some("https://git.example.test:8443/group/public-tools.git".to_owned()),
+            git_ref: None,
+            source_subdir: "tools".to_owned(),
+            visibility: "private".to_owned(),
+        });
+        let iron_proxy = IronProxyConfig::new("proxy:test", "ca-cert", "ca-key");
+        let targets = tools::clone_egress_targets(Some(&tools));
+        let policies = build_iron_proxy_network_policies_with_clone_egress(
+            &id,
+            &resolved(),
+            &iron_proxy,
+            &control_target(),
+            None,
+            false,
+            &targets,
+        );
+        let proxy_egress = policies[1].spec.as_ref().unwrap().egress.as_ref().unwrap();
+
+        assert!(proxy_egress.iter().any(|rule| rule_allows_cidr_port(
+            rule,
+            "192.168.50.10/32",
+            82
+        )));
+        assert!(
+            proxy_egress
+                .iter()
+                .any(|rule| rule_allows_cidr_port(rule, "0.0.0.0/0", 8443))
+        );
     }
 
     #[test]

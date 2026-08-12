@@ -103,6 +103,11 @@ credential interface.
 5. The readiness fingerprint includes a SHA-256 digest of each resolved clone
    URL. Changing a URL invalidates stale readiness without writing the URL to
    the readiness file.
+6. If an existing checkout's `origin` differs from the resolved clone URL,
+   repo-cache builds a fresh checkout in a temporary directory and replaces the
+   old checkout only after clone, fetch, and checkout succeed. Objects from the
+   old remote are never reused, while a transient new-remote failure leaves the
+   last checkout available and clears readiness.
 
 ### Repo-cache disabled
 
@@ -114,6 +119,9 @@ credential interface.
 4. The sandbox `tools-bootstrap` init container clones through the paired
    iron-proxy. Both `HTTP_PROXY` and `HTTPS_PROXY` are set so HTTP and HTTPS
    remotes follow the same egress path.
+5. Centaur adds the configured clone port to iron-proxy egress. A literal IP
+   gets an exact host CIDR; private DNS remotes require repo-cache because their
+   changing private addresses cannot be represented by a stable narrow rule.
 
 ## Security And Error Handling
 
@@ -125,6 +133,8 @@ credential interface.
 - Generated shell scripts quote clone URLs as data. A URL cannot inject shell
   syntax.
 - Error messages identify the stable `repo`, not the clone URL.
+- Direct clone Git stderr is suppressed so transport errors cannot echo the URL;
+  Centaur emits a stable repo-based failure message after bounded retries.
 - The repo-cache NetworkPolicy remains port-based. Operators must add the
   custom Git port to `repoCache.egressPorts`.
 - Direct sandbox clones remain subject to iron-proxy upstream policy. Enabling

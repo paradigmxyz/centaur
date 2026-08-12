@@ -160,6 +160,20 @@ class RepoCacheSync:
         if stale.exists() or stale.is_symlink():
             _remove_path(stale)
 
+    def replace_checkout(self, target: Path, replacement: Path) -> None:
+        if not target.exists() and not target.is_symlink():
+            replacement.replace(target)
+            return
+        previous = target.with_name(f"{target.name}.previous")
+        _remove_path(previous)
+        target.replace(previous)
+        try:
+            replacement.replace(target)
+        except Exception:
+            previous.replace(target)
+            raise
+        _remove_path(previous)
+
     @classmethod
     def from_env(cls) -> RepoCacheSync:
         interval = os.environ.get("SYNC_INTERVAL_SECONDS", "").strip()
@@ -349,14 +363,16 @@ class RepoCacheSync:
         target.parent.mkdir(parents=True, exist_ok=True)
         self.migrate_existing_checkout(repo, target)
 
-        if self._git_ok(target, "rev-parse", "--git-dir"):
+        has_checkout = self._git_ok(target, "rev-parse", "--git-dir")
+        replace_existing = False
+        if has_checkout and self._git_output(target, "remote", "get-url", "origin") != repo_url:
+            print(f"Re-cloning {repo} after clone URL changed", flush=True)
+            has_checkout = False
+            replace_existing = True
+
+        if has_checkout:
             print(f"Updating {repo}", flush=True)
             self._git_ok(target, "config", "gc.auto", "0")
-            if not self._git_ok(target, "remote", "set-url", "origin", repo_url):
-                self._run_git(
-                    ["-C", str(target), "remote", "add", "origin", repo_url],
-                    f"set origin for {repo}",
-                )
             self._run_git(
                 [
                     "-C",
@@ -380,7 +396,8 @@ class RepoCacheSync:
         print(f"Cloning {repo}", flush=True)
         for stale_tmp in glob.glob(f"{target}.tmp*"):
             _remove_path(Path(stale_tmp))
-        _remove_path(target)
+        if not replace_existing:
+            _remove_path(target)
         self._run_git(["clone", "--quiet", repo_url, str(tmp)], f"clone {repo}")
         self._git_ok(tmp, "config", "gc.auto", "0")
         self._run_git(
@@ -390,7 +407,7 @@ class RepoCacheSync:
         self._git_ok(tmp, "remote", "set-head", "origin", "-a")
         self.checkout_repo(repo, tmp)
         self._run_git(["-C", str(tmp), "clean", "-fd"], f"clean {repo}")
-        tmp.replace(target)
+        self.replace_checkout(target, tmp)
         self.remove_stale_visibility_target(repo)
         self.update_legacy_link(repo, target)
 

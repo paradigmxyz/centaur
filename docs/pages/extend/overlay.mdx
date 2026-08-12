@@ -142,6 +142,11 @@ in `repoCache.egressPorts`; adding a port permits repo-cache egress but does not
 grant unrestricted sandbox network access.
 :::
 
+The recommended GitLab setup keeps `repoCache.enabled: true`, as above. If you
+disable repo-cache, direct clones run through each sandbox's iron-proxy. Centaur
+can grant an exact target rule for a private literal IP, but not for a private
+DNS name whose address may change; use repo-cache for private DNS remotes.
+
 ## Mount paths
 
 Repo-cache-backed overlays appear under different prefixes depending on where

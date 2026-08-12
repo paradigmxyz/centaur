@@ -24,6 +24,7 @@
 
 use centaur_sandbox_core::RepoCacheAccess;
 use serde_json::{Value, json};
+use std::{collections::BTreeSet, net::IpAddr};
 
 const AGENT_UID: i64 = 1001;
 
@@ -121,6 +122,37 @@ pub struct GitCredentialsRef {
     pub username: String,
     pub secret_name: String,
     pub secret_key: String,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct CloneEgressTarget {
+    pub cidr: Option<String>,
+    pub port: u16,
+}
+
+pub(crate) fn clone_egress_targets(tools: Option<&ToolsConfig>) -> Vec<CloneEgressTarget> {
+    let Some(tools) = tools.filter(|tools| tools.repo_cache_path.is_none()) else {
+        return Vec::new();
+    };
+    tools
+        .sources()
+        .into_iter()
+        .filter_map(|source| source.clone_url)
+        .filter_map(|clone_url| reqwest::Url::parse(&clone_url).ok())
+        .filter_map(|clone_url| {
+            let port = clone_url.port_or_known_default()?;
+            let cidr = clone_url
+                .host_str()
+                .and_then(|host| host.parse::<IpAddr>().ok())
+                .map(|ip| match ip {
+                    IpAddr::V4(ip) => format!("{ip}/32"),
+                    IpAddr::V6(ip) => format!("{ip}/128"),
+                });
+            Some(CloneEgressTarget { cidr, port })
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 impl ToolsConfig {
@@ -271,11 +303,9 @@ pub(crate) fn baked_base_agent_env() -> Vec<(String, String)> {
     vec![("TOOL_DIRS".to_owned(), baked_base_tool_dirs())]
 }
 
-/// Routes the tools clone through the per-sandbox egress proxy. The sandbox
-/// NetworkPolicy only allows egress to the proxy, api-rs, and DNS — a direct
-/// clone to github.com is blocked whenever iron-proxy is enabled. The proxy
-/// MITMs TLS (github.com is in the baseline allowlist), so git must trust the
-/// firewall CA it re-signs with.
+/// Routes tool clones through the per-sandbox egress proxy. The sandbox
+/// NetworkPolicy only allows egress to the proxy, api-rs, and DNS. HTTPS
+/// remotes must trust the firewall CA used by the proxy for TLS inspection.
 pub(crate) struct CloneProxy {
     /// Per-sandbox proxy URL (the `HTTPS_PROXY` value `apply_proxy_env` set).
     pub https_proxy: String,
@@ -373,6 +403,7 @@ pub(crate) fn tools_init_container_json(
                 format!(".centaur-source-{index}")
             };
             let source_target_path = format!("$target/{source_path}");
+            let repo_label = shell_quote(repo);
             let checkout = match &source.git_ref {
                 Some(git_ref) => format!(
                     "git -C \"$source\" -c gc.auto=0 fetch --quiet origin \"{git_ref}\" && \
@@ -388,11 +419,13 @@ pub(crate) fn tools_init_container_json(
                 "source=\"{source_target_path}\"\n\
                  rm -rf \"$source\"\n\
                  attempt=0\n\
-                 until git clone --quiet --filter=blob:none --no-checkout {repo_url} \"$source\" && \
+                 until {{\n\
+                 git clone --quiet --filter=blob:none --no-checkout {repo_url} \"$source\" && \
                  git -C \"$source\" sparse-checkout set \"{subdir}\" && \
-                 {checkout}; do\n\
+                 {checkout}\n\
+                 }} 2>/dev/null; do\n\
                  attempt=$((attempt + 1))\n\
-                 if [ \"$attempt\" -ge 30 ]; then echo \"tools clone failed after $attempt attempts\" >&2; exit 1; fi\n\
+                 if [ \"$attempt\" -ge 30 ]; then printf 'tools clone failed after %s attempts for %s\\n' \"$attempt\" {repo_label} >&2; exit 1; fi\n\
                  rm -rf \"$source\"\n\
                  sleep 2\n\
                  done\n\
@@ -605,6 +638,10 @@ mod tests {
             "git clone --quiet --filter=blob:none --no-checkout 'http://git.example.test:82/group/tools.git'"
         ));
         assert!(!script.contains("https://github.com/group/tools.git"));
+        assert!(script.contains("} 2>/dev/null; do"));
+        assert!(script.contains(
+            "printf 'tools clone failed after %s attempts for %s\\n' \"$attempt\" 'group/tools'"
+        ));
     }
 
     #[test]
@@ -621,6 +658,42 @@ mod tests {
     }
 
     #[test]
+    fn direct_clone_egress_targets_include_custom_ports_and_literal_ips() {
+        let mut tools = ToolsConfig::new("group/tools", "centaur-agent:test");
+        tools.clone_url = Some("http://192.168.50.10:82/group/tools.git".to_owned());
+        tools.extra_sources.push(ToolSource {
+            repo: "group/public-tools".to_owned(),
+            clone_url: Some("https://git.example.test:8443/group/public-tools.git".to_owned()),
+            git_ref: None,
+            source_subdir: "tools".to_owned(),
+            visibility: "private".to_owned(),
+        });
+
+        assert_eq!(
+            clone_egress_targets(Some(&tools)),
+            vec![
+                CloneEgressTarget {
+                    cidr: None,
+                    port: 8443,
+                },
+                CloneEgressTarget {
+                    cidr: Some("192.168.50.10/32".to_owned()),
+                    port: 82,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn repo_cache_sources_do_not_add_sandbox_clone_egress() {
+        let mut tools = ToolsConfig::new("group/tools", "centaur-agent:test");
+        tools.clone_url = Some("http://192.168.50.10:82/group/tools.git".to_owned());
+        tools.repo_cache_path = Some("/var/lib/centaur/repos".to_owned());
+
+        assert!(clone_egress_targets(Some(&tools)).is_empty());
+    }
+
+    #[test]
     fn tools_init_retries_clone_until_proxy_accepts() {
         // The per-sandbox proxy may not be listening when the init container
         // first runs, and an init failure is terminal for the Sandbox — the
@@ -632,8 +705,9 @@ mod tests {
             .as_str()
             .unwrap()
             .to_owned();
-        assert!(script.contains("until git clone"));
-        assert!(script.contains("checkout --quiet --detach FETCH_HEAD; do"));
+        assert!(script.contains("until {\ngit clone"));
+        assert!(script.contains("checkout --quiet --detach FETCH_HEAD"));
+        assert!(script.contains("} 2>/dev/null; do"));
         assert!(script.contains("if [ \"$attempt\" -ge 30 ]"));
         assert!(script.contains("sleep 2"));
         assert!(
@@ -680,7 +754,7 @@ mod tests {
             .unwrap()
             .to_owned();
         // Default branch: plain checkout, no explicit ref fetch.
-        assert!(script.contains("git -C \"$source\" checkout --quiet; do"));
+        assert!(script.contains("git -C \"$source\" checkout --quiet\n} 2>/dev/null; do"));
         assert!(!script.contains("fetch --quiet origin"));
     }
 

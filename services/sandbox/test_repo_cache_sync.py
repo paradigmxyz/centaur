@@ -194,6 +194,81 @@ class RepoCacheSyncTest(unittest.TestCase):
             self.assertIn("<redacted-clone-url>", message)
             self.assertNotIn(clone_url, message)
 
+    def test_clone_url_change_replaces_cached_checkout_before_sync(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_url = "http://git-old.example.test/acme/centaur.git"
+            new_url = "http://git-new.example.test/acme/centaur.git"
+            sync = self.make_sync(
+                root,
+                repository_clone_urls={"acme/centaur": new_url},
+            )
+            target = sync.repository_target("acme/centaur")
+            (target / ".git").mkdir(parents=True)
+            stale_object = target / ".git" / "objects" / "stale-object"
+            stale_object.parent.mkdir()
+            stale_object.write_text("belongs to old remote")
+            commands: list[list[str]] = []
+
+            def fake_run_git(
+                args: list[str], _label: str
+            ) -> subprocess.CompletedProcess[str]:
+                commands.append(args)
+                if args[:2] == ["clone", "--quiet"]:
+                    (Path(args[-1]) / ".git").mkdir(parents=True)
+                return subprocess.CompletedProcess(["git", *args], 0, "", "")
+
+            with (
+                mock.patch.object(
+                    sync,
+                    "_git_ok",
+                    side_effect=lambda repo_path, *_args: (repo_path / ".git").is_dir(),
+                ),
+                mock.patch.object(sync, "_git_output", return_value=old_url),
+                mock.patch.object(sync, "_run_git", side_effect=fake_run_git),
+                mock.patch.object(sync, "checkout_repo"),
+            ):
+                sync.sync_repo("acme/centaur")
+
+            self.assertIn(["clone", "--quiet", new_url, str(target) + ".tmp"], commands)
+            self.assertFalse(stale_object.exists())
+
+    def test_clone_url_change_preserves_cached_checkout_when_reclone_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            new_url = "http://git-new.example.test/acme/centaur.git"
+            sync = self.make_sync(
+                root,
+                repository_clone_urls={"acme/centaur": new_url},
+            )
+            target = sync.repository_target("acme/centaur")
+            (target / ".git").mkdir(parents=True)
+            stale_object = target / ".git" / "objects" / "stale-object"
+            stale_object.parent.mkdir()
+            stale_object.write_text("belongs to old remote")
+
+            with (
+                mock.patch.object(
+                    sync,
+                    "_git_ok",
+                    side_effect=lambda repo_path, *_args: (repo_path / ".git").is_dir(),
+                ),
+                mock.patch.object(
+                    sync,
+                    "_git_output",
+                    return_value="http://git-old.example.test/acme/centaur.git",
+                ),
+                mock.patch.object(
+                    sync,
+                    "_run_git",
+                    side_effect=RuntimeError("clone acme/centaur failed"),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "clone acme/centaur failed"):
+                    sync.sync_repo("acme/centaur")
+
+            self.assertEqual(stale_object.read_text(), "belongs to old remote")
+
     def test_write_ready_preserves_readiness_format(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
