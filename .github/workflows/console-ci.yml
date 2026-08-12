@@ -117,7 +117,7 @@ jobs:
 
     services:
       postgres:
-        image: postgres:17
+        image: paradedb/paradedb:0.23.0-pg16
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -136,6 +136,17 @@ jobs:
         with:
           working-directory: services/console
           bundler-cache: true
+
+      - name: Verify migrations match the checked-in schema
+        env:
+          RAILS_ENV: test
+          IRON_CONTROL_DB_HOST: localhost
+          IRON_CONTROL_DB_PORT: 5432
+          IRON_CONTROL_DB_USERNAME: postgres
+          IRON_CONTROL_DB_PASSWORD: postgres
+        run: |
+          bin/rails db:create db:migrate
+          git diff --exit-code -- db/schema.rb
 
       - name: Run tests
         env:

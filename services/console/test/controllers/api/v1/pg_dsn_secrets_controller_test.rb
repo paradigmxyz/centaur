@@ -24,6 +24,7 @@ module Api
         assert_response :ok
 
         data = json_body.fetch("data")
+        refute data.key?("namespace")
         assert_equal secret.oid, data["id"]
         assert_equal "analytics", data["database"]
         assert_equal "readonly", data["role"]
@@ -45,23 +46,21 @@ module Api
         assert_equal source_id, secret.reload.dsn_source.id
       end
 
-      test "GET lookup finds a pg_dsn secret by namespace and foreign_id" do
+      test "GET lookup finds a pg_dsn secret by foreign_id" do
         secret = pg_dsn_secrets(:acme_analytics_pg)
-        get lookup_api_v1_pg_dsn_secrets_url(namespace: secret.namespace, foreign_id: secret.foreign_id),
-            headers: auth_headers
+        get lookup_api_v1_pg_dsn_secrets_url(foreign_id: secret.foreign_id), headers: auth_headers
         assert_response :ok
         assert_equal secret.oid, json_body.dig("data", "id")
       end
 
-      test "GET lookup scopes a pg_dsn secret by namespace" do
+      test "GET lookup rejects a non-default compatibility path" do
         secret = pg_dsn_secrets(:acme_analytics_pg)
-        get lookup_api_v1_pg_dsn_secrets_url(namespace: "globex", foreign_id: secret.foreign_id),
-            headers: auth_headers
+        get "/api/v1/pg_dsn_secrets/lookup/other/#{secret.foreign_id}", headers: auth_headers
         assert_response :not_found
       end
 
       test "GET lookup returns 404 when no pg_dsn secret matches" do
-        get lookup_api_v1_pg_dsn_secrets_url(namespace: "acme", foreign_id: "does-not-exist"),
+        get lookup_api_v1_pg_dsn_secrets_url(foreign_id: "does-not-exist"),
             headers: auth_headers
         assert_response :not_found
       end
@@ -69,7 +68,6 @@ module Api
       test "POST creates a pg_dsn secret with a nested dsn source" do
         body = {
           data: {
-            namespace: "acme",
             foreign_id: "new-pg",
             name: "orders",
             database: "orders",
@@ -92,7 +90,6 @@ module Api
       test "POST never echoes a control_plane dsn secret back" do
         body = {
           data: {
-            namespace: "acme",
             foreign_id: "inline-pg",
             database: "app",
             dsn: { source_type: "control_plane", secret: "postgres://u:sup3rsecret@db/app" }
@@ -107,7 +104,6 @@ module Api
       test "POST is rejected when the inline DSN database does not match" do
         body = {
           data: {
-            namespace: "acme",
             foreign_id: "mismatch-pg",
             database: "app",
             dsn: { source_type: "control_plane", secret: "postgres://u:pw@db/other" }
@@ -123,7 +119,6 @@ module Api
       test "POST without a dsn source is rejected" do
         body = {
           data: {
-            namespace: "acme",
             foreign_id: "no-dsn",
             database: "no-dsn-db"
           }
@@ -138,7 +133,6 @@ module Api
       test "POST without a database is rejected" do
         body = {
           data: {
-            namespace: "acme",
             foreign_id: "no-db",
             dsn: { source_type: "env", config: { var: "PG_DSN" } }
           }
@@ -171,7 +165,6 @@ module Api
       test "POST persists session settings and echoes them back" do
         body = {
           data: {
-            namespace: "acme",
             foreign_id: "settings-pg",
             database: "settings-db",
             settings: [
@@ -199,7 +192,6 @@ module Api
       test "POST persists value_from settings and echoes the stored reference" do
         body = {
           data: {
-            namespace: "acme",
             foreign_id: "value-from-pg",
             database: "value-from-db",
             settings: [
@@ -222,10 +214,9 @@ module Api
         )
       end
 
-      test "POST canonicalizes legacy identity labels without changing custom labels" do
+      test "POST preserves principal label references" do
         body = {
           data: {
-            namespace: "acme",
             foreign_id: "legacy-value-from-pg",
             database: "legacy-value-from-db",
             settings: [
@@ -241,7 +232,7 @@ module Api
 
         assert_equal(
           [
-            { "name" => "centaur.slack_channel_id", "value_from" => { "principal_field" => "slack_channel_id" } },
+            { "name" => "centaur.slack_channel_id", "value_from" => { "principal_label" => "slack_channel_id" } },
             { "name" => "app.tenant", "value_from" => { "principal_label" => "tenant" } }
           ],
           json_body.dig("data", "settings")
@@ -251,7 +242,6 @@ module Api
       test "POST with an invalid value_from is rejected" do
         body = {
           data: {
-            namespace: "acme",
             foreign_id: "bad-value-from-pg",
             database: "bad-value-from-db",
             settings: [ { name: "app.tenant", value_from: { principal_field: "labels" } } ],
@@ -268,7 +258,6 @@ module Api
       test "POST with an invalid setting name is rejected" do
         body = {
           data: {
-            namespace: "acme",
             foreign_id: "bad-settings-pg",
             database: "bad-settings-db",
             settings: [ { name: "role", value: "x" } ],
@@ -321,7 +310,6 @@ module Api
       test "PUT upserts a new pg_dsn secret by foreign_id" do
         body = {
           data: {
-            namespace: "acme",
             database: "upsert-db",
             dsn: { source_type: "env", config: { var: "UPSERT_DSN" } }
           }
@@ -338,7 +326,6 @@ module Api
         existing = pg_dsn_secrets(:acme_analytics_pg)
         body = {
           data: {
-            namespace: "acme",
             database: existing.database,
             role: "centaur_readonly",
             dsn: { source_type: "env", config: { var: "SHARED_DATABASE_DSN" } }
@@ -354,8 +341,8 @@ module Api
         assert_equal existing.database, json_body.dig("data", "database")
       end
 
-      test "GET index is scoped by namespace" do
-        get api_v1_pg_dsn_secrets_url, params: { namespace: "acme" }, headers: auth_headers
+      test "GET index returns pg_dsn secrets" do
+        get api_v1_pg_dsn_secrets_url, params: {}.to_json, headers: auth_headers
         assert_response :ok
         ids = json_body.fetch("data").map { |r| r["id"] }
         assert_includes ids, pg_dsn_secrets(:acme_analytics_pg).oid

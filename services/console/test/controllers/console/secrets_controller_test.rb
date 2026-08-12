@@ -29,8 +29,11 @@ module Console
     test "GET new and edit render without error" do
       get new_console_static_secret_url
       assert_response :ok
+      assert_select "input[name='secret[namespace]']", count: 0
+      assert_select ".form-label", text: "Namespace", count: 0
       get edit_console_static_secret_url(static_secrets(:acme_prod_api_key).oid)
       assert_response :ok
+      assert_select ".form-label", text: "Namespace", count: 0
     end
 
     # The managed-secret guard banner is behavior (a warning), not form markup, so
@@ -49,7 +52,7 @@ module Console
                         -> { SecretSource.count } => 1,
                         -> { RequestRule.count } => 2 do
         post console_static_secrets_url, params: {
-          secret: { namespace: "acme", name: "ui-static", foreign_id: "ui-static" },
+          secret: { name: "ui-static", foreign_id: "ui-static" },
           static: { mode: "inject", header: "Authorization", formatter: "Bearer {{ .Value }}" },
           source: { source_type: "env", reference: "UI_TOKEN" },
           rules: {
@@ -60,7 +63,7 @@ module Console
         }
       end
 
-      secret = StaticSecret.find_by!(namespace: "acme", foreign_id: "ui-static")
+      secret = StaticSecret.find_by!(foreign_id: "ui-static")
       assert_redirected_to console_secret_path("static", secret.oid)
       assert_equal({ "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" }, secret.inject_config)
       assert_equal({ "team" => "platform" }, secret.labels)
@@ -72,7 +75,7 @@ module Console
     test "POST create with no inject or replace is rejected without writing" do
       assert_no_difference [ "StaticSecret.count", "SecretSource.count", "RequestRule.count" ] do
         post console_static_secrets_url, params: {
-          secret: { namespace: "acme", name: "broken" },
+          secret: { name: "broken" },
           static: { mode: "inject" },
           source: { source_type: "env", reference: "X" }
         }
@@ -84,13 +87,13 @@ module Console
       assert_difference -> { StaticSecret.count } => 1,
                         -> { RequestRule.count } => 2 do
         post console_static_secrets_url, params: {
-          secret: { namespace: "acme", name: "GitHub token", foreign_id: "github-token" },
+          secret: { name: "GitHub token", foreign_id: "github-token" },
           static: { kind: "github_token", mode: "inject" },
           source: { source_type: "env", reference: "GITHUB_TOKEN" }
         }
       end
 
-      secret = StaticSecret.find_by!(namespace: "acme", foreign_id: "github-token")
+      secret = StaticSecret.find_by!(foreign_id: "github-token")
       assert_equal "github_token", secret.kind
       assert_nil secret.inject_config
       assert_equal CredentialProfiles::GithubToken::REPLACE_CONFIG, secret.replace_config
@@ -99,7 +102,6 @@ module Console
 
     test "PATCH preserves a GitHub token profile through the form representation" do
       secret = StaticSecret.create!(
-        namespace: "acme",
         name: "GitHub token",
         kind: "github_token",
         replace_config: CredentialProfiles::GithubToken::REPLACE_CONFIG,
@@ -107,7 +109,7 @@ module Console
       )
 
       patch console_static_secret_url(secret.oid), params: {
-        secret: { namespace: "acme", name: "renamed GitHub token" },
+        secret: { name: "renamed GitHub token" },
         static: {
           kind: "github_token", mode: "replace", proxy_value: "GITHUB_TOKEN",
           match_headers: "Authorization"
@@ -126,7 +128,7 @@ module Console
     test "POST create with an invalid nested rule is rejected without writing" do
       assert_no_difference [ "StaticSecret.count", "RequestRule.count" ] do
         post console_static_secrets_url, params: {
-          secret: { namespace: "acme", name: "bad-rule" },
+          secret: { name: "bad-rule" },
           static: { mode: "inject", header: "Authorization" },
           rules: { "0" => { host: "h.example.com", cidr: "10.0.0.0/8" } }
         }
@@ -137,7 +139,7 @@ module Console
     test "PATCH update changes attributes and replaces rules" do
       secret = static_secrets(:github_token_inject)
       patch console_static_secret_url(secret.oid), params: {
-        secret: { namespace: secret.namespace, name: "renamed" },
+        secret: { name: "renamed" },
         static: { mode: "inject", header: "X-Token" },
         source: { source_type: "env", reference: "NEW_VAR" },
         rules: { "0" => { host: "only.example.com", http_methods: "GET", paths: "/" } }
@@ -170,11 +172,11 @@ module Console
     test "POST create builds a pg_dsn secret with an inline DSN source" do
       assert_difference -> { PgDsnSecret.count } => 1, -> { SecretSource.count } => 1 do
         post console_pg_dsn_secrets_url, params: {
-          secret: { namespace: "acme", foreign_id: "ui-shop", database: "shop", role: "readonly" },
+          secret: { foreign_id: "ui-shop", database: "shop", role: "readonly" },
           source: { source_type: "control_plane", secret: "postgres://u:p@db.example:5432/shop" }
         }
       end
-      secret = PgDsnSecret.find_by!(namespace: "acme", foreign_id: "ui-shop")
+      secret = PgDsnSecret.find_by!(foreign_id: "ui-shop")
       assert_redirected_to console_secret_path("pg_dsn", secret.oid)
       assert_equal "shop", secret.database
       assert_equal "control_plane", secret.dsn_source.source_type
@@ -183,7 +185,7 @@ module Console
     test "POST create rejects a database that mismatches the inline DSN" do
       assert_no_difference [ "PgDsnSecret.count", "SecretSource.count" ] do
         post console_pg_dsn_secrets_url, params: {
-          secret: { namespace: "acme", foreign_id: "ui-mismatch", database: "wrong" },
+          secret: { foreign_id: "ui-mismatch", database: "wrong" },
           source: { source_type: "control_plane", secret: "postgres://u:p@db.example/shop" }
         }
       end
@@ -193,7 +195,7 @@ module Console
     test "POST create requires foreign_id and database for pg_dsn" do
       assert_no_difference "PgDsnSecret.count" do
         post console_pg_dsn_secrets_url, params: {
-          secret: { namespace: "acme" },
+          secret: {},
           source: { source_type: "env", reference: "PG_DSN" }
         }
       end
@@ -203,7 +205,7 @@ module Console
     test "PATCH update changes the pg_dsn database and source" do
       secret = pg_dsn_secrets(:acme_reporting_pg)
       patch console_pg_dsn_secret_url(secret.oid), params: {
-        secret: { namespace: secret.namespace, foreign_id: secret.foreign_id, database: "reporting", role: "" },
+        secret: { foreign_id: secret.foreign_id, database: "reporting", role: "" },
         source: { source_type: "env", reference: "REPORTING_DSN" }
       }
       assert_redirected_to console_secret_path("pg_dsn", secret.oid)
@@ -223,7 +225,7 @@ module Console
 
     test "POST create captures ordered session settings and drops blank-name rows" do
       post console_pg_dsn_secrets_url, params: {
-        secret: { namespace: "acme", foreign_id: "ui-settings", database: "settingsdb" },
+        secret: { foreign_id: "ui-settings", database: "settingsdb" },
         settings: {
           "0" => { name: "app.tenant", value: "centaur" },
           "1" => { name: "", value: "ignored" },
@@ -231,7 +233,7 @@ module Console
         },
         source: { source_type: "env", reference: "SETTINGS_DSN" }
       }
-      secret = PgDsnSecret.find_by!(namespace: "acme", foreign_id: "ui-settings")
+      secret = PgDsnSecret.find_by!(foreign_id: "ui-settings")
       assert_redirected_to console_secret_path("pg_dsn", secret.oid)
       assert_equal(
         [
@@ -244,7 +246,7 @@ module Console
 
     test "POST create captures principal-derived settings via the kind select" do
       post console_pg_dsn_secrets_url, params: {
-        secret: { namespace: "acme", foreign_id: "ui-value-from", database: "valuefromdb" },
+        secret: { foreign_id: "ui-value-from", database: "valuefromdb" },
         settings: {
           "0" => { name: "centaur.slack_channel_id", kind: "principal_field", value: "slack_channel_id" },
           "1" => { name: "centaur.principal", kind: "principal_field", value: "foreign_id" },
@@ -252,7 +254,7 @@ module Console
         },
         source: { source_type: "env", reference: "VALUE_FROM_DSN" }
       }
-      secret = PgDsnSecret.find_by!(namespace: "acme", foreign_id: "ui-value-from")
+      secret = PgDsnSecret.find_by!(foreign_id: "ui-value-from")
       assert_redirected_to console_secret_path("pg_dsn", secret.oid)
       assert_equal(
         [
@@ -266,13 +268,13 @@ module Console
 
     test "POST create captures proxy label settings via the kind select" do
       post console_pg_dsn_secrets_url, params: {
-        secret: { namespace: "acme", foreign_id: "ui-proxy-label", database: "proxylabeldb" },
+        secret: { foreign_id: "ui-proxy-label", database: "proxylabeldb" },
         settings: {
           "0" => { name: "centaur.slack_user_id", kind: "proxy_label", value: "centaur.slack_user_id" }
         },
         source: { source_type: "env", reference: "PROXY_LABEL_DSN" }
       }
-      secret = PgDsnSecret.find_by!(namespace: "acme", foreign_id: "ui-proxy-label")
+      secret = PgDsnSecret.find_by!(foreign_id: "ui-proxy-label")
       assert_redirected_to console_secret_path("pg_dsn", secret.oid)
       assert_equal(
         [
@@ -285,7 +287,7 @@ module Console
     test "POST create rejects an unknown principal_field from the console form" do
       assert_no_difference "PgDsnSecret.count" do
         post console_pg_dsn_secrets_url, params: {
-          secret: { namespace: "acme", foreign_id: "ui-bad-field", database: "badfielddb" },
+          secret: { foreign_id: "ui-bad-field", database: "badfielddb" },
           settings: { "0" => { name: "app.tenant", kind: "principal_field", value: "labels" } },
           source: { source_type: "env", reference: "SETTINGS_DSN" }
         }
@@ -297,7 +299,7 @@ module Console
       secret = pg_dsn_secrets(:acme_reporting_pg)
       secret.update!(settings: [ { "name" => "app.tenant", "value" => "centaur" } ])
       patch console_pg_dsn_secret_url(secret.oid), params: {
-        secret: { namespace: secret.namespace, foreign_id: secret.foreign_id, database: "reporting" },
+        secret: { foreign_id: secret.foreign_id, database: "reporting" },
         source: { source_type: "env", reference: "REPORTING_DSN" }
       }
       assert_redirected_to console_secret_path("pg_dsn", secret.oid)
@@ -307,7 +309,7 @@ module Console
     test "POST create rejects an invalid session setting name" do
       assert_no_difference "PgDsnSecret.count" do
         post console_pg_dsn_secrets_url, params: {
-          secret: { namespace: "acme", foreign_id: "ui-bad-setting", database: "badsettingdb" },
+          secret: { foreign_id: "ui-bad-setting", database: "badsettingdb" },
           settings: { "0" => { name: "session_authorization", value: "x" } },
           source: { source_type: "env", reference: "SETTINGS_DSN" }
         }
@@ -329,7 +331,7 @@ module Console
                         -> { SecretSource.count } => 1,
                         -> { RequestRule.count } => 1 do
         post console_gcp_auth_secrets_url, params: {
-          secret: { namespace: "acme", foreign_id: "ui-gcp-key", name: "ui-gcp" },
+          secret: { foreign_id: "ui-gcp-key", name: "ui-gcp" },
           gcp: {
             credential_mode: "keyfile",
             subject: "bot@acme.example",
@@ -340,7 +342,7 @@ module Console
         }
       end
 
-      secret = GcpAuthSecret.find_by!(namespace: "acme", foreign_id: "ui-gcp-key")
+      secret = GcpAuthSecret.find_by!(foreign_id: "ui-gcp-key")
       assert_redirected_to console_secret_path("gcp_auth", secret.oid)
       assert_equal %w[https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/devstorage.read_only], secret.scopes
       assert_equal "bot@acme.example", secret.subject
@@ -353,7 +355,7 @@ module Console
       assert_difference -> { GcpAuthSecret.count } => 1 do
         assert_no_difference "SecretSource.count" do
           post console_gcp_auth_secrets_url, params: {
-            secret: { namespace: "acme", foreign_id: "ui-gcp-wi" },
+            secret: { foreign_id: "ui-gcp-wi" },
             gcp: {
               credential_mode: "workload_identity",
               subject: "ignored@acme.example",
@@ -364,7 +366,7 @@ module Console
         end
       end
 
-      secret = GcpAuthSecret.find_by!(namespace: "acme", foreign_id: "ui-gcp-wi")
+      secret = GcpAuthSecret.find_by!(foreign_id: "ui-gcp-wi")
       assert_redirected_to console_secret_path("gcp_auth", secret.oid)
       assert_equal({ "type" => "workload_identity" }, secret.credentials_provider)
       assert_nil secret.keyfile_source
@@ -374,7 +376,7 @@ module Console
     test "POST create gcp_auth without scopes is rejected without writing" do
       assert_no_difference [ "GcpAuthSecret.count", "SecretSource.count" ] do
         post console_gcp_auth_secrets_url, params: {
-          secret: { namespace: "acme", name: "no-scopes" },
+          secret: { name: "no-scopes" },
           gcp: { credential_mode: "keyfile", scopes: "" },
           source: { source_type: "env", reference: "GCP_KEY" }
         }
@@ -387,7 +389,7 @@ module Console
       assert secret.keyfile_source.present?
 
       patch console_gcp_auth_secret_url(secret.oid), params: {
-        secret: { namespace: secret.namespace, foreign_id: secret.foreign_id },
+        secret: { foreign_id: secret.foreign_id },
         gcp: { credential_mode: "workload_identity", scopes: "https://www.googleapis.com/auth/cloud-platform" }
       }
 
@@ -412,7 +414,7 @@ module Console
                         -> { SecretSource.count } => 1,
                         -> { RequestRule.count } => 1 do
         post console_gcp_id_token_secrets_url, params: {
-          secret: { namespace: "acme", foreign_id: "ui-cloud-run", name: "ui cloud run" },
+          secret: { foreign_id: "ui-cloud-run", name: "ui cloud run" },
           gcp_id_token: {
             audience: "https://ui-service-abc123-uc.a.run.app",
             header: "x-serverless-authorization"
@@ -422,7 +424,7 @@ module Console
         }
       end
 
-      secret = GcpIdTokenSecret.find_by!(namespace: "acme", foreign_id: "ui-cloud-run")
+      secret = GcpIdTokenSecret.find_by!(foreign_id: "ui-cloud-run")
       assert_redirected_to console_secret_path("gcp_id_token", secret.oid)
       assert_equal "https://ui-service-abc123-uc.a.run.app", secret.audience
       assert_equal "x-serverless-authorization", secret.header
@@ -433,7 +435,7 @@ module Console
     test "POST create gcp_id_token without rules is rejected without writing" do
       assert_no_difference [ "GcpIdTokenSecret.count", "SecretSource.count", "RequestRule.count" ] do
         post console_gcp_id_token_secrets_url, params: {
-          secret: { namespace: "acme", foreign_id: "ui-cloud-run-no-rules" },
+          secret: { foreign_id: "ui-cloud-run-no-rules" },
           gcp_id_token: { audience: "https://ui-service-abc123-uc.a.run.app" },
           source: { source_type: "env", reference: "UI_CLOUD_RUN_KEYFILE" }
         }
@@ -447,7 +449,7 @@ module Console
       secret = gcp_id_token_secrets(:acme_cloud_run)
 
       patch console_gcp_id_token_secret_url(secret.oid), params: {
-        secret: { namespace: secret.namespace, foreign_id: secret.foreign_id },
+        secret: { foreign_id: secret.foreign_id },
         gcp_id_token: {
           audience: "https://updated-service-abc123-uc.a.run.app",
           header: ""
@@ -491,16 +493,16 @@ module Console
       assert_redirected_to console_secret_path("static", secret.oid)
     end
 
-    test "POST grant_role rejects a role from another namespace" do
+    test "POST grant_role allows any role" do
       secret = static_secrets(:acme_staging_api_key)
       role = roles(:globex_infra)
 
-      assert_no_difference -> { Grant.count } do
+      assert_difference -> { Grant.count } => 1 do
         post console_secret_grant_role_url("static", secret.oid), params: { role_id: role.oid }
       end
 
       assert_redirected_to console_secret_path("static", secret.oid)
-      assert_equal "Role must be in the same namespace as the secret.", flash[:alert]
+      assert_equal "Assigned secret to Infra.", flash[:notice]
     end
 
     test "DELETE revoke_role_grant removes a role grant from the secret" do

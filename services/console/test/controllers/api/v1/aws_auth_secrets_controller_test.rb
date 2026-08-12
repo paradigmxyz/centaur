@@ -16,7 +16,6 @@ module Api
       def valid_body(overrides = {})
         {
           data: {
-            namespace: "acme",
             foreign_id: "new-aws",
             allowed_services: [ "logs", "monitoring" ],
             access_key_id: { source_type: "env", config: { var: "AWS_ACCESS_KEY_ID" } },
@@ -37,6 +36,7 @@ module Api
         assert_response :ok
 
         data = json_body.fetch("data")
+        refute data.key?("namespace")
         assert_equal({ "source_type" => "env", "config" => { "var" => "AWS_ACCESS_KEY_ID" } }, data["access_key_id"])
         assert_equal({ "source_type" => "env", "config" => { "var" => "AWS_SECRET_ACCESS_KEY" } }, data["secret_access_key"])
         assert_nil data["session_token"]
@@ -44,16 +44,16 @@ module Api
         assert_equal 1, data["rules"].length
       end
 
-      test "GET lookup finds an aws_auth secret by namespace and foreign_id" do
+      test "GET lookup finds an aws_auth secret by foreign_id" do
         secret = aws_auth_secrets(:acme_cloudwatch_aws)
-        get lookup_api_v1_aws_auth_secrets_url(namespace: secret.namespace, foreign_id: secret.foreign_id),
+        get lookup_api_v1_aws_auth_secrets_url(foreign_id: secret.foreign_id),
             headers: auth_headers
         assert_response :ok
         assert_equal secret.oid, json_body.dig("data", "id")
       end
 
       test "GET lookup returns 404 when no aws_auth secret matches" do
-        get lookup_api_v1_aws_auth_secrets_url(namespace: "acme", foreign_id: "does-not-exist"),
+        get lookup_api_v1_aws_auth_secrets_url(foreign_id: "does-not-exist"),
             headers: auth_headers
         assert_response :not_found
       end
@@ -128,7 +128,6 @@ module Api
 
         body = {
           data: {
-            namespace: secret.namespace,
             foreign_id: secret.foreign_id,
             name: secret.name,
             labels: secret.labels,
@@ -155,7 +154,6 @@ module Api
         secret = aws_auth_secrets(:acme_cloudwatch_aws)
         body = {
           data: {
-            namespace: secret.namespace,
             foreign_id: secret.foreign_id,
             name: secret.name,
             labels: secret.labels,

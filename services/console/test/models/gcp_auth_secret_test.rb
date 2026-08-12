@@ -3,7 +3,6 @@ require "test_helper"
 class GcpAuthSecretTest < ActiveSupport::TestCase
   def base_attrs(overrides = {})
     {
-      namespace: "acme",
       foreign_id: "new-gcp",
       scopes: [ "https://www.googleapis.com/auth/cloud-platform" ],
       created_by: users(:acme_admin)

@@ -1,0 +1,65 @@
+<% content_for :title, "#{@skill.name} · Centaur Console" %>
+<% owned = @skill.user_id == current_user.id %>
+<% visibility_badge_class = @skill.shared? ? "resource-badge" : "role-pill" %>
+
+<nav class="mb-4" aria-label="Breadcrumb">
+  <%= link_to(owned ? mine_console_skills_path : console_skills_path,
+              class: "inline-flex items-center gap-1.5 text-sm text-zinc-500 hover:text-centaur-300") do %>
+    <span aria-hidden="true">&larr;</span>
+    <span>Back to Skills</span>
+  <% end %>
+</nav>
+
+<div class="mb-8">
+  <div class="flex flex-wrap items-center justify-between gap-4">
+    <div class="flex items-center gap-2">
+      <h1 class="text-xl font-semibold text-zinc-100"><%= @skill.name %></h1>
+      <span class="<%= visibility_badge_class %>"><%= @skill.shared? ? "PUBLIC" : "PRIVATE" %></span>
+    </div>
+
+    <div class="flex min-h-9 shrink-0 flex-wrap items-center gap-2">
+      <% if owned %>
+        <%= link_to "Edit", edit_console_skill_path(@skill.oid), class: "inline-flex h-9 items-center rounded border border-ink-600 px-3 text-sm text-zinc-200 hover:border-ink-500" %>
+        <%= button_to(@skill.shared? ? unshare_console_skill_path(@skill.oid) : share_console_skill_path(@skill.oid),
+                      form: { class: "flex items-center" },
+                      class: "inline-flex h-9 items-center gap-2 rounded border border-ink-600 px-3 text-xs hover:border-ink-500",
+                      role: "switch",
+                      aria: { checked: @skill.shared? },
+                      title: @skill.shared? ? "Make this skill private" : "Make this skill public") do %>
+          <span class="<%= @skill.shared? ? 'text-zinc-500' : 'font-medium text-zinc-100' %>">Private</span>
+          <span class="relative h-5 w-9 rounded-full <%= @skill.shared? ? 'bg-centaur-500' : 'bg-ink-600' %>">
+            <span class="absolute left-1 top-1 h-3 w-3 rounded-full bg-white transition-transform <%= 'translate-x-4' if @skill.shared? %>"></span>
+          </span>
+          <span class="<%= @skill.shared? ? 'font-medium text-centaur-300' : 'text-zinc-500' %>">Public</span>
+        <% end %>
+        <%= button_to "Archive",
+                      console_skill_path(@skill.oid),
+                      method: :delete,
+                      form: { class: "flex items-center" },
+                      class: "inline-flex h-9 items-center rounded border border-red-500/30 px-3 text-sm text-red-300 hover:border-red-500/60" %>
+      <% else %>
+        <% if acting_admin? %>
+          <%= button_to "Make Private",
+                        unshare_console_skill_path(@skill.oid),
+                        form: { class: "flex items-center" },
+                        class: "inline-flex h-9 items-center rounded border border-red-500/30 px-3 text-sm text-red-300 hover:border-red-500/60" %>
+        <% end %>
+      <% end %>
+    </div>
+  </div>
+  <p class="mt-2 text-xs text-zinc-600">by <%= @skill.user.name.presence || @skill.user.email %> · updated <%= local_time(@skill.updated_at, relative: true) %></p>
+</div>
+
+<div class="max-w-3xl space-y-8">
+  <section aria-labelledby="skill-description-heading">
+    <h2 id="skill-description-heading" class="mb-3 text-sm font-semibold text-zinc-100">Description</h2>
+    <p class="text-sm leading-6 text-zinc-400"><%= @skill.description %></p>
+  </section>
+
+  <section aria-labelledby="skill-instructions-heading">
+    <h2 id="skill-instructions-heading" class="mb-3 text-sm font-semibold text-zinc-100">Instructions</h2>
+    <article class="console-markdown text-sm leading-6">
+      <%= console_markdown(@skill.content) %>
+    </article>
+  </section>
+</div>

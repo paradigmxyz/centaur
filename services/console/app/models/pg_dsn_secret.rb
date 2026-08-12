@@ -33,27 +33,12 @@ class PgDsnSecret < ApplicationRecord
   # to the principal oid and `console_user_id` to the associated user oid; raw
   # database primary keys are never exposed as setting values.
   PRINCIPAL_FIELDS = %w[
-    id namespace foreign_id name kind slack_user_id slack_channel_id slack_team_id slack_email
+    id foreign_id name kind slack_user_id slack_channel_id slack_team_id slack_email
     console_user_id console_user_email slack_history_channel_ids
   ].freeze
-  # Legacy `principal_label` selectors that canonicalize to a first-class
-  # `principal_field` on save. The `email` label stays on the compatibility
-  # shim: unlike these names, it is plausible as a custom label on principals
-  # of other kinds, where a rewrite would change what it resolves to.
-  IDENTITY_PRINCIPAL_LABEL_FIELDS = {
-    "kind" => "kind",
-    "slack_user_id" => "slack_user_id",
-    "slack_channel_id" => "slack_channel_id",
-    "slack_team_id" => "slack_team_id",
-    "slack_email" => "slack_email",
-    "console-user-id" => "console_user_id"
-  }.freeze
-
   has_one :dsn_source, class_name: "SecretSource", dependent: :destroy
   has_many :grants, dependent: :destroy
   belongs_to :created_by, class_name: "User"
-
-  before_validation :normalize_identity_principal_label_settings
 
   # One entry in the proxy's synced `postgres` list, keyed for routing by
   # `database`. The opaque id is carried too so the proxy can refer back to the
@@ -97,7 +82,6 @@ class PgDsnSecret < ApplicationRecord
     end
   end
 
-  validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
   validates :foreign_id, presence: true, uniqueness: true,
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
   validates :database, presence: true
@@ -107,26 +91,6 @@ class PgDsnSecret < ApplicationRecord
   validate :database_matches_inline_dsn
 
   private
-
-  def normalize_identity_principal_label_settings
-    return unless settings.is_a?(Array)
-
-    normalized = settings.map do |setting|
-      next setting unless setting.is_a?(Hash)
-
-      indifferent_setting = setting.with_indifferent_access
-      value_from = indifferent_setting[:value_from]
-      next setting unless value_from.is_a?(Hash)
-
-      field = IDENTITY_PRINCIPAL_LABEL_FIELDS[value_from[:principal_label].to_s]
-      next setting unless field
-
-      indifferent_setting.except(:value_from).merge(
-        value_from: value_from.except(:principal_label).merge(principal_field: field)
-      ).to_h
-    end
-    self.settings = normalized unless normalized == settings
-  end
 
   def labels_is_a_hash
     errors.add(:labels, "must be a hash") unless labels.is_a?(Hash)
@@ -143,10 +107,6 @@ class PgDsnSecret < ApplicationRecord
 
     label = ref[:principal_label]
     if label.present?
-      if PrincipalIdentityLabels.promoted?(principal, label)
-        return PrincipalIdentityLabels.value(principal, label).to_s
-      end
-
       return principal&.labels&.fetch(label.to_s, "").to_s
     end
 
@@ -157,7 +117,6 @@ class PgDsnSecret < ApplicationRecord
 
     case ref[:principal_field].to_s
     when "id" then principal.oid
-    when "namespace" then principal.namespace.to_s
     when "foreign_id" then principal.foreign_id.to_s
     when "name" then principal.name.to_s
     when "kind" then principal.kind.to_s

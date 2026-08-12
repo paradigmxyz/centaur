@@ -11,6 +11,7 @@ class ConsoleController < ApplicationController
   before_action :require_admin
 
   PRINCIPALS_PER_PAGE = 50
+  PRINCIPAL_DETAIL_PER_PAGE = 50
 
   # Friendly labels for the source backend (and the gcp_auth credentials_provider
   # type). The secrets table shows only this -- the full reference lives on the
@@ -45,8 +46,8 @@ class ConsoleController < ApplicationController
     @principal = Principal.find_by_oid!(params[:id])
     load_slack_channel_permission_form(@principal)
     @inherited_slack_channel_permissions = @principal.inherited_slack_channel_permissions_payload
-    @roles = @principal.roles.order(:id)
-    @granted = {
+    load_principal_roles
+    effective_grant_relations = {
       "static" => @principal.granted_static_secrets,
       "gcp_auth" => @principal.granted_gcp_auth_secrets,
       "gcp_id_token" => @principal.granted_gcp_id_token_secrets,
@@ -55,40 +56,46 @@ class ConsoleController < ApplicationController
       "pg_dsn" => @principal.granted_pg_dsn_secrets,
       "hmac" => @principal.granted_hmac_secrets
     }
+    effective_page = PrincipalEffectiveGrantsPage.new(
+      principal: @principal,
+      relations: effective_grant_relations,
+      page: params[:effective_grants_page],
+      per_page: PRINCIPAL_DETAIL_PER_PAGE
+    ).call
+    @granted = effective_page.records_by_kind
+    @grant_sources = effective_page.sources_by_key
+    @effective_grants_page = effective_page.page
+    @effective_grants_total_pages = effective_page.total_pages
+    @effective_grants_total_count = effective_page.total_count
+
     # Direct grants (revocable here) -- distinct from @granted, which also folds in
     # grants inherited from roles.
-    @direct_grants = @principal.grants
+    direct_grants_scope = @principal.grants.order(:id)
+    @direct_grants_total_count = direct_grants_scope.count
+    @direct_grants_total_pages = total_pages(@direct_grants_total_count, PRINCIPAL_DETAIL_PER_PAGE)
+    @direct_grants_page = bounded_page(params[:direct_grants_page], @direct_grants_total_pages)
+    @direct_grants = direct_grants_scope
       .includes(Grant::GRANTABLE_ASSOCIATIONS)
-      .order(:id)
-    # How each effective secret is reached, for the Source column: keyed by
-    # [kind, secret_id], a list of { type: :direct } / { type: :role, role: } --
-    # a secret can be granted directly and/or through one or more roles.
-    @grant_sources = Hash.new { |h, k| h[k] = [] }
-    @principal.effective_grants.includes(:role).each do |grant|
-      assoc = Grant::GRANTABLE_ASSOCIATIONS.find { |a| grant.public_send("#{a}_id") }
-      next unless assoc
-      kind = assoc.to_s.delete_suffix("_secret")
-      @grant_sources[[ kind, grant.public_send("#{assoc}_id") ]] <<
-        (grant.role ? { type: :role, role: grant.role } : { type: :direct })
-    end
-    # Assignment options for the inline forms. Roles are namespace-scoped, so
-    # only same-namespace roles are assignable from this principal. Secrets span
-    # all namespaces; the namespace is shown as a label on each option.
-    # Already-directly-granted secrets are filtered out of the grant dropdown
+      .limit(PRINCIPAL_DETAIL_PER_PAGE)
+      .offset((@direct_grants_page - 1) * PRINCIPAL_DETAIL_PER_PAGE)
+    # Assignment options for the inline forms. Already-directly-granted secrets
+    # are filtered out of the grant dropdown
     # (they're in the table above); a role-inherited secret stays offered, so it
     # can be promoted to a direct grant.
     @assignable_roles = Role
-      .where(namespace: @principal.namespace)
       .where.not(id: @principal.role_ids)
       .order(:id)
-    granted_ids = Hash.new { |h, k| h[k] = [] }
-    @direct_grants.each do |grant|
-      assoc = Grant::GRANTABLE_ASSOCIATIONS.find { |a| grant.public_send("#{a}_id") }
-      next unless assoc
-      granted_ids[assoc.to_s.delete_suffix("_secret")] << grant.public_send("#{assoc}_id")
+    granted_ids = Hash.new { |hash, key| hash[key] = [] }
+    @principal.grants.pluck(*Grant::GRANTABLE_ASSOCIATIONS.map { |assoc| "#{assoc}_id" }).each do |ids|
+      ids.each_with_index do |id, index|
+        next unless id
+
+        kind = Grant::GRANTABLE_ASSOCIATIONS.fetch(index).to_s.delete_suffix("_secret")
+        granted_ids[kind] << id
+      end
     end
     @assignable_secrets = SECRET_KINDS.each_with_object({}) do |(kind, cfg), acc|
-      acc[kind] = cfg[:model].where.not(id: granted_ids[kind]).order(:namespace, :id)
+      acc[kind] = cfg[:model].where.not(id: granted_ids[kind]).order(:id)
     end
   end
 
@@ -111,10 +118,7 @@ class ConsoleController < ApplicationController
     grantable = @secret.class.name.underscore.to_sym
     @role_grants = Grant.where(grantable => @secret).where.not(role_id: nil).includes(:role).order(:id)
     granted_role_ids = @role_grants.map(&:role_id)
-    @assignable_roles = Role
-      .where(namespace: @secret.namespace)
-      .where.not(id: granted_role_ids)
-      .order(:id)
+    @assignable_roles = Role.where.not(id: granted_role_ids).order(:id)
   end
 
   # Managed broker credentials and their refresh-loop status. Distinct from
@@ -210,6 +214,25 @@ class ConsoleController < ApplicationController
   end
 
   private
+
+  def load_principal_roles
+    scope = @principal.roles.order(:id)
+    @roles_total_count = scope.count
+    @roles_total_pages = total_pages(@roles_total_count, PRINCIPAL_DETAIL_PER_PAGE)
+    @roles_page = bounded_page(params[:roles_page], @roles_total_pages)
+    @roles = scope
+      .limit(PRINCIPAL_DETAIL_PER_PAGE)
+      .offset((@roles_page - 1) * PRINCIPAL_DETAIL_PER_PAGE)
+  end
+
+  def total_pages(total_count, per_page)
+    [ (total_count.to_f / per_page).ceil, 1 ].max
+  end
+
+  def bounded_page(value, total_pages)
+    page = Integer(value.to_s, 10, exception: false) || 1
+    [ [ page, 1 ].max, total_pages ].min
+  end
 
   def page_param
     page = Integer(params[:page].to_s, 10, exception: false) || 1

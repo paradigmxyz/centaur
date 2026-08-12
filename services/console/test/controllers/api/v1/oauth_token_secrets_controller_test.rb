@@ -24,6 +24,7 @@ module Api
         assert_response :ok
 
         data = json_body.fetch("data")
+        refute data.key?("namespace")
         assert_equal "refresh_token", data["grant"]
         assert_equal({ "source_type" => "env", "config" => { "var" => "GMAIL_CLIENT_ID" } },
                      data.dig("credentials", "client_id"))
@@ -45,23 +46,21 @@ module Api
         assert_equal rule_ids, secret.rules.ids
       end
 
-      test "GET lookup finds an oauth_token secret by namespace and foreign_id" do
+      test "GET lookup finds an oauth_token secret by foreign_id" do
         secret = oauth_token_secrets(:acme_gmail_oauth)
-        get lookup_api_v1_oauth_token_secrets_url(namespace: secret.namespace, foreign_id: secret.foreign_id),
-            headers: auth_headers
+        get lookup_api_v1_oauth_token_secrets_url(foreign_id: secret.foreign_id), headers: auth_headers
         assert_response :ok
         assert_equal secret.oid, json_body.dig("data", "id")
       end
 
-      test "GET lookup scopes an oauth_token secret by namespace" do
+      test "GET lookup rejects a non-default compatibility path" do
         secret = oauth_token_secrets(:acme_gmail_oauth)
-        get lookup_api_v1_oauth_token_secrets_url(namespace: "globex", foreign_id: secret.foreign_id),
-            headers: auth_headers
+        get "/api/v1/oauth_token_secrets/lookup/other/#{secret.foreign_id}", headers: auth_headers
         assert_response :not_found
       end
 
       test "GET lookup returns 404 when no oauth_token secret matches" do
-        get lookup_api_v1_oauth_token_secrets_url(namespace: "acme", foreign_id: "does-not-exist"),
+        get lookup_api_v1_oauth_token_secrets_url(foreign_id: "does-not-exist"),
             headers: auth_headers
         assert_response :not_found
       end
@@ -69,7 +68,6 @@ module Api
       test "POST creates a refresh_token oauth secret" do
         body = {
           data: {
-            namespace: "acme",
             foreign_id: "new-oauth",
             grant: "refresh_token",
             token_endpoint: "https://oauth2.googleapis.com/token",
@@ -95,7 +93,6 @@ module Api
       test "POST creates a password grant with token_endpoint_headers" do
         body = {
           data: {
-            namespace: "acme",
             foreign_id: "password-provider",
             grant: "password",
             token_endpoint: "https://auth.example.com/token",
@@ -124,7 +121,6 @@ module Api
       test "POST rejects a grant that is missing a required field" do
         body = {
           data: {
-            namespace: "acme",
             foreign_id: "incomplete",
             grant: "refresh_token",
             token_endpoint: "https://oauth2.googleapis.com/token",
@@ -188,7 +184,6 @@ module Api
       test "PUT upserts a new oauth secret by foreign_id" do
         body = {
           data: {
-            namespace: "acme",
             grant: "client_credentials",
             token_endpoint: "https://oauth2.googleapis.com/token",
             credentials: {
@@ -206,8 +201,8 @@ module Api
         assert_equal "cc-upsert", json_body.dig("data", "foreign_id")
       end
 
-      test "GET index is scoped by namespace" do
-        get api_v1_oauth_token_secrets_url, params: { namespace: "acme" }, headers: auth_headers
+      test "GET index returns oauth_token secrets" do
+        get api_v1_oauth_token_secrets_url, params: {}.to_json, headers: auth_headers
         assert_response :ok
         ids = json_body.fetch("data").map { |r| r["id"] }
         assert_includes ids, oauth_token_secrets(:acme_gmail_oauth).oid

@@ -1,6 +1,10 @@
 import httpx
 import pytest
-from client import SANDBOX_OAUTH_APPS_PATH, SANDBOX_PERMISSIONS_PATH, ConsoleClient
+from client import (
+    SANDBOX_OAUTH_APPS_PATH,
+    SANDBOX_PERMISSIONS_PATH,
+    ConsoleClient,
+)
 
 
 def json_response(payload, status_code=200):

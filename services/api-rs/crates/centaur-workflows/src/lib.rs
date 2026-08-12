@@ -284,15 +284,11 @@ impl WorkflowHostSandboxRuntime {
 #[derive(Clone)]
 pub struct WorkflowPrincipalRegistrar {
     client: IronControlClient,
-    namespace: String,
 }
 
 impl WorkflowPrincipalRegistrar {
-    pub fn new(client: IronControlClient, namespace: impl Into<String>) -> Self {
-        Self {
-            client,
-            namespace: namespace.into(),
-        }
+    pub fn new(client: IronControlClient) -> Self {
+        Self { client }
     }
 
     async fn register_workflow_principals(
@@ -305,7 +301,6 @@ impl WorkflowPrincipalRegistrar {
             let record = self
                 .client
                 .upsert_principal(&PrincipalInput {
-                    namespace: self.namespace.clone(),
                     foreign_id,
                     name: format!("Workflow {workflow_name}"),
                     labels: workflow_principal_labels(workflow_name),
@@ -4563,10 +4558,10 @@ mod tests {
             ..PythonWorkflowMetadata::default()
         };
 
-        let registrar = WorkflowPrincipalRegistrar::new(
-            IronControlClient::new("http://127.0.0.1:1", "test-key"),
-            "default",
-        );
+        let registrar = WorkflowPrincipalRegistrar::new(IronControlClient::new(
+            "http://127.0.0.1:1",
+            "test-key",
+        ));
         let error = match prepare_workflow_host_sandbox(
             None,
             registrar,

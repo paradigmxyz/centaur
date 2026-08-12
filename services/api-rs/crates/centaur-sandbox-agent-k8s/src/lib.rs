@@ -104,8 +104,6 @@ pub struct IronControlSettings {
     pub client: IronControlClient,
     /// Base URL injected into the proxy pod as `IRON_CONTROL_URL`.
     pub control_url: String,
-    /// iron-control namespace, used to resolve principals by `foreign_id`.
-    pub namespace: String,
 }
 
 #[cfg(test)]
@@ -113,7 +111,6 @@ fn test_iron_control_settings() -> IronControlSettings {
     IronControlSettings {
         client: IronControlClient::new("http://127.0.0.1:1", "test-key"),
         control_url: "http://iron-control".to_owned(),
-        namespace: "default".to_owned(),
     }
 }
 

@@ -39,7 +39,6 @@ class OauthApp < ApplicationRecord
   validates :provider, inclusion: { in: ->(_) { Oauth::Providers.keys }, message: "is not a supported provider" }
   validates :client_id, presence: true
   validates :client_secret, presence: true
-  validates :credential_namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
   validate :labels_is_a_hash
   validate :allowed_scopes_valid
 

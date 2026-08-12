@@ -31,7 +31,6 @@ module SlackDm
         client_id: "slack-client-#{SecureRandom.hex(4)}",
         client_secret: "secret",
         allowed_scopes: SlackDm::SyncCredential::REQUIRED_SCOPES,
-        credential_namespace: "acme",
         created_by: users(:acme_admin)
       )
     end
@@ -39,7 +38,6 @@ module SlackDm
     def credential
       @credential ||= BrokerCredential.create!(
         oauth_app: slack_app,
-        namespace: "acme",
         foreign_id: "slack-dms-#{SecureRandom.hex(6)}",
         token_endpoint: "https://slack.com/api/oauth.v2.access",
         access_token: "xoxp-live",
@@ -92,7 +90,8 @@ module SlackDm
                 "is_im" => true,
                 "is_mpim" => false,
                 "user" => "U_OTHER",
-                "is_archived" => false
+                "is_archived" => false,
+                "purpose" => { "value" => "direct\u0000message" }
               }
             ],
             "response_metadata" => { "next_cursor" => "" }
@@ -114,14 +113,15 @@ module SlackDm
                 "ts" => "1700000000.000002",
                 "thread_ts" => "1700000000.000002",
                 "user" => "U_OTHER",
-                "text" => "hello",
+                "text" => "hel\u0000lo",
+                "blocks" => [ { "text" => { "text" => "hel\u0000lo" } } ],
                 "reply_count" => 1,
                 "reply_users" => [ "U_ME" ],
                 "latest_reply" => "1700000000.000003",
                 "files" => [
                   {
                     "id" => "F123",
-                    "name" => "note.txt",
+                    "name" => "no\u0000te.txt",
                     "title" => "Note",
                     "mimetype" => "text/plain",
                     "filetype" => "text",
@@ -173,8 +173,12 @@ module SlackDm
       assert_equal %w[U_OTHER U_ME], batch[:members].map { |member| member[:user_id] }
       assert_equal 2, batch[:messages].length
       assert_equal "hello", batch[:messages].first[:text]
+      assert_equal "hello", batch[:messages].first[:raw_payload].dig("blocks", 0, "text", "text")
+      assert_equal "directmessage", batch[:conversations].first[:raw_payload].dig("purpose", "value")
       assert_equal "1700000000.000002", batch[:messages].last[:parent_message_ts]
       assert_equal "F123", batch[:attachments].first[:slack_file_id]
+      assert_equal "note.txt", batch[:attachments].first[:name]
+      assert_equal "note.txt", batch[:attachments].first[:raw_payload]["name"]
       assert_equal "1700000000.000002", batch[:checkpoints].first[:watermark_ts]
     end
 

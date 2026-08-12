@@ -14,7 +14,7 @@ module Console
     before_action :set_principal, except: %i[new create]
 
     def new
-      @principal = Principal.new(namespace: "default")
+      @principal = Principal.new
     end
 
     def create
@@ -97,8 +97,7 @@ module Console
     private
 
     def assign_form(principal)
-      fields = principal_params.permit(:namespace, :foreign_id, :name)
-      fields[:namespace] = fields[:namespace].presence || "default"
+      fields = principal_params.permit(:foreign_id, :name)
       fields[:foreign_id] = fields[:foreign_id].presence
       principal.assign_attributes(fields)
       principal.labels = label_params

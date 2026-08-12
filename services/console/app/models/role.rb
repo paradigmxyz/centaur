@@ -2,8 +2,7 @@ class Role < ApplicationRecord
   oid_prefix "role"
 
   include ForeignIdCollisionGuard
-
-  attr_readonly :namespace, :foreign_id
+  attr_readonly :foreign_id
 
   has_many :grants, dependent: :destroy
   has_many :principal_roles, dependent: :destroy
@@ -16,13 +15,12 @@ class Role < ApplicationRecord
   URL_SAFE_FORMAT = /\A[A-Za-z0-9\-._~]+\z/
   URL_SAFE_MESSAGE = "must contain only URL-safe characters (A-Z, a-z, 0-9, -, ., _, ~)"
 
-  validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
   validates :foreign_id, uniqueness: { allow_nil: true },
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }, allow_nil: true
   validate :labels_is_a_hash
 
   def self.ensure_default_infra!(created_by:)
-    role = find_or_initialize_by(namespace: "default", foreign_id: "infra")
+    role = find_or_initialize_by(foreign_id: "infra")
     if role.new_record?
       role.assign_attributes(
         name: "Infra",

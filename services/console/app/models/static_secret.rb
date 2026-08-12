@@ -95,7 +95,6 @@ class StaticSecret < ApplicationRecord
     end
   end
 
-  validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
   validates :kind, presence: true, inclusion: { in: CredentialProfiles::Registry.kinds }
   validates :foreign_id, uniqueness: { allow_nil: true },
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }, allow_nil: true

@@ -1524,7 +1524,7 @@ async function renderExecutionAttempt(
   try {
     const streamResult = await renderExecutionStream(
       thread,
-      streamSessionAfterHandoff(options, input),
+      clearRejectedStickyModel(thread, input, streamSessionAfterHandoff(options, input), options),
       message,
       options,
       trace,
@@ -1664,6 +1664,47 @@ async function renderExecutionAttempt(
     })
     recordRenderAttempt('live', outcome, renderStartedAtMs)
   }
+}
+
+async function* clearRejectedStickyModel(
+  thread: Thread<SlackbotV2ThreadState>,
+  input: ForwardSessionInput,
+  stream: AsyncIterable<SlackbotV2RendererSource>,
+  options: SlackbotV2Options
+): AsyncIterable<SlackbotV2RendererSource> {
+  for await (const event of stream) {
+    if (input.model && isRejectedModelEvent(event)) {
+      const latest = (await thread.state) ?? {}
+      // A newer turn may already have replaced the sticky model while this
+      // stream was finishing. Clear only the value rejected by this execution.
+      if (latest.model === input.model) {
+        await thread.setState({ model: null })
+        traceLog(options, 'slackbotv2_rejected_sticky_model_cleared', input.trace, {
+          model: input.model
+        })
+      }
+    }
+    yield event
+  }
+}
+
+function isRejectedModelEvent(event: SlackbotV2RendererSource): boolean {
+  if (!event || typeof event !== 'object') return false
+  const eventKind = String(
+    'eventKind' in event ? event.eventKind : 'event' in event ? event.event : ''
+  )
+  if (eventKind !== 'session.execution_failed' && eventKind !== 'session.stream_error') {
+    return false
+  }
+  const detail = JSON.stringify('data' in event ? event.data : event).toLowerCase()
+  return (
+    detail.includes('model_not_found') ||
+    (/\bmodel\b/.test(detail) &&
+      (detail.includes('does not exist') ||
+        detail.includes('not supported') ||
+        detail.includes('unsupported model') ||
+        detail.includes('invalid model')))
+  )
 }
 
 /**
@@ -3117,7 +3158,7 @@ async function slackApiMessageFromSlack(
     author: {
       fullName: actorId,
       isBot,
-      isMe: Boolean(actorId && actorId === currentMessage.author.userId),
+      isMe: Boolean(actorId && options.botUserId && actorId === options.botUserId),
       userId: actorId,
       userName: actorId
     },
