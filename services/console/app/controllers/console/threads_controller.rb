@@ -963,10 +963,12 @@ class Console::ThreadsController < ApplicationController
   # api-rs's activity-summary worker condenses harness output into short
   # first-person status lines persisted as session.activity_summary events,
   # each pointing at the output-line event that triggered it via
-  # source_event_id. A summary belongs to the latest trace item at or before
-  # its source line, so each disclosure's collapsed preview shows the newest
-  # status generated during that block; items no summary covers keep the
-  # raw-text fallback rendered by the transcript partial.
+  # source_event_id. A summary belongs to the latest trace item from the same
+  # execution at or before its source line, so each disclosure's collapsed
+  # preview shows the newest status generated during that block; items no
+  # summary covers keep the raw-text fallback rendered by the transcript
+  # partial. Legacy summaries without an execution id retain event-order
+  # matching for compatibility with imported fixtures.
   def apply_activity_summaries(items)
     anchored = items.select { |item| item[:event_id] }
     return items if anchored.empty?
@@ -977,7 +979,11 @@ class Console::ThreadsController < ApplicationController
       source_event_id = payload["source_event_id"]
       next if summary.blank? || source_event_id.nil?
 
-      item = anchored.reverse_each.find { |candidate| candidate[:event_id] <= source_event_id.to_i }
+      execution_id = event.execution_id.presence
+      item = anchored.reverse_each.find do |candidate|
+        candidate[:event_id] <= source_event_id.to_i &&
+          (execution_id.blank? || candidate[:execution_id].to_s == execution_id.to_s)
+      end
       item[:summary] = summary if item
     end
     items

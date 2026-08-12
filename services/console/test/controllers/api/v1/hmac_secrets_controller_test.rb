@@ -16,7 +16,6 @@ module Api
       def valid_body(overrides = {})
         {
           data: {
-            namespace: "acme",
             foreign_id: "new-hmac",
             timestamp_format: "unix_seconds",
             signature_algorithm: "sha256",
@@ -41,6 +40,7 @@ module Api
         assert_response :ok
 
         data = json_body.fetch("data")
+        refute data.key?("namespace")
         assert_equal "sha256", data["signature_algorithm"]
         assert_equal({ "source_type" => "env", "config" => { "var" => "WEBHOOK_HMAC_KEY" } },
                      data.dig("credentials", "secret"))
@@ -85,23 +85,21 @@ module Api
         assert_operator principal.reload.sync_config_cache_version, :>, version
       end
 
-      test "GET lookup finds an hmac secret by namespace and foreign_id" do
+      test "GET lookup finds an hmac secret by foreign_id" do
         secret = hmac_secrets(:acme_webhook_hmac)
-        get lookup_api_v1_hmac_secrets_url(namespace: secret.namespace, foreign_id: secret.foreign_id),
-            headers: auth_headers
+        get lookup_api_v1_hmac_secrets_url(foreign_id: secret.foreign_id), headers: auth_headers
         assert_response :ok
         assert_equal secret.oid, json_body.dig("data", "id")
       end
 
-      test "GET lookup scopes an hmac secret by namespace" do
+      test "GET lookup rejects a non-default compatibility path" do
         secret = hmac_secrets(:acme_webhook_hmac)
-        get lookup_api_v1_hmac_secrets_url(namespace: "globex", foreign_id: secret.foreign_id),
-            headers: auth_headers
+        get "/api/v1/hmac_secrets/lookup/other/#{secret.foreign_id}", headers: auth_headers
         assert_response :not_found
       end
 
       test "GET lookup returns 404 when no hmac secret matches" do
-        get lookup_api_v1_hmac_secrets_url(namespace: "acme", foreign_id: "does-not-exist"),
+        get lookup_api_v1_hmac_secrets_url(foreign_id: "does-not-exist"),
             headers: auth_headers
         assert_response :not_found
       end
@@ -175,8 +173,8 @@ module Api
         assert_nil secret.name
       end
 
-      test "GET index is scoped by namespace" do
-        get api_v1_hmac_secrets_url, params: { namespace: "acme" }, headers: auth_headers
+      test "GET index returns hmac secrets" do
+        get api_v1_hmac_secrets_url, params: {}.to_json, headers: auth_headers
         assert_response :ok
         ids = json_body.fetch("data").map { |r| r["id"] }
         assert_includes ids, hmac_secrets(:acme_webhook_hmac).oid

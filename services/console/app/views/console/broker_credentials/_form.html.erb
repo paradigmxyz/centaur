@@ -6,11 +6,6 @@
       <h2 class="form-section-heading">Identity</h2>
       <div class="grid gap-5 sm:grid-cols-2">
         <div>
-          <label class="form-label" for="credential_namespace">Namespace</label>
-          <%= text_field_tag "credential[namespace]", credential.namespace.presence || "default", id: "credential_namespace", class: "form-input #{field_error_class(credential, :namespace)}" %>
-          <%= field_error(credential, :namespace) %>
-        </div>
-        <div>
           <label class="form-label" for="credential_foreign_id">Foreign ID</label>
           <%= text_field_tag "credential[foreign_id]", credential.foreign_id, id: "credential_foreign_id", class: "form-input #{field_error_class(credential, :foreign_id)}", placeholder: "stable-handle" %>
           <%= field_error(credential, :foreign_id) %>

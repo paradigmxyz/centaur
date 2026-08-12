@@ -156,9 +156,9 @@ export type SlackbotV2Options = {
    */
   channelDefaults?: ChannelDefaults
   /**
-   * Harness for new threads when no --claude/--amp/--codex/--nanocodex flag is
-   * given (HarnessType wire value: codex | amp | claudecode | nanocodex).
-   * Defaults to codex.
+   * Harness for new threads when no --claude/--amp/--codex/--nanocodex/--hermes
+   * flag is given (HarnessType wire value: codex | amp | claudecode |
+   * nanocodex | hermes). Defaults to codex.
    */
   defaultHarnessType?: string
   fetch?: SlackbotV2Fetch
@@ -201,6 +201,8 @@ export type SlackbotV2Options = {
   sessionApiTimeoutMs?: number
   signingSecret: string
   slackApiUrl?: string
+  /** Bot workspace team ID resolved once from Slack's auth.test response. */
+  slackHomeTeamId?: string
   /** Deadline for optional Slack Web API metadata lookups. */
   slackApiTimeoutMs?: number
   state?: StateAdapter

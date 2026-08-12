@@ -90,6 +90,8 @@ RUN useradd -m -s /bin/bash -u 1001 agent \
 
 ARG CLAUDE_CODE_VERSION=2.1.154
 ARG CODEX_VERSION=0.144.0
+# Hermes Agent (NousResearch) — pinned by commit SHA per the dependency policy.
+ARG HERMES_AGENT_REF=e5e2fb8b2dbe1cae85aa5ad6ce45aef376016e43
 ARG PI_CODING_AGENT_VERSION=0.67.2
 ARG NUSHELL_VERSION=0.112.2
 ARG KUBECTL_VERSION=v1.34.2
@@ -155,6 +157,23 @@ RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     && claude --version | grep -F "${CLAUDE_CODE_VERSION}" \
     && codex --version | grep -F "${CODEX_VERSION}" \
     && pnpm --version | grep -F "${PNPM_VERSION}"
+
+# ── Hermes Agent (own venv; exposes `hermes` + the tui_gateway module) ───────
+# The hermes harness drives `python -m tui_gateway.entry` (see
+# crates/harness-server/src/hermes.rs). HERMES_PYTHON points the harness at
+# this venv's interpreter; the `hermes` shim serves cron ticks + CLI use.
+# Hermes intentionally rejects wheel builds because its runtime assets depend
+# on the source-checkout layout, so install the pinned checkout editable.
+RUN git init /opt/hermes-agent \
+    && git -C /opt/hermes-agent remote add origin https://github.com/NousResearch/hermes-agent.git \
+    && git -C /opt/hermes-agent fetch --depth 1 origin "${HERMES_AGENT_REF}" \
+    && git -C /opt/hermes-agent checkout --detach FETCH_HEAD \
+    && python3 -m venv /opt/hermes \
+    && /opt/hermes/bin/pip install --no-cache-dir --editable /opt/hermes-agent \
+    && rm -rf /opt/hermes-agent/.git \
+    && ln -s /opt/hermes/bin/hermes /usr/local/bin/hermes \
+    && hermes version
+ENV HERMES_PYTHON=/opt/hermes/bin/python3
 
 # ── agent-browser system deps (must run as root before USER agent) ───────────
 # Chrome for Testing doesn't provide Linux ARM64 builds; fall back to system chromium

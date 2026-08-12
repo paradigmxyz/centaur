@@ -576,6 +576,7 @@ enum HarnessTypeArg {
     #[value(name = "claudecode")]
     ClaudeCode,
     Nanocodex,
+    Hermes,
 }
 
 impl From<HarnessTypeArg> for HarnessType {
@@ -585,6 +586,7 @@ impl From<HarnessTypeArg> for HarnessType {
             HarnessTypeArg::Amp => Self::Amp,
             HarnessTypeArg::ClaudeCode => Self::ClaudeCode,
             HarnessTypeArg::Nanocodex => Self::Nanocodex,
+            HarnessTypeArg::Hermes => Self::Hermes,
         }
     }
 }

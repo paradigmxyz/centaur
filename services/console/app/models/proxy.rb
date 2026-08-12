@@ -11,6 +11,10 @@ class Proxy < ApplicationRecord
   # Optional: a proxy may boot unassigned and have a principal assigned or
   # swapped later. principal_id is mutable so the assignment can change.
   belongs_to :principal, optional: true
+  # Optional second principal: the human whose turn is currently running.
+  # When set, the rendered config unions in their always-available direct
+  # credential grants (see PrincipalSyncConfigSnapshot).
+  belongs_to :requester_principal, class_name: "Principal", optional: true
 
   validates :name, presence: true
   validates :bearer_token_hash, presence: true, uniqueness: true
@@ -20,6 +24,7 @@ class Proxy < ApplicationRecord
   before_validation :normalize_labels
   before_validation :issue_token, on: :create
   before_save :stamp_principal_assignment, if: :will_save_change_to_principal_id?
+  before_save :stamp_requester_principal_assignment, if: :will_save_change_to_requester_principal_id?
 
   # Whether the proxy currently carries a principal (and therefore any authority).
   def assigned?
@@ -73,6 +78,10 @@ class Proxy < ApplicationRecord
   # column always reflects the current assignment.
   def stamp_principal_assignment
     self.principal_assigned_at = principal_id ? Time.current : nil
+  end
+
+  def stamp_requester_principal_assignment
+    self.requester_principal_assigned_at = requester_principal_id ? Time.current : nil
   end
 
   def issue_token

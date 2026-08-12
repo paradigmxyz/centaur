@@ -7,7 +7,6 @@ class AwsAuthSecretTest < ActiveSupport::TestCase
 
   def build(roles: { "access_key_id" => "AWS_ACCESS_KEY_ID", "secret_access_key" => "AWS_SECRET_ACCESS_KEY" }, overrides: {})
     secret = AwsAuthSecret.new({
-      namespace: "acme",
       foreign_id: "new-aws",
       allowed_services: %w[logs monitoring],
       created_by: users(:acme_admin)

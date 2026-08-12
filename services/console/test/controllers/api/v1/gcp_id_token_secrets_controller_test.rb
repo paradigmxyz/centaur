@@ -24,6 +24,7 @@ module Api
         assert_response :ok
 
         data = json_body.fetch("data")
+        refute data.key?("namespace")
         assert_equal secret.oid, data["id"]
         assert_equal "https://my-service-abc123-uc.a.run.app", data["audience"]
         assert_equal "x-serverless-authorization", data["header"]
@@ -48,16 +49,16 @@ module Api
         assert_equal rule_ids, secret.rules.ids
       end
 
-      test "GET lookup finds a gcp_id_token secret by namespace and foreign_id" do
+      test "GET lookup finds a gcp_id_token secret by foreign_id" do
         secret = gcp_id_token_secrets(:acme_cloud_run)
-        get lookup_api_v1_gcp_id_token_secrets_url(namespace: secret.namespace, foreign_id: secret.foreign_id),
+        get lookup_api_v1_gcp_id_token_secrets_url(foreign_id: secret.foreign_id),
             headers: auth_headers
         assert_response :ok
         assert_equal secret.oid, json_body.dig("data", "id")
       end
 
       test "GET lookup returns 404 when no gcp_id_token secret matches" do
-        get lookup_api_v1_gcp_id_token_secrets_url(namespace: "acme", foreign_id: "does-not-exist"),
+        get lookup_api_v1_gcp_id_token_secrets_url(foreign_id: "does-not-exist"),
             headers: auth_headers
         assert_response :not_found
       end
@@ -65,7 +66,6 @@ module Api
       test "POST creates a gcp_id_token secret" do
         body = {
           data: {
-            namespace: "acme",
             foreign_id: "new-cloud-run",
             name: "new cloud run",
             audience: "https://new-service-abc123-uc.a.run.app",
@@ -90,7 +90,6 @@ module Api
       test "POST never echoes a control_plane keyfile secret back" do
         body = {
           data: {
-            namespace: "acme",
             foreign_id: "inline-cloud-run",
             audience: "https://inline-service-abc123-uc.a.run.app",
             keyfile: { source_type: "control_plane", secret: "{\"client_email\":\"x\"}" },
@@ -106,7 +105,6 @@ module Api
       test "POST rejects missing rules" do
         body = {
           data: {
-            namespace: "acme",
             foreign_id: "no-rules",
             audience: "https://no-rules-abc123-uc.a.run.app",
             keyfile: { source_type: "env", config: { var: "CLOUD_RUN_KEYFILE" } }
@@ -143,7 +141,6 @@ module Api
       test "PUT upserts a new gcp_id_token secret by foreign_id" do
         body = {
           data: {
-            namespace: "acme",
             audience: "https://upsert-service-abc123-uc.a.run.app",
             keyfile: { source_type: "env", config: { var: "UPSERT_CLOUD_RUN_KEYFILE" } },
             rules: [ { host: "upsert-service-abc123-uc.a.run.app" } ]
@@ -157,8 +154,8 @@ module Api
         assert_equal "cloud-run-upsert", json_body.dig("data", "foreign_id")
       end
 
-      test "GET index is scoped by namespace" do
-        get api_v1_gcp_id_token_secrets_url, params: { namespace: "acme" }, headers: auth_headers
+      test "GET index returns gcp_id_token secrets" do
+        get api_v1_gcp_id_token_secrets_url, params: {}.to_json, headers: auth_headers
         assert_response :ok
         ids = json_body.fetch("data").map { |r| r["id"] }
         assert_includes ids, gcp_id_token_secrets(:acme_cloud_run).oid

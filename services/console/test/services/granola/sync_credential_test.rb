@@ -27,7 +27,6 @@ module Granola
         client_id: "granola-client",
         client_secret: "granola-secret",
         allowed_scopes: %w[meetings:read],
-        credential_namespace: "acme",
         created_by: users(:acme_admin)
       )
     end
@@ -35,7 +34,6 @@ module Granola
     def credential
       @credential ||= BrokerCredential.create!(
         oauth_app: granola_app,
-        namespace: "acme",
         foreign_id: "granola-sync-#{SecureRandom.hex(6)}",
         token_endpoint: Oauth::Providers::Granola::TOKEN_ENDPOINT,
         access_token: "granola-access-token",

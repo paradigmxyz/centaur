@@ -238,7 +238,7 @@ impl AgentSandboxBackend {
         let iron_control = &self.config.iron_control;
         let effective = iron_control
             .client
-            .effective_config(&iron_control.namespace, principal)
+            .effective_config(principal)
             .await
             .map_err(|err| SandboxError::backend_source("iron-control effective_config", err))?;
 

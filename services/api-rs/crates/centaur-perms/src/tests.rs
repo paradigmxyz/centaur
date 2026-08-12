@@ -453,7 +453,7 @@ fn translates_http_replace_to_static_input() {
         )
         .unwrap(),
     ];
-    let out = translate::translate("default", "tool-slack", &secrets, &SourcePolicy::env());
+    let out = translate::translate("tool-slack", &secrets, &SourcePolicy::env());
     let SecretInput::Static(input) = &out.inputs[0] else {
         panic!("expected static")
     };
@@ -483,7 +483,7 @@ fn translates_gcp_auth_defaults_scopes_when_unset() {
         )
         .unwrap(),
     ];
-    let out = translate::translate("default", "tool-gcs", &secrets, &SourcePolicy::env());
+    let out = translate::translate("tool-gcs", &secrets, &SourcePolicy::env());
     let SecretInput::GcpAuth(input) = &out.inputs[0] else {
         panic!("expected gcp_auth")
     };
@@ -505,7 +505,7 @@ fn translates_gcp_id_token_to_input() {
         )
         .unwrap(),
     ];
-    let out = translate::translate("default", "tool-cloudrun", &secrets, &SourcePolicy::env());
+    let out = translate::translate("tool-cloudrun", &secrets, &SourcePolicy::env());
     let SecretInput::GcpIdToken(input) = &out.inputs[0] else {
         panic!("expected gcp_id_token")
     };
@@ -542,7 +542,7 @@ fn translates_oauth_with_json_key_fields() {
         )
         .unwrap(),
     ];
-    let out = translate::translate("default", "tool-gsuite", &secrets, &SourcePolicy::env());
+    let out = translate::translate("tool-gsuite", &secrets, &SourcePolicy::env());
     let SecretInput::OAuthToken(input) = &out.inputs[0] else {
         panic!("expected oauth")
     };
@@ -568,7 +568,7 @@ fn translates_pg_dsn_to_input_with_roundtrip_foreign_id() {
         )
         .unwrap(),
     ];
-    let out = translate::translate("default", "tool-reshift", &secrets, &SourcePolicy::env());
+    let out = translate::translate("tool-reshift", &secrets, &SourcePolicy::env());
     let SecretInput::PgDsn(input) = &out.inputs[0] else {
         panic!("expected pg_dsn")
     };
@@ -604,7 +604,7 @@ fn translates_pg_dsn_to_input_with_roundtrip_foreign_id() {
 #[test]
 fn translates_hmac_to_input() {
     let secrets = vec![tools::parse_secret(&entry(FALCONX_HMAC), &[]).unwrap()];
-    let out = translate::translate("default", "tool-falconx", &secrets, &SourcePolicy::env());
+    let out = translate::translate("tool-falconx", &secrets, &SourcePolicy::env());
     let SecretInput::Hmac(input) = &out.inputs[0] else {
         panic!("expected hmac")
     };
@@ -636,7 +636,7 @@ fn translates_hmac_to_input() {
 #[test]
 fn translates_aws_auth_to_input() {
     let secrets = vec![tools::parse_secret(&entry(CLOUDWATCH_AWS), &[]).unwrap()];
-    let out = translate::translate("default", "tool-cloudwatch", &secrets, &SourcePolicy::env());
+    let out = translate::translate("tool-cloudwatch", &secrets, &SourcePolicy::env());
     let SecretInput::AwsAuth(input) = &out.inputs[0] else {
         panic!("expected aws_auth")
     };
@@ -680,7 +680,7 @@ fn translates_aws_auth_session_token_through_policy() {
         )
         .unwrap(),
     ];
-    let out = translate::translate("default", "tool-cw", &secrets, &SourcePolicy::env());
+    let out = translate::translate("tool-cw", &secrets, &SourcePolicy::env());
     let SecretInput::AwsAuth(input) = &out.inputs[0] else {
         panic!("expected aws_auth")
     };
@@ -698,7 +698,7 @@ fn translates_brokered_token_to_token_broker_static_secret() {
         )
         .unwrap(),
     ];
-    let out = translate::translate("default", "tool-codex", &secrets, &SourcePolicy::env());
+    let out = translate::translate("tool-codex", &secrets, &SourcePolicy::env());
     let SecretInput::Static(input) = &out.inputs[0] else {
         panic!("expected static")
     };
@@ -708,7 +708,7 @@ fn translates_brokered_token_to_token_broker_static_secret() {
     assert_eq!(input.source.source_type, "token_broker");
     assert_eq!(
         input.source.config,
-        serde_json::json!({ "credential_id": "openai-codex", "credential_namespace": "default" })
+        serde_json::json!({ "credential_id": "openai-codex", })
     );
     let inject = input.inject_config.as_ref().unwrap();
     assert_eq!(inject.header.as_deref(), Some("Authorization"));
@@ -735,7 +735,7 @@ fn duplicate_secret_names_get_unique_foreign_ids() {
         )
         .unwrap(),
     ];
-    let out = translate::translate("default", "tool-x", &secrets, &SourcePolicy::env());
+    let out = translate::translate("tool-x", &secrets, &SourcePolicy::env());
     let SecretInput::Static(a) = &out.inputs[0] else {
         panic!()
     };
@@ -759,13 +759,7 @@ fn translate_for_tool_adds_tool_identity_labels() {
         tool: "slack".to_owned(),
         overlay: "centaur-paradigm".to_owned(),
     };
-    let out = translate::translate_for_tool(
-        "default",
-        "tool-slack",
-        &labels,
-        &secrets,
-        &SourcePolicy::env(),
-    );
+    let out = translate::translate_for_tool("tool-slack", &labels, &secrets, &SourcePolicy::env());
     let SecretInput::Static(secret) = &out.inputs[0] else {
         panic!()
     };
@@ -931,7 +925,6 @@ fn real_slack_tool_parses_and_translates() {
     let manifest = tools::find_tool(&[tools_dir], "slack").unwrap();
     assert_eq!(manifest.name, "slack");
     let out = translate::translate(
-        "default",
         "tool-slack",
         &manifest.all_secrets().cloned().collect::<Vec<_>>(),
         &SourcePolicy::env(),
@@ -951,7 +944,6 @@ fn real_gsuite_tool_parses_oauth() {
     };
     let manifest = tools::find_tool(&[tools_dir], "gsuite").unwrap();
     let out = translate::translate(
-        "default",
         "tool-gsuite",
         &manifest.all_secrets().cloned().collect::<Vec<_>>(),
         &SourcePolicy::env(),

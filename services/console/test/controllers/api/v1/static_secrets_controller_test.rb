@@ -42,8 +42,8 @@ module Api
         assert_response :ok
 
         data = json_body.fetch("data")
+        refute data.key?("namespace")
         assert_equal ref.oid, data["id"]
-        assert_equal ref.namespace, data["namespace"]
         assert_equal ref.name, data["name"]
         assert_equal "custom", data["kind"]
         assert_equal({ "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" },
@@ -61,7 +61,6 @@ module Api
       test "POST resolves a github_token profile into explicit configuration and rules" do
         body = {
           data: {
-            namespace: "acme",
             name: "GitHub token",
             kind: "github_token",
             source: { source_type: "env", config: { "var" => "GITHUB_TOKEN" } }
@@ -84,7 +83,6 @@ module Api
       test "POST rejects configuration that conflicts with the selected profile" do
         body = {
           data: {
-            namespace: "acme",
             name: "misconfigured GitHub token",
             kind: "github_token",
             inject_config: { "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" },
@@ -107,23 +105,21 @@ module Api
         assert_response :not_found
       end
 
-      test "GET lookup finds a static secret by namespace and foreign_id" do
+      test "GET lookup finds a static secret by foreign_id" do
         ref = static_secrets(:acme_prod_api_key)
-        get lookup_api_v1_static_secrets_url(namespace: ref.namespace, foreign_id: ref.foreign_id),
-            headers: auth_headers
+        get lookup_api_v1_static_secrets_url(foreign_id: ref.foreign_id), headers: auth_headers
         assert_response :ok
         assert_equal ref.oid, json_body.dig("data", "id")
       end
 
-      test "GET lookup scopes a static secret by namespace" do
+      test "GET lookup rejects a non-default compatibility path" do
         ref = static_secrets(:acme_prod_api_key)
-        get lookup_api_v1_static_secrets_url(namespace: "globex", foreign_id: ref.foreign_id),
-            headers: auth_headers
+        get "/api/v1/static_secrets/lookup/other/#{ref.foreign_id}", headers: auth_headers
         assert_response :not_found
       end
 
       test "GET lookup returns 404 when no static secret matches" do
-        get lookup_api_v1_static_secrets_url(namespace: "acme", foreign_id: "does-not-exist"),
+        get lookup_api_v1_static_secrets_url(foreign_id: "does-not-exist"),
             headers: auth_headers
         assert_response :not_found
       end
@@ -131,7 +127,6 @@ module Api
       test "POST creates a SecretRef with nested source and rules in a single transaction" do
         body = {
           data: {
-            namespace: "acme",
             name: "api-created-ref",
             description: "from API",
             labels: { "team" => "platform" },
@@ -158,10 +153,33 @@ module Api
         assert_equal [ 0, 1 ], data["rules"].map { |r| r["position"] }
       end
 
+      test "POST rejects credential_namespace in a token broker source config" do
+        credential = broker_credentials(:acme_managed_gmail)
+        body = {
+          data: {
+            foreign_id: "token-broker-compatibility",
+            inject_config: { "header" => "Authorization" },
+            source: {
+              source_type: "token_broker",
+              config: {
+                credential_id: credential.foreign_id,
+                credential_namespace: "default"
+              }
+            },
+            rules: [ { host: "api.example.com" } ]
+          }
+        }
+
+        assert_no_difference -> { StaticSecret.count } do
+          post api_v1_static_secrets_url, params: body.to_json, headers: auth_headers
+        end
+
+        assert_response :unprocessable_content
+      end
+
       test "POST ignores client-supplied rule positions and uses the array index" do
         body = {
           data: {
-            namespace: "acme",
             name: "position-override",
             inject_config: { "header" => "Authorization" },
             source: { source_type: "env", config: { "var" => "X" } },
@@ -183,7 +201,6 @@ module Api
       test "POST returns 422 when SSR validation fails (both inject and replace configs)" do
         body = {
           data: {
-            namespace: "acme",
             name: "invalid-ref",
             inject_config: { "header" => "Authorization" },
             replace_config: { "proxy_value" => "__TOKEN__" }
@@ -200,7 +217,6 @@ module Api
       test "POST returns 422 and rolls back SSR when a nested rule is invalid" do
         body = {
           data: {
-            namespace: "acme",
             name: "rolled-back",
             inject_config: { "header" => "Authorization" },
             source: { source_type: "env", config: { "var" => "X" } },
@@ -216,7 +232,7 @@ module Api
       end
 
       test "POST rejects a foreign_id that starts with the opaque id prefix" do
-        body = { data: { namespace: "acme", foreign_id: "ssr_collide", name: "x",
+        body = { data: { foreign_id: "ssr_collide", name: "x",
                          inject_config: { "header" => "X" } } }
         assert_no_difference -> { StaticSecret.count } do
           post api_v1_static_secrets_url, params: body.to_json, headers: auth_headers
@@ -227,7 +243,6 @@ module Api
       test "PUT upserts a new secret by foreign_id" do
         body = {
           data: {
-            namespace: "acme",
             name: "upserted",
             inject_config: { "header" => "Authorization" },
             source: { source_type: "env", config: { "var" => "UP" } },
@@ -242,14 +257,12 @@ module Api
 
         data = json_body.fetch("data")
         assert_equal "upserted-ref", data["foreign_id"]
-        assert_equal "acme", data["namespace"]
         assert_equal "upserted", data["name"]
       end
 
       test "PUT retries when a concurrent create wins the foreign_id race" do
         body = {
           data: {
-            namespace: "acme",
             name: "retry-upserted",
             inject_config: { "header" => "Authorization" },
             source: { source_type: "env", config: { "var" => "UP" } }
@@ -262,7 +275,6 @@ module Api
           calls += 1
           if calls == 1
             StaticSecret.create!(
-              namespace: "acme",
               foreign_id: "raced-ref",
               name: "winner",
               inject_config: { "header" => "X-Old" }
@@ -279,7 +291,7 @@ module Api
         end
         assert_response :ok
 
-        ref = StaticSecret.find_by!(namespace: "acme", foreign_id: "raced-ref")
+        ref = StaticSecret.find_by!(foreign_id: "raced-ref")
         assert_equal "retry-upserted", ref.name
         assert_equal({ "header" => "Authorization" }, ref.inject_config)
         assert_equal "UP", ref.source.config["var"]
@@ -293,7 +305,6 @@ module Api
         ref = static_secrets(:acme_prod_api_key)
         body = {
           data: {
-            namespace: ref.namespace,
             name: "renamed-by-upsert",
             inject_config: { "header" => "Authorization" },
             source: { source_type: "env", config: { "var" => "X" } },
@@ -309,7 +320,7 @@ module Api
       end
 
       test "POST returns 400 when the data key is missing" do
-        post api_v1_static_secrets_url, params: { namespace: "acme" }.to_json, headers: auth_headers
+        post api_v1_static_secrets_url, params: {}.to_json, headers: auth_headers
         assert_response :bad_request
       end
 
@@ -322,7 +333,6 @@ module Api
 
         body = {
           data: {
-            namespace: ref.namespace,
             name: ref.name,
             description: "updated",
             inject_config: { "header" => "X-New" },
@@ -355,7 +365,6 @@ module Api
 
         body = {
           data: {
-            namespace: ref.namespace,
             name: ref.name,
             description: ref.description,
             labels: ref.labels,
@@ -376,7 +385,6 @@ module Api
 
       test "PUT preserves an omitted kind and resolves the profile before the no-op check" do
         ref = StaticSecret.create!(
-          namespace: "acme",
           name: "GitHub token",
           kind: "github_token",
           replace_config: CredentialProfiles::GithubToken::REPLACE_CONFIG,
@@ -392,7 +400,6 @@ module Api
 
         body = {
           data: {
-            namespace: ref.namespace,
             name: ref.name,
             source: { source_type: "control_plane", secret: "same-secret" }
           }
@@ -410,7 +417,6 @@ module Api
 
       test "PUT replaces an existing profile kind when custom is explicit" do
         ref = StaticSecret.create!(
-          namespace: "acme",
           name: "GitHub token",
           kind: "github_token",
           replace_config: CredentialProfiles::GithubToken::REPLACE_CONFIG,
@@ -420,7 +426,6 @@ module Api
 
         body = {
           data: {
-            namespace: ref.namespace,
             name: ref.name,
             kind: "custom",
             inject_config: { "header" => "X-Token" },
@@ -444,7 +449,6 @@ module Api
 
         body = {
           data: {
-            namespace: ref.namespace,
             name: ref.name,
             inject_config: { "header" => "Authorization" },
             source: { source_type: "control_plane" }
@@ -463,7 +467,6 @@ module Api
 
         body = {
           data: {
-            namespace: ref.namespace,
             name: ref.name,
             inject_config: { "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" },
             replace_config: nil,
@@ -486,7 +489,6 @@ module Api
 
         body = {
           data: {
-            namespace: ref.namespace,
             name: ref.name,
             inject_config: { "header" => "Authorization" }
           }
@@ -507,7 +509,6 @@ module Api
 
         body = {
           data: {
-            namespace: ref.namespace,
             name: ref.name,
             description: "should not persist",
             inject_config: { "header" => "Authorization" },
@@ -526,46 +527,45 @@ module Api
 
       test "PUT returns 404 for an unknown oid" do
         put api_v1_static_secret_url(id: "ssr_nope"),
-            params: { data: { namespace: "acme", name: "x", inject_config: { "header" => "X" } } }.to_json,
+            params: { data: { name: "x", inject_config: { "header" => "X" } } }.to_json,
             headers: auth_headers
         assert_response :not_found
       end
 
       test "GET index rejects requests without an Authorization header" do
-        get api_v1_static_secrets_url, params: { namespace: "acme" }
+        get api_v1_static_secrets_url
         assert_response :unauthorized
       end
 
-      test "GET index returns 400 when namespace is missing" do
+      test "GET index returns static secrets" do
         get api_v1_static_secrets_url, headers: auth_headers
-        assert_response :bad_request
+        assert_response :ok
       end
 
-      test "GET index returns all secret_refs in a namespace" do
-        get api_v1_static_secrets_url, params: { namespace: "acme" }, headers: auth_headers
+      test "GET index returns all secret refs" do
+        get api_v1_static_secrets_url, params: {}.to_json, headers: auth_headers
         assert_response :ok
 
         body = json_body
         names = body.fetch("data").map { |r| r["name"] }
-        expected = StaticSecret.where(namespace: "acme").pluck(:name)
+        expected = StaticSecret.pluck(:name)
         assert_equal expected.sort, names.sort
-        assert body["data"].all? { |r| r["namespace"] == "acme" }
         assert_equal expected.length, body.dig("meta", "total")
       end
 
       test "GET index filters by a single label" do
         get api_v1_static_secrets_url,
-            params: { namespace: "acme", labels: { env: "prod" } },
+            params: { labels: { env: "prod" } },
             headers: auth_headers
         assert_response :ok
 
         names = json_body.fetch("data").map { |r| r["name"] }
-        assert_equal %w[prod-api-key], names
+        assert_equal %w[prod-api-key prod-secret].sort, names.sort
       end
 
       test "GET index ANDs multiple label filters" do
         get api_v1_static_secrets_url,
-            params: { namespace: "acme", labels: { team: "platform", env: "staging" } },
+            params: { labels: { team: "platform", env: "staging" } },
             headers: auth_headers
         assert_response :ok
 
@@ -573,29 +573,28 @@ module Api
         assert_equal %w[staging-api-key], names
       end
 
-      test "GET index does not leak across namespaces" do
+      test "GET index searches all resources" do
         get api_v1_static_secrets_url,
-            params: { namespace: "acme", labels: { team: "platform", env: "prod" } },
+            params: { labels: { team: "platform", env: "prod" } },
             headers: auth_headers
         assert_response :ok
 
-        assert json_body.fetch("data").none? { |r| r["namespace"] == "globex" }
-        assert_equal %w[prod-api-key], json_body.fetch("data").map { |r| r["name"] }
+        assert_equal %w[prod-api-key prod-secret].sort, json_body.fetch("data").map { |r| r["name"] }.sort
       end
 
       test "GET index returns an empty array when no labels match" do
         get api_v1_static_secrets_url,
-            params: { namespace: "acme", labels: { env: "nowhere" } },
+            params: { labels: { env: "nowhere" } },
             headers: auth_headers
         assert_response :ok
         assert_equal [], json_body.fetch("data")
       end
 
       test "GET index honors limit and page" do
-        total = StaticSecret.where(namespace: "acme").count
+        total = StaticSecret.count
 
         get api_v1_static_secrets_url,
-            params: { namespace: "acme", limit: 1, page: 2 },
+            params: { limit: 1, page: 2 },
             headers: auth_headers
         assert_response :ok
 
@@ -610,7 +609,6 @@ module Api
       test "POST creates a control_plane source with an encrypted secret and never returns it" do
         body = {
           data: {
-            namespace: "acme",
             name: "control-plane-ref",
             inject_config: { "header" => "Authorization" },
             source: { source_type: "control_plane", secret: "plaintext-secret" }
@@ -642,7 +640,6 @@ module Api
 
         body = {
           data: {
-            namespace: ref.namespace,
             name: ref.name,
             inject_config: { "header" => "Authorization" },
             source: { source_type: "control_plane", secret: "new-secret" }
@@ -659,7 +656,6 @@ module Api
       test "POST rejects a control_plane source without a secret" do
         body = {
           data: {
-            namespace: "acme",
             name: "control-plane-no-secret",
             inject_config: { "header" => "Authorization" },
             source: { source_type: "control_plane" }
@@ -674,7 +670,7 @@ module Api
 
       test "GET index clamps limit above the max" do
         get api_v1_static_secrets_url,
-            params: { namespace: "acme", limit: 9999 },
+            params: { limit: 9999 },
             headers: auth_headers
         assert_response :ok
         assert_equal 200, json_body.dig("meta", "limit")

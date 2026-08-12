@@ -60,17 +60,15 @@
   <section class="form-section">
     <h2 class="form-section-heading">Default Roles</h2>
     <p class="mb-4 text-sm text-zinc-500">
-      New principals with no preassigned roles receive the selected roles from their namespace. Existing principals are unchanged.
+      New principals with no preassigned roles receive the selected roles. Existing principals are unchanged.
     </p>
 
     <%= hidden_field_tag "system_setting[default_role_ids][]", "" %>
     <% if @roles.any? %>
       <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-        <% @roles.group_by(&:namespace).each do |namespace, roles| %>
           <fieldset class="rounded border border-ink-700 bg-ink-850/60 p-4">
-            <legend class="px-1 text-xs font-semibold uppercase tracking-wide text-zinc-400"><%= namespace %></legend>
             <div class="space-y-3">
-              <% roles.each do |role| %>
+              <% @roles.each do |role| %>
                 <% role_label = role.name.presence || role.foreign_id.presence || role.oid %>
                 <label class="flex items-start gap-3">
                   <%= check_box_tag "system_setting[default_role_ids][]",
@@ -86,7 +84,6 @@
               <% end %>
             </div>
           </fieldset>
-        <% end %>
       </div>
     <% else %>
       <p class="text-sm text-zinc-500">Create a role before configuring default role assignments.</p>

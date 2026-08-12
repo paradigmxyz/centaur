@@ -4,7 +4,6 @@ require Rails.root.join("db/migrate/20260806190200_backfill_github_token_kind")
 class BackfillGithubTokenKindTest < ActiveSupport::TestCase
   def create_github_secret!(name:, inject_config: nil, replace_config: nil)
     secret = StaticSecret.create!(
-      namespace: "acme",
       name: name,
       inject_config: inject_config,
       replace_config: replace_config,
@@ -42,7 +41,6 @@ class BackfillGithubTokenKindTest < ActiveSupport::TestCase
 
   test "leaves API-only, custom-format, and expanded GitHub credentials custom" do
     api_only = StaticSecret.create!(
-      namespace: "acme",
       name: "API token",
       inject_config: { "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" },
       created_by: users(:acme_admin)
@@ -50,7 +48,6 @@ class BackfillGithubTokenKindTest < ActiveSupport::TestCase
     RequestRule.create!(host: "api.github.com", static_secret: api_only)
 
     custom = StaticSecret.create!(
-      namespace: "acme",
       name: "custom GitHub header",
       inject_config: { "header" => "Authorization", "formatter" => "token {{ .Value }}" },
       created_by: users(:acme_admin)

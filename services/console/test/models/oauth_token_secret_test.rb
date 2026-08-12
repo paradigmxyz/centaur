@@ -7,7 +7,6 @@ class OauthTokenSecretTest < ActiveSupport::TestCase
 
   def build(grant:, roles:, overrides: {})
     secret = OauthTokenSecret.new({
-      namespace: "acme",
       foreign_id: "new-oauth",
       grant: grant,
       token_endpoint: "https://login.example.com/token",

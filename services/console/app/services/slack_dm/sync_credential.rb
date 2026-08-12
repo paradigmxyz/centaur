@@ -75,7 +75,7 @@ module SlackDm
       batch[:run][:replies_fetched] = @replies_fetched
       batch[:run][:replies_upserted] = batch[:messages].count { |message| message[:parent_message_ts].present? }
       batch[:run][:finished] = true
-      @api_client.ingest_slack_dm_sync_batch(batch)
+      @api_client.ingest_slack_dm_sync_batch(sanitize_for_postgres(batch))
     end
 
     private
@@ -346,6 +346,21 @@ module SlackDm
     def slack_ts_sort_key(value)
       seconds, micros = value.to_s.split(".", 2)
       [ seconds.to_i, micros.to_s.ljust(6, "0")[0, 6].to_i ]
+    end
+
+    def sanitize_for_postgres(value)
+      case value
+      when Hash
+        value.to_h do |key, nested_value|
+          [ sanitize_for_postgres(key), sanitize_for_postgres(nested_value) ]
+        end
+      when Array
+        value.map { |nested_value| sanitize_for_postgres(nested_value) }
+      when String
+        value.delete("\u0000")
+      else
+        value
+      end
     end
 
     def slack_timeout = positive_env("SLACK_DM_SYNC_TIMEOUT_SECONDS", 20)

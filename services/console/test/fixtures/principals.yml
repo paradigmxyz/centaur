@@ -1,5 +1,4 @@
 acme_channel:
-  namespace: acme
   foreign_id: C0123456789
   kind: slack_channel
   slack_channel_id: C0123456789
@@ -9,7 +8,6 @@ acme_channel:
   created_by: acme_admin
 
 globex_user:
-  namespace: globex
   foreign_id: U987654321
   kind: user
   labels:
@@ -17,7 +15,6 @@ globex_user:
   created_by: globex_admin
 
 acme_user_alice:
-  namespace: acme
   foreign_id: U-alice
   kind: user
   labels:
@@ -26,7 +23,6 @@ acme_user_alice:
   created_by: acme_admin
 
 acme_user_bob:
-  namespace: acme
   foreign_id: U-bob
   kind: user
   labels:
@@ -35,7 +31,6 @@ acme_user_bob:
   created_by: acme_admin
 
 globex_user_overlap:
-  namespace: globex
   foreign_id: U-overlap
   kind: user
   labels:

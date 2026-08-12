@@ -25,10 +25,11 @@ module Api
       end
 
       def create
-        attrs = data_params.permit(:name, :principal_id)
+        attrs = data_params.permit(:name, :principal_id, :requester_principal_id)
         # principal_id is optional: a proxy may boot unassigned and be assigned later.
         principal = attrs[:principal_id].present? ? Principal.find_by_oid!(attrs[:principal_id]) : nil
-        proxy = ::Proxy.new(name: attrs[:name], principal: principal, labels: labels_param)
+        requester = attrs[:requester_principal_id].present? ? Principal.find_by_oid!(attrs[:requester_principal_id]) : nil
+        proxy = ::Proxy.new(name: attrs[:name], principal: principal, requester_principal: requester, labels: labels_param)
         proxy.save!
         render status: :created, json: { data: record_payload(proxy, include_config_hash: true).merge(token: proxy.token) }
       rescue ActiveRecord::RecordInvalid => e
@@ -37,12 +38,17 @@ module Api
 
       # PATCH/PUT assigns, swaps, or clears the proxy's principal on the fly. A
       # principal_id of null unassigns; an opaque id assigns or swaps; omitting
-      # the key leaves the assignment unchanged. The token never changes.
+      # the key leaves the assignment unchanged. requester_principal_id follows
+      # the same key semantics. The token never changes.
       def update
         proxy = ::Proxy.find_by_oid!(params[:id])
         if data_params.key?(:principal_id)
           oid = data_params[:principal_id]
           proxy.principal = oid.present? ? Principal.find_by_oid!(oid) : nil
+        end
+        if data_params.key?(:requester_principal_id)
+          oid = data_params[:requester_principal_id]
+          proxy.requester_principal = oid.present? ? Principal.find_by_oid!(oid) : nil
         end
         proxy.name = data_params[:name] if data_params.key?(:name)
         proxy.labels = permitted_labels if data_params.key?(:labels)
@@ -81,9 +87,11 @@ module Api
           id: proxy.oid,
           name: proxy.name,
           principal_id: proxy.principal&.oid,
+          requester_principal_id: proxy.requester_principal&.oid,
           status: proxy.status,
           labels: proxy.labels,
           principal_assigned_at: proxy.principal_assigned_at,
+          requester_principal_assigned_at: proxy.requester_principal_assigned_at,
           created_at: proxy.created_at,
           updated_at: proxy.updated_at
         }

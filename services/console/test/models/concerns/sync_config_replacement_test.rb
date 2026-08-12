@@ -20,7 +20,7 @@ class SyncConfigReplacementTest < ActiveSupport::TestCase
   end
 
   test "multi-source comparison ignores source and config key order" do
-    record = AwsAuthSecret.new(namespace: "acme")
+    record = AwsAuthSecret.new
     record.sources = [
       source("access_key_id", secret_id: "a", region: "z"),
       source("secret_access_key", secret_id: "z", region: "a")
@@ -33,8 +33,9 @@ class SyncConfigReplacementTest < ActiveSupport::TestCase
 
     assert SyncConfigReplacement.equivalent?(
       record,
-      { namespace: "acme" },
-      { sources: replacement_sources, rules: [] }
+      {},
+      sources: replacement_sources,
+      rules: []
     )
   end
 

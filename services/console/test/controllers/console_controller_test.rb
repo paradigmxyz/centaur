@@ -29,7 +29,7 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     post login_url, params: { email: users(:member_user).email, password: "password123456" }
 
     assert_no_difference -> { Role.count } do
-      post console_roles_url, params: { role: { foreign_id: "sneaky", namespace: "default" } }
+      post console_roles_url, params: { role: { foreign_id: "sneaky" } }
     end
     assert_redirected_to console_threads_path
   end
@@ -42,9 +42,9 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_select "td span", text: "Env"
     assert_select "body", text: /GITHUB_TOKEN/, count: 0
     # The foreign_id links to the detail page (full value as a hover tooltip),
-    # with the opaque oid and namespace shown beneath it.
+    # with the opaque oid shown beneath it.
     assert_select "a[href=?][title=?]", console_secret_path("static", secret.oid), secret.foreign_id
-    assert_select "div", text: /#{Regexp.escape(secret.oid)}.*#{Regexp.escape(secret.namespace)}/
+    assert_select "div", text: secret.oid
     # The name is plain text (not a link) with the full value as a tooltip.
     assert_select "span[title=?]", secret.name
   end
@@ -84,7 +84,7 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
       assert_select "select[name=role_id][aria-label=?]", "Role to assign"
       assert_select "option[value=?]", roles(:acme_admin_role).oid
       assert_select "option[value=?]", roles(:acme_infra).oid, count: 0
-      assert_select "option[value=?]", roles(:globex_infra).oid, count: 0
+      assert_select "option[value=?]", roles(:globex_infra).oid, count: 1
     end
     assert_select "form[action=?]", console_secret_revoke_role_grant_path("static", secret.oid, grant.oid) do
       assert_select "button[type=submit]", "Unassign"
@@ -155,7 +155,7 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
   end
 
   test "principals use creation time as secondary ordering" do
-    common = { namespace: "sort-order", kind: "user", name: "same", created_by: @operator }
+    common = { kind: "user", name: "same", created_by: @operator }
     newer = Principal.create!(common.merge(foreign_id: "Alpha-sort", created_at: 1.day.ago))
     older = Principal.create!(common.merge(foreign_id: "zeta-sort", created_at: 2.days.ago))
 
@@ -175,7 +175,6 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
         created_at: now,
         updated_at: now,
         created_by_id: @operator.id,
-        namespace: "pagination",
         foreign_id: "pagination-#{number}",
         kind: "user",
         name: "Pagination principal #{number}"
@@ -203,7 +202,7 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_select "a[href=?]", console_new_principal_path, text: "Add Principal"
   end
 
-  test "principal pages render first-class identity fields as labels" do
+  test "principal pages do not render first-class identity fields as labels" do
     principal = principals(:acme_channel)
     principal.update!(
       kind: "slack_dm",
@@ -223,7 +222,7 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     get console_principal_url(principal.oid)
     assert_response :ok
     expected_labels.each do |key, value|
-      assert_select ".label-chip", text: "#{key}=#{value}"
+      assert_select ".label-chip", text: "#{key}=#{value}", count: 0
     end
   end
 
@@ -288,7 +287,7 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     get console_credentials_url
     assert_response :ok
     assert_select "a[href=?][title=?]", console_credential_path(credential.oid), credential.foreign_id
-    assert_select "div", text: /#{Regexp.escape(credential.oid)}.*#{Regexp.escape(credential.namespace)}/
+    assert_select "div", text: credential.oid
     assert_select "span", text: credential.status
   end
 
@@ -364,7 +363,7 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
 
   test "credential detail page shows the provider identity for a flow-minted credential" do
     app = oauth_apps(:acme_google)
-    cred = BrokerCredential.create!(namespace: "acme", foreign_id: "minted-1",
+    cred = BrokerCredential.create!(foreign_id: "minted-1",
                                     token_endpoint: "https://oauth2.googleapis.com/token",
                                     oauth_app: app, provider_subject: "sub-9",
                                     provider_email: "person@example.com", external_user_key: "user-9")
@@ -382,7 +381,7 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_select "form[action=?]", console_principal_assign_role_path(principal.oid) do
       assert_select "select[name=role_id][aria-label=?]", "Role to assign"
       assert_select "option[value=?]", roles(:acme_admin_role).oid
-      assert_select "option[value=?]", roles(:globex_infra).oid, count: 0
+      assert_select "option[value=?]", roles(:globex_infra).oid, count: 1
     end
     assert_select "form[action=?]", console_principal_unassign_role_path(principal.oid, roles(:acme_infra).oid) do
       assert_select "button[type=submit]", "Unassign"
@@ -400,7 +399,6 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     now = Time.current
     role_ids = Role.insert_all!((1..50).map do |number|
       {
-        namespace: principal.namespace,
         foreign_id: "detail-page-role-#{number}",
         name: "Detail page role #{number}",
         labels: {},
@@ -416,7 +414,6 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
 
     secret_ids = StaticSecret.insert_all!((1..50).map do |number|
       {
-        namespace: principal.namespace,
         foreign_id: "detail-page-secret-#{number}",
         name: "Detail page secret #{number}",
         kind: "custom",

@@ -1,0 +1,73 @@
+# Using the Hermes Harness
+
+Centaur can run [Hermes Agent](https://github.com/NousResearch/hermes-agent)
+(by Nous Research) as a session harness alongside Codex, Claude Code, Amp,
+and Nanocodex. Start a Slack thread with `--hermes` (or set it as a channel
+or deployment default) and the sandbox runs a full Hermes gateway instead of
+a spawn-per-turn CLI.
+
+## What makes Hermes different from the other harnesses
+
+Hermes is a persistent personal agent, not a one-shot coding CLI. The
+harness integration is built so its long-lived subsystems keep working
+inside a Centaur sandbox:
+
+- **Durable sessions** — the harness speaks Hermes's JSON-RPC gateway
+  (`tui_gateway`) over stdio and keeps one Hermes session per Centaur
+  thread. Conversation history and Hermes's provider prompt cache survive
+  across turns, and after a sandbox restart the session is resumed from
+  Hermes's SQLite session store via `HERMES_CONTINUE_SESSION_ID`.
+- **Self-improvement loop** — Hermes's background memory/skill reviews run
+  after turns inside the gateway process. What the agent learns in one
+  thread (memories, skills) lands in `HERMES_HOME` and is available to
+  every later thread on the same volume.
+- **Cron jobs** — scheduled jobs the agent creates during a conversation
+  are ticked by the harness (`hermes cron tick`, cross-process file-locked
+  on Hermes's side) for as long as the sandbox lives. Set
+  `HERMES_CRON_TICK_SECONDS=0` to disable, or another interval in seconds
+  (default 60).
+- **Skills, delegation, MCP** — Hermes's skill library, `delegate_task`
+  subagents, and MCP client all run inside the sandbox process; no extra
+  wiring needed.
+- **Interrupts** — Centaur's interrupt maps to Hermes's
+  `session.interrupt`, ending the turn as Interrupted without killing the
+  gateway, so the session survives for the next message.
+
+## Configuration
+
+| Variable | Purpose |
+|---|---|
+| `HERMES_PYTHON` | Interpreter whose environment has `hermes-agent` installed. The sandbox image sets this to the baked-in `/opt/hermes/bin/python3`. |
+| `HERMES_BIN` | The `hermes` CLI used for cron ticks (default: `hermes` on PATH). |
+| `HERMES_HOME` | Hermes state root (config, sessions, memories, skills, cron). Mount a per-team volume here to persist learning across sandboxes. |
+| `HERMES_CONTINUE_SESSION_ID` | Resume a specific Hermes session id after a sandbox restart. |
+| `HERMES_CRON_TICK_SECONDS` | Cron tick interval; `0` disables the ticker. |
+| `HERMES_APPROVAL_MODE` | Defaults to `off` inside the sandbox — Centaur owns the safety boundary (isolated sandbox + iron-proxy egress). |
+
+Model/provider selection follows Hermes's own configuration
+(`$HERMES_HOME/config.yaml` + `.env`), so any provider Hermes supports works
+here, including OpenRouter and the Nous inference API. A per-thread
+`--model <name>` override is passed through to Hermes's session as a
+per-session model override.
+
+:::note
+Cron jobs resolve their model from `config.yaml`'s `model.default` (they run
+outside any interactive session), so give the sandbox `HERMES_HOME` a
+`config.yaml` with `model.default` set — a `.env` with provider keys alone is
+enough for turns, but not for scheduled jobs.
+:::
+
+## Persistence model
+
+Everything Hermes learns lives under `HERMES_HOME`. With the default
+throwaway sandbox, memory and skills last only as long as the sandbox; to
+get compounding, cross-thread learning, mount a persistent volume at
+`HERMES_HOME` (per team or per deployment, matching your permission
+boundaries — a shared volume means shared memory).
+
+## Credentials
+
+Hermes reads provider keys from `$HERMES_HOME/.env`. Under Centaur's
+credential-injection model you can keep real keys out of the sandbox by
+binding placeholder values and letting iron-proxy swap them on egress to the
+provider hosts, the same pattern the other harnesses use.

@@ -1,6 +1,5 @@
 module Console
   # Operator UI for roles: list/detail/create/edit and role-scoped secret grants.
-  # Roles are namespace-scoped bundles of secrets that principals can inherit.
   class RolesController < ApplicationController
     include KvRowParams
     include SecretKinds
@@ -14,7 +13,7 @@ module Console
     ]
 
     def index
-      @roles = Role.order(:namespace, :id)
+      @roles = Role.order(:id)
     end
 
     def show
@@ -27,15 +26,12 @@ module Console
         granted_ids[assoc.to_s.delete_suffix("_secret")] << grant.public_send("#{assoc}_id")
       end
       @assignable_secrets = SECRET_KINDS.each_with_object({}) do |(kind, cfg), acc|
-        acc[kind] = cfg[:model]
-          .where(namespace: @role.namespace)
-          .where.not(id: granted_ids[kind])
-          .order(:id)
+        acc[kind] = cfg[:model].where.not(id: granted_ids[kind]).order(:id)
       end
     end
 
     def new
-      @role = Role.new(namespace: "default")
+      @role = Role.new
     end
 
     def create
@@ -62,11 +58,6 @@ module Console
     def grant_secret
       secret = resolve_grantable(params[:grantable])
       return redirect_to console_role_path(@role.oid), alert: "Pick a secret to grant." unless secret
-      unless secret.namespace == @role.namespace
-        return redirect_to console_role_path(@role.oid),
-                           alert: "Secret must be in the same namespace as the role."
-      end
-
       @role.grants.create_with(created_by: current_user)
            .find_or_create_by!(grantable_assoc(secret) => secret)
       redirect_to console_role_path(@role.oid), notice: "Granted #{secret_label(secret)}."
@@ -93,12 +84,11 @@ module Console
     def assign_form(role, include_readonly:)
       fields =
         if include_readonly
-          role_params.permit(:namespace, :foreign_id, :name)
+          role_params.permit(:foreign_id, :name)
         else
           role_params.permit(:name)
         end
       if include_readonly
-        fields[:namespace] = fields[:namespace].presence || "default"
         fields[:foreign_id] = fields[:foreign_id].presence
       end
       role.assign_attributes(fields)

@@ -361,6 +361,7 @@ pub enum HarnessType {
     Amp,
     ClaudeCode,
     Nanocodex,
+    Hermes,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, AsRefStr, Display, EnumString)]

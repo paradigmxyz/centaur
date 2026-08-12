@@ -20,6 +20,7 @@
 - [Roles](#roles)
 - [Grants](#grants)
 - [API keys](#api-keys)
+- [Skills](#skills)
 - [Proxies](#proxies)
 - [Proxy sync](#proxy-sync)
 
@@ -41,7 +42,15 @@ A missing or invalid token returns `401`:
 
 `iron-proxy` instances authenticate to [`POST /api/v1/proxy/sync`](#proxy-sync) with their own token (`iprx_` followed by 64 lowercase hex characters), issued once when the proxy is created. An invalid proxy token returns `401` with `"invalid or missing proxy token"`.
 
+Sandbox skill catalog endpoints use the existing sandbox entitlement JWT injected by `iron-proxy`.
+
 ## Conventions
+
+### Namespace Compatibility
+
+Resources are global and `foreign_id` values are globally unique within each resource type. The removed `namespace` and `credential_namespace` fields are not part of requests or responses.
+
+Canonical foreign-id lookups use `/lookup/:foreign_id`. `/lookup/default/:foreign_id` remains as a temporary compatibility alias. Other formerly namespaced lookup paths return `404`.
 
 - **Request bodies** wrap attributes in a top-level `data` object. A missing `data` key returns `400`.
 - **Single-resource responses** wrap the resource in `data`.
@@ -55,19 +64,18 @@ A missing or invalid token returns `401`:
   ```
 
 - **Pagination** uses the `page` (default `1`) and `limit` (default `50`, max `200`) query parameters. Values are clamped into range; a non-integer value returns `400`.
-- **Namespaced list filtering** (static secrets, GCP auth secrets, GCP ID token secrets, OAuth token secrets, principals, roles) requires a `namespace` query parameter and accepts an optional `labels[key]=value` filter that matches by JSONB containment (all supplied pairs must be present). Label values must be scalars.
+- **List filtering** accepts an optional `labels[key]=value` filter that matches by JSONB containment (all supplied pairs must be present). Label values must be scalars.
 - **Object IDs** are prefixed by type: `ssr_` (static secret), `gas_` (GCP auth secret), `gid_` (GCP ID token secret), `ots_` (OAuth token secret), `prn_` (principal), `role_` (role), `grant_` (grant), `ak_` (API key), `prx_` (proxy).
-- **`namespace`** defaults to `"default"` when omitted on create. Once set, `namespace` and `foreign_id` are immutable.
-- **`namespace` and `foreign_id`** must be URL-safe: only `A-Z a-z 0-9 - . _ ~`. `foreign_id` is optional and, when set, must be globally unique within its resource type. A `foreign_id` may not start with the resource's opaque-id prefix (e.g. `ssr_`), so it can never be mistaken for an OID.
+- **`foreign_id`** must be URL-safe: only `A-Z a-z 0-9 - . _ ~`. It is optional for most resources and globally unique within its resource type. A `foreign_id` may not start with the resource's opaque-id prefix (e.g. `ssr_`), so it can never be mistaken for an OID.
 
 ### Upsert (`PUT` / `PATCH`)
 
 For the resources with a `foreign_id` (static secrets, GCP auth secrets, GCP ID token secrets, OAuth token secrets, principals, roles), `PUT`/`PATCH /api/v1/<resource>/:id` is an **upsert**, and `:id` may be either an OID or a `foreign_id`:
 
 - **`:id` is an OID** (it starts with the resource's prefix, e.g. `ssr_…`): updates that record. `404` if it does not exist — an OID is server-assigned, so it can't be created at a chosen value.
-- **`:id` is anything else**: it is treated as a `foreign_id` within the body `namespace` (default `"default"`). The record is **updated if it exists, created if it does not**. Creation responds `201`; update responds `200`.
+- **`:id` is anything else**: it is treated as a globally unique `foreign_id`. The record is **updated if it exists, created if it does not**. Creation responds `201`; update responds `200`.
 
-This makes provisioning idempotent: `PUT /api/v1/roles/acme-infra` with `{"data":{"namespace":"acme", …}}` converges the `acme/acme-infra` role whether or not it already exists, in one call. On the foreign-id form the namespace and foreign_id come from the URL/body, so omitting `foreign_id` from the body does not clear it.
+This makes provisioning idempotent: `PUT /api/v1/roles/infra` converges the `infra` role whether or not it already exists, in one call. Omitting `foreign_id` from the body does not clear it.
 - **`labels`** is an arbitrary string-keyed object (defaults to `{}`).
 - **Timestamps** are ISO 8601 UTC.
 
@@ -122,7 +130,7 @@ Shape:
 | `1password`           | `secret_ref`           | `token_env`                 | 1Password CLI / service account. |
 | `1password_connect`   | `secret_ref`           | `host_env`, `token_env`     | 1Password Connect server. |
 | `control_plane`       | — (no config keys)     | —                           | Value is supplied inline; see below. |
-| `token_broker`        | `credential_id`        | `credential_namespace`      | A managed [broker credential](#broker-credentials); see below. |
+| `token_broker`        | `credential_id`        | —                           | A managed [broker credential](#broker-credentials); see below. |
 
 `control_plane` is special: the value is stored in iron-control itself. Supply it as a top-level `secret` field on the source (not inside `config`), and leave `config` empty:
 
@@ -138,14 +146,14 @@ The `secret` field is encrypted at rest, is write-only, and is never returned in
 
 `token_broker` is also resolved by iron-control rather than by the proxy. `credential_id` names a [broker credential](#broker-credentials), and at sync time iron-control substitutes that credential's current access token, delivered inline exactly like a `control_plane` value. The reference never reaches the proxy. If the credential has no current token (it is still bootstrapping, or it is dead), the owning secret is omitted from the proxy's config until the credential recovers.
 
-`credential_id` is either the credential's opaque id (`bcr_...`) or its `foreign_id`. With a `foreign_id`, `credential_namespace` is required; with an opaque id it must be omitted (opaque ids are namespace independent, so they can reference a credential in any namespace, including a shared one). The reference is validated on write: it must resolve to an existing broker credential.
+`credential_id` is either the credential's opaque id (`bcr_...`) or globally unique `foreign_id`. The reference is validated on write: it must resolve to an existing broker credential.
 
 ```json
 { "source_type": "token_broker", "config": { "credential_id": "bcr_abc123" } }
 ```
 
 ```json
-{ "source_type": "token_broker", "config": { "credential_id": "gmail", "credential_namespace": "acme" } }
+{ "source_type": "token_broker", "config": { "credential_id": "gmail" } }
 ```
 
 ### Request rules
@@ -177,8 +185,7 @@ A static secret injects or replaces a fixed credential value on matching request
 
 | Field            | In requests | Notes |
 | ---------------- | ----------- | ----- |
-| `namespace`      | optional    | Defaults to `"default"`. Immutable after create. |
-| `foreign_id`     | optional    | Globally unique within this resource type. Immutable after create. |
+| `foreign_id`     | optional    | Globally unique. Immutable after create. |
 | `name`           | optional    | |
 | `description`    | optional    | |
 | `labels`         | optional    | Object; defaults to `{}`. |
@@ -219,7 +226,6 @@ Both config objects reject unknown keys.
 ```json
 {
   "data": {
-    "namespace": "default",
     "foreign_id": "github-token",
     "name": "GitHub Token",
     "description": "Repo access",
@@ -239,7 +245,6 @@ Returns `201` with the created resource. Response shape:
 {
   "data": {
     "id": "ssr_...",
-    "namespace": "default",
     "foreign_id": "github-token",
     "name": "GitHub Token",
     "description": "Repo access",
@@ -262,9 +267,9 @@ The `source` in responses never includes a `control_plane` `secret` value.
 
 | Method | Path | Notes |
 | ------ | ---- | ----- |
-| `GET`  | `/api/v1/static_secrets?namespace=default` | List. `namespace` required; `labels[k]=v` and pagination optional. |
+| `GET`  | `/api/v1/static_secrets` | List. `labels[k]=v` and pagination are optional. |
 | `GET`  | `/api/v1/static_secrets/:id` | Fetch one. `404` if missing. |
-| `GET`  | `/api/v1/static_secrets/lookup/:namespace/:foreign_id` | Fetch by namespace + foreign id. `404` if missing. |
+| `GET`  | `/api/v1/static_secrets/lookup/:foreign_id` | Fetch by foreign id. `404` if missing. |
 | `PUT`/`PATCH` | `/api/v1/static_secrets/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`; same body as create. `source` and `rules` are replaced wholesale. |
 | `DELETE` | `/api/v1/static_secrets/:id` | Delete. Returns `204`; `404` if missing. Cascades: the secret's source, rules, and any grants that reference it are removed. The granted roles and principals are not deleted. |
 
@@ -276,8 +281,7 @@ A GCP auth secret mints short-lived GCP OAuth2 access tokens and injects them as
 
 | Field                  | In requests | Notes |
 | ---------------------- | ----------- | ----- |
-| `namespace`            | optional    | Defaults to `"default"`. Immutable. |
-| `foreign_id`           | optional    | Globally unique within this resource type. Immutable. |
+| `foreign_id`           | optional    | Globally unique. Immutable. |
 | `name`, `description`  | optional    | |
 | `labels`               | optional    | |
 | `scopes`               | required    | Non-empty array of non-empty strings (GCP OAuth scopes). |
@@ -293,7 +297,6 @@ A GCP auth secret mints short-lived GCP OAuth2 access tokens and injects them as
 ```json
 {
   "data": {
-    "namespace": "default",
     "foreign_id": "sa-prod",
     "name": "Production Service Account",
     "scopes": ["https://www.googleapis.com/auth/cloud-platform"],
@@ -312,7 +315,6 @@ Or with workload identity instead of a keyfile:
 ```json
 {
   "data": {
-    "namespace": "default",
     "scopes": ["https://www.googleapis.com/auth/cloud-platform"],
     "credentials_provider": { "type": "workload_identity" },
     "rules": [ { "host": "googleapis.com", "http_methods": ["*"], "paths": ["/v1/*"] } ]
@@ -326,7 +328,6 @@ Returns `201`. Response shape:
 {
   "data": {
     "id": "gas_...",
-    "namespace": "default",
     "foreign_id": "sa-prod",
     "name": "Production Service Account",
     "description": null,
@@ -346,9 +347,9 @@ Returns `201`. Response shape:
 
 | Method | Path | Notes |
 | ------ | ---- | ----- |
-| `GET`  | `/api/v1/gcp_auth_secrets?namespace=default` | List. |
+| `GET`  | `/api/v1/gcp_auth_secrets` | List. |
 | `GET`  | `/api/v1/gcp_auth_secrets/:id` | Fetch one. |
-| `GET`  | `/api/v1/gcp_auth_secrets/lookup/:namespace/:foreign_id` | Fetch by namespace + foreign id. `404` if missing. |
+| `GET`  | `/api/v1/gcp_auth_secrets/lookup/:foreign_id` | Fetch by foreign id. `404` if missing. |
 | `PUT`/`PATCH` | `/api/v1/gcp_auth_secrets/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`; same body as create. |
 | `DELETE` | `/api/v1/gcp_auth_secrets/:id` | Delete. Returns `204`; `404` if missing. Cascades: the secret's sources, rules, and any grants that reference it are removed. The granted roles and principals are not deleted. |
 
@@ -360,8 +361,7 @@ A GCP ID token secret mints Google-signed OIDC ID tokens for an audience and inj
 
 | Field                 | In requests | Notes |
 | --------------------- | ----------- | ----- |
-| `namespace`           | optional    | Defaults to `"default"`. Immutable. |
-| `foreign_id`          | optional    | Globally unique within this resource type. Immutable. |
+| `foreign_id`          | optional    | Globally unique. Immutable. |
 | `name`, `description` | optional    | |
 | `labels`              | optional    | Object; defaults to `{}`. |
 | `audience`            | required    | ID token `aud` claim. For Cloud Run, use the service URL or configured custom audience. |
@@ -376,7 +376,6 @@ A GCP ID token secret mints Google-signed OIDC ID tokens for an audience and inj
 ```json
 {
   "data": {
-    "namespace": "default",
     "foreign_id": "cloud-run-caller",
     "name": "Cloud Run Caller",
     "audience": "https://my-service-abc123-uc.a.run.app",
@@ -396,7 +395,6 @@ Returns `201`. Response shape:
 {
   "data": {
     "id": "gid_...",
-    "namespace": "default",
     "foreign_id": "cloud-run-caller",
     "name": "Cloud Run Caller",
     "description": null,
@@ -417,9 +415,9 @@ The `keyfile` in responses never includes a `control_plane` `secret` value.
 
 | Method | Path | Notes |
 | ------ | ---- | ----- |
-| `GET`  | `/api/v1/gcp_id_token_secrets?namespace=default` | List. |
+| `GET`  | `/api/v1/gcp_id_token_secrets` | List. |
 | `GET`  | `/api/v1/gcp_id_token_secrets/:id` | Fetch one. |
-| `GET`  | `/api/v1/gcp_id_token_secrets/lookup/:namespace/:foreign_id` | Fetch by namespace + foreign id. `404` if missing. |
+| `GET`  | `/api/v1/gcp_id_token_secrets/lookup/:foreign_id` | Fetch by foreign id. `404` if missing. |
 | `PUT`/`PATCH` | `/api/v1/gcp_id_token_secrets/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`; same body as create. |
 | `DELETE` | `/api/v1/gcp_id_token_secrets/:id` | Delete. Returns `204`; `404` if missing. Cascades: the secret's source, rules, and any grants that reference it are removed. The granted roles and principals are not deleted. |
 
@@ -433,8 +431,7 @@ Each granted AWS auth secret is delivered to `iron-proxy` as its own `aws_auth` 
 
 | Field               | In requests | Notes |
 | ------------------- | ----------- | ----- |
-| `namespace`         | optional    | Defaults to `"default"`. Immutable. |
-| `foreign_id`        | optional    | Globally unique within this resource type. Immutable. |
+| `foreign_id`        | optional    | Globally unique. Immutable. |
 | `name`, `description` | optional  | |
 | `labels`            | optional    | Object; defaults to `{}`. |
 | `allowed_regions`   | optional    | Array of non-empty strings; defaults to `[]` (no region scoping). |
@@ -451,7 +448,6 @@ Each granted AWS auth secret is delivered to `iron-proxy` as its own `aws_auth` 
 ```json
 {
   "data": {
-    "namespace": "default",
     "foreign_id": "cloudwatch-reader",
     "name": "CloudWatch Reader",
     "allowed_regions": ["us-west-2"],
@@ -483,7 +479,6 @@ Returns `201`. Response shape (each credential echoes its source as `{ source_ty
 {
   "data": {
     "id": "aas_...",
-    "namespace": "default",
     "foreign_id": "cloudwatch-reader",
     "name": "CloudWatch Reader",
     "description": null,
@@ -504,9 +499,9 @@ Returns `201`. Response shape (each credential echoes its source as `{ source_ty
 
 | Method | Path | Notes |
 | ------ | ---- | ----- |
-| `GET`  | `/api/v1/aws_auth_secrets?namespace=default` | List. |
+| `GET`  | `/api/v1/aws_auth_secrets` | List. |
 | `GET`  | `/api/v1/aws_auth_secrets/:id` | Fetch one. |
-| `GET`  | `/api/v1/aws_auth_secrets/lookup/:namespace/:foreign_id` | Fetch by namespace + foreign id. `404` if missing. |
+| `GET`  | `/api/v1/aws_auth_secrets/lookup/:foreign_id` | Fetch by foreign id. `404` if missing. |
 | `PUT`/`PATCH` | `/api/v1/aws_auth_secrets/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`; same body as create. Replaces the credential sources wholesale, so a `PUT` must resend `access_key_id` and `secret_access_key` (and `session_token`, to keep it). |
 | `DELETE` | `/api/v1/aws_auth_secrets/:id` | Delete. Returns `204`; `404` if missing. Cascades: the secret's sources, rules, and any grants that reference it are removed. The granted roles and principals are not deleted. |
 
@@ -518,8 +513,7 @@ An OAuth token secret mints OAuth2 access tokens for a single grant and injects 
 
 | Field                    | In requests | Notes |
 | ------------------------ | ----------- | ----- |
-| `namespace`              | optional    | Defaults to `"default"`. Immutable. |
-| `foreign_id`             | optional    | Globally unique within this resource type. Immutable. |
+| `foreign_id`             | optional    | Globally unique. Immutable. |
 | `name`, `description`    | optional    | |
 | `labels`                 | optional    | |
 | `grant`                  | required    | One of `refresh_token`, `client_credentials`, `password`, `jwt_bearer`. |
@@ -550,7 +544,6 @@ Supplying a credential field that the chosen grant does not use, or omitting a r
 ```json
 {
   "data": {
-    "namespace": "default",
     "foreign_id": "slack-app",
     "name": "Slack App OAuth",
     "grant": "refresh_token",
@@ -577,7 +570,6 @@ Returns `201`. Response shape (note that `credentials` and `token_endpoint_heade
 {
   "data": {
     "id": "ots_...",
-    "namespace": "default",
     "foreign_id": "slack-app",
     "name": "Slack App OAuth",
     "description": null,
@@ -607,9 +599,9 @@ Returns `201`. Response shape (note that `credentials` and `token_endpoint_heade
 
 | Method | Path | Notes |
 | ------ | ---- | ----- |
-| `GET`  | `/api/v1/oauth_token_secrets?namespace=default` | List. |
+| `GET`  | `/api/v1/oauth_token_secrets` | List. |
 | `GET`  | `/api/v1/oauth_token_secrets/:id` | Fetch one. |
-| `GET`  | `/api/v1/oauth_token_secrets/lookup/:namespace/:foreign_id` | Fetch by namespace + foreign id. `404` if missing. |
+| `GET`  | `/api/v1/oauth_token_secrets/lookup/:foreign_id` | Fetch by foreign id. `404` if missing. |
 | `PUT`/`PATCH` | `/api/v1/oauth_token_secrets/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`; same body as create. |
 | `DELETE` | `/api/v1/oauth_token_secrets/:id` | Delete. Returns `204`; `404` if missing. Cascades: the secret's sources, rules, and any grants that reference it are removed. The granted roles and principals are not deleted. |
 
@@ -623,8 +615,7 @@ Listener and client knobs (bind address, client auth) are deliberately not model
 
 | Field         | In requests | Notes |
 | ------------- | ----------- | ----- |
-| `namespace`   | optional    | Defaults to `"default"`. Immutable after create. |
-| `foreign_id`  | required    | Globally unique within this resource type. Immutable after create. |
+| `foreign_id`  | required    | Globally unique. Immutable after create. |
 | `name`        | optional    | |
 | `description` | optional    | |
 | `labels`      | optional    | Object; defaults to `{}`. |
@@ -640,7 +631,6 @@ Listener and client knobs (bind address, client auth) are deliberately not model
 ```json
 {
   "data": {
-    "namespace": "default",
     "foreign_id": "analytics-pg",
     "name": "Analytics DB",
     "description": "Read-only reporting",
@@ -659,7 +649,6 @@ Returns `201` with the created resource. Response shape:
 {
   "data": {
     "id": "pgs_...",
-    "namespace": "default",
     "foreign_id": "analytics-pg",
     "name": "Analytics DB",
     "description": "Read-only reporting",
@@ -682,15 +671,15 @@ A setting may take its value from the proxy's assigned principal or proxy
 labels instead of storing a literal, by replacing `value` with `value_from`:
 
 ```json
-{ "name": "centaur.slack_channel_id", "value_from": { "principal_label": "slack_channel_id" } }
+{ "name": "centaur.slack_channel_id", "value_from": { "principal_field": "slack_channel_id" } }
 ```
 
 `value_from` contains exactly one of:
 
 | Key               | Resolves to |
 | ----------------- | ----------- |
-| `principal_label` | The named label on the assigned principal. Reserved identity labels resolve through their authoritative columns. A label the principal does not carry resolves to an empty string, so RLS-style policies fail closed. |
-| `principal_field` | One of the principal's fields: `id` (the opaque `prn_...` id), `namespace`, `foreign_id`, `name`, or `slack_history_channel_ids` (JSON array of Slack channel IDs with history permission). |
+| `principal_label` | The named label on the assigned principal. A label the principal does not carry resolves to an empty string, so RLS-style policies fail closed. |
+| `principal_field` | One of the principal's fields: `id` (the opaque `prn_...` id), `foreign_id`, `name`, `kind`, `slack_user_id`, `slack_channel_id`, `slack_team_id`, `slack_email`, `console_user_id`, `console_user_email`, or `slack_history_channel_ids` (JSON array of Slack channel IDs with history permission). |
 | `proxy_label`     | The named label on the proxy. A label the proxy does not carry resolves to an empty string, so RLS-style policies fail closed. |
 
 A setting has either `value` or `value_from`, never both; unknown
@@ -703,9 +692,9 @@ stored reference.
 
 | Method | Path | Notes |
 | ------ | ---- | ----- |
-| `GET`  | `/api/v1/pg_dsn_secrets?namespace=default` | List. `namespace` required; `labels[k]=v` and pagination optional. |
+| `GET`  | `/api/v1/pg_dsn_secrets` | List. `labels[k]=v` and pagination are optional. |
 | `GET`  | `/api/v1/pg_dsn_secrets/:id` | Fetch one. `404` if missing. |
-| `GET`  | `/api/v1/pg_dsn_secrets/lookup/:namespace/:foreign_id` | Fetch by namespace + foreign id. `404` if missing. |
+| `GET`  | `/api/v1/pg_dsn_secrets/lookup/:foreign_id` | Fetch by foreign id. `404` if missing. |
 | `PUT`/`PATCH` | `/api/v1/pg_dsn_secrets/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`; same body as create. `dsn` is replaced wholesale. |
 | `DELETE` | `/api/v1/pg_dsn_secrets/:id` | Delete. Returns `204`; `404` if missing. Cascades: the secret's source and any grants that reference it are removed. The granted roles and principals are not deleted. |
 
@@ -719,8 +708,7 @@ Each granted HMAC secret is delivered to `iron-proxy` as its own `hmac_sign` tra
 
 | Field                       | In requests | Notes |
 | --------------------------- | ----------- | ----- |
-| `namespace`                 | optional    | Defaults to `"default"`. Immutable. |
-| `foreign_id`                | optional    | Globally unique within this resource type. Immutable. |
+| `foreign_id`                | optional    | Globally unique. Immutable. |
 | `name`, `description`       | optional    | |
 | `labels`                    | optional    | Object; defaults to `{}`. |
 | `timestamp_format`          | required    | One of `unix_seconds`, `unix_millis`, `unix_nanos`, `rfc3339`. |
@@ -740,7 +728,6 @@ Each granted HMAC secret is delivered to `iron-proxy` as its own `hmac_sign` tra
 ```json
 {
   "data": {
-    "namespace": "default",
     "foreign_id": "webhook-hmac",
     "name": "Webhook Signing",
     "timestamp_format": "unix_seconds",
@@ -766,7 +753,6 @@ Returns `201`. Response shape (note that `credentials` echoes each source as `{ 
 {
   "data": {
     "id": "hms_...",
-    "namespace": "default",
     "foreign_id": "webhook-hmac",
     "name": "Webhook Signing",
     "description": null,
@@ -795,9 +781,9 @@ Returns `201`. Response shape (note that `credentials` echoes each source as `{ 
 
 | Method | Path | Notes |
 | ------ | ---- | ----- |
-| `GET`  | `/api/v1/hmac_secrets?namespace=default` | List. |
+| `GET`  | `/api/v1/hmac_secrets` | List. |
 | `GET`  | `/api/v1/hmac_secrets/:id` | Fetch one. |
-| `GET`  | `/api/v1/hmac_secrets/lookup/:namespace/:foreign_id` | Fetch by namespace + foreign id. `404` if missing. |
+| `GET`  | `/api/v1/hmac_secrets/lookup/:foreign_id` | Fetch by foreign id. `404` if missing. |
 | `PUT`/`PATCH` | `/api/v1/hmac_secrets/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`; same body as create. |
 | `DELETE` | `/api/v1/hmac_secrets/:id` | Delete. Returns `204`; `404` if missing. Cascades: the secret's sources, rules, and any grants that reference it are removed. The granted roles and principals are not deleted. |
 
@@ -813,8 +799,7 @@ The token credentials it refreshes with are fields on the credential, resolved b
 
 | Field                          | In requests | Notes |
 | ------------------------------ | ----------- | ----- |
-| `namespace`                    | optional    | Defaults to `"default"`. Immutable. |
-| `foreign_id`                   | optional    | Globally unique within this resource type. Immutable. |
+| `foreign_id`                   | optional    | Globally unique. Immutable. |
 | `name`, `description`          | optional    | |
 | `labels`                       | optional    | |
 | `grant`                        | optional    | One of `refresh_token`, `client_credentials`, `password`, or `preqin`. Defaults to `refresh_token`. |
@@ -864,7 +849,6 @@ Credentials minted by the [OAuth consent flow](#oauth-consent-flow) are linked t
 ```json
 {
   "data": {
-    "namespace": "default",
     "foreign_id": "gmail",
     "name": "Gmail",
     "grant": "refresh_token",
@@ -883,7 +867,6 @@ Returns `201`. The token blob, the `refresh_token` seed, and the `client_secret`
 {
   "data": {
     "id": "bcr_...",
-    "namespace": "default",
     "foreign_id": "gmail",
     "name": "Gmail",
     "description": null,
@@ -915,7 +898,6 @@ Password-grant providers use the same endpoint with `grant: "password"`:
 ```json
 {
   "data": {
-    "namespace": "default",
     "foreign_id": "password-provider",
     "name": "Password Provider",
     "grant": "password",
@@ -934,7 +916,6 @@ Client-credentials providers use the same endpoint with `grant: "client_credenti
 ```json
 {
   "data": {
-    "namespace": "default",
     "foreign_id": "bloomberg-dl",
     "name": "Bloomberg DL",
     "grant": "client_credentials",
@@ -952,7 +933,6 @@ Preqin Operational API credentials use the provider-specific `preqin` grant. iro
 ```json
 {
   "data": {
-    "namespace": "default",
     "foreign_id": "preqin-operational",
     "name": "Preqin Operational",
     "grant": "preqin",
@@ -971,7 +951,7 @@ The token is still consumed like any other broker token:
     "inject_config": { "header": "Authorization", "formatter": "Bearer {{ .Value }}" },
     "source": {
       "source_type": "token_broker",
-      "config": { "credential_id": "preqin-operational", "credential_namespace": "default" }
+      "config": { "credential_id": "preqin-operational" }
     },
     "rules": [ { "host": "api.preqin.com" } ]
   }
@@ -1003,9 +983,9 @@ When a refresh fails unrecoverably (for example the IdP returns `invalid_grant` 
 
 | Method | Path | Notes |
 | ------ | ---- | ----- |
-| `GET`  | `/api/v1/broker_credentials?namespace=default` | List. `namespace` required; `labels[k]=v` and pagination optional. |
+| `GET`  | `/api/v1/broker_credentials` | List. `labels[k]=v` and pagination are optional. |
 | `GET`  | `/api/v1/broker_credentials/:id` | Fetch one. `404` if missing. |
-| `GET`  | `/api/v1/broker_credentials/lookup/:namespace/:foreign_id` | Fetch by namespace + foreign id. `404` if missing. |
+| `GET`  | `/api/v1/broker_credentials/lookup/:foreign_id` | Fetch by foreign id. `404` if missing. |
 | `PUT`/`PATCH` | `/api/v1/broker_credentials/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`. Fresh initial values reseed and clear dead state. Omitted fields are preserved; write-only fields are only changed when supplied. |
 | `DELETE` | `/api/v1/broker_credentials/:id` | Delete. Returns `204`; `404` if missing. Returns `409` if any `token_broker` secret source still references the credential (remove those references first). |
 
@@ -1028,7 +1008,6 @@ Google and Slack are supported providers in this release. The `provider` field i
 | `client_id`            | required    | OAuth client id. Not secret; returned in responses. |
 | `client_secret`        | required on create | OAuth client secret. Write-only and encrypted at rest; on update it is only changed when supplied. Never returned. |
 | `allowed_scopes`       | required    | Non-empty array of scope strings the start endpoint requests. A flow's optional `scopes` param must be a subset; omitting it requests all of these. |
-| `credential_namespace` | optional    | Namespace for credentials minted by this app's flows. Defaults to `"default"`. |
 | `enabled`              | optional    | Defaults to `true`. A disabled app rejects new consent flows; existing credentials keep refreshing. |
 
 The `client_secret` is required and write-only: it is accepted on writes but never returned in any response.
@@ -1045,8 +1024,7 @@ The `client_secret` is required and write-only: it is accepted on writes but nev
     "provider": "google",
     "client_id": "1234.apps.googleusercontent.com",
     "client_secret": "GOCSPX-...",
-    "allowed_scopes": ["https://www.googleapis.com/auth/gmail.readonly"],
-    "credential_namespace": "default"
+    "allowed_scopes": ["https://www.googleapis.com/auth/gmail.readonly"]
   }
 }
 ```
@@ -1063,7 +1041,6 @@ Returns `201`. The `client_secret` is never echoed back:
     "provider": "google",
     "client_id": "1234.apps.googleusercontent.com",
     "allowed_scopes": ["https://www.googleapis.com/auth/gmail.readonly"],
-    "credential_namespace": "default",
     "enabled": true,
     "created_at": "2026-06-01T10:00:00Z",
     "updated_at": "2026-06-01T10:00:00Z"
@@ -1181,17 +1158,16 @@ Slack OAuth apps should use normal Slack API scopes such as `channels:history`, 
 A principal is an identity (an application, service, or proxy owner) that can be granted secrets.
 
 When a principal is created with no preassigned roles, the console assigns the
-system default roles configured for that principal's namespace. Defaults apply
+system default roles. Defaults apply
 only during initial creation. Updating an existing roleless principal does not
 restore roles that an operator removed. The default configuration assigns the
-system-managed `default/infra` role.
+system-managed `infra` role.
 
 ### Attributes
 
 | Field        | In requests | Notes |
 | ------------ | ----------- | ----- |
-| `namespace`  | optional    | Defaults to `"default"`. Immutable. |
-| `foreign_id` | optional    | Globally unique within this resource type. Immutable. |
+| `foreign_id` | optional    | Globally unique. Immutable. |
 | `name`       | optional    | |
 | `kind`       | optional    | Defaults to `unknown`. See the known values below. |
 | `slack_user_id` | optional | First-class Slack user identity. |
@@ -1200,7 +1176,7 @@ system-managed `default/infra` role.
 | `slack_email` | optional | First-class Slack email identity. |
 | `console_user_id` | optional | Database ID of the associated console user for a `console_user` principal. |
 | `console_user_email` | optional | Email identity for a `console_user` principal. |
-| `labels`     | optional    | Extensible metadata. Compatibility identity labels are still accepted and synthesized in responses during the transition. |
+| `labels`     | optional    | Extensible metadata. Identity is read from the first-class fields, not from labels with matching names. |
 | `slack_channel_permissions` | optional | Direct permissions owned by the principal. Full replacement when present on create or update. |
 | `effective_slack_channel_permissions` | response only | Direct permissions merged with permissions inherited from assigned roles. |
 
@@ -1213,7 +1189,7 @@ and `teams_conversation`. Use one of these values for the `kind` field.
 `POST /api/v1/principals`
 
 ```json
-{ "data": { "namespace": "default", "foreign_id": "api-service", "name": "API Service", "labels": { "tier": "backend" } } }
+{ "data": { "foreign_id": "api-service", "name": "API Service", "labels": { "tier": "backend" } } }
 ```
 
 Returns `201`:
@@ -1222,10 +1198,9 @@ Returns `201`:
 {
   "data": {
     "id": "prn_...",
-    "namespace": "default",
     "foreign_id": "api-service",
     "name": "API Service",
-    "labels": { "tier": "backend", "kind": "unknown" },
+    "labels": { "tier": "backend" },
     "slack_channel_permissions": [],
     "effective_slack_channel_permissions": [],
     "created_at": "2026-06-01T10:00:00Z",
@@ -1236,33 +1211,29 @@ Returns `201`:
 
 | Method | Path | Notes |
 | ------ | ---- | ----- |
-| `GET`  | `/api/v1/principals?namespace=default` | List. Accepts exact-match label filters, including the reserved identity labels. |
+| `GET`  | `/api/v1/principals` | List. Accepts exact-match label filters. |
 | `GET`  | `/api/v1/principals/:id` | Fetch one by OID. To fetch by `foreign_id`, use the lookup route below. |
-| `GET`  | `/api/v1/principals/lookup/:namespace/:foreign_id` | Fetch by namespace + foreign id. `404` if missing. |
+| `GET`  | `/api/v1/principals/lookup/:foreign_id` | Fetch by foreign id. `404` if missing. |
 | `GET`  | `/api/v1/principals/:id/effective_config` | [Effective config](#effective-config) the principal resolves to. `:id` is an OID. |
-| `GET`  | `/api/v1/principals/lookup/:namespace/:foreign_id/effective_config` | [Effective config](#effective-config) by namespace + foreign id. `404` if missing. |
+| `GET`  | `/api/v1/principals/lookup/:foreign_id/effective_config` | [Effective config](#effective-config) by foreign id. `404` if missing. |
 | `GET`  | `/api/v1/principals/:principal_id/grants` | [List the grants](#list-by-grantee) granted directly to the principal. |
 | `POST` | `/api/v1/principals/:id/slack_channel_permissions` | Idempotently create or update one direct Slack channel permission. Omitted flags default to enabled on create and remain unchanged on update. |
-| `PUT`/`PATCH` | `/api/v1/principals/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`. `name`, first-class identity fields, `labels`, and direct `slack_channel_permissions` are mutable on an existing record. `namespace` and `foreign_id` apply only when creating. |
+| `PUT`/`PATCH` | `/api/v1/principals/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`. `name`, first-class identity fields, `labels`, and direct `slack_channel_permissions` are mutable on an existing record. `foreign_id` applies only when creating. |
 
-The first-class identity fields are authoritative. For compatibility, responses
-still synthesize `kind`, `slack_user_id`, `slack_channel_id`, `slack_team_id`,
-and `slack_email` in `labels`. A `console_user` response also synthesizes
-`console-user-id` and `email`. Writes may send the compatibility labels, but if
-a request sends both forms, their values must agree or the API returns `422`.
-Sending a null, empty, or whitespace-only Slack identity label clears that
-value. A null or blank `kind` is rejected, as are unknown kind values and new
-or changed malformed nonblank Slack identities. Unchanged legacy values remain
-round-trip safe during the compatibility release.
+Identity values must be sent through the first-class fields. Labels with the
+same names are ordinary metadata and do not change or mirror identity fields.
+A null or blank `kind` is rejected, as are unknown kind values and new or
+changed malformed nonblank Slack identities. Unchanged migrated values remain
+round-trip safe.
 
 See [Role assignments](#role-assignments) for attaching roles to a principal.
 
 ### Effective config
 
 `GET /api/v1/principals/:id/effective_config`
-`GET /api/v1/principals/lookup/:namespace/:foreign_id/effective_config`
+`GET /api/v1/principals/lookup/:foreign_id/effective_config`
 
-The config a principal resolves to, in the same shape `iron-proxy` receives on [proxy sync](#proxy-sync), for operator inspection. The principal is addressed by OID (`:id`) or by an explicit namespace + `foreign_id` via the lookup route.
+The config a principal resolves to, in the same shape `iron-proxy` receives on [proxy sync](#proxy-sync), for operator inspection. The principal is addressed by OID (`:id`) or by `foreign_id` via the lookup route.
 
 Unlike proxy sync, this endpoint never reveals live secrets and does no config-hash negotiation:
 
@@ -1300,14 +1271,11 @@ The `secrets`, `transforms`, and `postgres` arrays are assembled exactly as in [
 
 A role is a reusable bundle of [grants](#grants) and Slack channel permissions. Principals are assigned roles, and a principal's effective access is the union of its own direct grants and Slack permissions plus those of every role it holds.
 
-Roles are namespaced. A principal may only be assigned roles in its own namespace.
-
 ### Attributes
 
 | Field        | In requests | Notes |
 | ------------ | ----------- | ----- |
-| `namespace`  | optional    | Defaults to `"default"`. Immutable. |
-| `foreign_id` | optional    | Globally unique within this resource type. Immutable. Handy for idempotent provisioning. |
+| `foreign_id` | optional    | Globally unique. Immutable. Handy for idempotent provisioning. |
 | `name`       | optional    | |
 | `labels`     | optional    | |
 | `slack_channel_permissions` | optional | Full replacement when present on create or update. Each row accepts `channel_id` and the `upload_enabled`, `download_enabled`, and `history_enabled` flags. |
@@ -1317,7 +1285,7 @@ Roles are namespaced. A principal may only be assigned roles in its own namespac
 `POST /api/v1/roles`
 
 ```json
-{ "data": { "namespace": "default", "foreign_id": "infra", "name": "Infra", "labels": { "kind": "shared" } } }
+{ "data": { "foreign_id": "infra", "name": "Infra", "labels": { "kind": "shared" } } }
 ```
 
 Returns `201`:
@@ -1326,7 +1294,6 @@ Returns `201`:
 {
   "data": {
     "id": "role_...",
-    "namespace": "default",
     "foreign_id": "infra",
     "name": "Infra",
     "labels": { "kind": "shared" },
@@ -1339,12 +1306,12 @@ Returns `201`:
 
 | Method   | Path | Notes |
 | -------- | ---- | ----- |
-| `GET`    | `/api/v1/roles?namespace=default` | List. `namespace` required; `labels[k]=v` and pagination optional. |
+| `GET`    | `/api/v1/roles` | List. `labels[k]=v` and pagination are optional. |
 | `GET`    | `/api/v1/roles/:id` | Fetch one. |
-| `GET`    | `/api/v1/roles/lookup/:namespace/:foreign_id` | Fetch by namespace + foreign id. `404` if missing. |
+| `GET`    | `/api/v1/roles/lookup/:foreign_id` | Fetch by foreign id. `404` if missing. |
 | `GET`    | `/api/v1/roles/:role_id/grants` | [List the grants](#list-by-grantee) attached to the role. |
 | `POST`   | `/api/v1/roles/:id/slack_channel_permissions` | Idempotently create or update one role-owned Slack channel permission without replacing other rows. Omitted flags default to enabled on create and remain unchanged on update. |
-| `PUT`/`PATCH` | `/api/v1/roles/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`. `name`, `labels`, and `slack_channel_permissions` are mutable on an existing record; `namespace` and `foreign_id` apply only when creating. |
+| `PUT`/`PATCH` | `/api/v1/roles/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`. `name`, `labels`, and `slack_channel_permissions` are mutable on an existing record; `foreign_id` applies only when creating. |
 | `DELETE` | `/api/v1/roles/:id` | Delete. Returns `204`. Cascades: the role's grants and its assignments are removed. |
 
 ### Role assignments
@@ -1357,7 +1324,7 @@ Assign and unassign roles on a principal. The assignment endpoints are nested un
 { "data": { "role_id": "role_..." } }
 ```
 
-Returns `201` with the assigned role's representation. Assigning a role from a different namespace, or one already assigned, returns `422`. An unknown principal or role returns `404`.
+Returns `201` with the assigned role's representation. Assigning an already assigned role returns `422`. An unknown principal or role returns `404`.
 
 | Method   | Path | Notes |
 | -------- | ---- | ----- |
@@ -1468,9 +1435,32 @@ Returns `201`. The plaintext `token` is included **only** in this create respons
 
 | Method   | Path | Notes |
 | -------- | ---- | ----- |
-| `GET`    | `/api/v1/api_keys` | List your keys (paginated; no `namespace`). Tokens are never returned. |
+| `GET`    | `/api/v1/api_keys` | List your keys (paginated). Tokens are never returned. |
 | `GET`    | `/api/v1/api_keys/:id` | Fetch one (no token). |
 | `DELETE` | `/api/v1/api_keys/:id` | Revoke (soft delete). Returns `204`. Revoking the key used for the current request returns `422` with `"cannot revoke the API key used for this request"`. |
+
+## Skills
+
+Skills are mutable `SKILL.md` documents authored by signed-in users in Console. There is no revision or draft resource: updating a public skill changes the document returned to agents immediately. Skill IDs use the `skl_` prefix.
+
+Console stores and validates `name`, `description`, and Markdown `instructions` as separate fields, then generates `SKILL.md`. Active skill names are globally unique, use lowercase letters, numbers, and hyphens, and are limited to 64 characters. The name `search` is reserved for the catalog search route. Because names cannot contain underscores, they cannot conflict with `skl_` OIDs. Archived names may be reused. Generated documents are limited to 64 KiB.
+
+### Sandbox Operations
+
+These endpoints use the existing sandbox entitlement JWT injected by `iron-proxy`. Console-user principals can see their own private skills and every public skill. Other principal kinds can see public skills only. Mutations require an active Console user linked to the sandbox principal and can change only that user's skills.
+
+| Method | Path | Notes |
+| ------ | ---- | ----- |
+| `GET` | `/api/v1/sandbox/skills` | List visible skills. Optional `scope=private|shared` and `limit` up to 20. |
+| `GET` | `/api/v1/sandbox/skills/search?q=...` | Full-text search visible skills. |
+| `GET` | `/api/v1/sandbox/skills/:id` | Read a visible skill by its exact name or `skl_...` OID. |
+| `POST` | `/api/v1/sandbox/skills` | Create a public skill from `data.name`, `data.description`, and `data.instructions`. |
+| `PUT`/`PATCH` | `/api/v1/sandbox/skills/:id` | Update an owned skill using those fields; optional `data.lock_version` detects concurrent edits. |
+| `DELETE` | `/api/v1/sandbox/skills/:id` | Archive an owned skill. |
+| `POST` | `/api/v1/sandbox/skills/:id/share` | Make an owned skill public. |
+| `POST` | `/api/v1/sandbox/skills/:id/unshare` | Make an owned skill private. |
+
+Catalog responses include the skill ID and a checksum over the generated document. Read responses set `Cache-Control: no-store`.
 
 ## Proxies
 
