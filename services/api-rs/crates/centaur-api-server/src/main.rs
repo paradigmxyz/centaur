@@ -27,6 +27,9 @@ async fn main() -> Result<(), ServerError> {
 
     let mut app_state = AppState::unready()
         .with_codex_nanocodex_rollout_percent(args.codex_nanocodex_rollout_percent());
+    if let Ok(key) = std::env::var("FEISHUBOT_API_KEY") {
+        app_state = app_state.with_feishu_ingress_key(key);
+    }
     if let Some(catalog) = args.gitlab_catalog()? {
         app_state = app_state.with_repository_catalog(std::sync::Arc::new(catalog));
     }

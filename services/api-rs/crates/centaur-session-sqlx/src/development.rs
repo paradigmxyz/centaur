@@ -6,12 +6,15 @@ use std::{
 use centaur_session_core::{
     ExecutionStatus, MessageRole, SessionStatus, ThreadKey,
     development::{
-        AcceptDevelopmentTask, AcceptedDevelopmentTask, ChangeSetCollectionClaim,
-        ChangeSetRepositoryState, ChangeSetState, CompleteChangeSetCollection,
-        CompleteWorkspacePreparation, CompletedDevelopmentExecution, ConfirmRepositorySelection,
-        DevelopmentChangeSet, DevelopmentChangeSetRepository, ExecutionBlocker,
-        RepositorySelectionDraft, RepositorySelectionOutcome, RepositoryState, SelectionFlowState,
-        SelectionKind, SessionWorkspace, WorkspacePreparationClaim, WorkspaceRepositorySnapshot,
+        AcceptDevelopmentTask, AcceptedDevelopmentTask, ActiveDevelopmentBinding,
+        ChangeSetCollectionClaim, ChangeSetRepositoryState, ChangeSetState,
+        CloseDevelopmentBinding, CompleteChangeSetCollection, CompleteWorkspacePreparation,
+        CompletedDevelopmentExecution, ConfirmRepositorySelection, ContinueDevelopmentTask,
+        ContinuedDevelopmentTask, DevelopmentChangeSet, DevelopmentChangeSetRepository,
+        ExecutionBlocker, FeishuDelivery, RecordFeishuDelivery, RepositoryId,
+        RepositorySelectionDraft, RepositorySelectionOutcome, RepositorySelectionView,
+        RepositoryState, SelectionFlowState, SelectionKind, SessionWorkspace,
+        UpdateRepositorySelectionView, WorkspacePreparationClaim, WorkspaceRepositorySnapshot,
         WorkspaceState,
     },
 };
@@ -25,6 +28,294 @@ use crate::{
 };
 
 impl PgSessionStore {
+    pub async fn get_feishu_delivery(
+        &self,
+        thread_key: &ThreadKey,
+    ) -> Result<FeishuDelivery, SessionStoreError> {
+        load_feishu_delivery(&self.pool, thread_key).await
+    }
+
+    pub async fn record_feishu_delivery(
+        &self,
+        record: &RecordFeishuDelivery,
+    ) -> Result<FeishuDelivery, SessionStoreError> {
+        if record.message_id.trim().is_empty()
+            || record.last_event_cursor < 0
+            || record.expected_desired_version < 0
+        {
+            return Err(SessionStoreError::InvalidDevelopmentRequest {
+                message: "Feishu delivery update is invalid".to_owned(),
+            });
+        }
+        let updated = sqlx::query(
+            r#"
+            update feishu_deliveries
+               set message_id = $2, last_event_cursor = $3,
+                   render_version = desired_version, state = 'delivered',
+                   failure_code = null, lease_owner = null, lease_expires_at = null,
+                   updated_at = now()
+             where thread_key = $1 and desired_version = $4
+            "#,
+        )
+        .bind(record.thread_key.as_str())
+        .bind(&record.message_id)
+        .bind(record.last_event_cursor)
+        .bind(record.expected_desired_version)
+        .execute(&self.pool)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(SessionStoreError::DevelopmentConflict {
+                message: "Feishu delivery render version is stale".to_owned(),
+            });
+        }
+        load_feishu_delivery(&self.pool, &record.thread_key).await
+    }
+
+    pub async fn list_pending_feishu_delivery_threads(
+        &self,
+    ) -> Result<Vec<ThreadKey>, SessionStoreError> {
+        sqlx::query_scalar::<_, String>(
+            r#"
+            select thread_key from feishu_deliveries
+             where state in ('pending', 'failed')
+             order by updated_at, delivery_id
+             limit 100
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(|value| {
+            value
+                .parse()
+                .map_err(|error| SessionStoreError::InvalidPersistedValue(format!("{error}")))
+        })
+        .collect()
+    }
+
+    pub async fn continue_development_task(
+        &self,
+        request: &ContinueDevelopmentTask,
+    ) -> Result<ContinuedDevelopmentTask, SessionStoreError> {
+        validate_continued_task(request)?;
+        let mut tx = self.pool.begin().await?;
+        let mut lock_keys = vec![
+            format!("channel:{}", request.channel.lock_key()),
+            request
+                .channel
+                .receipt_lock_key("event", &request.platform_event_id),
+            request
+                .channel
+                .receipt_lock_key("message", &request.platform_message_id),
+        ];
+        lock_keys.sort();
+        lock_keys.dedup();
+        for lock_key in lock_keys {
+            sqlx::query("select pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(lock_key)
+                .execute(&mut *tx)
+                .await?;
+        }
+        if let Some(existing) = continued_task_for_receipt(&mut tx, request).await? {
+            tx.commit().await?;
+            return Ok(existing);
+        }
+        let binding = sqlx::query_as::<_, (String, String, String)>(
+            r#"
+            select binding.thread_key, workspace.workspace_id, workspace.state
+              from development_channel_bindings binding
+              join session_workspaces workspace using (thread_key)
+             where binding.platform = $1 and binding.tenant_key = $2
+               and binding.conversation_key = $3 and binding.root_message_id = $4
+               and binding.active
+             for update of binding, workspace
+            "#,
+        )
+        .bind(&request.channel.platform)
+        .bind(&request.channel.tenant_key)
+        .bind(&request.channel.conversation_key)
+        .bind(&request.channel.root_message_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| SessionStoreError::DevelopmentNotFound {
+            message: "active development channel binding".to_owned(),
+        })?;
+        let thread_key = ThreadKey::parse(binding.0)
+            .map_err(|error| SessionStoreError::InvalidPersistedValue(format!("{error}")))?;
+        if binding.2 != WorkspaceState::Ready.as_ref() {
+            return Err(SessionStoreError::DevelopmentConflict {
+                message: format!("development workspace is {} and cannot continue", binding.2),
+            });
+        }
+        ensure_session_has_no_active_work(&mut tx, &thread_key).await?;
+        let message_id = prefixed_id("msg");
+        let execution_id = prefixed_id("exe");
+        sqlx::query(
+            r#"
+            insert into session_messages
+                (message_id, thread_key, client_message_id, role, parts, metadata)
+            values ($1, $2, $3, 'user', $4, $5)
+            "#,
+        )
+        .bind(&message_id)
+        .bind(thread_key.as_str())
+        .bind(&request.platform_message_id)
+        .bind(Value::Array(request.message.parts.clone()))
+        .bind(request.message.metadata.clone())
+        .execute(&mut *tx)
+        .await?;
+        if request.channel.platform == "feishu" {
+            sqlx::query(
+                "update feishu_deliveries set desired_version = desired_version + 1, state = 'pending', source_message_id = $2, failure_code = null, updated_at = now() where thread_key = $1",
+            )
+            .bind(thread_key.as_str())
+            .bind(&request.platform_message_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        let input_line = json!({
+            "type": "user",
+            "thread_key": thread_key.as_str(),
+            "client_user_message_id": request.platform_message_id,
+            "trace_metadata": {
+                "source": request.channel.platform,
+                "action": "execute",
+                "platform_event_id": request.platform_event_id,
+                "sender_principal_id": request.sender_principal_id,
+                "message_metadata": request.message.metadata,
+            },
+            "message": {
+                "role": "user",
+                "content": request.message.parts,
+            },
+        });
+        sqlx::query(
+            r#"
+            insert into session_executions
+                (execution_id, thread_key, idempotency_key, status, metadata)
+            values ($1, $2, $3, 'queued', $4)
+            "#,
+        )
+        .bind(&execution_id)
+        .bind(thread_key.as_str())
+        .bind(&request.platform_event_id)
+        .bind(json!({
+            "source": request.channel.platform,
+            "platform_event_id": request.platform_event_id,
+            "development_input_line": input_line,
+        }))
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"
+            insert into development_platform_events
+                (platform, tenant_key, event_id, message_id, thread_key)
+            values ($1, $2, $3, $4, $5)
+            "#,
+        )
+        .bind(&request.channel.platform)
+        .bind(&request.channel.tenant_key)
+        .bind(&request.platform_event_id)
+        .bind(&request.platform_message_id)
+        .bind(thread_key.as_str())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(ContinuedDevelopmentTask {
+            thread_key,
+            workspace_id: binding.1,
+            execution_id,
+            created: true,
+        })
+    }
+
+    pub async fn active_development_binding(
+        &self,
+        channel: &centaur_session_core::development::DevelopmentChannel,
+    ) -> Result<ActiveDevelopmentBinding, SessionStoreError> {
+        let row = sqlx::query_as::<_, (String, String, String)>(
+            r#"
+            select binding.thread_key, workspace.workspace_id,
+                   binding.initiator_principal_id
+              from development_channel_bindings binding
+              join session_workspaces workspace using (thread_key)
+             where binding.platform = $1 and binding.tenant_key = $2
+               and binding.conversation_key = $3 and binding.root_message_id = $4
+               and binding.active
+            "#,
+        )
+        .bind(&channel.platform)
+        .bind(&channel.tenant_key)
+        .bind(&channel.conversation_key)
+        .bind(&channel.root_message_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| SessionStoreError::DevelopmentNotFound {
+            message: "active development channel binding".to_owned(),
+        })?;
+        Ok(ActiveDevelopmentBinding {
+            thread_key: row
+                .0
+                .parse()
+                .map_err(|error| SessionStoreError::InvalidPersistedValue(format!("{error}")))?,
+            workspace_id: row.1,
+            initiator_principal_id: row.2,
+        })
+    }
+
+    pub async fn close_development_binding(
+        &self,
+        request: &CloseDevelopmentBinding,
+    ) -> Result<ThreadKey, SessionStoreError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("select pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("channel:{}", request.channel.lock_key()))
+            .execute(&mut *tx)
+            .await?;
+        let row = sqlx::query_as::<_, (String, String)>(
+            r#"
+            select thread_key, initiator_principal_id
+              from development_channel_bindings
+             where platform = $1 and tenant_key = $2 and conversation_key = $3
+               and root_message_id = $4 and active
+             for update
+            "#,
+        )
+        .bind(&request.channel.platform)
+        .bind(&request.channel.tenant_key)
+        .bind(&request.channel.conversation_key)
+        .bind(&request.channel.root_message_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| SessionStoreError::DevelopmentNotFound {
+            message: "active development channel binding".to_owned(),
+        })?;
+        if !request.is_admin && row.1 != request.requested_by_principal_id {
+            return Err(SessionStoreError::DevelopmentForbidden {
+                message: "only the task initiator or an administrator may start a new task"
+                    .to_owned(),
+            });
+        }
+        let thread_key = ThreadKey::parse(row.0)
+            .map_err(|error| SessionStoreError::InvalidPersistedValue(format!("{error}")))?;
+        ensure_session_has_no_active_work(&mut tx, &thread_key).await?;
+        sqlx::query(
+            r#"
+            update development_channel_bindings set active = false, updated_at = now()
+             where platform = $1 and tenant_key = $2 and conversation_key = $3
+               and root_message_id = $4 and active
+            "#,
+        )
+        .bind(&request.channel.platform)
+        .bind(&request.channel.tenant_key)
+        .bind(&request.channel.conversation_key)
+        .bind(&request.channel.root_message_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(thread_key)
+    }
+
     pub async fn accept_development_task(
         &self,
         request: &AcceptDevelopmentTask,
@@ -183,13 +474,14 @@ impl PgSessionStore {
         sqlx::query(
             r#"
             insert into development_selection_flows
-                (selection_flow_id, workspace_id, execution_id, kind, state)
-            values ($1, $2, $3, 'initial', 'pending')
+                (selection_flow_id, workspace_id, execution_id, kind, state, task_excerpt)
+            values ($1, $2, $3, 'initial', 'pending', $4)
             "#,
         )
         .bind(&selection_flow_id)
         .bind(&workspace_id)
         .bind(&execution_id)
+        .bind(development_task_excerpt(&request.message.parts))
         .execute(&mut *tx)
         .await?;
 
@@ -207,6 +499,25 @@ impl PgSessionStore {
         .bind(thread_key.as_str())
         .execute(&mut *tx)
         .await?;
+
+        if request.channel.platform == "feishu" {
+            sqlx::query(
+                r#"
+                insert into feishu_deliveries
+                    (delivery_id, tenant_key, thread_key, chat_id, root_message_id,
+                     source_message_id, state)
+                values ($1, $2, $3, $4, $5, $6, 'pending')
+                "#,
+            )
+            .bind(prefixed_id("fdl"))
+            .bind(&request.channel.tenant_key)
+            .bind(thread_key.as_str())
+            .bind(&request.channel.conversation_key)
+            .bind(&request.channel.root_message_id)
+            .bind(request.platform_message_id.as_deref())
+            .execute(&mut *tx)
+            .await?;
+        }
 
         tx.commit().await?;
         Ok(AcceptedDevelopmentTask {
@@ -403,15 +714,114 @@ impl PgSessionStore {
         })
     }
 
+    pub async fn get_repository_selection_view(
+        &self,
+        selection_flow_id: &str,
+        requested_by_principal_id: &str,
+        is_admin: bool,
+    ) -> Result<RepositorySelectionView, SessionStoreError> {
+        validate_nonempty("selection_flow_id", selection_flow_id)?;
+        validate_nonempty("requested_by_principal_id", requested_by_principal_id)?;
+        let row = sqlx::query_as::<_, RepositorySelectionViewRow>(
+            r#"
+            select flow.selection_flow_id, flow.workspace_id, workspace.thread_key,
+                   flow.execution_id,
+                   flow.kind, flow.state,
+                   flow.version, flow.task_excerpt, flow.query, flow.cursor,
+                   flow.cursor_history, flow.selected_repository_ids,
+                   binding.initiator_principal_id
+              from development_selection_flows flow
+              join session_workspaces workspace using (workspace_id)
+              join development_channel_bindings binding
+                on binding.thread_key = workspace.thread_key
+             where flow.selection_flow_id = $1
+             order by binding.active desc, binding.created_at desc
+             limit 1
+            "#,
+        )
+        .bind(selection_flow_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| SessionStoreError::DevelopmentNotFound {
+            message: format!("selection flow {selection_flow_id}"),
+        })?;
+        if !is_admin && row.initiator_principal_id != requested_by_principal_id {
+            return Err(SessionStoreError::DevelopmentForbidden {
+                message: "only the task initiator may view repository selection".to_owned(),
+            });
+        }
+        row.try_into()
+    }
+
+    pub async fn update_repository_selection_view(
+        &self,
+        request: &UpdateRepositorySelectionView,
+    ) -> Result<RepositorySelectionView, SessionStoreError> {
+        validate_selection_view_update(request)?;
+        let mut tx = self.pool.begin().await?;
+        let flow = lock_selection_flow(&mut tx, &request.selection_flow_id).await?;
+        ensure_pending_selection_version(&flow, request.expected_version)?;
+        ensure_selection_decider(&flow, &request.requested_by_principal_id)?;
+        let version = next_selection_version(request.expected_version)?;
+        let selected_repository_ids = serde_json::to_value(
+            request
+                .selected_repository_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| SessionStoreError::InvalidDevelopmentRequest {
+            message: format!("selected repository IDs cannot be encoded: {error}"),
+        })?;
+        let cursor_history = serde_json::to_value(&request.cursor_history).map_err(|error| {
+            SessionStoreError::InvalidDevelopmentRequest {
+                message: format!("repository cursor history cannot be encoded: {error}"),
+            }
+        })?;
+        let row = sqlx::query_as::<_, RepositorySelectionViewRow>(
+            r#"
+            update development_selection_flows flow
+               set version = $2, query = $3, cursor = $4, cursor_history = $5,
+                   selected_repository_ids = $6, updated_at = now()
+              from session_workspaces workspace, development_channel_bindings binding
+             where flow.selection_flow_id = $1
+               and workspace.workspace_id = flow.workspace_id
+               and binding.thread_key = workspace.thread_key
+               and binding.active
+            returning flow.selection_flow_id, flow.workspace_id, workspace.thread_key,
+                      flow.execution_id,
+                      flow.kind, flow.state,
+                      flow.version, flow.task_excerpt, flow.query, flow.cursor,
+                      flow.cursor_history, flow.selected_repository_ids,
+                      binding.initiator_principal_id
+            "#,
+        )
+        .bind(&request.selection_flow_id)
+        .bind(version)
+        .bind(&request.query)
+        .bind(&request.cursor)
+        .bind(cursor_history)
+        .bind(selected_repository_ids)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        row.try_into()
+    }
+
     pub async fn create_add_repository_selection(
         &self,
         thread_key: &ThreadKey,
+        requested_by_principal_id: &str,
+        is_admin: bool,
     ) -> Result<RepositorySelectionDraft, SessionStoreError> {
         let mut tx = self.pool.begin().await?;
         let workspace = sqlx::query_as::<_, (String, String)>(
             r#"
-            select workspace_id, state from session_workspaces
-             where thread_key = $1 for update
+            select workspace.workspace_id, workspace.state
+              from session_workspaces workspace
+              join development_channel_bindings binding using (thread_key)
+             where workspace.thread_key = $1 and binding.active
+             for update of workspace
             "#,
         )
         .bind(thread_key.as_str())
@@ -420,6 +830,17 @@ impl PgSessionStore {
         .ok_or_else(|| SessionStoreError::DevelopmentNotFound {
             message: format!("workspace for session {thread_key}"),
         })?;
+        let initiator = sqlx::query_scalar::<_, String>(
+            "select initiator_principal_id from development_channel_bindings where thread_key = $1 and active",
+        )
+        .bind(thread_key.as_str())
+        .fetch_one(&mut *tx)
+        .await?;
+        if !is_admin && initiator != requested_by_principal_id {
+            return Err(SessionStoreError::DevelopmentForbidden {
+                message: "only the task initiator or an administrator may add projects".to_owned(),
+            });
+        }
         if workspace.1 != WorkspaceState::Ready.as_ref() {
             return Err(SessionStoreError::DevelopmentConflict {
                 message: format!("workspace is {} and cannot accept projects", workspace.1),
@@ -439,6 +860,7 @@ impl PgSessionStore {
         .fetch_optional(&mut *tx)
         .await?
         {
+            wake_feishu_delivery(&mut tx, thread_key).await?;
             tx.commit().await?;
             return row.try_into();
         }
@@ -455,6 +877,7 @@ impl PgSessionStore {
         .bind(&workspace.0)
         .fetch_one(&mut *tx)
         .await?;
+        wake_feishu_delivery(&mut tx, thread_key).await?;
         tx.commit().await?;
         row.try_into()
     }
@@ -1722,6 +2145,24 @@ fn valid_git_sha(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+async fn wake_feishu_delivery(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    thread_key: &ThreadKey,
+) -> Result<(), SessionStoreError> {
+    sqlx::query(
+        r#"
+        update feishu_deliveries
+           set desired_version = desired_version + 1,
+               state = 'pending', failure_code = null, updated_at = now()
+         where thread_key = $1
+        "#,
+    )
+    .bind(thread_key.as_str())
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 fn parse_development_value<T>(value: String) -> Result<T, SessionStoreError>
 where
     T: std::str::FromStr,
@@ -1730,6 +2171,55 @@ where
     value
         .parse()
         .map_err(|error| SessionStoreError::InvalidPersistedValue(format!("{error}")))
+}
+
+async fn load_feishu_delivery<'e, E>(
+    executor: E,
+    thread_key: &ThreadKey,
+) -> Result<FeishuDelivery, SessionStoreError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let row = sqlx::query_as::<_, FeishuDeliveryRow>(
+        r#"
+        select delivery.delivery_id, delivery.tenant_key, delivery.thread_key,
+               delivery.chat_id, delivery.root_message_id, delivery.source_message_id,
+               delivery.message_id, delivery.last_event_cursor, delivery.desired_version,
+               delivery.render_version,
+               delivery.state, binding.initiator_principal_id,
+               (
+                   select flow.selection_flow_id
+                     from development_selection_flows flow
+                     join session_workspaces workspace using (workspace_id)
+                    where workspace.thread_key = delivery.thread_key
+                      and flow.state = 'pending'
+                    order by flow.created_at desc limit 1
+               ) as selection_flow_id,
+               (
+                   select execution.execution_id from session_executions execution
+                    where execution.thread_key = delivery.thread_key
+                    order by execution.created_at desc limit 1
+               ) as execution_id,
+               (
+                   select batch.publish_batch_id
+                     from development_publish_batches batch
+                     join development_change_sets changeset using (changeset_id)
+                     join session_workspaces workspace using (workspace_id)
+                    where workspace.thread_key = delivery.thread_key
+                    order by batch.created_at desc limit 1
+               ) as publish_batch_id
+          from feishu_deliveries delivery
+          join development_channel_bindings binding using (thread_key)
+         where delivery.thread_key = $1
+        "#,
+    )
+    .bind(thread_key.as_str())
+    .fetch_optional(executor)
+    .await?
+    .ok_or_else(|| SessionStoreError::DevelopmentNotFound {
+        message: format!("Feishu delivery for session {thread_key}"),
+    })?;
+    row.try_into()
 }
 
 #[derive(Debug)]
@@ -1841,6 +2331,110 @@ fn validate_development_task(request: &AcceptDevelopmentTask) -> Result<(), Sess
     Ok(())
 }
 
+fn validate_continued_task(request: &ContinueDevelopmentTask) -> Result<(), SessionStoreError> {
+    for (name, value) in [
+        ("platform", request.channel.platform.as_str()),
+        ("tenant_key", request.channel.tenant_key.as_str()),
+        (
+            "conversation_key",
+            request.channel.conversation_key.as_str(),
+        ),
+        ("root_message_id", request.channel.root_message_id.as_str()),
+        ("platform_event_id", request.platform_event_id.as_str()),
+        ("platform_message_id", request.platform_message_id.as_str()),
+        ("sender principal_id", request.sender_principal_id.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err(SessionStoreError::InvalidDevelopmentRequest {
+                message: format!("{name} must not be empty"),
+            });
+        }
+    }
+    if request.message.role != MessageRole::User
+        || request
+            .message
+            .client_message_id
+            .as_deref()
+            .is_some_and(|value| value != request.platform_message_id)
+    {
+        return Err(SessionStoreError::InvalidDevelopmentRequest {
+            message: "continued development message must be a matching user message".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_selection_view_update(
+    request: &UpdateRepositorySelectionView,
+) -> Result<(), SessionStoreError> {
+    validate_nonempty("selection_flow_id", &request.selection_flow_id)?;
+    validate_nonempty(
+        "requested_by_principal_id",
+        &request.requested_by_principal_id,
+    )?;
+    if request.expected_version < 1 {
+        return Err(SessionStoreError::InvalidDevelopmentRequest {
+            message: "selection version must be positive".to_owned(),
+        });
+    }
+    if request.query.chars().count() > 100 {
+        return Err(SessionStoreError::InvalidDevelopmentRequest {
+            message: "repository query is too long".to_owned(),
+        });
+    }
+    if request
+        .cursor
+        .as_ref()
+        .is_some_and(|value| value.len() > 2048)
+        || request.cursor_history.len() > 100
+        || request
+            .cursor_history
+            .iter()
+            .any(|value| value.len() > 2048)
+    {
+        return Err(SessionStoreError::InvalidDevelopmentRequest {
+            message: "repository cursor state is invalid".to_owned(),
+        });
+    }
+    if request.selected_repository_ids.len() > 50
+        || request
+            .selected_repository_ids
+            .iter()
+            .collect::<HashSet<_>>()
+            .len()
+            != request.selected_repository_ids.len()
+    {
+        return Err(SessionStoreError::InvalidDevelopmentRequest {
+            message: "selected repository IDs must be unique and contain at most 50 items"
+                .to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_nonempty(name: &str, value: &str) -> Result<(), SessionStoreError> {
+    if value.trim().is_empty() {
+        return Err(SessionStoreError::InvalidDevelopmentRequest {
+            message: format!("{name} must not be empty"),
+        });
+    }
+    Ok(())
+}
+
+fn development_task_excerpt(parts: &[Value]) -> String {
+    let text = parts
+        .iter()
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join(" ");
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(500)
+        .collect()
+}
+
 fn parse_selection_kind(value: &str) -> Result<SelectionKind, SessionStoreError> {
     value
         .parse()
@@ -1911,6 +2505,52 @@ struct RepositorySelectionDraftRow {
     version: i32,
 }
 
+#[derive(Debug, FromRow)]
+struct FeishuDeliveryRow {
+    delivery_id: String,
+    tenant_key: String,
+    thread_key: String,
+    chat_id: String,
+    root_message_id: String,
+    source_message_id: Option<String>,
+    message_id: Option<String>,
+    last_event_cursor: i64,
+    desired_version: i32,
+    render_version: i32,
+    state: String,
+    initiator_principal_id: String,
+    selection_flow_id: Option<String>,
+    execution_id: Option<String>,
+    publish_batch_id: Option<String>,
+}
+
+impl TryFrom<FeishuDeliveryRow> for FeishuDelivery {
+    type Error = SessionStoreError;
+
+    fn try_from(row: FeishuDeliveryRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            delivery_id: row.delivery_id,
+            tenant_key: row.tenant_key,
+            thread_key: row
+                .thread_key
+                .parse()
+                .map_err(|error| SessionStoreError::InvalidPersistedValue(format!("{error}")))?,
+            chat_id: row.chat_id,
+            root_message_id: row.root_message_id,
+            source_message_id: row.source_message_id,
+            message_id: row.message_id,
+            last_event_cursor: row.last_event_cursor,
+            desired_version: row.desired_version,
+            render_version: row.render_version,
+            state: row.state,
+            initiator_principal_id: row.initiator_principal_id,
+            selection_flow_id: row.selection_flow_id,
+            execution_id: row.execution_id,
+            publish_batch_id: row.publish_batch_id,
+        })
+    }
+}
+
 impl TryFrom<RepositorySelectionDraftRow> for RepositorySelectionDraft {
     type Error = SessionStoreError;
 
@@ -1927,6 +2567,62 @@ impl TryFrom<RepositorySelectionDraftRow> for RepositorySelectionDraft {
                 .parse()
                 .map_err(|error| SessionStoreError::InvalidPersistedValue(format!("{error}")))?,
             version: row.version,
+        })
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct RepositorySelectionViewRow {
+    selection_flow_id: String,
+    workspace_id: String,
+    thread_key: String,
+    execution_id: Option<String>,
+    kind: String,
+    state: String,
+    version: i32,
+    task_excerpt: String,
+    query: String,
+    cursor: Option<String>,
+    cursor_history: Value,
+    selected_repository_ids: Value,
+    initiator_principal_id: String,
+}
+
+impl TryFrom<RepositorySelectionViewRow> for RepositorySelectionView {
+    type Error = SessionStoreError;
+
+    fn try_from(row: RepositorySelectionViewRow) -> Result<Self, Self::Error> {
+        let cursor_history =
+            serde_json::from_value::<Vec<String>>(row.cursor_history).map_err(|error| {
+                SessionStoreError::InvalidPersistedValue(format!(
+                    "selection cursor history: {error}"
+                ))
+            })?;
+        let selected_repository_ids = serde_json::from_value::<Vec<RepositoryId>>(
+            row.selected_repository_ids,
+        )
+        .map_err(|error| {
+            SessionStoreError::InvalidPersistedValue(format!("selection repository IDs: {error}"))
+        })?;
+        Ok(Self {
+            selection_flow_id: row.selection_flow_id,
+            workspace_id: row.workspace_id,
+            thread_key: row
+                .thread_key
+                .parse()
+                .map_err(|error| SessionStoreError::InvalidPersistedValue(format!("{error}")))?,
+            execution_id: row.execution_id,
+            kind: parse_selection_kind(&row.kind)?,
+            state: row
+                .state
+                .parse()
+                .map_err(|error| SessionStoreError::InvalidPersistedValue(format!("{error}")))?,
+            version: row.version,
+            task_excerpt: row.task_excerpt,
+            query: row.query,
+            cursor: row.cursor,
+            cursor_history,
+            selected_repository_ids,
         })
     }
 }
@@ -1985,6 +2681,41 @@ async fn accepted_task_for_receipt(
     .await?;
 
     row.map(TryInto::try_into).transpose()
+}
+
+async fn continued_task_for_receipt(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    request: &ContinueDevelopmentTask,
+) -> Result<Option<ContinuedDevelopmentTask>, SessionStoreError> {
+    let row = sqlx::query_as::<_, (String, String, String)>(
+        r#"
+        select event.thread_key, workspace.workspace_id, execution.execution_id
+          from development_platform_events event
+          join session_workspaces workspace using (thread_key)
+          join session_executions execution
+            on execution.thread_key = event.thread_key
+           and execution.idempotency_key = event.event_id
+         where event.platform = $1 and event.tenant_key = $2
+           and (event.event_id = $3 or event.message_id = $4)
+         limit 1
+        "#,
+    )
+    .bind(&request.channel.platform)
+    .bind(&request.channel.tenant_key)
+    .bind(&request.platform_event_id)
+    .bind(&request.platform_message_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    row.map(|row| {
+        Ok(ContinuedDevelopmentTask {
+            thread_key: ThreadKey::parse(row.0)
+                .map_err(|error| SessionStoreError::InvalidPersistedValue(format!("{error}")))?,
+            workspace_id: row.1,
+            execution_id: row.2,
+            created: false,
+        })
+    })
+    .transpose()
 }
 
 #[derive(Debug, FromRow)]
@@ -2089,10 +2820,11 @@ mod tests {
     use centaur_session_core::{
         ExecutionStatus, HarnessType, MessageRole, SessionMessageInput, ThreadKey,
         development::{
-            AcceptDevelopmentTask, ChangeSetState, CompleteWorkspacePreparation,
-            ConfirmRepositorySelection, DevelopmentChannel, DevelopmentInitiator, ExecutionBlocker,
-            FailedRepositorySnapshot, PreparedRepositorySnapshot, ResolvedRepository,
-            SelectionFlowState, SelectionKind, WorkspaceState,
+            AcceptDevelopmentTask, ChangeSetState, CloseDevelopmentBinding,
+            CompleteWorkspacePreparation, ConfirmRepositorySelection, ContinueDevelopmentTask,
+            DevelopmentChannel, DevelopmentInitiator, ExecutionBlocker, FailedRepositorySnapshot,
+            PreparedRepositorySnapshot, RecordFeishuDelivery, RepositoryId, ResolvedRepository,
+            SelectionFlowState, SelectionKind, UpdateRepositorySelectionView, WorkspaceState,
         },
     };
     use serde_json::json;
@@ -2180,6 +2912,154 @@ mod tests {
         assert_eq!(
             claimed.execution.blocking_reason,
             Some(ExecutionBlocker::AwaitingProjectSelection)
+        );
+    }
+
+    #[tokio::test]
+    async fn feishu_delivery_recovery_versions_every_new_render_obligation() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let request = development_task("feishu-delivery-recovery");
+        let accepted = store.accept_development_task(&request).await.unwrap();
+        let initial = store
+            .get_feishu_delivery(&accepted.thread_key)
+            .await
+            .unwrap();
+        assert_eq!(initial.desired_version, 0);
+        assert_eq!(initial.render_version, 0);
+        assert_eq!(initial.state, "pending");
+
+        let delivered = store
+            .record_feishu_delivery(&RecordFeishuDelivery {
+                thread_key: accepted.thread_key.clone(),
+                message_id: "om-card-1".to_owned(),
+                last_event_cursor: 0,
+                expected_desired_version: initial.desired_version,
+            })
+            .await
+            .unwrap();
+        assert_eq!(delivered.state, "delivered");
+
+        store
+            .confirm_repository_selection(&ConfirmRepositorySelection {
+                selection_flow_id: accepted.selection_flow_id,
+                expected_version: 1,
+                decided_by_principal_id: "principal-1".to_owned(),
+                repositories: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let selection_wakeup = store
+            .get_feishu_delivery(&accepted.thread_key)
+            .await
+            .unwrap();
+        assert_eq!(selection_wakeup.desired_version, 1);
+        assert_eq!(selection_wakeup.render_version, 0);
+        assert_eq!(selection_wakeup.state, "pending");
+        assert!(matches!(
+            store
+                .record_feishu_delivery(&RecordFeishuDelivery {
+                    thread_key: accepted.thread_key.clone(),
+                    message_id: "om-card-1".to_owned(),
+                    last_event_cursor: 0,
+                    expected_desired_version: 0,
+                })
+                .await,
+            Err(crate::SessionStoreError::DevelopmentConflict { .. })
+        ));
+        store
+            .record_feishu_delivery(&RecordFeishuDelivery {
+                thread_key: accepted.thread_key.clone(),
+                message_id: "om-card-1".to_owned(),
+                last_event_cursor: 0,
+                expected_desired_version: selection_wakeup.desired_version,
+            })
+            .await
+            .unwrap();
+
+        let workspace_claim = store
+            .claim_workspace_preparation(
+                &accepted.workspace_id,
+                "workspace-owner",
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        store
+            .complete_workspace_preparation(&CompleteWorkspacePreparation {
+                workspace_id: accepted.workspace_id.clone(),
+                attempt: workspace_claim.workspace.preparation_attempt,
+                lease_owner: "workspace-owner".to_owned(),
+                storage_ref: "workspace-feishu-delivery".to_owned(),
+                prepared: Vec::new(),
+                failed: Vec::new(),
+            })
+            .await
+            .unwrap();
+        store
+            .complete_execution(&accepted.execution_id)
+            .await
+            .unwrap();
+
+        let follow_up_message_id = format!("follow-up-{}", Uuid::new_v4());
+        let continued = store
+            .continue_development_task(&ContinueDevelopmentTask {
+                channel: request.channel,
+                platform_event_id: format!("event-{follow_up_message_id}"),
+                platform_message_id: follow_up_message_id.clone(),
+                sender_principal_id: "principal-1".to_owned(),
+                message: SessionMessageInput {
+                    client_message_id: Some(follow_up_message_id.clone()),
+                    role: MessageRole::User,
+                    parts: vec![json!({"type": "text", "text": "Continue"})],
+                    metadata: json!({"source": "feishu"}),
+                },
+            })
+            .await
+            .unwrap();
+        let continuation_wakeup = store
+            .get_feishu_delivery(&accepted.thread_key)
+            .await
+            .unwrap();
+        assert_eq!(continuation_wakeup.desired_version, 2);
+        assert_eq!(continuation_wakeup.render_version, 1);
+        assert_eq!(continuation_wakeup.state, "pending");
+        assert_eq!(
+            continuation_wakeup.source_message_id.as_deref(),
+            Some(follow_up_message_id.as_str())
+        );
+        store
+            .complete_execution(&continued.execution_id)
+            .await
+            .unwrap();
+        store
+            .record_feishu_delivery(&RecordFeishuDelivery {
+                thread_key: accepted.thread_key.clone(),
+                message_id: "om-card-1".to_owned(),
+                last_event_cursor: 0,
+                expected_desired_version: continuation_wakeup.desired_version,
+            })
+            .await
+            .unwrap();
+
+        store
+            .create_add_repository_selection(&accepted.thread_key, "principal-1", false)
+            .await
+            .unwrap();
+        let add_wakeup = store
+            .get_feishu_delivery(&accepted.thread_key)
+            .await
+            .unwrap();
+        assert_eq!(add_wakeup.desired_version, 3);
+        assert_eq!(add_wakeup.render_version, 2);
+        assert_eq!(add_wakeup.state, "pending");
+        assert!(
+            store
+                .list_pending_feishu_delivery_threads()
+                .await
+                .unwrap()
+                .contains(&accepted.thread_key)
         );
     }
 
@@ -2330,6 +3210,218 @@ mod tests {
                 .expect("try to claim blocked execution")
                 .claimed
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn continued_turn_is_atomic_idempotent_and_binding_is_closeable() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let suffix = Uuid::new_v4();
+        let message_id = format!("message-{suffix}");
+        let channel = DevelopmentChannel {
+            platform: "feishu".to_owned(),
+            tenant_key: format!("tenant-{suffix}"),
+            conversation_key: format!("ou-user-{suffix}"),
+            root_message_id: "direct".to_owned(),
+        };
+        let first = AcceptDevelopmentTask {
+            channel: channel.clone(),
+            platform_event_id: format!("event-{suffix}"),
+            platform_message_id: Some(message_id.clone()),
+            harness_type: HarnessType::Codex,
+            initiator: DevelopmentInitiator {
+                principal_id: "principal-1".to_owned(),
+            },
+            message: SessionMessageInput {
+                client_message_id: Some(message_id),
+                role: MessageRole::User,
+                parts: vec![json!({"type": "text", "text": "Start the task"})],
+                metadata: json!({"source": "feishu"}),
+            },
+            session_metadata: json!({"source": "feishu"}),
+        };
+        let accepted = store.accept_development_task(&first).await.unwrap();
+        store
+            .confirm_repository_selection(&ConfirmRepositorySelection {
+                selection_flow_id: accepted.selection_flow_id,
+                expected_version: 1,
+                decided_by_principal_id: "principal-1".to_owned(),
+                repositories: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let preparation = store
+            .claim_workspace_preparation(
+                &accepted.workspace_id,
+                "workspace-owner",
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        store
+            .complete_workspace_preparation(&CompleteWorkspacePreparation {
+                workspace_id: accepted.workspace_id.clone(),
+                attempt: preparation.workspace.preparation_attempt,
+                lease_owner: "workspace-owner".to_owned(),
+                storage_ref: format!("workspace-{suffix}"),
+                prepared: Vec::new(),
+                failed: Vec::new(),
+            })
+            .await
+            .unwrap();
+        store
+            .complete_execution(&accepted.execution_id)
+            .await
+            .unwrap();
+
+        let follow_up = ContinueDevelopmentTask {
+            channel: channel.clone(),
+            platform_event_id: format!("follow-up-event-{suffix}"),
+            platform_message_id: format!("follow-up-message-{suffix}"),
+            sender_principal_id: "feishu:tenant:collaborator".to_owned(),
+            message: SessionMessageInput {
+                client_message_id: Some(format!("follow-up-message-{suffix}")),
+                role: MessageRole::User,
+                parts: vec![json!({"type": "text", "text": "Continue the task"})],
+                metadata: json!({"source": "feishu"}),
+            },
+        };
+        let continued = store.continue_development_task(&follow_up).await.unwrap();
+        let replay = store.continue_development_task(&follow_up).await.unwrap();
+        assert!(continued.created);
+        assert!(!replay.created);
+        assert_eq!(continued.thread_key, accepted.thread_key);
+        assert_eq!(continued.execution_id, replay.execution_id);
+        assert_eq!(
+            store
+                .list_messages(&accepted.thread_key)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+
+        assert!(matches!(
+            store
+                .close_development_binding(&CloseDevelopmentBinding {
+                    channel: channel.clone(),
+                    requested_by_principal_id: "other-principal".to_owned(),
+                    is_admin: false,
+                })
+                .await,
+            Err(crate::SessionStoreError::DevelopmentForbidden { .. })
+        ));
+        assert!(matches!(
+            store
+                .close_development_binding(&CloseDevelopmentBinding {
+                    channel: channel.clone(),
+                    requested_by_principal_id: "principal-1".to_owned(),
+                    is_admin: false,
+                })
+                .await,
+            Err(crate::SessionStoreError::DevelopmentConflict { .. })
+        ));
+        store
+            .complete_execution(&continued.execution_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .close_development_binding(&CloseDevelopmentBinding {
+                    channel: channel.clone(),
+                    requested_by_principal_id: "principal-1".to_owned(),
+                    is_admin: false,
+                })
+                .await
+                .unwrap(),
+            accepted.thread_key
+        );
+
+        let next_message_id = format!("next-message-{suffix}");
+        let next = store
+            .accept_development_task(&AcceptDevelopmentTask {
+                channel,
+                platform_event_id: format!("next-event-{suffix}"),
+                platform_message_id: Some(next_message_id.clone()),
+                message: SessionMessageInput {
+                    client_message_id: Some(next_message_id),
+                    ..first.message
+                },
+                ..first
+            })
+            .await
+            .unwrap();
+        assert_ne!(next.thread_key, accepted.thread_key);
+    }
+
+    #[tokio::test]
+    async fn selection_view_persists_cross_page_state_and_rejects_stale_updates() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let suffix = Uuid::new_v4();
+        let message_id = format!("selection-message-{suffix}");
+        let request = AcceptDevelopmentTask {
+            channel: DevelopmentChannel {
+                platform: "feishu".to_owned(),
+                tenant_key: format!("tenant-{suffix}"),
+                conversation_key: format!("chat-{suffix}"),
+                root_message_id: message_id.clone(),
+            },
+            platform_event_id: format!("selection-event-{suffix}"),
+            platform_message_id: Some(message_id.clone()),
+            harness_type: HarnessType::Codex,
+            initiator: DevelopmentInitiator {
+                principal_id: "principal-1".to_owned(),
+            },
+            message: SessionMessageInput {
+                client_message_id: Some(message_id),
+                role: MessageRole::User,
+                parts: vec![json!({"type": "text", "text": "Fix the checkout flow"})],
+                metadata: json!({"source": "feishu"}),
+            },
+            session_metadata: json!({"source": "feishu"}),
+        };
+        let accepted = store.accept_development_task(&request).await.unwrap();
+        let initial = store
+            .get_repository_selection_view(&accepted.selection_flow_id, "principal-1", false)
+            .await
+            .unwrap();
+        assert_eq!(initial.version, 1);
+        assert_eq!(initial.task_excerpt, "Fix the checkout flow");
+
+        let updated = store
+            .update_repository_selection_view(&UpdateRepositorySelectionView {
+                selection_flow_id: accepted.selection_flow_id.clone(),
+                expected_version: 1,
+                requested_by_principal_id: "principal-1".to_owned(),
+                query: "checkout".to_owned(),
+                cursor: Some("page-2".to_owned()),
+                cursor_history: vec![String::new(), "page-1".to_owned()],
+                selected_repository_ids: vec![RepositoryId::parse("gitlab:42").unwrap()],
+            })
+            .await
+            .unwrap();
+        assert_eq!(updated.version, 2);
+        assert_eq!(updated.query, "checkout");
+        assert_eq!(updated.cursor.as_deref(), Some("page-2"));
+        assert_eq!(updated.selected_repository_ids.len(), 1);
+
+        assert!(matches!(
+            store
+                .update_repository_selection_view(&UpdateRepositorySelectionView {
+                    selection_flow_id: accepted.selection_flow_id,
+                    expected_version: 1,
+                    requested_by_principal_id: "principal-1".to_owned(),
+                    query: String::new(),
+                    cursor: None,
+                    cursor_history: Vec::new(),
+                    selected_repository_ids: Vec::new(),
+                })
+                .await,
+            Err(crate::SessionStoreError::DevelopmentConflict { .. })
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2484,7 +3576,7 @@ mod tests {
             .expect("mark workspace ready");
 
         let draft = store
-            .create_add_repository_selection(&accepted.thread_key)
+            .create_add_repository_selection(&accepted.thread_key, "principal-1", false)
             .await
             .expect("create add-project selection");
         assert_eq!(draft.kind, SelectionKind::Add);
@@ -2492,7 +3584,7 @@ mod tests {
         assert_eq!(draft.version, 1);
         assert_eq!(
             store
-                .create_add_repository_selection(&accepted.thread_key)
+                .create_add_repository_selection(&accepted.thread_key, "principal-1", false)
                 .await
                 .expect("reuse pending add-project selection"),
             draft

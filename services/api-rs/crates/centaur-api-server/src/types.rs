@@ -23,6 +23,30 @@ pub struct AcceptDevelopmentTaskRequest {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct ContinueDevelopmentTaskRequest {
+    pub channel: DevelopmentChannel,
+    pub platform_event_id: String,
+    pub platform_message_id: String,
+    pub sender_principal_id: String,
+    pub message: SessionMessageInput,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloseDevelopmentBindingRequest {
+    pub channel: DevelopmentChannel,
+    pub requested_by_principal_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActiveDevelopmentBindingRequest {
+    pub channel: DevelopmentChannel,
+    pub requested_by_principal_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfirmDevelopmentSelectionRequest {
     pub expected_version: i32,
     pub decided_by_principal_id: String,
@@ -36,14 +60,54 @@ pub struct DecideDevelopmentSelectionRequest {
     pub decided_by_principal_id: String,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct CreateAddRepositorySelectionRequest {}
+pub struct GetDevelopmentSelectionRequest {
+    pub requested_by_principal_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateDevelopmentSelectionRequest {
+    pub expected_version: i32,
+    pub requested_by_principal_id: String,
+    pub query: String,
+    pub cursor: Option<String>,
+    pub cursor_history: Vec<String>,
+    pub selected_repository_ids: Vec<RepositoryId>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateAddRepositorySelectionRequest {
+    pub requested_by_principal_id: String,
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublicationRequest {
     pub idempotency_key: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FeishuPublicationRequest {
+    pub requested_by_principal_id: String,
+    pub idempotency_key: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FeishuPrincipalQuery {
+    pub requested_by_principal_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordFeishuDeliveryRequest {
+    pub message_id: String,
+    pub last_event_cursor: i64,
+    pub expected_desired_version: i32,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

@@ -73,6 +73,57 @@ pub struct AcceptedDevelopmentTask {
     pub created: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ContinueDevelopmentTask {
+    pub channel: DevelopmentChannel,
+    pub platform_event_id: String,
+    pub platform_message_id: String,
+    pub sender_principal_id: String,
+    pub message: SessionMessageInput,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ContinuedDevelopmentTask {
+    pub thread_key: ThreadKey,
+    pub workspace_id: String,
+    pub execution_id: String,
+    pub created: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct FeishuDelivery {
+    pub delivery_id: String,
+    pub tenant_key: String,
+    pub thread_key: ThreadKey,
+    pub chat_id: String,
+    pub root_message_id: String,
+    pub source_message_id: Option<String>,
+    pub message_id: Option<String>,
+    pub last_event_cursor: i64,
+    pub desired_version: i32,
+    pub render_version: i32,
+    pub state: String,
+    pub initiator_principal_id: String,
+    pub selection_flow_id: Option<String>,
+    pub execution_id: Option<String>,
+    pub publish_batch_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecordFeishuDelivery {
+    pub thread_key: ThreadKey,
+    pub message_id: String,
+    pub last_event_cursor: i64,
+    pub expected_desired_version: i32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CloseDevelopmentBinding {
+    pub channel: DevelopmentChannel,
+    pub requested_by_principal_id: String,
+    pub is_admin: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedRepository {
     pub repository_id: RepositoryId,
@@ -109,6 +160,40 @@ pub struct RepositorySelectionDraft {
     pub kind: SelectionKind,
     pub state: SelectionFlowState,
     pub version: i32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RepositorySelectionView {
+    pub selection_flow_id: String,
+    pub workspace_id: String,
+    pub thread_key: ThreadKey,
+    pub execution_id: Option<String>,
+    pub kind: SelectionKind,
+    pub state: SelectionFlowState,
+    pub version: i32,
+    pub task_excerpt: String,
+    pub query: String,
+    pub cursor: Option<String>,
+    pub cursor_history: Vec<String>,
+    pub selected_repository_ids: Vec<RepositoryId>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ActiveDevelopmentBinding {
+    pub thread_key: ThreadKey,
+    pub workspace_id: String,
+    pub initiator_principal_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpdateRepositorySelectionView {
+    pub selection_flow_id: String,
+    pub expected_version: i32,
+    pub requested_by_principal_id: String,
+    pub query: String,
+    pub cursor: Option<String>,
+    pub cursor_history: Vec<String>,
+    pub selected_repository_ids: Vec<RepositoryId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

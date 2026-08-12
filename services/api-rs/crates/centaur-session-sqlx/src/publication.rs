@@ -1346,7 +1346,7 @@ mod tests {
         };
         let (accepted, changeset_id) = ready_changeset(&store, &[42]).await;
         let draft = store
-            .create_add_repository_selection(&accepted.thread_key)
+            .create_add_repository_selection(&accepted.thread_key, "principal-1", false)
             .await
             .unwrap();
         store

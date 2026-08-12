@@ -7,6 +7,7 @@ use std::{
     sync::{Arc, RwLock},
     time::{Duration, Instant},
 };
+use subtle::ConstantTimeEq;
 
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::{
@@ -18,7 +19,7 @@ use axum::{
     Json, Router,
     body::{Body, Bytes},
     extract::{DefaultBodyLimit, MatchedPath, Path, Query, Request, State},
-    http::{HeaderMap, Method, StatusCode, Uri},
+    http::{HeaderMap, Method, StatusCode, Uri, header},
     middleware::{self, Next},
     response::{
         IntoResponse, Response, Sse,
@@ -76,6 +77,7 @@ pub struct AppState {
     repository_resolver: Option<Arc<dyn RepositoryResolver>>,
     repository_catalog: Option<Arc<dyn RepositoryCatalog>>,
     development_authorizer: Arc<dyn crate::development::DevelopmentAuthorizer>,
+    feishu_ingress_key: Option<Arc<str>>,
 }
 
 #[derive(Clone)]
@@ -94,6 +96,7 @@ impl AppState {
             repository_resolver: None,
             repository_catalog: None,
             development_authorizer: Arc::new(crate::development::ConsoleJwtDevelopmentAuthorizer),
+            feishu_ingress_key: None,
         }
     }
 
@@ -122,6 +125,59 @@ impl AppState {
     ) -> Self {
         self.development_authorizer = authorizer;
         self
+    }
+
+    pub fn with_feishu_ingress_key(mut self, key: impl Into<String>) -> Self {
+        let key = key.into();
+        if !key.trim().is_empty() {
+            self.feishu_ingress_key = Some(Arc::from(key));
+        }
+        self
+    }
+
+    pub(crate) fn authorize_feishu_ingress(&self, headers: &HeaderMap) -> Result<(), ApiError> {
+        let expected = self.feishu_ingress_key.as_deref().ok_or_else(|| {
+            ApiError::ServiceUnavailable(
+                "Feishu ingress authentication is not configured".to_owned(),
+            )
+        })?;
+        let supplied = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .ok_or_else(|| ApiError::Unauthorized("missing Feishu ingress token".to_owned()))?;
+        if supplied.as_bytes().ct_eq(expected.as_bytes()).into() {
+            Ok(())
+        } else {
+            Err(ApiError::Unauthorized(
+                "invalid Feishu ingress token".to_owned(),
+            ))
+        }
+    }
+
+    pub(crate) fn authorize_development_client(
+        &self,
+        headers: &HeaderMap,
+    ) -> Result<Option<crate::development::DevelopmentPrincipal>, ApiError> {
+        if self.feishu_ingress_matches(headers) {
+            Ok(None)
+        } else {
+            self.development_authorizer.authorize(headers).map(Some)
+        }
+    }
+
+    fn feishu_ingress_matches(&self, headers: &HeaderMap) -> bool {
+        let Some(expected) = self.feishu_ingress_key.as_deref() else {
+            return false;
+        };
+        let Some(supplied) = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+        else {
+            return false;
+        };
+        supplied.as_bytes().ct_eq(expected.as_bytes()).into()
     }
 
     pub(crate) fn development_authorizer(

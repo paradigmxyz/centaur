@@ -30,8 +30,10 @@ use centaur_session_core::{
     SandboxRepoCacheAccess as SessionRepoCacheAccess, Session, SessionEvent, SessionExecution,
     SessionMessageInput, ThreadKey,
     development::{
-        AcceptDevelopmentTask, AcceptedDevelopmentTask, ConfirmRepositorySelection,
-        RepositorySelectionDraft, RepositorySelectionOutcome,
+        AcceptDevelopmentTask, AcceptedDevelopmentTask, ActiveDevelopmentBinding,
+        CloseDevelopmentBinding, ConfirmRepositorySelection, ContinueDevelopmentTask,
+        ContinuedDevelopmentTask, FeishuDelivery, RecordFeishuDelivery, RepositorySelectionDraft,
+        RepositorySelectionOutcome, RepositorySelectionView, UpdateRepositorySelectionView,
     },
 };
 use centaur_session_sqlx::{
@@ -1523,6 +1525,52 @@ impl SessionRuntime {
         Ok(accepted)
     }
 
+    pub async fn continue_development_task(
+        &self,
+        request: &ContinueDevelopmentTask,
+    ) -> Result<ContinuedDevelopmentTask, SessionRuntimeError> {
+        let continued = self.store.continue_development_task(request).await?;
+        if continued.created {
+            self.drive_development_execution(&continued.thread_key, &continued.execution_id)
+                .await?;
+        }
+        Ok(continued)
+    }
+
+    pub async fn close_development_binding(
+        &self,
+        request: &CloseDevelopmentBinding,
+    ) -> Result<ThreadKey, SessionRuntimeError> {
+        Ok(self.store.close_development_binding(request).await?)
+    }
+
+    pub async fn active_development_binding(
+        &self,
+        channel: &centaur_session_core::development::DevelopmentChannel,
+    ) -> Result<ActiveDevelopmentBinding, SessionRuntimeError> {
+        Ok(self.store.active_development_binding(channel).await?)
+    }
+
+    pub async fn get_feishu_delivery(
+        &self,
+        thread_key: &ThreadKey,
+    ) -> Result<FeishuDelivery, SessionRuntimeError> {
+        Ok(self.store.get_feishu_delivery(thread_key).await?)
+    }
+
+    pub async fn record_feishu_delivery(
+        &self,
+        record: &RecordFeishuDelivery,
+    ) -> Result<FeishuDelivery, SessionRuntimeError> {
+        Ok(self.store.record_feishu_delivery(record).await?)
+    }
+
+    pub async fn list_pending_feishu_delivery_threads(
+        &self,
+    ) -> Result<Vec<ThreadKey>, SessionRuntimeError> {
+        Ok(self.store.list_pending_feishu_delivery_threads().await?)
+    }
+
     pub async fn confirm_repository_selection(
         &self,
         request: &ConfirmRepositorySelection,
@@ -1530,6 +1578,25 @@ impl SessionRuntime {
         let outcome = self.store.confirm_repository_selection(request).await?;
         self.spawn_workspace_preparation(outcome.workspace_id.clone());
         Ok(outcome)
+    }
+
+    pub async fn get_repository_selection_view(
+        &self,
+        selection_flow_id: &str,
+        requested_by_principal_id: &str,
+        is_admin: bool,
+    ) -> Result<RepositorySelectionView, SessionRuntimeError> {
+        Ok(self
+            .store
+            .get_repository_selection_view(selection_flow_id, requested_by_principal_id, is_admin)
+            .await?)
+    }
+
+    pub async fn update_repository_selection_view(
+        &self,
+        request: &UpdateRepositorySelectionView,
+    ) -> Result<RepositorySelectionView, SessionRuntimeError> {
+        Ok(self.store.update_repository_selection_view(request).await?)
     }
 
     pub async fn cancel_repository_selection(
@@ -1551,10 +1618,12 @@ impl SessionRuntime {
     pub async fn create_add_repository_selection(
         &self,
         thread_key: &ThreadKey,
+        requested_by_principal_id: &str,
+        is_admin: bool,
     ) -> Result<RepositorySelectionDraft, SessionRuntimeError> {
         Ok(self
             .store
-            .create_add_repository_selection(thread_key)
+            .create_add_repository_selection(thread_key, requested_by_principal_id, is_admin)
             .await?)
     }
 

@@ -145,6 +145,7 @@ impl CentaurClient {
     pub async fn create_add_repository_selection(
         &self,
         thread_key: &ThreadKey,
+        requested_by_principal_id: impl Into<String>,
     ) -> Result<RepositorySelectionDraft, ClientError> {
         self.post_json(
             &format!(
@@ -152,7 +153,9 @@ impl CentaurClient {
                 self.base_url,
                 urlencoding::encode(thread_key.as_str())
             ),
-            &CreateAddRepositorySelectionRequest::default(),
+            &CreateAddRepositorySelectionRequest {
+                requested_by_principal_id: requested_by_principal_id.into(),
+            },
         )
         .await
     }

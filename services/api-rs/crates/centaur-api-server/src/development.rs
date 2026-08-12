@@ -11,8 +11,10 @@ use axum::{
 use centaur_session_core::{
     MessageRole, ThreadKey,
     development::{
-        AcceptDevelopmentTask, ApprovePublication, ConfirmRepositorySelection, RepositoryId,
+        AcceptDevelopmentTask, ApprovePublication, CloseDevelopmentBinding,
+        ConfirmRepositorySelection, ContinueDevelopmentTask, RepositoryId,
         RepositorySelectionDraft, RepositorySelectionOutcome, ResolvedRepository, RetryPublication,
+        UpdateRepositorySelectionView,
     },
 };
 use thiserror::Error;
@@ -23,8 +25,12 @@ use crate::{
     gitlab::{GitLabCatalogError, RepositoryPage},
     routes::AppState,
     types::{
-        AcceptDevelopmentTaskRequest, ConfirmDevelopmentSelectionRequest,
-        CreateAddRepositorySelectionRequest, DecideDevelopmentSelectionRequest, PublicationRequest,
+        AcceptDevelopmentTaskRequest, ActiveDevelopmentBindingRequest,
+        CloseDevelopmentBindingRequest, ConfirmDevelopmentSelectionRequest,
+        ContinueDevelopmentTaskRequest, CreateAddRepositorySelectionRequest,
+        DecideDevelopmentSelectionRequest, FeishuPrincipalQuery, FeishuPublicationRequest,
+        GetDevelopmentSelectionRequest, PublicationRequest, RecordFeishuDeliveryRequest,
+        UpdateDevelopmentSelectionRequest,
     },
 };
 
@@ -93,6 +99,26 @@ pub(crate) fn development_router() -> Router<AppState> {
         .route("/api/development/repositories", get(search_repositories))
         .route("/api/development/tasks", post(accept_development_task))
         .route(
+            "/api/development/tasks/continue",
+            post(continue_development_task),
+        )
+        .route(
+            "/api/development/tasks/new",
+            post(close_development_binding),
+        )
+        .route(
+            "/api/development/tasks/active",
+            post(get_active_development_binding),
+        )
+        .route(
+            "/api/development/feishu/deliveries/pending",
+            get(list_pending_feishu_deliveries),
+        )
+        .route(
+            "/api/development/feishu/deliveries/{thread_key}",
+            get(get_feishu_delivery).put(record_feishu_delivery),
+        )
+        .route(
             "/api/development/changesets/{changeset_id}",
             get(get_changeset),
         )
@@ -113,6 +139,26 @@ pub(crate) fn development_router() -> Router<AppState> {
             post(retry_publication),
         )
         .route(
+            "/api/development/feishu/changesets/{changeset_id}",
+            get(get_feishu_changeset),
+        )
+        .route(
+            "/api/development/feishu/changesets/{changeset_id}/publish",
+            post(approve_feishu_publication),
+        )
+        .route(
+            "/api/development/feishu/publish-batches/{publish_batch_id}",
+            get(get_feishu_publish_batch),
+        )
+        .route(
+            "/api/development/feishu/publish-batches/{publish_batch_id}/retry",
+            post(retry_feishu_publication),
+        )
+        .route(
+            "/api/development/selections/{selection_flow_id}",
+            get(get_development_selection).put(update_development_selection),
+        )
+        .route(
             "/api/development/selections/{selection_flow_id}/confirm",
             post(confirm_development_selection),
         )
@@ -128,6 +174,186 @@ pub(crate) fn development_router() -> Router<AppState> {
             "/api/development/sessions/{thread_key}/repositories",
             post(create_add_repository_selection),
         )
+}
+
+async fn list_pending_feishu_deliveries(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ThreadKey>>, ApiError> {
+    state.authorize_feishu_ingress(&headers)?;
+    Ok(Json(
+        state
+            .runtime()?
+            .list_pending_feishu_delivery_threads()
+            .await?,
+    ))
+}
+
+async fn get_feishu_delivery(
+    State(state): State<AppState>,
+    Path(raw_thread_key): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<centaur_session_core::development::FeishuDelivery>, ApiError> {
+    state.authorize_feishu_ingress(&headers)?;
+    let thread_key = ThreadKey::try_from(raw_thread_key)?;
+    Ok(Json(
+        state.runtime()?.get_feishu_delivery(&thread_key).await?,
+    ))
+}
+
+async fn record_feishu_delivery(
+    State(state): State<AppState>,
+    Path(raw_thread_key): Path<String>,
+    headers: HeaderMap,
+    request: Result<Json<RecordFeishuDeliveryRequest>, JsonRejection>,
+) -> Result<Json<centaur_session_core::development::FeishuDelivery>, ApiError> {
+    state.authorize_feishu_ingress(&headers)?;
+    let thread_key = ThreadKey::try_from(raw_thread_key)?;
+    let Json(request) = development_json(request)?;
+    Ok(Json(
+        state
+            .runtime()?
+            .record_feishu_delivery(&centaur_session_core::development::RecordFeishuDelivery {
+                thread_key,
+                message_id: request.message_id,
+                last_event_cursor: request.last_event_cursor,
+                expected_desired_version: request.expected_desired_version,
+            })
+            .await?,
+    ))
+}
+
+async fn get_active_development_binding(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    request: Result<Json<ActiveDevelopmentBindingRequest>, JsonRejection>,
+) -> Result<Json<centaur_session_core::development::ActiveDevelopmentBinding>, ApiError> {
+    state.authorize_feishu_ingress(&headers)?;
+    let Json(request) = development_json(request)?;
+    validate_feishu_principal(&request.channel, &request.requested_by_principal_id)?;
+    let binding = state
+        .runtime()?
+        .active_development_binding(&request.channel)
+        .await?;
+    if binding.initiator_principal_id != request.requested_by_principal_id {
+        return Err(ApiError::Forbidden(
+            "only the task initiator may inspect this development task".to_owned(),
+        ));
+    }
+    Ok(Json(binding))
+}
+
+async fn get_feishu_changeset(
+    State(state): State<AppState>,
+    Path(changeset_id): Path<String>,
+    headers: HeaderMap,
+    Query(request): Query<FeishuPrincipalQuery>,
+) -> Result<Json<centaur_session_core::development::DevelopmentChangeSet>, ApiError> {
+    state.authorize_feishu_ingress(&headers)?;
+    validate_feishu_principal_id(&request.requested_by_principal_id)?;
+    let changeset = state
+        .runtime()?
+        .get_changeset(&changeset_id, &request.requested_by_principal_id, false)
+        .await?;
+    Ok(Json(changeset))
+}
+
+async fn approve_feishu_publication(
+    State(state): State<AppState>,
+    Path(changeset_id): Path<String>,
+    headers: HeaderMap,
+    request: Result<Json<FeishuPublicationRequest>, JsonRejection>,
+) -> Result<Json<centaur_session_core::development::DevelopmentPublishBatch>, ApiError> {
+    state.authorize_feishu_ingress(&headers)?;
+    let Json(request) = development_json(request)?;
+    validate_feishu_principal_id(&request.requested_by_principal_id)?;
+    let batch = state
+        .runtime()?
+        .approve_publication(&ApprovePublication {
+            changeset_id,
+            approver_principal_id: request.requested_by_principal_id,
+            is_admin: false,
+            idempotency_key: request.idempotency_key,
+        })
+        .await?;
+    Ok(Json(batch))
+}
+
+async fn get_feishu_publish_batch(
+    State(state): State<AppState>,
+    Path(publish_batch_id): Path<String>,
+    headers: HeaderMap,
+    Query(request): Query<FeishuPrincipalQuery>,
+) -> Result<Json<centaur_session_core::development::DevelopmentPublishBatch>, ApiError> {
+    state.authorize_feishu_ingress(&headers)?;
+    validate_feishu_principal_id(&request.requested_by_principal_id)?;
+    let batch = state
+        .runtime()?
+        .get_publish_batch(&publish_batch_id, &request.requested_by_principal_id, false)
+        .await?;
+    Ok(Json(batch))
+}
+
+async fn retry_feishu_publication(
+    State(state): State<AppState>,
+    Path(publish_batch_id): Path<String>,
+    headers: HeaderMap,
+    request: Result<Json<FeishuPublicationRequest>, JsonRejection>,
+) -> Result<Json<centaur_session_core::development::DevelopmentPublishBatch>, ApiError> {
+    state.authorize_feishu_ingress(&headers)?;
+    let Json(request) = development_json(request)?;
+    validate_feishu_principal_id(&request.requested_by_principal_id)?;
+    let batch = state
+        .runtime()?
+        .retry_failed_publication(&RetryPublication {
+            publish_batch_id,
+            requested_by_principal_id: request.requested_by_principal_id,
+            is_admin: false,
+            idempotency_key: request.idempotency_key,
+        })
+        .await?;
+    Ok(Json(batch))
+}
+
+async fn get_development_selection(
+    State(state): State<AppState>,
+    Path(selection_flow_id): Path<String>,
+    headers: HeaderMap,
+    Query(request): Query<GetDevelopmentSelectionRequest>,
+) -> Result<Json<centaur_session_core::development::RepositorySelectionView>, ApiError> {
+    authorize_requested_principal(&state, &headers, &request.requested_by_principal_id)?;
+    let view = state
+        .runtime()?
+        .get_repository_selection_view(
+            &selection_flow_id,
+            &request.requested_by_principal_id,
+            false,
+        )
+        .await?;
+    Ok(Json(view))
+}
+
+async fn update_development_selection(
+    State(state): State<AppState>,
+    Path(selection_flow_id): Path<String>,
+    headers: HeaderMap,
+    request: Result<Json<UpdateDevelopmentSelectionRequest>, JsonRejection>,
+) -> Result<Json<centaur_session_core::development::RepositorySelectionView>, ApiError> {
+    let Json(request) = development_json(request)?;
+    authorize_requested_principal(&state, &headers, &request.requested_by_principal_id)?;
+    let view = state
+        .runtime()?
+        .update_repository_selection_view(&UpdateRepositorySelectionView {
+            selection_flow_id,
+            expected_version: request.expected_version,
+            requested_by_principal_id: request.requested_by_principal_id,
+            query: request.query,
+            cursor: request.cursor,
+            cursor_history: request.cursor_history,
+            selected_repository_ids: request.selected_repository_ids,
+        })
+        .await?;
+    Ok(Json(view))
 }
 
 async fn approve_publication(
@@ -187,6 +413,57 @@ async fn get_publish_batch(
     Ok(Json(batch))
 }
 
+async fn continue_development_task(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    request: Result<Json<ContinueDevelopmentTaskRequest>, JsonRejection>,
+) -> Result<Json<centaur_session_core::development::ContinuedDevelopmentTask>, ApiError> {
+    let Json(request) = development_json(request)?;
+    authorize_channel_principal(
+        &state,
+        &headers,
+        &request.channel,
+        &request.sender_principal_id,
+    )?;
+    let continued = state
+        .runtime()?
+        .continue_development_task(&ContinueDevelopmentTask {
+            channel: request.channel,
+            platform_event_id: request.platform_event_id,
+            platform_message_id: request.platform_message_id,
+            sender_principal_id: request.sender_principal_id,
+            message: request.message,
+        })
+        .await?;
+    Ok(Json(continued))
+}
+
+async fn close_development_binding(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    request: Result<Json<CloseDevelopmentBindingRequest>, JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(request) = development_json(request)?;
+    let principal = authorize_channel_principal(
+        &state,
+        &headers,
+        &request.channel,
+        &request.requested_by_principal_id,
+    )?;
+    let thread_key = state
+        .runtime()?
+        .close_development_binding(&CloseDevelopmentBinding {
+            channel: request.channel,
+            requested_by_principal_id: request.requested_by_principal_id,
+            is_admin: principal.is_some_and(|principal| principal.is_admin),
+        })
+        .await?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "thread_key": thread_key,
+    })))
+}
+
 async fn get_changeset(
     State(state): State<AppState>,
     Path(changeset_id): Path<String>,
@@ -240,8 +517,10 @@ struct RepositoryCatalogQuery {
 
 async fn search_repositories(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<RepositoryCatalogQuery>,
 ) -> Result<Json<RepositoryPage>, ApiError> {
+    state.authorize_development_client(&headers)?;
     let page = state
         .repository_catalog()?
         .search(query.query.as_deref(), query.cursor.as_deref())
@@ -252,6 +531,7 @@ async fn search_repositories(
 
 async fn accept_development_task(
     State(state): State<AppState>,
+    headers: HeaderMap,
     request: Result<Json<AcceptDevelopmentTaskRequest>, JsonRejection>,
 ) -> Result<Json<centaur_session_core::development::AcceptedDevelopmentTask>, ApiError> {
     let Json(request) = development_json(request)?;
@@ -260,6 +540,12 @@ async fn accept_development_task(
             "development task message role must be user".to_owned(),
         ));
     }
+    authorize_channel_principal(
+        &state,
+        &headers,
+        &request.channel,
+        &request.initiator.principal_id,
+    )?;
     let accepted = state
         .runtime()?
         .accept_development_task(AcceptDevelopmentTask {
@@ -278,9 +564,11 @@ async fn accept_development_task(
 async fn confirm_development_selection(
     State(state): State<AppState>,
     Path(selection_flow_id): Path<String>,
+    headers: HeaderMap,
     request: Result<Json<ConfirmDevelopmentSelectionRequest>, JsonRejection>,
 ) -> Result<Json<RepositorySelectionOutcome>, ApiError> {
     let Json(request) = development_json(request)?;
+    authorize_requested_principal(&state, &headers, &request.decided_by_principal_id)?;
     let repositories = state
         .repository_resolver()?
         .resolve(&request.repository_ids)
@@ -302,9 +590,11 @@ async fn confirm_development_selection(
 async fn confirm_no_project(
     State(state): State<AppState>,
     Path(selection_flow_id): Path<String>,
+    headers: HeaderMap,
     request: Result<Json<DecideDevelopmentSelectionRequest>, JsonRejection>,
 ) -> Result<Json<RepositorySelectionOutcome>, ApiError> {
     let Json(request) = development_json(request)?;
+    authorize_requested_principal(&state, &headers, &request.decided_by_principal_id)?;
     let outcome = state
         .runtime()?
         .confirm_repository_selection(&ConfirmRepositorySelection {
@@ -320,9 +610,11 @@ async fn confirm_no_project(
 async fn cancel_development_selection(
     State(state): State<AppState>,
     Path(selection_flow_id): Path<String>,
+    headers: HeaderMap,
     request: Result<Json<DecideDevelopmentSelectionRequest>, JsonRejection>,
 ) -> Result<Json<RepositorySelectionOutcome>, ApiError> {
     let Json(request) = development_json(request)?;
+    authorize_requested_principal(&state, &headers, &request.decided_by_principal_id)?;
     let outcome = state
         .runtime()?
         .cancel_repository_selection(
@@ -337,19 +629,100 @@ async fn cancel_development_selection(
 async fn create_add_repository_selection(
     State(state): State<AppState>,
     Path(raw_thread_key): Path<String>,
+    headers: HeaderMap,
     request: Result<Json<CreateAddRepositorySelectionRequest>, JsonRejection>,
 ) -> Result<Json<RepositorySelectionDraft>, ApiError> {
-    let Json(_request) = development_json(request)?;
+    let Json(request) = development_json(request)?;
+    let principal = state.authorize_development_client(&headers)?;
+    match principal.as_ref() {
+        None => validate_feishu_principal_id(&request.requested_by_principal_id)?,
+        Some(principal)
+            if principal.principal_id != request.requested_by_principal_id
+                && !principal.is_admin =>
+        {
+            return Err(ApiError::Forbidden(
+                "requested principal does not match the authenticated user".to_owned(),
+            ));
+        }
+        Some(_) => {}
+    }
     let thread_key = ThreadKey::try_from(raw_thread_key)?;
     let draft = state
         .runtime()?
-        .create_add_repository_selection(&thread_key)
+        .create_add_repository_selection(
+            &thread_key,
+            &request.requested_by_principal_id,
+            principal.is_some_and(|principal| principal.is_admin),
+        )
         .await?;
     Ok(Json(draft))
 }
 
 fn development_json<T>(request: Result<Json<T>, JsonRejection>) -> Result<Json<T>, ApiError> {
     request.map_err(|_| ApiError::BadRequest("invalid development request body".to_owned()))
+}
+
+fn validate_feishu_principal(
+    channel: &centaur_session_core::development::DevelopmentChannel,
+    principal_id: &str,
+) -> Result<(), ApiError> {
+    if channel.platform != "feishu"
+        || !principal_id.starts_with(&format!("feishu:{}:", channel.tenant_key))
+        || principal_id.ends_with(':')
+    {
+        return Err(ApiError::BadRequest(
+            "Feishu principal does not match the channel tenant".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn authorize_channel_principal(
+    state: &AppState,
+    headers: &HeaderMap,
+    channel: &centaur_session_core::development::DevelopmentChannel,
+    principal_id: &str,
+) -> Result<Option<DevelopmentPrincipal>, ApiError> {
+    if channel.platform == "feishu" {
+        state.authorize_feishu_ingress(headers)?;
+        validate_feishu_principal(channel, principal_id)?;
+        return Ok(None);
+    }
+    let principal = state.development_authorizer().authorize(headers)?;
+    if principal.principal_id != principal_id {
+        return Err(ApiError::Forbidden(
+            "development request principal does not match the authenticated user".to_owned(),
+        ));
+    }
+    Ok(Some(principal))
+}
+
+fn authorize_requested_principal(
+    state: &AppState,
+    headers: &HeaderMap,
+    requested_by_principal_id: &str,
+) -> Result<(), ApiError> {
+    match state.authorize_development_client(headers)? {
+        None => validate_feishu_principal_id(requested_by_principal_id),
+        Some(principal) if principal.principal_id == requested_by_principal_id => Ok(()),
+        Some(_) => Err(ApiError::Forbidden(
+            "requested principal does not match the authenticated user".to_owned(),
+        )),
+    }
+}
+
+fn validate_feishu_principal_id(principal_id: &str) -> Result<(), ApiError> {
+    let mut parts = principal_id.split(':');
+    if parts.next() != Some("feishu")
+        || parts.next().is_none_or(str::is_empty)
+        || parts.next().is_none_or(str::is_empty)
+        || parts.next().is_some()
+    {
+        return Err(ApiError::BadRequest(
+            "invalid Feishu principal identifier".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_resolved_repositories(
@@ -592,7 +965,8 @@ mod tests {
             build_router_with_app_state(
                 AppState::ready_with_pool(runtime, None, Some(pool))
                     .with_repository_resolver(Arc::new(TestResolver))
-                    .with_development_authorizer(Arc::new(TestAuthorizer)),
+                    .with_development_authorizer(Arc::new(TestAuthorizer))
+                    .with_feishu_ingress_key("feishu-ingress"),
             ),
             store,
         ))
@@ -601,7 +975,7 @@ mod tests {
     fn intake_body(suffix: &str) -> Value {
         json!({
             "channel": {
-                "platform": "feishu",
+                "platform": "web",
                 "tenant_key": format!("tenant-{suffix}"),
                 "conversation_key": format!("chat-{suffix}"),
                 "root_message_id": format!("message-{suffix}")
@@ -614,14 +988,23 @@ mod tests {
                 "client_message_id": format!("message-{suffix}"),
                 "role": "user",
                 "parts": [{"type": "text", "text": "Fix the test"}],
-                "metadata": {"source": "feishu"}
+                "metadata": {"source": "web"}
             },
-            "session_metadata": {"source": "feishu"}
+            "session_metadata": {"source": "web"}
         })
     }
 
+    fn feishu_intake_body(suffix: &str, open_id: &str) -> Value {
+        let mut body = intake_body(suffix);
+        body["channel"]["platform"] = json!("feishu");
+        body["initiator"]["principal_id"] = json!(format!("feishu:tenant-{suffix}:{open_id}"));
+        body["message"]["metadata"] = json!({"source": "feishu"});
+        body["session_metadata"] = json!({"source": "feishu"});
+        body
+    }
+
     async fn post(app: axum::Router, uri: &str, body: Value) -> (StatusCode, Value) {
-        post_with_bearer(app, uri, body, None).await
+        post_with_bearer(app, uri, body, Some("principal-1")).await
     }
 
     async fn post_with_bearer(
@@ -667,6 +1050,58 @@ mod tests {
             .unwrap()
             .to_vec();
         (status, headers, body)
+    }
+
+    #[tokio::test]
+    async fn development_task_routes_separate_web_and_feishu_trust_boundaries() {
+        let Some((app, _store)) = test_app().await else {
+            return;
+        };
+
+        let suffix = uuid::Uuid::new_v4().to_string();
+        let feishu = feishu_intake_body(&suffix, "ou-1");
+        assert_eq!(
+            post_with_bearer(app.clone(), "/api/development/tasks", feishu.clone(), None,)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            post_with_bearer(
+                app.clone(),
+                "/api/development/tasks",
+                feishu.clone(),
+                Some("principal-1"),
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            post_with_bearer(
+                app.clone(),
+                "/api/development/tasks",
+                feishu,
+                Some("feishu-ingress"),
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+
+        let mut impersonated_web = intake_body(&uuid::Uuid::new_v4().to_string());
+        impersonated_web["initiator"]["principal_id"] = json!("principal-2");
+        assert_eq!(
+            post_with_bearer(
+                app,
+                "/api/development/tasks",
+                impersonated_web,
+                Some("principal-1"),
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
     }
 
     #[tokio::test]
@@ -802,7 +1237,12 @@ mod tests {
             "/api/development/sessions/{}/repositories",
             urlencoding::encode(no_project["thread_key"].as_str().unwrap())
         );
-        let (status, draft) = post(app.clone(), &add_uri, json!({})).await;
+        let (status, draft) = post(
+            app.clone(),
+            &add_uri,
+            json!({"requested_by_principal_id": "principal-1"}),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(draft["kind"], "add");
 

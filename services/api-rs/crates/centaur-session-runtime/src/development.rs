@@ -228,7 +228,7 @@ impl SessionRuntime {
         Ok(())
     }
 
-    async fn drive_development_execution(
+    pub(super) async fn drive_development_execution(
         &self,
         thread_key: &ThreadKey,
         execution_id: &str,
