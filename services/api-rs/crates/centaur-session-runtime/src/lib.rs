@@ -1,4 +1,5 @@
 mod cleanup;
+mod development;
 mod title_generator;
 
 use std::{
@@ -140,6 +141,7 @@ pub struct SessionRuntime {
     session_title_in_flight: SessionTitleThreadSet,
     session_title_rerun_requested: SessionTitleThreadSet,
     capacity: Option<Arc<SandboxCapacityController>>,
+    workspace: Option<development::WorkspaceRuntime>,
     stdout_owner_id: String,
     /// Set once a shutdown handoff begins; fences new stdout-owner claims
     /// so an execution cannot start on a control plane that is about to
@@ -843,6 +845,7 @@ impl SessionRuntime {
             session_title_in_flight: Arc::new(DashSet::new()),
             session_title_rerun_requested: Arc::new(DashSet::new()),
             capacity: None,
+            workspace: None,
             stdout_owner_id: format!("api-rs-{}", uuid::Uuid::new_v4().simple()),
             shutting_down: Arc::new(AtomicBool::new(false)),
         }
@@ -1518,7 +1521,9 @@ impl SessionRuntime {
         &self,
         request: &ConfirmRepositorySelection,
     ) -> Result<RepositorySelectionOutcome, SessionRuntimeError> {
-        Ok(self.store.confirm_repository_selection(request).await?)
+        let outcome = self.store.confirm_repository_selection(request).await?;
+        self.spawn_workspace_preparation(outcome.workspace_id.clone());
+        Ok(outcome)
     }
 
     pub async fn cancel_repository_selection(
@@ -2427,6 +2432,7 @@ impl SessionRuntime {
         );
         let ensure_started = Instant::now();
         let result = async {
+            let workspace_mount = self.workspace_mount(thread_key).await?;
             let persona_context =
                 self.resolve_stored_persona(persona_id, harness_type, desired_capabilities)?;
             if let Some(sandbox_id) = existing_sandbox_id {
@@ -2647,6 +2653,8 @@ impl SessionRuntime {
                 .warm_pool
                 .as_ref()
                 .filter(|_| {
+                    workspace_mount.is_none()
+                        &&
                     boot_mode.uses_warm_pool()
                         && warm_harness_matches
                         && warm_persona_matches
@@ -2720,6 +2728,12 @@ impl SessionRuntime {
                 harness_type,
                 persona_context.as_ref(),
             );
+            if let Some(workspace_mount) = &workspace_mount {
+                spec = workspace_mount.apply_to(spec).label(
+                    "centaur.ai/workspace",
+                    workspace_mount.storage_ref.clone(),
+                );
+            }
             if let Some(principal) = iron_control_principal {
                 spec.iron_control_principal = Some(principal.to_owned());
                 spec.iron_control_proxy_labels = proxy_labels.clone();
@@ -5799,6 +5813,8 @@ fn runtime_error_failure_class(error: &SessionRuntimeError) -> &'static str {
         SessionRuntimeError::Sandbox(SandboxError::InvalidSpec(_)) => "sandbox_invalid_spec",
         SessionRuntimeError::IronControl(_) => "iron_control",
         SessionRuntimeError::WarmPool(_) => "warm_pool",
+        SessionRuntimeError::Workspace(_) => "workspace",
+        SessionRuntimeError::Serialize(_) => "serialization",
         SessionRuntimeError::CapacityExceeded { .. } => "capacity",
     }
 }
@@ -6894,6 +6910,10 @@ pub enum SessionRuntimeError {
     IronControl(#[from] centaur_iron_control::IronControlError),
     #[error(transparent)]
     WarmPool(#[from] WarmPoolError),
+    #[error(transparent)]
+    Workspace(#[from] centaur_sandbox_core::WorkspaceError),
+    #[error(transparent)]
+    Serialize(#[from] serde_json::Error),
     #[error(
         "sandbox running capacity exceeded during {operation}: running={running}, max_running={max_running}"
     )]

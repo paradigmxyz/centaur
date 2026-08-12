@@ -25,9 +25,10 @@ use centaur_iron_proxy::{
 };
 use centaur_sandbox_agent_k8s::{
     AgentSandboxBackend, AgentSandboxConfig, GitCredentialsRef, IronControlSettings,
-    IronProxyConfig, OtlpEgressTarget, Toleration, ToolSource, ToolsConfig,
+    IronProxyConfig, KubeWorkspaceConfig, KubeWorkspaceManager, OtlpEgressTarget, Toleration,
+    ToolSource, ToolsConfig,
 };
-use centaur_sandbox_core::{Mount, MountKind, ResourceRequirements, SandboxSpec};
+use centaur_sandbox_core::{Mount, MountKind, ResourceRequirements, SandboxSpec, WorkspaceManager};
 use centaur_sandbox_local::LocalSandboxBackend;
 use centaur_sandbox_manager::{SandboxReaperConfig, WarmPoolConfig};
 use centaur_session_core::HarnessType;
@@ -66,6 +67,8 @@ pub(crate) struct Args {
     activity_summary: ActivitySummaryArgs,
     #[command(flatten)]
     gitlab: GitLabArgs,
+    #[command(flatten)]
+    workspace: WorkspaceArgs,
 }
 
 impl Args {
@@ -116,6 +119,19 @@ impl Args {
 
     pub(crate) fn gitlab_catalog(&self) -> Result<Option<GitLabCatalog>, ServerError> {
         self.gitlab.catalog()
+    }
+
+    pub(crate) async fn workspace_manager(
+        &self,
+    ) -> Result<Option<(Arc<dyn WorkspaceManager>, String, Duration)>, ServerError> {
+        if self.workspace.development_workspace_enabled
+            && (self.gitlab.base_url.is_none() || self.gitlab.token_file.is_none())
+        {
+            return Err(ServerError::UnsupportedConfig(
+                "development workspaces require GITLAB_BASE_URL and GITLAB_TOKEN_FILE".to_owned(),
+            ));
+        }
+        self.workspace.manager(&self.sandbox).await
     }
 
     pub(crate) fn shutdown_execution_drain_timeout(&self) -> Duration {
@@ -174,6 +190,119 @@ impl GitLabArgs {
         })
         .map(Some)
         .map_err(|error| ServerError::UnsupportedConfig(error.to_string()))
+    }
+}
+
+#[derive(Debug, ClapArgs)]
+struct WorkspaceArgs {
+    #[arg(
+        long = "development-workspace-enabled",
+        env = "DEVELOPMENT_WORKSPACE_ENABLED",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    development_workspace_enabled: bool,
+    #[arg(
+        long = "development-workspace-provisioner-image",
+        env = "DEVELOPMENT_WORKSPACE_PROVISIONER_IMAGE"
+    )]
+    development_workspace_provisioner_image: Option<String>,
+    #[arg(
+        long = "development-workspace-service-account",
+        env = "DEVELOPMENT_WORKSPACE_SERVICE_ACCOUNT"
+    )]
+    development_workspace_service_account_name: Option<String>,
+    #[arg(
+        long = "development-workspace-gitlab-secret",
+        env = "DEVELOPMENT_WORKSPACE_GITLAB_SECRET"
+    )]
+    development_workspace_gitlab_secret_name: Option<String>,
+    #[arg(
+        long = "development-workspace-gitlab-secret-key",
+        env = "DEVELOPMENT_WORKSPACE_GITLAB_SECRET_KEY",
+        default_value = "token"
+    )]
+    development_workspace_gitlab_secret_key: String,
+    #[arg(
+        long = "development-workspace-storage-size",
+        env = "DEVELOPMENT_WORKSPACE_STORAGE_SIZE",
+        default_value = "20Gi"
+    )]
+    development_workspace_storage_size: String,
+    #[arg(
+        long = "development-workspace-storage-class",
+        env = "DEVELOPMENT_WORKSPACE_STORAGE_CLASS"
+    )]
+    development_workspace_storage_class_name: Option<String>,
+    #[arg(
+        long = "development-workspace-ready-timeout-secs",
+        env = "DEVELOPMENT_WORKSPACE_READY_TIMEOUT_SECS",
+        default_value_t = 300,
+        value_parser = clap::value_parser!(u64).range(1..=3600)
+    )]
+    development_workspace_ready_timeout_secs: u64,
+    #[arg(
+        long = "development-workspace-reconcile-interval-secs",
+        env = "DEVELOPMENT_WORKSPACE_RECONCILE_INTERVAL_SECS",
+        default_value_t = 15,
+        value_parser = clap::value_parser!(u64).range(1..=300)
+    )]
+    development_workspace_reconcile_interval_secs: u64,
+}
+
+impl WorkspaceArgs {
+    async fn manager(
+        &self,
+        sandbox: &SandboxArgs,
+    ) -> Result<Option<(Arc<dyn WorkspaceManager>, String, Duration)>, ServerError> {
+        if !self.development_workspace_enabled {
+            return Ok(None);
+        }
+        if !matches!(sandbox.backend, SandboxBackendKind::AgentK8s) {
+            return Err(ServerError::UnsupportedConfig(
+                "development workspaces require the agent-k8s sandbox backend".to_owned(),
+            ));
+        }
+        let secret_name =
+            clean_optional_value(self.development_workspace_gitlab_secret_name.as_deref())
+                .ok_or_else(|| {
+                    ServerError::UnsupportedConfig(
+                        "DEVELOPMENT_WORKSPACE_GITLAB_SECRET is required when development workspaces are enabled"
+                            .to_owned(),
+                    )
+                })?;
+        let image = clean_optional_value(self.development_workspace_provisioner_image.as_deref())
+            .or_else(|| sandbox.agent_image.clone())
+            .ok_or_else(|| {
+                ServerError::UnsupportedConfig(
+                    "a development workspace provisioner image is required".to_owned(),
+                )
+            })?;
+        let mut config = KubeWorkspaceConfig::new(&sandbox.k8s_namespace, image);
+        config.service_account_name =
+            clean_optional_value(self.development_workspace_service_account_name.as_deref());
+        config.token_secret_key = self
+            .development_workspace_gitlab_secret_key
+            .trim()
+            .to_owned();
+        config.storage_size = self.development_workspace_storage_size.trim().to_owned();
+        config.storage_class_name =
+            clean_optional_value(self.development_workspace_storage_class_name.as_deref());
+        config.image_pull_policy = sandbox.agent_image_pull_policy.clone();
+        config.ready_timeout = Duration::from_secs(self.development_workspace_ready_timeout_secs);
+        if config.token_secret_key.is_empty() || config.storage_size.is_empty() {
+            return Err(ServerError::UnsupportedConfig(
+                "development workspace secret key and storage size must not be empty".to_owned(),
+            ));
+        }
+        Ok(Some((
+            Arc::new(KubeWorkspaceManager::new(
+                sandbox.kube_client().await?,
+                config,
+            )),
+            secret_name,
+            Duration::from_secs(self.development_workspace_reconcile_interval_secs),
+        )))
     }
 }
 
@@ -2528,6 +2657,33 @@ mod tests {
         .unwrap();
         assert!(enabled.gitlab_catalog().unwrap().is_some());
         fs::remove_file(token_file).unwrap();
+    }
+
+    #[test]
+    fn development_workspace_requires_gitlab_configuration() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::remove(&[
+            "DEVELOPMENT_WORKSPACE_ENABLED",
+            "GITLAB_BASE_URL",
+            "GITLAB_TOKEN_FILE",
+        ]);
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--development-workspace-enabled=true",
+        ])
+        .unwrap();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        assert!(matches!(
+            runtime.block_on(args.workspace_manager()),
+            Err(ServerError::UnsupportedConfig(message))
+                if message.contains("GITLAB_BASE_URL")
+        ));
     }
 
     #[test]

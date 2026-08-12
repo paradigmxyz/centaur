@@ -33,6 +33,9 @@ pub use tools::{GitCredentialsRef, ToolSource, ToolsConfig};
 pub mod generated;
 mod iron_proxy;
 mod tools;
+mod workspace;
+
+pub use workspace::{KubeWorkspaceConfig, KubeWorkspaceManager};
 
 const BACKEND_NAME: &str = "agent-sandbox-k8s";
 const DEFAULT_CONTAINER_NAME: &str = "agent";

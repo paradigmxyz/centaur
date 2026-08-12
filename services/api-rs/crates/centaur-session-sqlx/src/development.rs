@@ -1,11 +1,12 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, time::Duration};
 
 use centaur_session_core::{
     ExecutionStatus, MessageRole, SessionStatus, ThreadKey,
     development::{
-        AcceptDevelopmentTask, AcceptedDevelopmentTask, ConfirmRepositorySelection,
-        ExecutionBlocker, RepositorySelectionDraft, RepositorySelectionOutcome, SelectionFlowState,
-        SelectionKind, SessionWorkspace, WorkspaceState,
+        AcceptDevelopmentTask, AcceptedDevelopmentTask, CompleteWorkspacePreparation,
+        ConfirmRepositorySelection, ExecutionBlocker, RepositorySelectionDraft,
+        RepositorySelectionOutcome, SelectionFlowState, SelectionKind, SessionWorkspace,
+        WorkspacePreparationClaim, WorkspaceRepositorySnapshot, WorkspaceState,
     },
 };
 use serde_json::{Value, json};
@@ -153,6 +154,21 @@ impl PgSessionStore {
         .bind(json!({
             "source": request.channel.platform,
             "platform_event_id": request.platform_event_id,
+            "development_input_line": {
+                "type": "user",
+                "thread_key": thread_key.as_str(),
+                "client_user_message_id": request.message.client_message_id,
+                "trace_metadata": {
+                    "source": request.channel.platform,
+                    "action": "execute",
+                    "platform_event_id": request.platform_event_id,
+                    "message_metadata": request.message.metadata,
+                },
+                "message": {
+                    "role": request.message.role.as_ref(),
+                    "content": request.message.parts,
+                },
+            },
         }))
         .execute(&mut *tx)
         .await?;
@@ -370,6 +386,7 @@ impl PgSessionStore {
         tx.commit().await?;
         Ok(RepositorySelectionOutcome {
             selection_flow_id: request.selection_flow_id.clone(),
+            workspace_id: flow.workspace_id,
             state: SelectionFlowState::Confirmed,
             version,
             repository_ids,
@@ -495,6 +512,7 @@ impl PgSessionStore {
         tx.commit().await?;
         Ok(RepositorySelectionOutcome {
             selection_flow_id: selection_flow_id.to_owned(),
+            workspace_id: flow.workspace_id,
             state: SelectionFlowState::Cancelled,
             version,
             repository_ids: Vec::new(),
@@ -567,6 +585,315 @@ impl PgSessionStore {
         .await?;
 
         row.try_into()
+    }
+
+    pub async fn claim_workspace_preparation(
+        &self,
+        workspace_id: &str,
+        lease_owner: &str,
+        lease: Duration,
+    ) -> Result<WorkspacePreparationClaim, SessionStoreError> {
+        if workspace_id.trim().is_empty() || lease_owner.trim().is_empty() || lease.is_zero() {
+            return Err(SessionStoreError::InvalidDevelopmentRequest {
+                message: "workspace_id, lease_owner, and positive lease are required".to_owned(),
+            });
+        }
+        let mut tx = self.pool.begin().await?;
+        let lease_expires_at = OffsetDateTime::now_utc()
+            + time::Duration::try_from(lease).map_err(|_| {
+                SessionStoreError::InvalidDevelopmentRequest {
+                    message: "workspace preparation lease is too large".to_owned(),
+                }
+            })?;
+        let row = sqlx::query_as::<_, SessionWorkspaceRow>(
+            r#"
+            update session_workspaces
+               set preparation_attempt = preparation_attempt + case
+                       when preparation_attempt = 0 or exists(
+                           select 1 from session_repositories repository
+                            where repository.workspace_id = session_workspaces.workspace_id
+                              and repository.state in ('pending', 'failed')
+                       ) then 1 else 0
+                   end,
+                   lease_owner = $2,
+                   lease_expires_at = $3,
+                   updated_at = now()
+             where workspace_id = $1
+               and state = 'provisioning'
+               and (lease_owner is null or lease_owner = $2 or lease_expires_at < now())
+            returning workspace_id, thread_key, state, storage_ref,
+                      preparation_attempt, created_at, updated_at
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(lease_owner)
+        .bind(lease_expires_at)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| SessionStoreError::DevelopmentConflict {
+            message: format!("workspace {workspace_id} is not claimable for preparation"),
+        })?;
+        sqlx::query(
+            r#"
+            update session_repositories
+               set state = 'provisioning', provisioning_attempt = provisioning_attempt + 1,
+                   failure_code = null, failure_message = null, updated_at = now()
+             where workspace_id = $1 and state in ('pending', 'failed')
+            "#,
+        )
+        .bind(workspace_id)
+        .execute(&mut *tx)
+        .await?;
+        let repositories = sqlx::query_as::<_, WorkspaceRepositorySnapshotRow>(
+            r#"
+            select repository_id, display_name, path_with_namespace, default_branch,
+                   clone_url, relative_path, state, base_sha, local_branch, head_sha
+              from session_repositories
+             where workspace_id = $1
+             order by gitlab_project_id, repository_id
+             for update
+            "#,
+        )
+        .bind(workspace_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let execution_id = sqlx::query_scalar::<_, String>(
+            r#"
+            select flow.execution_id
+              from development_selection_flows flow
+              join session_executions execution on execution.execution_id = flow.execution_id
+             where flow.workspace_id = $1 and flow.kind = 'initial'
+               and execution.status = 'queued'
+               and execution.blocking_reason = 'workspace_provisioning'
+             order by flow.created_at, flow.selection_flow_id
+             limit 1
+            "#,
+        )
+        .bind(workspace_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(WorkspacePreparationClaim {
+            workspace: row.try_into()?,
+            execution_id,
+            repositories: repositories
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>, _>>()?,
+        })
+    }
+
+    pub async fn complete_workspace_preparation(
+        &self,
+        result: &CompleteWorkspacePreparation,
+    ) -> Result<SessionWorkspace, SessionStoreError> {
+        if result.storage_ref.trim().is_empty() || result.lease_owner.trim().is_empty() {
+            return Err(SessionStoreError::InvalidDevelopmentRequest {
+                message: "storage_ref and lease_owner are required".to_owned(),
+            });
+        }
+        let mut result_ids = HashSet::new();
+        for repository in &result.prepared {
+            if !result_ids.insert(repository.repository_id.clone())
+                || repository.base_sha.trim().is_empty()
+                || repository.head_sha.trim().is_empty()
+                || repository.local_branch.trim().is_empty()
+            {
+                return Err(SessionStoreError::InvalidDevelopmentRequest {
+                    message: "workspace preparation contains an invalid prepared repository"
+                        .to_owned(),
+                });
+            }
+        }
+        for repository in &result.failed {
+            if !result_ids.insert(repository.repository_id.clone())
+                || repository.failure_code.trim().is_empty()
+            {
+                return Err(SessionStoreError::InvalidDevelopmentRequest {
+                    message: "workspace preparation contains an invalid failed repository"
+                        .to_owned(),
+                });
+            }
+        }
+        let mut tx = self.pool.begin().await?;
+        let expected_ids = sqlx::query_scalar::<_, String>(
+            "select repository_id from session_repositories where workspace_id = $1 for update",
+        )
+        .bind(&result.workspace_id)
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .map(|value| value.parse())
+        .collect::<Result<HashSet<_>, _>>()
+        .map_err(|error| SessionStoreError::InvalidPersistedValue(format!("{error}")))?;
+        if expected_ids != result_ids {
+            return Err(SessionStoreError::DevelopmentConflict {
+                message: "workspace preparation result does not match the repository set"
+                    .to_owned(),
+            });
+        }
+        for repository in &result.prepared {
+            sqlx::query(
+                r#"
+                update session_repositories
+                   set state = 'ready', base_sha = $3, local_branch = $4, head_sha = $5,
+                       failure_code = null, failure_message = null, updated_at = now()
+                 where workspace_id = $1 and repository_id = $2
+                "#,
+            )
+            .bind(&result.workspace_id)
+            .bind(repository.repository_id.as_str())
+            .bind(&repository.base_sha)
+            .bind(&repository.local_branch)
+            .bind(&repository.head_sha)
+            .execute(&mut *tx)
+            .await?;
+        }
+        for repository in &result.failed {
+            sqlx::query(
+                r#"
+                update session_repositories
+                   set state = 'failed', failure_code = $3, failure_message = $4,
+                       updated_at = now()
+                 where workspace_id = $1 and repository_id = $2
+                "#,
+            )
+            .bind(&result.workspace_id)
+            .bind(repository.repository_id.as_str())
+            .bind(&repository.failure_code)
+            .bind(&repository.failure_message)
+            .execute(&mut *tx)
+            .await?;
+        }
+        let target_state = if result.failed.is_empty() {
+            WorkspaceState::Ready
+        } else {
+            WorkspaceState::Failed
+        };
+        let workspace = sqlx::query_as::<_, SessionWorkspaceRow>(
+            r#"
+            update session_workspaces
+               set state = $4, storage_ref = $5, lease_owner = null,
+                   lease_expires_at = null, updated_at = now()
+             where workspace_id = $1 and preparation_attempt = $2 and lease_owner = $3
+               and state = 'provisioning'
+            returning workspace_id, thread_key, state, storage_ref,
+                      preparation_attempt, created_at, updated_at
+            "#,
+        )
+        .bind(&result.workspace_id)
+        .bind(result.attempt)
+        .bind(&result.lease_owner)
+        .bind(target_state.as_ref())
+        .bind(&result.storage_ref)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| SessionStoreError::DevelopmentConflict {
+            message: "workspace preparation lease or attempt is stale".to_owned(),
+        })?;
+        if target_state == WorkspaceState::Ready {
+            sqlx::query(
+                r#"
+                update session_executions execution
+                   set blocking_reason = null, updated_at = now()
+                  from development_selection_flows flow
+                 where flow.workspace_id = $1
+                   and flow.execution_id = execution.execution_id
+                   and execution.status = 'queued'
+                   and execution.blocking_reason = 'workspace_provisioning'
+                "#,
+            )
+            .bind(&result.workspace_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        workspace.try_into()
+    }
+
+    pub async fn fail_workspace_preparation(
+        &self,
+        workspace_id: &str,
+        attempt: i32,
+        lease_owner: &str,
+        failure_code: &str,
+        failure_message: &str,
+    ) -> Result<SessionWorkspace, SessionStoreError> {
+        if workspace_id.trim().is_empty()
+            || attempt < 1
+            || lease_owner.trim().is_empty()
+            || failure_code.trim().is_empty()
+        {
+            return Err(SessionStoreError::InvalidDevelopmentRequest {
+                message: "workspace failure requires an ID, attempt, owner, and code".to_owned(),
+            });
+        }
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            r#"
+            update session_repositories
+               set state = 'failed', failure_code = $2, failure_message = $3,
+                   updated_at = now()
+             where workspace_id = $1 and state = 'provisioning'
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(failure_code)
+        .bind(failure_message)
+        .execute(&mut *tx)
+        .await?;
+        let workspace = sqlx::query_as::<_, SessionWorkspaceRow>(
+            r#"
+            update session_workspaces
+               set state = 'failed', lease_owner = null, lease_expires_at = null,
+                   updated_at = now()
+             where workspace_id = $1 and preparation_attempt = $2 and lease_owner = $3
+               and state = 'provisioning'
+            returning workspace_id, thread_key, state, storage_ref,
+                      preparation_attempt, created_at, updated_at
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(attempt)
+        .bind(lease_owner)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| SessionStoreError::DevelopmentConflict {
+            message: "workspace preparation lease or attempt is stale".to_owned(),
+        })?;
+        tx.commit().await?;
+        workspace.try_into()
+    }
+
+    pub async fn workspace_for_session(
+        &self,
+        thread_key: &ThreadKey,
+    ) -> Result<Option<SessionWorkspace>, SessionStoreError> {
+        let row = sqlx::query_as::<_, SessionWorkspaceRow>(
+            r#"
+            select workspace_id, thread_key, state, storage_ref,
+                   preparation_attempt, created_at, updated_at
+              from session_workspaces where thread_key = $1
+            "#,
+        )
+        .bind(thread_key.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(TryInto::try_into).transpose()
+    }
+
+    pub async fn list_provisioning_workspace_ids(&self) -> Result<Vec<String>, SessionStoreError> {
+        Ok(sqlx::query_scalar(
+            r#"
+            select workspace_id
+              from session_workspaces
+             where state = 'provisioning'
+               and (lease_owner is null or lease_expires_at < now())
+             order by updated_at, workspace_id
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?)
     }
 }
 
@@ -861,6 +1188,45 @@ struct SessionWorkspaceRow {
     updated_at: OffsetDateTime,
 }
 
+#[derive(Debug, FromRow)]
+struct WorkspaceRepositorySnapshotRow {
+    repository_id: String,
+    display_name: String,
+    path_with_namespace: String,
+    default_branch: String,
+    clone_url: String,
+    relative_path: String,
+    state: String,
+    base_sha: Option<String>,
+    local_branch: Option<String>,
+    head_sha: Option<String>,
+}
+
+impl TryFrom<WorkspaceRepositorySnapshotRow> for WorkspaceRepositorySnapshot {
+    type Error = SessionStoreError;
+
+    fn try_from(row: WorkspaceRepositorySnapshotRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            repository_id: row
+                .repository_id
+                .parse()
+                .map_err(|error| SessionStoreError::InvalidPersistedValue(format!("{error}")))?,
+            display_name: row.display_name,
+            path_with_namespace: row.path_with_namespace,
+            default_branch: row.default_branch,
+            clone_url: row.clone_url,
+            relative_path: row.relative_path,
+            state: row
+                .state
+                .parse()
+                .map_err(|error| SessionStoreError::InvalidPersistedValue(format!("{error}")))?,
+            base_sha: row.base_sha,
+            local_branch: row.local_branch,
+            head_sha: row.head_sha,
+        })
+    }
+}
+
 impl TryFrom<SessionWorkspaceRow> for SessionWorkspace {
     type Error = SessionStoreError;
 
@@ -888,9 +1254,10 @@ mod tests {
     use centaur_session_core::{
         HarnessType, MessageRole, SessionMessageInput, ThreadKey,
         development::{
-            AcceptDevelopmentTask, ConfirmRepositorySelection, DevelopmentChannel,
-            DevelopmentInitiator, ExecutionBlocker, ResolvedRepository, SelectionFlowState,
-            SelectionKind, WorkspaceState,
+            AcceptDevelopmentTask, CompleteWorkspacePreparation, ConfirmRepositorySelection,
+            DevelopmentChannel, DevelopmentInitiator, ExecutionBlocker, FailedRepositorySnapshot,
+            PreparedRepositorySnapshot, ResolvedRepository, SelectionFlowState, SelectionKind,
+            WorkspaceState,
         },
     };
     use serde_json::json;
@@ -1321,6 +1688,190 @@ mod tests {
         assert_eq!(added.repository_ids, vec!["gitlab:84".parse().unwrap()]);
         assert_eq!(added.workspace_state, WorkspaceState::Provisioning);
         assert_eq!(added.execution_blocker, None);
+    }
+
+    #[tokio::test]
+    async fn workspace_preparation_claim_and_completion_release_only_the_exact_execution() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let accepted = store
+            .accept_development_task(&development_task("workspace-preparation"))
+            .await
+            .expect("accept task");
+        store
+            .confirm_repository_selection(&ConfirmRepositorySelection {
+                selection_flow_id: accepted.selection_flow_id,
+                expected_version: 1,
+                decided_by_principal_id: "principal-1".to_owned(),
+                repositories: vec![resolved_repository(42)],
+            })
+            .await
+            .expect("confirm repository");
+
+        let claim = store
+            .claim_workspace_preparation(
+                &accepted.workspace_id,
+                "api-rs-test",
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .expect("claim preparation");
+        assert_eq!(claim.workspace.preparation_attempt, 1);
+        assert_eq!(
+            claim.execution_id.as_deref(),
+            Some(accepted.execution_id.as_str())
+        );
+        assert_eq!(claim.repositories.len(), 1);
+        assert_eq!(claim.repositories[0].state.as_ref(), "provisioning");
+
+        let stale = store
+            .complete_workspace_preparation(&CompleteWorkspacePreparation {
+                workspace_id: accepted.workspace_id.clone(),
+                attempt: 0,
+                lease_owner: "api-rs-test".to_owned(),
+                storage_ref: "workspace-test".to_owned(),
+                prepared: vec![PreparedRepositorySnapshot {
+                    repository_id: "gitlab:42".parse().unwrap(),
+                    base_sha: "a".repeat(40),
+                    local_branch: "centaur/test".to_owned(),
+                    head_sha: "a".repeat(40),
+                }],
+                failed: Vec::new(),
+            })
+            .await;
+        assert!(matches!(
+            stale,
+            Err(crate::SessionStoreError::DevelopmentConflict { .. })
+        ));
+
+        let ready = store
+            .complete_workspace_preparation(&CompleteWorkspacePreparation {
+                workspace_id: accepted.workspace_id,
+                attempt: claim.workspace.preparation_attempt,
+                lease_owner: "api-rs-test".to_owned(),
+                storage_ref: "workspace-test".to_owned(),
+                prepared: vec![PreparedRepositorySnapshot {
+                    repository_id: "gitlab:42".parse().unwrap(),
+                    base_sha: "a".repeat(40),
+                    local_branch: "centaur/test".to_owned(),
+                    head_sha: "a".repeat(40),
+                }],
+                failed: Vec::new(),
+            })
+            .await
+            .expect("complete preparation");
+        assert_eq!(ready.state, WorkspaceState::Ready);
+        assert_eq!(ready.storage_ref.as_deref(), Some("workspace-test"));
+        let execution = store
+            .latest_execution_for_thread(&accepted.thread_key)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(execution.blocking_reason.is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_workspace_preparation_keeps_execution_blocked() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let accepted = store
+            .accept_development_task(&development_task("workspace-failure"))
+            .await
+            .expect("accept task");
+        store
+            .confirm_repository_selection(&ConfirmRepositorySelection {
+                selection_flow_id: accepted.selection_flow_id,
+                expected_version: 1,
+                decided_by_principal_id: "principal-1".to_owned(),
+                repositories: vec![resolved_repository(42)],
+            })
+            .await
+            .expect("confirm repository");
+        let claim = store
+            .claim_workspace_preparation(
+                &accepted.workspace_id,
+                "api-rs-test",
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .expect("claim preparation");
+        let failed = store
+            .complete_workspace_preparation(&CompleteWorkspacePreparation {
+                workspace_id: accepted.workspace_id,
+                attempt: claim.workspace.preparation_attempt,
+                lease_owner: "api-rs-test".to_owned(),
+                storage_ref: "workspace-test".to_owned(),
+                prepared: Vec::new(),
+                failed: vec![FailedRepositorySnapshot {
+                    repository_id: "gitlab:42".parse().unwrap(),
+                    failure_code: "clone_failed".to_owned(),
+                    failure_message: "clone failed".to_owned(),
+                }],
+            })
+            .await
+            .expect("record failure");
+        assert_eq!(failed.state, WorkspaceState::Failed);
+        let execution = store
+            .latest_execution_for_thread(&accepted.thread_key)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            execution.blocking_reason,
+            Some(ExecutionBlocker::WorkspaceProvisioning)
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_backend_failure_is_durable_without_repositories() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let accepted = store
+            .accept_development_task(&development_task("workspace-backend-failure"))
+            .await
+            .expect("accept task");
+        store
+            .confirm_repository_selection(&ConfirmRepositorySelection {
+                selection_flow_id: accepted.selection_flow_id,
+                expected_version: 1,
+                decided_by_principal_id: "principal-1".to_owned(),
+                repositories: Vec::new(),
+            })
+            .await
+            .expect("confirm without repositories");
+        let claim = store
+            .claim_workspace_preparation(
+                &accepted.workspace_id,
+                "api-rs-test",
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .expect("claim preparation");
+
+        let failed = store
+            .fail_workspace_preparation(
+                &accepted.workspace_id,
+                claim.workspace.preparation_attempt,
+                "api-rs-test",
+                "workspace_backend_failed",
+                "workspace preparation failed",
+            )
+            .await
+            .expect("record backend failure");
+
+        assert_eq!(failed.state, WorkspaceState::Failed);
+        let execution = store
+            .latest_execution_for_thread(&accepted.thread_key)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            execution.blocking_reason,
+            Some(ExecutionBlocker::WorkspaceProvisioning)
+        );
     }
 
     fn development_task(label: &str) -> AcceptDevelopmentTask {

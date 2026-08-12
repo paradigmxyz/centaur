@@ -246,34 +246,34 @@ git commit -m "feat: add GitLab repository catalog"
 - Produces `WorkspaceManager::prepare(workspace) -> WorkspacePreparation` and `WorkspaceMount`.
 - Kubernetes implementation creates one PVC per Session and one short-lived Provisioner Job per attempt.
 
-- [ ] **Step 1: Write failing backend-neutral tests**
+- [x] **Step 1: Write failing backend-neutral tests**
 
 Require deterministic repository paths (`repos/42-project`), path collision rejection, append-only plans, sanitized `workspace.json`, and `SandboxSpec` mounting the Workspace at `/workspace` without any Git credential reference.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 ```bash
 cargo test -p centaur-sandbox-core workspace
 cargo test -p centaur-session-runtime workspace_preparation
 ```
 
-- [ ] **Step 3: Define the Workspace trait and local fake**
+- [x] **Step 3: Define the Workspace trait and local fake**
 
 The trait consumes resolved server-side repository snapshots and an opaque credential reference. `SessionRuntime` depends on the trait, persists `provisioning` before calling it, persists each structured result, and clears `workspace_provisioning` only when all bindings are ready.
 
-- [ ] **Step 4: Write failing Kubernetes object tests**
+- [x] **Step 4: Write failing Kubernetes object tests**
 
 Assert PVC owner labels, Job lease/attempt labels, init-only token Secret, noninteractive `GIT_ASKPASS`, exact-origin clone commands, hooks disabled, local branch creation, manifest write, and no credential volume on the eventual sandbox.
 
-- [ ] **Step 5: Implement Kube Workspace Manager**
+- [x] **Step 5: Implement Kube Workspace Manager**
 
 Build Kubernetes objects with typed APIs. The Provisioner reports machine-readable JSON through Job termination/output; reconciliation adopts existing PVCs and finished Jobs by Workspace/attempt labels before creating anything.
 
-- [ ] **Step 6: Attach Workspace and release Execution**
+- [x] **Step 6: Attach Workspace and release Execution**
 
 Extend sandbox preparation so a ready Session Workspace supplies a named-volume/PVC mount at `/workspace`. Legacy Sessions retain the current EmptyDir/repo-cache behavior. Trigger the existing execution driver only after the persisted blocker is null.
 
-- [ ] **Step 7: Verify and commit**
+- [x] **Step 7: Verify and commit**
 
 ```bash
 cargo +nightly fmt --all --check

@@ -9,6 +9,7 @@ mod error;
 mod io;
 mod lifecycle;
 mod spec;
+mod workspace;
 
 pub use backend::SandboxBackend;
 pub use error::{BoxedError, SandboxError, SandboxResult};
@@ -19,4 +20,9 @@ pub use lifecycle::{
 pub use spec::{
     EnvVar, Mount, MountKind, RepoCacheAccess, ResourceClaim, ResourceRequirements,
     SandboxCapabilities, SandboxSpec,
+};
+pub use workspace::{
+    FailedWorkspaceRepository, PreparedWorkspaceRepository, WorkspaceError, WorkspaceManager,
+    WorkspaceMount, WorkspacePreparation, WorkspacePreparationRequest, WorkspaceRepository,
+    repository_relative_path,
 };

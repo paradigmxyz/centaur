@@ -94,6 +94,7 @@ pub struct ConfirmRepositorySelection {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RepositorySelectionOutcome {
     pub selection_flow_id: String,
+    pub workspace_id: String,
     pub state: SelectionFlowState,
     pub version: i32,
     pub repository_ids: Vec<RepositoryId>,
@@ -108,6 +109,52 @@ pub struct RepositorySelectionDraft {
     pub kind: SelectionKind,
     pub state: SelectionFlowState,
     pub version: i32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspacePreparationClaim {
+    pub workspace: SessionWorkspace,
+    pub execution_id: Option<String>,
+    pub repositories: Vec<WorkspaceRepositorySnapshot>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceRepositorySnapshot {
+    pub repository_id: RepositoryId,
+    pub display_name: String,
+    pub path_with_namespace: String,
+    pub default_branch: String,
+    pub clone_url: String,
+    pub relative_path: String,
+    pub state: RepositoryState,
+    pub base_sha: Option<String>,
+    pub local_branch: Option<String>,
+    pub head_sha: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompleteWorkspacePreparation {
+    pub workspace_id: String,
+    pub attempt: i32,
+    pub lease_owner: String,
+    pub storage_ref: String,
+    pub prepared: Vec<PreparedRepositorySnapshot>,
+    pub failed: Vec<FailedRepositorySnapshot>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparedRepositorySnapshot {
+    pub repository_id: RepositoryId,
+    pub base_sha: String,
+    pub local_branch: String,
+    pub head_sha: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FailedRepositorySnapshot {
+    pub repository_id: RepositoryId,
+    pub failure_code: String,
+    pub failure_message: String,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -221,6 +268,13 @@ macro_rules! state_enum {
 
 state_enum!(WorkspaceState {
     AwaitingSelection,
+    Provisioning,
+    Ready,
+    Failed,
+});
+
+state_enum!(RepositoryState {
+    Pending,
     Provisioning,
     Ready,
     Failed,
