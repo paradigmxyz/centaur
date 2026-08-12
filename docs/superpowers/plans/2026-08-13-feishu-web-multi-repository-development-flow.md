@@ -38,7 +38,7 @@
 - Produces durable rows for channel bindings, Workspaces, selection flows, repositories, ChangeSets, Publish Batches/Items, and Feishu delivery.
 - Adds nullable `blocking_reason` to `session_executions`; execution claim queries select queued rows only when it is null.
 
-- [ ] **Step 1: Write failing domain tests**
+- [x] **Step 1: Write failing domain tests**
 
 Add tests in `development.rs` that require:
 
@@ -60,7 +60,7 @@ fn publish_batch_reduces_item_states_without_losing_partial_success() {
 }
 ```
 
-- [ ] **Step 2: Run the focused test and verify RED**
+- [x] **Step 2: Run the focused test and verify RED**
 
 Run:
 
@@ -71,11 +71,11 @@ cargo test -p centaur-session-core development
 
 Expected: compile failure because `development` and its types do not exist.
 
-- [ ] **Step 3: Implement the minimal typed state machines**
+- [x] **Step 3: Implement the minimal typed state machines**
 
 Use private string fields for parsed IDs, `serde` snake-case enums, `strum` database serialization, and transition methods returning typed errors. Export the module from `lib.rs`; do not add repository behavior to the existing monolithic file.
 
-- [ ] **Step 4: Add the schema migration**
+- [x] **Step 4: Add the schema migration**
 
 Create `0052_development_workspaces.sql` with:
 
@@ -97,11 +97,11 @@ create table session_workspaces (
 
 The same migration creates the remaining tables and unique constraints named in the design: `(workspace_id, repository_id)`, `(workspace_id, relative_path)`, platform event/message idempotency, one active selection flow, `(changeset_id, repository_id)`, `(changeset_id, idempotency_key)`, and `(publish_batch_id, repository_id)`.
 
-- [ ] **Step 5: Add SQLx row conversions and schema tests**
+- [x] **Step 5: Add SQLx row conversions and schema tests**
 
 `development.rs` in SQLx owns row structs and conversion errors. Add a database test that runs migrations, creates a legacy Session, attaches an empty Workspace, inserts a blocked Execution, and proves a duplicate repository binding and duplicate platform event are rejected.
 
-- [ ] **Step 6: Make focused checks GREEN**
+- [x] **Step 6: Make focused checks GREEN**
 
 Run:
 
@@ -113,7 +113,7 @@ SESSION_RUNTIME_TEST_DATABASE_URL="$TEST_DATABASE_URL" cargo test -p centaur-ses
 
 Expected: domain tests pass; database test either passes against disposable Postgres or explicitly reports it was skipped when no URL exists.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add services/api-rs/crates/centaur-session-core services/api-rs/crates/centaur-session-sqlx

@@ -3,6 +3,8 @@
 //! A session is the public control-plane object for one ongoing agent
 //! conversation. `thread_key` is the canonical identifier.
 
+pub mod development;
+
 use std::{collections::BTreeMap, fmt, str::FromStr};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
@@ -523,6 +525,8 @@ pub struct SessionExecution {
     pub idempotency_key: Option<String>,
     pub thread_key: ThreadKey,
     pub status: ExecutionStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocking_reason: Option<development::ExecutionBlocker>,
     pub metadata: Value,
     pub error: Option<String>,
     pub created_at: OffsetDateTime,

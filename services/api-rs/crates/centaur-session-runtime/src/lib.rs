@@ -8366,6 +8366,7 @@ mod tests {
             idempotency_key: None,
             thread_key,
             status,
+            blocking_reason: None,
             metadata,
             error: None,
             created_at: now,

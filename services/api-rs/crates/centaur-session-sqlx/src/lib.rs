@@ -1,5 +1,7 @@
 //! SQLx-backed session repository.
 
+mod development;
+
 use std::{collections::BTreeMap, str::FromStr, time::Duration};
 
 use centaur_session_core::{
@@ -339,6 +341,7 @@ impl PgSessionStore {
                 idempotency_key,
                 thread_key,
                 status,
+                blocking_reason,
                 metadata,
                 error,
                 created_at,
@@ -364,7 +367,7 @@ impl PgSessionStore {
     ) -> Result<Option<SessionExecution>, SessionStoreError> {
         let row = sqlx::query_as::<_, SessionExecutionRow>(
             r#"
-            select execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            select execution_id, idempotency_key, thread_key, status, blocking_reason, metadata, error, created_at, updated_at, started_at, completed_at
             from session_executions
             where thread_key = $1 and status in ($2, $3)
             order by created_at desc, execution_id desc
@@ -385,9 +388,9 @@ impl PgSessionStore {
     pub async fn list_active_executions(&self) -> Result<Vec<SessionExecution>, SessionStoreError> {
         let rows = sqlx::query_as::<_, SessionExecutionRow>(
             r#"
-            select execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            select execution_id, idempotency_key, thread_key, status, blocking_reason, metadata, error, created_at, updated_at, started_at, completed_at
             from session_executions
-            where status in ($1, $2)
+            where status in ($1, $2) and blocking_reason is null
             order by created_at, execution_id
             "#,
         )
@@ -404,11 +407,11 @@ impl PgSessionStore {
     ) -> Result<Vec<ActiveExecutionOwnership>, SessionStoreError> {
         let rows = sqlx::query_as::<_, ActiveExecutionOwnershipRow>(
             r#"
-            select execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at,
+            select execution_id, idempotency_key, thread_key, status, blocking_reason, metadata, error, created_at, updated_at, started_at, completed_at,
                    stdout_owner_id,
                    coalesce(stdout_owner_lease_expires_at > now(), false) as stdout_owner_lease_active
             from session_executions
-            where status in ($1, $2)
+            where status in ($1, $2) and blocking_reason is null
             order by created_at, execution_id
             "#,
         )
@@ -434,7 +437,7 @@ impl PgSessionStore {
     ) -> Result<Option<SessionExecution>, SessionStoreError> {
         let row = sqlx::query_as::<_, SessionExecutionRow>(
             r#"
-            select execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            select execution_id, idempotency_key, thread_key, status, blocking_reason, metadata, error, created_at, updated_at, started_at, completed_at
             from session_executions
             where thread_key = $1
             order by created_at desc, execution_id desc
@@ -456,8 +459,8 @@ impl PgSessionStore {
             r#"
             update session_executions
             set status = $2, started_at = coalesce(started_at, now()), updated_at = now()
-            where execution_id = $1 and status = $3
-            returning execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            where execution_id = $1 and status = $3 and blocking_reason is null
+            returning execution_id, idempotency_key, thread_key, status, blocking_reason, metadata, error, created_at, updated_at, started_at, completed_at
             "#,
         )
         .bind(execution_id)
@@ -472,7 +475,7 @@ impl PgSessionStore {
             // row without taking ownership.
             let row = sqlx::query_as::<_, SessionExecutionRow>(
                 r#"
-                select execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+                select execution_id, idempotency_key, thread_key, status, blocking_reason, metadata, error, created_at, updated_at, started_at, completed_at
                 from session_executions
                 where execution_id = $1
                 "#,
@@ -509,6 +512,7 @@ impl PgSessionStore {
                 updated_at = now()
             where execution_id = $1
               and status in ($4, $5)
+              and blocking_reason is null
               and (
                 stdout_owner_id is null
                 or stdout_owner_id = $2
@@ -542,6 +546,7 @@ impl PgSessionStore {
                 updated_at = now()
             where execution_id = $1
               and status in ($4, $5)
+              and blocking_reason is null
               and (
                 stdout_owner_id is null
                 or stdout_owner_lease_expires_at < now()
@@ -574,6 +579,7 @@ impl PgSessionStore {
             where execution_id = $1
               and stdout_owner_id = $2
               and status in ($4, $5)
+              and blocking_reason is null
             "#,
         )
         .bind(execution_id)
@@ -617,7 +623,9 @@ impl PgSessionStore {
             r#"
             select count(*)
             from session_executions
-            where stdout_owner_id = $1 and status in ($2, $3)
+            where stdout_owner_id = $1
+              and status in ($2, $3)
+              and blocking_reason is null
             "#,
         )
         .bind(owner_id)
@@ -672,7 +680,7 @@ impl PgSessionStore {
             update session_executions
             set status = $2, completed_at = coalesce(completed_at, now()), updated_at = now()
             where execution_id = $1
-            returning execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            returning execution_id, idempotency_key, thread_key, status, blocking_reason, metadata, error, created_at, updated_at, started_at, completed_at
             "#,
         )
         .bind(execution_id)
@@ -694,7 +702,7 @@ impl PgSessionStore {
             update session_executions
             set status = $2, completed_at = coalesce(completed_at, now()), updated_at = now()
             where execution_id = $1 and status in ($3, $4)
-            returning execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            returning execution_id, idempotency_key, thread_key, status, blocking_reason, metadata, error, created_at, updated_at, started_at, completed_at
             "#,
         )
         .bind(execution_id)
@@ -728,7 +736,7 @@ impl PgSessionStore {
             where execution_id = $1
               and status in ($3, $4)
               and stdout_owner_id = $5
-            returning execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            returning execution_id, idempotency_key, thread_key, status, blocking_reason, metadata, error, created_at, updated_at, started_at, completed_at
             "#,
         )
         .bind(execution_id)
@@ -757,7 +765,7 @@ impl PgSessionStore {
             update session_executions
             set status = $2, error = $3, completed_at = coalesce(completed_at, now()), updated_at = now()
             where execution_id = $1
-            returning execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            returning execution_id, idempotency_key, thread_key, status, blocking_reason, metadata, error, created_at, updated_at, started_at, completed_at
             "#,
         )
         .bind(execution_id)
@@ -781,7 +789,7 @@ impl PgSessionStore {
             update session_executions
             set status = $2, error = $3, completed_at = coalesce(completed_at, now()), updated_at = now()
             where execution_id = $1 and status in ($4, $5)
-            returning execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            returning execution_id, idempotency_key, thread_key, status, blocking_reason, metadata, error, created_at, updated_at, started_at, completed_at
             "#,
         )
         .bind(execution_id)
@@ -818,7 +826,7 @@ impl PgSessionStore {
             where execution_id = $1
               and status in ($4, $5)
               and stdout_owner_id = $6
-            returning execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            returning execution_id, idempotency_key, thread_key, status, blocking_reason, metadata, error, created_at, updated_at, started_at, completed_at
             "#,
         )
         .bind(execution_id)
@@ -856,7 +864,7 @@ impl PgSessionStore {
             where execution_id = $1
               and status in ($4, $5)
               and stdout_owner_id = $6
-            returning execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            returning execution_id, idempotency_key, thread_key, status, blocking_reason, metadata, error, created_at, updated_at, started_at, completed_at
             "#,
         )
         .bind(execution_id)
@@ -1706,6 +1714,7 @@ struct SessionExecutionRow {
     idempotency_key: Option<String>,
     thread_key: String,
     status: String,
+    blocking_reason: Option<String>,
     metadata: Value,
     error: Option<String>,
     created_at: OffsetDateTime,
@@ -1816,6 +1825,7 @@ impl TryFrom<SessionExecutionRow> for SessionExecution {
             idempotency_key: row.idempotency_key,
             thread_key: parse_persisted(row.thread_key)?,
             status: parse_persisted(row.status)?,
+            blocking_reason: row.blocking_reason.map(parse_persisted).transpose()?,
             metadata: row.metadata,
             error: row.error,
             created_at: row.created_at,
@@ -1833,6 +1843,7 @@ struct CreateExecutionRow {
     idempotency_key: Option<String>,
     thread_key: String,
     status: String,
+    blocking_reason: Option<String>,
     metadata: Value,
     error: Option<String>,
     created_at: OffsetDateTime,
@@ -1852,6 +1863,7 @@ impl TryFrom<CreateExecutionRow> for CreateExecutionResult {
                 idempotency_key: row.idempotency_key,
                 thread_key: row.thread_key,
                 status: row.status,
+                blocking_reason: row.blocking_reason,
                 metadata: row.metadata,
                 error: row.error,
                 created_at: row.created_at,
