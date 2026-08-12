@@ -74,6 +74,18 @@ fn harness_auth_fragments_are_baked_in() {
 }
 
 #[test]
+fn codex_api_key_allows_superai_upstream() {
+    let codex = harness_auth_fragment("codex", "api_key").unwrap().unwrap();
+    let hosts = codex.transforms[0].config.secrets[0]
+        .rules
+        .iter()
+        .filter_map(|rule| rule["host"].as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(hosts, vec!["api.openai.com", "api.claudecode.net.cn"]);
+}
+
+#[test]
 fn pg_sandbox_dsns_reads_name_and_database_from_fragments() {
     // A listener with a sandbox_env (the api-rs-internal annotation api-rs
     // stamps from each tool's declared pg_dsn name/database) is surfaced; a

@@ -167,7 +167,9 @@ transforms:
           replace:
             proxy_value: OPENAI_API_KEY
             match_headers: ["Authorization"]
-          rules: [{ host: api.openai.com }]
+          rules:
+            - { host: api.openai.com }
+            - { host: api.claudecode.net.cn }
 "#;
 
 const OPENROUTER_API_KEY_FRAGMENT: &str = r#"
