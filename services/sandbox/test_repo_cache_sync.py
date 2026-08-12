@@ -3,9 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import repo_cache_sync
 
@@ -170,6 +172,27 @@ class RepoCacheSyncTest(unittest.TestCase):
 
             self.assertIn(hashlib.sha256(clone_url.encode()).hexdigest(), fingerprint)
             self.assertNotIn(clone_url, fingerprint)
+
+    def test_git_failure_redacts_clone_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            clone_url = "http://git.example.test:82/acme/centaur.git"
+            sync = self.make_sync(
+                Path(tmp),
+                repository_clone_urls={"acme/centaur": clone_url},
+            )
+            failure = subprocess.CalledProcessError(
+                128,
+                ["git", "clone"],
+                stderr=f"fatal: unable to access '{clone_url}': connection refused",
+            )
+
+            with mock.patch("repo_cache_sync.subprocess.run", side_effect=failure):
+                with self.assertRaises(RuntimeError) as raised:
+                    sync._run_git(["clone", clone_url], "clone acme/centaur")
+
+            message = str(raised.exception)
+            self.assertIn("<redacted-clone-url>", message)
+            self.assertNotIn(clone_url, message)
 
     def test_write_ready_preserves_readiness_format(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

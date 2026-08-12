@@ -243,6 +243,12 @@ class RepoCacheSync:
             )
         except subprocess.CalledProcessError as exc:
             stderr = exc.stderr.strip()
+            for repo in self.repositories:
+                try:
+                    clone_url = self.repository_clone_url(repo)
+                except ValueError:
+                    continue
+                stderr = stderr.replace(clone_url, "<redacted-clone-url>")
             detail = f": {stderr}" if stderr else ""
             raise RuntimeError(f"{label} failed{detail}") from exc
 
