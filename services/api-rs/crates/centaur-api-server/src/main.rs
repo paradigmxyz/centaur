@@ -83,9 +83,12 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
     let mut runtime = SessionRuntime::new(store.clone(), sandbox_runtime, iron_control.registrar)
         .with_openai_session_title_generator_from_env();
     if let Some((manager, credential_ref, reconcile_interval)) = args.workspace_manager().await? {
-        runtime = runtime.with_workspace_manager(manager, credential_ref);
+        runtime = runtime
+            .with_workspace_manager(manager.clone(), credential_ref.clone())
+            .with_gitlab_publisher(manager, credential_ref);
         runtime.spawn_workspace_reconciliation(reconcile_interval);
         runtime.spawn_changeset_reconciliation(reconcile_interval);
+        runtime.spawn_publication_reconciliation(reconcile_interval);
     }
     runtime = runtime.with_personas(args.persona_registry()?);
     let sandbox_capacity_config = args.sandbox_capacity_config();

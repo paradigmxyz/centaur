@@ -233,6 +233,80 @@ pub struct CompleteChangeSetRepository {
     pub failure_message: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DevelopmentPublishBatch {
+    pub publish_batch_id: String,
+    pub changeset_id: String,
+    pub approver_principal_id: String,
+    pub idempotency_key: String,
+    pub state: PublishBatchState,
+    pub items: Vec<DevelopmentPublishItem>,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DevelopmentPublishItem {
+    pub publish_item_id: String,
+    pub changeset_repository_id: String,
+    pub repository_id: RepositoryId,
+    pub source_branch: String,
+    pub target_branch: String,
+    pub head_sha: String,
+    pub state: PublishItemState,
+    pub attempt_count: i32,
+    pub remote_branch_sha: Option<String>,
+    pub merge_request_iid: Option<i64>,
+    pub merge_request_url: Option<String>,
+    pub failure_code: Option<String>,
+    pub failure_message: Option<String>,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApprovePublication {
+    pub changeset_id: String,
+    pub approver_principal_id: String,
+    pub is_admin: bool,
+    pub idempotency_key: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RetryPublication {
+    pub publish_batch_id: String,
+    pub requested_by_principal_id: String,
+    pub is_admin: bool,
+    pub idempotency_key: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublishItemClaim {
+    pub batch: DevelopmentPublishBatch,
+    pub item: DevelopmentPublishItem,
+    pub workspace: SessionWorkspace,
+    pub repository: WorkspaceRepositorySnapshot,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompletePublishItem {
+    pub publish_batch_id: String,
+    pub publish_item_id: String,
+    pub lease_owner: String,
+    pub remote_branch_sha: String,
+    pub merge_request_iid: i64,
+    pub merge_request_url: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FailPublishItem {
+    pub publish_batch_id: String,
+    pub publish_item_id: String,
+    pub lease_owner: String,
+    pub failure_code: String,
+    pub failure_message: String,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CollectedChangeSetRepositoryState {
     Unchanged,
@@ -354,6 +428,7 @@ state_enum!(WorkspaceState {
     AwaitingSelection,
     Provisioning,
     Collecting,
+    Publishing,
     Ready,
     Failed,
 });
@@ -385,6 +460,8 @@ impl WorkspaceState {
                 | (Self::Failed | Self::Ready, Self::Provisioning)
                 | (Self::Ready, Self::Collecting)
                 | (Self::Collecting, Self::Ready)
+                | (Self::Ready, Self::Publishing)
+                | (Self::Publishing, Self::Ready)
         );
         allowed
             .then_some(next)

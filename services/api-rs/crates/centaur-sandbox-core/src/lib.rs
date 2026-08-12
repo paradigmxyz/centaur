@@ -22,9 +22,10 @@ pub use spec::{
     SandboxCapabilities, SandboxSpec,
 };
 pub use workspace::{
-    CollectedWorkspaceRepository, FailedWorkspaceRepository, PreparedWorkspaceRepository,
-    WorkspaceCollection, WorkspaceCollectionRepository, WorkspaceCollectionRequest,
-    WorkspaceCollectionState, WorkspaceError, WorkspaceManager, WorkspaceMount,
-    WorkspacePreparation, WorkspacePreparationRequest, WorkspaceRepository,
+    CollectedWorkspaceRepository, FailedWorkspaceRepository, GitLabMergeRequestRequest,
+    GitLabMergeRequestResult, GitLabPublisher, GitLabPushRequest, GitLabPushResult,
+    PreparedWorkspaceRepository, WorkspaceCollection, WorkspaceCollectionRepository,
+    WorkspaceCollectionRequest, WorkspaceCollectionState, WorkspaceError, WorkspaceManager,
+    WorkspaceMount, WorkspacePreparation, WorkspacePreparationRequest, WorkspaceRepository,
     repository_relative_path,
 };

@@ -41,6 +41,12 @@ pub struct DecideDevelopmentSelectionRequest {
 pub struct CreateAddRepositorySelectionRequest {}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublicationRequest {
+    pub idempotency_key: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CreateSessionRequest {
     pub harness_type: HarnessType,
     pub persona_id: Option<String>,

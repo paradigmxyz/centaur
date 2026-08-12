@@ -1,6 +1,7 @@
 //! SQLx-backed session repository.
 
 mod development;
+mod publication;
 
 use std::{collections::BTreeMap, str::FromStr, time::Duration};
 
@@ -27,7 +28,7 @@ pub const SESSION_EVENTS_CHANNEL: &str = "centaur_session_events";
 const DEFAULT_MAX_CONNECTIONS: u32 = 500;
 const DEVELOPMENT_EXECUTION_LOCK_SEED: i64 = 749_203;
 
-async fn lock_development_execution_boundary(
+pub(crate) async fn lock_development_execution_boundary(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     thread_key: &ThreadKey,
 ) -> Result<(), SessionStoreError> {

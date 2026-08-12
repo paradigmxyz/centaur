@@ -340,33 +340,33 @@ git commit -m "feat: collect immutable workspace changesets"
 - Produces `PublicationService::approve`, `retry_failed`, and `reconcile`.
 - Produces one deterministic source branch and one GitLab MR per changed repository.
 
-- [ ] **Step 1: Write failing authorization and state tests**
+- [x] **Step 1: Write failing authorization and state tests**
 
 Prove initiator and Centaur admin may approve; visible group members and shared-thread readers may not. Require clean exact HEAD for a new batch, one active batch per ChangeSet, immutable approver/idempotency data, and retry selection containing failed items only.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 ```bash
 cargo test -p centaur-session-runtime publication
 ```
 
-- [ ] **Step 3: Implement durable approval and leases**
+- [x] **Step 3: Implement durable approval and leases**
 
 Persist the batch/items before external work. Acquire a Workspace publication lease that blocks new Executions for the attempt. Release it only after every started item has a durable terminal or retryable state.
 
-- [ ] **Step 4: Write failing Publisher integration tests**
+- [x] **Step 4: Write failing Publisher integration tests**
 
 Against a temporary bare Git remote and fake GitLab API, require exact-SHA refspec, deterministic `centaur/<workspace-short>/<changeset-short>` branch, `core.hooksPath` disabled, remote-branch content verification, MR lookup before create, no agent code execution, and adoption after simulated crashes following push and MR creation.
 
-- [ ] **Step 5: Implement Publisher and retry reconciliation**
+- [x] **Step 5: Implement Publisher and retry reconciliation**
 
 Publisher reads the token only from its injected token-file reference. It pushes the stored SHA, verifies the remote branch, creates/finds the MR with a ChangeSet marker, and persists each external identity immediately. Retry accepts approved partial batches after Workspace advances but can publish only the originally recorded object.
 
-- [ ] **Step 6: Add API tests and delivery events**
+- [x] **Step 6: Add API tests and delivery events**
 
 Add approve/retry/get endpoints with one-time idempotency keys and durable `development.publish_*` events for platform renderers.
 
-- [ ] **Step 7: Verify and commit**
+- [x] **Step 7: Verify and commit**
 
 ```bash
 cargo +nightly fmt --all --check

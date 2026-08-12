@@ -11,8 +11,8 @@ use axum::{
 use centaur_session_core::{
     MessageRole, ThreadKey,
     development::{
-        AcceptDevelopmentTask, ConfirmRepositorySelection, RepositoryId, RepositorySelectionDraft,
-        RepositorySelectionOutcome, ResolvedRepository,
+        AcceptDevelopmentTask, ApprovePublication, ConfirmRepositorySelection, RepositoryId,
+        RepositorySelectionDraft, RepositorySelectionOutcome, ResolvedRepository, RetryPublication,
     },
 };
 use thiserror::Error;
@@ -24,7 +24,7 @@ use crate::{
     routes::AppState,
     types::{
         AcceptDevelopmentTaskRequest, ConfirmDevelopmentSelectionRequest,
-        CreateAddRepositorySelectionRequest, DecideDevelopmentSelectionRequest,
+        CreateAddRepositorySelectionRequest, DecideDevelopmentSelectionRequest, PublicationRequest,
     },
 };
 
@@ -101,6 +101,18 @@ pub(crate) fn development_router() -> Router<AppState> {
             get(get_changeset_artifact),
         )
         .route(
+            "/api/development/changesets/{changeset_id}/publish",
+            post(approve_publication),
+        )
+        .route(
+            "/api/development/publish-batches/{publish_batch_id}",
+            get(get_publish_batch),
+        )
+        .route(
+            "/api/development/publish-batches/{publish_batch_id}/retry",
+            post(retry_publication),
+        )
+        .route(
             "/api/development/selections/{selection_flow_id}/confirm",
             post(confirm_development_selection),
         )
@@ -116,6 +128,63 @@ pub(crate) fn development_router() -> Router<AppState> {
             "/api/development/sessions/{thread_key}/repositories",
             post(create_add_repository_selection),
         )
+}
+
+async fn approve_publication(
+    State(state): State<AppState>,
+    Path(changeset_id): Path<String>,
+    headers: HeaderMap,
+    request: Result<Json<PublicationRequest>, JsonRejection>,
+) -> Result<Json<centaur_session_core::development::DevelopmentPublishBatch>, ApiError> {
+    let principal = state.development_authorizer().authorize(&headers)?;
+    let Json(request) = development_json(request)?;
+    let batch = state
+        .runtime()?
+        .approve_publication(&ApprovePublication {
+            changeset_id,
+            approver_principal_id: principal.principal_id,
+            is_admin: principal.is_admin,
+            idempotency_key: request.idempotency_key,
+        })
+        .await?;
+    Ok(Json(batch))
+}
+
+async fn retry_publication(
+    State(state): State<AppState>,
+    Path(publish_batch_id): Path<String>,
+    headers: HeaderMap,
+    request: Result<Json<PublicationRequest>, JsonRejection>,
+) -> Result<Json<centaur_session_core::development::DevelopmentPublishBatch>, ApiError> {
+    let principal = state.development_authorizer().authorize(&headers)?;
+    let Json(request) = development_json(request)?;
+    let batch = state
+        .runtime()?
+        .retry_failed_publication(&RetryPublication {
+            publish_batch_id,
+            requested_by_principal_id: principal.principal_id,
+            is_admin: principal.is_admin,
+            idempotency_key: request.idempotency_key,
+        })
+        .await?;
+    Ok(Json(batch))
+}
+
+async fn get_publish_batch(
+    State(state): State<AppState>,
+    Path(publish_batch_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<centaur_session_core::development::DevelopmentPublishBatch>, ApiError> {
+    let principal = state.development_authorizer().authorize(&headers)?;
+    let batch = state
+        .runtime()?
+        .get_publish_batch(
+            &publish_batch_id,
+            &principal.principal_id,
+            principal.is_admin,
+        )
+        .await?;
+    Ok(Json(batch))
 }
 
 async fn get_changeset(
@@ -326,8 +395,9 @@ mod tests {
     };
     use centaur_iron_control::{IronControlError, Principal};
     use centaur_sandbox_core::{
-        ObservedSandbox, SandboxBackend, SandboxError, SandboxHandle, SandboxId, SandboxIo,
-        SandboxResult, SandboxSpec, SandboxStatus,
+        GitLabMergeRequestRequest, GitLabMergeRequestResult, GitLabPublisher, GitLabPushRequest,
+        GitLabPushResult, ObservedSandbox, SandboxBackend, SandboxError, SandboxHandle, SandboxId,
+        SandboxIo, SandboxResult, SandboxSpec, SandboxStatus, WorkspaceError,
     };
     use centaur_session_core::development::{
         CollectedChangeSetRepositoryState, CompleteChangeSetCollection,
@@ -424,6 +494,33 @@ mod tests {
 
     struct TestResolver;
 
+    struct TestPublisher;
+
+    #[async_trait]
+    impl GitLabPublisher for TestPublisher {
+        async fn push(
+            &self,
+            request: GitLabPushRequest,
+        ) -> Result<GitLabPushResult, WorkspaceError> {
+            Ok(GitLabPushResult {
+                remote_branch_sha: request.head_sha,
+            })
+        }
+
+        async fn ensure_merge_request(
+            &self,
+            request: GitLabMergeRequestRequest,
+        ) -> Result<GitLabMergeRequestResult, WorkspaceError> {
+            Ok(GitLabMergeRequestResult {
+                merge_request_iid: i64::try_from(request.project_id).unwrap(),
+                merge_request_url: format!(
+                    "http://git.example.internal/group/project/-/merge_requests/{}",
+                    request.project_id
+                ),
+            })
+        }
+    }
+
     struct TestAuthorizer;
 
     impl DevelopmentAuthorizer for TestAuthorizer {
@@ -489,7 +586,8 @@ mod tests {
             store.clone(),
             SandboxRuntime::backend(Arc::new(TestBackend), SandboxSpec::new("test")),
             TestRegistrar,
-        );
+        )
+        .with_gitlab_publisher(Arc::new(TestPublisher), "gitlab-publisher-token");
         Some((
             build_router_with_app_state(
                 AppState::ready_with_pool(runtime, None, Some(pool))
@@ -523,15 +621,24 @@ mod tests {
     }
 
     async fn post(app: axum::Router, uri: &str, body: Value) -> (StatusCode, Value) {
+        post_with_bearer(app, uri, body, None).await
+    }
+
+    async fn post_with_bearer(
+        app: axum::Router,
+        uri: &str,
+        body: Value,
+        bearer: Option<&str>,
+    ) -> (StatusCode, Value) {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(bearer) = bearer {
+            request = request.header(header::AUTHORIZATION, format!("Bearer {bearer}"));
+        }
         let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(uri)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
+            .oneshot(request.body(Body::from(body.to_string())).unwrap())
             .await
             .unwrap();
         let status = response.status();
@@ -846,5 +953,157 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(headers[header::CONTENT_TYPE], "text/x-diff; charset=utf-8");
         assert_eq!(body, patch);
+    }
+
+    #[tokio::test]
+    async fn publication_routes_derive_approver_from_auth_and_publish_exact_changeset() {
+        use sha2::{Digest, Sha256};
+
+        let Some((app, store)) = test_app().await else {
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4().to_string();
+        let (_, accepted) = post(app.clone(), "/api/development/tasks", intake_body(&suffix)).await;
+        let workspace_id = accepted["workspace_id"].as_str().unwrap();
+        let execution_id = accepted["execution_id"].as_str().unwrap();
+        store
+            .confirm_repository_selection(&ConfirmRepositorySelection {
+                selection_flow_id: accepted["selection_flow_id"].as_str().unwrap().to_owned(),
+                expected_version: 1,
+                decided_by_principal_id: "principal-1".to_owned(),
+                repositories: vec![ResolvedRepository {
+                    repository_id: "gitlab:42".parse().unwrap(),
+                    display_name: "Project".to_owned(),
+                    path_with_namespace: "group/project".to_owned(),
+                    default_branch: "main".to_owned(),
+                    clone_url: "http://git.example.internal:82/group/project.git".to_owned(),
+                    relative_path: "repos/42-project".to_owned(),
+                }],
+            })
+            .await
+            .unwrap();
+        let workspace_claim = store
+            .claim_workspace_preparation(
+                workspace_id,
+                "workspace-owner",
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        let base_sha = "a".repeat(40);
+        store
+            .complete_workspace_preparation(&CompleteWorkspacePreparation {
+                workspace_id: workspace_id.to_owned(),
+                attempt: workspace_claim.workspace.preparation_attempt,
+                lease_owner: "workspace-owner".to_owned(),
+                storage_ref: "workspace-api-publication".to_owned(),
+                prepared: vec![PreparedRepositorySnapshot {
+                    repository_id: "gitlab:42".parse().unwrap(),
+                    base_sha: base_sha.clone(),
+                    local_branch: "centaur/publication".to_owned(),
+                    head_sha: base_sha.clone(),
+                }],
+                failed: Vec::new(),
+            })
+            .await
+            .unwrap();
+        store.complete_execution(execution_id).await.unwrap();
+        let changeset = store
+            .begin_changeset_collection(execution_id, "collector")
+            .await
+            .unwrap()
+            .unwrap();
+        let patch = b"diff --git a/README.md b/README.md\n".to_vec();
+        let head_sha = "b".repeat(40);
+        let completed = store
+            .complete_changeset_collection(&CompleteChangeSetCollection {
+                changeset_id: changeset.changeset_id,
+                lease_owner: "collector".to_owned(),
+                repositories: vec![CompleteChangeSetRepository {
+                    repository_id: "gitlab:42".parse().unwrap(),
+                    state: CollectedChangeSetRepositoryState::Changed,
+                    base_sha: base_sha.clone(),
+                    recorded_head_sha: base_sha,
+                    head_sha: Some(head_sha.clone()),
+                    commit_metadata: json!([{"sha": head_sha}]),
+                    changed_file_count: 1,
+                    additions: 1,
+                    deletions: 0,
+                    patch_hash: Some(format!("sha256:{}", hex::encode(Sha256::digest(&patch)))),
+                    patch,
+                    test_evidence: json!([]),
+                    failure_code: None,
+                    failure_message: None,
+                }],
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let publish_uri = format!(
+            "/api/development/changesets/{}/publish",
+            completed.changeset_id
+        );
+        assert_eq!(
+            post_with_bearer(
+                app.clone(),
+                &publish_uri,
+                json!({"idempotency_key": "publish-unauthenticated"}),
+                None,
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            post_with_bearer(
+                app.clone(),
+                &publish_uri,
+                json!({"idempotency_key": "publish-forbidden"}),
+                Some("principal-2"),
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            post_with_bearer(
+                app.clone(),
+                &publish_uri,
+                json!({"idempotency_key": "publish-invalid", "approver_principal_id": "admin-1"}),
+                Some("principal-1"),
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        let (status, approved) = post_with_bearer(
+            app.clone(),
+            &publish_uri,
+            json!({"idempotency_key": "publish-valid"}),
+            Some("principal-1"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(approved["approver_principal_id"], "principal-1");
+        let batch_id = approved["publish_batch_id"].as_str().unwrap();
+        let batch_uri = format!("/api/development/publish-batches/{batch_id}");
+        assert_eq!(
+            get(app.clone(), &batch_uri, Some("principal-2")).await.0,
+            StatusCode::FORBIDDEN
+        );
+
+        let mut body = Value::Null;
+        for _ in 0..100 {
+            let (status, _, bytes) = get(app.clone(), &batch_uri, Some("principal-1")).await;
+            assert_eq!(status, StatusCode::OK);
+            body = serde_json::from_slice(&bytes).unwrap();
+            if body["state"] == "succeeded" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(body["state"], "succeeded");
+        assert_eq!(body["items"][0]["head_sha"], "b".repeat(40));
+        assert_eq!(body["items"][0]["merge_request_iid"], 42);
     }
 }

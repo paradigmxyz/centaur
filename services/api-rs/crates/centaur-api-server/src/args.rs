@@ -28,7 +28,7 @@ use centaur_sandbox_agent_k8s::{
     IronProxyConfig, KubeWorkspaceConfig, KubeWorkspaceManager, OtlpEgressTarget, Toleration,
     ToolSource, ToolsConfig,
 };
-use centaur_sandbox_core::{Mount, MountKind, ResourceRequirements, SandboxSpec, WorkspaceManager};
+use centaur_sandbox_core::{Mount, MountKind, ResourceRequirements, SandboxSpec};
 use centaur_sandbox_local::LocalSandboxBackend;
 use centaur_sandbox_manager::{SandboxReaperConfig, WarmPoolConfig};
 use centaur_session_core::HarnessType;
@@ -123,7 +123,7 @@ impl Args {
 
     pub(crate) async fn workspace_manager(
         &self,
-    ) -> Result<Option<(Arc<dyn WorkspaceManager>, String, Duration)>, ServerError> {
+    ) -> Result<Option<(Arc<KubeWorkspaceManager>, String, Duration)>, ServerError> {
         if self.workspace.development_workspace_enabled
             && (self.gitlab.base_url.is_none() || self.gitlab.token_file.is_none())
         {
@@ -254,7 +254,7 @@ impl WorkspaceArgs {
     async fn manager(
         &self,
         sandbox: &SandboxArgs,
-    ) -> Result<Option<(Arc<dyn WorkspaceManager>, String, Duration)>, ServerError> {
+    ) -> Result<Option<(Arc<KubeWorkspaceManager>, String, Duration)>, ServerError> {
         if !self.development_workspace_enabled {
             return Ok(None);
         }

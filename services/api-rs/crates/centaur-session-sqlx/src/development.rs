@@ -348,7 +348,8 @@ impl PgSessionStore {
         let workspace_updated = sqlx::query(
             r#"
             update session_workspaces
-               set state = 'provisioning', updated_at = now()
+               set state = 'provisioning', workspace_revision = workspace_revision + 1,
+                   updated_at = now()
              where workspace_id = $1 and state = $2
             "#,
         )
@@ -1344,10 +1345,33 @@ impl PgSessionStore {
         .bind(summary)
         .execute(&mut *tx)
         .await?;
-        sqlx::query(
-            "update session_workspaces set state = 'ready', updated_at = now() where workspace_id = $1 and state = 'collecting'",
+        let changed_head_count = result
+            .repositories
+            .iter()
+            .filter(|repository| {
+                repository.state
+                    == centaur_session_core::development::CollectedChangeSetRepositoryState::Changed
+            })
+            .count();
+        let workspace_revision = sqlx::query_scalar::<_, i64>(
+            r#"
+            update session_workspaces
+               set state = 'ready',
+                   workspace_revision = workspace_revision + case when $2 > 0 then 1 else 0 end,
+                   updated_at = now()
+             where workspace_id = $1 and state = 'collecting'
+            returning workspace_revision
+            "#,
         )
         .bind(&row.0)
+        .bind(i64::try_from(changed_head_count).unwrap_or(i64::MAX))
+        .fetch_one(&mut *tx)
+        .await?;
+        sqlx::query(
+            "update development_change_sets set workspace_revision = $2 where changeset_id = $1",
+        )
+        .bind(&result.changeset_id)
+        .bind(workspace_revision)
         .execute(&mut *tx)
         .await?;
         let changeset = load_changeset(&mut tx, &result.changeset_id)
@@ -1591,7 +1615,7 @@ async fn put_development_artifact(
         insert into development_artifacts
             (artifact_ref, sha256, media_type, byte_length, content)
         values ($1, $2, $3, $4, $5)
-        on conflict (artifact_ref) do nothing
+        on conflict do nothing
         "#,
     )
     .bind(&artifact_ref)
@@ -1601,6 +1625,24 @@ async fn put_development_artifact(
     .bind(content)
     .execute(&mut **tx)
     .await?;
+    let stored = sqlx::query_as::<_, (String, String, i32, Vec<u8>)>(
+        "select sha256, media_type, byte_length, content from development_artifacts where artifact_ref = $1",
+    )
+    .bind(&artifact_ref)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if stored.as_ref()
+        != Some(&(
+            actual_hash,
+            media_type.to_owned(),
+            byte_length,
+            content.to_vec(),
+        ))
+    {
+        return Err(SessionStoreError::InvalidPersistedValue(
+            "content-addressed development artifact does not match its reference".to_owned(),
+        ));
+    }
     Ok(artifact_ref)
 }
 

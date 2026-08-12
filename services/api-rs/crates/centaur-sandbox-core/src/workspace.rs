@@ -234,6 +234,98 @@ pub struct WorkspaceCollection {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GitLabPushRequest {
+    pub publish_item_id: String,
+    pub attempt: u32,
+    /// Opaque reference interpreted only by the concrete publisher.
+    pub credential_ref: String,
+    pub workspace_id: String,
+    pub storage_ref: String,
+    pub relative_path: String,
+    pub clone_url: String,
+    pub source_branch: String,
+    pub head_sha: String,
+}
+
+impl GitLabPushRequest {
+    pub fn validate(&self) -> Result<(), WorkspaceError> {
+        validate_publish_fields(&[
+            ("publish_item_id", &self.publish_item_id),
+            ("credential_ref", &self.credential_ref),
+            ("workspace_id", &self.workspace_id),
+            ("storage_ref", &self.storage_ref),
+            ("relative_path", &self.relative_path),
+            ("clone_url", &self.clone_url),
+            ("source_branch", &self.source_branch),
+        ])?;
+        if self.attempt == 0 {
+            return Err(WorkspaceError::Invalid(
+                "publication attempt must be positive".to_owned(),
+            ));
+        }
+        validate_publish_relative_path(&self.relative_path)?;
+        validate_clone_url(&self.clone_url)?;
+        validate_source_branch(&self.source_branch)?;
+        validate_git_sha(&self.head_sha)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GitLabPushResult {
+    pub remote_branch_sha: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GitLabMergeRequestRequest {
+    pub publish_item_id: String,
+    pub attempt: u32,
+    /// Opaque reference interpreted only by the concrete publisher.
+    pub credential_ref: String,
+    pub project_id: u64,
+    pub clone_url: String,
+    pub source_branch: String,
+    pub target_branch: String,
+    pub head_sha: String,
+    pub remote_branch_sha: String,
+    pub changeset_id: String,
+}
+
+impl GitLabMergeRequestRequest {
+    pub fn validate(&self) -> Result<(), WorkspaceError> {
+        validate_publish_fields(&[
+            ("publish_item_id", &self.publish_item_id),
+            ("credential_ref", &self.credential_ref),
+            ("clone_url", &self.clone_url),
+            ("source_branch", &self.source_branch),
+            ("target_branch", &self.target_branch),
+            ("changeset_id", &self.changeset_id),
+        ])?;
+        if self.attempt == 0 || self.project_id == 0 {
+            return Err(WorkspaceError::Invalid(
+                "publication attempt and GitLab project ID must be positive".to_owned(),
+            ));
+        }
+        validate_clone_url(&self.clone_url)?;
+        validate_source_branch(&self.source_branch)?;
+        validate_source_branch(&self.target_branch)?;
+        validate_git_sha(&self.head_sha)?;
+        validate_git_sha(&self.remote_branch_sha)?;
+        if self.remote_branch_sha != self.head_sha {
+            return Err(WorkspaceError::Invalid(
+                "remote branch must match the reviewed commit".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GitLabMergeRequestResult {
+    pub merge_request_iid: i64,
+    pub merge_request_url: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CollectedWorkspaceRepository {
     pub repository_id: String,
     pub state: WorkspaceCollectionState,
@@ -303,6 +395,16 @@ pub trait WorkspaceManager: Send + Sync {
     ) -> Result<WorkspaceCollection, WorkspaceError>;
 }
 
+#[async_trait]
+pub trait GitLabPublisher: Send + Sync {
+    async fn push(&self, request: GitLabPushRequest) -> Result<GitLabPushResult, WorkspaceError>;
+
+    async fn ensure_merge_request(
+        &self,
+        request: GitLabMergeRequestRequest,
+    ) -> Result<GitLabMergeRequestResult, WorkspaceError>;
+}
+
 #[derive(Debug, Error)]
 pub enum WorkspaceError {
     #[error("invalid workspace preparation: {0}")]
@@ -356,6 +458,71 @@ fn validate_git_sha(value: &str) -> Result<(), WorkspaceError> {
     if value.len() != 40 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(WorkspaceError::Invalid(
             "workspace collection contains an invalid Git SHA".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_publish_fields(fields: &[(&str, &String)]) -> Result<(), WorkspaceError> {
+    for (name, value) in fields {
+        if value.trim().is_empty() || value.contains(['\0', '\n', '\r']) {
+            return Err(WorkspaceError::Invalid(format!(
+                "publication {name} is invalid"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_publish_relative_path(value: &str) -> Result<(), WorkspaceError> {
+    if !value.starts_with("repos/")
+        || value.starts_with('/')
+        || value
+            .split('/')
+            .any(|component| matches!(component, "" | "." | ".."))
+    {
+        return Err(WorkspaceError::Invalid(
+            "publication repository path is invalid".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_clone_url(value: &str) -> Result<(), WorkspaceError> {
+    let Some((scheme, authority_and_path)) = value.split_once("://") else {
+        return Err(WorkspaceError::Invalid(
+            "publication clone URL must be HTTP(S)".to_owned(),
+        ));
+    };
+    let authority = authority_and_path.split('/').next().unwrap_or_default();
+    if !matches!(scheme, "http" | "https")
+        || authority.is_empty()
+        || authority.contains('@')
+        || !authority_and_path.contains('/')
+    {
+        return Err(WorkspaceError::Invalid(
+            "publication clone URL must be credential-free HTTP(S)".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_source_branch(value: &str) -> Result<(), WorkspaceError> {
+    let invalid = value.starts_with('-')
+        || value.starts_with('/')
+        || value.ends_with('/')
+        || value.ends_with('.')
+        || value.contains("..")
+        || value.contains("@{")
+        || value.contains("//")
+        || value.bytes().any(|byte| {
+            byte <= b' '
+                || byte == 0x7f
+                || matches!(byte, b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\')
+        });
+    if invalid {
+        return Err(WorkspaceError::Invalid(
+            "publication branch name is invalid".to_owned(),
         ));
     }
     Ok(())
@@ -510,5 +677,48 @@ mod tests {
         ] {
             assert!(invalid.validate().is_err());
         }
+    }
+
+    #[test]
+    fn publisher_requests_reject_unsafe_or_mismatched_git_inputs() {
+        let push = GitLabPushRequest {
+            publish_item_id: "pbi_123".to_owned(),
+            attempt: 1,
+            credential_ref: "gitlab-token".to_owned(),
+            workspace_id: "wsp_123".to_owned(),
+            storage_ref: "workspace-wsp-123".to_owned(),
+            relative_path: "repos/42-project".to_owned(),
+            clone_url: "https://git.example.test/group/project.git".to_owned(),
+            source_branch: "centaur/123/456".to_owned(),
+            head_sha: "a".repeat(40),
+        };
+        assert!(push.validate().is_ok());
+
+        let mut unsafe_url = push.clone();
+        unsafe_url.clone_url =
+            "https://oauth2:secret@git.example.test/group/project.git".to_owned();
+        assert!(unsafe_url.validate().is_err());
+
+        let mut symbolic_sha = push.clone();
+        symbolic_sha.head_sha = "HEAD".to_owned();
+        assert!(symbolic_sha.validate().is_err());
+
+        let merge_request = GitLabMergeRequestRequest {
+            publish_item_id: push.publish_item_id.clone(),
+            attempt: push.attempt,
+            credential_ref: push.credential_ref.clone(),
+            project_id: 42,
+            clone_url: push.clone_url.clone(),
+            source_branch: push.source_branch.clone(),
+            target_branch: "main".to_owned(),
+            head_sha: push.head_sha.clone(),
+            remote_branch_sha: push.head_sha.clone(),
+            changeset_id: "chg_456".to_owned(),
+        };
+        assert!(merge_request.validate().is_ok());
+
+        let mut mismatched = merge_request;
+        mismatched.remote_branch_sha = "b".repeat(40);
+        assert!(mismatched.validate().is_err());
     }
 }

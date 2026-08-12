@@ -1,6 +1,7 @@
 mod changeset;
 mod cleanup;
 mod development;
+mod publisher;
 mod title_generator;
 
 use std::{
@@ -143,6 +144,7 @@ pub struct SessionRuntime {
     session_title_rerun_requested: SessionTitleThreadSet,
     capacity: Option<Arc<SandboxCapacityController>>,
     workspace: Option<development::WorkspaceRuntime>,
+    publisher: Option<publisher::PublisherRuntime>,
     stdout_owner_id: String,
     /// Set once a shutdown handoff begins; fences new stdout-owner claims
     /// so an execution cannot start on a control plane that is about to
@@ -848,6 +850,7 @@ impl SessionRuntime {
             session_title_rerun_requested: Arc::new(DashSet::new()),
             capacity: None,
             workspace: None,
+            publisher: None,
             stdout_owner_id: format!("api-rs-{}", uuid::Uuid::new_v4().simple()),
             shutting_down: Arc::new(AtomicBool::new(false)),
         }

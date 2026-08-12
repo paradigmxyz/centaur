@@ -3,8 +3,9 @@ use std::{collections::BTreeMap, time::Duration};
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use centaur_sandbox_core::{
-    PreparedWorkspaceRepository, WorkspaceCollection, WorkspaceCollectionRequest, WorkspaceError,
-    WorkspaceManager, WorkspacePreparation, WorkspacePreparationRequest,
+    GitLabMergeRequestRequest, GitLabMergeRequestResult, GitLabPublisher, GitLabPushRequest,
+    GitLabPushResult, PreparedWorkspaceRepository, WorkspaceCollection, WorkspaceCollectionRequest,
+    WorkspaceError, WorkspaceManager, WorkspacePreparation, WorkspacePreparationRequest,
 };
 use k8s_openapi::api::{batch::v1::Job, core::v1::PersistentVolumeClaim};
 use kube::{
@@ -28,6 +29,7 @@ const TOKEN_MOUNT_PATH: &str = "/var/run/secrets/centaur-gitlab";
 const TOKEN_FILE_PATH: &str = "/var/run/secrets/centaur-gitlab/token";
 const RESULT_PREFIX: &str = "CENTAUR_WORKSPACE_RESULT=";
 const COLLECTION_READY_MARKER: &str = "CENTAUR_CHANGESET_READY";
+const PUBLICATION_RESULT_PREFIX: &str = "CENTAUR_PUBLICATION_RESULT=";
 const MAX_COLLECTION_RESULT_BYTES: usize = 3 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
@@ -261,6 +263,129 @@ impl WorkspaceManager for KubeWorkspaceManager {
             }
             sleep(Duration::from_millis(500)).await;
         }
+    }
+}
+
+#[async_trait]
+impl GitLabPublisher for KubeWorkspaceManager {
+    async fn push(&self, request: GitLabPushRequest) -> Result<GitLabPushResult, WorkspaceError> {
+        request.validate()?;
+        let job_name = publication_job_name("push", &request.publish_item_id, request.attempt);
+        let job = build_push_job(&request, &self.config)?;
+        self.ensure_publication_job(&job_name, job).await?;
+        self.wait_for_publication_result(&job_name, "publisher")
+            .await
+    }
+
+    async fn ensure_merge_request(
+        &self,
+        request: GitLabMergeRequestRequest,
+    ) -> Result<GitLabMergeRequestResult, WorkspaceError> {
+        request.validate()?;
+        let job_name =
+            publication_job_name("merge-request", &request.publish_item_id, request.attempt);
+        let job = build_merge_request_job(&request, &self.config)?;
+        self.ensure_publication_job(&job_name, job).await?;
+        self.wait_for_publication_result(&job_name, "publisher")
+            .await
+    }
+}
+
+impl KubeWorkspaceManager {
+    async fn ensure_publication_job(&self, name: &str, job: Job) -> Result<(), WorkspaceError> {
+        match self.jobs().get(name).await {
+            Ok(_) => Ok(()),
+            Err(error) if is_not_found(&error) => {
+                match self.jobs().create(&PostParams::default(), &job).await {
+                    Ok(_) => Ok(()),
+                    Err(Error::Api(kube_error)) if kube_error.code == 409 => Ok(()),
+                    Err(_) => Err(WorkspaceError::Backend(
+                        "GitLab publisher could not start".to_owned(),
+                    )),
+                }
+            }
+            Err(_) => Err(WorkspaceError::Backend(
+                "GitLab publisher lookup failed".to_owned(),
+            )),
+        }
+    }
+
+    async fn wait_for_publication_result<T>(
+        &self,
+        job_name: &str,
+        container: &str,
+    ) -> Result<T, WorkspaceError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let deadline = Instant::now() + self.config.ready_timeout;
+        loop {
+            let status = self
+                .jobs()
+                .get(job_name)
+                .await
+                .map_err(|_| WorkspaceError::Backend("GitLab publisher disappeared".to_owned()))?
+                .status
+                .unwrap_or_default();
+            if status.succeeded.unwrap_or_default() > 0 {
+                return self.read_publication_result(job_name, container).await;
+            }
+            if status.failed.unwrap_or_default() > 0 {
+                return Err(WorkspaceError::Backend(
+                    "GitLab publisher failed".to_owned(),
+                ));
+            }
+            if Instant::now() >= deadline {
+                return Err(WorkspaceError::Backend(
+                    "GitLab publisher timed out".to_owned(),
+                ));
+            }
+            sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    async fn read_publication_result<T>(
+        &self,
+        job_name: &str,
+        container: &str,
+    ) -> Result<T, WorkspaceError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let pods: Api<k8s_openapi::api::core::v1::Pod> =
+            Api::namespaced(self.client.clone(), &self.config.namespace);
+        let listed = pods
+            .list(&ListParams::default().labels(&format!("job-name={job_name}")))
+            .await
+            .map_err(|_| WorkspaceError::Backend("publication result is unavailable".to_owned()))?;
+        let pod_name = listed
+            .items
+            .into_iter()
+            .find_map(|pod| pod.metadata.name)
+            .ok_or_else(|| {
+                WorkspaceError::Backend("publication result pod is missing".to_owned())
+            })?;
+        let logs = pods
+            .logs(
+                &pod_name,
+                &LogParams {
+                    container: Some(container.to_owned()),
+                    tail_lines: Some(5),
+                    ..LogParams::default()
+                },
+            )
+            .await
+            .map_err(|_| WorkspaceError::Backend("publication result is unavailable".to_owned()))?;
+        let encoded = logs
+            .lines()
+            .rev()
+            .find_map(|line| line.strip_prefix(PUBLICATION_RESULT_PREFIX))
+            .ok_or_else(|| WorkspaceError::Backend("publication result is invalid".to_owned()))?;
+        let bytes = STANDARD
+            .decode(encoded)
+            .map_err(|_| WorkspaceError::Backend("publication result is invalid".to_owned()))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|_| WorkspaceError::Backend("publication result is invalid".to_owned()))
     }
 }
 
@@ -561,6 +686,141 @@ fn build_collection_job(
     .map_err(|error| WorkspaceError::Invalid(format!("collection Job: {error}")))
 }
 
+fn build_push_job(
+    request: &GitLabPushRequest,
+    config: &KubeWorkspaceConfig,
+) -> Result<Job, WorkspaceError> {
+    build_publication_job(
+        "push",
+        &request.publish_item_id,
+        request.attempt,
+        request,
+        Some((&request.storage_ref, WORKSPACE_VOLUME)),
+        PUSH_SCRIPT,
+        config,
+    )
+}
+
+fn build_merge_request_job(
+    request: &GitLabMergeRequestRequest,
+    config: &KubeWorkspaceConfig,
+) -> Result<Job, WorkspaceError> {
+    build_publication_job(
+        "merge-request",
+        &request.publish_item_id,
+        request.attempt,
+        request,
+        None,
+        MERGE_REQUEST_SCRIPT,
+        config,
+    )
+}
+
+fn build_publication_job<T: Serialize>(
+    operation: &str,
+    publish_item_id: &str,
+    attempt: u32,
+    request: &T,
+    workspace_volume: Option<(&str, &str)>,
+    script: &str,
+    config: &KubeWorkspaceConfig,
+) -> Result<Job, WorkspaceError> {
+    let name = publication_job_name(operation, publish_item_id, attempt);
+    let encoded = STANDARD.encode(
+        serde_json::to_vec(request)
+            .map_err(|error| WorkspaceError::Invalid(format!("publication input: {error}")))?,
+    );
+    let mut volume_mounts = vec![
+        json!({"name": TOKEN_VOLUME, "mountPath": TOKEN_MOUNT_PATH, "readOnly": true}),
+        json!({"name": "publisher-tmp", "mountPath": "/tmp"}),
+    ];
+    let mut volumes = vec![
+        json!({
+            "name": TOKEN_VOLUME,
+            "secret": {
+                "secretName": publication_credential_ref(request)?,
+                "items": [{"key": config.token_secret_key, "path": "token"}]
+            }
+        }),
+        json!({"name": "publisher-tmp", "emptyDir": {"sizeLimit": "8Mi"}}),
+    ];
+    if let Some((storage_ref, volume_name)) = workspace_volume {
+        volume_mounts.push(json!({
+            "name": volume_name,
+            "mountPath": "/workspace",
+            "readOnly": true
+        }));
+        volumes.push(json!({
+            "name": volume_name,
+            "persistentVolumeClaim": {"claimName": storage_ref}
+        }));
+    }
+    let labels = publication_labels(operation, publish_item_id, attempt);
+    let mut pod_spec = json!({
+        "restartPolicy": "Never",
+        "automountServiceAccountToken": false,
+        "securityContext": {"fsGroup": 1000},
+        "containers": [{
+            "name": "publisher",
+            "image": config.provisioner_image,
+            "imagePullPolicy": config.image_pull_policy,
+            "command": ["python3", "-c", script],
+            "env": [
+                {"name": "CENTAUR_PUBLICATION_REQUEST_B64", "value": encoded},
+                {"name": "CENTAUR_GIT_TOKEN_FILE", "value": TOKEN_FILE_PATH},
+                {"name": "GIT_ASKPASS", "value": "/tmp/centaur-git-askpass"},
+                {"name": "GIT_TERMINAL_PROMPT", "value": "0"},
+                {"name": "GIT_CONFIG_NOSYSTEM", "value": "1"},
+                {"name": "GIT_CONFIG_GLOBAL", "value": "/dev/null"},
+                {"name": "GIT_OPTIONAL_LOCKS", "value": "0"}
+            ],
+            "volumeMounts": volume_mounts,
+            "securityContext": {
+                "allowPrivilegeEscalation": false,
+                "readOnlyRootFilesystem": true,
+                "runAsNonRoot": true,
+                "runAsUser": 1000,
+                "capabilities": {"drop": ["ALL"]}
+            },
+            "resources": {
+                "requests": {"cpu": "25m", "memory": "64Mi"},
+                "limits": {"cpu": "1", "memory": "256Mi"}
+            }
+        }],
+        "volumes": volumes
+    });
+    if let Some(service_account_name) = &config.service_account_name {
+        pod_spec["serviceAccountName"] = json!(service_account_name);
+    }
+    serde_json::from_value(json!({
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {"name": name, "namespace": config.namespace, "labels": labels},
+        "spec": {
+            "backoffLimit": 0,
+            "activeDeadlineSeconds": config.ready_timeout.as_secs().max(1),
+            "ttlSecondsAfterFinished": 3600,
+            "template": {"metadata": {"labels": labels}, "spec": pod_spec}
+        }
+    }))
+    .map_err(|error| WorkspaceError::Invalid(format!("publication Job: {error}")))
+}
+
+fn publication_credential_ref<T: Serialize>(request: &T) -> Result<String, WorkspaceError> {
+    serde_json::to_value(request)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("credential_ref")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+        })
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            WorkspaceError::Invalid("publication credential reference is missing".to_owned())
+        })
+}
+
 fn workspace_labels(request: &WorkspacePreparationRequest) -> BTreeMap<String, String> {
     BTreeMap::from([
         (MANAGED_BY_LABEL.to_owned(), MANAGED_BY_VALUE.to_owned()),
@@ -589,6 +849,25 @@ fn collection_labels(request: &WorkspaceCollectionRequest) -> BTreeMap<String, S
     ])
 }
 
+fn publication_labels(
+    operation: &str,
+    publish_item_id: &str,
+    attempt: u32,
+) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (MANAGED_BY_LABEL.to_owned(), MANAGED_BY_VALUE.to_owned()),
+        (
+            "centaur.ai/publication-operation".to_owned(),
+            label_value(operation),
+        ),
+        (
+            "centaur.ai/publish-item-id".to_owned(),
+            label_value(publish_item_id),
+        ),
+        (WORKSPACE_ATTEMPT_LABEL.to_owned(), attempt.to_string()),
+    ])
+}
+
 fn workspace_pvc_name(workspace_id: &str) -> String {
     resource_name("workspace", workspace_id, None)
 }
@@ -599,6 +878,10 @@ fn workspace_job_name(workspace_id: &str, attempt: u32) -> String {
 
 fn collection_job_name(execution_id: &str) -> String {
     resource_name("changeset", execution_id, None)
+}
+
+fn publication_job_name(operation: &str, publish_item_id: &str, attempt: u32) -> String {
+    resource_name(operation, publish_item_id, Some(attempt))
 }
 
 fn resource_name(prefix: &str, workspace_id: &str, attempt: Option<u32>) -> String {
@@ -868,8 +1151,142 @@ print("CENTAUR_CHANGESET_READY", flush=True)
 time.sleep(3600)
 "##;
 
+const PUSH_SCRIPT: &str = r##"
+import base64, json, os, pathlib, subprocess
+
+request = json.loads(base64.b64decode(os.environ["CENTAUR_PUBLICATION_REQUEST_B64"]))
+workspace = pathlib.Path(os.environ.get("CENTAUR_WORKSPACE_ROOT", "/workspace")).resolve()
+repo = (workspace / request["relative_path"]).resolve()
+if workspace not in repo.parents or not (repo / ".git").is_dir():
+    raise RuntimeError("repository is unavailable")
+askpass = pathlib.Path("/tmp/centaur-git-askpass")
+askpass.write_text("#!/bin/sh\ncase \"$1\" in *Username*) printf '%s\\n' oauth2 ;; *) cat \"$CENTAUR_GIT_TOKEN_FILE\" ;; esac\n")
+askpass.chmod(0o700)
+
+def git(*args, check=True):
+    completed = subprocess.run(
+        ["git", "-c", "credential.helper=", "-c", "core.hooksPath=/dev/null", "-c", "http.followRedirects=false", *args],
+        cwd=repo,
+        env=dict(os.environ),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    if check and completed.returncode != 0:
+        raise RuntimeError("git publication command failed")
+    return completed
+
+head = request["head_sha"]
+branch_ref = "refs/heads/" + request["source_branch"]
+if git("status", "--porcelain=v1", "-z").stdout:
+    raise RuntimeError("repository has uncommitted changes")
+if git("cat-file", "-e", head + "^{commit}", check=False).returncode != 0:
+    raise RuntimeError("reviewed commit is unavailable")
+remote = git("ls-remote", "--heads", request["clone_url"], branch_ref).stdout.strip()
+if remote:
+    remote_sha = remote.split()[0]
+    if remote_sha != head:
+        raise RuntimeError("remote publication branch points to a different commit")
+else:
+    git("push", request["clone_url"], head + ":" + branch_ref)
+remote = git("ls-remote", "--heads", request["clone_url"], branch_ref).stdout.strip()
+remote_sha = remote.split()[0] if remote else ""
+if remote_sha != head:
+    raise RuntimeError("remote publication branch verification failed")
+result = base64.b64encode(json.dumps({"remote_branch_sha": remote_sha}, separators=(",", ":")).encode()).decode()
+print("CENTAUR_PUBLICATION_RESULT=" + result)
+"##;
+
+const MERGE_REQUEST_SCRIPT: &str = r##"
+import base64, json, os, urllib.error, urllib.parse, urllib.request
+
+request = json.loads(base64.b64decode(os.environ["CENTAUR_PUBLICATION_REQUEST_B64"]))
+parsed = urllib.parse.urlsplit(request["clone_url"])
+if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
+    raise RuntimeError("repository URL is invalid")
+host = parsed.hostname
+if parsed.port:
+    host += ":" + str(parsed.port)
+api = parsed.scheme + "://" + host + "/api/v4"
+token = open(os.environ["CENTAUR_GIT_TOKEN_FILE"], "r", encoding="utf-8").read().strip()
+if not token:
+    raise RuntimeError("GitLab token is unavailable")
+headers = {"PRIVATE-TOKEN": token, "Accept": "application/json"}
+project = str(request["project_id"])
+marker = "<!-- centaur-changeset:" + request["changeset_id"] + " -->"
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+opener = urllib.request.build_opener(NoRedirect)
+
+def api_request(method, path, data=None):
+    body = urllib.parse.urlencode(data).encode() if data is not None else None
+    call_headers = dict(headers)
+    if body is not None:
+        call_headers["Content-Type"] = "application/x-www-form-urlencoded"
+    response = opener.open(
+        urllib.request.Request(api + path, data=body, headers=call_headers, method=method),
+        timeout=60,
+    )
+    return json.loads(response.read())
+
+encoded_branch = urllib.parse.quote(request["source_branch"], safe="")
+branch = api_request("GET", "/projects/" + project + "/repository/branches/" + encoded_branch)
+if branch.get("commit", {}).get("id") != request["head_sha"]:
+    raise RuntimeError("GitLab branch no longer matches reviewed commit")
+
+def find_existing():
+    query = urllib.parse.urlencode({
+        "state": "opened",
+        "source_branch": request["source_branch"],
+        "target_branch": request["target_branch"],
+        "per_page": 100,
+    })
+    matches = api_request("GET", "/projects/" + project + "/merge_requests?" + query)
+    for merge_request in matches:
+        if marker in (merge_request.get("description") or ""):
+            return merge_request
+    return None
+
+merge_request = find_existing()
+if merge_request is None:
+    try:
+        merge_request = api_request("POST", "/projects/" + project + "/merge_requests", {
+            "source_branch": request["source_branch"],
+            "target_branch": request["target_branch"],
+            "title": "Centaur changeset " + request["changeset_id"],
+            "description": marker,
+            "remove_source_branch": "false",
+        })
+    except urllib.error.HTTPError as error:
+        if error.code != 409:
+            raise
+        merge_request = find_existing()
+if not merge_request:
+    raise RuntimeError("GitLab merge request could not be reconciled")
+iid = merge_request.get("iid")
+web_url = merge_request.get("web_url")
+if not isinstance(iid, int) or iid <= 0 or not isinstance(web_url, str) or not web_url:
+    raise RuntimeError("GitLab merge request response is invalid")
+result = base64.b64encode(json.dumps({"merge_request_iid": iid, "merge_request_url": web_url}, separators=(",", ":")).encode()).decode()
+print("CENTAUR_PUBLICATION_RESULT=" + result)
+"##;
+
 #[cfg(test)]
 mod tests {
+    use std::{
+        collections::BTreeMap,
+        fs,
+        path::Path,
+        process::Command,
+        sync::{Arc, Mutex},
+    };
+
     use centaur_sandbox_core::{
         PreparedWorkspaceRepository, WorkspaceCollectionRepository, WorkspaceCollectionRequest,
         WorkspaceRepository,
@@ -1029,5 +1446,245 @@ mod tests {
         assert!(COLLECTION_SCRIPT.contains("core.fsmonitor=false"));
         assert!(COLLECTION_SCRIPT.contains("core.untrackedCache=false"));
         assert!(COLLECTION_SCRIPT.contains("--no-ext-diff"));
+    }
+
+    #[test]
+    fn publisher_jobs_mount_credentials_only_in_short_lived_jobs() {
+        let config = KubeWorkspaceConfig::new("centaur", "centaur-api:latest");
+        let push_request = GitLabPushRequest {
+            publish_item_id: "pbi_abc_123".to_owned(),
+            attempt: 2,
+            credential_ref: "gitlab-publisher-token".to_owned(),
+            workspace_id: "wsp_abc_123".to_owned(),
+            storage_ref: "workspace-wsp-abc-123".to_owned(),
+            relative_path: "repos/42-project".to_owned(),
+            clone_url: "http://git.example.test:82/platform/project.git".to_owned(),
+            source_branch: "centaur/abc/def".to_owned(),
+            head_sha: "a".repeat(40),
+        };
+        let push = serde_json::to_value(build_push_job(&push_request, &config).unwrap()).unwrap();
+        assert_eq!(push["metadata"]["name"], "push-pbi-abc-123-a2");
+        let push_pod = &push["spec"]["template"]["spec"];
+        assert_eq!(push_pod["automountServiceAccountToken"], false);
+        assert_eq!(
+            push_pod["containers"][0]["volumeMounts"][2]["readOnly"],
+            true
+        );
+        assert_eq!(
+            push_pod["volumes"][0]["secret"]["secretName"],
+            "gitlab-publisher-token"
+        );
+        let rendered_push = serde_json::to_string(&push).unwrap();
+        assert!(rendered_push.contains("core.hooksPath=/dev/null"));
+        assert!(PUSH_SCRIPT.contains("head + \":\" + branch_ref"));
+        assert!(PUSH_SCRIPT.contains("ls-remote"));
+        assert!(!rendered_push.contains("not-a-real-token"));
+
+        let mr_request = GitLabMergeRequestRequest {
+            publish_item_id: push_request.publish_item_id.clone(),
+            attempt: push_request.attempt,
+            credential_ref: push_request.credential_ref.clone(),
+            project_id: 42,
+            clone_url: push_request.clone_url.clone(),
+            source_branch: push_request.source_branch.clone(),
+            target_branch: "main".to_owned(),
+            head_sha: push_request.head_sha.clone(),
+            remote_branch_sha: push_request.head_sha.clone(),
+            changeset_id: "chg_def_456".to_owned(),
+        };
+        let mr =
+            serde_json::to_value(build_merge_request_job(&mr_request, &config).unwrap()).unwrap();
+        assert_eq!(mr["metadata"]["name"], "merge-request-pbi-abc-123-a2");
+        assert_eq!(
+            mr["spec"]["template"]["spec"]["volumes"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(MERGE_REQUEST_SCRIPT.contains("find_existing()"));
+        assert!(MERGE_REQUEST_SCRIPT.contains("centaur-changeset:"));
+        assert!(MERGE_REQUEST_SCRIPT.contains("repository/branches"));
+    }
+
+    fn git(path: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {:?}: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    async fn run_script(
+        script: &str,
+        request: &impl Serialize,
+        env: BTreeMap<&str, String>,
+    ) -> serde_json::Value {
+        let encoded = STANDARD.encode(serde_json::to_vec(request).unwrap());
+        let script = script.to_owned();
+        let env = env
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), value))
+            .collect::<Vec<_>>();
+        let output = tokio::task::spawn_blocking(move || {
+            let mut command = Command::new("python3");
+            command
+                .arg("-c")
+                .arg(script)
+                .env("CENTAUR_PUBLICATION_REQUEST_B64", encoded)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null");
+            for (name, value) in env {
+                command.env(name, value);
+            }
+            command.output().expect("run publisher script")
+        })
+        .await
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "publisher script: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let encoded = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix(PUBLICATION_RESULT_PREFIX))
+            .expect("publication result");
+        serde_json::from_slice(&STANDARD.decode(encoded).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn publisher_scripts_push_exact_sha_and_adopt_existing_merge_request() {
+        let root = std::env::temp_dir().join(format!("centaur-publisher-{}", uuid::Uuid::new_v4()));
+        let workspace = root.join("workspace");
+        let repo = workspace.join("repos/42-project");
+        let bare = root.join("remote.git");
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init"]);
+        git(&repo, &["config", "user.name", "Centaur Test"]);
+        git(&repo, &["config", "user.email", "centaur@example.test"]);
+        fs::write(repo.join("README.md"), "reviewed\n").unwrap();
+        git(&repo, &["add", "README.md"]);
+        git(&repo, &["commit", "-m", "reviewed change"]);
+        let head = git(&repo, &["rev-parse", "HEAD"]);
+        fs::create_dir_all(repo.join(".git/hooks")).unwrap();
+        fs::write(repo.join(".git/hooks/pre-push"), "#!/bin/sh\nexit 99\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(
+                repo.join(".git/hooks/pre-push"),
+                fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+        }
+        fs::create_dir_all(&bare).unwrap();
+        git(&bare, &["init", "--bare"]);
+        let push_request = GitLabPushRequest {
+            publish_item_id: "pbi_script_test".to_owned(),
+            attempt: 1,
+            credential_ref: "unused".to_owned(),
+            workspace_id: "wsp_script_test".to_owned(),
+            storage_ref: "unused".to_owned(),
+            relative_path: "repos/42-project".to_owned(),
+            clone_url: format!("file://{}", bare.display()),
+            source_branch: "centaur/script/test".to_owned(),
+            head_sha: head.clone(),
+        };
+        let push_result = run_script(
+            PUSH_SCRIPT,
+            &push_request,
+            BTreeMap::from([("CENTAUR_WORKSPACE_ROOT", workspace.display().to_string())]),
+        )
+        .await;
+        assert_eq!(push_result["remote_branch_sha"], head);
+        assert_eq!(
+            git(&bare, &["rev-parse", "refs/heads/centaur/script/test"]),
+            head
+        );
+        let adopted = run_script(
+            PUSH_SCRIPT,
+            &push_request,
+            BTreeMap::from([("CENTAUR_WORKSPACE_ROOT", workspace.display().to_string())]),
+        )
+        .await;
+        assert_eq!(adopted, push_result);
+
+        let state = Arc::new(Mutex::new((0usize, false)));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let expected_head = head.clone();
+        let server_state = state.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let expected_head = expected_head.clone();
+                let server_state = server_state.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+                    let mut stream = stream;
+                    let mut request = vec![0u8; 8192];
+                    let count = stream.read(&mut request).await.unwrap();
+                    let request = String::from_utf8_lossy(&request[..count]);
+                    let request_line = request.lines().next().unwrap_or_default().to_owned();
+                    let (status, body) = if request_line.contains("/repository/branches/") {
+                        ("200 OK", json!({"commit": {"id": expected_head}}))
+                    } else if request_line.starts_with("GET ") {
+                        let created = server_state.lock().unwrap().1;
+                        let body = if created {
+                            json!([{"iid": 7, "web_url": "http://git.example.test/mr/7", "description": "<!-- centaur-changeset:chg_script_test -->"}])
+                        } else {
+                            json!([])
+                        };
+                        ("200 OK", body)
+                    } else {
+                        let mut state = server_state.lock().unwrap();
+                        state.0 += 1;
+                        state.1 = true;
+                        (
+                            "201 Created",
+                            json!({"iid": 7, "web_url": "http://git.example.test/mr/7", "description": "<!-- centaur-changeset:chg_script_test -->"}),
+                        )
+                    };
+                    let body = body.to_string();
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                });
+            }
+        });
+        let token_file = root.join("token");
+        fs::write(&token_file, "test-token\n").unwrap();
+        let mr_request = GitLabMergeRequestRequest {
+            publish_item_id: "pbi_script_test".to_owned(),
+            attempt: 1,
+            credential_ref: "unused".to_owned(),
+            project_id: 42,
+            clone_url: format!("http://{address}/group/project.git"),
+            source_branch: "centaur/script/test".to_owned(),
+            target_branch: "main".to_owned(),
+            head_sha: head.clone(),
+            remote_branch_sha: head,
+            changeset_id: "chg_script_test".to_owned(),
+        };
+        let env = BTreeMap::from([("CENTAUR_GIT_TOKEN_FILE", token_file.display().to_string())]);
+        let first = run_script(MERGE_REQUEST_SCRIPT, &mr_request, env.clone()).await;
+        let second = run_script(MERGE_REQUEST_SCRIPT, &mr_request, env).await;
+        assert_eq!(first, second);
+        assert_eq!(first["merge_request_iid"], 7);
+        assert_eq!(state.lock().unwrap().0, 1, "MR must be created once");
+        server.abort();
+        fs::remove_dir_all(root).unwrap();
     }
 }
