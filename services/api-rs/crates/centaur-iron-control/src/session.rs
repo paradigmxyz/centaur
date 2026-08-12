@@ -80,7 +80,7 @@ impl SessionRegistrar {
             metadata.actor_user_id,
             metadata.slack_team_id,
             metadata.conversation_name,
-        );
+        )?;
         let mut input = principal.to_principal_input();
         apply_slack_dm_email(thread_key, metadata.slack_user_email, &mut input);
         let existing = match self.client.get_principal(&input.foreign_id).await {
@@ -182,7 +182,7 @@ fn is_status(err: &IronControlError, code: u16) -> bool {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use crate::derive_principal;
+    use crate::{PrincipalDerivationError, derive_principal};
     use serde_json::json;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -251,8 +251,9 @@ mod tests {
 
     #[test]
     fn slack_dm_email_applies_only_to_dm_user_principals() {
-        let mut dm_input =
-            derive_principal("slack:T123:D123:ts", Some("U123"), None).to_principal_input();
+        let mut dm_input = derive_principal("slack:T123:D123:ts", Some("U123"), None)
+            .expect("DM principal should be derivable")
+            .to_principal_input();
         apply_slack_dm_email(
             "slack:T123:D123:1773364194.179929",
             Some(" ada@example.com "),
@@ -260,14 +261,49 @@ mod tests {
         );
         assert_eq!(dm_input.slack_email.as_deref(), Some("ada@example.com"));
 
-        let mut channel_input =
-            derive_principal("slack:T123:C123:ts", Some("U123"), None).to_principal_input();
+        let mut channel_input = derive_principal("slack:T123:C123:ts", Some("U123"), None)
+            .expect("channel principal should be derivable")
+            .to_principal_input();
         apply_slack_dm_email(
             "slack:T123:C123:1773364194.179929",
             Some("ada@example.com"),
             &mut channel_input,
         );
         assert_eq!(channel_input.slack_email, None);
+    }
+
+    #[tokio::test]
+    async fn register_session_rejects_slack_dm_without_team_id() {
+        let registrar =
+            SessionRegistrar::new(IronControlClient::new("http://127.0.0.1:1", "test-key"));
+        let metadata = json!({ "slack_user_id": "U123" });
+
+        let error = registrar
+            .register_session("slack:D123:1773364194.179929", Some(&metadata))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            IronControlError::PrincipalDerivation(PrincipalDerivationError::MissingSlackTeamId)
+        ));
+    }
+
+    #[tokio::test]
+    async fn register_session_rejects_slack_dm_without_user_id() {
+        let registrar =
+            SessionRegistrar::new(IronControlClient::new("http://127.0.0.1:1", "test-key"));
+        let metadata = json!({ "slack_team_id": "T123" });
+
+        let error = registrar
+            .register_session("slack:D123:1773364194.179929", Some(&metadata))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            IronControlError::PrincipalDerivation(PrincipalDerivationError::MissingSlackUserId)
+        ));
     }
 
     #[tokio::test]

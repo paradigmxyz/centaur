@@ -909,7 +909,10 @@ function sessionRequesterMetadata(
   identity?: RequesterIdentity
 ): JsonObject {
   const slackUserId = identity?.slackUserId ?? messageRequesterUserId(message)
-  const slackTeamId = identity?.slackTeamId ?? messageSlackTeamId(message)
+  // A resolved identity's team is authoritative even when absent: it may have
+  // been deliberately dropped as unverified (see homeGatedTeamId), so it must
+  // not be resurrected from the raw message.
+  const slackTeamId = identity ? identity.slackTeamId : messageSlackTeamId(message)
   const slackChannelId = message ? slackConversationId(message) : undefined
   const slackUserName = identity?.slackUserName ?? message?.author.userName
   const slackDisplayName = identity?.slackDisplayName ?? message?.author.fullName
@@ -930,6 +933,20 @@ function messageSlackTeamId(message: SlackbotV2ApiMessage | undefined): string |
   return message.teamId || slackTeamId(message.raw) || rawSlackString(message.raw, 'team_id')
 }
 
+// Event-derived teams are trusted only when they name the bot's own workspace:
+// Slack does not document the Connect payloads' `team` as the sender's home
+// workspace, and the DM principal foreign id is keyed on this value. A foreign
+// team must come from the users.info override in resolveRequesterIdentity.
+// Without a resolved home team there is nothing to verify against, so the
+// event team passes through.
+function homeGatedTeamId(
+  teamId: string | undefined,
+  options: SlackbotV2Options
+): string | undefined {
+  if (!options.slackHomeTeamId) return teamId
+  return teamId === options.slackHomeTeamId ? teamId : undefined
+}
+
 function messageRequesterUserId(message: SlackbotV2ApiMessage | undefined): string | undefined {
   if (!message) return undefined
   const rawUserId = rawSlackUserId(message.raw)
@@ -945,7 +962,7 @@ async function resolveRequesterIdentity(
   const identity: RequesterIdentity = {
     slackDisplayName: stringValue(message.author.fullName),
     slackMention: slackUserId ? `<@${slackUserId}>` : undefined,
-    slackTeamId: messageSlackTeamId(message),
+    slackTeamId: homeGatedTeamId(messageSlackTeamId(message), options),
     slackUserId,
     slackUserName: stringValue(message.author.userName)
   }
@@ -967,6 +984,10 @@ async function resolveRequesterIdentity(
     ?? stringValue(profile.real_name)
     ?? stringValue(profile.name)
     ?? identity.slackDisplayName
+  // users.info `team_id` is the user's home workspace — authoritative over
+  // event-derived teams, which can name the delivery workspace for Slack
+  // Connect senders. The DM principal foreign id is keyed on this value.
+  identity.slackTeamId = stringValue(profile.team_id) ?? identity.slackTeamId
   if (
     options.slackHomeTeamId
     && stringValue(profile.team_id) === options.slackHomeTeamId
@@ -990,7 +1011,7 @@ function requesterIdentityCacheKey(
   message: SlackbotV2ApiMessage,
   slackUserId: string
 ): string | undefined {
-  const teamId = message.teamId || slackTeamId(message.raw) || rawSlackString(message.raw, 'team_id')
+  const teamId = messageSlackTeamId(message)
   return teamId ? `slack:${teamId}:${slackUserId}` : `slack:${slackUserId}`
 }
 
@@ -1025,7 +1046,9 @@ function mergeRequesterIdentity(
     slackDisplayName: cached.slackDisplayName ?? fallback.slackDisplayName,
     slackEmail: cached.slackEmail ?? fallback.slackEmail,
     slackMention: fallback.slackMention ?? cached.slackMention,
-    slackTeamId: fallback.slackTeamId ?? cached.slackTeamId,
+    // Cached identities carry the profile-verified team; the fallback's team
+    // is message-derived and home-gated (see homeGatedTeamId).
+    slackTeamId: cached.slackTeamId ?? fallback.slackTeamId,
     slackUserId: fallback.slackUserId ?? cached.slackUserId,
     slackUserName: cached.slackUserName ?? fallback.slackUserName
   }
