@@ -7,14 +7,15 @@
 //! in console or ``centaur-perms`` remain sticky. The principal is derived from
 //! the thread key (see [`crate::derive_principal`]).
 
+use serde_json::Value;
+use std::collections::BTreeMap;
+
 use crate::IronControlClient;
 use crate::error::{IronControlError, Result};
 use crate::models::{Principal, SlackChannelPermissionInput};
 use crate::principal::{
     derive_principal_with_slack_team, is_direct_message, slack_conversation_id,
 };
-use serde_json::Value;
-use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct SessionPrincipalMetadata<'a> {
