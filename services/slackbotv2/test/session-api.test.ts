@@ -191,6 +191,46 @@ describe('Slack home team resolution', () => {
   })
 })
 
+describe('Slack home team API metadata', () => {
+  test('exposes the home team ID throughout durable session requests', async () => {
+    const { fetchFn, requests } = fakeApi()
+
+    await forwardToSessionApi(
+      { ...options(fetchFn), slackHomeTeamId: 'T_HOME' },
+      forwardInput(apiMessage('hello'))
+    )
+
+    const create = requests.find(request => request.url.endsWith('.000100'))?.body as {
+      metadata?: JsonObject
+    }
+    const append = requests.find(request => request.url.endsWith('/messages'))?.body as {
+      messages?: Array<{ metadata?: JsonObject }>
+    }
+    const execute = executeBody(requests) as { metadata?: JsonObject }
+
+    expect(create.metadata?.slack_home_team_id).toBe('T_HOME')
+    expect(append.messages?.[0]?.metadata?.slack_home_team_id).toBe('T_HOME')
+    expect(execute.metadata?.slack_home_team_id).toBe('T_HOME')
+    expect(executeLine(requests).trace_metadata).toEqual(
+      expect.objectContaining({ slack_home_team_id: 'T_HOME' })
+    )
+  })
+
+  test('omits the home team ID when it is unavailable', async () => {
+    const { fetchFn, requests } = fakeApi()
+
+    await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hello')))
+
+    const create = requests.find(request => request.url.endsWith('.000100'))?.body as {
+      metadata?: JsonObject
+    }
+    const execute = executeBody(requests) as { metadata?: JsonObject }
+
+    expect(create.metadata?.slack_home_team_id).toBeUndefined()
+    expect(execute.metadata?.slack_home_team_id).toBeUndefined()
+  })
+})
+
 describe('session event streaming', () => {
   test('passes activity summary events through to the renderer source stream', async () => {
     const encoded = new TextEncoder().encode(
@@ -1118,6 +1158,74 @@ describe('session principal display name', () => {
     expect(createBody(requests).metadata?.slack_conversation_name).toBe('Grace Hopper')
     expect(createBody(requests).metadata?.slack_user_email).toBeUndefined()
     expect(createBody(requests).metadata?.slack_user_id).toBe('U1')
+    expect(createBody(requests).metadata?.slack_team_id).toBe('T2')
+  })
+
+  test('DM metadata falls back to the event team when the profile lookup fails', async () => {
+    const { fetchFn, requests } = fakeApi()
+    const dm = apiMessage('hi')
+    dm.threadId = 'slack:D9:1700000000.000100'
+    dm.raw = { channel: 'D9', team: 'THOST' }
+    dm.teamId = 'THOST'
+    await withSlackStub(
+      () => Response.json({ error: 'user_not_found', ok: false }),
+      async () => {
+        await forwardToSessionApi(
+          { ...slackOptions(fetchFn), slackHomeTeamId: 'THOST' },
+          forwardInput(dm)
+        )
+      }
+    )
+    expect(createBody(requests).metadata?.slack_team_id).toBe('THOST')
+  })
+
+  test('DM metadata drops an unverified foreign event team when the profile lookup fails', async () => {
+    const { fetchFn, requests } = fakeApi()
+    const dm = apiMessage('hi')
+    dm.threadId = 'slack:D9:1700000000.000100'
+    dm.raw = { channel: 'D9', team: 'TEXTERNAL' }
+    dm.teamId = 'TEXTERNAL'
+    await withSlackStub(
+      () => Response.json({ error: 'user_not_found', ok: false }),
+      async () => {
+        await forwardToSessionApi(
+          { ...slackOptions(fetchFn), slackHomeTeamId: 'THOST' },
+          forwardInput(dm)
+        )
+      }
+    )
+    expect(createBody(requests).metadata?.slack_team_id).toBeUndefined()
+    expect(createBody(requests).metadata?.slack_user_id).toBe('U1')
+  })
+
+  test('DM metadata prefers the users.info home team over the event team', async () => {
+    const { fetchFn, requests } = fakeApi()
+    const dm = apiMessage('hi')
+    dm.threadId = 'slack:D9:1700000000.000100'
+    dm.raw = { channel: 'D9', team: 'THOST' }
+    dm.teamId = 'THOST'
+    await withSlackStub(
+      url => {
+        if (url.includes('users.info')) {
+          return Response.json({
+            ok: true,
+            user: {
+              is_stranger: true,
+              profile: { display_name: 'Grace Hopper' },
+              team_id: 'TEXTERNAL'
+            }
+          })
+        }
+        return Response.json({ ok: true, profile: { display_name: 'Grace Hopper' } })
+      },
+      async () => {
+        await forwardToSessionApi(
+          { ...slackOptions(fetchFn), slackHomeTeamId: 'THOST' },
+          forwardInput(dm)
+        )
+      }
+    )
+    expect(createBody(requests).metadata?.slack_team_id).toBe('TEXTERNAL')
   })
 
   test('falls back to no name when the channel lookup fails', async () => {

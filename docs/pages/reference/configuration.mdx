@@ -16,6 +16,7 @@ Use these as the main extension points:
 | `api.extraEnv` | API feature flags, worker tuning, retention, observability, and deployment-specific overrides. |
 | `apiRs.extraEnv` | Rust API feature flags, telemetry exporter settings, and deployment-specific overrides. |
 | `apiRs.metrics.*` | Prometheus/VictoriaMetrics scrape metadata for the Rust API `/metrics` endpoint. |
+| `console.sqlExporter.*` | SQL Exporter configuration and scrape metadata for Console database metrics. |
 | `slackbot.extraEnv` | Slackbot HTTP, Slack, feedback, and cross-org behavior. |
 | `sandbox.extraEnv` | Extra variables copied into every sandbox pod through `KUBERNETES_SANDBOX_EXTRA_ENV`. |
 | `overlays.sources` | Ordered repo-cache-backed overlay repos for tools, workflows, and skills; subdirs default to `tools`, `workflows`, and `.agents/skills`. |
@@ -51,6 +52,7 @@ Optional required-by-mode variables:
 | `LOCAL_DEV_API_KEY` | API env. | Static local admin/dev key bootstrapped into Postgres. |
 | `TEAMS_BOT_APP_ID`, `TEAMS_BOT_APP_PASSWORD`, `TEAMS_BOT_APP_TENANT_ID` | Local shell before `just bootstrap-secrets`; production Secret. | Required by Teamsbot when `teamsbot.enabled=true`. |
 | `TEAMSBOT_API_KEY` | `secretManager.existingSecretName`; local bootstrap generates it when Teams credentials are present and it is omitted. | Static API key used by Teamsbot. |
+| `CONSOLE_SQLEXPORTER_DATABASE_URL` | `secretManager.existingSecretName`; local bootstrap copies it from the shell when provided. | Database URL for a separately provisioned read-only PostgreSQL role. Required when `console.sqlExporter.enabled=true`. |
 
 ## Console and Permission Control Plane
 
@@ -70,6 +72,10 @@ for the operator workflow.
 | `console.publicUrl` | Helm value. | Public Console origin used for links and MCP authorization metadata. |
 | `console.passwordLoginEnabled` | Helm value, default `true`. | Enables the break-glass email and password login. Disable after SSO is configured for a public Console. |
 | `console.ssoEmailDomains` | Helm value. | Limits Google or Slack SSO admission by email domain. Empty accepts any IdP-authenticated email. |
+| `console.sqlExporter.enabled` | Helm value, default `false`. | Runs one internal SQL Exporter replica, initially configured with Solid Queue collectors. Enable it after the read-only database role and Secret key exist. |
+| `console.sqlExporter.metrics.*` | Helm values. | Configures the SQL Exporter metrics path and Prometheus-compatible scrape annotations. |
+| `console.sqlExporter.databaseUrlSecretKey` | Helm value, default `CONSOLE_SQLEXPORTER_DATABASE_URL`. | Selects the key in `secretManager.existingSecretName` containing the database URL for a dedicated read-only PostgreSQL role. |
+| `networkPolicy.metricsIngressSourceNamespaces` | Helm value. | Allows Prometheus-compatible collectors in the listed namespaces to scrape internal metrics Services. Collectors in the Centaur namespace are always allowed. |
 | `apiRs.syncInfraSecrets`, `IRON_CONTROL_SYNC_INFRA_SECRETS` | Helm value, default `true`. | Upserts the shared `infra` role and its harness/platform secrets. Set false only when another process owns that shared Console state. |
 | `IRON_CONTROL_URL`, `IRON_CONTROL_API_KEY` | Chart-rendered for api-rs; operator shell for `centaur-perms`. | Connects the runtime or CLI to the Console. |
 

@@ -372,7 +372,7 @@ async fn describe_grant(client: &IronControlClient, grant: &Grant) -> Option<Str
 }
 
 async fn principals_show(client: &IronControlClient, args: &PrincipalSelector) -> Result<()> {
-    let identity = principal::resolve_principal(&args.principal, args.slack_user.as_deref());
+    let identity = principal::resolve_principal(&args.principal, args.slack_user.as_deref())?;
     let principal = get_principal_or_fail(client, &identity.foreign_id).await?;
     println!(
         "principal: {} ({}) — {}",
@@ -441,7 +441,7 @@ async fn principals_grant(
         bail!("--grant-id is only valid for `principals revoke`");
     }
     let policy = build_source_policy(cli)?;
-    let identity = principal::resolve_principal(&args.principal, args.slack_user.as_deref());
+    let identity = principal::resolve_principal(&args.principal, args.slack_user.as_deref())?;
     let principal_id = ensure_principal(client, &identity).await?;
     println!("principal: {} ({principal_id})", identity.foreign_id);
 
@@ -492,7 +492,7 @@ async fn principals_revoke(client: &IronControlClient, args: &PrincipalGrantArgs
     {
         bail!("nothing to revoke: pass at least one --tool, --role, --secret, or --grant-id");
     }
-    let identity = principal::resolve_principal(&args.principal, args.slack_user.as_deref());
+    let identity = principal::resolve_principal(&args.principal, args.slack_user.as_deref())?;
     let principal = get_principal_or_fail(client, &identity.foreign_id).await?;
     println!("principal: {} ({})", identity.foreign_id, principal.id);
 

@@ -189,6 +189,34 @@ console:
   worker:
     replicaCount: 1
     resources: {}
+  # Prometheus SQL Exporter for Console database metrics, initially Solid Queue.
+  # This runs as one internal-only replica because every instance would report
+  # the same global database state. The exporter reads a dedicated, read-only DSN
+  # from secretManager.existingSecretName without writing the credential into
+  # its ConfigMap or command-line arguments.
+  sqlExporter:
+    # Enable after CONSOLE_SQLEXPORTER_DATABASE_URL has been added to the
+    # shared infra Secret and its PostgreSQL role has been granted SELECT on
+    # every table queried by a configured collector.
+    enabled: false
+    image:
+      repository: burningalchemist/sql_exporter
+      tag: 0.24.4
+      pullPolicy: IfNotPresent
+    port: 9399
+    # Key in secretManager.existingSecretName containing the complete database
+    # URL for a dedicated read-only PostgreSQL role.
+    databaseUrlSecretKey: CONSOLE_SQLEXPORTER_DATABASE_URL
+    # Used by NetworkPolicy when postgres.enabled=false and the queue database
+    # is externally managed.
+    databasePort: 5432
+    minInterval: 15s
+    scrapeTimeout: 5s
+    metrics:
+      scrapeAnnotations: true
+      path: /metrics
+      annotations: {}
+    resources: {}
 
 # Values for the upstream 1Password Connect subchart
 # (https://github.com/1Password/connect-helm-charts/tree/main/charts/connect).
@@ -695,6 +723,10 @@ networkPolicy:
   enabled: true
   ingressSourceNamespaces: []
   apiIngressSourceNamespaces: []
+  # Namespaces containing Prometheus-compatible collectors that may scrape
+  # internal metrics-only Services such as the Console queue SQL Exporter.
+  # Same-namespace collectors are always admitted.
+  metricsIngressSourceNamespaces: []
   ingressControllerNamespaces:
     - kube-system
   # Port the kubernetes.default ClusterIP forwards to for the API server. The
