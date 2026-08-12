@@ -66,6 +66,7 @@ Thumbs.db
 # Local runtime artifacts
 logs/
 *.log
+.worktrees/
 
 # Node
 node_modules/
