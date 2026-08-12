@@ -26,6 +26,7 @@
         <% if app.description.present? %>
           <p class="line-clamp-2 text-xs text-zinc-500" title="<%= app.description %>"><%= app.description %></p>
         <% end %>
+        <p class="text-xs text-zinc-500"><%= app.always_available? ? "Used automatically whenever you ask the bot." : "Used only in your DMs with the bot." %></p>
         <div class="mt-auto flex items-center justify-between gap-3 pt-1">
           <% credential = @credentials_by_app_id[app.id] %>
           <% if credential %>

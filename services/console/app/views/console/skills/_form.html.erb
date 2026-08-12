@@ -1,0 +1,52 @@
+<%= form_with model: [ :console, skill ],
+              class: "space-y-5" do |form| %>
+  <% if skill.errors.any? %>
+    <div class="rounded border border-red-500/30 bg-red-500/[0.08] px-4 py-3 text-sm text-red-200">
+      <p class="font-semibold">Could not save this skill:</p>
+      <ul class="mt-2 list-disc space-y-1 pl-5">
+        <% skill.errors.full_messages.each do |message| %>
+          <li><%= message %></li>
+        <% end %>
+      </ul>
+    </div>
+  <% end %>
+
+  <%= form.hidden_field :lock_version if skill.persisted? %>
+  <div class="grid gap-5 lg:grid-cols-2">
+    <div>
+      <%= form.label :name, class: "mb-2 block text-sm font-medium text-zinc-200" %>
+      <%= form.text_field :name,
+            required: true,
+            maxlength: 64,
+            autofocus: !skill.persisted?,
+            placeholder: "incident-triage",
+            class: "form-input" %>
+      <p class="mt-2 text-xs text-zinc-500">Globally unique. Use lowercase letters, numbers, and hyphens.</p>
+    </div>
+    <div>
+      <%= form.label :description, class: "mb-2 block text-sm font-medium text-zinc-200" %>
+      <%= form.text_field :description,
+            required: true,
+            placeholder: "What this skill does and when an agent should use it",
+            class: "form-input" %>
+      <p class="mt-2 text-xs text-zinc-500">Agents use this description to decide when the skill applies.</p>
+    </div>
+  </div>
+
+  <div>
+    <%= form.label :content, "Instructions", class: "mb-2 block text-sm font-medium text-zinc-200" %>
+    <%= form.text_area :content,
+          rows: 24,
+          required: true,
+          spellcheck: false,
+          class: "min-h-[32rem] w-full resize-y rounded-lg border border-ink-600 bg-ink-900 px-4 py-3 font-mono text-sm leading-6 text-zinc-100 outline-none focus:border-centaur-500 focus:ring-1 focus:ring-centaur-500" %>
+    <p class="mt-2 text-xs text-zinc-500">Markdown instructions loaded when the skill is selected. The complete generated SKILL.md may be up to 64 KiB.</p>
+  </div>
+
+  <div class="flex flex-wrap items-center gap-3">
+    <%= form.submit skill.persisted? ? "Save skill" : "Create skill",
+          class: "cursor-pointer rounded bg-centaur-500 px-4 py-2 text-sm font-semibold text-ink-900 hover:bg-centaur-400" %>
+    <%= link_to "Cancel", skill.persisted? ? console_skill_path(skill.oid) : console_skills_path,
+          class: "rounded border border-ink-600 px-4 py-2 text-sm text-zinc-300 hover:border-ink-500 hover:text-zinc-100" %>
+  </div>
+<% end %>

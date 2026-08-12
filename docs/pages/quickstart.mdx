@@ -100,6 +100,11 @@ Check the namespace:
 just status
 ```
 
+The local bootstrap also creates the Console admin, API key, and encryption
+secrets. Before inviting more users or granting tools, review default roles and
+sandbox capabilities in
+[Advanced Permissioning](/secrets/advanced-permissioning#configure-the-console).
+
 ## 4. Verify the API
 
 The API exposes localhost inside its own deployment. Localhost bypasses external

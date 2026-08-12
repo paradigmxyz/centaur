@@ -126,17 +126,17 @@ class SecretSourceTest < ActiveSupport::TestCase
     assert s.valid?, s.errors.full_messages.inspect
   end
 
-  test "token_broker source is valid referencing a credential by namespace + foreign_id" do
+  test "token_broker source is valid referencing a credential by foreign_id" do
     cred = make_broker_credential(access_token: nil)
     s = new_source(source_type: "token_broker",
-                   config: { "credential_id" => cred.foreign_id, "credential_namespace" => cred.namespace })
+                   config: { "credential_id" => cred.foreign_id })
     assert s.valid?, s.errors.full_messages.inspect
   end
 
   test "token_broker source rejects a reference that does not resolve" do
-    # A foreign_id in a namespace with no such credential.
+    # A foreign_id with no such credential.
     s = new_source(source_type: "token_broker",
-                   config: { "credential_id" => "ghost", "credential_namespace" => "nope" })
+                   config: { "credential_id" => "ghost" })
     assert_not s.valid?
     assert s.errors[:config].any? { |m| m.include?("does not reference an existing broker credential") }
 
@@ -147,21 +147,6 @@ class SecretSourceTest < ActiveSupport::TestCase
     s2 = new_source(source_type: "token_broker", config: { "credential_id" => oid })
     assert_not s2.valid?
     assert s2.errors[:config].any? { |m| m.include?("does not reference an existing broker credential") }
-  end
-
-  test "token_broker foreign_id reference requires a namespace" do
-    cred = make_broker_credential(access_token: nil)
-    s = new_source(source_type: "token_broker", config: { "credential_id" => cred.foreign_id })
-    assert_not s.valid?
-    assert s.errors[:config].any? { |m| m.include?("credential_namespace is required") }
-  end
-
-  test "token_broker oid reference forbids a namespace" do
-    cred = make_broker_credential(access_token: nil)
-    s = new_source(source_type: "token_broker",
-                   config: { "credential_id" => cred.oid, "credential_namespace" => "default" })
-    assert_not s.valid?
-    assert s.errors[:config].any? { |m| m.include?("not allowed when credential_id is an opaque id") }
   end
 
   test "token_broker source rejects unknown config keys" do
@@ -187,7 +172,7 @@ class SecretSourceTest < ActiveSupport::TestCase
   test "token_broker foreign_id reference resolves at sync" do
     cred = make_broker_credential(access_token: "live-token")
     s = new_source(source_type: "token_broker",
-                   config: { "credential_id" => cred.foreign_id, "credential_namespace" => cred.namespace })
+                   config: { "credential_id" => cred.foreign_id })
     assert_equal({ "type" => "control_plane", "value" => "live-token" }, s.to_proxy_source)
   end
 
@@ -206,7 +191,7 @@ class SecretSourceTest < ActiveSupport::TestCase
   # A persisted BrokerCredential. access_token is set via the model so encryption
   # applies.
   def make_broker_credential(access_token:)
-    bc = BrokerCredential.create!(namespace: "default", foreign_id: "src-#{SecureRandom.hex(4)}",
+    bc = BrokerCredential.create!(foreign_id: "src-#{SecureRandom.hex(4)}",
                                   token_endpoint: "https://idp.example/token", client_id: "cid",
                                   created_by: users(:acme_admin), refresh_token: "seed")
     bc.update!(access_token: access_token, expires_at: 1.hour.from_now, last_refresh: Time.current) if access_token

@@ -1,9 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 import {
-  buildConsoleSessionContextBlock,
+  buildSlackResponseContextBlock,
   consoleSessionUrl,
   defaultModelForHarness,
   defaultReasoningForHarness,
+  defaultServiceTierForHarness,
   effectiveReasoningForHarness,
   harnessDisplayName,
   reasoningForModel
@@ -152,6 +153,17 @@ describe('defaultReasoningForHarness', () => {
   })
 })
 
+describe('defaultServiceTierForHarness', () => {
+  const bakedServiceTier = (codexConfig as { service_tier: string }).service_tier
+
+  test('reports the baked Codex service tier only for the Codex harness', () => {
+    expect(bakedServiceTier).toBe('fast')
+    expect(defaultServiceTierForHarness('codex')).toBe(bakedServiceTier)
+    expect(defaultServiceTierForHarness('nanocodex')).toBeUndefined()
+    expect(defaultServiceTierForHarness('claudecode')).toBeUndefined()
+  })
+})
+
 describe('consoleSessionUrl', () => {
   test('builds the /console/threads URL with an encoded thread key', () => {
     expect(consoleSessionUrl('https://console.centaur.dev', 'slack:C123:1700000000.000100')).toBe(
@@ -172,12 +184,13 @@ describe('consoleSessionUrl', () => {
   })
 })
 
-describe('buildConsoleSessionContextBlock', () => {
+describe('buildSlackResponseContextBlock', () => {
   test('builds a context block with uppercased model then harness, middot separated', () => {
-    const block = buildConsoleSessionContextBlock({
+    const block = buildSlackResponseContextBlock({
       consoleBaseUrl: 'https://console.centaur.dev',
       threadKey: 'slack:C123:1700000000.000100',
       harnessType: 'codex',
+      metadataEnabled: true,
       model: 'gpt-5.2',
       reasoning: 'xhigh'
     })
@@ -194,10 +207,11 @@ describe('buildConsoleSessionContextBlock', () => {
   })
 
   test('omits the model segment when no model is provided', () => {
-    const block = buildConsoleSessionContextBlock({
+    const block = buildSlackResponseContextBlock({
       consoleBaseUrl: 'https://console.centaur.dev',
       threadKey: 'slack:C1:1',
-      harnessType: 'claudecode'
+      harnessType: 'claudecode',
+      metadataEnabled: true
     })
     expect(block?.elements[0]?.text).toBe(
       '<https://console.centaur.dev/console/threads?thread=slack%3AC1%3A1|Open chat in Console> · Claude Code'
@@ -205,10 +219,11 @@ describe('buildConsoleSessionContextBlock', () => {
   })
 
   test('shows the resolved Nanocodex harness', () => {
-    const block = buildConsoleSessionContextBlock({
+    const block = buildSlackResponseContextBlock({
       consoleBaseUrl: 'https://console.centaur.dev',
       threadKey: 'slack:C1:1',
       harnessType: 'nanocodex',
+      metadataEnabled: true,
       model: 'gpt-5.6-sol',
       reasoning: 'low'
     })
@@ -220,12 +235,42 @@ describe('buildConsoleSessionContextBlock', () => {
 
   test('skips the block entirely when no console base URL is set', () => {
     expect(
-      buildConsoleSessionContextBlock({
+      buildSlackResponseContextBlock({
         consoleBaseUrl: undefined,
         threadKey: 'slack:C1:1',
         harnessType: 'codex',
         model: 'gpt-5.2'
       })
     ).toBeUndefined()
+  })
+
+  test('builds a Console link without metadata when metadata is disabled', () => {
+    const block = buildSlackResponseContextBlock({
+      consoleBaseUrl: 'https://console.centaur.dev',
+      threadKey: 'slack:C1:1',
+      harnessType: 'codex',
+      metadataEnabled: false,
+      model: 'gpt-5.6-sol',
+      reasoning: 'low',
+      serviceTier: 'fast'
+    })
+
+    expect(block?.elements[0]?.text).toBe(
+      '<https://console.centaur.dev/console/threads?thread=slack%3AC1%3A1|Open chat in Console>'
+    )
+  })
+
+  test('builds metadata without a Console URL when independently enabled', () => {
+    const block = buildSlackResponseContextBlock({
+      consoleBaseUrl: undefined,
+      threadKey: 'slack:C1:1',
+      harnessType: 'codex',
+      metadataEnabled: true,
+      model: 'gpt-5.6-sol',
+      reasoning: 'low',
+      serviceTier: 'fast'
+    })
+
+    expect(block?.elements[0]?.text).toBe('GPT-5.6-SOL · Codex · Low · Fast')
   })
 })

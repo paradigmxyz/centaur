@@ -11,7 +11,7 @@ module Api
         render json: { data: record_payload(ref) }
       end
 
-      # GET /api/v1/pg_dsn_secrets/lookup/:namespace/:foreign_id
+      # GET /api/v1/pg_dsn_secrets/lookup/:foreign_id
       def lookup
         render json: { data: record_payload(find_by_foreign_id!(PgDsnSecret)) }
       end
@@ -77,7 +77,6 @@ module Api
       def record_payload(ref)
         {
           id: ref.oid,
-          namespace: ref.namespace,
           foreign_id: ref.foreign_id,
           name: ref.name,
           description: ref.description,

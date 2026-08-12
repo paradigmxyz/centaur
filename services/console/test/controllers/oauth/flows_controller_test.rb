@@ -294,7 +294,6 @@ module Oauth
       assert_equal "google connected as user@example.com.", flash[:notice]
 
       cred = BrokerCredential.find_by(oauth_app: @app, provider_subject: "google-sub-1")
-      assert_equal "acme", cred.namespace
       assert_equal "google-google-google-sub-1", cred.foreign_id
       assert_equal "https://oauth2.googleapis.com/token", cred.token_endpoint
       assert_equal "user@example.com", cred.provider_email
@@ -319,7 +318,6 @@ module Oauth
 
       app = oauth_apps(:acme_slack)
       cred = BrokerCredential.find_by(oauth_app: app, provider_subject: "U0R7MFMJM")
-      assert_equal "acme", cred.namespace
       assert_equal "slack-slack-u0r7mfmjm", cred.foreign_id
       assert_equal "Slack – grace", cred.name
       assert_equal "https://slack.com/api/oauth.v2.access", cred.token_endpoint
@@ -364,7 +362,6 @@ module Oauth
 
       app = oauth_apps(:acme_slack)
       cred = BrokerCredential.find_by(oauth_app: app, provider_subject: "U0BOTUSER")
-      assert_equal "acme", cred.namespace
       assert_equal "slack-slack-u0botuser", cred.foreign_id
       assert_equal "Slack – Acme", cred.name
       assert_equal "https://slack.com/api/oauth.v2.access", cred.token_endpoint
@@ -393,7 +390,6 @@ module Oauth
 
       app = oauth_apps(:acme_attio)
       cred = BrokerCredential.find_by(oauth_app: app)
-      assert_equal "acme", cred.namespace
       assert_match(/\Aattio-attio-pending-[a-f0-9]{32}\z/, cred.foreign_id)
       assert_match(/\Apending-[a-f0-9]{32}\z/, cred.provider_subject)
       assert_equal "Attio – Pending Attio workspace", cred.name
@@ -422,7 +418,6 @@ module Oauth
 
       app = oauth_apps(:acme_github)
       cred = BrokerCredential.find_by(oauth_app: app)
-      assert_equal "acme", cred.namespace
       assert_match(/\Agithub-github-pending-[a-f0-9]{32}\z/, cred.foreign_id)
       assert_match(/\Apending-[a-f0-9]{32}\z/, cred.provider_subject)
       assert_equal "GitHub – Pending GitHub account", cred.name
@@ -434,6 +429,16 @@ module Oauth
       assert_nil cred.next_attempt_at
       assert_equal [ "api.github.com", "github.com" ], cred.static_secret.rules.map(&:host)
       assert_equal "GitHub – Pending GitHub account token", cred.static_secret.name
+      assert_equal "github_token", cred.static_secret.kind
+      assert_nil cred.static_secret.inject_config
+      assert_equal(
+        {
+          "proxy_value" => "GITHUB_TOKEN",
+          "match_headers" => [ "Authorization" ],
+          "require" => false
+        },
+        cred.static_secret.replace_config
+      )
       refute_includes BrokerCredential.refreshable, cred
     end
 
@@ -451,7 +456,6 @@ module Oauth
 
       app = oauth_apps(:acme_linear)
       cred = BrokerCredential.find_by(oauth_app: app)
-      assert_equal "acme", cred.namespace
       assert_match(/\Alinear-linear-pending-[a-f0-9]{32}\z/, cred.foreign_id)
       assert_match(/\Apending-[a-f0-9]{32}\z/, cred.provider_subject)
       assert_equal "Linear – Pending Linear account", cred.name
@@ -476,7 +480,6 @@ module Oauth
       cred = BrokerCredential.find_by(oauth_app: @app, provider_subject: "google-sub-1")
       secret = cred.static_secret
       assert_equal cred, secret.broker_credential # first-class link to the credential
-      assert_equal cred.namespace, secret.namespace
       assert_nil secret.foreign_id # found by association, so no collidable foreign_id
       assert_nil secret.created_by # the wrapping secret is not owned by an operator
       assert_equal({ "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" }, secret.inject_config)

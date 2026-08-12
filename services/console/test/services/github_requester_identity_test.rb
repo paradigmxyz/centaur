@@ -34,7 +34,6 @@ class GithubRequesterIdentityTest < ActiveSupport::TestCase
     app = oauth_apps(:acme_github)
     app.update!(client_secret: "github-secret")
     BrokerCredential.create!(
-      namespace: app.credential_namespace,
       oauth_app: app,
       created_by: created_by,
       provider_subject: "12345",

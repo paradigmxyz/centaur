@@ -69,7 +69,7 @@ class Iron::BootstrapTest < ActiveSupport::TestCase
     set_env(email: "boot@example.com", password: "password123456", api_key: VALID_TOKEN)
     Iron::Bootstrap.run!
     user = User.find_by!(email: "boot@example.com")
-    role = Role.find_by!(namespace: "default", foreign_id: "infra")
+    role = Role.find_by!(foreign_id: "infra")
 
     assert_equal user, user.authenticate("password123456")
     assert_equal user, ApiKey.find_by_token(VALID_TOKEN).user

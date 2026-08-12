@@ -4,6 +4,7 @@ import datetime as dt
 import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,16 +25,13 @@ class _FakeConnection:
         fetch_rows=None,
         row=None,
         fetchrow_rows=None,
-        val=None,
     ) -> None:
         self.rows = rows or []
         self.fetch_rows = list(fetch_rows or [])
         self.row = row
         self.fetchrow_rows = list(fetchrow_rows or [])
-        self.val = val
         self.fetch_calls = []
         self.fetchrow_calls = []
-        self.fetchval_calls = []
         self.execute_calls = []
         self.cursor_calls = []
         self.transaction_calls = []
@@ -42,7 +40,10 @@ class _FakeConnection:
     async def fetch(self, query, *args):
         self.fetch_calls.append((query, args))
         if self.fetch_rows:
-            return self.fetch_rows.pop(0)
+            result = self.fetch_rows.pop(0)
+            if isinstance(result, BaseException):
+                raise result
+            return result
         return self.rows
 
     async def fetchrow(self, query, *args):
@@ -50,10 +51,6 @@ class _FakeConnection:
         if self.fetchrow_rows:
             return self.fetchrow_rows.pop(0)
         return self.row
-
-    async def fetchval(self, query, *args):
-        self.fetchval_calls.append((query, args))
-        return self.val
 
     async def execute(self, query, *args):
         self.execute_calls.append((query, args))
@@ -92,9 +89,28 @@ class _FakeCursor:
             raise StopAsyncIteration from exc
 
 
+class _FakeEmbeddingsAPI:
+    def __init__(self, embedding=None, error: Exception | None = None) -> None:
+        self.embedding = embedding or [0.1, 0.2, 0.3]
+        self.error = error
+        self.calls = []
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.error:
+            raise self.error
+        return SimpleNamespace(data=[SimpleNamespace(embedding=self.embedding)])
+
+
+class _FakeOpenAIClient:
+    def __init__(self, embedding=None, error: Exception | None = None) -> None:
+        self.embeddings = _FakeEmbeddingsAPI(embedding=embedding, error=error)
+
+
 @pytest.fixture(autouse=True)
 def _disable_lookup_metric_push(monkeypatch):
     monkeypatch.setenv("COMPANY_CONTEXT_LOOKUP_METRICS_ENABLED", "0")
+    monkeypatch.setenv("COMPANY_CONTEXT_EMBEDDINGS_ENABLED", "false")
 
 
 @pytest.mark.parametrize("query", ["", "   "])
@@ -324,6 +340,250 @@ def test_search_queries_bm25_and_returns_compact_results(monkeypatch):
     assert fake.closed is True
 
 
+def test_search_skips_embeddings_when_experiment_is_disabled(monkeypatch):
+    fake = _FakeConnection(
+        rows=[
+            {
+                "document_id": "slack:thread:keyword",
+                "source": "slack",
+                "source_type": "slack_thread",
+                "title": "Keyword result",
+                "score": 2.0,
+            }
+        ],
+    )
+    embeddings_client = _FakeOpenAIClient()
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+    monkeypatch.setenv("COMPANY_CONTEXT_EMBEDDINGS_ENABLED", "false")
+
+    result = CompanyContextClient(
+        "postgresql://example",
+        embeddings_client=embeddings_client,
+    ).search("keyword query", source="slack", limit=5)
+
+    assert result["status"] == "ok"
+    assert result["search_mode"] == "keyword"
+    assert result["vector_count"] == 0
+    assert [item["document_id"] for item in result["results"]] == ["slack:thread:keyword"]
+    assert embeddings_client.embeddings.calls == []
+    assert fake.fetch_calls[0][1][-1] == 5
+
+
+def test_search_hybrid_override_forces_keyword_search(monkeypatch):
+    fake = _FakeConnection(
+        rows=[
+            {
+                "document_id": "slack:thread:keyword",
+                "source": "slack",
+                "source_type": "slack_thread",
+                "title": "Keyword result",
+                "score": 2.0,
+            }
+        ],
+    )
+    embeddings_client = _FakeOpenAIClient()
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+    monkeypatch.setenv("COMPANY_CONTEXT_EMBEDDINGS_ENABLED", "true")
+
+    result = CompanyContextClient(
+        "postgresql://example",
+        embeddings_client=embeddings_client,
+    ).search("keyword query", source="slack", limit=5, hybrid=False)
+
+    assert result["status"] == "ok"
+    assert result["search_mode"] == "keyword"
+    assert embeddings_client.embeddings.calls == []
+    assert fake.fetch_calls[0][1][-1] == 5
+
+
+def test_search_tolerates_empty_vector_results(monkeypatch):
+    fake = _FakeConnection(
+        fetch_rows=[
+            [
+                {
+                    "document_id": "slack:thread:keyword",
+                    "source": "slack",
+                    "source_type": "slack_thread",
+                    "title": "Keyword result",
+                    "score": 2.0,
+                }
+            ],
+            [],
+        ],
+    )
+    embeddings_client = _FakeOpenAIClient()
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+    monkeypatch.setenv("COMPANY_CONTEXT_EMBEDDINGS_ENABLED", "true")
+    monkeypatch.setenv("COMPANY_CONTEXT_EMBEDDINGS_MODEL", "text-embedding-3-large")
+
+    result = CompanyContextClient(
+        "postgresql://example",
+        embeddings_client=embeddings_client,
+    ).search("semantic query", source="slack", limit=5)
+
+    assert result["status"] == "ok"
+    assert result["search_mode"] == "keyword"
+    assert result["vector_count"] == 0
+    assert result["results"][0]["lane"] == "indexed"
+    assert embeddings_client.embeddings.calls == [
+        {
+            "model": "text-embedding-3-large",
+            "input": "semantic query",
+            "dimensions": 1536,
+            "encoding_format": "float",
+        }
+    ]
+    assert fake.fetch_calls[0][1][-1] == 30
+    assert fake.fetch_calls[1][1][1] == "text-embedding-3-large"
+    assert fake.fetch_calls[1][1][-1] == 30
+
+
+def test_search_falls_back_when_query_embedding_fails(monkeypatch):
+    fake = _FakeConnection(
+        rows=[
+            {
+                "document_id": "slack:thread:keyword",
+                "source": "slack",
+                "source_type": "slack_thread",
+                "title": "Keyword result",
+                "score": 2.0,
+            }
+        ],
+    )
+    embeddings_client = _FakeOpenAIClient(error=RuntimeError("embedding unavailable"))
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+    monkeypatch.setenv("COMPANY_CONTEXT_EMBEDDINGS_ENABLED", "true")
+
+    result = CompanyContextClient(
+        "postgresql://example",
+        embeddings_client=embeddings_client,
+    ).search("semantic query", source="slack", limit=5)
+
+    assert result["status"] == "ok"
+    assert result["search_mode"] == "keyword"
+    assert [item["document_id"] for item in result["results"]] == ["slack:thread:keyword"]
+    assert len(fake.fetch_calls) == 1
+
+
+def test_search_falls_back_when_vector_query_is_incompatible(monkeypatch):
+    fake = _FakeConnection(
+        fetch_rows=[
+            [
+                {
+                    "document_id": "slack:thread:keyword",
+                    "source": "slack",
+                    "source_type": "slack_thread",
+                    "title": "Keyword result",
+                    "score": 2.0,
+                }
+            ],
+            RuntimeError("vector operator is unavailable"),
+        ],
+    )
+    embeddings_client = _FakeOpenAIClient()
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+    monkeypatch.setenv("COMPANY_CONTEXT_EMBEDDINGS_ENABLED", "true")
+
+    result = CompanyContextClient(
+        "postgresql://example",
+        embeddings_client=embeddings_client,
+    ).search("semantic query", source="slack", limit=5)
+
+    assert result["status"] == "ok"
+    assert result["search_mode"] == "keyword"
+    assert [item["document_id"] for item in result["results"]] == ["slack:thread:keyword"]
+    assert len(fake.fetch_calls) == 2
+
+
+def test_search_uses_equal_weight_reciprocal_rank_fusion(monkeypatch):
+    fake = _FakeConnection(
+        fetch_rows=[
+            [
+                {
+                    "document_id": "slack:thread:keyword-only",
+                    "source": "slack",
+                    "source_type": "slack_thread",
+                    "title": "Keyword only",
+                    "score": 10.0,
+                },
+                {
+                    "document_id": "slack:thread:both",
+                    "source": "slack",
+                    "source_type": "slack_thread",
+                    "title": "Both lanes",
+                    "score": 5.0,
+                },
+            ],
+            [
+                {
+                    "document_id": "slack:thread:both",
+                    "source": "slack",
+                    "source_type": "slack_thread",
+                    "title": "Both lanes",
+                    "vector_similarity": 0.91,
+                },
+                {
+                    "document_id": "slack:thread:vector-only",
+                    "source": "slack",
+                    "source_type": "slack_thread",
+                    "title": "Vector only",
+                    "vector_similarity": 0.89,
+                },
+            ],
+        ],
+    )
+    embeddings_client = _FakeOpenAIClient()
+
+    async def fake_connect(*args, **kwargs):
+        return fake
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+    monkeypatch.setenv("COMPANY_CONTEXT_EMBEDDINGS_ENABLED", "true")
+
+    result = CompanyContextClient(
+        "postgresql://example",
+        embeddings_client=embeddings_client,
+    ).search("hybrid query", source="slack", limit=3)
+
+    assert result["status"] == "ok"
+    assert result["search_mode"] == "hybrid"
+    assert result["vector_count"] == 2
+    assert [item["document_id"] for item in result["results"]] == [
+        "slack:thread:both",
+        "slack:thread:keyword-only",
+        "slack:thread:vector-only",
+    ]
+    both, keyword_only, vector_only = result["results"]
+    assert both["lane"] == "hybrid"
+    assert both["matched_lanes"] == ["keyword", "vector"]
+    assert both["keyword_rank"] == 2
+    assert both["vector_rank"] == 1
+    assert both["keyword_score"] == 5.0
+    assert both["vector_similarity"] == 0.91
+    assert keyword_only["lane"] == "keyword"
+    assert vector_only["lane"] == "vector"
+
+
 def test_search_emits_grouped_lookup_metrics(monkeypatch):
     fake = _FakeConnection(
         rows=[
@@ -521,7 +781,8 @@ def test_search_uses_or_terms_and_drops_stop_words(monkeypatch):
 
     assert result["status"] == "ok"
     query, args = fake.fetch_calls[0]
-    assert "WHERE (title ||| $1::text::pdb.boost(8) OR body ||| $1::text::pdb.boost(2))" in query
+    keyword_clause = company_context_client._search_where_clause(4)
+    assert f"WHERE {keyword_clause}" in query
     assert "OR (title ||| $2::text::pdb.boost(4) OR body ||| $2::text)" in query
     assert "OR (title ||| $3::text::pdb.boost(4) OR body ||| $3::text)" in query
     assert "OR (title ||| $4::text::pdb.boost(4) OR body ||| $4::text)" in query
@@ -565,6 +826,10 @@ def test_search_applies_occurred_at_filters(monkeypatch):
     assert result["occurred_after"] == "2026-05-01T00:00:00+00:00"
     assert result["occurred_before"] == "2026-05-08T12:30:00+00:00"
     query, args = fake.fetch_calls[0]
+    keyword_clause = company_context_client._search_where_clause(1)
+    assert keyword_clause.startswith("((")
+    assert keyword_clause.endswith("))")
+    assert f"WHERE {keyword_clause}" in query
     assert "OR occurred_at >= $5" in query
     assert "OR occurred_at < $6" in query
     assert "metadata ->> 'channel_id'" not in query

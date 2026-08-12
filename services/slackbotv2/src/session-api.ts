@@ -966,7 +966,12 @@ async function resolveRequesterIdentity(
     ?? stringValue(profile.real_name)
     ?? stringValue(profile.name)
     ?? identity.slackDisplayName
-  identity.slackEmail = stringValue(profile.email) ?? identity.slackEmail
+  if (
+    options.slackHomeTeamId
+    && stringValue(profile.team_id) === options.slackHomeTeamId
+  ) {
+    identity.slackEmail = stringValue(profile.email) ?? identity.slackEmail
+  }
   identity.slackUserName = stringValue(profile.name) ?? identity.slackUserName
 
   const github = extractGithubHandleFromSlackProfile(profile)
@@ -1144,6 +1149,17 @@ async function fetchSlackChannelName(
     name
   })
   return name
+}
+
+export async function resolveSlackHomeTeamId(
+  options: SlackbotV2Options
+): Promise<string> {
+  const payload = await slackApiGet(options, 'auth.test', {})
+  const teamId = stringValue(payload?.team_id)
+  if (!teamId) {
+    throw new Error('Slack auth.test failed to resolve the bot home team ID')
+  }
+  return teamId
 }
 
 async function slackApiGet(

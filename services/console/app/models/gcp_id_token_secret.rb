@@ -33,8 +33,7 @@ class GcpIdTokenSecret < ApplicationRecord
     [ "header:#{header.presence || DEFAULT_HEADER}" ]
   end
 
-  validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
-  validates :foreign_id, uniqueness: { scope: :namespace, allow_nil: true },
+  validates :foreign_id, uniqueness: { allow_nil: true },
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }, allow_nil: true
   validates :audience, presence: true
   validate :labels_is_a_hash

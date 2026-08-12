@@ -42,12 +42,6 @@
           <%= field_error(app, :client_secret) %>
           <p class="form-hint">Stored encrypted.<%= " Leave blank to keep the current secret." unless app.new_record? %></p>
         </div>
-        <div>
-          <label class="form-label" for="oauth_app_credential_namespace">Credential namespace</label>
-          <%= text_field_tag "oauth_app[credential_namespace]", app.credential_namespace.presence || "default", id: "oauth_app_credential_namespace", class: "form-input #{field_error_class(app, :credential_namespace)}" %>
-          <%= field_error(app, :credential_namespace) %>
-          <p class="form-hint">Namespace for broker credentials minted by this app's flows.</p>
-        </div>
       </div>
     </section>
 
@@ -65,6 +59,11 @@
           <label class="form-label mb-0" for="oauth_app_enabled">Enabled</label>
         </div>
         <p class="form-hint -mt-2">A disabled app rejects new consent flows; existing credentials keep refreshing.</p>
+        <div class="flex items-center gap-2">
+          <%= check_box_tag "oauth_app[always_available]", "1", app.always_available, id: "oauth_app_always_available", class: "h-4 w-4" %>
+          <label class="form-label mb-0" for="oauth_app_always_available">Always available to the connecting user</label>
+        </div>
+        <p class="form-hint -mt-2">Used automatically on any conversation turn they start, channels included. Off: automatic use covers only their DMs.</p>
       </div>
     </section>
 

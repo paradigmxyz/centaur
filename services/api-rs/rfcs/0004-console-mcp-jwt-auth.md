@@ -352,7 +352,6 @@ Example JWT payload:
   "client_id": "mcp_client_abc123",
   "principal_id": "prn_abc123",
   "principal_foreign_id": "console-user-alice-example-com",
-  "principal_namespace": "default",
   "email": "alice@example.com",
   "name": "Alice Example"
 }
@@ -371,7 +370,6 @@ Claim semantics:
 | `client_id` | Registered OAuth client id. |
 | `principal_id` | iron-control principal oid used for tool runner/proxy binding. |
 | `principal_foreign_id` | Human/debug identifier. Not authoritative for proxy binding. |
-| `principal_namespace` | Human/debug namespace. |
 | `email`/`name` | Display only. |
 
 The JWT must not include:
@@ -389,7 +387,6 @@ Console creates or finds one MCP principal per active console user.
 Default mapping:
 
 ```text
-namespace:  <configured namespace, default "default">
 foreign_id: console-user-<slugified email>
 name:       Console User <email>
 labels:
@@ -512,7 +509,6 @@ CENTAUR_MCP_PUBLIC_URL
 CENTAUR_CONSOLE_PUBLIC_URL
 CENTAUR_MCP_ACCESS_TOKEN_TTL_SECONDS
 CENTAUR_MCP_REFRESH_TOKEN_TTL_SECONDS
-CENTAUR_MCP_PRINCIPAL_NAMESPACE
 ```
 
 `CENTAUR_JWT_SIGNING_SECRET` is intentionally general. The other env vars are
@@ -739,7 +735,5 @@ Manual dogfood:
   for Amp/Codex/VS Code?
 - Default access token TTL: 1 hour, 8 hours, or environment-specific?
 - Default refresh token TTL: 7 days, 30 days, or environment-specific?
-- Should the console principal namespace default to `default` or a dedicated
-  namespace like `mcp`?
 - Do we want a first-version access-token `jti` denylist, or is short TTL
   enough?

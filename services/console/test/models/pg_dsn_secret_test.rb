@@ -3,7 +3,6 @@ require "test_helper"
 class PgDsnSecretTest < ActiveSupport::TestCase
   def base_attrs(overrides = {})
     {
-      namespace: "acme",
       foreign_id: "new-pg",
       database: "new-db",
       created_by: users(:acme_admin)
@@ -48,14 +47,14 @@ class PgDsnSecretTest < ActiveSupport::TestCase
     assert with_dsn(PgDsnSecret.new(base_attrs(role: nil))).valid?
   end
 
-  test "foreign_id is unique within a namespace" do
+  test "foreign_id is globally unique" do
     with_dsn(PgDsnSecret.new(base_attrs(foreign_id: "shared-pg", database: "db-a"))).save!
     dup = with_dsn(PgDsnSecret.new(base_attrs(foreign_id: "shared-pg", database: "db-b")))
     assert_not dup.valid?
     assert_includes dup.errors[:foreign_id], "has already been taken"
   end
 
-  test "database can be shared within a namespace" do
+  test "database can be shared" do
     with_dsn(PgDsnSecret.new(base_attrs(foreign_id: "first-pg", database: "shared-db"))).save!
     dup = with_dsn(PgDsnSecret.new(base_attrs(foreign_id: "second-pg", database: "shared-db")))
     assert dup.valid?
@@ -130,16 +129,10 @@ class PgDsnSecretTest < ActiveSupport::TestCase
     principal = principals(:acme_channel)
     principal.update!(
       labels: {
-        "slack_channel_id" => "C0123456789",
         "google_subject" => "google-sub-alice"
       }
     )
-    assert_not principal.reload.labels.key?("slack_channel_id")
     secret = with_dsn(PgDsnSecret.new(base_attrs(settings: [
-      {
-        "name" => "centaur.slack_channel_id",
-        "value_from" => { "principal_label" => "slack_channel_id" }
-      },
       {
         "name" => "centaur.google_subject",
         "value_from" => { "principal_label" => "google_subject" }
@@ -156,7 +149,6 @@ class PgDsnSecretTest < ActiveSupport::TestCase
 
     assert_equal(
       [
-        { "name" => "centaur.slack_channel_id", "value" => "C0123456789" },
         { "name" => "centaur.google_subject", "value" => "google-sub-alice" },
         { "name" => "centaur.principal", "value" => principal.foreign_id },
         { "name" => "centaur.principal_id", "value" => principal.oid },
@@ -167,20 +159,70 @@ class PgDsnSecretTest < ActiveSupport::TestCase
     )
   end
 
-  test "to_proxy_dsn resolves console user compatibility labels from columns" do
+  test "to_proxy_dsn resolves console user fields" do
     user = users(:acme_admin)
     principal = Principal.create!(
-      namespace: "acme",
       kind: "console_user",
       console_user_id: user.id,
       console_user_email: user.email,
       created_by: user
     )
     secret = with_dsn(PgDsnSecret.new(base_attrs(settings: [
-      { "name" => "app.user_id", "value_from" => { "principal_label" => "console-user-id" } },
-      { "name" => "app.email", "value_from" => { "principal_label" => "email" } }
+      { "name" => "app.user_id", "value_from" => { "principal_field" => "console_user_id" } },
+      { "name" => "app.email", "value_from" => { "principal_field" => "console_user_email" } }
     ])))
 
+    assert_equal(
+      [
+        { "name" => "app.user_id", "value" => user.oid },
+        { "name" => "app.email", "value" => user.email }
+      ],
+      secret.to_proxy_dsn(principal: principal)["settings"]
+    )
+  end
+
+  test "to_proxy_dsn resolves first-class identity fields" do
+    principal = principals(:acme_channel)
+    principal.update!(
+      slack_user_id: "U0123456789",
+      slack_team_id: "T0123456789",
+      slack_email: "ada@example.com"
+    )
+    secret = with_dsn(PgDsnSecret.new(base_attrs(settings: [
+      { "name" => "app.kind", "value_from" => { "principal_field" => "kind" } },
+      { "name" => "app.user_id", "value_from" => { "principal_field" => "slack_user_id" } },
+      { "name" => "app.channel_id", "value_from" => { "principal_field" => "slack_channel_id" } },
+      { "name" => "app.team_id", "value_from" => { "principal_field" => "slack_team_id" } },
+      { "name" => "app.email", "value_from" => { "principal_field" => "slack_email" } }
+    ])))
+
+    assert secret.valid?
+    assert_equal(
+      [
+        { "name" => "app.kind", "value" => "slack_channel" },
+        { "name" => "app.user_id", "value" => "U0123456789" },
+        { "name" => "app.channel_id", "value" => "C0123456789" },
+        { "name" => "app.team_id", "value" => "T0123456789" },
+        { "name" => "app.email", "value" => "ada@example.com" }
+      ],
+      secret.to_proxy_dsn(principal: principal)["settings"]
+    )
+  end
+
+  test "to_proxy_dsn resolves first-class console user fields" do
+    user = users(:acme_admin)
+    principal = Principal.create!(
+      kind: "console_user",
+      console_user_id: user.id,
+      console_user_email: user.email,
+      created_by: user
+    )
+    secret = with_dsn(PgDsnSecret.new(base_attrs(settings: [
+      { "name" => "app.user_id", "value_from" => { "principal_field" => "console_user_id" } },
+      { "name" => "app.email", "value_from" => { "principal_field" => "console_user_email" } }
+    ])))
+
+    assert secret.valid?
     assert_equal(
       [
         { "name" => "app.user_id", "value" => user.oid },
@@ -271,12 +313,12 @@ class PgDsnSecretTest < ActiveSupport::TestCase
     assert_equal "", value
   end
 
-  test "to_proxy_dsn resolves value_from as an empty string without a principal" do
+  test "to_proxy_dsn does not fall back from principal labels to identity fields" do
     secret = with_dsn(PgDsnSecret.new(base_attrs(settings: [
       { "name" => "centaur.slack_channel_id", "value_from" => { "principal_label" => "slack_channel_id" } }
     ])))
 
-    assert_equal "", secret.to_proxy_dsn.dig("settings", 0, "value")
+    assert_equal "", secret.to_proxy_dsn(principal: principals(:acme_channel)).dig("settings", 0, "value")
   end
 
   test "a setting with both value and value_from is rejected" do
@@ -330,7 +372,17 @@ class PgDsnSecretTest < ActiveSupport::TestCase
     ])))
     assert_not secret.valid?
     assert_includes secret.errors[:settings],
-      %([0] unknown principal_field "labels" (one of: id, namespace, foreign_id, name, slack_history_channel_ids))
+      %([0] unknown principal_field "labels" (one of: #{PgDsnSecret::PRINCIPAL_FIELDS.join(", ")}))
+  end
+
+  test "an unknown principal_field cannot invoke a principal method while rendering" do
+    principal = principals(:acme_channel)
+    secret = with_dsn(PgDsnSecret.new(base_attrs(settings: [
+      { "name" => "app.tenant", "value_from" => { "principal_field" => "destroy" } }
+    ])))
+
+    assert_equal "", secret.to_proxy_dsn(principal: principal).dig("settings", 0, "value")
+    assert Principal.exists?(principal.id)
   end
 
   test "settings with a valid empty value are accepted and stringified" do

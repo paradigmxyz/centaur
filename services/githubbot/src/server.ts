@@ -116,6 +116,7 @@ const options: GithubbotOptions = {
   autoMerge: boolEnv("GITHUBBOT_AUTO_MERGE", true),
   botUserId: optionalEnv("GITHUBBOT_USER_ID"),
   ciFixMaxAttempts: optionalNumberEnv("GITHUBBOT_CI_FIX_MAX_ATTEMPTS"),
+  workflowEvents: boolEnv("GITHUBBOT_WORKFLOW_EVENTS", false),
   deleteBranchOnMerge: boolEnv("GITHUBBOT_DELETE_BRANCH_ON_MERGE", true),
   escalationHandle: optionalEnv("GITHUBBOT_ESCALATION_HANDLE"),
   holdLabel: optionalEnv("GITHUBBOT_HOLD_LABEL"),

@@ -41,6 +41,8 @@ ironProxy:
     - "10.43.0.0/16"
   secretSource: onepassword
   secretTtl: 10m
+  # Requests/limits for each per-sandbox iron-proxy pod (k8s resources map).
+  resources: {}
 
 # Base tools delivery for api-rs sandboxes. When enabled, repo-cache keeps `repo`
 # fresh on each node and a tools-bootstrap init container copies `subdir` into
@@ -240,6 +242,22 @@ sandbox:
     repository: centaur-agent
     tag: latest
     pullPolicy: Always
+  # Node steering for sandbox pods **and** their paired iron-proxy pods. These
+  # reach the pod through the control plane, not through this chart's templates:
+  # api-rs creates them at runtime, so a Helm or kustomize patch cannot touch
+  # them. They are passed through to `Sandbox.spec.podTemplate.spec` and the
+  # iron-proxy PodSpec.
+  #
+  # Set these to keep untrusted agent workloads on a dedicated (usually tainted)
+  # node pool and/or under a stronger RuntimeClass such as gVisor. Empty leaves
+  # placement to the default scheduler.
+  nodeSelector: {}
+  #   workload: centaur-sandbox
+  tolerations: []
+  # - key: centaur.ai/sandbox
+  #   operator: Exists
+  #   effect: NoSchedule
+  # RuntimeClass for sandbox + iron-proxy pods, e.g. gVisor.
   runtimeClassName: ""
   reposPath: ""
   # How the in-sandbox harness authenticates upstream. Single source of truth:
@@ -269,11 +287,9 @@ sandbox:
     enabled: false
     size: 10Gi
     storageClassName: ""
-  resources:
-    limits: {}
-    requests:
-      cpu: 100m
-      memory: 512Mi
+  # Requests/limits for the agent container of every sandbox pod, per-session
+  # and warm (k8s resources map).
+  resources: {}
 
 repoCache:
   enabled: true
@@ -378,6 +394,8 @@ apiRs:
   workflowHostSandbox: true
   workflowEnableMode: all
   workflowAllowedNames: ""
+  # Requests/limits for the workflow-host sandbox pod (k8s resources map).
+  workflowHostResources: {}
   # Scheduled ETL workflow configuration. The chart renders these into api-rs
   # env so workflow discovery sees the right schedules, then derives the
   # workflow-host passthrough list from the same non-secret config.
@@ -416,6 +434,13 @@ apiRs:
       intervalSeconds: 14400
       maxWindowSeconds: 21600
       batchSize: 50
+    companyContextEmbeddings:
+      # Enables the embedding workflow and hybrid search in agent sandboxes.
+      enabled: false
+      intervalSeconds: 300
+      batchSize: 250
+      # Shared by the embedding workflow and company-context searches in agent sandboxes.
+      model: text-embedding-3-small
   # Reaper: stop sandboxes older than the max lifetime, regardless of whether
   # they are running or suspended. 0 disables the sweep. Interval must be >= 1.
   sandboxMaxLifetimeSecs: 259200 # 3 days
@@ -475,6 +500,13 @@ slackbotv2:
   # Join newly-created public channels after subscribed channel_created events.
   # Requires the Slack app to grant channels:read and channels:join.
   autoJoinCreatedChannels: false
+  # Append model, harness, and reasoning effort to the first live streamed
+  # Slack assistant response, every response, or no responses. Independent of
+  # the optional Console link below.
+  responseMetadataMode: first
+  # Include the Codex service tier when a response metadata footer is rendered.
+  # This does not cause the footer to appear on additional responses.
+  responseServiceTierEnabled: false
   # Public/local MCP endpoint shown in MCP SSO setup messages. The default
   # assumes users connect through `kubectl port-forward ... 3000:8080`.
   mcpPublicUrl: "http://localhost:3000"
@@ -551,6 +583,8 @@ githubbot:
   # / draft status.
   autoMerge: true
   mergeMethod: squash
+  # Emit CI and review workflow events to api-rs.
+  workflowEvents: false
   # Fallback @handle (no leading @) the bot tags when it gives up; empty = none.
   escalationHandle: ""
   # Optional review / issue-work methodology overrides. When set, the chart writes

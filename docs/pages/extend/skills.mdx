@@ -1,6 +1,6 @@
 ---
 title: Creating Skills
-description: Add reusable sandbox-agent skills through overlay .agents/skills directories.
+description: Author private and shared skills in Console or deploy builtin skills through an overlay.
 ---
 
 # Creating Skills
@@ -10,13 +10,20 @@ matches the skill's purpose. They are not API tools and they do not grant new
 network access by themselves. Use them for repeatable procedures, repo-specific
 operating knowledge, QA playbooks, investigation steps, or formatting rules.
 
-Put organization skills in an overlay repo under `.agents/skills/`. See
+Users can author a skill's name, description, and Markdown instructions from the
+Console Skills page. Console generates the complete `SKILL.md` when an agent
+reads it. Private skills are available only to that user's Console principal.
+Shared skills are available to every principal and update immediately when
+their author saves them. New skills are public by default and can be made
+private from their detail page.
+
+Builtin organization skills live in an overlay repo under `.agents/skills/`. See
 [Using an overlay](/extend/overlay) for packaging, mount paths, and chart
 configuration.
 
 Skills are loaded from `CENTAUR_SKILL_DIRS` in the sandbox. In a repo-cache
-overlay deployment, they must exist under the source's `skillsSubdir` — by
-default `.agents/skills/` — in the sandbox repo checkout, for example
+overlay deployment, they must exist under the source's `skillsSubdir`, which
+defaults to `.agents/skills/`, in the sandbox repo checkout, for example
 `/home/agent/github/your-org/centaur-overlay/.agents/skills`. The sandbox
 entrypoint copies those skills into the agent workspace during startup; a
 source without the directory is skipped.
@@ -26,6 +33,11 @@ source without the directory is skipped.
 Keep the entrypoint concise and action-oriented:
 
 ```markdown
+---
+name: incident-response
+description: Investigate production incidents, failed rollouts, and service outages.
+---
+
 # Incident Response
 
 Use this skill when investigating a production incident, failed rollout, or
@@ -42,7 +54,10 @@ service outage.
 Add references only when they save context. Put long runbooks in
 `references/`, scripts in `scripts/`, and examples in `examples/`.
 
-## What belongs in a skill
+Console-authored skills contain only the generated `SKILL.md`. Keep skills with
+supporting `scripts/`, `references/`, or assets in the overlay repository.
+
+## What Belongs In A Skill
 
 Good skills:
 
@@ -55,7 +70,25 @@ Good skills:
 Avoid using skills for tool credentials, API clients, or durable automation.
 Those belong in tools, secret configuration, and workflows.
 
-## Verify
+## Discover Skills
+
+Agents can search Console-authored skills through the catalog command:
+
+```bash
+centaur-skills search "investigate a failed rollout"
+centaur-skills read customer-research
+centaur-skills read skl_example
+centaur-skills list --scope shared
+```
+
+The CLI reads Console skills by exact name or `skl_` OID through iron-proxy
+using the sandbox's existing entitlement token. Names use lowercase letters,
+numbers, and hyphens, so they cannot conflict with the underscore in an OID.
+Builtin skills remain separate: the sandbox mounts them from the overlay and
+the agent's native skill loader discovers them directly. A skill never adds
+credentials or grants.
+
+## Verify Builtin Skills
 
 Start an agent with the overlay loaded and ask it to inspect available skills.
 For a running sandbox, the agent can confirm overlay state with:
