@@ -18,12 +18,15 @@ Use these as the main extension points:
 | `apiRs.metrics.*` | Prometheus/VictoriaMetrics scrape metadata for the Rust API `/metrics` endpoint. |
 | `slackbot.extraEnv` | Slackbot HTTP, Slack, feedback, and cross-org behavior. |
 | `sandbox.extraEnv` | Extra variables copied into every sandbox pod through `KUBERNETES_SANDBOX_EXTRA_ENV`. |
-| `overlays.sources` | Ordered repo-cache-backed overlay repos for tools, workflows, and skills; subdirs default to `tools`, `workflows`, and `.agents/skills`. |
+| `overlays.sources` | Ordered repo-cache-backed overlay repos for tools, workflows, and skills. Each source accepts an optional HTTP(S) `cloneUrl`; subdirs default to `tools`, `workflows`, and `.agents/skills`. |
+| `repoCache.gitCredentials` | Secret-backed username and token used to clone private Git remotes. |
 | `overlay.systemPrompt` | Small inline prompt overlay escape hatch. |
 
-Tool credentials are not listed here. Tool plugins declare their own secrets in
-`tools/**/pyproject.toml`; Centaur resolves them through `secret(...)` and
-iron-proxy instead of treating them as global platform configuration.
+Application tool credentials are not listed here. Tool plugins declare those
+secrets in `tools/**/pyproject.toml`; Centaur resolves them through `secret(...)`
+and iron-proxy instead of treating them as global platform configuration. Git
+credentials used to fetch the plugin repositories are separate and configured
+with `repoCache.gitCredentials` or `toolServer.gitCredentials`.
 
 ## Required
 
@@ -76,6 +79,33 @@ for the operator workflow.
 Default roles and default sandbox capabilities are stored in the Console, not
 as Helm values. Configure them in **System Settings** before new principals are
 created. Changing a default does not rewrite existing principals.
+
+## Repository Sources
+
+`repo` is the stable identity used in cache paths, mount paths, and
+`AGENT_REPO`. When `cloneUrl` is empty, Centaur derives
+`https://github.com/<repo>.git`; an explicit `cloneUrl` may use `http://` or
+`https://` and may point to GitLab or another Git server. URLs containing a
+username or password are rejected.
+
+| Helm value or env var | Set from | Controls |
+| --- | --- | --- |
+| `overlays.sources[*].cloneUrl` | Helm value. | Git remote for an ordered tools, workflows, or skills source. |
+| `toolServer.cloneUrl` | Helm compatibility value. | Git remote for the primary tool source when `overlays.sources` is empty. |
+| `toolServer.extraSources[*].cloneUrl` | Helm compatibility value. | Git remote for an additional tool source. |
+| `repoCache.repositories[*].cloneUrl` | Helm value on object entries. | Git remote for a cache-only repository. |
+| `repoCache.gitCredentials.username` | Helm value; default `oauth2`. | Username returned by `GIT_ASKPASS`. GitLab deploy tokens require their generated username. |
+| `repoCache.gitCredentials.existingSecretName`, `secretKey` | Kubernetes Secret reference. | Token/password mounted into repo-cache; generic credentials take precedence over `repoCache.githubToken`. |
+| `toolServer.gitCredentials.*` | Kubernetes Secret reference. | Direct-clone credential used only when repo-cache is disabled; generic credentials take precedence over `toolServer.githubToken`. |
+| `repoCache.egressPorts` | Helm value; default `[443]`. | Destination TCP ports allowed for repo-cache. Add a custom HTTP port such as `82` when required. |
+| `REPOSITORY_CLONE_URLS` | Chart-rendered JSON for repo-cache. | Mapping from stable repository identity to resolved explicit remotes. Readiness stores SHA-256 URL hashes, not raw URLs. |
+| `KUBERNETES_TOOLS_CLONE_URL`, `KUBERNETES_TOOLS_EXTRA_SOURCES` | Chart-rendered for api-rs. | Primary and additional remotes propagated to sandbox init containers. |
+
+:::warning[Plain HTTP has no transport confidentiality]
+An `http://` clone sends the Git username, token, and repository contents in
+plaintext. Restrict it to trusted isolated networks and use HTTPS when
+available. Never embed credentials in `cloneUrl`.
+:::
 
 ## API
 

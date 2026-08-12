@@ -55,12 +55,17 @@ overlays:
       visibility: private
 ```
 
-`repo` is `owner/name` on GitHub. `ref` can be a branch, tag, or commit SHA;
-omit it, set it to `""`, or set it to `main` to track the repo's default
-branch. Pinning a SHA is recommended when you need a fully reproducible
-production rollout, but many overlay repos intentionally track `main` so a
-reviewed merge is enough for new sandboxes to pick up the change after
-repo-cache refreshes.
+`repo` is a stable `owner/name`-style identity. Centaur uses it for cache and
+mount paths and exposes it as `AGENT_REPO`; it does not have to name a GitHub
+repository. Without `cloneUrl`, Centaur keeps the existing behavior and clones
+`https://github.com/<repo>.git`. Set `cloneUrl` to an explicit HTTP or HTTPS
+remote for another Git service.
+
+`ref` can be a branch, tag, or commit SHA; omit it or set it to `""` to track
+the repo's default branch. Pinning a SHA is recommended when you need a fully
+reproducible production rollout, but many overlay repos intentionally track
+their default branch so a reviewed merge is enough for new sandboxes to pick
+up the change after repo-cache refreshes.
 
 `visibility` controls which sandboxes may receive the repo-cache checkout.
 It defaults to `private`. Set `visibility: public` only for repos whose full
@@ -82,8 +87,60 @@ extra configuration. Set a subdir to a non-default path to relocate it, or to
 ```
 
 For compatibility, when `overlays.sources` is empty the chart maps
-`toolServer.repo`, `toolServer.ref`, `toolServer.subdir`, and
+`toolServer.repo`, `toolServer.cloneUrl`, `toolServer.ref`, `toolServer.subdir`, and
 `toolServer.extraSources[]` into the same ordered overlay list.
+
+## Use a self-hosted GitLab remote
+
+Create a Secret containing a GitLab project, group, or deploy token. This
+example reads the token without adding it to shell history and streams it to
+`kubectl` rather than putting it in the Git URL:
+
+```bash
+read -rs GITLAB_REPO_TOKEN
+printf '%s' "$GITLAB_REPO_TOKEN" | kubectl create secret generic gitlab-repo-token \
+  --namespace centaur \
+  --from-file=token=/dev/stdin \
+  --dry-run=client -o yaml | kubectl apply -f -
+unset GITLAB_REPO_TOKEN
+```
+
+Then select the remote and Secret in your Helm values:
+
+```yaml
+overlays:
+  sources:
+    - repo: platform/centaur-overlay
+      cloneUrl: http://git.internal.example:82/platform/centaur-overlay.git
+      ref: main
+      visibility: private
+
+repoCache:
+  enabled: true
+  gitCredentials:
+    username: oauth2
+    existingSecretName: gitlab-repo-token
+    secretKey: token
+  egressPorts:
+    - 82
+    - 443
+```
+
+For a GitLab deploy token, set `username` to that token's generated username.
+For a personal, project, or group access token, GitLab accepts any non-empty
+username; the example keeps the conventional `oauth2` value.
+The generic `gitCredentials` setting takes precedence over the legacy
+`githubToken` setting. Do not put a username or token in `cloneUrl`; Centaur
+rejects URLs containing user-info and supplies credentials through
+`GIT_ASKPASS` from the mounted Secret.
+
+:::warning[Plain HTTP exposes repository data and credentials]
+An `http://` remote sends the Git username, token, and repository contents
+without transport encryption. Use it only on a trusted isolated network and
+prefer HTTPS whenever the Git server can provide it. Include the remote's port
+in `repoCache.egressPorts`; adding a port permits repo-cache egress but does not
+grant unrestricted sandbox network access.
+:::
 
 ## Mount paths
 
