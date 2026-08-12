@@ -20,13 +20,14 @@ use kube::api::{
     AttachParams, DeleteParams, ListParams, LogParams, Patch, PatchParams, PostParams,
 };
 use kube::{Api, Client, Error};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Mutex;
 use tokio::time::{Instant, sleep};
 
 pub use generated::agents_x_k8s_io as crd;
 pub use iron_proxy::IronProxyConfig;
+pub use k8s_openapi::api::core::v1::Toleration;
 pub use tools::{GitHubTokenRef, ToolSource, ToolsConfig};
 
 pub mod generated;
@@ -59,9 +60,20 @@ pub struct AgentSandboxConfig {
     pub annotations: BTreeMap<String, String>,
     pub image_pull_policy: Option<String>,
     pub image_pull_secrets: Vec<String>,
+    /// Node steering for every sandbox pod **and** its paired iron-proxy pod.
+    /// `Sandbox.spec.podTemplate.spec` already accepts `nodeSelector`,
+    /// `tolerations`, and `runtimeClassName`; without wiring these through
+    /// api-rs, chart values such as `sandbox.runtimeClassName` are inert
+    /// because sandbox pods are created at runtime rather than by Helm.
+    pub node_selector: BTreeMap<String, String>,
+    /// Tolerations applied with `node_selector` so sandboxes can land on a
+    /// tainted agents pool. Empty leaves default scheduling untouched.
+    pub tolerations: Vec<Toleration>,
+    /// RuntimeClass for sandbox and iron-proxy pods (e.g. `gvisor`).
+    pub runtime_class_name: Option<String>,
     pub state_volume: Option<StateVolumeConfig>,
     pub iron_proxy: Option<IronProxyConfig>,
-    pub iron_control: Option<IronControlSettings>,
+    pub iron_control: IronControlSettings,
     /// When set, every sandbox gets a `tools-bootstrap` init container that
     /// git-clones the tools repo into the agent's `/app/tools`, and `TOOL_DIRS`
     /// is set so the agent's shim installer finds them.
@@ -82,7 +94,7 @@ pub struct OtlpEgressTarget {
     pub port: u16,
 }
 
-/// iron-control coordinates for sync-mode egress proxies. When set, a sandbox
+/// iron-control coordinates for sync-mode egress proxies. A sandbox
 /// whose spec carries an `iron_control_principal` gets a per-sandbox proxy
 /// registered in iron-control (synced over `IRON_CONTROL_URL` with its
 /// `iprx_` token) instead of a rendered static proxy config.
@@ -92,12 +104,18 @@ pub struct IronControlSettings {
     pub client: IronControlClient,
     /// Base URL injected into the proxy pod as `IRON_CONTROL_URL`.
     pub control_url: String,
-    /// iron-control namespace, used to resolve principals by `foreign_id`.
-    pub namespace: String,
+}
+
+#[cfg(test)]
+fn test_iron_control_settings() -> IronControlSettings {
+    IronControlSettings {
+        client: IronControlClient::new("http://127.0.0.1:1", "test-key"),
+        control_url: "http://iron-control".to_owned(),
+    }
 }
 
 impl AgentSandboxConfig {
-    pub fn new(namespace: impl Into<String>) -> Self {
+    pub fn new(namespace: impl Into<String>, iron_control: IronControlSettings) -> Self {
         Self {
             namespace: namespace.into(),
             field_manager: "centaur-api-rs".to_owned(),
@@ -106,9 +124,12 @@ impl AgentSandboxConfig {
             annotations: BTreeMap::new(),
             image_pull_policy: None,
             image_pull_secrets: Vec::new(),
+            node_selector: BTreeMap::new(),
+            tolerations: Vec::new(),
+            runtime_class_name: None,
             state_volume: None,
             iron_proxy: None,
-            iron_control: None,
+            iron_control,
             tools: None,
             otlp_egress: None,
             ready_timeout: Duration::from_secs(60),
@@ -122,11 +143,6 @@ impl AgentSandboxConfig {
 
     pub fn iron_proxy(mut self, iron_proxy: IronProxyConfig) -> Self {
         self.iron_proxy = Some(iron_proxy);
-        self
-    }
-
-    pub fn iron_control(mut self, iron_control: IronControlSettings) -> Self {
-        self.iron_control = Some(iron_control);
         self
     }
 
@@ -176,11 +192,17 @@ impl AgentSandboxBackend {
         }
     }
 
-    pub async fn try_default(namespace: impl Into<String>) -> SandboxResult<Self> {
+    pub async fn try_default(
+        namespace: impl Into<String>,
+        iron_control: IronControlSettings,
+    ) -> SandboxResult<Self> {
         let client = Client::try_default()
             .await
             .map_err(|err| SandboxError::backend_source("create kube client", err))?;
-        Ok(Self::new(client, AgentSandboxConfig::new(namespace)))
+        Ok(Self::new(
+            client,
+            AgentSandboxConfig::new(namespace, iron_control),
+        ))
     }
 
     fn sandboxes(&self) -> Api<crd::Sandbox> {
@@ -479,8 +501,9 @@ impl SandboxBackend for AgentSandboxBackend {
         }
         // The proxy resources were recreated, so re-bind them to the sandbox
         // for cascade deletion.
-        if let Some(sandbox) = self.get_sandbox(id).await?
-            && let Err(error) = self.adopt_iron_proxy_resources(id, &sandbox).await
+        let sandbox = self.get_sandbox(id).await?;
+        if let Some(sandbox) = &sandbox
+            && let Err(error) = self.adopt_iron_proxy_resources(id, sandbox).await
         {
             tracing::warn!(
                 sandbox_id = id.as_str(),
@@ -488,7 +511,24 @@ impl SandboxBackend for AgentSandboxBackend {
                 "failed to set ownerReferences on resumed iron-proxy resources"
             );
         }
-        self.patch_sandbox_merge(id, sandbox_resume_patch()).await?;
+        // A pod that was deleted out from under a `Suspended`/`Created`
+        // sandbox (janitor, node pressure, manual reap) comes back through
+        // this same resume path. Re-derive the capability labels from the
+        // sandbox's own recorded env (the durable source of truth `resolve_
+        // iron_proxy_for_resume` already reads for the same purpose) and
+        // reassert them on both the Sandbox and its pod template, so the
+        // recreated agent pod keeps the labels the create path applied —
+        // otherwise it loses `centaur.ai/api-server-enabled` /
+        // `observability-enabled` and the chart's NetworkPolicy stops
+        // routing its model-proxy egress.
+        let capability_labels = sandbox
+            .as_ref()
+            .map(|sandbox| {
+                sandbox_capability_labels(sandbox, &self.config.container_name, id.as_str())
+            })
+            .unwrap_or_default();
+        self.patch_sandbox_merge(id, sandbox_resume_patch(&capability_labels))
+            .await?;
         self.wait_until_running(id).await
     }
 }
@@ -500,12 +540,66 @@ fn sandbox_pause_patch(paused_at: jiff::Timestamp) -> Value {
     })
 }
 
-fn sandbox_resume_patch() -> Value {
-    // A JSON merge patch null removes the annotation.
+fn sandbox_resume_patch(capability_labels: &BTreeMap<&'static str, bool>) -> Value {
+    // A JSON merge patch null removes a key, so a disabled capability clears
+    // its label rather than writing "false" — matching `build_agent_sandbox`,
+    // which only ever inserts these labels, never sets them false.
+    let labels: Map<String, Value> = capability_labels
+        .iter()
+        .map(|(&label, &enabled)| {
+            (
+                label.to_owned(),
+                if enabled { json!("true") } else { Value::Null },
+            )
+        })
+        .collect();
     json!({
-        "spec": { "replicas": 1 },
-        "metadata": { "annotations": { PAUSED_AT_ANNOTATION: null } },
+        "spec": {
+            "replicas": 1,
+            "podTemplate": { "metadata": { "labels": labels } },
+        },
+        "metadata": {
+            "annotations": { PAUSED_AT_ANNOTATION: null },
+            "labels": labels,
+        },
     })
+}
+
+/// Re-derive the capability labels `build_agent_sandbox` would apply for this
+/// sandbox's recorded capabilities, reading them back from the durable env
+/// vars `apply_sandbox_capabilities` stamped on the container at create time.
+/// Missing or invalid env values use the same fail-closed CR-label fallback as
+/// `resolve_iron_proxy_for_resume`. Used to reassert the labels on resume,
+/// since a pod recreated after external deletion (janitor, node pressure,
+/// manual reap) only inherits whatever the Sandbox's `podTemplate` currently
+/// carries.
+fn sandbox_capability_labels(
+    sandbox: &crd::Sandbox,
+    container_name: &str,
+    sandbox_id: &str,
+) -> BTreeMap<&'static str, bool> {
+    let mut labels = BTreeMap::new();
+    labels.insert(
+        OBSERVABILITY_ENABLED_LABEL,
+        iron_proxy::resolve_resume_capability(
+            iron_proxy::sandbox_observability_enabled(sandbox, container_name),
+            sandbox.metadata.labels.as_ref(),
+            OBSERVABILITY_ENABLED_LABEL,
+            "observability",
+            sandbox_id,
+        ),
+    );
+    labels.insert(
+        API_SERVER_ENABLED_LABEL,
+        iron_proxy::resolve_resume_capability(
+            iron_proxy::sandbox_api_server_enabled(sandbox, container_name),
+            sandbox.metadata.labels.as_ref(),
+            API_SERVER_ENABLED_LABEL,
+            "api_server",
+            sandbox_id,
+        ),
+    );
+    labels
 }
 
 fn sandbox_creation_time(sandbox: &crd::Sandbox) -> Option<SystemTime> {
@@ -721,6 +815,27 @@ fn build_agent_sandbox(
                 .collect::<Vec<_>>()
         }),
     );
+    // Node steering — passed through to the CRD podTemplate fields. Chart
+    // values alone cannot reach these pods; api-rs creates them at runtime.
+    insert_optional(
+        &mut pod_spec,
+        "nodeSelector",
+        (!config.node_selector.is_empty()).then(|| config.node_selector.clone()),
+    );
+    insert_optional(
+        &mut pod_spec,
+        "tolerations",
+        (!config.tolerations.is_empty()).then(|| config.tolerations.clone()),
+    );
+    insert_optional(
+        &mut pod_spec,
+        "runtimeClassName",
+        config
+            .runtime_class_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty()),
+    );
 
     let mut agent_spec = json!({
         "replicas": 1,
@@ -796,14 +911,7 @@ fn mount_json(spec: &SandboxSpec) -> (Vec<Value>, Vec<Value>) {
 
 fn resources_json(spec: &SandboxSpec) -> Option<Value> {
     let resources = spec.resources.as_ref()?;
-    let mut limits = serde_json::Map::new();
-    if let Some(cpu_millis) = resources.cpu_millis {
-        limits.insert("cpu".to_owned(), json!(format!("{cpu_millis}m")));
-    }
-    if let Some(memory_bytes) = resources.memory_bytes {
-        limits.insert("memory".to_owned(), json!(format!("{memory_bytes}")));
-    }
-    (!limits.is_empty()).then(|| json!({ "limits": limits }))
+    (!resources.is_empty()).then(|| json!(resources))
 }
 
 fn state_volume_claim_json(state_volume: &StateVolumeConfig) -> Vec<Value> {
@@ -874,8 +982,11 @@ fn map_kube_error(operation: &str, err: Error) -> SandboxError {
 
 #[cfg(test)]
 mod tests {
-    use centaur_sandbox_core::{RepoCacheAccess, ResourceLimits, SandboxCapabilities, SandboxSpec};
+    use centaur_sandbox_core::{
+        RepoCacheAccess, ResourceRequirements, SandboxCapabilities, SandboxSpec,
+    };
     use k8s_openapi::api::core::v1::{PodCondition, PodStatus};
+    use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 
     use super::*;
 
@@ -890,11 +1001,15 @@ mod tests {
                 "/workspace",
             ))
             .resources(
-                ResourceLimits::new()
-                    .cpu_millis(500)
-                    .memory_bytes(512 * 1024 * 1024),
+                ResourceRequirements::new()
+                    .request("cpu", "250m")
+                    .request("memory", "256Mi")
+                    .request("ephemeral-storage", "1Gi")
+                    .limit("cpu", "500m")
+                    .limit("memory", "512Mi")
+                    .limit("example.com/gpu", "1"),
             );
-        let config = AgentSandboxConfig::new("centaur")
+        let config = AgentSandboxConfig::new("centaur", test_iron_control_settings())
             .state_volume(StateVolumeConfig::new("/home/agent/state", "10Gi"));
 
         let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
@@ -917,7 +1032,126 @@ mod tests {
         assert_eq!(container.image.as_deref(), Some("centaur-agent:latest"));
         assert_eq!(container.stdin, Some(true));
         assert_eq!(container.volume_mounts.as_ref().unwrap().len(), 2);
-        assert!(container.resources.as_ref().unwrap().limits.is_some());
+        let resources = container.resources.as_ref().unwrap();
+        let quantity = |value: &str| IntOrString::String(value.to_owned());
+        assert_eq!(
+            resources.requests.as_ref().unwrap().get("cpu"),
+            Some(&quantity("250m"))
+        );
+        assert_eq!(
+            resources.requests.as_ref().unwrap().get("memory"),
+            Some(&quantity("256Mi"))
+        );
+        assert_eq!(
+            resources
+                .requests
+                .as_ref()
+                .unwrap()
+                .get("ephemeral-storage"),
+            Some(&quantity("1Gi"))
+        );
+        assert_eq!(
+            resources.limits.as_ref().unwrap().get("cpu"),
+            Some(&quantity("500m"))
+        );
+        assert_eq!(
+            resources.limits.as_ref().unwrap().get("memory"),
+            Some(&quantity("512Mi"))
+        );
+        assert_eq!(
+            resources.limits.as_ref().unwrap().get("example.com/gpu"),
+            Some(&quantity("1"))
+        );
+    }
+
+    #[test]
+    fn renders_partial_sandbox_resources() {
+        let spec = SandboxSpec::new("centaur-agent:latest").resources(
+            ResourceRequirements::new()
+                .request("memory", "4Gi")
+                .limit("memory", "4Gi"),
+        );
+        let config = AgentSandboxConfig::new("centaur", test_iron_control_settings());
+
+        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+
+        let resources = sandbox.spec.pod_template.spec.containers[0]
+            .resources
+            .as_ref()
+            .unwrap();
+        let memory = IntOrString::String("4Gi".to_owned());
+        assert_eq!(
+            resources.requests.as_ref().unwrap().get("memory"),
+            Some(&memory)
+        );
+        assert_eq!(
+            resources.limits.as_ref().unwrap().get("memory"),
+            Some(&memory)
+        );
+        assert!(!resources.requests.as_ref().unwrap().contains_key("cpu"));
+        assert!(!resources.limits.as_ref().unwrap().contains_key("cpu"));
+    }
+
+    #[test]
+    fn omits_resources_when_unset() {
+        let spec = SandboxSpec::new("centaur-agent:latest");
+        let config = AgentSandboxConfig::new("centaur", test_iron_control_settings());
+
+        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+
+        assert!(
+            sandbox.spec.pod_template.spec.containers[0]
+                .resources
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn node_steering_reaches_the_sandbox_pod_template() {
+        let spec = SandboxSpec::new("centaur-agent:latest");
+        let mut config = AgentSandboxConfig::new("centaur", test_iron_control_settings());
+        config.node_selector =
+            BTreeMap::from([("workload".to_owned(), "centaur-sandbox".to_owned())]);
+        config.tolerations = vec![Toleration {
+            key: Some("example.com/sandbox".to_owned()),
+            operator: Some("Exists".to_owned()),
+            effect: Some("NoSchedule".to_owned()),
+            ..Default::default()
+        }];
+        config.runtime_class_name = Some("gvisor".to_owned());
+
+        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+        let pod_spec = &sandbox.spec.pod_template.spec;
+
+        assert_eq!(
+            pod_spec
+                .node_selector
+                .as_ref()
+                .and_then(|selector| selector.get("workload"))
+                .map(String::as_str),
+            Some("centaur-sandbox")
+        );
+        let tolerations = pod_spec
+            .tolerations
+            .as_ref()
+            .expect("tolerations should be set");
+        assert_eq!(tolerations.len(), 1);
+        assert_eq!(tolerations[0].key.as_deref(), Some("example.com/sandbox"));
+        assert_eq!(tolerations[0].effect.as_deref(), Some("NoSchedule"));
+        assert_eq!(pod_spec.runtime_class_name.as_deref(), Some("gvisor"));
+    }
+
+    #[test]
+    fn node_steering_is_omitted_when_unset() {
+        let spec = SandboxSpec::new("centaur-agent:latest");
+        let config = AgentSandboxConfig::new("centaur", test_iron_control_settings());
+
+        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+        let pod_spec = &sandbox.spec.pod_template.spec;
+
+        assert!(pod_spec.node_selector.is_none());
+        assert!(pod_spec.tolerations.is_none());
+        assert!(pod_spec.runtime_class_name.is_none());
     }
 
     #[test]
@@ -927,7 +1161,7 @@ mod tests {
             observability_enabled: true,
             api_server_enabled: true,
         });
-        let config = AgentSandboxConfig::new("centaur");
+        let config = AgentSandboxConfig::new("centaur", test_iron_control_settings());
 
         let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
 
@@ -980,7 +1214,7 @@ mod tests {
             observability_enabled: false,
             api_server_enabled: false,
         });
-        let config = AgentSandboxConfig::new("centaur");
+        let config = AgentSandboxConfig::new("centaur", test_iron_control_settings());
 
         let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
 
@@ -1018,13 +1252,111 @@ mod tests {
         );
     }
 
+    /// A pod deleted out from under a sandbox (janitor, node pressure, manual
+    /// reap) comes back through `resume`, which only has the sandbox id, not
+    /// the original `SandboxSpec`. Regression test for the recreated agent
+    /// pod losing `centaur.ai/api-server-enabled` and
+    /// `centaur.ai/observability-enabled`: the resume patch must restore both
+    /// labels (derived from the sandbox's own recorded capability env, the
+    /// same durable source `resolve_iron_proxy_for_resume` already trusts)
+    /// on the Sandbox and its pod template, matching what `build_agent_sandbox`
+    /// would have applied for these capabilities.
+    #[test]
+    fn resume_reasserts_capability_labels_from_recorded_env() {
+        // Mirrors what `apply_sandbox_capabilities` (centaur-session-runtime)
+        // stamps onto the spec env alongside `.capabilities(..)`, since that's
+        // the durable record `sandbox_capability_labels` reads back on resume.
+        let spec = SandboxSpec::new("centaur-agent:latest")
+            .capabilities(SandboxCapabilities {
+                repo_cache: RepoCacheAccess::All,
+                observability_enabled: true,
+                api_server_enabled: true,
+            })
+            .env("CENTAUR_SANDBOX_OBSERVABILITY_ENABLED", "true")
+            .env("CENTAUR_SANDBOX_API_SERVER_ENABLED", "true");
+        let config = AgentSandboxConfig::new("centaur", test_iron_control_settings());
+        let mut sandbox =
+            build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+
+        // Simulate the observed production bug: the recreated pod's template
+        // lost the capability labels even though the container's capability
+        // env (the create path's durable record) is untouched.
+        if let Some(labels) = sandbox
+            .spec
+            .pod_template
+            .metadata
+            .as_mut()
+            .and_then(|metadata| metadata.labels.as_mut())
+        {
+            labels.remove(OBSERVABILITY_ENABLED_LABEL);
+            labels.remove(API_SERVER_ENABLED_LABEL);
+        }
+        if let Some(labels) = sandbox.metadata.labels.as_mut() {
+            labels.remove(OBSERVABILITY_ENABLED_LABEL);
+            labels.remove(API_SERVER_ENABLED_LABEL);
+        }
+
+        let labels = sandbox_capability_labels(&sandbox, DEFAULT_CONTAINER_NAME, "asbx-test");
+        assert_eq!(labels.get(OBSERVABILITY_ENABLED_LABEL), Some(&true));
+        assert_eq!(labels.get(API_SERVER_ENABLED_LABEL), Some(&true));
+
+        let patch = sandbox_resume_patch(&labels);
+        assert_eq!(
+            patch["metadata"]["labels"][OBSERVABILITY_ENABLED_LABEL],
+            json!("true")
+        );
+        assert_eq!(
+            patch["metadata"]["labels"][API_SERVER_ENABLED_LABEL],
+            json!("true")
+        );
+        assert_eq!(
+            patch["spec"]["podTemplate"]["metadata"]["labels"][OBSERVABILITY_ENABLED_LABEL],
+            json!("true")
+        );
+        assert_eq!(
+            patch["spec"]["podTemplate"]["metadata"]["labels"][API_SERVER_ENABLED_LABEL],
+            json!("true")
+        );
+    }
+
+    #[test]
+    fn resume_patch_clears_labels_for_restricted_capabilities() {
+        // Exercise the fail-closed fallback for callers that set the backend
+        // capabilities without duplicating them into the container env.
+        let spec = SandboxSpec::new("centaur-agent:latest").capabilities(SandboxCapabilities {
+            repo_cache: RepoCacheAccess::All,
+            observability_enabled: false,
+            api_server_enabled: false,
+        });
+        let config = AgentSandboxConfig::new("centaur", test_iron_control_settings());
+        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+
+        let labels = sandbox_capability_labels(&sandbox, DEFAULT_CONTAINER_NAME, "asbx-test");
+        assert_eq!(labels.get(OBSERVABILITY_ENABLED_LABEL), Some(&false));
+        assert_eq!(labels.get(API_SERVER_ENABLED_LABEL), Some(&false));
+
+        // A JSON merge patch null removes the key rather than writing
+        // "false", matching how `build_agent_sandbox` omits (not falsifies)
+        // the label for a disabled capability.
+        let patch = sandbox_resume_patch(&labels);
+        assert!(patch["metadata"]["labels"][OBSERVABILITY_ENABLED_LABEL].is_null());
+        assert!(patch["metadata"]["labels"][API_SERVER_ENABLED_LABEL].is_null());
+        assert!(
+            patch["spec"]["podTemplate"]["metadata"]["labels"][OBSERVABILITY_ENABLED_LABEL]
+                .is_null()
+        );
+        assert!(
+            patch["spec"]["podTemplate"]["metadata"]["labels"][API_SERVER_ENABLED_LABEL].is_null()
+        );
+    }
+
     #[test]
     fn tools_clone_rides_iron_proxy_when_enabled() {
         // apply_proxy_env runs before build_agent_sandbox in create(), so the
         // resolved per-sandbox proxy URL arrives on the spec env.
         let spec = SandboxSpec::new("centaur-agent:latest")
             .env("HTTPS_PROXY", "http://asbx-test-iron-proxy:8080");
-        let config = AgentSandboxConfig::new("centaur")
+        let config = AgentSandboxConfig::new("centaur", test_iron_control_settings())
             .tools(ToolsConfig::new("paradigmxyz/centaur", "api:test"))
             .iron_proxy(IronProxyConfig::new("proxy:test", "ca-cert", "ca-key"));
 
@@ -1046,7 +1378,7 @@ mod tests {
 
         // Without iron-proxy the clone goes direct: no proxy exports, no CA mount.
         let spec = SandboxSpec::new("centaur-agent:latest");
-        let config = AgentSandboxConfig::new("centaur")
+        let config = AgentSandboxConfig::new("centaur", test_iron_control_settings())
             .tools(ToolsConfig::new("paradigmxyz/centaur", "api:test"));
         let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
         let bootstrap = &sandbox
@@ -1077,7 +1409,7 @@ mod tests {
         });
         let mut tools = ToolsConfig::new("paradigmxyz/centaur", "api:test");
         tools.repo_cache_path = Some("/var/lib/centaur/repos".to_owned());
-        let config = AgentSandboxConfig::new("centaur").tools(tools);
+        let config = AgentSandboxConfig::new("centaur", test_iron_control_settings()).tools(tools);
 
         let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
         let pod_spec = &sandbox.spec.pod_template.spec;
@@ -1113,7 +1445,7 @@ mod tests {
     #[test]
     fn bootstrap_empty_dirs_are_writable_by_agent_uid() {
         let spec = SandboxSpec::new("centaur-agent:latest");
-        let config = AgentSandboxConfig::new("centaur")
+        let config = AgentSandboxConfig::new("centaur", test_iron_control_settings())
             .tools(ToolsConfig::new("paradigmxyz/centaur", "api:test"));
 
         let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();

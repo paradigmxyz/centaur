@@ -6,7 +6,13 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
   TranscriptSession = Struct.new(:metadata_hash, :harness_type, :title, keyword_init: true)
   ModelSession = Struct.new(:thread_key, :metadata_hash, :harness_type, keyword_init: true)
   ModelExecution = Struct.new(:metadata, keyword_init: true)
-  TranscriptEvent = Struct.new(:event_type, :payload_hash, :created_at, keyword_init: true)
+  TranscriptEvent = Struct.new(
+    :event_type,
+    :payload_hash,
+    :created_at,
+    :execution_id,
+    keyword_init: true
+  )
   SelectedSession = Struct.new(:thread_key, keyword_init: true)
 
   setup do
@@ -1593,6 +1599,32 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_nil items[1][:summary]
   end
 
+  test "activity summaries do not attach to trace items from another execution" do
+    controller = Console::ThreadsController.new
+    items = [
+      { event_id: 10, execution_id: "exe-1", text: "first execution" },
+      { event_id: 20, execution_id: "exe-2", text: "second execution" }
+    ]
+    summaries = [
+      TranscriptEvent.new(
+        event_type: "session.activity_summary",
+        execution_id: "exe-2",
+        payload_hash: { "summary" => "I'm starting the second execution", "source_event_id" => 15 }
+      ),
+      TranscriptEvent.new(
+        event_type: "session.activity_summary",
+        execution_id: "exe-2",
+        payload_hash: { "summary" => "I'm working in the second execution", "source_event_id" => 21 }
+      )
+    ]
+    controller.define_singleton_method(:selected_activity_summaries) { summaries }
+
+    controller.send(:apply_activity_summaries, items)
+
+    assert_nil items[0][:summary]
+    assert_equal "I'm working in the second execution", items[1][:summary]
+  end
+
   test "thinking extraction formats claude stream-json tool calls" do
     controller = Console::ThreadsController.new
     line = {
@@ -1954,7 +1986,6 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
 
   def create_slack_oauth_credential(app, subject:, email:, labels: {})
     BrokerCredential.create!(
-      namespace: app.credential_namespace,
       oauth_app: app,
       provider_subject: subject,
       provider_email: email,

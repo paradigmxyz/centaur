@@ -465,17 +465,18 @@ if [ -n "${CENTAUR_TOOLS_URL:-}" ]; then
     done
 fi
 
-# Signal readiness
-touch "$HOME_DIR/.ready"
-
-# ── Background: slow auth tasks ─────────────────────────────────────────────
-{
-    if [ -n "${GITHUB_TOKEN:-}" ]; then
-        git config --global credential.helper store
-        printf 'https://oauth2:%s@github.com\n' "$GITHUB_TOKEN" > "$HOME_DIR/.git-credentials"
-        echo "${GITHUB_TOKEN}" | gh auth login --with-token 2>/dev/null || true
-        gh auth setup-git 2>/dev/null || true
+# Git and gh both read the placeholder token from the environment. Install gh's
+# credential helper before signalling readiness so Git can present that
+# placeholder as the HTTP Basic password for iron-proxy to replace. setup-git is
+# local-only; unlike `gh auth login`, it does not verify or persist the token.
+if [ -n "${GITHUB_TOKEN:-}" ]; then
+    if ! gh auth setup-git >/dev/null 2>&1; then
+        echo "failed to configure the GitHub credential helper" >&2
+        exit 1
     fi
-} &
+fi
+
+# Signal readiness only after every client-side credential helper is installed.
+touch "$HOME_DIR/.ready"
 
 exec "$@"

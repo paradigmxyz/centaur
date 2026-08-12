@@ -24,7 +24,7 @@ module Console
 
     def set_system_setting
       @system_setting = SystemSetting.current
-      @roles = Role.order(:namespace, :name, :foreign_id, :id)
+      @roles = Role.order(:name, :foreign_id, :id)
     end
 
     def system_setting_params

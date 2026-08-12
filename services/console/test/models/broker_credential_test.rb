@@ -21,7 +21,7 @@ class BrokerCredentialTest < ActiveSupport::TestCase
 
   def build_credential(refresh_token: "seed-rt", **overrides)
     BrokerCredential.new({
-      namespace: "default", foreign_id: "cred-#{SecureRandom.hex(4)}",
+      foreign_id: "cred-#{SecureRandom.hex(4)}",
       token_endpoint: "https://idp.example/token", scopes: %w[a b],
       client_id: "cid", client_secret: "sec",
       created_by: users(:acme_admin), refresh_token: refresh_token
@@ -49,9 +49,9 @@ class BrokerCredentialTest < ActiveSupport::TestCase
 
   test "at most one wrapping static secret per credential" do
     cred = create_credential
-    StaticSecret.create!(namespace: "default", name: "wrapper", broker_credential: cred,
+    StaticSecret.create!(name: "wrapper", broker_credential: cred,
                          inject_config: { "header" => "Authorization" })
-    dup = StaticSecret.new(namespace: "default", name: "dup", broker_credential: cred,
+    dup = StaticSecret.new(name: "dup", broker_credential: cred,
                            inject_config: { "header" => "Authorization" })
     assert_raises(ActiveRecord::RecordNotUnique) { dup.save!(validate: false) }
   end
@@ -107,7 +107,7 @@ class BrokerCredentialTest < ActiveSupport::TestCase
       provider: "google", slug: "slug-#{SecureRandom.hex(4)}",
       client_id: "app-cid", client_secret: "app-secret",
       allowed_scopes: %w[a b],
-      credential_namespace: "default", created_by: users(:acme_admin)
+      created_by: users(:acme_admin)
     }.merge(overrides))
   end
 
@@ -242,6 +242,24 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     assert_equal 0, bc.failure_count
     assert_in_delta (now + 3600).to_f, bc.expires_at.to_f, 1
     assert bc.next_attempt_at > now
+  end
+
+  test "refresh skips a queued attempt made stale by a successful refresh" do
+    now = Time.current
+    client = Minitest::Mock.new
+    expect_refresh(client, returns: result(access_token: "AT-1", refresh_token: "RT-2", expires_in: 3600))
+    bc = create_credential
+    bc.update!(next_attempt_at: now)
+    bc.refresh_client = client
+
+    bc.refresh!(now: now)
+    bc.refresh!(now: now + 1.minute)
+
+    client.verify
+    bc.reload
+    assert_equal "AT-1", bc.access_token
+    assert_equal "RT-2", bc.refresh_token
+    assert_operator bc.next_attempt_at, :>, now + 1.minute
   end
 
   test "refresh carries the previous refresh_token forward when the IdP omits it" do

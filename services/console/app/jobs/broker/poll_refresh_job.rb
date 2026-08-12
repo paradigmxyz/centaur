@@ -5,9 +5,10 @@ module Broker
   # next one (unlike a self-rescheduling job, which orphans a credential forever
   # if its enqueue is ever lost).
   #
-  # FOR UPDATE SKIP LOCKED skips credentials whose refresh is already in flight
-  # (locked by a RefreshCredentialJob), so we don't enqueue redundant work for
-  # them.
+  # FOR UPDATE SKIP LOCKED skips credentials whose refresh is actively holding
+  # its row lock. A credential can still be enqueued by multiple poll ticks
+  # while the first job waits in the queue; BrokerCredential#refresh! re-checks
+  # next_attempt_at under that same row lock so those stale jobs are no-ops.
   class PollRefreshJob < ApplicationJob
     queue_as :default
 

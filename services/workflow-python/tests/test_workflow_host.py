@@ -493,6 +493,99 @@ class WorkflowHostTests(unittest.TestCase):
         assert registered is not None
         self.assertEqual(host.normalize_principal(registered), True)
 
+    def test_workflow_name_from_source_reads_string_constant(self) -> None:
+        host = load_workflow_host()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "named.py"
+            path.write_text(
+                "WORKFLOW_NAME: str = 'annotated_workflow'\n"
+                "def handler(inp, ctx):\n"
+                "    return None\n"
+            )
+            self.assertEqual(host.workflow_name_from_source(path), "annotated_workflow")
+
+            path.write_text(
+                "WORKFLOW_NAME = 'x' + 'y'\n"
+                "def handler(inp, ctx):\n"
+                "    return None\n"
+            )
+            self.assertIsNone(host.workflow_name_from_source(path))
+
+    def test_discover_skips_disallowed_workflows_without_importing(self) -> None:
+        host = load_workflow_host()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            marker = tmp_path / "imported.marker"
+            (tmp_path / "blocked.py").write_text(
+                f"open({str(marker)!r}, 'w').write('imported')\n"
+                "WORKFLOW_NAME = 'blocked_workflow'\n"
+                "def handler(inp, ctx):\n"
+                "    return None\n"
+            )
+            (tmp_path / "allowed.py").write_text(
+                "WORKFLOW_NAME = 'allowed_workflow'\n"
+                "def handler(inp, ctx):\n"
+                "    return None\n"
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "WORKFLOW_DIRS": tmp,
+                    "WORKFLOW_ENABLE_MODE": "allowlist",
+                    "WORKFLOW_ALLOWED_NAMES": "allowed_workflow",
+                },
+                clear=False,
+            ):
+                discovered = host.discover_workflows()
+
+        self.assertEqual(set(discovered), {"allowed_workflow"})
+        self.assertFalse(marker.exists())
+
+    def test_discover_loads_allowed_workflows_in_allowlist_mode(self) -> None:
+        host = load_workflow_host()
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "allowed.py").write_text(
+                "WORKFLOW_NAME = 'allowed_workflow'\n"
+                "def handler(inp, ctx):\n"
+                "    return None\n"
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "WORKFLOW_DIRS": tmp,
+                    "WORKFLOW_ENABLE_MODE": "allowlist",
+                    "WORKFLOW_ALLOWED_NAMES": "allowed_workflow,other",
+                },
+                clear=False,
+            ):
+                discovered = host.discover_workflows()
+
+        self.assertEqual(set(discovered), {"allowed_workflow"})
+
+    def test_discover_skips_non_constant_workflow_name_without_importing(self) -> None:
+        host = load_workflow_host()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            marker = tmp_path / "imported.marker"
+            (tmp_path / "dynamic.py").write_text(
+                f"open({str(marker)!r}, 'w').write('imported')\n"
+                "WORKFLOW_NAME = 'dynamic' + '_workflow'\n"
+                "def handler(inp, ctx):\n"
+                "    return None\n"
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "WORKFLOW_DIRS": tmp,
+                    "WORKFLOW_ENABLE_MODE": "all",
+                },
+                clear=False,
+            ):
+                discovered = host.discover_workflows()
+
+        self.assertEqual(discovered, {})
+        self.assertFalse(marker.exists())
+
     def test_failed_workflow_host_exits_with_stdin_open(self) -> None:
         source = (
             "WORKFLOW_NAME = 'failing_workflow'\n"

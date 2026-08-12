@@ -4,8 +4,7 @@ class Principal < ApplicationRecord
   oid_prefix "prn"
 
   include ForeignIdCollisionGuard
-
-  attr_readonly :namespace, :foreign_id
+  attr_readonly :foreign_id
 
   has_many :grants, dependent: :destroy
   # Proxies outlive their principal: deleting a principal unassigns its proxies
@@ -26,9 +25,6 @@ class Principal < ApplicationRecord
   after_commit :auto_grant_matching_oauth_credentials, on: %i[create update]
   after_create :assign_default_roles, if: :roles_blank_for_defaulting?
   before_validation :apply_sandbox_repo_cache_label
-  before_validation :validate_identity_label_consistency
-  before_validation :promote_identity_labels_to_fields
-  before_validation :strip_identity_labels
   before_commit :bump_own_sync_config_cache_version, on: :update, if: :sync_config_fields_changed?
 
   URL_SAFE_FORMAT = /\A[A-Za-z0-9\-._~]+\z/
@@ -44,8 +40,7 @@ class Principal < ApplicationRecord
   SLACK_CHANNEL_ID_FORMAT = /\A[CDG][A-Z0-9]{8,}\z/
   SLACK_TEAM_ID_FORMAT = /\A[TE][A-Z0-9]{8,}\z/
 
-  validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
-  validates :foreign_id, uniqueness: { scope: :namespace, allow_nil: true },
+  validates :foreign_id, uniqueness: { allow_nil: true },
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }, allow_nil: true
   validates :sandbox_repo_cache, inclusion: { in: SANDBOX_REPO_CACHE_VALUES }
   validates :kind, presence: true,
@@ -150,7 +145,6 @@ class Principal < ApplicationRecord
 
   def labels_with_sandbox_capabilities
     labels.to_h.merge(
-      PrincipalIdentityLabels.serialize(self),
       SANDBOX_REPO_CACHE_LABEL => sandbox_repo_cache
     )
   end
@@ -251,7 +245,7 @@ class Principal < ApplicationRecord
   end
 
   def assign_default_roles
-    role_ids = Role.where(namespace: namespace, assign_by_default: true).ids
+    role_ids = Role.where(assign_by_default: true).ids
     return if role_ids.empty?
 
     # These assignments are part of the principal's initial state, so there is
@@ -265,22 +259,6 @@ class Principal < ApplicationRecord
 
   def apply_sandbox_repo_cache_label
     self[:labels] = labels.to_h.merge(SANDBOX_REPO_CACHE_LABEL => sandbox_repo_cache)
-  end
-
-  def validate_identity_label_consistency
-    PrincipalIdentityLabels.validate_consistency(self)
-  end
-
-  # Legacy API writers may still send principal identity through labels during
-  # the compatibility release. Promote only fields that were not assigned
-  # directly. Reserved identity labels are stripped below so columns remain
-  # authoritative.
-  def promote_identity_labels_to_fields
-    PrincipalIdentityLabels.assign(self)
-  end
-
-  def strip_identity_labels
-    PrincipalIdentityLabels.strip(self)
   end
 
   def supplied_key?(attributes, key)
@@ -375,8 +353,10 @@ class Principal < ApplicationRecord
   end
 
   def sync_config_fields_changed?
-    identity_fields = PrincipalIdentityLabels.columns
-    ([ "name", "labels", "sandbox_api_server_enabled" ] + identity_fields).any? do |field|
+    %w[
+      name labels sandbox_api_server_enabled kind slack_user_id slack_channel_id slack_team_id slack_email
+      console_user_id console_user_email
+    ].any? do |field|
       previous_changes.key?(field)
     end
   end

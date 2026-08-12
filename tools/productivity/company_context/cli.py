@@ -129,6 +129,11 @@ def search(
     occurred_before: str | None = typer.Option(
         None, "--before", help="Only results before this time."
     ),
+    hybrid: bool = typer.Option(
+        True,
+        "--hybrid/--no-hybrid",
+        help="Fuse keyword and vector results when embeddings are enabled.",
+    ),
     json_output: bool = typer.Option(False, "--json", help="Output raw JSON."),
 ) -> None:
     """Search indexed company context, including Google Docs and Granola notes."""
@@ -139,6 +144,7 @@ def search(
         source_type=source_type,
         occurred_after=occurred_after,
         occurred_before=occurred_before,
+        hybrid=hybrid,
     )
     _require_ok(result)
     if json_output:

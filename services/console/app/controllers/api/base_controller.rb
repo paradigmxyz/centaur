@@ -38,24 +38,16 @@ module Api
       params.require(:data)
     end
 
-    # Namespace for a create/upsert write, taken from the request body
-    # (defaults to "default"), matching the create path.
-    def upsert_namespace
-      data_params[:namespace].presence || "default"
-    end
-
     # Permits the body of a document write (create or PUT upsert) with replace
     # semantics: a permitted field that is omitted from the body, or sent as
     # null (which strong params drops for hash and array filters), is reset to
     # its column default rather than retained from the existing record, so the
-    # body always replaces the whole document. The identity columns (namespace,
-    # foreign_id) are the exception: an upsert by foreign_id sets them on the
+    # body always replaces the whole document. The identity column foreign_id
+    # is the exception: an upsert by foreign_id sets it on the
     # record before assignment, so a blank body value must not wipe them.
     def permit_document(ref, attrs, *scalars, **filters)
-      permitted = attrs.permit(:namespace, :foreign_id, *scalars, **filters)
+      permitted = attrs.permit(:foreign_id, *scalars, **filters)
       permitted.delete(:foreign_id) if permitted[:foreign_id].blank? && ref.foreign_id.present?
-      permitted.delete(:namespace) if permitted[:namespace].blank? && ref.namespace.present?
-      permitted[:namespace] = "default" if permitted[:namespace].blank? && ref.namespace.blank?
 
       defaults = ref.class.column_defaults
       columns = (scalars + filters.keys).map(&:to_s)
@@ -66,7 +58,7 @@ module Api
     #
     # When :id is an opaque id for this model it must reference an existing
     # record (update only; ActiveRecord::RecordNotFound otherwise). Any other
-    # value is treated as a foreign_id within the body namespace and the record
+    # value is treated as a globally unique foreign_id and the record
     # is initialized when absent, so a PUT to a foreign_id creates it. The
     # identity columns come from the URL/body here rather than mass assignment,
     # and a foreign_id can never start with the opaque-id prefix (model
@@ -76,17 +68,16 @@ module Api
       if identifier.start_with?("#{model.oid_prefix}_")
         model.find_by_oid!(identifier)
       else
-        record = model.find_or_initialize_by(namespace: upsert_namespace, foreign_id: identifier)
+        record = model.find_or_initialize_by(foreign_id: identifier)
         record.created_by = current_user if record.new_record?
         record
       end
     end
 
-    # Resolves a record from a namespaced lookup route, where namespace and
-    # foreign_id are explicit, required path segments. Raises
-    # ActiveRecord::RecordNotFound when nothing matches.
+    # Resolves a record from a canonical or default-namespace compatibility
+    # lookup route.
     def find_by_foreign_id!(model)
-      model.find_by!(namespace: params.require(:namespace), foreign_id: params.require(:foreign_id))
+      model.find_by!(foreign_id: params.require(:foreign_id))
     end
 
     def build_rules(attrs)
@@ -116,16 +107,13 @@ module Api
     MAX_PAGE_LIMIT = 200
 
     def paginated_label_search(scope, label_filter: nil)
-      namespace = params.require(:namespace)
-
       labels = label_filter_params
-      filtered = scope.where(namespace: namespace)
       filtered = if label_filter
-        label_filter.call(filtered, labels)
+        label_filter.call(scope, labels)
       elsif labels.any?
-        filtered.where("labels @> ?", labels.to_json)
+        scope.where("labels @> ?", labels.to_json)
       else
-        filtered
+        scope
       end
 
       limit = pagination_limit

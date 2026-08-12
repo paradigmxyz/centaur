@@ -14,8 +14,7 @@ module Api
       def valid_body(**overrides)
         { data: {
           provider: "google", slug: "api-google", client_id: "the-client-id", client_secret: "the-secret",
-          allowed_scopes: [ "https://www.googleapis.com/auth/gmail.readonly" ],
-          credential_namespace: "acme"
+          allowed_scopes: [ "https://www.googleapis.com/auth/gmail.readonly" ]
         }.merge(overrides) }
       end
 
@@ -55,17 +54,20 @@ module Api
 
       test "create persists the app and redacts the secret" do
         assert_difference -> { OauthApp.count } => 1 do
-          post api_v1_oauth_apps_url, params: valid_body.to_json, headers: auth_headers
+          post api_v1_oauth_apps_url,
+               params: valid_body.to_json,
+               headers: auth_headers
         end
         assert_response :created
         data = json_body.fetch("data")
         assert_equal "google", data["provider"]
         assert_equal "api-google", data["slug"]
+        refute data.key?("credential_namespace")
         refute data.key?("client_secret")
 
         created = OauthApp.find_by_oid(data["id"])
         assert_equal "the-secret", created.client_secret
-        assert_equal "acme", created.credential_namespace
+        assert_not created.has_attribute?(:credential_namespace)
       end
 
       test "create persists and serializes always_available" do
@@ -120,7 +122,7 @@ module Api
 
       test "destroy is blocked with 409 while minted credentials exist" do
         app = oauth_apps(:acme_google)
-        BrokerCredential.create!(namespace: "acme", foreign_id: "minted-api",
+        BrokerCredential.create!(foreign_id: "minted-api",
                                  token_endpoint: "https://oauth2.googleapis.com/token",
                                  oauth_app: app, provider_subject: "sub-api")
         assert_no_difference -> { OauthApp.count } do

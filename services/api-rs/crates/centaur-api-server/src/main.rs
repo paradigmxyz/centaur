@@ -76,38 +76,28 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
     }
     let pool = store.pool().clone();
     let sandbox_runtime = args.sandbox_runtime().await?;
-    let mut runtime = SessionRuntime::new(store.clone(), sandbox_runtime)
+    let iron_control = args.iron_control_runtime().await?;
+    let mut runtime = SessionRuntime::new(store.clone(), sandbox_runtime, iron_control.registrar)
         .with_openai_session_title_generator_from_env();
-    let mut warm_pool_bootstrap_principal = None;
-    let mut workflow_host_principal = None;
-    let mut workflow_principal_registrar = None;
-    if let Some(iron_control) = args.iron_control_runtime().await? {
-        info!("iron-control session registration enabled");
-        warm_pool_bootstrap_principal = Some(iron_control.warm_pool_bootstrap_principal);
-        workflow_host_principal = Some(iron_control.workflow_host_principal);
-        workflow_principal_registrar = Some(iron_control.workflow_principal_registrar);
-        runtime = runtime.with_iron_control(iron_control.registrar);
-    }
     runtime = runtime.with_personas(args.persona_registry()?);
     let sandbox_capacity_config = args.sandbox_capacity_config();
     if let Some(config) = sandbox_capacity_config {
         runtime = runtime.with_sandbox_capacity(config);
     }
-    if let Some(mut config) = args.warm_pool_config() {
-        config.bootstrap_iron_control_principal = warm_pool_bootstrap_principal.clone();
+    if let Some(config) = args.warm_pool_config(&iron_control.warm_pool_bootstrap_principal) {
         runtime = runtime.with_warm_pool(config);
     }
     runtime = runtime.with_sandbox_reaper(args.sandbox_reaper_config());
     runtime = runtime.with_sandbox_cleanup(args.sandbox_cleanup_config());
     let workflow_host_sandbox = args
-        .workflow_host_sandbox_runtime(workflow_host_principal.as_deref())
+        .workflow_host_sandbox_runtime(&iron_control.workflow_host_principal)
         .await?;
     let workflows = Some(
-        WorkflowRuntime::new_with_workflow_host_sandbox_and_principal_registrar(
+        WorkflowRuntime::new(
             store,
             runtime.clone(),
             workflow_host_sandbox,
-            workflow_principal_registrar,
+            iron_control.workflow_principal_registrar,
         )
         .await?,
     );

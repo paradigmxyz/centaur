@@ -38,15 +38,15 @@ module Api
         assert_response :ok
 
         data = json_body.fetch("data")
+        refute data.key?("namespace")
         assert_equal principal.oid, data["id"]
-        assert_equal "acme", data["namespace"]
         assert_equal "C0123456789", data["foreign_id"]
-        PrincipalIdentityLabels.columns.each { |field| assert_not data.key?(field) }
+        %w[kind slack_user_id slack_channel_id slack_team_id slack_email console_user_id console_user_email].each do |field|
+          assert_not data.key?(field)
+        end
         assert_equal(
           {
-            "kind" => "slack_channel",
             "team" => "platform",
-            "slack_channel_id" => "C0123456789",
             Principal::SANDBOX_REPO_CACHE_LABEL => "all"
           },
           data["labels"]
@@ -72,9 +72,9 @@ module Api
       test "POST creates a Principal" do
         body = {
           data: {
-            namespace: "acme",
             foreign_id: "U-new-id",
-            labels: { "kind" => "user", "team" => "platform" },
+            kind: "user",
+            labels: { "team" => "platform" },
             slack_channel_permissions: [
               {
                 channel_id: "C0123456789",
@@ -93,11 +93,9 @@ module Api
 
         data = json_body.fetch("data")
         assert_match(/\Aprn_/, data["id"])
-        assert_equal "acme", data["namespace"]
         assert_equal "U-new-id", data["foreign_id"]
         assert_equal(
           {
-            "kind" => "user",
             "team" => "platform",
             Principal::SANDBOX_REPO_CACHE_LABEL => "all"
           },
@@ -120,6 +118,22 @@ module Api
         assert_equal true, data["sandbox_api_server_enabled"]
       end
 
+      test "POST preserves a label named namespace" do
+        post api_v1_principals_url,
+             params: {
+               data: {
+                 foreign_id: "namespace-label-create",
+                 labels: { "namespace" => "prod" }
+               }
+             }.to_json,
+             headers: auth_headers
+
+        assert_response :created
+        principal = Principal.find_by!(foreign_id: "namespace-label-create")
+        assert_equal "prod", principal.labels["namespace"]
+        assert_equal "prod", json_body.dig("data", "labels", "namespace")
+      end
+
       test "POST applies system sandbox defaults when omitted" do
         system_settings(:default).update!(
           default_sandbox_repo_cache: "public",
@@ -128,7 +142,6 @@ module Api
         )
         body = {
           data: {
-            namespace: "acme",
             foreign_id: "U-defaulted"
           }
         }
@@ -142,16 +155,18 @@ module Api
         assert_equal false, data["sandbox_api_server_enabled"]
       end
 
-      test "POST applies configured default roles from the principal namespace" do
+      test "POST applies all configured default roles" do
+        Role.update_all(assign_by_default: false)
         roles(:acme_infra).update!(assign_by_default: true)
         roles(:globex_infra).update!(assign_by_default: true)
-        body = { data: { namespace: "acme", foreign_id: "U-default-roles" } }
+        body = { data: { foreign_id: "U-default-roles" } }
 
         post api_v1_principals_url, params: body.to_json, headers: auth_headers
         assert_response :created
 
-        principal = Principal.find_by!(namespace: "acme", foreign_id: "U-default-roles")
-        assert_equal [ roles(:acme_infra) ], principal.roles
+        principal = Principal.find_by!(foreign_id: "U-default-roles")
+        expected = [ roles(:acme_infra), roles(:globex_infra) ].sort_by(&:id)
+        assert_equal expected, principal.roles.order(:id).to_a
       end
 
       test "POST keeps explicit sandbox capabilities over system defaults" do
@@ -162,7 +177,6 @@ module Api
         )
         body = {
           data: {
-            namespace: "acme",
             foreign_id: "U-explicit-capabilities",
             sandbox_repo_cache: "all",
             sandbox_observability_enabled: true,
@@ -183,7 +197,6 @@ module Api
         system_settings(:default).update!(default_sandbox_repo_cache: "all")
         body = {
           data: {
-            namespace: "acme",
             foreign_id: "U-explicit-repo-cache-label",
             labels: { Principal::SANDBOX_REPO_CACHE_LABEL => "none" }
           }
@@ -195,7 +208,7 @@ module Api
         data = json_body.fetch("data")
         assert_equal "all", data["sandbox_repo_cache"]
         assert_equal(
-          { Principal::SANDBOX_REPO_CACHE_LABEL => "all", "kind" => "unknown" },
+          { Principal::SANDBOX_REPO_CACHE_LABEL => "all" },
           data["labels"]
         )
       end
@@ -204,7 +217,6 @@ module Api
         system_settings(:default).update!(default_sandbox_repo_cache: "all")
         body = {
           data: {
-            namespace: "acme",
             foreign_id: "U-repo-cache-param-wins",
             sandbox_repo_cache: "public",
             labels: { Principal::SANDBOX_REPO_CACHE_LABEL => "none" }
@@ -217,7 +229,7 @@ module Api
         data = json_body.fetch("data")
         assert_equal "public", data["sandbox_repo_cache"]
         assert_equal(
-          { Principal::SANDBOX_REPO_CACHE_LABEL => "public", "kind" => "unknown" },
+          { Principal::SANDBOX_REPO_CACHE_LABEL => "public" },
           data["labels"]
         )
       end
@@ -232,7 +244,6 @@ module Api
 
         data = json_body.fetch("data")
         assert_equal "Just a label", data["name"]
-        assert_equal "default", data["namespace"]
         assert_nil data["foreign_id"]
       end
 
@@ -280,10 +291,10 @@ module Api
         assert_equal false, data["sandbox_api_server_enabled"]
       end
 
-      test "POST returns 422 when (namespace, foreign_id) already exists" do
+      test "POST returns 422 when foreign_id already exists" do
         existing = principals(:acme_channel)
         body = {
-          data: { namespace: existing.namespace, foreign_id: existing.foreign_id }
+          data: { foreign_id: existing.foreign_id }
         }
 
         assert_no_difference -> { Principal.count } do
@@ -293,7 +304,7 @@ module Api
       end
 
       test "POST returns 400 when the data key is missing" do
-        post api_v1_principals_url, params: { namespace: "acme" }.to_json, headers: auth_headers
+        post api_v1_principals_url, params: {}.to_json, headers: auth_headers
         assert_response :bad_request
       end
 
@@ -301,7 +312,6 @@ module Api
         post api_v1_principals_url,
              params: {
                data: {
-                 namespace: "acme",
                  foreign_id: "direct-slack-identity",
                  kind: "slack_dm",
                  slack_user_id: "U0123456789",
@@ -313,32 +323,31 @@ module Api
              headers: auth_headers
 
         assert_response :created
-        principal = Principal.find_by!(namespace: "acme", foreign_id: "direct-slack-identity")
+        principal = Principal.find_by!(foreign_id: "direct-slack-identity")
         assert_equal "slack_dm", principal.kind
         assert_equal "U0123456789", principal.slack_user_id
         assert_equal "T0123456789", principal.slack_team_id
         assert_equal "ada@example.com", principal.slack_email
         assert_equal "centaur", principal.labels["managed-by"]
-        PrincipalIdentityLabels.columns.each do |field|
+        %w[kind slack_user_id slack_channel_id slack_team_id slack_email console_user_id console_user_email].each do |field|
           assert_not json_body.fetch("data").key?(field)
         end
       end
 
-      test "POST accepts matching first-class fields and compatibility labels" do
+      test "POST keeps identity-named labels separate from first-class fields" do
         user = users(:acme_admin)
 
         post api_v1_principals_url,
              params: {
                data: {
-                 namespace: "acme",
                  foreign_id: "matching-console-user-identity",
                  kind: "console_user",
                  console_user_id: user.id,
                  console_user_email: user.email,
                  labels: {
-                   "kind" => "console_user",
-                   "console-user-id" => user.oid,
-                   "email" => user.email,
+                   "kind" => "custom",
+                   "console-user-id" => "custom-user",
+                   "email" => "custom@example.com",
                    "managed-by" => "centaur"
                  }
                }
@@ -346,92 +355,13 @@ module Api
              headers: auth_headers
 
         assert_response :created
-        principal = Principal.find_by!(namespace: "acme", foreign_id: "matching-console-user-identity")
+        principal = Principal.find_by!(foreign_id: "matching-console-user-identity")
         assert_equal user.id, principal.console_user_id
         assert_equal user.email, principal.console_user_email
         assert_equal "centaur", principal.labels["managed-by"]
-        assert_empty principal.labels.slice("kind", "console-user-id", "email")
-      end
-
-      test "POST returns 422 when first-class Slack fields disagree with compatibility labels" do
-        assert_no_difference -> { Principal.count } do
-          post api_v1_principals_url,
-               params: {
-                 data: {
-                   namespace: "acme",
-                   foreign_id: "conflicting-slack-identity",
-                   kind: "slack_dm",
-                   slack_user_id: "U0123456789",
-                   slack_channel_id: "D0123456789",
-                   slack_team_id: "T0123456789",
-                   slack_email: "ada@example.com",
-                   labels: {
-                     "kind" => "slack_channel",
-                     "slack_user_id" => "U9876543210",
-                     "slack_channel_id" => "D9876543210",
-                     "slack_team_id" => "T9876543210",
-                     "slack_email" => "grace@example.com"
-                   }
-                 }
-               }.to_json,
-               headers: auth_headers
-        end
-
-        assert_response :unprocessable_content
-        details = json_body.dig("error", "details")
-        %w[kind slack_user_id slack_channel_id slack_team_id slack_email].each do |field|
-          assert_includes details.fetch(field), "does not agree with labels.#{field}"
-        end
-      end
-
-      test "POST returns 422 when first-class console user fields disagree with compatibility labels" do
-        user = users(:acme_admin)
-        other_user = users(:globex_admin)
-
-        assert_no_difference -> { Principal.count } do
-          post api_v1_principals_url,
-               params: {
-                 data: {
-                   namespace: "acme",
-                   foreign_id: "conflicting-console-user-identity",
-                   kind: "console_user",
-                   console_user_id: user.id,
-                   console_user_email: user.email,
-                   labels: {
-                     "kind" => "console_user",
-                     "console-user-id" => other_user.oid,
-                     "email" => other_user.email
-                   }
-                 }
-               }.to_json,
-               headers: auth_headers
-        end
-
-        assert_response :unprocessable_content
-        details = json_body.dig("error", "details")
-        assert_includes details.fetch("console_user_id"), "does not agree with labels.console-user-id"
-        assert_includes details.fetch("console_user_email"), "does not agree with labels.email"
-      end
-
-      test "PUT returns 422 when an unchanged first-class field disagrees with a label" do
-        principal = principals(:acme_user_alice)
-
-        put api_v1_principal_url(id: principal.oid),
-            params: {
-              data: {
-                kind: principal.kind,
-                slack_user_id: principal.slack_user_id,
-                labels: {
-                  "kind" => principal.kind,
-                  "slack_user_id" => "U9876543210"
-                }
-              }
-            }.to_json,
-            headers: auth_headers
-
-        assert_response :unprocessable_content
-        assert_includes json_body.dig("error", "details", "slack_user_id"),
-                        "does not agree with labels.slack_user_id"
+        assert_equal "custom", principal.labels["kind"]
+        assert_equal "custom-user", principal.labels["console-user-id"]
+        assert_equal "custom@example.com", principal.labels["email"]
       end
 
       test "PUT updates labels" do
@@ -446,27 +376,38 @@ module Api
         principal.reload
         assert_equal(
           {
+            "kind" => "slack_channel",
             "team" => "ops",
             Principal::SANDBOX_REPO_CACHE_LABEL => "all"
           },
           principal.labels
         )
         assert_equal "slack_channel", json_body.dig("data", "labels", "kind")
-        assert_equal "C0123456789", json_body.dig("data", "labels", "slack_channel_id")
+        assert_not json_body.dig("data", "labels").key?("slack_channel_id")
       end
 
-      test "PUT promotes identity labels into columns and normalizes blank Slack values" do
+      test "PUT preserves a label named namespace" do
+        principal = principals(:acme_channel)
+
+        put api_v1_principal_url(id: principal.oid),
+            params: { data: { labels: { "namespace" => "default" } } }.to_json,
+            headers: auth_headers
+
+        assert_response :ok
+        assert_equal "default", principal.reload.labels["namespace"]
+        assert_equal "default", json_body.dig("data", "labels", "namespace")
+      end
+
+      test "PUT updates first-class identity fields" do
         principal = principals(:acme_channel)
         body = {
           data: {
-            labels: {
-              "kind" => "slack_dm",
-              "slack_user_id" => "U0123456789",
-              "slack_channel_id" => "  ",
-              "slack_team_id" => "T0123456789",
-              "slack_email" => "ada@example.com",
-              "team" => "ops"
-            }
+            kind: "slack_dm",
+            slack_user_id: "U0123456789",
+            slack_channel_id: nil,
+            slack_team_id: "T0123456789",
+            slack_email: "ada@example.com",
+            labels: { "team" => "ops" }
           }
         }
 
@@ -483,18 +424,17 @@ module Api
           { "team" => "ops", Principal::SANDBOX_REPO_CACHE_LABEL => "all" },
           principal.labels
         )
-        assert_equal "slack_dm", json_body.dig("data", "labels", "kind")
-        assert_equal "U0123456789", json_body.dig("data", "labels", "slack_user_id")
-        assert_not json_body.dig("data", "labels").key?("slack_channel_id")
-        assert_equal "T0123456789", json_body.dig("data", "labels", "slack_team_id")
-        assert_equal "ada@example.com", json_body.dig("data", "labels", "slack_email")
+        assert_equal "ops", json_body.dig("data", "labels", "team")
+        assert_empty json_body.dig("data", "labels").slice(
+          "kind", "slack_user_id", "slack_channel_id", "slack_team_id", "slack_email"
+        )
       end
 
       test "PUT rejects a blank kind" do
         principal = principals(:acme_channel)
 
         put api_v1_principal_url(id: principal.oid),
-            params: { data: { labels: { kind: "  " } } }.to_json,
+            params: { data: { kind: "  " } }.to_json,
             headers: auth_headers
 
         assert_response :unprocessable_content
@@ -507,13 +447,11 @@ module Api
         put api_v1_principal_url(id: principal.oid),
             params: {
               data: {
-                labels: {
-                  kind: "future_platform",
-                  slack_user_id: " U0123456789 ",
-                  slack_channel_id: "C123",
-                  slack_team_id: "t0123456789",
-                  slack_email: "not-an-email"
-                }
+                kind: "future_platform",
+                slack_user_id: " U0123456789 ",
+                slack_channel_id: "C123",
+                slack_team_id: "t0123456789",
+                slack_email: "not-an-email"
               }
             }.to_json,
             headers: auth_headers
@@ -662,7 +600,9 @@ module Api
         assert_equal "TACME", principal.slack_team_id
         assert_equal "pending", principal.slack_email
         assert_equal "identity-platform", principal.labels["team"]
-        assert_empty principal.labels.slice(*PrincipalIdentityLabels.labels_for(principal.kind))
+        assert_empty principal.labels.slice(
+          "kind", "slack_user_id", "slack_channel_id", "slack_team_id", "slack_email"
+        )
       end
 
       test "POST leaves omitted flags unchanged on an existing permission" do
@@ -894,14 +834,12 @@ module Api
         assert_predicate permission, :history_enabled
       end
 
-      test "PUT ignores attempts to change immutable namespace and foreign_id" do
+      test "PUT keeps foreign_id immutable" do
         principal = principals(:acme_channel)
-        original_namespace = principal.namespace
         original_foreign_id = principal.foreign_id
 
         body = {
           data: {
-            namespace: "different-namespace",
             foreign_id: "different-foreign-id",
             labels: { "kind" => "slack_channel" }
           }
@@ -911,7 +849,6 @@ module Api
         assert_response :ok
 
         principal.reload
-        assert_equal original_namespace, principal.namespace
         assert_equal original_foreign_id, principal.foreign_id
       end
 
@@ -928,14 +865,13 @@ module Api
           default_sandbox_observability_enabled: false,
           default_sandbox_api_server_enabled: false
         )
-        body = { data: { namespace: "acme", name: "Upserted" } }
+        body = { data: { name: "Upserted" } }
         assert_difference -> { Principal.count } => 1 do
           put api_v1_principal_url(id: "U-upsert"), params: body.to_json, headers: auth_headers
         end
         assert_response :created
 
         data = json_body.fetch("data")
-        assert_equal "acme", data["namespace"]
         assert_equal "U-upsert", data["foreign_id"]
         assert_equal "Upserted", data["name"]
         assert_equal "public", data["sandbox_repo_cache"]
@@ -945,7 +881,7 @@ module Api
 
       test "PUT by foreign_id updates an existing principal without creating" do
         principal = principals(:acme_channel)
-        body = { data: { namespace: "acme", name: "Renamed channel" } }
+        body = { data: { name: "Renamed channel" } }
         assert_no_difference -> { Principal.count } do
           put api_v1_principal_url(id: principal.foreign_id), params: body.to_json, headers: auth_headers
         end
@@ -957,7 +893,7 @@ module Api
         principal = principals(:acme_user_bob)
         principal.principal_roles.destroy_all
         roles(:acme_infra).update!(assign_by_default: true)
-        body = { data: { namespace: "acme", name: "Still roleless" } }
+        body = { data: { name: "Still roleless" } }
 
         put api_v1_principal_url(id: principal.foreign_id), params: body.to_json, headers: auth_headers
 
@@ -966,74 +902,70 @@ module Api
       end
 
       test "GET index rejects requests without an Authorization header" do
-        get api_v1_principals_url, params: { namespace: "acme" }
+        get api_v1_principals_url
         assert_response :unauthorized
       end
 
-      test "GET index returns 400 when namespace is missing" do
+      test "GET index returns principals" do
         get api_v1_principals_url, headers: auth_headers
-        assert_response :bad_request
+        assert_response :ok
       end
 
-      test "GET index returns all principals in a namespace" do
-        get api_v1_principals_url, params: { namespace: "acme" }, headers: auth_headers
+      test "GET index returns all principals" do
+        get api_v1_principals_url, params: {}.to_json, headers: auth_headers
         assert_response :ok
 
         body = json_body
         ids = body.fetch("data").map { |p| p["id"] }
-        expected = Principal.where(namespace: "acme").pluck(:id).map { |id| Principal.find(id).oid }
+        expected = Principal.pluck(:id).map { |id| Principal.find(id).oid }
         assert_equal expected.sort, ids.sort
-        assert body["data"].all? { |p| p["namespace"] == "acme" }
         assert_equal expected.length, body.dig("meta", "total")
       end
 
       test "GET index filters by a single label" do
         get api_v1_principals_url,
-            params: { namespace: "acme", labels: { kind: "user" } },
+            params: { labels: { team: "platform" } },
             headers: auth_headers
         assert_response :ok
 
         foreign_ids = json_body.fetch("data").map { |p| p["foreign_id"] }
-        assert_equal %w[U-alice U-bob].sort, foreign_ids.sort
+        assert_equal %w[C0123456789 U-alice U-overlap].sort, foreign_ids.sort
       end
 
-      test "GET index filters promoted identity labels through columns" do
+      test "GET index does not treat identity fields as labels" do
         principals(:acme_channel).update!(slack_team_id: "T0123456789", slack_email: "channel@example.com")
 
         get api_v1_principals_url,
             params: {
-              namespace: "acme",
-              labels: {
-                kind: "slack_channel",
-                slack_channel_id: "C0123456789",
-                slack_team_id: "T0123456789",
-                slack_email: "channel@example.com"
-              }
+              labels: { slack_channel_id: "C0123456789" }
             },
             headers: auth_headers
         assert_response :ok
 
-        assert_equal [ "C0123456789" ], json_body.fetch("data").map { |p| p["foreign_id"] }
+        assert_empty json_body.fetch("data")
       end
 
-      test "GET index filters console user compatibility labels through columns" do
+      test "GET index filters identity-named labels as ordinary metadata" do
         user = users(:acme_admin)
         Principal.create!(
-          namespace: "acme",
           foreign_id: "console-user-admin",
           kind: "console_user",
           console_user_id: user.id,
           console_user_email: user.email,
+          labels: {
+            "kind" => "custom",
+            "console-user-id" => "custom-user",
+            "email" => "custom@example.com"
+          },
           created_by: user
         )
 
         get api_v1_principals_url,
             params: {
-              namespace: "acme",
               labels: {
-                kind: "console_user",
-                "console-user-id" => user.oid,
-                email: user.email
+                kind: "custom",
+                "console-user-id" => "custom-user",
+                email: "custom@example.com"
               }
             },
             headers: auth_headers
@@ -1041,13 +973,12 @@ module Api
 
         data = json_body.fetch("data")
         assert_equal [ "console-user-admin" ], data.map { |p| p["foreign_id"] }
-        assert_equal user.oid, data.first.dig("labels", "console-user-id")
-        assert_equal user.email, data.first.dig("labels", "email")
+        assert_equal "custom-user", data.first.dig("labels", "console-user-id")
+        assert_equal "custom@example.com", data.first.dig("labels", "email")
       end
 
       test "GET index still filters ordinary email labels" do
         Principal.create!(
-          namespace: "acme",
           foreign_id: "ordinary-email-principal",
           kind: "user",
           labels: { "email" => "ordinary@example.com" },
@@ -1055,7 +986,7 @@ module Api
         )
 
         get api_v1_principals_url,
-            params: { namespace: "acme", labels: { email: "ordinary@example.com" } },
+            params: { labels: { email: "ordinary@example.com" } },
             headers: auth_headers
         assert_response :ok
 
@@ -1064,36 +995,32 @@ module Api
 
       test "GET index filters by sandbox repo-cache label" do
         get api_v1_principals_url,
-            params: { namespace: "acme", labels: { Principal::SANDBOX_REPO_CACHE_LABEL => "all" } },
+            params: { labels: { Principal::SANDBOX_REPO_CACHE_LABEL => "all" } },
             headers: auth_headers
         assert_response :ok
 
         foreign_ids = json_body.fetch("data").map { |p| p["foreign_id"] }
-        assert_equal %w[C0123456789 U-alice U-bob].sort, foreign_ids.sort
+        assert_equal %w[C0123456789 U-alice U-bob U-overlap U987654321].sort, foreign_ids.sort
       end
 
       test "GET index ANDs multiple label filters" do
         get api_v1_principals_url,
-            params: { namespace: "acme", labels: { kind: "user", team: "platform" } },
+            params: {
+              labels: {
+                team: "platform",
+                Principal::SANDBOX_REPO_CACHE_LABEL => "all"
+              }
+            },
             headers: auth_headers
         assert_response :ok
 
         foreign_ids = json_body.fetch("data").map { |p| p["foreign_id"] }
-        assert_equal %w[U-alice], foreign_ids
-      end
-
-      test "GET index does not leak across namespaces" do
-        get api_v1_principals_url,
-            params: { namespace: "acme", labels: { kind: "user", team: "platform" } },
-            headers: auth_headers
-        assert_response :ok
-
-        assert json_body.fetch("data").none? { |p| p["namespace"] == "globex" }
+        assert_equal %w[C0123456789 U-alice U-overlap].sort, foreign_ids.sort
       end
 
       test "GET index returns an empty array when no labels match" do
         get api_v1_principals_url,
-            params: { namespace: "acme", labels: { kind: "nonexistent" } },
+            params: { labels: { kind: "nonexistent" } },
             headers: auth_headers
         assert_response :ok
         assert_equal [], json_body.fetch("data")
@@ -1102,12 +1029,12 @@ module Api
 
       test "GET index honors limit and page" do
         get api_v1_principals_url,
-            params: { namespace: "acme", limit: 1, page: 2 },
+            params: { limit: 1, page: 2 },
             headers: auth_headers
         assert_response :ok
 
         body = json_body
-        total = Principal.where(namespace: "acme").count
+        total = Principal.count
         assert_equal 1, body.fetch("data").length
         assert_equal 1, body.dig("meta", "limit")
         assert_equal 2, body.dig("meta", "page")
@@ -1115,47 +1042,36 @@ module Api
         assert_equal total, body.dig("meta", "total_pages")
       end
 
-      test "GET lookup finds a principal by namespace and foreign_id" do
+      test "GET lookup finds a principal by foreign_id" do
         principal = principals(:acme_channel)
 
-        get lookup_api_v1_principals_url(namespace: principal.namespace, foreign_id: principal.foreign_id),
+        get lookup_api_v1_principals_url(foreign_id: principal.foreign_id),
             headers: auth_headers
         assert_response :ok
 
         data = json_body.fetch("data")
         assert_equal principal.oid, data["id"]
-        assert_equal principal.namespace, data["namespace"]
         assert_equal principal.foreign_id, data["foreign_id"]
       end
 
       test "GET lookup returns 404 when no principal matches" do
-        get lookup_api_v1_principals_url(namespace: "acme", foreign_id: "U-does-not-exist"),
+        get lookup_api_v1_principals_url(foreign_id: "U-does-not-exist"),
             headers: auth_headers
         assert_response :not_found
       end
 
       test "GET lookup rejects unauthenticated requests" do
-        get lookup_api_v1_principals_url(namespace: "acme", foreign_id: "U-alice")
+        get lookup_api_v1_principals_url(foreign_id: "U-alice")
         assert_response :unauthorized
       end
 
-      test "GET lookup scopes by namespace" do
-        # globex_user_overlap and acme_user_alice both have similar labels but different namespaces
-        get lookup_api_v1_principals_url(namespace: "globex", foreign_id: "U-alice"),
-            headers: auth_headers
+      test "GET lookup rejects a non-default compatibility path" do
+        get "/api/v1/principals/lookup/other/U-alice", headers: auth_headers
         assert_response :not_found
       end
 
       test "POST rejects a non-URL-safe foreign_id" do
-        body = { data: { namespace: "acme", foreign_id: "bad/value" } }
-        assert_no_difference -> { Principal.count } do
-          post api_v1_principals_url, params: body.to_json, headers: auth_headers
-        end
-        assert_response :unprocessable_content
-      end
-
-      test "POST rejects a non-URL-safe namespace" do
-        body = { data: { namespace: "acme corp", foreign_id: "U-ok" } }
+        body = { data: { foreign_id: "bad/value" } }
         assert_no_difference -> { Principal.count } do
           post api_v1_principals_url, params: body.to_json, headers: auth_headers
         end
@@ -1164,7 +1080,7 @@ module Api
 
       test "GET index clamps limit above the max" do
         get api_v1_principals_url,
-            params: { namespace: "acme", limit: 9999 },
+            params: { limit: 9999 },
             headers: auth_headers
         assert_response :ok
         assert_equal 200, json_body.dig("meta", "limit")
@@ -1220,23 +1136,19 @@ module Api
         assert_equal "no-store", response.headers["Cache-Control"]
       end
 
-      test "GET effective_config resolves a namespaced foreign_id via the lookup route" do
+      test "GET effective_config resolves a foreign_id via the lookup route" do
         grant_sources_to_acme_channel
         principal = principals(:acme_channel)
 
-        get lookup_effective_config_api_v1_principals_url(namespace: principal.namespace,
-                                                          foreign_id: principal.foreign_id),
-            headers: auth_headers
+        get lookup_effective_config_api_v1_principals_url(foreign_id: principal.foreign_id), headers: auth_headers
         assert_response :ok
         assert_equal principal.oid, json_body.dig("data", "id")
         assert_equal 2, json_body.dig("data", "secrets").length
       end
 
-      test "GET effective_config lookup scopes a foreign_id by namespace" do
+      test "GET effective_config rejects a non-default compatibility path" do
         principal = principals(:acme_channel)
-        get lookup_effective_config_api_v1_principals_url(namespace: "globex",
-                                                          foreign_id: principal.foreign_id),
-            headers: auth_headers
+        get "/api/v1/principals/lookup/other/#{principal.foreign_id}/effective_config", headers: auth_headers
         assert_response :not_found
       end
 
@@ -1252,8 +1164,7 @@ module Api
       end
 
       test "GET effective_config lookup returns 404 for an unknown foreign_id" do
-        get lookup_effective_config_api_v1_principals_url(namespace: "acme",
-                                                          foreign_id: "U-does-not-exist"),
+        get lookup_effective_config_api_v1_principals_url(foreign_id: "U-does-not-exist"),
             headers: auth_headers
         assert_response :not_found
       end

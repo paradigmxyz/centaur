@@ -14,7 +14,6 @@ module Oauth
       app = oauth_apps(:acme_attio)
       app.update!(client_secret: "attio-secret")
       BrokerCredential.create!({
-        namespace: "acme",
         foreign_id: "attio-attio-pending-abc123",
         name: "Attio – Pending Attio workspace",
         token_endpoint: Oauth::Providers::Attio::TOKEN_ENDPOINT,
@@ -28,7 +27,6 @@ module Oauth
 
     def wrap_credential(credential, name: "#{credential.name} token")
       StaticSecret.create!(
-        namespace: credential.namespace,
         name: name,
         broker_credential: credential,
         inject_config: { "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" }

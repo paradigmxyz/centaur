@@ -8,6 +8,10 @@ set shell := ["bash", "-uc"]
 export CENTAUR_CONSOLE_INITIAL_USER_EMAIL := "dev@iron.local"
 export CENTAUR_CONSOLE_INITIAL_USER_PASSWORD := "dev-password-1234"
 export CENTAUR_CONSOLE_INITIAL_API_KEY := "iak_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+export CENTAUR_CONSOLE_DB_HOST := env_var_or_default("CENTAUR_CONSOLE_DB_HOST", "127.0.0.1")
+export CENTAUR_CONSOLE_DB_PORT := env_var_or_default("CENTAUR_CONSOLE_DB_PORT", "55432")
+export CENTAUR_CONSOLE_DB_USERNAME := env_var_or_default("CENTAUR_CONSOLE_DB_USERNAME", "postgres")
+export CENTAUR_CONSOLE_DB_PASSWORD := env_var_or_default("CENTAUR_CONSOLE_DB_PASSWORD", "postgres")
 
 # List available recipes.
 default:
@@ -15,7 +19,7 @@ default:
 
 # Prepare the database, then run the web server + Tailwind CSS watcher under
 # overmind (see Procfile.dev), so console styles rebuild on change.
-dev: deps
+dev: deps paradedb
     @echo "== Preparing database =="
     bin/rails db:prepare
     @echo "== Starting overmind (web + css watch) on http://localhost:3000 =="
@@ -24,6 +28,10 @@ dev: deps
     @echo "   password: $CENTAUR_CONSOLE_INITIAL_USER_PASSWORD"
     @echo "   api key:  $CENTAUR_CONSOLE_INITIAL_API_KEY"
     bin/dev
+
+# Start the persistent ParadeDB container used by local Console development.
+paradedb:
+    script/start-paradedb
 
 # Build the Tailwind CSS bundle once (app/assets/builds/tailwind.css).
 css:
@@ -42,5 +50,5 @@ api-key:
     @echo "$CENTAUR_CONSOLE_INITIAL_API_KEY"
 
 # Drop, recreate, and migrate the dev database. Re-bootstraps on next `just dev`.
-db-reset:
+db-reset: paradedb
     bin/rails db:drop db:create db:migrate
