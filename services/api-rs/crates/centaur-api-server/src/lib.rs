@@ -1,5 +1,6 @@
 mod api_jwt;
 pub mod client;
+pub mod development;
 mod error;
 mod mcp;
 mod routes;

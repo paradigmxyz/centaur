@@ -1601,6 +1601,14 @@ pub enum SessionStoreError {
     },
     #[error("invalid persisted value: {0}")]
     InvalidPersistedValue(String),
+    #[error("development resource not found: {message}")]
+    DevelopmentNotFound { message: String },
+    #[error("development state conflict: {message}")]
+    DevelopmentConflict { message: String },
+    #[error("development action is forbidden: {message}")]
+    DevelopmentForbidden { message: String },
+    #[error("invalid development request: {message}")]
+    InvalidDevelopmentRequest { message: String },
     #[error("invalid notification payload on {channel}: {payload}: {error}")]
     InvalidNotification {
         channel: String,

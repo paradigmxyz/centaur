@@ -26,6 +26,10 @@ use centaur_session_core::{
     SandboxCapabilities as SessionSandboxCapabilities,
     SandboxRepoCacheAccess as SessionRepoCacheAccess, Session, SessionEvent, SessionExecution,
     SessionMessageInput, ThreadKey,
+    development::{
+        AcceptDevelopmentTask, AcceptedDevelopmentTask, ConfirmRepositorySelection,
+        RepositorySelectionDraft, RepositorySelectionOutcome,
+    },
 };
 use centaur_session_sqlx::{
     PgSessionStore, SandboxCapacityCandidate, SessionEventListener, SessionStoreError,
@@ -1490,6 +1494,57 @@ impl SessionRuntime {
             );
         }
         result
+    }
+
+    pub async fn accept_development_task(
+        &self,
+        request: AcceptDevelopmentTask,
+    ) -> Result<AcceptedDevelopmentTask, SessionRuntimeError> {
+        let accepted = self.store.accept_development_task(&request).await?;
+        let principal = self
+            .iron_control
+            .register_session(
+                accepted.thread_key.as_str(),
+                Some(&request.session_metadata),
+            )
+            .await?;
+        self.store
+            .set_iron_control_principal(&accepted.thread_key, Some(&principal.id))
+            .await?;
+        Ok(accepted)
+    }
+
+    pub async fn confirm_repository_selection(
+        &self,
+        request: &ConfirmRepositorySelection,
+    ) -> Result<RepositorySelectionOutcome, SessionRuntimeError> {
+        Ok(self.store.confirm_repository_selection(request).await?)
+    }
+
+    pub async fn cancel_repository_selection(
+        &self,
+        selection_flow_id: &str,
+        expected_version: i32,
+        decided_by_principal_id: &str,
+    ) -> Result<RepositorySelectionOutcome, SessionRuntimeError> {
+        Ok(self
+            .store
+            .cancel_repository_selection(
+                selection_flow_id,
+                expected_version,
+                decided_by_principal_id,
+            )
+            .await?)
+    }
+
+    pub async fn create_add_repository_selection(
+        &self,
+        thread_key: &ThreadKey,
+    ) -> Result<RepositorySelectionDraft, SessionRuntimeError> {
+        Ok(self
+            .store
+            .create_add_repository_selection(thread_key)
+            .await?)
     }
 
     /// Restart an existing session on a different harness: stop its sandbox
@@ -9663,6 +9718,62 @@ mod adoption_tests {
         first.expect("first pipe ensure should succeed");
         second.expect("second pipe ensure should reuse the first pipe");
         assert_eq!(backend.opens(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocked_execution_never_reaches_sandbox_before_selection() {
+        use centaur_session_core::development::{
+            DevelopmentChannel, DevelopmentInitiator, ExecutionBlocker,
+        };
+
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let suffix = uuid::Uuid::new_v4();
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime = runtime_with(&store, backend.clone());
+        let accepted = runtime
+            .accept_development_task(AcceptDevelopmentTask {
+                channel: DevelopmentChannel {
+                    platform: "feishu".to_owned(),
+                    tenant_key: format!("tenant-{suffix}"),
+                    conversation_key: format!("chat-{suffix}"),
+                    root_message_id: format!("message-{suffix}"),
+                },
+                platform_event_id: format!("event-{suffix}"),
+                platform_message_id: Some(format!("message-{suffix}")),
+                harness_type: HarnessType::Codex,
+                initiator: DevelopmentInitiator {
+                    principal_id: "principal-1".to_owned(),
+                },
+                message: SessionMessageInput {
+                    client_message_id: Some(format!("message-{suffix}")),
+                    role: MessageRole::User,
+                    parts: vec![json!({"type": "text", "text": "Fix the test"})],
+                    metadata: json!({"source": "feishu"}),
+                },
+                session_metadata: json!({"source": "feishu"}),
+            })
+            .await
+            .expect("accept development task");
+
+        let session = store
+            .get_session(&accepted.thread_key)
+            .await
+            .expect("load session");
+        let execution = store
+            .latest_execution_for_thread(&accepted.thread_key)
+            .await
+            .expect("load execution")
+            .expect("blocked execution");
+        assert_eq!(session.iron_control_principal.as_deref(), Some("prn_test"));
+        assert_eq!(
+            execution.blocking_reason,
+            Some(ExecutionBlocker::AwaitingProjectSelection)
+        );
+        assert_eq!(backend.opens(), 0);
+        assert!(backend.created_specs().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

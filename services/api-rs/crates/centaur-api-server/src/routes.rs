@@ -55,6 +55,7 @@ use uuid::Uuid;
 use crate::{
     ApiError,
     api_jwt::{bearer_jwt_from_headers, decode_jwt_payload, verify_console_jwt},
+    development::{RepositoryResolver, development_router},
     mcp::{mcp_get, mcp_post, mcp_protected_resource_metadata},
     slack_proxy::slack_proxy_router,
     types::{
@@ -72,6 +73,7 @@ pub struct AppState {
     initialized: Arc<RwLock<Option<AppRuntimeState>>>,
     metrics: PrometheusHandle,
     codex_nanocodex_rollout_percent: u8,
+    repository_resolver: Option<Arc<dyn RepositoryResolver>>,
 }
 
 #[derive(Clone)]
@@ -87,12 +89,24 @@ impl AppState {
             initialized: Arc::new(RwLock::new(None)),
             metrics: prometheus_handle().expect("failed to initialize Prometheus metrics recorder"),
             codex_nanocodex_rollout_percent: 0,
+            repository_resolver: None,
         }
     }
 
     pub fn with_codex_nanocodex_rollout_percent(mut self, percent: u8) -> Self {
         self.codex_nanocodex_rollout_percent = percent;
         self
+    }
+
+    pub fn with_repository_resolver(mut self, resolver: Arc<dyn RepositoryResolver>) -> Self {
+        self.repository_resolver = Some(resolver);
+        self
+    }
+
+    pub(crate) fn repository_resolver(&self) -> Result<Arc<dyn RepositoryResolver>, ApiError> {
+        self.repository_resolver
+            .clone()
+            .ok_or_else(|| ApiError::NotFound("repository catalog is not configured".to_owned()))
     }
 
     pub fn ready(runtime: SessionRuntime, workflows: Option<WorkflowRuntime>) -> Self {
@@ -213,6 +227,7 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
         .route("/api/personas", get(list_personas))
+        .merge(development_router())
         .route("/mcp", post(mcp_post).get(mcp_get))
         .route(
             "/.well-known/oauth-protected-resource",

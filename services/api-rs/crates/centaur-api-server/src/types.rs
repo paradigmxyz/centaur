@@ -1,9 +1,44 @@
 use axum::response::sse::Event;
-use centaur_session_core::{HarnessType, Session, SessionEvent, SessionMessageInput, ThreadKey};
+use centaur_session_core::{
+    HarnessType, Session, SessionEvent, SessionMessageInput, ThreadKey,
+    development::{DevelopmentChannel, DevelopmentInitiator, RepositoryId},
+};
 use centaur_session_runtime::SESSION_OUTPUT_LINE_EVENT;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptDevelopmentTaskRequest {
+    pub channel: DevelopmentChannel,
+    pub platform_event_id: String,
+    pub platform_message_id: Option<String>,
+    pub harness_type: HarnessType,
+    pub initiator: DevelopmentInitiator,
+    pub message: SessionMessageInput,
+    #[serde(default)]
+    pub session_metadata: Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfirmDevelopmentSelectionRequest {
+    pub expected_version: i32,
+    pub decided_by_principal_id: String,
+    pub repository_ids: Vec<RepositoryId>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecideDevelopmentSelectionRequest {
+    pub expected_version: i32,
+    pub decided_by_principal_id: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateAddRepositorySelectionRequest {}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CreateSessionRequest {

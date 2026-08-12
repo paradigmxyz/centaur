@@ -5,7 +5,110 @@ use strum::{AsRefStr, Display, EnumString};
 use thiserror::Error;
 use time::OffsetDateTime;
 
-use crate::ThreadKey;
+use crate::{HarnessType, SessionMessageInput, ThreadKey};
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DevelopmentChannel {
+    pub platform: String,
+    pub tenant_key: String,
+    pub conversation_key: String,
+    pub root_message_id: String,
+}
+
+impl DevelopmentChannel {
+    pub fn lock_key(&self) -> String {
+        format!(
+            "{}:{}{}:{}{}:{}{}:{}",
+            self.platform.len(),
+            self.platform,
+            self.tenant_key.len(),
+            self.tenant_key,
+            self.conversation_key.len(),
+            self.conversation_key,
+            self.root_message_id.len(),
+            self.root_message_id,
+        )
+    }
+
+    pub fn receipt_lock_key(&self, kind: &str, receipt_id: &str) -> String {
+        format!(
+            "receipt:{}:{}{}:{}{}:{}{}:{}",
+            kind.len(),
+            kind,
+            self.platform.len(),
+            self.platform,
+            self.tenant_key.len(),
+            self.tenant_key,
+            receipt_id.len(),
+            receipt_id,
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DevelopmentInitiator {
+    pub principal_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AcceptDevelopmentTask {
+    pub channel: DevelopmentChannel,
+    pub platform_event_id: String,
+    pub platform_message_id: Option<String>,
+    pub harness_type: HarnessType,
+    pub initiator: DevelopmentInitiator,
+    pub message: SessionMessageInput,
+    #[serde(default)]
+    pub session_metadata: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AcceptedDevelopmentTask {
+    pub thread_key: ThreadKey,
+    pub workspace_id: String,
+    pub selection_flow_id: String,
+    pub execution_id: String,
+    pub created: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedRepository {
+    pub repository_id: RepositoryId,
+    pub display_name: String,
+    pub path_with_namespace: String,
+    pub default_branch: String,
+    pub clone_url: String,
+    pub relative_path: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfirmRepositorySelection {
+    pub selection_flow_id: String,
+    pub expected_version: i32,
+    pub decided_by_principal_id: String,
+    pub repositories: Vec<ResolvedRepository>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RepositorySelectionOutcome {
+    pub selection_flow_id: String,
+    pub state: SelectionFlowState,
+    pub version: i32,
+    pub repository_ids: Vec<RepositoryId>,
+    pub workspace_state: WorkspaceState,
+    pub execution_blocker: Option<ExecutionBlocker>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RepositorySelectionDraft {
+    pub selection_flow_id: String,
+    pub workspace_id: String,
+    pub kind: SelectionKind,
+    pub state: SelectionFlowState,
+    pub version: i32,
+}
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct RepositoryId(String);
@@ -174,6 +277,8 @@ state_enum!(SelectionFlowState {
     Confirmed,
     Cancelled,
 });
+
+state_enum!(SelectionKind { Initial, Add });
 
 impl SelectionFlowState {
     pub fn transition_to(self, next: Self) -> Result<Self, StateTransitionError> {

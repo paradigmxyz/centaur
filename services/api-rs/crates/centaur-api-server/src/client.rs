@@ -1,14 +1,18 @@
 use std::pin::Pin;
 
-use centaur_session_core::{Session, ThreadKey};
+use centaur_session_core::{
+    Session, ThreadKey,
+    development::{AcceptedDevelopmentTask, RepositorySelectionDraft, RepositorySelectionOutcome},
+};
 use eventsource_stream::Eventsource;
 use futures_util::{Stream, StreamExt};
 use reqwest::{Client as HttpClient, StatusCode};
 use thiserror::Error;
 
 use crate::types::{
-    AppendMessagesRequest, AppendMessagesResponse, CreateSessionRequest, ExecuteSessionRequest,
-    ExecuteSessionResponse,
+    AcceptDevelopmentTaskRequest, AppendMessagesRequest, AppendMessagesResponse,
+    ConfirmDevelopmentSelectionRequest, CreateAddRepositorySelectionRequest, CreateSessionRequest,
+    DecideDevelopmentSelectionRequest, ExecuteSessionRequest, ExecuteSessionResponse,
 };
 
 #[derive(Clone, Debug)]
@@ -58,6 +62,80 @@ impl CentaurClient {
         self.post_json(
             &format!("{}/execute", self.session_url(thread_key)),
             &request,
+        )
+        .await
+    }
+
+    pub async fn accept_development_task(
+        &self,
+        request: AcceptDevelopmentTaskRequest,
+    ) -> Result<AcceptedDevelopmentTask, ClientError> {
+        self.post_json(
+            &format!("{}/api/development/tasks", self.base_url),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn confirm_development_selection(
+        &self,
+        selection_flow_id: &str,
+        request: ConfirmDevelopmentSelectionRequest,
+    ) -> Result<RepositorySelectionOutcome, ClientError> {
+        self.post_json(
+            &format!(
+                "{}/api/development/selections/{}/confirm",
+                self.base_url,
+                urlencoding::encode(selection_flow_id)
+            ),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn confirm_development_no_project(
+        &self,
+        selection_flow_id: &str,
+        request: DecideDevelopmentSelectionRequest,
+    ) -> Result<RepositorySelectionOutcome, ClientError> {
+        self.post_json(
+            &format!(
+                "{}/api/development/selections/{}/no-project",
+                self.base_url,
+                urlencoding::encode(selection_flow_id)
+            ),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn cancel_development_selection(
+        &self,
+        selection_flow_id: &str,
+        request: DecideDevelopmentSelectionRequest,
+    ) -> Result<RepositorySelectionOutcome, ClientError> {
+        self.post_json(
+            &format!(
+                "{}/api/development/selections/{}/cancel",
+                self.base_url,
+                urlencoding::encode(selection_flow_id)
+            ),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn create_add_repository_selection(
+        &self,
+        thread_key: &ThreadKey,
+    ) -> Result<RepositorySelectionDraft, ClientError> {
+        self.post_json(
+            &format!(
+                "{}/api/development/sessions/{}/repositories",
+                self.base_url,
+                urlencoding::encode(thread_key.as_str())
+            ),
+            &CreateAddRepositorySelectionRequest::default(),
         )
         .await
     }

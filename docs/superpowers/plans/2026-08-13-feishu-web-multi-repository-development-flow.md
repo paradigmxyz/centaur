@@ -133,11 +133,11 @@ git commit -m "feat: add durable development workspace model"
 - Produces `AcceptedDevelopmentTask { thread_key, workspace_id, selection_flow_id, execution_id, created }`.
 - Produces versioned confirm/no-project/cancel/add-project mutations.
 
-- [ ] **Step 1: Write failing transactional tests**
+- [x] **Step 1: Write failing transactional tests**
 
 Add SQLx tests proving one call creates Session, Workspace, message, selection flow, and queued Execution with `awaiting_project_selection`; replaying the same platform event returns the same IDs and no duplicate rows. Add a claim test proving blocked queued Executions cannot transition to running.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -148,7 +148,7 @@ cargo test -p centaur-session-runtime blocked_execution
 
 Expected: missing method/type failures.
 
-- [ ] **Step 3: Implement one SQL transaction**
+- [x] **Step 3: Implement one SQL transaction**
 
 Implement:
 
@@ -161,11 +161,11 @@ pub async fn accept_development_task(
 
 It locks the channel binding, resolves or creates the Session generation, performs all inserts, and returns an existing result on idempotent replay. Existing legacy `create_or_get_session`, `append_messages`, and `create_execution` remain unchanged.
 
-- [ ] **Step 4: Implement selection state transitions**
+- [x] **Step 4: Implement selection state transitions**
 
 Confirm re-resolves opaque IDs through a caller-supplied resolved snapshot list, inserts bindings append-only, increments flow version, and changes the Execution blocker to `workspace_provisioning`. No-project confirms an empty set. Cancel marks the draft cancelled and cancels its blocked Execution. Add-project rejects active Execution/publication and existing Repository IDs.
 
-- [ ] **Step 5: Add route tests before routes**
+- [x] **Step 5: Add route tests before routes**
 
 Use Axum `oneshot` tests for:
 
@@ -179,11 +179,11 @@ POST /api/development/sessions/:thread_key/repositories
 
 Require malformed IDs and caller-supplied clone URLs/roles to receive `400`, stale versions `409`, and replayed event keys `200` with `created: false`.
 
-- [ ] **Step 6: Implement thin handlers and client methods**
+- [x] **Step 6: Implement thin handlers and client methods**
 
 Handlers parse platform-neutral requests and call runtime/store services. Do not include Feishu card or Console HTML knowledge. Add matching typed methods to the Rust client for service integration tests.
 
-- [ ] **Step 7: Verify and commit**
+- [x] **Step 7: Verify and commit**
 
 ```bash
 cargo +nightly fmt --all --check
