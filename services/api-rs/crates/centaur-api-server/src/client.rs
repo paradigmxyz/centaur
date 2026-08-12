@@ -9,6 +9,7 @@ use futures_util::{Stream, StreamExt};
 use reqwest::{Client as HttpClient, StatusCode};
 use thiserror::Error;
 
+use crate::gitlab::RepositoryPage;
 use crate::types::{
     AcceptDevelopmentTaskRequest, AppendMessagesRequest, AppendMessagesResponse,
     ConfirmDevelopmentSelectionRequest, CreateAddRepositorySelectionRequest, CreateSessionRequest,
@@ -75,6 +76,22 @@ impl CentaurClient {
             &request,
         )
         .await
+    }
+
+    pub async fn search_repositories(
+        &self,
+        query: Option<&str>,
+        cursor: Option<&str>,
+    ) -> Result<RepositoryPage, ClientError> {
+        let url = format!("{}/api/development/repositories", self.base_url);
+        let response = self
+            .client
+            .get(url)
+            .query(&[("query", query), ("cursor", cursor)])
+            .send()
+            .await?;
+        let response = ensure_response_success(response).await?;
+        Ok(response.json().await?)
     }
 
     pub async fn confirm_development_selection(

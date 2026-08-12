@@ -25,8 +25,11 @@ async fn main() -> Result<(), ServerError> {
         "starting centaur api-rs server"
     );
 
-    let app_state = AppState::unready()
+    let mut app_state = AppState::unready()
         .with_codex_nanocodex_rollout_percent(args.codex_nanocodex_rollout_percent());
+    if let Some(catalog) = args.gitlab_catalog()? {
+        app_state = app_state.with_repository_catalog(std::sync::Arc::new(catalog));
+    }
     let app = build_router_with_app_state(app_state.clone());
     let shutdown_state = app_state.clone();
     let drain_timeout = args.shutdown_execution_drain_timeout();

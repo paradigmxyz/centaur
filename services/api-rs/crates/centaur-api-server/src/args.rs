@@ -15,6 +15,7 @@ use centaur_api_server::{
     DiscoveredToolProxyFragment, SandboxRuntime, ToolDiscoveryConfig, discover_persona_registry,
     discover_tool_proxy_fragment,
 };
+use centaur_api_server::{GitLabCatalog, GitLabCatalogConfig};
 use centaur_iron_control::{
     IdentityInput, IronControlClient, IronControlError, PrincipalInput, RegisterError, RoleSpec,
     SessionRegistrar, register_role,
@@ -63,6 +64,8 @@ pub(crate) struct Args {
     sandbox: SandboxArgs,
     #[command(flatten)]
     activity_summary: ActivitySummaryArgs,
+    #[command(flatten)]
+    gitlab: GitLabArgs,
 }
 
 impl Args {
@@ -111,6 +114,10 @@ impl Args {
         self.activity_summary.config()
     }
 
+    pub(crate) fn gitlab_catalog(&self) -> Result<Option<GitLabCatalog>, ServerError> {
+        self.gitlab.catalog()
+    }
+
     pub(crate) fn shutdown_execution_drain_timeout(&self) -> Duration {
         Duration::from_secs(self.server.shutdown_execution_drain_timeout_secs)
     }
@@ -122,6 +129,51 @@ impl Args {
     pub(crate) fn execution_adoption_interval(&self) -> Option<Duration> {
         (self.server.execution_adoption_interval_secs > 0)
             .then(|| Duration::from_secs(self.server.execution_adoption_interval_secs))
+    }
+}
+
+#[derive(Debug, ClapArgs)]
+struct GitLabArgs {
+    /// Exact GitLab instance URL. Requires `GITLAB_TOKEN_FILE` when set.
+    #[arg(long = "gitlab-base-url", env = "GITLAB_BASE_URL")]
+    base_url: Option<String>,
+    /// File containing the shared GitLab bot token. Requires `GITLAB_BASE_URL` when set.
+    #[arg(long = "gitlab-token-file", env = "GITLAB_TOKEN_FILE")]
+    token_file: Option<PathBuf>,
+    #[arg(
+        long = "gitlab-catalog-page-size",
+        env = "GITLAB_CATALOG_PAGE_SIZE",
+        default_value_t = 50,
+        value_parser = clap::value_parser!(u16).range(1..=100)
+    )]
+    page_size: u16,
+    #[arg(
+        long = "gitlab-request-timeout-secs",
+        env = "GITLAB_REQUEST_TIMEOUT_SECS",
+        default_value_t = 10,
+        value_parser = clap::value_parser!(u64).range(1..=120)
+    )]
+    request_timeout_secs: u64,
+}
+
+impl GitLabArgs {
+    fn catalog(&self) -> Result<Option<GitLabCatalog>, ServerError> {
+        let (Some(base_url), Some(token_file)) = (&self.base_url, &self.token_file) else {
+            if self.base_url.is_some() || self.token_file.is_some() {
+                return Err(ServerError::UnsupportedConfig(
+                    "GITLAB_BASE_URL and GITLAB_TOKEN_FILE must be configured together".to_owned(),
+                ));
+            }
+            return Ok(None);
+        };
+        GitLabCatalog::new(GitLabCatalogConfig {
+            base_url: base_url.clone(),
+            token_file: token_file.clone(),
+            page_size: self.page_size,
+            request_timeout: Duration::from_secs(self.request_timeout_secs),
+        })
+        .map(Some)
+        .map_err(|error| ServerError::UnsupportedConfig(error.to_string()))
     }
 }
 
@@ -2256,6 +2308,21 @@ mod tests {
             }
             Self { saved }
         }
+
+        fn remove(names: &[&'static str]) -> Self {
+            let saved = names
+                .iter()
+                .map(|name| (*name, env::var(name).ok()))
+                .collect();
+            for name in names {
+                // SAFETY: tests that mutate process env hold ENV_LOCK for the
+                // duration of the guard.
+                unsafe {
+                    env::remove_var(name);
+                }
+            }
+            Self { saved }
+        }
     }
 
     impl Drop for EnvGuard {
@@ -2412,6 +2479,55 @@ mod tests {
             args.execution_adoption_interval(),
             Some(Duration::from_secs(15))
         );
+    }
+
+    #[test]
+    fn gitlab_catalog_is_optional_and_requires_complete_configuration() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::remove(&[
+            "GITLAB_BASE_URL",
+            "GITLAB_TOKEN_FILE",
+            "GITLAB_CATALOG_PAGE_SIZE",
+            "GITLAB_REQUEST_TIMEOUT_SECS",
+        ]);
+        let disabled = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+        ])
+        .unwrap();
+        assert!(disabled.gitlab_catalog().unwrap().is_none());
+
+        let incomplete = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--gitlab-base-url",
+            "http://git.example.test:82",
+        ])
+        .unwrap();
+        assert!(matches!(
+            incomplete.gitlab_catalog(),
+            Err(ServerError::UnsupportedConfig(_))
+        ));
+
+        let token_file = env::temp_dir().join(format!(
+            "centaur-gitlab-args-token-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::write(&token_file, "not-a-real-token\n").unwrap();
+        let enabled = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--gitlab-base-url",
+            "http://git.example.test:82",
+            "--gitlab-token-file",
+            token_file.to_str().unwrap(),
+        ])
+        .unwrap();
+        assert!(enabled.gitlab_catalog().unwrap().is_some());
+        fs::remove_file(token_file).unwrap();
     }
 
     #[test]

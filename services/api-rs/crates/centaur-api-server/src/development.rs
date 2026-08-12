@@ -2,8 +2,8 @@ use std::{collections::HashSet, future::Future, pin::Pin};
 
 use axum::{
     Json, Router,
-    extract::{Path, State, rejection::JsonRejection},
-    routing::post,
+    extract::{Path, Query, State, rejection::JsonRejection},
+    routing::{get, post},
 };
 use centaur_session_core::{
     MessageRole, ThreadKey,
@@ -16,6 +16,7 @@ use thiserror::Error;
 
 use crate::{
     ApiError,
+    gitlab::{GitLabCatalogError, RepositoryPage},
     routes::AppState,
     types::{
         AcceptDevelopmentTaskRequest, ConfirmDevelopmentSelectionRequest,
@@ -31,6 +32,17 @@ pub trait RepositoryResolver: Send + Sync {
     fn resolve<'a>(&'a self, repository_ids: &'a [RepositoryId]) -> ResolveRepositoriesFuture<'a>;
 }
 
+pub type SearchRepositoriesFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<RepositoryPage, GitLabCatalogError>> + Send + 'a>>;
+
+pub trait RepositoryCatalog: RepositoryResolver {
+    fn search<'a>(
+        &'a self,
+        query: Option<&'a str>,
+        cursor: Option<&'a str>,
+    ) -> SearchRepositoriesFuture<'a>;
+}
+
 #[derive(Debug, Error)]
 pub enum RepositoryResolveError {
     #[error("repository catalog is not configured")]
@@ -43,6 +55,7 @@ pub enum RepositoryResolveError {
 
 pub(crate) fn development_router() -> Router<AppState> {
     Router::new()
+        .route("/api/development/repositories", get(search_repositories))
         .route("/api/development/tasks", post(accept_development_task))
         .route(
             "/api/development/selections/{selection_flow_id}/confirm",
@@ -60,6 +73,25 @@ pub(crate) fn development_router() -> Router<AppState> {
             "/api/development/sessions/{thread_key}/repositories",
             post(create_add_repository_selection),
         )
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RepositoryCatalogQuery {
+    query: Option<String>,
+    cursor: Option<String>,
+}
+
+async fn search_repositories(
+    State(state): State<AppState>,
+    Query(query): Query<RepositoryCatalogQuery>,
+) -> Result<Json<RepositoryPage>, ApiError> {
+    let page = state
+        .repository_catalog()?
+        .search(query.query.as_deref(), query.cursor.as_deref())
+        .await
+        .map_err(repository_catalog_error)?;
+    Ok(Json(page))
 }
 
 async fn accept_development_task(
@@ -185,7 +217,14 @@ fn repository_resolve_error(error: RepositoryResolveError) -> ApiError {
     match error {
         RepositoryResolveError::Disabled => ApiError::NotFound(error.to_string()),
         RepositoryResolveError::Invalid(_) => ApiError::BadRequest(error.to_string()),
-        RepositoryResolveError::Unavailable => ApiError::ServiceUnavailable(error.to_string()),
+        RepositoryResolveError::Unavailable => ApiError::RepositoryCatalogUnavailable,
+    }
+}
+
+fn repository_catalog_error(error: GitLabCatalogError) -> ApiError {
+    match error {
+        GitLabCatalogError::Invalid(message) => ApiError::BadRequest(message),
+        GitLabCatalogError::Unavailable => ApiError::RepositoryCatalogUnavailable,
     }
 }
 

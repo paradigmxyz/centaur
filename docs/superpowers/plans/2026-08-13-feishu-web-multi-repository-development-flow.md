@@ -205,11 +205,11 @@ git commit -m "feat: add durable development task intake"
 - Produces `GitLabCatalog::search(query, cursor) -> RepositoryPage` and `resolve(ids) -> Vec<ResolvedRepository>`.
 - Configuration: exact GitLab base URL, token file path, page size, request timeout.
 
-- [ ] **Step 1: Write failing adapter tests**
+- [x] **Step 1: Write failing adapter tests**
 
 Use a local HTTP test server to require `/api/v4/projects?membership=true&simple=true`, keyword search, GitLab `X-Next-Page` cursor conversion, `PRIVATE-TOKEN` header presence without logging it, archived/default-branch rejection, and exact scheme/host/port clone URL validation.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 ```bash
 cargo test -p centaur-api-server gitlab_catalog
@@ -217,15 +217,15 @@ cargo test -p centaur-api-server gitlab_catalog
 
 Expected: missing `GitLabCatalog` module.
 
-- [ ] **Step 3: Implement the adapter and routes**
+- [x] **Step 3: Implement the adapter and routes**
 
 Read the token from its file for each request or a redaction-safe secret wrapper. Return only opaque ID, name, namespace, bounded description, default branch, archived, and last activity. Never serialize clone URLs.
 
-- [ ] **Step 4: Verify errors and pagination**
+- [x] **Step 4: Verify errors and pagination**
 
 Run the focused tests and add route coverage for disabled catalog (`404`), timeout/upstream (`503` with sanitized code), invalid cursor (`400`), and full page traversal.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add services/api-rs

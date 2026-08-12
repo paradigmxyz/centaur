@@ -55,7 +55,7 @@ use uuid::Uuid;
 use crate::{
     ApiError,
     api_jwt::{bearer_jwt_from_headers, decode_jwt_payload, verify_console_jwt},
-    development::{RepositoryResolver, development_router},
+    development::{RepositoryCatalog, RepositoryResolver, development_router},
     mcp::{mcp_get, mcp_post, mcp_protected_resource_metadata},
     slack_proxy::slack_proxy_router,
     types::{
@@ -74,6 +74,7 @@ pub struct AppState {
     metrics: PrometheusHandle,
     codex_nanocodex_rollout_percent: u8,
     repository_resolver: Option<Arc<dyn RepositoryResolver>>,
+    repository_catalog: Option<Arc<dyn RepositoryCatalog>>,
 }
 
 #[derive(Clone)]
@@ -90,6 +91,7 @@ impl AppState {
             metrics: prometheus_handle().expect("failed to initialize Prometheus metrics recorder"),
             codex_nanocodex_rollout_percent: 0,
             repository_resolver: None,
+            repository_catalog: None,
         }
     }
 
@@ -103,8 +105,23 @@ impl AppState {
         self
     }
 
+    pub fn with_repository_catalog<T>(mut self, catalog: Arc<T>) -> Self
+    where
+        T: RepositoryCatalog + 'static,
+    {
+        self.repository_resolver = Some(catalog.clone());
+        self.repository_catalog = Some(catalog);
+        self
+    }
+
     pub(crate) fn repository_resolver(&self) -> Result<Arc<dyn RepositoryResolver>, ApiError> {
         self.repository_resolver
+            .clone()
+            .ok_or_else(|| ApiError::NotFound("repository catalog is not configured".to_owned()))
+    }
+
+    pub(crate) fn repository_catalog(&self) -> Result<Arc<dyn RepositoryCatalog>, ApiError> {
+        self.repository_catalog
             .clone()
             .ok_or_else(|| ApiError::NotFound("repository catalog is not configured".to_owned()))
     }
