@@ -1,5 +1,10 @@
 # Console Multi-Repository Workspaces
 
+> Superseded by
+> [Feishu And Web Multi-Repository Development Flow](./2026-08-13-feishu-web-multi-repository-development-flow-design.md).
+> Keep this document as design history; do not use it as the implementation
+> specification for the first release.
+
 ## Objective
 
 Allow a Console Chat to work across zero, one, or many repositories from one
