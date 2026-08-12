@@ -132,7 +132,7 @@ impl SessionRegistrar {
         let Some(principal) = derive_slack_requester_principal(
             thread_key,
             slack_user_id,
-            Some(slack_team_id),
+            slack_team_id,
             metadata.get("slack_display_name").and_then(Value::as_str),
         ) else {
             return Ok(None);
