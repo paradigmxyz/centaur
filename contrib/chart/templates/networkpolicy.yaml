@@ -93,6 +93,12 @@ spec:
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-worker") | nindent 14 }}
+{{- if $console.sqlExporter.enabled }}
+        # The Console SQL Exporter reads queue state from the bundled Postgres.
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-sql-exporter") | nindent 14 }}
+{{- end }}
         # iron-proxy pods forward the tool-server sidecar's pool to Postgres
         # (the sidecar reaches the core DB through the per-sandbox proxy, not
         # directly), so the proxy must be allowed to connect.
