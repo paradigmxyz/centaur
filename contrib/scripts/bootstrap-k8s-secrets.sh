@@ -78,6 +78,10 @@ Console bootstrap:
   IRON_CONTROL_DATABASE_URL    overrides the derived DSN (default points at the
                                bundled Postgres server with no database path, so
                                Rails resolves db names from its database.yml)
+  CONSOLE_SQLEXPORTER_DATABASE_URL
+                               database DSN for a separately
+                               provisioned read-only PostgreSQL role; copied
+                               into centaur-infra-env when set
   IRON_CONTROL_INITIAL_USER_EMAIL
                                initial admin email (default admin@centaur.local)
   The initial password, API key, the three ActiveRecord encryption keys, and
@@ -250,6 +254,10 @@ if secret_exists centaur-infra-env; then
     fi
     patch_data+=("\"IRON_CONTROL_DATABASE_URL\":\"$(printf '%s' "$ic_db_url" | base64 | tr -d '\n')\"")
   fi
+  if [[ -n "${CONSOLE_SQLEXPORTER_DATABASE_URL:-}" ]] && \
+     ! secret_key_present CONSOLE_SQLEXPORTER_DATABASE_URL; then
+    patch_data+=("\"CONSOLE_SQLEXPORTER_DATABASE_URL\":\"$(printf '%s' "$CONSOLE_SQLEXPORTER_DATABASE_URL" | base64 | tr -d '\n')\"")
+  fi
   if ! secret_key_present IRON_CONTROL_INITIAL_USER_EMAIL; then
     ic_email="${IRON_CONTROL_INITIAL_USER_EMAIL:-admin@centaur.local}"
     patch_data+=("\"IRON_CONTROL_INITIAL_USER_EMAIL\":\"$(printf '%s' "$ic_email" | base64 | tr -d '\n')\"")
@@ -334,6 +342,11 @@ else
     --from-literal=IRON_CONTROL_SECRET_KEY_BASE="$(rand_hex)$(rand_hex)"
     --from-literal=CENTAUR_JWT_SIGNING_SECRET="$(rand_hex)$(rand_hex)"
   )
+  if [[ -n "${CONSOLE_SQLEXPORTER_DATABASE_URL:-}" ]]; then
+    secret_args+=(
+      --from-literal=CONSOLE_SQLEXPORTER_DATABASE_URL="$CONSOLE_SQLEXPORTER_DATABASE_URL"
+    )
+  fi
   if [[ -n "${DISCORD_BOT_TOKEN:-}" ]]; then
     secret_args+=(
       --from-literal=DISCORD_BOT_TOKEN="$DISCORD_BOT_TOKEN"

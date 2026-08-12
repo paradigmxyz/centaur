@@ -52,6 +52,37 @@
             "resources": { "type": "object" }
           }
         },
+        "sqlExporter": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "image": {
+              "type": "object",
+              "properties": {
+                "repository": { "type": "string" },
+                "tag": { "type": "string" },
+                "pullPolicy": { "type": "string" }
+              }
+            },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "databaseUrlSecretKey": { "type": "string", "minLength": 1 },
+            "databasePort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "minInterval": { "type": "string", "minLength": 1 },
+            "scrapeTimeout": { "type": "string", "minLength": 1 },
+            "metrics": {
+              "type": "object",
+              "properties": {
+                "scrapeAnnotations": { "type": "boolean" },
+                "path": { "type": "string" },
+                "annotations": {
+                  "type": "object",
+                  "additionalProperties": { "type": "string" }
+                }
+              }
+            },
+            "resources": { "type": "object" }
+          }
+        },
         "resources": { "type": "object" }
       }
     }
@@ -420,6 +451,10 @@
           "items": { "type": "string" }
         },
         "apiIngressSourceNamespaces": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "metricsIngressSourceNamespaces": {
           "type": "array",
           "items": { "type": "string" }
         },
