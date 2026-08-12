@@ -8,7 +8,6 @@
 //! the thread key (see [`crate::derive_principal`]).
 
 use serde_json::Value;
-use std::collections::BTreeMap;
 
 use crate::IronControlClient;
 use crate::error::{IronControlError, Result};
@@ -163,7 +162,6 @@ impl SessionRegistrar {
             return Ok(false);
         };
         let mut labels = existing.labels;
-        strip_compatibility_identity_labels(&mut labels);
         labels.extend(std::mem::take(&mut input.labels));
         input.labels = labels;
         Ok(true)
@@ -225,18 +223,6 @@ fn set_slack_email(input: &mut PrincipalInput, slack_user_email: Option<&str>) {
     };
     if input.slack_user_id.is_some() {
         input.slack_email = Some(email.to_owned());
-    }
-}
-
-fn strip_compatibility_identity_labels(labels: &mut BTreeMap<String, String>) {
-    for label in [
-        "kind",
-        "slack_user_id",
-        "slack_channel_id",
-        "slack_team_id",
-        "slack_email",
-    ] {
-        labels.remove(label);
     }
 }
 
@@ -724,27 +710,6 @@ mod tests {
         assert_eq!(
             slack_permission_for_thread("slack:D123:ts", Some("D123"), None),
             None
-        );
-    }
-
-    #[test]
-    fn compatibility_identity_labels_are_not_merged_back_into_writes() {
-        let mut labels = BTreeMap::from([
-            ("kind".to_owned(), "slack_dm".to_owned()),
-            ("slack_user_id".to_owned(), "U0123456789".to_owned()),
-            ("slack_team_id".to_owned(), "T0123456789".to_owned()),
-            ("managed-by".to_owned(), "centaur".to_owned()),
-            ("team".to_owned(), "platform".to_owned()),
-        ]);
-
-        strip_compatibility_identity_labels(&mut labels);
-
-        assert_eq!(
-            labels,
-            BTreeMap::from([
-                ("managed-by".to_owned(), "centaur".to_owned()),
-                ("team".to_owned(), "platform".to_owned()),
-            ])
         );
     }
 
