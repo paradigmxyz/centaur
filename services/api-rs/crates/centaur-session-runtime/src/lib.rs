@@ -5866,6 +5866,13 @@ fn terminal_output(value: &Value, prior_final_answer_text: &str) -> Option<Termi
     if matches!(method, Some("error" | "turn/failed"))
         || matches!(event_type, Some("error" | "turn.failed" | "run.failed"))
     {
+        // Codex emits intermediate `error` notifications with willRetry=true
+        // while reconnecting a dropped model stream. Those are not terminal.
+        if error_notification_will_retry(value)
+            && matches!(method.or(event_type), Some("error"))
+        {
+            return None;
+        }
         return Some(TerminalOutput::Failed {
             error: terminal_error_text(value),
         });
@@ -6074,6 +6081,37 @@ fn result_is_failure(value: &Value) -> bool {
     )
 }
 
+fn error_notification_will_retry(value: &Value) -> bool {
+    matches!(
+        value
+            .pointer("/params/willRetry")
+            .or_else(|| value.get("willRetry"))
+            .and_then(Value::as_bool),
+        Some(true)
+    )
+}
+
+fn nested_codex_error_text(value: &Value) -> Option<String> {
+    let error = value
+        .pointer("/params/error")
+        .or_else(|| value.get("error"))?;
+    if !error.is_object() {
+        return None;
+    }
+    let message = error.get("message").and_then(Value::as_str).unwrap_or("");
+    let details = error
+        .get("additionalDetails")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let text = match (message.is_empty(), details.is_empty()) {
+        (false, false) if !message.contains(details) => format!("{message}: {details}"),
+        (false, _) => message.to_owned(),
+        (true, false) => details.to_owned(),
+        (true, true) => return None,
+    };
+    Some(text)
+}
+
 fn terminal_error_text(value: &Value) -> String {
     for key in ["error", "message", "result", "text"] {
         if let Some(text) = value.get(key).and_then(Value::as_str)
@@ -6081,6 +6119,9 @@ fn terminal_error_text(value: &Value) -> String {
         {
             return text.trim().to_owned();
         }
+    }
+    if let Some(text) = nested_codex_error_text(value) {
+        return text;
     }
     terminal_payload_text(value)
         .trim()
@@ -7429,6 +7470,49 @@ mod tests {
             terminal_output(&event, ""),
             Some(TerminalOutput::Failed {
                 error: "sandbox exited".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn retryable_codex_error_notification_is_not_terminal() {
+        let event = json!({
+            "method": "error",
+            "params": {
+                "error": {
+                    "message": "Reconnecting... 1/5",
+                    "additionalDetails": "stream disconnected before completion: provider error",
+                    "codexErrorInfo": { "responseStreamDisconnected": { "httpStatusCode": null } }
+                },
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "willRetry": true
+            }
+        });
+
+        assert_eq!(terminal_output(&event, ""), None);
+    }
+
+    #[test]
+    fn exhausted_codex_error_notification_is_terminal_with_nested_text() {
+        let event = json!({
+            "method": "error",
+            "params": {
+                "error": {
+                    "message": "Reconnecting... 5/5",
+                    "additionalDetails": "stream disconnected before completion: provider error",
+                },
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "willRetry": false
+            }
+        });
+
+        assert_eq!(
+            terminal_output(&event, ""),
+            Some(TerminalOutput::Failed {
+                error: "Reconnecting... 5/5: stream disconnected before completion: provider error"
+                    .to_owned()
             })
         );
     }
