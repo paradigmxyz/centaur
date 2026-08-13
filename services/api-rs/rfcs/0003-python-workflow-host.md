@@ -300,7 +300,7 @@ The route should:
 
 - look up the registered slug
 - enforce allowed methods and content types
-- verify HMAC, GitHub HMAC, or bearer auth
+- verify raw-body HMAC, GitHub HMAC, Standard Webhooks, or bearer auth
 - redact sensitive headers
 - parse JSON or form payloads
 - preserve the Python-compatible input envelope
