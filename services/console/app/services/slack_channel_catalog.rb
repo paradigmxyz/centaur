@@ -1,4 +1,3 @@
-require "digest"
 require "json"
 
 class SlackChannelCatalog
@@ -11,53 +10,9 @@ class SlackChannelCatalog
 
   DEFAULT_API_URL = "https://slack.com/api".freeze
   DEFAULT_TYPES = "public_channel,private_channel".freeze
-  CACHE_TTL = 5.minutes
   OPEN_TIMEOUT_SECONDS = 2
   READ_TIMEOUT_SECONDS = 5
   WRITE_TIMEOUT_SECONDS = 2
-
-  def self.fetch
-    token = ENV["CENTAUR_CONSOLE_SLACK_BOT_TOKEN"].presence || ENV["SLACK_BOT_TOKEN"].presence
-    return Result.new(channels: [], error: "SLACK_BOT_TOKEN is not configured.", configured: false) if token.blank?
-
-    api_url = ENV["SLACK_API_URL"].presence || DEFAULT_API_URL
-    key = cache_key(token: token, api_url: api_url)
-    cached = Rails.cache.read(key)
-    return deserialize_result(cached) if cached
-
-    result = new(token: token, api_url: api_url).fetch
-    Rails.cache.write(key, serialize_result(result), expires_in: CACHE_TTL) if result.ok?
-    result
-  end
-
-  def self.cache_key(token:, api_url:)
-    token_digest = Digest::SHA256.hexdigest(token)
-    api_url_digest = Digest::SHA256.hexdigest(api_url)
-    "slack_channel_catalog/v1/#{api_url_digest}/#{token_digest}"
-  end
-
-  def self.serialize_result(result)
-    {
-      "channels" => result.channels.map do |channel|
-        { "id" => channel.id, "name" => channel.name, "private" => channel.private }
-      end,
-      "error" => result.error,
-      "configured" => result.configured
-    }
-  end
-
-  def self.deserialize_result(payload)
-    return payload if payload.is_a?(Result)
-
-    channels = Array(payload["channels"]).map do |channel|
-      Channel.new(
-        id: channel.fetch("id"),
-        name: channel.fetch("name"),
-        private: channel.fetch("private")
-      )
-    end
-    Result.new(channels: channels, error: payload["error"], configured: payload["configured"])
-  end
 
   def initialize(token:, api_url:, api: nil)
     @token = token

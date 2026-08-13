@@ -326,7 +326,7 @@ module Console
     private
 
     def with_slack_channel_catalog(catalog)
-      singleton = SlackChannelCatalog.singleton_class
+      singleton = SlackChannelCatalogProvider.singleton_class
       original = singleton.instance_method(:fetch)
       singleton.define_method(:fetch) { catalog }
       yield
