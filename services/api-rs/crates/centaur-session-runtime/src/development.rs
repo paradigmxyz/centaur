@@ -574,9 +574,11 @@ mod workspace_preparation_tests {
 
         let spec = backend.specs.lock().unwrap().first().unwrap().clone();
         assert_eq!(spec.working_dir.as_deref(), Some("/workspace"));
-        assert!(spec.env.iter().any(|env| {
-            env.name == "CENTAUR_WORKSPACE_ROOT" && env.value == "/workspace"
-        }));
+        assert!(
+            spec.env
+                .iter()
+                .any(|env| { env.name == "CENTAUR_WORKSPACE_ROOT" && env.value == "/workspace" })
+        );
         assert!(spec.mounts.iter().any(|mount| {
             mount.target_path == "/workspace"
                 && mount.kind
