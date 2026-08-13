@@ -8,10 +8,11 @@ class CentaurApiClient
 
   attr_reader :base_url
 
-  def initialize(base_url: nil, api_key: nil, http: nil, timeout: DEFAULT_TIMEOUT_SECONDS)
+  def initialize(base_url: nil, api_key: nil, http: nil, timeout: DEFAULT_TIMEOUT_SECONDS,
+                 read_timeout: timeout)
     @base_url = (base_url.presence || ConsoleEnv["CENTAUR_API_URL"].presence || "http://localhost:8080").delete_suffix("/")
     @api_key = api_key.presence || ConsoleEnv["CENTAUR_API_KEY"].presence
-    @api = HttpClient.new(http: http, open_timeout: timeout, read_timeout: timeout)
+    @api = HttpClient.new(http: http, open_timeout: timeout, read_timeout: read_timeout)
   end
 
   def list_slack_archive_imports(limit: 100)
