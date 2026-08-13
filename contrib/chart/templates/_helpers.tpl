@@ -99,6 +99,48 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 {{- end -}}
 
+{{- define "centaur.validateGitLabOrigin" -}}
+{{- $origin := .Values.workspaceRepositories.gitlab.baseUrl | default "" -}}
+{{- if not (regexMatch `^https?://(?:\[[0-9A-Fa-f:.]+\]|[^/@:?#[:space:]]+)(?::[0-9]+)?/?$` $origin) -}}
+{{- fail "workspaceRepositories.gitlab.baseUrl must be an HTTP(S) origin with a host, optional port, and no credentials or path" -}}
+{{- end -}}
+{{- if and (hasPrefix "http://" $origin) (not .Values.workspaceRepositories.gitlab.allowInsecureHttp) -}}
+{{- fail "workspaceRepositories.gitlab.allowInsecureHttp must be true to send the shared GitLab Token over HTTP" -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "centaur.developmentGitLabEgressTargets" -}}
+{{- $origin := .Values.workspaceRepositories.gitlab.baseUrl | default "" -}}
+{{- $targets := list -}}
+{{- if $origin -}}
+{{- $parsed := urlParse $origin -}}
+{{- $host := get $parsed "host" | default "" -}}
+{{- $scheme := get $parsed "scheme" | default "" -}}
+{{- $port := ternary 443 80 (eq $scheme "https") -}}
+{{- $explicitPort := regexFind `:[0-9]+$` $host | trimPrefix ":" -}}
+{{- if $explicitPort -}}{{- $port = atoi $explicitPort -}}{{- end -}}
+{{- if or (lt $port 1) (gt $port 65535) -}}
+{{- fail "workspaceRepositories.gitlab.baseUrl port must be between 1 and 65535" -}}
+{{- end -}}
+{{- range $configuredCidr := .Values.workspaceRepositories.gitlab.egressCidrs -}}
+{{- $cidr := trim $configuredCidr -}}
+{{- $valid := false -}}
+{{- if regexMatch `^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/(3[0-2]|[12]?[0-9])$` $cidr -}}
+{{- $address := regexFind `^[^/]+` $cidr -}}
+{{- $valid = true -}}
+{{- range $octet := splitList "." $address -}}
+{{- if or (not (regexMatch `^[0-9]{1,3}$` $octet)) (gt (atoi $octet) 255) -}}{{- $valid = false -}}{{- end -}}
+{{- end -}}
+{{- else if regexMatch `^[0-9A-Fa-f:]+/([0-9]|[1-9][0-9]|1[01][0-9]|12[0-8])$` $cidr -}}
+{{- $valid = true -}}
+{{- end -}}
+{{- if not $valid -}}{{- fail (printf "workspaceRepositories.gitlab.egressCidrs contains invalid CIDR %q" $configuredCidr) -}}{{- end -}}
+{{- $targets = append $targets (dict "cidr" $cidr "port" $port) -}}
+{{- end -}}
+{{- end -}}
+{{- toJson $targets -}}
+{{- end -}}
+
 {{- define "centaur.registerCloneUrl" -}}
 {{- $repo := .repo | default "" -}}
 {{- $repoLabel := default .repoLabel $repo -}}
@@ -210,6 +252,11 @@ so the defaults are safe for repos that only carry some surfaces.
 
 {{- define "centaur.apiRsDirectCloneEgressTargets" -}}
 {{- $targets := dict -}}
+{{- if .Values.workspaceRepositories.enabled -}}
+{{- range $gitlabTarget := include "centaur.developmentGitLabEgressTargets" . | fromJsonArray -}}
+{{- $_ := set $targets (printf "%s:%v" (get $gitlabTarget "cidr") (get $gitlabTarget "port")) $gitlabTarget -}}
+{{- end -}}
+{{- end -}}
 {{- if not .Values.repoCache.enabled -}}
 {{- $sources := include "centaur.overlaySources" . | fromJsonArray -}}
 {{- range $source := $sources -}}

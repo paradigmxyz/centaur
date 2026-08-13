@@ -24,6 +24,7 @@ const CURSOR_PREFIX: &str = "gitlab-page:";
 #[derive(Clone, Debug)]
 pub struct GitLabCatalogConfig {
     pub base_url: String,
+    pub allow_insecure_http: bool,
     pub token_file: PathBuf,
     pub page_size: u16,
     pub request_timeout: Duration,
@@ -59,6 +60,8 @@ pub struct RepositoryPage {
 pub enum GitLabCatalogBuildError {
     #[error("GitLab base URL is invalid")]
     InvalidBaseUrl,
+    #[error("GitLab base URL must use HTTPS unless insecure HTTP is explicitly allowed")]
+    InsecureBaseUrl,
     #[error("GitLab repository catalog page size must be between 1 and 100")]
     InvalidPageSize,
     #[error("GitLab repository catalog timeout must be greater than zero")]
@@ -92,6 +95,9 @@ struct GitLabProject {
 impl GitLabCatalog {
     pub fn new(config: GitLabCatalogConfig) -> Result<Self, GitLabCatalogBuildError> {
         let base_url = normalize_base_url(&config.base_url)?;
+        if base_url.scheme() != "https" && !config.allow_insecure_http {
+            return Err(GitLabCatalogBuildError::InsecureBaseUrl);
+        }
         if !(1..=MAX_PAGE_SIZE).contains(&config.page_size) {
             return Err(GitLabCatalogBuildError::InvalidPageSize);
         }
@@ -600,10 +606,21 @@ mod gitlab_catalog_tests {
     fn config(base_url: String) -> GitLabCatalogConfig {
         GitLabCatalogConfig {
             base_url,
+            allow_insecure_http: true,
             token_file: token_file(),
             page_size: 25,
             request_timeout: Duration::from_secs(2),
         }
+    }
+
+    #[test]
+    fn gitlab_catalog_rejects_insecure_http_by_default() {
+        let mut config = config("http://git.example.test:82".to_owned());
+        config.allow_insecure_http = false;
+        assert!(matches!(
+            GitLabCatalog::new(config),
+            Err(super::GitLabCatalogBuildError::InsecureBaseUrl)
+        ));
     }
 
     #[tokio::test]
@@ -671,7 +688,12 @@ mod gitlab_catalog_tests {
 
     async fn get_json(app: axum::Router, uri: &str) -> (StatusCode, Value) {
         let response = app
-            .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get(uri)
+                    .header("authorization", "Bearer gitlab-test-ingress-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let status = response.status();
@@ -682,7 +704,9 @@ mod gitlab_catalog_tests {
 
     #[tokio::test]
     async fn gitlab_catalog_route_handles_disabled_invalid_and_upstream_errors() {
-        let disabled = build_router_with_app_state(AppState::unready());
+        let disabled = build_router_with_app_state(
+            AppState::unready().with_feishu_ingress_key("gitlab-test-ingress-key"),
+        );
         assert_eq!(
             get_json(disabled, "/api/development/repositories").await.0,
             StatusCode::NOT_FOUND
@@ -690,7 +714,11 @@ mod gitlab_catalog_tests {
 
         let (origin, _) = spawn_fake_gitlab().await;
         let catalog = Arc::new(GitLabCatalog::new(config(origin)).unwrap());
-        let app = build_router_with_app_state(AppState::unready().with_repository_catalog(catalog));
+        let app = build_router_with_app_state(
+            AppState::unready()
+                .with_feishu_ingress_key("gitlab-test-ingress-key")
+                .with_repository_catalog(catalog),
+        );
         let (status, body) = get_json(
             app.clone(),
             "/api/development/repositories?cursor=not-a-cursor",
@@ -703,8 +731,11 @@ mod gitlab_catalog_tests {
         let unavailable_origin = format!("http://{}", listener.local_addr().unwrap());
         drop(listener);
         let unavailable = Arc::new(GitLabCatalog::new(config(unavailable_origin)).unwrap());
-        let app =
-            build_router_with_app_state(AppState::unready().with_repository_catalog(unavailable));
+        let app = build_router_with_app_state(
+            AppState::unready()
+                .with_feishu_ingress_key("gitlab-test-ingress-key")
+                .with_repository_catalog(unavailable),
+        );
         let (status, body) = get_json(app, "/api/development/repositories").await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["code"], "repository_catalog_unavailable");

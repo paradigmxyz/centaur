@@ -22,6 +22,7 @@ use tokio::{
 const MANAGED_BY_LABEL: &str = "centaur.ai/managed-by";
 const WORKSPACE_ID_LABEL: &str = "centaur.ai/workspace-id";
 const WORKSPACE_ATTEMPT_LABEL: &str = "centaur.ai/workspace-attempt";
+const DEVELOPMENT_JOB_ROLE_LABEL: &str = "centaur.ai/development-job-role";
 const MANAGED_BY_VALUE: &str = "api-rs-workspace";
 const WORKSPACE_VOLUME: &str = "workspace";
 const TOKEN_VOLUME: &str = "gitlab-token";
@@ -38,10 +39,13 @@ pub struct KubeWorkspaceConfig {
     pub field_manager: String,
     pub provisioner_image: String,
     pub service_account_name: Option<String>,
+    pub publisher_service_account_name: Option<String>,
     pub token_secret_key: String,
     pub storage_size: String,
+    pub storage_access_mode: String,
     pub storage_class_name: Option<String>,
     pub image_pull_policy: Option<String>,
+    pub image_pull_secrets: Vec<String>,
     pub ready_timeout: Duration,
 }
 
@@ -52,10 +56,13 @@ impl KubeWorkspaceConfig {
             field_manager: "centaur-api-rs-workspace".to_owned(),
             provisioner_image: provisioner_image.into(),
             service_account_name: None,
+            publisher_service_account_name: None,
             token_secret_key: "token".to_owned(),
             storage_size: "20Gi".to_owned(),
+            storage_access_mode: "ReadWriteOnce".to_owned(),
             storage_class_name: None,
             image_pull_policy: None,
+            image_pull_secrets: Vec::new(),
             ready_timeout: Duration::from_secs(300),
         }
     }
@@ -487,7 +494,7 @@ fn build_workspace_pvc(
 ) -> Result<PersistentVolumeClaim, WorkspaceError> {
     let name = workspace_pvc_name(&request.workspace_id);
     let mut spec = json!({
-        "accessModes": ["ReadWriteOnce"],
+        "accessModes": [config.storage_access_mode],
         "resources": {"requests": {"storage": config.storage_size}},
     });
     if let Some(storage_class_name) = &config.storage_class_name {
@@ -512,6 +519,7 @@ fn build_workspace_job(
     config: &KubeWorkspaceConfig,
 ) -> Result<Job, WorkspaceError> {
     let name = workspace_job_name(&request.workspace_id, request.attempt);
+    let labels = workspace_job_labels(request);
     let input = ProvisionerInput {
         workspace_id: &request.workspace_id,
         thread_key: &request.thread_key,
@@ -535,6 +543,7 @@ fn build_workspace_job(
     );
     let mut pod_spec = json!({
         "restartPolicy": "Never",
+        "automountServiceAccountToken": false,
         "securityContext": {"fsGroup": 1000},
         "containers": [{
             "name": "provisioner",
@@ -591,20 +600,21 @@ fn build_workspace_job(
     if let Some(image_pull_policy) = &config.image_pull_policy {
         pod_spec["containers"][0]["imagePullPolicy"] = json!(image_pull_policy);
     }
+    apply_image_pull_secrets(&mut pod_spec, config);
     serde_json::from_value(json!({
         "apiVersion": "batch/v1",
         "kind": "Job",
         "metadata": {
             "name": name,
             "namespace": config.namespace,
-            "labels": workspace_labels(request),
+            "labels": labels,
         },
         "spec": {
             "backoffLimit": 0,
             "activeDeadlineSeconds": config.ready_timeout.as_secs().max(1),
             "ttlSecondsAfterFinished": 3600,
             "template": {
-                "metadata": {"labels": workspace_labels(request)},
+                "metadata": {"labels": labels},
                 "spec": pod_spec,
             }
         }
@@ -621,6 +631,52 @@ fn build_collection_job(
         serde_json::to_vec(request)
             .map_err(|error| WorkspaceError::Invalid(format!("collection input: {error}")))?,
     );
+    let mut pod_spec = json!({
+        "restartPolicy": "Never",
+        "serviceAccountName": config.service_account_name,
+        "automountServiceAccountToken": false,
+        "securityContext": {"fsGroup": 1000},
+        "containers": [{
+            "name": "collector",
+            "image": config.provisioner_image,
+            "imagePullPolicy": config.image_pull_policy,
+            "command": ["python3", "-c", COLLECTION_SCRIPT],
+            "env": [
+                {"name": "CENTAUR_CHANGESET_REQUEST_B64", "value": encoded},
+                {"name": "GIT_TERMINAL_PROMPT", "value": "0"},
+                {"name": "GIT_OPTIONAL_LOCKS", "value": "0"},
+                {"name": "GIT_CONFIG_NOSYSTEM", "value": "1"},
+                {"name": "GIT_CONFIG_GLOBAL", "value": "/dev/null"}
+            ],
+            "volumeMounts": [{
+                "name": WORKSPACE_VOLUME,
+                "mountPath": "/workspace",
+                "readOnly": true
+            }, {
+                "name": "result",
+                "mountPath": "/result"
+            }],
+            "securityContext": {
+                "allowPrivilegeEscalation": false,
+                "readOnlyRootFilesystem": true,
+                "runAsNonRoot": true,
+                "runAsUser": 1000,
+                "capabilities": {"drop": ["ALL"]}
+            },
+            "resources": {
+                "requests": {"cpu": "25m", "memory": "64Mi"},
+                "limits": {"cpu": "1", "memory": "256Mi"}
+            }
+        }],
+        "volumes": [{
+            "name": WORKSPACE_VOLUME,
+            "persistentVolumeClaim": {"claimName": request.storage_ref}
+        }, {
+            "name": "result",
+            "emptyDir": {"sizeLimit": "4Mi"}
+        }]
+    });
+    apply_image_pull_secrets(&mut pod_spec, config);
     serde_json::from_value(json!({
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -635,51 +691,7 @@ fn build_collection_job(
             "ttlSecondsAfterFinished": 3600,
             "template": {
                 "metadata": {"labels": collection_labels(request)},
-                "spec": {
-                    "restartPolicy": "Never",
-                    "serviceAccountName": config.service_account_name,
-                    "automountServiceAccountToken": false,
-                    "securityContext": {"fsGroup": 1000},
-                    "containers": [{
-                        "name": "collector",
-                        "image": config.provisioner_image,
-                        "imagePullPolicy": config.image_pull_policy,
-                        "command": ["python3", "-c", COLLECTION_SCRIPT],
-                        "env": [
-                            {"name": "CENTAUR_CHANGESET_REQUEST_B64", "value": encoded},
-                            {"name": "GIT_TERMINAL_PROMPT", "value": "0"},
-                            {"name": "GIT_OPTIONAL_LOCKS", "value": "0"},
-                            {"name": "GIT_CONFIG_NOSYSTEM", "value": "1"},
-                            {"name": "GIT_CONFIG_GLOBAL", "value": "/dev/null"}
-                        ],
-                    "volumeMounts": [{
-                        "name": WORKSPACE_VOLUME,
-                        "mountPath": "/workspace",
-                        "readOnly": true
-                    }, {
-                        "name": "result",
-                        "mountPath": "/result"
-                    }],
-                        "securityContext": {
-                            "allowPrivilegeEscalation": false,
-                            "readOnlyRootFilesystem": true,
-                            "runAsNonRoot": true,
-                            "runAsUser": 1000,
-                            "capabilities": {"drop": ["ALL"]}
-                        },
-                        "resources": {
-                            "requests": {"cpu": "25m", "memory": "64Mi"},
-                            "limits": {"cpu": "1", "memory": "256Mi"}
-                        }
-                    }],
-                    "volumes": [{
-                        "name": WORKSPACE_VOLUME,
-                        "persistentVolumeClaim": {"claimName": request.storage_ref}
-                    }, {
-                        "name": "result",
-                        "emptyDir": {"sizeLimit": "4Mi"}
-                    }]
-                }
+                "spec": pod_spec
             }
         }
     }))
@@ -789,9 +801,10 @@ fn build_publication_job<T: Serialize>(
         }],
         "volumes": volumes
     });
-    if let Some(service_account_name) = &config.service_account_name {
+    if let Some(service_account_name) = config.publisher_service_account_name.as_ref() {
         pod_spec["serviceAccountName"] = json!(service_account_name);
     }
+    apply_image_pull_secrets(&mut pod_spec, config);
     serde_json::from_value(json!({
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -821,6 +834,18 @@ fn publication_credential_ref<T: Serialize>(request: &T) -> Result<String, Works
         })
 }
 
+fn apply_image_pull_secrets(pod_spec: &mut serde_json::Value, config: &KubeWorkspaceConfig) {
+    if !config.image_pull_secrets.is_empty() {
+        pod_spec["imagePullSecrets"] = json!(
+            config
+                .image_pull_secrets
+                .iter()
+                .map(|name| json!({"name": name}))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
 fn workspace_labels(request: &WorkspacePreparationRequest) -> BTreeMap<String, String> {
     BTreeMap::from([
         (MANAGED_BY_LABEL.to_owned(), MANAGED_BY_VALUE.to_owned()),
@@ -835,9 +860,22 @@ fn workspace_labels(request: &WorkspacePreparationRequest) -> BTreeMap<String, S
     ])
 }
 
+fn workspace_job_labels(request: &WorkspacePreparationRequest) -> BTreeMap<String, String> {
+    let mut labels = workspace_labels(request);
+    labels.insert(
+        DEVELOPMENT_JOB_ROLE_LABEL.to_owned(),
+        "provisioner".to_owned(),
+    );
+    labels
+}
+
 fn collection_labels(request: &WorkspaceCollectionRequest) -> BTreeMap<String, String> {
     BTreeMap::from([
         (MANAGED_BY_LABEL.to_owned(), MANAGED_BY_VALUE.to_owned()),
+        (
+            DEVELOPMENT_JOB_ROLE_LABEL.to_owned(),
+            "collector".to_owned(),
+        ),
         (
             WORKSPACE_ID_LABEL.to_owned(),
             label_value(&request.workspace_id),
@@ -856,6 +894,10 @@ fn publication_labels(
 ) -> BTreeMap<String, String> {
     BTreeMap::from([
         (MANAGED_BY_LABEL.to_owned(), MANAGED_BY_VALUE.to_owned()),
+        (
+            DEVELOPMENT_JOB_ROLE_LABEL.to_owned(),
+            "publisher".to_owned(),
+        ),
         (
             "centaur.ai/publication-operation".to_owned(),
             label_value(operation),
@@ -1331,7 +1373,10 @@ mod tests {
 
     #[test]
     fn workspace_objects_isolate_credentials_to_provisioner() {
-        let config = KubeWorkspaceConfig::new("centaur", "centaur-api:latest");
+        let mut config = KubeWorkspaceConfig::new("centaur", "centaur-api:latest");
+        config.service_account_name = Some("workspace-provisioner".to_owned());
+        config.storage_access_mode = "ReadWriteMany".to_owned();
+        config.image_pull_secrets = vec!["registry-credentials".to_owned()];
         let request = request();
         let pvc = build_workspace_pvc(&request, &config).unwrap();
         assert_eq!(pvc.metadata.name.as_deref(), Some("workspace-wsp-abc-123"));
@@ -1339,12 +1384,30 @@ mod tests {
             pvc.metadata.labels.as_ref().unwrap()[WORKSPACE_ID_LABEL],
             "wsp-abc-123"
         );
+        assert_eq!(
+            pvc.spec.as_ref().unwrap().access_modes,
+            Some(vec!["ReadWriteMany".to_owned()])
+        );
+        assert!(
+            !pvc.metadata
+                .labels
+                .as_ref()
+                .unwrap()
+                .contains_key(DEVELOPMENT_JOB_ROLE_LABEL)
+        );
 
         let job = build_workspace_job(&request, "workspace-wsp-abc-123", &config).unwrap();
         let value = serde_json::to_value(job).unwrap();
         assert_eq!(value["metadata"]["name"], "workspace-wsp-abc-123-a2");
         let pod = &value["spec"]["template"]["spec"];
+        assert_eq!(
+            value["spec"]["template"]["metadata"]["labels"][DEVELOPMENT_JOB_ROLE_LABEL],
+            "provisioner"
+        );
         assert_eq!(pod["restartPolicy"], "Never");
+        assert_eq!(pod["automountServiceAccountToken"], false);
+        assert_eq!(pod["serviceAccountName"], "workspace-provisioner");
+        assert_eq!(pod["imagePullSecrets"][0]["name"], "registry-credentials");
         assert_eq!(
             pod["volumes"][0]["persistentVolumeClaim"]["claimName"],
             "workspace-wsp-abc-123"
@@ -1422,6 +1485,10 @@ mod tests {
         let job = build_collection_job(&request, &config).unwrap();
         let value = serde_json::to_value(job).unwrap();
         assert_eq!(value["metadata"]["name"], "changeset-exe-abc-123");
+        assert_eq!(
+            value["metadata"]["labels"][DEVELOPMENT_JOB_ROLE_LABEL],
+            "collector"
+        );
         let pod = &value["spec"]["template"]["spec"];
         assert_eq!(pod["automountServiceAccountToken"], false);
         assert_eq!(pod["containers"][0]["volumeMounts"][0]["readOnly"], true);
@@ -1450,7 +1517,10 @@ mod tests {
 
     #[test]
     fn publisher_jobs_mount_credentials_only_in_short_lived_jobs() {
-        let config = KubeWorkspaceConfig::new("centaur", "centaur-api:latest");
+        let mut config = KubeWorkspaceConfig::new("centaur", "centaur-api:latest");
+        config.service_account_name = Some("workspace-provisioner".to_owned());
+        config.publisher_service_account_name = Some("gitlab-publisher".to_owned());
+        config.image_pull_secrets = vec!["registry-credentials".to_owned()];
         let push_request = GitLabPushRequest {
             publish_item_id: "pbi_abc_123".to_owned(),
             attempt: 2,
@@ -1464,8 +1534,17 @@ mod tests {
         };
         let push = serde_json::to_value(build_push_job(&push_request, &config).unwrap()).unwrap();
         assert_eq!(push["metadata"]["name"], "push-pbi-abc-123-a2");
+        assert_eq!(
+            push["metadata"]["labels"][DEVELOPMENT_JOB_ROLE_LABEL],
+            "publisher"
+        );
         let push_pod = &push["spec"]["template"]["spec"];
         assert_eq!(push_pod["automountServiceAccountToken"], false);
+        assert_eq!(push_pod["serviceAccountName"], "gitlab-publisher");
+        assert_eq!(
+            push_pod["imagePullSecrets"][0]["name"],
+            "registry-credentials"
+        );
         assert_eq!(
             push_pod["containers"][0]["volumeMounts"][2]["readOnly"],
             true

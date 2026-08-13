@@ -15,6 +15,7 @@ import {
   type SelectionCardState
 } from './selection-cards.js'
 import { FeishuApiError, FeishuSessionApi, type SelectionView } from './session-api.js'
+import { FeishuMetrics } from './metrics.js'
 
 type UnknownRecord = Record<string, unknown>
 
@@ -23,18 +24,23 @@ export type FeishuBotOptions = {
   tenantAllowlist: ReadonlySet<string>
   api: FeishuSessionApi
   renderer: FeishuRenderer
+  metrics?: FeishuMetrics
   consolePublicUrl?: string
 }
 
 export class FeishuBot {
-  constructor(private readonly options: FeishuBotOptions) {}
+  private readonly metrics: FeishuMetrics
+
+  constructor(private readonly options: FeishuBotOptions) {
+    this.metrics = options.metrics ?? new FeishuMetrics()
+  }
 
   acceptMessageEvent(event: unknown): void {
-    this.run(async () => this.handleMessage(event))
+    this.runEvent('message', async () => this.handleMessage(event))
   }
 
   acceptCardEvent(event: unknown): void {
-    this.run(async () => this.handleCard(event))
+    this.runEvent('card', async () => this.handleCard(event))
   }
 
   listPendingDeliveries(): Promise<string[]> {
@@ -98,21 +104,42 @@ export class FeishuBot {
     })
   }
 
-  private async handleMessage(event: unknown): Promise<void> {
+  private runEvent(
+    kind: 'message' | 'card',
+    operation: () => Promise<boolean>
+  ): void {
+    const startedAt = performance.now()
+    queueMicrotask(() => {
+      void operation().then(accepted => {
+        this.metrics.recordEvent(
+          kind,
+          accepted ? 'accepted' : 'ignored',
+          performance.now() - startedAt
+        )
+      }).catch(error => {
+        this.metrics.recordEvent(kind, 'failed', performance.now() - startedAt)
+        const code = error instanceof FeishuApiError ? error.status : undefined
+        console.error('feishubot operation failed', { code })
+      })
+    })
+  }
+
+  private async handleMessage(event: unknown): Promise<boolean> {
     const message = normalizeFeishuMessage(event, { botOpenId: this.options.botOpenId })
-    if (!message || !this.options.tenantAllowlist.has(message.tenantKey)) return
+    if (!message || !this.options.tenantAllowlist.has(message.tenantKey)) return false
     if (message.command === 'new') {
       await this.startNewTask(message)
-      return
+      return true
     }
     if (message.command === 'projects') {
       await this.addProjects(message)
-      return
+      return true
     }
     const accepted = await this.options.api.acceptMessage(message)
+    this.metrics.recordDeduplication(accepted.created ? 'new' : 'duplicate')
     if (accepted.selection_flow_id) {
       await this.sendSelection(message, accepted.thread_key, accepted.selection_flow_id)
-      return
+      return true
     }
     const cardMessageId = await this.upsertSessionCard(
       message,
@@ -125,6 +152,7 @@ export class FeishuBot {
       accepted.execution_id,
       message.principalId
     ))
+    return true
   }
 
   private async startNewTask(message: NormalizedFeishuMessage): Promise<void> {
@@ -172,7 +200,7 @@ export class FeishuBot {
         delivery.delivery_id
       )
     }
-    await this.options.api.recordDelivery(
+    await this.recordDelivery(
       threadKey,
       messageId,
       delivery.last_event_cursor,
@@ -198,7 +226,7 @@ export class FeishuBot {
         delivery.delivery_id
       )
     }
-    await this.options.api.recordDelivery(
+    await this.recordDelivery(
       delivery.thread_key,
       messageId,
       delivery.last_event_cursor,
@@ -207,9 +235,9 @@ export class FeishuBot {
     return messageId
   }
 
-  private async handleCard(input: unknown): Promise<void> {
+  private async handleCard(input: unknown): Promise<boolean> {
     const event = normalizeFeishuCardAction(input)
-    if (!event || !this.options.tenantAllowlist.has(event.tenantKey)) return
+    if (!event || !this.options.tenantAllowlist.has(event.tenantKey)) return false
     const principalId = `feishu:${event.tenantKey}:${event.operatorOpenId}`
     if (event.action === 'approve_publication') {
       const changesetId = requiredOpaqueId(event.value.changeset_id, 'chg')
@@ -220,7 +248,7 @@ export class FeishuBot {
       ) as PublicationBatch
       await this.options.renderer.updateCard(event.messageId, renderPublicationCard(batch))
       this.run(async () => this.pollPublication(event.messageId, batch.publish_batch_id, principalId))
-      return
+      return true
     }
     if (event.action === 'retry_failed') {
       const batchId = requiredOpaqueId(event.value.publish_batch_id, 'pub')
@@ -231,22 +259,23 @@ export class FeishuBot {
       ) as PublicationBatch
       await this.options.renderer.updateCard(event.messageId, renderPublicationCard(batch))
       this.run(async () => this.pollPublication(event.messageId, batch.publish_batch_id, principalId))
-      return
+      return true
     }
     const selectionFlowId = requiredOpaqueId(event.value.selection_flow_id, 'sel')
     const expectedVersion = positiveInteger(event.value.expected_version)
     const view = await this.options.api.getSelection(selectionFlowId, principalId)
     if (view.version !== expectedVersion || view.state !== 'pending') {
+      this.metrics.recordStaleConflict('selection')
       await this.refreshSelection(event.messageId, view, principalId)
-      return
+      return true
     }
     if (event.action === 'confirm' || event.action === 'no_project') {
-      await (event.action === 'confirm'
-        ? await this.options.api.confirmSelection(selectionFlowId, view.version, principalId, view.selected_repository_ids)
-        : await this.options.api.confirmNoProject(selectionFlowId, view.version, principalId))
+      await this.selectionMutation(() => event.action === 'confirm'
+        ? this.options.api.confirmSelection(selectionFlowId, view.version, principalId, view.selected_repository_ids)
+        : this.options.api.confirmNoProject(selectionFlowId, view.version, principalId))
       await this.options.renderer.updateCard(event.messageId, renderProgressCard({ status: '工作区准备中' }))
       const delivery = await this.options.api.getDelivery(view.thread_key)
-      await this.options.api.recordDelivery(
+      await this.recordDelivery(
         view.thread_key,
         event.messageId,
         delivery.last_event_cursor,
@@ -260,26 +289,36 @@ export class FeishuBot {
           principalId
         ))
       }
-      return
+      return true
     }
     if (event.action === 'cancel') {
-      await this.options.api.cancelSelection(selectionFlowId, view.version, principalId)
+      await this.selectionMutation(() => this.options.api.cancelSelection(
+        selectionFlowId,
+        view.version,
+        principalId
+      ))
       await this.options.renderer.updateCard(
         event.messageId,
         renderProgressCard({ title: '任务已取消', status: '未启动代码执行' })
       )
-      return
+      return true
     }
     const current = await this.selectionState(view)
     const action = selectionAction(event, current)
     const next = applySelectionAction(current, action)
-    const persisted = await this.options.api.updateSelection(selectionFlowId, view.version, principalId, {
-      query: next.query,
-      cursor: next.cursor,
-      cursor_history: next.cursorHistory,
-      selected_repository_ids: next.selectedRepositoryIds
-    })
+    const persisted = await this.selectionMutation(() => this.options.api.updateSelection(
+      selectionFlowId,
+      view.version,
+      principalId,
+      {
+        query: next.query,
+        cursor: next.cursor,
+        cursor_history: next.cursorHistory,
+        selected_repository_ids: next.selectedRepositoryIds
+      }
+    ))
     await this.refreshSelection(event.messageId, persisted, principalId)
+    return true
   }
 
   private async loadSelectionState(selectionFlowId: string, principalId: string): Promise<SelectionCardState> {
@@ -348,21 +387,17 @@ export class FeishuBot {
           failed: event.event === 'development.changeset_failed'
         }))
         const delivery = await this.options.api.getDelivery(threadKey)
-        try {
-          await this.options.api.recordDelivery(
-            threadKey,
-            messageId,
-            lastEventCursor,
-            delivery.desired_version
-          )
-        } catch (error) {
-          if (!(error instanceof FeishuApiError) || error.status !== 409) throw error
-        }
+        await this.recordDelivery(
+          threadKey,
+          messageId,
+          lastEventCursor,
+          delivery.desired_version
+        )
       }
       if (terminal) {
         const delivery = await this.options.api.getDelivery(threadKey)
         if (delivery.last_event_cursor < lastEventCursor || delivery.state !== 'delivered') {
-          await this.options.api.recordDelivery(
+          await this.recordDelivery(
             threadKey,
             messageId,
             lastEventCursor,
@@ -379,6 +414,38 @@ export class FeishuBot {
     return `${this.options.consolePublicUrl}/console/changesets/${encodeURIComponent(changesetId)}`
   }
 
+  private async selectionMutation<T>(operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation()
+    } catch (error) {
+      if (error instanceof FeishuApiError && error.status === 409) {
+        this.metrics.recordStaleConflict('selection')
+      }
+      throw error
+    }
+  }
+
+  private async recordDelivery(
+    threadKey: string,
+    messageId: string,
+    lastEventCursor: number,
+    desiredVersion: number
+  ): Promise<boolean> {
+    try {
+      await this.options.api.recordDelivery(
+        threadKey,
+        messageId,
+        lastEventCursor,
+        desiredVersion
+      )
+      return true
+    } catch (error) {
+      if (!(error instanceof FeishuApiError) || error.status !== 409) throw error
+      this.metrics.recordStaleConflict('delivery')
+      return false
+    }
+  }
+
   private async pollPublication(messageId: string, batchId: string, principalId: string): Promise<void> {
     for (let attempt = 0; attempt < 150; attempt += 1) {
       await Bun.sleep(2_000)
@@ -389,7 +456,7 @@ export class FeishuBot {
         const threadKey = string(record(changeset)?.thread_key)
         if (threadKey) {
           const delivery = await this.options.api.getDelivery(threadKey)
-          await this.options.api.recordDelivery(
+          await this.recordDelivery(
             threadKey,
             messageId,
             delivery.last_event_cursor,

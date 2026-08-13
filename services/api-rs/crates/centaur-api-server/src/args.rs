@@ -124,6 +124,13 @@ impl Args {
     pub(crate) async fn workspace_manager(
         &self,
     ) -> Result<Option<(Arc<KubeWorkspaceManager>, String, Duration)>, ServerError> {
+        if self.workspace.gitlab_publishing_enabled && !self.workspace.development_workspace_enabled
+        {
+            return Err(ServerError::UnsupportedConfig(
+                "GitLab publishing requires development workspaces".to_owned(),
+            ));
+        }
+        self.workspace.validate_publisher_identities()?;
         if self.workspace.development_workspace_enabled
             && (self.gitlab.base_url.is_none() || self.gitlab.token_file.is_none())
         {
@@ -132,6 +139,10 @@ impl Args {
             ));
         }
         self.workspace.manager(&self.sandbox).await
+    }
+
+    pub(crate) fn gitlab_publishing_enabled(&self) -> bool {
+        self.workspace.gitlab_publishing_enabled()
     }
 
     pub(crate) fn shutdown_execution_drain_timeout(&self) -> Duration {
@@ -153,6 +164,14 @@ struct GitLabArgs {
     /// Exact GitLab instance URL. Requires `GITLAB_TOKEN_FILE` when set.
     #[arg(long = "gitlab-base-url", env = "GITLAB_BASE_URL")]
     base_url: Option<String>,
+    /// Permit sending the shared GitLab token over plaintext HTTP.
+    #[arg(
+        long = "gitlab-allow-insecure-http",
+        env = "GITLAB_ALLOW_INSECURE_HTTP",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    allow_insecure_http: bool,
     /// File containing the shared GitLab bot token. Requires `GITLAB_BASE_URL` when set.
     #[arg(long = "gitlab-token-file", env = "GITLAB_TOKEN_FILE")]
     token_file: Option<PathBuf>,
@@ -184,6 +203,7 @@ impl GitLabArgs {
         };
         GitLabCatalog::new(GitLabCatalogConfig {
             base_url: base_url.clone(),
+            allow_insecure_http: self.allow_insecure_http,
             token_file: token_file.clone(),
             page_size: self.page_size,
             request_timeout: Duration::from_secs(self.request_timeout_secs),
@@ -203,15 +223,32 @@ struct WorkspaceArgs {
     )]
     development_workspace_enabled: bool,
     #[arg(
+        long = "gitlab-publishing-enabled",
+        env = "GITLAB_PUBLISHING_ENABLED",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    gitlab_publishing_enabled: bool,
+    #[arg(
         long = "development-workspace-provisioner-image",
         env = "DEVELOPMENT_WORKSPACE_PROVISIONER_IMAGE"
     )]
     development_workspace_provisioner_image: Option<String>,
     #[arg(
+        long = "development-workspace-provisioner-image-pull-policy",
+        env = "DEVELOPMENT_WORKSPACE_PROVISIONER_IMAGE_PULL_POLICY"
+    )]
+    development_workspace_provisioner_image_pull_policy: Option<String>,
+    #[arg(
         long = "development-workspace-service-account",
         env = "DEVELOPMENT_WORKSPACE_SERVICE_ACCOUNT"
     )]
     development_workspace_service_account_name: Option<String>,
+    #[arg(
+        long = "development-workspace-publisher-service-account",
+        env = "DEVELOPMENT_WORKSPACE_PUBLISHER_SERVICE_ACCOUNT"
+    )]
+    development_workspace_publisher_service_account_name: Option<String>,
     #[arg(
         long = "development-workspace-gitlab-secret",
         env = "DEVELOPMENT_WORKSPACE_GITLAB_SECRET"
@@ -229,6 +266,13 @@ struct WorkspaceArgs {
         default_value = "20Gi"
     )]
     development_workspace_storage_size: String,
+    #[arg(
+        long = "development-workspace-storage-access-mode",
+        env = "DEVELOPMENT_WORKSPACE_STORAGE_ACCESS_MODE",
+        default_value = "ReadWriteOnce",
+        value_parser = ["ReadWriteOnce", "ReadWriteMany"]
+    )]
+    development_workspace_storage_access_mode: String,
     #[arg(
         long = "development-workspace-storage-class",
         env = "DEVELOPMENT_WORKSPACE_STORAGE_CLASS"
@@ -251,6 +295,42 @@ struct WorkspaceArgs {
 }
 
 impl WorkspaceArgs {
+    fn gitlab_publishing_enabled(&self) -> bool {
+        self.gitlab_publishing_enabled
+    }
+
+    fn validate_publisher_identities(&self) -> Result<(), ServerError> {
+        if !self.gitlab_publishing_enabled {
+            return Ok(());
+        }
+        let provisioner = clean_optional_value(
+            self.development_workspace_service_account_name.as_deref(),
+        )
+        .ok_or_else(|| {
+            ServerError::UnsupportedConfig(
+                "DEVELOPMENT_WORKSPACE_SERVICE_ACCOUNT is required when GitLab publishing is enabled"
+                    .to_owned(),
+            )
+        })?;
+        let publisher = clean_optional_value(
+            self.development_workspace_publisher_service_account_name
+                .as_deref(),
+        )
+        .ok_or_else(|| {
+            ServerError::UnsupportedConfig(
+                "DEVELOPMENT_WORKSPACE_PUBLISHER_SERVICE_ACCOUNT is required when GitLab publishing is enabled"
+                    .to_owned(),
+            )
+        })?;
+        if provisioner == publisher {
+            return Err(ServerError::UnsupportedConfig(
+                "development workspace provisioner and publisher ServiceAccounts must be different"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     async fn manager(
         &self,
         sandbox: &SandboxArgs,
@@ -281,18 +361,41 @@ impl WorkspaceArgs {
         let mut config = KubeWorkspaceConfig::new(&sandbox.k8s_namespace, image);
         config.service_account_name =
             clean_optional_value(self.development_workspace_service_account_name.as_deref());
+        config.publisher_service_account_name = clean_optional_value(
+            self.development_workspace_publisher_service_account_name
+                .as_deref(),
+        );
         config.token_secret_key = self
             .development_workspace_gitlab_secret_key
             .trim()
             .to_owned();
         config.storage_size = self.development_workspace_storage_size.trim().to_owned();
+        config.storage_access_mode = self
+            .development_workspace_storage_access_mode
+            .trim()
+            .to_owned();
         config.storage_class_name =
             clean_optional_value(self.development_workspace_storage_class_name.as_deref());
-        config.image_pull_policy = sandbox.agent_image_pull_policy.clone();
+        config.image_pull_policy = clean_optional_value(
+            self.development_workspace_provisioner_image_pull_policy
+                .as_deref(),
+        )
+        .or_else(|| sandbox.agent_image_pull_policy.clone());
+        config.image_pull_secrets = sandbox
+            .image_pull_secrets
+            .iter()
+            .map(|secret| secret.trim())
+            .filter(|secret| !secret.is_empty())
+            .map(str::to_owned)
+            .collect();
         config.ready_timeout = Duration::from_secs(self.development_workspace_ready_timeout_secs);
-        if config.token_secret_key.is_empty() || config.storage_size.is_empty() {
+        if config.token_secret_key.is_empty()
+            || config.storage_size.is_empty()
+            || config.storage_access_mode.is_empty()
+        {
             return Err(ServerError::UnsupportedConfig(
-                "development workspace secret key and storage size must not be empty".to_owned(),
+                "development workspace secret key, storage size, and access mode must not be empty"
+                    .to_owned(),
             ));
         }
         Ok(Some((
@@ -2615,6 +2718,7 @@ mod tests {
         let _lock = ENV_LOCK.lock().unwrap();
         let _env = EnvGuard::remove(&[
             "GITLAB_BASE_URL",
+            "GITLAB_ALLOW_INSECURE_HTTP",
             "GITLAB_TOKEN_FILE",
             "GITLAB_CATALOG_PAGE_SIZE",
             "GITLAB_REQUEST_TIMEOUT_SECS",
@@ -2655,7 +2759,22 @@ mod tests {
             token_file.to_str().unwrap(),
         ])
         .unwrap();
-        assert!(enabled.gitlab_catalog().unwrap().is_some());
+        assert!(matches!(
+            enabled.gitlab_catalog(),
+            Err(ServerError::UnsupportedConfig(message)) if message.contains("HTTPS")
+        ));
+        let explicitly_insecure = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--gitlab-base-url",
+            "http://git.example.test:82",
+            "--gitlab-allow-insecure-http=true",
+            "--gitlab-token-file",
+            token_file.to_str().unwrap(),
+        ])
+        .unwrap();
+        assert!(explicitly_insecure.gitlab_catalog().unwrap().is_some());
         fs::remove_file(token_file).unwrap();
     }
 
@@ -2684,6 +2803,82 @@ mod tests {
             Err(ServerError::UnsupportedConfig(message))
                 if message.contains("GITLAB_BASE_URL")
         ));
+    }
+
+    #[test]
+    fn gitlab_publishing_requires_development_workspace() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env =
+            EnvGuard::remove(&["DEVELOPMENT_WORKSPACE_ENABLED", "GITLAB_PUBLISHING_ENABLED"]);
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--gitlab-publishing-enabled=true",
+        ])
+        .unwrap();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        assert!(matches!(
+            runtime.block_on(args.workspace_manager()),
+            Err(ServerError::UnsupportedConfig(message))
+                if message.contains("publishing requires development workspaces")
+        ));
+    }
+
+    #[test]
+    fn gitlab_publishing_requires_separate_job_identities() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::remove(&[
+            "DEVELOPMENT_WORKSPACE_ENABLED",
+            "GITLAB_PUBLISHING_ENABLED",
+            "DEVELOPMENT_WORKSPACE_SERVICE_ACCOUNT",
+            "DEVELOPMENT_WORKSPACE_PUBLISHER_SERVICE_ACCOUNT",
+        ]);
+        let missing = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--development-workspace-enabled=true",
+            "--gitlab-publishing-enabled=true",
+        ])
+        .unwrap();
+        assert!(matches!(
+            missing.workspace.validate_publisher_identities(),
+            Err(ServerError::UnsupportedConfig(message))
+                if message.contains("DEVELOPMENT_WORKSPACE_SERVICE_ACCOUNT")
+        ));
+
+        let shared = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--development-workspace-enabled=true",
+            "--gitlab-publishing-enabled=true",
+            "--development-workspace-service-account=shared-job-identity",
+            "--development-workspace-publisher-service-account=shared-job-identity",
+        ])
+        .unwrap();
+        assert!(matches!(
+            shared.workspace.validate_publisher_identities(),
+            Err(ServerError::UnsupportedConfig(message))
+                if message.contains("must be different")
+        ));
+
+        let separate = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--development-workspace-enabled=true",
+            "--gitlab-publishing-enabled=true",
+            "--development-workspace-service-account=workspace-provisioner",
+            "--development-workspace-publisher-service-account=gitlab-publisher",
+        ])
+        .unwrap();
+        separate.workspace.validate_publisher_identities().unwrap();
     }
 
     #[test]

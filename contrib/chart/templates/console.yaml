@@ -4,6 +4,10 @@
 {{- $dbName := $console.database.name }}
 {{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") }}
 {{- $mcpPublicUrl := default .Values.slackbotv2.mcpPublicUrl .Values.apiRs.mcpPublicUrl }}
+{{- if $console.feishuLogin.enabled -}}
+{{- $_ := required "console.feishuLogin.secretRef is required when China Feishu login is enabled" $console.feishuLogin.secretRef -}}
+{{- if not $console.feishuLogin.allowedTenantKeys -}}{{- fail "console.feishuLogin.allowedTenantKeys must contain at least one tenant key" -}}{{- end -}}
+{{- end -}}
 # console — Rails control plane for authenticated API access and encrypted
 # secret storage. The chart owns the Deployment shape (image, port, env,
 # security context) so operators tune it via `helm upgrade`. It runs against a
@@ -43,6 +47,9 @@ spec:
     metadata:
       annotations:
         checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
+{{- if $console.feishuLogin.enabled }}
+        checksum/feishu-login-secret: {{ include "centaur.secretResourceVersion" (dict "root" . "name" $console.feishuLogin.secretRef) | sha256sum }}
+{{- end }}
       labels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console") | nindent 8 }}
     spec:
@@ -230,6 +237,20 @@ spec:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sCENTAUR_CONSOLE_SLACK_CLIENT_SECRET" $prefix }}
+{{- end }}
+{{- if $console.feishuLogin.enabled }}
+            - name: CENTAUR_CONSOLE_FEISHU_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $console.feishuLogin.secretRef | quote }}
+                  key: {{ $console.feishuLogin.clientIdKey | quote }}
+            - name: CENTAUR_CONSOLE_FEISHU_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $console.feishuLogin.secretRef | quote }}
+                  key: {{ $console.feishuLogin.clientSecretKey | quote }}
+            - name: CENTAUR_CONSOLE_FEISHU_ALLOWED_TENANT_KEYS
+              value: {{ join "," $console.feishuLogin.allowedTenantKeys | quote }}
 {{- end }}
             - name: RAILS_ENV
               value: {{ $console.railsEnv | quote }}

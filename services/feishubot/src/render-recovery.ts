@@ -8,7 +8,8 @@ export class FeishuRenderRecovery {
 
   constructor(
     private readonly reconciler: FeishuDeliveryReconciler,
-    private readonly intervalMs = 5_000
+    private readonly intervalMs = 5_000,
+    private readonly metrics: FeishuMetrics = new FeishuMetrics()
   ) {}
 
   stop(): void {
@@ -19,7 +20,14 @@ export class FeishuRenderRecovery {
     while (!this.stopped) {
       try {
         for (const threadKey of await this.reconciler.listPendingDeliveries()) {
-          await this.reconciler.reconcileDelivery(threadKey)
+          this.metrics.recordRecovery('attempted')
+          try {
+            await this.reconciler.reconcileDelivery(threadKey)
+            this.metrics.recordRecovery('succeeded')
+          } catch (error) {
+            this.metrics.recordRecovery('failed')
+            throw error
+          }
         }
       } catch (error) {
         console.error('Feishu delivery reconciliation failed', {
@@ -30,3 +38,4 @@ export class FeishuRenderRecovery {
     }
   }
 }
+import { FeishuMetrics } from './metrics.js'

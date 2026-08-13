@@ -1,0 +1,119 @@
+{{- if .Values.feishubot.enabled }}
+{{- if not .Values.apiRs.enabled -}}{{- fail "feishubot.enabled requires apiRs.enabled" -}}{{- end -}}
+{{- $_ := required "feishubot.secretRef is required when feishubot is enabled" .Values.feishubot.secretRef -}}
+{{- if not .Values.feishubot.allowedTenantKeys -}}{{- fail "feishubot.allowedTenantKeys must contain at least one tenant key" -}}{{- end -}}
+{{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") -}}
+{{- $name := include "centaur.componentName" (dict "root" . "component" "feishubot") -}}
+{{- $annotations := dict -}}
+{{- if .Values.feishubot.metrics.scrapeAnnotations -}}
+{{- $annotations = dict "prometheus.io/scrape" "true" "prometheus.io/path" .Values.feishubot.metrics.path "prometheus.io/port" (printf "%v" .Values.feishubot.port) -}}
+{{- $annotations = mergeOverwrite $annotations (.Values.feishubot.metrics.annotations | default dict) -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "feishubot") | nindent 4 }}
+spec:
+  # China Feishu permits one active long connection for this app. Recreate
+  # prevents overlapping connections during a rollout.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "feishubot") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/feishu-secret: {{ include "centaur.secretResourceVersion" (dict "root" . "name" .Values.feishubot.secretRef) | sha256sum }}
+{{- with $annotations }}
+{{ toYaml . | nindent 8 }}
+{{- end }}
+      labels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "feishubot") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 35
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: feishubot
+          image: {{ printf "%s:%s" .Values.feishubot.image.repository .Values.feishubot.image.tag | quote }}
+          imagePullPolicy: {{ .Values.feishubot.image.pullPolicy }}
+          env:
+            - name: PORT
+              value: {{ .Values.feishubot.port | quote }}
+            - name: CENTAUR_API_URL
+              value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
+{{- with (include "centaur.consoleValues" . | fromYaml).publicUrl }}
+            - name: CENTAUR_CONSOLE_PUBLIC_URL
+              value: {{ trimSuffix "/" . | quote }}
+{{- end }}
+            - name: FEISHU_TENANT_ALLOWLIST
+              value: {{ join "," .Values.feishubot.allowedTenantKeys | quote }}
+            - name: FEISHU_APP_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.feishubot.secretRef | quote }}
+                  key: {{ .Values.feishubot.appIdKey | quote }}
+            - name: FEISHU_APP_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.feishubot.secretRef | quote }}
+                  key: {{ .Values.feishubot.appSecretKey | quote }}
+            - name: FEISHU_BOT_OPEN_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.feishubot.secretRef | quote }}
+                  key: {{ .Values.feishubot.botOpenIdKey | quote }}
+            - name: FEISHUBOT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.feishubot.secretRef | quote }}
+                  key: {{ .Values.feishubot.apiKeyKey | quote }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.feishubot.port }}
+          startupProbe:
+            httpGet:
+              path: /ready
+              port: http
+            failureThreshold: 36
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 5
+          securityContext:
+{{ toYaml .Values.containerSecurityContext | nindent 12 }}
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+          resources:
+{{ toYaml .Values.feishubot.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "feishubot") | nindent 4 }}
+spec:
+  selector:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "feishubot") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.feishubot.port }}
+      targetPort: http
+{{- end }}

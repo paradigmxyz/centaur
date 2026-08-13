@@ -160,6 +160,14 @@ console:
   # bot and DM sync use.
   slackOauth:
     enabled: false
+  # China Feishu OAuth login for Console. This uses a China Feishu self-built
+  # app from open.feishu.cn; it is independent from GitLab credentials.
+  feishuLogin:
+    enabled: false
+    secretRef: ""
+    clientIdKey: app-id
+    clientSecretKey: app-secret
+    allowedTenantKeys: []
   # OAuth app slug whose user-level Slack credentials are used by the DM sync
   # worker. Keep this aligned with the Console OAuth app users authorize.
   slackDmSync:
@@ -501,6 +509,69 @@ apiRs:
     timeoutSeconds: 5
   terminationGracePeriodSeconds: 35
   extraEnv: {}
+  resources: {}
+
+# Durable, task-scoped repositories selected from one deployment GitLab
+# Catalog. api-rs mounts the token for Catalog calls and passes only its Secret
+# reference to short-lived provisioner jobs. Agent sandboxes receive the
+# prepared Workspace PVC and never receive the GitLab credential.
+workspaceRepositories:
+  enabled: false
+  gitlab:
+    baseUrl: ""
+    # Plain HTTP exposes the shared read/write Token on the network. Keep this
+    # false unless a trusted private network requires an HTTP-only GitLab.
+    allowInsecureHttp: false
+    # NetworkPolicy cannot target a DNS name. List the stable GitLab ingress
+    # CIDRs separately so baseUrl can retain the hostname required by TLS and
+    # virtual-host routing. Required when networkPolicy.enabled is true.
+    egressCidrs: []
+    secretRef: ""
+    secretKey: token
+    pageSize: 20
+    requestTimeoutSecs: 10
+  storage:
+    className: ""
+    size: 20Gi
+    # Independent sandbox, collector, and publisher pods may run on different
+    # nodes. Use ReadWriteOnce only on a guaranteed single-node deployment.
+    accessMode: ReadWriteOnce
+  provisionerImage:
+    # Empty values fall back to sandbox.image.
+    repository: ""
+    tag: ""
+    pullPolicy: ""
+  readyTimeoutSecs: 300
+  reconcileIntervalSecs: 15
+
+# Human-approved push and merge-request publication. The first release uses the
+# same deployment GitLab bot Token as repository discovery and provisioning.
+gitlabPublishing:
+  enabled: false
+  secretRef: ""
+  secretKey: token
+  branchPrefix: centaur
+
+# China Feishu enterprise self-built app + bot capability. Long connection
+# delivery permits exactly one active replica, so the Deployment is fixed to
+# one replica with a Recreate rollout.
+feishubot:
+  enabled: false
+  image:
+    repository: centaur-feishubot
+    tag: latest
+    pullPolicy: Always
+  secretRef: ""
+  appIdKey: app-id
+  appSecretKey: app-secret
+  botOpenIdKey: bot-open-id
+  apiKeyKey: api-key
+  allowedTenantKeys: []
+  port: 3005
+  metrics:
+    scrapeAnnotations: true
+    path: /metrics
+    annotations: {}
   resources: {}
 
 # Chat SDK Slackbot v2. Forwards Slack events to the api-rs control plane

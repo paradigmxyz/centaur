@@ -5,10 +5,13 @@ import { loadConfig } from './config.js'
 import { FeishuRenderer } from './feishu-client.js'
 import { FeishuRenderRecovery } from './render-recovery.js'
 import { FeishuSessionApi } from './session-api.js'
+import { healthResponse } from './health.js'
+import { FeishuMetrics } from './metrics.js'
 
 const config = loadConfig()
 const client = new Lark.Client(config.feishu)
-const renderer = new FeishuRenderer(client)
+const metrics = new FeishuMetrics()
+const renderer = new FeishuRenderer(client, metrics)
 const api = new FeishuSessionApi({
   baseUrl: config.apiUrl,
   apiKey: config.apiKey
@@ -18,19 +21,24 @@ const bot = new FeishuBot({
   tenantAllowlist: config.tenantAllowlist,
   api,
   renderer,
+  metrics,
   ...(config.consolePublicUrl ? { consolePublicUrl: config.consolePublicUrl } : {})
 })
 const dispatcher = new Lark.EventDispatcher({})
 dispatcher.register({
   'im.message.receive_v1': (event: unknown) => {
+    const startedAt = performance.now()
     bot.acceptMessageEvent(event)
+    metrics.recordEventAck('message', performance.now() - startedAt)
   },
   'card.action.trigger': (event: unknown) => {
+    const startedAt = performance.now()
     bot.acceptCardEvent(event)
+    metrics.recordEventAck('card', performance.now() - startedAt)
   }
 })
 
-const recovery = new FeishuRenderRecovery(bot)
+const recovery = new FeishuRenderRecovery(bot, 5_000, metrics)
 const connection = new FeishuConnectionState(() => {
   void recovery.run()
 })
@@ -42,11 +50,7 @@ const server = Bun.serve({
   port: config.port,
   fetch(request) {
     const path = new URL(request.url).pathname
-    if (path === '/health') return Response.json({ ok: true })
-    if (path === '/ready') {
-      return Response.json({ ready: connection.ready }, { status: connection.ready ? 200 : 503 })
-    }
-    return new Response('Not found', { status: 404 })
+    return healthResponse(path, connection.ready, metrics) ?? new Response('Not found', { status: 404 })
   }
 })
 

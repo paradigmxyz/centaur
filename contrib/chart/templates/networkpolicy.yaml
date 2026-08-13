@@ -2,6 +2,7 @@
 {{- $ingressSourceNamespaces := default .Values.networkPolicy.ingressControllerNamespaces .Values.networkPolicy.ingressSourceNamespaces }}
 {{- $console := include "centaur.consoleValues" . | fromYaml }}
 {{- $apiRsDirectCloneEgressTargets := include "centaur.apiRsDirectCloneEgressTargets" . | fromJsonArray }}
+{{- $developmentGitLabTargets := include "centaur.developmentGitLabEgressTargets" . | fromJsonArray }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -158,6 +159,11 @@ spec:
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "slackbotv2") | nindent 14 }}
+{{- end }}
+{{- if .Values.feishubot.enabled }}
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "feishubot") | nindent 14 }}
 {{- end }}
 {{- if .Values.linearbot.enabled }}
         - podSelector:
@@ -340,8 +346,8 @@ spec:
         - protocol: TCP
           port: 443
 {{- range $target := $apiRsDirectCloneEgressTargets }}
-    # An explicitly configured literal-IP Git remote authorizes only this
-    # destination and port while api-rs performs direct source discovery.
+    # Explicit GitLab CIDRs authorize only the configured destination and port
+    # while api-rs performs catalog discovery.
     - to:
         - ipBlock:
             cidr: {{ get $target "cidr" | quote }}
@@ -355,6 +361,72 @@ spec:
     - ports:
         - protocol: TCP
           port: {{ .Values.networkPolicy.apiServerPort }}
+---
+{{- end }}
+{{- if .Values.feishubot.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "feishubot") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "feishubot") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "feishubot") | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+{{- range $ingressSourceNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . | quote }}
+{{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.feishubot.port }}
+  egress:
+{{- if .Values.apiRs.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.apiRs.port }}
+{{- end }}
+    - ports:
+        - protocol: TCP
+          port: 443
+---
+{{- end }}
+{{- if .Values.workspaceRepositories.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "development-gitlab-egress") }}
+  labels:
+{{ include "centaur.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: centaur.ai/development-job-role
+        operator: In
+        values: ["provisioner", "publisher"]
+  policyTypes:
+    - Egress
+  egress:
+{{- range $target := $developmentGitLabTargets }}
+    -
+      to:
+        - ipBlock:
+            cidr: {{ get $target "cidr" | quote }}
+      ports:
+        - protocol: TCP
+          port: {{ get $target "port" }}
+{{- end }}
 ---
 {{- end }}
 {{- if .Values.slackbotv2.enabled }}

@@ -1,0 +1,39 @@
+{{- if .Values.gitlabPublishing.enabled -}}
+{{- if not .Values.workspaceRepositories.enabled -}}
+{{- fail "gitlabPublishing.enabled requires workspaceRepositories.enabled" -}}
+{{- end -}}
+{{- if or (ne .Values.gitlabPublishing.secretRef .Values.workspaceRepositories.gitlab.secretRef) (ne .Values.gitlabPublishing.secretKey .Values.workspaceRepositories.gitlab.secretKey) -}}
+{{- fail "workspaceRepositories and gitlabPublishing must reference the same GitLab Secret and key" -}}
+{{- end -}}
+{{- if ne .Values.gitlabPublishing.branchPrefix "centaur" -}}
+{{- fail "gitlabPublishing.branchPrefix currently supports only centaur" -}}
+{{- end -}}
+{{- end -}}
+{{- if .Values.workspaceRepositories.enabled -}}
+{{- if not .Values.apiRs.enabled -}}{{- fail "workspaceRepositories.enabled requires apiRs.enabled" -}}{{- end -}}
+{{- if ne .Values.apiRs.sandboxBackend "agent-k8s" -}}{{- fail "workspaceRepositories.enabled requires apiRs.sandboxBackend=agent-k8s" -}}{{- end -}}
+{{- $_ := include "centaur.validateGitLabOrigin" . -}}
+{{- $gitlabTargets := include "centaur.developmentGitLabEgressTargets" . | fromJsonArray -}}
+{{- if and .Values.networkPolicy.enabled (eq (len $gitlabTargets) 0) -}}
+{{- fail "workspaceRepositories.gitlab.egressCidrs must contain at least one CIDR when networkPolicy.enabled is true" -}}
+{{- end -}}
+{{- $_ := required "workspaceRepositories.gitlab.secretRef is required when workspace repositories are enabled" .Values.workspaceRepositories.gitlab.secretRef -}}
+{{- $_ := required "workspaceRepositories.gitlab.secretKey is required when workspace repositories are enabled" .Values.workspaceRepositories.gitlab.secretKey -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "workspace-provisioner") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "workspace-provisioner") | nindent 4 }}
+automountServiceAccountToken: false
+---
+{{- end }}
+{{- if .Values.gitlabPublishing.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "gitlab-publisher") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "gitlab-publisher") | nindent 4 }}
+automountServiceAccountToken: false
+{{- end }}

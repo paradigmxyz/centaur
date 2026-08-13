@@ -63,6 +63,11 @@ jobs:
       - name: Lint chart
         run: helm lint contrib/chart
 
+      - name: Run chart contract tests
+        run: |
+          bash contrib/chart/tests/test_git_clone_url.sh
+          bash contrib/chart/tests/test_development_workflow.sh
+
       - name: Install yq
         uses: mikefarah/yq@1b9b4ac5187171d2e5e3129be0cfa827c7f9d53d # v4.53.3
 

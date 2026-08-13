@@ -24,6 +24,7 @@ jobs:
       workflow_python_tests: ${{ steps.filter.outputs.workflow_python_tests }}
       tool_tests: ${{ steps.filter.outputs.tool_tests }}
       slackbotv2_tests: ${{ steps.filter.outputs.slackbotv2_tests }}
+      feishubot_checks: ${{ steps.filter.outputs.feishubot_checks }}
       discordbot_checks: ${{ steps.filter.outputs.discordbot_checks }}
       githubbot_checks: ${{ steps.filter.outputs.githubbot_checks }}
       teamsbot_checks: ${{ steps.filter.outputs.teamsbot_checks }}
@@ -93,6 +94,14 @@ jobs:
             '^\.github/workflows/ci\.yml$'
           set_output slackbotv2_tests \
             '^services/slackbotv2/' \
+            '^package\.json$' \
+            '^pnpm-lock\.yaml$' \
+            '^pnpm-workspace\.yaml$' \
+            '^\.github/workflows/ci\.yml$'
+          set_output feishubot_checks \
+            '^services/feishubot/' \
+            '^packages/harness-events/' \
+            '^packages/rendering/' \
             '^package\.json$' \
             '^pnpm-lock\.yaml$' \
             '^pnpm-workspace\.yaml$' \
@@ -419,6 +428,36 @@ jobs:
         working-directory: services/linearbot
         run: bun test test
 
+  feishubot-checks:
+    name: China Feishu bot typecheck and tests
+    runs-on: depot-ubuntu-24.04-16
+    needs: ci_changes
+    if: needs.ci_changes.outputs.feishubot_checks == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 10.28.1
+          run_install: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Install Node dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm --filter feishubot run check:types
+
+      - name: Test
+        run: pnpm --filter feishubot test
+
   discordbot-checks:
     name: Discordbot typecheck and tests
     runs-on: depot-ubuntu-24.04-16
@@ -532,6 +571,7 @@ jobs:
       - workflow-python-tests
       - tool-tests
       - slackbotv2-tests
+      - feishubot-checks
       - discordbot-checks
       - githubbot-checks
       - teamsbot-checks
@@ -540,5 +580,5 @@ jobs:
       - name: Decide whether the needed jobs succeeded or failed
         uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # v1.2.2
         with:
-          allowed-skips: migration-order, harness-server-checks, rust-api, sandbox-tests, workflow-python-tests, tool-tests, slackbotv2-tests, discordbot-checks, githubbot-checks, teamsbot-checks
+          allowed-skips: migration-order, harness-server-checks, rust-api, sandbox-tests, workflow-python-tests, tool-tests, slackbotv2-tests, feishubot-checks, discordbot-checks, githubbot-checks, teamsbot-checks
           jobs: ${{ toJSON(needs) }}

@@ -76,6 +76,10 @@
 {{- $apiRsMetricsAnnotations = dict "prometheus.io/scrape" "true" "prometheus.io/path" .Values.apiRs.metrics.path "prometheus.io/port" (printf "%v" .Values.apiRs.port) -}}
 {{- $apiRsMetricsAnnotations = mergeOverwrite $apiRsMetricsAnnotations (.Values.apiRs.metrics.annotations | default dict) -}}
 {{- end -}}
+{{- $workspaceProvisionerImageRepository := default .Values.sandbox.image.repository .Values.workspaceRepositories.provisionerImage.repository -}}
+{{- $workspaceProvisionerImageTag := default .Values.sandbox.image.tag .Values.workspaceRepositories.provisionerImage.tag -}}
+{{- $workspaceProvisionerImagePullPolicy := default .Values.sandbox.image.pullPolicy .Values.workspaceRepositories.provisionerImage.pullPolicy -}}
+{{- $workspaceProvisionerImage := printf "%s:%s" $workspaceProvisionerImageRepository $workspaceProvisionerImageTag -}}
 {{- $apiRsEtl := .Values.apiRs.etl | default dict -}}
 {{- $companyContextEmbeddingsEnabled := dig "companyContextEmbeddings" "enabled" false $apiRsEtl -}}
 {{- $companyContextEmbeddingsModel := dig "companyContextEmbeddings" "model" "text-embedding-3-small" $apiRsEtl -}}
@@ -143,7 +147,16 @@ rules:
     verbs: ["create", "delete", "get", "list", "patch", "watch"]
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
+{{- if .Values.workspaceRepositories.enabled }}
+    verbs: ["create", "delete", "get", "list", "patch", "watch"]
+{{- else }}
     verbs: ["delete", "get", "list", "watch"]
+{{- end }}
+{{- if .Values.workspaceRepositories.enabled }}
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "delete", "get", "list", "watch"]
+{{- end }}
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["create", "delete", "get", "list", "patch", "watch"]
@@ -198,6 +211,9 @@ spec:
     metadata:
       annotations:
         checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
+{{- if .Values.feishubot.enabled }}
+        checksum/feishu-secret: {{ include "centaur.secretResourceVersion" (dict "root" . "name" .Values.feishubot.secretRef) | sha256sum }}
+{{- end }}
         checksum/overlay: {{ dict "overlay" .Values.overlay "overlays" .Values.overlays | toJson | sha256sum }}
 {{- with $apiRsMetricsAnnotations }}
 {{ toYaml . | nindent 8 }}
@@ -321,6 +337,55 @@ spec:
               value: {{ .Values.apiRs.sandboxCleanupIntervalSecs | quote }}
             - name: SESSION_SANDBOX_IDLE_CLEANUP_BACKSTOP_SECS
               value: {{ .Values.apiRs.sandboxIdleCleanupBackstopSecs | quote }}
+{{- if .Values.workspaceRepositories.enabled }}
+            - name: GITLAB_BASE_URL
+              value: {{ trimSuffix "/" .Values.workspaceRepositories.gitlab.baseUrl | quote }}
+            - name: GITLAB_ALLOW_INSECURE_HTTP
+              value: {{ .Values.workspaceRepositories.gitlab.allowInsecureHttp | quote }}
+            - name: GITLAB_TOKEN_FILE
+              value: /var/run/secrets/centaur-gitlab/token
+            - name: GITLAB_CATALOG_PAGE_SIZE
+              value: {{ .Values.workspaceRepositories.gitlab.pageSize | quote }}
+            - name: GITLAB_REQUEST_TIMEOUT_SECS
+              value: {{ .Values.workspaceRepositories.gitlab.requestTimeoutSecs | quote }}
+            - name: DEVELOPMENT_WORKSPACE_ENABLED
+              value: "true"
+            - name: DEVELOPMENT_WORKSPACE_PROVISIONER_IMAGE
+              value: {{ $workspaceProvisionerImage | quote }}
+            - name: DEVELOPMENT_WORKSPACE_PROVISIONER_IMAGE_PULL_POLICY
+              value: {{ $workspaceProvisionerImagePullPolicy | quote }}
+            - name: DEVELOPMENT_WORKSPACE_SERVICE_ACCOUNT
+              value: {{ include "centaur.componentName" (dict "root" . "component" "workspace-provisioner") | quote }}
+{{- if .Values.gitlabPublishing.enabled }}
+            - name: DEVELOPMENT_WORKSPACE_PUBLISHER_SERVICE_ACCOUNT
+              value: {{ include "centaur.componentName" (dict "root" . "component" "gitlab-publisher") | quote }}
+{{- end }}
+            - name: DEVELOPMENT_WORKSPACE_GITLAB_SECRET
+              value: {{ .Values.workspaceRepositories.gitlab.secretRef | quote }}
+            - name: DEVELOPMENT_WORKSPACE_GITLAB_SECRET_KEY
+              value: {{ .Values.workspaceRepositories.gitlab.secretKey | quote }}
+            - name: DEVELOPMENT_WORKSPACE_STORAGE_SIZE
+              value: {{ .Values.workspaceRepositories.storage.size | quote }}
+            - name: DEVELOPMENT_WORKSPACE_STORAGE_ACCESS_MODE
+              value: {{ .Values.workspaceRepositories.storage.accessMode | quote }}
+{{- with .Values.workspaceRepositories.storage.className }}
+            - name: DEVELOPMENT_WORKSPACE_STORAGE_CLASS
+              value: {{ . | quote }}
+{{- end }}
+            - name: DEVELOPMENT_WORKSPACE_READY_TIMEOUT_SECS
+              value: {{ .Values.workspaceRepositories.readyTimeoutSecs | quote }}
+            - name: DEVELOPMENT_WORKSPACE_RECONCILE_INTERVAL_SECS
+              value: {{ .Values.workspaceRepositories.reconcileIntervalSecs | quote }}
+            - name: GITLAB_PUBLISHING_ENABLED
+              value: {{ .Values.gitlabPublishing.enabled | quote }}
+{{- end }}
+{{- if .Values.feishubot.enabled }}
+            - name: FEISHUBOT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.feishubot.secretRef | quote }}
+                  key: {{ .Values.feishubot.apiKeyKey | quote }}
+{{- end }}
             - name: SESSION_ACTIVITY_SUMMARY_ENABLED
               value: {{ .Values.apiRs.activitySummary.enabled | quote }}
 {{- if .Values.apiRs.activitySummary.enabled }}
@@ -569,7 +634,7 @@ spec:
 {{ toYaml .Values.containerSecurityContext | nindent 12 }}
           resources:
 {{ toYaml .Values.apiRs.resources | nindent 12 }}
-{{- if or $useOverlayRepoCache $toolsDirectCredential }}
+{{- if or $useOverlayRepoCache $toolsDirectCredential .Values.workspaceRepositories.enabled }}
           volumeMounts:
 {{- if $useOverlayRepoCache }}
             - name: repo-cache
@@ -581,8 +646,13 @@ spec:
               mountPath: /tools-git-credentials
               readOnly: true
 {{- end }}
+{{- if .Values.workspaceRepositories.enabled }}
+            - name: development-gitlab-token
+              mountPath: /var/run/secrets/centaur-gitlab
+              readOnly: true
 {{- end }}
-{{- if or $useOverlayRepoCache $toolsDirectCredential }}
+{{- end }}
+{{- if or $useOverlayRepoCache $toolsDirectCredential .Values.workspaceRepositories.enabled }}
       volumes:
 {{- if $useOverlayRepoCache }}
         - name: repo-cache
@@ -603,6 +673,15 @@ spec:
             defaultMode: 256
             items:
               - key: {{ $toolsCredentialSecretKey | quote }}
+                path: token
+{{- end }}
+{{- if .Values.workspaceRepositories.enabled }}
+        - name: development-gitlab-token
+          secret:
+            secretName: {{ .Values.workspaceRepositories.gitlab.secretRef | quote }}
+            defaultMode: 256
+            items:
+              - key: {{ .Values.workspaceRepositories.gitlab.secretKey | quote }}
                 path: token
 {{- end }}
 {{- end }}

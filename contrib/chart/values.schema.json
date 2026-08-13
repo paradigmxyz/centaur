@@ -28,6 +28,19 @@
             "oauthAppSlug": { "type": "string" }
           }
         },
+        "feishuLogin": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "secretRef": { "type": "string" },
+            "clientIdKey": { "type": "string" },
+            "clientSecretKey": { "type": "string" },
+            "allowedTenantKeys": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
         "service": {
           "type": "object",
           "properties": {
@@ -385,6 +398,94 @@
           "type": "object",
           "additionalProperties": { "type": "string" }
         }
+      }
+    },
+    "workspaceRepositories": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "gitlab": {
+          "type": "object",
+          "properties": {
+            "baseUrl": { "type": "string" },
+            "allowInsecureHttp": { "type": "boolean" },
+            "egressCidrs": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "uniqueItems": true
+            },
+            "secretRef": { "type": "string" },
+            "secretKey": { "type": "string" },
+            "pageSize": { "type": "integer", "minimum": 1, "maximum": 100 },
+            "requestTimeoutSecs": { "type": "integer", "minimum": 1, "maximum": 120 }
+          }
+        },
+        "storage": {
+          "type": "object",
+          "properties": {
+            "className": { "type": "string" },
+            "size": { "type": "string", "minLength": 1 },
+            "accessMode": {
+              "type": "string",
+              "enum": ["ReadWriteOnce", "ReadWriteMany"]
+            }
+          }
+        },
+        "provisionerImage": {
+          "type": "object",
+          "properties": {
+            "repository": { "type": "string" },
+            "tag": { "type": "string" },
+            "pullPolicy": { "type": "string" }
+          }
+        },
+        "readyTimeoutSecs": { "type": "integer", "minimum": 1, "maximum": 3600 },
+        "reconcileIntervalSecs": { "type": "integer", "minimum": 1, "maximum": 300 }
+      }
+    },
+    "gitlabPublishing": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "secretRef": { "type": "string" },
+        "secretKey": { "type": "string" },
+        "branchPrefix": { "type": "string", "minLength": 1 }
+      }
+    },
+    "feishubot": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": {
+          "type": "object",
+          "properties": {
+            "repository": { "type": "string" },
+            "tag": { "type": "string" },
+            "pullPolicy": { "type": "string" }
+          }
+        },
+        "secretRef": { "type": "string" },
+        "appIdKey": { "type": "string" },
+        "appSecretKey": { "type": "string" },
+        "botOpenIdKey": { "type": "string" },
+        "apiKeyKey": { "type": "string" },
+        "allowedTenantKeys": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "metrics": {
+          "type": "object",
+          "properties": {
+            "scrapeAnnotations": { "type": "boolean" },
+            "path": { "type": "string" },
+            "annotations": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            }
+          }
+        },
+        "resources": { "type": "object" }
       }
     },
     "slackbotv2": {
