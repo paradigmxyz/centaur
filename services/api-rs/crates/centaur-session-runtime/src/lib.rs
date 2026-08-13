@@ -5868,9 +5868,7 @@ fn terminal_output(value: &Value, prior_final_answer_text: &str) -> Option<Termi
     {
         // Codex emits intermediate `error` notifications with willRetry=true
         // while reconnecting a dropped model stream. Those are not terminal.
-        if error_notification_will_retry(value)
-            && matches!(method.or(event_type), Some("error"))
-        {
+        if error_notification_will_retry(value) && matches!(method.or(event_type), Some("error")) {
             return None;
         }
         return Some(TerminalOutput::Failed {
