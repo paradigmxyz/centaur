@@ -53,8 +53,6 @@ class Principal < ApplicationRecord
                             allow_nil: true, if: :will_save_change_to_slack_team_id?
   validates :slack_email, format: { with: URI::MailTo::EMAIL_REGEXP, message: "is not a valid email address" },
                           allow_nil: true, if: :will_save_change_to_slack_email?
-  validates :console_user_email, format: { with: URI::MailTo::EMAIL_REGEXP, message: "is not a valid email address" },
-                                 allow_nil: true, if: :will_save_change_to_console_user_email?
 
   # Stand-in for an inline secret value in redacted config: operator inspection
   # reports that a control_plane source carries a value without revealing it.
@@ -155,7 +153,6 @@ class Principal < ApplicationRecord
     return unless user
 
     self.console_user = user
-    self.console_user_email = user.email
   end
 
   def labels_with_sandbox_capabilities
@@ -370,7 +367,7 @@ class Principal < ApplicationRecord
   def sync_config_fields_changed?
     %w[
       name labels sandbox_api_server_enabled kind slack_user_id slack_channel_id slack_team_id slack_email
-      console_user_id console_user_email
+      console_user_id
     ].any? do |field|
       previous_changes.key?(field)
     end

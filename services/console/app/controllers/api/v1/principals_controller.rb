@@ -101,7 +101,6 @@ module Api
           :slack_team_id,
           :slack_email,
           :console_user_id,
-          :console_user_email,
           :sandbox_repo_cache,
           :sandbox_observability_enabled,
           :sandbox_api_server_enabled,

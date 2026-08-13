@@ -26,20 +26,17 @@ class BackfillSlackDmPrincipalConsoleUsersTest < ActiveSupport::TestCase
       foreign_id: "backfill-already-linked-slack-dm",
       kind: "slack_dm",
       slack_email: member.email,
-      console_user: admin,
-      console_user_email: admin.email
+      console_user: admin
     )
     previous_cache_version = matching.sync_config_cache_version
 
     BackfillSlackDmPrincipalConsoleUsers.new.up
 
     assert_equal member, matching.reload.console_user
-    assert_equal member.email, matching.console_user_email
     assert_equal previous_cache_version + 1, matching.sync_config_cache_version
     assert_nil unmatched.reload.console_user
     assert_nil channel.reload.console_user
     assert_equal admin, already_linked.reload.console_user
-    assert_equal admin.email, already_linked.console_user_email
   end
 
   private

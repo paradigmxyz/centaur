@@ -7,7 +7,6 @@ class Api::V1::SandboxSkillsControllerTest < ActionDispatch::IntegrationTest
       name: "Member User",
       kind: :console_user,
       console_user: users(:member_user),
-      console_user_email: users(:member_user).email,
       labels: {},
       created_by: users(:member_user)
     )

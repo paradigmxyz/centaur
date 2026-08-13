@@ -3,7 +3,6 @@ class BackfillSlackDmPrincipalConsoleUsers < ActiveRecord::Migration[8.1]
     execute <<~SQL
       UPDATE principals
       SET console_user_id = users.id,
-          console_user_email = users.email,
           sync_config_cache_version = principals.sync_config_cache_version + 1,
           updated_at = CURRENT_TIMESTAMP
       FROM users

@@ -41,7 +41,7 @@ module Api
         refute data.key?("namespace")
         assert_equal principal.oid, data["id"]
         assert_equal "C0123456789", data["foreign_id"]
-        %w[kind slack_user_id slack_channel_id slack_team_id slack_email console_user_id console_user_email].each do |field|
+        %w[kind slack_user_id slack_channel_id slack_team_id slack_email console_user_id].each do |field|
           assert_not data.key?(field)
         end
         assert_equal(
@@ -329,7 +329,7 @@ module Api
         assert_equal "T0123456789", principal.slack_team_id
         assert_equal "ada@example.com", principal.slack_email
         assert_equal "centaur", principal.labels["managed-by"]
-        %w[kind slack_user_id slack_channel_id slack_team_id slack_email console_user_id console_user_email].each do |field|
+        %w[kind slack_user_id slack_channel_id slack_team_id slack_email console_user_id].each do |field|
           assert_not json_body.fetch("data").key?(field)
         end
       end
@@ -352,7 +352,6 @@ module Api
         assert_response :created
         principal = Principal.find_by!(foreign_id: "linked-slack-dm")
         assert_equal user, principal.console_user
-        assert_equal user.email, principal.console_user_email
       end
 
       test "PUT links an existing Slack DM when the trusted email is supplied again" do
@@ -370,7 +369,6 @@ module Api
 
         assert_response :ok
         assert_equal user, principal.reload.console_user
-        assert_equal user.email, principal.console_user_email
       end
 
       test "PUT does not link from a stored Slack email when the request omits it" do
@@ -388,7 +386,6 @@ module Api
 
         assert_response :ok
         assert_nil principal.reload.console_user
-        assert_nil principal.console_user_email
       end
 
       test "POST does not link a non-DM principal by Slack email" do
@@ -407,7 +404,6 @@ module Api
         assert_response :created
         principal = Principal.find_by!(foreign_id: "channel-with-user-email")
         assert_nil principal.console_user
-        assert_nil principal.console_user_email
       end
 
       test "POST keeps identity-named labels separate from first-class fields" do
@@ -419,7 +415,6 @@ module Api
                  foreign_id: "matching-console-user-identity",
                  kind: "console_user",
                  console_user_id: user.id,
-                 console_user_email: user.email,
                  labels: {
                    "kind" => "custom",
                    "console-user-id" => "custom-user",
@@ -433,7 +428,6 @@ module Api
         assert_response :created
         principal = Principal.find_by!(foreign_id: "matching-console-user-identity")
         assert_equal user.id, principal.console_user_id
-        assert_equal user.email, principal.console_user_email
         assert_equal "centaur", principal.labels["managed-by"]
         assert_equal "custom", principal.labels["kind"]
         assert_equal "custom-user", principal.labels["console-user-id"]
@@ -1027,7 +1021,6 @@ module Api
           foreign_id: "console-user-admin",
           kind: "console_user",
           console_user_id: user.id,
-          console_user_email: user.email,
           labels: {
             "kind" => "custom",
             "console-user-id" => "custom-user",
