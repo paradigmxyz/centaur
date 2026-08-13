@@ -48,14 +48,28 @@ mod tests {
         build_router_with_runtime as build_router_with_iron_control,
     };
 
-    const TEST_API_KEY: &str = "test-api-key";
-
     fn test_auth() -> ApiAuthConfig {
-        ApiAuthConfig::testing(TEST_API_KEY, "test-secret")
+        ApiAuthConfig::testing("test-secret")
     }
 
     fn test_auth_with_slack() -> ApiAuthConfig {
-        ApiAuthConfig::testing_with_slack_ingress(TEST_API_KEY, "test-slackbot-key", "test-secret")
+        ApiAuthConfig::testing_with_slack_ingress("test-slackbot-key", "test-secret")
+    }
+
+    fn console_token() -> String {
+        encode(
+            &Header::new(Algorithm::HS256),
+            &json!({
+                "iss": "centaur-console",
+                "sub": "centaur-console",
+                "aud": "centaur-api",
+                "iat": 1_700_000_000i64,
+                "exp": 4_102_444_800i64,
+                "token_use": "console_service",
+            }),
+            &EncodingKey::from_secret(b"test-secret"),
+        )
+        .unwrap()
     }
 
     fn principal_token(subject: &str) -> String {
@@ -248,60 +262,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn console_key_passes_every_capability_route_family() {
+    async fn console_service_jwt_passes_every_capability_route_family() {
         for request in [
             Request::builder()
                 .uri("/api/personas")
-                .header(header::AUTHORIZATION, format!("Bearer {TEST_API_KEY}"))
+                .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                 .body(Body::empty())
                 .unwrap(),
             Request::builder()
                 .uri("/api/session/slack%3AC123%3A123.456")
-                .header(header::AUTHORIZATION, format!("Bearer {TEST_API_KEY}"))
+                .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                 .body(Body::empty())
                 .unwrap(),
             Request::builder()
                 .method(Method::POST)
                 .uri("/api/session/slack%3AC123%3A123.456/interrupt")
-                .header(header::AUTHORIZATION, format!("Bearer {TEST_API_KEY}"))
+                .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                 .body(Body::empty())
                 .unwrap(),
             Request::builder()
                 .method(Method::POST)
                 .uri("/api/sandboxes/drain")
-                .header(header::AUTHORIZATION, format!("Bearer {TEST_API_KEY}"))
+                .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                 .body(Body::empty())
                 .unwrap(),
             Request::builder()
                 .uri("/api/workflows/runs")
-                .header(header::AUTHORIZATION, format!("Bearer {TEST_API_KEY}"))
+                .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                 .body(Body::empty())
                 .unwrap(),
             Request::builder()
                 .method(Method::POST)
                 .uri("/api/workflows/events")
-                .header(header::AUTHORIZATION, format!("Bearer {TEST_API_KEY}"))
+                .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"event_name":"test.event","payload":{}}"#))
                 .unwrap(),
             Request::builder()
                 .uri("/api/admin/slack/archive-imports")
-                .header(header::AUTHORIZATION, format!("Bearer {TEST_API_KEY}"))
+                .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                 .body(Body::empty())
                 .unwrap(),
             Request::builder()
                 .uri("/api/admin/slack/dm-sync/checkpoints")
-                .header(header::AUTHORIZATION, format!("Bearer {TEST_API_KEY}"))
+                .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                 .body(Body::empty())
                 .unwrap(),
             Request::builder()
                 .uri("/api/admin/google/docs-sync/checkpoint")
-                .header(header::AUTHORIZATION, format!("Bearer {TEST_API_KEY}"))
+                .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                 .body(Body::empty())
                 .unwrap(),
             Request::builder()
                 .uri("/api/admin/granola/sync/checkpoint")
-                .header(header::AUTHORIZATION, format!("Bearer {TEST_API_KEY}"))
+                .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                 .body(Body::empty())
                 .unwrap(),
         ] {
@@ -317,7 +331,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/slack/channels")
-                    .header(header::AUTHORIZATION, format!("Bearer {TEST_API_KEY}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -657,7 +671,7 @@ mod tests {
         ] {
             request.headers_mut().insert(
                 header::AUTHORIZATION,
-                format!("Bearer {TEST_API_KEY}").parse().unwrap(),
+                format!("Bearer {}", console_token()).parse().unwrap(),
             );
             let app = build_router_with_app_state(AppState::unready(test_auth()));
             let response = app.oneshot(request).await.unwrap();
@@ -710,7 +724,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/session/slack%3AC123%3A123.456/messages")
-                    .header(header::AUTHORIZATION, format!("Bearer {TEST_API_KEY}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(header::CONTENT_LENGTH, (256 * 1024 * 1024 + 1).to_string())
                     .body(Body::from(r#"{"messages":"not-an-array"}"#))
@@ -737,7 +751,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/session/slack%3AC123%3A123.456/execute")
-                    .header(header::AUTHORIZATION, format!("Bearer {TEST_API_KEY}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(header::CONTENT_LENGTH, (256 * 1024 * 1024 + 1).to_string())
                     .body(Body::from(r#"{"input_lines":"not-an-array"}"#))
@@ -763,7 +777,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/session/slack%3AC123%3A123.456")
-                    .header(header::AUTHORIZATION, format!("Bearer {TEST_API_KEY}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -794,7 +808,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/session/discord%3A111%3A222%3A333")
-                    .header(header::AUTHORIZATION, format!("Bearer {TEST_API_KEY}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -826,7 +840,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/session/linear%3AISSUE%3Ac%3ACMT%3As%3ASESS")
-                    .header(header::AUTHORIZATION, format!("Bearer {TEST_API_KEY}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -858,7 +872,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/session/github%3A0xSplits%2Fcentaur%3A704%3Arc%3A99")
-                    .header(header::AUTHORIZATION, format!("Bearer {TEST_API_KEY}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -893,7 +907,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/session/cli%3Atest")
-                    .header(header::AUTHORIZATION, format!("Bearer {TEST_API_KEY}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                     .body(Body::empty())
                     .unwrap(),
             )

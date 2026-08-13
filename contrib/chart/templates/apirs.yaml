@@ -221,11 +221,6 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sCENTAUR_JWT_SIGNING_SECRET" .Values.secretManager.envPrefix }}
-            - name: CENTAUR_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "centaur.secretEnvName" . }}
-                  key: {{ printf "%sCENTAUR_API_KEY" .Values.secretManager.envPrefix }}
 {{- range $ingress := list
   (dict "enabled" .Values.slackbotv2.enabled "key" "SLACKBOT_API_KEY")
   (dict "enabled" .Values.discordbot.enabled "key" "DISCORDBOT_API_KEY")

@@ -20,11 +20,6 @@ set to onepassword-connect in the Helm values):
                                creates Secret centaur-onepassword-connect-credentials
   OP_CONNECT_TOKEN             Connect API token; added to centaur-infra-env
 
-Optional api-rs Console key:
-  CENTAUR_API_KEY              shared only by api-rs and Console; auto-generated
-                               once when absent. Set this to choose the initial
-                               value when creating or topping up the Secret.
-
 Optional repo-cache GitHub token:
   GITHUB_TOKEN                 added to centaur-infra-env when present; the
                                repo-cache DaemonSet reads it (repoCache.githubToken
@@ -209,9 +204,6 @@ if secret_exists centaur-infra-env; then
   if ! secret_key_present IRON_BROKER_TOKEN; then
     patch_data+=("\"IRON_BROKER_TOKEN\":\"$(rand_hex | base64 | tr -d '\n')\"")
   fi
-  if ! secret_key_present CENTAUR_API_KEY; then
-    patch_data+=("\"CENTAUR_API_KEY\":\"$(printf '%s' "${CENTAUR_API_KEY:-$(rand_hex)}" | base64 | tr -d '\n')\"")
-  fi
   # GITHUB_TOKEN for the repo-cache DaemonSet. Set whenever present so it can be
   # rotated; harmless when repoCache is disabled.
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then
@@ -332,7 +324,6 @@ else
     --from-literal=SLACKBOT_API_KEY="$SLACKBOT_API_KEY"
     --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD"
     --from-literal=DATABASE_URL="$DATABASE_URL"
-    --from-literal=CENTAUR_API_KEY="${CENTAUR_API_KEY:-$(rand_hex)}"
     --from-literal=IRON_CONTROL_DATABASE_URL="$IRON_CONTROL_DATABASE_URL"
     --from-literal=IRON_CONTROL_INITIAL_USER_EMAIL="$IRON_CONTROL_INITIAL_USER_EMAIL"
     --from-literal=IRON_CONTROL_INITIAL_USER_PASSWORD="$(rand_hex)"

@@ -176,11 +176,6 @@ spec:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sCENTAUR_JWT_SIGNING_SECRET" $prefix }}
-            - name: CENTAUR_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $secretEnv }}
-                  key: {{ printf "%sCENTAUR_API_KEY" $prefix }}
             # In-cluster console URL exactly as sandboxes dial it (the same
             # value api-rs receives as IRON_CONTROL_URL). Console derives the
             # sandbox entitlements injection-rule host from it, so the rule

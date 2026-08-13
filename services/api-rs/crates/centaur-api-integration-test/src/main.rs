@@ -26,16 +26,16 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| DEFAULT_API_URL.to_owned())
         .trim_end_matches('/')
         .to_owned();
-    let api_key = env::var("CENTAUR_API_KEY")
-        .context("CENTAUR_API_KEY must be set for api-rs integration tests")?;
-    if api_key.trim().is_empty() {
-        bail!("CENTAUR_API_KEY must not be empty");
+    let api_token = env::var("CENTAUR_API_TOKEN")
+        .context("CENTAUR_API_TOKEN must be set for api-rs integration tests")?;
+    if api_token.trim().is_empty() {
+        bail!("CENTAUR_API_TOKEN must not be empty");
     }
     let mut default_headers = HeaderMap::new();
     default_headers.insert(
         AUTHORIZATION,
-        HeaderValue::from_str(&format!("Bearer {api_key}"))
-            .context("CENTAUR_API_KEY is not a valid HTTP bearer credential")?,
+        HeaderValue::from_str(&format!("Bearer {api_token}"))
+            .context("CENTAUR_API_TOKEN is not a valid HTTP bearer credential")?,
     );
     let http = HttpClient::builder()
         .default_headers(default_headers)

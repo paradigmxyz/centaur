@@ -13,6 +13,7 @@ use crate::{
 
 const DEFAULT_API_JWT_AUDIENCE: &str = "centaur-api";
 const DEFAULT_API_JWT_ISSUER: &str = "centaur-console";
+const CONSOLE_SERVICE_SUBJECT: &str = "centaur-console";
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum Capability {
@@ -107,20 +108,13 @@ pub struct ApiAuthConfig {
 
 impl ApiAuthConfig {
     pub fn from_env() -> Result<Self, ApiAuthConfigError> {
-        let console_key = required_env("CENTAUR_API_KEY")?;
         let jwt_secret = required_env("CENTAUR_JWT_SIGNING_SECRET")?;
         let jwt_audience = optional_env("CENTAUR_API_JWT_AUDIENCE")
             .unwrap_or_else(|| DEFAULT_API_JWT_AUDIENCE.to_owned());
         let jwt_issuer = optional_env("CENTAUR_API_JWT_ISSUER")
             .unwrap_or_else(|| DEFAULT_API_JWT_ISSUER.to_owned());
 
-        let mut callers = vec![static_caller(
-            "console",
-            CallerClass::Console,
-            console_key,
-            Capability::ALL,
-            None,
-        )];
+        let mut callers = Vec::new();
         for spec in [
             IngressSpec {
                 env_var: "SLACKBOT_API_KEY",
@@ -182,16 +176,9 @@ impl ApiAuthConfig {
         })
     }
 
-    pub fn testing(console_key: impl Into<String>, jwt_secret: impl Into<String>) -> Self {
-        let caller = static_caller(
-            "console",
-            CallerClass::Console,
-            console_key.into(),
-            Capability::ALL,
-            None,
-        );
+    pub fn testing(jwt_secret: impl Into<String>) -> Self {
         Self {
-            static_callers: Arc::new(vec![caller]),
+            static_callers: Arc::new(Vec::new()),
             jwt_secret: Arc::from(jwt_secret.into()),
             jwt_audience: Arc::from(DEFAULT_API_JWT_AUDIENCE),
             jwt_issuer: Arc::from(DEFAULT_API_JWT_ISSUER),
@@ -200,31 +187,21 @@ impl ApiAuthConfig {
 
     #[cfg(test)]
     pub(crate) fn testing_with_slack_ingress(
-        console_key: impl Into<String>,
         slack_key: impl Into<String>,
         jwt_secret: impl Into<String>,
     ) -> Self {
-        let callers = vec![
-            static_caller(
-                "console",
-                CallerClass::Console,
-                console_key.into(),
-                Capability::ALL,
-                None,
-            ),
-            static_caller(
-                "slackbot",
-                CallerClass::Ingress,
-                slack_key.into(),
-                [
-                    Capability::PersonasRead,
-                    Capability::SessionsRead,
-                    Capability::SessionsWrite,
-                    Capability::WorkflowsEvents,
-                ],
-                Some("slack:"),
-            ),
-        ];
+        let callers = vec![static_caller(
+            "slackbot",
+            CallerClass::Ingress,
+            slack_key.into(),
+            [
+                Capability::PersonasRead,
+                Capability::SessionsRead,
+                Capability::SessionsWrite,
+                Capability::WorkflowsEvents,
+            ],
+            Some("slack:"),
+        )];
         Self {
             static_callers: Arc::new(callers),
             jwt_secret: Arc::from(jwt_secret.into()),
@@ -253,20 +230,34 @@ impl ApiAuthConfig {
         if token.matches('.').count() != 2 {
             return Err(ApiError::Unauthorized("invalid bearer token".to_owned()));
         }
-        let claims = verify_hs256_jwt::<ApiPrincipalClaims>(
+        let claims = verify_hs256_jwt::<ApiJwtClaims>(
             token,
             self.jwt_secret.as_bytes(),
             &self.jwt_audience,
             &self.jwt_issuer,
         )?;
         let subject = claims.sub.trim().to_owned();
-        Ok(AuthenticatedCaller {
-            class: CallerClass::Principal,
-            identity: subject.clone(),
-            capabilities: BTreeSet::from([Capability::SessionsRead, Capability::SlackProxy]),
-            platform_prefix: None,
-            principal_subject: Some(subject),
-        })
+        match claims.token_use {
+            Some(ApiJwtTokenUse::ConsoleService) if subject == CONSOLE_SERVICE_SUBJECT => {
+                Ok(AuthenticatedCaller {
+                    class: CallerClass::Console,
+                    identity: subject,
+                    capabilities: Capability::ALL.into_iter().collect(),
+                    platform_prefix: None,
+                    principal_subject: None,
+                })
+            }
+            Some(ApiJwtTokenUse::ConsoleService) => Err(ApiError::Unauthorized(
+                "invalid Console service token subject".to_owned(),
+            )),
+            None => Ok(AuthenticatedCaller {
+                class: CallerClass::Principal,
+                identity: subject.clone(),
+                capabilities: BTreeSet::from([Capability::SessionsRead, Capability::SlackProxy]),
+                platform_prefix: None,
+                principal_subject: Some(subject),
+            }),
+        }
     }
 }
 
@@ -279,8 +270,15 @@ pub enum ApiAuthConfigError {
 }
 
 #[derive(Deserialize)]
-struct ApiPrincipalClaims {
+struct ApiJwtClaims {
     sub: String,
+    token_use: Option<ApiJwtTokenUse>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ApiJwtTokenUse {
+    ConsoleService,
 }
 
 struct IngressSpec {
@@ -343,12 +341,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn authenticates_static_console_key() {
-        let auth = ApiAuthConfig::testing("console-secret", "jwt-secret");
+    fn authenticates_console_service_jwt() {
+        let auth = ApiAuthConfig::testing("jwt-secret");
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &json!({
+                "iss": "centaur-console",
+                "sub": "centaur-console",
+                "aud": "centaur-api",
+                "iat": 1_700_000_000i64,
+                "exp": 4_102_444_800i64,
+                "token_use": "console_service",
+            }),
+            &EncodingKey::from_secret(b"jwt-secret"),
+        )
+        .unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(
             header::AUTHORIZATION,
-            "Bearer console-secret".parse().unwrap(),
+            format!("Bearer {token}").parse().unwrap(),
         );
 
         let caller = auth.authenticate(&headers).unwrap();
@@ -357,8 +368,36 @@ mod tests {
     }
 
     #[test]
+    fn console_service_jwt_requires_the_exact_service_subject() {
+        let auth = ApiAuthConfig::testing("jwt-secret");
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &json!({
+                "iss": "centaur-console",
+                "sub": "prn_test",
+                "aud": "centaur-api",
+                "iat": 1_700_000_000i64,
+                "exp": 4_102_444_800i64,
+                "token_use": "console_service",
+            }),
+            &EncodingKey::from_secret(b"jwt-secret"),
+        )
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+
+        assert!(matches!(
+            auth.authenticate(&headers),
+            Err(ApiError::Unauthorized(_))
+        ));
+    }
+
+    #[test]
     fn authenticates_principal_jwt_with_limited_capabilities() {
-        let auth = ApiAuthConfig::testing("console-secret", "jwt-secret");
+        let auth = ApiAuthConfig::testing("jwt-secret");
         let token = encode(
             &Header::new(Algorithm::HS256),
             &json!({
@@ -387,18 +426,18 @@ mod tests {
     fn duplicate_tokens_are_rejected() {
         let callers = vec![
             static_caller(
-                "console",
-                CallerClass::Console,
-                "same".to_owned(),
-                Capability::ALL,
-                None,
-            ),
-            static_caller(
                 "slackbot",
                 CallerClass::Ingress,
                 "same".to_owned(),
                 [Capability::SessionsWrite],
                 Some("slack:"),
+            ),
+            static_caller(
+                "githubbot",
+                CallerClass::Ingress,
+                "same".to_owned(),
+                [Capability::SessionsWrite],
+                Some("github:"),
             ),
         ];
 
@@ -410,7 +449,7 @@ mod tests {
 
     #[test]
     fn missing_malformed_unknown_and_expired_credentials_are_unauthorized() {
-        let auth = ApiAuthConfig::testing("console-secret", "jwt-secret");
+        let auth = ApiAuthConfig::testing("jwt-secret");
         for value in [None, Some("Basic value"), Some("Bearer unknown")] {
             let mut headers = HeaderMap::new();
             if let Some(value) = value {

@@ -36,7 +36,6 @@ These must exist for the normal Helm deployment. For local development,
 | `DATABASE_URL` | `secretManager.existingSecretName`; local bootstrap generates it. | API and Slackbot Postgres connection. |
 | `SLACK_SIGNING_SECRET` | `secretManager.existingSecretName`; local bootstrap reads shell env. | Slack request signature verification. |
 | `SLACKBOT_API_KEY` | `secretManager.existingSecretName`; local bootstrap reads shell env. | Dedicated Slackbot key accepted by api-rs for the Slack session namespace and workflow events. |
-| `CENTAUR_API_KEY` | `secretManager.existingSecretName`; local bootstrap generates it when absent. | Trusted Console key accepted by api-rs for all protected capabilities. Never expose it to sandboxes. |
 | `SLACK_BOT_TOKEN` | `secretManager.existingSecretName`; local bootstrap reads shell env. | Slack Web API access for Slackbot and api-rs Slack helpers. |
 | `SANDBOX_SIGNING_KEY` | `secretManager.existingSecretName`; local bootstrap generates it. | Signing key for short-lived sandbox API tokens. |
 | `IRON_MANAGEMENT_API_KEY` | `secretManager.existingSecretName`; local bootstrap generates it. | Management key for API-created iron-proxy pods. |
@@ -68,7 +67,7 @@ for the operator workflow.
 | `IRON_CONTROL_INITIAL_API_KEY` | `secretManager.existingSecretName`; local bootstrap generates it when absent. | Admin API key used by api-rs and `centaur-perms`. |
 | `IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY`, `IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY`, `IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT` | `secretManager.existingSecretName`; local bootstrap generates them when absent. | Encrypts credential material at rest. Keep these stable after first boot. |
 | `IRON_CONTROL_SECRET_KEY_BASE` | `secretManager.existingSecretName`; local bootstrap generates it when absent. | Console session and application signing secret. |
-| `CENTAUR_JWT_SIGNING_SECRET` | `secretManager.existingSecretName`; local bootstrap generates it when absent. | Signs Console-issued MCP tokens and sandbox api-rs principal tokens. |
+| `CENTAUR_JWT_SIGNING_SECRET` | `secretManager.existingSecretName`; local bootstrap generates it when absent. | Signs Console-issued MCP tokens, Console service tokens, and sandbox api-rs principal tokens. |
 | `console.publicUrl` | Helm value. | Public Console origin used for links and MCP authorization metadata. |
 | `console.passwordLoginEnabled` | Helm value, default `true`. | Enables the break-glass email and password login. Disable after SSO is configured for a public Console. |
 | `console.ssoEmailDomains` | Helm value. | Limits Google or Slack SSO admission by email domain. Empty accepts any IdP-authenticated email. |

@@ -111,13 +111,8 @@ def current_session_context() -> dict[str, Any]:
     _require_api_server_enabled("current_session_context")
     thread_key = current_thread_key()
     base_url = secret("CENTAUR_API_URL", "http://api:8000").rstrip("/")
-    headers: dict[str, str] = {}
-    api_key = secret("CENTAUR_API_KEY", "").strip()
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(
         f"{base_url}/api/session/{quote(thread_key, safe='')}",
-        headers=headers,
         method="GET",
     )
     with urllib.request.urlopen(request, timeout=30) as response:

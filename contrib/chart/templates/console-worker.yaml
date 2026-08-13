@@ -130,11 +130,6 @@ spec:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sCENTAUR_JWT_SIGNING_SECRET" $prefix }}
-            - name: CENTAUR_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $secretEnv }}
-                  key: {{ printf "%sCENTAUR_API_KEY" $prefix }}
 {{- if $console.publicUrl }}
             - name: CENTAUR_CONSOLE_PUBLIC_URL
               value: {{ $console.publicUrl | quote }}
