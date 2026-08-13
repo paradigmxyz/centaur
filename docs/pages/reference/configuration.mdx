@@ -51,6 +51,7 @@ Optional required-by-mode variables:
 | `OP_CONNECT_TOKEN` | Secret or local bootstrap shell env. | Token used by iron-proxy when `ironProxy.secretSource=onepassword-connect`. |
 | `TEAMS_BOT_APP_ID`, `TEAMS_BOT_APP_PASSWORD`, `TEAMS_BOT_APP_TENANT_ID` | Local shell before `just bootstrap-secrets`; production Secret. | Required by Teamsbot when `teamsbot.enabled=true`. |
 | `TEAMSBOT_API_KEY` | `secretManager.existingSecretName`; local bootstrap generates it when Teams credentials are present and it is omitted. | Static API key used by Teamsbot. |
+| `CENTAUR_APIRS_ADMIN_API_KEY` | `secretManager.existingSecretName` or the api-rs environment. | Optional static bearer token with every api-rs capability. Generate a distinct value with `openssl rand -hex 32`. |
 | `CONSOLE_SQLEXPORTER_DATABASE_URL` | `secretManager.existingSecretName`; local bootstrap copies it from the shell when provided. | Database URL for a separately provisioned read-only PostgreSQL role. Required when `console.sqlExporter.enabled=true`. |
 
 ## Console and Permission Control Plane

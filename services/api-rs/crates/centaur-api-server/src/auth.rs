@@ -14,6 +14,7 @@ use crate::{
 const DEFAULT_API_JWT_AUDIENCE: &str = "centaur-api";
 const DEFAULT_API_JWT_ISSUER: &str = "centaur-console";
 const CONSOLE_SERVICE_SUBJECT: &str = "centaur-console";
+const STATIC_ADMIN_IDENTITY: &str = "api-rs-admin";
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum Capability {
@@ -46,6 +47,7 @@ impl Capability {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CallerClass {
+    Admin,
     Console,
     Ingress,
     Principal,
@@ -54,6 +56,7 @@ pub(crate) enum CallerClass {
 impl CallerClass {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
+            Self::Admin => "admin",
             Self::Console => "console",
             Self::Ingress => "ingress",
             Self::Principal => "principal",
@@ -115,6 +118,15 @@ impl ApiAuthConfig {
             .unwrap_or_else(|| DEFAULT_API_JWT_ISSUER.to_owned());
 
         let mut callers = Vec::new();
+        if let Some(token) = optional_env("CENTAUR_APIRS_ADMIN_API_KEY") {
+            callers.push(static_caller(
+                STATIC_ADMIN_IDENTITY,
+                CallerClass::Admin,
+                token,
+                Capability::ALL,
+                None,
+            ));
+        }
         for spec in [
             IngressSpec {
                 env_var: "SLACKBOT_API_KEY",
@@ -365,6 +377,35 @@ mod tests {
         let caller = auth.authenticate(&headers).unwrap();
         assert_eq!(caller.class(), CallerClass::Console);
         assert!(caller.has_capability(Capability::AdminSync));
+    }
+
+    #[test]
+    fn authenticates_static_admin_with_every_capability() {
+        let auth = ApiAuthConfig {
+            static_callers: Arc::new(vec![static_caller(
+                STATIC_ADMIN_IDENTITY,
+                CallerClass::Admin,
+                "admin-key".to_owned(),
+                Capability::ALL,
+                None,
+            )]),
+            jwt_secret: Arc::from("jwt-secret"),
+            jwt_audience: Arc::from(DEFAULT_API_JWT_AUDIENCE),
+            jwt_issuer: Arc::from(DEFAULT_API_JWT_ISSUER),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "Bearer admin-key".parse().unwrap());
+
+        let caller = auth.authenticate(&headers).unwrap();
+        assert_eq!(caller.class(), CallerClass::Admin);
+        assert_eq!(caller.identity(), STATIC_ADMIN_IDENTITY);
+        assert!(
+            Capability::ALL
+                .into_iter()
+                .all(|capability| caller.has_capability(capability))
+        );
+        assert_eq!(caller.platform_prefix(), None);
+        assert_eq!(caller.principal_subject(), None);
     }
 
     #[test]

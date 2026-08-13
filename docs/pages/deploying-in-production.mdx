@@ -66,6 +66,7 @@ Minimum keys:
 | `SLACK_BOT_TOKEN` | Slackbot/API | Bot User OAuth Token from the Slack app. |
 | `SLACK_SIGNING_SECRET` | Slackbot/API | Used to verify Slack webhook signatures. |
 | `SLACKBOT_API_KEY` | Slackbot to API | Dedicated static service token restricted to Slack session routes and workflow event emission. |
+| `CENTAUR_APIRS_ADMIN_API_KEY` | Optional administrator access to API | Static bearer token with every api-rs capability. Generate with `openssl rand -hex 32`, store it in the infra Secret, and keep it distinct from all ingress keys. |
 | `OP_CONNECT_TOKEN` | [iron-proxy](https://docs.iron.sh) 1Password Connect source (preferred) | Needed when `ironProxy.secretSource` is `onepassword-connect`. |
 | `OP_SERVICE_ACCOUNT_TOKEN` | [iron-proxy](https://docs.iron.sh) 1Password service-account source | Needed when `ironProxy.secretSource` is `onepassword`. |
 | `OP_VAULT` | [iron-proxy](https://docs.iron.sh) 1Password source | Vault name or id used for `op://` references (either mode). |
