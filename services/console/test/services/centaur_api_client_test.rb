@@ -88,6 +88,22 @@ class CentaurApiClientTest < ActiveSupport::TestCase
     http.verify
   end
 
+  test "supports a longer read timeout for sync batches" do
+    http = Minitest::Mock.new
+    expect_request(http, status: 200, body: { ok: true }.to_json) do |request|
+      assert_equal 120, request[:timeout]
+    end
+    client = CentaurApiClient.new(
+      base_url: "http://api.internal:8080",
+      http: http,
+      read_timeout: 120
+    )
+
+    client.ingest_slack_dm_sync_batch(messages: [])
+
+    http.verify
+  end
+
   test "gets Google Docs sync checkpoint for a broker credential" do
     http = Minitest::Mock.new
     expect_request(http, status: 200, body: { checkpoint: nil }.to_json) do |request|

@@ -24,6 +24,16 @@ module SlackDm
       end
     end
 
+    class FakeHttpClient
+      def initialize(response)
+        @response = response
+      end
+
+      def get(*)
+        @response
+      end
+    end
+
     def slack_app
       OauthApp.create!(
         provider: "slack",
@@ -47,6 +57,22 @@ module SlackDm
         scopes: SlackDm::SyncCredential::REQUIRED_SCOPES,
         provider_subject: "U_ME"
       )
+    end
+
+    test "uses an extended API read timeout by default" do
+      api_client = Object.new
+      client_created = false
+      factory = lambda do |read_timeout:|
+        assert_equal SlackDm::SyncCredential::API_READ_TIMEOUT_SECONDS, read_timeout
+        client_created = true
+        api_client
+      end
+
+      CentaurApiClient.stub(:new, factory) do
+        SlackDm::SyncCredential.new(Object.new)
+      end
+
+      assert client_created
     end
 
     test "oauth_app_slug defaults to slack and honors console env prefix" do
@@ -279,6 +305,29 @@ module SlackDm
       assert_nil api_client.batch
     ensure
       previous.nil? ? ENV.delete(env_key) : ENV[env_key] = previous
+    end
+
+    test "429 responses expose Retry-After for deferred job execution" do
+      [
+        [ "120", 120 ],
+        [ "600", 5.minutes.to_i ],
+        [ "invalid", 1 ]
+      ].each do |header, expected|
+        response = HttpClient::Response.new(
+          status: 429,
+          body: "",
+          headers: { "retry-after" => header }
+        )
+
+        error = assert_raises(SlackDm::SyncCredential::RateLimitedError) do
+          SlackDm::SyncCredential.new(
+            credential,
+            http_client: FakeHttpClient.new(response)
+          ).call
+        end
+
+        assert_equal expected, error.retry_after
+      end
     end
   end
 end

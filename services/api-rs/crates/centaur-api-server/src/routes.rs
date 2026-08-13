@@ -2048,6 +2048,7 @@ async fn ingest_slack_dm_sync_batch(
     validate_slack_dm_sync_batch(&request)?;
     let pool = db_pool(&state)?;
     let mut tx = pool.begin().await?;
+    acquire_slack_dm_sync_locks(&mut tx, &request).await?;
 
     if let Some(run) = &request.run {
         upsert_slack_dm_sync_run(&mut tx, run).await?;
@@ -3138,6 +3139,60 @@ fn validate_slack_dm_sync_batch(request: &SlackDmSyncBatchRequest) -> Result<(),
     Ok(())
 }
 
+async fn acquire_slack_dm_sync_locks(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    request: &SlackDmSyncBatchRequest,
+) -> Result<(), ApiError> {
+    // Credential-scoped job limits still allow two credentials to update the
+    // same shared conversation. Transaction-scoped locks serialize only
+    // overlapping conversations and release automatically on commit or
+    // rollback. BTreeSet ordering prevents multi-conversation batches from
+    // deadlocking while acquiring the locks.
+    for (home_team_id, conversation_id) in slack_dm_sync_conversation_keys(request) {
+        let lock_name = format!("centaur:slack-private-sync:{home_team_id}:{conversation_id}");
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(lock_name)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(())
+}
+
+fn slack_dm_sync_conversation_keys(request: &SlackDmSyncBatchRequest) -> BTreeSet<(&str, &str)> {
+    let mut conversation_keys = BTreeSet::new();
+    conversation_keys.extend(request.conversations.iter().map(|conversation| {
+        (
+            conversation.home_team_id.as_str(),
+            conversation.conversation_id.as_str(),
+        )
+    }));
+    conversation_keys.extend(request.members.iter().map(|member| {
+        (
+            member.home_team_id.as_str(),
+            member.conversation_id.as_str(),
+        )
+    }));
+    conversation_keys.extend(request.messages.iter().map(|message| {
+        (
+            message.home_team_id.as_str(),
+            message.conversation_id.as_str(),
+        )
+    }));
+    conversation_keys.extend(request.attachments.iter().map(|attachment| {
+        (
+            attachment.home_team_id.as_str(),
+            attachment.conversation_id.as_str(),
+        )
+    }));
+    conversation_keys.extend(request.checkpoints.iter().map(|checkpoint| {
+        (
+            checkpoint.home_team_id.as_str(),
+            checkpoint.conversation_id.as_str(),
+        )
+    }));
+    conversation_keys
+}
+
 #[cfg(test)]
 mod slack_user_sync_tests {
     use super::*;
@@ -3171,6 +3226,25 @@ mod slack_user_sync_tests {
         let error = validate_slack_dm_sync_batch(&request_with_conversation_type("public_channel"))
             .unwrap_err();
         assert!(matches!(error, ApiError::BadRequest(_)));
+    }
+
+    #[test]
+    fn collects_sync_conversation_locks_in_stable_order() {
+        let mut request = request_with_conversation_type("im");
+        request.conversations.push(SlackDmSyncConversationPayload {
+            home_team_id: "T123".to_owned(),
+            conversation_id: "D999".to_owned(),
+            conversation_type: "im".to_owned(),
+            is_archived: false,
+            is_ext_shared: false,
+            raw_payload: json!({}),
+        });
+
+        let conversation_keys = slack_dm_sync_conversation_keys(&request)
+            .into_iter()
+            .collect::<Vec<_>>();
+
+        assert_eq!(conversation_keys, vec![("T123", "D999"), ("T123", "G123")]);
     }
 }
 
