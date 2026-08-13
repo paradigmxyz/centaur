@@ -24,6 +24,16 @@ module SlackDm
       end
     end
 
+    class FakeHttpClient
+      def initialize(response)
+        @response = response
+      end
+
+      def get(*)
+        @response
+      end
+    end
+
     def slack_app
       OauthApp.create!(
         provider: "slack",
@@ -279,6 +289,29 @@ module SlackDm
       assert_nil api_client.batch
     ensure
       previous.nil? ? ENV.delete(env_key) : ENV[env_key] = previous
+    end
+
+    test "429 responses expose Retry-After for deferred job execution" do
+      [
+        [ "120", 120 ],
+        [ "600", 5.minutes.to_i ],
+        [ "invalid", 1 ]
+      ].each do |header, expected|
+        response = HttpClient::Response.new(
+          status: 429,
+          body: "",
+          headers: { "retry-after" => header }
+        )
+
+        error = assert_raises(SlackDm::SyncCredential::RateLimitedError) do
+          SlackDm::SyncCredential.new(
+            credential,
+            http_client: FakeHttpClient.new(response)
+          ).call
+        end
+
+        assert_equal expected, error.retry_after
+      end
     end
   end
 end
