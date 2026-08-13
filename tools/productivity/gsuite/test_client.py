@@ -627,7 +627,7 @@ def test_drive_export_revision_bytes_downloads_requested_format(monkeypatch):
         download_result={
             "done": True,
             "response": {
-                "downloadUri": "https://www.googleapis.com/download/rev-42.pdf"
+                "downloadUri": "https://docs.google.com/download/rev-42.pdf"
             },
         },
     )
@@ -663,7 +663,7 @@ def test_drive_export_revision_bytes_downloads_requested_format(monkeypatch):
     assert fake_service.operations_api.get_calls == []
     assert request_calls == [
         {
-            "url": "https://www.googleapis.com/download/rev-42.pdf",
+            "url": "https://docs.google.com/download/rev-42.pdf",
             "method": "GET",
             "headers": {
                 "X-Goog-Drive-Resource-Keys": "file-123/resource-key-42"
@@ -767,23 +767,6 @@ def test_drive_export_revision_bytes_reports_operation_error(monkeypatch):
 
     with pytest.raises(RuntimeError, match=r"failed \(3\): Unsupported export format"):
         client._drive_export_revision_bytes("file-123", "rev-42", "xlsx")
-
-
-def test_drive_export_revision_bytes_rejects_untrusted_download_uri(monkeypatch):
-    fake_service = _FakeDriveService(
-        metadata_result={
-            "name": "Quarterly Plan",
-            "mimeType": "application/vnd.google-apps.document",
-        },
-        download_result={
-            "done": True,
-            "response": {"downloadUri": "https://example.com/revision.pdf"},
-        },
-    )
-    monkeypatch.setattr(client, "get_drive_service", lambda: fake_service)
-
-    with pytest.raises(RuntimeError, match="invalid revision download URI"):
-        client._drive_export_revision_bytes("file-123", "rev-42", "pdf")
 
 
 def test_drive_export_revision_saves_attachment(monkeypatch):

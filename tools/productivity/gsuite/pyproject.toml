@@ -38,6 +38,7 @@ hosts = [
     "gmail.googleapis.com",
     "calendar.googleapis.com",
     "www.googleapis.com",
+    "docs.google.com",
     "*.googleusercontent.com",
     "*.usercontent.google.com",
     "docs.googleapis.com",

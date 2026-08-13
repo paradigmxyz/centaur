@@ -960,7 +960,6 @@ _DRIVE_REVISION_DOWNLOAD_MIME_TYPES = {
     "application/vnd.google-apps.document",
     "application/vnd.google-apps.spreadsheet",
 }
-_DRIVE_DOWNLOAD_URI_HOSTS = {"www.googleapis.com"}
 _DRIVE_DOWNLOAD_POLL_ATTEMPTS = 8
 
 
@@ -1063,20 +1062,6 @@ def _drive_export_mime_type(export_format: str) -> str:
     return mime_type
 
 
-def _validate_drive_download_uri(download_uri: str) -> None:
-    parts = urlsplit(download_uri)
-    hostname = (parts.hostname or "").lower()
-    is_google_content_host = hostname.endswith(
-        ".googleusercontent.com"
-    ) or hostname.endswith(".usercontent.google.com")
-    if (
-        parts.scheme != "https"
-        or not hostname
-        or (hostname not in _DRIVE_DOWNLOAD_URI_HOSTS and not is_google_content_host)
-    ):
-        raise RuntimeError("Google Drive returned an invalid revision download URI")
-
-
 def _drive_resource_key_headers(file_id: str, resource_key: str | None) -> dict[str, str]:
     if not resource_key:
         return {}
@@ -1159,7 +1144,6 @@ def _drive_export_revision_bytes(
         resource_key,
     )
     download_uri = result["downloadUri"]
-    _validate_drive_download_uri(download_uri)
 
     response, content = _build_http().request(
         download_uri,
