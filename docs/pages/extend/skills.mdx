@@ -88,6 +88,25 @@ Builtin skills remain separate: the sandbox mounts them from the overlay and
 the agent's native skill loader discovers them directly. A skill never adds
 credentials or grants.
 
+## Author Skills From A Sandbox
+
+Console users can create shared skills and edit skills they own from a sandbox:
+
+```bash
+centaur-skills create deployment-checks \
+  --description "Check a deployment before declaring it healthy." \
+  --instructions-file instructions.md
+centaur-skills edit skl_example \
+  --description "Check and diagnose deployments." \
+  --instructions-file updated-instructions.md
+```
+
+Use `--instructions` instead of `--instructions-file` for a short inline
+Markdown body. `edit` accepts partial changes and targets skills by OID. Pass
+the current `lock_version` with `--lock-version` when an edit should fail if
+another writer changed the skill first. Newly created skills are public and
+edits to public skills are visible to agents immediately.
+
 ## Verify Builtin Skills
 
 Start an agent with the overlay loaded and ask it to inspect available skills.

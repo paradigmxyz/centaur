@@ -2,7 +2,7 @@ import json
 
 import httpx
 import pytest
-from cli import list_skills, read, search
+from cli import create, edit, list_skills, read, search
 from client import SANDBOX_SKILLS_PATH, SkillsClient
 
 
@@ -67,6 +67,75 @@ def test_read_uses_skill_name_or_oid_and_returns_document(identifier):
     assert result["document"].startswith("---\n")
 
 
+def test_create_posts_skill_fields_and_returns_author_payload():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == SANDBOX_SKILLS_PATH
+        assert json.loads(request.content) == {
+            "data": {
+                "name": "incident-triage",
+                "description": "Triage incidents.",
+                "instructions": "# Workflow\n\nInvestigate the alert.",
+            }
+        }
+        return json_response(
+            {
+                "data": {
+                    "id": "skl_123",
+                    "name": "incident-triage",
+                    "lock_version": 0,
+                }
+            },
+            status_code=201,
+        )
+
+    result = make_client(handler).create(
+        "incident-triage",
+        "Triage incidents.",
+        "# Workflow\n\nInvestigate the alert.",
+    )
+
+    assert result == {
+        "id": "skl_123",
+        "name": "incident-triage",
+        "lock_version": 0,
+    }
+
+
+def test_edit_patches_only_provided_fields_with_lock_version():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "PATCH"
+        assert request.url.path == f"{SANDBOX_SKILLS_PATH}/skl_123"
+        assert json.loads(request.content) == {
+            "data": {
+                "description": "Updated incident guidance.",
+                "lock_version": 2,
+            }
+        }
+        return json_response(
+            {
+                "data": {
+                    "id": "skl_123",
+                    "description": "Updated incident guidance.",
+                    "lock_version": 3,
+                }
+            }
+        )
+
+    result = make_client(handler).edit(
+        "skl_123",
+        description="Updated incident guidance.",
+        lock_version=2,
+    )
+
+    assert result["lock_version"] == 3
+
+
+def test_edit_requires_a_field():
+    with pytest.raises(ValueError, match="at least one skill field"):
+        make_client(lambda _request: json_response({})).edit("skl_123")
+
+
 def test_requests_wrap_http_errors_without_exposing_credentials():
     def handler(_request: httpx.Request) -> httpx.Response:
         return json_response({"error": {"message": "invalid sandbox token"}}, status_code=401)
@@ -123,3 +192,70 @@ def test_cli_read_outputs_raw_skill_markdown(monkeypatch, capsys):
     read("incident-response")
 
     assert capsys.readouterr().out == "# Incident Response\n"
+
+
+def test_cli_create_reads_instructions_file(monkeypatch, capsys, tmp_path):
+    instructions_file = tmp_path / "instructions.md"
+    instructions_file.write_text("# Workflow\n\nInvestigate the alert.\n")
+
+    class StubClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def create(self, name, description, instructions):
+            assert name == "incident-triage"
+            assert description == "Triage incidents."
+            assert instructions == "# Workflow\n\nInvestigate the alert.\n"
+            return {"id": "skl_123", "name": name, "lock_version": 0}
+
+    monkeypatch.setattr("cli.get_client", StubClient)
+
+    create(
+        "incident-triage",
+        description="Triage incidents.",
+        instructions=None,
+        instructions_file=instructions_file,
+    )
+
+    assert json.loads(capsys.readouterr().out) == {
+        "data": {"id": "skl_123", "name": "incident-triage", "lock_version": 0}
+    }
+
+
+def test_cli_edit_sends_partial_fields(monkeypatch, capsys):
+    class StubClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def edit(self, identifier, *, name, description, instructions, lock_version):
+            assert identifier == "skl_123"
+            assert name is None
+            assert description == "Updated guidance."
+            assert instructions is None
+            assert lock_version == 2
+            return {"id": identifier, "description": description, "lock_version": 3}
+
+    monkeypatch.setattr("cli.get_client", StubClient)
+
+    edit(
+        "skl_123",
+        name=None,
+        description="Updated guidance.",
+        instructions=None,
+        instructions_file=None,
+        lock_version=2,
+    )
+
+    assert json.loads(capsys.readouterr().out) == {
+        "data": {
+            "id": "skl_123",
+            "description": "Updated guidance.",
+            "lock_version": 3,
+        }
+    }

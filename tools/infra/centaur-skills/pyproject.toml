@@ -1,6 +1,6 @@
 [project]
 name = "centaur-skills"
-description = "Discover and read Console-authored skills"
+description = "Discover, read, create, and edit Console-authored skills"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
