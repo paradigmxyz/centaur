@@ -203,7 +203,7 @@ def test_drive_export_revision_command_writes_selected_revision(tmp_path, monkey
     output_path = tmp_path / "Quarterly Model-revision-rev-42.xlsx"
     assert result.exit_code == 0
     assert output_path.read_bytes() == b"historical workbook"
-    assert "Quarterly Model-revision-rev-42.xlsx" in result.output
+    assert "Exported revision rev-42" in result.output
     assert calls == [
         {"file_id": "sheet-123", "revision_id": "rev-42", "export_format": "xlsx"}
     ]
