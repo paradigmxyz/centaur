@@ -57,8 +57,6 @@ secrets = [
         "gmail.googleapis.com",
         "calendar.googleapis.com",
         "www.googleapis.com",
-        "*.googleusercontent.com",
-        "*.usercontent.google.com",
         "docs.googleapis.com",
         "sheets.googleapis.com",
         "slides.googleapis.com",
