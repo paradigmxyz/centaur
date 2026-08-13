@@ -1252,7 +1252,7 @@ if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.usern
 host = parsed.hostname
 if parsed.port:
     host += ":" + str(parsed.port)
-api = parsed.scheme + "://" + host + "/api/v4"
+api = parsed.scheme + "://" + host + "/api/v3"
 token = open(os.environ["CENTAUR_GIT_TOKEN_FILE"], "r", encoding="utf-8").read().strip()
 if not token:
     raise RuntimeError("GitLab token is unavailable")
@@ -1584,6 +1584,8 @@ mod tests {
         assert!(MERGE_REQUEST_SCRIPT.contains("find_existing()"));
         assert!(MERGE_REQUEST_SCRIPT.contains("centaur-changeset:"));
         assert!(MERGE_REQUEST_SCRIPT.contains("repository/branches"));
+        assert!(MERGE_REQUEST_SCRIPT.contains("/api/v3"));
+        assert!(!MERGE_REQUEST_SCRIPT.contains("/api/v4"));
     }
 
     fn git(path: &Path, args: &[&str]) -> String {

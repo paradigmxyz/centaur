@@ -165,10 +165,9 @@ impl GitLabCatalog {
                 "search must be at most {MAX_SEARCH_CHARS} characters"
             )));
         }
-        let url = self.api_url("api/v4/projects")?;
+        let url = self.api_url("api/v3/projects")?;
         let mut request = self.client.get(url).query(&[
             ("membership", "true".to_owned()),
-            ("simple", "true".to_owned()),
             ("order_by", "last_activity_at".to_owned()),
             ("sort", "desc".to_owned()),
             ("per_page", self.page_size.to_string()),
@@ -200,7 +199,7 @@ impl GitLabCatalog {
         let mut repositories = Vec::with_capacity(repository_ids.len());
         for repository_id in repository_ids {
             let project_id = repository_id.project_id();
-            let url = self.api_url(&format!("api/v4/projects/{project_id}"))?;
+            let url = self.api_url(&format!("api/v3/projects/{project_id}"))?;
             let response = self.send_allowing_not_found(url).await?;
             let Some(response) = response else {
                 return Err(GitLabCatalogError::Invalid(format!(
@@ -541,7 +540,7 @@ mod gitlab_catalog_tests {
         Query(query): Query<HashMap<String, String>>,
         headers: HeaderMap,
     ) -> Response {
-        state.record("/api/v4/projects".to_owned(), query.clone(), &headers);
+        state.record("/api/v3/projects".to_owned(), query.clone(), &headers);
         let page = query.get("page").map(String::as_str).unwrap_or("1");
         let projects = if page == "2" {
             json!([project(&state.origin, 2, false, Some("main"))])
@@ -563,7 +562,7 @@ mod gitlab_catalog_tests {
         headers: HeaderMap,
     ) -> Response {
         state.record(
-            format!("/api/v4/projects/{project_id}"),
+            format!("/api/v3/projects/{project_id}"),
             HashMap::new(),
             &headers,
         );
@@ -623,8 +622,8 @@ mod gitlab_catalog_tests {
             requests: requests.clone(),
         };
         let app = Router::new()
-            .route("/api/v4/projects", get(list_projects))
-            .route("/api/v4/projects/{project_id}", get(get_project))
+            .route("/api/v3/projects", get(list_projects))
+            .route("/api/v3/projects/{project_id}", get(get_project))
             .with_state(state);
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (origin, requests)
@@ -633,7 +632,7 @@ mod gitlab_catalog_tests {
     async fn spawn_status_gitlab(status: StatusCode) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
-        let app = Router::new().route("/api/v4/projects", get(move || async move { status }));
+        let app = Router::new().route("/api/v3/projects", get(move || async move { status }));
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         origin
     }
@@ -693,9 +692,9 @@ mod gitlab_catalog_tests {
         assert!(second.next_cursor.is_none());
 
         let requests = requests.lock().unwrap();
-        assert_eq!(requests[0].path, "/api/v4/projects");
+        assert_eq!(requests[0].path, "/api/v3/projects");
         assert_eq!(requests[0].query.get("membership").unwrap(), "true");
-        assert_eq!(requests[0].query.get("simple").unwrap(), "true");
+        assert!(!requests[0].query.contains_key("simple"));
         assert_eq!(requests[0].query.get("search").unwrap(), "platform");
         assert_eq!(requests[0].query.get("per_page").unwrap(), "25");
         assert_eq!(requests[1].query.get("page").unwrap(), "2");

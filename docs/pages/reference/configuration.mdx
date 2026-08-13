@@ -148,7 +148,7 @@ them, and stores the working trees on a task-scoped PVC.
 | `gitlabPublishing.branchPrefix` | Helm value; currently `centaur`. | Prefix for deterministic publication branches. |
 
 The GitLab credential must be a Personal, Project, or Group Access Token that
-GitLab accepts in the `PRIVATE-TOKEN` header for `GET /api/v4/projects`, and it
+GitLab accepts in the `PRIVATE-TOKEN` header for `GET /api/v3/projects`, and it
 must be able to clone every intended project. A deploy token or credential that
 works only with Git clone cannot drive the repository catalog. When publication
 is enabled the Access Token also needs the minimum project API/repository rights
