@@ -1174,8 +1174,8 @@ system-managed `infra` role.
 | `slack_channel_id` | optional | First-class Slack conversation identity. |
 | `slack_team_id` | optional | First-class Slack team or enterprise scope. |
 | `slack_email` | optional | First-class Slack email identity. |
-| `console_user_id` | optional | Database ID of the associated console user for a `console_user` principal. |
-| `console_user_email` | optional | Email identity for a `console_user` principal. |
+| `console_user_id` | optional | Database ID of the associated Console user. A `slack_dm` principal is linked automatically when an explicitly supplied `slack_email` matches a Console user's email. |
+| `console_user_email` | optional | Email identity of the associated Console user. |
 | `labels`     | optional    | Extensible metadata. Identity is read from the first-class fields, not from labels with matching names. |
 | `slack_channel_permissions` | optional | Direct permissions owned by the principal. Full replacement when present on create or update. |
 | `effective_slack_channel_permissions` | response only | Direct permissions merged with permissions inherited from assigned roles. |
@@ -1447,7 +1447,7 @@ Console stores and validates `name`, `description`, and Markdown `instructions` 
 
 ### Sandbox Operations
 
-These endpoints use the existing sandbox entitlement JWT injected by `iron-proxy`. Console-user principals can see their own private skills and every public skill. Other principal kinds can see public skills only. Mutations require an active Console user linked to the sandbox principal and can change only that user's skills.
+These endpoints use the existing sandbox entitlement JWT injected by `iron-proxy`. Principals linked to an active Console user can see that user's private skills and every public skill. Other principals can see public skills only. Mutations require an active Console user linked to the sandbox principal and can change only that user's skills.
 
 | Method | Path | Notes |
 | ------ | ---- | ----- |

@@ -334,6 +334,82 @@ module Api
         end
       end
 
+      test "POST links a Slack DM principal to the Console user with the same email" do
+        user = users(:member_user)
+
+        post api_v1_principals_url,
+             params: {
+               data: {
+                 foreign_id: "linked-slack-dm",
+                 kind: "slack_dm",
+                 slack_user_id: "U0123456789",
+                 slack_team_id: "T0123456789",
+                 slack_email: user.email.upcase
+               }
+             }.to_json,
+             headers: auth_headers
+
+        assert_response :created
+        principal = Principal.find_by!(foreign_id: "linked-slack-dm")
+        assert_equal user, principal.console_user
+        assert_equal user.email, principal.console_user_email
+      end
+
+      test "PUT links an existing Slack DM when the trusted email is supplied again" do
+        user = users(:member_user)
+        principal = Principal.create!(
+          foreign_id: "existing-unlinked-slack-dm",
+          kind: "slack_dm",
+          slack_email: user.email,
+          created_by: users(:acme_admin)
+        )
+
+        put api_v1_principal_url(id: principal.oid),
+            params: { data: { slack_email: user.email } }.to_json,
+            headers: auth_headers
+
+        assert_response :ok
+        assert_equal user, principal.reload.console_user
+        assert_equal user.email, principal.console_user_email
+      end
+
+      test "PUT does not link from a stored Slack email when the request omits it" do
+        user = users(:member_user)
+        principal = Principal.create!(
+          foreign_id: "untrusted-stored-slack-email",
+          kind: "slack_dm",
+          slack_email: user.email,
+          created_by: users(:acme_admin)
+        )
+
+        put api_v1_principal_url(id: principal.oid),
+            params: { data: { name: "External Slack DM" } }.to_json,
+            headers: auth_headers
+
+        assert_response :ok
+        assert_nil principal.reload.console_user
+        assert_nil principal.console_user_email
+      end
+
+      test "POST does not link a non-DM principal by Slack email" do
+        user = users(:member_user)
+
+        post api_v1_principals_url,
+             params: {
+               data: {
+                 foreign_id: "channel-with-user-email",
+                 kind: "slack_channel",
+                 slack_email: user.email
+               }
+             }.to_json,
+             headers: auth_headers
+
+        assert_response :created
+        principal = Principal.find_by!(foreign_id: "channel-with-user-email")
+        assert_nil principal.console_user
+        assert_nil principal.console_user_email
+      end
+
       test "POST keeps identity-named labels separate from first-class fields" do
         user = users(:acme_admin)
 

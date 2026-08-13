@@ -143,6 +143,21 @@ class Principal < ApplicationRecord
     end
   end
 
+  # Slackbot only sends a DM partner's email when that user belongs to the
+  # bot's home workspace. Treat an explicitly supplied email as a trusted
+  # bridge to the corresponding Console account. This is called from the API
+  # upsert boundary rather than a model callback so an omitted email never
+  # activates a stale value already stored on the principal.
+  def link_console_user_by_slack_email
+    return unless kind == "slack_dm" && slack_email.present?
+
+    user = User.find_by(email: slack_email.to_s.strip.downcase)
+    return unless user
+
+    self.console_user = user
+    self.console_user_email = user.email
+  end
+
   def labels_with_sandbox_capabilities
     labels.to_h.merge(
       SANDBOX_REPO_CACHE_LABEL => sandbox_repo_cache
