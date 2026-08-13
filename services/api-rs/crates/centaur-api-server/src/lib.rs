@@ -1,4 +1,5 @@
 mod api_jwt;
+mod auth;
 pub mod client;
 mod error;
 mod mcp;
@@ -7,6 +8,7 @@ mod slack_proxy;
 mod tool_discovery;
 pub mod types;
 
+pub use auth::{ApiAuthConfig, ApiAuthConfigError};
 pub use centaur_session_runtime::{SandboxRuntime, SessionRuntime};
 pub use error::ApiError;
 pub use routes::{
@@ -42,9 +44,53 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        AppState, build_router_with_app_state,
+        ApiAuthConfig, AppState, build_router_with_app_state,
         build_router_with_runtime as build_router_with_iron_control,
     };
+
+    fn test_auth() -> ApiAuthConfig {
+        ApiAuthConfig::testing("test-secret")
+    }
+
+    fn test_auth_with_slack() -> ApiAuthConfig {
+        ApiAuthConfig::testing_with_slack_ingress("test-slackbot-key", "test-secret")
+    }
+
+    fn console_token() -> String {
+        encode(
+            &Header::new(Algorithm::HS256),
+            &json!({
+                "iss": "centaur-console",
+                "sub": "centaur-console",
+                "aud": "centaur-api",
+                "iat": 1_700_000_000i64,
+                "exp": 4_102_444_800i64,
+                "token_use": "console_service",
+            }),
+            &EncodingKey::from_secret(b"test-secret"),
+        )
+        .unwrap()
+    }
+
+    fn principal_token(subject: &str) -> String {
+        encode(
+            &Header::new(Algorithm::HS256),
+            &json!({
+                "iss": "centaur-console",
+                "sub": subject,
+                "aud": "centaur-api",
+                "iat": 1_700_000_000i64,
+                "exp": 4_102_444_800i64,
+                "slack": {
+                    "upload_channels": [],
+                    "download_channels": [],
+                    "history_channels": []
+                }
+            }),
+            &EncodingKey::from_secret(b"test-secret"),
+        )
+        .unwrap()
+    }
 
     #[derive(Clone, Copy)]
     struct TestSessionPrincipalRegistrar;
@@ -93,7 +139,12 @@ mod tests {
         store: PgSessionStore,
         sandbox_runtime: SandboxRuntime,
     ) -> axum::Router {
-        build_router_with_iron_control(store, sandbox_runtime, TestSessionPrincipalRegistrar)
+        build_router_with_iron_control(
+            store,
+            sandbox_runtime,
+            TestSessionPrincipalRegistrar,
+            test_auth(),
+        )
     }
 
     #[tokio::test]
@@ -154,7 +205,7 @@ mod tests {
 
     #[tokio::test]
     async fn healthz_is_available_before_runtime_is_ready() {
-        let app = build_router_with_app_state(AppState::unready());
+        let app = build_router_with_app_state(AppState::unready(test_auth()));
 
         let response = app
             .oneshot(
@@ -169,8 +220,276 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn protected_routes_reject_anonymous_requests_before_handlers() {
+        for request in [
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/session/not-a-valid-thread-key")
+                .body(Body::from("not-json"))
+                .unwrap(),
+            Request::builder()
+                .uri("/api/slack/channels")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/sandboxes/drain")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .uri("/api/workflows/runs")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .uri("/api/admin/slack/archive-imports")
+                .body(Body::empty())
+                .unwrap(),
+        ] {
+            let response = build_router_with_app_state(AppState::unready(test_auth()))
+                .oneshot(request)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(
+                response.headers().get(header::WWW_AUTHENTICATE),
+                Some(&"Bearer".parse().unwrap())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn console_service_jwt_passes_every_capability_route_family() {
+        for request in [
+            Request::builder()
+                .uri("/api/session/slack%3AC123%3A123.456")
+                .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/session/slack%3AC123%3A123.456/interrupt")
+                .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/sandboxes/drain")
+                .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .uri("/api/workflows/runs")
+                .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/workflows/events")
+                .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"event_name":"test.event","payload":{}}"#))
+                .unwrap(),
+            Request::builder()
+                .uri("/api/admin/slack/archive-imports")
+                .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .uri("/api/admin/slack/dm-sync/checkpoints")
+                .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .uri("/api/admin/google/docs-sync/checkpoint")
+                .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .uri("/api/admin/granola/sync/checkpoint")
+                .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
+                .body(Body::empty())
+                .unwrap(),
+        ] {
+            let response = build_router_with_app_state(AppState::unready(test_auth()))
+                .oneshot(request)
+                .await
+                .unwrap();
+            assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_ne!(response.status(), StatusCode::FORBIDDEN);
+        }
+
+        let slack_proxy = build_router_with_app_state(AppState::unready(test_auth()))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/slack/channels")
+                    .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(slack_proxy.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn public_and_protocol_routes_are_outside_the_general_auth_gate() {
+        for uri in [
+            "/healthz",
+            "/readyz",
+            "/metrics",
+            "/.well-known/oauth-protected-resource",
+            "/.well-known/oauth-protected-resource/mcp",
+        ] {
+            let response = build_router_with_app_state(AppState::unready(test_auth()))
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_ne!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+        }
+
+        let response = build_router_with_app_state(AppState::unready(test_auth()))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webhooks/example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn ingress_key_is_platform_scoped_and_capability_limited() {
+        let authorized = format!("Bearer {}", "test-slackbot-key");
+        for (request, expected) in [
+            (
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/session/slack%3AC123%3A123.456")
+                    .header(header::AUTHORIZATION, &authorized)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"harness_type":"codex"}"#))
+                    .unwrap(),
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/session/discord%3A123%3A456")
+                    .header(header::AUTHORIZATION, &authorized)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"harness_type":"codex"}"#))
+                    .unwrap(),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/sandboxes/drain")
+                    .header(header::AUTHORIZATION, &authorized)
+                    .body(Body::empty())
+                    .unwrap(),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Request::builder()
+                    .uri("/api/workflows/runs")
+                    .header(header::AUTHORIZATION, &authorized)
+                    .body(Body::empty())
+                    .unwrap(),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Request::builder()
+                    .uri("/api/slack/channels")
+                    .header(header::AUTHORIZATION, &authorized)
+                    .body(Body::empty())
+                    .unwrap(),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/workflows/events")
+                    .header(header::AUTHORIZATION, &authorized)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"event_name":"test.event","payload":{}}"#))
+                    .unwrap(),
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+        ] {
+            let response = build_router_with_app_state(AppState::unready(test_auth_with_slack()))
+                .oneshot(request)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn principal_jwt_is_read_only_and_archive_exception_is_subject_scoped() {
+        let principal = principal_token("prn_sandbox");
+        let write_response = build_router_with_app_state(AppState::unready(test_auth()))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/session/slack%3AC123%3A123.456")
+                    .header(header::AUTHORIZATION, format!("Bearer {principal}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"harness_type":"codex"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(write_response.status(), StatusCode::FORBIDDEN);
+
+        let pool =
+            PgPool::connect_lazy("postgres://postgres:postgres@localhost/centaur_test").unwrap();
+        let state = AppState::unready(test_auth());
+        state.mark_ready_with_workflow_host(
+            centaur_session_runtime::SessionRuntime::new(
+                PgSessionStore::new(pool),
+                SandboxRuntime::backend(Arc::new(TestBackend::default()), SandboxSpec::new("test")),
+                TestSessionPrincipalRegistrar,
+            ),
+            None,
+            None,
+            "prn_workflow_host".to_owned(),
+        );
+
+        let other_response = build_router_with_app_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/admin/slack/archive-imports/import-1/download-url")
+                    .header(header::AUTHORIZATION, format!("Bearer {principal}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(other_response.status(), StatusCode::FORBIDDEN);
+
+        let workflow_host = principal_token("prn_workflow_host");
+        let host_response = build_router_with_app_state(state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/admin/slack/archive-imports/import-1/download-url")
+                    .header(header::AUTHORIZATION, format!("Bearer {workflow_host}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(host_response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn healthz_decodes_slack_client_bearer_jwt_when_present() {
-        let app = build_router_with_app_state(AppState::unready());
+        let app = build_router_with_app_state(AppState::unready(test_auth()));
         let token = encode(
             &Header::new(Algorithm::HS256),
             &json!({
@@ -228,7 +547,7 @@ mod tests {
 
     #[tokio::test]
     async fn readyz_reports_starting_until_runtime_is_ready() {
-        let state = AppState::unready();
+        let state = AppState::unready(test_auth());
         let app = build_router_with_app_state(state.clone());
 
         let response = app
@@ -269,7 +588,7 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_routes_report_unavailable_until_runtime_is_ready() {
-        for request in [
+        for mut request in [
             Request::builder()
                 .method(Method::GET)
                 .uri("/api/session/slack%3AC123%3A123.456")
@@ -341,7 +660,11 @@ mod tests {
                 .body(Body::empty())
                 .unwrap(),
         ] {
-            let app = build_router_with_app_state(AppState::unready());
+            request.headers_mut().insert(
+                header::AUTHORIZATION,
+                format!("Bearer {}", console_token()).parse().unwrap(),
+            );
+            let app = build_router_with_app_state(AppState::unready(test_auth()));
             let response = app.oneshot(request).await.unwrap();
             assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         }
@@ -349,7 +672,7 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_requires_bearer_before_runtime_is_ready() {
-        let app = build_router_with_app_state(AppState::unready());
+        let app = build_router_with_app_state(AppState::unready(test_auth()));
 
         let response = app
             .oneshot(
@@ -392,6 +715,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/session/slack%3AC123%3A123.456/messages")
+                    .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(header::CONTENT_LENGTH, (256 * 1024 * 1024 + 1).to_string())
                     .body(Body::from(r#"{"messages":"not-an-array"}"#))
@@ -418,6 +742,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/session/slack%3AC123%3A123.456/execute")
+                    .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(header::CONTENT_LENGTH, (256 * 1024 * 1024 + 1).to_string())
                     .body(Body::from(r#"{"input_lines":"not-an-array"}"#))
@@ -443,6 +768,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/session/slack%3AC123%3A123.456")
+                    .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -473,6 +799,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/session/discord%3A111%3A222%3A333")
+                    .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -504,6 +831,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/session/linear%3AISSUE%3Ac%3ACMT%3As%3ASESS")
+                    .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -535,6 +863,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/session/github%3A0xSplits%2Fcentaur%3A704%3Arc%3A99")
+                    .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -569,6 +898,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/session/cli%3Atest")
+                    .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                     .body(Body::empty())
                     .unwrap(),
             )

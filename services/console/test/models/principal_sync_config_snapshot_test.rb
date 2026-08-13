@@ -186,6 +186,29 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     end
   end
 
+  test "config_for adds api server JWT without Slack channel permissions" do
+    with_env(
+      "CENTAUR_JWT_SIGNING_SECRET" => "test-secret",
+      "CENTAUR_API_URL" => "http://api.internal:8080",
+      "CENTAUR_API_SERVER_PROXY_HOSTS" => nil
+    ) do
+      principal = principals(:acme_channel)
+
+      config = PrincipalSyncConfigSnapshot.config_for(principal)
+      entry = config.fetch("secrets").find do |secret|
+        secret.dig("inject", "header") == "Authorization" &&
+          secret.dig("source", "type") == "control_plane"
+      end
+
+      refute_nil entry
+      claims = jwt_payload(entry.dig("source", "value"))
+      assert_equal principal.oid, claims.fetch("sub")
+      assert_empty claims.dig("slack", "upload_channels")
+      assert_empty claims.dig("slack", "download_channels")
+      assert_empty claims.dig("slack", "history_channels")
+    end
+  end
+
   test "config_for omits api server JWT when sandbox api access is disabled" do
     with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
       principal = principals(:acme_channel)
@@ -517,11 +540,6 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
       "CENTAUR_JWT_SIGNING_SECRET" => "test-secret",
       "CENTAUR_API_URL" => "http://api.internal:8080"
     ) do
-      SlackChannelPermission.create!(
-        principal: @principal,
-        channel_id: "C0123456789",
-        upload_enabled: true
-      )
       boundary = 1_700_001_000 + ApiServer::Jwt.rotation_offset(@principal)
       current_time = Time.zone.at(boundary + 60)
       previous_window_time = Time.zone.at(boundary - 60)
@@ -701,7 +719,11 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
       api_server_secrets = removed.config.fetch("secrets").select do |secret|
         secret.dig("inject", "header") == "Authorization"
       end
-      assert_empty api_server_secrets
+      assert_equal 1, api_server_secrets.length
+      claims = jwt_payload(api_server_secrets.first.dig("source", "value"))
+      assert_empty claims.dig("slack", "upload_channels")
+      assert_empty claims.dig("slack", "download_channels")
+      assert_empty claims.dig("slack", "history_channels")
     end
   end
 

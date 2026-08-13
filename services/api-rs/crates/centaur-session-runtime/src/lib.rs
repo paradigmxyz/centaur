@@ -869,6 +869,11 @@ impl SessionRuntime {
         Ok(self.store.get_session_title(thread_key).await?)
     }
 
+    /// Load the durable session for API resource authorization.
+    pub async fn session(&self, thread_key: &ThreadKey) -> Result<Session, SessionRuntimeError> {
+        Ok(self.store.get_session(thread_key).await?)
+    }
+
     /// Returns the harness already persisted for a thread, if the session
     /// exists. API policy uses this to keep rollout assignments sticky across
     /// configuration changes without exposing the session store itself.

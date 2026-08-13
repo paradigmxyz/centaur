@@ -170,6 +170,7 @@ kubectl create secret generic centaur-infra-env \
   --from-literal=OP_VAULT=... \
   --from-literal=SLACK_BOT_TOKEN=... \
   --from-literal=SLACK_SIGNING_SECRET=... \
+  --from-literal=CENTAUR_JWT_SIGNING_SECRET=... \
   --from-literal=SLACKBOT_API_KEY=...
 ```
 
@@ -223,8 +224,11 @@ Expected paths include:
 You can also inspect the api-rs session context for a thread:
 
 ```bash
+CENTAUR_API_TOKEN=$(kubectl exec -n centaur-system deploy/centaur-centaur-console -- \
+  bin/rails runner 'print ApiServer::Jwt.encode_for_console_service')
 THREAD_PATH=$(jq -rn --arg v "$THREAD_KEY" '$v|@uri')
-curl -s "$CENTAUR_API_URL/api/session/${THREAD_PATH}" | jq
+curl -s "$CENTAUR_API_URL/api/session/${THREAD_PATH}" \
+  -H "Authorization: Bearer $CENTAUR_API_TOKEN" | jq
 ```
 
 ## What to change first

@@ -614,10 +614,7 @@ function ensureTrailingSlash(value: string): string {
 }
 
 function apiHeaders(options: LinearbotOptions, jsonBody = true): HeadersInit {
-  const apiKey =
-    options.apiKey ??
-    process.env.LINEARBOT_API_KEY ??
-    process.env.CENTAUR_API_KEY;
+  const apiKey = options.apiKey ?? process.env.LINEARBOT_API_KEY;
   return {
     ...(jsonBody ? { "content-type": "application/json" } : {}),
     ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),

@@ -4,6 +4,7 @@ module ApiServer
     DEFAULT_ISSUER = "centaur-console".freeze
     DEFAULT_WINDOW_SECONDS = 15.minutes.to_i
     DEFAULT_TTL_SECONDS = 1.hour.to_i
+    CONSOLE_SERVICE_SUBJECT = "centaur-console".freeze
 
     module_function
 
@@ -12,7 +13,6 @@ module ApiServer
       upload_channels = channels.fetch(:upload)
       download_channels = channels.fetch(:download)
       history_channels = channels.fetch(:history)
-      return nil if upload_channels.empty? && download_channels.empty? && history_channels.empty?
 
       CentaurJwt::WindowedToken.encode(
         subject_oid: principal.oid,
@@ -28,6 +28,21 @@ module ApiServer
             "download_channels" => download_channels,
             "history_channels" => history_channels
           }
+        }
+      )
+    end
+
+    def encode_for_console_service(now: Time.current)
+      CentaurJwt::WindowedToken.encode(
+        subject_oid: CONSOLE_SERVICE_SUBJECT,
+        audience: audience,
+        issuer: issuer,
+        window_seconds: DEFAULT_WINDOW_SECONDS,
+        ttl_seconds: DEFAULT_TTL_SECONDS,
+        now: now,
+        claims: {
+          "sub" => CONSOLE_SERVICE_SUBJECT,
+          "token_use" => "console_service"
         }
       )
     end

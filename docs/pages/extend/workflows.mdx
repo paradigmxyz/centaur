@@ -106,10 +106,19 @@ These primitives compose into larger automations:
 
 ## Run a workflow
 
+Direct administrative API calls need a short-lived Console service token. Mint
+one from the running Console instead of storing a separate static key:
+
+```bash
+CENTAUR_API_TOKEN=$(kubectl exec -n centaur-system deploy/centaur-centaur-console -- \
+  bin/rails runner 'print ApiServer::Jwt.encode_for_console_service')
+```
+
 Create a run through the API:
 
 ```bash
 curl -s "$CENTAUR_API_URL/api/workflows/runs" \
+  -H "Authorization: Bearer $CENTAUR_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "workflow_name": "nightly_report",
@@ -121,14 +130,16 @@ curl -s "$CENTAUR_API_URL/api/workflows/runs" \
 Inspect it:
 
 ```bash
-curl -s "$CENTAUR_API_URL/api/workflows/runs/$RUN_ID" | jq
+curl -s "$CENTAUR_API_URL/api/workflows/runs/$RUN_ID" \
+  -H "Authorization: Bearer $CENTAUR_API_TOKEN" | jq
 ```
 
 List recent runs, optionally filtering by exact workflow name. The default
 limit is 50 and the maximum is 1000:
 
 ```bash
-curl -s "$CENTAUR_API_URL/api/workflows/runs?workflow_name=nightly_report&limit=1000" | jq
+curl -s "$CENTAUR_API_URL/api/workflows/runs?workflow_name=nightly_report&limit=1000" \
+  -H "Authorization: Bearer $CENTAUR_API_TOKEN" | jq
 ```
 
 ## Schedule a workflow

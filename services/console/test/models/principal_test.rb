@@ -404,12 +404,15 @@ class PrincipalTest < ActiveSupport::TestCase
     end
   end
 
-  test "api server JWT does not infer permissions from Slack channel identity" do
+  test "api server JWT does not infer Slack permissions from channel identity" do
     with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
       principal = principals(:acme_channel)
       principal.update!(slack_channel_id: "C0123456789")
 
-      assert_nil ApiServer::Jwt.encode_for_principal(principal)
+      claims = jwt_payload(ApiServer::Jwt.encode_for_principal(principal))
+      assert_empty claims.dig("slack", "upload_channels")
+      assert_empty claims.dig("slack", "download_channels")
+      assert_empty claims.dig("slack", "history_channels")
     end
   end
 
@@ -432,7 +435,10 @@ class PrincipalTest < ActiveSupport::TestCase
       SlackChannelPermission.replace_for!(principal, [])
 
       assert_empty principal.slack_channel_permissions.reload
-      assert_nil ApiServer::Jwt.encode_for_principal(principal)
+      claims = jwt_payload(ApiServer::Jwt.encode_for_principal(principal))
+      assert_empty claims.dig("slack", "upload_channels")
+      assert_empty claims.dig("slack", "download_channels")
+      assert_empty claims.dig("slack", "history_channels")
     end
   end
 

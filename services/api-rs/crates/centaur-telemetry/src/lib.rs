@@ -55,6 +55,7 @@ pub const FIELD_THREAD_KEY: &str = "thread_key";
 pub const HTTP_REQUESTS_TOTAL: &str = "http_server_requests_total";
 pub const HTTP_REQUEST_DURATION_SECONDS: &str = "http_server_request_duration_seconds";
 pub const HTTP_REQUESTS_IN_FLIGHT: &str = "http_server_requests_in_flight";
+pub const API_AUTHENTICATIONS_TOTAL: &str = "centaur_api_authentications_total";
 pub const SESSION_EXECUTIONS_TOTAL: &str = "centaur_session_executions_total";
 pub const SESSION_EXECUTION_DURATION_SECONDS: &str = "centaur_session_execution_duration_seconds";
 pub const SESSION_FIRST_TOKEN_LATENCY_SECONDS: &str = "centaur_session_first_token_latency_seconds";
@@ -308,6 +309,15 @@ pub fn record_http_request_finished(method: &str, route: &str, status: u16, dura
         "status_class" => http_status_class(status),
     )
     .record(duration.as_secs_f64());
+}
+
+pub fn record_api_authentication(caller_class: &'static str, outcome: &'static str) {
+    metrics::counter!(
+        API_AUTHENTICATIONS_TOTAL,
+        "caller_class" => caller_class,
+        "outcome" => outcome,
+    )
+    .increment(1);
 }
 
 pub fn record_session_execution_started(harness: &str) {
@@ -927,6 +937,10 @@ fn describe_metrics() {
         "Number of in-flight HTTP requests in the Rust API."
     );
     metrics::describe_counter!(
+        API_AUTHENTICATIONS_TOTAL,
+        "Protected API authentication decisions by bounded caller class and outcome."
+    );
+    metrics::describe_counter!(
         SESSION_EXECUTIONS_TOTAL,
         "Session execution lifecycle events by harness and status."
     );
@@ -1344,6 +1358,17 @@ mod tests {
             r#"http_server_request_duration_seconds_count{method="POST",route="/api/session/{thread_key}/execute_test",status_class="2xx"}"#
         ));
         assert!(metrics.contains("http_server_requests_in_flight 0"));
+    }
+
+    #[test]
+    fn prometheus_authentication_metrics_use_bounded_labels() {
+        prometheus_handle().unwrap();
+        record_api_authentication("principal", "forbidden");
+
+        let metrics = render_metrics().unwrap();
+        assert!(metrics.contains(
+            r#"centaur_api_authentications_total{caller_class="principal",outcome="forbidden"} 1"#
+        ));
     }
 
     #[test]
