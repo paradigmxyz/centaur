@@ -1471,10 +1471,17 @@ async def _recover_rendered_document(page, *, filename: str) -> dict:
         images = await _download_images(valid_urls)
 
     if len(images) != total:
-        return _err(
-            f"Failed to download all document pages ({len(images)}/{total}).",
-            page_count=total,
+        LOGGER.info(
+            "Downloaded %d/%d rendered slide images; using the viewport capture fallback",
+            len(images),
+            total,
         )
+        images = await _capture_visible_pages(page, total)
+        if len(images) != total:
+            return _err(
+                f"Failed to recover all document pages ({len(images)}/{total}).",
+                page_count=total,
+            )
 
     LOGGER.info("Assembling %d downloaded pages into a PDF", len(images))
     buffer = BytesIO()
@@ -1534,6 +1541,39 @@ async def _navigate_all_slides(page, total: int) -> None:
         if page_number == total or page_number % 10 == 0:
             LOGGER.info("Rendered page %d/%d", page_number, total)
     await asyncio.sleep(1)
+
+
+async def _capture_visible_pages(page, total: int) -> list[Image.Image]:
+    """Capture every page from the authenticated viewer when image URLs reject downloads.
+
+    Spreadsheet-style DocSend viewers can render pages successfully while their signed
+    image URLs return 403 outside the renderer. In that case, preserve exactly what the
+    authenticated browser can display by stepping through the viewer and capturing each
+    viewport as a PDF page.
+    """
+    LOGGER.info("Capturing all %d DocSend pages from the authenticated viewport", total)
+    for _ in range(total):
+        await page.keyboard.press("ArrowLeft")
+        await asyncio.sleep(0.1)
+    await asyncio.sleep(1)
+
+    images: list[Image.Image] = []
+    for page_number in range(1, total + 1):
+        try:
+            png = await page.screenshot(full_page=False)
+            source = Image.open(BytesIO(png))
+            rgb = Image.new("RGB", source.size, (255, 255, 255))
+            rgb.paste(source, mask=source.split()[3] if source.mode == "RGBA" else None)
+            source.close()
+            images.append(rgb)
+        except Exception as exc:
+            LOGGER.warning("Failed to capture DocSend page %d: %s", page_number, exc)
+            break
+        if page_number < total:
+            await page.keyboard.press("ArrowRight")
+            await asyncio.sleep(0.75)
+    LOGGER.info("Captured %d/%d DocSend pages from the viewport", len(images), total)
+    return images
 
 
 async def _extract_dom_image_urls(page) -> list[str]:

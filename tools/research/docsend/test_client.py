@@ -93,6 +93,76 @@ def test_recover_rendered_document_builds_a_pdf_from_visible_pages(monkeypatch) 
     ]
 
 
+def test_recover_rendered_document_captures_viewports_when_images_are_forbidden(
+    monkeypatch,
+) -> None:
+    calls: list[tuple[str, object]] = []
+
+    class FakeImage:
+        def save(self, buffer, file_format, *, save_all, append_images) -> None:
+            calls.append(("save", (file_format, save_all, len(append_images))))
+            buffer.write(b"spreadsheet-pdf")
+
+    async def slide_count(page) -> int:
+        return 2
+
+    async def navigate(page, total: int) -> None:
+        calls.append(("navigate", total))
+
+    async def extract(page) -> list[str]:
+        return []
+
+    async def fetch(page, total: int) -> list[str]:
+        return ["https://example.test/1", "https://example.test/2"]
+
+    async def download(urls: list[str]) -> list[FakeImage]:
+        calls.append(("download", urls))
+        return []
+
+    async def capture(page, total: int) -> list[FakeImage]:
+        calls.append(("capture", total))
+        return [FakeImage(), FakeImage()]
+
+    monkeypatch.setattr(_CLIENT, "_slide_count", slide_count)
+    monkeypatch.setattr(_CLIENT, "_navigate_all_slides", navigate)
+    monkeypatch.setattr(_CLIENT, "_extract_dom_image_urls", extract)
+    monkeypatch.setattr(_CLIENT, "_fetch_slide_urls", fetch)
+    monkeypatch.setattr(_CLIENT, "_download_images", download)
+    monkeypatch.setattr(_CLIENT, "_capture_visible_pages", capture)
+
+    result = asyncio.run(_CLIENT._recover_rendered_document(object(), filename="Model.pdf"))
+
+    assert result["status"] == "ok"
+    assert result["page_count"] == 2
+    assert base64.b64decode(result["data"]) == b"spreadsheet-pdf"
+    assert calls == [
+        ("navigate", 2),
+        ("download", ["https://example.test/1", "https://example.test/2"]),
+        ("capture", 2),
+        ("save", ("PDF", True, 1)),
+    ]
+
+
+def test_navigate_all_slides_visits_each_page(monkeypatch) -> None:
+    keys: list[str] = []
+
+    class Keyboard:
+        async def press(self, key: str) -> None:
+            keys.append(key)
+
+    class Page:
+        keyboard = Keyboard()
+
+    async def no_sleep(seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(_CLIENT.asyncio, "sleep", no_sleep)
+
+    asyncio.run(_CLIENT._navigate_all_slides(Page(), 3))
+
+    assert keys == ["ArrowLeft", "ArrowLeft", "ArrowLeft", "ArrowRight", "ArrowRight"]
+
+
 def test_fetch_space_item_recovers_a_document_when_download_is_disabled(monkeypatch) -> None:
     class DisabledDownloadButton:
         async def count(self) -> int:
