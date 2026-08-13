@@ -28,6 +28,11 @@ module = "client.py"
 # MCP backend: the Bearer token for mcp.granola.ai is injected by the proxy
 # from the console OAuth consent flow grant, not declared here.
 hosts = ["mcp.granola.ai"]
+# REST backend: the client sets `Authorization: Bearer <placeholder>` itself, so
+# GRANOLA_API_KEY is a replace-mode secret matched on the Authorization header.
+# Inject mode would only *add* a header the client never sends; here iron-proxy
+# must swap the placeholder in the header the client already emits, or the
+# upstream sees the placeholder and 401s.
 secrets = [
-    {type = "http", name = "GRANOLA_API_KEY", mode = "inject", inject_header = "Authorization", inject_formatter = "Bearer {{ .Value }}", hosts = ["public-api.granola.ai"]},
+    {type = "http", name = "GRANOLA_API_KEY", match_headers = ["Authorization"], hosts = ["public-api.granola.ai"]},
 ]

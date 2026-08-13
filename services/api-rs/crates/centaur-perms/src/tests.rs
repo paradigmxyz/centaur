@@ -473,6 +473,46 @@ fn translates_http_replace_to_static_input() {
 }
 
 #[test]
+fn granola_api_key_translates_to_authorization_replace_rule() {
+    // Regression for issue #1243: the granola REST client sets
+    // `Authorization: Bearer <placeholder>` itself, so GRANOLA_API_KEY must be a
+    // replace-mode secret whose placeholder iron-proxy swaps inside the header the
+    // client already sends — not inject-mode, which would add a second header and
+    // leave the placeholder in place (upstream 401). This asserts the exact
+    // declaration shipped in tools/productivity/granola/pyproject.toml.
+    let secrets = vec![
+        tools::parse_secret(
+            &entry(
+                r#"{type = "http", name = "GRANOLA_API_KEY", match_headers = ["Authorization"], hosts = ["public-api.granola.ai"]}"#,
+            ),
+            &[],
+        )
+        .unwrap(),
+    ];
+
+    // Parses as replace mode with the placeholder defaulting to the secret name —
+    // the same string the tool client emits as the Bearer token.
+    let ParsedSecret::Http(http) = &secrets[0] else {
+        panic!("expected http")
+    };
+    assert_eq!(http.mode, SecretMode::Replace);
+    assert_eq!(http.replacer, "GRANOLA_API_KEY");
+    assert_eq!(http.match_headers, vec!["Authorization".to_owned()]);
+
+    // Translates to a proxy rule that scans the Authorization header for that
+    // placeholder and swaps it — no inject config.
+    let out = translate::translate("tool-granola", &secrets, &SourcePolicy::env());
+    let SecretInput::Static(input) = &out.inputs[0] else {
+        panic!("expected static")
+    };
+    let replace = input.replace_config.as_ref().unwrap();
+    assert_eq!(replace.proxy_value, "GRANOLA_API_KEY");
+    assert_eq!(replace.match_headers, vec!["Authorization".to_owned()]);
+    assert!(input.inject_config.is_none());
+    assert_eq!(input.rules[0].host.as_deref(), Some("public-api.granola.ai"));
+}
+
+#[test]
 fn translates_gcp_auth_defaults_scopes_when_unset() {
     let secrets = vec![
         tools::parse_secret(
