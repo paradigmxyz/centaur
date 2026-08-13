@@ -1,8 +1,14 @@
 require "test_helper"
 
 class ApiServer::JwtTest < ActiveSupport::TestCase
-  test "console user token carries only the authenticated subject and server admin decision" do
+  test "console user token carries authenticated subject server admin decision and Feishu aliases" do
     user = users(:acme_admin)
+    user.user_identities.create!(
+      provider: "feishu",
+      subject: JSON.generate([ "tenant-a", "on-user" ]),
+      tenant_key: "tenant-a",
+      open_id: "ou-user"
+    )
 
     with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
       claims = jwt_payload(ApiServer::Jwt.encode_for_console_user(user, admin: true))
@@ -12,6 +18,7 @@ class ApiServer::JwtTest < ActiveSupport::TestCase
       assert_equal ApiServer::Jwt::DEFAULT_AUDIENCE, claims.fetch("aud")
       assert_equal ApiServer::Jwt::DEFAULT_ISSUER, claims.fetch("iss")
       assert_nil claims["slack"]
+      assert_equal [ "feishu:tenant-a:ou-user" ], claims.fetch("development_principal_ids")
     end
   end
 

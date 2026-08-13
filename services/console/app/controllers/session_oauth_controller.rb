@@ -30,6 +30,7 @@ class SessionOauthController < ApplicationController
   # Tests swap in an AuthorizationCodeClient built around an http double, mirroring
   # Oauth::FlowsController.
   class_attribute :exchange_client_factory, default: -> { Broker::AuthorizationCodeClient.new }
+  class_attribute :identity_http_factory, default: -> { }
 
   before_action :set_provider
 
@@ -65,8 +66,7 @@ class SessionOauthController < ApplicationController
       return redirect_to login_path, alert: "Sign in was canceled."
     end
 
-    result = exchange_code(params[:code], flow["code_verifier"])
-    identity = @provider.identity_from(result, client_id: ConsoleAuth.client_id(@key))
+    identity = exchange_identity(params[:code], flow["code_verifier"])
     sign_in_console_user(User.link_or_provision(provider: @key, identity: identity))
   rescue Broker::ExchangeError => e
     Rails.logger.error { "console login exchange failed (#{@key}): #{e.reason}" }
@@ -121,6 +121,25 @@ class SessionOauthController < ApplicationController
       # Login requests no offline access, so the IdP returns no refresh token.
       require_refresh_token: false
     )
+  end
+
+  def exchange_identity(code, code_verifier)
+    if @provider.respond_to?(:exchange_identity)
+      arguments = {
+        code: code.to_s,
+        client_id: ConsoleAuth.client_id(@key),
+        client_secret: ConsoleAuth.client_secret(@key),
+        redirect_uri: callback_redirect_uri,
+        code_verifier: code_verifier.to_s,
+        allowed_tenant_keys: ConsoleAuth.feishu_allowed_tenant_keys
+      }
+      http = identity_http_factory.call
+      arguments[:http] = http if http
+      return @provider.exchange_identity(**arguments)
+    end
+
+    result = exchange_code(code, code_verifier)
+    @provider.identity_from(result, client_id: ConsoleAuth.client_id(@key))
   end
 
   # The callback redirect URI registered with the IdP: "<public base>/auth/<provider>/callback".

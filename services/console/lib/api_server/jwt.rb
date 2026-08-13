@@ -33,6 +33,10 @@ module ApiServer
     end
 
     def encode_for_console_user(user, admin: false, now: Time.current)
+      development_principal_ids = user.user_identities.feishu.filter_map do |identity|
+        next if identity.tenant_key.blank? || identity.open_id.blank?
+        "feishu:#{identity.tenant_key}:#{identity.open_id}"
+      end.uniq.sort.first(16)
       CentaurJwt::WindowedToken.encode(
         subject_oid: user.oid,
         audience: audience,
@@ -42,7 +46,8 @@ module ApiServer
         now: now,
         claims: {
           "sub" => user.oid,
-          "centaur_admin" => admin == true
+          "centaur_admin" => admin == true,
+          "development_principal_ids" => development_principal_ids
         }
       )
     end

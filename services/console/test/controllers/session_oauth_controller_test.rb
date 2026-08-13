@@ -8,9 +8,12 @@ require "test_helper"
 class SessionOauthControllerTest < ActionDispatch::IntegrationTest
   GOOGLE_CLIENT_ID = "google-login-client-id".freeze
   SLACK_CLIENT_ID = "slack-login-client-id".freeze
+  FEISHU_CLIENT_ID = "cli_feishu_login".freeze
   ENV_KEYS = %w[
     CENTAUR_CONSOLE_GOOGLE_CLIENT_ID CENTAUR_CONSOLE_GOOGLE_CLIENT_SECRET
     CENTAUR_CONSOLE_SLACK_CLIENT_ID CENTAUR_CONSOLE_SLACK_CLIENT_SECRET
+    CENTAUR_CONSOLE_FEISHU_CLIENT_ID CENTAUR_CONSOLE_FEISHU_CLIENT_SECRET
+    CENTAUR_CONSOLE_FEISHU_ALLOWED_TENANT_KEYS
     CENTAUR_CONSOLE_BOOTSTRAP_ADMINS CENTAUR_CONSOLE_SSO_EMAIL_DOMAINS
   ].freeze
 
@@ -26,6 +29,7 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
     ENV_KEYS.each { |k| ENV.delete(k) }
     @prev_env.each { |k, v| ENV[k] = v }
     SessionOauthController.exchange_client_factory = -> { Broker::AuthorizationCodeClient.new }
+    SessionOauthController.identity_http_factory = -> { }
     @exchange_http_mocks.each(&:verify)
   end
 
@@ -72,6 +76,20 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
     assert_select "a[href=?]", auth_start_path(provider: "slack"), count: 0
   end
 
+  test "the login form offers China Feishu only when credentials and tenant allowlist are configured" do
+    ENV["CENTAUR_CONSOLE_FEISHU_CLIENT_ID"] = FEISHU_CLIENT_ID
+    ENV["CENTAUR_CONSOLE_FEISHU_CLIENT_SECRET"] = "feishu-login-secret"
+    get login_url
+    assert_select "a[href=?]", auth_start_path(provider: "feishu"), count: 0
+
+    configure_feishu
+
+    get login_url
+
+    assert_response :ok
+    assert_select "a[href=?]", auth_start_path(provider: "feishu"), text: /Continue with Feishu/
+  end
+
   # --- start ----------------------------------------------------------------
 
   test "start redirects to Google with login params and no offline access" do
@@ -93,6 +111,63 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
     get auth_start_url(provider: "slack") # no slack creds set
     assert_redirected_to login_path
     assert_equal "That sign-in method is not available.", flash[:alert]
+  end
+
+  test "Feishu start uses China authorization endpoint exact callback and PKCE" do
+    configure_feishu
+
+    get auth_start_url(provider: "feishu")
+
+    assert_response :redirect
+    uri = URI.parse(response.location)
+    assert_equal "accounts.feishu.cn", uri.host
+    assert_equal "/open-apis/authen/v1/authorize", uri.path
+    query = URI.decode_www_form(uri.query).to_h
+    assert_equal FEISHU_CLIENT_ID, query["client_id"]
+    assert_equal "http://www.example.com/auth/feishu/callback", query["redirect_uri"]
+    assert_equal "contact:user.employee:readonly", query["scope"]
+    assert_equal "S256", query["code_challenge_method"]
+    assert query["code_challenge"].present?
+  end
+
+  test "Feishu callback provisions non-admin identity without persisting tokens" do
+    configure_feishu
+    ENV["CENTAUR_CONSOLE_BOOTSTRAP_ADMINS"] = "feishu-user@corp.example"
+    http = stub_feishu_exchange
+    state = start_flow(provider: "feishu")
+
+    assert_difference -> { User.count }, 1 do
+      get auth_callback_url(provider: "feishu"), params: { code: "feishu-code", state: state }
+    end
+
+    assert_redirected_to console_threads_path
+    user = User.find_by!(email: "feishu-user@corp.example")
+    identity = user.user_identities.find_by!(provider: "feishu")
+    assert_not user.admin?
+    assert_equal JSON.generate([ "tenant-a", "on-user" ]), identity.subject
+    assert_equal "tenant-a", identity.tenant_key
+    assert_equal "ou-user", identity.open_id
+    refute_includes identity.attributes.values.compact.map(&:to_s), "AT-sensitive"
+    http.verify
+
+    assert_no_difference [ "User.count", "UserIdentity.count" ] do
+      get auth_callback_url(provider: "feishu"), params: { code: "feishu-code", state: state }
+    end
+    assert_redirected_to login_path
+  end
+
+  test "Feishu callback rejects a tenant outside the allowlist" do
+    configure_feishu
+    http = stub_feishu_exchange(tenant_key: "tenant-b")
+    state = start_flow(provider: "feishu")
+
+    assert_no_difference [ "User.count", "UserIdentity.count" ] do
+      get auth_callback_url(provider: "feishu"), params: { code: "feishu-code", state: state }
+    end
+
+    assert_redirected_to login_path
+    assert_equal "Sign in failed. Please try again.", flash[:alert]
+    http.verify
   end
 
   test "Slack HTTPS login uses client secret without PKCE and accepts a rotating token response" do
@@ -255,5 +330,56 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
     get auth_callback_url(provider: "google"), params: { code: "bad", state: state }
     assert_redirected_to login_path
     assert_nil session[:user_id]
+  end
+
+  private
+
+  def configure_feishu
+    ENV["CENTAUR_CONSOLE_FEISHU_CLIENT_ID"] = FEISHU_CLIENT_ID
+    ENV["CENTAUR_CONSOLE_FEISHU_CLIENT_SECRET"] = "feishu-login-secret"
+    ENV["CENTAUR_CONSOLE_FEISHU_ALLOWED_TENANT_KEYS"] = "tenant-a"
+  end
+
+  def stub_feishu_exchange(tenant_key: "tenant-a", enterprise_email: "feishu-user@corp.example")
+    http = Minitest::Mock.new
+    http.expect(
+      :call,
+      HttpClient::Response.new(
+        status: 200,
+        body: { code: 0, access_token: "AT-sensitive", expires_in: 7200 }.to_json,
+        headers: {}
+      )
+    ) do |method:, url:, body:, headers:, **|
+      payload = JSON.parse(body)
+      method == :post && url == Login::Providers::Feishu::TOKEN_ENDPOINT &&
+        headers["Content-Type"] == "application/json" &&
+        payload["code"] == "feishu-code" &&
+        payload["client_id"] == FEISHU_CLIENT_ID &&
+        payload["client_secret"] == "feishu-login-secret" &&
+        payload["redirect_uri"] == "http://www.example.com/auth/feishu/callback" &&
+        payload["code_verifier"].present?
+    end
+    http.expect(
+      :call,
+      HttpClient::Response.new(
+        status: 200,
+        body: {
+          code: 0,
+          data: {
+            tenant_key: tenant_key,
+            open_id: "ou-user",
+            union_id: "on-user",
+            enterprise_email: enterprise_email,
+            name: "Feishu User"
+          }
+        }.to_json,
+        headers: {}
+      )
+    ) do |method:, url:, headers:, **|
+      method == :get && url == Login::Providers::Feishu::USER_INFO_ENDPOINT &&
+        headers["Authorization"] == "Bearer AT-sensitive"
+    end
+    SessionOauthController.identity_http_factory = -> { HttpClient.new(http: http) }
+    http
   end
 end

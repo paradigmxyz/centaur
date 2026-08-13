@@ -7,10 +7,13 @@ class UserIdentity < ApplicationRecord
 
   belongs_to :user
 
-  PROVIDERS = %w[google slack].freeze
+  PROVIDERS = %w[google slack feishu].freeze
   SLACK_PROVIDER = "slack".freeze
+  FEISHU_PROVIDER = "feishu".freeze
+  FEISHU_ID_COMPONENT_FORMAT = /\A[^:\s]+\z/
 
   scope :slack, -> { where(provider: SLACK_PROVIDER) }
+  scope :feishu, -> { where(provider: FEISHU_PROVIDER) }
 
   # A Slack identity that arrives (or gains its team) after the user already
   # consented to OAuth credentials is the one ordering the Principal/
@@ -27,11 +30,23 @@ class UserIdentity < ApplicationRecord
 
   normalizes :email, with: ->(e) { e.to_s.strip.downcase.presence }
   normalizes :team_id, with: ->(id) { id.to_s.strip.presence }
+  normalizes :tenant_key, with: ->(key) { key.to_s.strip.presence }
+  normalizes :open_id, with: ->(id) { id.to_s.strip.presence }
 
   validates :provider, presence: true, inclusion: { in: PROVIDERS }
   validates :subject, presence: true, uniqueness: { scope: :provider }
+  validates :tenant_key, :open_id, presence: true, if: :feishu?
+  validates :tenant_key, absence: { message: "is reserved for Feishu identities" }, unless: :feishu?
+  validates :open_id, absence: { message: "is reserved for Feishu identities" }, unless: :feishu?
+  validates :open_id, uniqueness: { scope: %i[provider tenant_key] }, if: :feishu?
+  validates :tenant_key, :open_id,
+            length: { maximum: 255 },
+            format: { with: FEISHU_ID_COMPONENT_FORMAT, message: "contains unsupported characters" },
+            if: :feishu?
+  validate :feishu_subject_matches_tenant, if: :feishu?
 
   def slack? = provider == SLACK_PROVIDER
+  def feishu? = provider == FEISHU_PROVIDER
 
   # The single native Slack identity in ``identities``, as ``[subject,
   # team_id]``, or nil. Slack's OIDC id_token is the authenticated source of
@@ -53,6 +68,15 @@ class UserIdentity < ApplicationRecord
   end
 
   private
+
+  def feishu_subject_matches_tenant
+    encoded_tenant, union_id = JSON.parse(subject.to_s)
+    return if encoded_tenant == tenant_key && union_id.is_a?(String) && union_id.present?
+
+    errors.add(:subject, "must encode the Feishu tenant and union ID")
+  rescue JSON::ParserError, TypeError, ArgumentError
+    errors.add(:subject, "must encode the Feishu tenant and union ID")
+  end
 
   # Never let reconciliation abort the surrounding write: this hook runs inside
   # the SSO login's commit path, and a failure here must not break sign-in.

@@ -7,6 +7,8 @@
 #   CENTAUR_CONSOLE_<PROVIDER>_CLIENT_ID / _CLIENT_SECRET (ENV)
 #   credentials.console_auth.<provider>.client_id/secret  (fallback)
 # A provider is offered on the login page only when both are present.
+# Feishu additionally requires CENTAUR_CONSOLE_FEISHU_ALLOWED_TENANT_KEYS (or
+# credentials.console_auth.feishu.allowed_tenant_keys).
 #
 # SSO email domains are optional. When configured, every SSO login must use an
 # email address under one of these domains:
@@ -23,7 +25,7 @@
 module ConsoleAuth
   # The providers a Login::Providers strategy exists for. A provider must also be
   # `configured?` to actually appear on the login page.
-  SUPPORTED = %w[google slack].freeze
+  SUPPORTED = %w[google slack feishu].freeze
 
   module_function
 
@@ -33,7 +35,9 @@ module ConsoleAuth
   end
 
   def configured?(provider)
-    SUPPORTED.include?(provider.to_s) && client_id(provider).present? && client_secret(provider).present?
+    key = provider.to_s
+    SUPPORTED.include?(key) && client_id(key).present? && client_secret(key).present? &&
+      (key != UserIdentity::FEISHU_PROVIDER || feishu_allowed_tenant_keys.any?)
   end
 
   def client_id(provider) = setting(provider, "client_id")
@@ -67,6 +71,13 @@ module ConsoleAuth
     raw = ConsoleEnv["BOOTSTRAP_ADMINS"].presence || credentials_dig(:bootstrap_admins)
     list = raw.is_a?(Array) ? raw : raw.to_s.split(/[,\s]+/)
     list.map { |e| e.to_s.strip.downcase }.reject(&:empty?).uniq
+  end
+
+  def feishu_allowed_tenant_keys
+    raw = ConsoleEnv["FEISHU_ALLOWED_TENANT_KEYS"].presence ||
+      credentials_dig(:feishu, :allowed_tenant_keys)
+    list = raw.is_a?(Array) ? raw : raw.to_s.split(/[,\s]+/)
+    list.map { |key| key.to_s.strip }.reject(&:empty?).uniq
   end
 
   # ENV first (CENTAUR_CONSOLE_GOOGLE_CLIENT_ID), then credentials

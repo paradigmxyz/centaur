@@ -38,6 +38,32 @@ use crate::{
 pub struct DevelopmentPrincipal {
     pub principal_id: String,
     pub is_admin: bool,
+    pub principal_aliases: Vec<String>,
+}
+
+impl DevelopmentPrincipal {
+    fn ids(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.principal_id.as_str())
+            .chain(self.principal_aliases.iter().map(String::as_str))
+    }
+
+    fn from_console_claims(claims: DevelopmentJwtClaims) -> Result<Self, ApiError> {
+        if claims.development_principal_ids.len() > 16
+            || claims
+                .development_principal_ids
+                .iter()
+                .any(|principal_id| validate_feishu_principal_id(principal_id).is_err())
+        {
+            return Err(ApiError::Unauthorized(
+                "invalid development principal aliases".to_owned(),
+            ));
+        }
+        Ok(Self {
+            principal_id: claims.sub,
+            is_admin: claims.centaur_admin,
+            principal_aliases: claims.development_principal_ids,
+        })
+    }
 }
 
 pub trait DevelopmentAuthorizer: Send + Sync {
@@ -52,16 +78,15 @@ struct DevelopmentJwtClaims {
     sub: String,
     #[serde(default)]
     centaur_admin: bool,
+    #[serde(default)]
+    development_principal_ids: Vec<String>,
 }
 
 impl DevelopmentAuthorizer for ConsoleJwtDevelopmentAuthorizer {
     fn authorize(&self, headers: &HeaderMap) -> Result<DevelopmentPrincipal, ApiError> {
         let token = bearer_token(headers)?;
         let claims = verify_console_jwt::<DevelopmentJwtClaims>(token)?;
-        Ok(DevelopmentPrincipal {
-            principal_id: claims.sub,
-            is_admin: claims.centaur_admin,
-        })
+        DevelopmentPrincipal::from_console_claims(claims)
     }
 }
 
@@ -383,11 +408,16 @@ async fn approve_publication(
 ) -> Result<Json<centaur_session_core::development::DevelopmentPublishBatch>, ApiError> {
     let principal = state.development_authorizer().authorize(&headers)?;
     let Json(request) = development_json(request)?;
+    let changeset = get_changeset_for_principal(&state, &changeset_id, &principal).await?;
     let batch = state
         .runtime()?
         .approve_publication(&ApprovePublication {
             changeset_id,
-            approver_principal_id: principal.principal_id,
+            approver_principal_id: if principal.is_admin {
+                principal.principal_id
+            } else {
+                changeset.initiator_principal_id
+            },
             is_admin: principal.is_admin,
             idempotency_key: request.idempotency_key,
         })
@@ -403,11 +433,17 @@ async fn retry_publication(
 ) -> Result<Json<centaur_session_core::development::DevelopmentPublishBatch>, ApiError> {
     let principal = state.development_authorizer().authorize(&headers)?;
     let Json(request) = development_json(request)?;
+    let existing = get_publish_batch_for_principal(&state, &publish_batch_id, &principal).await?;
+    let changeset = get_changeset_for_principal(&state, &existing.changeset_id, &principal).await?;
     let batch = state
         .runtime()?
         .retry_failed_publication(&RetryPublication {
             publish_batch_id,
-            requested_by_principal_id: principal.principal_id,
+            requested_by_principal_id: if principal.is_admin {
+                principal.principal_id
+            } else {
+                changeset.initiator_principal_id
+            },
             is_admin: principal.is_admin,
             idempotency_key: request.idempotency_key,
         })
@@ -421,14 +457,7 @@ async fn get_publish_batch(
     headers: HeaderMap,
 ) -> Result<Json<centaur_session_core::development::DevelopmentPublishBatch>, ApiError> {
     let principal = state.development_authorizer().authorize(&headers)?;
-    let batch = state
-        .runtime()?
-        .get_publish_batch(
-            &publish_batch_id,
-            &principal.principal_id,
-            principal.is_admin,
-        )
-        .await?;
+    let batch = get_publish_batch_for_principal(&state, &publish_batch_id, &principal).await?;
     Ok(Json(batch))
 }
 
@@ -489,10 +518,7 @@ async fn get_changeset(
     headers: HeaderMap,
 ) -> Result<Json<centaur_session_core::development::DevelopmentChangeSet>, ApiError> {
     let principal = state.development_authorizer().authorize(&headers)?;
-    let changeset = state
-        .runtime()?
-        .get_changeset(&changeset_id, &principal.principal_id, principal.is_admin)
-        .await?;
+    let changeset = get_changeset_for_principal(&state, &changeset_id, &principal).await?;
     Ok(Json(changeset))
 }
 
@@ -502,12 +528,18 @@ async fn get_changeset_artifact(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let principal = state.development_authorizer().authorize(&headers)?;
+    let changeset = get_changeset_for_principal(&state, &changeset_id, &principal).await?;
+    let effective_principal_id = if principal.is_admin {
+        principal.principal_id.as_str()
+    } else {
+        changeset.initiator_principal_id.as_str()
+    };
     let content = state
         .runtime()?
         .get_changeset_artifact(
             &changeset_id,
             &artifact_ref,
-            &principal.principal_id,
+            effective_principal_id,
             principal.is_admin,
         )
         .await?;
@@ -730,6 +762,64 @@ fn development_json<T>(request: Result<Json<T>, JsonRejection>) -> Result<Json<T
     request.map_err(|_| ApiError::BadRequest("invalid development request body".to_owned()))
 }
 
+async fn get_changeset_for_principal(
+    state: &AppState,
+    changeset_id: &str,
+    principal: &DevelopmentPrincipal,
+) -> Result<centaur_session_core::development::DevelopmentChangeSet, ApiError> {
+    if principal.is_admin {
+        return Ok(state
+            .runtime()?
+            .get_changeset(changeset_id, &principal.principal_id, true)
+            .await?);
+    }
+    for principal_id in principal.ids() {
+        match state
+            .runtime()?
+            .get_changeset(changeset_id, principal_id, false)
+            .await
+        {
+            Ok(changeset) => return Ok(changeset),
+            Err(centaur_session_runtime::SessionRuntimeError::Store(
+                centaur_session_sqlx::SessionStoreError::DevelopmentForbidden { .. },
+            )) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(ApiError::Forbidden(
+        "changeset is not accessible to this principal".to_owned(),
+    ))
+}
+
+async fn get_publish_batch_for_principal(
+    state: &AppState,
+    publish_batch_id: &str,
+    principal: &DevelopmentPrincipal,
+) -> Result<centaur_session_core::development::DevelopmentPublishBatch, ApiError> {
+    if principal.is_admin {
+        return Ok(state
+            .runtime()?
+            .get_publish_batch(publish_batch_id, &principal.principal_id, true)
+            .await?);
+    }
+    for principal_id in principal.ids() {
+        match state
+            .runtime()?
+            .get_publish_batch(publish_batch_id, principal_id, false)
+            .await
+        {
+            Ok(batch) => return Ok(batch),
+            Err(centaur_session_runtime::SessionRuntimeError::Store(
+                centaur_session_sqlx::SessionStoreError::DevelopmentForbidden { .. },
+            )) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(ApiError::Forbidden(
+        "publish batch is not accessible to this principal".to_owned(),
+    ))
+}
+
 fn validate_feishu_principal(
     channel: &centaur_session_core::development::DevelopmentChannel,
     principal_id: &str,
@@ -781,9 +871,12 @@ fn authorize_requested_principal(
 
 fn validate_feishu_principal_id(principal_id: &str) -> Result<(), ApiError> {
     let mut parts = principal_id.split(':');
-    if parts.next() != Some("feishu")
-        || parts.next().is_none_or(str::is_empty)
-        || parts.next().is_none_or(str::is_empty)
+    let scheme = parts.next();
+    let tenant_key = parts.next();
+    let open_id = parts.next();
+    if scheme != Some("feishu")
+        || invalid_feishu_principal_component(tenant_key)
+        || invalid_feishu_principal_component(open_id)
         || parts.next().is_some()
     {
         return Err(ApiError::BadRequest(
@@ -791,6 +884,12 @@ fn validate_feishu_principal_id(principal_id: &str) -> Result<(), ApiError> {
         ));
     }
     Ok(())
+}
+
+fn invalid_feishu_principal_component(value: Option<&str>) -> bool {
+    value.is_none_or(|value| {
+        value.is_empty() || value.len() > 255 || value.chars().any(char::is_whitespace)
+    })
 }
 
 fn validate_resolved_repositories(
@@ -859,8 +958,8 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        DevelopmentAuthorizer, DevelopmentPrincipal, RepositoryResolveError, RepositoryResolver,
-        ResolveRepositoriesFuture,
+        DevelopmentAuthorizer, DevelopmentJwtClaims, DevelopmentPrincipal, RepositoryResolveError,
+        RepositoryResolver, ResolveRepositoriesFuture,
     };
     use crate::{ApiError, AppState, build_router_with_app_state};
 
@@ -982,15 +1081,17 @@ mod tests {
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| value.strip_prefix("Bearer "))
                 .ok_or_else(|| ApiError::Unauthorized("missing bearer token".to_owned()))?;
-            let (principal_id, is_admin) = match value {
-                "principal-1" => ("principal-1", false),
-                "principal-2" => ("principal-2", false),
-                "admin-1" => ("admin-1", true),
+            let (principal_id, is_admin, principal_aliases) = match value {
+                "principal-1" => ("principal-1", false, Vec::new()),
+                "principal-2" => ("principal-2", false, Vec::new()),
+                "principal-1-alias" => ("usr-console", false, vec!["principal-1".to_owned()]),
+                "admin-1" => ("admin-1", true, Vec::new()),
                 _ => return Err(ApiError::Unauthorized("invalid bearer token".to_owned())),
             };
             Ok(DevelopmentPrincipal {
                 principal_id: principal_id.to_owned(),
                 is_admin,
+                principal_aliases,
             })
         }
     }
@@ -1178,6 +1279,35 @@ mod tests {
             .0,
             StatusCode::FORBIDDEN
         );
+    }
+
+    #[test]
+    fn console_development_claims_accept_only_bounded_feishu_aliases() {
+        let principal = DevelopmentPrincipal::from_console_claims(DevelopmentJwtClaims {
+            sub: "usr_console".to_owned(),
+            centaur_admin: false,
+            development_principal_ids: vec!["feishu:tenant-a:ou-user".to_owned()],
+        })
+        .unwrap();
+        assert_eq!(principal.principal_id, "usr_console");
+        assert_eq!(principal.principal_aliases, vec!["feishu:tenant-a:ou-user"]);
+
+        for aliases in [
+            vec!["principal-1".to_owned()],
+            vec!["feishu:tenant-a:ou:user".to_owned()],
+            (0..17)
+                .map(|index| format!("feishu:tenant-a:ou-{index}"))
+                .collect(),
+        ] {
+            assert!(matches!(
+                DevelopmentPrincipal::from_console_claims(DevelopmentJwtClaims {
+                    sub: "usr_console".to_owned(),
+                    centaur_admin: false,
+                    development_principal_ids: aliases,
+                }),
+                Err(ApiError::Unauthorized(_))
+            ));
+        }
     }
 
     #[tokio::test]
@@ -1573,7 +1703,7 @@ mod tests {
             .0,
             StatusCode::FORBIDDEN
         );
-        for bearer in ["principal-1", "admin-1"] {
+        for bearer in ["principal-1", "principal-1-alias", "admin-1"] {
             let (status, _, body) = get(app.clone(), &summary_uri, Some(bearer)).await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(
@@ -1595,7 +1725,7 @@ mod tests {
             get(app.clone(), &artifact_uri, Some("principal-2")).await.0,
             StatusCode::FORBIDDEN
         );
-        let (status, headers, body) = get(app, &artifact_uri, Some("principal-1")).await;
+        let (status, headers, body) = get(app, &artifact_uri, Some("principal-1-alias")).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(headers[header::CONTENT_TYPE], "text/x-diff; charset=utf-8");
         assert_eq!(body, patch);
@@ -1726,7 +1856,7 @@ mod tests {
             app.clone(),
             &publish_uri,
             json!({"idempotency_key": "publish-valid"}),
-            Some("principal-1"),
+            Some("principal-1-alias"),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -1740,7 +1870,7 @@ mod tests {
 
         let mut body = Value::Null;
         for _ in 0..100 {
-            let (status, _, bytes) = get(app.clone(), &batch_uri, Some("principal-1")).await;
+            let (status, _, bytes) = get(app.clone(), &batch_uri, Some("principal-1-alias")).await;
             assert_eq!(status, StatusCode::OK);
             body = serde_json::from_slice(&bytes).unwrap();
             if body["state"] == "succeeded" {

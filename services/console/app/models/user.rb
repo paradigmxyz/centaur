@@ -45,8 +45,8 @@ class User < ApplicationRecord
   # as needed, and (re)caches the identity's email/name. A returning login matches
   # by the stable (provider, subject). A new identity links to an existing user
   # only when the IdP-verified email matches -- an unverified email must never
-  # adopt an account -- otherwise a new active user is created (admin when the
-  # verified email is on the bootstrap allowlist). +identity+ is the provider
+  # adopt an account -- otherwise a new active user is created. Existing OIDC
+  # providers may bootstrap an allowlisted admin; Feishu never may. +identity+ is the provider
   # strategy's { subject:, email:, email_verified:, name: } hash.
   def self.link_or_provision(provider:, identity:)
     raise SsoEmailDomainNotAllowed unless ConsoleAuth.sso_email_allowed?(identity[:email])
@@ -59,7 +59,7 @@ class User < ApplicationRecord
             u.update!(name: identity[:name]) if identity[:name].present? && u.name.blank?
           end
         else
-          (linkable_user(identity) || create!(provisioned_attributes(identity))).tap do |u|
+          (linkable_user(identity) || create!(provisioned_attributes(provider:, identity:))).tap do |u|
             u.user_identities.create!(
               identity_attributes(provider:, identity:).merge(provider:, subject: identity[:subject])
             )
@@ -82,6 +82,9 @@ class User < ApplicationRecord
     attributes = { email: identity[:email], email_verified: identity[:email_verified] }
     if provider == UserIdentity::SLACK_PROVIDER && identity[:team_id].present?
       attributes[:team_id] = identity[:team_id]
+    elsif provider == UserIdentity::FEISHU_PROVIDER
+      attributes[:tenant_key] = identity[:tenant_key]
+      attributes[:open_id] = identity[:open_id]
     end
     attributes
   end
@@ -89,9 +92,11 @@ class User < ApplicationRecord
 
   # Attributes for a brand-new SSO user: everyone is provisioned active once the
   # IdP identity has passed the configured SSO admission policy. Admin
-  # additionally requires a bootstrap-allowlisted, IdP-verified email.
-  def self.provisioned_attributes(identity)
-    admin = identity[:email_verified] == true && ConsoleAuth.bootstrap_admin?(identity[:email])
+  # additionally requires a bootstrap-allowlisted, IdP-verified email and a
+  # provider permitted to bootstrap administrators.
+  def self.provisioned_attributes(provider:, identity:)
+    admin = provider != UserIdentity::FEISHU_PROVIDER && identity[:email_verified] == true &&
+      ConsoleAuth.bootstrap_admin?(identity[:email])
     { email: identity[:email], name: identity[:name], status: :active, admin: admin }
   end
   private_class_method :provisioned_attributes

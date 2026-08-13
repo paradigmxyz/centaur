@@ -34,6 +34,58 @@ class UserIdentityTest < ActiveSupport::TestCase
     assert other.valid?
   end
 
+  test "Feishu identity requires and normalizes tenant and app-scoped open id" do
+    identity = UserIdentity.create!(
+      valid_attrs(
+        provider: "feishu",
+        subject: JSON.generate([ "tenant-a", "on-user" ]),
+        tenant_key: " tenant-a ",
+        open_id: " ou-user "
+      )
+    )
+
+    assert_equal "tenant-a", identity.tenant_key
+    assert_equal "ou-user", identity.open_id
+    assert identity.feishu?
+  end
+
+  test "non-Feishu identity cannot carry Feishu identity attributes" do
+    identity = UserIdentity.new(valid_attrs(tenant_key: "tenant-a", open_id: "ou-user"))
+
+    assert_not identity.valid?
+    assert_includes identity.errors[:tenant_key], "is reserved for Feishu identities"
+    assert_includes identity.errors[:open_id], "is reserved for Feishu identities"
+  end
+
+  test "Feishu delivery identity rejects separators that could change principal parsing" do
+    identity = UserIdentity.new(
+      valid_attrs(
+        provider: "feishu",
+        subject: JSON.generate([ "tenant:a", "on-user" ]),
+        tenant_key: "tenant:a",
+        open_id: "ou-user"
+      )
+    )
+
+    assert_not identity.valid?
+    assert_includes identity.errors[:tenant_key], "contains unsupported characters"
+  end
+
+  test "Feishu stable subject must encode the same tenant and a union id" do
+    for subject in [
+      JSON.generate([ "tenant-b", "on-user" ]),
+      JSON.generate([ "tenant-a", "" ]),
+      JSON.generate({ tenant_key: "tenant-a", union_id: "on-user" })
+    ]
+      identity = UserIdentity.new(
+        valid_attrs(provider: "feishu", subject:, tenant_key: "tenant-a", open_id: "ou-user")
+      )
+
+      assert_not identity.valid?
+      assert_includes identity.errors[:subject], "must encode the Feishu tenant and union ID"
+    end
+  end
+
   test "email is normalized to lowercase and stripped" do
     identity = UserIdentity.create!(valid_attrs(email: "  Mixed@Case.EXAMPLE  "))
     assert_equal "mixed@case.example", identity.email

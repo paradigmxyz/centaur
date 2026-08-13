@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_08_12_042212) do
+ActiveRecord::Schema[8.1].define(version: 2026_08_13_005916) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
   enable_extension "pg_search"
@@ -479,12 +479,15 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_12_042212) do
     t.datetime "created_at", null: false
     t.string "email"
     t.boolean "email_verified", default: false, null: false
+    t.string "open_id"
     t.string "provider", null: false
     t.string "subject", null: false
     t.string "team_id"
+    t.string "tenant_key"
     t.datetime "updated_at", null: false
     t.bigint "user_id", null: false
     t.index ["provider", "subject"], name: "index_user_identities_on_provider_and_subject", unique: true
+    t.index ["provider", "tenant_key", "open_id"], name: "index_user_identities_on_feishu_delivery_identity", unique: true, where: "((provider)::text = 'feishu'::text)"
     t.index ["user_id"], name: "index_user_identities_on_user_id"
   end
 

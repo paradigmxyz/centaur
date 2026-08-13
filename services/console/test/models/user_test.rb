@@ -213,6 +213,25 @@ class UserTest < ActiveSupport::TestCase
     ENV.delete("CENTAUR_CONSOLE_BOOTSTRAP_ADMINS")
   end
 
+  test "link_or_provision stores Feishu delivery identity and never bootstrap-promotes it" do
+    ENV["CENTAUR_CONSOLE_BOOTSTRAP_ADMINS"] = "boss@example.com"
+    user = User.link_or_provision(
+      provider: "feishu",
+      identity: identity(
+        subject: JSON.generate([ "tenant-a", "on-boss" ]),
+        email: "boss@example.com",
+        tenant_key: "tenant-a",
+        open_id: "ou-boss"
+      )
+    )
+
+    assert user.active?
+    assert_not user.admin?
+    assert_equal [ [ "tenant-a", "ou-boss" ] ], user.user_identities.feishu.pluck(:tenant_key, :open_id)
+  ensure
+    ENV.delete("CENTAUR_CONSOLE_BOOTSTRAP_ADMINS")
+  end
+
   test "link_or_provision activates a returning legacy-pending user" do
     user = User.link_or_provision(provider: "slack",
                                   identity: identity(subject: "late-sub", email: "worker@acme.example"))

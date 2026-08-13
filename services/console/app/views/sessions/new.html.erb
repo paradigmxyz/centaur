@@ -23,7 +23,7 @@
       <% providers.each do |provider| %>
         <%= link_to auth_start_path(provider: provider),
               class: "flex w-full items-center justify-center rounded border border-ink-600 bg-ink-800/60 px-4 py-2 text-sm text-zinc-200 transition-colors hover:border-centaur-500/40 hover:text-centaur-200" do %>
-          Continue with <%= provider.capitalize %>
+          Continue with <%= provider == "feishu" ? "Feishu" : provider.capitalize %>
         <% end %>
       <% end %>
     </div>
