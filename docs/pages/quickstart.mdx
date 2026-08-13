@@ -40,7 +40,8 @@ kubectl get nodes
 ```
 
 The `Justfile` builds local images named `centaur-api-rs:latest`,
-`centaur-iron-proxy:latest`, `centaur-slackbotv2:latest`, and
+`centaur-iron-proxy:latest`, `centaur-slackbotv2:latest`,
+`centaur-feishubot:latest`, and
 `centaur-agent:latest`, then deploys `contrib/chart` with
 `contrib/chart/values.dev.yaml`.
 
@@ -118,7 +119,7 @@ kubectl exec -n centaur deploy/centaur-centaur-api-rs -- \
 Expected shape:
 
 ```json
-{"status":"ok"}
+{"ok":true}
 ```
 
 ## 5. Run an agent turn
@@ -153,7 +154,147 @@ If you changed the namespace or release name, set `CENTAUR_NAMESPACE` and
 `CENTAUR_RELEASE` before running `just smoke` so the recipe targets the right
 deployment.
 
-## 6. Setup Slack integration
+## 6. Optional: connect GitLab projects
+
+Create a dedicated GitLab Personal, Project, or Group Access Token that GitLab
+accepts in the `PRIVATE-TOKEN` header for `GET /api/v4/projects`. The Token must
+also be able to clone every project Centaur should offer. A deploy token or
+username/password that works only for Git clone is not sufficient for automatic
+project listing. Enabling merge-request publication additionally requires the
+minimum rights to push branches and create merge requests. Store the Token in a
+Kubernetes Secret under a key such as `token`; do not put it in a values file,
+clone URL, command argument, or sandbox variable.
+
+Validate the credential against the projects API before enabling the feature.
+A JSON array is expected. A redirect to `/users/sign_in` means GitLab did not
+accept the credential as an API Access Token.
+
+Configure the catalog and workspace in a private values file:
+
+```yaml
+workspaceRepositories:
+  enabled: true
+  gitlab:
+    baseUrl: https://git.example.test
+    egressCidrs: [192.0.2.44/32]
+    secretRef: centaur-gitlab
+    secretKey: token
+  storage:
+    className: example-rwx-storage
+    size: 20Gi
+    accessMode: ReadWriteMany
+
+gitlabPublishing:
+  enabled: true
+  secretRef: centaur-gitlab
+  secretKey: token
+```
+
+`baseUrl` remains the real hostname used for TLS and virtual-host routing;
+`egressCidrs` is the corresponding fixed network destination for NetworkPolicy.
+On a guaranteed single-node cluster, `ReadWriteOnce` is sufficient. Use
+`ReadWriteMany` when the sandbox and lifecycle jobs can run on different nodes.
+
+For an HTTP-only private GitLab, the risk acceptance must be explicit:
+
+```yaml
+workspaceRepositories:
+  gitlab:
+    baseUrl: http://git.example.test:82
+    allowInsecureHttp: true
+    egressCidrs: [192.0.2.44/32]
+```
+
+Plain HTTP exposes the shared read/write Token and repository contents to
+network observers. Prefer HTTPS.
+
+After deployment, open **New chat** in Console, enter the task, select several
+projects or **No project**, and start the task. The Session keeps that repository
+set for follow-up messages. Use **Add projects** to extend it. After execution,
+review the immutable ChangeSet and test evidence, then choose **Create MR**. Only
+the task initiator or a Centaur administrator can approve. A partial failure
+keeps successful merge requests and retries only failed repositories.
+
+## 7. Optional: setup China Feishu
+
+Use the China platform at `open.feishu.cn/app`:
+
+1. Create an enterprise self-built application and enable bot capability.
+2. Grant the message receive/send and user identity permissions required by the
+   application. Console OAuth requires access to the enterprise email returned
+   by user info.
+3. Under **Events and Callbacks**, select long connection and subscribe to the
+   receive-message event whose event key is `im.message.receive_v1`.
+4. Enable interactive card callbacks, set the application's availability range,
+   create a version, and have an enterprise administrator publish it.
+5. Store the app ID, app secret, bot open ID, and a dedicated internal api-rs key
+   in a Kubernetes Secret. Do not reuse the GitLab Token.
+
+Enable the ingress with an explicit tenant allowlist:
+
+```yaml
+feishubot:
+  enabled: true
+  secretRef: centaur-feishu
+  appIdKey: app-id
+  appSecretKey: app-secret
+  botOpenIdKey: bot-open-id
+  apiKeyKey: api-key
+  allowedTenantKeys: [tenant-example]
+```
+
+The chart pins one replica and a `Recreate` rollout because the application has
+one active long connection. A direct message starts a task and then shows the
+project picker. Follow-ups reuse that Session. Send `/projects` to add projects
+or `/new` to close the active task before starting another. In a group, mention
+the real bot; Centaur binds the Session to that root topic.
+
+To enable Console login with China Feishu, create a separate login app or client
+and register this exact callback:
+
+```text
+https://console.example.test/auth/feishu/callback
+```
+
+Then configure:
+
+```yaml
+console:
+  publicUrl: https://console.example.test
+  feishuLogin:
+    enabled: true
+    secretRef: centaur-feishu-login
+    clientIdKey: app-id
+    clientSecretKey: app-secret
+    allowedTenantKeys: [tenant-example]
+```
+
+Console links users by `(tenant_key, union_id)`, requires enterprise email, and
+does not grant administrator access unless the existing bootstrap-admin policy
+does so. Bot messaging continues to work without Console login; login is needed
+for the browser review surface.
+
+Verify the deployment before sending a real message:
+
+```bash
+kubectl get deploy,pod -n centaur -l app.kubernetes.io/component=feishubot
+kubectl exec -n centaur deploy/centaur-centaur-feishubot -- \
+  curl -fsS http://localhost:3005/health
+kubectl exec -n centaur deploy/centaur-centaur-feishubot -- \
+  curl -fsS http://localhost:3005/ready
+```
+
+If `/health` succeeds but `/ready` returns 503, inspect Feishubot logs and the
+China Feishu app credentials, version, tenant availability, and long-connection
+configuration.
+
+Rollback the write path first: set `gitlabPublishing.enabled=false` to stop new
+publication approvals while preserving review. Then disable `feishubot.enabled`
+or `console.feishuLogin.enabled` independently. Disable
+`workspaceRepositories.enabled` only after active development Sessions no longer
+need Workspace preparation or recovery.
+
+## 8. Setup Slack integration
 
 Slack needs to reach the Slackbot webhook at a public HTTPS URL. Configure your
 network, ingress, or local tunnel so the Slackbot route is reachable at:
@@ -178,7 +319,7 @@ as `message.im`, Slack will also require direct-message scopes such as
 
 Save changes and reinstall the app.
 
-## 7. Try Slack mentions
+## 9. Try Slack mentions
 
 Invite the bot to a test channel and mention it:
 

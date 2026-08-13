@@ -20,6 +20,10 @@ Use these as the main extension points:
 | `sandbox.extraEnv` | Extra variables copied into every sandbox pod through `KUBERNETES_SANDBOX_EXTRA_ENV`. |
 | `overlays.sources` | Ordered repo-cache-backed overlay repos for tools, workflows, and skills. Each source accepts an optional HTTP(S) `cloneUrl`; subdirs default to `tools`, `workflows`, and `.agents/skills`. |
 | `repoCache.gitCredentials` | Secret-backed username and token used to clone private Git remotes. |
+| `workspaceRepositories.*` | Durable task repository catalog, Workspace PVC, and Provisioner settings. |
+| `gitlabPublishing.*` | Human-approved GitLab branch and merge-request publication. |
+| `feishubot.*` | China Feishu self-built app ingress, tenant policy, probes, and metrics. |
+| `console.feishuLogin.*` | China Feishu OAuth login and tenant admission policy for Console. |
 | `overlay.systemPrompt` | Small inline prompt overlay escape hatch. |
 
 Application tool credentials are not listed here. Tool plugins declare those
@@ -72,7 +76,11 @@ for the operator workflow.
 | `CENTAUR_JWT_SIGNING_SECRET` | `secretManager.existingSecretName`; local bootstrap generates it when absent. | Signs Console-issued MCP access tokens. |
 | `console.publicUrl` | Helm value. | Public Console origin used for links and MCP authorization metadata. |
 | `console.passwordLoginEnabled` | Helm value, default `true`. | Enables the break-glass email and password login. Disable after SSO is configured for a public Console. |
-| `console.ssoEmailDomains` | Helm value. | Limits Google or Slack SSO admission by email domain. Empty accepts any IdP-authenticated email. |
+| `console.ssoEmailDomains` | Helm value. | Limits Google, Slack, or Feishu SSO admission by email domain. Empty accepts any IdP-authenticated email. |
+| `console.feishuLogin.enabled` | Helm value, default `false`. | Enables China Feishu OAuth on the Console login page. |
+| `console.feishuLogin.secretRef`, `clientIdKey`, `clientSecretKey` | Explicit Kubernetes Secret reference and keys. | Supplies the China Feishu login app ID and secret without broad `envFrom`. |
+| `console.feishuLogin.allowedTenantKeys` | Helm value. | Required non-empty tenant allowlist when Feishu login is enabled. |
+| `CENTAUR_CONSOLE_FEISHU_ALLOWED_TENANT_KEYS` | Rendered from the allowlist. | Fails closed before provisioning a Console user from an unapproved tenant. |
 | `apiRs.syncInfraSecrets`, `IRON_CONTROL_SYNC_INFRA_SECRETS` | Helm value, default `true`. | Upserts the shared `infra` role and its harness/platform secrets. Set false only when another process owns that shared Console state. |
 | `IRON_CONTROL_URL`, `IRON_CONTROL_API_KEY` | Chart-rendered for api-rs; operator shell for `centaur-perms`. | Connects the runtime or CLI to the Console. |
 
@@ -117,6 +125,65 @@ add broad public custom-port rules. Use repo-cache for private DNS remotes or
 DNS remotes on ports other than the proxy's baseline HTTPS port. Authenticated
 direct clones run only during sandbox bootstrap; background refresh is disabled
 because the long-running agent does not receive the Git Secret.
+
+## Development repositories and publication
+
+This is separate from overlay and tool source cloning. It lists all projects
+visible to one deployment GitLab Token, lets each task select zero or more of
+them, and stores the working trees on a task-scoped PVC.
+
+| Helm value or env var | Set from | Controls |
+| --- | --- | --- |
+| `workspaceRepositories.enabled` / `DEVELOPMENT_WORKSPACE_ENABLED` | Helm value, default `false`. | Enables the GitLab catalog and durable Workspace preparation. Requires the `agent-k8s` sandbox backend. |
+| `workspaceRepositories.gitlab.baseUrl` / `GITLAB_BASE_URL` | Helm value. | Exact GitLab HTTP(S) origin; paths, credentials, query strings, fragments, and redirects are rejected. |
+| `workspaceRepositories.gitlab.allowInsecureHttp` / `GITLAB_ALLOW_INSECURE_HTTP` | Helm value, default `false`. | Explicitly accepts plaintext HTTP. Both Helm and api-rs fail closed without it. |
+| `workspaceRepositories.gitlab.egressCidrs` | Helm value. | Stable GitLab ingress CIDRs used by NetworkPolicy. Required when NetworkPolicy is enabled because Kubernetes policy cannot target a DNS name. |
+| `workspaceRepositories.gitlab.secretRef`, `secretKey` | Explicit Kubernetes Secret reference. | Shared GitLab bot Token used only by api-rs catalog calls and short-lived Provisioner/Publisher jobs. |
+| `workspaceRepositories.gitlab.pageSize`, `requestTimeoutSecs` | Helm values. | Catalog pagination and GitLab request timeout. |
+| `workspaceRepositories.storage.className`, `size` | Helm values. | Workspace PVC storage class and requested capacity. |
+| `workspaceRepositories.storage.accessMode` / `DEVELOPMENT_WORKSPACE_STORAGE_ACCESS_MODE` | Helm value, default `ReadWriteOnce`. | Use `ReadWriteMany` when sandbox, Collector, and Publisher can schedule on different nodes; use `ReadWriteOnce` only when one-node attachment is guaranteed. |
+| `workspaceRepositories.provisionerImage.*` | Helm values; defaults to the sandbox image. | Image and pull policy for Provisioner, Collector, and Publisher jobs. |
+| `gitlabPublishing.enabled` / `GITLAB_PUBLISHING_ENABLED` | Helm value, default `false`. | Enables approval-triggered branch pushes and merge-request creation. |
+| `gitlabPublishing.secretRef`, `secretKey` | Explicit Kubernetes Secret reference. | Must reference the same Token as repository discovery in the first release. |
+| `gitlabPublishing.branchPrefix` | Helm value; currently `centaur`. | Prefix for deterministic publication branches. |
+
+The GitLab credential must be a Personal, Project, or Group Access Token that
+GitLab accepts in the `PRIVATE-TOKEN` header for `GET /api/v4/projects`, and it
+must be able to clone every intended project. A deploy token or credential that
+works only with Git clone cannot drive the repository catalog. When publication
+is enabled the Access Token also needs the minimum project API/repository rights
+to push branches and create merge requests. The Token is mounted as a file into
+api-rs for catalog requests and by Secret reference into short-lived jobs. It is
+not injected into Feishubot, Console, the browser, `harness-server`, agent
+sandboxes, or persistent Workspace files. Provisioner and Publisher use distinct
+ServiceAccounts and api-rs rejects a publishing configuration that collapses
+them to one identity.
+
+:::danger[Plain HTTP exposes the shared read/write Token]
+Set `allowInsecureHttp: true` only for an isolated network whose GitLab has no
+HTTPS endpoint. The flag is an explicit risk acceptance, not encryption. Use
+`https://` whenever possible and restrict `egressCidrs` to the GitLab ingress.
+:::
+
+## China Feishu bot
+
+Use a China Feishu enterprise self-built application with bot capability, not
+a fixed-group custom webhook robot. The bot uses a long connection and does not
+need a public event callback URL.
+
+| Helm value or env var | Set from | Controls |
+| --- | --- | --- |
+| `feishubot.enabled` | Helm value, default `false`. | Deploys the single-replica China Feishu ingress. |
+| `feishubot.secretRef` | Explicit Kubernetes Secret reference. | Secret containing the app ID, app secret, bot open ID, and internal api-rs key. |
+| `feishubot.appIdKey`, `appSecretKey`, `botOpenIdKey`, `apiKeyKey` | Helm values. | Key names inside `secretRef`; defaults are `app-id`, `app-secret`, `bot-open-id`, and `api-key`. |
+| `feishubot.allowedTenantKeys` / `FEISHU_TENANT_ALLOWLIST` | Helm value. | Required non-empty tenant allowlist. Events from other tenants are ignored. |
+| `feishubot.port` | Helm value, default `3005`. | Health, readiness, and Prometheus endpoint port. |
+| `CENTAUR_CONSOLE_PUBLIC_URL` | Rendered from `console.publicUrl`. | Adds authenticated Console ChangeSet links to result cards. |
+
+`/health` reports process liveness, `/ready` requires an established Feishu long
+connection, and `/metrics` exposes bounded event, deduplication, acknowledgement,
+render, recovery, and optimistic-conflict signals. Metric labels never include
+tenant keys, user IDs, message IDs, task text, or source code.
 
 ## API
 

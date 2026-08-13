@@ -5,9 +5,9 @@ description: How Centaur runs agents with an API, Postgres, sandbox pods, tools,
 
 # Architecture
 
-Centaur accepts Slack and API requests, stores each turn, assigns an isolated
-runtime, exposes approved tools, injects credentials through a proxy, and keeps
-an event trail clients can replay.
+Centaur accepts Slack, China Feishu, Web Chat, and API requests, stores each
+turn, assigns an isolated runtime, exposes approved tools, injects credentials
+through controlled boundaries, and keeps an event trail clients can replay.
 
 <figure className="architecture-figure">
   <img src="/brand/architecture.svg" alt="Centaur architecture — ingress, durable control plane, isolated execution, tools, workflows, and controlled egress" />
@@ -17,7 +17,7 @@ an event trail clients can replay.
 
 | Plane | Responsibility | Main components |
 |-------|----------------|-----------------|
-| Ingress | Accept user and client input. | Slack Events API, Slackbot webhook, external API clients. |
+| Ingress | Accept user and client input. | Slack Events API, China Feishu long connection, Console Web Chat, external API clients. |
 | Control | Persist requests and coordinate runtime state. | api-rs, Postgres, session runtime, workflow runtime. |
 | Execution | Run one assigned agent session per thread. | Kubernetes sandbox pods. |
 | Capabilities | Give agents approved actions. | Tool plugins, workflow engine, overlays. |
@@ -40,6 +40,33 @@ pod replacement, or worker failover does not erase the run. The event stream is
 the client contract; Slack and other clients should reconnect with
 `after_event_id` instead of trying to reconstruct state locally.
 
+## Multi-repository development lifecycle
+
+The development workflow adds durable product objects around the normal Session
+and Execution lifecycle:
+
+| Object | Responsibility |
+| --- | --- |
+| Channel binding | Maps a Feishu DM/topic or Web Chat to the current Session. |
+| Session workspace | Owns the selected repository set and persistent workspace storage for one task. |
+| Selection flow | Records search, pagination, multi-select, no-project, and add-project decisions with optimistic versions. |
+| ChangeSet | Freezes the exact changed file patch, base/head SHAs, patch hash, and test evidence produced by one completed execution. |
+| Publish batch | Records human approval and one idempotent GitLab branch/MR result per changed repository. |
+
+The task arrives before repository selection. A user can select several GitLab
+projects or continue with no project. A short-lived Provisioner receives the
+GitLab credential and prepares the selected repositories on the Workspace PVC;
+the long-running sandbox receives that PVC but never the credential. When the
+execution finishes, a credential-free Collector reads the workspace and creates
+an immutable ChangeSet. The task initiator or a Centaur administrator can then
+approve that ChangeSet. Separate Publisher jobs push the exact recorded commit
+SHA and create or adopt one merge request per repository. A partially successful
+batch keeps its successful merge requests and retries only failed items.
+
+The current product is one Agent working across multiple repositories. Future
+parallel Agents require separate Git worktrees or equivalent isolated working
+directories per Agent; they must not mutate one shared checkout concurrently.
+
 ## Slackbot ingress
 
 Slack talks to Centaur through the Slack Events API. The public request URL is
@@ -59,6 +86,27 @@ During a Slack delivery, the API owns the execution state while Slackbot owns
 Slack rendering: opening or updating the thread UI, streaming chunks, rendering
 steps, and posting the final answer. The landing page preview shows that Slack
 thread surface; the durable API lifecycle above is the system underneath it.
+
+## China Feishu ingress
+
+`services/feishubot` connects an enterprise self-built application with bot
+capability to China Feishu. The shared official Node SDK package is configured
+explicitly with `Domain.Feishu` and `AppType.SelfBuild`; it does not call the
+international Lark API. The service uses a long connection, so its Deployment
+runs exactly one replica with a `Recreate` rollout.
+
+Direct messages reuse the active task until the user sends `/new`. Group
+messages require a real bot mention and bind by tenant, chat, and root message,
+so follow-up messages stay in the same Feishu topic. `/projects` starts an
+add-project selection for the current task. Selection, progress, ChangeSet, and
+publication state render as interactive cards.
+
+api-rs owns event idempotency, Session/Execution state, optimistic selection
+versions, and delivery cursors. Feishubot acknowledges SDK callbacks quickly,
+performs work asynchronously, and reconciles pending deliveries after a restart.
+Feishu user and tenant IDs are transport identities; Console login separately
+links the durable `(tenant_key, union_id)` identity and stores `open_id` only as
+the app-scoped delivery attribute.
 
 ## Execution path
 
@@ -115,7 +163,11 @@ and does not protect against.
 | Failure | Expected recovery |
 |---------|-------------------|
 | Client disconnects | Reconnect to the event stream with `after_event_id`. |
+| Feishubot reconnects | Re-establish the China Feishu long connection, then reconcile pending durable deliveries. |
 | API restarts | Reload assignments, executions, and terminal state from Postgres. |
+| Provisioner fails | Keep the Workspace attempt and per-repository failure state; retry through durable reconciliation. |
+| Publisher fails after push or MR creation | Reconcile the exact branch SHA and adopt an existing matching MR instead of duplicating it. |
+| One repository fails to publish | Mark the batch partially successful, preserve successful MRs, and retry only failed items. |
 | Sandbox pod dies | The execution becomes terminal, the event trail remains in Postgres, and operators inspect `GET /api/session/{thread}` plus api-rs/sandbox logs before retrying the turn. |
 | Workflow worker restarts | Re-run the handler and skip completed checkpoints. |
 | Proxy restarts | Rebuild the key-injection map from the secret-manager cache. |
