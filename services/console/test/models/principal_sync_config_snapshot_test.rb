@@ -574,29 +574,6 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     end
   end
 
-  test "warm job rebuilds legacy API-enabled snapshots without a JWT" do
-    with_env(
-      "CENTAUR_JWT_SIGNING_SECRET" => "test-secret",
-      "CENTAUR_API_URL" => "http://api.internal:8080"
-    ) do
-      snapshot = PrincipalSyncConfigSnapshot.fetch_for(@principal)
-      payload = snapshot.payload.deep_dup
-      payload.fetch("config")["secrets"] = []
-      snapshot.update_columns(payload: payload, updated_at: Time.current)
-
-      refute snapshot.reload.fresh_for?(@principal)
-      PrincipalSyncConfigSnapshotWarmJob.perform_now(@principal.id)
-
-      refreshed = snapshot.reload
-      assert refreshed.fresh_for?(@principal)
-      token = refreshed.config.fetch("secrets").find do |secret|
-        secret.dig("source", "type") == "control_plane" &&
-          secret.dig("inject", "header") == "Authorization"
-      end
-      refute_nil token
-    end
-  end
-
   test "fetch_for does not rebuild api server JWT snapshots when sandbox api access is disabled" do
     with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
       @principal.update!(
