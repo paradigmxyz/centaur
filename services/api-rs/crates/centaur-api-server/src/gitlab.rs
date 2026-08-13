@@ -93,6 +93,41 @@ struct GitLabProject {
 }
 
 impl GitLabCatalog {
+    fn unavailable(failure_code: &'static str, http_status: Option<u16>) -> GitLabCatalogError {
+        tracing::warn!(
+            event = "gitlab_repository_catalog_unavailable",
+            failure_code,
+            http_status,
+            "GitLab repository catalog request failed"
+        );
+        GitLabCatalogError::Unavailable
+    }
+
+    fn upstream_failure_code(status: StatusCode) -> &'static str {
+        if status.is_redirection() {
+            "unexpected_redirect"
+        } else if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+            "authentication_rejected"
+        } else {
+            "upstream_status"
+        }
+    }
+
+    fn upstream_error(status: StatusCode) -> GitLabCatalogError {
+        Self::unavailable(Self::upstream_failure_code(status), Some(status.as_u16()))
+    }
+
+    fn transport_error(error: &reqwest::Error) -> GitLabCatalogError {
+        let failure_code = if error.is_timeout() {
+            "request_timeout"
+        } else if error.is_connect() {
+            "connection_failed"
+        } else {
+            "transport_error"
+        };
+        Self::unavailable(failure_code, None)
+    }
+
     pub fn new(config: GitLabCatalogConfig) -> Result<Self, GitLabCatalogBuildError> {
         let base_url = normalize_base_url(&config.base_url)?;
         if base_url.scheme() != "https" && !config.allow_insecure_http {
@@ -147,7 +182,7 @@ impl GitLabCatalog {
         let projects = response
             .json::<Vec<GitLabProject>>()
             .await
-            .map_err(|_| GitLabCatalogError::Unavailable)?;
+            .map_err(|_| Self::unavailable("invalid_response", None))?;
         let repositories = projects
             .into_iter()
             .map(RepositorySummary::from_project)
@@ -175,7 +210,7 @@ impl GitLabCatalog {
             let project = response
                 .json::<GitLabProject>()
                 .await
-                .map_err(|_| GitLabCatalogError::Unavailable)?;
+                .map_err(|_| Self::unavailable("invalid_response", None))?;
             repositories.push(self.resolve_project(repository_id, project)?);
         }
         Ok(repositories)
@@ -190,9 +225,9 @@ impl GitLabCatalog {
             .header(PRIVATE_TOKEN.clone(), token)
             .send()
             .await
-            .map_err(|_| GitLabCatalogError::Unavailable)?;
+            .map_err(|error| Self::transport_error(&error))?;
         if !response.status().is_success() {
-            return Err(GitLabCatalogError::Unavailable);
+            return Err(Self::upstream_error(response.status()));
         }
         Ok(response)
     }
@@ -208,25 +243,26 @@ impl GitLabCatalog {
             .header(PRIVATE_TOKEN.clone(), token)
             .send()
             .await
-            .map_err(|_| GitLabCatalogError::Unavailable)?;
+            .map_err(|error| Self::transport_error(&error))?;
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
         if !response.status().is_success() {
-            return Err(GitLabCatalogError::Unavailable);
+            return Err(Self::upstream_error(response.status()));
         }
         Ok(Some(response))
     }
 
     fn token_header(&self) -> Result<HeaderValue, GitLabCatalogError> {
-        let token = read_token(&self.token_file).map_err(|_| GitLabCatalogError::Unavailable)?;
-        HeaderValue::from_str(&token).map_err(|_| GitLabCatalogError::Unavailable)
+        let token = read_token(&self.token_file)
+            .map_err(|_| Self::unavailable("credential_unavailable", None))?;
+        HeaderValue::from_str(&token).map_err(|_| Self::unavailable("credential_unavailable", None))
     }
 
     fn api_url(&self, path: &str) -> Result<Url, GitLabCatalogError> {
         self.base_url
             .join(path)
-            .map_err(|_| GitLabCatalogError::Unavailable)
+            .map_err(|_| Self::unavailable("invalid_configuration", None))
     }
 
     fn resolve_project(
@@ -235,7 +271,7 @@ impl GitLabCatalog {
         project: GitLabProject,
     ) -> Result<ResolvedRepository, GitLabCatalogError> {
         if project.id != requested_id.project_id() {
-            return Err(GitLabCatalogError::Unavailable);
+            return Err(Self::unavailable("invalid_response", None));
         }
         if project.archived {
             return Err(GitLabCatalogError::Invalid(format!(
@@ -312,7 +348,7 @@ impl RepositoryCatalog for GitLabCatalog {
 impl RepositorySummary {
     fn from_project(project: GitLabProject) -> Result<Self, GitLabCatalogError> {
         if project.id == 0 || project.path_with_namespace.trim().is_empty() {
-            return Err(GitLabCatalogError::Unavailable);
+            return Err(GitLabCatalog::unavailable("invalid_response", None));
         }
         let namespace = project
             .path_with_namespace
@@ -321,7 +357,7 @@ impl RepositorySummary {
             .to_owned();
         Ok(Self {
             repository_id: RepositoryId::parse(format!("gitlab:{}", project.id))
-                .map_err(|_| GitLabCatalogError::Unavailable)?,
+                .map_err(|_| GitLabCatalog::unavailable("invalid_response", None))?,
             name: project.name,
             namespace,
             path_with_namespace: project.path_with_namespace,
@@ -432,7 +468,7 @@ fn next_cursor(headers: &reqwest::header::HeaderMap) -> Result<Option<String>, G
     };
     let value = value
         .to_str()
-        .map_err(|_| GitLabCatalogError::Unavailable)?;
+        .map_err(|_| GitLabCatalog::unavailable("invalid_response", None))?;
     if value.is_empty() {
         return Ok(None);
     }
@@ -440,7 +476,7 @@ fn next_cursor(headers: &reqwest::header::HeaderMap) -> Result<Option<String>, G
         .parse::<u64>()
         .ok()
         .filter(|page| *page > 0)
-        .ok_or(GitLabCatalogError::Unavailable)?;
+        .ok_or_else(|| GitLabCatalog::unavailable("invalid_response", None))?;
     Ok(Some(encode_cursor(page)))
 }
 
@@ -594,6 +630,14 @@ mod gitlab_catalog_tests {
         (origin, requests)
     }
 
+    async fn spawn_status_gitlab(status: StatusCode) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new().route("/api/v4/projects", get(move || async move { status }));
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        origin
+    }
+
     fn token_file() -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "centaur-gitlab-catalog-token-{}",
@@ -656,6 +700,28 @@ mod gitlab_catalog_tests {
         assert_eq!(requests[0].query.get("per_page").unwrap(), "25");
         assert_eq!(requests[1].query.get("page").unwrap(), "2");
         assert!(requests.iter().all(|request| request.token_matches));
+    }
+
+    #[tokio::test]
+    async fn gitlab_catalog_classifies_upstream_status_without_exposing_details() {
+        for (status, failure_code) in [
+            (StatusCode::FOUND, "unexpected_redirect"),
+            (StatusCode::UNAUTHORIZED, "authentication_rejected"),
+            (StatusCode::FORBIDDEN, "authentication_rejected"),
+            (StatusCode::INTERNAL_SERVER_ERROR, "upstream_status"),
+        ] {
+            let origin = spawn_status_gitlab(status).await;
+            let catalog = GitLabCatalog::new(config(origin)).unwrap();
+
+            let error = catalog.search(None, None).await.unwrap_err();
+
+            assert!(matches!(error, GitLabCatalogError::Unavailable));
+            assert_eq!(GitLabCatalog::upstream_failure_code(status), failure_code);
+            assert_eq!(
+                error.to_string(),
+                "repository catalog is temporarily unavailable"
+            );
+        }
     }
 
     #[tokio::test]

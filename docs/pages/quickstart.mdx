@@ -169,6 +169,14 @@ Validate the credential against the projects API before enabling the feature.
 A JSON array is expected. A redirect to `/users/sign_in` means GitLab did not
 accept the credential as an API Access Token.
 
+When the repository picker returns `repository_catalog_unavailable`, inspect
+the api-rs log entry whose event is
+`gitlab_repository_catalog_unavailable`. Its fixed `failure_code` distinguishes
+`unexpected_redirect`, `authentication_rejected`, `connection_failed`,
+`request_timeout`, and `invalid_response`; an upstream HTTP status may also be
+present. The entry deliberately excludes the request URL, search text, response
+body, and Token.
+
 Configure the catalog and workspace in a private values file:
 
 ```yaml
