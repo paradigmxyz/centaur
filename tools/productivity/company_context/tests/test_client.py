@@ -160,10 +160,10 @@ def test_default_database_url_does_not_fall_back_to_raw_database_url(monkeypatch
         reset_tool_context(token)
 
 
-def test_postgres_database_name_defaults_to_centaur(monkeypatch):
+def test_postgres_database_name_defaults_to_physical_database(monkeypatch):
     monkeypatch.delenv("COMPANY_CONTEXT_POSTGRES_DATABASE", raising=False)
 
-    assert company_context_client._postgres_database_name() == "centaur"
+    assert company_context_client._postgres_database_name() == "ai_v2"
 
 
 def test_postgres_database_name_matches_manifest_route():
@@ -177,6 +177,8 @@ def test_postgres_database_name_matches_manifest_route():
     )
 
     assert company_context_client.DEFAULT_POSTGRES_DATABASE == pg_dsn["database"]
+    assert pg_dsn["name"] == "company_context_dsn"
+    assert company_context_client.POSTGRES_ROUTE == "company-context"
 
 
 def test_postgres_database_name_can_be_overridden(monkeypatch):
@@ -188,7 +190,28 @@ def test_postgres_database_name_can_be_overridden(monkeypatch):
 def test_postgres_database_name_uses_default_for_blank_override(monkeypatch):
     monkeypatch.setenv("COMPANY_CONTEXT_POSTGRES_DATABASE", " ")
 
-    assert company_context_client._postgres_database_name() == "centaur"
+    assert company_context_client._postgres_database_name() == "ai_v2"
+
+
+def test_connect_sends_company_context_route(monkeypatch):
+    captured = {}
+
+    async def fake_connect(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return _FakeConnection()
+
+    monkeypatch.setattr(company_context_client.asyncpg, "connect", fake_connect)
+
+    connection = company_context_client.asyncio.run(
+        CompanyContextClient("postgresql://proxy")._connect()
+    )
+
+    assert isinstance(connection, _FakeConnection)
+    assert captured["args"] == ("postgresql://proxy/ai_v2",)
+    assert captured["kwargs"]["server_settings"] == {
+        "iron.route": "company-context"
+    }
 
 
 @pytest.mark.parametrize("sql", ["", "   "])

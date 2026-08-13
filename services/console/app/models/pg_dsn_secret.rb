@@ -1,10 +1,8 @@
 # A Postgres upstream credential: a connection-string (DSN) resolved from a
 # secret source, plus an optional SET ROLE for the upstream session. Delivered to
-# iron-proxy in the single-listener `postgres` list, where it is keyed for routing
-# by `database` (the dbname a client sends to reach this upstream). Multiple
-# secrets may target the same database so different principals can route that
-# database through different upstream roles. Principal sync emits only one
-# effective route per database, chosen by grant priority.
+# iron-proxy in the single-listener `postgres` list, where `database` identifies
+# the physical database and `foreign_id` selects the logical permission route.
+# Multiple granted routes may safely target the same physical database.
 #
 # `foreign_id` is also required: it identifies the upstream for credential
 # delivery (env-var supplied DSNs) and is the stable handle operators reference.
@@ -40,10 +38,8 @@ class PgDsnSecret < ApplicationRecord
   has_many :grants, dependent: :destroy
   belongs_to :created_by, class_name: "User"
 
-  # One entry in the proxy's synced `postgres` list, keyed for routing by
-  # `database`. The opaque id is carried too so the proxy can refer back to the
-  # canonical resource (it ignores fields it does not use). The DSN reuses the
-  # shared secrets source shape.
+  # One entry in the proxy's synced `postgres` list. `database` remains the
+  # physical DSN database while `foreign_id` is the logical route selector.
   def to_proxy_dsn(principal: nil, proxy: nil)
     entry = {
       "id" => oid,

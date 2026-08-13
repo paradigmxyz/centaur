@@ -1226,9 +1226,9 @@ pub(crate) fn apply_proxy_env(spec: &mut SandboxSpec, resolved: &ResolvedIronPro
     for (name, value) in &resolved.replace_placeholders {
         set_missing_env(spec, name, value);
     }
-    // The sandbox always gets one local Postgres base DSN. Tools choose the
-    // database name they connect to; iron-proxy routes that database to the
-    // assigned principal's effective pg_dsn secret.
+    // The sandbox always gets one local Postgres base DSN. Tools send the
+    // physical database and the pg_dsn foreign_id as iron.route; iron-proxy
+    // resolves both against the assigned principal's effective routes.
     if let Some(pg) = &resolved.pg {
         let value = format!(
             "postgresql://{}:{}@{}:{}",

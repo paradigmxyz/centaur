@@ -1726,7 +1726,7 @@ mod tests {
                 .sandbox_env
                 .as_ref()
                 .and_then(|sandbox_env| sandbox_env.database.as_deref()),
-            Some("centaur")
+            Some("ai_v2")
         );
         assert_eq!(
             listener

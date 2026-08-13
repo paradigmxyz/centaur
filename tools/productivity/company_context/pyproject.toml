@@ -30,7 +30,7 @@ module = "client.py"
 [[tool.centaur.secrets]]
 type = "pg_dsn"
 name = "company_context_dsn"
-database = "centaur"
+database = "ai_v2"
 secret_ref = "DATABASE_URL"
 role = "centaur_company_context_reader"
 settings = [
