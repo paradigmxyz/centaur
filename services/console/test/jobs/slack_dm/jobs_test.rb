@@ -72,7 +72,7 @@ module SlackDm
       assert_in_delta now.to_f + 120, retry_job[:at], 0.001
     end
 
-    test "SyncCredentialJob stops retrying rate limits at the execution cap" do
+    test "SyncCredentialJob allows only one delayed rate-limit retry" do
       credential = slack_credential(app: slack_app)
       job = SlackDm::SyncCredentialJob.new(credential.id)
       job.executions = SlackDm::SyncCredentialJob::MAX_RATE_LIMIT_EXECUTIONS - 1

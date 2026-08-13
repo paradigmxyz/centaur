@@ -1,6 +1,6 @@
 module SlackDm
   class SyncCredentialJob < ApplicationJob
-    MAX_RATE_LIMIT_EXECUTIONS = 5
+    MAX_RATE_LIMIT_EXECUTIONS = 2
 
     queue_as :default
 
