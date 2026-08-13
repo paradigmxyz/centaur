@@ -855,14 +855,14 @@ def drive_revision_cmd(
 def drive_export_revision_cmd(
     file_id_or_url: str = typer.Argument(
         ...,
-        help="Drive file ID or Google Docs or Sheets URL",
+        help="Drive file ID or Google Docs, Sheets, or Slides URL",
     ),
     revision_id: str = typer.Argument(..., help="Revision ID"),
     format: str = typer.Option(
         "pdf",
         "--format",
         "-f",
-        help="Export format: txt, pdf, docx, html, csv, xlsx, md",
+        help="Export format: txt, pdf, docx, html, csv, xlsx, pptx, md",
     ),
     output: str = typer.Option(
         ".",
@@ -876,12 +876,13 @@ def drive_export_revision_cmd(
         help="Print text-based exports instead of writing a file",
     ),
 ):
-    """Export an earlier Docs or Sheets revision.
+    """Export an earlier Docs, Sheets, or Slides revision.
 
     Examples:
         gsuite drive export-revision "1abc123" "42"
         gsuite drive export-revision "https://docs.google.com/document/d/1abc123/edit" "42" -f docx
         gsuite drive export-revision "https://docs.google.com/spreadsheets/d/1abc123/edit" "42" -f xlsx -o old.xlsx
+        gsuite drive export-revision "https://docs.google.com/presentation/d/1abc123/edit" "42" -f pptx
         gsuite drive export-revision "1abc123" "42" -f txt --stdout
     """
     import re
@@ -909,6 +910,47 @@ def drive_export_revision_cmd(
             output_path = output_path / f"{stem}-revision-{safe_revision_id}.{format}"
         output_path.write_bytes(data)
         console.print(f"[green]✓ Exported revision {revision_id} to {output_path}[/]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1) from e
+
+
+@drive_app.command("download-revision")
+def drive_download_revision_cmd(
+    file_id_or_url: str = typer.Argument(..., help="Drive file ID or URL"),
+    revision_id: str = typer.Argument(..., help="Revision ID"),
+    output: str = typer.Option(
+        ".",
+        "--output",
+        "-o",
+        help="Output directory or file path",
+    ),
+):
+    """Download the original bytes of an earlier binary Drive revision.
+
+    Use export-revision for native Google Docs, Sheets, and Slides files.
+
+    Examples:
+        gsuite drive download-revision "1abc123" "42"
+        gsuite drive download-revision "1abc123" "42" -o old-image.png
+    """
+    import re
+
+    from .client import _drive_download_revision_bytes
+
+    try:
+        file_id = extract_drive_file_id(file_id_or_url)
+        metadata, revision, data = _drive_download_revision_bytes(file_id, revision_id)
+        output_path = Path(output)
+        if output_path.is_dir():
+            original_name = revision["original_filename"] or metadata.get("name")
+            original_path = Path(original_name or f"drive-{file_id}")
+            safe_revision_id = re.sub(r"[^a-zA-Z0-9_.-]", "_", revision_id)
+            output_path = output_path / (
+                f"{original_path.stem}-revision-{safe_revision_id}{original_path.suffix}"
+            )
+        output_path.write_bytes(data)
+        console.print(f"[green]✓ Downloaded revision {revision_id} to {output_path}[/]")
     except Exception as e:
         console.print(f"[red]Error: {e}[/]")
         raise typer.Exit(1) from e

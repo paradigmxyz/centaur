@@ -1,32 +1,39 @@
 import base64
+import tomllib
+from pathlib import Path
 
 import pytest
 
 from gsuite import client
 
 
+def test_revision_export_hosts_authenticate_only_initial_google_docs_request():
+    pyproject = tomllib.loads(
+        Path(client.__file__).with_name("pyproject.toml").read_text()
+    )
+    centaur_config = pyproject["tool"]["centaur"]
+    oauth_hosts = centaur_config["secrets"][0]["hosts"]
+
+    assert "docs.google.com" in centaur_config["hosts"]
+    assert "*.googleusercontent.com" in centaur_config["hosts"]
+    assert "*.usercontent.google.com" in centaur_config["hosts"]
+    assert "docs.google.com" in oauth_hosts
+    assert "*.googleusercontent.com" not in oauth_hosts
+    assert "*.usercontent.google.com" not in oauth_hosts
+
+
 class _CreateRequest:
     def __init__(self, result: dict):
         self._result = result
-        self.headers: dict[str, str] = {}
 
     def execute(self) -> dict:
         return self._result
 
 
 class _FakeFilesApi:
-    def __init__(
-        self,
-        metadata_result: dict | None = None,
-        download_result: dict | None = None,
-    ):
+    def __init__(self):
         self.create_calls: list[dict] = []
         self.list_calls: list[dict] = []
-        self.get_calls: list[dict] = []
-        self.download_calls: list[dict] = []
-        self.download_requests: list[_CreateRequest] = []
-        self.metadata_result = metadata_result or {}
-        self.download_result = download_result or {}
 
     def create(self, **kwargs):
         self.create_calls.append(kwargs)
@@ -66,17 +73,6 @@ class _FakeFilesApi:
             }
         )
 
-    def get(self, **kwargs):
-        self.get_calls.append(kwargs)
-        return _CreateRequest(self.metadata_result)
-
-    def download(self, **kwargs):
-        self.download_calls.append(kwargs)
-        request = _CreateRequest(self.download_result)
-        self.download_requests.append(request)
-        return request
-
-
 class _FakeRevisionsApi:
     def __init__(
         self,
@@ -99,45 +95,23 @@ class _FakeRevisionsApi:
         return _CreateRequest(self.get_result)
 
 
-class _FakeOperationsApi:
-    def __init__(self, get_results: list[dict] | None = None):
-        self.get_results = list(get_results or [])
-        self.get_calls: list[dict] = []
-        self.get_requests: list[_CreateRequest] = []
-
-    def get(self, **kwargs):
-        self.get_calls.append(kwargs)
-        if not self.get_results:
-            raise AssertionError("Unexpected extra operations.get call")
-        request = _CreateRequest(self.get_results.pop(0))
-        self.get_requests.append(request)
-        return request
-
-
 class _FakeDriveService:
     def __init__(
         self,
         revision_list_results: list[dict] | None = None,
         revision_get_result: dict | None = None,
-        metadata_result: dict | None = None,
-        download_result: dict | None = None,
-        operation_get_results: list[dict] | None = None,
     ):
-        self.files_api = _FakeFilesApi(metadata_result, download_result)
+        self.files_api = _FakeFilesApi()
         self.revisions_api = _FakeRevisionsApi(
             revision_list_results,
             revision_get_result,
         )
-        self.operations_api = _FakeOperationsApi(operation_get_results)
 
     def files(self):
         return self.files_api
 
     def revisions(self):
         return self.revisions_api
-
-    def operations(self):
-        return self.operations_api
 
 
 class _FakeGmailMessagesApi:
@@ -613,25 +587,33 @@ def test_drive_export_revision_bytes_downloads_requested_format(monkeypatch):
         status = 200
 
     class FakeHttp:
-        def request(self, url, method, headers):
-            request_calls.append({"url": url, "method": method, "headers": headers})
+        def request(self, url, method):
+            request_calls.append({"url": url, "method": method})
             return FakeResponse(), b"historical pdf"
 
-    fake_service = _FakeDriveService(
-        metadata_result={
+    monkeypatch.setattr(
+        client,
+        "drive_get",
+        lambda file_id: {
+            "id": file_id,
             "name": "Quarterly Plan",
-            "mimeType": "application/vnd.google-apps.document",
-            "webViewLink": "https://docs.google.com/document/d/file-123/edit",
-            "resourceKey": "resource-key-42",
+            "web_view_link": "https://docs.google.com/document/d/file-123/edit",
         },
-        download_result={
-            "done": True,
-            "response": {
-                "downloadUri": "https://docs.google.com/download/rev-42.pdf"
+    )
+    monkeypatch.setattr(
+        client,
+        "drive_get_revision",
+        lambda file_id, revision_id: {
+            "id": revision_id,
+            "export_links": {
+                "application/pdf": (
+                    "https://docs.google.com/feeds/download/documents/export/"
+                    "Export?id=file-123&revision=rev-42&exportFormat=pdf"
+                ),
+                "text/plain": "https://docs.google.com/export/rev-42.txt",
             },
         },
     )
-    monkeypatch.setattr(client, "get_drive_service", lambda: fake_service)
     monkeypatch.setattr(client, "_build_http", lambda: FakeHttp())
 
     metadata, mime_type, data = client._drive_export_revision_bytes(
@@ -643,130 +625,101 @@ def test_drive_export_revision_bytes_downloads_requested_format(monkeypatch):
     assert metadata["name"] == "Quarterly Plan"
     assert mime_type == "application/pdf"
     assert data == b"historical pdf"
-    assert fake_service.files_api.get_calls == [
-        {
-            "fileId": "file-123",
-            "fields": "name,mimeType,webViewLink,resourceKey",
-            "supportsAllDrives": True,
-        }
-    ]
-    assert fake_service.files_api.download_requests[0].headers == {
-        "X-Goog-Drive-Resource-Keys": "file-123/resource-key-42"
-    }
-    assert fake_service.files_api.download_calls == [
-        {
-            "fileId": "file-123",
-            "revisionId": "rev-42",
-            "mimeType": "application/pdf",
-        }
-    ]
-    assert fake_service.operations_api.get_calls == []
     assert request_calls == [
         {
-            "url": "https://docs.google.com/download/rev-42.pdf",
+            "url": (
+                "https://docs.google.com/feeds/download/documents/export/"
+                "Export?id=file-123&revision=rev-42&exportFormat=pdf"
+            ),
             "method": "GET",
-            "headers": {
-                "X-Goog-Drive-Resource-Keys": "file-123/resource-key-42"
-            },
         }
     ]
 
 
-def test_drive_export_revision_bytes_polls_pending_operation(monkeypatch):
-    sleeps: list[int] = []
+def test_drive_export_revision_bytes_reports_available_formats(monkeypatch):
+    monkeypatch.setattr(client, "drive_get", lambda file_id: {"id": file_id})
+    monkeypatch.setattr(
+        client,
+        "drive_get_revision",
+        lambda file_id, revision_id: {
+            "id": revision_id,
+            "export_links": {"text/plain": "https://docs.google.com/export/rev-42.txt"},
+        },
+    )
+
+    with pytest.raises(ValueError, match="Available formats: txt"):
+        client._drive_export_revision_bytes("file-123", "rev-42", "pdf")
+
+
+def test_drive_download_revision_bytes_uses_alt_media(monkeypatch):
     request_calls: list[dict] = []
 
     class FakeResponse:
         status = 200
 
     class FakeHttp:
-        def request(self, url, method, headers):
-            request_calls.append({"url": url, "method": method, "headers": headers})
-            return FakeResponse(), b"historical workbook"
+        def request(self, url, method):
+            request_calls.append({"url": url, "method": method})
+            return FakeResponse(), b"historical binary"
 
-    fake_service = _FakeDriveService(
-        metadata_result={
-            "name": "Quarterly Model",
-            "mimeType": "application/vnd.google-apps.spreadsheet",
-            "resourceKey": "resource-key-file",
+    monkeypatch.setattr(
+        client,
+        "drive_get",
+        lambda file_id: {
+            "id": file_id,
+            "name": "diagram.png",
+            "mime_type": "image/png",
         },
-        download_result={
-            "name": "operations/download-42",
-            "metadata": {"resourceKey": "resource-key-operation"},
-        },
-        operation_get_results=[
-            {"name": "operations/download-42", "done": False},
-            {
-                "name": "operations/download-42",
-                "done": True,
-                "response": {
-                    "downloadUri": "https://drive.usercontent.google.com/download/rev-42"
-                },
-            },
-        ],
     )
-    monkeypatch.setattr(client, "get_drive_service", lambda: fake_service)
+    monkeypatch.setattr(
+        client,
+        "drive_get_revision",
+        lambda file_id, revision_id: {
+            "id": revision_id,
+            "mime_type": "image/png",
+            "original_filename": "diagram.png",
+        },
+    )
     monkeypatch.setattr(client, "_build_http", lambda: FakeHttp())
-    monkeypatch.setattr(client.time, "sleep", lambda seconds: sleeps.append(seconds))
 
-    _metadata, mime_type, data = client._drive_export_revision_bytes(
-        "file-123", "rev-42", "xlsx"
+    metadata, revision, data = client._drive_download_revision_bytes(
+        "file/id", "rev 42"
     )
 
-    assert mime_type == (
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-    assert data == b"historical workbook"
-    assert sleeps == [1, 2]
-    assert fake_service.operations_api.get_calls == [
-        {"name": "operations/download-42"},
-        {"name": "operations/download-42"},
-    ]
-    assert [request.headers for request in fake_service.operations_api.get_requests] == [
-        {"X-Goog-Drive-Resource-Keys": "file-123/resource-key-operation"},
-        {"X-Goog-Drive-Resource-Keys": "file-123/resource-key-operation"},
-    ]
+    assert metadata["name"] == "diagram.png"
+    assert revision["id"] == "rev 42"
+    assert data == b"historical binary"
     assert request_calls == [
         {
-            "url": "https://drive.usercontent.google.com/download/rev-42",
+            "url": (
+                "https://www.googleapis.com/drive/v3/files/file%2Fid/"
+                "revisions/rev%2042?alt=media"
+            ),
             "method": "GET",
-            "headers": {
-                "X-Goog-Drive-Resource-Keys": "file-123/resource-key-operation"
-            },
         }
     ]
 
 
-def test_drive_export_revision_bytes_rejects_presentations(monkeypatch):
-    fake_service = _FakeDriveService(
-        metadata_result={
-            "name": "Quarterly Review",
-            "mimeType": "application/vnd.google-apps.presentation",
+def test_drive_download_revision_bytes_rejects_google_workspace_files(monkeypatch):
+    monkeypatch.setattr(
+        client,
+        "drive_get",
+        lambda file_id: {
+            "id": file_id,
+            "mime_type": "application/vnd.google-apps.presentation",
         },
     )
-    monkeypatch.setattr(client, "get_drive_service", lambda: fake_service)
-
-    with pytest.raises(ValueError, match="Google Docs and Google Sheets only"):
-        client._drive_export_revision_bytes("file-123", "rev-42", "pdf")
-
-    assert fake_service.files_api.download_calls == []
-
-
-def test_drive_export_revision_bytes_reports_operation_error(monkeypatch):
-    fake_service = _FakeDriveService(
-        metadata_result={
-            "name": "Quarterly Plan",
-            "mimeType": "application/vnd.google-apps.document",
-        },
-        download_result={
-            "done": True,
-            "error": {"code": 3, "message": "Unsupported export format"},
+    monkeypatch.setattr(
+        client,
+        "drive_get_revision",
+        lambda file_id, revision_id: {
+            "id": revision_id,
+            "mime_type": "application/vnd.google-apps.presentation",
         },
     )
-    monkeypatch.setattr(client, "get_drive_service", lambda: fake_service)
 
-    with pytest.raises(RuntimeError, match=r"failed \(3\): Unsupported export format"):
-        client._drive_export_revision_bytes("file-123", "rev-42", "xlsx")
+    with pytest.raises(ValueError, match="export-revision"):
+        client._drive_download_revision_bytes("slides-123", "rev-42")
 
 
 def test_drive_export_revision_saves_attachment(monkeypatch):
@@ -777,7 +730,7 @@ def test_drive_export_revision_saves_attachment(monkeypatch):
         lambda file_id, revision_id, export_format: (
             {
                 "name": "Quarterly Plan",
-                "webViewLink": "https://docs.google.com/document/d/file-123/edit",
+                "web_view_link": "https://docs.google.com/document/d/file-123/edit",
             },
             "application/pdf",
             b"historical pdf",
@@ -806,6 +759,7 @@ def test_gsuite_client_exposes_drive_revisions(monkeypatch):
     list_calls: list[dict] = []
     get_calls: list[dict] = []
     export_calls: list[dict] = []
+    download_calls: list[dict] = []
     monkeypatch.setattr(
         client,
         "drive_list_revisions",
@@ -836,6 +790,14 @@ def test_gsuite_client_exposes_drive_revisions(monkeypatch):
             or {"id": "attachment-123"}
         ),
     )
+    monkeypatch.setattr(
+        client,
+        "drive_download_revision",
+        lambda file_id, revision_id: (
+            download_calls.append({"file_id": file_id, "revision_id": revision_id})
+            or {"id": "attachment-456"}
+        ),
+    )
 
     gsuite = client.GSuiteClient()
     assert gsuite.drive_list_revisions("file-123", max_results=25) == [{"id": "rev-1"}]
@@ -843,11 +805,15 @@ def test_gsuite_client_exposes_drive_revisions(monkeypatch):
     assert gsuite.drive_export_revision("file-123", "rev-1", "pdf") == {
         "id": "attachment-123"
     }
+    assert gsuite.drive_download_revision("file-123", "rev-1") == {
+        "id": "attachment-456"
+    }
     assert list_calls == [{"file_id": "file-123", "max_results": 25}]
     assert get_calls == [{"file_id": "file-123", "revision_id": "rev-1"}]
     assert export_calls == [
         {"file_id": "file-123", "revision_id": "rev-1", "export_format": "pdf"}
     ]
+    assert download_calls == [{"file_id": "file-123", "revision_id": "rev-1"}]
 
 
 def test_sheets_add_tab_uses_batch_update(monkeypatch):

@@ -235,3 +235,32 @@ def test_drive_export_revision_command_prints_text_to_stdout(monkeypatch):
 
     assert result.exit_code == 0
     assert "[Historical draft]" in result.output
+
+
+def test_drive_download_revision_command_writes_original_binary(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        client,
+        "_drive_download_revision_bytes",
+        lambda file_id, revision_id: (
+            {"name": "diagram.png"},
+            {"original_filename": "diagram.png"},
+            b"historical image",
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "drive",
+            "download-revision",
+            "file-123",
+            "rev-42",
+            "--output",
+            str(tmp_path),
+        ],
+    )
+
+    output_path = tmp_path / "diagram-revision-rev-42.png"
+    assert result.exit_code == 0
+    assert output_path.read_bytes() == b"historical image"
+    assert "Downloaded revision rev-42" in result.output

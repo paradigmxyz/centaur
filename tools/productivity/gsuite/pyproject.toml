@@ -4,7 +4,7 @@ description = "Gmail, Calendar, Drive, Docs, Sheets, Slides, Analytics"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
-    "google-api-python-client>=2.198.0",
+    "google-api-python-client>=2.100.0",
     "google-analytics-data>=0.18.0",
     "google-analytics-admin>=0.22.0",
     "google-auth-httplib2>=0.2.0",
@@ -58,6 +58,7 @@ secrets = [
         "gmail.googleapis.com",
         "calendar.googleapis.com",
         "www.googleapis.com",
+        "docs.google.com",
         "docs.googleapis.com",
         "sheets.googleapis.com",
         "slides.googleapis.com",
