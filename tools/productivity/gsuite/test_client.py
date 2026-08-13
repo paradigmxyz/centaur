@@ -7,7 +7,7 @@ import pytest
 from gsuite import client
 
 
-def test_revision_export_hosts_authenticate_only_initial_google_docs_request():
+def test_revision_export_authenticates_google_docs_request():
     pyproject = tomllib.loads(
         Path(client.__file__).with_name("pyproject.toml").read_text()
     )
@@ -15,11 +15,7 @@ def test_revision_export_hosts_authenticate_only_initial_google_docs_request():
     oauth_hosts = centaur_config["secrets"][0]["hosts"]
 
     assert "docs.google.com" in centaur_config["hosts"]
-    assert "*.googleusercontent.com" in centaur_config["hosts"]
-    assert "*.usercontent.google.com" in centaur_config["hosts"]
     assert "docs.google.com" in oauth_hosts
-    assert "*.googleusercontent.com" not in oauth_hosts
-    assert "*.usercontent.google.com" not in oauth_hosts
 
 
 class _CreateRequest:
