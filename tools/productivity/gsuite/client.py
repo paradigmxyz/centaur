@@ -5,6 +5,7 @@ import io
 import mimetypes
 import os
 import re
+import time
 import urllib.request
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -955,11 +956,12 @@ DRIVE_EXPORT_FORMATS = {
     "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     "md": "text/markdown",
 }
-_DRIVE_EXPORT_LINK_HOSTS = {
-    "docs.google.com",
-    "drive.google.com",
-    "www.googleapis.com",
+_DRIVE_REVISION_DOWNLOAD_MIME_TYPES = {
+    "application/vnd.google-apps.document",
+    "application/vnd.google-apps.spreadsheet",
 }
+_DRIVE_DOWNLOAD_URI_HOSTS = {"www.googleapis.com"}
+_DRIVE_DOWNLOAD_POLL_ATTEMPTS = 8
 
 
 def _normalize_drive_revision(revision: dict) -> dict:
@@ -1061,8 +1063,8 @@ def _drive_export_mime_type(export_format: str) -> str:
     return mime_type
 
 
-def _validate_drive_export_link(export_url: str) -> None:
-    parts = urlsplit(export_url)
+def _validate_drive_download_uri(download_uri: str) -> None:
+    parts = urlsplit(download_uri)
     hostname = (parts.hostname or "").lower()
     is_google_content_host = hostname.endswith(
         ".googleusercontent.com"
@@ -1070,9 +1072,40 @@ def _validate_drive_export_link(export_url: str) -> None:
     if (
         parts.scheme != "https"
         or not hostname
-        or (hostname not in _DRIVE_EXPORT_LINK_HOSTS and not is_google_content_host)
+        or (hostname not in _DRIVE_DOWNLOAD_URI_HOSTS and not is_google_content_host)
     ):
-        raise RuntimeError("Google Drive returned an invalid revision export URL")
+        raise RuntimeError("Google Drive returned an invalid revision download URI")
+
+
+def _drive_download_operation_result(service, operation: dict) -> dict:
+    """Poll a Drive download operation and return its completed response."""
+    for attempt in range(_DRIVE_DOWNLOAD_POLL_ATTEMPTS + 1):
+        if operation.get("done"):
+            if error := operation.get("error"):
+                code = error.get("code", "unknown")
+                message = error.get("message", "unknown error")
+                raise RuntimeError(
+                    f"Google Drive revision download failed ({code}): {message}"
+                )
+            response = operation.get("response") or {}
+            if not response.get("downloadUri"):
+                raise RuntimeError(
+                    "Google Drive revision download completed without a download URI"
+                )
+            return response
+
+        operation_name = operation.get("name")
+        if not operation_name:
+            raise RuntimeError(
+                "Google Drive revision download returned an unnamed pending operation"
+            )
+        if attempt == _DRIVE_DOWNLOAD_POLL_ATTEMPTS:
+            break
+
+        time.sleep(min(2**attempt, 10))
+        operation = service.operations().get(name=operation_name).execute()
+
+    raise RuntimeError("Google Drive revision download did not finish in time")
 
 
 def _drive_export_revision_bytes(
@@ -1081,26 +1114,39 @@ def _drive_export_revision_bytes(
     export_format: str = "pdf",
 ) -> tuple[dict, str, bytes]:
     mime_type = _drive_export_mime_type(export_format)
-    metadata = drive_get(file_id)
-    revision = drive_get_revision(file_id, revision_id)
-    export_url = revision["export_links"].get(mime_type)
-    if not export_url:
-        available_formats = sorted(
-            export_format_name
-            for export_format_name, candidate_mime_type in DRIVE_EXPORT_FORMATS.items()
-            if candidate_mime_type in revision["export_links"]
+    service = get_drive_service()
+    metadata = (
+        service.files()
+        .get(
+            fileId=file_id,
+            fields="name,mimeType,webViewLink",
+            supportsAllDrives=True,
         )
-        available = ", ".join(available_formats) or "none"
+        .execute()
+    )
+    if metadata.get("mimeType") not in _DRIVE_REVISION_DOWNLOAD_MIME_TYPES:
         raise ValueError(
-            f"Revision {revision_id} cannot be exported as {export_format}. "
-            f"Available formats: {available}"
+            "Historical revision downloads are supported for Google Docs and "
+            "Google Sheets only"
         )
 
-    _validate_drive_export_link(export_url)
-    response, content = _build_http().request(export_url, method="GET")
+    operation = (
+        service.files()
+        .download(
+            fileId=file_id,
+            revisionId=revision_id,
+            mimeType=mime_type,
+        )
+        .execute()
+    )
+    result = _drive_download_operation_result(service, operation)
+    download_uri = result["downloadUri"]
+    _validate_drive_download_uri(download_uri)
+
+    response, content = _build_http().request(download_uri, method="GET")
     status = int(response.status)
     if not 200 <= status < 300:
-        raise RuntimeError(f"Google Drive revision export failed with HTTP {status}")
+        raise RuntimeError(f"Google Drive revision download failed with HTTP {status}")
 
     return metadata, mime_type, bytes(content)
 
@@ -1110,12 +1156,12 @@ def drive_export_revision(
     revision_id: str,
     export_format: str = "pdf",
 ) -> dict:
-    """Export an earlier Docs, Sheets, or Slides revision as an attachment.
+    """Export an earlier Docs or Sheets revision as an attachment.
 
     Args:
         file_id: The Google Drive file ID
         revision_id: Revision ID returned by drive_list_revisions
-        export_format: Export format (txt, pdf, docx, html, csv, xlsx, pptx, md)
+        export_format: Export format (txt, pdf, docx, html, csv, xlsx, md)
 
     Returns:
         Attachment metadata
@@ -1130,7 +1176,7 @@ def drive_export_revision(
         name=f"{stem}-revision-{revision_id}.{export_format}",
         mime_type=mime_type,
         data=data,
-        source_url=metadata.get("web_view_link"),
+        source_url=metadata.get("webViewLink"),
     )
 
 
@@ -2963,12 +3009,12 @@ class GSuiteClient:
         revision_id: str,
         export_format: str = "pdf",
     ) -> dict:
-        """Export an earlier Docs, Sheets, or Slides revision as an attachment.
+        """Export an earlier Docs or Sheets revision as an attachment.
 
         Args:
             file_id: The Google Drive file ID
             revision_id: Revision ID returned by drive_list_revisions
-            export_format: Export format (txt, pdf, docx, html, csv, xlsx, pptx, md)
+            export_format: Export format (txt, pdf, docx, html, csv, xlsx, md)
 
         Returns:
             Attachment metadata

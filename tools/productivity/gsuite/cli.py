@@ -855,14 +855,14 @@ def drive_revision_cmd(
 def drive_export_revision_cmd(
     file_id_or_url: str = typer.Argument(
         ...,
-        help="Drive file ID or Google Docs, Sheets, or Slides URL",
+        help="Drive file ID or Google Docs or Sheets URL",
     ),
     revision_id: str = typer.Argument(..., help="Revision ID"),
     format: str = typer.Option(
         "pdf",
         "--format",
         "-f",
-        help="Export format: txt, pdf, docx, html, csv, xlsx, pptx, md",
+        help="Export format: txt, pdf, docx, html, csv, xlsx, md",
     ),
     output: str = typer.Option(
         ".",
@@ -876,13 +876,12 @@ def drive_export_revision_cmd(
         help="Print text-based exports instead of writing a file",
     ),
 ):
-    """Export an earlier Docs, Sheets, or Slides revision.
+    """Export an earlier Docs or Sheets revision.
 
     Examples:
         gsuite drive export-revision "1abc123" "42"
         gsuite drive export-revision "https://docs.google.com/document/d/1abc123/edit" "42" -f docx
         gsuite drive export-revision "https://docs.google.com/spreadsheets/d/1abc123/edit" "42" -f xlsx -o old.xlsx
-        gsuite drive export-revision "https://docs.google.com/presentation/d/1abc123/edit" "42" -f pptx
         gsuite drive export-revision "1abc123" "42" -f txt --stdout
     """
     import re
