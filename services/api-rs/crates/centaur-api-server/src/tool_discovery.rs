@@ -1699,6 +1699,102 @@ mod tests {
     }
 
     #[test]
+    fn company_context_manifest_configures_company_context_reader() {
+        let tools_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../..")
+            .join("tools/productivity");
+        let discovered = discover_tool_proxy_fragment(&[tools_dir]).unwrap();
+        let listener = discovered
+            .fragment
+            .postgres
+            .iter()
+            .find(|listener| {
+                listener
+                    .sandbox_env
+                    .as_ref()
+                    .and_then(|sandbox_env| sandbox_env.name.as_deref())
+                    == Some("company_context_dsn")
+            })
+            .expect("company_context Postgres listener");
+
+        assert_eq!(
+            listener.extra.get("role").and_then(YamlValue::as_str),
+            Some("centaur_company_context_reader")
+        );
+        assert_eq!(
+            listener
+                .sandbox_env
+                .as_ref()
+                .and_then(|sandbox_env| sandbox_env.database.as_deref()),
+            Some("centaur")
+        );
+        assert_eq!(
+            listener
+                .upstream
+                .as_ref()
+                .and_then(|upstream| upstream.dsn.as_ref())
+                .and_then(|dsn| dsn.get("placeholder"))
+                .and_then(YamlValue::as_str),
+            Some("CENTAUR_POSTGRES_DSN")
+        );
+        assert_eq!(
+            listener.settings,
+            vec![
+                PgDsnSetting {
+                    name: "centaur.slack_channel_id".to_owned(),
+                    value: None,
+                    value_from: Some(PgDsnSettingValueFrom {
+                        principal_label: None,
+                        principal_field: Some("slack_channel_id".to_owned()),
+                        proxy_label: None,
+                    }),
+                },
+                PgDsnSetting {
+                    name: "centaur.slack_team_id".to_owned(),
+                    value: None,
+                    value_from: Some(PgDsnSettingValueFrom {
+                        principal_label: None,
+                        principal_field: Some("slack_team_id".to_owned()),
+                        proxy_label: None,
+                    }),
+                },
+                PgDsnSetting {
+                    name: "centaur.slack_user_id".to_owned(),
+                    value: None,
+                    value_from: Some(PgDsnSettingValueFrom {
+                        principal_label: None,
+                        principal_field: Some("slack_user_id".to_owned()),
+                        proxy_label: None,
+                    }),
+                },
+                PgDsnSetting {
+                    name: "centaur.google_subject".to_owned(),
+                    value: None,
+                    value_from: Some(PgDsnSettingValueFrom {
+                        principal_label: Some("google_subject".to_owned()),
+                        principal_field: None,
+                        proxy_label: None,
+                    }),
+                },
+                PgDsnSetting {
+                    name: "centaur.slack_history_channel_ids".to_owned(),
+                    value: None,
+                    value_from: Some(PgDsnSettingValueFrom {
+                        principal_label: None,
+                        principal_field: Some("slack_history_channel_ids".to_owned()),
+                        proxy_label: None,
+                    }),
+                },
+                PgDsnSetting {
+                    name: "centaur.slack_include_public".to_owned(),
+                    value: Some("true".to_owned()),
+                    value_from: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn rejects_pg_dsn_value_from_with_multiple_selectors() {
         let value: TomlValue = toml::from_str(
             r#"

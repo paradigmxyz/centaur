@@ -32,9 +32,12 @@ type = "pg_dsn"
 name = "company_context_dsn"
 database = "centaur"
 secret_ref = "CENTAUR_POSTGRES_DSN"
-role = "centaur_slack_reader"
+role = "centaur_company_context_reader"
 settings = [
     { name = "centaur.slack_channel_id", value_from = { principal_field = "slack_channel_id" } },
     { name = "centaur.slack_team_id", value_from = { principal_field = "slack_team_id" } },
     { name = "centaur.slack_user_id", value_from = { principal_field = "slack_user_id" } },
+    { name = "centaur.google_subject", value_from = { principal_label = "google_subject" } },
+    { name = "centaur.slack_history_channel_ids", value_from = { principal_field = "slack_history_channel_ids" } },
+    { name = "centaur.slack_include_public", value = "true" },
 ]
