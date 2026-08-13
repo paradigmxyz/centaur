@@ -1560,7 +1560,7 @@ async def _capture_visible_pages(page, total: int) -> list[Image.Image]:
     images: list[Image.Image] = []
     for page_number in range(1, total + 1):
         try:
-            png = await page.screenshot(full_page=False)
+            png = await _capture_visible_page(page)
             source = Image.open(BytesIO(png))
             rgb = Image.new("RGB", source.size, (255, 255, 255))
             rgb.paste(source, mask=source.split()[3] if source.mode == "RGBA" else None)
@@ -1574,6 +1574,24 @@ async def _capture_visible_pages(page, total: int) -> list[Image.Image]:
             await asyncio.sleep(0.75)
     LOGGER.info("Captured %d/%d DocSend pages from the viewport", len(images), total)
     return images
+
+
+async def _capture_visible_page(page) -> bytes:
+    """Capture the document surface without DocSend's surrounding viewer chrome."""
+    await page.evaluate(
+        """() => {
+          const cookieFrame = document.querySelector('#ccpa-iframe');
+          if (cookieFrame) cookieFrame.style.visibility = 'hidden';
+        }"""
+    )
+    spreadsheet = page.locator(
+        'iframe#previews-iframe:visible, iframe[class*="spreadsheet-viewer"]:visible'
+    ).first
+    if await spreadsheet.count() > 0:
+        LOGGER.info("Capturing the visible DocSend spreadsheet frame")
+        return await spreadsheet.screenshot()
+    LOGGER.info("No document-only capture surface found; capturing the viewer viewport")
+    return await page.screenshot(full_page=False)
 
 
 async def _extract_dom_image_urls(page) -> list[str]:

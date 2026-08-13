@@ -163,6 +163,61 @@ def test_navigate_all_slides_visits_each_page(monkeypatch) -> None:
     assert keys == ["ArrowLeft", "ArrowLeft", "ArrowLeft", "ArrowRight", "ArrowRight"]
 
 
+def test_capture_visible_page_uses_spreadsheet_frame_without_viewer_chrome() -> None:
+    class SpreadsheetFrame:
+        @property
+        def first(self):
+            return self
+
+        async def count(self) -> int:
+            return 1
+
+        async def screenshot(self) -> bytes:
+            return b"spreadsheet-only"
+
+    class Page:
+        async def evaluate(self, script: str) -> None:
+            assert "#ccpa-iframe" in script
+
+        def locator(self, selector: str):
+            assert selector == (
+                'iframe#previews-iframe:visible, iframe[class*="spreadsheet-viewer"]:visible'
+            )
+            return SpreadsheetFrame()
+
+        async def screenshot(self, **kwargs) -> bytes:
+            raise AssertionError("the surrounding DocSend viewport must not be captured")
+
+    result = asyncio.run(_CLIENT._capture_visible_page(Page()))
+
+    assert result == b"spreadsheet-only"
+
+
+def test_capture_visible_page_falls_back_for_unknown_viewers() -> None:
+    class MissingFrame:
+        @property
+        def first(self):
+            return self
+
+        async def count(self) -> int:
+            return 0
+
+    class Page:
+        async def evaluate(self, script: str) -> None:
+            assert "#ccpa-iframe" in script
+
+        def locator(self, selector: str):
+            return MissingFrame()
+
+        async def screenshot(self, *, full_page: bool) -> bytes:
+            assert full_page is False
+            return b"viewer-viewport"
+
+    result = asyncio.run(_CLIENT._capture_visible_page(Page()))
+
+    assert result == b"viewer-viewport"
+
+
 def test_fetch_space_item_recovers_a_document_when_download_is_disabled(monkeypatch) -> None:
     class DisabledDownloadButton:
         async def count(self) -> int:
