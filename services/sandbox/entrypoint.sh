@@ -223,6 +223,24 @@ if effort:
 
 text = "\n".join(lines).rstrip() + "\n"
 
+# OPENAI_BASE_URL configures codex's built-in OpenAI provider. api-rs passes
+# the same value into the sandbox that it uses for its own OpenAI requests and
+# to derive iron-proxy's credential host, so deployments do not need a custom
+# model provider just to use another OpenAI-compatible Responses API endpoint.
+# Applied before CODEX_CONFIG_OVERLAY so an explicit operator overlay still wins.
+openai_base_url = (os.environ.get("OPENAI_BASE_URL") or "").strip().rstrip("/")
+if openai_base_url:
+    import tomllib
+    import tomli_w
+
+    try:
+        config = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        print(f"ignoring OPENAI_BASE_URL patch: {exc}", file=sys.stderr)
+    else:
+        config["openai_base_url"] = openai_base_url
+        text = tomli_w.dumps(config)
+
 # CODEX_BEDROCK_REGION: when codex's built-in `amazon-bedrock` provider is enabled
 # (the api-rs sandbox env injects this), pin its AWS region from the SAME env var
 # that scopes iron-proxy's SigV4 re-signing, so the in-sandbox client signs/sends

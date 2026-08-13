@@ -32,6 +32,7 @@ use centaur_sandbox_manager::{SandboxReaperConfig, WarmPoolConfig};
 use centaur_session_core::HarnessType;
 use centaur_session_runtime::{
     PersonaRegistry, SandboxCapacityConfig, SandboxWorkloadMode, SessionSandboxCleanupConfig,
+    openai_base_url,
 };
 use centaur_workflows::{WorkflowHostSandboxRuntime, WorkflowPrincipalRegistrar};
 use clap::{Args as ClapArgs, Parser, ValueEnum};
@@ -149,12 +150,6 @@ struct ActivitySummaryArgs {
     )]
     model: String,
     #[arg(
-        long = "session-activity-summary-openai-base-url",
-        env = "SESSION_ACTIVITY_SUMMARY_OPENAI_BASE_URL",
-        default_value = "https://api.openai.com/v1"
-    )]
-    openai_base_url: String,
-    #[arg(
         long = "session-activity-summary-min-interval-secs",
         env = "SESSION_ACTIVITY_SUMMARY_MIN_INTERVAL_SECS",
         default_value_t = 20,
@@ -197,7 +192,7 @@ impl ActivitySummaryArgs {
             return None;
         };
         Some(ActivitySummaryConfig {
-            base_url: self.openai_base_url.clone(),
+            base_url: openai_base_url(),
             api_key,
             max_facts: usize::try_from(self.max_facts).unwrap_or(usize::MAX),
             max_output_tokens: u16::try_from(self.max_output_tokens).unwrap_or(u16::MAX),
@@ -1012,6 +1007,12 @@ impl SandboxArgs {
         let codex_auth_mode = clean_optional_value(env::var("CODEX_AUTH_MODE").ok().as_deref())
             .unwrap_or_else(|| "api_key".to_owned());
         envs.push(("CODEX_AUTH_MODE".to_owned(), codex_auth_mode.clone()));
+        if codex_auth_mode == "api_key"
+            && let Some(base_url) =
+                clean_optional_value(env::var("OPENAI_BASE_URL").ok().as_deref())
+        {
+            envs.push(("OPENAI_BASE_URL".to_owned(), base_url));
+        }
         if let Some(mode) = clean_optional_value(env::var("CLAUDE_CODE_AUTH_MODE").ok().as_deref())
         {
             envs.push(("CLAUDE_CODE_AUTH_MODE".to_owned(), mode));
@@ -1020,8 +1021,8 @@ impl SandboxArgs {
         // Inject the infra/harness placeholder credentials so env-based
         // consumers send the proxy_value iron-proxy replaces with the real
         // secret: codex's OPENAI_API_KEY (api_key mode -> codex logs in and
-        // hits api.openai.com instead of falling back to the ChatGPT
-        // auth.json), git/gh's GITHUB_TOKEN, the slack tool's
+        // hits OPENAI_BASE_URL (api.openai.com by default) instead of falling
+        // back to the ChatGPT auth.json), git/gh's GITHUB_TOKEN, the slack tool's
         // SLACK_BOT_TOKEN, and the rest of the infra set.
         for (name, value) in self.iron_proxy.sandbox_placeholder_env()? {
             if !envs.iter().any(|(existing, _)| existing == &name) {
@@ -2652,6 +2653,8 @@ mod tests {
 
     #[test]
     fn codex_app_server_env_template_injects_auth_mode_and_placeholder() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[("OPENAI_BASE_URL", "https://compatible-api.example/v1")]);
         let args = Args::try_parse_from([
             "centaur-api-server",
             "--database-url",
@@ -2675,6 +2678,9 @@ mod tests {
         // The codex auth mode is propagated so the sandbox agent matches the
         // proxy's registered credential.
         assert!(env.iter().any(|(name, _)| name == "CODEX_AUTH_MODE"));
+        assert!(env.iter().any(|(name, value)| {
+            name == "OPENAI_BASE_URL" && value == "https://compatible-api.example/v1"
+        }));
         // api_key mode (the default) injects the placeholder the egress proxy
         // replaces, so codex logs in and hits api.openai.com instead of
         // falling back to the ChatGPT auth.json.

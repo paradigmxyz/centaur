@@ -865,7 +865,7 @@ impl ActivitySummaryClient {
             .timeout(config.timeout)
             .build()
             .map_err(ActivitySummaryError::Http)?;
-        let responses_url = format!("{}/responses", config.base_url.trim_end_matches('/'));
+        let responses_url = format!("{}/responses", config.base_url);
         Ok(Self {
             api_key: config.api_key.clone(),
             client,
