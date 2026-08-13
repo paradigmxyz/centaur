@@ -4,9 +4,9 @@ const MAX_SELECTED = 50
 
 export type RepositorySummary = {
   repository_id: string
-  display_name: string
+  name: string
   path_with_namespace: string
-  default_branch: string
+  default_branch?: string | null
   archived: boolean
   description?: string | null
 }
@@ -104,7 +104,7 @@ export function renderSelectionCard(state: SelectionCardState): RenderedCard {
     tag: 'div',
     text: {
       tag: 'lark_md',
-      content: `**${plain(repository.display_name, 80)}**\n${plain(repository.path_with_namespace, 120)}`
+      content: `**${plain(repository.name, 80)}**\n${plain(repository.path_with_namespace, 120)}`
     },
     extra: {
       tag: 'button',
@@ -145,17 +145,12 @@ export function renderSelectionCard(state: SelectionCardState): RenderedCard {
       ]
     },
     ...repositoryElements,
-    ...(selected.length ? [{ tag: 'action', actions: selected }] : []),
-    {
-      tag: 'action',
-      actions: [
-        { tag: 'button', text: { tag: 'plain_text', content: '上一页' }, value: value('previous'), disabled: !pending || state.cursorHistory.length === 0 },
-        { tag: 'button', text: { tag: 'plain_text', content: '下一页' }, value: value('next'), disabled: !pending || !state.nextCursor },
-        { tag: 'button', type: 'primary', text: { tag: 'plain_text', content: '确认' }, value: value('confirm'), disabled: !pending },
-        { tag: 'button', text: { tag: 'plain_text', content: '暂不选择项目' }, value: value('no_project'), disabled: !pending },
-        { tag: 'button', text: { tag: 'plain_text', content: '取消' }, value: value('cancel'), disabled: !pending }
-      ]
-    }
+    ...selected,
+    { tag: 'button', text: { tag: 'plain_text', content: '上一页' }, value: value('previous'), disabled: !pending || state.cursorHistory.length === 0 },
+    { tag: 'button', text: { tag: 'plain_text', content: '下一页' }, value: value('next'), disabled: !pending || !state.nextCursor },
+    { tag: 'button', type: 'primary', text: { tag: 'plain_text', content: '确认' }, value: value('confirm'), disabled: !pending },
+    { tag: 'button', text: { tag: 'plain_text', content: '暂不选择项目' }, value: value('no_project'), disabled: !pending },
+    { tag: 'button', text: { tag: 'plain_text', content: '取消' }, value: value('cancel'), disabled: !pending }
   ]
   return {
     fallbackText: bounded(`选择项目：已选择 ${state.selectedRepositoryIds.length} 个项目`),

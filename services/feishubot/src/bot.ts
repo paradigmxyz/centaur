@@ -337,7 +337,7 @@ export class FeishuBot {
       cursorHistory: view.cursor_history,
       nextCursor: page.next_cursor ?? null,
       selectedRepositoryIds: view.selected_repository_ids,
-      repositories: page.items,
+      repositories: page.repositories,
       status: view.state
     }
   }

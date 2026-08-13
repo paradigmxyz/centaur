@@ -66,12 +66,13 @@ export type FeishuDelivery = {
 }
 
 export type RepositoryPage = {
-  items: Array<{
+  repositories: Array<{
     repository_id: string
-    display_name: string
+    name: string
+    namespace: string
     path_with_namespace: string
     description?: string | null
-    default_branch: string
+    default_branch?: string | null
     archived: boolean
     last_activity_at?: string | null
   }>

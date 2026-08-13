@@ -16,8 +16,8 @@ const initial: SelectionCardState = {
   nextCursor: 'next-1',
   selectedRepositoryIds: [],
   repositories: [
-    { repository_id: 'gitlab:42', display_name: 'payments', path_with_namespace: 'backend/payments', default_branch: 'main', archived: false },
-    { repository_id: 'gitlab:84', display_name: 'console', path_with_namespace: 'web/console', default_branch: 'main', archived: false }
+    { repository_id: 'gitlab:42', name: 'payments', path_with_namespace: 'backend/payments', default_branch: 'main', archived: false },
+    { repository_id: 'gitlab:84', name: 'console', path_with_namespace: 'web/console', default_branch: 'main', archived: false }
   ],
   status: 'pending'
 }
@@ -42,6 +42,7 @@ describe('Feishu selection cards', () => {
     expect(card.fallbackText).toContain('选择项目')
     expect(card.fallbackText.length).toBeLessThanOrEqual(500)
     const actions = JSON.stringify(card.card)
+    expect(actions).not.toContain('\"tag\":\"action\"')
     for (const action of ['toggle', 'search', 'next', 'confirm', 'no_project', 'cancel']) {
       expect(actions).toContain(`\"action\":\"${action}\"`)
     }

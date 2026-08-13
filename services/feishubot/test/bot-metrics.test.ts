@@ -23,6 +23,39 @@ afterEach(() => {
 })
 
 describe('Feishu bot metrics', () => {
+  it('renders the repository catalog returned by api-rs', async () => {
+    let renderedCard = ''
+    const bot = new FeishuBot({
+      botOpenId: 'ou-bot',
+      tenantAllowlist: new Set(['tenant-1']),
+      api: selectionApi({
+        searchRepositories: async () => ({
+          repositories: [{
+            repository_id: 'gitlab:42',
+            name: 'payments',
+            namespace: 'backend',
+            path_with_namespace: 'backend/payments',
+            description: null,
+            default_branch: 'main',
+            archived: false,
+            last_activity_at: null
+          }],
+          next_cursor: null
+        })
+      }),
+      renderer: {
+        updateCard: async (_messageId: string, card: Parameters<FeishuRenderer['updateCard']>[1]) => {
+          renderedCard = JSON.stringify(card.card)
+        }
+      } as unknown as FeishuRenderer
+    })
+
+    await bot.reconcileDelivery('development:1')
+
+    expect(renderedCard).toContain('payments')
+    expect(renderedCard).toContain('backend/payments')
+  })
+
   it('classifies a delivery write conflict without misclassifying it as selection', async () => {
     spyOn(console, 'error').mockImplementation(() => {})
     const metrics = new FeishuMetrics()
@@ -102,7 +135,9 @@ function selectionApi(overrides: Record<string, unknown>): FeishuSessionApi {
       desired_version: 1,
       render_version: 0,
       state: 'pending',
-      initiator_principal_id: 'feishu:tenant-1:ou-user-1'
+      initiator_principal_id: 'feishu:tenant-1:ou-user-1',
+      selection_flow_id: 'sel_1',
+      source_message_id: 'om-source-1'
     }),
     recordDelivery: async () => ({}),
     ...overrides

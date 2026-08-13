@@ -48,7 +48,7 @@ describe('Feishu durable API client', () => {
       baseUrl: 'http://api-rs:8080/',
       fetch: async (input, init) => {
         calls.push({ url: String(input), body: init?.body ? JSON.parse(String(init.body)) : undefined })
-        return response({ ok: true, items: [], next_cursor: null })
+        return response({ repositories: [], next_cursor: null })
       }
     })
     await api.searchRepositories('服务 api', 'cursor+/=')
