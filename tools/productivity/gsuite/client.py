@@ -1077,9 +1077,21 @@ def _validate_drive_download_uri(download_uri: str) -> None:
         raise RuntimeError("Google Drive returned an invalid revision download URI")
 
 
-def _drive_download_operation_result(service, operation: dict) -> dict:
+def _drive_resource_key_headers(file_id: str, resource_key: str | None) -> dict[str, str]:
+    if not resource_key:
+        return {}
+    return {"X-Goog-Drive-Resource-Keys": f"{file_id}/{resource_key}"}
+
+
+def _drive_download_operation_result(
+    service,
+    operation: dict,
+    file_id: str,
+    resource_key: str | None,
+) -> tuple[dict, str | None]:
     """Poll a Drive download operation and return its completed response."""
     for attempt in range(_DRIVE_DOWNLOAD_POLL_ATTEMPTS + 1):
+        resource_key = (operation.get("metadata") or {}).get("resourceKey") or resource_key
         if operation.get("done"):
             if error := operation.get("error"):
                 code = error.get("code", "unknown")
@@ -1092,7 +1104,7 @@ def _drive_download_operation_result(service, operation: dict) -> dict:
                 raise RuntimeError(
                     "Google Drive revision download completed without a download URI"
                 )
-            return response
+            return response, resource_key
 
         operation_name = operation.get("name")
         if not operation_name:
@@ -1103,7 +1115,9 @@ def _drive_download_operation_result(service, operation: dict) -> dict:
             break
 
         time.sleep(min(2**attempt, 10))
-        operation = service.operations().get(name=operation_name).execute()
+        request = service.operations().get(name=operation_name)
+        request.headers.update(_drive_resource_key_headers(file_id, resource_key))
+        operation = request.execute()
 
     raise RuntimeError("Google Drive revision download did not finish in time")
 
@@ -1119,7 +1133,7 @@ def _drive_export_revision_bytes(
         service.files()
         .get(
             fileId=file_id,
-            fields="name,mimeType,webViewLink",
+            fields="name,mimeType,webViewLink,resourceKey",
             supportsAllDrives=True,
         )
         .execute()
@@ -1130,20 +1144,28 @@ def _drive_export_revision_bytes(
             "Google Sheets only"
         )
 
-    operation = (
-        service.files()
-        .download(
-            fileId=file_id,
-            revisionId=revision_id,
-            mimeType=mime_type,
-        )
-        .execute()
+    resource_key = metadata.get("resourceKey")
+    request = service.files().download(
+        fileId=file_id,
+        revisionId=revision_id,
+        mimeType=mime_type,
     )
-    result = _drive_download_operation_result(service, operation)
+    request.headers.update(_drive_resource_key_headers(file_id, resource_key))
+    operation = request.execute()
+    result, resource_key = _drive_download_operation_result(
+        service,
+        operation,
+        file_id,
+        resource_key,
+    )
     download_uri = result["downloadUri"]
     _validate_drive_download_uri(download_uri)
 
-    response, content = _build_http().request(download_uri, method="GET")
+    response, content = _build_http().request(
+        download_uri,
+        method="GET",
+        headers=_drive_resource_key_headers(file_id, resource_key),
+    )
     status = int(response.status)
     if not 200 <= status < 300:
         raise RuntimeError(f"Google Drive revision download failed with HTTP {status}")

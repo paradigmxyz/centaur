@@ -8,6 +8,7 @@ from gsuite import client
 class _CreateRequest:
     def __init__(self, result: dict):
         self._result = result
+        self.headers: dict[str, str] = {}
 
     def execute(self) -> dict:
         return self._result
@@ -23,6 +24,7 @@ class _FakeFilesApi:
         self.list_calls: list[dict] = []
         self.get_calls: list[dict] = []
         self.download_calls: list[dict] = []
+        self.download_requests: list[_CreateRequest] = []
         self.metadata_result = metadata_result or {}
         self.download_result = download_result or {}
 
@@ -70,7 +72,9 @@ class _FakeFilesApi:
 
     def download(self, **kwargs):
         self.download_calls.append(kwargs)
-        return _CreateRequest(self.download_result)
+        request = _CreateRequest(self.download_result)
+        self.download_requests.append(request)
+        return request
 
 
 class _FakeRevisionsApi:
@@ -99,12 +103,15 @@ class _FakeOperationsApi:
     def __init__(self, get_results: list[dict] | None = None):
         self.get_results = list(get_results or [])
         self.get_calls: list[dict] = []
+        self.get_requests: list[_CreateRequest] = []
 
     def get(self, **kwargs):
         self.get_calls.append(kwargs)
         if not self.get_results:
             raise AssertionError("Unexpected extra operations.get call")
-        return _CreateRequest(self.get_results.pop(0))
+        request = _CreateRequest(self.get_results.pop(0))
+        self.get_requests.append(request)
+        return request
 
 
 class _FakeDriveService:
@@ -606,8 +613,8 @@ def test_drive_export_revision_bytes_downloads_requested_format(monkeypatch):
         status = 200
 
     class FakeHttp:
-        def request(self, url, method):
-            request_calls.append({"url": url, "method": method})
+        def request(self, url, method, headers):
+            request_calls.append({"url": url, "method": method, "headers": headers})
             return FakeResponse(), b"historical pdf"
 
     fake_service = _FakeDriveService(
@@ -615,6 +622,7 @@ def test_drive_export_revision_bytes_downloads_requested_format(monkeypatch):
             "name": "Quarterly Plan",
             "mimeType": "application/vnd.google-apps.document",
             "webViewLink": "https://docs.google.com/document/d/file-123/edit",
+            "resourceKey": "resource-key-42",
         },
         download_result={
             "done": True,
@@ -638,10 +646,13 @@ def test_drive_export_revision_bytes_downloads_requested_format(monkeypatch):
     assert fake_service.files_api.get_calls == [
         {
             "fileId": "file-123",
-            "fields": "name,mimeType,webViewLink",
+            "fields": "name,mimeType,webViewLink,resourceKey",
             "supportsAllDrives": True,
         }
     ]
+    assert fake_service.files_api.download_requests[0].headers == {
+        "X-Goog-Drive-Resource-Keys": "file-123/resource-key-42"
+    }
     assert fake_service.files_api.download_calls == [
         {
             "fileId": "file-123",
@@ -654,26 +665,35 @@ def test_drive_export_revision_bytes_downloads_requested_format(monkeypatch):
         {
             "url": "https://www.googleapis.com/download/rev-42.pdf",
             "method": "GET",
+            "headers": {
+                "X-Goog-Drive-Resource-Keys": "file-123/resource-key-42"
+            },
         }
     ]
 
 
 def test_drive_export_revision_bytes_polls_pending_operation(monkeypatch):
     sleeps: list[int] = []
+    request_calls: list[dict] = []
 
     class FakeResponse:
         status = 200
 
     class FakeHttp:
-        def request(self, url, method):
+        def request(self, url, method, headers):
+            request_calls.append({"url": url, "method": method, "headers": headers})
             return FakeResponse(), b"historical workbook"
 
     fake_service = _FakeDriveService(
         metadata_result={
             "name": "Quarterly Model",
             "mimeType": "application/vnd.google-apps.spreadsheet",
+            "resourceKey": "resource-key-file",
         },
-        download_result={"name": "operations/download-42"},
+        download_result={
+            "name": "operations/download-42",
+            "metadata": {"resourceKey": "resource-key-operation"},
+        },
         operation_get_results=[
             {"name": "operations/download-42", "done": False},
             {
@@ -701,6 +721,19 @@ def test_drive_export_revision_bytes_polls_pending_operation(monkeypatch):
     assert fake_service.operations_api.get_calls == [
         {"name": "operations/download-42"},
         {"name": "operations/download-42"},
+    ]
+    assert [request.headers for request in fake_service.operations_api.get_requests] == [
+        {"X-Goog-Drive-Resource-Keys": "file-123/resource-key-operation"},
+        {"X-Goog-Drive-Resource-Keys": "file-123/resource-key-operation"},
+    ]
+    assert request_calls == [
+        {
+            "url": "https://drive.usercontent.google.com/download/rev-42",
+            "method": "GET",
+            "headers": {
+                "X-Goog-Drive-Resource-Keys": "file-123/resource-key-operation"
+            },
+        }
     ]
 
 
