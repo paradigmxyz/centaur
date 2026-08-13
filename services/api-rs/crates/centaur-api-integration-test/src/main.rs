@@ -8,7 +8,10 @@ use anyhow::{Context, Result, bail};
 use centaur_session_core::HarnessType;
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
-use reqwest::{Client as HttpClient, StatusCode};
+use reqwest::{
+    Client as HttpClient, StatusCode,
+    header::{AUTHORIZATION, HeaderMap, HeaderValue},
+};
 use serde_json::{Value, json};
 use tokio::time::{Instant, sleep, timeout};
 use uuid::Uuid;
@@ -23,7 +26,21 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| DEFAULT_API_URL.to_owned())
         .trim_end_matches('/')
         .to_owned();
-    let http = HttpClient::new();
+    let api_key = env::var("CENTAUR_API_KEY")
+        .context("CENTAUR_API_KEY must be set for api-rs integration tests")?;
+    if api_key.trim().is_empty() {
+        bail!("CENTAUR_API_KEY must not be empty");
+    }
+    let mut default_headers = HeaderMap::new();
+    default_headers.insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {api_key}"))
+            .context("CENTAUR_API_KEY is not a valid HTTP bearer credential")?,
+    );
+    let http = HttpClient::builder()
+        .default_headers(default_headers)
+        .build()
+        .context("failed to build authenticated HTTP client")?;
 
     let mut results = Vec::new();
 

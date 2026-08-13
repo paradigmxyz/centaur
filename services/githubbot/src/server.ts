@@ -112,7 +112,7 @@ if (!postgresUrl) {
 const options: GithubbotOptions = {
   apiUrl,
   allowedAuthorAssociations: listEnv("GITHUBBOT_ALLOWED_AUTHOR_ASSOCIATIONS"),
-  apiKey: optionalEnv("GITHUBBOT_API_KEY") ?? optionalEnv("CENTAUR_API_KEY"),
+  apiKey: optionalEnv("GITHUBBOT_API_KEY"),
   autoMerge: boolEnv("GITHUBBOT_AUTO_MERGE", true),
   botUserId: optionalEnv("GITHUBBOT_USER_ID"),
   ciFixMaxAttempts: optionalNumberEnv("GITHUBBOT_CI_FIX_MAX_ATTEMPTS"),

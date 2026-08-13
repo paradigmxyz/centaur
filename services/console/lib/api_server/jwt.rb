@@ -12,7 +12,6 @@ module ApiServer
       upload_channels = channels.fetch(:upload)
       download_channels = channels.fetch(:download)
       history_channels = channels.fetch(:history)
-      return nil if upload_channels.empty? && download_channels.empty? && history_channels.empty?
 
       CentaurJwt::WindowedToken.encode(
         subject_oid: principal.oid,

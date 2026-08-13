@@ -160,8 +160,16 @@ class PrincipalSyncConfigSnapshot < ApplicationRecord
   def api_server_jwt_window_stale?(principal)
     return false unless principal.sandbox_api_server_enabled?
 
-    return false if principal.slack_jwt_channel_ids.empty?
     return false if ENV["CENTAUR_JWT_SIGNING_SECRET"].to_s.blank?
+    api_hosts = self.class.send(:api_server_hosts_for)
+    return false if api_hosts.empty?
+
+    token_present = Array(config["secrets"]).any? do |secret|
+      secret.dig("source", "type") == "control_plane" &&
+        secret.dig("inject", "header") == "Authorization" &&
+        Array(secret["rules"]).any? { |rule| api_hosts.include?(rule["host"]) }
+    end
+    return true unless token_present
 
     updated_at.to_i < ApiServer::Jwt.window_start_for(principal, Time.current.to_i)
   end

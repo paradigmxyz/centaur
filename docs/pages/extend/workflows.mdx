@@ -110,6 +110,7 @@ Create a run through the API:
 
 ```bash
 curl -s "$CENTAUR_API_URL/api/workflows/runs" \
+  -H "Authorization: Bearer $CENTAUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "workflow_name": "nightly_report",
@@ -121,14 +122,16 @@ curl -s "$CENTAUR_API_URL/api/workflows/runs" \
 Inspect it:
 
 ```bash
-curl -s "$CENTAUR_API_URL/api/workflows/runs/$RUN_ID" | jq
+curl -s "$CENTAUR_API_URL/api/workflows/runs/$RUN_ID" \
+  -H "Authorization: Bearer $CENTAUR_API_KEY" | jq
 ```
 
 List recent runs, optionally filtering by exact workflow name. The default
 limit is 50 and the maximum is 1000:
 
 ```bash
-curl -s "$CENTAUR_API_URL/api/workflows/runs?workflow_name=nightly_report&limit=1000" | jq
+curl -s "$CENTAUR_API_URL/api/workflows/runs?workflow_name=nightly_report&limit=1000" \
+  -H "Authorization: Bearer $CENTAUR_API_KEY" | jq
 ```
 
 ## Schedule a workflow

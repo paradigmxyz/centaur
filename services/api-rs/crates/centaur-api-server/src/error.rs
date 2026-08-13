@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    http::StatusCode,
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 use centaur_session_core::ThreadKeyError;
@@ -109,7 +109,13 @@ impl IntoResponse for ApiError {
             body["existing_harness"] = json!(existing);
             body["requested_harness"] = json!(requested);
         }
-        (status, Json(body)).into_response()
+        let mut response = (status, Json(body)).into_response();
+        if status == StatusCode::UNAUTHORIZED {
+            response
+                .headers_mut()
+                .insert(header::WWW_AUTHENTICATE, "Bearer".parse().unwrap());
+        }
+        response
     }
 }
 

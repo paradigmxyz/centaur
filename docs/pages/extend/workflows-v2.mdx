@@ -278,6 +278,7 @@ Then create a real run:
 
 ```bash
 curl -s "$CENTAUR_API_URL/api/workflows/runs" \
+  -H "Authorization: Bearer $CENTAUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "workflow_name": "nightly_report",

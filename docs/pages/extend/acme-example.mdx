@@ -170,6 +170,8 @@ kubectl create secret generic centaur-infra-env \
   --from-literal=OP_VAULT=... \
   --from-literal=SLACK_BOT_TOKEN=... \
   --from-literal=SLACK_SIGNING_SECRET=... \
+  --from-literal=CENTAUR_API_KEY=... \
+  --from-literal=CENTAUR_JWT_SIGNING_SECRET=... \
   --from-literal=SLACKBOT_API_KEY=...
 ```
 
@@ -224,7 +226,8 @@ You can also inspect the api-rs session context for a thread:
 
 ```bash
 THREAD_PATH=$(jq -rn --arg v "$THREAD_KEY" '$v|@uri')
-curl -s "$CENTAUR_API_URL/api/session/${THREAD_PATH}" | jq
+curl -s "$CENTAUR_API_URL/api/session/${THREAD_PATH}" \
+  -H "Authorization: Bearer $CENTAUR_API_KEY" | jq
 ```
 
 ## What to change first
