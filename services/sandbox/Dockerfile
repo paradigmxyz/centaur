@@ -44,6 +44,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     python-docx==1.2.0 lxml==6.0.2 docx-revisions==0.1.4 \
     matplotlib==3.10.8 numpy==2.4.4 pandas==3.0.2 \
     python-pptx==1.0.2 openpyxl==3.1.5 PyMuPDF==1.27.2 mammoth==1.12.0 \
+    weasyprint==69.0 markdown==3.10.3 \
     faster-whisper \
     asyncpg==0.30.0 \
     boto3>=1.40.0 \
@@ -61,6 +62,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     rich>=13.0.0 \
     slack-sdk==3.39.0 \
     tomli-w==1.2.0 \
+    && python3 -c 'import markdown, weasyprint; assert markdown.__version__ == "3.10.3"; assert weasyprint.__version__ == "69.0"' \
     && find /usr/local/lib/python3.12 /usr/lib/python3 -type d -name __pycache__ -prune -exec rm -rf '{}' +
 
 # ── GitHub CLI + Node.js 24 (LTS) + Docker CLI + Google Cloud CLI (cached) ──
