@@ -29,8 +29,8 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose};
 use centaur_session_core::{ChatDestination, HarnessType, ThreadKey};
 use centaur_session_runtime::{
-    ExecuteSessionInput, HarnessConflictPolicy, PersonaSummary, SandboxRuntime,
-    SessionPrincipalRegistrar, SessionRuntime, thread_trace_id, thread_trace_parent_span_id,
+    ExecuteSessionInput, HarnessConflictPolicy, SandboxRuntime, SessionPrincipalRegistrar,
+    SessionRuntime, thread_trace_id, thread_trace_parent_span_id,
 };
 use centaur_session_sqlx::PgSessionStore;
 use centaur_telemetry::{
@@ -212,7 +212,6 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
-        .route("/api/personas", get(list_personas))
         .route("/mcp", post(mcp_post).get(mcp_get))
         .route(
             "/.well-known/oauth-protected-resource",
@@ -748,12 +747,6 @@ async fn get_session_context(
         linear,
         github,
     }))
-}
-
-async fn list_personas(
-    State(state): State<AppState>,
-) -> Result<Json<Vec<PersonaSummary>>, ApiError> {
-    Ok(Json(state.runtime()?.personas()))
 }
 
 async fn append_messages(
