@@ -65,6 +65,9 @@ def test_recover_rendered_document_builds_a_pdf_from_visible_pages(monkeypatch) 
     async def slide_count(page) -> int:
         return 2
 
+    async def no_spreadsheet(page) -> list:
+        return []
+
     async def navigate(page, total: int) -> None:
         calls.append(("navigate", total))
 
@@ -76,6 +79,7 @@ def test_recover_rendered_document_builds_a_pdf_from_visible_pages(monkeypatch) 
         return [FakeImage(), FakeImage()]
 
     monkeypatch.setattr(_CLIENT, "_slide_count", slide_count)
+    monkeypatch.setattr(_CLIENT, "_capture_spreadsheet_sheets", no_spreadsheet)
     monkeypatch.setattr(_CLIENT, "_navigate_all_slides", navigate)
     monkeypatch.setattr(_CLIENT, "_extract_dom_image_urls", extract)
     monkeypatch.setattr(_CLIENT, "_download_images", download)
@@ -106,6 +110,9 @@ def test_recover_rendered_document_captures_viewports_when_images_are_forbidden(
     async def slide_count(page) -> int:
         return 2
 
+    async def no_spreadsheet(page) -> list:
+        return []
+
     async def navigate(page, total: int) -> None:
         calls.append(("navigate", total))
 
@@ -124,6 +131,7 @@ def test_recover_rendered_document_captures_viewports_when_images_are_forbidden(
         return [FakeImage(), FakeImage()]
 
     monkeypatch.setattr(_CLIENT, "_slide_count", slide_count)
+    monkeypatch.setattr(_CLIENT, "_capture_spreadsheet_sheets", no_spreadsheet)
     monkeypatch.setattr(_CLIENT, "_navigate_all_slides", navigate)
     monkeypatch.setattr(_CLIENT, "_extract_dom_image_urls", extract)
     monkeypatch.setattr(_CLIENT, "_fetch_slide_urls", fetch)
@@ -161,6 +169,81 @@ def test_navigate_all_slides_visits_each_page(monkeypatch) -> None:
     asyncio.run(_CLIENT._navigate_all_slides(Page(), 3))
 
     assert keys == ["ArrowLeft", "ArrowLeft", "ArrowLeft", "ArrowRight", "ArrowRight"]
+
+
+def test_capture_spreadsheet_sheets_clicks_and_captures_each_tab(monkeypatch) -> None:
+    calls: list[tuple] = []
+    state = {"selected": 0}
+
+    class Tab:
+        def __init__(self, index: int):
+            self.index = index
+
+        async def inner_text(self) -> str:
+            return ["Summary", "Spend Ranking"][self.index]
+
+        async def click(self, *, force: bool) -> None:
+            calls.append(("click", self.index, force))
+            state["selected"] = self.index
+
+    class Sheet:
+        def __init__(self, index: int):
+            self.index = index
+
+        async def wait_for(self, *, state: str) -> None:
+            calls.append(("wait", self.index, state))
+
+    class Collection:
+        def __init__(self, kind: str):
+            self.kind = kind
+
+        async def count(self) -> int:
+            return 2
+
+        def nth(self, index: int):
+            return Tab(index) if self.kind == "tabs" else Sheet(index)
+
+    class Frame:
+        def locator(self, selector: str):
+            if selector == "#tabstrip a.tabstrip-link":
+                return Collection("tabs")
+            assert selector == ".sheet-content"
+            return Collection("sheets")
+
+        async def wait_for_timeout(self, milliseconds: int) -> None:
+            calls.append(("timeout", milliseconds))
+
+    class Iframe:
+        async def content_frame(self):
+            return Frame()
+
+        async def screenshot(self) -> bytes:
+            calls.append(("screenshot", state["selected"]))
+            return f"sheet-{state['selected']}".encode()
+
+    class Page:
+        async def evaluate(self, script: str) -> None:
+            assert "#ccpa-iframe" in script
+
+        async def query_selector(self, selector: str):
+            assert selector == "#previews-iframe"
+            return Iframe()
+
+    monkeypatch.setattr(_CLIENT, "_rgb_image_from_png", lambda png: png.decode())
+
+    result = asyncio.run(_CLIENT._capture_spreadsheet_sheets(Page()))
+
+    assert result == ["sheet-0", "sheet-1"]
+    assert calls == [
+        ("click", 0, True),
+        ("timeout", 500),
+        ("wait", 0, "visible"),
+        ("screenshot", 0),
+        ("click", 1, True),
+        ("timeout", 500),
+        ("wait", 1, "visible"),
+        ("screenshot", 1),
+    ]
 
 
 def test_capture_visible_page_uses_spreadsheet_frame_without_viewer_chrome() -> None:

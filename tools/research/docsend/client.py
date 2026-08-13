@@ -1438,50 +1438,54 @@ async def _fetch_space_item(
 
 async def _recover_rendered_document(page, *, filename: str) -> dict:
     """Recover a visible DocSend document from its rendered page images."""
-    total = 0
-    for _ in range(3):
-        total = await _slide_count(page)
-        if total > 0:
-            break
-        await asyncio.sleep(2)
-    if total == 0:
-        return _err("Could not determine page count")
-    LOGGER.info("DocSend document contains %d pages", total)
-
-    await _navigate_all_slides(page, total)
-
-    LOGGER.info("Extracting rendered slide image URLs")
-    image_urls = await _extract_dom_image_urls(page)
-    if len(image_urls) == total:
-        LOGGER.info("Found %d rendered slide images", len(image_urls))
-        images = await _download_images(image_urls)
+    images = await _capture_spreadsheet_sheets(page)
+    total = len(images)
+    if total:
+        LOGGER.info("Captured %d DocSend spreadsheet sheets", total)
     else:
-        LOGGER.info(
-            "Found %d/%d rendered slide images; using the DocSend page-data fallback",
-            len(image_urls),
-            total,
-        )
-        api_urls = await _fetch_slide_urls(page, total)
-        valid_urls = [url for url in api_urls if url]
-        if len(valid_urls) != total:
-            return _err(
-                f"Failed to recover all document pages ({len(valid_urls)}/{total}).",
-                page_count=total,
-            )
-        images = await _download_images(valid_urls)
+        for _ in range(3):
+            total = await _slide_count(page)
+            if total > 0:
+                break
+            await asyncio.sleep(2)
+        if total == 0:
+            return _err("Could not determine page count")
+        LOGGER.info("DocSend document contains %d pages", total)
 
-    if len(images) != total:
-        LOGGER.info(
-            "Downloaded %d/%d rendered slide images; using the viewport capture fallback",
-            len(images),
-            total,
-        )
-        images = await _capture_visible_pages(page, total)
-        if len(images) != total:
-            return _err(
-                f"Failed to recover all document pages ({len(images)}/{total}).",
-                page_count=total,
+        await _navigate_all_slides(page, total)
+
+        LOGGER.info("Extracting rendered slide image URLs")
+        image_urls = await _extract_dom_image_urls(page)
+        if len(image_urls) == total:
+            LOGGER.info("Found %d rendered slide images", len(image_urls))
+            images = await _download_images(image_urls)
+        else:
+            LOGGER.info(
+                "Found %d/%d rendered slide images; using the DocSend page-data fallback",
+                len(image_urls),
+                total,
             )
+            api_urls = await _fetch_slide_urls(page, total)
+            valid_urls = [url for url in api_urls if url]
+            if len(valid_urls) != total:
+                return _err(
+                    f"Failed to recover all document pages ({len(valid_urls)}/{total}).",
+                    page_count=total,
+                )
+            images = await _download_images(valid_urls)
+
+        if len(images) != total:
+            LOGGER.info(
+                "Downloaded %d/%d rendered slide images; using the viewport capture fallback",
+                len(images),
+                total,
+            )
+            images = await _capture_visible_pages(page, total)
+            if len(images) != total:
+                return _err(
+                    f"Failed to recover all document pages ({len(images)}/{total}).",
+                    page_count=total,
+                )
 
     LOGGER.info("Assembling %d downloaded pages into a PDF", len(images))
     buffer = BytesIO()
@@ -1561,11 +1565,7 @@ async def _capture_visible_pages(page, total: int) -> list[Image.Image]:
     for page_number in range(1, total + 1):
         try:
             png = await _capture_visible_page(page)
-            source = Image.open(BytesIO(png))
-            rgb = Image.new("RGB", source.size, (255, 255, 255))
-            rgb.paste(source, mask=source.split()[3] if source.mode == "RGBA" else None)
-            source.close()
-            images.append(rgb)
+            images.append(_rgb_image_from_png(png))
         except Exception as exc:
             LOGGER.warning("Failed to capture DocSend page %d: %s", page_number, exc)
             break
@@ -1576,14 +1576,46 @@ async def _capture_visible_pages(page, total: int) -> list[Image.Image]:
     return images
 
 
+async def _capture_spreadsheet_sheets(page) -> list[Image.Image]:
+    """Click and capture each sheet inside DocSend's spreadsheet preview iframe."""
+    await _hide_capture_overlays(page)
+    iframe = await page.query_selector("#previews-iframe")
+    if iframe is None:
+        return []
+    frame = await iframe.content_frame()
+    if frame is None:
+        return []
+
+    tabs = frame.locator("#tabstrip a.tabstrip-link")
+    sheets = frame.locator(".sheet-content")
+    tab_count = await tabs.count()
+    if tab_count == 0 or await sheets.count() != tab_count:
+        return []
+
+    images: list[Image.Image] = []
+    for index in range(tab_count):
+        tab = tabs.nth(index)
+        sheet = sheets.nth(index)
+        name = (await tab.inner_text()).strip() or f"Sheet {index + 1}"
+        LOGGER.info("Capturing DocSend spreadsheet tab %d/%d: %s", index + 1, tab_count, name)
+        await tab.click(force=True)
+        await frame.wait_for_timeout(500)
+        await sheet.wait_for(state="visible")
+        images.append(_rgb_image_from_png(await iframe.screenshot()))
+    return images
+
+
+def _rgb_image_from_png(png: bytes) -> Image.Image:
+    source = Image.open(BytesIO(png))
+    rgb = Image.new("RGB", source.size, (255, 255, 255))
+    rgb.paste(source, mask=source.split()[3] if source.mode == "RGBA" else None)
+    source.close()
+    return rgb
+
+
 async def _capture_visible_page(page) -> bytes:
     """Capture the document surface without DocSend's surrounding viewer chrome."""
-    await page.evaluate(
-        """() => {
-          const cookieFrame = document.querySelector('#ccpa-iframe');
-          if (cookieFrame) cookieFrame.style.visibility = 'hidden';
-        }"""
-    )
+    await _hide_capture_overlays(page)
     spreadsheet = page.locator(
         'iframe#previews-iframe:visible, iframe[class*="spreadsheet-viewer"]:visible'
     ).first
@@ -1592,6 +1624,16 @@ async def _capture_visible_page(page) -> bytes:
         return await spreadsheet.screenshot()
     LOGGER.info("No document-only capture surface found; capturing the viewer viewport")
     return await page.screenshot(full_page=False)
+
+
+async def _hide_capture_overlays(page) -> None:
+    """Hide DocSend overlays that obscure documents or intercept workbook clicks."""
+    await page.evaluate(
+        """() => {
+          const cookieFrame = document.querySelector('#ccpa-iframe');
+          if (cookieFrame) cookieFrame.style.visibility = 'hidden';
+        }"""
+    )
 
 
 async def _extract_dom_image_urls(page) -> list[str]:
