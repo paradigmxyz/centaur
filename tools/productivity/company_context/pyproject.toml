@@ -31,7 +31,7 @@ module = "client.py"
 type = "pg_dsn"
 name = "company_context_dsn"
 database = "centaur"
-secret_ref = "CENTAUR_POSTGRES_DSN"
+secret_ref = "DATABASE_URL"
 role = "centaur_company_context_reader"
 settings = [
     { name = "centaur.slack_channel_id", value_from = { principal_field = "slack_channel_id" } },

@@ -1735,7 +1735,7 @@ mod tests {
                 .and_then(|upstream| upstream.dsn.as_ref())
                 .and_then(|dsn| dsn.get("placeholder"))
                 .and_then(YamlValue::as_str),
-            Some("CENTAUR_POSTGRES_DSN")
+            Some("DATABASE_URL")
         );
         assert_eq!(
             listener.settings,
