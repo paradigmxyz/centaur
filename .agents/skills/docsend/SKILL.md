@@ -101,7 +101,10 @@ Both commands return only one directory level. Read each folder's ID from the pr
 For bulk downloads, inspect the returned `items`, traverse any folders, and call
 `fetch` once for each item whose `type` is `file`. Fetch files sequentially so
 the agent can choose output paths and report an individual failure without
-losing the rest of the inventory:
+losing the rest of the inventory. Treat every fetch as independent: if one item
+does not return `status: ok`, record its path, status, and error, then move on to
+the next file. Do not stop the bulk download because one item failed. This is
+common for unsupported file types such as videos.
 
 ```bash
 docsend fetch '<session-id>' \
@@ -128,5 +131,6 @@ docsend close '<session-id>'
 - For `email_required`, ask for an email unless the user already supplied one.
 - For `passcode_required`, ask only for the document passcode.
 - Preserve session fields on verification and failure responses.
+- During a bulk download, continue to the next file after any per-item failure and summarize all skipped or failed items after attempting the full inventory.
 - Report statuses such as `blocked`, `expired`, `item_not_found`, `not_downloadable`, and `download_unavailable` exactly. Only recover pages that the authenticated DocSend viewer renders; do not bypass access controls.
 - Do not expose email addresses, passcodes, verification URLs, API keys, or downloaded file data in the final response.
