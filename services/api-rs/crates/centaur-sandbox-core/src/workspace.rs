@@ -4,9 +4,10 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{Mount, MountKind, SandboxSpec};
+use crate::{EnvVar, Mount, MountKind, SandboxSpec};
 
 pub const WORKSPACE_MOUNT_PATH: &str = "/workspace";
+pub const WORKSPACE_ROOT_ENV: &str = "CENTAUR_WORKSPACE_ROOT";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceRepository {
@@ -373,6 +374,9 @@ impl WorkspaceMount {
     pub fn apply_to(&self, mut spec: SandboxSpec) -> SandboxSpec {
         spec.mounts
             .retain(|mount| mount.target_path != WORKSPACE_MOUNT_PATH);
+        spec.env.retain(|env| env.name != WORKSPACE_ROOT_ENV);
+        spec.env
+            .push(EnvVar::new(WORKSPACE_ROOT_ENV, WORKSPACE_MOUNT_PATH));
         spec.mounts.push(Mount::new(
             MountKind::NamedVolume(self.storage_ref.clone()),
             WORKSPACE_MOUNT_PATH,
@@ -623,7 +627,7 @@ mod tests {
         assert!(!manifest.contains("secret/team-gitlab-token"));
 
         let mount = WorkspaceMount::new("workspace-wsp-123");
-        let spec = mount.apply_to(SandboxSpec::new("agent"));
+        let spec = mount.apply_to(mount.apply_to(SandboxSpec::new("agent")));
         assert_eq!(spec.working_dir.as_deref(), Some("/workspace"));
         assert_eq!(spec.mounts.len(), 1);
         assert_eq!(
@@ -632,6 +636,14 @@ mod tests {
                 MountKind::NamedVolume("workspace-wsp-123".to_owned()),
                 "/workspace"
             )
+        );
+        assert_eq!(
+            spec.env
+                .iter()
+                .filter(|env| env.name == "CENTAUR_WORKSPACE_ROOT")
+                .map(|env| env.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/workspace"]
         );
         let serialized = serde_json::to_string(&spec).unwrap();
         assert!(!serialized.contains("token"));
