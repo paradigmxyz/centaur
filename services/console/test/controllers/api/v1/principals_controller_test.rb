@@ -419,6 +419,26 @@ module Api
         assert_equal second_user, principal.reload.console_user
       end
 
+      test "PUT unlinks a Slack DM when its trusted email no longer matches a Console user" do
+        user = users(:member_user)
+        principal = Principal.create!(
+          foreign_id: "formerly-linked-slack-dm",
+          kind: "slack_dm",
+          slack_email: user.email,
+          console_user: user,
+          created_by: users(:acme_admin)
+        )
+
+        put api_v1_principal_url(id: principal.oid),
+            params: { data: { slack_email: "unmatched-new-email@example.com" } }.to_json,
+            headers: auth_headers
+
+        assert_response :ok
+        principal.reload
+        assert_equal "unmatched-new-email@example.com", principal.slack_email
+        assert_nil principal.console_user
+      end
+
       test "PUT does not link from a stored Slack email when the request omits it" do
         user = users(:member_user)
         principal = Principal.create!(
