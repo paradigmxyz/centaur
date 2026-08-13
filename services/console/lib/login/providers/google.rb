@@ -19,7 +19,7 @@ module Login
       def pkce? = true
       def token_exchange_client_secret(secret) = secret
 
-      def identity_from(result, client_id:)
+      def identity_from(result, client_id:, nonce: nil)
         Login::IdToken.identity(result.id_token, client_id: client_id, valid_issuers: VALID_ISSUERS)
       end
     end

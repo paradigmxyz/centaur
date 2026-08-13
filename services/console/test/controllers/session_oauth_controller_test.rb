@@ -8,9 +8,12 @@ require "test_helper"
 class SessionOauthControllerTest < ActionDispatch::IntegrationTest
   GOOGLE_CLIENT_ID = "google-login-client-id".freeze
   SLACK_CLIENT_ID = "slack-login-client-id".freeze
+  OKTA_CLIENT_ID = "okta-login-client-id".freeze
+  OKTA_ISSUER = "https://identity.example.com/oauth2/default".freeze
   ENV_KEYS = %w[
     CENTAUR_CONSOLE_GOOGLE_CLIENT_ID CENTAUR_CONSOLE_GOOGLE_CLIENT_SECRET
     CENTAUR_CONSOLE_SLACK_CLIENT_ID CENTAUR_CONSOLE_SLACK_CLIENT_SECRET
+    CENTAUR_CONSOLE_OKTA_CLIENT_ID CENTAUR_CONSOLE_OKTA_CLIENT_SECRET CENTAUR_CONSOLE_OKTA_ISSUER
     CENTAUR_CONSOLE_BOOTSTRAP_ADMINS CENTAUR_CONSOLE_SSO_EMAIL_DOMAINS
   ].freeze
 
@@ -85,6 +88,7 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
     assert_equal "code", q["response_type"]
     assert_equal "openid email profile", q["scope"]
     assert_equal "S256", q["code_challenge_method"]
+    assert q["nonce"].present?
     assert_nil q["access_type"], "login must not request offline access"
     assert_nil q["prompt"]
   end
@@ -134,6 +138,40 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
     user = User.find_by!(email: "rotating@example.com")
     assert_equal "Rotating User", user.name
     assert_equal [ [ "slack", "U123ROTATING" ] ], user.user_identities.pluck(:provider, :subject)
+  end
+
+  test "Okta start uses discovery, PKCE, and a flow-bound nonce" do
+    configure_okta
+    metadata = {
+      "issuer" => OKTA_ISSUER,
+      "authorization_endpoint" => "#{OKTA_ISSUER}/v1/authorize",
+      "token_endpoint" => "#{OKTA_ISSUER}/v1/token",
+      "jwks_uri" => "#{OKTA_ISSUER}/v1/keys"
+    }
+
+    Login::OidcDiscovery.stub(:metadata, metadata) do
+      get auth_start_url(provider: "okta")
+    end
+
+    assert_response :redirect
+    query = URI.decode_www_form(URI.parse(response.location).query).to_h
+    assert_equal OKTA_CLIENT_ID, query["client_id"]
+    assert_equal "http://www.example.com/auth/okta/callback", query["redirect_uri"]
+    assert_equal "openid email profile", query["scope"]
+    assert_equal "S256", query["code_challenge_method"]
+    assert query["nonce"].present?
+  end
+
+  test "Okta discovery failure returns to login instead of raising" do
+    configure_okta
+    failure = Broker::ExchangeError.new("discovery unavailable", stage: "oauth", code: "oidc_document_failed")
+
+    Login::OidcDiscovery.stub(:metadata, ->(_issuer) { raise failure }) do
+      get auth_start_url(provider: "okta")
+    end
+
+    assert_redirected_to login_path
+    assert_equal "Sign in is temporarily unavailable. Please try again.", flash[:alert]
   end
 
   # --- callback: provisioning ------------------------------------------------
@@ -255,5 +293,14 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
     get auth_callback_url(provider: "google"), params: { code: "bad", state: state }
     assert_redirected_to login_path
     assert_nil session[:user_id]
+  end
+
+
+  private
+
+  def configure_okta
+    ENV["CENTAUR_CONSOLE_OKTA_CLIENT_ID"] = OKTA_CLIENT_ID
+    ENV["CENTAUR_CONSOLE_OKTA_CLIENT_SECRET"] = "okta-login-secret"
+    ENV["CENTAUR_CONSOLE_OKTA_ISSUER"] = OKTA_ISSUER
   end
 end

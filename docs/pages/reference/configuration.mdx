@@ -71,11 +71,14 @@ for the operator workflow.
 | `CENTAUR_JWT_SIGNING_SECRET` | `secretManager.existingSecretName`; local bootstrap generates it when absent. | Signs Console-issued MCP access tokens. |
 | `console.publicUrl` | Helm value. | Public Console origin used for links and MCP authorization metadata. |
 | `console.passwordLoginEnabled` | Helm value, default `true`. | Enables the break-glass email and password login. Disable after SSO is configured for a public Console. |
-| `console.ssoEmailDomains` | Helm value. | Limits Google or Slack SSO admission by email domain. Empty accepts any IdP-authenticated email. |
+| `console.ssoEmailDomains` | Helm value. | Limits Google, Slack, or Okta SSO admission by email domain. Empty accepts any IdP-authenticated email. |
 | `console.sqlExporter.enabled` | Helm value, default `false`. | Runs one internal SQL Exporter replica, initially configured with Solid Queue collectors. Enable it after the read-only database role and Secret key exist. |
 | `console.sqlExporter.metrics.*` | Helm values. | Configures the SQL Exporter metrics path and Prometheus-compatible scrape annotations. |
 | `console.sqlExporter.databaseUrlSecretKey` | Helm value, default `CONSOLE_SQLEXPORTER_DATABASE_URL`. | Selects the key in `secretManager.existingSecretName` containing the database URL for a dedicated read-only PostgreSQL role. |
 | `networkPolicy.metricsIngressSourceNamespaces` | Helm value. | Allows Prometheus-compatible collectors in the listed namespaces to scrape internal metrics Services. Collectors in the Centaur namespace are always allowed. |
+| `console.oktaOauth.enabled` | Helm value, default `false`. | Enables Okta OIDC login for the Console. |
+| `console.oktaOauth.issuer` | Helm value. | Okta organization or custom authorization-server issuer used for OIDC discovery. |
+| `CENTAUR_CONSOLE_OKTA_CLIENT_ID`, `CENTAUR_CONSOLE_OKTA_CLIENT_SECRET` | `secretManager.existingSecretName` when Okta login is enabled. | Okta OIDC web application credentials. |
 | `apiRs.syncInfraSecrets`, `IRON_CONTROL_SYNC_INFRA_SECRETS` | Helm value, default `true`. | Upserts the shared `infra` role and its harness/platform secrets. Set false only when another process owns that shared Console state. |
 | `IRON_CONTROL_URL`, `IRON_CONTROL_API_KEY` | Chart-rendered for api-rs; operator shell for `centaur-perms`. | Connects the runtime or CLI to the Console. |
 

@@ -22,7 +22,7 @@ module Login
       # callbacks, even when the Slack app has opted into optional PKCE support.
       def token_exchange_client_secret(secret) = secret
 
-      def identity_from(result, client_id:)
+      def identity_from(result, client_id:, nonce: nil)
         identity = Login::IdToken.identity(result.id_token, client_id: client_id, valid_issuers: VALID_ISSUERS)
         claims = Login::IdToken.decode_claims(result.id_token)
         identity.merge(team_id: claims[TEAM_ID_CLAIM].to_s.strip.presence)

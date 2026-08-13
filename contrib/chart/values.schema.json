@@ -8,6 +8,13 @@
         "replicaCount": { "type": "integer" },
         "publicUrl": { "type": "string" },
         "railsEnv": { "type": "string" },
+        "oktaOauth": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "issuer": { "type": "string" }
+          }
+        },
         "image": {
           "type": "object",
           "properties": {

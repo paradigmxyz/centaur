@@ -106,9 +106,9 @@ Behavior:
 
 When deploying to Kubernetes, source these values from a `Secret`, not from a `ConfigMap`.
 
-## Google And Slack Authentication
+## Google, Slack, And Okta Authentication
 
-The operator console always supports email and password sign-in. To add Google or Slack SSO buttons to the login page, configure an OAuth/OIDC client with the provider and set the matching client credentials in the environment. A provider is shown only when both its client ID and client secret are present.
+The operator console supports email and password sign-in by default. To add Google, Slack, or Okta SSO buttons to the login page, configure an OAuth/OIDC client with the provider and set the matching client credentials in the environment. Okta also requires its issuer URL. A provider is shown only when all of its required settings are present.
 
 | Variable                              | Required | Description                                                                                 |
 | ------------------------------------- | -------- | ------------------------------------------------------------------------------------------- |
@@ -117,6 +117,9 @@ The operator console always supports email and password sign-in. To add Google o
 | `CENTAUR_CONSOLE_GOOGLE_CLIENT_SECRET`   | for Google | Google OAuth client secret for console login.                                                |
 | `CENTAUR_CONSOLE_SLACK_CLIENT_ID`        | for Slack | Slack OpenID Connect client ID for console login.                                            |
 | `CENTAUR_CONSOLE_SLACK_CLIENT_SECRET`    | for Slack | Slack OpenID Connect client secret for console login.                                        |
+| `CENTAUR_CONSOLE_OKTA_ISSUER`            | for Okta  | Okta OIDC issuer URL, such as `https://id.example.com` or a custom authorization-server issuer. |
+| `CENTAUR_CONSOLE_OKTA_CLIENT_ID`         | for Okta  | Okta OIDC web application client ID for console login.                                       |
+| `CENTAUR_CONSOLE_OKTA_CLIENT_SECRET`     | for Okta  | Okta OIDC web application client secret for console login.                                   |
 | `CENTAUR_CONSOLE_SSO_EMAIL_DOMAINS`      | recommended for public exposure | Comma- or whitespace-separated domain allowlist for SSO users, for example `acme.com example.org`. Empty allows any IdP-authenticated email. |
 | `CENTAUR_CONSOLE_PASSWORD_LOGIN_ENABLED` | no       | Set to `false` to disable email and password sign-in. Defaults to enabled.                    |
 | `CENTAUR_CONSOLE_PUBLIC_SLACK_THREADS_ENABLED` | no | Set to `true` to let every authenticated Console user browse public Slack channel conversations. Requires the Slack ETL channel catalog; access fails closed when it is unavailable. Private channels and DMs remain owner-only. Defaults to disabled. |
@@ -126,8 +129,11 @@ Register these callback URLs with the provider:
 
 - Google: `<CENTAUR_CONSOLE_PUBLIC_URL>/auth/google/callback`
 - Slack: `<CENTAUR_CONSOLE_PUBLIC_URL>/auth/slack/callback`
+- Okta: `<CENTAUR_CONSOLE_PUBLIC_URL>/auth/okta/callback`
 
-Both providers request the `openid`, `email`, and `profile` scopes. Client credentials may also be stored in Rails credentials under `console_auth.<provider>.client_id` and `console_auth.<provider>.client_secret`, but environment variables take precedence.
+The Okta application must use the authorization-code flow with PKCE and the RS256 ID-token signing algorithm; request the `openid`, `email`, and `profile` scopes. The Console discovers the authorization, token, UserInfo, and JWKS endpoints from the issuer. It verifies each ID token's signature, issuer, audience, expiry, issued-at time, and nonce, then requires UserInfo to return the same subject and a verified email before signing a user in.
+
+All three providers request the `openid`, `email`, and `profile` scopes. Client credentials may also be stored in Rails credentials under `console_auth.<provider>.client_id` and `console_auth.<provider>.client_secret`, but environment variables take precedence. Okta's issuer may likewise be stored at `console_auth.okta.issuer`.
 
 Google OAuth consent apps for broker credentials are configured separately in the console under **OAuth Apps**. Those app callbacks use `/oauth/<slug>/callback` and currently support Google only; Slack support here applies to operator console sign-in.
 

@@ -50,7 +50,11 @@ class SessionOauthController < ApplicationController
       expires: FLOW_TTL.from_now, httponly: true, same_site: :lax
     }
 
-    redirect_to authorization_url(state, code_verifier), allow_other_host: true
+    redirect_to authorization_url(state, code_verifier, nonce), allow_other_host: true
+  rescue Broker::ExchangeError => e
+    cookies.delete(FLOW_COOKIE)
+    Rails.logger.error { "console login start failed (#{@key}): #{e.reason}" }
+    redirect_to login_path, alert: "Sign in is temporarily unavailable. Please try again."
   end
 
   # GET /auth/:provider/callback?code=&state=  (or ?error=)
@@ -66,7 +70,11 @@ class SessionOauthController < ApplicationController
     end
 
     result = exchange_code(params[:code], flow["code_verifier"])
-    identity = @provider.identity_from(result, client_id: ConsoleAuth.client_id(@key))
+    identity = @provider.identity_from(
+      result,
+      client_id: ConsoleAuth.client_id(@key),
+      nonce: flow["nonce"]
+    )
     sign_in_console_user(User.link_or_provision(provider: @key, identity: identity))
   rescue Broker::ExchangeError => e
     Rails.logger.error { "console login exchange failed (#{@key}): #{e.reason}" }
@@ -89,13 +97,14 @@ class SessionOauthController < ApplicationController
     redirect_to login_path, alert: "That sign-in method is not available." if @provider.nil?
   end
 
-  def authorization_url(state, code_verifier)
+  def authorization_url(state, code_verifier, nonce)
     query = {
       "client_id" => ConsoleAuth.client_id(@key),
       "redirect_uri" => callback_redirect_uri,
       "response_type" => "code",
       "scope" => @provider.scopes.join(" "),
-      "state" => state
+      "state" => state,
+      "nonce" => nonce
     }.merge(@provider.extra_authorization_params)
 
     if code_verifier.present?

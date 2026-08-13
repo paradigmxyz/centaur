@@ -117,7 +117,7 @@ console:
   # be shared by their owner from the Threads UI.
   publicSlackThreadsEnabled: false
   # Optional SSO admission policy. When non-empty, only identities whose email
-  # domain matches this list can sign in through Google or Slack.
+  # domain matches this list can sign in through Google, Slack, or Okta.
   ssoEmailDomains: []
   image:
     repository: centaur-console
@@ -151,6 +151,15 @@ console:
   # bot and DM sync use.
   slackOauth:
     enabled: false
+  # Okta as an OIDC identity provider for console sign-in. Set issuer to the
+  # authorization-server issuer (for example, https://id.example.com or
+  # https://id.example.com/oauth2/default). The Console discovers endpoints and
+  # signing keys from it. The shared infra Secret must contain keys
+  # <secretManager.envPrefix>CENTAUR_CONSOLE_OKTA_CLIENT_ID and
+  # <secretManager.envPrefix>CENTAUR_CONSOLE_OKTA_CLIENT_SECRET when enabled.
+  oktaOauth:
+    enabled: false
+    issuer: ""
   # OAuth app slug whose user-level Slack credentials are used by the DM sync
   # worker. Keep this aligned with the Console OAuth app users authorize.
   slackDmSync:

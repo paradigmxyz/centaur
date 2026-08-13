@@ -6,6 +6,8 @@
 # Per provider, looks up:
 #   CENTAUR_CONSOLE_<PROVIDER>_CLIENT_ID / _CLIENT_SECRET (ENV)
 #   credentials.console_auth.<provider>.client_id/secret  (fallback)
+# Okta additionally requires an OIDC issuer URL:
+#   CENTAUR_CONSOLE_OKTA_ISSUER
 # A provider is offered on the login page only when both are present.
 #
 # SSO email domains are optional. When configured, every SSO login must use an
@@ -23,7 +25,7 @@
 module ConsoleAuth
   # The providers a Login::Providers strategy exists for. A provider must also be
   # `configured?` to actually appear on the login page.
-  SUPPORTED = %w[google slack].freeze
+  SUPPORTED = %w[google slack okta].freeze
 
   module_function
 
@@ -33,11 +35,14 @@ module ConsoleAuth
   end
 
   def configured?(provider)
-    SUPPORTED.include?(provider.to_s) && client_id(provider).present? && client_secret(provider).present?
+    key = provider.to_s
+    SUPPORTED.include?(key) && client_id(key).present? && client_secret(key).present? &&
+      (key != "okta" || issuer(key).present?)
   end
 
   def client_id(provider) = setting(provider, "client_id")
   def client_secret(provider) = setting(provider, "client_secret")
+  def issuer(provider) = setting(provider, "issuer")
 
   def password_login_enabled?
     raw = ConsoleEnv["PASSWORD_LOGIN_ENABLED"]
