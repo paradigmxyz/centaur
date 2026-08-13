@@ -156,11 +156,12 @@ def _copy_published_tools(tool_dir: Path, published: Path) -> None:
         if tool_name in blocklist:
             continue
         if tool_name in existing:
+            previous = existing[tool_name]
             print(
-                f"skipping duplicate tool {tool_name}: {package_dir} conflicts with {existing[tool_name]}",
+                f"replacing tool {tool_name}: {package_dir} shadows {previous}",
                 file=sys.stderr,
             )
-            continue
+            _remove_path(previous)
         relative_package_dir = package_dir.relative_to(published)
         target = tool_dir / relative_package_dir
         if target.exists() or target.is_symlink():
@@ -246,6 +247,16 @@ def _refresh_checkout(source_path: Path, git_ref: object | None) -> None:
 
 def _refresh_source(tool_dir: Path, source_metadata: dict[str, object]) -> None:
     subdir = str(source_metadata.get("source_subdir") or "tools")
+    if source_metadata.get("source") == "baked":
+        source_path = source_metadata.get("source_path")
+        if not source_path:
+            raise RuntimeError("baked tools metadata is missing source_path")
+        _copy_refreshed_source(
+            tool_dir,
+            Path(str(source_path)),
+            str(source_metadata.get("repo") or source_path),
+        )
+        return
     if source_metadata.get("source") == "repo_cache":
         repo_cache_repo_path = source_metadata.get("repo_cache_repo_path")
         if not repo_cache_repo_path:

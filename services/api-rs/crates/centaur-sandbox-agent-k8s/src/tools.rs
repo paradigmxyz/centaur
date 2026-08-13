@@ -11,10 +11,9 @@
 //! trees api-rs's own `tool_discovery` scans, so the creds api-rs grants match
 //! the tools the agent installs:
 //!
-//! * a `tools-bootstrap` init container publishes the tools repo's `source_subdir`
-//!   from the repo-cache DaemonSet's node-level cache when configured, otherwise
-//!   it git-clones the tools repo at a pinned ref into an emptyDir mounted at
-//!   `/app/tools`;
+//! * a `tools-bootstrap` init container publishes the configured repository or
+//!   immutable image base, then applies later sources from repo-cache or pinned
+//!   Git refs into an emptyDir mounted at `/app/tools`;
 //!
 //! `TOOL_DIRS` is set explicitly on the agent env to `/app/tools`, pointing at
 //! the path the init container populates in this pod. The published tools tree
@@ -47,10 +46,7 @@ const REPO_CACHE_VOLUME: &str = "tools-repo-cache";
 const PUBLIC_VISIBILITY: &str = "public";
 const PRIVATE_VISIBILITY: &str = "private";
 
-/// Git source for the base tools tree. When set, every sandbox gets a
-/// `tools-bootstrap` init container that clones `repo` at `git_ref` and
-/// publishes its `source_subdir` into the agent's `/app/tools` — so adding a
-/// tool is a push to the repo, not an image rebuild.
+/// Base tool provenance plus ordered deployment overlays.
 #[derive(Clone, Debug)]
 pub struct ToolsConfig {
     /// `owner/name` GitHub repo carrying the tools tree.
@@ -65,6 +61,10 @@ pub struct ToolsConfig {
     /// `install-tool-shims` (the default sandbox image does).
     pub image: String,
     pub image_pull_policy: Option<String>,
+    /// Whether the first tools source is supplied by `image` instead of the
+    /// repository/cache path. Deployment-specific derived images use this to
+    /// keep patched tools aligned with their api-rs binary.
+    pub baked_base: bool,
     /// GitHub token secret for private-repo clones. `None` => unauthenticated clone.
     pub github_token: Option<GitHubTokenRef>,
     /// Optional repo-cache root path mounted into the sandbox. When set,
@@ -82,8 +82,8 @@ pub struct ToolsConfig {
     /// Whether running sandboxes should watch repo-cache checkouts and refresh
     /// local tool shims when commits change.
     pub auto_reload: bool,
-    /// Additional tool sources copied after the base tree. Duplicate tool names
-    /// are skipped by the copy helper.
+    /// Additional tool sources copied after the base tree. Later sources replace
+    /// earlier tools with the same package-directory name.
     pub extra_sources: Vec<ToolSource>,
 }
 
@@ -118,6 +118,7 @@ impl ToolsConfig {
             visibility: PRIVATE_VISIBILITY.to_owned(),
             image: image.into(),
             image_pull_policy: None,
+            baked_base: false,
             github_token: None,
             repo_cache_path: None,
             repo_cache_pvc: None,
@@ -127,19 +128,26 @@ impl ToolsConfig {
         }
     }
 
-    fn sources(&self) -> Vec<ToolSource> {
-        let mut sources = vec![ToolSource {
-            repo: self.repo.clone(),
-            git_ref: self.git_ref.clone(),
-            source_subdir: self.source_subdir.clone(),
-            visibility: self.visibility.clone(),
-        }];
+    fn published_sources(&self) -> Vec<ToolSource> {
+        let mut sources = Vec::new();
+        if !self.baked_base {
+            sources.push(ToolSource {
+                repo: self.repo.clone(),
+                git_ref: self.git_ref.clone(),
+                source_subdir: self.source_subdir.clone(),
+                visibility: self.visibility.clone(),
+            });
+        }
         sources.extend(self.extra_sources.clone());
         sources
     }
 
-    pub(crate) fn has_sources(&self) -> bool {
-        !self.repo.is_empty()
+    pub(crate) fn requires_bootstrap(&self) -> bool {
+        if self.baked_base {
+            !self.extra_sources.is_empty()
+        } else {
+            !self.repo.is_empty()
+        }
     }
 
     pub fn scoped_for_repo_cache_access(&self, access: &RepoCacheAccess) -> Self {
@@ -156,9 +164,11 @@ impl ToolsConfig {
                     scoped.git_ref = first_public.git_ref;
                     scoped.source_subdir = first_public.source_subdir;
                     scoped.visibility = first_public.visibility;
+                    scoped.baked_base = false;
                     scoped.extra_sources.remove(0);
                 } else {
                     scoped.repo.clear();
+                    scoped.baked_base = false;
                 }
             }
         }
@@ -267,14 +277,15 @@ pub(crate) struct CloneProxy {
     pub ca_volume_mount: Value,
 }
 
-/// The `tools-bootstrap` init container: resolves each configured source, then
-/// delegates copying to `install-tool-shims`. With a `CloneProxy`, the clone
-/// fallback rides the per-sandbox iron-proxy like all other sandbox egress.
+/// The `tools-bootstrap` init container resolves the configured source chain and
+/// delegates complete-directory replacement to `install-tool-shims`. With a
+/// `CloneProxy`, the clone fallback rides the per-sandbox iron-proxy like all
+/// other sandbox egress.
 pub(crate) fn tools_init_container_json(
     tools: &ToolsConfig,
     clone_proxy: Option<&CloneProxy>,
 ) -> Value {
-    let sources = tools.sources();
+    let sources = tools.published_sources();
 
     let proxy_exports = match clone_proxy {
         Some(proxy) => format!(
@@ -309,6 +320,17 @@ pub(crate) fn tools_init_container_json(
     // space or metacharacter breaks loudly in git instead of in the shell.
     let mut publish_steps = String::new();
     let mut metadata_sources = Vec::new();
+    if tools.baked_base {
+        publish_steps.push_str(&format!(
+            "install-tool-shims --copy-tools \"{BAKED_BASE_TOOL_DIR}\" \"$target\"\n"
+        ));
+        metadata_sources.push(json!({
+            "repo": tools.repo,
+            "git_ref": tools.git_ref.as_deref(),
+            "source": "baked",
+            "source_path": BAKED_BASE_TOOL_DIR,
+        }));
+    }
     for (index, source) in sources.iter().enumerate() {
         let subdir = &source.source_subdir;
         let repo = &source.repo;
@@ -540,15 +562,23 @@ mod tests {
     }
 
     #[test]
-    fn tools_init_clones_repo_into_emptydir() {
+    fn tools_init_publishes_baked_base_then_clones_overlay() {
         let mut tools = ToolsConfig::new("paradigmxyz/centaur", "centaur-agent:test");
-        tools.git_ref = Some("main".to_owned());
+        tools.baked_base = true;
+        tools.extra_sources.push(ToolSource {
+            repo: "acme/tools-overlay".to_owned(),
+            git_ref: Some("main".to_owned()),
+            source_subdir: "tools".to_owned(),
+            visibility: "private".to_owned(),
+        });
         let c = tools_init_container_json(&tools, None);
         assert_eq!(c["name"], "tools-bootstrap");
         assert_eq!(c["image"], "centaur-agent:test");
         let script = c["command"][2].as_str().unwrap();
+        let baked_copy = "install-tool-shims --copy-tools \"/opt/centaur/tools\" \"$target\"";
+        assert!(script.contains(baked_copy));
         assert!(script.contains(
-            "git clone --quiet --filter=blob:none --no-checkout \"https://github.com/paradigmxyz/centaur.git\""
+            "git clone --quiet --filter=blob:none --no-checkout \"https://github.com/acme/tools-overlay.git\""
         ));
         assert!(script.contains("sparse-checkout set \"tools\""));
         assert!(script.contains("fetch --quiet origin \"main\""));
@@ -556,9 +586,12 @@ mod tests {
         assert!(script.contains("\"source_path\":\".centaur-source\""));
         assert!(script.contains("if [ -d \"$source/tools\" ]; then"));
         assert!(script.contains("install-tool-shims --copy-tools \"$source/tools\" \"$target\""));
-        assert!(script.contains(
-            "skipping tools source paradigmxyz/centaur: no tools/ at the configured ref"
-        ));
+        assert!(script.find(baked_copy).unwrap() < script.find("git clone").unwrap());
+        assert!(
+            script.contains(
+                "skipping tools source acme/tools-overlay: no tools/ at the configured ref"
+            )
+        );
         assert!(script.contains(".centaur-tools-source.json"));
         assert!(!script.contains("cp -R"));
         // No token configured => no askpass, single (tools) volume mount.
@@ -583,9 +616,8 @@ mod tests {
         assert!(script.contains("checkout --quiet --detach FETCH_HEAD; do"));
         assert!(script.contains("if [ \"$attempt\" -ge 30 ]"));
         assert!(script.contains("sleep 2"));
-        assert!(
-            script.find("done").unwrap() < script.find("install-tool-shims --copy-tools").unwrap()
-        );
+        let overlay_copy = "install-tool-shims --copy-tools \"$source/tools\" \"$target\"";
+        assert!(script.find("done").unwrap() < script.find(overlay_copy).unwrap());
     }
 
     #[test]
@@ -755,6 +787,7 @@ mod tests {
     #[test]
     fn public_repo_cache_filters_private_tool_sources() {
         let mut tools = ToolsConfig::new("acme/private-tools", "centaur-agent:test");
+        tools.baked_base = true;
         tools.repo_cache_path = Some("/var/lib/centaur/repos".to_owned());
         tools.extra_sources.push(ToolSource {
             repo: "acme/public-tools".to_owned(),
@@ -773,14 +806,28 @@ mod tests {
 
         assert_eq!(scoped.repo, "acme/public-tools");
         assert_eq!(scoped.git_ref.as_deref(), Some("docs"));
+        assert!(!scoped.baked_base);
         assert!(scoped.extra_sources.is_empty());
         let script = tools_init_container_json(&scoped, None)["command"][2]
             .as_str()
             .unwrap()
             .to_owned();
         assert!(script.contains("cache_repo=\"/var/lib/centaur/repos/acme/public-tools\""));
+        assert!(!script.contains("\"source\":\"baked\""));
         assert!(!script.contains("acme/private-tools"));
         assert!(!script.contains("acme/other-private-tools"));
+    }
+
+    #[test]
+    fn public_repo_cache_without_public_sources_exposes_no_tools() {
+        let mut tools = ToolsConfig::new("acme/private-tools", "centaur-agent:test");
+        tools.baked_base = true;
+
+        let scoped = tools.scoped_for_repo_cache_access(&RepoCacheAccess::Public);
+
+        assert!(scoped.repo.is_empty());
+        assert!(!scoped.baked_base);
+        assert!(!scoped.requires_bootstrap());
     }
 
     #[test]

@@ -44,31 +44,32 @@ ironProxy:
   # Requests/limits for each per-sandbox iron-proxy pod (k8s resources map).
   resources: {}
 
-# Base tools delivery for api-rs sandboxes. When enabled, repo-cache keeps `repo`
-# fresh on each node and a tools-bootstrap init container copies `subdir` into
-# each sandbox's /app/tools, so adding a tool is a push to the repo, not an image
-# rebuild. Prefer overlays.sources for new deployments; toolServer.* remains as
-# a compatibility input and maps to the first ordered overlay source when
-# overlays.sources is empty. `port` is legacy (the deprecated tool-server
-# sidecar) and unused here.
+# Base tools delivery for api-rs sandboxes. The default `repository` mode keeps
+# the source tree live through repo-cache. Derived releases can select `image`
+# so the first source comes from the immutable api-rs and sandbox images while
+# later sources remain live overlays. Prefer overlays.sources for new
+# deployments; toolServer.* remains as a compatibility input when
+# overlays.sources is empty. `port` is legacy and unused here.
 toolServer:
   enabled: true
   port: 8001
-  # owner/name of the GitHub repo carrying the tools tree. REQUIRED when enabled;
-  # override for forks. Private repos additionally need githubToken below.
+  # `repository` publishes the first source from repo-cache/Git. `image` uses
+  # the tools baked into both runtime images and treats later sources as
+  # overlays. The image mode requires those images to share one source revision.
+  baseSource: repository
+  # owner/name of the base tools repo. REQUIRED when enabled; override for forks.
   repo: paradigmxyz/centaur
-  # Branch, tag, or commit to check out; empty = the repo's default branch. Pin
-  # this to the tool set the api-rs image was built with so the creds api-rs
-  # grants match the tools the sandbox installs.
+  # Branch, tag, or commit for the base tree. In image mode this records the
+  # source revision baked into both runtime images.
   ref: ""
   # Repo visibility for sandbox repo-cache access. Defaults to private; set to
   # public only for repos safe to expose to principals with sandbox_repo_cache=public.
   visibility: private
-  # Subdirectory in the repo holding the tools tree (mounted at /app/tools).
+  # Subdirectory in the source repo holding the tools tree.
   subdir: tools
-  # Additional repo/subdir sources copied after the base tools source. Duplicate
-  # tool names are skipped by the sandbox copy helper. These repos are cached
-  # automatically when repoCache.enabled=true.
+  # Additional repo/subdir sources applied after the base. Later sources
+  # replace earlier tools with the same package-directory name. These repos are
+  # cached automatically when repoCache.enabled=true.
   extraSources: []
   # - repo: tempoxyz/centaur-tempo
   #   ref: ""
@@ -237,11 +238,12 @@ overlay:
   mountPath: /app/overlay/org
   systemPrompt: ""
 
-# Ordered repo-cache-backed overlays. Each source repo is synced by repo-cache;
-# api-rs reads tools/workflows from /var/lib/centaur/repos, while sandboxes read
-# matching workflow/skill paths from /home/agent/github. Later sources shadow
-# earlier ones when names collide. When sources is empty, toolServer.repo and
-# toolServer.extraSources are mapped into this shape for compatibility.
+# Ordered overlays. In image base mode, the first tools source identifies the
+# immutable tree baked into both runtime images and later sources are
+# repo-cache-backed overlays. In repository mode every tools source comes from
+# repo-cache/Git. Workflows and skills remain repo-cache-backed for every source.
+# Later sources shadow earlier ones when names collide. When sources is empty,
+# toolServer.repo and toolServer.extraSources map into this shape.
 #
 # Subdirs default to the conventional layout — toolsSubdir: tools,
 # workflowsSubdir: workflows, skillsSubdir: .agents/skills — so most sources

@@ -136,6 +136,7 @@
       "properties": {
         "enabled": { "type": "boolean" },
         "port": { "type": "integer" },
+        "baseSource": { "type": "string", "enum": ["repository", "image"] },
         "repo": { "type": "string" },
         "ref": { "type": "string" },
         "visibility": { "type": "string" },

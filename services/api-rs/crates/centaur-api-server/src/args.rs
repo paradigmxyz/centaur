@@ -219,15 +219,18 @@ struct ToolGitSource {
 
 impl ToolGitSource {
     fn from_config(tools: &ToolsConfig) -> Vec<Self> {
-        let mut sources = vec![Self::from_source(
-            &ToolSource {
-                repo: tools.repo.clone(),
-                git_ref: tools.git_ref.clone(),
-                source_subdir: tools.source_subdir.clone(),
-                visibility: tools.visibility.clone(),
-            },
-            tools.repo_cache_path.clone(),
-        )];
+        let mut sources = Vec::new();
+        if !tools.baked_base {
+            sources.push(Self::from_source(
+                &ToolSource {
+                    repo: tools.repo.clone(),
+                    git_ref: tools.git_ref.clone(),
+                    source_subdir: tools.source_subdir.clone(),
+                    visibility: tools.visibility.clone(),
+                },
+                tools.repo_cache_path.clone(),
+            ));
+        }
         sources.extend(
             tools
                 .extra_sources
@@ -1312,7 +1315,10 @@ impl SandboxArgs {
     fn tool_proxy_dirs(&self) -> Result<Vec<PathBuf>, ServerError> {
         if let Some(tools) = self.tools_source.to_config() {
             let sources = ToolGitSource::from_config(&tools);
-            let mut dirs = Vec::with_capacity(sources.len());
+            let mut dirs = Vec::with_capacity(sources.len() + usize::from(tools.baked_base));
+            if tools.baked_base {
+                dirs.push(PathBuf::from("/app/tools"));
+            }
             for source in sources {
                 source.sync()?;
                 let tools_dir = source.tools_dir();
@@ -1527,6 +1533,14 @@ struct ToolsArgs {
         env = "KUBERNETES_TOOLS_RUNNER_IMAGE_PULL_POLICY"
     )]
     image_pull_policy: Option<String>,
+    #[arg(
+        id = "tools_base_source",
+        long = "kubernetes-tools-base-source",
+        env = "KUBERNETES_TOOLS_BASE_SOURCE",
+        value_enum,
+        default_value = "repository"
+    )]
+    base_source: ToolsBaseSource,
     // Secret + key holding a GitHub token for private-repo clones (optional).
     #[arg(
         id = "tools_github_token_secret",
@@ -1612,6 +1626,7 @@ impl ToolsArgs {
         let image = clean_optional_value(self.image.as_deref())?;
         let mut config = ToolsConfig::new(repo, image);
         config.image_pull_policy = self.image_pull_policy.clone();
+        config.baked_base = self.base_source == ToolsBaseSource::Image;
         config.git_ref = clean_optional_value(self.git_ref.as_deref());
         config.visibility = repository_visibility(self.visibility.as_deref());
         if let Some(subdir) = clean_optional_value(Some(self.source_subdir.as_str())) {
@@ -1630,6 +1645,12 @@ impl ToolsArgs {
         config.extra_sources = self.extra_sources();
         Some(config)
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum ToolsBaseSource {
+    Repository,
+    Image,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -2414,6 +2435,8 @@ mod tests {
             "main",
             "--kubernetes-tools-runner-image",
             "centaur-agent:test",
+            "--kubernetes-tools-base-source",
+            "image",
             "--kubernetes-tools-repo-cache-path",
             "/var/lib/centaur/repos",
             "--kubernetes-tools-visibility",
@@ -2429,6 +2452,7 @@ mod tests {
         assert_eq!(tools.source_subdir, "tools");
         assert_eq!(tools.visibility, "public");
         assert_eq!(tools.image, "centaur-agent:test");
+        assert!(tools.baked_base);
         assert_eq!(
             tools.repo_cache_path.as_deref(),
             Some("/var/lib/centaur/repos")
@@ -2463,6 +2487,69 @@ mod tests {
         let config = AgentSandboxConfig::try_from(&args.sandbox).unwrap();
         let tools = config.tools.expect("tools should be Some");
         assert!(!tools.auto_reload);
+    }
+
+    #[test]
+    fn invalid_tools_base_source_is_rejected() {
+        let error = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-backend",
+            "agent-k8s",
+            "--iron-control-url",
+            "http://console.local",
+            "--iron-control-api-key",
+            "iak_test",
+            "--kubernetes-tools-repo",
+            "paradigmxyz/centaur",
+            "--kubernetes-tools-runner-image",
+            "centaur-agent:test",
+            "--kubernetes-tools-base-source",
+            "invalid",
+        ])
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("invalid value 'invalid' for '--kubernetes-tools-base-source")
+        );
+    }
+
+    #[test]
+    fn image_tools_base_uses_baked_metadata_before_overlay_dirs() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-backend",
+            "agent-k8s",
+            "--iron-control-url",
+            "http://console.local",
+            "--iron-control-api-key",
+            "iak_test",
+            "--kubernetes-tools-repo",
+            "acme/base",
+            "--kubernetes-tools-runner-image",
+            "centaur-agent:test",
+            "--kubernetes-tools-base-source",
+            "image",
+            "--kubernetes-tools-repo-cache-path",
+            "/var/lib/centaur/repos",
+            "--kubernetes-tools-extra-sources",
+            r#"[{"repo":"acme/overlay","subdir":"tools","visibility":"private"}]"#,
+        ])
+        .unwrap();
+
+        let tools = args.sandbox.tools_source.to_config().unwrap();
+        assert!(tools.baked_base);
+        let sources = ToolGitSource::from_config(&tools);
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].repo, "acme/overlay");
+        assert_eq!(
+            sources[0].tools_dir(),
+            PathBuf::from("/var/lib/centaur/repos/acme/overlay/tools")
+        );
     }
 
     #[test]
