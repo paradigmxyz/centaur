@@ -354,6 +354,27 @@ module Api
         assert_equal user, principal.console_user
       end
 
+      test "POST leaves a Slack DM unlinked when no Console user has the supplied email" do
+        email = "missing-console-user@example.com"
+
+        post api_v1_principals_url,
+             params: {
+               data: {
+                 foreign_id: "unmatched-slack-dm",
+                 kind: "slack_dm",
+                 slack_user_id: "U1123456789",
+                 slack_team_id: "T1123456789",
+                 slack_email: email
+               }
+             }.to_json,
+             headers: auth_headers
+
+        assert_response :created
+        principal = Principal.find_by!(foreign_id: "unmatched-slack-dm")
+        assert_equal email, principal.slack_email
+        assert_nil principal.console_user
+      end
+
       test "PUT links an existing Slack DM when the trusted email is supplied again" do
         user = users(:member_user)
         principal = Principal.create!(
@@ -369,6 +390,33 @@ module Api
 
         assert_response :ok
         assert_equal user, principal.reload.console_user
+      end
+
+      test "PUT relinks a Slack DM when its trusted email changes to another Console user" do
+        first_user = users(:member_user)
+        second_user = users(:globex_admin)
+
+        post api_v1_principals_url,
+             params: {
+               data: {
+                 foreign_id: "relinked-slack-dm",
+                 kind: "slack_dm",
+                 slack_user_id: "U2123456789",
+                 slack_team_id: "T2123456789",
+                 slack_email: first_user.email
+               }
+             }.to_json,
+             headers: auth_headers
+        assert_response :created
+        principal = Principal.find_by!(foreign_id: "relinked-slack-dm")
+        assert_equal first_user, principal.console_user
+
+        put api_v1_principal_url(id: principal.oid),
+            params: { data: { slack_email: second_user.email } }.to_json,
+            headers: auth_headers
+
+        assert_response :ok
+        assert_equal second_user, principal.reload.console_user
       end
 
       test "PUT does not link from a stored Slack email when the request omits it" do
