@@ -356,11 +356,7 @@ cat > "$HOME_DIR/.pi/agent/settings.json" <<EOF
 EOF
 
 # ── Per-session workspace clone (no shared worktree metadata) ────────────────
-if [ "${CENTAUR_PERSISTENT_STATE:-0}" = "1" ]; then
-    WORKSPACE_DIR="$STATE_DIR/workspace"
-else
-    WORKSPACE_DIR="$HOME_DIR/workspace"
-fi
+WORKSPACE_DIR="$(select-workspace-root "$HOME_DIR" "$STATE_DIR" "${CENTAUR_PERSISTENT_STATE:-0}")"
 if [ -n "${AGENT_REPO:-}" ]; then
     REPO_PATH="$HOME_DIR/github/$AGENT_REPO"
     if ! git -C "$REPO_PATH" rev-parse --git-dir >/dev/null 2>&1; then
