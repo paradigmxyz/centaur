@@ -2,12 +2,39 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import compose_system_prompt
 
 
 class ComposeSystemPromptTest(unittest.TestCase):
+    def test_appends_development_workspace_rules_after_overlays(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            workspace = root / "workspace"
+            home.mkdir()
+            workspace.mkdir()
+            (home / "AGENTS.md").write_text("base\n")
+            (home / "AGENTS_OVERLAY.md").write_text("overlay\n")
+
+            target = workspace / "AGENTS.md"
+            with patch.dict("os.environ", {"CENTAUR_WORKSPACE_ROOT": "/workspace"}):
+                compose_system_prompt.compose_system_prompt(
+                    home_dir=home,
+                    target_prompt=target,
+                    repo_mount=home / "github",
+                )
+
+            prompt = target.read_text()
+            self.assertIn("[Development Workspace]", prompt)
+            self.assertGreater(prompt.index("[Development Workspace]"), prompt.index("overlay"))
+            self.assertIn("/workspace/repos", prompt)
+            self.assertIn("Do not run `git-branch`", prompt)
+            self.assertIn("Never run `git push` from this sandbox", prompt)
+            self.assertIn("publication approval", prompt)
+
     def test_appends_multiple_overlay_prompts_in_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

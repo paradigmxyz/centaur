@@ -8,6 +8,13 @@ from pathlib import Path
 
 SEPARATOR = "\n\n---\n\n"
 OVERLAY_PROMPT = Path("services/sandbox/SYSTEM_PROMPT.md")
+DEVELOPMENT_WORKSPACE_PROMPT = """[Development Workspace]
+This section overrides the generic Environment Git workflow above for a prepared development Workspace.
+The durable writable Workspace is mounted at `/workspace`; selected repositories are under `/workspace/repos` and are the only task repositories you may modify.
+Run Git and code commands from the selected repository below `/workspace/repos`. Do not use repo-cache checkouts under `~/github`. Do not run `git-branch` or create replacement clones under `~/branches` for selected repositories.
+You may commit changes in the selected Workspace repository. Never run `git push` from this sandbox; it intentionally has no GitLab credential. After the turn, Centaur collects committed changes and presents a publication approval action that starts the short-lived publisher.
+If the user asks to commit and push, commit in the selected Workspace repository and state that the push occurs through the publication approval action.
+"""
 
 
 def _append_prompt(target: Path, source: Path) -> bool:
@@ -59,6 +66,11 @@ def compose_system_prompt(
             continue
         if _append_prompt(target_prompt, prompt_path):
             appended.add(resolved)
+
+    if os.environ.get("CENTAUR_WORKSPACE_ROOT"):
+        with target_prompt.open("a") as target_file:
+            target_file.write(SEPARATOR)
+            target_file.write(DEVELOPMENT_WORKSPACE_PROMPT)
 
 
 def main() -> int:

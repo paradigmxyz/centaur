@@ -24,6 +24,7 @@ const WORKSPACE_ID_LABEL: &str = "centaur.ai/workspace-id";
 const WORKSPACE_ATTEMPT_LABEL: &str = "centaur.ai/workspace-attempt";
 const DEVELOPMENT_JOB_ROLE_LABEL: &str = "centaur.ai/development-job-role";
 const MANAGED_BY_VALUE: &str = "api-rs-workspace";
+const WORKSPACE_UID: i64 = 1001;
 const WORKSPACE_VOLUME: &str = "workspace";
 const TOKEN_VOLUME: &str = "gitlab-token";
 const TOKEN_MOUNT_PATH: &str = "/var/run/secrets/centaur-gitlab";
@@ -544,7 +545,7 @@ fn build_workspace_job(
     let mut pod_spec = json!({
         "restartPolicy": "Never",
         "automountServiceAccountToken": false,
-        "securityContext": {"fsGroup": 1000},
+        "securityContext": {"fsGroup": WORKSPACE_UID},
         "containers": [{
             "name": "provisioner",
             "image": config.provisioner_image,
@@ -559,7 +560,8 @@ fn build_workspace_job(
             "securityContext": {
                 "allowPrivilegeEscalation": false,
                 "runAsNonRoot": true,
-                "runAsUser": 1000,
+                "runAsUser": WORKSPACE_UID,
+                "runAsGroup": WORKSPACE_UID,
                 "capabilities": {"drop": ["ALL"]}
             }
         }],
@@ -635,7 +637,7 @@ fn build_collection_job(
         "restartPolicy": "Never",
         "serviceAccountName": config.service_account_name,
         "automountServiceAccountToken": false,
-        "securityContext": {"fsGroup": 1000},
+        "securityContext": {"fsGroup": WORKSPACE_UID},
         "containers": [{
             "name": "collector",
             "image": config.provisioner_image,
@@ -660,7 +662,8 @@ fn build_collection_job(
                 "allowPrivilegeEscalation": false,
                 "readOnlyRootFilesystem": true,
                 "runAsNonRoot": true,
-                "runAsUser": 1000,
+                "runAsUser": WORKSPACE_UID,
+                "runAsGroup": WORKSPACE_UID,
                 "capabilities": {"drop": ["ALL"]}
             },
             "resources": {
@@ -771,7 +774,7 @@ fn build_publication_job<T: Serialize>(
     let mut pod_spec = json!({
         "restartPolicy": "Never",
         "automountServiceAccountToken": false,
-        "securityContext": {"fsGroup": 1000},
+        "securityContext": {"fsGroup": WORKSPACE_UID},
         "containers": [{
             "name": "publisher",
             "image": config.provisioner_image,
@@ -791,7 +794,8 @@ fn build_publication_job<T: Serialize>(
                 "allowPrivilegeEscalation": false,
                 "readOnlyRootFilesystem": true,
                 "runAsNonRoot": true,
-                "runAsUser": 1000,
+                "runAsUser": WORKSPACE_UID,
+                "runAsGroup": WORKSPACE_UID,
                 "capabilities": {"drop": ["ALL"]}
             },
             "resources": {
@@ -989,7 +993,7 @@ fn failed_preparation(request: &WorkspacePreparationRequest) -> WorkspacePrepara
 }
 
 const PROVISIONER_SCRIPT: &str = r##"
-import base64, json, os, pathlib, shutil, subprocess
+import base64, json, os, pathlib, re, shutil, subprocess, urllib.parse, urllib.request
 
 request = json.loads(base64.b64decode(os.environ["CENTAUR_WORKSPACE_REQUEST_B64"]))
 workspace = pathlib.Path("/workspace")
@@ -997,8 +1001,31 @@ repositories_root = workspace / "repos"
 if repositories_root.is_symlink():
     raise RuntimeError("workspace repositories root is a symlink")
 repositories_root.mkdir(parents=True, exist_ok=True)
+gitlab_username = ""
+if request["repositories"]:
+    clone_origin = urllib.parse.urlsplit(request["repositories"][0]["clone_url"])
+    if clone_origin.scheme not in ("http", "https") or not clone_origin.hostname or clone_origin.username or clone_origin.password:
+        raise RuntimeError("repository origin is invalid")
+    token = pathlib.Path(os.environ["CENTAUR_GIT_TOKEN_FILE"]).read_text().strip()
+    if not token:
+        raise RuntimeError("GitLab token is unavailable")
+    identity_url = urllib.parse.urlunsplit((clone_origin.scheme, clone_origin.netloc, "/api/v3/user", "", ""))
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+            return None
+
+    identity_request = urllib.request.Request(identity_url, headers={"PRIVATE-TOKEN": token})
+    with urllib.request.build_opener(NoRedirect).open(identity_request, timeout=15) as response:
+        identity_bytes = response.read(4097)
+    if len(identity_bytes) > 4096:
+        raise RuntimeError("GitLab identity response is too large")
+    gitlab_username = json.loads(identity_bytes).get("username", "")
+    if not isinstance(gitlab_username, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,255}", gitlab_username):
+        raise RuntimeError("GitLab identity response is invalid")
+    os.environ["CENTAUR_GIT_USERNAME"] = gitlab_username
 askpass = pathlib.Path("/tmp/centaur-git-askpass")
-askpass.write_text("#!/bin/sh\ncase \"$1\" in *Username*) printf '%s\\n' oauth2 ;; *) cat \"$CENTAUR_GIT_TOKEN_FILE\" ;; esac\n")
+askpass.write_text("#!/bin/sh\ncase \"$1\" in *Username*) printf '%s\\n' \"$CENTAUR_GIT_USERNAME\" ;; *) cat \"$CENTAUR_GIT_TOKEN_FILE\" ;; esac\n")
 askpass.chmod(0o700)
 prepared, failed = [], []
 
@@ -1018,6 +1045,10 @@ def git(repo, *args):
         check=True,
     ).stdout.strip()
 
+def configure_workspace_repository(repo):
+    git(repo, "config", "user.name", "Centaur Agent")
+    git(repo, "config", "user.email", "centaur-agent@localhost")
+
 for repository in request["repositories"]:
     repository_id = repository["repository_id"]
     try:
@@ -1027,6 +1058,7 @@ for repository in request["repositories"]:
         if existing:
             if not (target / ".git").is_dir():
                 raise RuntimeError("existing repository is missing")
+            configure_workspace_repository(target)
             prepared.append(existing)
             continue
         if target.is_symlink():
@@ -1052,6 +1084,7 @@ for repository in request["repositories"]:
             git(target, "fetch", "--prune", "origin", repository["default_branch"])
             base_sha = git(target, "rev-parse", "FETCH_HEAD")
             git(target, "checkout", "-b", branch, base_sha)
+        configure_workspace_repository(target)
         subprocess.run(["git", "config", "--unset-all", "credential.helper"], cwd=target, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         prepared.append({"repository_id": repository_id, "base_sha": base_sha, "local_branch": branch, "head_sha": base_sha})
     except Exception:
@@ -1194,15 +1227,36 @@ time.sleep(3600)
 "##;
 
 const PUSH_SCRIPT: &str = r##"
-import base64, json, os, pathlib, subprocess
+import base64, json, os, pathlib, re, subprocess, urllib.parse, urllib.request
 
 request = json.loads(base64.b64decode(os.environ["CENTAUR_PUBLICATION_REQUEST_B64"]))
 workspace = pathlib.Path(os.environ.get("CENTAUR_WORKSPACE_ROOT", "/workspace")).resolve()
 repo = (workspace / request["relative_path"]).resolve()
 if workspace not in repo.parents or not (repo / ".git").is_dir():
     raise RuntimeError("repository is unavailable")
+clone_origin = urllib.parse.urlsplit(request["clone_url"])
+if clone_origin.scheme not in ("http", "https") or not clone_origin.hostname or clone_origin.username or clone_origin.password:
+    raise RuntimeError("repository origin is invalid")
+token = pathlib.Path(os.environ["CENTAUR_GIT_TOKEN_FILE"]).read_text().strip()
+if not token:
+    raise RuntimeError("GitLab token is unavailable")
+identity_url = urllib.parse.urlunsplit((clone_origin.scheme, clone_origin.netloc, "/api/v3/user", "", ""))
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+        return None
+
+identity_request = urllib.request.Request(identity_url, headers={"PRIVATE-TOKEN": token})
+with urllib.request.build_opener(NoRedirect).open(identity_request, timeout=15) as response:
+    identity_bytes = response.read(4097)
+if len(identity_bytes) > 4096:
+    raise RuntimeError("GitLab identity response is too large")
+gitlab_username = json.loads(identity_bytes).get("username", "")
+if not isinstance(gitlab_username, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,255}", gitlab_username):
+    raise RuntimeError("GitLab identity response is invalid")
+os.environ["CENTAUR_GIT_USERNAME"] = gitlab_username
 askpass = pathlib.Path("/tmp/centaur-git-askpass")
-askpass.write_text("#!/bin/sh\ncase \"$1\" in *Username*) printf '%s\\n' oauth2 ;; *) cat \"$CENTAUR_GIT_TOKEN_FILE\" ;; esac\n")
+askpass.write_text("#!/bin/sh\ncase \"$1\" in *Username*) printf '%s\\n' \"$CENTAUR_GIT_USERNAME\" ;; *) cat \"$CENTAUR_GIT_TOKEN_FILE\" ;; esac\n")
 askpass.chmod(0o700)
 
 def git(*args, check=True):
@@ -1407,6 +1461,9 @@ mod tests {
         assert_eq!(pod["restartPolicy"], "Never");
         assert_eq!(pod["automountServiceAccountToken"], false);
         assert_eq!(pod["serviceAccountName"], "workspace-provisioner");
+        assert_eq!(pod["securityContext"]["fsGroup"], 1001);
+        assert_eq!(pod["containers"][0]["securityContext"]["runAsUser"], 1001);
+        assert_eq!(pod["containers"][0]["securityContext"]["runAsGroup"], 1001);
         assert_eq!(pod["imagePullSecrets"][0]["name"], "registry-credentials");
         assert_eq!(
             pod["volumes"][0]["persistentVolumeClaim"]["claimName"],
@@ -1424,7 +1481,16 @@ mod tests {
         assert!(rendered.contains("shutil.rmtree"));
         assert!(rendered.contains("O_NOFOLLOW"));
         assert!(rendered.contains("GIT_ASKPASS"));
-        assert!(!rendered.contains("oauth2:"));
+        assert!(
+            PROVISIONER_SCRIPT.contains("git(repo, \"config\", \"user.name\", \"Centaur Agent\")")
+        );
+        assert!(
+            PROVISIONER_SCRIPT
+                .contains("git(repo, \"config\", \"user.email\", \"centaur-agent@localhost\")")
+        );
+        assert!(rendered.contains("api/v3/user"));
+        assert!(rendered.contains("PRIVATE-TOKEN"));
+        assert!(!rendered.contains("printf '%s\\\\n' oauth2"));
         assert!(!rendered.contains("not-a-real-token"));
     }
 
@@ -1491,6 +1557,9 @@ mod tests {
         );
         let pod = &value["spec"]["template"]["spec"];
         assert_eq!(pod["automountServiceAccountToken"], false);
+        assert_eq!(pod["securityContext"]["fsGroup"], 1001);
+        assert_eq!(pod["containers"][0]["securityContext"]["runAsUser"], 1001);
+        assert_eq!(pod["containers"][0]["securityContext"]["runAsGroup"], 1001);
         assert_eq!(pod["containers"][0]["volumeMounts"][0]["readOnly"], true);
         assert_eq!(pod["volumes"].as_array().unwrap().len(), 2);
         assert_eq!(pod["volumes"][1]["emptyDir"]["sizeLimit"], "4Mi");
@@ -1541,6 +1610,15 @@ mod tests {
         let push_pod = &push["spec"]["template"]["spec"];
         assert_eq!(push_pod["automountServiceAccountToken"], false);
         assert_eq!(push_pod["serviceAccountName"], "gitlab-publisher");
+        assert_eq!(push_pod["securityContext"]["fsGroup"], 1001);
+        assert_eq!(
+            push_pod["containers"][0]["securityContext"]["runAsUser"],
+            1001
+        );
+        assert_eq!(
+            push_pod["containers"][0]["securityContext"]["runAsGroup"],
+            1001
+        );
         assert_eq!(
             push_pod["imagePullSecrets"][0]["name"],
             "registry-credentials"
@@ -1555,6 +1633,9 @@ mod tests {
         );
         let rendered_push = serde_json::to_string(&push).unwrap();
         assert!(rendered_push.contains("core.hooksPath=/dev/null"));
+        assert!(PUSH_SCRIPT.contains("api/v3/user"));
+        assert!(PUSH_SCRIPT.contains("PRIVATE-TOKEN"));
+        assert!(!PUSH_SCRIPT.contains("printf '%s\\\\n' oauth2"));
         assert!(PUSH_SCRIPT.contains("head + \":\" + branch_ref"));
         assert!(PUSH_SCRIPT.contains("ls-remote"));
         assert!(!rendered_push.contains("not-a-real-token"));
@@ -1670,6 +1751,34 @@ mod tests {
         }
         fs::create_dir_all(&bare).unwrap();
         git(&bare, &["init", "--bare"]);
+        let identity_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let identity_address = identity_listener.local_addr().unwrap();
+        let identity_server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = identity_listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+                    let mut request = vec![0u8; 4096];
+                    let count = stream.read(&mut request).await.unwrap();
+                    let request = String::from_utf8_lossy(&request[..count]);
+                    assert!(request.starts_with("GET /api/v3/user "));
+                    let body = r#"{"username":"centaur-test"}"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                });
+            }
+        });
+        let clone_url = format!("http://{identity_address}/group/project.git");
+        let file_url = format!("file://{}", bare.display());
+        git(
+            &repo,
+            &["config", &format!("url.{file_url}.insteadOf"), &clone_url],
+        );
+        let token_file = root.join("token");
+        fs::write(&token_file, "test-token\n").unwrap();
         let push_request = GitLabPushRequest {
             publish_item_id: "pbi_script_test".to_owned(),
             attempt: 1,
@@ -1677,14 +1786,17 @@ mod tests {
             workspace_id: "wsp_script_test".to_owned(),
             storage_ref: "unused".to_owned(),
             relative_path: "repos/42-project".to_owned(),
-            clone_url: format!("file://{}", bare.display()),
+            clone_url,
             source_branch: "centaur/script/test".to_owned(),
             head_sha: head.clone(),
         };
         let push_result = run_script(
             PUSH_SCRIPT,
             &push_request,
-            BTreeMap::from([("CENTAUR_WORKSPACE_ROOT", workspace.display().to_string())]),
+            BTreeMap::from([
+                ("CENTAUR_WORKSPACE_ROOT", workspace.display().to_string()),
+                ("CENTAUR_GIT_TOKEN_FILE", token_file.display().to_string()),
+            ]),
         )
         .await;
         assert_eq!(push_result["remote_branch_sha"], head);
@@ -1695,10 +1807,14 @@ mod tests {
         let adopted = run_script(
             PUSH_SCRIPT,
             &push_request,
-            BTreeMap::from([("CENTAUR_WORKSPACE_ROOT", workspace.display().to_string())]),
+            BTreeMap::from([
+                ("CENTAUR_WORKSPACE_ROOT", workspace.display().to_string()),
+                ("CENTAUR_GIT_TOKEN_FILE", token_file.display().to_string()),
+            ]),
         )
         .await;
         assert_eq!(adopted, push_result);
+        identity_server.abort();
 
         let state = Arc::new(Mutex::new((0usize, false)));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1745,8 +1861,6 @@ mod tests {
                 });
             }
         });
-        let token_file = root.join("token");
-        fs::write(&token_file, "test-token\n").unwrap();
         let mr_request = GitLabMergeRequestRequest {
             publish_item_id: "pbi_script_test".to_owned(),
             attempt: 1,
