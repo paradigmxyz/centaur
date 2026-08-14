@@ -79,14 +79,6 @@ def secret(key: str, default: str | None = None) -> str:
     raise KeyError(f"Missing secret '{key}'{ctx_name}")
 
 
-def _require_api_server_enabled(operation: str) -> None:
-    if secret("CENTAUR_SANDBOX_API_SERVER_ENABLED", "true").strip().lower() == "false":
-        raise RuntimeError(
-            f"{operation} requires the API server sandbox capability, but it is disabled "
-            "for this principal."
-        )
-
-
 def current_thread_key() -> str:
     """Return the active thread key for a tool call."""
     try:
@@ -108,7 +100,6 @@ def current_session_context() -> dict[str, Any]:
     ``slack.thread_ts``. The API remains the source of truth so warm pooled
     sandboxes do not need per-thread environment mutation.
     """
-    _require_api_server_enabled("current_session_context")
     thread_key = current_thread_key()
     base_url = secret("CENTAUR_API_URL", "http://api:8000").rstrip("/")
     request = urllib.request.Request(
@@ -290,7 +281,6 @@ def save_attachment(
             uploads_dir=uploads_dir,
         )
 
-    _require_api_server_enabled("save_attachment")
     thread_key = current_thread_key()
     base_url = secret("CENTAUR_API_URL", "http://api:8000").rstrip("/")
     payload = json.dumps(

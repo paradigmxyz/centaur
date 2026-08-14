@@ -81,6 +81,11 @@ mod tests {
                 "aud": "centaur-api",
                 "iat": 1_700_000_000i64,
                 "exp": 4_102_444_800i64,
+                "capabilities": {
+                    "sessions_read": false,
+                    "workflows_read": false,
+                    "workflows_write": false
+                },
                 "slack": {
                     "upload_channels": [],
                     "download_channels": [],
@@ -131,7 +136,6 @@ mod tests {
             name: "Test".to_owned(),
             labels: Default::default(),
             sandbox_observability_enabled: true,
-            sandbox_api_server_enabled: true,
         }
     }
 
@@ -429,7 +433,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn principal_jwt_is_read_only_and_archive_exception_is_subject_scoped() {
+    async fn principal_jwt_is_capability_scoped_and_archive_exception_is_subject_scoped() {
         let principal = principal_token("prn_sandbox");
         let write_response = build_router_with_app_state(AppState::unready(test_auth()))
             .oneshot(
@@ -444,6 +448,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(write_response.status(), StatusCode::FORBIDDEN);
+
+        let slack_response = build_router_with_app_state(AppState::unready(test_auth()))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/slack/channels")
+                    .header(header::AUTHORIZATION, format!("Bearer {principal}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(slack_response.status(), StatusCode::UNAUTHORIZED);
+        assert_ne!(slack_response.status(), StatusCode::FORBIDDEN);
 
         let pool =
             PgPool::connect_lazy("postgres://postgres:postgres@localhost/centaur_test").unwrap();

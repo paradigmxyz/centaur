@@ -166,10 +166,6 @@ class SlackClient:
         except ValueError:
             return cls._DEFAULT_API_TIMEOUT_SECONDS
 
-    def _api_server_proxy_enabled(self) -> bool:
-        """Return whether the sandbox API-server proxy is enabled."""
-        return secret("CENTAUR_SANDBOX_API_SERVER_ENABLED", "true").strip().lower() != "false"
-
     def _clean_channel_ref(self, channel: str) -> str:
         """Normalize #name, ID, and <#ID|name> Slack channel references."""
         raw = str(channel).strip()
@@ -1207,12 +1203,6 @@ class SlackClient:
         Slack credentials. `channel_id` must be an explicit Slack conversation
         ID authorized by the principal's `slack.history_channels` claim.
         """
-        if not self._api_server_proxy_enabled():
-            raise RuntimeError(
-                "Slack channel history proxy requires the API server sandbox capability, "
-                "but it is disabled for this principal."
-            )
-
         normalized_channel_id = self._clean_channel_ref(channel_id).upper()
         if len(normalized_channel_id) < 9 or not self._looks_like_channel_id(normalized_channel_id):
             raise ValueError("channel_id must be a Slack conversation ID like C123456789")
@@ -1248,12 +1238,6 @@ class SlackClient:
         oldest: str | int | float | None = None,
     ) -> dict[str, Any]:
         """Fetch Slack thread replies through the Centaur API server."""
-        if not self._api_server_proxy_enabled():
-            raise RuntimeError(
-                "Slack thread replies require the API server sandbox capability, "
-                "but it is disabled for this principal."
-            )
-
         normalized_channel_id = self._normalize_explicit_channel_id(channel_id)
         normalized_thread_ts = self._normalize_ts(thread_ts)
         if normalized_thread_ts is None:
@@ -1507,12 +1491,6 @@ class SlackClient:
 
     def list_channels_proxy(self, limit: int = 200, history_only: bool = False) -> list[dict]:
         """List Slack channels exposed by the Centaur API server proxy JWT."""
-        if not self._api_server_proxy_enabled():
-            raise RuntimeError(
-                "Slack channel listing proxy requires the API server sandbox capability, "
-                "but it is disabled for this principal."
-            )
-
         response = self._centaur_api_get_json("/api/slack/channels", {})
         channels = response.get("channels", []) or []
         if history_only:
@@ -1546,12 +1524,6 @@ class SlackClient:
         This maps to Slack's `files.list` for channels authorized by the
         principal's `slack.download_channels` claim.
         """
-        if not self._api_server_proxy_enabled():
-            raise RuntimeError(
-                "Slack file listing proxy requires the API server sandbox capability, "
-                "but it is disabled for this principal."
-            )
-
         requested_limit: int | None = None
         if limit is not None:
             requested_limit = int(limit)
@@ -1573,12 +1545,6 @@ class SlackClient:
 
     def get_channel_members_proxy(self, channel_id: str, limit: int = 1000) -> list[dict]:
         """List Slack channel members through the Centaur API server proxy."""
-        if not self._api_server_proxy_enabled():
-            raise RuntimeError(
-                "Slack channel members proxy requires the API server sandbox capability, "
-                "but it is disabled for this principal."
-            )
-
         requested_limit = int(limit)
         if not 1 <= requested_limit <= 10_000:
             raise ValueError("limit must be between 1 and 10000")
@@ -2095,11 +2061,6 @@ class SlackClient:
         as base64, and the API server handles Slack credentials and channel
         authorization through the principal-scoped JWT.
         """
-        if not self._api_server_proxy_enabled():
-            raise RuntimeError(
-                "Slack file upload proxy requires the API server sandbox capability, "
-                "but it is disabled for this principal."
-            )
         normalized_channel_id = self._normalize_explicit_channel_id(channel_id)
         effective_filename = str(filename).strip()
         if not effective_filename:
@@ -2133,11 +2094,6 @@ class SlackClient:
 
         Returns base64-encoded file bytes plus filename, content type, and size.
         """
-        if not self._api_server_proxy_enabled():
-            raise RuntimeError(
-                "Slack file download proxy requires the API server sandbox capability, "
-                "but it is disabled for this principal."
-            )
         normalized_file_id = self._normalize_file_id(file_id)
         normalized_channel_id = self._normalize_explicit_channel_id(channel_id)
         body, headers = self._centaur_api_get_bytes(
@@ -2161,11 +2117,6 @@ class SlackClient:
 
     def file_info_proxy(self, file_id: str, channel_id: str) -> dict[str, Any]:
         """Fetch Slack file metadata through the Centaur API server proxy."""
-        if not self._api_server_proxy_enabled():
-            raise RuntimeError(
-                "Slack file info proxy requires the API server sandbox capability, "
-                "but it is disabled for this principal."
-            )
         normalized_file_id = self._normalize_file_id(file_id)
         normalized_channel_id = self._normalize_explicit_channel_id(channel_id)
         return self._centaur_api_get_json(
@@ -2341,11 +2292,6 @@ class SlackClient:
             List of file dicts with id, name, title, filetype, user, channels, permalink
         """
         requested_limit = max(1, int(max_results))
-        if not self._api_server_proxy_enabled():
-            raise RuntimeError(
-                "Slack file listing proxy requires the API server sandbox capability, "
-                "but it is disabled for this principal."
-            )
         results: list[dict] = []
         user_cache = self._get_user_cache()
         page_limit = self._MAX_SLACK_FILES_LIST_PAGE_SIZE
