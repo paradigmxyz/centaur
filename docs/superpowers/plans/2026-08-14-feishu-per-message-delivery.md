@@ -25,6 +25,7 @@
 - `services/api-rs/crates/centaur-session-sqlx/migrations/0058_feishu_delivery_generations.sql`: generation columns, target bindings, backfill, and scoped wake triggers.
 - `services/api-rs/crates/centaur-session-core/src/development.rs`: public durable delivery and record-write fields.
 - `services/api-rs/crates/centaur-session-sqlx/src/development.rs`: transactional generation rotation, target-aware loading, and stale-write guards.
+- `services/api-rs/crates/centaur-session-sqlx/tests/feishu_delivery_generations.rs`: upgrade backfill coverage for execution and terminal-selection targets.
 - `services/api-rs/crates/centaur-session-runtime/src/lib.rs`: forwards add-selection source-message identity.
 - `services/api-rs/crates/centaur-api-server/src/types.rs`: accepts the generation write guard and optional `/projects` source message.
 - `services/api-rs/crates/centaur-api-server/src/development.rs`: maps the HTTP request fields to runtime types.
@@ -50,7 +51,7 @@
 - Produces: `PgSessionStore::create_add_repository_selection(&ThreadKey, &str, bool, Option<&str>)`.
 - Produces: delivery rows directly bound to `execution_id` and `selection_flow_id`.
 
-- [ ] **Step 1: Extend the SQLx recovery test with generation and target assertions**
+- [x] **Step 1: Extend the SQLx recovery test with generation and target assertions**
 
 Add these assertions and stale-write cases to `feishu_delivery_recovery_versions_every_new_render_obligation`:
 
@@ -116,7 +117,7 @@ assert_eq!(
 );
 ```
 
-- [ ] **Step 2: Run the focused SQLx test and verify it fails**
+- [x] **Step 2: Run the focused SQLx test and verify it fails**
 
 Run:
 
@@ -126,7 +127,7 @@ cargo test --manifest-path services/api-rs/Cargo.toml -p centaur-session-sqlx fe
 
 Expected: compilation fails because generation fields and the fourth add-selection argument do not exist.
 
-- [ ] **Step 3: Add migration `0058_feishu_delivery_generations.sql`**
+- [x] **Step 3: Add migration `0058_feishu_delivery_generations.sql`**
 
 Create the columns, backfill current targets, and replace both broad triggers:
 
@@ -182,7 +183,7 @@ end;
 $$;
 ```
 
-- [ ] **Step 4: Extend Rust delivery types and guarded writes**
+- [x] **Step 4: Extend Rust delivery types and guarded writes**
 
 Add `delivery_generation` to `FeishuDelivery` and `expected_delivery_generation` to `RecordFeishuDelivery`. Change the record SQL predicate to:
 
@@ -202,7 +203,7 @@ delivery.execution_id,
 
 Use a `left join development_selection_flows selection on selection.selection_flow_id = delivery.selection_flow_id` in `load_feishu_delivery`.
 
-- [ ] **Step 5: Rotate the delivery transactionally for follow-up messages**
+- [x] **Step 5: Rotate the delivery transactionally for follow-up messages**
 
 Move the Feishu delivery update after the new execution insert and replace it with:
 
@@ -220,7 +221,7 @@ update feishu_deliveries
 
 Bind the new `execution_id` as `$3`. Initial delivery insertion stores both `execution_id` and `selection_flow_id`.
 
-- [ ] **Step 6: Rotate `/projects` delivery generations**
+- [x] **Step 6: Rotate `/projects` delivery generations**
 
 Change the store signature to accept `source_message_id: Option<&str>`. After finding or inserting the selection flow, bind it to the delivery. When a source message is present, rotate card identity:
 
@@ -244,7 +245,7 @@ update feishu_deliveries
  where thread_key = $1
 ```
 
-- [ ] **Step 7: Run focused and crate tests**
+- [x] **Step 7: Run focused and crate tests**
 
 Run:
 
@@ -271,7 +272,7 @@ Expected: all selected tests pass.
 - Produces: `FeishuSessionApi.createAddSelection(threadKey, principalId, sourceMessageId)`.
 - Produces: `FeishuSessionApi.recordDelivery(..., expectedDeliveryGeneration)`.
 
-- [ ] **Step 1: Write failing TypeScript request-contract assertions**
+- [x] **Step 1: Write failing TypeScript request-contract assertions**
 
 Add a test which invokes both methods and checks exact bodies:
 
@@ -311,7 +312,7 @@ it('carries the source message and generation guards for durable delivery', asyn
 })
 ```
 
-- [ ] **Step 2: Run the client test and verify it fails**
+- [x] **Step 2: Run the client test and verify it fails**
 
 Run:
 
@@ -321,7 +322,7 @@ pnpm --filter feishubot test -- session-api.test.ts
 
 Expected: TypeScript reports excess method arguments or the expected request fields are absent.
 
-- [ ] **Step 3: Thread request fields through Rust API layers**
+- [x] **Step 3: Thread request fields through Rust API layers**
 
 Add these fields:
 
@@ -342,7 +343,7 @@ pub struct RecordFeishuDeliveryRequest {
 
 Map both fields in `development.rs`. Extend the runtime add-selection method with `source_message_id: Option<&str>` and pass it to the store. Keep the general Rust client source-neutral by serializing `source_message_id: None`.
 
-- [ ] **Step 4: Extend the TypeScript API client**
+- [x] **Step 4: Extend the TypeScript API client**
 
 Add `delivery_generation: number` to `FeishuDelivery`. Send `source_message_id` from `createAddSelection`, and add `expected_delivery_generation` to `recordDelivery`:
 
@@ -362,7 +363,7 @@ async createAddSelection(threadKey: string, principalId: string, sourceMessageId
 }
 ```
 
-- [ ] **Step 5: Run API and client validation**
+- [x] **Step 5: Run API and client validation**
 
 Run:
 
@@ -385,7 +386,7 @@ Expected: all commands pass.
 - Consumes: generation-aware `recordDelivery` and source-aware `createAddSelection` from Task 2.
 - Produces: `renderExecutionOnce(delivery, messageId)` single-flight entry point.
 
-- [ ] **Step 1: Write a failing new-message placement test**
+- [x] **Step 1: Write a failing new-message placement test**
 
 Use a direct-message event whose accepted delivery has `source_message_id: 'om-user-2'`, `message_id: null`, and `delivery_generation: 2`. Assert:
 
@@ -401,7 +402,7 @@ expect(recordedGenerations).toEqual([2])
 
 The API stub returns an empty terminal event so the background renderer finishes without hanging.
 
-- [ ] **Step 2: Write a failing `/projects` source-message test**
+- [x] **Step 2: Write a failing `/projects` source-message test**
 
 Send a normalized `/projects` event and assert the API call is exactly:
 
@@ -413,7 +414,7 @@ expect(addSelectionCalls).toEqual([{
 }])
 ```
 
-- [ ] **Step 3: Run the bot test and verify it fails**
+- [x] **Step 3: Run the bot test and verify it fails**
 
 Run:
 
@@ -423,7 +424,7 @@ pnpm --filter feishubot test -- bot-delivery.test.ts
 
 Expected: the old bot updates an existing card or omits the source message and generation.
 
-- [ ] **Step 4: Make card creation generation-aware**
+- [x] **Step 4: Make card creation generation-aware**
 
 Pass `message.messageId` to `createAddSelection`. In `upsertSessionCard` and `renderDeliveryCard`, use this idempotency key when replying:
 
@@ -439,7 +440,7 @@ messageId = await this.options.renderer.replyCard(
 
 Pass `delivery.delivery_generation` through every call to the private `recordDelivery` wrapper. When the wrapper returns `false`, stop that render path because a newer generation owns the thread.
 
-- [ ] **Step 5: Run the bot placement tests**
+- [x] **Step 5: Run the bot placement tests**
 
 Run:
 
@@ -462,7 +463,7 @@ Expected: both files pass, including the pre-existing execution-failure renderin
 - Produces: one active `renderExecution` promise per `thread_key`, generation, and execution ID.
 - Produces: recovery that continues after a per-delivery failure.
 
-- [ ] **Step 1: Write a failing single-flight test**
+- [x] **Step 1: Write a failing single-flight test**
 
 Make `streamEvents` increment a counter, wait on a deferred promise, and then yield a terminal event. Call `reconcileDelivery('development:1')` twice concurrently and assert:
 
@@ -475,11 +476,11 @@ releaseStream()
 await Promise.all([first, second])
 ```
 
-- [ ] **Step 2: Write a failing recovery isolation test**
+- [x] **Step 2: Write a failing recovery isolation test**
 
 Run recovery with pending keys `['development:bad', 'development:good']`. Make the first reconciliation throw and the second call `recovery.stop()`. Assert both keys were attempted in order and both failure and success metrics were recorded.
 
-- [ ] **Step 3: Run both focused tests and verify they fail**
+- [x] **Step 3: Run both focused tests and verify they fail**
 
 Run:
 
@@ -489,7 +490,7 @@ pnpm --filter feishubot test -- bot-delivery.test.ts render-recovery.test.ts
 
 Expected: two streams are created and the recovery loop skips the second delivery after the first throws.
 
-- [ ] **Step 4: Add the shared render promise map**
+- [x] **Step 4: Add the shared render promise map**
 
 Add:
 
@@ -522,7 +523,7 @@ private renderExecutionOnce(
 
 Immediate event handlers detach this promise with `this.run`, while `reconcileDelivery` awaits it directly.
 
-- [ ] **Step 5: Isolate recovery failures**
+- [x] **Step 5: Isolate recovery failures**
 
 Replace the inner rethrow with logging and continue:
 
@@ -540,7 +541,7 @@ try {
 
 Keep the outer catch for list failures only.
 
-- [ ] **Step 6: Run the full Feishu suite**
+- [x] **Step 6: Run the full Feishu suite**
 
 Run:
 
@@ -560,7 +561,7 @@ Expected: all tests and type checks pass.
 - Consumes: all contracts from Tasks 1-4.
 - Produces: evidence that the migration, Rust API, and Feishu transport agree.
 
-- [ ] **Step 1: Format only affected source files**
+- [x] **Step 1: Format only affected source files**
 
 Run:
 
@@ -576,7 +577,7 @@ rustfmt --edition 2024 \
 
 Expected: the formatter succeeds without touching unrelated files.
 
-- [ ] **Step 2: Run affected Rust and TypeScript checks**
+- [x] **Step 2: Run affected Rust and TypeScript checks**
 
 Run:
 
@@ -589,7 +590,7 @@ pnpm --filter feishubot run check:types
 
 Expected: every command passes.
 
-- [ ] **Step 3: Check the final diff without staging unrelated work**
+- [x] **Step 3: Check the final diff without staging unrelated work**
 
 Run:
 
@@ -608,6 +609,6 @@ git diff -- services/api-rs/crates/centaur-session-core/src/development.rs \
 
 Expected: no whitespace errors; unrelated GitLab and workspace-failure changes remain present and unstaged.
 
-- [ ] **Step 4: Stop before deployment**
+- [x] **Step 4: Stop before deployment**
 
 Report the passing evidence and request explicit authorization before running `just deploy`, restarting pods, or sending a real Feishu validation message.

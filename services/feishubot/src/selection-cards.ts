@@ -137,6 +137,7 @@ export function renderSelectionCard(state: SelectionCardState): RenderedCard {
         },
         {
           tag: 'button',
+          name: 'repository_search_submit',
           action_type: 'form_submit',
           text: { tag: 'plain_text', content: '搜索' },
           value: value('search'),

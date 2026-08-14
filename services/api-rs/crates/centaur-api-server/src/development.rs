@@ -25,7 +25,7 @@ use crate::{
     gitlab::{GitLabCatalogError, RepositoryPage},
     routes::AppState,
     types::{
-        AcceptDevelopmentTaskRequest, ActiveDevelopmentBindingRequest,
+        AcceptDevelopmentTaskRequest, ActiveDevelopmentBindingRequest, ClaimFeishuDeliveryRequest,
         CloseDevelopmentBindingRequest, ConfirmDevelopmentSelectionRequest,
         ContinueDevelopmentTaskRequest, CreateAddRepositorySelectionRequest,
         DecideDevelopmentSelectionRequest, FeishuPrincipalQuery, FeishuPublicationRequest,
@@ -142,6 +142,10 @@ pub(crate) fn development_router() -> Router<AppState> {
         .route(
             "/api/development/feishu/deliveries/{thread_key}",
             get(get_feishu_delivery).put(record_feishu_delivery),
+        )
+        .route(
+            "/api/development/feishu/deliveries/{thread_key}/claim",
+            post(claim_feishu_delivery),
         )
         .route(
             "/api/development/changesets/{changeset_id}",
@@ -262,6 +266,31 @@ async fn record_feishu_delivery(
                 message_id: request.message_id,
                 last_event_cursor: request.last_event_cursor,
                 expected_desired_version: request.expected_desired_version,
+                expected_delivery_generation: request.expected_delivery_generation,
+                lease_owner: request.lease_owner,
+                render_complete: request.render_complete,
+            })
+            .await?,
+    ))
+}
+
+async fn claim_feishu_delivery(
+    State(state): State<AppState>,
+    Path(raw_thread_key): Path<String>,
+    headers: HeaderMap,
+    request: Result<Json<ClaimFeishuDeliveryRequest>, JsonRejection>,
+) -> Result<Json<centaur_session_core::development::FeishuDelivery>, ApiError> {
+    state.authorize_feishu_ingress(&headers)?;
+    let thread_key = ThreadKey::try_from(raw_thread_key)?;
+    let Json(request) = development_json(request)?;
+    Ok(Json(
+        state
+            .runtime()?
+            .claim_feishu_delivery(&centaur_session_core::development::ClaimFeishuDelivery {
+                thread_key,
+                expected_delivery_generation: request.expected_delivery_generation,
+                expected_desired_version: request.expected_desired_version,
+                lease_owner: request.lease_owner,
             })
             .await?,
     ))
@@ -753,6 +782,8 @@ async fn create_add_repository_selection(
             &thread_key,
             &request.requested_by_principal_id,
             principal.is_some_and(|principal| principal.is_admin),
+            request.source_message_id.as_deref(),
+            request.idempotency_key.as_deref(),
         )
         .await?;
     Ok(Json(draft))

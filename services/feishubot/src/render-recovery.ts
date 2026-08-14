@@ -19,16 +19,19 @@ export class FeishuRenderRecovery {
   async run(): Promise<void> {
     while (!this.stopped) {
       try {
-        for (const threadKey of await this.reconciler.listPendingDeliveries()) {
+        const pending = await this.reconciler.listPendingDeliveries()
+        await Promise.all(pending.map(async threadKey => {
           this.metrics.recordRecovery('attempted')
           try {
             await this.reconciler.reconcileDelivery(threadKey)
             this.metrics.recordRecovery('succeeded')
           } catch (error) {
             this.metrics.recordRecovery('failed')
-            throw error
+            console.error('Feishu delivery reconciliation failed', {
+              status: error instanceof Error ? error.name : 'unknown'
+            })
           }
-        }
+        }))
       } catch (error) {
         console.error('Feishu delivery reconciliation failed', {
           status: error instanceof Error ? error.name : 'unknown'

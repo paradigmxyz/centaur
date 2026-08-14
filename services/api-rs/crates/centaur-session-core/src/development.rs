@@ -100,6 +100,7 @@ pub struct FeishuDelivery {
     pub source_message_id: Option<String>,
     pub message_id: Option<String>,
     pub last_event_cursor: i64,
+    pub delivery_generation: i32,
     pub desired_version: i32,
     pub render_version: i32,
     pub state: String,
@@ -110,11 +111,22 @@ pub struct FeishuDelivery {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaimFeishuDelivery {
+    pub thread_key: ThreadKey,
+    pub expected_delivery_generation: i32,
+    pub expected_desired_version: i32,
+    pub lease_owner: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecordFeishuDelivery {
     pub thread_key: ThreadKey,
     pub message_id: String,
     pub last_event_cursor: i64,
     pub expected_desired_version: i32,
+    pub expected_delivery_generation: i32,
+    pub lease_owner: String,
+    pub render_complete: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

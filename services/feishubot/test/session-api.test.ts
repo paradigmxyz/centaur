@@ -66,4 +66,57 @@ describe('Feishu durable API client', () => {
       { url: 'http://api-rs:8080/api/development/feishu/publish-batches/pub_1/retry', body: { requested_by_principal_id: 'feishu:tenant:on-1', idempotency_key: 'retry-1' } }
     ])
   })
+
+  it('carries the source message and generation guards for durable delivery', async () => {
+    const calls: Array<{ url: string; body: unknown }> = []
+    const api = new FeishuSessionApi({
+      baseUrl: 'http://api-rs:8080/',
+      fetch: async (input, init) => {
+        calls.push({
+          url: String(input),
+          body: init?.body ? JSON.parse(String(init.body)) : undefined
+        })
+        return response({})
+      }
+    })
+
+    await api.createAddSelection(
+      'development:1',
+      'feishu:tenant:ou-1',
+      'om-projects',
+      'evt-projects'
+    )
+    await api.claimDelivery('development:1', 3, 7, 'renderer-1')
+    await api.recordDelivery('development:1', 'om-card', 42, 7, 3, 'renderer-1', true)
+
+    expect(calls).toEqual([
+      {
+        url: 'http://api-rs:8080/api/development/sessions/development%3A1/repositories',
+        body: {
+          requested_by_principal_id: 'feishu:tenant:ou-1',
+          source_message_id: 'om-projects',
+          idempotency_key: 'evt-projects'
+        }
+      },
+      {
+        url: 'http://api-rs:8080/api/development/feishu/deliveries/development%3A1/claim',
+        body: {
+          expected_delivery_generation: 3,
+          expected_desired_version: 7,
+          lease_owner: 'renderer-1'
+        }
+      },
+      {
+        url: 'http://api-rs:8080/api/development/feishu/deliveries/development%3A1',
+        body: {
+          message_id: 'om-card',
+          last_event_cursor: 42,
+          expected_desired_version: 7,
+          expected_delivery_generation: 3,
+          lease_owner: 'renderer-1',
+          render_complete: true
+        }
+      }
+    ])
+  })
 })

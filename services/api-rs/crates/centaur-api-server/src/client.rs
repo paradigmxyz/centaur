@@ -155,6 +155,8 @@ impl CentaurClient {
             ),
             &CreateAddRepositorySelectionRequest {
                 requested_by_principal_id: requested_by_principal_id.into(),
+                source_message_id: None,
+                idempotency_key: None,
             },
         )
         .await

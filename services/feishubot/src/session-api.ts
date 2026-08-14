@@ -56,6 +56,7 @@ export type FeishuDelivery = {
   source_message_id?: string | null
   message_id?: string | null
   last_event_cursor: number
+  delivery_generation: number
   desired_version: number
   render_version: number
   state: string
@@ -149,13 +150,22 @@ export class FeishuSessionApi {
     })
   }
 
-  async createAddSelection(threadKey: string, principalId: string) {
+  async createAddSelection(
+    threadKey: string,
+    principalId: string,
+    sourceMessageId: string,
+    idempotencyKey: string
+  ) {
     return this.#json<{ selection_flow_id: string; workspace_id: string; version: number }>(
       'add projects',
       `api/development/sessions/${encodeURIComponent(threadKey)}/repositories`,
       {
         method: 'POST',
-        body: JSON.stringify({ requested_by_principal_id: principalId })
+        body: JSON.stringify({
+          requested_by_principal_id: principalId,
+          source_message_id: sourceMessageId,
+          idempotency_key: idempotencyKey
+        })
       }
     )
   }
@@ -259,11 +269,34 @@ export class FeishuSessionApi {
     })
   }
 
+  claimDelivery(
+    threadKey: string,
+    expectedDeliveryGeneration: number,
+    expectedDesiredVersion: number,
+    leaseOwner: string
+  ): Promise<FeishuDelivery> {
+    return this.#json(
+      'claim Feishu delivery',
+      `api/development/feishu/deliveries/${encodeURIComponent(threadKey)}/claim`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          expected_delivery_generation: expectedDeliveryGeneration,
+          expected_desired_version: expectedDesiredVersion,
+          lease_owner: leaseOwner
+        })
+      }
+    )
+  }
+
   recordDelivery(
     threadKey: string,
     messageId: string,
     lastEventCursor: number,
-    expectedDesiredVersion: number
+    expectedDesiredVersion: number,
+    expectedDeliveryGeneration: number,
+    leaseOwner: string,
+    renderComplete: boolean
   ): Promise<FeishuDelivery> {
     return this.#json(
       'record Feishu delivery',
@@ -273,7 +306,10 @@ export class FeishuSessionApi {
         body: JSON.stringify({
           message_id: messageId,
           last_event_cursor: lastEventCursor,
-          expected_desired_version: expectedDesiredVersion
+          expected_desired_version: expectedDesiredVersion,
+          expected_delivery_generation: expectedDeliveryGeneration,
+          lease_owner: leaseOwner,
+          render_complete: renderComplete
         })
       }
     )

@@ -48,6 +48,13 @@ impl SessionRuntime {
         let runtime = self.clone();
         tokio::spawn(async move {
             loop {
+                match runtime.store.reconcile_failed_workspace_executions().await {
+                    Ok(reconciled) if reconciled > 0 => {
+                        info!(reconciled, "reconciled failed workspace executions");
+                    }
+                    Ok(_) => {}
+                    Err(error) => warn!(%error, "failed to reconcile failed workspace executions"),
+                }
                 match runtime.store.list_provisioning_workspace_ids().await {
                     Ok(workspace_ids) => {
                         for workspace_id in workspace_ids {

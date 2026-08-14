@@ -31,9 +31,10 @@ use centaur_session_core::{
     SessionMessageInput, ThreadKey,
     development::{
         AcceptDevelopmentTask, AcceptedDevelopmentTask, ActiveDevelopmentBinding,
-        CloseDevelopmentBinding, ConfirmRepositorySelection, ContinueDevelopmentTask,
-        ContinuedDevelopmentTask, FeishuDelivery, RecordFeishuDelivery, RepositorySelectionDraft,
-        RepositorySelectionOutcome, RepositorySelectionView, UpdateRepositorySelectionView,
+        ClaimFeishuDelivery, CloseDevelopmentBinding, ConfirmRepositorySelection,
+        ContinueDevelopmentTask, ContinuedDevelopmentTask, FeishuDelivery, RecordFeishuDelivery,
+        RepositorySelectionDraft, RepositorySelectionOutcome, RepositorySelectionView,
+        UpdateRepositorySelectionView,
     },
 };
 use centaur_session_sqlx::{
@@ -1558,6 +1559,16 @@ impl SessionRuntime {
         Ok(self.store.get_feishu_delivery(thread_key).await?)
     }
 
+    pub async fn claim_feishu_delivery(
+        &self,
+        claim: &ClaimFeishuDelivery,
+    ) -> Result<FeishuDelivery, SessionRuntimeError> {
+        Ok(self
+            .store
+            .claim_feishu_delivery(claim, Duration::from_secs(60))
+            .await?)
+    }
+
     pub async fn record_feishu_delivery(
         &self,
         record: &RecordFeishuDelivery,
@@ -1620,10 +1631,18 @@ impl SessionRuntime {
         thread_key: &ThreadKey,
         requested_by_principal_id: &str,
         is_admin: bool,
+        source_message_id: Option<&str>,
+        idempotency_key: Option<&str>,
     ) -> Result<RepositorySelectionDraft, SessionRuntimeError> {
         Ok(self
             .store
-            .create_add_repository_selection(thread_key, requested_by_principal_id, is_admin)
+            .create_add_repository_selection(
+                thread_key,
+                requested_by_principal_id,
+                is_admin,
+                source_message_id,
+                idempotency_key,
+            )
             .await?)
     }
 

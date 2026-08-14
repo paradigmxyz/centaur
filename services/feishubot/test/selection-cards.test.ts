@@ -48,6 +48,19 @@ describe('Feishu selection cards', () => {
     }
     expect(actions).not.toContain('clone_url')
   })
+
+  it('names every interactive component in the repository search form', () => {
+    const card = renderSelectionCard(initial)
+    const body = card.card.body as {
+      elements: Array<{ tag: string; elements?: Array<{ name?: string }> }>
+    }
+    const form = body.elements.find(element => element.tag === 'form')
+    if (!form?.elements) throw new Error('repository search form is missing')
+    const names = form.elements.map(element => element.name)
+
+    expect(names).toEqual(['query', 'repository_search_submit'])
+    expect(new Set(names).size).toBe(names.length)
+  })
 })
 
 describe('Feishu publication cards', () => {

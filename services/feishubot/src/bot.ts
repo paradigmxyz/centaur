@@ -14,7 +14,12 @@ import {
   type SelectionAction,
   type SelectionCardState
 } from './selection-cards.js'
-import { FeishuApiError, FeishuSessionApi, type SelectionView } from './session-api.js'
+import {
+  FeishuApiError,
+  FeishuSessionApi,
+  type FeishuDelivery,
+  type SelectionView
+} from './session-api.js'
 import { FeishuMetrics } from './metrics.js'
 
 type UnknownRecord = Record<string, unknown>
@@ -30,6 +35,9 @@ export type FeishuBotOptions = {
 
 export class FeishuBot {
   private readonly metrics: FeishuMetrics
+  private readonly activeRenders = new Map<string, Promise<void>>()
+  private readonly activePublications = new Map<string, Promise<void>>()
+  private readonly renderOwnerId = crypto.randomUUID()
 
   constructor(private readonly options: FeishuBotOptions) {
     this.metrics = options.metrics ?? new FeishuMetrics()
@@ -50,48 +58,50 @@ export class FeishuBot {
   async reconcileDelivery(threadKey: string): Promise<void> {
     const delivery = await this.options.api.getDelivery(threadKey)
     if (delivery.selection_flow_id) {
-      const state = await this.loadSelectionState(
+      const view = await this.options.api.getSelection(
         delivery.selection_flow_id,
         delivery.initiator_principal_id
       )
-      await this.renderDeliveryCard(delivery, renderSelectionCard(state))
-      return
+      if (view.state === 'cancelled') {
+        await this.renderDeliveryCard(
+          delivery,
+          renderProgressCard({ title: '任务已取消', status: '未启动代码执行' }),
+          true
+        )
+        return
+      }
+      if (view.state === 'pending' || !delivery.execution_id) {
+        const state = await this.selectionState(view)
+        await this.renderDeliveryCard(delivery, renderSelectionCard(state), true)
+        return
+      }
     }
     if (delivery.publish_batch_id) {
       const batch = await this.options.api.getPublishBatch(
         delivery.publish_batch_id,
         delivery.initiator_principal_id
       ) as PublicationBatch
-      await this.renderDeliveryCard(delivery, renderPublicationCard(batch))
-      if (!['succeeded', 'partially_succeeded', 'failed'].includes(batch.state)) {
-        this.run(async () => this.pollPublication(
-          delivery.message_id!,
+      const terminal = ['succeeded', 'partially_succeeded', 'failed'].includes(batch.state)
+      const messageId = await this.renderDeliveryCard(delivery, renderPublicationCard(batch), terminal)
+      if (!terminal && messageId) {
+        await this.pollPublicationOnce(
+          { ...delivery, message_id: messageId },
           batch.publish_batch_id,
           delivery.initiator_principal_id
-        ))
+        )
       }
       return
     }
     if (delivery.execution_id && delivery.message_id) {
-      this.run(async () => this.renderExecution(
-        delivery.message_id!,
-        delivery.thread_key,
-        delivery.execution_id!,
-        delivery.initiator_principal_id,
-        delivery.last_event_cursor
-      ))
+      await this.renderExecutionOnce(delivery, delivery.message_id)
     } else if (delivery.execution_id) {
       const messageId = await this.renderDeliveryCard(
         delivery,
-        renderProgressCard({ status: '正在处理' })
+        renderProgressCard({ status: '正在处理' }),
+        false
       )
-      this.run(async () => this.renderExecution(
-        messageId,
-        delivery.thread_key,
-        delivery.execution_id!,
-        delivery.initiator_principal_id,
-        delivery.last_event_cursor
-      ))
+      if (!messageId) return
+      await this.renderExecutionOnce(delivery, messageId)
     }
   }
 
@@ -137,21 +147,25 @@ export class FeishuBot {
     }
     const accepted = await this.options.api.acceptMessage(message)
     this.metrics.recordDeduplication(accepted.created ? 'new' : 'duplicate')
+    const delivery = await this.options.api.getDelivery(accepted.thread_key)
+    if (
+      delivery.source_message_id !== message.messageId
+      || delivery.execution_id !== accepted.execution_id
+      || (accepted.selection_flow_id && delivery.selection_flow_id !== accepted.selection_flow_id)
+    ) return true
     if (accepted.selection_flow_id) {
-      await this.sendSelection(message, accepted.thread_key, accepted.selection_flow_id)
+      await this.sendSelection(message, delivery, accepted.selection_flow_id)
       return true
     }
-    const cardMessageId = await this.upsertSessionCard(
+    const rendered = await this.upsertSessionCard(
       message,
-      accepted.thread_key,
-      renderProgressCard({ status: '任务已提交' })
+      delivery,
+      renderProgressCard({ status: '任务已提交' }),
+      false
     )
-    this.run(async () => this.renderExecution(
-      cardMessageId,
-      accepted.thread_key,
-      accepted.execution_id,
-      message.principalId
-    ))
+    if (!rendered) return true
+    const { messageId: cardMessageId, delivery: claimedDelivery } = rendered
+    this.run(async () => this.renderExecutionOnce(claimedDelivery, cardMessageId))
     return true
   }
 
@@ -170,26 +184,51 @@ export class FeishuBot {
 
   private async addProjects(message: NormalizedFeishuMessage): Promise<void> {
     const binding = await this.options.api.activeBinding(message)
-    const selection = await this.options.api.createAddSelection(binding.thread_key, message.principalId)
-    await this.sendSelection(message, binding.thread_key, selection.selection_flow_id)
+    let selection
+    try {
+      selection = await this.options.api.createAddSelection(
+        binding.thread_key,
+        message.principalId,
+        message.messageId,
+        message.eventId
+      )
+    } catch (error) {
+      if (error instanceof FeishuApiError && error.status === 409) {
+        await this.options.renderer.replyText(
+          message.messageId,
+          '上一张项目选择卡片仍在创建，请稍后重试。',
+          !message.isDirect
+        )
+        return
+      }
+      throw error
+    }
+    const delivery = await this.options.api.getDelivery(binding.thread_key)
+    if (
+      delivery.source_message_id !== message.messageId
+      || delivery.selection_flow_id !== selection.selection_flow_id
+    ) return
+    await this.sendSelection(message, delivery, selection.selection_flow_id)
   }
 
   private async sendSelection(
     message: NormalizedFeishuMessage,
-    threadKey: string,
+    delivery: FeishuDelivery,
     selectionFlowId: string
   ): Promise<void> {
     const state = await this.loadSelectionState(selectionFlowId, message.principalId)
-    await this.upsertSessionCard(message, threadKey, renderSelectionCard(state))
+    await this.upsertSessionCard(message, delivery, renderSelectionCard(state), true)
   }
 
   private async upsertSessionCard(
     message: NormalizedFeishuMessage,
-    threadKey: string,
-    card: ReturnType<typeof renderProgressCard>
-  ): Promise<string> {
-    const delivery = await this.options.api.getDelivery(threadKey)
-    let messageId = delivery.message_id ?? undefined
+    delivery: FeishuDelivery,
+    card: ReturnType<typeof renderProgressCard>,
+    renderComplete: boolean
+  ): Promise<{ messageId: string; delivery: FeishuDelivery } | undefined> {
+    const claimed = await this.claimDelivery(delivery)
+    if (!claimed) return undefined
+    let messageId = claimed.message_id ?? undefined
     if (messageId) {
       await this.options.renderer.updateCard(messageId, card)
     } else {
@@ -197,40 +236,47 @@ export class FeishuBot {
         message.messageId,
         card,
         !message.isDirect,
-        delivery.delivery_id
+        `${claimed.delivery_id}-${claimed.delivery_generation}`
       )
     }
     await this.recordDelivery(
-      threadKey,
+      claimed.thread_key,
       messageId,
-      delivery.last_event_cursor,
-      delivery.desired_version
+      claimed.last_event_cursor,
+      claimed.desired_version,
+      claimed.delivery_generation,
+      renderComplete
     )
-    return messageId
+    return { messageId, delivery: claimed }
   }
 
   private async renderDeliveryCard(
     delivery: Awaited<ReturnType<FeishuSessionApi['getDelivery']>>,
-    card: ReturnType<typeof renderProgressCard>
-  ): Promise<string> {
-    let messageId = delivery.message_id ?? undefined
+    card: ReturnType<typeof renderProgressCard>,
+    renderComplete: boolean
+  ): Promise<string | undefined> {
+    const claimed = await this.claimDelivery(delivery)
+    if (!claimed) return undefined
+    let messageId = claimed.message_id ?? undefined
     if (messageId) {
       await this.options.renderer.updateCard(messageId, card)
     } else {
-      const sourceMessageId = delivery.source_message_id
+      const sourceMessageId = claimed.source_message_id
       if (!sourceMessageId) throw new Error('Feishu delivery has no source message')
       messageId = await this.options.renderer.replyCard(
         sourceMessageId,
         card,
-        delivery.root_message_id !== 'direct',
-        delivery.delivery_id
+        claimed.root_message_id !== 'direct',
+        `${claimed.delivery_id}-${claimed.delivery_generation}`
       )
     }
     await this.recordDelivery(
-      delivery.thread_key,
+      claimed.thread_key,
       messageId,
-      delivery.last_event_cursor,
-      delivery.desired_version
+      claimed.last_event_cursor,
+      claimed.desired_version,
+      claimed.delivery_generation,
+      renderComplete
     )
     return messageId
   }
@@ -241,53 +287,96 @@ export class FeishuBot {
     const principalId = `feishu:${event.tenantKey}:${event.operatorOpenId}`
     if (event.action === 'approve_publication') {
       const changesetId = requiredOpaqueId(event.value.changeset_id, 'chg')
+      const owningDelivery = await this.publicationDelivery(
+        changesetId,
+        principalId,
+        event.messageId
+      )
+      if (!owningDelivery || !await this.claimDelivery(owningDelivery)) return true
       const batch = await this.options.api.approvePublication(
         changesetId,
         principalId,
         `feishu:${event.messageId}:${event.operatorOpenId}:approve:${changesetId}`
       ) as PublicationBatch
-      await this.options.renderer.updateCard(event.messageId, renderPublicationCard(batch))
-      this.run(async () => this.pollPublication(event.messageId, batch.publish_batch_id, principalId))
+      const delivery = await this.options.api.getDelivery(owningDelivery.thread_key)
+      if (!sameDeliveryGeneration(delivery, owningDelivery, event.messageId)) return true
+      const messageId = await this.renderDeliveryCard(delivery, renderPublicationCard(batch), false)
+      if (messageId) {
+        this.run(async () => this.pollPublicationOnce(
+          { ...delivery, message_id: messageId },
+          batch.publish_batch_id,
+          principalId
+        ))
+      }
       return true
     }
     if (event.action === 'retry_failed') {
       const batchId = requiredOpaqueId(event.value.publish_batch_id, 'pub')
+      const previousBatch = await this.options.api.getPublishBatch(batchId, principalId) as PublicationBatch
+      const owningDelivery = await this.publicationDelivery(
+        previousBatch.changeset_id,
+        principalId,
+        event.messageId
+      )
+      if (
+        !owningDelivery
+        || owningDelivery.publish_batch_id !== batchId
+        || !await this.claimDelivery(owningDelivery)
+      ) return true
       const batch = await this.options.api.retryPublication(
         batchId,
         principalId,
         `feishu:${event.messageId}:${event.operatorOpenId}:retry:${batchId}:${event.eventId}`
       ) as PublicationBatch
-      await this.options.renderer.updateCard(event.messageId, renderPublicationCard(batch))
-      this.run(async () => this.pollPublication(event.messageId, batch.publish_batch_id, principalId))
+      const delivery = await this.options.api.getDelivery(owningDelivery.thread_key)
+      if (!sameDeliveryGeneration(delivery, owningDelivery, event.messageId)) return true
+      const messageId = await this.renderDeliveryCard(delivery, renderPublicationCard(batch), false)
+      if (messageId) {
+        this.run(async () => this.pollPublicationOnce(
+          { ...delivery, message_id: messageId },
+          batch.publish_batch_id,
+          principalId
+        ))
+      }
       return true
     }
     const selectionFlowId = requiredOpaqueId(event.value.selection_flow_id, 'sel')
     const expectedVersion = positiveInteger(event.value.expected_version)
     const view = await this.options.api.getSelection(selectionFlowId, principalId)
+    const owningDelivery = await this.options.api.getDelivery(view.thread_key)
+    if (
+      owningDelivery.selection_flow_id !== selectionFlowId
+      || owningDelivery.message_id !== event.messageId
+    ) {
+      this.metrics.recordStaleConflict('delivery')
+      return true
+    }
     if (view.version !== expectedVersion || view.state !== 'pending') {
       this.metrics.recordStaleConflict('selection')
-      await this.refreshSelection(event.messageId, view, principalId)
+      await this.renderDeliveryCard(
+        owningDelivery,
+        renderSelectionCard(await this.selectionState(view)),
+        true
+      )
       return true
     }
     if (event.action === 'confirm' || event.action === 'no_project') {
       await this.selectionMutation(() => event.action === 'confirm'
         ? this.options.api.confirmSelection(selectionFlowId, view.version, principalId, view.selected_repository_ids)
         : this.options.api.confirmNoProject(selectionFlowId, view.version, principalId))
-      await this.options.renderer.updateCard(event.messageId, renderProgressCard({ status: '工作区准备中' }))
       const delivery = await this.options.api.getDelivery(view.thread_key)
-      await this.recordDelivery(
-        view.thread_key,
-        event.messageId,
-        delivery.last_event_cursor,
-        delivery.desired_version
+      if (!sameSelectionDelivery(delivery, owningDelivery, selectionFlowId, event.messageId)) return true
+      const messageId = await this.renderDeliveryCard(
+        delivery,
+        renderProgressCard({ status: '工作区准备中' }),
+        !view.execution_id
       )
-      if (view.execution_id) {
-        this.run(async () => this.renderExecution(
-          event.messageId,
-          view.thread_key,
-          view.execution_id!,
-          principalId
-        ))
+      if (view.execution_id && messageId) {
+        this.run(async () => this.renderExecutionOnce({
+          ...delivery,
+          execution_id: view.execution_id,
+          initiator_principal_id: principalId
+        }, messageId))
       }
       return true
     }
@@ -297,9 +386,12 @@ export class FeishuBot {
         view.version,
         principalId
       ))
-      await this.options.renderer.updateCard(
-        event.messageId,
-        renderProgressCard({ title: '任务已取消', status: '未启动代码执行' })
+      const delivery = await this.options.api.getDelivery(view.thread_key)
+      if (!sameSelectionDelivery(delivery, owningDelivery, selectionFlowId, event.messageId)) return true
+      await this.renderDeliveryCard(
+        delivery,
+        renderProgressCard({ title: '任务已取消', status: '未启动代码执行' }),
+        true
       )
       return true
     }
@@ -317,7 +409,13 @@ export class FeishuBot {
         selected_repository_ids: next.selectedRepositoryIds
       }
     ))
-    await this.refreshSelection(event.messageId, persisted, principalId)
+    const delivery = await this.options.api.getDelivery(view.thread_key)
+    if (!sameSelectionDelivery(delivery, owningDelivery, selectionFlowId, event.messageId)) return true
+    await this.renderDeliveryCard(
+      delivery,
+      renderSelectionCard(await this.selectionState(persisted)),
+      true
+    )
     return true
   }
 
@@ -342,8 +440,36 @@ export class FeishuBot {
     }
   }
 
-  private async refreshSelection(messageId: string, view: SelectionView, _principalId: string): Promise<void> {
-    await this.options.renderer.updateCard(messageId, renderSelectionCard(await this.selectionState(view)))
+  private renderExecutionOnce(delivery: FeishuDelivery, messageId: string): Promise<void> {
+    const executionId = delivery.execution_id
+    if (!executionId) return Promise.resolve()
+    const key = `${delivery.thread_key}:${delivery.delivery_generation}:${executionId}`
+    const active = this.activeRenders.get(key)
+    if (active) return active
+    const created = (async () => {
+      try {
+        const current = await this.options.api.getDelivery(delivery.thread_key)
+        if (
+          current.delivery_generation !== delivery.delivery_generation
+          || current.execution_id !== executionId
+          || current.message_id !== messageId
+        ) return
+        const claimed = await this.claimDelivery(current)
+        if (!claimed) return
+        await this.renderExecution(
+          messageId,
+          claimed.thread_key,
+          executionId,
+          claimed.initiator_principal_id,
+          claimed.last_event_cursor,
+          claimed.delivery_generation
+        )
+      } finally {
+        this.activeRenders.delete(key)
+      }
+    })()
+    this.activeRenders.set(key, created)
+    return created
   }
 
   private async renderExecution(
@@ -351,14 +477,16 @@ export class FeishuBot {
     threadKey: string,
     executionId: string,
     principalId: string,
-    afterEventId = 0
+    afterEventId: number,
+    deliveryGeneration: number
   ): Promise<void> {
     const mapper = new CodexAppServerRendererEventMapper({ sessionId: threadKey })
     let status = '正在处理'
     let changesetId: string | undefined
     let lastRender = 0
-    let lastEventCursor = 0
-    for await (const event of this.options.api.streamEvents(threadKey, executionId, afterEventId)) {
+    let lastEventCursor = afterEventId
+    for await (const event of this.options.api.streamEvents(threadKey, executionId, 0)) {
+      const executionFailed = event.event === 'session.execution_failed'
       if (event.id !== undefined) lastEventCursor = event.id
       if (event.event === 'development.changeset_ready') {
         changesetId = record(event.data)?.changeset_id as string | undefined
@@ -372,11 +500,24 @@ export class FeishuBot {
         const mapped = mapper.process({ eventKind: event.event, data: event.data, eventId: event.id })
         const latestStatus = [...mapped].reverse().find(item => item.type === 'renderer.status')
         if (latestStatus?.type === 'renderer.status') status = latestStatus.status
+        if (executionFailed) status = string(record(event.data)?.error) || '任务执行失败'
       }
       const terminal = Boolean(changesetId)
+        || executionFailed
         || ['development.changeset_empty', 'development.changeset_needs_agent_completion', 'development.changeset_failed'].includes(event.event)
-      if (terminal || Date.now() - lastRender >= 1_200) {
+      const isAfterCursor = event.id === undefined
+        ? afterEventId === 0
+        : event.id > afterEventId
+      if (isAfterCursor && (terminal || Date.now() - lastRender >= 1_200)) {
         lastRender = Date.now()
+        const current = await this.options.api.getDelivery(threadKey)
+        if (
+          current.delivery_generation !== deliveryGeneration
+          || current.execution_id !== executionId
+          || current.message_id !== messageId
+        ) return
+        const claimed = await this.claimDelivery(current)
+        if (!claimed) return
         await this.options.renderer.updateCard(messageId, renderProgressCard({
           status,
           answer: mapper.answerText(),
@@ -384,28 +525,19 @@ export class FeishuBot {
             changesetId,
             consoleUrl: this.changeSetUrl(changesetId, principalId)
           } : {}),
-          failed: event.event === 'development.changeset_failed'
+          failed: executionFailed || event.event === 'development.changeset_failed'
         }))
-        const delivery = await this.options.api.getDelivery(threadKey)
-        await this.recordDelivery(
+        const recorded = await this.recordDelivery(
           threadKey,
           messageId,
           lastEventCursor,
-          delivery.desired_version
+          claimed.desired_version,
+          deliveryGeneration,
+          terminal
         )
+        if (!recorded) return
       }
-      if (terminal) {
-        const delivery = await this.options.api.getDelivery(threadKey)
-        if (delivery.last_event_cursor < lastEventCursor || delivery.state !== 'delivered') {
-          await this.recordDelivery(
-            threadKey,
-            messageId,
-            lastEventCursor,
-            delivery.desired_version
-          )
-        }
-        return
-      }
+      if (terminal && isAfterCursor) return
     }
   }
 
@@ -425,18 +557,38 @@ export class FeishuBot {
     }
   }
 
+  private async claimDelivery(delivery: FeishuDelivery): Promise<FeishuDelivery | undefined> {
+    try {
+      return await this.options.api.claimDelivery(
+        delivery.thread_key,
+        delivery.delivery_generation,
+        delivery.desired_version,
+        this.renderOwnerId
+      )
+    } catch (error) {
+      if (!(error instanceof FeishuApiError) || error.status !== 409) throw error
+      this.metrics.recordStaleConflict('delivery')
+      return undefined
+    }
+  }
+
   private async recordDelivery(
     threadKey: string,
     messageId: string,
     lastEventCursor: number,
-    desiredVersion: number
+    desiredVersion: number,
+    deliveryGeneration: number,
+    renderComplete: boolean
   ): Promise<boolean> {
     try {
       await this.options.api.recordDelivery(
         threadKey,
         messageId,
         lastEventCursor,
-        desiredVersion
+        desiredVersion,
+        deliveryGeneration,
+        this.renderOwnerId,
+        renderComplete
       )
       return true
     } catch (error) {
@@ -446,25 +598,59 @@ export class FeishuBot {
     }
   }
 
-  private async pollPublication(messageId: string, batchId: string, principalId: string): Promise<void> {
+  private async publicationDelivery(
+    changesetId: string,
+    principalId: string,
+    messageId: string
+  ): Promise<FeishuDelivery | undefined> {
+    const changeset = await this.options.api.getChangeset(changesetId, principalId)
+    const threadKey = string(record(changeset)?.thread_key)
+    if (!threadKey) throw new Error('publication changeset has no session')
+    const delivery = await this.options.api.getDelivery(threadKey)
+    if (delivery.message_id === messageId) return delivery
+    this.metrics.recordStaleConflict('delivery')
+    return undefined
+  }
+
+  private pollPublicationOnce(
+    delivery: FeishuDelivery,
+    batchId: string,
+    principalId: string
+  ): Promise<void> {
+    const key = `${delivery.thread_key}:${delivery.delivery_generation}:${batchId}`
+    const active = this.activePublications.get(key)
+    if (active) return active
+    const created = (async () => {
+      try {
+        await this.pollPublication(delivery, batchId, principalId)
+      } finally {
+        this.activePublications.delete(key)
+      }
+    })()
+    this.activePublications.set(key, created)
+    return created
+  }
+
+  private async pollPublication(
+    expectedDelivery: FeishuDelivery,
+    batchId: string,
+    principalId: string
+  ): Promise<void> {
     for (let attempt = 0; attempt < 150; attempt += 1) {
       await Bun.sleep(2_000)
       const batch = await this.options.api.getPublishBatch(batchId, principalId) as PublicationBatch
-      await this.options.renderer.updateCard(messageId, renderPublicationCard(batch))
-      if (['succeeded', 'partially_succeeded', 'failed'].includes(batch.state)) {
-        const changeset = await this.options.api.getChangeset(batch.changeset_id, principalId)
-        const threadKey = string(record(changeset)?.thread_key)
-        if (threadKey) {
-          const delivery = await this.options.api.getDelivery(threadKey)
-          await this.recordDelivery(
-            threadKey,
-            messageId,
-            delivery.last_event_cursor,
-            delivery.desired_version
-          )
-        }
-        return
-      }
+      const delivery = await this.options.api.getDelivery(expectedDelivery.thread_key)
+      if (
+        !sameDeliveryGeneration(delivery, expectedDelivery, expectedDelivery.message_id ?? '')
+        || delivery.publish_batch_id !== batchId
+      ) return
+      const terminal = ['succeeded', 'partially_succeeded', 'failed'].includes(batch.state)
+      const messageId = await this.renderDeliveryCard(
+        delivery,
+        renderPublicationCard(batch),
+        terminal
+      )
+      if (!messageId || terminal) return
     }
     throw new Error('publication status polling timed out')
   }
@@ -495,6 +681,26 @@ function selectionAction(event: NormalizedFeishuCardAction, state: SelectionCard
     case 'previous': return { action: 'previous', ...base }
     default: throw new Error('unsupported Feishu card action')
   }
+}
+
+function sameSelectionDelivery(
+  current: FeishuDelivery,
+  previous: FeishuDelivery,
+  selectionFlowId: string,
+  messageId: string
+): boolean {
+  return current.delivery_generation === previous.delivery_generation
+    && current.selection_flow_id === selectionFlowId
+    && current.message_id === messageId
+}
+
+function sameDeliveryGeneration(
+  current: FeishuDelivery,
+  previous: FeishuDelivery,
+  messageId: string
+): boolean {
+  return current.delivery_generation === previous.delivery_generation
+    && current.message_id === messageId
 }
 
 function requiredRepositoryId(value: unknown): string {

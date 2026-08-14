@@ -7,7 +7,7 @@ use centaur_session_core::{
     ExecutionStatus, MessageRole, SessionStatus, ThreadKey,
     development::{
         AcceptDevelopmentTask, AcceptedDevelopmentTask, ActiveDevelopmentBinding,
-        ChangeSetCollectionClaim, ChangeSetRepositoryState, ChangeSetState,
+        ChangeSetCollectionClaim, ChangeSetRepositoryState, ChangeSetState, ClaimFeishuDelivery,
         CloseDevelopmentBinding, CompleteChangeSetCollection, CompleteWorkspacePreparation,
         CompletedDevelopmentExecution, ConfirmRepositorySelection, ContinueDevelopmentTask,
         ContinuedDevelopmentTask, DevelopmentChangeSet, DevelopmentChangeSetRepository,
@@ -36,6 +36,54 @@ impl PgSessionStore {
         load_feishu_delivery(&self.pool, thread_key).await
     }
 
+    pub async fn claim_feishu_delivery(
+        &self,
+        claim: &ClaimFeishuDelivery,
+        lease: Duration,
+    ) -> Result<FeishuDelivery, SessionStoreError> {
+        if claim.expected_delivery_generation < 0
+            || claim.expected_desired_version < 0
+            || claim.lease_owner.trim().is_empty()
+            || lease.is_zero()
+        {
+            return Err(SessionStoreError::InvalidDevelopmentRequest {
+                message: "Feishu delivery claim is invalid".to_owned(),
+            });
+        }
+        let mut tx = self.pool.begin().await?;
+        let updated = sqlx::query(
+            r#"
+            update feishu_deliveries
+               set lease_owner = $4,
+                   lease_expires_at = now() + $5 * interval '1 second',
+                   updated_at = now()
+             where thread_key = $1
+               and delivery_generation = $2
+               and desired_version = $3
+               and (
+                    lease_owner is null
+                    or lease_expires_at <= now()
+                    or lease_owner = $4
+               )
+            "#,
+        )
+        .bind(claim.thread_key.as_str())
+        .bind(claim.expected_delivery_generation)
+        .bind(claim.expected_desired_version)
+        .bind(&claim.lease_owner)
+        .bind(lease.as_secs_f64())
+        .execute(&mut *tx)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(SessionStoreError::DevelopmentConflict {
+                message: "Feishu delivery is owned by another renderer".to_owned(),
+            });
+        }
+        let delivery = load_feishu_delivery(&mut *tx, &claim.thread_key).await?;
+        tx.commit().await?;
+        Ok(delivery)
+    }
+
     pub async fn record_feishu_delivery(
         &self,
         record: &RecordFeishuDelivery,
@@ -43,6 +91,8 @@ impl PgSessionStore {
         if record.message_id.trim().is_empty()
             || record.last_event_cursor < 0
             || record.expected_desired_version < 0
+            || record.expected_delivery_generation < 0
+            || record.lease_owner.trim().is_empty()
         {
             return Err(SessionStoreError::InvalidDevelopmentRequest {
                 message: "Feishu delivery update is invalid".to_owned(),
@@ -52,16 +102,25 @@ impl PgSessionStore {
             r#"
             update feishu_deliveries
                set message_id = $2, last_event_cursor = $3,
-                   render_version = desired_version, state = 'delivered',
-                   failure_code = null, lease_owner = null, lease_expires_at = null,
+                   render_version = desired_version,
+                   state = case when $7 then 'delivered' else 'pending' end,
+                   failure_code = null,
+                   lease_owner = case when $7 then null else lease_owner end,
+                   lease_expires_at = case when $7 then null else lease_expires_at end,
                    updated_at = now()
              where thread_key = $1 and desired_version = $4
+               and delivery_generation = $5
+               and $3 >= last_event_cursor
+               and lease_owner = $6 and lease_expires_at > now()
             "#,
         )
         .bind(record.thread_key.as_str())
         .bind(&record.message_id)
         .bind(record.last_event_cursor)
         .bind(record.expected_desired_version)
+        .bind(record.expected_delivery_generation)
+        .bind(&record.lease_owner)
+        .bind(record.render_complete)
         .execute(&self.pool)
         .await?;
         if updated.rows_affected() != 1 {
@@ -165,15 +224,6 @@ impl PgSessionStore {
         .bind(request.message.metadata.clone())
         .execute(&mut *tx)
         .await?;
-        if request.channel.platform == "feishu" {
-            sqlx::query(
-                "update feishu_deliveries set desired_version = desired_version + 1, state = 'pending', source_message_id = $2, failure_code = null, updated_at = now() where thread_key = $1",
-            )
-            .bind(thread_key.as_str())
-            .bind(&request.platform_message_id)
-            .execute(&mut *tx)
-            .await?;
-        }
         let input_line = development_input_line(
             &thread_key,
             &request.platform_event_id,
@@ -199,6 +249,26 @@ impl PgSessionStore {
         ))
         .execute(&mut *tx)
         .await?;
+        if request.channel.platform == "feishu" {
+            sqlx::query(
+                r#"
+                update feishu_deliveries
+                   set delivery_generation = delivery_generation + 1,
+                       desired_version = desired_version + 1,
+                       state = 'pending', source_message_id = $2,
+                       message_id = null, last_event_cursor = 0,
+                       execution_id = $3, selection_flow_id = null,
+                       failure_code = null, lease_owner = null, lease_expires_at = null,
+                       updated_at = now()
+                 where thread_key = $1
+                "#,
+            )
+            .bind(thread_key.as_str())
+            .bind(&request.platform_message_id)
+            .bind(&execution_id)
+            .execute(&mut *tx)
+            .await?;
+        }
         sqlx::query(
             r#"
             insert into development_platform_events
@@ -496,8 +566,8 @@ impl PgSessionStore {
                 r#"
                 insert into feishu_deliveries
                     (delivery_id, tenant_key, thread_key, chat_id, root_message_id,
-                     source_message_id, state)
-                values ($1, $2, $3, $4, $5, $6, 'pending')
+                     source_message_id, execution_id, selection_flow_id, state)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, 'pending')
                 "#,
             )
             .bind(prefixed_id("fdl"))
@@ -506,6 +576,8 @@ impl PgSessionStore {
             .bind(&request.channel.conversation_key)
             .bind(&request.channel.root_message_id)
             .bind(request.platform_message_id.as_deref())
+            .bind(&execution_id)
+            .bind(&selection_flow_id)
             .execute(&mut *tx)
             .await?;
         }
@@ -804,7 +876,18 @@ impl PgSessionStore {
         thread_key: &ThreadKey,
         requested_by_principal_id: &str,
         is_admin: bool,
+        source_message_id: Option<&str>,
+        idempotency_key: Option<&str>,
     ) -> Result<RepositorySelectionDraft, SessionStoreError> {
+        if source_message_id.is_some_and(|value| value.trim().is_empty())
+            || idempotency_key.is_some_and(|value| value.trim().is_empty())
+            || (idempotency_key.is_some() && source_message_id.is_none())
+        {
+            return Err(SessionStoreError::InvalidDevelopmentRequest {
+                message: "add-project source message and idempotency key must not be empty"
+                    .to_owned(),
+            });
+        }
         let mut tx = self.pool.begin().await?;
         let workspace = sqlx::query_as::<_, (String, String)>(
             r#"
@@ -832,6 +915,28 @@ impl PgSessionStore {
                 message: "only the task initiator or an administrator may add projects".to_owned(),
             });
         }
+        if let Some(idempotency_key) = idempotency_key
+            && let Some(row) = sqlx::query_as::<_, RepositorySelectionDraftRow>(
+                r#"
+                select flow.selection_flow_id, flow.workspace_id, flow.kind, flow.state,
+                       flow.version
+                  from development_selection_receipts receipt
+                  join development_selection_flows flow using (selection_flow_id)
+                  join session_workspaces workspace using (workspace_id)
+                 where receipt.thread_key = $1
+                   and (receipt.idempotency_key = $2 or receipt.source_message_id = $3)
+                   and workspace.thread_key = receipt.thread_key
+                "#,
+            )
+            .bind(thread_key.as_str())
+            .bind(idempotency_key)
+            .bind(source_message_id.expect("validated receipt source message"))
+            .fetch_optional(&mut *tx)
+            .await?
+        {
+            tx.commit().await?;
+            return row.try_into();
+        }
         if workspace.1 != WorkspaceState::Ready.as_ref() {
             return Err(SessionStoreError::DevelopmentConflict {
                 message: format!("workspace is {} and cannot accept projects", workspace.1),
@@ -839,7 +944,7 @@ impl PgSessionStore {
         }
         ensure_session_has_no_active_work(&mut tx, thread_key).await?;
 
-        if let Some(row) = sqlx::query_as::<_, RepositorySelectionDraftRow>(
+        if let Some(mut row) = sqlx::query_as::<_, RepositorySelectionDraftRow>(
             r#"
             select selection_flow_id, workspace_id, kind, state, version
               from development_selection_flows
@@ -851,7 +956,34 @@ impl PgSessionStore {
         .fetch_optional(&mut *tx)
         .await?
         {
-            wake_feishu_delivery(&mut tx, thread_key).await?;
+            if idempotency_key.is_some() {
+                row = sqlx::query_as::<_, RepositorySelectionDraftRow>(
+                    r#"
+                    update development_selection_flows
+                       set version = version + 1, updated_at = now()
+                     where selection_flow_id = $1 and state = 'pending'
+                    returning selection_flow_id, workspace_id, kind, state, version
+                    "#,
+                )
+                .bind(&row.selection_flow_id)
+                .fetch_one(&mut *tx)
+                .await?;
+            }
+            insert_selection_receipt(
+                &mut tx,
+                thread_key,
+                idempotency_key,
+                source_message_id,
+                &row.selection_flow_id,
+            )
+            .await?;
+            bind_feishu_selection_delivery(
+                &mut tx,
+                thread_key,
+                &row.selection_flow_id,
+                source_message_id,
+            )
+            .await?;
             tx.commit().await?;
             return row.try_into();
         }
@@ -868,7 +1000,21 @@ impl PgSessionStore {
         .bind(&workspace.0)
         .fetch_one(&mut *tx)
         .await?;
-        wake_feishu_delivery(&mut tx, thread_key).await?;
+        insert_selection_receipt(
+            &mut tx,
+            thread_key,
+            idempotency_key,
+            source_message_id,
+            &row.selection_flow_id,
+        )
+        .await?;
+        bind_feishu_selection_delivery(
+            &mut tx,
+            thread_key,
+            &row.selection_flow_id,
+            source_message_id,
+        )
+        .await?;
         tx.commit().await?;
         row.try_into()
     }
@@ -1228,6 +1374,13 @@ impl PgSessionStore {
             .bind(&result.workspace_id)
             .execute(&mut *tx)
             .await?;
+        } else {
+            let _ = fail_workspace_execution(
+                &mut tx,
+                &result.workspace_id,
+                "workspace preparation failed",
+            )
+            .await?;
         }
         tx.commit().await?;
         workspace.try_into()
@@ -1283,6 +1436,7 @@ impl PgSessionStore {
         .ok_or_else(|| SessionStoreError::DevelopmentConflict {
             message: "workspace preparation lease or attempt is stale".to_owned(),
         })?;
+        let _ = fail_workspace_execution(&mut tx, workspace_id, failure_message).await?;
         tx.commit().await?;
         workspace.try_into()
     }
@@ -1386,6 +1540,36 @@ impl PgSessionStore {
         )
         .fetch_all(&self.pool)
         .await?)
+    }
+
+    pub async fn reconcile_failed_workspace_executions(&self) -> Result<u64, SessionStoreError> {
+        let workspace_ids = sqlx::query_scalar::<_, String>(
+            r#"
+            select distinct workspace.workspace_id
+              from session_workspaces workspace
+              join development_selection_flows flow
+                on flow.workspace_id = workspace.workspace_id
+              join session_executions execution
+                on execution.execution_id = flow.execution_id
+             where workspace.state = 'failed'
+               and execution.status = 'queued'
+               and execution.blocking_reason = 'workspace_provisioning'
+             order by workspace.workspace_id
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut reconciled = 0;
+        for workspace_id in workspace_ids {
+            let mut tx = self.pool.begin().await?;
+            if fail_workspace_execution(&mut tx, &workspace_id, "workspace preparation failed")
+                .await?
+            {
+                reconciled += 1;
+            }
+            tx.commit().await?;
+        }
+        Ok(reconciled)
     }
 
     pub async fn begin_changeset_collection(
@@ -1928,6 +2112,81 @@ impl PgSessionStore {
     }
 }
 
+async fn insert_selection_receipt(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    thread_key: &ThreadKey,
+    idempotency_key: Option<&str>,
+    source_message_id: Option<&str>,
+    selection_flow_id: &str,
+) -> Result<(), SessionStoreError> {
+    let Some(idempotency_key) = idempotency_key else {
+        return Ok(());
+    };
+    sqlx::query(
+        r#"
+        insert into development_selection_receipts
+            (thread_key, idempotency_key, source_message_id, selection_flow_id)
+        values ($1, $2, $3, $4)
+        "#,
+    )
+    .bind(thread_key.as_str())
+    .bind(idempotency_key)
+    .bind(source_message_id.expect("validated receipt source message"))
+    .bind(selection_flow_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn fail_workspace_execution(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: &str,
+    error: &str,
+) -> Result<bool, SessionStoreError> {
+    let execution = sqlx::query_as::<_, (String, String)>(
+        r#"
+        update session_executions execution
+           set status = 'failed', blocking_reason = null, error = $2,
+               completed_at = coalesce(completed_at, now()),
+               stdout_owner_id = null, stdout_owner_lease_expires_at = null,
+               updated_at = now()
+          from development_selection_flows flow
+         where flow.workspace_id = $1
+           and flow.execution_id = execution.execution_id
+           and execution.status = 'queued'
+           and execution.blocking_reason = 'workspace_provisioning'
+        returning execution.execution_id, execution.thread_key
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(error)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((execution_id, thread_key)) = execution else {
+        return Ok(false);
+    };
+    sqlx::query("update sessions set status = 'failed', updated_at = now() where thread_key = $1")
+        .bind(&thread_key)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query(
+        r#"
+        insert into session_events (thread_key, execution_id, event_type, payload)
+        values ($1, $2, 'session.execution_failed', $3)
+        "#,
+    )
+    .bind(&thread_key)
+    .bind(&execution_id)
+    .bind(json!({
+        "execution_id": execution_id,
+        "thread_key": thread_key,
+        "error": error,
+    }))
+    .execute(&mut **tx)
+    .await?;
+    Ok(true)
+}
+
 #[derive(Debug, FromRow)]
 struct DevelopmentChangeSetRow {
     changeset_id: String,
@@ -2206,21 +2465,54 @@ fn valid_git_sha(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-async fn wake_feishu_delivery(
+async fn bind_feishu_selection_delivery(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     thread_key: &ThreadKey,
+    selection_flow_id: &str,
+    source_message_id: Option<&str>,
 ) -> Result<(), SessionStoreError> {
-    sqlx::query(
+    let result = sqlx::query(
         r#"
         update feishu_deliveries
-           set desired_version = desired_version + 1,
-               state = 'pending', failure_code = null, updated_at = now()
+           set delivery_generation = delivery_generation +
+                   case when $3::text is not null
+                          and source_message_id is distinct from $3
+                        then 1 else 0 end,
+               desired_version = desired_version + 1,
+               source_message_id = coalesce($3, source_message_id),
+               message_id = case when $3::text is not null
+                                      and source_message_id is distinct from $3
+                                 then null else message_id end,
+               last_event_cursor = case when $3::text is not null
+                                             and source_message_id is distinct from $3
+                                        then 0 else last_event_cursor end,
+               execution_id = null, selection_flow_id = $2,
+               state = 'pending', failure_code = null,
+               lease_owner = null, lease_expires_at = null, updated_at = now()
          where thread_key = $1
+           and ($3::text is null
+                or source_message_id is null
+                or source_message_id is not distinct from $3
+                or message_id is not null
+                or not exists (
+                    select 1
+                      from development_selection_flows current_flow
+                     where current_flow.selection_flow_id = feishu_deliveries.selection_flow_id
+                       and current_flow.kind = 'add'
+                       and current_flow.state = 'pending'
+                ))
         "#,
     )
     .bind(thread_key.as_str())
+    .bind(selection_flow_id)
+    .bind(source_message_id)
     .execute(&mut **tx)
     .await?;
+    if source_message_id.is_some() && result.rows_affected() != 1 {
+        return Err(SessionStoreError::DevelopmentConflict {
+            message: "previous Feishu delivery card has not been recorded".to_owned(),
+        });
+    }
     Ok(())
 }
 
@@ -2245,28 +2537,18 @@ where
         r#"
         select delivery.delivery_id, delivery.tenant_key, delivery.thread_key,
                delivery.chat_id, delivery.root_message_id, delivery.source_message_id,
-               delivery.message_id, delivery.last_event_cursor, delivery.desired_version,
-               delivery.render_version,
+               delivery.message_id, delivery.last_event_cursor,
+               delivery.delivery_generation, delivery.desired_version, delivery.render_version,
                delivery.state, binding.initiator_principal_id,
-               (
-                   select flow.selection_flow_id
-                     from development_selection_flows flow
-                     join session_workspaces workspace using (workspace_id)
-                    where workspace.thread_key = delivery.thread_key
-                      and flow.state = 'pending'
-                    order by flow.created_at desc limit 1
-               ) as selection_flow_id,
-               (
-                   select execution.execution_id from session_executions execution
-                    where execution.thread_key = delivery.thread_key
-                    order by execution.created_at desc limit 1
-               ) as execution_id,
+               delivery.selection_flow_id,
+               delivery.execution_id,
                (
                    select batch.publish_batch_id
                      from development_publish_batches batch
-                     join development_change_sets changeset using (changeset_id)
-                     join session_workspaces workspace using (workspace_id)
+                    join development_change_sets changeset using (changeset_id)
+                    join session_workspaces workspace using (workspace_id)
                     where workspace.thread_key = delivery.thread_key
+                      and changeset.execution_id = delivery.execution_id
                     order by batch.created_at desc limit 1
                ) as publish_batch_id
           from feishu_deliveries delivery
@@ -2717,6 +2999,7 @@ struct FeishuDeliveryRow {
     source_message_id: Option<String>,
     message_id: Option<String>,
     last_event_cursor: i64,
+    delivery_generation: i32,
     desired_version: i32,
     render_version: i32,
     state: String,
@@ -2742,6 +3025,7 @@ impl TryFrom<FeishuDeliveryRow> for FeishuDelivery {
             source_message_id: row.source_message_id,
             message_id: row.message_id,
             last_event_cursor: row.last_event_cursor,
+            delivery_generation: row.delivery_generation,
             desired_version: row.desired_version,
             render_version: row.render_version,
             state: row.state,
@@ -3049,7 +3333,7 @@ mod tests {
     use centaur_session_core::{
         ExecutionStatus, HarnessType, MessageRole, SessionMessageInput, ThreadKey,
         development::{
-            AcceptDevelopmentTask, ChangeSetState, CloseDevelopmentBinding,
+            AcceptDevelopmentTask, ChangeSetState, ClaimFeishuDelivery, CloseDevelopmentBinding,
             CompleteWorkspacePreparation, ConfirmRepositorySelection, ContinueDevelopmentTask,
             DevelopmentChannel, DevelopmentInitiator, ExecutionBlocker, FailedRepositorySnapshot,
             PreparedRepositorySnapshot, RecordFeishuDelivery, RepositoryId, ResolvedRepository,
@@ -3158,6 +3442,28 @@ mod tests {
         assert_eq!(initial.desired_version, 0);
         assert_eq!(initial.render_version, 0);
         assert_eq!(initial.state, "pending");
+        assert_eq!(initial.delivery_generation, 0);
+        assert_eq!(
+            initial.execution_id.as_deref(),
+            Some(accepted.execution_id.as_str())
+        );
+        assert_eq!(
+            initial.selection_flow_id.as_deref(),
+            Some(accepted.selection_flow_id.as_str())
+        );
+        let renderer_owner = "feishubot-recovery-test";
+        store
+            .claim_feishu_delivery(
+                &ClaimFeishuDelivery {
+                    thread_key: accepted.thread_key.clone(),
+                    expected_delivery_generation: initial.delivery_generation,
+                    expected_desired_version: initial.desired_version,
+                    lease_owner: renderer_owner.to_owned(),
+                },
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
 
         let delivered = store
             .record_feishu_delivery(&RecordFeishuDelivery {
@@ -3165,6 +3471,9 @@ mod tests {
                 message_id: "om-card-1".to_owned(),
                 last_event_cursor: 0,
                 expected_desired_version: initial.desired_version,
+                expected_delivery_generation: initial.delivery_generation,
+                lease_owner: renderer_owner.to_owned(),
+                render_complete: true,
             })
             .await
             .unwrap();
@@ -3186,6 +3495,18 @@ mod tests {
         assert_eq!(selection_wakeup.desired_version, 1);
         assert_eq!(selection_wakeup.render_version, 0);
         assert_eq!(selection_wakeup.state, "pending");
+        store
+            .claim_feishu_delivery(
+                &ClaimFeishuDelivery {
+                    thread_key: accepted.thread_key.clone(),
+                    expected_delivery_generation: selection_wakeup.delivery_generation,
+                    expected_desired_version: selection_wakeup.desired_version,
+                    lease_owner: renderer_owner.to_owned(),
+                },
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
         assert!(matches!(
             store
                 .record_feishu_delivery(&RecordFeishuDelivery {
@@ -3193,6 +3514,9 @@ mod tests {
                     message_id: "om-card-1".to_owned(),
                     last_event_cursor: 0,
                     expected_desired_version: 0,
+                    expected_delivery_generation: initial.delivery_generation,
+                    lease_owner: renderer_owner.to_owned(),
+                    render_complete: true,
                 })
                 .await,
             Err(crate::SessionStoreError::DevelopmentConflict { .. })
@@ -3203,6 +3527,9 @@ mod tests {
                 message_id: "om-card-1".to_owned(),
                 last_event_cursor: 0,
                 expected_desired_version: selection_wakeup.desired_version,
+                expected_delivery_generation: selection_wakeup.delivery_generation,
+                lease_owner: renderer_owner.to_owned(),
+                render_complete: true,
             })
             .await
             .unwrap();
@@ -3230,6 +3557,42 @@ mod tests {
             .complete_execution(&accepted.execution_id)
             .await
             .unwrap();
+        let old_changeset_id = format!("chg_{}", Uuid::new_v4());
+        let old_publish_batch_id = format!("pub_{}", Uuid::new_v4());
+        sqlx::query(
+            r#"
+            insert into development_change_sets
+                (changeset_id, workspace_id, execution_id, initiator_principal_id, state)
+            values ($1, $2, $3, 'principal-1', 'ready')
+            "#,
+        )
+        .bind(&old_changeset_id)
+        .bind(&accepted.workspace_id)
+        .bind(&accepted.execution_id)
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            insert into development_publish_batches
+                (publish_batch_id, changeset_id, approver_principal_id, idempotency_key, state)
+            values ($1, $2, 'principal-1', 'old-publication', 'succeeded')
+            "#,
+        )
+        .bind(&old_publish_batch_id)
+        .bind(&old_changeset_id)
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            store
+                .get_feishu_delivery(&accepted.thread_key)
+                .await
+                .unwrap()
+                .publish_batch_id
+                .as_deref(),
+            Some(old_publish_batch_id.as_str())
+        );
 
         let follow_up_message_id = format!("follow-up-{}", Uuid::new_v4());
         let continued = store
@@ -3254,26 +3617,118 @@ mod tests {
         assert_eq!(continuation_wakeup.desired_version, 2);
         assert_eq!(continuation_wakeup.render_version, 1);
         assert_eq!(continuation_wakeup.state, "pending");
+        assert_eq!(continuation_wakeup.delivery_generation, 1);
+        assert!(continuation_wakeup.message_id.is_none());
+        assert_eq!(continuation_wakeup.last_event_cursor, 0);
+        assert_eq!(
+            continuation_wakeup.execution_id.as_deref(),
+            Some(continued.execution_id.as_str())
+        );
+        assert!(continuation_wakeup.selection_flow_id.is_none());
+        assert!(continuation_wakeup.publish_batch_id.is_none());
         assert_eq!(
             continuation_wakeup.source_message_id.as_deref(),
             Some(follow_up_message_id.as_str())
         );
         store
+            .claim_feishu_delivery(
+                &ClaimFeishuDelivery {
+                    thread_key: accepted.thread_key.clone(),
+                    expected_delivery_generation: continuation_wakeup.delivery_generation,
+                    expected_desired_version: continuation_wakeup.desired_version,
+                    lease_owner: renderer_owner.to_owned(),
+                },
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .record_feishu_delivery(&RecordFeishuDelivery {
+                    thread_key: accepted.thread_key.clone(),
+                    message_id: "om-stale-card".to_owned(),
+                    last_event_cursor: 0,
+                    expected_desired_version: continuation_wakeup.desired_version,
+                    expected_delivery_generation: initial.delivery_generation,
+                    lease_owner: renderer_owner.to_owned(),
+                    render_complete: false,
+                })
+                .await,
+            Err(crate::SessionStoreError::DevelopmentConflict { .. })
+        ));
+        store
             .complete_execution(&continued.execution_id)
             .await
             .unwrap();
-        store
+        let rendered = store
             .record_feishu_delivery(&RecordFeishuDelivery {
                 thread_key: accepted.thread_key.clone(),
-                message_id: "om-card-1".to_owned(),
-                last_event_cursor: 0,
+                message_id: "om-card-2".to_owned(),
+                last_event_cursor: 10,
                 expected_desired_version: continuation_wakeup.desired_version,
+                expected_delivery_generation: continuation_wakeup.delivery_generation,
+                lease_owner: renderer_owner.to_owned(),
+                render_complete: true,
             })
             .await
             .unwrap();
-
         store
-            .create_add_repository_selection(&accepted.thread_key, "principal-1", false)
+            .claim_feishu_delivery(
+                &ClaimFeishuDelivery {
+                    thread_key: accepted.thread_key.clone(),
+                    expected_delivery_generation: rendered.delivery_generation,
+                    expected_desired_version: rendered.desired_version,
+                    lease_owner: renderer_owner.to_owned(),
+                },
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .record_feishu_delivery(&RecordFeishuDelivery {
+                    thread_key: accepted.thread_key.clone(),
+                    message_id: "om-card-2".to_owned(),
+                    last_event_cursor: 9,
+                    expected_desired_version: rendered.desired_version,
+                    expected_delivery_generation: rendered.delivery_generation,
+                    lease_owner: renderer_owner.to_owned(),
+                    render_complete: true,
+                })
+                .await,
+            Err(crate::SessionStoreError::DevelopmentConflict { .. })
+        ));
+        store
+            .append_event(&accepted.thread_key, None, "session.stdout_eof", json!({}))
+            .await
+            .unwrap();
+        store
+            .append_event(
+                &accepted.thread_key,
+                Some(&accepted.execution_id),
+                "session.execution_completed",
+                json!({}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get_feishu_delivery(&accepted.thread_key)
+                .await
+                .unwrap()
+                .desired_version,
+            rendered.desired_version
+        );
+
+        let projects_message_id = format!("projects-{}", Uuid::new_v4());
+        let add_selection = store
+            .create_add_repository_selection(
+                &accepted.thread_key,
+                "principal-1",
+                false,
+                Some(&projects_message_id),
+                None,
+            )
             .await
             .unwrap();
         let add_wakeup = store
@@ -3283,6 +3738,35 @@ mod tests {
         assert_eq!(add_wakeup.desired_version, 3);
         assert_eq!(add_wakeup.render_version, 2);
         assert_eq!(add_wakeup.state, "pending");
+        assert_eq!(add_wakeup.delivery_generation, 2);
+        assert!(add_wakeup.message_id.is_none());
+        assert!(add_wakeup.execution_id.is_none());
+        assert_eq!(
+            add_wakeup.selection_flow_id.as_deref(),
+            Some(add_selection.selection_flow_id.as_str())
+        );
+        assert_eq!(
+            add_wakeup.source_message_id.as_deref(),
+            Some(projects_message_id.as_str())
+        );
+        store
+            .create_add_repository_selection(
+                &accepted.thread_key,
+                "principal-1",
+                false,
+                Some(&projects_message_id),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get_feishu_delivery(&accepted.thread_key)
+                .await
+                .unwrap()
+                .delivery_generation,
+            add_wakeup.delivery_generation
+        );
         assert!(
             store
                 .list_pending_feishu_delivery_threads()
@@ -3290,6 +3774,101 @@ mod tests {
                 .unwrap()
                 .contains(&accepted.thread_key)
         );
+    }
+
+    #[tokio::test]
+    async fn feishu_delivery_claim_fences_renderers_and_tracks_completion() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let accepted = store
+            .accept_development_task(&development_task("feishu-delivery-claim"))
+            .await
+            .unwrap();
+        let delivery = store
+            .get_feishu_delivery(&accepted.thread_key)
+            .await
+            .unwrap();
+        store
+            .append_event(
+                &accepted.thread_key,
+                Some(&accepted.execution_id),
+                "session.activity_summary",
+                json!({"summary": "working"}),
+            )
+            .await
+            .unwrap();
+        let owner = "feishubot-owner-1";
+        assert!(matches!(
+            store
+                .claim_feishu_delivery(
+                    &ClaimFeishuDelivery {
+                        thread_key: accepted.thread_key.clone(),
+                        expected_delivery_generation: delivery.delivery_generation,
+                        expected_desired_version: delivery.desired_version,
+                        lease_owner: owner.to_owned(),
+                    },
+                    std::time::Duration::from_secs(30),
+                )
+                .await,
+            Err(crate::SessionStoreError::DevelopmentConflict { .. })
+        ));
+        let delivery = store
+            .get_feishu_delivery(&accepted.thread_key)
+            .await
+            .unwrap();
+        store
+            .claim_feishu_delivery(
+                &ClaimFeishuDelivery {
+                    thread_key: accepted.thread_key.clone(),
+                    expected_delivery_generation: delivery.delivery_generation,
+                    expected_desired_version: delivery.desired_version,
+                    lease_owner: owner.to_owned(),
+                },
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .claim_feishu_delivery(
+                    &ClaimFeishuDelivery {
+                        thread_key: accepted.thread_key.clone(),
+                        expected_delivery_generation: delivery.delivery_generation,
+                        expected_desired_version: delivery.desired_version,
+                        lease_owner: "feishubot-owner-2".to_owned(),
+                    },
+                    std::time::Duration::from_secs(30),
+                )
+                .await,
+            Err(crate::SessionStoreError::DevelopmentConflict { .. })
+        ));
+        let progress = store
+            .record_feishu_delivery(&RecordFeishuDelivery {
+                thread_key: accepted.thread_key.clone(),
+                message_id: "om-card-claim".to_owned(),
+                last_event_cursor: 0,
+                expected_desired_version: delivery.desired_version,
+                expected_delivery_generation: delivery.delivery_generation,
+                lease_owner: owner.to_owned(),
+                render_complete: false,
+            })
+            .await
+            .unwrap();
+        assert_eq!(progress.state, "pending");
+        let completed = store
+            .record_feishu_delivery(&RecordFeishuDelivery {
+                thread_key: accepted.thread_key,
+                message_id: "om-card-claim".to_owned(),
+                last_event_cursor: 0,
+                expected_desired_version: progress.desired_version,
+                expected_delivery_generation: progress.delivery_generation,
+                lease_owner: owner.to_owned(),
+                render_complete: true,
+            })
+            .await
+            .unwrap();
+        assert_eq!(completed.state, "delivered");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3805,18 +4384,137 @@ mod tests {
             .expect("mark workspace ready");
 
         let draft = store
-            .create_add_repository_selection(&accepted.thread_key, "principal-1", false)
+            .create_add_repository_selection(
+                &accepted.thread_key,
+                "principal-1",
+                false,
+                Some("projects-message-1"),
+                Some("projects-event-1"),
+            )
             .await
             .expect("create add-project selection");
         assert_eq!(draft.kind, SelectionKind::Add);
         assert_eq!(draft.state, SelectionFlowState::Pending);
         assert_eq!(draft.version, 1);
+        let first_delivery = store
+            .get_feishu_delivery(&accepted.thread_key)
+            .await
+            .expect("load first add-project delivery");
         assert_eq!(
             store
-                .create_add_repository_selection(&accepted.thread_key, "principal-1", false)
+                .create_add_repository_selection(
+                    &accepted.thread_key,
+                    "principal-1",
+                    false,
+                    Some("projects-message-1"),
+                    Some("projects-event-1"),
+                )
                 .await
                 .expect("reuse pending add-project selection"),
             draft
+        );
+        assert_eq!(
+            store
+                .get_feishu_delivery(&accepted.thread_key)
+                .await
+                .expect("load replayed add-project delivery")
+                .delivery_generation,
+            first_delivery.delivery_generation
+        );
+        let receipt_owner = "projects-receipt-test";
+        store
+            .claim_feishu_delivery(
+                &ClaimFeishuDelivery {
+                    thread_key: accepted.thread_key.clone(),
+                    expected_delivery_generation: first_delivery.delivery_generation,
+                    expected_desired_version: first_delivery.desired_version,
+                    lease_owner: receipt_owner.to_owned(),
+                },
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .expect("claim first projects delivery");
+        store
+            .record_feishu_delivery(&RecordFeishuDelivery {
+                thread_key: accepted.thread_key.clone(),
+                message_id: "projects-card-1".to_owned(),
+                last_event_cursor: first_delivery.last_event_cursor,
+                expected_desired_version: first_delivery.desired_version,
+                expected_delivery_generation: first_delivery.delivery_generation,
+                lease_owner: receipt_owner.to_owned(),
+                render_complete: true,
+            })
+            .await
+            .expect("record first projects card");
+        let second_draft = store
+            .create_add_repository_selection(
+                &accepted.thread_key,
+                "principal-1",
+                false,
+                Some("projects-message-2"),
+                Some("projects-event-2"),
+            )
+            .await
+            .expect("reuse selection for a new command");
+        assert_eq!(second_draft.selection_flow_id, draft.selection_flow_id);
+        assert_eq!(second_draft.version, draft.version + 1);
+        let second_delivery = store
+            .get_feishu_delivery(&accepted.thread_key)
+            .await
+            .expect("load second add-project delivery");
+        assert_eq!(
+            second_delivery.delivery_generation,
+            first_delivery.delivery_generation + 1
+        );
+        assert_eq!(
+            second_delivery.source_message_id.as_deref(),
+            Some("projects-message-2")
+        );
+        let delayed_draft = store
+            .create_add_repository_selection(
+                &accepted.thread_key,
+                "principal-1",
+                false,
+                Some("projects-message-1"),
+                Some("projects-event-1"),
+            )
+            .await
+            .expect("replay old add-project command");
+        assert_eq!(delayed_draft, second_draft);
+        let duplicate_message_draft = store
+            .create_add_repository_selection(
+                &accepted.thread_key,
+                "principal-1",
+                false,
+                Some("projects-message-1"),
+                Some("projects-event-3"),
+            )
+            .await
+            .expect("replay add-project message with a different event ID");
+        assert_eq!(duplicate_message_draft, second_draft);
+        assert!(matches!(
+            store
+                .create_add_repository_selection(
+                    &accepted.thread_key,
+                    "principal-1",
+                    false,
+                    Some("projects-message-3"),
+                    Some("projects-event-4"),
+                )
+                .await,
+            Err(crate::SessionStoreError::DevelopmentConflict { .. })
+        ));
+        let delayed_replay = store
+            .get_feishu_delivery(&accepted.thread_key)
+            .await
+            .expect("load delivery after delayed replay");
+        assert_eq!(
+            delayed_replay.delivery_generation,
+            second_delivery.delivery_generation
+        );
+        assert_eq!(
+            delayed_replay.source_message_id.as_deref(),
+            Some("projects-message-2")
         );
 
         let duplicate = store
@@ -3835,7 +4533,7 @@ mod tests {
         let added = store
             .confirm_repository_selection(&ConfirmRepositorySelection {
                 selection_flow_id: draft.selection_flow_id,
-                expected_version: 1,
+                expected_version: second_draft.version,
                 decided_by_principal_id: "principal-1".to_owned(),
                 repositories: vec![resolved_repository(84)],
             })
@@ -3928,7 +4626,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_workspace_preparation_keeps_execution_blocked() {
+    async fn failed_workspace_preparation_terminates_execution() {
         let Some(store) = test_store().await else {
             return;
         };
@@ -3974,9 +4672,79 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        assert_eq!(execution.status, ExecutionStatus::Failed);
+        assert!(execution.blocking_reason.is_none());
         assert_eq!(
-            execution.blocking_reason,
-            Some(ExecutionBlocker::WorkspaceProvisioning)
+            execution.error.as_deref(),
+            Some("workspace preparation failed")
+        );
+        let events = store
+            .list_events_after(&accepted.thread_key, 0, Some(&execution.execution_id), 100)
+            .await
+            .expect("list execution events");
+        assert!(events.iter().any(|event| {
+            event.event_type == "session.execution_failed"
+                && event.payload["error"] == "workspace preparation failed"
+        }));
+    }
+
+    #[tokio::test]
+    async fn failed_workspace_reconciliation_terminates_legacy_blocked_execution_once() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let accepted = store
+            .accept_development_task(&development_task("workspace-failure-reconciliation"))
+            .await
+            .expect("accept task");
+        store
+            .confirm_repository_selection(&ConfirmRepositorySelection {
+                selection_flow_id: accepted.selection_flow_id,
+                expected_version: 1,
+                decided_by_principal_id: "principal-1".to_owned(),
+                repositories: vec![resolved_repository(42)],
+            })
+            .await
+            .expect("confirm repository");
+        sqlx::query(
+            "update session_workspaces set state = 'failed', updated_at = now() where workspace_id = $1",
+        )
+        .bind(&accepted.workspace_id)
+        .execute(&store.pool)
+        .await
+        .expect("simulate legacy failed workspace");
+
+        assert!(
+            store
+                .reconcile_failed_workspace_executions()
+                .await
+                .expect("reconcile failed workspace")
+                >= 1
+        );
+        assert_eq!(
+            store
+                .reconcile_failed_workspace_executions()
+                .await
+                .expect("repeat reconciliation"),
+            0
+        );
+        let execution = store
+            .latest_execution_for_thread(&accepted.thread_key)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(execution.status, ExecutionStatus::Failed);
+        assert!(execution.blocking_reason.is_none());
+        let events = store
+            .list_events_after(&accepted.thread_key, 0, Some(&execution.execution_id), 100)
+            .await
+            .expect("list execution events");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_type == "session.execution_failed")
+                .count(),
+            1
         );
     }
 
@@ -4024,9 +4792,11 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        assert_eq!(execution.status, ExecutionStatus::Failed);
+        assert!(execution.blocking_reason.is_none());
         assert_eq!(
-            execution.blocking_reason,
-            Some(ExecutionBlocker::WorkspaceProvisioning)
+            execution.error.as_deref(),
+            Some("workspace preparation failed")
         );
     }
 

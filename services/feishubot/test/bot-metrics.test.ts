@@ -56,6 +56,54 @@ describe('Feishu bot metrics', () => {
     expect(renderedCard).toContain('backend/payments')
   })
 
+  it('renders session execution failures as terminal cards', async () => {
+    let renderedCard = ''
+    let markRendered: () => void = () => {}
+    const rendered = new Promise<void>(resolve => {
+      markRendered = resolve
+    })
+    const bot = new FeishuBot({
+      botOpenId: 'ou-bot',
+      tenantAllowlist: new Set(['tenant-1']),
+      api: selectionApi({
+        getDelivery: async () => ({
+          delivery_id: 'fdl_1',
+          tenant_key: 'tenant-1',
+          thread_key: 'development:1',
+          chat_id: 'oc-1',
+          root_message_id: 'direct',
+          message_id: 'om-card-1',
+          last_event_cursor: 0,
+          desired_version: 1,
+          render_version: 0,
+          state: 'pending',
+          initiator_principal_id: 'feishu:tenant-1:ou-user-1',
+          execution_id: 'exe_1'
+        }),
+        streamEvents: async function * () {
+          yield {
+            id: 42,
+            event: 'session.execution_failed',
+            data: { error: 'workspace preparation failed' }
+          }
+        }
+      }),
+      renderer: {
+        updateCard: async (_messageId: string, card: Parameters<FeishuRenderer['updateCard']>[1]) => {
+          renderedCard = JSON.stringify(card.card)
+          markRendered()
+        }
+      } as unknown as FeishuRenderer
+    })
+
+    await bot.reconcileDelivery('development:1')
+    await rendered
+
+    expect(renderedCard).toContain('任务失败')
+    expect(renderedCard).toContain('"template":"red"')
+    expect(renderedCard).toContain('workspace preparation failed')
+  })
+
   it('classifies a delivery write conflict without misclassifying it as selection', async () => {
     spyOn(console, 'error').mockImplementation(() => {})
     const metrics = new FeishuMetrics()
@@ -108,7 +156,7 @@ describe('Feishu bot metrics', () => {
 })
 
 function selectionApi(overrides: Record<string, unknown>): FeishuSessionApi {
-  return {
+  const api = {
     getSelection: async () => ({
       selection_flow_id: 'sel_1',
       workspace_id: 'wsp_1',
@@ -142,6 +190,10 @@ function selectionApi(overrides: Record<string, unknown>): FeishuSessionApi {
     recordDelivery: async () => ({}),
     ...overrides
   } as unknown as FeishuSessionApi
+  if (!('claimDelivery' in overrides)) {
+    api.claimDelivery = async (threadKey: string) => api.getDelivery(threadKey)
+  }
+  return api
 }
 
 function renderer(): FeishuRenderer {

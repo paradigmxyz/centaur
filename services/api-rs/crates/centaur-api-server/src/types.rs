@@ -83,6 +83,10 @@ pub struct UpdateDevelopmentSelectionRequest {
 #[serde(deny_unknown_fields)]
 pub struct CreateAddRepositorySelectionRequest {
     pub requested_by_principal_id: String,
+    #[serde(default)]
+    pub source_message_id: Option<String>,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -106,10 +110,21 @@ pub struct FeishuPrincipalQuery {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct ClaimFeishuDeliveryRequest {
+    pub expected_delivery_generation: i32,
+    pub expected_desired_version: i32,
+    pub lease_owner: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecordFeishuDeliveryRequest {
     pub message_id: String,
     pub last_event_cursor: i64,
     pub expected_desired_version: i32,
+    pub expected_delivery_generation: i32,
+    pub lease_owner: String,
+    pub render_complete: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
