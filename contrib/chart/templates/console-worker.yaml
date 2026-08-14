@@ -90,6 +90,14 @@ spec:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sDATABASE_URL" $prefix }}
+            # Slack channel catalog refresh jobs run in this worker, so it
+            # needs the same bot token as the web Console process.
+            - name: CENTAUR_CONSOLE_SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sSLACK_BOT_TOKEN" $prefix }}
+                  optional: true
             - name: IRON_CONTROL_INITIAL_USER_EMAIL
               valueFrom:
                 secretKeyRef:
