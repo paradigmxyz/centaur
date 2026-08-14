@@ -450,7 +450,7 @@ async fn metrics(State(state): State<AppState>) -> Response {
 #[derive(Clone, Copy)]
 enum RouteAccess {
     Capability(Capability),
-    PrincipalSlackProxy,
+    PrincipalOnly,
     ArchiveDownload,
 }
 
@@ -487,10 +487,7 @@ async fn authorize_api_request(
 
     let allowed = match access {
         RouteAccess::Capability(capability) => caller.has_capability(capability),
-        RouteAccess::PrincipalSlackProxy => {
-            caller.class() == CallerClass::Principal
-                && caller.has_capability(Capability::SlackProxy)
-        }
+        RouteAccess::PrincipalOnly => caller.class() == CallerClass::Principal,
         RouteAccess::ArchiveDownload => {
             caller.has_capability(Capability::AdminArchive)
                 || caller
@@ -565,7 +562,7 @@ fn route_access(method: &Method, route: &str) -> Option<RouteAccess> {
         (&Method::POST, "/api/admin/slack/archive-imports/{import_id}/download-url") => {
             Some(RouteAccess::ArchiveDownload)
         }
-        (_, route) if route.starts_with("/api/slack/") => Some(RouteAccess::PrincipalSlackProxy),
+        (_, route) if route.starts_with("/api/slack/") => Some(RouteAccess::PrincipalOnly),
         (_, route) if route.starts_with("/api/admin/slack/archive-imports") => {
             capability(Capability::AdminArchive)
         }

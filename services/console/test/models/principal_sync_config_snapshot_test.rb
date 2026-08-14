@@ -177,6 +177,9 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
       assert_equal "centaur-console", claims.fetch("iss")
       assert_equal "centaur-api", claims.fetch("aud")
       assert_equal principal.oid, claims.fetch("sub")
+      assert_equal false, claims.dig("capabilities", "sessions_read")
+      assert_equal false, claims.dig("capabilities", "workflows_read")
+      assert_equal false, claims.dig("capabilities", "workflows_write")
       assert_equal [ "C0123456789" ], claims.dig("slack", "upload_channels")
       assert_equal [ "G9876543210" ], claims.dig("slack", "download_channels")
       assert_equal [ "C0123456789" ], claims.dig("slack", "history_channels")
@@ -206,28 +209,6 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
       assert_empty claims.dig("slack", "upload_channels")
       assert_empty claims.dig("slack", "download_channels")
       assert_empty claims.dig("slack", "history_channels")
-    end
-  end
-
-  test "config_for omits api server JWT when sandbox api access is disabled" do
-    with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
-      principal = principals(:acme_channel)
-      principal.update!(
-        sandbox_api_server_enabled: false
-      )
-      SlackChannelPermission.create!(
-        principal: principal,
-        channel_id: "C0123456789",
-        upload_enabled: true
-      )
-
-      config = PrincipalSyncConfigSnapshot.config_for(principal)
-      entry = config.fetch("secrets").find do |secret|
-        secret.dig("inject", "header") == "Authorization" &&
-          secret.dig("source", "type") == "control_plane"
-      end
-
-      assert_nil entry
     end
   end
 
@@ -570,31 +551,6 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
         assert refreshed.fresh_for?(@principal)
         refute_equal original_token, refreshed_token
         refute_equal original_hash, proxy.reload.sync_config_snapshot.fetch(:config_hash)
-      end
-    end
-  end
-
-  test "fetch_for does not rebuild api server JWT snapshots when sandbox api access is disabled" do
-    with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
-      @principal.update!(
-        sandbox_api_server_enabled: false
-      )
-      SlackChannelPermission.create!(
-        principal: @principal,
-        channel_id: "C0123456789",
-        upload_enabled: true
-      )
-      boundary = 1_700_001_000 + ApiServer::Jwt.rotation_offset(@principal)
-      current_time = Time.zone.at(boundary + 60)
-      previous_window_time = Time.zone.at(boundary - 60)
-
-      snapshot = PrincipalSyncConfigSnapshot.fetch_for(@principal)
-      snapshot.update_columns(updated_at: previous_window_time)
-
-      travel_to current_time do
-        assert_no_changes -> { snapshot.reload.updated_at } do
-          assert_equal snapshot, PrincipalSyncConfigSnapshot.fetch_for(@principal)
-        end
       end
     end
   end

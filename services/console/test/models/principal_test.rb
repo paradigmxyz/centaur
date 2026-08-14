@@ -181,13 +181,15 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_equal({ Principal::SANDBOX_REPO_CACHE_LABEL => "all" }, principal.reload.labels)
   end
 
-  test "sandbox access defaults to enabled" do
+  test "API sandbox access defaults to disabled" do
     principal = Principal.create!(default_attrs(foreign_id: "C-default-sandbox-access"))
     principal.reload
 
     assert_equal "all", principal.sandbox_repo_cache
     assert_predicate principal, :sandbox_observability_enabled
-    assert_predicate principal, :sandbox_api_server_enabled
+    assert_not principal.sandbox_sessions_read_enabled
+    assert_not principal.sandbox_workflows_read_enabled
+    assert_not principal.sandbox_workflows_write_enabled
   end
 
   test "new principals with no roles receive all configured defaults" do
@@ -499,6 +501,19 @@ class PrincipalTest < ActiveSupport::TestCase
       slack_user_id: "U0123456789",
       slack_team_id: "T0123456789",
       slack_email: "a@example.com"
+    )
+
+    assert_equal previous_version + 1, principal.reload.sync_config_cache_version
+  end
+
+  test "API JWT capability changes invalidate the sync config cache" do
+    principal = principals(:acme_channel)
+    previous_version = principal.sync_config_cache_version
+
+    principal.update!(
+      sandbox_sessions_read_enabled: true,
+      sandbox_workflows_read_enabled: true,
+      sandbox_workflows_write_enabled: true
     )
 
     assert_equal previous_version + 1, principal.reload.sync_config_cache_version

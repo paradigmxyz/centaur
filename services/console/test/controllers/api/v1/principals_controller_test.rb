@@ -54,7 +54,9 @@ module Api
         assert_equal "all", data["sandbox_repo_cache"]
         assert_not data.key?("sandbox_repo_cache_enabled")
         assert_equal true, data["sandbox_observability_enabled"]
-        assert_equal true, data["sandbox_api_server_enabled"]
+        assert_equal false, data["sandbox_sessions_read_enabled"]
+        assert_equal false, data["sandbox_workflows_read_enabled"]
+        assert_equal false, data["sandbox_workflows_write_enabled"]
       end
 
       test "GET returns 404 for an unknown oid" do
@@ -115,7 +117,9 @@ module Api
         assert_equal "all", data["sandbox_repo_cache"]
         assert_not data.key?("sandbox_repo_cache_enabled")
         assert_equal true, data["sandbox_observability_enabled"]
-        assert_equal true, data["sandbox_api_server_enabled"]
+        assert_equal false, data["sandbox_sessions_read_enabled"]
+        assert_equal false, data["sandbox_workflows_read_enabled"]
+        assert_equal false, data["sandbox_workflows_write_enabled"]
       end
 
       test "POST preserves a label named namespace" do
@@ -138,7 +142,9 @@ module Api
         system_settings(:default).update!(
           default_sandbox_repo_cache: "public",
           default_sandbox_observability_enabled: false,
-          default_sandbox_api_server_enabled: false
+          default_sandbox_sessions_read_enabled: true,
+          default_sandbox_workflows_read_enabled: true,
+          default_sandbox_workflows_write_enabled: true
         )
         body = {
           data: {
@@ -152,7 +158,9 @@ module Api
         data = json_body.fetch("data")
         assert_equal "public", data["sandbox_repo_cache"]
         assert_equal false, data["sandbox_observability_enabled"]
-        assert_equal false, data["sandbox_api_server_enabled"]
+        assert_equal true, data["sandbox_sessions_read_enabled"]
+        assert_equal true, data["sandbox_workflows_read_enabled"]
+        assert_equal true, data["sandbox_workflows_write_enabled"]
       end
 
       test "POST applies all configured default roles" do
@@ -173,14 +181,18 @@ module Api
         system_settings(:default).update!(
           default_sandbox_repo_cache: "none",
           default_sandbox_observability_enabled: false,
-          default_sandbox_api_server_enabled: false
+          default_sandbox_sessions_read_enabled: false,
+          default_sandbox_workflows_read_enabled: false,
+          default_sandbox_workflows_write_enabled: false
         )
         body = {
           data: {
             foreign_id: "U-explicit-capabilities",
             sandbox_repo_cache: "all",
             sandbox_observability_enabled: true,
-            sandbox_api_server_enabled: true
+            sandbox_sessions_read_enabled: true,
+            sandbox_workflows_read_enabled: true,
+            sandbox_workflows_write_enabled: true
           }
         }
 
@@ -190,7 +202,9 @@ module Api
         data = json_body.fetch("data")
         assert_equal "all", data["sandbox_repo_cache"]
         assert_equal true, data["sandbox_observability_enabled"]
-        assert_equal true, data["sandbox_api_server_enabled"]
+        assert_equal true, data["sandbox_sessions_read_enabled"]
+        assert_equal true, data["sandbox_workflows_read_enabled"]
+        assert_equal true, data["sandbox_workflows_write_enabled"]
       end
 
       test "POST overwrites explicit repo-cache label with system default" do
@@ -252,7 +266,9 @@ module Api
         principal.update!(
           sandbox_repo_cache: "none",
           sandbox_observability_enabled: false,
-          sandbox_api_server_enabled: false
+          sandbox_sessions_read_enabled: false,
+          sandbox_workflows_read_enabled: false,
+          sandbox_workflows_write_enabled: false
         )
         body = { data: { name: "Acme Slack channel" } }
 
@@ -263,7 +279,9 @@ module Api
         assert_equal "Acme Slack channel", principal.name
         assert_equal "none", principal.sandbox_repo_cache
         assert_equal false, principal.sandbox_observability_enabled
-        assert_equal false, principal.sandbox_api_server_enabled
+        assert_equal false, principal.sandbox_sessions_read_enabled
+        assert_equal false, principal.sandbox_workflows_read_enabled
+        assert_equal false, principal.sandbox_workflows_write_enabled
       end
 
       test "PUT updates sandbox access flags" do
@@ -272,7 +290,9 @@ module Api
           data: {
             sandbox_repo_cache: "public",
             sandbox_observability_enabled: false,
-            sandbox_api_server_enabled: false
+            sandbox_sessions_read_enabled: false,
+            sandbox_workflows_read_enabled: false,
+            sandbox_workflows_write_enabled: false
           }
         }
 
@@ -282,13 +302,17 @@ module Api
         principal.reload
         assert_equal "public", principal.sandbox_repo_cache
         assert_equal false, principal.sandbox_observability_enabled
-        assert_equal false, principal.sandbox_api_server_enabled
+        assert_equal false, principal.sandbox_sessions_read_enabled
+        assert_equal false, principal.sandbox_workflows_read_enabled
+        assert_equal false, principal.sandbox_workflows_write_enabled
 
         data = json_body.fetch("data")
         assert_equal "public", data["sandbox_repo_cache"]
         assert_not data.key?("sandbox_repo_cache_enabled")
         assert_equal false, data["sandbox_observability_enabled"]
-        assert_equal false, data["sandbox_api_server_enabled"]
+        assert_equal false, data["sandbox_sessions_read_enabled"]
+        assert_equal false, data["sandbox_workflows_read_enabled"]
+        assert_equal false, data["sandbox_workflows_write_enabled"]
       end
 
       test "POST returns 422 when foreign_id already exists" do
@@ -1001,7 +1025,9 @@ module Api
         system_settings(:default).update!(
           default_sandbox_repo_cache: "public",
           default_sandbox_observability_enabled: false,
-          default_sandbox_api_server_enabled: false
+          default_sandbox_sessions_read_enabled: false,
+          default_sandbox_workflows_read_enabled: false,
+          default_sandbox_workflows_write_enabled: false
         )
         body = { data: { name: "Upserted" } }
         assert_difference -> { Principal.count } => 1 do
@@ -1014,7 +1040,9 @@ module Api
         assert_equal "Upserted", data["name"]
         assert_equal "public", data["sandbox_repo_cache"]
         assert_equal false, data["sandbox_observability_enabled"]
-        assert_equal false, data["sandbox_api_server_enabled"]
+        assert_equal false, data["sandbox_sessions_read_enabled"]
+        assert_equal false, data["sandbox_workflows_read_enabled"]
+        assert_equal false, data["sandbox_workflows_write_enabled"]
       end
 
       test "PUT by foreign_id updates an existing principal without creating" do

@@ -20,7 +20,6 @@ const STATIC_ADMIN_IDENTITY: &str = "api-rs-admin";
 pub(crate) enum Capability {
     SessionsRead,
     SessionsWrite,
-    SlackProxy,
     SandboxesDrain,
     WorkflowsRead,
     WorkflowsWrite,
@@ -30,10 +29,9 @@ pub(crate) enum Capability {
 }
 
 impl Capability {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 8] = [
         Self::SessionsRead,
         Self::SessionsWrite,
-        Self::SlackProxy,
         Self::SandboxesDrain,
         Self::WorkflowsRead,
         Self::WorkflowsWrite,
@@ -255,13 +253,35 @@ impl ApiAuthConfig {
             Some(ApiJwtTokenUse::ConsoleService) => Err(ApiError::Unauthorized(
                 "invalid Console service token subject".to_owned(),
             )),
-            None => Ok(AuthenticatedCaller {
-                class: CallerClass::Principal,
-                identity: subject.clone(),
-                capabilities: BTreeSet::from([Capability::SessionsRead, Capability::SlackProxy]),
-                platform_prefix: None,
-                principal_subject: Some(subject),
-            }),
+            None => {
+                let mut capabilities = BTreeSet::new();
+                match claims.capabilities {
+                    Some(jwt_capabilities) => {
+                        if jwt_capabilities.sessions_read {
+                            capabilities.insert(Capability::SessionsRead);
+                        }
+                        if jwt_capabilities.workflows_read {
+                            capabilities.insert(Capability::WorkflowsRead);
+                        }
+                        if jwt_capabilities.workflows_write {
+                            capabilities.insert(Capability::WorkflowsWrite);
+                        }
+                    }
+                    // Tokens minted before capability claims were deployed had
+                    // session read access. Preserve that access during rolling
+                    // upgrades; new tokens always carry the explicit object.
+                    None => {
+                        capabilities.insert(Capability::SessionsRead);
+                    }
+                }
+                Ok(AuthenticatedCaller {
+                    class: CallerClass::Principal,
+                    identity: subject.clone(),
+                    capabilities,
+                    platform_prefix: None,
+                    principal_subject: Some(subject),
+                })
+            }
         }
     }
 }
@@ -278,6 +298,17 @@ pub enum ApiAuthConfigError {
 struct ApiJwtClaims {
     sub: String,
     token_use: Option<ApiJwtTokenUse>,
+    capabilities: Option<ApiJwtCapabilities>,
+}
+
+#[derive(Deserialize)]
+struct ApiJwtCapabilities {
+    #[serde(default)]
+    sessions_read: bool,
+    #[serde(default)]
+    workflows_read: bool,
+    #[serde(default)]
+    workflows_write: bool,
 }
 
 #[derive(Deserialize)]
@@ -430,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn authenticates_principal_jwt_with_limited_capabilities() {
+    fn authenticates_legacy_principal_jwt_with_session_read_capability() {
         let auth = ApiAuthConfig::testing("jwt-secret");
         let token = encode(
             &Header::new(Algorithm::HS256),
@@ -454,6 +485,38 @@ mod tests {
         assert_eq!(caller.principal_subject(), Some("prn_test"));
         assert!(caller.has_capability(Capability::SessionsRead));
         assert!(!caller.has_capability(Capability::SessionsWrite));
+    }
+
+    #[test]
+    fn authenticates_principal_jwt_with_explicit_capabilities() {
+        let auth = ApiAuthConfig::testing("jwt-secret");
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &json!({
+                "iss": "centaur-console",
+                "sub": "prn_test",
+                "aud": "centaur-api",
+                "iat": 1_700_000_000i64,
+                "exp": 4_102_444_800i64,
+                "capabilities": {
+                    "sessions_read": false,
+                    "workflows_read": true,
+                    "workflows_write": true,
+                },
+            }),
+            &EncodingKey::from_secret(b"jwt-secret"),
+        )
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+
+        let caller = auth.authenticate(&headers).unwrap();
+        assert!(!caller.has_capability(Capability::SessionsRead));
+        assert!(caller.has_capability(Capability::WorkflowsRead));
+        assert!(caller.has_capability(Capability::WorkflowsWrite));
     }
 
     #[test]

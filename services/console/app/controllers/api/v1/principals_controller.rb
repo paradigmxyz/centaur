@@ -86,7 +86,9 @@ module Api
           effective_slack_channel_permissions: principal.effective_slack_channel_permissions_payload,
           sandbox_repo_cache: principal.sandbox_repo_cache,
           sandbox_observability_enabled: principal.sandbox_observability_enabled,
-          sandbox_api_server_enabled: principal.sandbox_api_server_enabled,
+          sandbox_sessions_read_enabled: principal.sandbox_sessions_read_enabled,
+          sandbox_workflows_read_enabled: principal.sandbox_workflows_read_enabled,
+          sandbox_workflows_write_enabled: principal.sandbox_workflows_write_enabled,
           created_at: principal.created_at,
           updated_at: principal.updated_at
         }
@@ -103,7 +105,9 @@ module Api
           :console_user_id,
           :sandbox_repo_cache,
           :sandbox_observability_enabled,
-          :sandbox_api_server_enabled,
+          :sandbox_sessions_read_enabled,
+          :sandbox_workflows_read_enabled,
+          :sandbox_workflows_write_enabled,
           labels: {}
         )
       end

@@ -71,14 +71,36 @@
         </span>
       </label>
       <label class="flex items-start gap-3">
-        <%= hidden_field_tag :sandbox_api_server_enabled, "0" %>
-        <%= check_box_tag :sandbox_api_server_enabled,
+        <%= hidden_field_tag :sandbox_sessions_read_enabled, "0" %>
+        <%= check_box_tag :sandbox_sessions_read_enabled,
                           "1",
-                          @principal.sandbox_api_server_enabled,
+                          @principal.sandbox_sessions_read_enabled,
                           class: checkbox_class %>
         <span>
-          <span class="block text-sm font-medium text-zinc-100">API server</span>
-          <span class="block text-xs text-zinc-500">Allow sandbox access to the api-rs control plane.</span>
+          <span class="block text-sm font-medium text-zinc-100">Read sessions</span>
+          <span class="block text-xs text-zinc-500">Allow sandbox API tokens to read sessions and session events.</span>
+        </span>
+      </label>
+      <label class="flex items-start gap-3">
+        <%= hidden_field_tag :sandbox_workflows_read_enabled, "0" %>
+        <%= check_box_tag :sandbox_workflows_read_enabled,
+                          "1",
+                          @principal.sandbox_workflows_read_enabled,
+                          class: checkbox_class %>
+        <span>
+          <span class="block text-sm font-medium text-zinc-100">Read workflows</span>
+          <span class="block text-xs text-zinc-500">Allow sandbox API tokens to list workflow schedules and inspect runs.</span>
+        </span>
+      </label>
+      <label class="flex items-start gap-3">
+        <%= hidden_field_tag :sandbox_workflows_write_enabled, "0" %>
+        <%= check_box_tag :sandbox_workflows_write_enabled,
+                          "1",
+                          @principal.sandbox_workflows_write_enabled,
+                          class: checkbox_class %>
+        <span>
+          <span class="block text-sm font-medium text-zinc-100">Write workflows</span>
+          <span class="block text-xs text-zinc-500">Allow sandbox API tokens to create and cancel workflow runs.</span>
         </span>
       </label>
       <div>

@@ -136,8 +136,14 @@ class Principal < ApplicationRecord
     unless supplied_key?(supplied, :sandbox_observability_enabled)
       self.sandbox_observability_enabled = defaults[:sandbox_observability_enabled]
     end
-    unless supplied_key?(supplied, :sandbox_api_server_enabled)
-      self.sandbox_api_server_enabled = defaults[:sandbox_api_server_enabled]
+    unless supplied_key?(supplied, :sandbox_sessions_read_enabled)
+      self.sandbox_sessions_read_enabled = defaults[:sandbox_sessions_read_enabled]
+    end
+    unless supplied_key?(supplied, :sandbox_workflows_read_enabled)
+      self.sandbox_workflows_read_enabled = defaults[:sandbox_workflows_read_enabled]
+    end
+    unless supplied_key?(supplied, :sandbox_workflows_write_enabled)
+      self.sandbox_workflows_write_enabled = defaults[:sandbox_workflows_write_enabled]
     end
   end
 
@@ -364,8 +370,8 @@ class Principal < ApplicationRecord
 
   def sync_config_fields_changed?
     %w[
-      name labels sandbox_api_server_enabled kind slack_user_id slack_channel_id slack_team_id slack_email
-      console_user_id
+      name labels sandbox_sessions_read_enabled sandbox_workflows_read_enabled
+      sandbox_workflows_write_enabled kind slack_user_id slack_channel_id slack_team_id slack_email console_user_id
     ].any? do |field|
       previous_changes.key?(field)
     end

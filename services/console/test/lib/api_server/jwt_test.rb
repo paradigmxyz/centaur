@@ -1,6 +1,28 @@
 require "test_helper"
 
 class ApiServerJwtTest < ActiveSupport::TestCase
+  test "Principal token materializes sandbox API capabilities" do
+    principal = principals(:acme_channel)
+    principal.update!(
+      sandbox_sessions_read_enabled: false,
+      sandbox_workflows_read_enabled: true,
+      sandbox_workflows_write_enabled: true
+    )
+
+    with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
+      claims = CentaurJwt::Hs256.decode(
+        ApiServer::Jwt.encode_for_principal(principal),
+        signing_secret: "test-secret",
+        iss: ApiServer::Jwt::DEFAULT_ISSUER,
+        aud: ApiServer::Jwt::DEFAULT_AUDIENCE
+      )
+
+      assert_equal false, claims.dig("capabilities", "sessions_read")
+      assert_equal true, claims.dig("capabilities", "workflows_read")
+      assert_equal true, claims.dig("capabilities", "workflows_write")
+    end
+  end
+
   test "Console service token is purpose bound and short lived" do
     now = Time.current
 

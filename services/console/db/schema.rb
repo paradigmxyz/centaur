@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_08_13_212224) do
+ActiveRecord::Schema[8.1].define(version: 2026_08_14_180000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
   enable_extension "pg_search"
@@ -308,6 +308,9 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_13_212224) do
     t.boolean "sandbox_api_server_enabled", default: true, null: false
     t.boolean "sandbox_observability_enabled", default: true, null: false
     t.string "sandbox_repo_cache", default: "all", null: false
+    t.boolean "sandbox_sessions_read_enabled", default: false, null: false
+    t.boolean "sandbox_workflows_read_enabled", default: false, null: false
+    t.boolean "sandbox_workflows_write_enabled", default: false, null: false
     t.string "slack_channel_id"
     t.string "slack_email"
     t.string "slack_team_id"
@@ -469,6 +472,9 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_13_212224) do
     t.boolean "default_sandbox_api_server_enabled", default: true, null: false
     t.boolean "default_sandbox_observability_enabled", default: true, null: false
     t.string "default_sandbox_repo_cache", default: "all", null: false
+    t.boolean "default_sandbox_sessions_read_enabled", default: false, null: false
+    t.boolean "default_sandbox_workflows_read_enabled", default: false, null: false
+    t.boolean "default_sandbox_workflows_write_enabled", default: false, null: false
     t.boolean "singleton", default: true, null: false
     t.datetime "updated_at", null: false
     t.index ["singleton"], name: "index_system_settings_on_singleton", unique: true

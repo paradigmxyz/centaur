@@ -38,7 +38,9 @@ module Console
       @principal.update!(
         sandbox_repo_cache: params[:sandbox_repo_cache],
         sandbox_observability_enabled: ActiveModel::Type::Boolean.new.cast(params[:sandbox_observability_enabled]),
-        sandbox_api_server_enabled: ActiveModel::Type::Boolean.new.cast(params[:sandbox_api_server_enabled])
+        sandbox_sessions_read_enabled: ActiveModel::Type::Boolean.new.cast(params[:sandbox_sessions_read_enabled]),
+        sandbox_workflows_read_enabled: ActiveModel::Type::Boolean.new.cast(params[:sandbox_workflows_read_enabled]),
+        sandbox_workflows_write_enabled: ActiveModel::Type::Boolean.new.cast(params[:sandbox_workflows_write_enabled])
       )
       redirect_to console_principal_path(@principal.oid), notice: "Updated sandbox access."
     rescue ActiveRecord::RecordInvalid => e
