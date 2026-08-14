@@ -132,6 +132,38 @@ class Api::V1::SandboxSkillsControllerTest < ActionDispatch::IntegrationTest
     assert_not_nil skill.reload.archived_at
   end
 
+  test "editor principal reads and updates a private skill but cannot archive it" do
+    skill = skills(:other_private)
+    skill.editors << users(:member_user)
+
+    with_token(@member_proxy) do |headers|
+      get "/api/v1/sandbox/skills/#{skill.oid}", headers: headers
+    end
+    assert_response :ok
+
+    with_token(@member_proxy) do |headers|
+      patch "/api/v1/sandbox/skills/#{skill.oid}",
+            params: {
+              data: {
+                name: skill.name,
+                description: "Updated by a collaborator.",
+                instructions: skill.content,
+                lock_version: skill.lock_version
+              }
+            },
+            headers: headers,
+            as: :json
+    end
+    assert_response :ok
+    assert_equal "Updated by a collaborator.", skill.reload.description
+
+    with_token(@member_proxy) do |headers|
+      delete "/api/v1/sandbox/skills/#{skill.oid}", headers: headers
+    end
+    assert_response :not_found
+    assert_nil skill.reload.archived_at
+  end
+
   test "non-user principal cannot mutate skills" do
     assert_no_difference("Skill.count") do
       with_token(@channel_proxy) do |headers|

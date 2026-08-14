@@ -9,15 +9,24 @@ class Skill < ApplicationRecord
   RESERVED_NAMES = %w[search].freeze
 
   belongs_to :user
+  has_many :skill_editors, dependent: :destroy
+  has_many :editors, through: :skill_editors, source: :user
 
   enum :visibility, { private: "private", shared: "shared" },
        default: :shared, validate: true, prefix: true
 
   scope :active, -> { where(archived_at: nil) }
   scope :shared, -> { where(visibility: "shared") }
+  scope :editable_by, lambda { |user|
+    return none unless user
+
+    active.where(user: user).or(
+      active.where(id: SkillEditor.where(user: user).select(:skill_id))
+    )
+  }
   scope :catalog_visible_to, lambda { |user|
     shared_scope = active.shared
-    user ? shared_scope.or(active.where(user: user)) : shared_scope
+    user ? shared_scope.or(editable_by(user)) : shared_scope
   }
 
   normalizes :name, :description, with: ->(value) { value.to_s.strip }
@@ -64,6 +73,10 @@ class Skill < ApplicationRecord
 
   def shared?
     visibility_shared?
+  end
+
+  def editable_by?(candidate)
+    candidate && (user_id == candidate.id || editors.exists?(candidate.id))
   end
 
   def unshare!

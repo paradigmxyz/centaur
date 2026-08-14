@@ -1446,7 +1446,7 @@ Console stores and validates `name`, `description`, and Markdown `instructions` 
 
 ### Sandbox Operations
 
-These endpoints use the existing sandbox entitlement JWT injected by `iron-proxy`. Principals linked to an active Console user can see that user's private skills and every public skill. Other principals can see public skills only. Mutations require an active Console user linked to the sandbox principal and can change only that user's skills.
+These endpoints use the existing sandbox entitlement JWT injected by `iron-proxy`. Principals linked to an active Console user can see that user's private skills, private skills they have been added to as an editor, and every public skill. Other principals can see public skills only. Mutations require an active Console user linked to the sandbox principal. Owners can perform every mutation on their skills, while editors can update skill content but cannot share, unshare, or archive the skill.
 
 | Method | Path | Notes |
 | ------ | ---- | ----- |
@@ -1454,7 +1454,7 @@ These endpoints use the existing sandbox entitlement JWT injected by `iron-proxy
 | `GET` | `/api/v1/sandbox/skills/search?q=...` | Full-text search visible skills. |
 | `GET` | `/api/v1/sandbox/skills/:id` | Read a visible skill by its exact name or `skl_...` OID. |
 | `POST` | `/api/v1/sandbox/skills` | Create a public skill from `data.name`, `data.description`, and `data.instructions`. |
-| `PUT`/`PATCH` | `/api/v1/sandbox/skills/:id` | Update an owned skill using those fields; optional `data.lock_version` detects concurrent edits. |
+| `PUT`/`PATCH` | `/api/v1/sandbox/skills/:id` | Update an owned or editable skill using those fields; optional `data.lock_version` detects concurrent edits. |
 | `DELETE` | `/api/v1/sandbox/skills/:id` | Archive an owned skill. |
 | `POST` | `/api/v1/sandbox/skills/:id/share` | Make an owned skill public. |
 | `POST` | `/api/v1/sandbox/skills/:id/unshare` | Make an owned skill private. |

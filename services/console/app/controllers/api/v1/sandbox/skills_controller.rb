@@ -31,7 +31,7 @@ module Api
         end
 
         def update
-          skill = owned_skill
+          skill = editable_skill
           skill.update!(skill_params)
           render json: { data: author_payload(skill) }
         end
@@ -82,6 +82,10 @@ module Api
 
         def owned_skill
           authoring_user.skills.active.find_by_oid!(params[:id])
+        end
+
+        def editable_skill
+          Skill.editable_by(authoring_user).find_by_oid!(params[:id])
         end
 
         def skill_params
