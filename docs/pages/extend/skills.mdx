@@ -99,13 +99,16 @@ centaur-skills create deployment-checks \
 centaur-skills edit skl_example \
   --description "Check and diagnose deployments." \
   --instructions-file updated-instructions.md
+centaur-skills delete skl_example
 ```
 
 Use `--instructions` instead of `--instructions-file` for a short inline
 Markdown body. `edit` accepts partial changes and targets skills by OID. Pass
 the current `lock_version` with `--lock-version` when an edit should fail if
 another writer changed the skill first. Newly created skills are public and
-edits to public skills are visible to agents immediately.
+edits to public skills are visible to agents immediately. `delete` archives an
+owned skill by OID, removing it from the active catalog without deleting its
+stored record.
 
 ## Verify Builtin Skills
 

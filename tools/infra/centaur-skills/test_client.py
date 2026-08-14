@@ -2,7 +2,17 @@ import json
 
 import httpx
 import pytest
-from cli import add_editor, create, edit, editors, list_skills, read, remove_editor, search
+from cli import (
+    add_editor,
+    create,
+    delete,
+    edit,
+    editors,
+    list_skills,
+    read,
+    remove_editor,
+    search,
+)
 from client import SANDBOX_SKILLS_PATH, SkillsClient
 
 
@@ -134,6 +144,17 @@ def test_edit_patches_only_provided_fields_with_lock_version():
 def test_edit_requires_a_field():
     with pytest.raises(ValueError, match="at least one skill field"):
         make_client(lambda _request: json_response({})).edit("skl_123")
+
+
+def test_delete_archives_skill_by_oid():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "DELETE"
+        assert request.url.path == f"{SANDBOX_SKILLS_PATH}/skl_123"
+        return httpx.Response(204)
+
+    result = make_client(handler).delete("skl_123")
+
+    assert result is None
 
 
 def test_list_add_and_remove_editors_use_editor_endpoint():
@@ -305,6 +326,26 @@ def test_cli_edit_sends_partial_fields(monkeypatch, capsys):
             "description": "Updated guidance.",
             "lock_version": 3,
         }
+    }
+
+
+def test_cli_delete_archives_skill(monkeypatch, capsys):
+    class StubClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def delete(self, identifier):
+            assert identifier == "skl_123"
+
+    monkeypatch.setattr("cli.get_client", StubClient)
+
+    delete("skl_123")
+
+    assert json.loads(capsys.readouterr().out) == {
+        "data": {"id": "skl_123", "archived": True}
     }
 
 

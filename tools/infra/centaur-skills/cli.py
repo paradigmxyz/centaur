@@ -134,6 +134,16 @@ def edit(
     print(json.dumps({"data": result}, indent=2, default=str))
 
 
+@app.command("delete")
+def delete(
+    identifier: str = typer.Argument(..., help="OID of an owned skill"),
+) -> None:
+    """Archive an owned Console-authored skill."""
+    with get_client() as client:
+        client.delete(identifier)
+    print(json.dumps({"data": {"id": identifier, "archived": True}}, indent=2))
+
+
 @app.command("editors")
 def editors(
     identifier: str = typer.Argument(..., help="Visible skill name or OID"),

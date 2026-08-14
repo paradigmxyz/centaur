@@ -133,6 +133,13 @@ class SkillsClient:
             raise RuntimeError("centaur-skills response did not include a data object")
         return result
 
+    def delete(self, identifier: str) -> None:
+        """Archive an owned Console skill by OID."""
+        self._request(
+            f"{SANDBOX_SKILLS_PATH}/{quote(identifier, safe='')}",
+            method="DELETE",
+        )
+
     def list_editors(self, identifier: str) -> dict[str, Any]:
         """List editors for a visible Console skill by exact name or OID."""
         result = self._request(
@@ -170,7 +177,7 @@ class SkillsClient:
         method: str = "GET",
         params: dict[str, str | int] | None = None,
         json: dict[str, Any] | None = None,
-    ) -> dict[str, Any] | list[dict[str, Any]]:
+    ) -> dict[str, Any] | list[dict[str, Any]] | None:
         try:
             response = self.client.request(method, path, params=params, json=json)
             response.raise_for_status()
@@ -179,6 +186,9 @@ class SkillsClient:
             raise RuntimeError(f"centaur-skills request failed: {detail}") from exc
         except httpx.RequestError as exc:
             raise RuntimeError(f"centaur-skills request failed: {exc}") from exc
+
+        if not response.content:
+            return None
 
         payload = response.json()
         data = payload.get("data")
