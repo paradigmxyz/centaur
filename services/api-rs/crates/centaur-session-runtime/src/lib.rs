@@ -1807,10 +1807,32 @@ impl SessionRuntime {
         thread_key: &ThreadKey,
         input: ExecuteSessionInput,
     ) -> Result<SessionExecution, SessionRuntimeError> {
+        self.execute_session_impl(thread_key, input, None).await
+    }
+
+    async fn drive_session_execution(
+        &self,
+        thread_key: &ThreadKey,
+        execution_id: &str,
+        input: ExecuteSessionInput,
+    ) -> Result<SessionExecution, SessionRuntimeError> {
+        self.execute_session_impl(thread_key, input, Some(execution_id))
+            .await
+    }
+
+    async fn execute_session_impl(
+        &self,
+        thread_key: &ThreadKey,
+        input: ExecuteSessionInput,
+        persisted_execution_id: Option<&str>,
+    ) -> Result<SessionExecution, SessionRuntimeError> {
         if self.shutting_down.load(Ordering::SeqCst) {
             return Err(SessionRuntimeError::ShuttingDown);
         }
-        let persisted_request = persisted_execute_request(&input)?;
+        let persisted_request = persisted_execution_id
+            .is_none()
+            .then(|| persisted_execute_request(&input))
+            .transpose()?;
         let ExecuteSessionInput {
             idempotency_key,
             metadata,
@@ -1854,36 +1876,47 @@ impl SessionRuntime {
             let (idle_timeout, max_duration) = duration_options(idle_timeout_ms, max_duration_ms)?;
             let requester_metadata = metadata.clone();
 
-            let execution = self
-                .store
-                .create_execution_with_request(
-                    thread_key,
-                    idempotency_key.as_deref(),
-                    execution_metadata(metadata, idle_timeout_ms, max_duration_ms),
-                    persisted_request,
-                )
-                .await?;
-            span.record(
-                "centaur.execution_id",
-                execution.execution.execution_id.as_str(),
-            );
-            span.record("execution_id", execution.execution.execution_id.as_str());
-            if !execution.created && execution.execution.status != ExecutionStatus::Queued {
-                info!(
-                    component = COMPONENT_SESSION_RUNTIME,
-                    event = "session_execute_idempotent_replay",
-                    thread_key = %thread_key,
-                    execution_id = %execution.execution.execution_id,
-                    status = %execution.execution.status,
-                    "returning existing execution"
+            let claim = if let Some(execution_id) = persisted_execution_id {
+                span.record("centaur.execution_id", execution_id);
+                span.record("execution_id", execution_id);
+                self.store.mark_execution_running(execution_id).await?
+            } else {
+                let execution = self
+                    .store
+                    .create_execution_with_request(
+                        thread_key,
+                        idempotency_key.as_deref(),
+                        execution_metadata(metadata, idle_timeout_ms, max_duration_ms),
+                        persisted_request.expect("new executions have a persisted request"),
+                    )
+                    .await?;
+                span.record(
+                    "centaur.execution_id",
+                    execution.execution.execution_id.as_str(),
                 );
-                return Ok(execution.execution);
-            }
-            let claim = self
-                .store
-                .mark_execution_running(&execution.execution.execution_id)
-                .await?;
+                span.record("execution_id", execution.execution.execution_id.as_str());
+                if !execution.created && execution.execution.status != ExecutionStatus::Queued {
+                    info!(
+                        component = COMPONENT_SESSION_RUNTIME,
+                        event = "session_execute_idempotent_replay",
+                        thread_key = %thread_key,
+                        execution_id = %execution.execution.execution_id,
+                        status = %execution.execution.status,
+                        "returning existing execution"
+                    );
+                    return Ok(execution.execution);
+                }
+                self.store
+                    .mark_execution_running(&execution.execution.execution_id)
+                    .await?
+            };
             let execution = claim.execution;
+            if execution.thread_key != *thread_key {
+                return Err(SessionRuntimeError::BadRequest(format!(
+                    "execution {} belongs to thread {}, not {}",
+                    execution.execution_id, execution.thread_key, thread_key
+                )));
+            }
             span.record("centaur.execution_id", execution.execution_id.as_str());
             span.record("execution_id", execution.execution_id.as_str());
             if !claim.claimed {
@@ -2082,24 +2115,11 @@ impl SessionRuntime {
                 self.load_persisted_execute_request(&execution.execution.execution_id)
                     .await?
             };
-            let runtime = self.clone();
-            let queued_thread_key = thread_key.clone();
-            let queued_execution_id = execution.execution.execution_id.clone();
-            tokio::spawn(async move {
-                if let Err(error) = runtime
-                    .execute_session(&queued_thread_key, persisted_input)
-                    .await
-                {
-                    warn!(
-                        component = COMPONENT_SESSION_RUNTIME,
-                        event = "session_execute_dispatch_failed",
-                        thread_key = %queued_thread_key,
-                        execution_id = queued_execution_id,
-                        %error,
-                        "failed to dispatch queued session execution"
-                    );
-                }
-            });
+            self.spawn_session_execution(
+                thread_key.clone(),
+                execution.execution.execution_id.clone(),
+                persisted_input,
+            );
         }
 
         info!(
@@ -2114,16 +2134,36 @@ impl SessionRuntime {
         Ok(execution.execution)
     }
 
+    fn spawn_session_execution(
+        &self,
+        thread_key: ThreadKey,
+        execution_id: String,
+        input: ExecuteSessionInput,
+    ) {
+        let runtime = self.clone();
+        tokio::spawn(async move {
+            if let Err(error) = runtime
+                .drive_session_execution(&thread_key, &execution_id, input)
+                .await
+            {
+                warn!(
+                    component = COMPONENT_SESSION_RUNTIME,
+                    event = "session_execute_dispatch_failed",
+                    thread_key = %thread_key,
+                    execution_id,
+                    %error,
+                    "failed to dispatch queued session execution"
+                );
+            }
+        });
+    }
+
     async fn load_persisted_execute_request(
         &self,
         execution_id: &str,
     ) -> Result<ExecuteSessionInput, SessionRuntimeError> {
         let request = self.store.execution_request(execution_id).await?;
-        serde_json::from_value(request).map_err(|error| {
-            SessionRuntimeError::BadRequest(format!(
-                "execution {execution_id} has an invalid persisted request: {error}"
-            ))
-        })
+        deserialize_persisted_execute_request(execution_id, request)
     }
 
     async fn record_execution_failure(
@@ -3106,10 +3146,11 @@ impl SessionRuntime {
         });
     }
 
-    /// One pass over all active executions. Queued requests can always be
-    /// claimed and replayed from durable input. `pre_sandbox_grace` only
-    /// protects a running row that has not finished sandbox assignment;
-    /// `None` is only correct when no re-scan will follow.
+    /// One pass over all active executions. Queued requests with persisted
+    /// input can be claimed and replayed immediately. `pre_sandbox_grace`
+    /// protects running rows awaiting sandbox assignment and legacy queued
+    /// rows that predate durable requests; `None` is only correct when no
+    /// re-scan will follow.
     async fn run_orphan_adoption_scan(
         &self,
         state: &mut OrphanAdoptionState,
@@ -3238,7 +3279,37 @@ impl SessionRuntime {
         if execution.status == ExecutionStatus::Queued {
             // mark_execution_running is an atomic claim, so a periodic scan
             // can safely race the accepting process without double delivery.
-            let input = match self.load_persisted_execute_request(execution_id).await {
+            let request = match self.store.execution_request(execution_id).await {
+                Ok(request) => request,
+                Err(error) => {
+                    self.fail_orphaned_execution(
+                        thread_key,
+                        execution_id,
+                        "",
+                        &format!("queued request could not be recovered: {error}"),
+                    )
+                    .await;
+                    return Ok(OrphanAdoption::Failed);
+                }
+            };
+            let request_is_empty = request.as_object().is_some_and(serde_json::Map::is_empty);
+            if request_is_empty {
+                let age = SystemTime::now()
+                    .duration_since(SystemTime::from(execution.created_at))
+                    .unwrap_or_default();
+                if pre_sandbox_grace.is_some_and(|grace| age < grace) {
+                    debug!(
+                        component = COMPONENT_SESSION_RUNTIME,
+                        event = "execution_adoption_skipped",
+                        thread_key = %thread_key,
+                        execution_id,
+                        age_ms = duration_millis_u64(age),
+                        "skipping young queued execution without a persisted request"
+                    );
+                    return Ok(OrphanAdoption::Skipped);
+                }
+            }
+            let input = match deserialize_persisted_execute_request(execution_id, request) {
                 Ok(input) => input,
                 Err(error) => {
                     self.fail_orphaned_execution(
@@ -3251,14 +3322,13 @@ impl SessionRuntime {
                     return Ok(OrphanAdoption::Failed);
                 }
             };
-            self.execute_session(thread_key, input).await?;
             info!(
                 component = COMPONENT_SESSION_RUNTIME,
                 event = "execution_adopted",
                 thread_key = %thread_key,
                 execution_id,
                 mode = "queued_request",
-                "dispatched queued execution from its persisted request"
+                "scheduling queued execution from its persisted request"
             );
             let _ = self
                 .store
@@ -3269,6 +3339,7 @@ impl SessionRuntime {
                     json!({ "mode": "queued_request" }),
                 )
                 .await;
+            self.spawn_session_execution(thread_key.clone(), execution.execution_id.clone(), input);
             return Ok(OrphanAdoption::Adopted);
         }
         let session = self.store.get_session(thread_key).await?;
@@ -6910,6 +6981,17 @@ fn persisted_execute_request(input: &ExecuteSessionInput) -> Result<Value, Sessi
     })
 }
 
+fn deserialize_persisted_execute_request(
+    execution_id: &str,
+    request: Value,
+) -> Result<ExecuteSessionInput, SessionRuntimeError> {
+    serde_json::from_value(request).map_err(|error| {
+        SessionRuntimeError::BadRequest(format!(
+            "execution {execution_id} has an invalid persisted request: {error}"
+        ))
+    })
+}
+
 fn idle_timeout_from_execution(execution: &SessionExecution) -> Option<Duration> {
     execution
         .metadata
@@ -8830,28 +8912,32 @@ mod adoption_tests {
                 .await
                 .expect("set sandbox id");
         }
-        let created = store
-            .create_execution_with_request(
-                thread_key,
-                None,
-                json!({}),
-                persisted_execute_request(&ExecuteSessionInput {
-                    idempotency_key: None,
-                    metadata: Some(json!({"source": "adoption-test"})),
-                    input_lines: vec![
-                        json!({
-                            "type": "user",
-                            "message": {"content": [{"type": "text", "text": "recover me"}]}
-                        })
-                        .to_string(),
-                    ],
-                    idle_timeout_ms: None,
-                    max_duration_ms: None,
-                })
-                .expect("serialize execution request"),
-            )
-            .await
-            .expect("create execution");
+        let created = if running {
+            store.create_execution(thread_key, None, json!({})).await
+        } else {
+            store
+                .create_execution_with_request(
+                    thread_key,
+                    None,
+                    json!({}),
+                    persisted_execute_request(&ExecuteSessionInput {
+                        idempotency_key: None,
+                        metadata: Some(json!({"source": "adoption-test"})),
+                        input_lines: vec![
+                            json!({
+                                "type": "user",
+                                "message": {"content": [{"type": "text", "text": "recover me"}]}
+                            })
+                            .to_string(),
+                        ],
+                        idle_timeout_ms: None,
+                        max_duration_ms: None,
+                    })
+                    .expect("serialize execution request"),
+                )
+                .await
+        }
+        .expect("create execution");
         let execution_id = created.execution.execution_id;
         if running {
             store
@@ -8969,7 +9055,7 @@ mod adoption_tests {
         backend.push_io(io).await;
         let runtime = runtime_with(&store, backend.clone());
         let input = ExecuteSessionInput {
-            idempotency_key: Some("slack-message-1".to_owned()),
+            idempotency_key: None,
             metadata: Some(json!({"source": "slackbotv2"})),
             input_lines: vec![
                 json!({
@@ -9009,6 +9095,23 @@ mod adoption_tests {
             .await
             .expect("write terminal output");
         wait_for_event(&store, &thread_key, "session.execution_completed").await;
+        let latest = store
+            .latest_execution_for_thread(&thread_key)
+            .await
+            .expect("load latest execution")
+            .expect("execution exists");
+        assert_eq!(latest.execution_id, execution.execution_id);
+        assert_eq!(latest.status, ExecutionStatus::Completed);
+        let completed = events(&store, &thread_key)
+            .await
+            .into_iter()
+            .filter(|event| event.event_type == "session.execution_completed")
+            .collect::<Vec<_>>();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(
+            completed[0].execution_id.as_deref(),
+            Some(execution.execution_id.as_str())
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10708,13 +10811,16 @@ mod adoption_tests {
         let _serial = TEST_LOCK.lock().await;
         let thread_key =
             ThreadKey::parse(format!("test:adopt-queued-{}", uuid::Uuid::new_v4())).unwrap();
-        orphaned_execution(&store, &thread_key, Some("sbx-mock"), false).await;
+        let execution_id = orphaned_execution(&store, &thread_key, None, false).await;
 
         let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let create_gate = backend.hold_create();
         let (io, mut stdout, _stdin) = mock_io();
         backend.push_io(io).await;
         let runtime = runtime_with(&store, backend.clone());
-        runtime.adopt_orphaned_executions().await;
+        timeout(Duration::from_secs(1), runtime.adopt_orphaned_executions())
+            .await
+            .expect("adoption scan must not wait for sandbox creation");
 
         let all = events(&store, &thread_key).await;
         assert!(
@@ -10724,13 +10830,84 @@ mod adoption_tests {
             }),
             "expected queued request adoption event"
         );
-        assert_eq!(backend.opens(), 1);
+        timeout(Duration::from_secs(1), backend.create_started.notified())
+            .await
+            .expect("background recovery should start sandbox creation");
+        assert_eq!(backend.opens(), 0);
 
+        create_gate.notify_one();
         stdout
             .write_all(&completed_output_bytes("Recovered queued request."))
             .await
             .unwrap();
         wait_for_event(&store, &thread_key, "session.execution_completed").await;
+        let latest = store
+            .latest_execution_for_thread(&thread_key)
+            .await
+            .expect("load latest execution")
+            .expect("execution exists");
+        assert_eq!(latest.execution_id, execution_id);
+        assert_eq!(latest.status, ExecutionStatus::Completed);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn periodic_scan_graces_young_legacy_queued_execution_without_request() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:adopt-legacy-{}", uuid::Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+        let execution_id = store
+            .create_execution(&thread_key, None, json!({}))
+            .await
+            .expect("create legacy execution")
+            .execution
+            .execution_id;
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime = runtime_with(&store, backend);
+        runtime
+            .run_orphan_adoption_scan(
+                &mut OrphanAdoptionState::default(),
+                Some(PRE_SANDBOX_ORPHAN_GRACE),
+            )
+            .await;
+
+        let active = store
+            .active_execution_for_thread(&thread_key)
+            .await
+            .expect("load active execution")
+            .expect("legacy execution remains active");
+        assert_eq!(active.execution_id, execution_id);
+        assert_eq!(active.status, ExecutionStatus::Queued);
+        assert!(
+            events(&store, &thread_key)
+                .await
+                .iter()
+                .all(|event| event.event_type != "session.execution_failed"),
+            "young legacy execution must remain claimable by the old process"
+        );
+
+        let claim = store
+            .mark_execution_running(&execution_id)
+            .await
+            .expect("old process claims execution after grace");
+        assert!(claim.claimed);
+        store
+            .fail_execution(&execution_id, "test cleanup")
+            .await
+            .expect("terminalize legacy execution");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
