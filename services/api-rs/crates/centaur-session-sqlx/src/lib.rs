@@ -324,15 +324,31 @@ impl PgSessionStore {
         idempotency_key: Option<&str>,
         metadata: Value,
     ) -> Result<CreateExecutionResult, SessionStoreError> {
+        self.create_execution_with_request(thread_key, idempotency_key, metadata, empty_object())
+            .await
+    }
+
+    pub async fn create_execution_with_request(
+        &self,
+        thread_key: &ThreadKey,
+        idempotency_key: Option<&str>,
+        metadata: Value,
+        request: Value,
+    ) -> Result<CreateExecutionResult, SessionStoreError> {
         let execution_id = prefixed_id("exe");
         let row = sqlx::query_as::<_, CreateExecutionRow>(
             r#"
             insert into session_executions
-                (execution_id, thread_key, idempotency_key, status, metadata)
-            values ($1, $2, $3, $4, $5)
+                (execution_id, thread_key, idempotency_key, status, metadata, request)
+            values ($1, $2, $3, $4, $5, $6)
             on conflict (thread_key, idempotency_key)
                 where idempotency_key is not null
-            do update set idempotency_key = excluded.idempotency_key
+            do update set
+                idempotency_key = excluded.idempotency_key,
+                request = case
+                    when session_executions.request = '{}'::jsonb then excluded.request
+                    else session_executions.request
+                end
             returning
                 execution_id = $1 as created,
                 execution_id,
@@ -352,10 +368,27 @@ impl PgSessionStore {
         .bind(idempotency_key)
         .bind(ExecutionStatus::Queued.as_ref())
         .bind(metadata)
+        .bind(request)
         .fetch_one(&self.pool)
         .await?;
 
         row.try_into()
+    }
+
+    pub async fn execution_request(&self, execution_id: &str) -> Result<Value, SessionStoreError> {
+        sqlx::query_scalar::<_, Value>(
+            r#"
+            select request
+            from session_executions
+            where execution_id = $1
+            "#,
+        )
+        .bind(execution_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| SessionStoreError::ExecutionNotFound {
+            execution_id: execution_id.to_owned(),
+        })
     }
 
     pub async fn active_execution_for_thread(
@@ -1591,6 +1624,8 @@ pub enum SessionStoreError {
     },
     #[error("invalid persisted value: {0}")]
     InvalidPersistedValue(String),
+    #[error("session execution not found for execution_id {execution_id}")]
+    ExecutionNotFound { execution_id: String },
     #[error("invalid notification payload on {channel}: {payload}: {error}")]
     InvalidNotification {
         channel: String,
@@ -2036,6 +2071,71 @@ mod tests {
                 .proxy_labels,
             labels
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn execution_requests_are_durable_and_idempotent() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let thread_key =
+            ThreadKey::parse(format!("test:execution-request-{}", Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+        let first_request = json!({
+            "idempotency_key": "slack-message-1",
+            "input_lines": ["{\"type\":\"user\",\"text\":\"first\"}"],
+            "metadata": {"source": "slackbotv2"},
+            "idle_timeout_ms": 1000,
+            "max_duration_ms": null
+        });
+        let first = store
+            .create_execution_with_request(
+                &thread_key,
+                Some("slack-message-1"),
+                json!({"source": "slackbotv2"}),
+                first_request.clone(),
+            )
+            .await
+            .expect("create execution with request");
+
+        let replay = store
+            .create_execution_with_request(
+                &thread_key,
+                Some("slack-message-1"),
+                json!({"source": "different-replay"}),
+                json!({"input_lines": ["different replay"]}),
+            )
+            .await
+            .expect("replay idempotent execution request");
+
+        assert!(first.created);
+        assert!(!replay.created);
+        assert_eq!(replay.execution.execution_id, first.execution.execution_id);
+        assert_eq!(
+            store
+                .execution_request(&first.execution.execution_id)
+                .await
+                .expect("load persisted execution request"),
+            first_request
+        );
+
+        store
+            .mark_execution_running(&first.execution.execution_id)
+            .await
+            .expect("mark execution running");
+        store
+            .complete_execution(&first.execution.execution_id)
+            .await
+            .expect("complete execution");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

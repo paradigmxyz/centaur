@@ -953,7 +953,7 @@ async fn execute_session(
     let thread_key = ThreadKey::try_from(raw_thread_key)?;
     let execution = state
         .runtime()?
-        .execute_session(
+        .enqueue_session_execution(
             &thread_key,
             ExecuteSessionInput {
                 idempotency_key: request.idempotency_key,

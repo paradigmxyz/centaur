@@ -69,9 +69,9 @@ const STDOUT_OWNER_LEASE: Duration = Duration::from_secs(45);
 const STDOUT_OWNER_RENEW_INTERVAL: Duration = Duration::from_secs(10);
 const EXECUTION_HANDOFF_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const EXECUTION_HANDOFF_DB_TIMEOUT: Duration = Duration::from_secs(5);
-/// A live execution can briefly have no sandbox while it moves from queued
-/// through warm-sandbox assignment. A periodic adoption scan must not fail a
-/// young row it observes in that window.
+/// A running execution can briefly have no sandbox while it moves through
+/// warm-sandbox assignment. A periodic adoption scan must not fail a young row
+/// it observes in that window.
 const PRE_SANDBOX_ORPHAN_GRACE: Duration = Duration::from_secs(120);
 const COMPONENT_SESSION_RUNTIME: &str = "session_runtime";
 const SANDBOX_REPOS_MOUNT_PATH: &str = "/home/agent/github";
@@ -356,7 +356,7 @@ pub struct WorkflowSandboxCleanupReport {
     pub failed: Vec<DrainFailure>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ExecuteSessionInput {
     pub idempotency_key: Option<String>,
     pub metadata: Option<Value>,
@@ -1807,6 +1807,10 @@ impl SessionRuntime {
         thread_key: &ThreadKey,
         input: ExecuteSessionInput,
     ) -> Result<SessionExecution, SessionRuntimeError> {
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return Err(SessionRuntimeError::ShuttingDown);
+        }
+        let persisted_request = persisted_execute_request(&input)?;
         let ExecuteSessionInput {
             idempotency_key,
             metadata,
@@ -1852,10 +1856,11 @@ impl SessionRuntime {
 
             let execution = self
                 .store
-                .create_execution(
+                .create_execution_with_request(
                     thread_key,
                     idempotency_key.as_deref(),
                     execution_metadata(metadata, idle_timeout_ms, max_duration_ms),
+                    persisted_request,
                 )
                 .await?;
             span.record(
@@ -2037,6 +2042,88 @@ impl SessionRuntime {
             );
         }
         result
+    }
+
+    /// Persist an execution request and return before sandbox provisioning or
+    /// stdin delivery. The queued row is the durable handoff boundary for HTTP
+    /// callers: a background driver handles the live attempt, while the
+    /// orphan-adoption scan replays a queued request after process restart.
+    pub async fn enqueue_session_execution(
+        &self,
+        thread_key: &ThreadKey,
+        input: ExecuteSessionInput,
+    ) -> Result<SessionExecution, SessionRuntimeError> {
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return Err(SessionRuntimeError::ShuttingDown);
+        }
+        self.store.get_session(thread_key).await?;
+        validate_input_lines(&input.input_lines)?;
+        let _ = duration_options(input.idle_timeout_ms, input.max_duration_ms)?;
+
+        let request = persisted_execute_request(&input)?;
+        let execution = self
+            .store
+            .create_execution_with_request(
+                thread_key,
+                input.idempotency_key.as_deref(),
+                execution_metadata(
+                    input.metadata.clone(),
+                    input.idle_timeout_ms,
+                    input.max_duration_ms,
+                ),
+                request,
+            )
+            .await?;
+
+        if execution.execution.status == ExecutionStatus::Queued {
+            let persisted_input = if execution.created {
+                input
+            } else {
+                self.load_persisted_execute_request(&execution.execution.execution_id)
+                    .await?
+            };
+            let runtime = self.clone();
+            let queued_thread_key = thread_key.clone();
+            let queued_execution_id = execution.execution.execution_id.clone();
+            tokio::spawn(async move {
+                if let Err(error) = runtime
+                    .execute_session(&queued_thread_key, persisted_input)
+                    .await
+                {
+                    warn!(
+                        component = COMPONENT_SESSION_RUNTIME,
+                        event = "session_execute_dispatch_failed",
+                        thread_key = %queued_thread_key,
+                        execution_id = queued_execution_id,
+                        %error,
+                        "failed to dispatch queued session execution"
+                    );
+                }
+            });
+        }
+
+        info!(
+            component = COMPONENT_SESSION_RUNTIME,
+            event = "session_execute_enqueued",
+            thread_key = %thread_key,
+            execution_id = %execution.execution.execution_id,
+            status = %execution.execution.status,
+            created = execution.created,
+            "persisted session execution request"
+        );
+        Ok(execution.execution)
+    }
+
+    async fn load_persisted_execute_request(
+        &self,
+        execution_id: &str,
+    ) -> Result<ExecuteSessionInput, SessionRuntimeError> {
+        let request = self.store.execution_request(execution_id).await?;
+        serde_json::from_value(request).map_err(|error| {
+            SessionRuntimeError::BadRequest(format!(
+                "execution {execution_id} has an invalid persisted request: {error}"
+            ))
+        })
     }
 
     async fn record_execution_failure(
@@ -2994,9 +3081,6 @@ impl SessionRuntime {
     ///    and re-arm the remaining max-duration deadline.
     /// 3. The sandbox is gone: record the failure honestly.
     pub async fn adopt_orphaned_executions(&self) {
-        // A one-shot scan has no later tick to revisit skipped rows, so
-        // queued orphans are failed immediately regardless of age — the
-        // pre-rescan startup behavior.
         self.run_orphan_adoption_scan(&mut OrphanAdoptionState::default(), None)
             .await;
     }
@@ -3022,9 +3106,10 @@ impl SessionRuntime {
         });
     }
 
-    /// One pass over all active executions. `pre_sandbox_grace` is the
-    /// minimum age before a row awaiting sandbox assignment is treated as
-    /// orphaned; `None` is only correct when no re-scan will follow.
+    /// One pass over all active executions. Queued requests can always be
+    /// claimed and replayed from durable input. `pre_sandbox_grace` only
+    /// protects a running row that has not finished sandbox assignment;
+    /// `None` is only correct when no re-scan will follow.
     async fn run_orphan_adoption_scan(
         &self,
         state: &mut OrphanAdoptionState,
@@ -3151,35 +3236,40 @@ impl SessionRuntime {
         let thread_key = &execution.thread_key;
         let execution_id = execution.execution_id.as_str();
         if execution.status == ExecutionStatus::Queued {
-            // Input is only written after an execution is marked running, so
-            // a queued orphan never reached the harness: nothing can come.
-            // On a periodic scan, young queued rows are skipped instead of
-            // failed: they are most likely a live execute_session observed
-            // mid-transition, and a later tick revisits them.
-            if let Some(grace) = pre_sandbox_grace {
-                let age = SystemTime::now()
-                    .duration_since(SystemTime::from(execution.created_at))
-                    .unwrap_or_default();
-                if age < grace {
-                    debug!(
-                        component = COMPONENT_SESSION_RUNTIME,
-                        event = "execution_adoption_skipped",
-                        thread_key = %thread_key,
+            // mark_execution_running is an atomic claim, so a periodic scan
+            // can safely race the accepting process without double delivery.
+            let input = match self.load_persisted_execute_request(execution_id).await {
+                Ok(input) => input,
+                Err(error) => {
+                    self.fail_orphaned_execution(
+                        thread_key,
                         execution_id,
-                        age_ms = duration_millis_u64(age),
-                        "skipping young queued execution; a live execute may still claim it"
-                    );
-                    return Ok(OrphanAdoption::Skipped);
+                        "",
+                        &format!("queued request could not be recovered: {error}"),
+                    )
+                    .await;
+                    return Ok(OrphanAdoption::Failed);
                 }
-            }
-            self.fail_orphaned_execution(
-                thread_key,
+            };
+            self.execute_session(thread_key, input).await?;
+            info!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "execution_adopted",
+                thread_key = %thread_key,
                 execution_id,
-                "",
-                "orphaned before input was sent",
-            )
-            .await;
-            return Ok(OrphanAdoption::Failed);
+                mode = "queued_request",
+                "dispatched queued execution from its persisted request"
+            );
+            let _ = self
+                .store
+                .append_event(
+                    thread_key,
+                    Some(execution_id),
+                    "session.execution_adopted",
+                    json!({ "mode": "queued_request" }),
+                )
+                .await;
+            return Ok(OrphanAdoption::Adopted);
         }
         let session = self.store.get_session(thread_key).await?;
         let Some(sandbox_id) = session.sandbox_id.as_deref() else {
@@ -6812,6 +6902,14 @@ fn execution_metadata(
     metadata
 }
 
+fn persisted_execute_request(input: &ExecuteSessionInput) -> Result<Value, SessionRuntimeError> {
+    serde_json::to_value(input).map_err(|error| {
+        SessionRuntimeError::BadRequest(format!(
+            "session execution request could not be persisted: {error}"
+        ))
+    })
+}
+
 fn idle_timeout_from_execution(execution: &SessionExecution) -> Option<Duration> {
     execution
         .metadata
@@ -8473,6 +8571,8 @@ mod adoption_tests {
         ios: Mutex<VecDeque<SandboxIo>>,
         recorded_output: std::sync::Mutex<Vec<String>>,
         open_count: AtomicUsize,
+        create_started: tokio::sync::Notify,
+        create_gate: std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>,
         status: std::sync::Mutex<SandboxStatus>,
         observed_statuses: std::sync::Mutex<BTreeMap<String, SandboxStatus>>,
         create_id: String,
@@ -8489,6 +8589,8 @@ mod adoption_tests {
                 ios: Mutex::new(VecDeque::new()),
                 recorded_output: std::sync::Mutex::new(recorded_output),
                 open_count: AtomicUsize::new(0),
+                create_started: tokio::sync::Notify::new(),
+                create_gate: std::sync::Mutex::new(None),
                 status: std::sync::Mutex::new(status),
                 observed_statuses: std::sync::Mutex::new(BTreeMap::new()),
                 create_id: "mock-sbx".to_owned(),
@@ -8506,6 +8608,12 @@ mod adoption_tests {
 
         fn opens(&self) -> usize {
             self.open_count.load(Ordering::SeqCst)
+        }
+
+        fn hold_create(&self) -> Arc<tokio::sync::Notify> {
+            let gate = Arc::new(tokio::sync::Notify::new());
+            *self.create_gate.lock().unwrap() = Some(gate.clone());
+            gate
         }
 
         fn set_recorded_output(&self, recorded_output: Vec<String>) {
@@ -8563,6 +8671,11 @@ mod adoption_tests {
 
         async fn create(&self, spec: SandboxSpec) -> SandboxResult<SandboxHandle> {
             self.created_specs.lock().unwrap().push(spec);
+            self.create_started.notify_one();
+            let gate = self.create_gate.lock().unwrap().clone();
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
             self.set_observed_status(&self.create_id, SandboxStatus::Running);
             Ok(SandboxHandle::new(
                 SandboxId::new(self.create_id.clone()),
@@ -8718,7 +8831,25 @@ mod adoption_tests {
                 .expect("set sandbox id");
         }
         let created = store
-            .create_execution(thread_key, None, json!({}))
+            .create_execution_with_request(
+                thread_key,
+                None,
+                json!({}),
+                persisted_execute_request(&ExecuteSessionInput {
+                    idempotency_key: None,
+                    metadata: Some(json!({"source": "adoption-test"})),
+                    input_lines: vec![
+                        json!({
+                            "type": "user",
+                            "message": {"content": [{"type": "text", "text": "recover me"}]}
+                        })
+                        .to_string(),
+                    ],
+                    idle_timeout_ms: None,
+                    max_duration_ms: None,
+                })
+                .expect("serialize execution request"),
+            )
             .await
             .expect("create execution");
         let execution_id = created.execution.execution_id;
@@ -8731,8 +8862,8 @@ mod adoption_tests {
         execution_id
     }
 
-    /// Ages an execution row past `PRE_SANDBOX_ORPHAN_GRACE` so adoption treats it
-    /// as a genuine orphan instead of a young row racing a live execute.
+    /// Ages a running pre-sandbox row past `PRE_SANDBOX_ORPHAN_GRACE` so
+    /// adoption treats it as a genuine orphan instead of an assignment race.
     async fn backdate_execution(store: &PgSessionStore, execution_id: &str, seconds: f64) {
         let result = sqlx::query(
             "update session_executions \
@@ -8811,6 +8942,73 @@ mod adoption_tests {
             SandboxRuntime::backend(backend, SandboxSpec::new("mock")),
             TestSessionPrincipalRegistrar,
         )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn enqueue_returns_after_durable_commit_without_waiting_for_sandbox() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:enqueue-{}", uuid::Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let create_gate = backend.hold_create();
+        let (io, mut stdout, _stdin) = mock_io();
+        backend.push_io(io).await;
+        let runtime = runtime_with(&store, backend.clone());
+        let input = ExecuteSessionInput {
+            idempotency_key: Some("slack-message-1".to_owned()),
+            metadata: Some(json!({"source": "slackbotv2"})),
+            input_lines: vec![
+                json!({
+                    "type": "user",
+                    "message": {"content": [{"type": "text", "text": "queue me"}]}
+                })
+                .to_string(),
+            ],
+            idle_timeout_ms: None,
+            max_duration_ms: None,
+        };
+
+        let execution = timeout(
+            Duration::from_secs(1),
+            runtime.enqueue_session_execution(&thread_key, input.clone()),
+        )
+        .await
+        .expect("enqueue must not wait for sandbox creation")
+        .expect("enqueue execution");
+        assert_eq!(execution.status, ExecutionStatus::Queued);
+        assert_eq!(
+            store
+                .execution_request(&execution.execution_id)
+                .await
+                .expect("load durable request"),
+            persisted_execute_request(&input).expect("serialize input")
+        );
+
+        timeout(Duration::from_secs(1), backend.create_started.notified())
+            .await
+            .expect("background driver should start sandbox creation");
+        assert!(backend.created_specs().len() == 1);
+
+        create_gate.notify_one();
+        stdout
+            .write_all(&completed_output_bytes("Processed from durable queue."))
+            .await
+            .expect("write terminal output");
+        wait_for_event(&store, &thread_key, "session.execution_completed").await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10503,7 +10701,7 @@ mod adoption_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn fails_queued_orphans_that_never_received_input() {
+    async fn dispatches_queued_orphans_from_durable_input() {
         let Some(store) = test_store().await else {
             return;
         };
@@ -10512,69 +10710,60 @@ mod adoption_tests {
             ThreadKey::parse(format!("test:adopt-queued-{}", uuid::Uuid::new_v4())).unwrap();
         orphaned_execution(&store, &thread_key, Some("sbx-mock"), false).await;
 
-        // The one-shot scan has no later tick to revisit skipped rows, so it
-        // fails queued orphans immediately regardless of age.
         let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let (io, mut stdout, _stdin) = mock_io();
+        backend.push_io(io).await;
         let runtime = runtime_with(&store, backend.clone());
         runtime.adopt_orphaned_executions().await;
 
-        wait_for_event(&store, &thread_key, "session.execution_failed").await;
         let all = events(&store, &thread_key).await;
-        let failed = all
-            .iter()
-            .find(|event| event.event_type == "session.execution_failed")
-            .expect("failed event");
-        let error = failed.payload["error"].as_str().unwrap_or_default();
         assert!(
-            error.contains("orphaned before input was sent"),
-            "unexpected error: {error}"
+            all.iter().any(|event| {
+                event.event_type == "session.execution_adopted"
+                    && event.payload["mode"] == json!("queued_request")
+            }),
+            "expected queued request adoption event"
         );
-        assert_eq!(backend.opens(), 0);
+        assert_eq!(backend.opens(), 1);
+
+        stdout
+            .write_all(&completed_output_bytes("Recovered queued request."))
+            .await
+            .unwrap();
+        wait_for_event(&store, &thread_key, "session.execution_completed").await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn periodic_scan_skips_young_pre_sandbox_executions_until_grace_passes() {
+    async fn periodic_scan_dispatches_queued_but_graces_young_running_executions() {
         let Some(store) = test_store().await else {
             return;
         };
         let _serial = TEST_LOCK.lock().await;
         let thread_key =
             ThreadKey::parse(format!("test:adopt-young-{}", uuid::Uuid::new_v4())).unwrap();
-        let execution_id = orphaned_execution(&store, &thread_key, Some("sbx-mock"), false).await;
+        orphaned_execution(&store, &thread_key, Some("sbx-mock"), false).await;
 
         let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let (io, mut stdout, _stdin) = mock_io();
+        backend.push_io(io).await;
         let runtime = runtime_with(&store, backend.clone());
         let mut state = OrphanAdoptionState::default();
         runtime
             .run_orphan_adoption_scan(&mut state, Some(PRE_SANDBOX_ORPHAN_GRACE))
             .await;
 
-        // A queued row younger than the grace window may belong to a live
-        // execute_session mid-transition; a periodic scan must leave it
-        // alone and revisit it later.
-        let all = events(&store, &thread_key).await;
         assert!(
-            all.iter()
-                .all(|event| event.event_type != "session.execution_failed"),
-            "young queued execution must not be failed"
+            events(&store, &thread_key).await.iter().any(|event| {
+                event.event_type == "session.execution_adopted"
+                    && event.payload["mode"] == json!("queued_request")
+            }),
+            "queued execution should be dispatched immediately"
         );
-        let active = store
-            .list_active_executions()
+        stdout
+            .write_all(&completed_output_bytes("Recovered on periodic scan."))
             .await
-            .expect("list active executions");
-        assert!(
-            active
-                .iter()
-                .any(|execution| execution.execution_id == execution_id),
-            "young queued execution must stay active"
-        );
-
-        // Once the row ages past the grace window, a later tick fails it.
-        backdate_execution(&store, &execution_id, 300.0).await;
-        runtime
-            .run_orphan_adoption_scan(&mut state, Some(PRE_SANDBOX_ORPHAN_GRACE))
-            .await;
-        wait_for_event(&store, &thread_key, "session.execution_failed").await;
+            .unwrap();
+        wait_for_event(&store, &thread_key, "session.execution_completed").await;
 
         // A newly running execution can still be waiting for its warm
         // sandbox assignment. It gets the same periodic grace, but is failed
