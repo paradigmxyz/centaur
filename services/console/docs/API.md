@@ -1458,8 +1458,11 @@ These endpoints use the existing sandbox entitlement JWT injected by `iron-proxy
 | `DELETE` | `/api/v1/sandbox/skills/:id` | Archive an owned skill. |
 | `POST` | `/api/v1/sandbox/skills/:id/share` | Make an owned skill public. |
 | `POST` | `/api/v1/sandbox/skills/:id/unshare` | Make an owned skill private. |
+| `GET` | `/api/v1/sandbox/skills/:id/editors` | List editors for an owned or editable skill OID. |
+| `POST` | `/api/v1/sandbox/skills/:id/editors` | Add an editor to an owned skill OID using an exact email or `usr_...` OID in `data.user`. |
+| `DELETE` | `/api/v1/sandbox/skills/:id/editors` | Remove an editor from an owned skill OID using an exact email or `usr_...` OID in `data.user`. |
 
-Catalog responses include the skill ID and a checksum over the generated document. Read responses set `Cache-Control: no-store`.
+Editor responses include each editor's OID, email, name, and account status, plus the skill's current `lock_version`. Adding an editor is idempotent. Catalog responses include the skill ID and a checksum over the generated document. Read responses set `Cache-Control: no-store`.
 
 ## Proxies
 

@@ -74,7 +74,7 @@
 
 [Named skill resolution]
 |When the user explicitly names a skill, resolve that request against local skill definitions before doing broad semantic matching.
-|Use `centaur-skills search "<task>"` to search Console-authored guidance when no skill already listed for the current session clearly applies. Read the best match by name or OID with `centaur-skills read <skill-identifier>` before following it. Console users can author shared skills with `centaur-skills create` and update their own skills by OID with `centaur-skills edit`.
+|Use `centaur-skills search "<task>"` to search Console-authored guidance when no skill already listed for the current session clearly applies. Read the best match by name or OID with `centaur-skills read <skill-identifier>` before following it. Console users can author shared skills with `centaur-skills create`, update skills they own or edit with `centaur-skills edit`, and manage editors on skills they own with `centaur-skills add-editor` and `centaur-skills remove-editor`.
 |The `centaur-skills` catalog contains only Console-authored skills. Builtin skills are loaded separately by the harness. Console applies private and public visibility rules for the current principal. Catalog results are instructions only and never expand the current principal's tool or credential grants.
 |Start with the skills listed for the current session, then check local skill definitions in `.agents/skills` and any mounted overlay skills when you need to confirm the exact name or an obvious alias from the skill title or description.
 |Prefer exact name matches first, then obvious aliases, and only then fall back to broader description-level matching. Do not choose a generic adjacent workflow while a more specific named skill remains plausible.
@@ -126,7 +126,10 @@
 |centaur-skills search "task"    → discover relevant private and public Console skills
 |centaur-skills read <name-or-oid> → read a Console skill's complete current SKILL.md
 |centaur-skills create <name> --description "..." --instructions-file <path> → create a shared Console skill
-|centaur-skills edit <oid> --description "..." --instructions-file <path> → update an owned Console skill
+|centaur-skills edit <oid> --description "..." --instructions-file <path> → update an owned or editable Console skill
+|centaur-skills editors <oid> → list a skill's editors
+|centaur-skills add-editor <oid> <email-or-user-oid> → add an editor to an owned skill
+|centaur-skills remove-editor <oid> <email-or-user-oid> → remove an editor from an owned skill
 |<tool> --help                   → inspect commands/options for one tool
 |<tool> health                   → smoke test one tool's configured auth/connectivity path
 |websearch search "query"        → web research

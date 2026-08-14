@@ -3,7 +3,7 @@ module Api
     module Sandbox
       class SkillsController < Api::SandboxBaseController
         MAX_LIMIT = 20
-        before_action :require_authoring_user!, only: %i[create update destroy share unshare]
+        before_action :require_authoring_user!, only: %i[create update destroy share unshare editors add_editor remove_editor]
 
         def index
           scope = visible_skills.order(updated_at: :desc, id: :asc).limit(limit)
@@ -53,6 +53,37 @@ module Api
           render json: { data: author_payload(skill) }
         end
 
+        def editors
+          render json: { data: editor_management_payload(editable_skill) }
+        end
+
+        def add_editor
+          skill = owned_skill
+          editor = resolve_editor!(User.active)
+
+          Skill.transaction do
+            assignment = skill.skill_editors.find_or_initialize_by(user: editor)
+            if assignment.new_record?
+              assignment.save!
+              skill.touch
+            end
+          end
+
+          render json: { data: editor_management_payload(skill) }
+        end
+
+        def remove_editor
+          skill = owned_skill
+          editor = resolve_editor!(skill.editors)
+
+          Skill.transaction do
+            skill.skill_editors.find_by!(user: editor).destroy!
+            skill.touch
+          end
+
+          render json: { data: editor_management_payload(skill) }
+        end
+
         private
 
         def require_authoring_user!
@@ -96,6 +127,30 @@ module Api
 
         def author_payload(skill)
           skill.catalog_payload(include_document: true).merge(lock_version: skill.lock_version)
+        end
+
+        def editor_management_payload(skill)
+          {
+            id: skill.oid,
+            editors: skill.editors.order(:email).map { |editor| editor_payload(editor) },
+            lock_version: skill.lock_version
+          }
+        end
+
+        def editor_payload(editor)
+          {
+            id: editor.oid,
+            email: editor.email,
+            name: editor.name,
+            status: editor.status
+          }
+        end
+
+        def resolve_editor!(scope)
+          reference = params.require(:data).require(:user).to_s.strip
+          return scope.find_by_oid!(reference) if reference.start_with?("usr_")
+
+          scope.find_by!(email: reference.downcase)
         end
 
         def limit

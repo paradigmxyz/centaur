@@ -164,6 +164,118 @@ class Api::V1::SandboxSkillsControllerTest < ActionDispatch::IntegrationTest
     assert_nil skill.reload.archived_at
   end
 
+  test "owner lists adds and removes editors by email or user OID" do
+    skill = skills(:member_private)
+    editor = users(:globex_admin)
+    initial_lock_version = skill.lock_version
+
+    with_token(@member_proxy) do |headers|
+      get "/api/v1/sandbox/skills/#{skill.oid}/editors", headers: headers
+    end
+    assert_response :ok
+    assert_equal [], json_body.dig("data", "editors")
+
+    assert_difference("SkillEditor.count", 1) do
+      with_token(@member_proxy) do |headers|
+        post "/api/v1/sandbox/skills/#{skill.oid}/editors",
+             params: { data: { user: editor.email.upcase } },
+             headers: headers,
+             as: :json
+      end
+    end
+    assert_response :ok
+    assert_equal editor.oid, json_body.dig("data", "editors", 0, "id")
+    assert_equal editor.email, json_body.dig("data", "editors", 0, "email")
+    assert_equal initial_lock_version + 1, json_body.dig("data", "lock_version")
+
+    assert_no_difference("SkillEditor.count") do
+      with_token(@member_proxy) do |headers|
+        post "/api/v1/sandbox/skills/#{skill.oid}/editors",
+             params: { data: { user: editor.oid } },
+             headers: headers,
+             as: :json
+      end
+    end
+    assert_response :ok
+    assert_equal initial_lock_version + 1, json_body.dig("data", "lock_version")
+
+    assert_difference("SkillEditor.count", -1) do
+      with_token(@member_proxy) do |headers|
+        delete "/api/v1/sandbox/skills/#{skill.oid}/editors",
+               params: { data: { user: editor.email } },
+               headers: headers,
+               as: :json
+      end
+    end
+    assert_response :ok
+    assert_equal [], json_body.dig("data", "editors")
+    assert_equal initial_lock_version + 2, json_body.dig("data", "lock_version")
+  end
+
+  test "editor can list membership but cannot manage editors" do
+    skill = skills(:other_private)
+    skill.editors << users(:member_user)
+
+    with_token(@member_proxy) do |headers|
+      get "/api/v1/sandbox/skills/#{skill.oid}/editors", headers: headers
+    end
+    assert_response :ok
+    assert_equal users(:member_user).oid, json_body.dig("data", "editors", 0, "id")
+
+    with_token(@member_proxy) do |headers|
+      post "/api/v1/sandbox/skills/#{skill.oid}/editors",
+           params: { data: { user: users(:globex_admin).oid } },
+           headers: headers,
+           as: :json
+    end
+    assert_response :not_found
+
+    with_token(@member_proxy) do |headers|
+      delete "/api/v1/sandbox/skills/#{skill.oid}/editors",
+             params: { data: { user: users(:member_user).oid } },
+             headers: headers,
+             as: :json
+    end
+    assert_response :not_found
+    assert_equal [ users(:member_user) ], skill.reload.editors.to_a
+  end
+
+  test "editor membership is not exposed to public viewers or shared principals" do
+    skill = skills(:admin_shared)
+    skill.editors << users(:globex_admin)
+
+    with_token(@member_proxy) do |headers|
+      get "/api/v1/sandbox/skills/#{skill.oid}/editors", headers: headers
+    end
+    assert_response :not_found
+
+    with_token(@channel_proxy) do |headers|
+      get "/api/v1/sandbox/skills/#{skill.oid}/editors", headers: headers
+    end
+    assert_response :forbidden
+  end
+
+  test "owner cannot add itself or a disabled user as an editor" do
+    skill = skills(:member_private)
+
+    with_token(@member_proxy) do |headers|
+      post "/api/v1/sandbox/skills/#{skill.oid}/editors",
+           params: { data: { user: users(:member_user).oid } },
+           headers: headers,
+           as: :json
+    end
+    assert_response :unprocessable_entity
+
+    with_token(@member_proxy) do |headers|
+      post "/api/v1/sandbox/skills/#{skill.oid}/editors",
+           params: { data: { user: users(:disabled_user).email } },
+           headers: headers,
+           as: :json
+    end
+    assert_response :not_found
+    assert_empty skill.reload.editors
+  end
+
   test "non-user principal cannot mutate skills" do
     assert_no_difference("Skill.count") do
       with_token(@channel_proxy) do |headers|

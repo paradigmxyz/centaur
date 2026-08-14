@@ -111,7 +111,7 @@ class SkillsClient:
         instructions: str | None = None,
         lock_version: int | None = None,
     ) -> dict[str, Any]:
-        """Edit an owned Console skill by OID."""
+        """Edit an owned or editable Console skill by OID."""
         attributes: dict[str, str | int] = {}
         if name is not None:
             attributes["name"] = name
@@ -128,6 +128,37 @@ class SkillsClient:
             f"{SANDBOX_SKILLS_PATH}/{quote(identifier, safe='')}",
             method="PATCH",
             json={"data": attributes},
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError("centaur-skills response did not include a data object")
+        return result
+
+    def list_editors(self, identifier: str) -> dict[str, Any]:
+        """List editors for an owned or editable Console skill by OID."""
+        result = self._request(
+            f"{SANDBOX_SKILLS_PATH}/{quote(identifier, safe='')}/editors"
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError("centaur-skills response did not include a data object")
+        return result
+
+    def add_editor(self, identifier: str, user: str) -> dict[str, Any]:
+        """Add an editor to an owned skill by exact email or Console user OID."""
+        return self._manage_editor(identifier, user, method="POST")
+
+    def remove_editor(self, identifier: str, user: str) -> dict[str, Any]:
+        """Remove an editor from an owned skill by exact email or Console user OID."""
+        return self._manage_editor(identifier, user, method="DELETE")
+
+    def _manage_editor(self, identifier: str, user: str, *, method: str) -> dict[str, Any]:
+        normalized_user = user.strip()
+        if not normalized_user:
+            raise ValueError("user email or OID must not be empty")
+
+        result = self._request(
+            f"{SANDBOX_SKILLS_PATH}/{quote(identifier, safe='')}/editors",
+            method=method,
+            json={"data": {"user": normalized_user}},
         )
         if not isinstance(result, dict):
             raise RuntimeError("centaur-skills response did not include a data object")

@@ -12,7 +12,7 @@ load_dotenv()
 
 app = typer.Typer(
     name="centaur-skills",
-    help="Discover and author Console skills available to this agent",
+    help="Discover, author, and manage editors for Console skills available to this agent",
     no_args_is_help=True,
 )
 
@@ -89,7 +89,7 @@ def create(
 
 @app.command("edit")
 def edit(
-    identifier: str = typer.Argument(..., help="OID of an owned skill"),
+    identifier: str = typer.Argument(..., help="OID of an owned or editable skill"),
     name: str | None = typer.Option(None, "--name", help="New lowercase skill name"),
     description: str | None = typer.Option(
         None,
@@ -118,7 +118,7 @@ def edit(
         help="Reject the edit if the skill has changed since this version",
     ),
 ) -> None:
-    """Edit fields on an owned Console-authored skill."""
+    """Edit fields on an owned or editable Console-authored skill."""
     resolved_instructions = _resolve_instructions(instructions, instructions_file, required=False)
     if all(value is None for value in (name, description, resolved_instructions)):
         raise typer.BadParameter("provide --name, --description, or instructions to edit")
@@ -131,6 +131,38 @@ def edit(
             instructions=resolved_instructions,
             lock_version=lock_version,
         )
+    print(json.dumps({"data": result}, indent=2, default=str))
+
+
+@app.command("editors")
+def editors(
+    identifier: str = typer.Argument(..., help="OID of an owned or editable skill"),
+) -> None:
+    """List editors for an owned or editable skill."""
+    with get_client() as client:
+        result = client.list_editors(identifier)
+    print(json.dumps({"data": result}, indent=2, default=str))
+
+
+@app.command("add-editor")
+def add_editor(
+    identifier: str = typer.Argument(..., help="OID of an owned skill"),
+    user: str = typer.Argument(..., help="Exact Console user email or usr_ OID"),
+) -> None:
+    """Add an editor to an owned Console-authored skill."""
+    with get_client() as client:
+        result = client.add_editor(identifier, user)
+    print(json.dumps({"data": result}, indent=2, default=str))
+
+
+@app.command("remove-editor")
+def remove_editor(
+    identifier: str = typer.Argument(..., help="OID of an owned skill"),
+    user: str = typer.Argument(..., help="Exact Console user email or usr_ OID"),
+) -> None:
+    """Remove an editor from an owned Console-authored skill."""
+    with get_client() as client:
+        result = client.remove_editor(identifier, user)
     print(json.dumps({"data": result}, indent=2, default=str))
 
 
