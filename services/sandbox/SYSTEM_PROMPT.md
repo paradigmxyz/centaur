@@ -127,7 +127,7 @@
 |centaur-skills read <name-or-oid> → read a Console skill's complete current SKILL.md
 |centaur-skills create <name> --description "..." --instructions-file <path> → create a shared Console skill
 |centaur-skills edit <oid> --description "..." --instructions-file <path> → update an owned or editable Console skill
-|centaur-skills editors <oid> → list a skill's editors
+|centaur-skills editors <name-or-oid> → list editors for any visible skill
 |centaur-skills add-editor <oid> <email-or-user-oid> → add an editor to an owned skill
 |centaur-skills remove-editor <oid> <email-or-user-oid> → remove an editor from an owned skill
 |<tool> --help                   → inspect commands/options for one tool

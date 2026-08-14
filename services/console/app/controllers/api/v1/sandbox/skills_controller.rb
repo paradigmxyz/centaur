@@ -3,7 +3,7 @@ module Api
     module Sandbox
       class SkillsController < Api::SandboxBaseController
         MAX_LIMIT = 20
-        before_action :require_authoring_user!, only: %i[create update destroy share unshare editors add_editor remove_editor]
+        before_action :require_authoring_user!, only: %i[create update destroy share unshare add_editor remove_editor]
 
         def index
           scope = visible_skills.order(updated_at: :desc, id: :asc).limit(limit)
@@ -54,7 +54,7 @@ module Api
         end
 
         def editors
-          render json: { data: editor_management_payload(editable_skill) }
+          render json: { data: editor_management_payload(visible_skill) }
         end
 
         def add_editor

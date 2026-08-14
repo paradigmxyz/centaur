@@ -17,6 +17,18 @@ class Console::SkillsControllerTest < ActionDispatch::IntegrationTest
     assert_no_match skills(:other_private).name, response.body
   end
 
+  test "shows editor identities to viewers of a shared skill" do
+    skill = skills(:admin_shared)
+    editor = users(:globex_admin)
+    skill.editors << editor
+
+    get console_skill_url(skill.oid)
+
+    assert_response :ok
+    assert_select "#skill-editors-heading", text: "Editors"
+    assert_match editor.email, response.body
+  end
+
   test "shows owned and editable skills on the my skills tab" do
     skills(:other_private).editors << @user
     get mine_console_skills_url
@@ -72,6 +84,7 @@ class Console::SkillsControllerTest < ActionDispatch::IntegrationTest
     assert_select "textarea[name='skill[content]']"
     assert_select "input[role='combobox'][data-user-typeahead-target='input']"
     assert_select "input[name='skill[editor_oids][]']"
+    assert_match "Their names and emails are visible to anyone who can view the skill.", response.body
   end
 
   test "owner adds and removes editors" do

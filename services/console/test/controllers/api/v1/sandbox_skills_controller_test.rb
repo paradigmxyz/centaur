@@ -240,8 +240,25 @@ class Api::V1::SandboxSkillsControllerTest < ActionDispatch::IntegrationTest
     assert_equal [ users(:member_user) ], skill.reload.editors.to_a
   end
 
-  test "editor membership is not exposed to public viewers or shared principals" do
+  test "shared skill editor membership is visible to user and shared principals" do
     skill = skills(:admin_shared)
+    skill.editors << users(:globex_admin)
+
+    with_token(@member_proxy) do |headers|
+      get "/api/v1/sandbox/skills/#{skill.oid}/editors", headers: headers
+    end
+    assert_response :ok
+    assert_equal users(:globex_admin).email, json_body.dig("data", "editors", 0, "email")
+
+    with_token(@channel_proxy) do |headers|
+      get "/api/v1/sandbox/skills/#{skill.oid}/editors", headers: headers
+    end
+    assert_response :ok
+    assert_equal users(:globex_admin).oid, json_body.dig("data", "editors", 0, "id")
+  end
+
+  test "private skill editor membership remains limited to users who can edit it" do
+    skill = skills(:other_private)
     skill.editors << users(:globex_admin)
 
     with_token(@member_proxy) do |headers|
@@ -252,7 +269,7 @@ class Api::V1::SandboxSkillsControllerTest < ActionDispatch::IntegrationTest
     with_token(@channel_proxy) do |headers|
       get "/api/v1/sandbox/skills/#{skill.oid}/editors", headers: headers
     end
-    assert_response :forbidden
+    assert_response :not_found
   end
 
   test "owner cannot add itself or a disabled user as an editor" do

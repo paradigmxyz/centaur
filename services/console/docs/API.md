@@ -1458,11 +1458,11 @@ These endpoints use the existing sandbox entitlement JWT injected by `iron-proxy
 | `DELETE` | `/api/v1/sandbox/skills/:id` | Archive an owned skill. |
 | `POST` | `/api/v1/sandbox/skills/:id/share` | Make an owned skill public. |
 | `POST` | `/api/v1/sandbox/skills/:id/unshare` | Make an owned skill private. |
-| `GET` | `/api/v1/sandbox/skills/:id/editors` | List editors for an owned or editable skill OID. |
+| `GET` | `/api/v1/sandbox/skills/:id/editors` | List editors for any visible skill by exact name or OID. |
 | `POST` | `/api/v1/sandbox/skills/:id/editors` | Add an editor to an owned skill OID using an exact email or `usr_...` OID in `data.user`. |
 | `DELETE` | `/api/v1/sandbox/skills/:id/editors` | Remove an editor from an owned skill OID using an exact email or `usr_...` OID in `data.user`. |
 
-Editor responses include each editor's OID, email, name, and account status, plus the skill's current `lock_version`. Adding an editor is idempotent. Catalog responses include the skill ID and a checksum over the generated document. Read responses set `Cache-Control: no-store`.
+Editor responses include each editor's OID, email, name, and account status, plus the skill's current `lock_version`. The editor list follows skill visibility: every principal that can read a shared skill can also read its editor list, while a private skill's list remains visible only to its owner and editors. Adding an editor is idempotent. Catalog responses include the skill ID and a checksum over the generated document. Read responses set `Cache-Control: no-store`.
 
 ## Proxies
 

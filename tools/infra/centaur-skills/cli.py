@@ -136,9 +136,9 @@ def edit(
 
 @app.command("editors")
 def editors(
-    identifier: str = typer.Argument(..., help="OID of an owned or editable skill"),
+    identifier: str = typer.Argument(..., help="Visible skill name or OID"),
 ) -> None:
-    """List editors for an owned or editable skill."""
+    """List editors for a visible skill."""
     with get_client() as client:
         result = client.list_editors(identifier)
     print(json.dumps({"data": result}, indent=2, default=str))

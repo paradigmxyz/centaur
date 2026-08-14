@@ -134,7 +134,7 @@ class SkillsClient:
         return result
 
     def list_editors(self, identifier: str) -> dict[str, Any]:
-        """List editors for an owned or editable Console skill by OID."""
+        """List editors for a visible Console skill by exact name or OID."""
         result = self._request(
             f"{SANDBOX_SKILLS_PATH}/{quote(identifier, safe='')}/editors"
         )
