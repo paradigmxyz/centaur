@@ -66,5 +66,17 @@ class SystemPromptTest(unittest.TestCase):
         self.assertIn("personal `provider_email`", prompt)
         self.assertIn("Centaur can use their personal connected account", prompt)
 
+    def test_sandbox_api_permission_guidance_is_present(self) -> None:
+        prompt = SYSTEM_PROMPT.read_text()
+
+        self.assertIn("[Sandbox API permissions]", prompt)
+        self.assertIn("fetch the current sandbox permissions with `centaur-console permissions`", prompt)
+        self.assertIn("`sandbox_sessions_read_enabled`", prompt)
+        self.assertIn("`sandbox_workflows_read_enabled`", prompt)
+        self.assertIn("`sandbox_workflows_write_enabled`", prompt)
+        self.assertIn("Workflow write access does not imply workflow read access", prompt)
+        self.assertIn("Treat a false or missing capability as denied", prompt)
+        self.assertIn("do not assume access", prompt)
+
 if __name__ == "__main__":
     unittest.main()

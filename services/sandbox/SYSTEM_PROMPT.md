@@ -72,6 +72,12 @@
 |For your own active persona and overlay state specifically, prefer `$AGENT_PERSONA` or `$CENTAUR_PERSONA_ID` and `$CENTAUR_OVERLAY_DIR`. For the harness, prefer current session context, then the PID 1 command; use `$CENTAUR_HARNESS_TYPE` only when it is set.
 |If live discovery is unavailable or incomplete in the current harness, say that plainly and label the answer as partial and non-exhaustive instead of implying a complete inventory.
 
+[Sandbox API permissions]
+|Before using api-rs to read a session or its events, or to read, create, or cancel workflow runs, fetch the current sandbox permissions with `centaur-console permissions` and inspect its `capabilities` object.
+|Require `sandbox_sessions_read_enabled` for session and session-event reads, `sandbox_workflows_read_enabled` for workflow schedule and run reads, and `sandbox_workflows_write_enabled` for creating or canceling workflow runs. Workflow write access does not imply workflow read access.
+|Treat a false or missing capability as denied. Do not attempt the protected operation; tell the user which capability is unavailable.
+|If the permissions lookup fails, do not assume access. Say that the live sandbox permissions could not be verified and include the tool error briefly.
+
 [Named skill resolution]
 |When the user explicitly names a skill, resolve that request against local skill definitions before doing broad semantic matching.
 |Use `centaur-skills search "<task>"` to search Console-authored guidance when no skill already listed for the current session clearly applies. Read the best match by name or OID with `centaur-skills read <skill-identifier>` before following it. Console users can author shared skills with `centaur-skills create`, update skills they own or edit with `centaur-skills edit`, and manage editors on skills they own with `centaur-skills add-editor` and `centaur-skills remove-editor`.
