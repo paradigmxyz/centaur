@@ -31,6 +31,7 @@ describe('extractMessageOverrides', () => {
     expect(extractMessageOverrides('--amp review this').harnessType).toBe('amp')
     expect(extractMessageOverrides('--codex review this').harnessType).toBe('codex')
     expect(extractMessageOverrides('--nanocodex review this').harnessType).toBe('nanocodex')
+    expect(extractMessageOverrides('--hermes review this').harnessType).toBe('hermes')
   })
 
   test('parses harness flag anywhere in the message', () => {
@@ -364,6 +365,18 @@ describe('validateStrategyOverrides', () => {
       provider: undefined,
       reasoning: undefined
     })
+    expect(validateStrategyOverrides({ model: 'claude-opus-5' })).toEqual({
+      harnessType: 'claudecode',
+      model: 'claude-opus-5',
+      provider: undefined,
+      reasoning: undefined
+    })
+    expect(validateStrategyOverrides({ model: 'claude-opus-5-fast' })).toEqual({
+      harnessType: 'claudecode',
+      model: 'claude-opus-5-fast',
+      provider: undefined,
+      reasoning: undefined
+    })
     expect(validateStrategyOverrides({ model: 'claude-sonnet-4-6' })).toEqual({
       harnessType: 'claudecode',
       model: 'claude-sonnet-4-6',
@@ -414,6 +427,12 @@ describe('validateStrategyOverrides', () => {
       model: 'gpt-5.6-sol',
       provider: undefined,
       reasoning: 'max'
+    })
+    expect(validateStrategyOverrides({ harness: 'nanocodex', reasoning: 'high' })).toEqual({
+      harnessType: 'nanocodex',
+      model: undefined,
+      provider: undefined,
+      reasoning: 'high'
     })
   })
 })

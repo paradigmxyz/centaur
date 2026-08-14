@@ -516,10 +516,21 @@ payload = json.loads(sys.argv[4])
 module_path = project_dir / client_module
 package_name = project_dir.name.replace("-", "_")
 if (project_dir / "__init__.py").is_file() and package_name.isidentifier() and module_path.suffix == ".py":
-    parent = str(project_dir.parent)
-    if parent not in sys.path:
-        sys.path.insert(0, parent)
-    module = importlib.import_module(f"{{package_name}}.{{module_path.stem}}")
+    package_path = project_dir / "__init__.py"
+    package_spec = importlib.util.spec_from_file_location(
+        package_name,
+        package_path,
+        submodule_search_locations=[str(project_dir)],
+    )
+    if package_spec is None or package_spec.loader is None:
+        raise RuntimeError(f"cannot load tool package from {{package_path}}")
+    package = importlib.util.module_from_spec(package_spec)
+    sys.modules[package_name] = package
+    package_spec.loader.exec_module(package)
+
+    relative_module = module_path.relative_to(project_dir).with_suffix("")
+    module_name = ".".join((package_name, *relative_module.parts))
+    module = importlib.import_module(module_name)
 else:
     spec = importlib.util.spec_from_file_location("_centaur_tool_client", module_path)
     if spec is None or spec.loader is None:

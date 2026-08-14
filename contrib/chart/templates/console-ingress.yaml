@@ -1,5 +1,5 @@
 {{- $console := include "centaur.consoleValues" . | fromYaml }}
-{{- if and $console.enabled $console.ingress.enabled }}
+{{- if $console.ingress.enabled }}
 # Optional Ingress for the console; the controller (Tailscale operator,
 # Cloudflare, ingress-nginx, ...) is installed separately and selected via
 # console.ingress.className. defaultBackend renders the single-backend

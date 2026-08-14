@@ -1,7 +1,7 @@
 module Console
   # Create/edit form for OAuth apps: identity, the provider + OAuth client it
   # consents with, the flow policy (allowed scopes, allowed return URLs, the
-  # credential namespace, the enable kill switch), and labels. Modeled on
+  # the enable kill switch, and labels. Modeled on
   # Console::BrokerCredentialsController -- an OAuth app is operator config, not a
   # secret, so it lives on its own rather than under BaseSecretsController.
   class OauthAppsController < ApplicationController
@@ -43,9 +43,10 @@ module Console
     # assigned when non-blank, so editing without re-entering it leaves the stored
     # value in place (same pattern as BrokerCredentialsController).
     def assign_form(app)
-      fields = app_params.permit(:slug, :description, :provider, :client_id, :credential_namespace)
+      fields = app_params.permit(:slug, :description, :provider, :client_id)
       app.assign_attributes(fields)
       app.enabled = app_params[:enabled] == "1"
+      app.always_available = app_params[:always_available] == "1"
       app.allowed_scopes = line_list(app_params[:allowed_scopes])
       app.labels = label_params
 

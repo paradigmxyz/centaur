@@ -86,16 +86,18 @@ spec:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "teamsbot") | nindent 14 }}
 {{- end }}
-{{- if $console.enabled }}
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console") | nindent 14 }}
-{{- if $console.worker.enabled }}
         # console Solid Queue worker (bin/jobs) reaches the app + queue DBs.
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-worker") | nindent 14 }}
-{{- end }}
+{{- if $console.sqlExporter.enabled }}
+        # The Console SQL Exporter reads queue state from the bundled Postgres.
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-sql-exporter") | nindent 14 }}
 {{- end }}
         # iron-proxy pods forward the tool-server sidecar's pool to Postgres
         # (the sidecar reaches the core DB through the per-sandbox proxy, not
@@ -182,18 +184,14 @@ spec:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "teamsbot") | nindent 14 }}
 {{- end }}
-{{- if $console.enabled }}
         # Console pages call api-rs for admin-backed views such as ETLs.
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console") | nindent 14 }}
-{{- if $console.worker.enabled }}
         # Console background jobs call api-rs for sync ingestion/checkpoints.
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-worker") | nindent 14 }}
-{{- end }}
-{{- end }}
         # New sandboxes call back into the control plane only when their
         # principal has the API server sandbox capability.
         - podSelector:
@@ -335,7 +333,6 @@ spec:
           port: {{ .Values.ironProxy.service.pgPort }}
         - protocol: TCP
           port: {{ .Values.ironProxy.service.managementPort }}
-{{- if $console.enabled }}
     # console control plane: register principals/roles/grants and per-sandbox proxies.
     - to:
         - podSelector:
@@ -344,7 +341,6 @@ spec:
       ports:
         - protocol: TCP
           port: {{ $console.service.httpPort }}
-{{- end }}
     - ports:
         - protocol: TCP
           port: 443

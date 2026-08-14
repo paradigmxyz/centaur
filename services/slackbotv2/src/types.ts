@@ -78,6 +78,13 @@ export type SlackbotV2CreateSessionRequest = {
   on_harness_conflict?: 'reject' | 'restart'
 }
 
+export type SlackbotV2HarnessAssignment = {
+  experiment: string
+  requestedHarness: string
+  cohort: string
+  rolloutPercent: number
+}
+
 export type SlackbotV2ExecuteSessionRequest = {
   idempotency_key?: string
   idle_timeout_ms?: number
@@ -128,24 +135,30 @@ export type SlackbotV2Options = {
    * status and structured task output is hidden from the Slack stream.
    */
   activitySummaryStatusEnabled?: boolean
+  /** Join public channels after Slack channel_created events. */
+  autoJoinCreatedChannels?: boolean
   botToken: string
   botUserId?: string
   /**
    * Public origin of the Console UI (same value the Console itself uses,
    * `CENTAUR_CONSOLE_PUBLIC_URL`). When set, the first assistant message in a
-   * Slack thread gets an "Open chat in Console" context link. Unset skips
-   * the block entirely.
+   * Slack thread gets an "Open chat in Console" context link. Unset skips the
+   * link; response metadata renders independently according to its configured mode.
    */
   consolePublicUrl?: string
+  /** Controls whether response metadata renders on the first, every, or no live responses. */
+  responseMetadataMode?: 'first' | 'always' | 'never'
+  /** Include the Codex service tier in response metadata footers when they render. */
+  responseServiceTierEnabled?: boolean
   /**
    * Per-channel default harness/model/provider/reasoning, keyed by Slack
    * conversation id (SLACKBOTV2_CHANNEL_DEFAULTS). See channel-defaults.ts.
    */
   channelDefaults?: ChannelDefaults
   /**
-   * Harness for new threads when no --claude/--amp/--codex/--nanocodex flag is
-   * given (HarnessType wire value: codex | amp | claudecode | nanocodex).
-   * Defaults to codex.
+   * Harness for new threads when no --claude/--amp/--codex/--nanocodex/--hermes
+   * flag is given (HarnessType wire value: codex | amp | claudecode |
+   * nanocodex | hermes). Defaults to codex.
    */
   defaultHarnessType?: string
   fetch?: SlackbotV2Fetch
@@ -157,6 +170,12 @@ export type SlackbotV2Options = {
    * harness config files (see console-session-link.ts).
    */
   harnessDefaultModels?: Record<string, string>
+  /**
+   * Deployment-configured default reasoning per Codex-compatible harness,
+   * mirrored from CODEX_MODEL_REASONING_EFFORT. Display only; explicit and
+   * channel reasoning selections are forwarded separately on each turn.
+   */
+  harnessDefaultReasoning?: Record<string, string>
   /** Strategy for resolving message-level harness/model/provider/reasoning overrides. */
   messageOverridesStrategy?: MessageOverridesStrategy
   /**
@@ -182,6 +201,8 @@ export type SlackbotV2Options = {
   sessionApiTimeoutMs?: number
   signingSecret: string
   slackApiUrl?: string
+  /** Bot workspace team ID resolved once from Slack's auth.test response. */
+  slackHomeTeamId?: string
   /** Deadline for optional Slack Web API metadata lookups. */
   slackApiTimeoutMs?: number
   state?: StateAdapter
@@ -258,6 +279,10 @@ export type ForwardSessionInput = {
   executeMessage?: SlackbotV2ApiMessage
   /** Effective harness selected by sticky thread flags (including --nanocodex). */
   harnessType?: string
+  /** Harness returned by api-rs after applying control-plane policy. */
+  metadataHarnessType?: string
+  /** Experiment/cohort returned by api-rs and recorded on this execution. */
+  harnessAssignment?: SlackbotV2HarnessAssignment
   messages: SlackbotV2ApiMessage[]
   /** Effective model selected by sticky thread flags (--model/--opus/...). */
   model?: string
@@ -269,7 +294,7 @@ export type ForwardSessionInput = {
   metadataModel?: string
   /** Effective model provider selected by sticky thread flags (--bedrock); codex only. */
   provider?: string
-  /** Per-turn reasoning effort parsed from the `-rsn` flag (codex only). */
+  /** Per-turn reasoning effort parsed from the `-rsn` flag (Codex/Nanocodex). */
   reasoning?: string
   onEventId(eventId: number): void
   openStream: boolean

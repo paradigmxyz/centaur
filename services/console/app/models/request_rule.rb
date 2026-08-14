@@ -7,6 +7,7 @@ class RequestRule < ApplicationRecord
 
   HTTP_METHODS = %w[GET HEAD POST PUT PATCH DELETE OPTIONS CONNECT].freeze
   METHOD_WILDCARD = "*".freeze
+  SYNC_CONFIG_REPLACEMENT_ATTRIBUTES = %w[position host cidr http_methods paths].freeze
 
   # A rule hangs off exactly one credential type.
   belongs_to :static_secret, optional: true

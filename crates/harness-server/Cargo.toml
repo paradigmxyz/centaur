@@ -10,7 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 allocative = "=0.3.4"
-base64 = "0.22"
+base64 = "0.23"
 clap = { version = "4.5", features = ["derive"] }
 codex-app-server-protocol = { git = "https://github.com/openai/codex", rev = "e93dc98a48d597df322436ffe8d03bfd7ec63b3b", package = "codex-app-server-protocol" }
 # Already a transitive dep of codex-app-server-protocol; made direct because
@@ -23,12 +23,12 @@ codex-utils-absolute-path = { git = "https://github.com/openai/codex", rev = "e9
 # provider's per-image caps (Bedrock/mantle rejects images past ~5 MB / 8000 px).
 # Scoped to the formats chat clients actually paste to keep the build lean.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
-nanocodex = { git = "https://github.com/gakonst/nanocodex", rev = "c99b521ef101c3ee4382d2a3301a77cca80d19ac" }
+nanocodex = { git = "https://github.com/gakonst/nanocodex", rev = "bf022728c6d36501bdb1c380c7092743db3d5dae" }
 opentelemetry-proto = { version = "0.32.0", default-features = false, features = ["trace", "gen-tonic-messages"] }
 prost = "0.14"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sha2 = "0.10"
+sha2 = "0.11"
 thiserror = "2.0"
 tokio = { version = "1.49", features = ["rt-multi-thread", "sync"] }
 url = "2.5"

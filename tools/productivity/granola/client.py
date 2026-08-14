@@ -14,8 +14,9 @@ GRANOLA_BACKEND=mcp|rest.
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
+from xml.etree import ElementTree
 
 import httpx
 from centaur_sdk import secret
@@ -127,56 +128,63 @@ class GranolaClient:
         return [n for n in all_notes if query_lower in (n.get("title") or "").lower()][:limit]
 
 
-# Matches one <meeting ...>...</meeting> block in MCP meetings_data output.
-_MEETING_RE = re.compile(
-    r'<meeting id="(?P<id>[^"]+)" title="(?P<title>[^"]*)" date="(?P<date>[^"]*)">'
-    r"(?P<body>.*?)</meeting>",
-    re.DOTALL,
-)
-_PARTICIPANTS_RE = re.compile(r"<known_participants>(.*?)</known_participants>", re.DOTALL)
-_SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.DOTALL)
-# "Zygimantas (note creator) from Tempo <z@tempo.xyz>" -> name + email
 _PARTICIPANT_RE = re.compile(r"(?P<name>[^,<]+?)\s*<(?P<email>[^>]+)>")
 
 
 def _parse_meeting_date(raw: str) -> str:
     """Convert MCP dates like 'Jul 8, 2026 5:30 PM GMT+2' to ISO, best effort."""
-    m = re.match(r"(\w+ \d+, \d+ \d+:\d+ [AP]M) GMT(?P<off>[+-]\d+)?", raw)
-    if not m:
+    date_text, separator, offset_text = raw.rpartition(" GMT")
+    if not separator:
         return raw
     try:
-        dt = datetime.strptime(m.group(1), "%b %d, %Y %I:%M %p")
-        off = m.group("off")
-        return dt.isoformat() + (f"{int(off):+03d}:00" if off else "")
+        offset_hours = int(offset_text or "0")
+        if not -23 <= offset_hours <= 23:
+            return raw
+        dt = datetime.strptime(date_text, "%b %d, %Y %I:%M %p")
+        return dt.replace(tzinfo=timezone(timedelta(hours=offset_hours))).isoformat()
     except ValueError:
         return raw
 
 
+def _parse_participants(text: str) -> list[dict[str, str]]:
+    """Parse Granola's display-name/email participant text."""
+    return [
+        {
+            "name": participant.group("name").strip(),
+            "email": participant.group("email").strip().lower(),
+        }
+        for participant in _PARTICIPANT_RE.finditer(text)
+    ]
+
+
 def _parse_meetings(text: str) -> list[dict[str, Any]]:
     """Parse MCP meetings_data text into REST-shaped note dicts."""
+    try:
+        root = ElementTree.fromstring(f"<granola_response>{text}</granola_response>")
+    except ElementTree.ParseError as error:
+        raise RuntimeError("Granola MCP returned malformed meeting XML") from error
+
     notes = []
-    for m in _MEETING_RE.finditer(text):
-        body = m.group("body")
-        attendees = []
-        pm = _PARTICIPANTS_RE.search(body)
-        if pm:
-            for p in _PARTICIPANT_RE.finditer(pm.group(1)):
-                attendees.append({"name": p.group("name").strip(), "email": p.group("email")})
+    for meeting in root.findall(".//meeting"):
+        if not all(meeting.get(name) for name in ("id", "title", "date")):
+            continue
+        participants = meeting.findtext("known_participants", default="")
+        attendees = _parse_participants(participants)
         owner = next(
             (a for a in attendees if "(note creator)" in a["name"]),
             attendees[0] if attendees else {},
         )
         if owner:
             owner = {**owner, "name": owner["name"].replace("(note creator)", "").split(" from ")[0].strip()}
-        sm = _SUMMARY_RE.search(body)
+        summary = meeting.findtext("summary")
         notes.append(
             {
-                "id": m.group("id"),
-                "title": m.group("title"),
-                "created_at": _parse_meeting_date(m.group("date")),
+                "id": meeting.get("id"),
+                "title": meeting.get("title"),
+                "created_at": _parse_meeting_date(meeting.get("date", "")),
                 "owner": owner,
                 "attendees": attendees,
-                "summary_markdown": sm.group(1).strip() if sm else None,
+                "summary_markdown": summary.strip() if summary else None,
             }
         )
     return notes

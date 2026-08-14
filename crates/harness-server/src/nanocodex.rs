@@ -7,13 +7,17 @@ use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use nanocodex::{AgentEvent, AgentEvents, Nanocodex, Prompt, Thinking, Tools, Turn, UserInput};
+use nanocodex::{
+    AgentEvent, AgentEvents, Nanocodex, OpenAiAuth, Prompt, Thinking, Tools, Turn, UserInput,
+    load_chatgpt_auth,
+};
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::nanocodex_subagents::{ChildAgents, with_subagents};
+use crate::util::default_codex_home;
 use crate::{HarnessServerError, Result};
 
 /// Runs the Centaur blocks adapter while preserving Nanocodex's native event
@@ -27,13 +31,11 @@ pub fn run_nanocodex_blocks_server() -> Result<()> {
 }
 
 async fn run() -> Result<()> {
-    let api_key =
-        env::var("OPENAI_API_KEY").map_err(|_| HarnessServerError::MissingEnvironment {
-            name: "OPENAI_API_KEY",
-        })?;
+    let auth = configured_openai_auth()?;
     let cwd = env::current_dir()?;
     let session_id = format!("nanocodex-{}", Uuid::new_v4().simple());
     let child_agents = Arc::new(ChildAgents::default());
+    let default_thinking = configured_default_thinking();
 
     let (sender, mut receiver) = mpsc::unbounded_channel();
     std::thread::spawn(move || {
@@ -56,10 +58,20 @@ async fn run() -> Result<()> {
             continue;
         }
         match parse_blocks_line(&line, &mut staged)? {
-            BlocksCommand::User { prompt, subagents } => {
+            BlocksCommand::User {
+                prompt,
+                subagents,
+                thinking,
+            } => {
                 if agent.is_none() {
-                    let (new_agent, new_events) =
-                        build_agent(&api_key, &cwd, &session_id, &child_agents, subagents)?;
+                    let (new_agent, new_events) = build_agent(
+                        &auth,
+                        &cwd,
+                        &session_id,
+                        &child_agents,
+                        subagents,
+                        default_thinking,
+                    )?;
                     agent = Some(new_agent);
                     events = Some(new_events);
                     subagents_enabled = subagents;
@@ -69,6 +81,10 @@ async fn run() -> Result<()> {
                 let agent = agent.as_ref().ok_or_else(|| {
                     HarnessServerError::Nanocodex("agent was not initialized".to_owned())
                 })?;
+                agent
+                    .set_thinking(thinking.unwrap_or(default_thinking))
+                    .await
+                    .map_err(nanocodex_error)?;
                 let turn = agent.prompt(prompt).await.map_err(nanocodex_error)?;
                 let events = events.as_mut().ok_or_else(|| {
                     HarnessServerError::Nanocodex("event stream was not initialized".to_owned())
@@ -93,15 +109,45 @@ async fn run() -> Result<()> {
     Ok(())
 }
 
+fn configured_openai_auth() -> Result<OpenAiAuth> {
+    let auth_mode = env::var("CODEX_AUTH_MODE").ok();
+    let api_key = env::var("OPENAI_API_KEY").ok();
+    let codex_home = env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(default_codex_home);
+    openai_auth(auth_mode.as_deref(), api_key, codex_home)
+}
+
+fn openai_auth(
+    auth_mode: Option<&str>,
+    api_key: Option<String>,
+    codex_home: PathBuf,
+) -> Result<OpenAiAuth> {
+    match auth_mode.unwrap_or("api_key").trim() {
+        "access_token" => load_chatgpt_auth(codex_home.join("auth.json"))
+            .map_err(|error| HarnessServerError::Nanocodex(error.to_string())),
+        "api_key" | "" => api_key
+            .filter(|value| !value.trim().is_empty())
+            .map(OpenAiAuth::api_key)
+            .ok_or(HarnessServerError::MissingEnvironment {
+                name: "OPENAI_API_KEY",
+            }),
+        mode => Err(HarnessServerError::Nanocodex(format!(
+            "unsupported CODEX_AUTH_MODE `{mode}`"
+        ))),
+    }
+}
+
 fn build_agent(
-    api_key: &str,
+    auth: &OpenAiAuth,
     cwd: &std::path::Path,
     session_id: &str,
     child_agents: &Arc<ChildAgents>,
     subagents: bool,
+    thinking: Thinking,
 ) -> Result<(Nanocodex, AgentEvents)> {
-    let builder = Nanocodex::builder(api_key)
-        .thinking(Thinking::Low)
+    let builder = Nanocodex::builder(auth.clone())
+        .thinking(thinking)
         .workspace(cwd)
         .session_id(session_id);
     let result = if subagents {
@@ -147,7 +193,11 @@ async fn run_turn(
                     continue;
                 }
                 match parse_blocks_line(&line, staged)? {
-                    BlocksCommand::User { prompt, subagents } => {
+                    BlocksCommand::User {
+                        prompt,
+                        subagents,
+                        thinking: _,
+                    } => {
                         if subagents && !subagents_enabled {
                             eprintln!("nanocodex --subagents only applies to the first session message");
                         }
@@ -181,7 +231,11 @@ fn nanocodex_error(error: nanocodex::NanocodexError) -> HarnessServerError {
 }
 
 enum BlocksCommand {
-    User { prompt: Prompt, subagents: bool },
+    User {
+        prompt: Prompt,
+        subagents: bool,
+        thinking: Option<Thinking>,
+    },
     AttachmentChunk,
     Interrupt,
 }
@@ -196,6 +250,8 @@ struct BlocksLine {
     content: Option<Value>,
     #[serde(default)]
     message: Option<BlocksMessage>,
+    #[serde(default)]
+    reasoning: Option<String>,
     #[serde(rename = "attachmentId", default)]
     attachment_id: Option<String>,
     #[serde(rename = "localPath", alias = "path", default)]
@@ -241,9 +297,15 @@ fn parse_blocks_line(line: &str, staged: &mut HashMap<String, PathBuf>) -> Resul
                 });
             }
             let subagents = take_subagents_flag(&mut inputs);
+            let thinking = parsed
+                .reasoning
+                .as_deref()
+                .map(parse_thinking)
+                .transpose()?;
             Ok(BlocksCommand::User {
                 prompt: Prompt::content(inputs),
                 subagents,
+                thinking,
             })
         }
         "attachment.chunk" => {
@@ -279,6 +341,36 @@ fn parse_blocks_line(line: &str, staged: &mut HashMap<String, PathBuf>) -> Resul
             message: format!("unsupported blocks input type `{kind}`"),
         }),
     }
+}
+
+fn configured_default_thinking() -> Thinking {
+    let Some(value) = env::var("CODEX_MODEL_REASONING_EFFORT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Thinking::Low;
+    };
+    match parse_thinking(&value) {
+        Ok(thinking) => thinking,
+        Err(error) => {
+            eprintln!("ignoring invalid CODEX_MODEL_REASONING_EFFORT: {error}");
+            Thinking::Low
+        }
+    }
+}
+
+fn parse_thinking(value: &str) -> Result<Thinking> {
+    let normalized = value.trim().to_ascii_lowercase();
+    // Nanocodex does not expose a distinct `minimal` level. Low is the nearest
+    // supported Responses effort and is also Centaur's stock Codex default.
+    let normalized = if normalized == "minimal" {
+        "low"
+    } else {
+        normalized.as_str()
+    };
+    normalized
+        .parse()
+        .map_err(|message| HarnessServerError::InvalidBlocksInput { message })
 }
 
 fn take_subagents_flag(inputs: &mut [UserInput]) -> bool {
@@ -459,6 +551,7 @@ fn required_value_string_alias(value: &Value, name: &str, alias: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nanocodex::OpenAiAuthMode;
 
     #[test]
     fn parses_text_without_codex_protocol_types() {
@@ -467,10 +560,16 @@ mod tests {
             &mut HashMap::new(),
         )
         .unwrap();
-        let BlocksCommand::User { prompt, subagents } = command else {
+        let BlocksCommand::User {
+            prompt,
+            subagents,
+            thinking,
+        } = command
+        else {
             panic!("expected user prompt");
         };
         assert!(!subagents);
+        assert_eq!(thinking, None);
         assert_eq!(
             serde_json::to_value(prompt).unwrap()["instruction"][0]["text"],
             "hello"
@@ -484,7 +583,10 @@ mod tests {
             &mut HashMap::new(),
         )
         .unwrap();
-        let BlocksCommand::User { prompt, subagents } = command else {
+        let BlocksCommand::User {
+            prompt, subagents, ..
+        } = command
+        else {
             panic!("expected user prompt");
         };
         assert!(!subagents);
@@ -508,7 +610,10 @@ mod tests {
             &mut HashMap::new(),
         )
         .unwrap();
-        let BlocksCommand::User { prompt, subagents } = command else {
+        let BlocksCommand::User {
+            prompt, subagents, ..
+        } = command
+        else {
             panic!("expected user prompt");
         };
         assert!(subagents);
@@ -525,7 +630,10 @@ mod tests {
             &mut HashMap::new(),
         )
         .unwrap();
-        let BlocksCommand::User { prompt, subagents } = command else {
+        let BlocksCommand::User {
+            prompt, subagents, ..
+        } = command
+        else {
             panic!("expected user prompt");
         };
         assert!(!subagents);
@@ -533,5 +641,66 @@ mod tests {
             serde_json::to_value(prompt).unwrap()["instruction"][0]["text"],
             "keep --subagents=false literal"
         );
+    }
+
+    #[test]
+    fn parses_reasoning_effort_for_nanocodex_turns() {
+        let command = parse_blocks_line(
+            r#"{"type":"user","reasoning":"high","text":"inspect"}"#,
+            &mut HashMap::new(),
+        )
+        .unwrap();
+        let BlocksCommand::User { thinking, .. } = command else {
+            panic!("expected user prompt");
+        };
+        assert_eq!(thinking, Some(Thinking::High));
+    }
+
+    #[test]
+    fn api_key_auth_remains_the_default() {
+        let auth = openai_auth(None, Some("test-api-key".to_owned()), PathBuf::new()).unwrap();
+
+        assert_eq!(auth.mode(), OpenAiAuthMode::ApiKey);
+    }
+
+    #[test]
+    fn access_token_auth_loads_the_shared_codex_login() {
+        let codex_home = env::temp_dir().join(format!(
+            "centaur-nanocodex-auth-{}",
+            Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&codex_home).unwrap();
+        std::fs::write(
+            codex_home.join("auth.json"),
+            include_str!("../../../services/sandbox/codex-auth.json"),
+        )
+        .unwrap();
+
+        let auth = openai_auth(Some("access_token"), None, codex_home.clone()).unwrap();
+
+        assert_eq!(auth.mode(), OpenAiAuthMode::ChatGpt);
+        std::fs::remove_dir_all(codex_home).unwrap();
+    }
+
+    #[test]
+    fn rejects_unsupported_auth_modes() {
+        let error = openai_auth(Some("chatgpt"), None, PathBuf::new()).unwrap_err();
+
+        assert!(
+            matches!(error, HarnessServerError::Nanocodex(message) if message.contains("unsupported CODEX_AUTH_MODE `chatgpt`"))
+        );
+    }
+
+    #[test]
+    fn api_key_auth_requires_a_non_empty_key() {
+        let error =
+            openai_auth(Some("api_key"), Some("  ".to_owned()), PathBuf::new()).unwrap_err();
+
+        assert!(matches!(
+            error,
+            HarnessServerError::MissingEnvironment {
+                name: "OPENAI_API_KEY"
+            }
+        ));
     }
 }

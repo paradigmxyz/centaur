@@ -1,6 +1,8 @@
 require "test_helper"
 
 class ProxySyncControllerTest < ActionDispatch::IntegrationTest
+  include ActiveJob::TestHelper
+
   ACME_TOKEN = "iprx_#{'a' * 64}".freeze
 
   def auth_headers(token = ACME_TOKEN)
@@ -25,6 +27,11 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
 
     RequestRule.create!(host: "api.example.com", http_methods: [ "POST" ], paths: [ "/v1/*" ],
                         position: 0, static_secret: @inject)
+  end
+
+  teardown do
+    clear_enqueued_jobs
+    clear_performed_jobs
   end
 
   test "rejects requests without an Authorization header" do
@@ -69,7 +76,7 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
     refute_nil entry
     assert_equal "Bearer {{ .Value }}", entry.dig("inject", "formatter")
     assert_equal(
-      { "host" => "centaur-console", "methods" => [ "GET" ], "paths" => [ Proxy::SANDBOX_ENTITLEMENTS_PATH_PATTERN ] },
+      { "host" => "centaur-console", "methods" => %w[GET POST PUT PATCH DELETE], "paths" => [ Proxy::SANDBOX_ENTITLEMENTS_PATH_PATTERN ] },
       entry.fetch("rules").first
     )
 
@@ -102,7 +109,7 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
 
     snapshot = PrincipalSyncConfigSnapshot.find_by!(principal: @proxy.principal)
     assert_equal @proxy.principal.sync_config_cache_version, snapshot.principal_cache_version
-    assert_equal "s3cr3t-db-pass", snapshot.payload.dig("secrets", 1, "source", "value")
+    assert_equal "s3cr3t-db-pass", snapshot.config.dig("secrets", 1, "source", "value")
 
     raw = PrincipalSyncConfigSnapshot.connection.select_value(
       "SELECT payload FROM principal_sync_config_snapshots WHERE id = #{snapshot.id}"
@@ -118,7 +125,15 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
     @replace.source.update!(secret: "rotated-db-pass")
 
     assert_operator @proxy.principal.reload.sync_config_cache_version, :>, original_version
-    assert_difference -> { PrincipalSyncConfigSnapshot.count }, 1 do
+    assert_no_difference -> { PrincipalSyncConfigSnapshot.count } do
+      assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ @proxy.principal.id ]) do
+        post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
+      end
+    end
+    assert_response :ok
+
+    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob)
+    assert_no_difference -> { PrincipalSyncConfigSnapshot.count } do
       post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
     end
     assert_response :ok
@@ -175,7 +190,7 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
   test "secrets without a source are skipped" do
     # Grant a sourceless static secret to the same principal.
     sourceless = StaticSecret.create!(
-      namespace: "acme", name: "no-source",
+      name: "no-source",
       inject_config: { "header" => "X-Token" }, created_by: users(:acme_admin)
     )
     Grant.create!(principal: @proxy.principal, static_secret: sourceless, created_by: users(:acme_admin))
@@ -228,7 +243,7 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
 
     original_hash = json_body.fetch("config_hash")
     snapshot = PrincipalSyncConfigSnapshot.find_by!(principal: @proxy.principal)
-    transform = snapshot.payload.fetch("transforms").find { |t| t["name"] == "gcp_id_token" }
+    transform = snapshot.config.fetch("transforms").find { |t| t["name"] == "gcp_id_token" }
     assert_equal secret.audience, transform.dig("config", "audience")
     assert_equal "CLOUD_RUN_SA_KEYFILE", transform.dig("config", "keyfile", "var")
 
@@ -244,7 +259,15 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
     secret.update!(audience: "https://updated-service-abc123-uc.a.run.app")
 
     assert_operator @proxy.principal.reload.sync_config_cache_version, :>, original_version
-    assert_difference -> { PrincipalSyncConfigSnapshot.count }, 1 do
+    assert_no_difference -> { PrincipalSyncConfigSnapshot.count } do
+      assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ @proxy.principal.id ]) do
+        post api_v1_proxy_sync_url, params: { config_hash: original_hash }.to_json, headers: auth_headers
+      end
+    end
+    assert_response :ok
+
+    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob)
+    assert_no_difference -> { PrincipalSyncConfigSnapshot.count } do
       post api_v1_proxy_sync_url, params: { config_hash: original_hash }.to_json, headers: auth_headers
     end
     assert_response :ok
@@ -300,12 +323,12 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
   end
 
   test "postgres entries resolve value_from settings against the proxy principal" do
-    @proxy.principal.update!(labels: { "slack_channel_id" => "C0123456789" })
+    @proxy.principal.update!(slack_channel_id: "C0123456789")
     pg = pg_dsn_secrets(:acme_analytics_pg)
     pg.update!(settings: [
       {
         "name" => "centaur.slack_channel_id",
-        "value_from" => { "principal_label" => "slack_channel_id" }
+        "value_from" => { "principal_field" => "slack_channel_id" }
       }
     ])
 
@@ -315,6 +338,26 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
     entry = json_body.fetch("postgres").find { |e| e["foreign_id"] == pg.foreign_id }
     assert_equal(
       [ { "name" => "centaur.slack_channel_id", "value" => "C0123456789" } ],
+      entry["settings"]
+    )
+  end
+
+  test "postgres entries resolve value_from settings against proxy labels" do
+    @proxy.update!(labels: { "centaur.slack_user_id" => "U0123456789" })
+    pg = pg_dsn_secrets(:acme_analytics_pg)
+    pg.update!(settings: [
+      {
+        "name" => "centaur.slack_user_id",
+        "value_from" => { "proxy_label" => "centaur.slack_user_id" }
+      }
+    ])
+
+    post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
+    assert_response :ok
+
+    entry = json_body.fetch("postgres").find { |e| e["foreign_id"] == pg.foreign_id }
+    assert_equal(
+      [ { "name" => "centaur.slack_user_id", "value" => "U0123456789" } ],
       entry["settings"]
     )
   end
@@ -340,6 +383,12 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
 
     # Promote the role grant above the direct grants and it now sorts last.
     grants(:acme_infra_prod_api_key).update!(priority: 500)
+    assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ @proxy.principal.id ]) do
+      post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
+    end
+    assert_response :ok
+
+    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob)
     post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
     assert_response :ok
     bumped = json_body.fetch("secrets").map { |s| s.dig("source", "var") || s.dig("source", "type") }
@@ -370,13 +419,13 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
   test "broker credential token changes bump reachable principal cache version" do
     admin = users(:acme_admin)
     credential = BrokerCredential.create!(
-      namespace: "acme", foreign_id: "sync-cache-#{SecureRandom.hex(4)}",
+      foreign_id: "sync-cache-#{SecureRandom.hex(4)}",
       name: "sync cache broker", token_endpoint: "https://oauth.example.com/token",
       client_id: "client", refresh_token: "refresh", access_token: "token-1",
       expires_at: 1.hour.from_now, last_refresh: Time.current, created_by: admin
     )
     secret = StaticSecret.new(
-      namespace: "acme", name: "brokered",
+      name: "brokered",
       inject_config: { "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" },
       created_by: admin
     )
@@ -392,6 +441,12 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
     credential.update!(access_token: "token-2", expires_at: 2.hours.from_now, last_refresh: Time.current)
 
     assert_operator @proxy.principal.reload.sync_config_cache_version, :>, original_version
+    assert_enqueued_with(job: PrincipalSyncConfigSnapshotWarmJob, args: [ @proxy.principal.id ]) do
+      post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
+    end
+    assert_response :ok
+
+    perform_enqueued_jobs(only: PrincipalSyncConfigSnapshotWarmJob)
     post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
     assert_response :ok
 
@@ -399,20 +454,111 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
     refute_nil entry
   end
 
+  # --- requester principal union ------------------------------------------
+
+  def create_requester
+    Principal.create!(foreign_id: "requester-#{SecureRandom.hex(4)}",
+                      kind: "user", created_by: users(:acme_admin))
+  end
+
+  def create_requester_with_hoistable_wrapper(host: "api.github.com", header: "X-Requester-Token")
+    admin = users(:acme_admin)
+    requester = create_requester
+    app = OauthApp.create!(
+      slug: "hoist-#{SecureRandom.hex(4)}", provider: "github", client_id: "cid",
+      client_secret: "shh",
+      allowed_scopes: [ "repo" ], always_available: true, created_by: admin
+    )
+    credential = BrokerCredential.create!(
+      foreign_id: "hoist-cred-#{SecureRandom.hex(4)}",
+      token_endpoint: "https://oauth.example.com/token", client_id: "cid",
+      refresh_token: "refresh", access_token: "hoisted-token",
+      expires_at: 1.hour.from_now, last_refresh: Time.current,
+      oauth_app: app, created_by: admin
+    )
+    secret = StaticSecret.new(
+      name: "hoist wrapper",
+      inject_config: { "header" => header, "formatter" => "Bearer {{ .Value }}" },
+      broker_credential: credential, created_by: admin
+    )
+    secret.build_source(source_type: "token_broker", config: { "credential_id" => credential.oid })
+    secret.rules.build(host: host, position: 0)
+    secret.save!
+    Grant.create!(principal: requester, static_secret: secret, created_by: admin)
+    requester
+  end
+
+  test "sync unions the requester's always_available wrapper with the conversation secrets" do
+    requester = create_requester_with_hoistable_wrapper
+    @proxy.update!(requester_principal: requester)
+
+    post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
+    assert_response :ok
+
+    secrets = json_body.fetch("secrets")
+    assert_equal 3, secrets.length
+    hoisted = secrets.find { |s| s.dig("source", "value") == "hoisted-token" }
+    refute_nil hoisted
+    assert_equal({ "header" => "X-Requester-Token", "formatter" => "Bearer {{ .Value }}" }, hoisted["inject"])
+    assert secrets.any? { |s| s.dig("source", "var") == "GITHUB_TOKEN" }
+    assert secrets.any? { |s| s.dig("source", "value") == "s3cr3t-db-pass" }
+  end
+
+  test "a requester with no hoistable grants changes only the config hash" do
+    post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
+    assert_response :ok
+    baseline = json_body
+
+    @proxy.update!(requester_principal: create_requester)
+
+    post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
+    assert_response :ok
+
+    body = json_body
+    refute_equal baseline.fetch("config_hash"), body.fetch("config_hash")
+    assert_equal baseline.fetch("secrets"), body.fetch("secrets")
+    assert_equal baseline.fetch("transforms"), body.fetch("transforms")
+    assert_equal baseline.fetch("postgres"), body.fetch("postgres")
+  end
+
+  test "a requester wrapper suppresses a conversation role-granted secret on the same host and header" do
+    prod = static_secrets(:acme_prod_api_key)
+    SecretSource.create!(source_type: "env", config: { "var" => "PROD_API_KEY" }, static_secret: prod)
+    RequestRule.create!(host: "internal.example.com", position: 0, static_secret: prod)
+
+    requester = create_requester_with_hoistable_wrapper(host: "internal.example.com", header: "X-Api-Key")
+    @proxy.update!(requester_principal: requester)
+
+    post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
+    assert_response :ok
+    served = json_body.fetch("secrets").map { |s| s.dig("source", "var") || s.dig("source", "value") }
+    refute_includes served, "PROD_API_KEY"
+    assert_includes served, "hoisted-token"
+
+    @proxy.update!(requester_principal: nil)
+    post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
+    assert_response :ok
+    served = json_body.fetch("secrets").map { |s| s.dig("source", "var") || s.dig("source", "value") }
+    assert_includes served, "PROD_API_KEY"
+    refute_includes served, "hoisted-token"
+  end
+
+  test "matching config_hash short-circuits on the requester path" do
+    requester = create_requester_with_hoistable_wrapper
+    @proxy.update!(requester_principal: requester)
+
+    post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
+    assert_response :ok
+    current = json_body.fetch("config_hash")
+
+    post api_v1_proxy_sync_url, params: { config_hash: current }.to_json, headers: auth_headers
+    assert_response :ok
+    assert_equal current, json_body.fetch("config_hash")
+    refute json_body.key?("secrets")
+  end
+
   def jwt_payload(token)
     _header, payload, _signature = token.split(".")
     JSON.parse(Base64.urlsafe_decode64(payload))
-  end
-
-  def with_env(values)
-    previous = values.keys.to_h { |key| [ key, ENV[key] ] }
-    values.each do |key, value|
-      value.nil? ? ENV.delete(key) : ENV[key] = value
-    end
-    yield
-  ensure
-    previous.each do |key, value|
-      value.nil? ? ENV.delete(key) : ENV[key] = value
-    end
   end
 end

@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.util
+import json
 import os
+import select
+import subprocess
 import sys
 import tempfile
 import types
 import unittest
+from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import patch
 
@@ -69,10 +74,69 @@ class RequestRpc(FakeRpc):
             }
         if message_type == "ctx.sleep":
             return {"slept": True}
+        if message_type == "ctx.event.wait":
+            return {"approved": True}
         raise AssertionError(f"unexpected request {payload}")
 
 
 class WorkflowHostTests(unittest.TestCase):
+    @contextlib.contextmanager
+    def workflow_host(
+        self,
+        source: str | None = None,
+        *,
+        filename: str = "workflow.py",
+    ) -> Iterator[subprocess.Popen[str]]:
+        host_path = Path(__file__).resolve().parents[1] / "workflow_host.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            if source is not None:
+                (Path(tmp) / filename).write_text(source)
+            proc = subprocess.Popen(
+                [sys.executable, str(host_path)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env={**os.environ, "WORKFLOW_DIRS": tmp},
+            )
+            assert proc.stdin is not None
+            assert proc.stdout is not None
+            assert proc.stderr is not None
+            try:
+                yield proc
+            finally:
+                self.stop_host(proc)
+
+    def send_host_message(
+        self,
+        proc: subprocess.Popen[str],
+        message: dict,
+    ) -> None:
+        assert proc.stdin is not None
+        proc.stdin.write(json.dumps(message) + "\n")
+        proc.stdin.flush()
+
+    def read_host_message(
+        self,
+        proc: subprocess.Popen[str],
+        *,
+        timeout: float = 2,
+    ) -> dict:
+        assert proc.stdout is not None
+        readable, _, _ = select.select([proc.stdout], [], [], timeout)
+        self.assertTrue(readable, "workflow host did not emit a response")
+        line = proc.stdout.readline()
+        self.assertTrue(line, "workflow host closed stdout before emitting a response")
+        return json.loads(line)
+
+    def stop_host(self, proc: subprocess.Popen[str]) -> None:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=2)
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream is not None and not stream.closed:
+                stream.close()
+
     def test_workflow_api_modules_are_importable(self) -> None:
         load_workflow_host()
 
@@ -131,6 +195,34 @@ class WorkflowHostTests(unittest.TestCase):
         self.assertEqual(
             rpc.requests,
             [{"type": "ctx.sleep", "step": "pause", "duration_seconds": 2.5}],
+        )
+
+    def test_wait_for_event_sends_durable_event_identity_and_timeout(self) -> None:
+        host = load_workflow_host()
+        rpc = RequestRpc()
+        ctx = host.WorkflowContext(
+            rpc,
+            run_id="run-123",
+            task_id="task-456",
+            workflow_name="sample",
+        )
+
+        result = asyncio.run(
+            ctx.wait_for_event("approval", "review", "change:42", timeout=30)
+        )
+
+        self.assertEqual(result, {"approved": True})
+        self.assertEqual(
+            rpc.requests,
+            [
+                {
+                    "type": "ctx.event.wait",
+                    "step": "approval",
+                    "event_type": "review",
+                    "correlation_id": "change:42",
+                    "timeout_seconds": 30.0,
+                }
+            ],
         )
 
     def test_tools_proxy_calls_tool_manager(self) -> None:
@@ -400,6 +492,459 @@ class WorkflowHostTests(unittest.TestCase):
 
         assert registered is not None
         self.assertEqual(host.normalize_principal(registered), True)
+
+    def test_workflow_name_from_source_reads_string_constant(self) -> None:
+        host = load_workflow_host()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "named.py"
+            path.write_text(
+                "WORKFLOW_NAME: str = 'annotated_workflow'\n"
+                "def handler(inp, ctx):\n"
+                "    return None\n"
+            )
+            self.assertEqual(host.workflow_name_from_source(path), "annotated_workflow")
+
+            path.write_text(
+                "WORKFLOW_NAME = 'x' + 'y'\n"
+                "def handler(inp, ctx):\n"
+                "    return None\n"
+            )
+            self.assertIsNone(host.workflow_name_from_source(path))
+
+    def test_discover_skips_disallowed_workflows_without_importing(self) -> None:
+        host = load_workflow_host()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            marker = tmp_path / "imported.marker"
+            (tmp_path / "blocked.py").write_text(
+                f"open({str(marker)!r}, 'w').write('imported')\n"
+                "WORKFLOW_NAME = 'blocked_workflow'\n"
+                "def handler(inp, ctx):\n"
+                "    return None\n"
+            )
+            (tmp_path / "allowed.py").write_text(
+                "WORKFLOW_NAME = 'allowed_workflow'\n"
+                "def handler(inp, ctx):\n"
+                "    return None\n"
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "WORKFLOW_DIRS": tmp,
+                    "WORKFLOW_ENABLE_MODE": "allowlist",
+                    "WORKFLOW_ALLOWED_NAMES": "allowed_workflow",
+                },
+                clear=False,
+            ):
+                discovered = host.discover_workflows()
+
+        self.assertEqual(set(discovered), {"allowed_workflow"})
+        self.assertFalse(marker.exists())
+
+    def test_discover_loads_allowed_workflows_in_allowlist_mode(self) -> None:
+        host = load_workflow_host()
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "allowed.py").write_text(
+                "WORKFLOW_NAME = 'allowed_workflow'\n"
+                "def handler(inp, ctx):\n"
+                "    return None\n"
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "WORKFLOW_DIRS": tmp,
+                    "WORKFLOW_ENABLE_MODE": "allowlist",
+                    "WORKFLOW_ALLOWED_NAMES": "allowed_workflow,other",
+                },
+                clear=False,
+            ):
+                discovered = host.discover_workflows()
+
+        self.assertEqual(set(discovered), {"allowed_workflow"})
+
+    def test_discover_skips_non_constant_workflow_name_without_importing(self) -> None:
+        host = load_workflow_host()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            marker = tmp_path / "imported.marker"
+            (tmp_path / "dynamic.py").write_text(
+                f"open({str(marker)!r}, 'w').write('imported')\n"
+                "WORKFLOW_NAME = 'dynamic' + '_workflow'\n"
+                "def handler(inp, ctx):\n"
+                "    return None\n"
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "WORKFLOW_DIRS": tmp,
+                    "WORKFLOW_ENABLE_MODE": "all",
+                },
+                clear=False,
+            ):
+                discovered = host.discover_workflows()
+
+        self.assertEqual(discovered, {})
+        self.assertFalse(marker.exists())
+
+    def test_failed_workflow_host_exits_with_stdin_open(self) -> None:
+        source = (
+            "WORKFLOW_NAME = 'failing_workflow'\n"
+            "async def handler(inp, ctx):\n"
+            "    raise RuntimeError('boom')\n"
+        )
+        with self.workflow_host(source) as proc:
+            self.send_host_message(
+                proc,
+                {
+                    "type": "workflow.start",
+                    "run_id": "run-123",
+                    "task_id": "task-456",
+                    "workflow_name": "failing_workflow",
+                    "input": {},
+                },
+            )
+
+            response = self.read_host_message(proc)
+            self.assertEqual(response["type"], "workflow.error")
+            self.assertEqual(response["message"], "boom")
+            proc.wait(timeout=2)
+            self.assertEqual(proc.returncode, 0)
+            assert proc.stderr is not None
+            self.assertEqual(proc.stderr.read(), "")
+
+    def test_workflow_host_returns_result_after_context_response(self) -> None:
+        source = (
+            "WORKFLOW_NAME = 'agent_workflow'\n"
+            "async def handler(inp, ctx):\n"
+            "    result = await ctx.agent_turn('summarize this')\n"
+            "    return {'agent_result': result}\n"
+        )
+        with self.workflow_host(source) as proc:
+            self.send_host_message(
+                proc,
+                {
+                    "type": "workflow.start",
+                    "run_id": "run-123",
+                    "task_id": "task-456",
+                    "workflow_name": "agent_workflow",
+                    "input": {},
+                },
+            )
+
+            request = self.read_host_message(proc)
+            self.assertEqual(request["type"], "ctx.agent_turn")
+            self.send_host_message(
+                proc,
+                {
+                    "type": "ctx.response",
+                    "request_id": request["request_id"],
+                    "ok": True,
+                    "value": {"text": "daily digest"},
+                },
+            )
+
+            response = self.read_host_message(proc)
+            self.assertEqual(response["type"], "workflow.result")
+            self.assertEqual(
+                response["result"],
+                {"agent_result": {"text": "daily digest"}},
+            )
+            proc.wait(timeout=2)
+            self.assertEqual(proc.returncode, 0)
+            assert proc.stderr is not None
+            self.assertEqual(proc.stderr.read(), "")
+
+    def test_workflow_host_returns_error_after_failed_context_response(self) -> None:
+        source = (
+            "WORKFLOW_NAME = 'agent_workflow'\n"
+            "async def handler(inp, ctx):\n"
+            "    return await ctx.agent_turn('summarize this')\n"
+        )
+        with self.workflow_host(source) as proc:
+            self.send_host_message(
+                proc,
+                {
+                    "type": "workflow.start",
+                    "run_id": "run-123",
+                    "task_id": "task-456",
+                    "workflow_name": "agent_workflow",
+                    "input": {},
+                },
+            )
+
+            request = self.read_host_message(proc)
+            self.assertEqual(request["type"], "ctx.agent_turn")
+            self.send_host_message(
+                proc,
+                {
+                    "type": "ctx.response",
+                    "request_id": request["request_id"],
+                    "ok": False,
+                    "error": "agent unavailable",
+                },
+            )
+
+            response = self.read_host_message(proc)
+            self.assertEqual(response["type"], "workflow.error")
+            self.assertEqual(response["message"], "agent unavailable")
+            proc.wait(timeout=2)
+            self.assertEqual(proc.returncode, 0)
+            assert proc.stderr is not None
+            self.assertEqual(proc.stderr.read(), "")
+
+    def test_workflow_host_finishes_active_workflow_after_stdin_eof(self) -> None:
+        source = (
+            "import asyncio\n"
+            "WORKFLOW_NAME = 'slow_workflow'\n"
+            "async def handler(inp, ctx):\n"
+            "    await asyncio.sleep(0.05)\n"
+            "    return {'done': True}\n"
+        )
+        with self.workflow_host(source) as proc:
+            self.send_host_message(
+                proc,
+                {
+                    "type": "workflow.start",
+                    "run_id": "run-123",
+                    "task_id": "task-456",
+                    "workflow_name": "slow_workflow",
+                    "input": {},
+                },
+            )
+            assert proc.stdin is not None
+            proc.stdin.close()
+
+            response = self.read_host_message(proc)
+            self.assertEqual(response["type"], "workflow.result")
+            self.assertEqual(response["result"], {"done": True})
+            proc.wait(timeout=2)
+            self.assertEqual(proc.returncode, 0)
+            assert proc.stderr is not None
+            self.assertEqual(proc.stderr.read(), "")
+
+    def test_malformed_input_cancels_active_workflow_cleanly(self) -> None:
+        source = (
+            "WORKFLOW_NAME = 'agent_workflow'\n"
+            "async def handler(inp, ctx):\n"
+            "    return await ctx.agent_turn('summarize this')\n"
+        )
+        with self.workflow_host(source) as proc:
+            self.send_host_message(
+                proc,
+                {
+                    "type": "workflow.start",
+                    "run_id": "run-123",
+                    "task_id": "task-456",
+                    "workflow_name": "agent_workflow",
+                    "input": {},
+                },
+            )
+            request = self.read_host_message(proc)
+            self.assertEqual(request["type"], "ctx.agent_turn")
+            assert proc.stdin is not None
+            proc.stdin.write("this is not JSON\n")
+            proc.stdin.flush()
+
+            response = self.read_host_message(proc)
+            self.assertEqual(response["type"], "host.error")
+            self.assertIn("invalid workflow host input", response["message"])
+            proc.wait(timeout=2)
+            self.assertEqual(proc.returncode, 1)
+            assert proc.stderr is not None
+            self.assertEqual(proc.stderr.read(), "")
+
+    def test_concurrent_start_does_not_interrupt_active_workflow(self) -> None:
+        source = (
+            "WORKFLOW_NAME = 'agent_workflow'\n"
+            "async def handler(inp, ctx):\n"
+            "    return await ctx.agent_turn('summarize this')\n"
+        )
+        start = {
+            "type": "workflow.start",
+            "run_id": "run-123",
+            "task_id": "task-456",
+            "workflow_name": "agent_workflow",
+            "input": {},
+        }
+        with self.workflow_host(source) as proc:
+            self.send_host_message(proc, start)
+            request = self.read_host_message(proc)
+            self.assertEqual(request["type"], "ctx.agent_turn")
+
+            self.send_host_message(proc, start)
+            rejection = self.read_host_message(proc)
+            self.assertEqual(rejection["type"], "workflow.error")
+            self.assertEqual(
+                rejection["message"],
+                "workflow host already has an active workflow",
+            )
+
+            self.send_host_message(
+                proc,
+                {
+                    "type": "ctx.response",
+                    "request_id": request["request_id"],
+                    "ok": True,
+                    "value": {"text": "done"},
+                },
+            )
+            response = self.read_host_message(proc)
+            self.assertEqual(response["type"], "workflow.result")
+            self.assertEqual(response["result"], {"text": "done"})
+            proc.wait(timeout=2)
+            self.assertEqual(proc.returncode, 0)
+            assert proc.stderr is not None
+            self.assertEqual(proc.stderr.read(), "")
+
+    def test_workflow_host_handles_multiple_context_responses(self) -> None:
+        source = (
+            "WORKFLOW_NAME = 'agent_workflow'\n"
+            "async def handler(inp, ctx):\n"
+            "    first = await ctx.agent_turn('first')\n"
+            "    second = await ctx.agent_turn('second')\n"
+            "    return {'first': first, 'second': second}\n"
+        )
+        with self.workflow_host(source) as proc:
+            self.send_host_message(
+                proc,
+                {
+                    "type": "workflow.start",
+                    "run_id": "run-123",
+                    "task_id": "task-456",
+                    "workflow_name": "agent_workflow",
+                    "input": {},
+                },
+            )
+            for expected_prompt in ("first", "second"):
+                request = self.read_host_message(proc)
+                self.assertEqual(request["type"], "ctx.agent_turn")
+                self.assertEqual(request["args"]["text"], expected_prompt)
+                self.send_host_message(
+                    proc,
+                    {
+                        "type": "ctx.response",
+                        "request_id": request["request_id"],
+                        "ok": True,
+                        "value": {"text": f"{expected_prompt} result"},
+                    },
+                )
+
+            response = self.read_host_message(proc)
+            self.assertEqual(response["type"], "workflow.result")
+            self.assertEqual(
+                response["result"],
+                {
+                    "first": {"text": "first result"},
+                    "second": {"text": "second result"},
+                },
+            )
+            proc.wait(timeout=2)
+            self.assertEqual(proc.returncode, 0)
+            assert proc.stderr is not None
+            self.assertEqual(proc.stderr.read(), "")
+
+    def test_workflow_completion_wins_when_more_input_is_buffered(self) -> None:
+        source = (
+            "WORKFLOW_NAME = 'agent_workflow'\n"
+            "async def handler(inp, ctx):\n"
+            "    return await ctx.agent_turn('summarize this')\n"
+        )
+        start = {
+            "type": "workflow.start",
+            "run_id": "run-123",
+            "task_id": "task-456",
+            "workflow_name": "agent_workflow",
+            "input": {},
+        }
+        with self.workflow_host(source) as proc:
+            self.send_host_message(proc, start)
+            request = self.read_host_message(proc)
+            self.assertEqual(request["type"], "ctx.agent_turn")
+
+            assert proc.stdin is not None
+            context_response = {
+                "type": "ctx.response",
+                "request_id": request["request_id"],
+                "ok": True,
+                "value": {"text": "done"},
+            }
+            proc.stdin.write(json.dumps(context_response) + "\n")
+            proc.stdin.write(json.dumps(start) + "\n")
+            proc.stdin.flush()
+
+            response = self.read_host_message(proc)
+            self.assertEqual(response["type"], "workflow.result")
+            self.assertEqual(response["result"], {"text": "done"})
+            proc.wait(timeout=2)
+            self.assertEqual(proc.returncode, 0)
+            assert proc.stderr is not None
+            self.assertEqual(proc.stderr.read(), "")
+
+    def test_workflow_host_accepts_large_start_input(self) -> None:
+        source = (
+            "WORKFLOW_NAME = 'large_input_workflow'\n"
+            "async def handler(inp, ctx):\n"
+            "    return {'size': len(inp['payload'])}\n"
+        )
+        payload = "x" * (128 * 1024)
+        with self.workflow_host(source) as proc:
+            self.send_host_message(
+                proc,
+                {
+                    "type": "workflow.start",
+                    "run_id": "run-123",
+                    "task_id": "task-456",
+                    "workflow_name": "large_input_workflow",
+                    "input": {"payload": payload},
+                },
+            )
+
+            response = self.read_host_message(proc)
+            self.assertEqual(response["type"], "workflow.result")
+            self.assertEqual(response["result"], {"size": len(payload)})
+            proc.wait(timeout=2)
+            self.assertEqual(proc.returncode, 0)
+            assert proc.stderr is not None
+            self.assertEqual(proc.stderr.read(), "")
+
+    def test_workflow_host_accepts_large_context_response(self) -> None:
+        source = (
+            "WORKFLOW_NAME = 'agent_workflow'\n"
+            "async def handler(inp, ctx):\n"
+            "    result = await ctx.agent_turn('return a large result')\n"
+            "    return {'size': len(result['text'])}\n"
+        )
+        result_text = "x" * (128 * 1024)
+        with self.workflow_host(source) as proc:
+            self.send_host_message(
+                proc,
+                {
+                    "type": "workflow.start",
+                    "run_id": "run-123",
+                    "task_id": "task-456",
+                    "workflow_name": "agent_workflow",
+                    "input": {},
+                },
+            )
+            request = self.read_host_message(proc)
+            self.assertEqual(request["type"], "ctx.agent_turn")
+            self.send_host_message(
+                proc,
+                {
+                    "type": "ctx.response",
+                    "request_id": request["request_id"],
+                    "ok": True,
+                    "value": {"text": result_text},
+                },
+            )
+
+            response = self.read_host_message(proc)
+            self.assertEqual(response["type"], "workflow.result")
+            self.assertEqual(response["result"], {"size": len(result_text)})
+            proc.wait(timeout=2)
+            self.assertEqual(proc.returncode, 0)
+            assert proc.stderr is not None
+            self.assertEqual(proc.stderr.read(), "")
 
 
 if __name__ == "__main__":

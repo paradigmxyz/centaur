@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    http::StatusCode,
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 use centaur_session_core::ThreadKeyError;
@@ -67,6 +67,9 @@ impl IntoResponse for ApiError {
             Self::Runtime(SessionRuntimeError::Store(SessionStoreError::PersonaConflict {
                 ..
             })) => StatusCode::CONFLICT,
+            Self::Runtime(SessionRuntimeError::IronControl(
+                centaur_iron_control::IronControlError::PrincipalDerivation(_),
+            )) => StatusCode::BAD_REQUEST,
             Self::Workflow(WorkflowRuntimeError::BadRequest(_)) => StatusCode::BAD_REQUEST,
             Self::Workflow(WorkflowRuntimeError::Disabled(_)) => StatusCode::FORBIDDEN,
             Self::Workflow(WorkflowRuntimeError::NotFound(_)) => StatusCode::NOT_FOUND,
@@ -106,7 +109,13 @@ impl IntoResponse for ApiError {
             body["existing_harness"] = json!(existing);
             body["requested_harness"] = json!(requested);
         }
-        (status, Json(body)).into_response()
+        let mut response = (status, Json(body)).into_response();
+        if status == StatusCode::UNAUTHORIZED {
+            response
+                .headers_mut()
+                .insert(header::WWW_AUTHENTICATE, "Bearer".parse().unwrap());
+        }
+        response
     }
 }
 
@@ -124,4 +133,20 @@ pub(crate) fn error_chain(error: &dyn std::error::Error) -> String {
         source = cause.source();
     }
     message
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use centaur_iron_control::{IronControlError, PrincipalDerivationError};
+
+    #[test]
+    fn principal_derivation_errors_are_bad_requests() {
+        let response = ApiError::Runtime(SessionRuntimeError::IronControl(
+            IronControlError::PrincipalDerivation(PrincipalDerivationError::MissingSlackTeamId),
+        ))
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
 }

@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+container_name="centaur-console-paradedb"
+image="paradedb/paradedb:0.23.0-pg16"
+db_port="${CENTAUR_CONSOLE_DB_PORT:-55432}"
+db_user="${CENTAUR_CONSOLE_DB_USERNAME:-postgres}"
+db_password="${CENTAUR_CONSOLE_DB_PASSWORD:-postgres}"
+db_name="iron_control_development"
+manage_container="${CENTAUR_CONSOLE_MANAGE_PARADEDB:-true}"
+
+case "${manage_container}" in
+  false|FALSE|0|no|NO)
+    echo "== Using configured external ParadeDB =="
+    exit 0
+    ;;
+esac
+
+if ! docker info >/dev/null 2>&1; then
+  echo "Docker is required for Console development. Start Docker and retry." >&2
+  exit 1
+fi
+
+if docker container inspect "${container_name}" >/dev/null 2>&1; then
+  if [[ "$(docker inspect --format '{{.State.Running}}' "${container_name}")" != "true" ]]; then
+    echo "== Starting existing ParadeDB container =="
+    docker start "${container_name}" >/dev/null
+  fi
+else
+  echo "== Creating ParadeDB container =="
+  docker run --detach \
+    --name "${container_name}" \
+    --publish "127.0.0.1:${db_port}:5432" \
+    --env "POSTGRES_USER=${db_user}" \
+    --env "POSTGRES_PASSWORD=${db_password}" \
+    --env "POSTGRES_DB=${db_name}" \
+    --volume "${container_name}-data:/var/lib/postgresql/data" \
+    "${image}" \
+    -c shared_preload_libraries=pg_search,pg_cron \
+    -c max_connections=200 >/dev/null
+fi
+
+for _attempt in {1..60}; do
+  if docker exec "${container_name}" pg_isready -U "${db_user}" -d "${db_name}" >/dev/null 2>&1; then
+    echo "== ParadeDB ready on 127.0.0.1:${db_port} =="
+    exit 0
+  fi
+  sleep 1
+done
+
+docker logs "${container_name}" >&2
+echo "ParadeDB did not become ready within 60 seconds." >&2
+exit 1

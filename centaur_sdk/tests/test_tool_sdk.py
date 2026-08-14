@@ -78,7 +78,7 @@ def test_secret_raises_key_error_with_tool_name_after_all_sources_miss(
 
 
 def test_current_session_context_fetches_api_context(monkeypatch: pytest.MonkeyPatch):
-    requested: dict[str, str] = {}
+    requested: dict[str, str | None] = {}
 
     class FakeResponse:
         def __enter__(self):
@@ -96,6 +96,7 @@ def test_current_session_context_fetches_api_context(monkeypatch: pytest.MonkeyP
     def fake_urlopen(request, timeout):
         requested["url"] = request.full_url
         requested["timeout"] = str(timeout)
+        requested["authorization"] = request.get_header("Authorization")
         return FakeResponse()
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
@@ -103,7 +104,7 @@ def test_current_session_context_fetches_api_context(monkeypatch: pytest.MonkeyP
         ToolContext(
             name="fake-tool",
             thread_key="slack:C123:123.456",
-            secrets={"CENTAUR_API_URL": "http://api:8000", "CENTAUR_API_KEY": ""},
+            secrets={"CENTAUR_API_URL": "http://api:8000"},
         )
     )
     try:
@@ -111,6 +112,7 @@ def test_current_session_context_fetches_api_context(monkeypatch: pytest.MonkeyP
         assert context["slack"]["channel_id"] == "C123"
         assert requested["url"] == "http://api:8000/api/session/slack%3AC123%3A123.456"
         assert requested["timeout"] == "30"
+        assert requested["authorization"] is None
     finally:
         reset_tool_context(token)
 
@@ -152,7 +154,7 @@ def test_current_slack_thread_returns_api_slack_destination(
         ToolContext(
             name="fake-tool",
             thread_key="slack:C123:123.456",
-            secrets={"CENTAUR_API_URL": "http://api:8000", "CENTAUR_API_KEY": ""},
+            secrets={"CENTAUR_API_URL": "http://api:8000"},
         )
     )
     try:
@@ -187,7 +189,7 @@ def _discord_context(thread_key: str, monkeypatch: pytest.MonkeyPatch):
         ToolContext(
             name="fake-tool",
             thread_key=thread_key,
-            secrets={"CENTAUR_API_URL": "http://api:8000", "CENTAUR_API_KEY": ""},
+            secrets={"CENTAUR_API_URL": "http://api:8000"},
         )
     )
 
@@ -231,7 +233,7 @@ def _linear_context(thread_key: str, monkeypatch: pytest.MonkeyPatch):
         ToolContext(
             name="fake-tool",
             thread_key=thread_key,
-            secrets={"CENTAUR_API_URL": "http://api:8000", "CENTAUR_API_KEY": ""},
+            secrets={"CENTAUR_API_URL": "http://api:8000"},
         )
     )
 
@@ -276,7 +278,7 @@ def _github_context(thread_key: str, monkeypatch: pytest.MonkeyPatch):
         ToolContext(
             name="fake-tool",
             thread_key=thread_key,
-            secrets={"CENTAUR_API_URL": "http://api:8000", "CENTAUR_API_KEY": ""},
+            secrets={"CENTAUR_API_URL": "http://api:8000"},
         )
     )
 
@@ -324,7 +326,7 @@ def test_current_github_thread_rejects_slack_thread(monkeypatch: pytest.MonkeyPa
         ToolContext(
             name="fake-tool",
             thread_key="slack:C123:123.456",
-            secrets={"CENTAUR_API_URL": "http://api:8000", "CENTAUR_API_KEY": ""},
+            secrets={"CENTAUR_API_URL": "http://api:8000"},
         )
     )
     try:
@@ -346,7 +348,7 @@ def test_current_linear_thread_rejects_slack_thread(monkeypatch: pytest.MonkeyPa
         ToolContext(
             name="fake-tool",
             thread_key="slack:C123:123.456",
-            secrets={"CENTAUR_API_URL": "http://api:8000", "CENTAUR_API_KEY": ""},
+            secrets={"CENTAUR_API_URL": "http://api:8000"},
         )
     )
     try:
@@ -368,7 +370,7 @@ def test_current_discord_thread_rejects_slack_thread(monkeypatch: pytest.MonkeyP
         ToolContext(
             name="fake-tool",
             thread_key="slack:C123:123.456",
-            secrets={"CENTAUR_API_URL": "http://api:8000", "CENTAUR_API_KEY": ""},
+            secrets={"CENTAUR_API_URL": "http://api:8000"},
         )
     )
     try:

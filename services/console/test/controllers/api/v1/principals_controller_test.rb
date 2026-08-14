@@ -38,12 +38,14 @@ module Api
         assert_response :ok
 
         data = json_body.fetch("data")
+        refute data.key?("namespace")
         assert_equal principal.oid, data["id"]
-        assert_equal "acme", data["namespace"]
         assert_equal "C0123456789", data["foreign_id"]
+        %w[kind slack_user_id slack_channel_id slack_team_id slack_email console_user_id].each do |field|
+          assert_not data.key?(field)
+        end
         assert_equal(
           {
-            "kind" => "slack_channel",
             "team" => "platform",
             Principal::SANDBOX_REPO_CACHE_LABEL => "all"
           },
@@ -70,13 +72,12 @@ module Api
       test "POST creates a Principal" do
         body = {
           data: {
-            namespace: "acme",
             foreign_id: "U-new-id",
-            labels: { "kind" => "user", "team" => "platform" },
+            kind: "user",
+            labels: { "team" => "platform" },
             slack_channel_permissions: [
               {
                 channel_id: "C0123456789",
-                channel_name: "general",
                 upload_enabled: true,
                 download_enabled: false,
                 history_enabled: true
@@ -92,11 +93,9 @@ module Api
 
         data = json_body.fetch("data")
         assert_match(/\Aprn_/, data["id"])
-        assert_equal "acme", data["namespace"]
         assert_equal "U-new-id", data["foreign_id"]
         assert_equal(
           {
-            "kind" => "user",
             "team" => "platform",
             Principal::SANDBOX_REPO_CACHE_LABEL => "all"
           },
@@ -106,7 +105,6 @@ module Api
           [
             {
               "channel_id" => "C0123456789",
-              "channel_name" => "general",
               "upload_enabled" => true,
               "download_enabled" => false,
               "history_enabled" => true
@@ -120,6 +118,22 @@ module Api
         assert_equal true, data["sandbox_api_server_enabled"]
       end
 
+      test "POST preserves a label named namespace" do
+        post api_v1_principals_url,
+             params: {
+               data: {
+                 foreign_id: "namespace-label-create",
+                 labels: { "namespace" => "prod" }
+               }
+             }.to_json,
+             headers: auth_headers
+
+        assert_response :created
+        principal = Principal.find_by!(foreign_id: "namespace-label-create")
+        assert_equal "prod", principal.labels["namespace"]
+        assert_equal "prod", json_body.dig("data", "labels", "namespace")
+      end
+
       test "POST applies system sandbox defaults when omitted" do
         system_settings(:default).update!(
           default_sandbox_repo_cache: "public",
@@ -128,7 +142,6 @@ module Api
         )
         body = {
           data: {
-            namespace: "acme",
             foreign_id: "U-defaulted"
           }
         }
@@ -142,6 +155,20 @@ module Api
         assert_equal false, data["sandbox_api_server_enabled"]
       end
 
+      test "POST applies all configured default roles" do
+        Role.update_all(assign_by_default: false)
+        roles(:acme_infra).update!(assign_by_default: true)
+        roles(:globex_infra).update!(assign_by_default: true)
+        body = { data: { foreign_id: "U-default-roles" } }
+
+        post api_v1_principals_url, params: body.to_json, headers: auth_headers
+        assert_response :created
+
+        principal = Principal.find_by!(foreign_id: "U-default-roles")
+        expected = [ roles(:acme_infra), roles(:globex_infra) ].sort_by(&:id)
+        assert_equal expected, principal.roles.order(:id).to_a
+      end
+
       test "POST keeps explicit sandbox capabilities over system defaults" do
         system_settings(:default).update!(
           default_sandbox_repo_cache: "none",
@@ -150,7 +177,6 @@ module Api
         )
         body = {
           data: {
-            namespace: "acme",
             foreign_id: "U-explicit-capabilities",
             sandbox_repo_cache: "all",
             sandbox_observability_enabled: true,
@@ -171,7 +197,6 @@ module Api
         system_settings(:default).update!(default_sandbox_repo_cache: "all")
         body = {
           data: {
-            namespace: "acme",
             foreign_id: "U-explicit-repo-cache-label",
             labels: { Principal::SANDBOX_REPO_CACHE_LABEL => "none" }
           }
@@ -182,14 +207,16 @@ module Api
 
         data = json_body.fetch("data")
         assert_equal "all", data["sandbox_repo_cache"]
-        assert_equal({ Principal::SANDBOX_REPO_CACHE_LABEL => "all" }, data["labels"])
+        assert_equal(
+          { Principal::SANDBOX_REPO_CACHE_LABEL => "all" },
+          data["labels"]
+        )
       end
 
       test "POST uses repo-cache param over conflicting label" do
         system_settings(:default).update!(default_sandbox_repo_cache: "all")
         body = {
           data: {
-            namespace: "acme",
             foreign_id: "U-repo-cache-param-wins",
             sandbox_repo_cache: "public",
             labels: { Principal::SANDBOX_REPO_CACHE_LABEL => "none" }
@@ -201,7 +228,10 @@ module Api
 
         data = json_body.fetch("data")
         assert_equal "public", data["sandbox_repo_cache"]
-        assert_equal({ Principal::SANDBOX_REPO_CACHE_LABEL => "public" }, data["labels"])
+        assert_equal(
+          { Principal::SANDBOX_REPO_CACHE_LABEL => "public" },
+          data["labels"]
+        )
       end
 
       test "POST creates a Principal with only a human-readable name" do
@@ -214,7 +244,6 @@ module Api
 
         data = json_body.fetch("data")
         assert_equal "Just a label", data["name"]
-        assert_equal "default", data["namespace"]
         assert_nil data["foreign_id"]
       end
 
@@ -262,10 +291,10 @@ module Api
         assert_equal false, data["sandbox_api_server_enabled"]
       end
 
-      test "POST returns 422 when (namespace, foreign_id) already exists" do
+      test "POST returns 422 when foreign_id already exists" do
         existing = principals(:acme_channel)
         body = {
-          data: { namespace: existing.namespace, foreign_id: existing.foreign_id }
+          data: { foreign_id: existing.foreign_id }
         }
 
         assert_no_difference -> { Principal.count } do
@@ -275,8 +304,202 @@ module Api
       end
 
       test "POST returns 400 when the data key is missing" do
-        post api_v1_principals_url, params: { namespace: "acme" }.to_json, headers: auth_headers
+        post api_v1_principals_url, params: {}.to_json, headers: auth_headers
         assert_response :bad_request
+      end
+
+      test "POST creates a Slack principal from first-class identity fields" do
+        post api_v1_principals_url,
+             params: {
+               data: {
+                 foreign_id: "direct-slack-identity",
+                 kind: "slack_dm",
+                 slack_user_id: "U0123456789",
+                 slack_team_id: "T0123456789",
+                 slack_email: "ada@example.com",
+                 labels: { "managed-by" => "centaur" }
+               }
+             }.to_json,
+             headers: auth_headers
+
+        assert_response :created
+        principal = Principal.find_by!(foreign_id: "direct-slack-identity")
+        assert_equal "slack_dm", principal.kind
+        assert_equal "U0123456789", principal.slack_user_id
+        assert_equal "T0123456789", principal.slack_team_id
+        assert_equal "ada@example.com", principal.slack_email
+        assert_equal "centaur", principal.labels["managed-by"]
+        %w[kind slack_user_id slack_channel_id slack_team_id slack_email console_user_id].each do |field|
+          assert_not json_body.fetch("data").key?(field)
+        end
+      end
+
+      test "POST links a Slack DM principal to the Console user with the same email" do
+        user = users(:member_user)
+
+        post api_v1_principals_url,
+             params: {
+               data: {
+                 foreign_id: "linked-slack-dm",
+                 kind: "slack_dm",
+                 slack_user_id: "U0123456789",
+                 slack_team_id: "T0123456789",
+                 slack_email: user.email.upcase
+               }
+             }.to_json,
+             headers: auth_headers
+
+        assert_response :created
+        principal = Principal.find_by!(foreign_id: "linked-slack-dm")
+        assert_equal user, principal.console_user
+      end
+
+      test "POST leaves a Slack DM unlinked when no Console user has the supplied email" do
+        email = "missing-console-user@example.com"
+
+        post api_v1_principals_url,
+             params: {
+               data: {
+                 foreign_id: "unmatched-slack-dm",
+                 kind: "slack_dm",
+                 slack_user_id: "U1123456789",
+                 slack_team_id: "T1123456789",
+                 slack_email: email
+               }
+             }.to_json,
+             headers: auth_headers
+
+        assert_response :created
+        principal = Principal.find_by!(foreign_id: "unmatched-slack-dm")
+        assert_equal email, principal.slack_email
+        assert_nil principal.console_user
+      end
+
+      test "PUT links an existing Slack DM when the trusted email is supplied again" do
+        user = users(:member_user)
+        principal = Principal.create!(
+          foreign_id: "existing-unlinked-slack-dm",
+          kind: "slack_dm",
+          slack_email: user.email,
+          created_by: users(:acme_admin)
+        )
+
+        put api_v1_principal_url(id: principal.oid),
+            params: { data: { slack_email: user.email } }.to_json,
+            headers: auth_headers
+
+        assert_response :ok
+        assert_equal user, principal.reload.console_user
+      end
+
+      test "PUT relinks a Slack DM when its trusted email changes to another Console user" do
+        first_user = users(:member_user)
+        second_user = users(:globex_admin)
+
+        post api_v1_principals_url,
+             params: {
+               data: {
+                 foreign_id: "relinked-slack-dm",
+                 kind: "slack_dm",
+                 slack_user_id: "U2123456789",
+                 slack_team_id: "T2123456789",
+                 slack_email: first_user.email
+               }
+             }.to_json,
+             headers: auth_headers
+        assert_response :created
+        principal = Principal.find_by!(foreign_id: "relinked-slack-dm")
+        assert_equal first_user, principal.console_user
+
+        put api_v1_principal_url(id: principal.oid),
+            params: { data: { slack_email: second_user.email } }.to_json,
+            headers: auth_headers
+
+        assert_response :ok
+        assert_equal second_user, principal.reload.console_user
+      end
+
+      test "PUT unlinks a Slack DM when its trusted email no longer matches a Console user" do
+        user = users(:member_user)
+        principal = Principal.create!(
+          foreign_id: "formerly-linked-slack-dm",
+          kind: "slack_dm",
+          slack_email: user.email,
+          console_user: user,
+          created_by: users(:acme_admin)
+        )
+
+        put api_v1_principal_url(id: principal.oid),
+            params: { data: { slack_email: "unmatched-new-email@example.com" } }.to_json,
+            headers: auth_headers
+
+        assert_response :ok
+        principal.reload
+        assert_equal "unmatched-new-email@example.com", principal.slack_email
+        assert_nil principal.console_user
+      end
+
+      test "PUT does not link from a stored Slack email when the request omits it" do
+        user = users(:member_user)
+        principal = Principal.create!(
+          foreign_id: "untrusted-stored-slack-email",
+          kind: "slack_dm",
+          slack_email: user.email,
+          created_by: users(:acme_admin)
+        )
+
+        put api_v1_principal_url(id: principal.oid),
+            params: { data: { name: "External Slack DM" } }.to_json,
+            headers: auth_headers
+
+        assert_response :ok
+        assert_nil principal.reload.console_user
+      end
+
+      test "POST does not link a non-DM principal by Slack email" do
+        user = users(:member_user)
+
+        post api_v1_principals_url,
+             params: {
+               data: {
+                 foreign_id: "channel-with-user-email",
+                 kind: "slack_channel",
+                 slack_email: user.email
+               }
+             }.to_json,
+             headers: auth_headers
+
+        assert_response :created
+        principal = Principal.find_by!(foreign_id: "channel-with-user-email")
+        assert_nil principal.console_user
+      end
+
+      test "POST keeps identity-named labels separate from first-class fields" do
+        user = users(:acme_admin)
+
+        post api_v1_principals_url,
+             params: {
+               data: {
+                 foreign_id: "matching-console-user-identity",
+                 kind: "console_user",
+                 console_user_id: user.id,
+                 labels: {
+                   "kind" => "custom",
+                   "console-user-id" => "custom-user",
+                   "email" => "custom@example.com",
+                   "managed-by" => "centaur"
+                 }
+               }
+             }.to_json,
+             headers: auth_headers
+
+        assert_response :created
+        principal = Principal.find_by!(foreign_id: "matching-console-user-identity")
+        assert_equal user.id, principal.console_user_id
+        assert_equal "centaur", principal.labels["managed-by"]
+        assert_equal "custom", principal.labels["kind"]
+        assert_equal "custom-user", principal.labels["console-user-id"]
+        assert_equal "custom@example.com", principal.labels["email"]
       end
 
       test "PUT updates labels" do
@@ -297,6 +520,85 @@ module Api
           },
           principal.labels
         )
+        assert_equal "slack_channel", json_body.dig("data", "labels", "kind")
+        assert_not json_body.dig("data", "labels").key?("slack_channel_id")
+      end
+
+      test "PUT preserves a label named namespace" do
+        principal = principals(:acme_channel)
+
+        put api_v1_principal_url(id: principal.oid),
+            params: { data: { labels: { "namespace" => "default" } } }.to_json,
+            headers: auth_headers
+
+        assert_response :ok
+        assert_equal "default", principal.reload.labels["namespace"]
+        assert_equal "default", json_body.dig("data", "labels", "namespace")
+      end
+
+      test "PUT updates first-class identity fields" do
+        principal = principals(:acme_channel)
+        body = {
+          data: {
+            kind: "slack_dm",
+            slack_user_id: "U0123456789",
+            slack_channel_id: nil,
+            slack_team_id: "T0123456789",
+            slack_email: "ada@example.com",
+            labels: { "team" => "ops" }
+          }
+        }
+
+        put api_v1_principal_url(id: principal.oid), params: body.to_json, headers: auth_headers
+        assert_response :ok
+
+        principal.reload
+        assert_equal "slack_dm", principal.kind
+        assert_equal "U0123456789", principal.slack_user_id
+        assert_nil principal.slack_channel_id
+        assert_equal "T0123456789", principal.slack_team_id
+        assert_equal "ada@example.com", principal.slack_email
+        assert_equal(
+          { "team" => "ops", Principal::SANDBOX_REPO_CACHE_LABEL => "all" },
+          principal.labels
+        )
+        assert_equal "ops", json_body.dig("data", "labels", "team")
+        assert_empty json_body.dig("data", "labels").slice(
+          "kind", "slack_user_id", "slack_channel_id", "slack_team_id", "slack_email"
+        )
+      end
+
+      test "PUT rejects a blank kind" do
+        principal = principals(:acme_channel)
+
+        put api_v1_principal_url(id: principal.oid),
+            params: { data: { kind: "  " } }.to_json,
+            headers: auth_headers
+
+        assert_response :unprocessable_content
+        assert_includes json_body.dig("error", "details", "kind"), "can't be blank"
+      end
+
+      test "PUT rejects unknown kinds and malformed Slack identity fields" do
+        principal = principals(:acme_channel)
+
+        put api_v1_principal_url(id: principal.oid),
+            params: {
+              data: {
+                kind: "future_platform",
+                slack_user_id: " U0123456789 ",
+                slack_channel_id: "C123",
+                slack_team_id: "t0123456789",
+                slack_email: "not-an-email"
+              }
+            }.to_json,
+            headers: auth_headers
+
+        assert_response :unprocessable_content
+        details = json_body.dig("error", "details")
+        %w[kind slack_user_id slack_channel_id slack_team_id slack_email].each do |field|
+          assert_predicate details.fetch(field), :any?
+        end
       end
 
       test "PUT overwrites explicit repo-cache label" do
@@ -349,14 +651,12 @@ module Api
           [
             {
               "channel_id" => "C0123456789",
-              "channel_name" => nil,
               "upload_enabled" => true,
               "download_enabled" => true,
               "history_enabled" => false
             },
             {
               "channel_id" => "G9876543210",
-              "channel_name" => nil,
               "upload_enabled" => false,
               "download_enabled" => false,
               "history_enabled" => true
@@ -364,6 +664,103 @@ module Api
           ],
           principal.reload.slack_channel_permissions_payload
         )
+      end
+
+      test "GET separates direct and effective Slack channel permissions" do
+        principal = principals(:acme_channel)
+        SlackChannelPermission.create!(
+          principal: principal,
+          channel_id: "C0123456789",
+          upload_enabled: true
+        )
+        roles(:acme_infra).slack_channel_permissions.create!(
+          channel_id: "C0123456789",
+          download_enabled: true,
+          history_enabled: true
+        )
+
+        get api_v1_principal_url(id: principal.oid), headers: auth_headers
+        assert_response :ok
+        assert_equal(
+          {
+            "channel_id" => "C0123456789",
+            "upload_enabled" => true,
+            "download_enabled" => false,
+            "history_enabled" => false
+          },
+          json_body.dig("data", "slack_channel_permissions").sole
+        )
+        assert_equal(
+          {
+            "channel_id" => "C0123456789",
+            "upload_enabled" => true,
+            "download_enabled" => true,
+            "history_enabled" => true
+          },
+          json_body.dig("data", "effective_slack_channel_permissions").sole
+        )
+
+        returned = json_body.fetch("data")
+        put api_v1_principal_url(id: principal.oid),
+            params: { data: returned }.to_json,
+            headers: auth_headers
+        assert_response :ok
+
+        principal.principal_roles.find_by!(role: roles(:acme_infra)).destroy!
+        assert_equal [ "C0123456789" ], principal.reload.slack_channel_permissions.pluck(:channel_id)
+        direct = principal.slack_channel_permissions.sole
+        assert_not direct.download_enabled
+        assert_not direct.history_enabled
+      end
+
+      test "GET and PUT round-trip preserves malformed migrated identity values" do
+        principal = principals(:acme_user_alice)
+        principal.update_columns(
+          slack_user_id: "U12345",
+          slack_channel_id: "D123",
+          slack_team_id: "TACME",
+          slack_email: "pending"
+        )
+
+        get api_v1_principal_url(id: principal.oid), headers: auth_headers
+        assert_response :ok
+        returned = json_body.fetch("data")
+        returned.fetch("labels")["team"] = "identity-platform"
+
+        put api_v1_principal_url(id: principal.oid),
+            params: { data: returned }.to_json,
+            headers: auth_headers
+        assert_response :ok
+
+        principal.reload
+        assert_equal "U12345", principal.slack_user_id
+        assert_equal "D123", principal.slack_channel_id
+        assert_equal "TACME", principal.slack_team_id
+        assert_equal "pending", principal.slack_email
+        assert_equal "identity-platform", principal.labels["team"]
+        assert_empty principal.labels.slice(
+          "kind", "slack_user_id", "slack_channel_id", "slack_team_id", "slack_email"
+        )
+      end
+
+      test "POST leaves omitted flags unchanged on an existing permission" do
+        principal = principals(:acme_channel)
+        permission = principal.slack_channel_permissions.create!(
+          channel_id: "C0123456789",
+          upload_enabled: false,
+          download_enabled: true,
+          history_enabled: false
+        )
+
+        post "/api/v1/principals/#{principal.oid}/slack_channel_permissions",
+             params: { data: { channel_id: permission.channel_id, history_enabled: true } }.to_json,
+             headers: auth_headers
+        assert_response :ok
+
+        permission.reload
+        assert_not permission.upload_enabled
+        assert_predicate permission, :download_enabled
+        assert_predicate permission, :history_enabled
       end
 
       test "PUT rejects a single Slack channel permission object" do
@@ -424,7 +821,6 @@ module Api
         body = {
           data: {
             channel_id: "C0123456789",
-            channel_name: "general",
             upload_enabled: true,
             download_enabled: true,
             history_enabled: true
@@ -440,7 +836,7 @@ module Api
           [ "C0123456789", "G9876543210" ],
           principal.reload.slack_channel_permissions.ordered.pluck(:channel_id)
         )
-        assert_equal "general", json_body.dig("data", "channel_name")
+        assert_not json_body.fetch("data").key?("channel_name")
       end
 
       test "POST updates an existing Slack channel permission with normalized channel id" do
@@ -448,7 +844,6 @@ module Api
         SlackChannelPermission.create!(
           principal: principal,
           channel_id: "C0123456789",
-          channel_name: "general",
           upload_enabled: true,
           download_enabled: false,
           history_enabled: false
@@ -456,7 +851,6 @@ module Api
         body = {
           data: {
             channel_id: " c0123456789 ",
-            channel_name: "general",
             upload_enabled: false,
             download_enabled: true,
             history_enabled: true
@@ -482,7 +876,6 @@ module Api
         body = {
           data: {
             channel_id: "C0123456789",
-            channel_name: "new-name",
             upload_enabled: false,
             download_enabled: true,
             history_enabled: false
@@ -496,7 +889,6 @@ module Api
           if calls == 1
             target_principal.slack_channel_permissions.create!(
               channel_id: attrs[:channel_id],
-              channel_name: "winner",
               upload_enabled: true,
               download_enabled: false,
               history_enabled: true
@@ -517,7 +909,6 @@ module Api
 
         permission = principal.reload.slack_channel_permissions.sole
         assert_equal "C0123456789", permission.channel_id
-        assert_equal "new-name", permission.channel_name
         assert_not permission.upload_enabled
         assert_predicate permission, :download_enabled
         assert_not permission.history_enabled
@@ -527,12 +918,45 @@ module Api
         Api::V1::PrincipalsController.send(:private, :save_slack_channel_permission!)
       end
 
+      test "POST returns a validation error when the uniqueness retry is invalid" do
+        principal = principals(:acme_channel)
+        body = {
+          data: {
+            channel_id: "C0123456789",
+            upload_enabled: false,
+            download_enabled: false,
+            history_enabled: false
+          }
+        }
+        original = Api::V1::PrincipalsController.instance_method(:save_slack_channel_permission!)
+
+        Api::V1::PrincipalsController.define_method(:save_slack_channel_permission!) do |target_principal, attrs|
+          target_principal.slack_channel_permissions.create!(
+            channel_id: attrs[:channel_id],
+            upload_enabled: true
+          )
+          raise ActiveRecord::RecordNotUnique, "duplicate key value violates unique constraint"
+        end
+        Api::V1::PrincipalsController.send(:private, :save_slack_channel_permission!)
+
+        assert_difference -> { principal.slack_channel_permissions.count } => 1 do
+          post "/api/v1/principals/#{principal.oid}/slack_channel_permissions",
+               params: body.to_json,
+               headers: auth_headers
+        end
+        assert_response :unprocessable_content
+        assert_equal "validation failed", json_body.dig("error", "message")
+        assert_includes json_body.dig("error", "details", "base"), "Select at least one Slack permission"
+      ensure
+        Api::V1::PrincipalsController.define_method(:save_slack_channel_permission!, original)
+        Api::V1::PrincipalsController.send(:private, :save_slack_channel_permission!)
+      end
+
       test "POST upserts one Slack DM permission" do
         principal = principals(:acme_user_bob)
         body = {
           data: {
-            channel_id: "D0123456789",
-            channel_name: "U0123456789"
+            channel_id: "D0123456789"
           }
         }
 
@@ -543,20 +967,17 @@ module Api
 
         permission = principal.reload.slack_channel_permissions.sole
         assert_equal "D0123456789", permission.channel_id
-        assert_equal "U0123456789", permission.channel_name
         assert_predicate permission, :upload_enabled
         assert_predicate permission, :download_enabled
         assert_predicate permission, :history_enabled
       end
 
-      test "PUT ignores attempts to change immutable namespace and foreign_id" do
+      test "PUT keeps foreign_id immutable" do
         principal = principals(:acme_channel)
-        original_namespace = principal.namespace
         original_foreign_id = principal.foreign_id
 
         body = {
           data: {
-            namespace: "different-namespace",
             foreign_id: "different-foreign-id",
             labels: { "kind" => "slack_channel" }
           }
@@ -566,7 +987,6 @@ module Api
         assert_response :ok
 
         principal.reload
-        assert_equal original_namespace, principal.namespace
         assert_equal original_foreign_id, principal.foreign_id
       end
 
@@ -583,14 +1003,13 @@ module Api
           default_sandbox_observability_enabled: false,
           default_sandbox_api_server_enabled: false
         )
-        body = { data: { namespace: "acme", name: "Upserted" } }
+        body = { data: { name: "Upserted" } }
         assert_difference -> { Principal.count } => 1 do
           put api_v1_principal_url(id: "U-upsert"), params: body.to_json, headers: auth_headers
         end
         assert_response :created
 
         data = json_body.fetch("data")
-        assert_equal "acme", data["namespace"]
         assert_equal "U-upsert", data["foreign_id"]
         assert_equal "Upserted", data["name"]
         assert_equal "public", data["sandbox_repo_cache"]
@@ -600,7 +1019,7 @@ module Api
 
       test "PUT by foreign_id updates an existing principal without creating" do
         principal = principals(:acme_channel)
-        body = { data: { namespace: "acme", name: "Renamed channel" } }
+        body = { data: { name: "Renamed channel" } }
         assert_no_difference -> { Principal.count } do
           put api_v1_principal_url(id: principal.foreign_id), params: body.to_json, headers: auth_headers
         end
@@ -608,70 +1027,137 @@ module Api
         assert_equal "Renamed channel", principal.reload.name
       end
 
+      test "PUT by foreign_id does not apply defaults to an existing roleless principal" do
+        principal = principals(:acme_user_bob)
+        principal.principal_roles.destroy_all
+        roles(:acme_infra).update!(assign_by_default: true)
+        body = { data: { name: "Still roleless" } }
+
+        put api_v1_principal_url(id: principal.foreign_id), params: body.to_json, headers: auth_headers
+
+        assert_response :ok
+        assert_empty principal.reload.roles
+      end
+
       test "GET index rejects requests without an Authorization header" do
-        get api_v1_principals_url, params: { namespace: "acme" }
+        get api_v1_principals_url
         assert_response :unauthorized
       end
 
-      test "GET index returns 400 when namespace is missing" do
+      test "GET index returns principals" do
         get api_v1_principals_url, headers: auth_headers
-        assert_response :bad_request
+        assert_response :ok
       end
 
-      test "GET index returns all principals in a namespace" do
-        get api_v1_principals_url, params: { namespace: "acme" }, headers: auth_headers
+      test "GET index returns all principals" do
+        get api_v1_principals_url, params: {}.to_json, headers: auth_headers
         assert_response :ok
 
         body = json_body
         ids = body.fetch("data").map { |p| p["id"] }
-        expected = Principal.where(namespace: "acme").pluck(:id).map { |id| Principal.find(id).oid }
+        expected = Principal.pluck(:id).map { |id| Principal.find(id).oid }
         assert_equal expected.sort, ids.sort
-        assert body["data"].all? { |p| p["namespace"] == "acme" }
         assert_equal expected.length, body.dig("meta", "total")
       end
 
       test "GET index filters by a single label" do
         get api_v1_principals_url,
-            params: { namespace: "acme", labels: { kind: "user" } },
+            params: { labels: { team: "platform" } },
             headers: auth_headers
         assert_response :ok
 
         foreign_ids = json_body.fetch("data").map { |p| p["foreign_id"] }
-        assert_equal %w[U-alice U-bob].sort, foreign_ids.sort
+        assert_equal %w[C0123456789 U-alice U-overlap].sort, foreign_ids.sort
+      end
+
+      test "GET index does not treat identity fields as labels" do
+        principals(:acme_channel).update!(slack_team_id: "T0123456789", slack_email: "channel@example.com")
+
+        get api_v1_principals_url,
+            params: {
+              labels: { slack_channel_id: "C0123456789" }
+            },
+            headers: auth_headers
+        assert_response :ok
+
+        assert_empty json_body.fetch("data")
+      end
+
+      test "GET index filters identity-named labels as ordinary metadata" do
+        user = users(:acme_admin)
+        Principal.create!(
+          foreign_id: "console-user-admin",
+          kind: "console_user",
+          console_user_id: user.id,
+          labels: {
+            "kind" => "custom",
+            "console-user-id" => "custom-user",
+            "email" => "custom@example.com"
+          },
+          created_by: user
+        )
+
+        get api_v1_principals_url,
+            params: {
+              labels: {
+                kind: "custom",
+                "console-user-id" => "custom-user",
+                email: "custom@example.com"
+              }
+            },
+            headers: auth_headers
+        assert_response :ok
+
+        data = json_body.fetch("data")
+        assert_equal [ "console-user-admin" ], data.map { |p| p["foreign_id"] }
+        assert_equal "custom-user", data.first.dig("labels", "console-user-id")
+        assert_equal "custom@example.com", data.first.dig("labels", "email")
+      end
+
+      test "GET index still filters ordinary email labels" do
+        Principal.create!(
+          foreign_id: "ordinary-email-principal",
+          kind: "user",
+          labels: { "email" => "ordinary@example.com" },
+          created_by: users(:acme_admin)
+        )
+
+        get api_v1_principals_url,
+            params: { labels: { email: "ordinary@example.com" } },
+            headers: auth_headers
+        assert_response :ok
+
+        assert_equal [ "ordinary-email-principal" ], json_body.fetch("data").map { |p| p["foreign_id"] }
       end
 
       test "GET index filters by sandbox repo-cache label" do
         get api_v1_principals_url,
-            params: { namespace: "acme", labels: { Principal::SANDBOX_REPO_CACHE_LABEL => "all" } },
+            params: { labels: { Principal::SANDBOX_REPO_CACHE_LABEL => "all" } },
             headers: auth_headers
         assert_response :ok
 
         foreign_ids = json_body.fetch("data").map { |p| p["foreign_id"] }
-        assert_equal %w[C0123456789 U-alice U-bob].sort, foreign_ids.sort
+        assert_equal %w[C0123456789 U-alice U-bob U-overlap U987654321].sort, foreign_ids.sort
       end
 
       test "GET index ANDs multiple label filters" do
         get api_v1_principals_url,
-            params: { namespace: "acme", labels: { kind: "user", team: "platform" } },
+            params: {
+              labels: {
+                team: "platform",
+                Principal::SANDBOX_REPO_CACHE_LABEL => "all"
+              }
+            },
             headers: auth_headers
         assert_response :ok
 
         foreign_ids = json_body.fetch("data").map { |p| p["foreign_id"] }
-        assert_equal %w[U-alice], foreign_ids
-      end
-
-      test "GET index does not leak across namespaces" do
-        get api_v1_principals_url,
-            params: { namespace: "acme", labels: { kind: "user", team: "platform" } },
-            headers: auth_headers
-        assert_response :ok
-
-        assert json_body.fetch("data").none? { |p| p["namespace"] == "globex" }
+        assert_equal %w[C0123456789 U-alice U-overlap].sort, foreign_ids.sort
       end
 
       test "GET index returns an empty array when no labels match" do
         get api_v1_principals_url,
-            params: { namespace: "acme", labels: { kind: "nonexistent" } },
+            params: { labels: { kind: "nonexistent" } },
             headers: auth_headers
         assert_response :ok
         assert_equal [], json_body.fetch("data")
@@ -680,12 +1166,12 @@ module Api
 
       test "GET index honors limit and page" do
         get api_v1_principals_url,
-            params: { namespace: "acme", limit: 1, page: 2 },
+            params: { limit: 1, page: 2 },
             headers: auth_headers
         assert_response :ok
 
         body = json_body
-        total = Principal.where(namespace: "acme").count
+        total = Principal.count
         assert_equal 1, body.fetch("data").length
         assert_equal 1, body.dig("meta", "limit")
         assert_equal 2, body.dig("meta", "page")
@@ -693,47 +1179,36 @@ module Api
         assert_equal total, body.dig("meta", "total_pages")
       end
 
-      test "GET lookup finds a principal by namespace and foreign_id" do
+      test "GET lookup finds a principal by foreign_id" do
         principal = principals(:acme_channel)
 
-        get lookup_api_v1_principals_url(namespace: principal.namespace, foreign_id: principal.foreign_id),
+        get lookup_api_v1_principals_url(foreign_id: principal.foreign_id),
             headers: auth_headers
         assert_response :ok
 
         data = json_body.fetch("data")
         assert_equal principal.oid, data["id"]
-        assert_equal principal.namespace, data["namespace"]
         assert_equal principal.foreign_id, data["foreign_id"]
       end
 
       test "GET lookup returns 404 when no principal matches" do
-        get lookup_api_v1_principals_url(namespace: "acme", foreign_id: "U-does-not-exist"),
+        get lookup_api_v1_principals_url(foreign_id: "U-does-not-exist"),
             headers: auth_headers
         assert_response :not_found
       end
 
       test "GET lookup rejects unauthenticated requests" do
-        get lookup_api_v1_principals_url(namespace: "acme", foreign_id: "U-alice")
+        get lookup_api_v1_principals_url(foreign_id: "U-alice")
         assert_response :unauthorized
       end
 
-      test "GET lookup scopes by namespace" do
-        # globex_user_overlap and acme_user_alice both have similar labels but different namespaces
-        get lookup_api_v1_principals_url(namespace: "globex", foreign_id: "U-alice"),
-            headers: auth_headers
+      test "GET lookup rejects a non-default compatibility path" do
+        get "/api/v1/principals/lookup/other/U-alice", headers: auth_headers
         assert_response :not_found
       end
 
       test "POST rejects a non-URL-safe foreign_id" do
-        body = { data: { namespace: "acme", foreign_id: "bad/value" } }
-        assert_no_difference -> { Principal.count } do
-          post api_v1_principals_url, params: body.to_json, headers: auth_headers
-        end
-        assert_response :unprocessable_content
-      end
-
-      test "POST rejects a non-URL-safe namespace" do
-        body = { data: { namespace: "acme corp", foreign_id: "U-ok" } }
+        body = { data: { foreign_id: "bad/value" } }
         assert_no_difference -> { Principal.count } do
           post api_v1_principals_url, params: body.to_json, headers: auth_headers
         end
@@ -742,7 +1217,7 @@ module Api
 
       test "GET index clamps limit above the max" do
         get api_v1_principals_url,
-            params: { namespace: "acme", limit: 9999 },
+            params: { limit: 9999 },
             headers: auth_headers
         assert_response :ok
         assert_equal 200, json_body.dig("meta", "limit")
@@ -798,23 +1273,19 @@ module Api
         assert_equal "no-store", response.headers["Cache-Control"]
       end
 
-      test "GET effective_config resolves a namespaced foreign_id via the lookup route" do
+      test "GET effective_config resolves a foreign_id via the lookup route" do
         grant_sources_to_acme_channel
         principal = principals(:acme_channel)
 
-        get lookup_effective_config_api_v1_principals_url(namespace: principal.namespace,
-                                                          foreign_id: principal.foreign_id),
-            headers: auth_headers
+        get lookup_effective_config_api_v1_principals_url(foreign_id: principal.foreign_id), headers: auth_headers
         assert_response :ok
         assert_equal principal.oid, json_body.dig("data", "id")
         assert_equal 2, json_body.dig("data", "secrets").length
       end
 
-      test "GET effective_config lookup scopes a foreign_id by namespace" do
+      test "GET effective_config rejects a non-default compatibility path" do
         principal = principals(:acme_channel)
-        get lookup_effective_config_api_v1_principals_url(namespace: "globex",
-                                                          foreign_id: principal.foreign_id),
-            headers: auth_headers
+        get "/api/v1/principals/lookup/other/#{principal.foreign_id}/effective_config", headers: auth_headers
         assert_response :not_found
       end
 
@@ -830,8 +1301,7 @@ module Api
       end
 
       test "GET effective_config lookup returns 404 for an unknown foreign_id" do
-        get lookup_effective_config_api_v1_principals_url(namespace: "acme",
-                                                          foreign_id: "U-does-not-exist"),
+        get lookup_effective_config_api_v1_principals_url(foreign_id: "U-does-not-exist"),
             headers: auth_headers
         assert_response :not_found
       end

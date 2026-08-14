@@ -1,16 +1,16 @@
 [project]
 name = "docsend"
-description = "DocSend document downloader — cloud browser + Playwright"
+description = "DocSend document and deal-room downloader — Browserbase + Playwright"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
+    "browserbase>=1.15.0",
     "python-dotenv>=1.0.0",
-    "rich>=13.0.0",
     "typer>=0.12.0",
-    "browser-use-sdk>=2.0.14",
     "httpx>=0.28.0",
     "pillow>=12.0.0",
-    "playwright>=1.50.0",
+    "playwright==1.62.0",
+    "websockets>=17.0",
 ]
 
 [project.scripts]
@@ -28,4 +28,5 @@ packages = ["."]
 
 [tool.centaur]
 module = "client.py"
-secrets = [{type = "http", name = "BROWSER_USE_API_KEY", match_query = true, hosts = ["connect.browser-use.com"]}]
+hosts = ["track.pstmrk.it"]
+secrets = [{type = "http", name = "BROWSERBASE_API_KEY", mode = "inject", inject_header = "X-BB-API-Key", hosts = ["api.browserbase.com"]}]

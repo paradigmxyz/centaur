@@ -1,9 +1,7 @@
-require "cgi"
 require "date"
 require "json"
-require "net/http"
+require "nokogiri"
 require "time"
-require "uri"
 
 module Granola
   # Syncs one user's connected Granola MCP account. This runs in the console so
@@ -12,18 +10,9 @@ module Granola
   class SyncCredential
     MCP_URL = "https://mcp.granola.ai/mcp"
     DEFAULT_INITIAL_LOOKBACK_DAYS = 365
-    # The MCP service currently advertises an average limit of about 100
-    # requests/minute. One run issues a list call, a batched detail call, and
-    # at most one transcript call per note, so fifty keeps a normal run well
-    # inside that envelope.
-    DEFAULT_MAX_NOTES = 50
     WATERMARK_OVERLAP_SECONDS = 5 * 60
 
-    MEETING_RE = /<meeting\s+id="(?<id>[^"]+)"\s+title="(?<title>[^"]*)"\s+date="(?<date>[^"]*)">(?<body>.*?)<\/meeting>/m
-    PARTICIPANTS_RE = /<known_participants>(?<participants>.*?)<\/known_participants>/m
-    SUMMARY_RE = /<summary>(?<summary>.*?)<\/summary>/m
     PARTICIPANT_RE = /(?<name>[^,<]+?)\s*<(?<email>[^>]+)>/
-    MCP_DATE_RE = /\A(?<date>\w+ \d+, \d+ \d+:\d+ [AP]M) GMT(?<offset>[+-]\d+)?\z/
 
     GranolaApiError = Class.new(StandardError)
 
@@ -42,10 +31,6 @@ module Granola
 
       def initial_lookback_days
         positive_int(ConsoleEnv["GRANOLA_SYNC_INITIAL_LOOKBACK_DAYS"], DEFAULT_INITIAL_LOOKBACK_DAYS)
-      end
-
-      def max_notes
-        positive_int(ConsoleEnv["GRANOLA_SYNC_MAX_NOTES"], DEFAULT_MAX_NOTES)
       end
 
       def positive_int(value, default)
@@ -87,18 +72,26 @@ module Granola
     end
 
     def sync_notes(checkpoint)
-      meetings = parse_meetings(
-        mcp_tool(
-          "list_meetings",
-          "time_range" => "custom",
-          "custom_start" => range_start(checkpoint),
-          "custom_end" => Time.current.utc.to_date.iso8601
-        )
-      ).first(self.class.max_notes)
+      response = mcp_tool(
+        "list_meetings",
+        "time_range" => "custom",
+        "custom_start" => range_start(checkpoint),
+        "custom_end" => Time.current.utc.to_date.iso8601
+      )
+      document = parse_meeting_document(response)
+      meetings = parse_meetings(document)
+      reported_count = document.at_xpath(".//meetings_data")&.[]("count").to_i
+      if meetings.empty? && reported_count.positive?
+        raise GranolaApiError, "Granola MCP reported meetings that could not be parsed"
+      end
 
-      details = parse_meetings(
-        mcp_tool("get_meetings", "meeting_ids" => meetings.map { |meeting| meeting.fetch("id") })
-      ).index_by { |meeting| meeting.fetch("id") }
+      return [] if meetings.empty?
+
+      details = meetings.each_slice(10).flat_map do |batch|
+        parse_meetings(
+          mcp_tool("get_meetings", "meeting_ids" => batch.map { |meeting| meeting.fetch("id") })
+        )
+      end.index_by { |meeting| meeting.fetch("id") }
 
       meetings.filter_map do |meeting|
         detailed = details.fetch(meeting.fetch("id"), meeting)
@@ -216,38 +209,52 @@ module Granola
     end
 
     def parse_meetings(text)
-      text.to_s.scan(MEETING_RE).filter_map do |id, title, date, body|
-        participants = participant_list(body)
+      document = text.is_a?(Nokogiri::XML::Node) ? text : parse_meeting_document(text)
+      document.xpath(".//meeting").filter_map do |meeting|
+        next unless %w[id title date].all? { |attribute| meeting[attribute].present? }
+
+        participants = participant_list(meeting.at_xpath("./known_participants")&.text)
         owner = participants.find { |participant| participant["name"].include?("(note creator)") } || participants.first || {}
         owner = owner.merge(
           "name" => owner.fetch("name", "").sub("(note creator)", "").split(" from ", 2).first.strip
         ) unless owner.empty?
-        summary_match = body.match(SUMMARY_RE)
         {
-          "id" => CGI.unescapeHTML(id),
-          "title" => CGI.unescapeHTML(title),
-          "date" => CGI.unescapeHTML(date),
+          "id" => meeting["id"],
+          "title" => meeting["title"],
+          "date" => meeting["date"],
           "owner" => owner,
           "attendees" => participants,
-          "summary_markdown" => CGI.unescapeHTML(summary_match&.[](:summary).to_s.strip)
+          "summary_markdown" => meeting.at_xpath("./summary")&.text.to_s.strip
         }
       end
     end
 
-    def participant_list(body)
-      participants = CGI.unescapeHTML(body.match(PARTICIPANTS_RE)&.[](:participants).to_s)
-      participants.scan(PARTICIPANT_RE).map do |name, email|
-        { "name" => CGI.unescapeHTML(name).strip, "email" => email.strip.downcase }
+    def parse_meeting_document(text)
+      Nokogiri::XML::DocumentFragment.parse(text.to_s) { |config| config.strict.nonet }
+    rescue Nokogiri::XML::SyntaxError => error
+      raise GranolaApiError, "Granola MCP returned malformed meeting XML: #{error.message}"
+    end
+
+    def participant_list(text)
+      text.to_s.scan(PARTICIPANT_RE).map do |name, email|
+        { "name" => name.strip, "email" => email.strip.downcase }
       end
     end
 
     def parse_mcp_date(value)
-      match = value.to_s.match(MCP_DATE_RE)
-      return nil unless match
+      parts = Date._strptime(value.to_s, "%b %d, %Y %I:%M %p %Z")
+      return nil if parts.empty? || parts[:leftover].present? || parts[:offset].nil?
 
-      offset = format("%+03d00", (match[:offset].presence || "+0").to_i)
-      Time.strptime("#{match[:date]} #{offset}", "%b %d, %Y %I:%M %p %z").iso8601
-    rescue ArgumentError
+      Time.new(
+        parts.fetch(:year),
+        parts.fetch(:mon),
+        parts.fetch(:mday),
+        parts.fetch(:hour),
+        parts.fetch(:min),
+        parts.fetch(:sec, 0),
+        parts.fetch(:offset)
+      ).iso8601
+    rescue ArgumentError, KeyError, TypeError
       nil
     end
 
@@ -315,24 +322,22 @@ module Granola
 
     def mcp_request(method, params, session_id: nil, notification: false)
       @rpc_id += 1 unless notification
-      uri = URI.parse(MCP_URL)
-      request = Net::HTTP::Post.new(uri)
-      request["Authorization"] = "Bearer #{@credential.access_token}"
-      request["Content-Type"] = "application/json"
-      request["Accept"] = "application/json, text/event-stream"
-      request["MCP-Protocol-Version"] = "2025-03-26" if session_id.present?
-      request["MCP-Session-Id"] = session_id if session_id.present?
+      headers = {
+        "Authorization" => "Bearer #{@credential.access_token}",
+        "Accept" => "application/json, text/event-stream"
+      }
+      headers["MCP-Protocol-Version"] = "2025-03-26" if session_id.present?
+      headers["MCP-Session-Id"] = session_id if session_id.present?
       payload = { jsonrpc: "2.0", method: method, params: params }
       payload[:id] = @rpc_id unless notification
-      request.body = payload.to_json
 
-      http = Net::HTTP.new(uri.host, uri.port)
-      http.use_ssl = true
-      http.open_timeout = 30
-      http.read_timeout = 60
-      response = http.request(request)
-      unless response.code.to_i.between?(200, 299)
-        raise GranolaApiError, "Granola MCP returned HTTP #{response.code}"
+      response = HttpClient.new(open_timeout: 30, read_timeout: 60).post(
+        MCP_URL,
+        json: payload,
+        headers: headers
+      )
+      unless response.success?
+        raise GranolaApiError, "Granola MCP returned HTTP #{response.status}"
       end
 
       response

@@ -15,7 +15,7 @@ use aws_sdk_s3::{
     presigning::PresigningConfig,
 };
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     body::{Body, Bytes},
     extract::{DefaultBodyLimit, MatchedPath, Path, Query, Request, State},
     http::{HeaderMap, Method, StatusCode, Uri},
@@ -27,22 +27,22 @@ use axum::{
     routing::{any, get, post},
 };
 use base64::{Engine as _, engine::general_purpose};
-use centaur_session_core::{ChatDestination, ThreadKey};
+use centaur_session_core::{ChatDestination, HarnessType, ThreadKey};
 use centaur_session_runtime::{
-    ExecuteSessionInput, HarnessConflictPolicy, PersonaSummary, SandboxRuntime, SessionRuntime,
-    thread_trace_id, thread_trace_parent_span_id,
+    ExecuteSessionInput, HarnessConflictPolicy, SandboxRuntime, SessionPrincipalRegistrar,
+    SessionRuntime, thread_trace_id, thread_trace_parent_span_id,
 };
 use centaur_session_sqlx::PgSessionStore;
 use centaur_telemetry::{
-    PrometheusHandle, http_status_class, prometheus_handle, record_http_request_finished,
-    record_http_request_started, set_span_parent_trace,
+    PrometheusHandle, http_status_class, prometheus_handle, record_api_authentication,
+    record_http_request_finished, record_http_request_started, set_span_parent_trace,
 };
 use centaur_workflows::{
     CreateWorkflowRunRequest, WebhookFilter, WorkflowRuntime, WorkflowWebhookAuth,
     WorkflowWebhookSpec, WorkflowWebhookTriggerKey,
 };
 use futures_util::{Stream, StreamExt};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -55,15 +55,16 @@ use uuid::Uuid;
 use crate::{
     ApiError,
     api_jwt::{bearer_jwt_from_headers, decode_jwt_payload, verify_console_jwt},
+    auth::{ApiAuthConfig, AuthenticatedCaller, CallerClass, Capability},
     mcp::{mcp_get, mcp_post, mcp_protected_resource_metadata},
     slack_proxy::slack_proxy_router,
     types::{
         AppendMessagesRequest, AppendMessagesResponse, CreateSessionRequest, CreateSessionResponse,
         DiscordThreadContext, EmitWorkflowEventRequest, EventsQuery, ExecuteSessionRequest,
-        ExecuteSessionResponse, GithubThreadContext, InterruptSessionExecutionRequest,
-        InterruptSessionExecutionResponse, LinearThreadContext, ListWorkflowRunsQuery,
-        OnHarnessConflict, SessionContextResponse, SessionSseEvent, SlackThreadContext,
-        stream_error_sse,
+        ExecuteSessionResponse, GithubThreadContext, HarnessAssignment,
+        InterruptSessionExecutionRequest, InterruptSessionExecutionResponse, LinearThreadContext,
+        ListWorkflowRunsQuery, OnHarnessConflict, SessionContextResponse, SessionSseEvent,
+        SlackThreadContext, stream_error_sse,
     },
 };
 
@@ -71,6 +72,8 @@ use crate::{
 pub struct AppState {
     initialized: Arc<RwLock<Option<AppRuntimeState>>>,
     metrics: PrometheusHandle,
+    codex_nanocodex_rollout_percent: u8,
+    auth: ApiAuthConfig,
 }
 
 #[derive(Clone)]
@@ -78,26 +81,39 @@ struct AppRuntimeState {
     runtime: SessionRuntime,
     workflows: Option<WorkflowRuntime>,
     pool: Option<PgPool>,
+    workflow_host_principal: Option<String>,
 }
 
 impl AppState {
-    pub fn unready() -> Self {
+    pub fn unready(auth: ApiAuthConfig) -> Self {
         Self {
             initialized: Arc::new(RwLock::new(None)),
             metrics: prometheus_handle().expect("failed to initialize Prometheus metrics recorder"),
+            codex_nanocodex_rollout_percent: 0,
+            auth,
         }
     }
 
-    pub fn ready(runtime: SessionRuntime, workflows: Option<WorkflowRuntime>) -> Self {
-        Self::ready_with_pool(runtime, workflows, None)
+    pub fn with_codex_nanocodex_rollout_percent(mut self, percent: u8) -> Self {
+        self.codex_nanocodex_rollout_percent = percent;
+        self
+    }
+
+    pub fn ready(
+        runtime: SessionRuntime,
+        workflows: Option<WorkflowRuntime>,
+        auth: ApiAuthConfig,
+    ) -> Self {
+        Self::ready_with_pool(runtime, workflows, None, auth)
     }
 
     pub fn ready_with_pool(
         runtime: SessionRuntime,
         workflows: Option<WorkflowRuntime>,
         pool: Option<PgPool>,
+        auth: ApiAuthConfig,
     ) -> Self {
-        let state = Self::unready();
+        let state = Self::unready(auth);
         state.mark_ready(runtime, workflows, pool);
         state
     }
@@ -116,6 +132,26 @@ impl AppState {
             runtime,
             workflows,
             pool,
+            workflow_host_principal: None,
+        });
+    }
+
+    pub fn mark_ready_with_workflow_host(
+        &self,
+        runtime: SessionRuntime,
+        workflows: Option<WorkflowRuntime>,
+        pool: Option<PgPool>,
+        workflow_host_principal: String,
+    ) {
+        let mut initialized = self
+            .initialized
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *initialized = Some(AppRuntimeState {
+            runtime,
+            workflows,
+            pool,
+            workflow_host_principal: Some(workflow_host_principal),
         });
     }
 
@@ -128,6 +164,12 @@ impl AppState {
 
     fn is_ready(&self) -> bool {
         self.initialized().is_some()
+    }
+
+    fn is_workflow_host(&self, subject: &str) -> bool {
+        self.initialized()
+            .and_then(|initialized| initialized.workflow_host_principal)
+            .is_some_and(|principal| principal == subject)
     }
 
     /// The session runtime, if initialization completed. Unlike the private
@@ -176,41 +218,35 @@ const REDACTED_WEBHOOK_HEADERS: &[&str] = &[
     "stripe-signature",
 ];
 
-pub fn build_router_with_runtime(store: PgSessionStore, sandbox_runtime: SandboxRuntime) -> Router {
+pub fn build_router_with_runtime(
+    store: PgSessionStore,
+    sandbox_runtime: SandboxRuntime,
+    iron_control: impl SessionPrincipalRegistrar + 'static,
+    auth: ApiAuthConfig,
+) -> Router {
     let pool = store.pool().clone();
     build_router_with_app_state(AppState::ready_with_pool(
-        SessionRuntime::new(store, sandbox_runtime),
+        SessionRuntime::new(store, sandbox_runtime, iron_control),
         None,
         Some(pool),
+        auth,
     ))
 }
 
-pub fn build_router_with_session_runtime(runtime: SessionRuntime) -> Router {
-    build_router_with_session_and_workflow_runtime(runtime, None)
+pub fn build_router_with_session_runtime(runtime: SessionRuntime, auth: ApiAuthConfig) -> Router {
+    build_router_with_session_and_workflow_runtime(runtime, None, auth)
 }
 
 pub fn build_router_with_session_and_workflow_runtime(
     runtime: SessionRuntime,
     workflows: Option<WorkflowRuntime>,
+    auth: ApiAuthConfig,
 ) -> Router {
-    build_router_with_app_state(AppState::ready(runtime, workflows))
+    build_router_with_app_state(AppState::ready(runtime, workflows, auth))
 }
 
 pub fn build_router_with_app_state(state: AppState) -> Router {
-    Router::new()
-        .route("/healthz", get(healthz))
-        .route("/readyz", get(readyz))
-        .route("/metrics", get(metrics))
-        .route("/api/personas", get(list_personas))
-        .route("/mcp", post(mcp_post).get(mcp_get))
-        .route(
-            "/.well-known/oauth-protected-resource",
-            get(mcp_protected_resource_metadata),
-        )
-        .route(
-            "/.well-known/oauth-protected-resource/mcp",
-            get(mcp_protected_resource_metadata),
-        )
+    let protected = Router::new()
         .route(
             "/api/session/{thread_key}",
             post(create_or_get_session).get(get_session_context),
@@ -293,57 +329,77 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
             "/api/admin/granola/sync/batch",
             post(ingest_granola_sync_batch).layer(DefaultBodyLimit::disable()),
         )
-        .route("/api/webhooks/{slug}", any(invoke_workflow_webhook))
-        .layer(
-            TraceLayer::new_for_http()
-                .make_span_with(|request: &Request<Body>| {
-                    let route = matched_route(request);
-                    let span = tracing::info_span!(
-                        "centaur.api_rs.http_request",
-                        "otel.kind" = "server",
-                        "otel.status_code" = tracing::field::Empty,
-                        "http.request.method" = request.method().as_str(),
-                        "http.route" = route.as_str(),
-                        "http.response.status_code" = tracing::field::Empty,
-                        "centaur.thread_key" = tracing::field::Empty,
-                        thread_key = tracing::field::Empty,
-                    );
-                    if let Some(thread_key) = session_thread_key_from_request(request) {
-                        span.record("centaur.thread_key", thread_key.as_str());
-                        span.record("thread_key", thread_key.as_str());
-                        set_span_parent_trace(
-                            &span,
-                            &thread_trace_id(&thread_key),
-                            &thread_trace_parent_span_id(&thread_key),
-                        );
-                    }
-                    span
-                })
-                .on_request(())
-                .on_response(|response: &Response, latency: Duration, span: &Span| {
-                    let status = response.status();
-                    span.record("http.response.status_code", status.as_u16());
-                    span.record(
-                        "otel.status_code",
-                        if status.is_server_error() {
-                            "ERROR"
-                        } else {
-                            "OK"
-                        },
-                    );
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            authorize_api_request,
+        ));
 
-                    tracing::info!(
-                        component = "api_server",
-                        event = "http_request",
-                        status = status.as_u16(),
-                        status_class = http_status_class(status.as_u16()),
-                        duration_ms = (latency.as_secs_f64() * 1000.0),
-                        "http request completed"
-                    );
-                }),
+    let app = Router::new()
+        .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
+        .route("/metrics", get(metrics))
+        .route("/mcp", post(mcp_post).get(mcp_get))
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(mcp_protected_resource_metadata),
         )
-        .layer(middleware::from_fn(http_metrics))
-        .with_state(state)
+        .route(
+            "/.well-known/oauth-protected-resource/mcp",
+            get(mcp_protected_resource_metadata),
+        )
+        .route("/api/webhooks/{slug}", any(invoke_workflow_webhook))
+        .merge(protected);
+
+    app.layer(
+        TraceLayer::new_for_http()
+            .make_span_with(|request: &Request<Body>| {
+                let route = matched_route(request);
+                let span = tracing::info_span!(
+                    "centaur.api_rs.http_request",
+                    "otel.kind" = "server",
+                    "otel.status_code" = tracing::field::Empty,
+                    "http.request.method" = request.method().as_str(),
+                    "http.route" = route.as_str(),
+                    "http.response.status_code" = tracing::field::Empty,
+                    "centaur.thread_key" = tracing::field::Empty,
+                    thread_key = tracing::field::Empty,
+                );
+                if let Some(thread_key) = session_thread_key_from_request(request) {
+                    span.record("centaur.thread_key", thread_key.as_str());
+                    span.record("thread_key", thread_key.as_str());
+                    set_span_parent_trace(
+                        &span,
+                        &thread_trace_id(&thread_key),
+                        &thread_trace_parent_span_id(&thread_key),
+                    );
+                }
+                span
+            })
+            .on_request(())
+            .on_response(|response: &Response, latency: Duration, span: &Span| {
+                let status = response.status();
+                span.record("http.response.status_code", status.as_u16());
+                span.record(
+                    "otel.status_code",
+                    if status.is_server_error() {
+                        "ERROR"
+                    } else {
+                        "OK"
+                    },
+                );
+
+                tracing::info!(
+                    component = "api_server",
+                    event = "http_request",
+                    status = status.as_u16(),
+                    status_class = http_status_class(status.as_u16()),
+                    duration_ms = (latency.as_secs_f64() * 1000.0),
+                    "http request completed"
+                );
+            }),
+    )
+    .layer(middleware::from_fn(http_metrics))
+    .with_state(state)
 }
 
 async fn healthz(headers: HeaderMap) -> Json<Value> {
@@ -389,6 +445,141 @@ async fn metrics(State(state): State<AppState>) -> Response {
         Body::from(state.metrics.render()),
     )
         .into_response()
+}
+
+#[derive(Clone, Copy)]
+enum RouteAccess {
+    Capability(Capability),
+    PrincipalSlackProxy,
+    ArchiveDownload,
+}
+
+async fn authorize_api_request(
+    State(state): State<AppState>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let route = matched_route(&request);
+    let method = request.method().clone();
+    let caller = match state.auth.authenticate(request.headers()) {
+        Ok(caller) => caller,
+        Err(error) => {
+            record_api_authentication("unknown", "unauthorized");
+            return error.into_response();
+        }
+    };
+    let Some(access) = route_access(&method, &route) else {
+        record_api_authentication(caller.class().as_str(), "forbidden");
+        tracing::warn!(
+            caller_class = caller.class().as_str(),
+            caller_identity = if caller.class() == CallerClass::Principal {
+                "principal"
+            } else {
+                caller.identity()
+            },
+            http_method = method.as_str(),
+            http_route = route,
+            "authenticated caller denied because route has no authorization policy"
+        );
+        return ApiError::Forbidden("caller is not authorized for this route".to_owned())
+            .into_response();
+    };
+
+    let allowed = match access {
+        RouteAccess::Capability(capability) => caller.has_capability(capability),
+        RouteAccess::PrincipalSlackProxy => {
+            caller.class() == CallerClass::Principal
+                && caller.has_capability(Capability::SlackProxy)
+        }
+        RouteAccess::ArchiveDownload => {
+            caller.has_capability(Capability::AdminArchive)
+                || caller
+                    .principal_subject()
+                    .is_some_and(|subject| state.is_workflow_host(subject))
+        }
+    };
+    if !allowed {
+        record_api_authentication(caller.class().as_str(), "forbidden");
+        tracing::warn!(
+            caller_class = caller.class().as_str(),
+            caller_identity = if caller.class() == CallerClass::Principal {
+                "principal"
+            } else {
+                caller.identity()
+            },
+            http_method = method.as_str(),
+            http_route = route,
+            "authenticated caller lacks route capability"
+        );
+        return ApiError::Forbidden("caller is not authorized for this route".to_owned())
+            .into_response();
+    }
+
+    if let Some(prefix) = caller.platform_prefix()
+        && route.starts_with("/api/session/")
+        && let Some(thread_key) = session_thread_key_from_request(&request)
+        && !thread_key.as_str().starts_with(prefix)
+    {
+        record_api_authentication(caller.class().as_str(), "forbidden");
+        tracing::warn!(
+            caller_class = caller.class().as_str(),
+            caller_identity = if caller.class() == CallerClass::Principal {
+                "principal"
+            } else {
+                caller.identity()
+            },
+            expected_thread_prefix = prefix,
+            "ingress caller denied for another platform's session"
+        );
+        return ApiError::Forbidden("caller is not authorized for this session".to_owned())
+            .into_response();
+    }
+
+    record_api_authentication(caller.class().as_str(), "authorized");
+    request.extensions_mut().insert(caller);
+    next.run(request).await
+}
+
+fn route_access(method: &Method, route: &str) -> Option<RouteAccess> {
+    let capability = |capability| Some(RouteAccess::Capability(capability));
+    match (method, route) {
+        (&Method::GET, "/api/session/{thread_key}")
+        | (&Method::GET, "/api/session/{thread_key}/events") => {
+            capability(Capability::SessionsRead)
+        }
+        (&Method::POST, "/api/session/{thread_key}")
+        | (&Method::POST, "/api/session/{thread_key}/messages")
+        | (&Method::POST, "/api/session/{thread_key}/execute")
+        | (&Method::POST, "/api/session/{thread_key}/interrupt") => {
+            capability(Capability::SessionsWrite)
+        }
+        (&Method::POST, "/api/sandboxes/drain") => capability(Capability::SandboxesDrain),
+        (&Method::GET, "/api/workflows/schedules")
+        | (&Method::GET, "/api/workflows/runs")
+        | (&Method::GET, "/api/workflows/runs/{run_id}") => capability(Capability::WorkflowsRead),
+        (&Method::POST, "/api/workflows/runs")
+        | (&Method::POST, "/api/workflows/runs/{run_id}/cancel") => {
+            capability(Capability::WorkflowsWrite)
+        }
+        (&Method::POST, "/api/workflows/events") => capability(Capability::WorkflowsEvents),
+        (&Method::POST, "/api/admin/slack/archive-imports/{import_id}/download-url") => {
+            Some(RouteAccess::ArchiveDownload)
+        }
+        (_, route) if route.starts_with("/api/slack/") => Some(RouteAccess::PrincipalSlackProxy),
+        (_, route) if route.starts_with("/api/admin/slack/archive-imports") => {
+            capability(Capability::AdminArchive)
+        }
+        (_, route) if route.starts_with("/api/admin/slack/dm-sync/") => {
+            capability(Capability::AdminSync)
+        }
+        (_, route) if route.starts_with("/api/admin/google/docs-sync/") => {
+            capability(Capability::AdminSync)
+        }
+        (_, route) if route.starts_with("/api/admin/granola/sync/") => {
+            capability(Capability::AdminSync)
+        }
+        _ => None,
+    }
 }
 
 async fn http_metrics(req: Request, next: Next) -> Response {
@@ -437,32 +628,221 @@ async fn create_or_get_session(
     Json(request): Json<CreateSessionRequest>,
 ) -> Result<Json<CreateSessionResponse>, ApiError> {
     let thread_key = ThreadKey::try_from(raw_thread_key)?;
+    let requested_harness = request.harness_type;
+    let runtime = state.runtime()?;
+    let existing_rollout_harness = if requested_harness == HarnessType::Codex {
+        runtime
+            .existing_session_harness(&thread_key)
+            .await?
+            .filter(|harness| matches!(harness, HarnessType::Codex | HarnessType::Nanocodex))
+    } else {
+        None
+    };
+    let harness_type = existing_rollout_harness.clone().unwrap_or_else(|| {
+        rollout_harness_for_thread(
+            &thread_key,
+            &requested_harness,
+            state.codex_nanocodex_rollout_percent,
+        )
+    });
+    let harness_assignment = codex_nanocodex_assignment(
+        &requested_harness,
+        &harness_type,
+        state.codex_nanocodex_rollout_percent,
+    );
+    tracing::info!(
+        component = "api_server",
+        event = "session_harness_rollout_resolved",
+        thread_key = %thread_key,
+        requested_harness = %requested_harness,
+        resolved_harness = %harness_type,
+        ab_test = harness_assignment.is_some(),
+        ab_test_experiment = harness_assignment
+            .as_ref()
+            .map_or("", |assignment| assignment.experiment),
+        ab_test_cohort = harness_assignment
+            .as_ref()
+            .map_or("", |assignment| assignment.cohort.as_ref()),
+        existing_rollout_harness_preserved = existing_rollout_harness.is_some(),
+        codex_nanocodex_rollout_percent = state.codex_nanocodex_rollout_percent,
+        "resolved requested session harness"
+    );
     let on_harness_conflict = match request.on_harness_conflict {
         Some(OnHarnessConflict::Restart) => HarnessConflictPolicy::Restart,
         Some(OnHarnessConflict::Reject) | None => HarnessConflictPolicy::Reject,
     };
-    let outcome = state
-        .runtime()?
+    let outcome = runtime
         .create_or_get_session(
             &thread_key,
-            &request.harness_type,
+            &harness_type,
             request.persona_id.as_deref(),
-            request.metadata,
+            session_metadata_with_harness_assignment(request.metadata, harness_assignment.as_ref()),
             on_harness_conflict,
         )
         .await?;
     Ok(Json(CreateSessionResponse {
         session: outcome.session,
         harness_switched: outcome.harness_switched,
+        harness_assignment,
     }))
+}
+
+const CODEX_NANOCODEX_AB_EXPERIMENT: &str = "codex_nanocodex_ab";
+
+fn codex_nanocodex_assignment(
+    requested_harness: &HarnessType,
+    cohort: &HarnessType,
+    rollout_percent: u8,
+) -> Option<HarnessAssignment> {
+    (*requested_harness == HarnessType::Codex && (1..100).contains(&rollout_percent)).then(|| {
+        HarnessAssignment {
+            experiment: CODEX_NANOCODEX_AB_EXPERIMENT,
+            requested_harness: requested_harness.clone(),
+            cohort: cohort.clone(),
+            rollout_percent,
+        }
+    })
+}
+
+fn session_metadata_with_harness_assignment(
+    metadata: Option<Value>,
+    assignment: Option<&HarnessAssignment>,
+) -> Option<Value> {
+    let Some(assignment) = assignment else {
+        return metadata;
+    };
+    let mut metadata = metadata.unwrap_or_else(|| json!({}));
+    if let Value::Object(object) = &mut metadata {
+        object.insert(
+            "harness_assignment".to_owned(),
+            json!({
+                "experiment": assignment.experiment,
+                "requested_harness": assignment.requested_harness,
+                "cohort": assignment.cohort,
+                "rollout_percent": assignment.rollout_percent,
+            }),
+        );
+    }
+    Some(metadata)
+}
+
+fn rollout_harness_for_thread(
+    thread_key: &ThreadKey,
+    requested_harness: &HarnessType,
+    nanocodex_percent: u8,
+) -> HarnessType {
+    if *requested_harness != HarnessType::Codex || nanocodex_percent == 0 {
+        return requested_harness.clone();
+    }
+    if nanocodex_percent >= 100 {
+        return HarnessType::Nanocodex;
+    }
+
+    let digest = Sha256::digest(thread_key.as_str().as_bytes());
+    let bucket = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]);
+    let threshold = (u64::from(nanocodex_percent) * (u64::from(u32::MAX) + 1)) / 100;
+    if u64::from(bucket) < threshold {
+        HarnessType::Nanocodex
+    } else {
+        HarnessType::Codex
+    }
+}
+
+#[cfg(test)]
+mod harness_rollout_tests {
+    use super::*;
+
+    #[test]
+    fn codex_rollout_is_sticky_and_split_by_thread_key() {
+        let codex_thread = ThreadKey::try_from("slack:C1:1700000000.000100".to_owned()).unwrap();
+        let nanocodex_thread =
+            ThreadKey::try_from("slack:C1:1700000000.000104".to_owned()).unwrap();
+
+        assert_eq!(
+            rollout_harness_for_thread(&codex_thread, &HarnessType::Codex, 50),
+            HarnessType::Codex
+        );
+        assert_eq!(
+            rollout_harness_for_thread(&nanocodex_thread, &HarnessType::Codex, 50),
+            HarnessType::Nanocodex
+        );
+        assert_eq!(
+            rollout_harness_for_thread(&nanocodex_thread, &HarnessType::Codex, 50),
+            HarnessType::Nanocodex
+        );
+    }
+
+    #[test]
+    fn codex_rollout_honors_boundaries_and_other_harnesses() {
+        let thread_key = ThreadKey::try_from("cli:rollout-boundaries".to_owned()).unwrap();
+
+        assert_eq!(
+            rollout_harness_for_thread(&thread_key, &HarnessType::Codex, 0),
+            HarnessType::Codex
+        );
+        assert_eq!(
+            rollout_harness_for_thread(&thread_key, &HarnessType::Codex, 100),
+            HarnessType::Nanocodex
+        );
+        assert_eq!(
+            rollout_harness_for_thread(&thread_key, &HarnessType::ClaudeCode, 50),
+            HarnessType::ClaudeCode
+        );
+        assert_eq!(
+            rollout_harness_for_thread(&thread_key, &HarnessType::Nanocodex, 50),
+            HarnessType::Nanocodex
+        );
+    }
+
+    #[test]
+    fn codex_rollout_is_balanced_across_many_thread_keys() {
+        let nanocodex = (0..10_000)
+            .filter(|index| {
+                let thread_key = ThreadKey::try_from(format!("cli:rollout-{index}")).unwrap();
+                rollout_harness_for_thread(&thread_key, &HarnessType::Codex, 50)
+                    == HarnessType::Nanocodex
+            })
+            .count();
+
+        assert!(
+            (4_900..=5_100).contains(&nanocodex),
+            "nanocodex={nanocodex}"
+        );
+    }
+
+    #[test]
+    fn codex_rollout_assignment_is_explicit_and_persistable() {
+        let assignment =
+            codex_nanocodex_assignment(&HarnessType::Codex, &HarnessType::Nanocodex, 50).unwrap();
+        let metadata = session_metadata_with_harness_assignment(
+            Some(json!({"source": "slackbotv2"})),
+            Some(&assignment),
+        )
+        .unwrap();
+
+        assert_eq!(assignment.experiment, CODEX_NANOCODEX_AB_EXPERIMENT);
+        assert_eq!(assignment.cohort, HarnessType::Nanocodex);
+        assert_eq!(
+            metadata.pointer("/harness_assignment/cohort"),
+            Some(&json!("nanocodex"))
+        );
+        assert_eq!(metadata.get("source"), Some(&json!("slackbotv2")));
+        assert!(codex_nanocodex_assignment(&HarnessType::Codex, &HarnessType::Codex, 0).is_none());
+        assert!(
+            codex_nanocodex_assignment(&HarnessType::Nanocodex, &HarnessType::Nanocodex, 50)
+                .is_none()
+        );
+    }
 }
 
 async fn get_session_context(
     State(state): State<AppState>,
+    Extension(caller): Extension<AuthenticatedCaller>,
     Path(raw_thread_key): Path<String>,
 ) -> Result<Json<SessionContextResponse>, ApiError> {
     let runtime = state.runtime()?;
     let thread_key = ThreadKey::try_from(raw_thread_key)?;
+    authorize_principal_session_read(&runtime, &caller, &thread_key).await?;
     let destination = thread_key.chat_destination();
     let platform = destination
         .as_ref()
@@ -552,12 +932,6 @@ async fn get_session_context(
     }))
 }
 
-async fn list_personas(
-    State(state): State<AppState>,
-) -> Result<Json<Vec<PersonaSummary>>, ApiError> {
-    Ok(Json(state.runtime()?.personas()))
-}
-
 async fn append_messages(
     State(state): State<AppState>,
     Path(raw_thread_key): Path<String>,
@@ -642,12 +1016,14 @@ async fn drain_sandboxes(State(state): State<AppState>) -> Result<Json<Value>, A
 
 async fn stream_events(
     State(state): State<AppState>,
+    Extension(caller): Extension<AuthenticatedCaller>,
     Path(raw_thread_key): Path<String>,
     Query(query): Query<EventsQuery>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
     let thread_key = ThreadKey::try_from(raw_thread_key)?;
-    let events = state
-        .runtime()?
+    let runtime = state.runtime()?;
+    authorize_principal_session_read(&runtime, &caller, &thread_key).await?;
+    let events = runtime
         .stream_events(
             &thread_key,
             query.after_event_id.unwrap_or(0),
@@ -674,6 +1050,46 @@ async fn stream_events(
         Ok(sse)
     });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+async fn authorize_principal_session_read(
+    runtime: &SessionRuntime,
+    caller: &AuthenticatedCaller,
+    thread_key: &ThreadKey,
+) -> Result<(), ApiError> {
+    let Some(subject) = caller.principal_subject() else {
+        return Ok(());
+    };
+    let session = runtime.session(thread_key).await?;
+    if principal_subject_owns_session(Some(subject), session.iron_control_principal.as_deref()) {
+        return Ok(());
+    }
+    Err(ApiError::Forbidden(
+        "caller is not authorized for this session".to_owned(),
+    ))
+}
+
+fn principal_subject_owns_session(subject: Option<&str>, session_principal: Option<&str>) -> bool {
+    subject.is_none_or(|subject| session_principal == Some(subject))
+}
+
+#[cfg(test)]
+mod session_authorization_tests {
+    use super::principal_subject_owns_session;
+
+    #[test]
+    fn principal_session_reads_require_exact_persisted_owner() {
+        assert!(principal_subject_owns_session(None, Some("prn_owner")));
+        assert!(principal_subject_owns_session(
+            Some("prn_owner"),
+            Some("prn_owner")
+        ));
+        assert!(!principal_subject_owns_session(
+            Some("prn_other"),
+            Some("prn_owner")
+        ));
+        assert!(!principal_subject_owns_session(Some("prn_owner"), None));
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1850,6 +2266,7 @@ async fn ingest_slack_dm_sync_batch(
     validate_slack_dm_sync_batch(&request)?;
     let pool = db_pool(&state)?;
     let mut tx = pool.begin().await?;
+    acquire_slack_dm_sync_locks(&mut tx, &request).await?;
 
     if let Some(run) = &request.run {
         upsert_slack_dm_sync_run(&mut tx, run).await?;
@@ -2375,7 +2792,9 @@ async fn list_workflow_runs(
     Query(query): Query<ListWorkflowRunsQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let workflows = workflow_runtime(&state)?;
-    let runs = workflows.list_runs(query.limit.unwrap_or(50)).await?;
+    let runs = workflows
+        .list_runs(query.limit.unwrap_or(50), query.workflow_name.as_deref())
+        .await?;
     Ok(Json(json!({ "ok": true, "runs": runs })))
 }
 
@@ -2410,9 +2829,24 @@ async fn emit_workflow_event(
     Json(request): Json<EmitWorkflowEventRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let workflows = workflow_runtime(&state)?;
-    workflows
-        .emit_event(&request.event_name, request.payload)
-        .await?;
+    let event_name = match (
+        request.event_name.as_deref(),
+        request.event_type.as_deref(),
+        request.correlation_id.as_deref(),
+    ) {
+        (Some(event_name), None, None) if !event_name.trim().is_empty() => event_name.to_owned(),
+        (None, Some(event_type), Some(correlation_id))
+            if !event_type.trim().is_empty() && !correlation_id.trim().is_empty() =>
+        {
+            centaur_workflows::python_workflow_event_name(event_type, correlation_id)
+        }
+        _ => {
+            return Err(ApiError::BadRequest(
+                "provide either event_name or both event_type and correlation_id".to_owned(),
+            ));
+        }
+    };
+    workflows.emit_event(&event_name, request.payload).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -2923,6 +3357,60 @@ fn validate_slack_dm_sync_batch(request: &SlackDmSyncBatchRequest) -> Result<(),
     Ok(())
 }
 
+async fn acquire_slack_dm_sync_locks(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    request: &SlackDmSyncBatchRequest,
+) -> Result<(), ApiError> {
+    // Credential-scoped job limits still allow two credentials to update the
+    // same shared conversation. Transaction-scoped locks serialize only
+    // overlapping conversations and release automatically on commit or
+    // rollback. BTreeSet ordering prevents multi-conversation batches from
+    // deadlocking while acquiring the locks.
+    for (home_team_id, conversation_id) in slack_dm_sync_conversation_keys(request) {
+        let lock_name = format!("centaur:slack-private-sync:{home_team_id}:{conversation_id}");
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(lock_name)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(())
+}
+
+fn slack_dm_sync_conversation_keys(request: &SlackDmSyncBatchRequest) -> BTreeSet<(&str, &str)> {
+    let mut conversation_keys = BTreeSet::new();
+    conversation_keys.extend(request.conversations.iter().map(|conversation| {
+        (
+            conversation.home_team_id.as_str(),
+            conversation.conversation_id.as_str(),
+        )
+    }));
+    conversation_keys.extend(request.members.iter().map(|member| {
+        (
+            member.home_team_id.as_str(),
+            member.conversation_id.as_str(),
+        )
+    }));
+    conversation_keys.extend(request.messages.iter().map(|message| {
+        (
+            message.home_team_id.as_str(),
+            message.conversation_id.as_str(),
+        )
+    }));
+    conversation_keys.extend(request.attachments.iter().map(|attachment| {
+        (
+            attachment.home_team_id.as_str(),
+            attachment.conversation_id.as_str(),
+        )
+    }));
+    conversation_keys.extend(request.checkpoints.iter().map(|checkpoint| {
+        (
+            checkpoint.home_team_id.as_str(),
+            checkpoint.conversation_id.as_str(),
+        )
+    }));
+    conversation_keys
+}
+
 #[cfg(test)]
 mod slack_user_sync_tests {
     use super::*;
@@ -2956,6 +3444,25 @@ mod slack_user_sync_tests {
         let error = validate_slack_dm_sync_batch(&request_with_conversation_type("public_channel"))
             .unwrap_err();
         assert!(matches!(error, ApiError::BadRequest(_)));
+    }
+
+    #[test]
+    fn collects_sync_conversation_locks_in_stable_order() {
+        let mut request = request_with_conversation_type("im");
+        request.conversations.push(SlackDmSyncConversationPayload {
+            home_team_id: "T123".to_owned(),
+            conversation_id: "D999".to_owned(),
+            conversation_type: "im".to_owned(),
+            is_archived: false,
+            is_ext_shared: false,
+            raw_payload: json!({}),
+        });
+
+        let conversation_keys = slack_dm_sync_conversation_keys(&request)
+            .into_iter()
+            .collect::<Vec<_>>();
+
+        assert_eq!(conversation_keys, vec![("T123", "D999"), ("T123", "G123")]);
     }
 }
 

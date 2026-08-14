@@ -23,6 +23,20 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
     && rm -rf /usr/share/doc /usr/share/man /usr/share/info
 
+# reth's default JIT build uses revmc, which depends on llvm-sys 221.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key \
+      | gpg --dearmor -o /usr/share/keyrings/llvm-snapshot.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-22 main" \
+      | tee /etc/apt/sources.list.d/llvm-22.list > /dev/null \
+    && apt-get update && apt-get install -y --no-install-recommends \
+      clang-22 lld-22 llvm-22-dev libclang-22-dev libpolly-22-dev \
+    && rm -rf /usr/share/doc /usr/share/man /usr/share/info
+
+ENV LLVM_SYS_221_PREFIX=/usr/lib/llvm-22
+ENV LIBCLANG_PATH=/usr/lib/llvm-22/lib
+
 # ── Python deps ──────────────────────────────────────────────────────────────
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     pip3 install --break-system-packages --no-compile --ignore-installed "packaging>=24.2.0" \
@@ -40,6 +54,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     feedparser>=6.0.0 \
     httplib2>=0.20.0 \
     httpx>=0.28.0 \
+    "openai>=2.53.0" \
     opentelemetry-proto==1.42.1 \
     "psycopg[binary]>=3.2.0" \
     pysocks>=1.7.1 \
@@ -75,6 +90,8 @@ RUN useradd -m -s /bin/bash -u 1001 agent \
 
 ARG CLAUDE_CODE_VERSION=2.1.154
 ARG CODEX_VERSION=0.144.0
+# Hermes Agent (NousResearch) — pinned by commit SHA per the dependency policy.
+ARG HERMES_AGENT_REF=e5e2fb8b2dbe1cae85aa5ad6ce45aef376016e43
 ARG PI_CODING_AGENT_VERSION=0.67.2
 ARG NUSHELL_VERSION=0.112.2
 ARG KUBECTL_VERSION=v1.34.2
@@ -98,6 +115,19 @@ RUN set -eux; \
       -o /usr/local/bin/kubectl; \
     chmod +x /usr/local/bin/kubectl; \
     kubectl version --client=true | grep -F "${KUBECTL_VERSION#v}"
+
+# ── AWS CLI v2 ─────────────────────────────────────────────────────────────
+RUN set -eux; \
+    aws_arch="$(case "$(dpkg --print-architecture)" in \
+      amd64) echo x86_64 ;; \
+      arm64) echo aarch64 ;; \
+      *) echo unsupported-architecture >&2; exit 1 ;; \
+    esac)"; \
+    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${aws_arch}.zip" -o /tmp/awscliv2.zip; \
+    unzip -q /tmp/awscliv2.zip -d /tmp; \
+    /tmp/aws/install; \
+    rm -rf /tmp/awscliv2.zip /tmp/aws; \
+    aws --version
 
 # ── Nushell ─────────────────────────────────────────────────────────────────
 RUN set -eux; \
@@ -127,6 +157,23 @@ RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     && claude --version | grep -F "${CLAUDE_CODE_VERSION}" \
     && codex --version | grep -F "${CODEX_VERSION}" \
     && pnpm --version | grep -F "${PNPM_VERSION}"
+
+# ── Hermes Agent (own venv; exposes `hermes` + the tui_gateway module) ───────
+# The hermes harness drives `python -m tui_gateway.entry` (see
+# crates/harness-server/src/hermes.rs). HERMES_PYTHON points the harness at
+# this venv's interpreter; the `hermes` shim serves cron ticks + CLI use.
+# Hermes intentionally rejects wheel builds because its runtime assets depend
+# on the source-checkout layout, so install the pinned checkout editable.
+RUN git init /opt/hermes-agent \
+    && git -C /opt/hermes-agent remote add origin https://github.com/NousResearch/hermes-agent.git \
+    && git -C /opt/hermes-agent fetch --depth 1 origin "${HERMES_AGENT_REF}" \
+    && git -C /opt/hermes-agent checkout --detach FETCH_HEAD \
+    && python3 -m venv /opt/hermes \
+    && /opt/hermes/bin/pip install --no-cache-dir --editable /opt/hermes-agent \
+    && rm -rf /opt/hermes-agent/.git \
+    && ln -s /opt/hermes/bin/hermes /usr/local/bin/hermes \
+    && hermes version
+ENV HERMES_PYTHON=/opt/hermes/bin/python3
 
 # ── agent-browser system deps (must run as root before USER agent) ───────────
 # Chrome for Testing doesn't provide Linux ARM64 builds; fall back to system chromium
@@ -203,6 +250,13 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
       agent-browser install; \
     fi
 
+# Keep Playwright in uv's image-backed cache so isolated tool environments do
+# not download its large Python driver package on first use. Browser binaries
+# are intentionally omitted because DocSend connects to Browserbase over CDP.
+ARG PLAYWRIGHT_VERSION=1.62.0
+RUN uv tool install "playwright==${PLAYWRIGHT_VERSION}" \
+    && playwright --version | grep -F "${PLAYWRIGHT_VERSION}"
+
 # ── Agent skills + workspace setup (rarely changes) ─────────────────────────
 RUN --mount=type=cache,target=/home/agent/.npm,uid=1001,gid=1001,sharing=locked \
     npx -y skills add vercel-labs/agent-browser
@@ -240,6 +294,7 @@ COPY --link services/workflow-python/api/ /usr/local/bin/api/
 COPY --link --chmod=755 services/sandbox/git-branch.sh /usr/local/bin/git-branch
 COPY --link --chmod=755 services/sandbox/install_tool_shims.py /usr/local/bin/install-tool-shims
 COPY --link --chmod=755 services/sandbox/centaur_tool_host.py /usr/local/bin/centaur-tool-host
+COPY --link --chmod=755 services/sandbox/compose_system_prompt.py /usr/local/bin/compose-system-prompt
 COPY --link --chmod=755 services/sandbox/repo_cache_sync.py /usr/local/bin/repo-cache-sync
 COPY --link --chmod=755 services/sandbox/repo_cache_watch.py /usr/local/bin/repo-cache-watch
 COPY --link --chmod=755 services/sandbox/entrypoint.sh /entrypoint.sh
@@ -254,7 +309,7 @@ RUN --mount=type=cache,target=/home/agent/.cargo/registry,uid=1001,gid=1001,shar
     --mount=type=cache,target=/home/agent/.cargo/git,uid=1001,gid=1001,sharing=locked \
     --mount=type=cache,target=/home/agent/.cache/harness-server-target,uid=1001,gid=1001,sharing=locked \
     CARGO_TARGET_DIR=/home/agent/.cache/harness-server-target \
-    cargo install --locked --path /opt/centaur/harness-server-src --root /home/agent/.local
+    cargo +stable install --locked --path /opt/centaur/harness-server-src --root /home/agent/.local
 
 # No RUN instructions after these — all repo-local content at the very end.
 COPY --link --chown=1001:1001 .agents/skills/ /home/agent/.agents/skills/

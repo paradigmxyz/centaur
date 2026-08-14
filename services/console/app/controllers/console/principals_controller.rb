@@ -6,6 +6,7 @@ module Console
   class PrincipalsController < ApplicationController
     include KvRowParams
     include SecretKinds
+    include Console::SlackChannelPermissionManagement
 
     layout "console"
 
@@ -13,7 +14,7 @@ module Console
     before_action :set_principal, except: %i[new create]
 
     def new
-      @principal = Principal.new(namespace: "default")
+      @principal = Principal.new
     end
 
     def create
@@ -45,10 +46,11 @@ module Console
     end
 
     def update_slack_channel_permissions
-      @principal.update!(slack_channel_permission_params)
-      redirect_to console_principal_path(@principal.oid), notice: "Updated Slack channel permissions."
-    rescue ActiveRecord::RecordInvalid => e
-      redirect_to console_principal_path(@principal.oid), alert: e.record.errors.full_messages.to_sentence
+      update_slack_channel_permissions_from_form(
+        @principal,
+        console_principal_path(@principal.oid),
+        preserve_api_managed_direct_messages: true
+      )
     end
 
     def assign_role
@@ -95,8 +97,7 @@ module Console
     private
 
     def assign_form(principal)
-      fields = principal_params.permit(:namespace, :foreign_id, :name)
-      fields[:namespace] = fields[:namespace].presence || "default"
+      fields = principal_params.permit(:foreign_id, :name)
       fields[:foreign_id] = fields[:foreign_id].presence
       principal.assign_attributes(fields)
       principal.labels = label_params
@@ -104,20 +105,6 @@ module Console
 
     def principal_params
       params.fetch(:principal, ActionController::Parameters.new)
-    end
-
-    def slack_channel_permission_params
-      params.require(:principal).permit(
-        slack_channel_permissions_attributes: %i[
-          id
-          channel_id
-          channel_name
-          upload_enabled
-          download_enabled
-          history_enabled
-          _destroy
-        ]
-      )
     end
 
     # Parse the "<kind>:<oid>" value from the grant dropdown into a secret record.

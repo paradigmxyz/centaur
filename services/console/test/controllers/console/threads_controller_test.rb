@@ -6,7 +6,13 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
   TranscriptSession = Struct.new(:metadata_hash, :harness_type, :title, keyword_init: true)
   ModelSession = Struct.new(:thread_key, :metadata_hash, :harness_type, keyword_init: true)
   ModelExecution = Struct.new(:metadata, keyword_init: true)
-  TranscriptEvent = Struct.new(:event_type, :payload_hash, :created_at, keyword_init: true)
+  TranscriptEvent = Struct.new(
+    :event_type,
+    :payload_hash,
+    :created_at,
+    :execution_id,
+    keyword_init: true
+  )
   SelectedSession = Struct.new(:thread_key, keyword_init: true)
 
   setup do
@@ -849,8 +855,15 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
       # through a hidden field, not a native select.
       assert_select "input[type=hidden][name=model]", count: 1
       assert_select "[data-console-model-option][data-value=?]", "amp"
+      assert_select "[data-console-model-option][data-value=?]", "claude-opus-5"
       assert_select "select", count: 0
     end
+    picker = css_select("[data-console-model-picker]").first
+    agents = JSON.parse(picker["data-agents"])
+    assert_equal(
+      { "label" => "Claude Opus 5", "efforts" => [ %w[fast Fast] ] },
+      agents["claude-opus-5"]
+    )
     # Submitting replaces the centered empty state with a full-height,
     # bottom-aligned optimistic transcript while the request is in flight.
     assert_includes response.body, 'container.classList.add("console-new-chat--optimistic")'
@@ -1148,10 +1161,46 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_equal "max", line["reasoning"]
   end
 
+  test "Claude Opus 5 Fast selects the native fast model variant" do
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      post console_threads_url,
+           params: { prompt: "Reply with PONG.", model: "claude-opus-5", effort: "fast" }
+    end
+
+    create = client.calls[0].last
+    assert_equal "claudecode", create[:harness_type]
+    assert_equal "claude-opus-5-fast", create[:metadata][:model]
+
+    execute = client.calls[2].last
+    assert_equal "claude-opus-5-fast", execute[:metadata][:model]
+    assert_not execute[:metadata].key?(:reasoning)
+    line = JSON.parse(execute[:input_lines].first)
+    assert_equal "claude-opus-5-fast", line["model"]
+    assert_not line.key?("reasoning")
+  end
+
+  test "Claude Opus 5 uses the standard model by default" do
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      post console_threads_url,
+           params: { prompt: "Reply with PONG.", model: "claude-opus-5" }
+    end
+
+    create = client.calls[0].last
+    assert_equal "claudecode", create[:harness_type]
+    assert_equal "claude-opus-5", create[:metadata][:model]
+
+    execute = client.calls[2].last
+    assert_equal "claude-opus-5", execute[:metadata][:model]
+    line = JSON.parse(execute[:input_lines].first)
+    assert_equal "claude-opus-5", line["model"]
+  end
+
   test "an effort the model does not offer is dropped" do
     client = RecordingApiClient.new
     with_composer(client: client) do
-      # max is 5.6-only; claude models take no effort at all.
+      # max is 5.6-only; Opus 4.8 does not offer model-variant efforts.
       post console_threads_url,
            params: { prompt: "Reply with PONG.", model: "gpt-5.5", effort: "max" }
       post console_threads_url,
@@ -1550,6 +1599,32 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_nil items[1][:summary]
   end
 
+  test "activity summaries do not attach to trace items from another execution" do
+    controller = Console::ThreadsController.new
+    items = [
+      { event_id: 10, execution_id: "exe-1", text: "first execution" },
+      { event_id: 20, execution_id: "exe-2", text: "second execution" }
+    ]
+    summaries = [
+      TranscriptEvent.new(
+        event_type: "session.activity_summary",
+        execution_id: "exe-2",
+        payload_hash: { "summary" => "I'm starting the second execution", "source_event_id" => 15 }
+      ),
+      TranscriptEvent.new(
+        event_type: "session.activity_summary",
+        execution_id: "exe-2",
+        payload_hash: { "summary" => "I'm working in the second execution", "source_event_id" => 21 }
+      )
+    ]
+    controller.define_singleton_method(:selected_activity_summaries) { summaries }
+
+    controller.send(:apply_activity_summaries, items)
+
+    assert_nil items[0][:summary]
+    assert_equal "I'm working in the second execution", items[1][:summary]
+  end
+
   test "thinking extraction formats claude stream-json tool calls" do
     controller = Console::ThreadsController.new
     line = {
@@ -1787,6 +1862,15 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
                   console_threads_path(thread: thread_key)
   end
 
+  test "sidebar keeps an already-open thread selected on plain click" do
+    get console_threads_url(thread: "console:sidebar-active")
+
+    assert_response :ok
+    assert_includes response.body, "if (isOpen && !modified) {"
+    assert_includes response.body, "event.preventDefault();"
+    assert_includes response.body, "event.stopPropagation();"
+  end
+
   # The sidebar list loads out of band via a lazy Turbo Frame, so the page must
   # forward the current thread selection on the frame src for the active
   # highlight to render.
@@ -1875,16 +1959,6 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     Console::ThreadsController.client_factory = original_factory
   end
 
-  # Sets each env var for the block (nil deletes) and restores the previous
-  # values afterwards.
-  def with_env(overrides)
-    previous = overrides.keys.index_with { |name| ENV[name] }
-    overrides.each { |name, value| value.nil? ? ENV.delete(name) : ENV[name] = value }
-    yield
-  ensure
-    previous.each { |name, value| value.nil? ? ENV.delete(name) : ENV[name] = value }
-  end
-
   def with_recent_first_error
     singleton = class << CentaurSession; self; end
     original = CentaurSession.method(:recent_first)
@@ -1912,7 +1986,6 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
 
   def create_slack_oauth_credential(app, subject:, email:, labels: {})
     BrokerCredential.create!(
-      namespace: app.credential_namespace,
       oauth_app: app,
       provider_subject: subject,
       provider_email: email,

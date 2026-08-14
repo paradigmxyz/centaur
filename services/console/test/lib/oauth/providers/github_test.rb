@@ -37,6 +37,7 @@ module Oauth
         assert_equal "https://github.com/login/oauth/authorize", strategy.authorization_endpoint
         assert_equal "https://github.com/login/oauth/access_token", strategy.token_endpoint
         assert_equal [], strategy.identity_scopes
+        assert_equal "github_token", strategy.wrapping_secret_kind
         assert_equal "scope", strategy.authorization_scope_param
         assert_equal " ", strategy.scope_separator
         refute strategy.refreshable?

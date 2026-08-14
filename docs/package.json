@@ -11,16 +11,16 @@
     "deploy": "wrangler deploy"
   },
   "dependencies": {
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "vocs": "https://pkg.pr.new/vocs@3f54829",
     "waku": "1.0.0-alpha.6",
     "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@resvg/resvg-wasm": "^2.6.2",
-    "typescript": "5.9.3",
-    "wrangler": "^4.14.0"
+    "typescript": "7.0.2",
+    "wrangler": "^4.114.0"
   },
   "overrides": {
     "esbuild": "^0.28.1"

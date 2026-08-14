@@ -14,7 +14,6 @@ module Oauth
       app = oauth_apps(:acme_github)
       app.update!(client_secret: "github-secret")
       BrokerCredential.create!({
-        namespace: "acme",
         foreign_id: "github-github-pending-abc123",
         name: "GitHub – Pending GitHub account",
         token_endpoint: Oauth::Providers::Github::TOKEN_ENDPOINT,
@@ -28,7 +27,6 @@ module Oauth
 
     def wrap_credential(credential, name: "#{credential.name} token")
       StaticSecret.create!(
-        namespace: credential.namespace,
         name: name,
         broker_credential: credential,
         inject_config: { "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" }

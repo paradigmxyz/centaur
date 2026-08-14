@@ -57,6 +57,15 @@ Rails.application.routes.draw do
         post :run, action: :force_start
       end
     end
+    resources :skills do
+      collection do
+        get :mine
+      end
+      member do
+        post :share
+        post :unshare
+      end
+    end
     # Lazily-loaded sidebar thread list (Turbo Frame src). Kept off the main
     # page render so the unindexed cross-database sessions query does not block
     # every console page. See ApplicationController#load_console_sidebar_threads.
@@ -67,8 +76,12 @@ Rails.application.routes.draw do
       member do
         post "grants", to: "roles#grant_secret", as: :grant_secret
         delete "grants/:grant_id", to: "roles#revoke_grant", as: :revoke_grant
+        patch "slack_channel_permissions", to: "roles#update_slack_channel_permissions",
+              as: :slack_channel_permissions
       end
     end
+    delete "slack_channel_permissions/:slack_channel_permission_id", to: "slack_channel_permissions#destroy",
+           as: :slack_channel_permission
   end
   # Role assignments and direct grants managed from the principal detail page. The
   # extra /roles and /grants path segments keep these clear of the show route above
@@ -146,41 +159,68 @@ Rails.application.routes.draw do
 
   namespace :api do
     namespace :v1 do
-      # Each secret type is addressable by opaque oid (member routes) or by an
-      # explicit namespace + foreign_id via the namespaced lookup route.
+      # Each secret type is addressable by opaque oid or globally unique foreign_id.
+      # The /lookup/default/... form is a temporary compatibility alias.
       resources :static_secrets, only: %i[index show create update destroy] do
-        collection { get "lookup/:namespace/:foreign_id", action: :lookup, as: :lookup }
+        collection do
+          get "lookup/default/:foreign_id", action: :lookup, as: :default_lookup
+          get "lookup/:foreign_id", action: :lookup, as: :lookup
+        end
       end
       resources :gcp_auth_secrets, only: %i[index show create update destroy] do
-        collection { get "lookup/:namespace/:foreign_id", action: :lookup, as: :lookup }
+        collection do
+          get "lookup/default/:foreign_id", action: :lookup, as: :default_lookup
+          get "lookup/:foreign_id", action: :lookup, as: :lookup
+        end
       end
       resources :gcp_id_token_secrets, only: %i[index show create update destroy] do
-        collection { get "lookup/:namespace/:foreign_id", action: :lookup, as: :lookup }
+        collection do
+          get "lookup/default/:foreign_id", action: :lookup, as: :default_lookup
+          get "lookup/:foreign_id", action: :lookup, as: :lookup
+        end
       end
       resources :aws_auth_secrets, only: %i[index show create update destroy] do
-        collection { get "lookup/:namespace/:foreign_id", action: :lookup, as: :lookup }
+        collection do
+          get "lookup/default/:foreign_id", action: :lookup, as: :default_lookup
+          get "lookup/:foreign_id", action: :lookup, as: :lookup
+        end
       end
       resources :oauth_token_secrets, only: %i[index show create update destroy] do
-        collection { get "lookup/:namespace/:foreign_id", action: :lookup, as: :lookup }
+        collection do
+          get "lookup/default/:foreign_id", action: :lookup, as: :default_lookup
+          get "lookup/:foreign_id", action: :lookup, as: :lookup
+        end
       end
       resources :pg_dsn_secrets, only: %i[index show create update destroy] do
-        collection { get "lookup/:namespace/:foreign_id", action: :lookup, as: :lookup }
+        collection do
+          get "lookup/default/:foreign_id", action: :lookup, as: :default_lookup
+          get "lookup/:foreign_id", action: :lookup, as: :lookup
+        end
       end
       resources :hmac_secrets, only: %i[index show create update destroy] do
-        collection { get "lookup/:namespace/:foreign_id", action: :lookup, as: :lookup }
+        collection do
+          get "lookup/default/:foreign_id", action: :lookup, as: :default_lookup
+          get "lookup/:foreign_id", action: :lookup, as: :lookup
+        end
       end
       resources :roles, only: %i[index show create update destroy] do
         collection do
-          get "lookup/:namespace/:foreign_id", action: :lookup, as: :lookup
+          get "lookup/default/:foreign_id", action: :lookup, as: :default_lookup
+          get "lookup/:foreign_id", action: :lookup, as: :lookup
+        end
+        member do
+          post "slack_channel_permissions", action: :upsert_slack_channel_permission
         end
         # Grants whose grantee is this role. :role_id is the role's oid.
         resources :grants, only: %i[index], controller: :grantee_grants
       end
       resources :principals, only: %i[index show create update] do
         collection do
-          get "lookup/:namespace/:foreign_id", action: :lookup, as: :lookup
-          get "lookup/:namespace/:foreign_id/effective_config",
-              action: :effective_config, as: :lookup_effective_config
+          get "lookup/default/:foreign_id/effective_config",
+              action: :effective_config, as: :default_lookup_effective_config
+          get "lookup/:foreign_id/effective_config", action: :effective_config, as: :lookup_effective_config
+          get "lookup/default/:foreign_id", action: :lookup, as: :default_lookup
+          get "lookup/:foreign_id", action: :lookup, as: :lookup
         end
         member do
           get "effective_config"
@@ -194,11 +234,13 @@ Rails.application.routes.draw do
       resources :grants, only: %i[show create destroy]
       resources :api_keys, only: %i[index show create destroy]
       resources :proxies, only: %i[index show create update destroy]
-
       # Operator-managed broker credentials (ApiKey auth). CRUD + lookup; the
       # rotating token blob is never serialized back.
       resources :broker_credentials, only: %i[index show create update destroy] do
-        collection { get "lookup/:namespace/:foreign_id", action: :lookup, as: :lookup }
+        collection do
+          get "lookup/default/:foreign_id", action: :lookup, as: :default_lookup
+          get "lookup/:foreign_id", action: :lookup, as: :lookup
+        end
       end
 
       # Operator-managed OAuth apps (ApiKey auth). Addressed by oid or slug; CRUD
@@ -212,8 +254,17 @@ Rails.application.routes.draw do
 
       # Called from inside sandboxes through their assigned iron-proxy. The
       # proxy injects a short-lived sandbox entitlement JWT scoped to these paths.
-      get "sandbox/permissions", to: "sandbox_permissions#show"
-      get "sandbox/oauth_apps", to: "sandbox_oauth_apps#index"
+      namespace :sandbox do
+        resource :permissions, only: :show
+        resources :oauth_apps, only: :index
+        resources :skills, only: %i[index show create update destroy] do
+          collection { get :search }
+          member do
+            post :share
+            post :unshare
+          end
+        end
+      end
     end
   end
 

@@ -7,6 +7,14 @@
   <div class="space-y-6">
     <%= render "identity_fields", secret: secret %>
 
+    <section class="form-section">
+      <h2 class="form-section-heading">Credential profile</h2>
+      <%= select_tag "static[kind]",
+                     options_for_select([ [ "Custom", "custom" ], [ "GitHub token", "github_token" ] ], secret.kind),
+                     class: "form-input" %>
+      <p class="form-hint">Profiles apply and validate the proxy configuration and request rules for known credential types.</p>
+    </section>
+
     <section data-controller="toggle" class="form-section">
       <h2 class="form-section-heading">Injection</h2>
       <% inject_errors = secret.errors[:base] + secret.errors[:inject_config] + secret.errors[:replace_config] %>
