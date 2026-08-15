@@ -46,7 +46,7 @@ module Oauth
 
       def refresh_scopes(_scopes) = []
 
-      def identity_from(result, client_id:)
+      def identity_from(result, client_id:, http_client: nil)
         user_id = result.response&.dig("authed_user", "id")
         if user_id.present?
           return {
