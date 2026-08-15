@@ -50,6 +50,11 @@ module Oauth
       FlowsController.identity_http_client_factory = -> { HttpClient.new(http: http) }
     end
 
+    def stub_identity_network_failure(error)
+      transport = ->(**) { raise error }
+      FlowsController.identity_http_client_factory = -> { HttpClient.new(http: transport) }
+    end
+
     def id_token(claims)
       "h.#{Base64.urlsafe_encode64(claims.to_json, padding: false)}.s"
     end
@@ -608,10 +613,10 @@ module Oauth
       assert_equal wrapper, credential.static_secret
     end
 
-    test "identity lookup failure renders an error and persists nothing" do
+    test "identity lookup network failure renders an error and persists nothing" do
       state = start_flow(slug: "github", scopes: "repo")
       stub_exchange(status: 200, body: github_token_body)
-      stub_identity(status: 503, body: "temporarily unavailable")
+      stub_identity_network_failure(SocketError.new("identity host unavailable"))
 
       assert_no_difference [ -> { BrokerCredential.count }, -> { StaticSecret.count } ] do
         get oauth_callback_url(slug: "github"), params: { state: state, code: "auth-code" }

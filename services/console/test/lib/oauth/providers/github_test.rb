@@ -74,6 +74,21 @@ module Oauth
         http.verify
       end
 
+      test "identity endpoint network failure raises a network exchange error" do
+        transport = ->(**) { raise Errno::ECONNREFUSED }
+
+        err = assert_raises(Broker::ExchangeError) do
+          Github.new.identity_from(
+            result,
+            client_id: "unused",
+            http_client: HttpClient.new(http: transport)
+          )
+        end
+
+        assert_equal "identity_lookup_failed", err.code
+        assert_equal "network", err.stage
+      end
+
       test "parses comma or space separated granted scopes" do
         assert_equal %w[repo read:user gist], Github.new.parse_granted_scopes("repo,read:user gist")
       end

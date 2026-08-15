@@ -37,15 +37,17 @@ module Oauth
                                           stage: "parse", code: "missing_access_token")
         end
 
-        response = http_client.get(
-          USER_ENDPOINT,
-          headers: {
-            "Accept" => "application/vnd.github+json",
-            "Authorization" => "Bearer #{result.access_token}",
-            "X-GitHub-Api-Version" => "2022-11-28",
-            "User-Agent" => "centaur-console"
-          }
-        )
+        response = identity_response(provider: display_name) do
+          http_client.get(
+            USER_ENDPOINT,
+            headers: {
+              "Accept" => "application/vnd.github+json",
+              "Authorization" => "Bearer #{result.access_token}",
+              "X-GitHub-Api-Version" => "2022-11-28",
+              "User-Agent" => "centaur-console"
+            }
+          )
+        end
         profile = identity_json(response, provider: display_name)
         subject = require_identity(profile["id"], provider: display_name).to_s
         login = require_identity(profile["login"], provider: display_name).to_s

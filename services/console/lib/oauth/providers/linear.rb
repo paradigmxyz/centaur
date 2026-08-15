@@ -47,14 +47,16 @@ module Oauth
                                           stage: "parse", code: "missing_access_token")
         end
 
-        response = http_client.post(
-          GRAPHQL_ENDPOINT,
-          json: { query: VIEWER_QUERY },
-          headers: {
-            "Authorization" => "Bearer #{result.access_token}",
-            "User-Agent" => "centaur-console"
-          }
-        )
+        response = identity_response(provider: display_name) do
+          http_client.post(
+            GRAPHQL_ENDPOINT,
+            json: { query: VIEWER_QUERY },
+            headers: {
+              "Authorization" => "Bearer #{result.access_token}",
+              "User-Agent" => "centaur-console"
+            }
+          )
+        end
         payload = identity_json(response, provider: display_name)
         viewer = payload.dig("data", "viewer")
         unless viewer.is_a?(Hash)

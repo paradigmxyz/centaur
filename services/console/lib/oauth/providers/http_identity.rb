@@ -7,6 +7,18 @@ module Oauth
     module HttpIdentity
       private
 
+      def identity_response(provider:)
+        yield
+      rescue Broker::ExchangeError
+        raise
+      rescue StandardError => e
+        raise Broker::ExchangeError.new(
+          "#{provider} identity endpoint request failed: #{e.class}",
+          stage: "network",
+          code: "identity_lookup_failed"
+        )
+      end
+
       def identity_json(response, provider:)
         unless response.success?
           raise Broker::ExchangeError.new(
@@ -34,12 +46,6 @@ module Oauth
           stage: "parse",
           code: "invalid_identity_response",
           status: response.status
-        )
-      rescue StandardError => e
-        raise Broker::ExchangeError.new(
-          "#{provider} identity endpoint request failed: #{e.class}",
-          stage: "network",
-          code: "identity_lookup_failed"
         )
       end
 

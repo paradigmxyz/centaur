@@ -38,13 +38,15 @@ module Oauth
                                           stage: "parse", code: "missing_access_token")
         end
 
-        response = http_client.get(
-          SELF_ENDPOINT,
-          headers: {
-            "Authorization" => "Bearer #{result.access_token}",
-            "User-Agent" => "centaur-console"
-          }
-        )
+        response = identity_response(provider: display_name) do
+          http_client.get(
+            SELF_ENDPOINT,
+            headers: {
+              "Authorization" => "Bearer #{result.access_token}",
+              "User-Agent" => "centaur-console"
+            }
+          )
+        end
         workspace = identity_json(response, provider: display_name)
         subject = require_identity(workspace["workspace_id"], provider: display_name).to_s
 
