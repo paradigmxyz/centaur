@@ -1072,7 +1072,7 @@ def search(query, limit=20):
         .unwrap();
 
         let result = mcp_centaur_tool_result(
-            &AppState::unready(),
+            &AppState::unready(crate::ApiAuthConfig::testing("test-secret")),
             &McpPrincipal {
                 principal_id: "mcp:test".to_owned(),
                 token_id: "mcp_tok_test".to_owned(),
