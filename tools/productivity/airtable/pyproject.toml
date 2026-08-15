@@ -1,6 +1,6 @@
 [project]
 name = "airtable"
-description = "Airtable API client for bases, schemas, views, and records"
+description = "Airtable API client for bases, schemas, views, records, and record writes"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [

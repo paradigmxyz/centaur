@@ -13,18 +13,18 @@ module Oauth
       TOKEN_ENDPOINT = "https://github.com/login/oauth/access_token"
       USER_ENDPOINT = "https://api.github.com/user"
       IDENTITY_SCOPES = [].freeze
-      API_HOSTS = %w[api.github.com github.com].freeze
 
       def key = KEY
       def display_name = "GitHub"
       def authorization_endpoint = AUTHORIZATION_ENDPOINT
       def token_endpoint = TOKEN_ENDPOINT
       def identity_scopes = IDENTITY_SCOPES
-      def api_hosts = API_HOSTS
       def authorization_scope_param = "scope"
       def scope_separator = " "
       def extra_authorization_params = {}
       def refreshable? = false
+
+      def wrapping_secret_kind = CredentialProfiles::GithubToken::KIND
 
       def parse_granted_scopes(scope)
         scope.to_s.split(/[,\s]+/).reject(&:blank?)

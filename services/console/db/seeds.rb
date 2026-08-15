@@ -80,7 +80,6 @@ unless Rails.env.production?
       app.allowed_scopes = attrs[:allowed_scopes]
       app.client_id = "seed-#{attrs[:slug]}-client-id"
       app.client_secret = "seed-#{attrs[:slug]}-client-secret"
-      app.credential_namespace = "default"
       app.enabled = true
       app.created_by = seed_user
     end

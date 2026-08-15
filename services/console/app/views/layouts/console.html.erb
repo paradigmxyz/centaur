@@ -5,7 +5,10 @@
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <meta charset="utf-8">
     <%= csrf_meta_tags %>
+    <%= tag.link rel: "manifest", href: pwa_manifest_path(format: :json) %>
+    <meta name="theme-color" content="#050506">
     <link rel="icon" href="/icon-dark.svg" type="image/svg+xml" data-console-favicon>
+    <link rel="apple-touch-icon" href="/pwa-icon-192.png">
     <script>
       (() => {
         const storageKey = "centaur-console-theme";
@@ -26,6 +29,7 @@
             return null;
           }
         };
+        const preference = () => storedTheme() || "system";
         const resolveTheme = () => storedTheme() || systemTheme();
         const applyTheme = (theme) => {
           const nextTheme = validTheme(theme) ? theme : systemTheme();
@@ -42,6 +46,16 @@
         window.ConsoleTheme = {
           apply: applyTheme,
           persist: (theme) => {
+            if (theme === "system") {
+              try {
+                localStorage.removeItem(storageKey);
+                localStorage.removeItem(storageSourceKey);
+              } catch (_error) {
+                // Theme still follows the system for this page load when storage is unavailable.
+              }
+              return applyTheme(systemTheme());
+            }
+
             const nextTheme = applyTheme(theme);
             try {
               localStorage.setItem(storageKey, nextTheme);
@@ -51,6 +65,7 @@
             }
             return nextTheme;
           },
+          preference: preference,
           resolve: resolveTheme
         };
 
@@ -237,6 +252,12 @@
         font-weight: 500;
       }
 
+      /* Keep stacked group tabs (Workflows / New chat / Chats) on the same
+         0.125rem rhythm as the nav rows above them. */
+      .console-thread-group + .console-thread-group {
+        margin-top: 0.125rem;
+      }
+
       .console-thread-group-title {
         display: flex;
         height: 2.35rem;
@@ -358,6 +379,87 @@
         color: #f4f4f5;
       }
 
+      .console-thread-share-wrap {
+        position: relative;
+        flex: 0 0 auto;
+      }
+
+      .console-thread-share-trigger {
+        display: grid;
+        height: 1.75rem;
+        width: 1.75rem;
+        cursor: pointer;
+        place-items: center;
+        border-radius: 0.5rem;
+        color: #71717a;
+        transition: background 120ms ease, color 120ms ease;
+      }
+
+      .console-thread-share-trigger:hover {
+        background: rgba(255, 255, 255, 0.08);
+        color: #f4f4f5;
+      }
+
+      .console-share-dialog {
+        width: min(28rem, calc(100vw - 2rem));
+        margin: auto;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 0.875rem;
+        background: #101012;
+        color: #d4d4d8;
+        padding: 0;
+        box-shadow: 0 24px 70px rgba(0, 0, 0, 0.58);
+      }
+
+      .console-share-dialog::backdrop {
+        background: rgba(0, 0, 0, 0.66);
+        backdrop-filter: blur(2px);
+      }
+
+      .console-share-dialog-copy {
+        padding: 1.5rem 1.5rem 1.25rem;
+      }
+
+      .console-share-dialog-copy h2 {
+        color: #f4f4f5;
+        font-size: 1rem;
+        font-weight: 600;
+      }
+
+      .console-share-dialog-copy > p:not(.console-share-dialog-error) {
+        margin-top: 0.75rem;
+        color: #a1a1aa;
+        font-size: 0.875rem;
+        line-height: 1.5;
+      }
+
+      .console-share-dialog-error {
+        margin-top: 0.75rem;
+        color: #fca5a5;
+        font-size: 0.75rem;
+      }
+
+      .console-share-dialog-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 0.75rem;
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+        padding: 1rem 1.5rem;
+      }
+
+      .console-share-dialog-actions .btn-primary,
+      .console-share-dialog-actions .btn-secondary {
+        min-width: 6.5rem;
+        padding-top: 0.5rem;
+        padding-bottom: 0.5rem;
+        text-align: center;
+      }
+
+      .console-share-dialog-actions .btn-primary:disabled {
+        cursor: wait;
+        opacity: 0.6;
+      }
+
       .console-thinking {
         min-width: 0;
         padding: 0.125rem 0;
@@ -416,6 +518,7 @@
       }
 
       .console-thinking-preview {
+        flex: 1 1 auto;
         min-width: 0;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -427,6 +530,7 @@
         flex: 0 0 auto;
         color: #d4d4d8;
         font-weight: 500;
+        white-space: nowrap;
       }
 
       .console-thinking-failed,
@@ -437,7 +541,9 @@
       /* The comma hugs the group title: pull the label back across the flex
          gap so it reads "Ran 2 commands, 1 failed". */
       .console-thinking-failed {
+        flex: 0 0 auto;
         margin-left: -0.4rem;
+        white-space: nowrap;
       }
 
       .console-thinking-failed::before {
@@ -704,6 +810,13 @@
         color: #f4f4f5;
       }
 
+      /* The install item is hidden until beforeinstallprompt fires; the
+         explicit rule is needed because display: flex above would otherwise
+         override the hidden attribute. */
+      .console-account-menu-button[hidden] {
+        display: none;
+      }
+
       .console-main {
         display: flex;
         height: 100%;
@@ -793,6 +906,25 @@
         min-width: 0;
       }
 
+      .console-message-images {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.75rem;
+        max-width: 100%;
+      }
+
+      .console-message-image {
+        display: block;
+        width: auto;
+        height: auto;
+        max-width: 100%;
+        max-height: min(28rem, 60vh);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 0.75rem;
+        object-fit: contain;
+      }
+
       .console-message-timestamp {
         min-height: 1.25rem;
         padding-top: 0.375rem;
@@ -808,20 +940,235 @@
         opacity: 1;
       }
 
+      /* Chat composer — the full-page New-chat card and the dock pinned under
+         open transcripts share one box; the dock only adds placement. No
+         separator rule: the rounded box already reads as the boundary, and a
+         full-bleed hairline over the narrower transcript column looks off. */
+      .console-composer-dock {
+        flex: 0 0 auto;
+        padding: 0.25rem 0 1rem;
+      }
+
+      .console-composer-dock--panel {
+        padding: 0.6rem 0.75rem 0.75rem;
+      }
+
+      .console-composer-box {
+        display: flex;
+        flex-direction: column;
+        gap: 0.4rem;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 1.25rem;
+        background: rgba(255, 255, 255, 0.035);
+        padding: 0.75rem 0.875rem 0.625rem;
+        transition: border-color 120ms ease;
+      }
+
+      .console-composer-box:focus-within {
+        border-color: rgba(255, 255, 255, 0.22);
+      }
+
+      .console-composer-input {
+        width: 100%;
+        resize: none;
+        border: 0;
+        background: transparent;
+        color: #f4f4f5;
+        font-size: 0.875rem;
+        line-height: 1.5;
+        outline: none;
+      }
+
+      .console-composer-input::placeholder {
+        color: #71717a;
+      }
+
+      .console-composer-controls {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        min-width: 0;
+      }
+
+      .console-composer-spacer {
+        flex: 1;
+      }
+
+      /* Model picker: a pill trigger opening a popover that reuses the
+         account-menu panel/item classes, so both dropdowns share one design. */
+      .console-composer-model {
+        position: relative;
+        min-width: 0;
+      }
+
+      .console-composer-model-trigger {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        max-width: 16rem;
+        border-radius: 999px;
+        background: transparent;
+        padding: 0.3rem 0.75rem;
+        color: #a1a1aa;
+        font-size: 0.8125rem;
+        font-weight: 500;
+        transition: background 120ms ease, color 120ms ease;
+      }
+
+      .console-composer-model-trigger:hover,
+      .console-composer-model-trigger[aria-expanded="true"] {
+        background: rgba(255, 255, 255, 0.09);
+        color: #f4f4f5;
+      }
+
+      .console-composer-model-chevron {
+        display: grid;
+        place-items: center;
+        transform: rotate(90deg);
+        transition: transform 120ms ease;
+      }
+
+      .console-composer-model-trigger[aria-expanded="true"] .console-composer-model-chevron {
+        transform: rotate(-90deg);
+      }
+
+      /* The picker sits just left of the send button, so the popover hangs
+         from its right edge. It scrolls when the composer script caps its
+         height to keep it inside the viewport. */
+      .console-composer-model-menu {
+        top: calc(100% + 0.4rem);
+        right: 0;
+        bottom: auto;
+        left: auto;
+        width: 15rem;
+        overflow-y: auto;
+      }
+
+      /* Flipped by the composer script when the space below the pill can't
+         fit the menu (docked composers sit at the bottom of the window). */
+      .console-composer-model-menu--above {
+        top: auto;
+        bottom: calc(100% + 0.4rem);
+      }
+
+      /* Root rows of the picker menu: setting name left, current value and a
+         chevron on the right (codex-app style). */
+      .console-composer-menu-value {
+        margin-left: auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: #71717a;
+        font-weight: 400;
+      }
+
+      .console-composer-menu-chevron {
+        display: grid;
+        flex: 0 0 auto;
+        place-items: center;
+        color: #71717a;
+      }
+
+      .console-composer-model-option-label {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        flex: 1;
+        text-align: left;
+      }
+
+      .console-composer-model-check {
+        display: grid;
+        place-items: center;
+        color: #3ace79;
+      }
+
+      /* "Thinking…" placeholder while a turn is executing, painted both by
+         the server (_thinking_indicator) and the composer's optimistic JS. */
+      .console-thinking-pending {
+        color: #8b8b94;
+        font-size: 0.875rem;
+        line-height: 1.5;
+        animation: console-thinking-pulse 1.6s ease-in-out infinite;
+      }
+
+      @keyframes console-thinking-pulse {
+        0%, 100% { opacity: 0.45; }
+        50% { opacity: 1; }
+      }
+
+      .console-composer-send {
+        display: grid;
+        height: 2rem;
+        width: 2rem;
+        flex: 0 0 auto;
+        place-items: center;
+        border-radius: 999px;
+        background: #28c26a;
+        color: #0b0b0d;
+        transition: background 120ms ease;
+      }
+
+      .console-composer-send:hover {
+        background: #3ace79;
+      }
+
+      /* Full-page New-chat composer. Its resting state sits a bit above
+         vertical center (the claude.ai-style resting height) and matches the
+         transcript column width so it reads as an empty chat, not a separate
+         page. Once submitted, it fills the available transcript height and
+         bottom-aligns the optimistic turn like an opened conversation. */
+      .console-new-chat {
+        width: 100%;
+        max-width: 48rem;
+        margin-top: 28vh;
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+      }
+
+      .console-new-chat--optimistic {
+        align-self: stretch;
+        max-width: 52rem;
+        margin-top: 0;
+        padding: 1.5rem 0;
+        justify-content: flex-end;
+      }
+
+      .console-new-chat-title {
+        color: #f4f4f5;
+        font-size: 1.25rem;
+        font-weight: 600;
+        text-align: center;
+      }
+
+
       .console-control-tabs {
         display: flex;
         gap: 0.25rem;
         margin-bottom: 1.5rem;
         border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        /* Too many tabs to fit a phone width: scroll them horizontally rather
+           than clipping the trailing ones off the edge. */
+        overflow-x: auto;
+        scrollbar-width: none;
+      }
+
+      .console-control-tabs::-webkit-scrollbar {
+        display: none;
       }
 
       .console-control-tab {
         margin-bottom: -1px;
+        flex: 0 0 auto;
         padding: 0.625rem 0.75rem;
         border-bottom: 1px solid transparent;
         color: #a1a1aa;
         font-size: 0.875rem;
         font-weight: 500;
+        white-space: nowrap;
         text-decoration: none;
         transition: border-color 120ms ease, color 120ms ease;
       }
@@ -964,6 +1311,42 @@
       html[data-console-theme="light"] .console-panel-close:hover {
         background: #e8e9e3;
         color: #24272b;
+      }
+
+      html[data-console-theme="light"] .console-thread-share-trigger {
+        color: #7a7f86;
+      }
+
+      html[data-console-theme="light"] .console-thread-share-trigger:hover {
+        background: #e8e9e3;
+        color: #24272b;
+      }
+
+      html[data-console-theme="light"] .console-share-dialog {
+        border-color: #d8d8d0;
+        background: #ffffff;
+        color: #565c63;
+        box-shadow: 0 24px 70px rgba(31, 36, 40, 0.2);
+      }
+
+      html[data-console-theme="light"] .console-share-dialog::backdrop {
+        background: rgba(36, 39, 43, 0.38);
+      }
+
+      html[data-console-theme="light"] .console-share-dialog-copy h2 {
+        color: #24272b;
+      }
+
+      html[data-console-theme="light"] .console-share-dialog-copy > p:not(.console-share-dialog-error) {
+        color: #6f757c;
+      }
+
+      html[data-console-theme="light"] .console-share-dialog-actions {
+        border-top-color: #e5e5de;
+      }
+
+      html[data-console-theme="light"] .console-share-dialog-error {
+        color: #b42318;
       }
 
       html[data-console-theme="light"] .console-thinking-summary {
@@ -1119,6 +1502,12 @@
         border-bottom-color: #e6e5de;
       }
 
+      html[data-console-theme="light"] .role-pill {
+        background: #eaf6ff;
+        color: #0369a1;
+        --tw-ring-color: rgb(14 165 233 / 0.3);
+      }
+
       html[data-console-theme="light"] .form-input {
         border-color: #d2d3cc;
         background: #ffffff;
@@ -1181,6 +1570,7 @@
       html[data-console-theme="light"] .bg-ink-950,
       html[data-console-theme="light"] .bg-ink-950\/15,
       html[data-console-theme="light"] .bg-ink-950\/35,
+      html[data-console-theme="light"] .bg-ink-950\/80,
       html[data-console-theme="light"] .bg-ink-900,
       html[data-console-theme="light"] .bg-ink-900\/25,
       html[data-console-theme="light"] .bg-ink-900\/35,
@@ -1246,23 +1636,171 @@
         color: #8c9198;
       }
 
-      @media (max-width: 760px) {
+      /* Composer: plain-CSS component classes, so the utility-class remaps
+         above never reach them — they need their own light overrides. */
+      html[data-console-theme="light"] .console-composer-box {
+        border-color: rgba(15, 18, 20, 0.14);
+        background: #ffffff;
+      }
+
+      html[data-console-theme="light"] .console-composer-box:focus-within {
+        border-color: rgba(15, 18, 20, 0.3);
+      }
+
+      html[data-console-theme="light"] .console-composer-input {
+        color: #1c1f23;
+      }
+
+      html[data-console-theme="light"] .console-composer-input::placeholder {
+        color: #8c9198;
+      }
+
+      html[data-console-theme="light"] .console-composer-model-trigger {
+        background: transparent;
+        color: #565c63;
+      }
+
+      html[data-console-theme="light"] .console-composer-model-trigger:hover,
+      html[data-console-theme="light"] .console-composer-model-trigger[aria-expanded="true"] {
+        background: rgba(15, 18, 20, 0.1);
+        color: #1c1f23;
+      }
+
+      html[data-console-theme="light"] .console-composer-model-check {
+        color: #1f9d55;
+      }
+
+      html[data-console-theme="light"] .console-composer-menu-value,
+      html[data-console-theme="light"] .console-composer-menu-chevron {
+        color: #8c9198;
+      }
+
+      html[data-console-theme="light"] .console-thinking-pending {
+        color: #6f757c;
+      }
+
+      html[data-console-theme="light"] .console-composer-send {
+        color: #ffffff;
+      }
+
+      html[data-console-theme="light"] .console-new-chat-title {
+        color: #1c1f23;
+      }
+
+      /* The mobile top bar (hamburger + brand) and the drawer scrim are hidden
+         on desktop; the media query below turns them on for narrow viewports. */
+      .console-mobile-bar {
+        display: none;
+        flex: 0 0 auto;
+        position: sticky;
+        top: 0;
+        z-index: 30;
+        height: 3.25rem;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0 0.75rem;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+        background: rgba(7, 7, 8, 0.92);
+        backdrop-filter: blur(8px);
+      }
+
+      .console-mobile-nav-toggle {
+        display: grid;
+        height: 2.25rem;
+        width: 2.25rem;
+        flex: 0 0 auto;
+        cursor: pointer;
+        place-items: center;
+        border-radius: 0.625rem;
+        color: #d4d4d8;
+        transition: background 120ms ease, color 120ms ease;
+      }
+
+      .console-mobile-nav-toggle:hover {
+        background: rgba(255, 255, 255, 0.06);
+        color: #f4f4f5;
+      }
+
+      .console-mobile-brand {
+        display: flex;
+        min-width: 0;
+        align-items: center;
+        color: #f4f4f5;
+        text-decoration: none;
+      }
+
+      .console-mobile-brand img {
+        height: 1.4rem;
+        width: auto;
+      }
+
+      .console-scrim {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 40;
+        background: rgba(0, 0, 0, 0.55);
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 200ms ease;
+      }
+
+      html[data-console-theme="light"] .console-mobile-bar {
+        border-bottom-color: #deded7;
+        background: rgba(251, 251, 248, 0.92);
+      }
+
+      html[data-console-theme="light"] .console-mobile-nav-toggle {
+        color: #5f656c;
+      }
+
+      html[data-console-theme="light"] .console-mobile-nav-toggle:hover {
+        background: #edede8;
+        color: #24272b;
+      }
+
+      html[data-console-theme="light"] .console-mobile-brand {
+        color: #24272b;
+      }
+
+      html[data-console-theme="light"] .console-mobile-brand img {
+        filter: invert(1) drop-shadow(0 0 14px rgba(40, 194, 106, 0.14));
+      }
+
+      /* Mobile: the 18rem rail squeezes the content to a sliver, so below this
+         breakpoint the sidebar becomes an off-canvas drawer toggled from the
+         top bar. The main content then gets the full viewport width, and the
+         drawer keeps its full labels/brand/account row (no cryptic icon-only
+         rail). */
+      @media (max-width: 768px) {
+        .console-mobile-bar {
+          display: flex;
+        }
+
         .console-sidebar {
-          width: 11rem;
+          position: fixed;
+          top: 0;
+          bottom: 0;
+          left: 0;
+          z-index: 50;
+          width: 17rem;
+          max-width: 82vw;
+          transform: translateX(-100%);
+          transition: transform 200ms ease;
         }
 
-        .console-brand-lockup,
-        .console-account-details {
-          display: none;
+        .console-nav-open .console-sidebar {
+          transform: translateX(0);
+          box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
         }
 
-        .console-brand-glyph {
-          display: grid;
+        .console-scrim {
+          display: block;
         }
 
-        .console-sidebar-top {
-          justify-content: center;
-          padding: 0;
+        .console-nav-open .console-scrim {
+          opacity: 1;
+          pointer-events: auto;
         }
 
         .console-main-page {
@@ -1270,15 +1808,15 @@
         }
 
         .console-main-thread-frame {
-          padding: 1rem 1rem 0;
+          padding: 0.85rem 0.85rem 0;
         }
-
       }
     </style>
   </head>
 
   <% threads_view = request.path.start_with?("/console/threads") %>
   <% workflows_view = request.path.start_with?("/console/workflows") %>
+  <% skills_view = request.path.start_with?("/console/skills") %>
   <%# The Control and Data Sync sections are admin-only (each controller enforces
       require_admin server-side); Integrations is for everyone -- it lists the
       public consent start links any team member can use. %>
@@ -1328,6 +1866,15 @@
             <% end %>
           </nav>
 
+          <div class="console-thread-group">
+            <a href="<%= console_skills_path %>"
+               class="console-thread-group-title <%= "console-thread-group-title-active" if skills_view %>"
+               title="Skills">
+              <span class="console-nav-icon"><%= console_icon("workflow", classes: "size-4") %></span>
+              <span class="console-nav-label">Skills</span>
+            </a>
+          </div>
+
           <% if acting_admin? %>
             <div class="console-thread-group">
               <a href="<%= console_workflows_path %>"
@@ -1338,6 +1885,21 @@
               </a>
             </div>
           <% end %>
+
+          <%# New chat rides the thread-link machinery with the "new" sentinel
+              key: plain click opens the full-page composer, Cmd/Ctrl-click
+              adds a composer pane to the split view. %>
+          <div class="console-thread-group">
+            <a href="<%= console_threads_path(thread: Console::ThreadsController::NEW_PANE_KEY) %>"
+               class="console-thread-group-title"
+               aria-label="New chat"
+               title="New chat"
+               data-console-thread-link
+               data-console-new-chat>
+              <span class="console-nav-icon"><%= console_icon("plus", classes: "size-4") %></span>
+              <span class="console-nav-label">New chat</span>
+            </a>
+          </div>
 
           <div class="console-thread-group">
             <a href="<%= console_threads_path %>"
@@ -1392,14 +1954,31 @@
               <div class="console-account-menu-line" title="<%= current_user.email %>"><%= current_user.email %></div>
               <div class="console-account-menu-line console-account-menu-muted">Centaur Console</div>
               <div class="console-account-menu-separator"></div>
+              <%# PWA install entry point. Hidden unless the browser reports
+                  the console is installable (beforeinstallprompt); installing
+                  keeps the standalone window plus the manifest's file_handlers
+                  registration. %>
+              <button type="button"
+                      class="console-account-menu-button"
+                      data-controller="pwa-install"
+                      data-pwa-install-target="banner"
+                      data-action="pwa-install#install"
+                      hidden
+                      role="menuitem"
+                      title="Install Centaur Console as a standalone app"
+                      aria-label="Install app">
+                <%= console_icon("computer", classes: "size-4") %>
+                <span>Install app</span>
+              </button>
               <button type="button"
                       class="console-account-menu-button"
                       data-console-theme-toggle
                       role="menuitem"
-                      aria-label="Switch to light mode">
-                <span data-console-theme-action-icon="light"><%= console_icon("sun", classes: "size-4") %></span>
-                <span data-console-theme-action-icon="dark" hidden><%= console_icon("moon", classes: "size-4") %></span>
-                <span data-console-theme-label>Light mode</span>
+                      aria-label="Current theme: system. Switch to light mode">
+                <span data-console-theme-icon="light" hidden><%= console_icon("sun", classes: "size-4") %></span>
+                <span data-console-theme-icon="dark" hidden><%= console_icon("moon", classes: "size-4") %></span>
+                <span data-console-theme-icon="system"><%= console_icon("computer", classes: "size-4") %></span>
+                <span data-console-theme-label>System mode</span>
               </button>
               <% if acting_admin? %>
                 <%= button_to console_descope_path,
@@ -1429,6 +2008,20 @@
       </aside>
 
       <main class="console-main <%= "console-main-threads" if threads_view %>">
+        <div class="console-mobile-bar">
+          <button type="button"
+                  id="console-mobile-nav-toggle"
+                  class="console-mobile-nav-toggle"
+                  aria-label="Open navigation"
+                  aria-controls="console-shell"
+                  aria-expanded="false"
+                  data-console-nav-toggle>
+            <%= console_icon("menu", classes: "size-5") %>
+          </button>
+          <a href="<%= root_path %>" class="console-mobile-brand" aria-label="Centaur Console">
+            <%= image_tag "centaur-lockup-white.svg", alt: "Centaur", class: "glow", width: 497, height: 127 %>
+          </a>
+        </div>
         <div class="<%= threads_view ? "console-main-thread-frame" : "console-main-page" %>">
           <% if flash[:notice] %>
             <div class="mb-6 rounded border border-ink-600 bg-ink-850/60 px-4 py-3 text-sm text-zinc-400"><%= flash[:notice] %></div>
@@ -1439,9 +2032,71 @@
           <%= yield %>
         </div>
       </main>
+
+      <div class="console-scrim" data-console-nav-scrim aria-hidden="true"></div>
     </div>
 
     <script>
+      (() => {
+        // Mobile navigation drawer. Below the CSS breakpoint the sidebar is
+        // off-canvas; the hamburger in the top bar toggles a `console-nav-open`
+        // class on the shell that slides it in over a scrim. The drawer closes
+        // on scrim click, Escape, following any nav link, and after every Turbo
+        // navigation so it never lingers over the freshly loaded page.
+        const shell = document.getElementById("console-shell");
+        const toggle = document.querySelector("[data-console-nav-toggle]");
+        const scrim = document.querySelector("[data-console-nav-scrim]");
+        const sidebar = shell && shell.querySelector(".console-sidebar");
+        if (!shell || !toggle || !sidebar) return;
+
+        const OPEN_CLASS = "console-nav-open";
+        // Mirrors the CSS breakpoint: only in the off-canvas range does a
+        // closed drawer need to be pulled out of the tab / assistive-tech order.
+        const mobileQuery = window.matchMedia("(max-width: 768px)");
+
+        const isOpen = () => shell.classList.contains(OPEN_CLASS);
+
+        // Off-canvas and closed => hide the sidebar from keyboard and assistive
+        // tech: it sits before the page in DOM order, so leaving it merely
+        // translated off-screen makes users tab through invisible controls
+        // first. Desktop and the open drawer stay fully interactive.
+        const syncInert = () => {
+          sidebar.inert = mobileQuery.matches && !isOpen();
+        };
+
+        const setOpen = (open) => {
+          shell.classList.toggle(OPEN_CLASS, open);
+          toggle.setAttribute("aria-expanded", String(open));
+          syncInert();
+        };
+
+        toggle.addEventListener("click", () => setOpen(!isOpen()));
+        if (scrim) scrim.addEventListener("click", () => setOpen(false));
+
+        document.addEventListener("keydown", (event) => {
+          if (event.key === "Escape" && isOpen()) setOpen(false);
+        });
+
+        // Only real navigations should dismiss the drawer. Links (section nav,
+        // thread rows, the brand) qualify; in-drawer buttons that open a menu
+        // or reveal more rows (account menu, theme toggle, "show more") must
+        // not, or they'd slam the drawer shut before doing anything. Form
+        // buttons that submit (sign out, view as operator) trigger a full
+        // navigation, which the turbo listeners below already close on.
+        shell.addEventListener("click", (event) => {
+          if (!isOpen()) return;
+          if (event.target.closest(".console-sidebar a[href]")) {
+            setOpen(false);
+          }
+        });
+
+        mobileQuery.addEventListener("change", syncInert);
+        document.addEventListener("turbo:visit", () => setOpen(false));
+        document.addEventListener("turbo:load", () => setOpen(false));
+
+        syncInert();
+      })();
+
       (() => {
         const accountButton = document.getElementById("console-account-menu-button");
         const accountMenu = document.getElementById("console-account-menu");
@@ -1475,35 +2130,51 @@
 
         const root = document.documentElement;
         const label = themeToggle.querySelector("[data-console-theme-label]");
-        const lightIcon = themeToggle.querySelector("[data-console-theme-action-icon='light']");
-        const darkIcon = themeToggle.querySelector("[data-console-theme-action-icon='dark']");
+        const lightIcon = themeToggle.querySelector("[data-console-theme-icon='light']");
+        const darkIcon = themeToggle.querySelector("[data-console-theme-icon='dark']");
+        const systemIcon = themeToggle.querySelector("[data-console-theme-icon='system']");
+        const themePreferences = ["system", "light", "dark"];
+        const themeLabels = {
+          system: "System mode",
+          light: "Light mode",
+          dark: "Dark mode"
+        };
 
-        const syncThemeControl = (theme) => {
-          const nextTheme = theme === "light" ? "light" : "dark";
-          const isLight = nextTheme === "light";
-          if (label) label.textContent = isLight ? "Dark mode" : "Light mode";
+        const nextThemePreference = (preference) => {
+          const currentIndex = themePreferences.indexOf(preference);
+          return themePreferences[(currentIndex + 1) % themePreferences.length];
+        };
+
+        const syncThemeControl = (preference) => {
+          const nextPreference = nextThemePreference(preference);
+          if (label) label.textContent = themeLabels[preference];
           themeToggle.setAttribute(
             "aria-label",
-            isLight ? "Switch to dark mode" : "Switch to light mode"
+            `Current theme: ${preference}. Switch to ${nextPreference} mode`
           );
-          if (lightIcon) lightIcon.hidden = isLight;
-          if (darkIcon) darkIcon.hidden = !isLight;
+          themeToggle.dataset.consoleThemePreference = preference;
+          if (lightIcon) lightIcon.hidden = preference !== "light";
+          if (darkIcon) darkIcon.hidden = preference !== "dark";
+          if (systemIcon) systemIcon.hidden = preference !== "system";
         };
 
-        const applyTheme = (theme, persist = false) => {
-          let nextTheme;
+        const applyTheme = (preference, persist = false) => {
           if (window.ConsoleTheme) {
-            nextTheme = persist ? window.ConsoleTheme.persist(theme) : window.ConsoleTheme.apply(theme);
+            if (persist) window.ConsoleTheme.persist(preference);
+            else window.ConsoleTheme.apply(preference);
           } else {
-            nextTheme = theme === "light" ? "light" : "dark";
+            const useLightTheme = preference === "light" ||
+              (preference === "system" && window.matchMedia?.("(prefers-color-scheme: light)").matches);
+            const nextTheme = useLightTheme ? "light" : "dark";
             root.dataset.consoleTheme = nextTheme;
           }
-          syncThemeControl(nextTheme);
+          syncThemeControl(preference);
         };
 
-        applyTheme(root.dataset.consoleTheme || window.ConsoleTheme?.resolve?.() || "dark");
+        applyTheme(window.ConsoleTheme?.preference?.() || root.dataset.consoleTheme || "dark");
         themeToggle.addEventListener("click", () => {
-          applyTheme(root.dataset.consoleTheme === "light" ? "dark" : "light", true);
+          const currentPreference = themeToggle.dataset.consoleThemePreference || "system";
+          applyTheme(nextThemePreference(currentPreference), true);
         });
       })();
 
@@ -1558,6 +2229,9 @@
             : [];
 
           document.querySelectorAll("[data-console-thread-link]").forEach((link) => {
+            // The New chat tab participates in open/close clicks but is not a
+            // thread row: no open-dot or pane-number decoration.
+            if (link.dataset.consoleNewChat !== undefined) return;
             const key = new URL(link.href, window.location.origin).searchParams.get("thread");
             const paneIndex = openKeys.indexOf(key);
             const open = paneIndex !== -1;
@@ -1576,7 +2250,57 @@
           });
         };
 
-        document.addEventListener("turbo:load", syncSidebarActiveThreads);
+        // A chat the turbo-permanent list has never seen (just started from
+        // the composer, or older than the list window) appears immediately as
+        // an optimistic row, then the frame refetches so the server's row,
+        // title, and ordering replace it.
+        const SIDEBAR_THREADS_PATH = "<%= console_sidebar_threads_path %>";
+
+        const ensureActiveThreadRow = () => {
+          const url = new URL(window.location.href);
+          if (!url.pathname.startsWith(THREADS_PATH)) return;
+          const openKeys = (url.searchParams.get("thread") || "").split(",").filter(Boolean);
+          const primary = openKeys[0];
+          // "new" is the composer-pane sentinel, not a thread.
+          if (!primary || primary === "new") return;
+
+          const frame = document.getElementById("console_sidebar_threads");
+          if (!frame) return;
+          // Still on the lazy-load placeholder: the initial fetch carries the
+          // thread param and will include this chat on its own.
+          if (!frame.querySelector("[data-console-thread-link], .console-thread-empty")) return;
+
+          const known = Array.from(frame.querySelectorAll("[data-console-thread-link]")).some((link) =>
+            new URL(link.href, window.location.origin).searchParams.get("thread") === primary
+          );
+          if (known) return;
+
+          frame.querySelector(".console-thread-empty")?.remove();
+          const title = document.querySelector(".console-thread-detail-header h1")?.textContent?.trim() || primary;
+          const link = document.createElement("a");
+          link.href = `${THREADS_PATH}?thread=${encodeURIComponent(primary)}`;
+          link.className = "console-thread-link";
+          link.setAttribute("data-console-thread-link", "true");
+          link.title = title;
+          const titleSpan = document.createElement("span");
+          titleSpan.className = "console-thread-title";
+          titleSpan.textContent = title;
+          const timeSpan = document.createElement("span");
+          timeSpan.className = "console-thread-time";
+          timeSpan.textContent = "now";
+          link.append(titleSpan, timeSpan);
+          frame.prepend(link);
+          syncSidebarActiveThreads();
+
+          const src = new URL(SIDEBAR_THREADS_PATH, window.location.origin);
+          src.searchParams.set("thread", openKeys.join(","));
+          frame.setAttribute("src", src.toString());
+        };
+
+        document.addEventListener("turbo:load", () => {
+          syncSidebarActiveThreads();
+          ensureActiveThreadRow();
+        });
         document.addEventListener("turbo:frame-load", (event) => {
           if (event.target && event.target.id === "console_sidebar_threads") syncSidebarActiveThreads();
         });
@@ -1585,7 +2309,8 @@
       (() => {
         // Sidebar thread clicks against the split-view grid. The thread param
         // carries up to PANEL_LIMIT comma-separated keys in grid order.
-        //   - click or Cmd/Ctrl-click on an already-open thread closes it
+        //   - Cmd/Ctrl-click on an already-open thread closes it
+        //   - plain click on an already-open thread is a no-op
         //   - Cmd/Ctrl-click on a closed thread adds it as a pane
         //   - plain click on a closed thread falls through to Turbo (replaces
         //     the selection with that single thread)
@@ -1607,6 +2332,12 @@
             : [];
           const isOpen = openKeys.includes(key);
           const modified = event.metaKey || event.ctrlKey;
+
+          if (isOpen && !modified) {
+            event.preventDefault();
+            event.stopPropagation();
+            return;
+          }
 
           let nextKeys;
           if (isOpen) {

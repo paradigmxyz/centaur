@@ -26,6 +26,27 @@ It is a Rails application backed by Postgres. It provides a JSON API, an operato
 
 Operators manage credentials, principals, roles, and grants through the API or the console. Each `iron-proxy` instance signs in with its own token, fetches the configuration for its assigned principal, and adds the granted credentials to matching outbound requests.
 
+## Local Development
+
+Console requires ParadeDB with the `pg_search` extension. A vanilla Postgres
+server cannot run the Console schema or skill search. Install Docker, Ruby using
+the version in `.ruby-version`, and Overmind or Foreman, then run:
+
+```bash
+just dev
+```
+
+This starts a persistent `paradedb/paradedb:0.23.0-pg16` container named
+`centaur-console-paradedb`, exposes it on `127.0.0.1:55432`, prepares the Rails
+database, and starts the web and CSS processes. Database files are retained in
+the `centaur-console-paradedb-data` Docker volume between runs.
+
+To use an existing ParadeDB installation instead, set
+`CENTAUR_CONSOLE_DB_HOST`, `CENTAUR_CONSOLE_DB_PORT`,
+`CENTAUR_CONSOLE_DB_USERNAME`, and `CENTAUR_CONSOLE_DB_PASSWORD`, then set
+`CENTAUR_CONSOLE_MANAGE_PARADEDB=false` so `just dev` does not start Docker. The
+server must have `pg_search` installed and available to the Console database.
+
 ## Environment Variables
 
 All of the console's environment variables use the `CENTAUR_CONSOLE_` prefix. For backwards compatibility, every variable also resolves from the legacy `IRON_CONTROL_` name when the `CENTAUR_CONSOLE_` one is unset, so existing deployments keep working until they migrate. The `CENTAUR_CONSOLE_` name wins when both are set.
@@ -53,8 +74,8 @@ The script exports recent `sessions`, `session_messages`,
 `session.output.line` events (capped by `THINKING_EVENT_LIMIT_PER_THREAD`,
 default 200 per thread), and referenced `slack_sync_users` rows with the source
 connection forced read-only, then imports them into the local `ai_v2` database
-used by the Console dev container. The Threads surface is read-only: it does
-not render a composer and rejects POSTs server-side.
+used by the Console dev container. The Console never writes directly to those
+session tables; starting and continuing accessible chats goes through api-rs.
 
 Threads extras beyond the Slack surface:
 
@@ -96,7 +117,10 @@ The operator console always supports email and password sign-in. To add Google o
 | `CENTAUR_CONSOLE_GOOGLE_CLIENT_SECRET`   | for Google | Google OAuth client secret for console login.                                                |
 | `CENTAUR_CONSOLE_SLACK_CLIENT_ID`        | for Slack | Slack OpenID Connect client ID for console login.                                            |
 | `CENTAUR_CONSOLE_SLACK_CLIENT_SECRET`    | for Slack | Slack OpenID Connect client secret for console login.                                        |
-| `CENTAUR_CONSOLE_BOOTSTRAP_ADMINS`       | no       | Comma- or whitespace-separated email allowlist. Matching users become active admins on first SSO login. Other SSO users become active non-admin operators and land on the console directly -- the deployment's network boundary is the access control, there is no approval queue. |
+| `CENTAUR_CONSOLE_SSO_EMAIL_DOMAINS`      | recommended for public exposure | Comma- or whitespace-separated domain allowlist for SSO users, for example `acme.com example.org`. Empty allows any IdP-authenticated email. |
+| `CENTAUR_CONSOLE_PASSWORD_LOGIN_ENABLED` | no       | Set to `false` to disable email and password sign-in. Defaults to enabled.                    |
+| `CENTAUR_CONSOLE_PUBLIC_SLACK_THREADS_ENABLED` | no | Set to `true` to let every authenticated Console user browse public Slack channel conversations. Requires the Slack ETL channel catalog; access fails closed when it is unavailable. Private channels and DMs remain owner-only. Defaults to disabled. |
+| `CENTAUR_CONSOLE_BOOTSTRAP_ADMINS`       | no       | Comma- or whitespace-separated email allowlist. Matching users become active admins on first SSO login. Other accepted SSO users become active non-admin operators and land on the console directly. |
 
 Register these callback URLs with the provider:
 

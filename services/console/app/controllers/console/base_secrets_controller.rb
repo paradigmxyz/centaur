@@ -15,7 +15,7 @@ module Console
     before_action :set_secret, only: %i[edit update destroy]
 
     def new
-      @secret = model.new(namespace: "default")
+      @secret = model.new
     end
 
     def create
@@ -65,13 +65,11 @@ module Console
       raise NotImplementedError, "#{self.class} must define #assign_form"
     end
 
-    # namespace / foreign_id / name / description / labels. A blank namespace
-    # defaults to "default"; a blank foreign_id becomes nil so the allow_nil
-    # validations apply (an empty string would fail the URL-safe format).
+    # foreign_id / name / description / labels. A blank foreign_id becomes nil
+    # so the allow_nil validations apply.
     def assign_identity(secret)
       fields = params.fetch(:secret, ActionController::Parameters.new)
-               .permit(:namespace, :foreign_id, :name, :description)
-      fields[:namespace] = fields[:namespace].presence || "default"
+               .permit(:foreign_id, :name, :description)
       fields[:foreign_id] = fields[:foreign_id].presence
       secret.assign_attributes(fields)
       secret.labels = label_params

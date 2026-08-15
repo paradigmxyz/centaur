@@ -14,7 +14,7 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose};
 use centaur_session_runtime::{SessionRuntime, ToolHostCallInput};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -1008,7 +1008,7 @@ def search(query, limit=20):
         .unwrap();
 
         let result = mcp_centaur_tool_result(
-            &AppState::unready(),
+            &AppState::unready(crate::ApiAuthConfig::testing("test-secret")),
             &McpPrincipal {
                 principal_id: "mcp:test".to_owned(),
                 token_id: "mcp_tok_test".to_owned(),
@@ -1037,7 +1037,7 @@ def search(query, limit=20):
         fs::write(temp.join("client.py"), "def _hidden():\n    return None\n").unwrap();
 
         let result = mcp_centaur_tool_result(
-            &AppState::unready(),
+            &AppState::unready(crate::ApiAuthConfig::testing("test-secret")),
             &McpPrincipal {
                 principal_id: "mcp:test".to_owned(),
                 token_id: "mcp_tok_test".to_owned(),

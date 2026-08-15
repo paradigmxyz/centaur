@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     convert::Infallible,
     convert::TryFrom,
     env,
@@ -15,7 +15,7 @@ use aws_sdk_s3::{
     presigning::PresigningConfig,
 };
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     body::{Body, Bytes},
     extract::{DefaultBodyLimit, MatchedPath, Path, Query, Request, State},
     http::{HeaderMap, Method, StatusCode, Uri},
@@ -27,22 +27,22 @@ use axum::{
     routing::{any, get, post},
 };
 use base64::{Engine as _, engine::general_purpose};
-use centaur_session_core::ThreadKey;
+use centaur_session_core::{ChatDestination, HarnessType, ThreadKey};
 use centaur_session_runtime::{
-    ExecuteSessionInput, HarnessConflictPolicy, PersonaSummary, SandboxRuntime, SessionRuntime,
-    thread_trace_id, thread_trace_parent_span_id,
+    ExecuteSessionInput, HarnessConflictPolicy, SandboxRuntime, SessionPrincipalRegistrar,
+    SessionRuntime, thread_trace_id, thread_trace_parent_span_id,
 };
 use centaur_session_sqlx::PgSessionStore;
 use centaur_telemetry::{
-    PrometheusHandle, http_status_class, prometheus_handle, record_http_request_finished,
-    record_http_request_started, set_span_parent_trace,
+    PrometheusHandle, http_status_class, prometheus_handle, record_api_authentication,
+    record_http_request_finished, record_http_request_started, set_span_parent_trace,
 };
 use centaur_workflows::{
     CreateWorkflowRunRequest, WebhookFilter, WorkflowRuntime, WorkflowWebhookAuth,
     WorkflowWebhookSpec, WorkflowWebhookTriggerKey,
 };
 use futures_util::{Stream, StreamExt};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -55,14 +55,16 @@ use uuid::Uuid;
 use crate::{
     ApiError,
     api_jwt::{bearer_jwt_from_headers, decode_jwt_payload, verify_console_jwt},
+    auth::{ApiAuthConfig, AuthenticatedCaller, CallerClass, Capability},
     mcp::{mcp_get, mcp_post, mcp_protected_resource_metadata},
     slack_proxy::slack_proxy_router,
     types::{
         AppendMessagesRequest, AppendMessagesResponse, CreateSessionRequest, CreateSessionResponse,
-        EmitWorkflowEventRequest, EventsQuery, ExecuteSessionRequest, ExecuteSessionResponse,
-        InterruptSessionExecutionRequest, InterruptSessionExecutionResponse, ListWorkflowRunsQuery,
-        OnHarnessConflict, SessionContextResponse, SessionSseEvent, SlackThreadContext,
-        stream_error_sse,
+        DiscordThreadContext, EmitWorkflowEventRequest, EventsQuery, ExecuteSessionRequest,
+        ExecuteSessionResponse, GithubThreadContext, HarnessAssignment,
+        InterruptSessionExecutionRequest, InterruptSessionExecutionResponse, LinearThreadContext,
+        ListWorkflowRunsQuery, OnHarnessConflict, SessionContextResponse, SessionSseEvent,
+        SlackThreadContext, stream_error_sse,
     },
 };
 
@@ -70,6 +72,8 @@ use crate::{
 pub struct AppState {
     initialized: Arc<RwLock<Option<AppRuntimeState>>>,
     metrics: PrometheusHandle,
+    codex_nanocodex_rollout_percent: u8,
+    auth: ApiAuthConfig,
 }
 
 #[derive(Clone)]
@@ -77,26 +81,39 @@ struct AppRuntimeState {
     runtime: SessionRuntime,
     workflows: Option<WorkflowRuntime>,
     pool: Option<PgPool>,
+    workflow_host_principal: Option<String>,
 }
 
 impl AppState {
-    pub fn unready() -> Self {
+    pub fn unready(auth: ApiAuthConfig) -> Self {
         Self {
             initialized: Arc::new(RwLock::new(None)),
             metrics: prometheus_handle().expect("failed to initialize Prometheus metrics recorder"),
+            codex_nanocodex_rollout_percent: 0,
+            auth,
         }
     }
 
-    pub fn ready(runtime: SessionRuntime, workflows: Option<WorkflowRuntime>) -> Self {
-        Self::ready_with_pool(runtime, workflows, None)
+    pub fn with_codex_nanocodex_rollout_percent(mut self, percent: u8) -> Self {
+        self.codex_nanocodex_rollout_percent = percent;
+        self
+    }
+
+    pub fn ready(
+        runtime: SessionRuntime,
+        workflows: Option<WorkflowRuntime>,
+        auth: ApiAuthConfig,
+    ) -> Self {
+        Self::ready_with_pool(runtime, workflows, None, auth)
     }
 
     pub fn ready_with_pool(
         runtime: SessionRuntime,
         workflows: Option<WorkflowRuntime>,
         pool: Option<PgPool>,
+        auth: ApiAuthConfig,
     ) -> Self {
-        let state = Self::unready();
+        let state = Self::unready(auth);
         state.mark_ready(runtime, workflows, pool);
         state
     }
@@ -115,6 +132,26 @@ impl AppState {
             runtime,
             workflows,
             pool,
+            workflow_host_principal: None,
+        });
+    }
+
+    pub fn mark_ready_with_workflow_host(
+        &self,
+        runtime: SessionRuntime,
+        workflows: Option<WorkflowRuntime>,
+        pool: Option<PgPool>,
+        workflow_host_principal: String,
+    ) {
+        let mut initialized = self
+            .initialized
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *initialized = Some(AppRuntimeState {
+            runtime,
+            workflows,
+            pool,
+            workflow_host_principal: Some(workflow_host_principal),
         });
     }
 
@@ -127,6 +164,12 @@ impl AppState {
 
     fn is_ready(&self) -> bool {
         self.initialized().is_some()
+    }
+
+    fn is_workflow_host(&self, subject: &str) -> bool {
+        self.initialized()
+            .and_then(|initialized| initialized.workflow_host_principal)
+            .is_some_and(|principal| principal == subject)
     }
 
     /// The session runtime, if initialization completed. Unlike the private
@@ -175,41 +218,35 @@ const REDACTED_WEBHOOK_HEADERS: &[&str] = &[
     "stripe-signature",
 ];
 
-pub fn build_router_with_runtime(store: PgSessionStore, sandbox_runtime: SandboxRuntime) -> Router {
+pub fn build_router_with_runtime(
+    store: PgSessionStore,
+    sandbox_runtime: SandboxRuntime,
+    iron_control: impl SessionPrincipalRegistrar + 'static,
+    auth: ApiAuthConfig,
+) -> Router {
     let pool = store.pool().clone();
     build_router_with_app_state(AppState::ready_with_pool(
-        SessionRuntime::new(store, sandbox_runtime),
+        SessionRuntime::new(store, sandbox_runtime, iron_control),
         None,
         Some(pool),
+        auth,
     ))
 }
 
-pub fn build_router_with_session_runtime(runtime: SessionRuntime) -> Router {
-    build_router_with_session_and_workflow_runtime(runtime, None)
+pub fn build_router_with_session_runtime(runtime: SessionRuntime, auth: ApiAuthConfig) -> Router {
+    build_router_with_session_and_workflow_runtime(runtime, None, auth)
 }
 
 pub fn build_router_with_session_and_workflow_runtime(
     runtime: SessionRuntime,
     workflows: Option<WorkflowRuntime>,
+    auth: ApiAuthConfig,
 ) -> Router {
-    build_router_with_app_state(AppState::ready(runtime, workflows))
+    build_router_with_app_state(AppState::ready(runtime, workflows, auth))
 }
 
 pub fn build_router_with_app_state(state: AppState) -> Router {
-    Router::new()
-        .route("/healthz", get(healthz))
-        .route("/readyz", get(readyz))
-        .route("/metrics", get(metrics))
-        .route("/api/personas", get(list_personas))
-        .route("/mcp", post(mcp_post).get(mcp_get))
-        .route(
-            "/.well-known/oauth-protected-resource",
-            get(mcp_protected_resource_metadata),
-        )
-        .route(
-            "/.well-known/oauth-protected-resource/mcp",
-            get(mcp_protected_resource_metadata),
-        )
+    let protected = Router::new()
         .route(
             "/api/session/{thread_key}",
             post(create_or_get_session).get(get_session_context),
@@ -270,7 +307,7 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         )
         .route(
             "/api/admin/slack/dm-sync/checkpoints",
-            get(list_slack_dm_sync_checkpoints),
+            get(list_slack_private_sync_checkpoints),
         )
         .route(
             "/api/admin/slack/dm-sync/batch",
@@ -284,57 +321,85 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
             "/api/admin/google/docs-sync/batch",
             post(ingest_google_docs_sync_batch).layer(DefaultBodyLimit::disable()),
         )
-        .route("/api/webhooks/{slug}", any(invoke_workflow_webhook))
-        .layer(
-            TraceLayer::new_for_http()
-                .make_span_with(|request: &Request<Body>| {
-                    let route = matched_route(request);
-                    let span = tracing::info_span!(
-                        "centaur.api_rs.http_request",
-                        "otel.kind" = "server",
-                        "otel.status_code" = tracing::field::Empty,
-                        "http.request.method" = request.method().as_str(),
-                        "http.route" = route.as_str(),
-                        "http.response.status_code" = tracing::field::Empty,
-                        "centaur.thread_key" = tracing::field::Empty,
-                        thread_key = tracing::field::Empty,
-                    );
-                    if let Some(thread_key) = session_thread_key_from_request(request) {
-                        span.record("centaur.thread_key", thread_key.as_str());
-                        span.record("thread_key", thread_key.as_str());
-                        set_span_parent_trace(
-                            &span,
-                            &thread_trace_id(&thread_key),
-                            &thread_trace_parent_span_id(&thread_key),
-                        );
-                    }
-                    span
-                })
-                .on_request(())
-                .on_response(|response: &Response, latency: Duration, span: &Span| {
-                    let status = response.status();
-                    span.record("http.response.status_code", status.as_u16());
-                    span.record(
-                        "otel.status_code",
-                        if status.is_server_error() {
-                            "ERROR"
-                        } else {
-                            "OK"
-                        },
-                    );
-
-                    tracing::info!(
-                        component = "api_server",
-                        event = "http_request",
-                        status = status.as_u16(),
-                        status_class = http_status_class(status.as_u16()),
-                        duration_ms = (latency.as_secs_f64() * 1000.0),
-                        "http request completed"
-                    );
-                }),
+        .route(
+            "/api/admin/granola/sync/checkpoint",
+            get(get_granola_sync_checkpoint),
         )
-        .layer(middleware::from_fn(http_metrics))
-        .with_state(state)
+        .route(
+            "/api/admin/granola/sync/batch",
+            post(ingest_granola_sync_batch).layer(DefaultBodyLimit::disable()),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            authorize_api_request,
+        ));
+
+    let app = Router::new()
+        .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
+        .route("/metrics", get(metrics))
+        .route("/mcp", post(mcp_post).get(mcp_get))
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(mcp_protected_resource_metadata),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/mcp",
+            get(mcp_protected_resource_metadata),
+        )
+        .route("/api/webhooks/{slug}", any(invoke_workflow_webhook))
+        .merge(protected);
+
+    app.layer(
+        TraceLayer::new_for_http()
+            .make_span_with(|request: &Request<Body>| {
+                let route = matched_route(request);
+                let span = tracing::info_span!(
+                    "centaur.api_rs.http_request",
+                    "otel.kind" = "server",
+                    "otel.status_code" = tracing::field::Empty,
+                    "http.request.method" = request.method().as_str(),
+                    "http.route" = route.as_str(),
+                    "http.response.status_code" = tracing::field::Empty,
+                    "centaur.thread_key" = tracing::field::Empty,
+                    thread_key = tracing::field::Empty,
+                );
+                if let Some(thread_key) = session_thread_key_from_request(request) {
+                    span.record("centaur.thread_key", thread_key.as_str());
+                    span.record("thread_key", thread_key.as_str());
+                    set_span_parent_trace(
+                        &span,
+                        &thread_trace_id(&thread_key),
+                        &thread_trace_parent_span_id(&thread_key),
+                    );
+                }
+                span
+            })
+            .on_request(())
+            .on_response(|response: &Response, latency: Duration, span: &Span| {
+                let status = response.status();
+                span.record("http.response.status_code", status.as_u16());
+                span.record(
+                    "otel.status_code",
+                    if status.is_server_error() {
+                        "ERROR"
+                    } else {
+                        "OK"
+                    },
+                );
+
+                tracing::info!(
+                    component = "api_server",
+                    event = "http_request",
+                    status = status.as_u16(),
+                    status_class = http_status_class(status.as_u16()),
+                    duration_ms = (latency.as_secs_f64() * 1000.0),
+                    "http request completed"
+                );
+            }),
+    )
+    .layer(middleware::from_fn(http_metrics))
+    .with_state(state)
 }
 
 async fn healthz(headers: HeaderMap) -> Json<Value> {
@@ -380,6 +445,141 @@ async fn metrics(State(state): State<AppState>) -> Response {
         Body::from(state.metrics.render()),
     )
         .into_response()
+}
+
+#[derive(Clone, Copy)]
+enum RouteAccess {
+    Capability(Capability),
+    PrincipalSlackProxy,
+    ArchiveDownload,
+}
+
+async fn authorize_api_request(
+    State(state): State<AppState>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let route = matched_route(&request);
+    let method = request.method().clone();
+    let caller = match state.auth.authenticate(request.headers()) {
+        Ok(caller) => caller,
+        Err(error) => {
+            record_api_authentication("unknown", "unauthorized");
+            return error.into_response();
+        }
+    };
+    let Some(access) = route_access(&method, &route) else {
+        record_api_authentication(caller.class().as_str(), "forbidden");
+        tracing::warn!(
+            caller_class = caller.class().as_str(),
+            caller_identity = if caller.class() == CallerClass::Principal {
+                "principal"
+            } else {
+                caller.identity()
+            },
+            http_method = method.as_str(),
+            http_route = route,
+            "authenticated caller denied because route has no authorization policy"
+        );
+        return ApiError::Forbidden("caller is not authorized for this route".to_owned())
+            .into_response();
+    };
+
+    let allowed = match access {
+        RouteAccess::Capability(capability) => caller.has_capability(capability),
+        RouteAccess::PrincipalSlackProxy => {
+            caller.class() == CallerClass::Principal
+                && caller.has_capability(Capability::SlackProxy)
+        }
+        RouteAccess::ArchiveDownload => {
+            caller.has_capability(Capability::AdminArchive)
+                || caller
+                    .principal_subject()
+                    .is_some_and(|subject| state.is_workflow_host(subject))
+        }
+    };
+    if !allowed {
+        record_api_authentication(caller.class().as_str(), "forbidden");
+        tracing::warn!(
+            caller_class = caller.class().as_str(),
+            caller_identity = if caller.class() == CallerClass::Principal {
+                "principal"
+            } else {
+                caller.identity()
+            },
+            http_method = method.as_str(),
+            http_route = route,
+            "authenticated caller lacks route capability"
+        );
+        return ApiError::Forbidden("caller is not authorized for this route".to_owned())
+            .into_response();
+    }
+
+    if let Some(prefix) = caller.platform_prefix()
+        && route.starts_with("/api/session/")
+        && let Some(thread_key) = session_thread_key_from_request(&request)
+        && !thread_key.as_str().starts_with(prefix)
+    {
+        record_api_authentication(caller.class().as_str(), "forbidden");
+        tracing::warn!(
+            caller_class = caller.class().as_str(),
+            caller_identity = if caller.class() == CallerClass::Principal {
+                "principal"
+            } else {
+                caller.identity()
+            },
+            expected_thread_prefix = prefix,
+            "ingress caller denied for another platform's session"
+        );
+        return ApiError::Forbidden("caller is not authorized for this session".to_owned())
+            .into_response();
+    }
+
+    record_api_authentication(caller.class().as_str(), "authorized");
+    request.extensions_mut().insert(caller);
+    next.run(request).await
+}
+
+fn route_access(method: &Method, route: &str) -> Option<RouteAccess> {
+    let capability = |capability| Some(RouteAccess::Capability(capability));
+    match (method, route) {
+        (&Method::GET, "/api/session/{thread_key}")
+        | (&Method::GET, "/api/session/{thread_key}/events") => {
+            capability(Capability::SessionsRead)
+        }
+        (&Method::POST, "/api/session/{thread_key}")
+        | (&Method::POST, "/api/session/{thread_key}/messages")
+        | (&Method::POST, "/api/session/{thread_key}/execute")
+        | (&Method::POST, "/api/session/{thread_key}/interrupt") => {
+            capability(Capability::SessionsWrite)
+        }
+        (&Method::POST, "/api/sandboxes/drain") => capability(Capability::SandboxesDrain),
+        (&Method::GET, "/api/workflows/schedules")
+        | (&Method::GET, "/api/workflows/runs")
+        | (&Method::GET, "/api/workflows/runs/{run_id}") => capability(Capability::WorkflowsRead),
+        (&Method::POST, "/api/workflows/runs")
+        | (&Method::POST, "/api/workflows/runs/{run_id}/cancel") => {
+            capability(Capability::WorkflowsWrite)
+        }
+        (&Method::POST, "/api/workflows/events") => capability(Capability::WorkflowsEvents),
+        (&Method::POST, "/api/admin/slack/archive-imports/{import_id}/download-url") => {
+            Some(RouteAccess::ArchiveDownload)
+        }
+        (_, route) if route.starts_with("/api/slack/") => Some(RouteAccess::PrincipalSlackProxy),
+        (_, route) if route.starts_with("/api/admin/slack/archive-imports") => {
+            capability(Capability::AdminArchive)
+        }
+        (_, route) if route.starts_with("/api/admin/slack/dm-sync/") => {
+            capability(Capability::AdminSync)
+        }
+        (_, route) if route.starts_with("/api/admin/google/docs-sync/") => {
+            capability(Capability::AdminSync)
+        }
+        (_, route) if route.starts_with("/api/admin/granola/sync/") => {
+            capability(Capability::AdminSync)
+        }
+        _ => None,
+    }
 }
 
 async fn http_metrics(req: Request, next: Next) -> Response {
@@ -428,32 +628,288 @@ async fn create_or_get_session(
     Json(request): Json<CreateSessionRequest>,
 ) -> Result<Json<CreateSessionResponse>, ApiError> {
     let thread_key = ThreadKey::try_from(raw_thread_key)?;
+    let requested_harness = request.harness_type;
+    let runtime = state.runtime()?;
+    let existing_rollout_harness = if requested_harness == HarnessType::Codex {
+        runtime
+            .existing_session_harness(&thread_key)
+            .await?
+            .filter(|harness| matches!(harness, HarnessType::Codex | HarnessType::Nanocodex))
+    } else {
+        None
+    };
+    let harness_type = existing_rollout_harness.clone().unwrap_or_else(|| {
+        rollout_harness_for_thread(
+            &thread_key,
+            &requested_harness,
+            state.codex_nanocodex_rollout_percent,
+        )
+    });
+    let harness_assignment = codex_nanocodex_assignment(
+        &requested_harness,
+        &harness_type,
+        state.codex_nanocodex_rollout_percent,
+    );
+    tracing::info!(
+        component = "api_server",
+        event = "session_harness_rollout_resolved",
+        thread_key = %thread_key,
+        requested_harness = %requested_harness,
+        resolved_harness = %harness_type,
+        ab_test = harness_assignment.is_some(),
+        ab_test_experiment = harness_assignment
+            .as_ref()
+            .map_or("", |assignment| assignment.experiment),
+        ab_test_cohort = harness_assignment
+            .as_ref()
+            .map_or("", |assignment| assignment.cohort.as_ref()),
+        existing_rollout_harness_preserved = existing_rollout_harness.is_some(),
+        codex_nanocodex_rollout_percent = state.codex_nanocodex_rollout_percent,
+        "resolved requested session harness"
+    );
     let on_harness_conflict = match request.on_harness_conflict {
         Some(OnHarnessConflict::Restart) => HarnessConflictPolicy::Restart,
         Some(OnHarnessConflict::Reject) | None => HarnessConflictPolicy::Reject,
     };
-    let outcome = state
-        .runtime()?
+    let outcome = runtime
         .create_or_get_session(
             &thread_key,
-            &request.harness_type,
+            &harness_type,
             request.persona_id.as_deref(),
-            request.metadata,
+            session_metadata_with_harness_assignment(request.metadata, harness_assignment.as_ref()),
             on_harness_conflict,
         )
         .await?;
     Ok(Json(CreateSessionResponse {
         session: outcome.session,
         harness_switched: outcome.harness_switched,
+        harness_assignment,
     }))
+}
+
+const CODEX_NANOCODEX_AB_EXPERIMENT: &str = "codex_nanocodex_ab";
+
+fn codex_nanocodex_assignment(
+    requested_harness: &HarnessType,
+    cohort: &HarnessType,
+    rollout_percent: u8,
+) -> Option<HarnessAssignment> {
+    (*requested_harness == HarnessType::Codex && (1..100).contains(&rollout_percent)).then(|| {
+        HarnessAssignment {
+            experiment: CODEX_NANOCODEX_AB_EXPERIMENT,
+            requested_harness: requested_harness.clone(),
+            cohort: cohort.clone(),
+            rollout_percent,
+        }
+    })
+}
+
+fn session_metadata_with_harness_assignment(
+    metadata: Option<Value>,
+    assignment: Option<&HarnessAssignment>,
+) -> Option<Value> {
+    let Some(assignment) = assignment else {
+        return metadata;
+    };
+    let mut metadata = metadata.unwrap_or_else(|| json!({}));
+    if let Value::Object(object) = &mut metadata {
+        object.insert(
+            "harness_assignment".to_owned(),
+            json!({
+                "experiment": assignment.experiment,
+                "requested_harness": assignment.requested_harness,
+                "cohort": assignment.cohort,
+                "rollout_percent": assignment.rollout_percent,
+            }),
+        );
+    }
+    Some(metadata)
+}
+
+fn rollout_harness_for_thread(
+    thread_key: &ThreadKey,
+    requested_harness: &HarnessType,
+    nanocodex_percent: u8,
+) -> HarnessType {
+    if *requested_harness != HarnessType::Codex || nanocodex_percent == 0 {
+        return requested_harness.clone();
+    }
+    if nanocodex_percent >= 100 {
+        return HarnessType::Nanocodex;
+    }
+
+    let digest = Sha256::digest(thread_key.as_str().as_bytes());
+    let bucket = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]);
+    let threshold = (u64::from(nanocodex_percent) * (u64::from(u32::MAX) + 1)) / 100;
+    if u64::from(bucket) < threshold {
+        HarnessType::Nanocodex
+    } else {
+        HarnessType::Codex
+    }
+}
+
+#[cfg(test)]
+mod harness_rollout_tests {
+    use super::*;
+
+    #[test]
+    fn codex_rollout_is_sticky_and_split_by_thread_key() {
+        let codex_thread = ThreadKey::try_from("slack:C1:1700000000.000100".to_owned()).unwrap();
+        let nanocodex_thread =
+            ThreadKey::try_from("slack:C1:1700000000.000104".to_owned()).unwrap();
+
+        assert_eq!(
+            rollout_harness_for_thread(&codex_thread, &HarnessType::Codex, 50),
+            HarnessType::Codex
+        );
+        assert_eq!(
+            rollout_harness_for_thread(&nanocodex_thread, &HarnessType::Codex, 50),
+            HarnessType::Nanocodex
+        );
+        assert_eq!(
+            rollout_harness_for_thread(&nanocodex_thread, &HarnessType::Codex, 50),
+            HarnessType::Nanocodex
+        );
+    }
+
+    #[test]
+    fn codex_rollout_honors_boundaries_and_other_harnesses() {
+        let thread_key = ThreadKey::try_from("cli:rollout-boundaries".to_owned()).unwrap();
+
+        assert_eq!(
+            rollout_harness_for_thread(&thread_key, &HarnessType::Codex, 0),
+            HarnessType::Codex
+        );
+        assert_eq!(
+            rollout_harness_for_thread(&thread_key, &HarnessType::Codex, 100),
+            HarnessType::Nanocodex
+        );
+        assert_eq!(
+            rollout_harness_for_thread(&thread_key, &HarnessType::ClaudeCode, 50),
+            HarnessType::ClaudeCode
+        );
+        assert_eq!(
+            rollout_harness_for_thread(&thread_key, &HarnessType::Nanocodex, 50),
+            HarnessType::Nanocodex
+        );
+    }
+
+    #[test]
+    fn codex_rollout_is_balanced_across_many_thread_keys() {
+        let nanocodex = (0..10_000)
+            .filter(|index| {
+                let thread_key = ThreadKey::try_from(format!("cli:rollout-{index}")).unwrap();
+                rollout_harness_for_thread(&thread_key, &HarnessType::Codex, 50)
+                    == HarnessType::Nanocodex
+            })
+            .count();
+
+        assert!(
+            (4_900..=5_100).contains(&nanocodex),
+            "nanocodex={nanocodex}"
+        );
+    }
+
+    #[test]
+    fn codex_rollout_assignment_is_explicit_and_persistable() {
+        let assignment =
+            codex_nanocodex_assignment(&HarnessType::Codex, &HarnessType::Nanocodex, 50).unwrap();
+        let metadata = session_metadata_with_harness_assignment(
+            Some(json!({"source": "slackbotv2"})),
+            Some(&assignment),
+        )
+        .unwrap();
+
+        assert_eq!(assignment.experiment, CODEX_NANOCODEX_AB_EXPERIMENT);
+        assert_eq!(assignment.cohort, HarnessType::Nanocodex);
+        assert_eq!(
+            metadata.pointer("/harness_assignment/cohort"),
+            Some(&json!("nanocodex"))
+        );
+        assert_eq!(metadata.get("source"), Some(&json!("slackbotv2")));
+        assert!(codex_nanocodex_assignment(&HarnessType::Codex, &HarnessType::Codex, 0).is_none());
+        assert!(
+            codex_nanocodex_assignment(&HarnessType::Nanocodex, &HarnessType::Nanocodex, 50)
+                .is_none()
+        );
+    }
 }
 
 async fn get_session_context(
     State(state): State<AppState>,
+    Extension(caller): Extension<AuthenticatedCaller>,
     Path(raw_thread_key): Path<String>,
 ) -> Result<Json<SessionContextResponse>, ApiError> {
     let runtime = state.runtime()?;
     let thread_key = ThreadKey::try_from(raw_thread_key)?;
+    authorize_principal_session_read(&runtime, &caller, &thread_key).await?;
+    let destination = thread_key.chat_destination();
+    let platform = destination
+        .as_ref()
+        .map(ChatDestination::platform)
+        .unwrap_or("unknown")
+        .to_owned();
+    let (slack, discord, linear, github) = match destination {
+        Some(ChatDestination::Slack {
+            channel_id,
+            thread_ts,
+        }) => (
+            Some(SlackThreadContext {
+                channel_id,
+                thread_ts,
+            }),
+            None,
+            None,
+            None,
+        ),
+        Some(ChatDestination::Discord {
+            guild_id,
+            channel_id,
+            thread_id,
+        }) => (
+            None,
+            Some(DiscordThreadContext {
+                guild_id,
+                channel_id,
+                thread_id,
+            }),
+            None,
+            None,
+        ),
+        Some(ChatDestination::Linear {
+            issue_id,
+            comment_id,
+            agent_session_id,
+        }) => (
+            None,
+            None,
+            Some(LinearThreadContext {
+                issue_id,
+                comment_id,
+                agent_session_id,
+            }),
+            None,
+        ),
+        Some(ChatDestination::Github {
+            owner,
+            repo,
+            number,
+            kind,
+            review_comment_id,
+        }) => (
+            None,
+            None,
+            None,
+            Some(GithubThreadContext {
+                owner,
+                repo,
+                number,
+                kind: kind.as_str().to_owned(),
+                review_comment_id,
+            }),
+        ),
+        None => (None, None, None, None),
+    };
     let title = match runtime.session_title(&thread_key).await {
         Ok(title) => title,
         Err(error) => {
@@ -466,39 +922,14 @@ async fn get_session_context(
         }
     };
     Ok(Json(SessionContextResponse {
-        slack: slack_thread_context(&thread_key),
         title,
         thread_key,
+        platform,
+        slack,
+        discord,
+        linear,
+        github,
     }))
-}
-
-async fn list_personas(
-    State(state): State<AppState>,
-) -> Result<Json<Vec<PersonaSummary>>, ApiError> {
-    Ok(Json(state.runtime()?.personas()))
-}
-
-fn slack_thread_context(thread_key: &ThreadKey) -> Option<SlackThreadContext> {
-    let parts = thread_key.as_str().split(':').collect::<Vec<_>>();
-    let (channel_id, thread_ts) = match parts.as_slice() {
-        ["slack", channel_id, thread_ts] => (*channel_id, *thread_ts),
-        ["slack", _team_id, channel_id, thread_ts] => (*channel_id, *thread_ts),
-        [channel_id, thread_ts] if is_slack_conversation_id(channel_id) => {
-            (*channel_id, *thread_ts)
-        }
-        _ => return None,
-    };
-    if channel_id.is_empty() || thread_ts.is_empty() {
-        return None;
-    }
-    Some(SlackThreadContext {
-        channel_id: channel_id.to_owned(),
-        thread_ts: thread_ts.to_owned(),
-    })
-}
-
-fn is_slack_conversation_id(value: &str) -> bool {
-    matches!(value.as_bytes().first(), Some(b'C' | b'D' | b'G'))
 }
 
 async fn append_messages(
@@ -585,12 +1016,14 @@ async fn drain_sandboxes(State(state): State<AppState>) -> Result<Json<Value>, A
 
 async fn stream_events(
     State(state): State<AppState>,
+    Extension(caller): Extension<AuthenticatedCaller>,
     Path(raw_thread_key): Path<String>,
     Query(query): Query<EventsQuery>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
     let thread_key = ThreadKey::try_from(raw_thread_key)?;
-    let events = state
-        .runtime()?
+    let runtime = state.runtime()?;
+    authorize_principal_session_read(&runtime, &caller, &thread_key).await?;
+    let events = runtime
         .stream_events(
             &thread_key,
             query.after_event_id.unwrap_or(0),
@@ -617,6 +1050,397 @@ async fn stream_events(
         Ok(sse)
     });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+async fn authorize_principal_session_read(
+    runtime: &SessionRuntime,
+    caller: &AuthenticatedCaller,
+    thread_key: &ThreadKey,
+) -> Result<(), ApiError> {
+    let Some(subject) = caller.principal_subject() else {
+        return Ok(());
+    };
+    let session = runtime.session(thread_key).await?;
+    if principal_subject_owns_session(Some(subject), session.iron_control_principal.as_deref()) {
+        return Ok(());
+    }
+    Err(ApiError::Forbidden(
+        "caller is not authorized for this session".to_owned(),
+    ))
+}
+
+fn principal_subject_owns_session(subject: Option<&str>, session_principal: Option<&str>) -> bool {
+    subject.is_none_or(|subject| session_principal == Some(subject))
+}
+
+#[cfg(test)]
+mod session_authorization_tests {
+    use super::principal_subject_owns_session;
+
+    #[test]
+    fn principal_session_reads_require_exact_persisted_owner() {
+        assert!(principal_subject_owns_session(None, Some("prn_owner")));
+        assert!(principal_subject_owns_session(
+            Some("prn_owner"),
+            Some("prn_owner")
+        ));
+        assert!(!principal_subject_owns_session(
+            Some("prn_other"),
+            Some("prn_owner")
+        ));
+        assert!(!principal_subject_owns_session(Some("prn_owner"), None));
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct GranolaSyncCheckpointQuery {
+    scope_id: String,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+struct GranolaSyncCheckpointResponse {
+    scope_id: String,
+    #[serde(with = "time::serde::rfc3339::option")]
+    watermark_time: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    last_success_at: Option<OffsetDateTime>,
+    last_error: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GranolaSyncBatchRequest {
+    run: GranolaSyncRunPayload,
+    #[serde(default)]
+    notes: Vec<GranolaSyncNotePayload>,
+    #[serde(default)]
+    checkpoint: Option<GranolaSyncCheckpointPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GranolaSyncRunPayload {
+    run_id: String,
+    #[serde(default = "default_granola_sync_mode")]
+    mode: String,
+    status: String,
+    scope_id: String,
+    broker_credential_id: String,
+    source_user_email: String,
+    #[serde(default)]
+    notes_seen: i32,
+    #[serde(default)]
+    notes_upserted: i32,
+    #[serde(default)]
+    transcripts_seen: i32,
+    #[serde(default)]
+    transcripts_upserted: i32,
+    #[serde(default)]
+    error_text: String,
+    #[serde(default)]
+    metadata: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct GranolaSyncNotePayload {
+    note_id: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    owner: Value,
+    #[serde(default)]
+    attendees: Value,
+    #[serde(default)]
+    calendar_event: Value,
+    #[serde(default)]
+    summary_markdown: String,
+    #[serde(default)]
+    summary_text: String,
+    #[serde(default)]
+    transcript: Value,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    source_created_at: Option<String>,
+    #[serde(default)]
+    source_updated_at: Option<String>,
+    #[serde(default)]
+    raw_payload: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct GranolaSyncCheckpointPayload {
+    scope_id: String,
+    #[serde(default)]
+    watermark_time: Option<String>,
+}
+
+async fn get_granola_sync_checkpoint(
+    State(state): State<AppState>,
+    Query(query): Query<GranolaSyncCheckpointQuery>,
+) -> Result<Json<Value>, ApiError> {
+    require_non_empty("scope_id", &query.scope_id)?;
+    let checkpoint = sqlx::query_as::<_, GranolaSyncCheckpointResponse>(
+        "SELECT scope_id, watermark_time, last_success_at, last_error \
+         FROM granola_sync_checkpoints WHERE scope_id = $1",
+    )
+    .bind(&query.scope_id)
+    .fetch_optional(&db_pool(&state)?)
+    .await?;
+
+    Ok(Json(json!({ "ok": true, "checkpoint": checkpoint })))
+}
+
+async fn ingest_granola_sync_batch(
+    State(state): State<AppState>,
+    Json(request): Json<GranolaSyncBatchRequest>,
+) -> Result<Json<Value>, ApiError> {
+    validate_granola_sync_batch(&request)?;
+    let mut tx = db_pool(&state)?.begin().await?;
+    let run = &request.run;
+    let scope = json!({
+        "scope_id": run.scope_id,
+        "broker_credential_id": run.broker_credential_id,
+        "source_user_email": run.source_user_email,
+    });
+    let completed = run.status == "completed";
+    let scopes_synced = if completed {
+        json!([scope.clone()])
+    } else {
+        json!([])
+    };
+    let scopes_failed = if completed {
+        json!([])
+    } else {
+        json!([{ "scope_id": run.scope_id, "reason": run.error_text }])
+    };
+    let finished_at = Some(OffsetDateTime::now_utc());
+    let metadata = json!({
+        "broker_credential_id": run.broker_credential_id,
+        "source_user_email": run.source_user_email,
+        "console_metadata": run.metadata.clone(),
+    });
+
+    sqlx::query(
+        "INSERT INTO granola_sync_runs (\
+         run_id, mode, status, scopes_requested, scopes_synced, scopes_failed, \
+         notes_seen, notes_upserted, transcripts_seen, transcripts_upserted, \
+         finished_at, error_text, metadata\
+         ) VALUES (\
+         $1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7, $8, $9, $10, $11, $12, $13::jsonb\
+         ) ON CONFLICT (run_id) DO UPDATE SET \
+         mode = EXCLUDED.mode, status = EXCLUDED.status, \
+         scopes_requested = EXCLUDED.scopes_requested, scopes_synced = EXCLUDED.scopes_synced, \
+         scopes_failed = EXCLUDED.scopes_failed, notes_seen = EXCLUDED.notes_seen, \
+         notes_upserted = EXCLUDED.notes_upserted, transcripts_seen = EXCLUDED.transcripts_seen, \
+         transcripts_upserted = EXCLUDED.transcripts_upserted, \
+         finished_at = COALESCE(EXCLUDED.finished_at, granola_sync_runs.finished_at), \
+         error_text = EXCLUDED.error_text, metadata = EXCLUDED.metadata",
+    )
+    .bind(&run.run_id)
+    .bind(&run.mode)
+    .bind(&run.status)
+    .bind(json!([scope.clone()]))
+    .bind(scopes_synced)
+    .bind(scopes_failed)
+    .bind(run.notes_seen)
+    .bind(run.notes_upserted)
+    .bind(run.transcripts_seen)
+    .bind(run.transcripts_upserted)
+    .bind(finished_at)
+    .bind(&run.error_text)
+    .bind(metadata)
+    .execute(&mut *tx)
+    .await?;
+
+    for note in &request.notes {
+        let owner_id = json_text(&note.owner, "id").or_else(|| json_text(&note.owner, "user_id"));
+        let owner_email = json_text(&note.owner, "email").unwrap_or_default();
+        let owner_name = json_text(&note.owner, "name")
+            .or_else(|| json_text(&note.owner, "display_name"))
+            .unwrap_or_default();
+        let attendees = ensure_json_array("note.attendees", &note.attendees)?;
+        let transcript = ensure_json_array("note.transcript", &note.transcript)?;
+        ensure_json_object("note.calendar_event", &note.calendar_event)?;
+        let transcript_text = transcript
+            .iter()
+            .filter_map(|entry| json_text(entry, "text"))
+            .filter(|text| !text.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let content_text = [
+            note.title.trim(),
+            note.summary_markdown.trim(),
+            note.summary_text.trim(),
+            transcript_text.trim(),
+        ]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+        let access_emails = granola_access_emails(&run.source_user_email, &owner_email, attendees);
+        let content_hash = hex::encode(Sha256::digest(content_text.as_bytes()));
+
+        sqlx::query(
+            "INSERT INTO granola_sync_notes (\
+             note_id, title, owner_id, owner_email, owner_name, attendees, access_emails, \
+             calendar_event, summary_markdown, summary_text, transcript_text, transcript_payload, \
+             url, content_text, content_hash, source_created_at, source_updated_at, raw_payload, \
+             source_run_id, last_seen_at, last_error, updated_at\
+             ) VALUES (\
+             $1, $2, $3, $4, $5, $6::jsonb, $7::text[], $8::jsonb, $9, $10, $11, $12::jsonb, \
+             $13, $14, $15, $16::timestamptz, $17::timestamptz, $18::jsonb, $19, NOW(), '', NOW()\
+             ) ON CONFLICT (note_id) DO UPDATE SET \
+             title = EXCLUDED.title, owner_id = EXCLUDED.owner_id, owner_email = EXCLUDED.owner_email, \
+             owner_name = EXCLUDED.owner_name, attendees = EXCLUDED.attendees, \
+             access_emails = (SELECT COALESCE(array_agg(DISTINCT email ORDER BY email), ARRAY[]::text[]) \
+                              FROM unnest(granola_sync_notes.access_emails || EXCLUDED.access_emails) AS emails(email) \
+                              WHERE email <> ''), \
+             calendar_event = EXCLUDED.calendar_event, summary_markdown = EXCLUDED.summary_markdown, \
+             summary_text = EXCLUDED.summary_text, transcript_text = EXCLUDED.transcript_text, \
+             transcript_payload = EXCLUDED.transcript_payload, url = EXCLUDED.url, \
+             content_text = EXCLUDED.content_text, content_hash = EXCLUDED.content_hash, \
+             source_created_at = COALESCE(EXCLUDED.source_created_at, granola_sync_notes.source_created_at), \
+             source_updated_at = COALESCE(EXCLUDED.source_updated_at, granola_sync_notes.source_updated_at), \
+             raw_payload = EXCLUDED.raw_payload, source_run_id = EXCLUDED.source_run_id, \
+             last_seen_at = NOW(), last_error = '', updated_at = NOW()",
+        )
+        .bind(&note.note_id)
+        .bind(&note.title)
+        .bind(owner_id.unwrap_or_default())
+        .bind(&owner_email)
+        .bind(&owner_name)
+        .bind(&note.attendees)
+        .bind(access_emails)
+        .bind(&note.calendar_event)
+        .bind(&note.summary_markdown)
+        .bind(&note.summary_text)
+        .bind(transcript_text)
+        .bind(&note.transcript)
+        .bind(&note.url)
+        .bind(content_text)
+        .bind(content_hash)
+        .bind(&note.source_created_at)
+        .bind(&note.source_updated_at)
+        .bind(&note.raw_payload)
+        .bind(&run.run_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    if let Some(checkpoint) = &request.checkpoint {
+        let successful_at = completed.then(OffsetDateTime::now_utc);
+        sqlx::query(
+            "INSERT INTO granola_sync_checkpoints (\
+             scope_id, watermark_time, last_run_id, last_success_at, last_error, updated_at\
+             ) VALUES ($1, $2::timestamptz, $3, $4, $5, NOW()) \
+             ON CONFLICT (scope_id) DO UPDATE SET \
+             watermark_time = COALESCE(EXCLUDED.watermark_time, granola_sync_checkpoints.watermark_time), \
+             last_run_id = EXCLUDED.last_run_id, \
+             last_success_at = COALESCE(EXCLUDED.last_success_at, granola_sync_checkpoints.last_success_at), \
+             last_error = EXCLUDED.last_error, updated_at = NOW()",
+        )
+        .bind(&checkpoint.scope_id)
+        .bind(&checkpoint.watermark_time)
+        .bind(&run.run_id)
+        .bind(successful_at)
+        .bind(&run.error_text)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(Json(json!({
+        "ok": true,
+        "run_id": run.run_id,
+        "notes_ingested": request.notes.len(),
+    })))
+}
+
+fn default_granola_sync_mode() -> String {
+    "incremental".to_owned()
+}
+
+fn validate_granola_sync_batch(request: &GranolaSyncBatchRequest) -> Result<(), ApiError> {
+    let run = &request.run;
+    require_non_empty("run.run_id", &run.run_id)?;
+    require_non_empty("run.status", &run.status)?;
+    require_non_empty("run.scope_id", &run.scope_id)?;
+    require_non_empty("run.broker_credential_id", &run.broker_credential_id)?;
+    require_non_empty("run.source_user_email", &run.source_user_email)?;
+    if run.scope_id != format!("oauth:{}", run.broker_credential_id) {
+        return Err(ApiError::BadRequest(
+            "run.scope_id must be the OAuth credential scope".to_owned(),
+        ));
+    }
+    if !matches!(run.status.as_str(), "completed" | "failed") {
+        return Err(ApiError::BadRequest(
+            "run.status must be completed or failed".to_owned(),
+        ));
+    }
+    ensure_json_object("run.metadata", &run.metadata)?;
+    for note in &request.notes {
+        require_non_empty("note.note_id", &note.note_id)?;
+        ensure_json_object("note.owner", &note.owner)?;
+        ensure_json_array("note.attendees", &note.attendees)?;
+        ensure_json_object("note.calendar_event", &note.calendar_event)?;
+        ensure_json_array("note.transcript", &note.transcript)?;
+        ensure_json_object("note.raw_payload", &note.raw_payload)?;
+    }
+    if let Some(checkpoint) = &request.checkpoint {
+        require_non_empty("checkpoint.scope_id", &checkpoint.scope_id)?;
+        if checkpoint.scope_id != run.scope_id {
+            return Err(ApiError::BadRequest(
+                "checkpoint.scope_id must match run.scope_id".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_json_object<'a>(field: &str, value: &'a Value) -> Result<&'a Value, ApiError> {
+    if value.is_object() {
+        Ok(value)
+    } else {
+        Err(ApiError::BadRequest(format!(
+            "{field} must be a JSON object"
+        )))
+    }
+}
+
+fn ensure_json_array<'a>(field: &str, value: &'a Value) -> Result<&'a Vec<Value>, ApiError> {
+    value
+        .as_array()
+        .ok_or_else(|| ApiError::BadRequest(format!("{field} must be a JSON array")))
+}
+
+fn json_text(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn granola_access_emails(
+    source_user_email: &str,
+    owner_email: &str,
+    attendees: &[Value],
+) -> Vec<String> {
+    let mut emails = BTreeSet::new();
+    for candidate in std::iter::once(source_user_email)
+        .chain(std::iter::once(owner_email))
+        .chain(
+            attendees
+                .iter()
+                .filter_map(|attendee| attendee.get("email").and_then(Value::as_str)),
+        )
+    {
+        let normalized = candidate.trim().to_ascii_lowercase();
+        if !normalized.is_empty() {
+            emails.insert(normalized);
+        }
+    }
+    emails.into_iter().collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -1409,7 +2233,7 @@ async fn retry_slack_archive_import(
     ))
 }
 
-async fn list_slack_dm_sync_checkpoints(
+async fn list_slack_private_sync_checkpoints(
     State(state): State<AppState>,
     Query(query): Query<ListSlackDmSyncCheckpointsQuery>,
 ) -> Result<Json<Value>, ApiError> {
@@ -1417,7 +2241,7 @@ async fn list_slack_dm_sync_checkpoints(
     require_non_empty("broker_credential_id", &query.broker_credential_id)?;
     let rows = sqlx::query_as::<_, SlackDmSyncCheckpointResponse>(
         "SELECT broker_credential_id, home_team_id, conversation_id, watermark_ts \
-         FROM slack_dm_sync_checkpoints \
+         FROM slack_private_sync_checkpoints \
          WHERE broker_credential_id = $1 \
          AND ($2::text IS NULL OR home_team_id = $2) \
          ORDER BY home_team_id, conversation_id",
@@ -1442,6 +2266,7 @@ async fn ingest_slack_dm_sync_batch(
     validate_slack_dm_sync_batch(&request)?;
     let pool = db_pool(&state)?;
     let mut tx = pool.begin().await?;
+    acquire_slack_dm_sync_locks(&mut tx, &request).await?;
 
     if let Some(run) = &request.run {
         upsert_slack_dm_sync_run(&mut tx, run).await?;
@@ -1449,7 +2274,7 @@ async fn ingest_slack_dm_sync_batch(
 
     for conversation in &request.conversations {
         sqlx::query(
-            "INSERT INTO slack_dm_sync_conversations (\
+            "INSERT INTO slack_private_sync_conversations (\
              home_team_id, conversation_id, conversation_type, is_archived, is_ext_shared, \
              raw_payload, last_seen_at, updated_at\
              ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, NOW(), NOW()) \
@@ -1481,7 +2306,7 @@ async fn ingest_slack_dm_sync_batch(
         }
         for ((home_team_id, conversation_id), _) in conversations {
             sqlx::query(
-                "UPDATE slack_dm_sync_conversation_members \
+                "UPDATE slack_private_sync_conversation_members \
                  SET is_current_member = false, updated_at = NOW() \
                  WHERE home_team_id = $1 AND conversation_id = $2",
             )
@@ -1494,7 +2319,7 @@ async fn ingest_slack_dm_sync_batch(
 
     for member in &request.members {
         sqlx::query(
-            "INSERT INTO slack_dm_sync_conversation_members (\
+            "INSERT INTO slack_private_sync_conversation_members (\
              home_team_id, conversation_id, user_id, user_team_id, is_external, \
              is_current_member, raw_payload, last_seen_at, updated_at\
              ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, NOW(), NOW()) \
@@ -1525,7 +2350,7 @@ async fn ingest_slack_dm_sync_batch(
             None
         };
         sqlx::query(
-            "INSERT INTO slack_dm_sync_messages (\
+            "INSERT INTO slack_private_sync_messages (\
              home_team_id, conversation_id, message_ts, occurred_at, thread_ts, \
              parent_message_ts, is_thread_root, user_id, user_team_id, bot_id, \
              message_type, message_subtype, text, permalink, reply_count, reply_users, \
@@ -1550,9 +2375,9 @@ async fn ingest_slack_dm_sync_batch(
              reply_count = EXCLUDED.reply_count, \
              reply_users = EXCLUDED.reply_users, \
              latest_reply_ts = EXCLUDED.latest_reply_ts, \
-             thread_refreshed_at = COALESCE(EXCLUDED.thread_refreshed_at, slack_dm_sync_messages.thread_refreshed_at), \
+             thread_refreshed_at = COALESCE(EXCLUDED.thread_refreshed_at, slack_private_sync_messages.thread_refreshed_at), \
              raw_payload = EXCLUDED.raw_payload, \
-             source_run_id = COALESCE(EXCLUDED.source_run_id, slack_dm_sync_messages.source_run_id), \
+             source_run_id = COALESCE(EXCLUDED.source_run_id, slack_private_sync_messages.source_run_id), \
              last_seen_at = NOW(), \
              updated_at = NOW()",
         )
@@ -1582,7 +2407,7 @@ async fn ingest_slack_dm_sync_batch(
 
     for attachment in &request.attachments {
         sqlx::query(
-            "INSERT INTO slack_dm_sync_message_attachments (\
+            "INSERT INTO slack_private_sync_message_attachments (\
              home_team_id, conversation_id, message_ts, slack_file_id, name, title, \
              mimetype, filetype, size_bytes, url_private, permalink, download_status, \
              download_error, content_sha256, raw_payload, source_run_id, last_seen_at, updated_at\
@@ -1601,7 +2426,7 @@ async fn ingest_slack_dm_sync_batch(
              download_error = EXCLUDED.download_error, \
              content_sha256 = EXCLUDED.content_sha256, \
              raw_payload = EXCLUDED.raw_payload, \
-             source_run_id = COALESCE(EXCLUDED.source_run_id, slack_dm_sync_message_attachments.source_run_id), \
+             source_run_id = COALESCE(EXCLUDED.source_run_id, slack_private_sync_message_attachments.source_run_id), \
              last_seen_at = NOW(), \
              updated_at = NOW()",
         )
@@ -1632,14 +2457,14 @@ async fn ingest_slack_dm_sync_batch(
             None
         };
         sqlx::query(
-            "INSERT INTO slack_dm_sync_checkpoints (\
+            "INSERT INTO slack_private_sync_checkpoints (\
              broker_credential_id, home_team_id, conversation_id, watermark_ts, \
              last_run_id, last_success_at, last_error, updated_at\
              ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW()) \
              ON CONFLICT (broker_credential_id, home_team_id, conversation_id) DO UPDATE SET \
              watermark_ts = EXCLUDED.watermark_ts, \
              last_run_id = EXCLUDED.last_run_id, \
-             last_success_at = COALESCE(EXCLUDED.last_success_at, slack_dm_sync_checkpoints.last_success_at), \
+             last_success_at = COALESCE(EXCLUDED.last_success_at, slack_private_sync_checkpoints.last_success_at), \
              last_error = EXCLUDED.last_error, \
              updated_at = NOW()",
         )
@@ -1967,7 +2792,9 @@ async fn list_workflow_runs(
     Query(query): Query<ListWorkflowRunsQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let workflows = workflow_runtime(&state)?;
-    let runs = workflows.list_runs(query.limit.unwrap_or(50)).await?;
+    let runs = workflows
+        .list_runs(query.limit.unwrap_or(50), query.workflow_name.as_deref())
+        .await?;
     Ok(Json(json!({ "ok": true, "runs": runs })))
 }
 
@@ -2002,9 +2829,24 @@ async fn emit_workflow_event(
     Json(request): Json<EmitWorkflowEventRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let workflows = workflow_runtime(&state)?;
-    workflows
-        .emit_event(&request.event_name, request.payload)
-        .await?;
+    let event_name = match (
+        request.event_name.as_deref(),
+        request.event_type.as_deref(),
+        request.correlation_id.as_deref(),
+    ) {
+        (Some(event_name), None, None) if !event_name.trim().is_empty() => event_name.to_owned(),
+        (None, Some(event_type), Some(correlation_id))
+            if !event_type.trim().is_empty() && !correlation_id.trim().is_empty() =>
+        {
+            centaur_workflows::python_workflow_event_name(event_type, correlation_id)
+        }
+        _ => {
+            return Err(ApiError::BadRequest(
+                "provide either event_name or both event_type and correlation_id".to_owned(),
+            ));
+        }
+    };
+    workflows.emit_event(&event_name, request.payload).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -2228,7 +3070,7 @@ async fn upsert_slack_dm_sync_run(
         None
     };
     sqlx::query(
-        "INSERT INTO slack_dm_sync_runs (\
+        "INSERT INTO slack_private_sync_runs (\
          run_id, workflow_run_id, mode, status, broker_credential_id, source_user_id, \
          home_team_id, conversations_requested, conversations_synced, conversations_failed, \
          messages_fetched, messages_upserted, replies_fetched, replies_upserted, \
@@ -2250,7 +3092,7 @@ async fn upsert_slack_dm_sync_run(
          messages_upserted = EXCLUDED.messages_upserted, \
          replies_fetched = EXCLUDED.replies_fetched, \
          replies_upserted = EXCLUDED.replies_upserted, \
-         finished_at = COALESCE(EXCLUDED.finished_at, slack_dm_sync_runs.finished_at), \
+         finished_at = COALESCE(EXCLUDED.finished_at, slack_private_sync_runs.finished_at), \
          error_text = EXCLUDED.error_text, \
          metadata = EXCLUDED.metadata",
     )
@@ -2473,9 +3315,12 @@ fn validate_slack_dm_sync_batch(request: &SlackDmSyncBatchRequest) -> Result<(),
             "conversation.conversation_id",
             &conversation.conversation_id,
         )?;
-        if !matches!(conversation.conversation_type.as_str(), "im" | "mpim") {
+        if !matches!(
+            conversation.conversation_type.as_str(),
+            "im" | "mpim" | "private_channel"
+        ) {
             return Err(ApiError::BadRequest(
-                "conversation.conversation_type must be im or mpim".to_owned(),
+                "conversation.conversation_type must be im, mpim, or private_channel".to_owned(),
             ));
         }
         validate_json_shape("conversation.raw_payload", &conversation.raw_payload, true)?;
@@ -2510,6 +3355,115 @@ fn validate_slack_dm_sync_batch(request: &SlackDmSyncBatchRequest) -> Result<(),
         require_non_empty("checkpoint.conversation_id", &checkpoint.conversation_id)?;
     }
     Ok(())
+}
+
+async fn acquire_slack_dm_sync_locks(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    request: &SlackDmSyncBatchRequest,
+) -> Result<(), ApiError> {
+    // Credential-scoped job limits still allow two credentials to update the
+    // same shared conversation. Transaction-scoped locks serialize only
+    // overlapping conversations and release automatically on commit or
+    // rollback. BTreeSet ordering prevents multi-conversation batches from
+    // deadlocking while acquiring the locks.
+    for (home_team_id, conversation_id) in slack_dm_sync_conversation_keys(request) {
+        let lock_name = format!("centaur:slack-private-sync:{home_team_id}:{conversation_id}");
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(lock_name)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(())
+}
+
+fn slack_dm_sync_conversation_keys(request: &SlackDmSyncBatchRequest) -> BTreeSet<(&str, &str)> {
+    let mut conversation_keys = BTreeSet::new();
+    conversation_keys.extend(request.conversations.iter().map(|conversation| {
+        (
+            conversation.home_team_id.as_str(),
+            conversation.conversation_id.as_str(),
+        )
+    }));
+    conversation_keys.extend(request.members.iter().map(|member| {
+        (
+            member.home_team_id.as_str(),
+            member.conversation_id.as_str(),
+        )
+    }));
+    conversation_keys.extend(request.messages.iter().map(|message| {
+        (
+            message.home_team_id.as_str(),
+            message.conversation_id.as_str(),
+        )
+    }));
+    conversation_keys.extend(request.attachments.iter().map(|attachment| {
+        (
+            attachment.home_team_id.as_str(),
+            attachment.conversation_id.as_str(),
+        )
+    }));
+    conversation_keys.extend(request.checkpoints.iter().map(|checkpoint| {
+        (
+            checkpoint.home_team_id.as_str(),
+            checkpoint.conversation_id.as_str(),
+        )
+    }));
+    conversation_keys
+}
+
+#[cfg(test)]
+mod slack_user_sync_tests {
+    use super::*;
+
+    fn request_with_conversation_type(conversation_type: &str) -> SlackDmSyncBatchRequest {
+        SlackDmSyncBatchRequest {
+            run: None,
+            replace_memberships: false,
+            conversations: vec![SlackDmSyncConversationPayload {
+                home_team_id: "T123".to_owned(),
+                conversation_id: "G123".to_owned(),
+                conversation_type: conversation_type.to_owned(),
+                is_archived: false,
+                is_ext_shared: false,
+                raw_payload: json!({"name": "leadership"}),
+            }],
+            members: vec![],
+            messages: vec![],
+            attachments: vec![],
+            checkpoints: vec![],
+        }
+    }
+
+    #[test]
+    fn accepts_private_channel_conversations() {
+        validate_slack_dm_sync_batch(&request_with_conversation_type("private_channel")).unwrap();
+    }
+
+    #[test]
+    fn rejects_public_channel_conversations() {
+        let error = validate_slack_dm_sync_batch(&request_with_conversation_type("public_channel"))
+            .unwrap_err();
+        assert!(matches!(error, ApiError::BadRequest(_)));
+    }
+
+    #[test]
+    fn collects_sync_conversation_locks_in_stable_order() {
+        let mut request = request_with_conversation_type("im");
+        request.conversations.push(SlackDmSyncConversationPayload {
+            home_team_id: "T123".to_owned(),
+            conversation_id: "D999".to_owned(),
+            conversation_type: "im".to_owned(),
+            is_archived: false,
+            is_ext_shared: false,
+            raw_payload: json!({}),
+        });
+
+        let conversation_keys = slack_dm_sync_conversation_keys(&request)
+            .into_iter()
+            .collect::<Vec<_>>();
+
+        assert_eq!(conversation_keys, vec![("T123", "D999"), ("T123", "G123")]);
+    }
 }
 
 fn validate_google_docs_sync_batch(request: &GoogleDocsSyncBatchRequest) -> Result<(), ApiError> {
@@ -3008,6 +3962,90 @@ fn webhook_filter_matches(filter: &WebhookFilter, headers: &HeaderMap, body: &Va
             .as_deref()
             .is_some_and(|prefix| actual.trim_start().starts_with(prefix)),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod granola_sync_tests {
+    use super::*;
+
+    fn batch() -> GranolaSyncBatchRequest {
+        GranolaSyncBatchRequest {
+            run: GranolaSyncRunPayload {
+                run_id: "granola_test".to_owned(),
+                mode: "incremental".to_owned(),
+                status: "completed".to_owned(),
+                scope_id: "oauth:bcr_123".to_owned(),
+                broker_credential_id: "bcr_123".to_owned(),
+                source_user_email: "owner@example.com".to_owned(),
+                notes_seen: 1,
+                notes_upserted: 1,
+                transcripts_seen: 1,
+                transcripts_upserted: 1,
+                error_text: String::new(),
+                metadata: json!({"source": "console"}),
+            },
+            notes: vec![GranolaSyncNotePayload {
+                note_id: "meeting-1".to_owned(),
+                title: "Planning".to_owned(),
+                owner: json!({"email": "ada@example.com"}),
+                attendees: json!([
+                    {"email": "bob@example.com"},
+                    {"email": "OWNER@example.com"}
+                ]),
+                calendar_event: json!({}),
+                summary_markdown: "Ship it".to_owned(),
+                summary_text: "Ship it".to_owned(),
+                transcript: json!([{ "text": "Ada: ship it" }]),
+                url: String::new(),
+                source_created_at: None,
+                source_updated_at: None,
+                raw_payload: json!({"source": "granola_mcp"}),
+            }],
+            checkpoint: Some(GranolaSyncCheckpointPayload {
+                scope_id: "oauth:bcr_123".to_owned(),
+                watermark_time: Some("2026-07-08T12:00:00Z".to_owned()),
+            }),
+        }
+    }
+
+    #[test]
+    fn validates_a_credential_scoped_granola_batch() {
+        validate_granola_sync_batch(&batch()).unwrap();
+    }
+
+    #[test]
+    fn rejects_a_checkpoint_for_another_credential() {
+        let mut request = batch();
+        request.checkpoint.as_mut().unwrap().scope_id = "oauth:bcr_other".to_owned();
+        let error = validate_granola_sync_batch(&request).unwrap_err();
+        assert!(matches!(error, ApiError::BadRequest(_)));
+    }
+
+    #[test]
+    fn rejects_a_scope_that_does_not_belong_to_the_credential() {
+        let mut request = batch();
+        request.run.scope_id = "oauth:bcr_other".to_owned();
+        request.checkpoint.as_mut().unwrap().scope_id = "oauth:bcr_other".to_owned();
+        let error = validate_granola_sync_batch(&request).unwrap_err();
+        assert!(matches!(error, ApiError::BadRequest(_)));
+    }
+
+    #[test]
+    fn access_is_granted_to_source_owner_and_attendees() {
+        let emails = granola_access_emails(
+            "Owner@example.com",
+            "ada@example.com",
+            batch().notes[0].attendees.as_array().unwrap(),
+        );
+        assert_eq!(
+            emails,
+            vec![
+                "ada@example.com".to_owned(),
+                "bob@example.com".to_owned(),
+                "owner@example.com".to_owned(),
+            ]
+        );
     }
 }
 

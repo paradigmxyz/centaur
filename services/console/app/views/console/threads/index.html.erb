@@ -9,13 +9,15 @@
 
 <div class="flex min-h-0 flex-1 overflow-hidden bg-ink-950/15">
   <% if @thread_panels.size > 1 %>
+    <%# On phones the multi-pane grid can't fit side by side, so it stacks into
+        a single scrolling column; the md+ tracks below restore the split grid. %>
     <% grid_classes =
          case @thread_panels.size
-         when 2 then "grid-cols-2"
-         when 3 then "grid-cols-3"
-         else "grid-cols-2 grid-rows-2"
+         when 2 then "grid-cols-1 md:grid-cols-2"
+         when 3 then "grid-cols-1 md:grid-cols-3"
+         else "grid-cols-1 md:grid-cols-2 md:grid-rows-2"
          end %>
-    <section class="grid min-h-0 min-w-0 flex-1 gap-3 overflow-hidden pb-3 <%= grid_classes %>">
+    <section class="grid min-h-0 min-w-0 flex-1 gap-3 overflow-y-auto overflow-x-hidden pb-3 md:overflow-hidden <%= grid_classes %>">
       <% @thread_panels.each do |panel| %>
         <%= render "console/threads/thread_panel", panel: panel, panels: @thread_panels %>
       <% end %>
@@ -26,6 +28,11 @@
       <div class="console-thread-detail-header">
         <div class="console-thread-content">
           <% selected_thread_title = thread_title(@selected_session) %>
+          <% if thread_owned?(@selected_session) %>
+            <% thread_actions = capture do %>
+              <%= render "console/threads/thread_menu", session: @selected_session %>
+            <% end %>
+          <% end %>
           <% thread_meta = capture do %>
             <div class="flex min-w-0 items-center gap-2">
               <span class="truncate"><%= thread_source_label(@selected_session) %></span>
@@ -44,6 +51,7 @@
                      title: selected_thread_title,
                      title_attr: selected_thread_title,
                      subtitle: thread_meta,
+                     actions: thread_actions,
                      title_class: "truncate text-base font-semibold text-zinc-100",
                      subtitle_class: "mt-0.5 text-xs text-zinc-500",
                      class: "mb-0 min-h-16 items-center" %>
@@ -51,12 +59,30 @@
       </div>
       <% end %>
 
-      <div id="thread-transcript-scroll" class="console-transcript-scroll min-h-0 flex-1 overflow-y-auto py-6">
-        <% if @selected_session %>
-          <div class="console-thread-content flex flex-col gap-6">
-            <%= render "console/threads/transcript", items: @selected_transcript_items %>
+      <%# An empty selection IS the new-chat screen — both the explicit ?new=1
+          entry point and the nothing-selected / no-chats-yet cases. An
+          unresolvable ?thread= still renders as not-found. %>
+      <% if (@starting_new_thread || @selected_session.nil?) && !@thread_not_found %>
+        <div class="flex min-h-0 flex-1 items-start justify-center overflow-y-auto px-6">
+          <div class="console-new-chat">
+            <h1 class="console-new-chat-title">Start a new chat</h1>
+            <%= render "console/threads/composer", mode: :new %>
           </div>
-        <% elsif @thread_not_found %>
+        </div>
+      <% else %>
+      <div id="thread-transcript-scroll" class="console-transcript-scroll min-h-0 flex-1 overflow-y-auto py-6"
+           <% if @selected_session %>
+           data-controller="thread-poller"
+           data-thread-poller-url-value="<%= console_thread_panel_path(thread_key: @selected_session.thread_key) %>"
+           data-thread-poller-active-value="<%= thread_execution_active?(@selected_session.thread_key) %>"
+           <% end %>>
+        <% if @selected_session %>
+          <div class="console-thread-content flex flex-col gap-6" data-thread-poller-target="transcript">
+            <%= render "console/threads/panel_transcript",
+                       items: @selected_transcript_items,
+                       active: thread_execution_active?(@selected_session.thread_key) %>
+          </div>
+        <% else %>
           <div class="flex h-full items-center justify-center px-6">
             <div class="flex max-w-sm flex-col items-center gap-3 text-center">
               <div class="flex size-12 items-center justify-center rounded-full border border-ink-700 bg-ink-850/60 text-zinc-500">
@@ -65,29 +91,22 @@
               <div class="text-sm font-semibold text-zinc-200">Chat not found</div>
             </div>
           </div>
-        <% elsif @sessions.empty? %>
-          <div class="flex h-full items-center justify-center px-6">
-            <div class="flex max-w-sm flex-col items-center gap-3 text-center">
-              <div class="flex size-12 items-center justify-center rounded-full border border-ink-700 bg-ink-850/60 text-zinc-500">
-                <%= console_icon("message-square", classes: "size-5") %>
-              </div>
-              <div class="text-sm font-semibold text-zinc-200">No chats yet</div>
-              <p class="text-sm leading-6 text-zinc-500">
-                Chats you start — from Slack or the Console — will show up here.
-              </p>
-            </div>
-          </div>
-        <% else %>
-          <div class="flex h-full items-center justify-center px-6">
-            <div class="flex max-w-sm flex-col items-center gap-3 text-center">
-              <div class="flex size-12 items-center justify-center rounded-full border border-ink-700 bg-ink-850/60 text-zinc-500">
-                <%= console_icon("message-square", classes: "size-5") %>
-              </div>
-              <div class="text-sm font-semibold text-zinc-200">Select a chat from the sidebar</div>
-            </div>
-          </div>
         <% end %>
       </div>
+
+      <% if @selected_session && thread_writable?(@selected_session) %>
+        <div class="console-composer-dock">
+          <div class="console-thread-content">
+            <%= render "console/threads/composer", mode: :thread, session: @selected_session %>
+          </div>
+        </div>
+      <% end %>
+      <% end %>
     </section>
   <% end %>
+
+  <%# Live updates while a turn runs are per-panel: each transcript scroll
+      container carries a thread-poller Stimulus controller that polls
+      ThreadsController#panel and swaps only its own transcript, so activity
+      in one pane never re-renders the others (or eats composer drafts). %>
 </div>

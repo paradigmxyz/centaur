@@ -1,0 +1,144 @@
+require "test_helper"
+
+module Api
+  module V1
+    class SandboxPermissionsControllerTest < ActionDispatch::IntegrationTest
+      setup do
+        @proxy = proxies(:acme_proxy)
+        SecretSource.create!(
+          source_type: "control_plane",
+          secret: "s3cr3t-db-pass",
+          static_secret: static_secrets(:db_password_replace)
+        )
+        SlackChannelPermission.create!(
+          principal: @proxy.principal,
+          channel_id: "C0123456789",
+          upload_enabled: true,
+          history_enabled: true
+        )
+      end
+
+      test "returns redacted sandbox permissions for a valid sandbox token" do
+        pg = pg_dsn_secrets(:acme_analytics_pg)
+        pg.update!(settings: [
+          { "name" => "centaur.slack_user_id", "value_from" => { "proxy_label" => "centaur.slack_user_id" } }
+        ])
+        credential = BrokerCredential.create!(
+          foreign_id: "google-personal",
+          name: "Google - Personal User",
+          token_endpoint: "https://oauth2.googleapis.com/token",
+          oauth_app: oauth_apps(:acme_google),
+          provider_email: "person@example.com",
+          provider_subject: "google-sub-1",
+          scopes: [ "https://www.googleapis.com/auth/gmail.readonly" ],
+          refresh_token: "refresh-token",
+          access_token: "access-token",
+          expires_at: 1.hour.from_now,
+          last_refresh: Time.current
+        )
+        secret = StaticSecret.new(
+          name: "Google - Personal User token",
+          broker_credential: credential,
+          inject_config: { "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" }
+        )
+        secret.build_source(source_type: "token_broker", config: { "credential_id" => credential.oid })
+        secret.rules.build(host: "www.googleapis.com", position: 0)
+        secret.save!
+        Grant.create!(principal: @proxy.principal, static_secret: secret, created_by: users(:acme_admin))
+
+        with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
+          get "/api/v1/sandbox/permissions", headers: auth_headers(token_for(@proxy))
+        end
+        assert_response :ok
+
+        data = json_body.fetch("data")
+        assert_equal @proxy.name, data.fetch("sandbox_id")
+        assert_equal @proxy.oid, data.fetch("proxy_id")
+        assert_equal @proxy.principal.oid, data.fetch("principal_id")
+        refute data.fetch("principal").key?("namespace")
+        assert_equal @proxy.principal.sandbox_repo_cache, data.dig("capabilities", "sandbox_repo_cache")
+        assert_equal 1, data.fetch("slack_channel_permissions").length
+        assert_equal [
+          {
+            "id" => credential.oid,
+            "oauth_app_id" => oauth_apps(:acme_google).oid,
+            "slug" => "google",
+            "provider" => "google",
+            "provider_email" => "person@example.com",
+            "provider_subject" => "google-sub-1",
+            "status" => "live",
+            "scopes" => [ "https://www.googleapis.com/auth/gmail.readonly" ]
+          }
+        ], data.fetch("oauth_credentials")
+
+        entry = data.dig("permissions", "secrets").find { |secret| secret.dig("source", "type") == "control_plane" }
+        refute_nil entry
+        assert_equal "[redacted]", entry.dig("source", "value")
+        refute_includes response.body, "s3cr3t-db-pass"
+        assert_equal "no-store", response.headers["Cache-Control"]
+        assert_match(/\A"[0-9a-f]{64}"\z/, response.headers["ETag"])
+        permissions = data.fetch("permissions")
+        refute permissions.key?("postgres_setting_templates")
+        refute_includes response.body, "postgres_setting_templates"
+      end
+
+      test "returns merged role Slack channel permissions" do
+        roles(:acme_infra).slack_channel_permissions.create!(
+          channel_id: "C0123456789",
+          download_enabled: true
+        )
+
+        with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
+          get "/api/v1/sandbox/permissions", headers: auth_headers(token_for(@proxy))
+        end
+        assert_response :ok
+
+        permission = json_body.dig("data", "slack_channel_permissions").sole
+        assert_not permission.key?("channel_name")
+        assert_equal true, permission.fetch("upload_enabled")
+        assert_equal true, permission.fetch("download_enabled")
+        assert_equal true, permission.fetch("history_enabled")
+      end
+
+      test "rejects requests without a sandbox token" do
+        get "/api/v1/sandbox/permissions"
+        assert_response :unauthorized
+      end
+
+      test "rejects tokens after proxy assignment changes" do
+        with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
+          token = token_for(@proxy)
+          @proxy.update!(principal: principals(:globex_user))
+
+          get "/api/v1/sandbox/permissions", headers: auth_headers(token)
+        end
+
+        assert_response :unauthorized
+      end
+
+      test "rejects expired sandbox tokens" do
+        with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
+          token = token_for(@proxy, now: (SandboxEntitlements::Jwt::DEFAULT_TTL_SECONDS + 1.hour).seconds.ago)
+
+          get "/api/v1/sandbox/permissions", headers: auth_headers(token)
+        end
+
+        assert_response :unauthorized
+      end
+
+      private
+
+      def auth_headers(token)
+        { "Authorization" => "Bearer #{token}" }
+      end
+
+      def token_for(proxy, now: Time.current)
+        SandboxEntitlements::Jwt.encode_for_proxy(proxy, now: now)
+      end
+
+      def json_body
+        JSON.parse(response.body)
+      end
+    end
+  end
+end

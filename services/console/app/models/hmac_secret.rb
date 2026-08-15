@@ -3,7 +3,7 @@
 # request headers. The HMAC key, and any additional named credentials, are each
 # their own secret source (role_kind credential_field, role = the credential
 # name). Unlike oauth_token, the proxy carries each entry as its own hmac_sign
-# transform with its own rules, so Principal#sync_transforms emits one transform
+# transform with its own rules, so snapshot assembly emits one transform
 # per granted secret (like gcp_auth).
 class HmacSecret < ApplicationRecord
   oid_prefix "hms"
@@ -49,14 +49,13 @@ class HmacSecret < ApplicationRecord
     { "name" => "hmac_sign", "config" => config }
   end
 
-  # hmac_sign injects its signature (and companion values) into the named request
-  # headers; used for cross-type conflict detection in Principal#served_credentials.
+  # hmac_sign injects its signature and companion values into the named request
+  # headers; used for cross-type conflict detection during snapshot assembly.
   def proxy_conflict_targets
     headers.map { |h| "header:#{h["name"].downcase}" }
   end
 
-  validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
-  validates :foreign_id, uniqueness: { scope: :namespace, allow_nil: true },
+  validates :foreign_id, uniqueness: { allow_nil: true },
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }, allow_nil: true
   validates :timestamp_format, inclusion: { in: TIMESTAMP_FORMATS, message: "must be one of #{TIMESTAMP_FORMATS.join(", ")}" }
   validates :signature_algorithm, inclusion: { in: ALGORITHMS, message: "must be one of #{ALGORITHMS.join(", ")}" }

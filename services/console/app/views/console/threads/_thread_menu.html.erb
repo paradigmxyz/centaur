@@ -1,0 +1,47 @@
+<div class="console-thread-share-wrap"
+     data-controller="thread-share"
+     data-thread-share-url-value="<%= console_threads_url(thread: session.thread_key) %>">
+  <button type="button"
+          class="console-thread-share-trigger"
+          data-action="thread-share#open"
+          aria-label="Share chat"
+          title="Share chat">
+    <%= console_icon("share", classes: "size-4") %>
+  </button>
+
+  <dialog class="console-share-dialog"
+          aria-label="Share chat"
+          data-thread-share-target="dialog"
+          data-action="cancel->thread-share#cancel click->thread-share#closeFromBackdrop">
+    <%= form_with url: console_thread_share_path,
+                  method: :post,
+                  data: {
+                    thread_share_target: "form",
+                    action: "submit->thread-share#copyLink"
+                  } do %>
+      <%= hidden_field_tag :thread_key, session.thread_key %>
+      <div class="console-share-dialog-copy">
+        <h2>Share chat</h2>
+        <p>
+          Anyone with access to Centaur Console will be able to view and continue this chat.
+        </p>
+        <p class="console-share-dialog-error"
+           role="alert"
+           data-thread-share-target="error"
+           hidden></p>
+      </div>
+      <div class="console-share-dialog-actions">
+        <button type="button"
+                class="btn-secondary"
+                data-action="thread-share#cancel">
+          Cancel
+        </button>
+        <button type="submit"
+                class="btn-primary"
+                data-thread-share-target="copyButton">
+          Copy link
+        </button>
+      </div>
+    <% end %>
+  </dialog>
+</div>

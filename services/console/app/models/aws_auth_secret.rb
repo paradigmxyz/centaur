@@ -6,7 +6,7 @@
 # allowed_services scope what the proxy will sign for. Each credential is its own
 # secret source (role_kind credential_field, role = access_key_id /
 # secret_access_key / session_token), mirroring hmac_secret; like gcp_auth and
-# hmac, Principal#sync_transforms emits one transform per granted secret.
+# hmac, snapshot assembly emits one transform per granted secret.
 class AwsAuthSecret < ApplicationRecord
   oid_prefix "aas"
 
@@ -42,13 +42,12 @@ class AwsAuthSecret < ApplicationRecord
   end
 
   # aws_auth re-signs requests with SigV4, which owns the Authorization header;
-  # used for cross-type conflict detection in Principal#served_credentials.
+  # used for cross-type conflict detection during snapshot assembly.
   def proxy_conflict_targets
     [ "header:authorization" ]
   end
 
-  validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
-  validates :foreign_id, uniqueness: { scope: :namespace, allow_nil: true },
+  validates :foreign_id, uniqueness: { allow_nil: true },
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }, allow_nil: true
   validate :labels_is_a_hash
   validate :allowed_regions_are_strings

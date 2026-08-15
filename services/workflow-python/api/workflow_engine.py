@@ -25,12 +25,17 @@ class WorkflowContext:
         task_id: str,
         workflow_name: str,
         pool: Any = None,
+        agent_defaults: dict[str, Any] | None = None,
     ) -> None:
         self._rpc = rpc
         self.run_id = run_id
         self.task_id = task_id
         self.workflow_name = workflow_name
         self._pool = pool
+        # Module-level `AGENT_DEFAULTS` (e.g. {"model": ..., "reasoning": ...})
+        # applied to every ctx.agent_turn as a per-workflow default; explicit
+        # per-call kwargs always win. See agent_turn().
+        self._agent_defaults = dict(agent_defaults or {})
         self.tools = WorkflowTools(WorkflowToolManager(self._rpc))
 
     def log(self, event: str, **fields: Any) -> None:
@@ -96,8 +101,29 @@ class WorkflowContext:
             }
         )
 
+    async def wait_for_event(
+        self,
+        name: str,
+        event_type: str,
+        correlation_id: str,
+        *,
+        timeout: dt.timedelta | int | float | None = None,
+    ) -> Any:
+        """Suspend until the matching durable workflow event is delivered."""
+        request: dict[str, Any] = {
+            "type": "ctx.event.wait",
+            "step": name,
+            "event_type": event_type,
+            "correlation_id": correlation_id,
+        }
+        if timeout is not None:
+            request["timeout_seconds"] = duration_seconds(timeout)
+        return await self._rpc.request(request)
+
     async def agent_turn(self, text: str | None = None, **kwargs: Any) -> Any:
-        args = dict(kwargs)
+        # Per-workflow AGENT_DEFAULTS (model / provider / reasoning / harness,
+        # ...) form the base; explicit per-call kwargs override them key by key.
+        args = {**self._agent_defaults, **kwargs}
         if text is not None:
             args.setdefault("text", text)
         return await self._rpc.request({"type": "ctx.agent_turn", "args": args})
@@ -111,6 +137,23 @@ class WorkflowContext:
 
     async def start_agent(self, *args: Any, text: str | None = None, **kwargs: Any) -> Any:
         return await self.run_agent(*args, text=text, **kwargs)
+
+    async def start_workflow(
+        self,
+        workflow_name: str,
+        input: dict[str, Any] | None = None,
+        *,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Queue another workflow and return its durable task identifiers."""
+        request: dict[str, Any] = {
+            "type": "ctx.workflow.start",
+            "workflow_name": workflow_name,
+            "input": input or {},
+        }
+        if idempotency_key:
+            request["idempotency_key"] = idempotency_key
+        return await self._rpc.request(request)
 
     async def call_tool(self, tool: str, method: str, args: dict[str, Any] | None = None) -> Any:
         return await WorkflowToolManager(self._rpc).call_tool_raw(tool, method, args or {})

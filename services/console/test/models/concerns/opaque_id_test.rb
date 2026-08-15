@@ -19,7 +19,6 @@ class OpaqueIdTest < ActiveSupport::TestCase
 
   def create_record(klass = PrnModel)
     klass.create!(
-      namespace: "test",
       foreign_id: "f-#{SecureRandom.hex(6)}",
       created_by_id: users(:acme_admin).id
     )

@@ -11,6 +11,10 @@ default: &default
 development:
   <<: *default
   database: iron_control_development
+  # The ParadeDB image bootstraps demo extensions (postgis, vector, pg_ivm)
+  # into template1. Databases cloned from it inherit those extensions, and a
+  # schema dump then writes them all into schema.rb. template0 is always empty.
+  template: template0
 
 # Warning: The database defined as "test" will be erased and
 # re-generated from your development database when you run "rake".
@@ -18,6 +22,8 @@ development:
 test:
   <<: *default
   database: iron_control_test
+  # See the development note: template0 keeps schema.rb reproducible.
+  template: template0
 
 production:
   primary:

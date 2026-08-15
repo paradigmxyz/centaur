@@ -14,21 +14,26 @@
   </div>
   <div class="mt-2 flex flex-wrap items-center gap-2 text-sm">
     <span class="text-centaur-400 glow"><%= @principal.oid %></span>
-    <span class="text-zinc-600">·</span>
-    <span class="rounded bg-ink-700 px-2 py-0.5 text-xs text-zinc-400"><%= @principal.namespace %></span>
     <% if @principal.foreign_id.present? %>
       <span class="text-zinc-600">·</span>
       <span class="text-zinc-400">foreign_id: <span class="text-zinc-200"><%= @principal.foreign_id %></span></span>
     <% end %>
   </div>
-  <% if @principal.labels.present? %>
+  <% display_labels = @principal.labels_with_sandbox_capabilities %>
+  <% if display_labels.present? %>
     <div class="mt-3 flex flex-wrap gap-1">
-      <% @principal.labels.each do |k, v| %>
+      <% display_labels.each do |k, v| %>
         <span class="label-chip"><%= k %>=<%= v %></span>
       <% end %>
     </div>
   <% end %>
 </div>
+
+<%= render "console/shared/slack_channel_permissions",
+           owner: @principal,
+           url: console_principal_slack_channel_permissions_path(@principal.oid),
+           inherited_permissions: @inherited_slack_channel_permissions,
+           api_managed_direct_messages: true %>
 
 <!-- Sandbox access -->
 <section class="mb-8">
@@ -84,7 +89,7 @@
 </section>
 
 <!-- Roles -->
-<section class="mb-8">
+<section id="roles" class="mb-8">
   <div class="mb-4 flex flex-wrap items-end justify-between gap-3">
     <div>
       <h2 class="mb-1 text-xs font-semibold uppercase tracking-wider text-zinc-500">Roles</h2>
@@ -127,6 +132,13 @@
           <% end %>
         </tbody>
       </table>
+      <%= render "console/pagination",
+                 page: @roles_page,
+                 total_pages: @roles_total_pages,
+                 total_count: @roles_total_count,
+                 unit: "role",
+                 page_param: :roles_page,
+                 anchor: "roles" %>
     </div>
   <% else %>
     <div class="empty-state">No roles assigned.</div>
@@ -134,13 +146,20 @@
 </section>
 
 <!-- Direct grants -->
-<section class="mb-8">
+<section id="direct-grants" class="mb-8">
   <h2 class="mb-1 text-xs font-semibold uppercase tracking-wider text-zinc-500">Direct Grants</h2>
   <p class="mb-4 text-sm text-zinc-500">Secrets granted to this principal directly. Grants inherited from roles are managed on the role, not here.</p>
 
   <% if @direct_grants.any? %>
     <div class="console-panel mb-4">
-      <table class="console-table">
+      <table class="console-table console-table-fixed">
+        <colgroup>
+          <col class="w-40">
+          <col class="w-32">
+          <col class="w-[28%]">
+          <col>
+          <col class="w-28">
+        </colgroup>
         <thead class="console-table-head">
           <tr>
             <th class="console-th">Type</th>
@@ -161,8 +180,20 @@
               <td class="console-td-nowrap">
                 <%= link_to s.oid, console_secret_path(kind, s.oid), class: "console-link" %>
               </td>
-              <td class="console-td-nowrap text-zinc-300"><%= s.foreign_id || "—" %></td>
-              <td class="console-td-nowrap text-zinc-100"><%= s.try(:name).presence || %(<span class="text-zinc-600">unnamed</span>).html_safe %></td>
+              <td class="console-td-truncate text-zinc-300">
+                <% if s.foreign_id.present? %>
+                  <span class="console-cell-truncate" title="<%= s.foreign_id %>"><%= s.foreign_id %></span>
+                <% else %>
+                  <span class="text-zinc-600">—</span>
+                <% end %>
+              </td>
+              <td class="console-td-truncate text-zinc-100">
+                <% if (secret_name = s.try(:name).presence) %>
+                  <span class="console-cell-truncate" title="<%= secret_name %>"><%= secret_name %></span>
+                <% else %>
+                  <span class="text-zinc-600">unnamed</span>
+                <% end %>
+              </td>
               <td class="console-td-nowrap text-right">
                 <%= button_to "Revoke", console_principal_revoke_grant_path(@principal.oid, grant.oid), method: :delete,
                       form: { data: { turbo_confirm: "Revoke this grant?" } },
@@ -172,6 +203,13 @@
           <% end %>
         </tbody>
       </table>
+      <%= render "console/pagination",
+                 page: @direct_grants_page,
+                 total_pages: @direct_grants_total_pages,
+                 total_count: @direct_grants_total_count,
+                 unit: "direct grant",
+                 page_param: :direct_grants_page,
+                 anchor: "direct-grants" %>
     </div>
   <% else %>
     <div class="mb-4 rounded-xl border border-dashed border-ink-600 bg-ink-850/40 px-5 py-10 text-center text-zinc-600">
@@ -186,7 +224,7 @@
           <% next if secrets.empty? %>
           <optgroup label="<%= secret_kind_label(kind) %>">
             <% secrets.each do |s| %>
-              <option value="<%= kind %>:<%= s.oid %>"><%= s.try(:name).presence || s.foreign_id.presence || s.oid %> (<%= s.namespace %>)</option>
+              <option value="<%= kind %>:<%= s.oid %>"><%= secret_option_label(s) %></option>
             <% end %>
           </optgroup>
         <% end %>
@@ -197,18 +235,24 @@
 </section>
 
 <!-- Effective grants -->
-<section>
+<section id="effective-grants">
   <h2 class="mb-1 text-xs font-semibold uppercase tracking-wider text-zinc-500">Effective Grants</h2>
   <p class="mb-4 text-sm text-zinc-500">Every secret this principal resolves to: the direct grants above plus grants inherited from its roles. Read-only.</p>
 
-  <% total = @granted.values.sum(&:size) %>
-  <% if total.zero? %>
+  <% if @effective_grants_total_count.zero? %>
     <div class="rounded-xl border border-dashed border-ink-600 bg-ink-850/40 px-5 py-10 text-center text-zinc-600">
       This principal has no effective grants.
     </div>
   <% else %>
     <div class="console-panel">
-      <table class="console-table">
+      <table class="console-table console-table-fixed">
+        <colgroup>
+          <col class="w-40">
+          <col class="w-32">
+          <col class="w-[28%]">
+          <col>
+          <col class="w-56">
+        </colgroup>
         <thead class="console-table-head">
           <tr>
             <th class="console-th">Type</th>
@@ -230,16 +274,31 @@
                 <td class="console-td-nowrap">
                   <%= link_to s.oid, console_secret_path(kind, s.oid), class: "console-link" %>
                 </td>
-                <td class="console-td-nowrap text-zinc-300"><%= s.foreign_id || "—" %></td>
-                <td class="console-td-nowrap text-zinc-100"><%= s.try(:name).presence || %(<span class="text-zinc-600">unnamed</span>).html_safe %></td>
-                <td class="console-td-nowrap">
+                <td class="console-td-truncate text-zinc-300">
+                  <% if s.foreign_id.present? %>
+                    <span class="console-cell-truncate" title="<%= s.foreign_id %>"><%= s.foreign_id %></span>
+                  <% else %>
+                    <span class="text-zinc-600">—</span>
+                  <% end %>
+                </td>
+                <td class="console-td-truncate text-zinc-100">
+                  <% if (secret_name = s.try(:name).presence) %>
+                    <span class="console-cell-truncate" title="<%= secret_name %>"><%= secret_name %></span>
+                  <% else %>
+                    <span class="text-zinc-600">unnamed</span>
+                  <% end %>
+                </td>
+                <td class="console-td-truncate">
                   <div class="flex flex-wrap gap-1">
                     <% if sources.any? { |x| x[:type] == :direct } %>
                       <span class="inline-flex items-center rounded bg-centaur-500/10 px-2 py-0.5 text-[11px] text-centaur-300 ring-1 ring-centaur-500/30">direct</span>
                     <% end %>
                     <% roles.each do |r| %>
-                      <span class="inline-flex items-center rounded bg-ink-700 px-2 py-0.5 text-[11px] text-zinc-300 ring-1 ring-ink-600"
-                            title="<%= r.oid %>">via <%= r.name.presence || r.foreign_id || r.oid %></span>
+                      <% role_label = r.name.presence || r.foreign_id || r.oid %>
+                      <span class="inline-flex min-w-0 max-w-full items-center rounded bg-ink-700 px-2 py-0.5 text-[11px] text-zinc-300 ring-1 ring-ink-600"
+                            title="<%= role_label %> (<%= r.oid %>)">
+                        <span class="console-cell-inline-truncate">via <%= role_label %></span>
+                      </span>
                     <% end %>
                   </div>
                 </td>
@@ -248,6 +307,13 @@
           <% end %>
         </tbody>
       </table>
+      <%= render "console/pagination",
+                 page: @effective_grants_page,
+                 total_pages: @effective_grants_total_pages,
+                 total_count: @effective_grants_total_count,
+                 unit: "effective grant",
+                 page_param: :effective_grants_page,
+                 anchor: "effective-grants" %>
     </div>
   <% end %>
 </section>

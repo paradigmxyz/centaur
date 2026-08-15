@@ -85,6 +85,12 @@ secrets = [
 ]
 ```
 
+The Centaur Console assigns each sandbox proxy to a principal derived from its
+user, channel, issue, conversation, or workflow. The proxy receives only the
+secrets granted directly to that principal or inherited from its roles. See
+[Advanced Permissioning](/secrets/advanced-permissioning) for the setup and
+verification workflow.
+
 Three properties of this declaration matter:
 
 - **Placeholders, not values.** The sandbox sees the literal string
@@ -127,16 +133,13 @@ and what credentials it reached for.
 
 A few honest caveats:
 
-- **Credentials are deployment-scoped, not yet user-scoped.** Tool
-  and harness secrets live in a single vault (a Kubernetes Secret or
-  a 1Password vault) that every sandbox in the deployment draws from,
-  so a tool's reach is the same regardless of which user invokes it.
-  Per-user and per-channel scoping is on the roadmap. A thread in
-  `#payments` would get the payments `GITHUB_TOKEN` rather than a
-  deployment-wide one, and a DM would resolve to the invoking user's
-  credentials. See the [Advanced Permissioning roadmap](/secrets/advanced-permissioning).
-  Until that lands, pick which tools and harnesses an installation
-  exposes with the current scope in mind.
+- **A shared backing store still requires careful grants.** Credentials may
+  live together in one Kubernetes Secret or 1Password vault, but the Centaur
+  Console scopes their use by principal, role, and request rules. The `infra`
+  role is assigned to new principals by default so they can run a harness.
+  Operators must configure tool roles, direct grants, default roles, and
+  sandbox capabilities for their environment. See
+  [Advanced Permissioning](/secrets/advanced-permissioning).
 - **The default egress allowlist is permissive.** Leaving it open is
   a deliberate UX choice. An open configuration lets users start
   using agents immediately and develop an allowlist over time. If

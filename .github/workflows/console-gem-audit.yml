@@ -1,0 +1,31 @@
+name: Console Gem Audit
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: services/console
+
+jobs:
+  scan_gems:
+    runs-on: depot-ubuntu-24.04-16
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        with:
+          working-directory: services/console
+          bundler-cache: true
+
+      - name: Scan for known security vulnerabilities in gems used
+        run: bin/bundler-audit

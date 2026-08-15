@@ -7,11 +7,15 @@ require "test_helper"
 # HTTP double returning a canned token response (mirrors the broker flow test).
 class SessionOauthControllerTest < ActionDispatch::IntegrationTest
   GOOGLE_CLIENT_ID = "google-login-client-id".freeze
+  SLACK_CLIENT_ID = "slack-login-client-id".freeze
   ENV_KEYS = %w[
-    CENTAUR_CONSOLE_GOOGLE_CLIENT_ID CENTAUR_CONSOLE_GOOGLE_CLIENT_SECRET CENTAUR_CONSOLE_BOOTSTRAP_ADMINS
+    CENTAUR_CONSOLE_GOOGLE_CLIENT_ID CENTAUR_CONSOLE_GOOGLE_CLIENT_SECRET
+    CENTAUR_CONSOLE_SLACK_CLIENT_ID CENTAUR_CONSOLE_SLACK_CLIENT_SECRET
+    CENTAUR_CONSOLE_BOOTSTRAP_ADMINS CENTAUR_CONSOLE_SSO_EMAIL_DOMAINS
   ].freeze
 
   setup do
+    @exchange_http_mocks = []
     @prev_env = ENV.to_hash.slice(*ENV_KEYS)
     ENV["CENTAUR_CONSOLE_GOOGLE_CLIENT_ID"] = GOOGLE_CLIENT_ID
     ENV["CENTAUR_CONSOLE_GOOGLE_CLIENT_SECRET"] = "google-login-secret"
@@ -22,21 +26,13 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
     ENV_KEYS.each { |k| ENV.delete(k) }
     @prev_env.each { |k, v| ENV[k] = v }
     SessionOauthController.exchange_client_factory = -> { Broker::AuthorizationCodeClient.new }
-  end
-
-  class StubHTTP
-    def initialize(status:, body:)
-      @status = status
-      @body = body
-    end
-
-    def call(url:, form:, headers:, timeout:)
-      Broker::AuthorizationCodeClient::Response.new(status: @status, body: @body)
-    end
+    @exchange_http_mocks.each(&:verify)
   end
 
   def stub_exchange(status:, body:)
-    SessionOauthController.exchange_client_factory = -> { Broker::AuthorizationCodeClient.new(http: StubHTTP.new(status: status, body: body)) }
+    http = expect_http_call(status: status, body: body) { |request| yield request if block_given? }
+    @exchange_http_mocks << http
+    SessionOauthController.exchange_client_factory = -> { Broker::AuthorizationCodeClient.new(http: http) }
   end
 
   def id_token(claims)
@@ -99,6 +95,47 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
     assert_equal "That sign-in method is not available.", flash[:alert]
   end
 
+  test "Slack HTTPS login uses client secret without PKCE and accepts a rotating token response" do
+    ENV["CENTAUR_CONSOLE_SLACK_CLIENT_ID"] = SLACK_CLIENT_ID
+    ENV["CENTAUR_CONSOLE_SLACK_CLIENT_SECRET"] = "slack-login-secret"
+
+    state = start_flow(provider: "slack")
+    query = URI.decode_www_form(URI.parse(response.location).query).to_h
+    assert_equal "slack.com", URI.parse(response.location).host
+    assert_equal "openid email profile", query["scope"]
+    assert_nil query["code_challenge"]
+    assert_nil query["code_challenge_method"]
+
+    claims = {
+      "aud" => SLACK_CLIENT_ID,
+      "iss" => "https://slack.com",
+      "sub" => "U123ROTATING",
+      "email" => "rotating@example.com",
+      "email_verified" => true,
+      "name" => "Rotating User"
+    }
+    stub_exchange(
+      status: 200,
+      body: {
+        ok: true,
+        access_token: "xoxe.xoxp-1-access",
+        refresh_token: "xoxe-1-refresh",
+        expires_in: 43_200,
+        id_token: id_token(claims)
+      }.to_json
+    ) do |request|
+      assert_equal "slack-login-secret", request.dig(:form, "client_secret")
+      assert_nil request.dig(:form, "code_verifier")
+    end
+
+    get auth_callback_url(provider: "slack"), params: { code: "the-code", state: state }
+
+    assert_redirected_to console_threads_path
+    user = User.find_by!(email: "rotating@example.com")
+    assert_equal "Rotating User", user.name
+    assert_equal [ [ "slack", "U123ROTATING" ] ], user.user_identities.pluck(:provider, :subject)
+  end
+
   # --- callback: provisioning ------------------------------------------------
 
   test "callback provisions an active user for a non-bootstrap email and lands on the console" do
@@ -112,6 +149,38 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
     assert_equal "Test User", user.name
     assert_equal user.id, session[:user_id]
     assert_equal [ [ "google", "new-sub" ] ], user.user_identities.pluck(:provider, :subject)
+  end
+
+  test "callback redirects to the protected console URL the user first requested" do
+    get console_credentials_url(kind: "oauth")
+    assert_redirected_to login_path
+    assert_equal "/console/credentials?kind=oauth", session[:return_to]
+
+    run_callback(sub: "returning-sub", email: "returning@example.com")
+    assert_redirected_to "/console/credentials?kind=oauth"
+    assert_equal User.find_by!(email: "returning@example.com").id, session[:user_id]
+    assert_nil session[:return_to]
+  end
+
+  test "callback provisions a user inside the configured SSO domain allowlist" do
+    ENV["CENTAUR_CONSOLE_SSO_EMAIL_DOMAINS"] = "example.com acme.example"
+    assert_difference -> { User.count }, 1 do
+      run_callback(sub: "allowed-sub", email: "newcomer@example.com")
+    end
+    assert_redirected_to console_threads_path
+    assert_equal User.find_by!(email: "newcomer@example.com").id, session[:user_id]
+  end
+
+  test "callback rejects a user outside the configured SSO domain allowlist" do
+    ENV["CENTAUR_CONSOLE_SSO_EMAIL_DOMAINS"] = "acme.example"
+    assert_no_difference -> { User.count } do
+      assert_no_difference -> { UserIdentity.count } do
+        run_callback(sub: "outside-sub", email: "newcomer@example.com")
+      end
+    end
+    assert_redirected_to login_path
+    assert_equal "That email domain is not allowed to access the console.", flash[:alert]
+    assert_nil session[:user_id]
   end
 
   test "callback makes a bootstrap-allowlisted email active and admin" do

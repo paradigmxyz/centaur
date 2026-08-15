@@ -20,6 +20,17 @@ from centaur_sdk.tool_sdk import secret
 
 DEFAULT_SEARCH_LIMIT = 10
 MAX_SEARCH_LIMIT = 50
+MIN_HYBRID_CANDIDATE_LIMIT = 30
+RRF_K = 60
+DEFAULT_EMBEDDINGS_MODEL = "text-embedding-3-small"
+EMBEDDINGS_DIMENSIONS = 1_536
+OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
+COMPANY_CONTEXT_EMBEDDINGS_ENABLED_ENV = "COMPANY_CONTEXT_EMBEDDINGS_ENABLED"
+COMPANY_CONTEXT_EMBEDDINGS_MODEL_ENV = "COMPANY_CONTEXT_EMBEDDINGS_MODEL"
+DEFAULT_QUERY_LIMIT = 100
+MAX_QUERY_LIMIT = 1_000
+DEFAULT_QUERY_TIMEOUT_SECONDS = 10
+MAX_QUERY_TIMEOUT_SECONDS = 30
 TITLE_MATCH_BOOST = 4
 EXACT_QUERY_TITLE_BOOST = 8
 EXACT_QUERY_BODY_BOOST = 2
@@ -28,6 +39,8 @@ CHANNEL_DAY_SCORE_MULTIPLIER = 0.75
 DEFAULT_PREVIEW_CHARS = 280
 MAX_RELATED_CHILDREN = 25
 SLACK_DM_SOURCE = "slack_dm"
+GRANOLA_SOURCE = "granola"
+GRANOLA_SOURCE_TYPE = "granola_note"
 DOCS_SOURCE = "docs"
 LEGACY_GOOGLE_DRIVE_SOURCE = "google_drive"
 GOOGLE_DOCS_SOURCE_TYPE = "google_doc"
@@ -333,7 +346,7 @@ def _search_where_clause(term_count: int) -> str:
         clauses.append(
             f"(title ||| ${index}::text::pdb.boost({TITLE_MATCH_BOOST}) OR body ||| ${index}::text)"
         )
-    return " OR ".join(clauses)
+    return f"({' OR '.join(clauses)})"
 
 
 def _body_preview(body: str, *, query: str, max_chars: int = DEFAULT_PREVIEW_CHARS) -> str:
@@ -421,8 +434,40 @@ def _google_doc_summary(row: Any) -> dict[str, Any]:
     }
 
 
+def _granola_doc_summary(row: Any) -> dict[str, Any]:
+    """Return the common result shape for user-visible Granola notes."""
+    metadata = _as_dict(_row_value(row, "metadata", {}))
+    metadata.update(
+        {
+            "note_id": str(_row_value(row, "note_id", "")),
+            "owner_id": str(_row_value(row, "owner_id", "")),
+            "owner_email": str(_row_value(row, "owner_email", "")),
+            "attendee_labels": list(_row_value(row, "attendee_labels", []) or []),
+        }
+    )
+    return {
+        "document_id": str(_row_value(row, "document_id", "")),
+        "source": GRANOLA_SOURCE,
+        "source_type": GRANOLA_SOURCE_TYPE,
+        "source_document_id": str(_row_value(row, "note_id", "")),
+        "source_chunk_id": "",
+        "parent_document_id": None,
+        "title": str(_row_value(row, "title", "")),
+        "url": str(_row_value(row, "url", "")),
+        "author_name": str(
+            _row_value(row, "owner_name", "")
+            or _row_value(row, "owner_email", "")
+            or _row_value(row, "owner_id", "")
+        ),
+        "access_scope": "granola_note",
+        "occurred_at": _isoformat(_row_value(row, "occurred_at")),
+        "source_updated_at": _isoformat(_row_value(row, "source_updated_at")),
+        "metadata": metadata,
+    }
+
+
 def _dm_document_summary(row: Any) -> dict[str, Any]:
-    """Return the common metadata we expose for Slack DM context records."""
+    """Return metadata for user-scoped Slack conversation context records."""
     metadata = _as_dict(_row_value(row, "metadata", {}))
     conversation_type = str(_row_value(row, "conversation_type", ""))
     conversation_id = str(_row_value(row, "conversation_id", ""))
@@ -439,7 +484,11 @@ def _dm_document_summary(row: Any) -> dict[str, Any]:
         "title": str(_row_value(row, "title", "")),
         "url": str(_row_value(row, "permalink", "")),
         "author_name": user_id or bot_id,
-        "access_scope": "slack_dm",
+        "access_scope": (
+            "slack_private_channel"
+            if conversation_type == "private_channel"
+            else "slack_dm"
+        ),
         "occurred_at": _isoformat(_row_value(row, "occurred_at")),
         "source_updated_at": _isoformat(_row_value(row, "source_updated_at")),
         "conversation_id": conversation_id,
@@ -487,7 +536,16 @@ def _include_slack_dms_source(source: str | None, source_type: str | None) -> bo
         SLACK_DM_SOURCE,
         "slack_im",
         "slack_mpim",
+        "slack_private_channel",
         "slack_dm_conversation",
+    )
+
+
+def _include_granola_source(source: str | None, source_type: str | None) -> bool:
+    return (source is None or source == GRANOLA_SOURCE) and source_type in (
+        None,
+        GRANOLA_SOURCE,
+        GRANOLA_SOURCE_TYPE,
     )
 
 
@@ -501,11 +559,61 @@ def _company_context_filters_for_source(
     return source, source_type
 
 
+def _hybrid_candidate_limit(limit: int) -> int:
+    """Retrieve enough candidates for rank fusion without exceeding tool bounds."""
+    return min(MAX_SEARCH_LIMIT, max(limit, MIN_HYBRID_CANDIDATE_LIMIT))
+
+
+def _reciprocal_rank_fusion(
+    keyword_results: list[dict[str, Any]],
+    vector_results: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Fuse lexical and semantic ranks with equal-weight reciprocal rank fusion."""
+    fused: dict[str, dict[str, Any]] = {}
+
+    for lane, results in (("keyword", keyword_results), ("vector", vector_results)):
+        for rank, result in enumerate(results, start=1):
+            document_id = str(result.get("document_id") or "")
+            if not document_id:
+                continue
+            item = fused.setdefault(document_id, dict(result))
+            item["fusion_score"] = float(item.get("fusion_score") or 0.0) + 1.0 / (RRF_K + rank)
+            item[f"{lane}_rank"] = rank
+            if lane == "keyword":
+                item["keyword_score"] = float(result.get("score") or 0.0)
+            else:
+                item["vector_similarity"] = float(result.get("vector_similarity") or 0.0)
+
+    for item in fused.values():
+        lanes = [lane for lane in ("keyword", "vector") if f"{lane}_rank" in item]
+        item["lane"] = "hybrid" if len(lanes) == 2 else lanes[0]
+        item["matched_lanes"] = lanes
+        item["score"] = float(item["fusion_score"])
+
+    return sorted(
+        fused.values(),
+        key=lambda item: (
+            float(item.get("fusion_score") or 0.0),
+            str(item.get("source_updated_at") or ""),
+            str(item.get("document_id") or ""),
+        ),
+        reverse=True,
+    )[:limit]
+
+
 class CompanyContextClient:
     """Query the shared company context document table."""
 
-    def __init__(self, database_url: str | None = None) -> None:
+    def __init__(
+        self,
+        database_url: str | None = None,
+        *,
+        embeddings_client: Any | None = None,
+    ) -> None:
         self._database_url = (database_url or _scoped_database_url()).strip()
+        self._embeddings_client = embeddings_client
 
     def _require_database_url(self) -> str:
         if not self._database_url:
@@ -518,11 +626,111 @@ class CompanyContextClient:
             command_timeout=30,
         )
 
+    async def _query_embedding_async(self, query: str) -> str:
+        client = self._embeddings_client
+        if client is None:
+            api_key = secret(OPENAI_API_KEY_ENV, default="").strip()
+            if not api_key:
+                raise RuntimeError(f"{OPENAI_API_KEY_ENV} is not configured")
+            from openai import AsyncOpenAI
+
+            client = AsyncOpenAI(api_key=api_key)
+            self._embeddings_client = client
+
+        response = await client.embeddings.create(
+            model=self._embeddings_model(),
+            input=query,
+            dimensions=EMBEDDINGS_DIMENSIONS,
+            encoding_format="float",
+        )
+        data = list(response.data or [])
+        if not data or not data[0].embedding:
+            raise RuntimeError("OpenAI returned no query embedding")
+        return json.dumps(data[0].embedding, separators=(",", ":"))
+
+    @staticmethod
+    def _embeddings_model() -> str:
+        return (
+            os.getenv(  # noqa: TID251 - non-secret model configuration
+                COMPANY_CONTEXT_EMBEDDINGS_MODEL_ENV,
+                DEFAULT_EMBEDDINGS_MODEL,
+            ).strip()
+            or DEFAULT_EMBEDDINGS_MODEL
+        )
+
+    async def _query_async(
+        self,
+        *,
+        sql: str,
+        limit: int,
+        timeout_seconds: int,
+    ) -> dict[str, Any]:
+        conn = await self._connect()
+        try:
+            rows = []
+            async with conn.transaction(readonly=True):
+                await conn.execute(
+                    "SELECT set_config('statement_timeout', $1, true)",
+                    f"{timeout_seconds}s",
+                )
+                cursor = conn.cursor(
+                    sql,
+                    prefetch=min(limit + 1, 100),
+                    timeout=timeout_seconds,
+                )
+                async for row in cursor:
+                    rows.append(row)
+                    if len(rows) > limit:
+                        break
+
+            truncated = len(rows) > limit
+            visible_rows = rows[:limit]
+            columns = list(visible_rows[0].keys()) if visible_rows else []
+            return {
+                "status": "ok",
+                "row_count": len(visible_rows),
+                "limit": limit,
+                "truncated": truncated,
+                "columns": columns,
+                "rows": [dict(row) for row in visible_rows],
+            }
+        finally:
+            await conn.close()
+
+    def query(
+        self,
+        sql: str,
+        limit: int = DEFAULT_QUERY_LIMIT,
+        timeout_seconds: int = DEFAULT_QUERY_TIMEOUT_SECONDS,
+    ) -> dict:
+        """Run one read-only SQL query against the scoped company-context database."""
+        normalized_sql = sql.strip()
+        if not normalized_sql:
+            return {"status": "error", "error": "sql cannot be empty"}
+        if normalized_sql.endswith(";"):
+            normalized_sql = normalized_sql[:-1].rstrip()
+
+        try:
+            return asyncio.run(
+                self._query_async(
+                    sql=normalized_sql,
+                    limit=_clamp(limit, minimum=1, maximum=MAX_QUERY_LIMIT),
+                    timeout_seconds=_clamp(
+                        timeout_seconds,
+                        minimum=1,
+                        maximum=MAX_QUERY_TIMEOUT_SECONDS,
+                    ),
+                )
+            )
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
+
     async def _search_async(
         self,
         *,
         query: str,
         limit: int,
+        hybrid: bool,
         source: str | None,
         source_type: str | None,
         occurred_after: datetime | None,
@@ -530,10 +738,15 @@ class CompanyContextClient:
     ) -> dict[str, Any]:
         conn = await self._connect()
         try:
+            embeddings_available = hybrid and _env_flag_enabled(
+                COMPANY_CONTEXT_EMBEDDINGS_ENABLED_ENV, default=False
+            )
+            candidate_limit = _hybrid_candidate_limit(limit) if embeddings_available else limit
             terms = _search_terms(query)
             search_terms = [query, *terms]
             results = []
             google_docs_error = None
+            granola_error = None
             company_source, company_source_type = _company_context_filters_for_source(
                 source,
                 source_type,
@@ -584,7 +797,7 @@ class CompanyContextClient:
                 company_source_type,
                 occurred_after,
                 occurred_before,
-                limit,
+                candidate_limit,
             )
             for row in rows:
                 result = _document_summary(row)
@@ -603,7 +816,7 @@ class CompanyContextClient:
                         conn,
                         search_terms=search_terms,
                         term_count=len(terms),
-                        limit=limit,
+                        limit=candidate_limit,
                         modified_after=occurred_after,
                         modified_before=occurred_before,
                     )
@@ -620,6 +833,29 @@ class CompanyContextClient:
                 except asyncpg.UndefinedTableError as exc:
                     google_docs_error = str(exc)
 
+            if _include_granola_source(source, source_type):
+                try:
+                    granola_rows = await self._search_granola_async(
+                        conn,
+                        search_terms=search_terms,
+                        term_count=len(terms),
+                        limit=candidate_limit,
+                        occurred_after=occurred_after,
+                        occurred_before=occurred_before,
+                    )
+                    for row in granola_rows:
+                        result = _granola_doc_summary(row)
+                        result["score"] = float(_row_value(row, "score", 0.0) or 0.0)
+                        result["preview"] = _body_preview(
+                            str(_row_value(row, "body", "") or ""),
+                            query=query,
+                        )
+                        result["lane"] = "indexed"
+                        result["result_type"] = GRANOLA_SOURCE_TYPE
+                        results.append(result)
+                except asyncpg.UndefinedTableError as exc:
+                    granola_error = str(exc)
+
             results.sort(
                 key=lambda item: (
                     float(item.get("score") or 0.0),
@@ -627,7 +863,36 @@ class CompanyContextClient:
                 ),
                 reverse=True,
             )
-            results = results[:limit]
+            keyword_results = results[:candidate_limit]
+            vector_results: list[dict[str, Any]] = []
+            if embeddings_available:
+                try:
+                    query_embedding = await self._query_embedding_async(query)
+                    vector_results = await self._search_vectors_async(
+                        conn,
+                        query=query,
+                        query_embedding=query_embedding,
+                        limit=candidate_limit,
+                        source=source,
+                        source_type=source_type,
+                        occurred_after=occurred_after,
+                        occurred_before=occurred_before,
+                    )
+                except Exception:
+                    # Embedding generation and the experimental vector schema are
+                    # both optional. Any incompatibility falls back to lexical.
+                    vector_results = []
+
+            if vector_results:
+                results = _reciprocal_rank_fusion(
+                    keyword_results,
+                    vector_results,
+                    limit=limit,
+                )
+                search_mode = "hybrid"
+            else:
+                results = keyword_results[:limit]
+                search_mode = "keyword"
 
             _emit_company_context_lookup_metrics(
                 status="ok",
@@ -645,12 +910,16 @@ class CompanyContextClient:
                 "source_type": source_type,
                 "occurred_after": _isoformat(occurred_after),
                 "occurred_before": _isoformat(occurred_before),
+                "search_mode": search_mode,
                 "count": len(results),
                 "indexed_count": len(results),
+                "vector_count": len(vector_results),
                 "results": results,
             }
             if google_docs_error:
                 response["google_docs_error"] = google_docs_error
+            if granola_error:
+                response["granola_error"] = granola_error
             return response
         finally:
             await conn.close()
@@ -701,6 +970,245 @@ class CompanyContextClient:
             modified_before,
             limit,
         )
+
+    async def _search_granola_async(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        search_terms: list[str],
+        term_count: int,
+        limit: int,
+        occurred_after: datetime | None,
+        occurred_before: datetime | None,
+    ) -> list[Any]:
+        occurred_after_param = len(search_terms) + 1
+        occurred_before_param = len(search_terms) + 2
+        limit_param = len(search_terms) + 3
+        return await conn.fetch(
+            f"""
+            SELECT
+                document_id,
+                note_id,
+                title,
+                body,
+                url,
+                owner_id,
+                owner_email,
+                owner_name,
+                access_emails,
+                attendee_labels,
+                occurred_at,
+                source_updated_at,
+                metadata,
+                paradedb.score(document_id) AS score
+            FROM granola_context_documents
+            WHERE {_search_where_clause(term_count)}
+              AND (${occurred_after_param}::timestamptz IS NULL
+                   OR occurred_at >= ${occurred_after_param})
+              AND (${occurred_before_param}::timestamptz IS NULL
+                   OR occurred_at < ${occurred_before_param})
+            ORDER BY paradedb.score(document_id) DESC,
+                     occurred_at DESC NULLS LAST,
+                     source_updated_at DESC NULLS LAST,
+                     document_id ASC
+            LIMIT ${limit_param}
+            """,
+            *search_terms,
+            occurred_after,
+            occurred_before,
+            limit,
+        )
+
+    async def _search_vectors_async(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        query: str,
+        query_embedding: str,
+        limit: int,
+        source: str | None,
+        source_type: str | None,
+        occurred_after: datetime | None,
+        occurred_before: datetime | None,
+    ) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        company_source, company_source_type = _company_context_filters_for_source(
+            source,
+            source_type,
+        )
+        rows = await conn.fetch(
+            """
+            SELECT
+                d.document_id,
+                d.source,
+                d.source_type,
+                d.source_document_id,
+                d.source_chunk_id,
+                d.parent_document_id,
+                d.title,
+                d.url,
+                d.author_name,
+                d.access_scope,
+                d.body,
+                d.occurred_at,
+                d.source_updated_at,
+                d.metadata,
+                1 - (e.embedding <=> $1::vector) AS vector_similarity
+            FROM company_context_document_embeddings e
+            JOIN company_context_documents d
+              ON d.document_id = e.company_context_document_id
+            WHERE e.embedding IS NOT NULL
+              AND NOT e.embedding_failed
+              AND e.model = $2
+              AND ($3::text IS NULL OR d.source = $3)
+              AND ($4::text IS NULL OR d.source_type = $4)
+              AND ($5::timestamptz IS NULL OR d.occurred_at >= $5)
+              AND ($6::timestamptz IS NULL OR d.occurred_at < $6)
+            ORDER BY e.embedding <=> $1::vector,
+                     d.source_updated_at DESC NULLS LAST,
+                     d.document_id ASC
+            LIMIT $7
+            """,
+            query_embedding,
+            self._embeddings_model(),
+            company_source,
+            company_source_type,
+            occurred_after,
+            occurred_before,
+            limit,
+        )
+        for row in rows:
+            result = _document_summary(row)
+            result["vector_similarity"] = float(_row_value(row, "vector_similarity", 0.0) or 0.0)
+            result["score"] = result["vector_similarity"]
+            result["preview"] = _body_preview(
+                str(_row_value(row, "body", "") or ""),
+                query=query,
+            )
+            result["lane"] = "vector"
+            result["result_type"] = str(result["source_type"] or "indexed_document")
+            results.append(result)
+
+        if _include_google_docs_source(source, source_type):
+            try:
+                google_rows = await conn.fetch(
+                    """
+                    SELECT
+                        d.document_id,
+                        d.file_id,
+                        d.chunk_id,
+                        d.title,
+                        d.body,
+                        d.url,
+                        d.provider_author_id,
+                        d.provider_author_name,
+                        d.mime_type,
+                        d.drive_id,
+                        d.source_created_at,
+                        d.source_modified_at,
+                        d.metadata,
+                        1 - (e.embedding <=> $1::vector) AS vector_similarity
+                    FROM company_context_document_embeddings e
+                    JOIN google_docs_context_documents d
+                      ON d.document_id = e.google_docs_context_document_id
+                    WHERE e.embedding IS NOT NULL
+                      AND NOT e.embedding_failed
+                      AND e.model = $2
+                      AND ($3::timestamptz IS NULL OR d.source_modified_at >= $3)
+                      AND ($4::timestamptz IS NULL OR d.source_modified_at < $4)
+                    ORDER BY e.embedding <=> $1::vector,
+                             d.source_modified_at DESC NULLS LAST,
+                             d.document_id ASC
+                    LIMIT $5
+                    """,
+                    query_embedding,
+                    self._embeddings_model(),
+                    occurred_after,
+                    occurred_before,
+                    limit,
+                )
+                for row in google_rows:
+                    result = _google_doc_summary(row)
+                    result["vector_similarity"] = float(
+                        _row_value(row, "vector_similarity", 0.0) or 0.0
+                    )
+                    result["score"] = result["vector_similarity"]
+                    result["preview"] = _body_preview(
+                        str(_row_value(row, "body", "") or ""),
+                        query=query,
+                    )
+                    result["lane"] = "vector"
+                    result["result_type"] = GOOGLE_DOCS_SOURCE_TYPE
+                    results.append(result)
+            except Exception:
+                # Optional projections may lag the embedding experiment schema.
+                pass
+
+        if _include_granola_source(source, source_type):
+            try:
+                granola_rows = await conn.fetch(
+                    """
+                    SELECT
+                        d.document_id,
+                        d.note_id,
+                        d.title,
+                        d.body,
+                        d.url,
+                        d.owner_id,
+                        d.owner_email,
+                        d.owner_name,
+                        d.access_emails,
+                        d.attendee_labels,
+                        d.occurred_at,
+                        d.source_updated_at,
+                        d.metadata,
+                        1 - (e.embedding <=> $1::vector) AS vector_similarity
+                    FROM company_context_document_embeddings e
+                    JOIN granola_context_documents d
+                      ON d.document_id = e.granola_context_document_id
+                    WHERE e.embedding IS NOT NULL
+                      AND NOT e.embedding_failed
+                      AND e.model = $2
+                      AND ($3::timestamptz IS NULL OR d.occurred_at >= $3)
+                      AND ($4::timestamptz IS NULL OR d.occurred_at < $4)
+                    ORDER BY e.embedding <=> $1::vector,
+                             d.occurred_at DESC NULLS LAST,
+                             d.source_updated_at DESC NULLS LAST,
+                             d.document_id ASC
+                    LIMIT $5
+                    """,
+                    query_embedding,
+                    self._embeddings_model(),
+                    occurred_after,
+                    occurred_before,
+                    limit,
+                )
+                for row in granola_rows:
+                    result = _granola_doc_summary(row)
+                    result["vector_similarity"] = float(
+                        _row_value(row, "vector_similarity", 0.0) or 0.0
+                    )
+                    result["score"] = result["vector_similarity"]
+                    result["preview"] = _body_preview(
+                        str(_row_value(row, "body", "") or ""),
+                        query=query,
+                    )
+                    result["lane"] = "vector"
+                    result["result_type"] = GRANOLA_SOURCE_TYPE
+                    results.append(result)
+            except Exception:
+                # Optional projections may lag the embedding experiment schema.
+                pass
+
+        results.sort(
+            key=lambda item: (
+                float(item.get("vector_similarity") or 0.0),
+                str(item.get("source_updated_at") or ""),
+                str(item.get("document_id") or ""),
+            ),
+            reverse=True,
+        )
+        return results[:limit]
 
     async def _latest_date_for_connection(
         self,
@@ -773,6 +1281,31 @@ class CompanyContextClient:
             "latest_occurred_at": _isoformat(row["latest_occurred_at"]),
         }
 
+    async def _latest_granola_for_connection(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        source: str | None,
+        source_type: str | None,
+    ) -> dict[str, Any]:
+        if not _include_granola_source(source, source_type):
+            return self._empty_latest_date_result(source=source, source_type=source_type)
+        row = await conn.fetchrow(
+            """
+            SELECT
+                MAX(COALESCE(source_updated_at, occurred_at)) AS latest_date,
+                MAX(source_updated_at) AS latest_source_updated_at,
+                MAX(occurred_at) AS latest_occurred_at,
+                COUNT(*)::bigint AS document_count
+            FROM granola_context_documents
+            """
+        )
+        return self._latest_date_result_from_row(
+            row,
+            source=source,
+            source_type=source_type,
+        )
+
     async def _latest_slack_dms_for_connection(
         self,
         conn: asyncpg.Connection,
@@ -784,8 +1317,14 @@ class CompanyContextClient:
             return self._empty_latest_date_result(source=source, source_type=source_type)
 
         message_conversation_type = None
-        include_messages = source_type in (None, SLACK_DM_SOURCE, "slack_im", "slack_mpim")
-        if source_type in ("slack_im", "slack_mpim"):
+        include_messages = source_type in (
+            None,
+            SLACK_DM_SOURCE,
+            "slack_im",
+            "slack_mpim",
+            "slack_private_channel",
+        )
+        if source_type in ("slack_im", "slack_mpim", "slack_private_channel"):
             message_conversation_type = source_type.removeprefix("slack_")
         include_conversations = source_type in (None, SLACK_DM_SOURCE, "slack_dm_conversation")
 
@@ -801,7 +1340,7 @@ class CompanyContextClient:
                         MAX(source_updated_at) AS latest_source_updated_at,
                         MAX(occurred_at) AS latest_occurred_at,
                         COUNT(*)::bigint AS document_count
-                    FROM slack_dm_context_documents
+                    FROM slack_private_context_documents
                     WHERE ($1::text IS NULL OR conversation_type = $1)
                     """,
                     message_conversation_type,
@@ -821,7 +1360,7 @@ class CompanyContextClient:
                         MAX(source_updated_at) AS latest_source_updated_at,
                         MAX(last_seen_at) AS latest_occurred_at,
                         COUNT(*)::bigint AS document_count
-                    FROM slack_dm_conversation_context_documents
+                    FROM slack_private_conversation_context_documents
                     """,
                 )
                 conversations = self._latest_date_result_from_row(
@@ -880,6 +1419,7 @@ class CompanyContextClient:
         indexed: dict[str, Any],
         google_docs: dict[str, Any],
         slack_dms: dict[str, Any] | None = None,
+        granola: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         def latest(values: list[str | None]) -> str | None:
             present = [value for value in values if value]
@@ -888,6 +1428,8 @@ class CompanyContextClient:
         latest_results = [indexed, google_docs]
         if slack_dms is not None:
             latest_results.append(slack_dms)
+        if granola is not None:
+            latest_results.append(granola)
 
         return {
             "status": "ok",
@@ -913,6 +1455,7 @@ class CompanyContextClient:
         source_type: str | None = None,
         occurred_after: str | datetime | None = None,
         occurred_before: str | datetime | None = None,
+        hybrid: bool = True,
     ) -> dict:
         """Search indexed company context documents and return candidate document ids."""
         normalized_query = query.strip()
@@ -935,6 +1478,7 @@ class CompanyContextClient:
                 self._search_async(
                     query=normalized_query,
                     limit=_clamp(limit, minimum=1, maximum=MAX_SEARCH_LIMIT),
+                    hybrid=hybrid,
                     source=normalized_source,
                     source_type=normalized_source_type,
                     occurred_after=parsed_occurred_after,
@@ -980,7 +1524,7 @@ class CompanyContextClient:
                     participant_count,
                     metadata,
                     paradedb.score(document_id) AS score
-                FROM slack_dm_conversation_context_documents
+                FROM slack_private_conversation_context_documents
                 WHERE {_search_where_clause(len(terms))}
                 ORDER BY paradedb.score(document_id) DESC,
                          last_seen_at DESC NULLS LAST,
@@ -1075,7 +1619,7 @@ class CompanyContextClient:
                     source_updated_at,
                     metadata,
                     paradedb.score(document_id) AS score
-                FROM slack_dm_context_documents
+                FROM slack_private_context_documents
                 WHERE {_search_where_clause(len(terms))}
                   AND (${conversation_id_param}::text IS NULL
                        OR conversation_id = ${conversation_id_param})
@@ -1127,7 +1671,7 @@ class CompanyContextClient:
         occurred_after: str | datetime | None = None,
         occurred_before: str | datetime | None = None,
     ) -> dict:
-        """Search Slack DM and group DM context visible to the current Slack user."""
+        """Search private Slack context visible to the current Slack user."""
         normalized_query = query.strip()
         if not normalized_query:
             return {"status": "error", "error": "query cannot be empty"}
@@ -1167,6 +1711,7 @@ class CompanyContextClient:
         try:
             results = []
             google_docs_error = None
+            granola_error = None
             company_source, company_source_type = _company_context_filters_for_source(
                 source,
                 source_type,
@@ -1227,6 +1772,23 @@ class CompanyContextClient:
                         results.append(result)
                 except asyncpg.UndefinedTableError as exc:
                     google_docs_error = str(exc)
+            if _include_granola_source(source, source_type):
+                try:
+                    granola_rows = await self._list_granola_async(
+                        conn,
+                        limit=limit,
+                        occurred_after=occurred_after,
+                        occurred_before=occurred_before,
+                    )
+                    for row in granola_rows:
+                        result = _granola_doc_summary(row)
+                        result["preview"] = _body_preview(
+                            str(_row_value(row, "body", "") or ""),
+                            query="",
+                        )
+                        results.append(result)
+                except asyncpg.UndefinedTableError as exc:
+                    granola_error = str(exc)
             results.sort(
                 key=lambda item: (
                     str(item.get("occurred_at") or ""),
@@ -1246,6 +1808,8 @@ class CompanyContextClient:
             }
             if google_docs_error:
                 response["google_docs_error"] = google_docs_error
+            if granola_error:
+                response["granola_error"] = granola_error
             return response
         finally:
             await conn.close()
@@ -1283,6 +1847,42 @@ class CompanyContextClient:
             """,
             modified_after,
             modified_before,
+            limit,
+        )
+
+    async def _list_granola_async(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        limit: int,
+        occurred_after: datetime | None,
+        occurred_before: datetime | None,
+    ) -> list[Any]:
+        return await conn.fetch(
+            """
+            SELECT
+                document_id,
+                note_id,
+                title,
+                body,
+                url,
+                owner_id,
+                owner_email,
+                owner_name,
+                access_emails,
+                attendee_labels,
+                occurred_at,
+                source_updated_at,
+                metadata
+            FROM granola_context_documents
+            WHERE ($1::timestamptz IS NULL OR occurred_at >= $1)
+              AND ($2::timestamptz IS NULL OR occurred_at < $2)
+            ORDER BY occurred_at DESC NULLS LAST, source_updated_at DESC NULLS LAST,
+                     document_id ASC
+            LIMIT $3
+            """,
+            occurred_after,
+            occurred_before,
             limit,
         )
 
@@ -1343,12 +1943,20 @@ class CompanyContextClient:
                 source=source,
                 source_type=source_type,
             )
+            granola = self._empty_latest_date_result(source=source, source_type=source_type)
+            with suppress(asyncpg.UndefinedTableError):
+                granola = await self._latest_granola_for_connection(
+                    conn,
+                    source=source,
+                    source_type=source_type,
+                )
             return self._merge_latest_dates(
                 source=source,
                 source_type=source_type,
                 indexed=indexed,
                 google_docs=google_docs,
                 slack_dms=slack_dms,
+                granola=granola,
             )
         finally:
             await conn.close()
@@ -1468,6 +2076,16 @@ class CompanyContextClient:
                     google_doc = None
                 if google_doc is not None:
                     return google_doc
+                try:
+                    granola_doc = await self._read_granola_doc_async(
+                        conn,
+                        document_id,
+                        max_chars,
+                    )
+                except asyncpg.UndefinedTableError:
+                    granola_doc = None
+                if granola_doc is not None:
+                    return granola_doc
                 return {
                     "status": "error",
                     "error": f"document not found: {document_id}",
@@ -1530,6 +2148,48 @@ class CompanyContextClient:
         return {
             "status": "ok",
             **_google_doc_summary(row),
+            "chars": len(content),
+            "total_chars": len(body),
+            "truncated": truncated,
+            "content": content,
+        }
+
+    async def _read_granola_doc_async(
+        self,
+        conn: asyncpg.Connection,
+        document_id: str,
+        max_chars: int | None,
+    ) -> dict[str, Any] | None:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                document_id,
+                note_id,
+                title,
+                body,
+                url,
+                owner_id,
+                owner_email,
+                owner_name,
+                access_emails,
+                attendee_labels,
+                occurred_at,
+                source_updated_at,
+                metadata
+            FROM granola_context_documents
+            WHERE document_id = $1
+            """,
+            document_id,
+        )
+        if not row:
+            return None
+
+        body = str(row["body"] or "")
+        content = body if max_chars is None else body[:max_chars]
+        truncated = max_chars is not None and len(body) > max_chars
+        return {
+            "status": "ok",
+            **_granola_doc_summary(row),
             "chars": len(content),
             "total_chars": len(body),
             "truncated": truncated,

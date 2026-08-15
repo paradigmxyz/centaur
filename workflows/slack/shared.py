@@ -75,7 +75,7 @@ def attachment_max_bytes() -> int:
 
 
 class SlackSyncClient(Protocol):
-    """Small protocol for the Slack client methods used by Slack ETL workflows."""
+    """Small protocol for the direct Slack client used by Slack ETL workflows."""
 
     def _etl_access_mode(self) -> str: ...
 
@@ -713,7 +713,7 @@ class SlackEtlRateLimitError(RuntimeError):
 
 
 class SlackEtlClient:
-    """Slack user-token client used only by Slack ETL workflows."""
+    """Direct Slack user-token client used only by Slack ETL workflows."""
 
     _MAX_PAGE_SIZE = 200
     _DEFAULT_API_TIMEOUT_SECONDS = 8

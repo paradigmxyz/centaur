@@ -7,6 +7,7 @@ repository.workspace = true
 
 [dependencies]
 absurd-sdk.workspace = true
+centaur-iron-control.workspace = true
 centaur-session-core.workspace = true
 centaur-session-runtime.workspace = true
 centaur-session-sqlx.workspace = true

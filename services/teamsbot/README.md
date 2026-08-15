@@ -40,9 +40,8 @@ Common environment variables:
   crash-safe recovery leases.
 - `TEAMSBOT_STATE_KEY_PREFIX`: Postgres state namespace. Defaults to
   `centaur-teamsbot`.
-- `CENTAUR_API_URL`, `TEAMSBOT_API_KEY`, `CENTAUR_API_KEY`: Centaur session API
-  settings. `CENTAUR_API_URL` defaults to `http://127.0.0.1:8080`.
-  `TEAMSBOT_API_KEY` is preferred when both API-key env vars are set.
+- `CENTAUR_API_URL`, `TEAMSBOT_API_KEY`: Centaur session API settings.
+  `CENTAUR_API_URL` defaults to `http://127.0.0.1:8080`.
 - `CENTAUR_REQUEST_MAX_RETRIES`, `CENTAUR_REQUEST_RETRY_DELAY_MS`: retry policy
   for transient session API failures.
 - `TEAMS_BOT_APP_ID`, `TEAMS_BOT_APP_PASSWORD`, `TEAMS_BOT_APP_TENANT_ID`:

@@ -86,16 +86,18 @@ spec:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "teamsbot") | nindent 14 }}
 {{- end }}
-{{- if $console.enabled }}
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console") | nindent 14 }}
-{{- if $console.worker.enabled }}
         # console Solid Queue worker (bin/jobs) reaches the app + queue DBs.
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-worker") | nindent 14 }}
-{{- end }}
+{{- if $console.sqlExporter.enabled }}
+        # The Console SQL Exporter reads queue state from the bundled Postgres.
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-sql-exporter") | nindent 14 }}
 {{- end }}
         # iron-proxy pods forward the tool-server sidecar's pool to Postgres
         # (the sidecar reaches the core DB through the per-sandbox proxy, not
@@ -182,18 +184,14 @@ spec:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "teamsbot") | nindent 14 }}
 {{- end }}
-{{- if $console.enabled }}
         # Console pages call api-rs for admin-backed views such as ETLs.
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console") | nindent 14 }}
-{{- if $console.worker.enabled }}
         # Console background jobs call api-rs for sync ingestion/checkpoints.
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-worker") | nindent 14 }}
-{{- end }}
-{{- end }}
         # New sandboxes call back into the control plane only when their
         # principal has the API server sandbox capability.
         - podSelector:
@@ -275,6 +273,32 @@ spec:
 {{- end }}
 ---
 {{- end }}
+{{- if .Values.networkPolicy.otlpEgress.enabled }}
+# Pods with observability enabled may call the configured in-cluster OTLP
+# collector. Without the centaur.ai/observability-enabled=true label, default
+# deny blocks access to Laminar or other OTLP endpoints.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "centaur.fullname" . }}-otlp-egress
+  labels:
+{{ include "centaur.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      centaur.ai/observability-enabled: "true"
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ required "networkPolicy.otlpEgress.namespace is required when networkPolicy.otlpEgress.enabled" .Values.networkPolicy.otlpEgress.namespace | quote }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.otlpEgress.port }}
+---
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -309,7 +333,6 @@ spec:
           port: {{ .Values.ironProxy.service.pgPort }}
         - protocol: TCP
           port: {{ .Values.ironProxy.service.managementPort }}
-{{- if $console.enabled }}
     # console control plane: register principals/roles/grants and per-sandbox proxies.
     - to:
         - podSelector:
@@ -318,19 +341,6 @@ spec:
       ports:
         - protocol: TCP
           port: {{ $console.service.httpPort }}
-{{- end }}
-{{- if .Values.networkPolicy.otlpEgress.enabled }}
-    # OTLP trace export (e.g. Laminar). The collector lives in another
-    # namespace; without this rule api-rs's own spans die with
-    # BatchSpanProcessor "network error" export failures.
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: {{ required "networkPolicy.otlpEgress.namespace is required when networkPolicy.otlpEgress.enabled" .Values.networkPolicy.otlpEgress.namespace | quote }}
-      ports:
-        - protocol: TCP
-          port: {{ .Values.networkPolicy.otlpEgress.port }}
-{{- end }}
     - ports:
         - protocol: TCP
           port: 443

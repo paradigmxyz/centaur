@@ -2,6 +2,12 @@ import type { GitHubAdapter } from "@chat-adapter/github";
 import type { StateAdapter } from "chat";
 import { backgroundWaitUntil } from "./context";
 import { runTurnStream } from "./turn";
+import {
+  fetchCiEvaluation,
+  maybeEmitReviewSubmitted,
+  prepareCiCompleted,
+  type CiEvaluation,
+} from "./workflow-events";
 import type {
   ForwardSessionInput,
   GithubbotApiMessage,
@@ -36,59 +42,9 @@ const STATE_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 const CLAIM_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_CI_FIX_MAX_ATTEMPTS = 3;
 
-// CI conclusions that count as a hard, fixable failure (neutral/skipped/success
-// and the in-progress states are not failures).
-const FAILED_CONCLUSIONS = new Set([
-  "action_required",
-  "cancelled",
-  "failure",
-  "stale",
-  "timed_out",
-]);
-
 // ---------------------------------------------------------------------------
 // Pure decision helpers (unit-tested without GitHub).
 // ---------------------------------------------------------------------------
-
-export type CiCheck = { status: string; conclusion: string | null; name: string };
-export type CiStatus = { state: string; context: string };
-
-export type CiEvaluation = {
-  settled: boolean;
-  failed: boolean;
-  failingNames: string[];
-};
-
-/**
- * Decide whether all CI for a SHA is finished, and whether it's red. "Settled"
- * means no check run is still queued/in-progress and no legacy commit status is
- * pending — the point the user wants us to wait for before acting.
- */
-export function evaluateCi(
-  checks: CiCheck[],
-  statuses: CiStatus[],
-): CiEvaluation {
-  const anyCheckPending = checks.some((c) => c.status !== "completed");
-  const anyStatusPending = statuses.some((s) => s.state === "pending");
-  const failingChecks = checks.filter(
-    (c) =>
-      c.status === "completed" &&
-      c.conclusion !== null &&
-      FAILED_CONCLUSIONS.has(c.conclusion),
-  );
-  const failingStatuses = statuses.filter(
-    (s) => s.state === "failure" || s.state === "error",
-  );
-  const failingNames = [
-    ...failingChecks.map((c) => c.name),
-    ...failingStatuses.map((s) => s.context),
-  ];
-  return {
-    settled: !anyCheckPending && !anyStatusPending,
-    failed: failingNames.length > 0,
-    failingNames,
-  };
-}
 
 /**
  * A PR is bot-owned when the bot is one of its assignees. Ownership is purely an
@@ -374,6 +330,26 @@ export async function handleReviewEvent(
   const reviewer = stringValue(isRecord(reviewNode.user) ? reviewNode.user.login : undefined);
   const reviewState = stringValue(reviewNode.state)?.toLowerCase();
 
+  // A review is tied to review.commit_id. The PR head can advance before this
+  // webhook is handled, so a live PR lookup would correlate the review to the
+  // wrong push.
+  const reviewedHeadSha =
+    stringValue(reviewNode.commit_id) ??
+    stringValue(isRecord(prNode.head) ? prNode.head.sha : undefined);
+  if (reviewedHeadSha) {
+    backgroundWaitUntil(
+      maybeEmitReviewSubmitted(
+        ctx,
+        repo,
+        number,
+        reviewedHeadSha,
+        reviewer,
+        reviewState,
+        reviewId,
+      ),
+    );
+  }
+
   const pr = await fetchPr(ctx, repo.owner, repo.repo, number);
   if (!pr || !owns(ctx, pr)) return;
   // Never act on the bot's own review (it shouldn't review its own PRs anyway).
@@ -409,12 +385,22 @@ export async function handleCiEvent(
   if (!repo) return;
   const target = ciTarget(eventType, payload);
   if (!target) return;
+  const { emission, evaluation } = await prepareCiCompleted(
+    ctx,
+    eventType,
+    repo,
+    payload,
+    target.headSha,
+  );
+  if (emission) backgroundWaitUntil(emission);
   const prNumbers =
     target.prNumbers.length > 0
       ? target.prNumbers
       : await fetchPrNumbersForCommit(ctx, repo.owner, repo.repo, target.headSha);
   await Promise.all(
-    prNumbers.map((number) => processCi(ctx, repo.owner, repo.repo, number, target.headSha)),
+    prNumbers.map((number) =>
+      processCi(ctx, repo.owner, repo.repo, number, target.headSha, false, evaluation),
+    ),
   );
 }
 
@@ -425,14 +411,16 @@ async function processCi(
   number: number,
   headSha: string,
   force = false,
+  knownEvaluation?: CiEvaluation | null,
 ): Promise<void> {
   const pr = await fetchPr(ctx, owner, repo, number);
   if (!pr || !owns(ctx, pr)) return;
   // Ignore CI for a SHA that's already been superseded by a newer push.
   if (pr.headSha !== headSha) return;
 
-  const evaluation = await fetchCiEvaluation(ctx, owner, repo, headSha);
-  if (!evaluation.settled) return; // wait until *all* checks are done.
+  const evaluation =
+    knownEvaluation ?? (await fetchCiEvaluation(ctx, owner, repo, headSha));
+  if (!evaluation?.settled) return; // wait until *all* checks are done (and readable).
   // Act once per fully-settled SHA (the last-arriving check event wins).
   if (
     !(await claim(
@@ -762,42 +750,6 @@ function managementMessage(
 // ---------------------------------------------------------------------------
 // GitHub API reads.
 // ---------------------------------------------------------------------------
-
-async function fetchCiEvaluation(
-  ctx: PrManagerContext,
-  owner: string,
-  repo: string,
-  sha: string,
-): Promise<CiEvaluation> {
-  const checks: CiCheck[] = [];
-  const statuses: CiStatus[] = [];
-  try {
-    const { data } = await ctx.octokit.rest.checks.listForRef({
-      owner,
-      repo,
-      ref: sha,
-      per_page: 100,
-    });
-    for (const run of data.check_runs) {
-      checks.push({ status: run.status, conclusion: run.conclusion, name: run.name });
-    }
-  } catch (error) {
-    logger(ctx).debug("githubbot_checks_list_failed", { error: errorMessage(error) });
-  }
-  try {
-    const { data } = await ctx.octokit.rest.repos.getCombinedStatusForRef({
-      owner,
-      repo,
-      ref: sha,
-    });
-    for (const s of data.statuses) {
-      statuses.push({ state: s.state, context: s.context });
-    }
-  } catch (error) {
-    logger(ctx).debug("githubbot_status_fetch_failed", { error: errorMessage(error) });
-  }
-  return evaluateCi(checks, statuses);
-}
 
 async function commitAuthor(
   ctx: PrManagerContext,

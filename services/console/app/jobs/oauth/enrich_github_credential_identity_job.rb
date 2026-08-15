@@ -1,6 +1,4 @@
 require "json"
-require "net/http"
-require "uri"
 
 module Oauth
   class EnrichGithubCredentialIdentityJob < ApplicationJob
@@ -42,7 +40,8 @@ module Oauth
         name: "GitHub – #{display_name}",
         provider_subject: subject,
         provider_email: profile[:email].presence || credential.provider_email,
-        foreign_id: "github-#{credential.oauth_app.slug}-#{subject.downcase}"
+        foreign_id: "github-#{credential.oauth_app.slug}-#{subject.downcase}",
+        labels: (credential.labels || {}).merge("github_login" => profile[:login])
       )
 
       secret = credential.static_secret
@@ -70,7 +69,8 @@ module Oauth
       {
         subject: id.to_s,
         email: response["email"].presence,
-        name: response["name"].presence || login
+        name: response["name"].presence || login,
+        login: login
       }
     rescue GithubProfileRetryableError
       raise
@@ -89,20 +89,16 @@ module Oauth
         )
       end
 
-      uri = URI.parse(USER_ENDPOINT)
-      req = Net::HTTP::Get.new(uri)
-      req["Accept"] = "application/vnd.github+json"
-      req["Authorization"] = "Bearer #{access_token}"
-      req["X-GitHub-Api-Version"] = "2022-11-28"
-      req["User-Agent"] = "centaur-console"
-
-      http = Net::HTTP.new(uri.host, uri.port)
-      http.use_ssl = uri.scheme == "https"
-      http.open_timeout = 5
-      http.read_timeout = 5
-
-      response = http.request(req)
-      status = response.code.to_i
+      response = HttpClient.new.get(
+        USER_ENDPOINT,
+        headers: {
+          "Accept" => "application/vnd.github+json",
+          "Authorization" => "Bearer #{access_token}",
+          "X-GitHub-Api-Version" => "2022-11-28",
+          "User-Agent" => "centaur-console"
+        }
+      )
+      status = response.status
       if status == 429 || status >= 500
         raise GithubProfileRetryableError, "github user lookup http #{status}"
       end
@@ -111,7 +107,7 @@ module Oauth
         return nil
       end
 
-      parsed = JSON.parse(response.body.to_s)
+      parsed = response.json
       parsed.is_a?(Hash) ? parsed : nil
     rescue GithubProfileRetryableError
       raise

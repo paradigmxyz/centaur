@@ -5,6 +5,8 @@ module Console
   # detail page: assign/unassign roles and grant/revoke secrets, plus idempotency
   # and the signed-out gate.
   class PrincipalsControllerTest < ActionDispatch::IntegrationTest
+    include ActiveJob::TestHelper
+
     setup do
       @operator = users(:acme_admin)
       post login_url, params: { email: @operator.email, password: "password123456" }
@@ -21,7 +23,8 @@ module Console
       get console_new_principal_url
       assert_response :ok
       assert_select "form[action=?][method=?]", console_create_principal_path, "post" do
-        assert_select "input[name='principal[namespace]'][value=default]"
+        assert_select "input[name='principal[namespace]']", count: 0
+        assert_select ".form-label", text: "Namespace", count: 0
         assert_select "input[name='principal[foreign_id]']"
         assert_select "input[name='principal[name]']"
         assert_select "button", "Add label"
@@ -30,10 +33,19 @@ module Console
     end
 
     test "create persists a principal and redirects to its detail page" do
+      system_settings(:default).update!(
+        default_sandbox_repo_cache: "public",
+        default_sandbox_observability_enabled: false,
+        default_sandbox_api_server_enabled: false
+      )
+      Role.update_all(assign_by_default: false)
+      roles(:acme_infra).update!(assign_by_default: true)
+      roles(:globex_infra).update!(assign_by_default: true)
+
       assert_difference -> { Principal.count }, 1 do
         post console_create_principal_url,
              params: {
-               principal: { namespace: "acme", foreign_id: "C-new-console", name: "New console principal" },
+               principal: { foreign_id: "C-new-console", name: "New console principal" },
                labels: {
                  "0" => { key: "kind", value: "slack_channel" },
                  "1" => { key: "team", value: "platform" }
@@ -41,21 +53,37 @@ module Console
              }
       end
 
-      principal = Principal.find_by!(namespace: "acme", foreign_id: "C-new-console")
+      principal = Principal.find_by!(foreign_id: "C-new-console")
       assert_redirected_to console_principal_path(principal.oid)
       assert_equal "Principal created.", flash[:notice]
       assert_equal "New console principal", principal.name
-      assert_equal({ "kind" => "slack_channel", "team" => "platform" }, principal.labels)
+      assert_equal Principal::UNKNOWN_KIND, principal.kind
+      assert_equal(
+        {
+          "kind" => "slack_channel",
+          "team" => "platform",
+          Principal::SANDBOX_REPO_CACHE_LABEL => "public"
+        },
+        principal.labels
+      )
+      assert_equal "public", principal.sandbox_repo_cache
+      assert_equal false, principal.sandbox_observability_enabled
+      assert_equal false, principal.sandbox_api_server_enabled
+      expected = [ roles(:acme_infra), roles(:globex_infra) ].sort_by(&:id)
+      assert_equal expected, principal.roles.order(:id).to_a
       assert_equal @operator, principal.created_by
     end
 
     test "create re-renders validation errors" do
-      existing = principals(:acme_channel)
+      existing = Principal.create!(
+        foreign_id: "duplicate-console-principal",
+        created_by: @operator
+      )
 
       assert_no_difference -> { Principal.count } do
         post console_create_principal_url,
              params: {
-               principal: { namespace: existing.namespace, foreign_id: existing.foreign_id, name: "Duplicate" }
+               principal: { foreign_id: existing.foreign_id, name: "Duplicate" }
              }
       end
 
@@ -78,9 +106,177 @@ module Console
       assert_equal "Updated sandbox access.", flash[:notice]
       principal.reload
       assert_equal "public", principal.sandbox_repo_cache
-      assert_equal false, principal.sandbox_repo_cache_enabled
+      assert_equal "public", principal.labels[Principal::SANDBOX_REPO_CACHE_LABEL]
       assert_equal false, principal.sandbox_observability_enabled
       assert_equal false, principal.sandbox_api_server_enabled
+    end
+
+    test "update_slack_channel_permissions stores selected Slack channel permissions" do
+      principal = principals(:acme_user_bob)
+
+      patch console_principal_slack_channel_permissions_url(principal.oid),
+            params: {
+              principal: {
+                slack_channel_permissions_attributes: {
+                  "0" => {
+                    channel_id: "C0123456789",
+                    upload_enabled: "1",
+                    download_enabled: "0",
+                    history_enabled: "1"
+                  },
+                  "1" => {
+                    channel_id: "G9876543210",
+                    upload_enabled: "0",
+                    download_enabled: "1",
+                    history_enabled: "0"
+                  }
+                }
+              }
+            }
+
+      assert_redirected_to console_principal_path(principal.oid)
+      assert_equal(
+        [
+          {
+            "channel_id" => "C0123456789",
+            "upload_enabled" => true,
+            "download_enabled" => false,
+            "history_enabled" => true
+          },
+          {
+            "channel_id" => "G9876543210",
+            "upload_enabled" => false,
+            "download_enabled" => true,
+            "history_enabled" => false
+          }
+        ],
+        principal.reload.slack_channel_permissions_payload
+      )
+    end
+
+    test "update_slack_channel_permissions persists flag changes without a channel id" do
+      principal = principals(:acme_user_bob)
+      permission = principal.slack_channel_permissions.create!(
+        channel_id: "C0123456789",
+        upload_enabled: true,
+        download_enabled: true,
+        history_enabled: true
+      )
+
+      patch console_principal_slack_channel_permissions_url(principal.oid),
+            params: {
+              principal: {
+                slack_channel_permissions_attributes: {
+                  "0" => {
+                    id: permission.id,
+                    upload_enabled: "0",
+                    download_enabled: "1",
+                    history_enabled: "0"
+                  }
+                }
+              }
+            }
+
+      assert_redirected_to console_principal_path(principal.oid)
+      permission = principal.slack_channel_permissions.find_by!(channel_id: "C0123456789")
+      assert_not permission.upload_enabled
+      assert_predicate permission, :download_enabled
+      assert_not permission.history_enabled
+    end
+
+    test "update_slack_channel_permissions rejects channel id changes" do
+      principal = principals(:acme_user_bob)
+      permission = SlackChannelPermission.create!(
+        principal: principal,
+        channel_id: "C0123456789",
+        upload_enabled: true,
+        download_enabled: true,
+        history_enabled: true
+      )
+
+      patch console_principal_slack_channel_permissions_url(principal.oid),
+            params: {
+              principal: {
+                slack_channel_permissions_attributes: {
+                  "0" => {
+                    id: permission.id,
+                    channel_id: "G9876543210",
+                    upload_enabled: "1",
+                    download_enabled: "1",
+                    history_enabled: "1"
+                  }
+                }
+              }
+            }
+
+      assert_redirected_to console_principal_path(principal.oid)
+      assert_equal "Slack channels cannot be changed after creation.", flash[:alert]
+      assert_equal "C0123456789", permission.reload.channel_id
+    end
+
+    test "update_slack_channel_permissions preserves api managed direct messages" do
+      principal = principals(:acme_user_bob)
+      channel_permission = principal.slack_channel_permissions.create!(
+        channel_id: "C0123456789",
+        upload_enabled: true
+      )
+      dm_permission = principal.slack_channel_permissions.create!(
+        channel_id: "D0123456789",
+        download_enabled: true
+      )
+
+      patch console_principal_slack_channel_permissions_url(principal.oid),
+            params: {
+              principal: {
+                slack_channel_permissions_attributes: {
+                  "0" => {
+                    id: channel_permission.id,
+                    upload_enabled: "0",
+                    download_enabled: "1",
+                    history_enabled: "0"
+                  }
+                }
+              }
+            }
+
+      assert_redirected_to console_principal_path(principal.oid)
+      assert_equal %w[C0123456789 D0123456789], principal.slack_channel_permissions.reload.pluck(:channel_id).sort
+      assert_predicate principal.slack_channel_permissions.find_by!(channel_id: dm_permission.channel_id), :download_enabled
+    end
+
+    test "update_slack_channel_permissions skips unchanged submissions" do
+      principal = principals(:acme_user_bob)
+      channel_permission = principal.slack_channel_permissions.create!(
+        channel_id: "C0123456789",
+        upload_enabled: true
+      )
+      dm_permission = principal.slack_channel_permissions.create!(
+        channel_id: "D0123456789",
+        download_enabled: true
+      )
+      version = principal.reload.sync_config_cache_version
+      clear_enqueued_jobs
+
+      assert_no_enqueued_jobs only: PrincipalSyncConfigSnapshotWarmJob do
+        patch console_principal_slack_channel_permissions_url(principal.oid),
+              params: {
+                principal: {
+                  slack_channel_permissions_attributes: {
+                    "0" => {
+                      id: channel_permission.id,
+                      upload_enabled: "1",
+                      download_enabled: "0",
+                      history_enabled: "0"
+                    }
+                  }
+                }
+              }
+      end
+
+      assert_redirected_to console_principal_path(principal.oid)
+      assert_equal "Updated Slack channel permissions.", flash[:notice]
+      assert_equal version, principal.reload.sync_config_cache_version
+      assert_equal [ channel_permission.id, dm_permission.id ].sort, principal.slack_channel_permissions.reload.pluck(:id).sort
     end
 
     test "destroy deletes the principal and dependent access records" do

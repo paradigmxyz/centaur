@@ -1,0 +1,70 @@
+<% if skill.user_id == current_user.id %>
+  <div data-controller="user-typeahead"
+       data-action="click@window->user-typeahead#close">
+    <%= label_tag :skill_editor_search, "Editors", class: "mb-2 block text-sm font-medium text-zinc-200" %>
+    <%= hidden_field_tag "skill[editor_oids][]", "" %>
+    <div class="relative max-w-xl">
+      <%= text_field_tag :skill_editor_search,
+                         nil,
+                         placeholder: "Search console users by name or email",
+                         autocomplete: "off",
+                         role: "combobox",
+                         aria: { autocomplete: "list", expanded: "false", controls: "skill-editor-options" },
+                         class: "form-input",
+                         data: {
+                           user_typeahead_target: "input",
+                           action: "focus->user-typeahead#open input->user-typeahead#open keydown->user-typeahead#navigate"
+                         } %>
+      <ul id="skill-editor-options"
+          role="listbox"
+          hidden
+          data-user-typeahead-target="listbox"
+          class="absolute z-20 mt-1 max-h-60 w-full overflow-y-auto rounded-lg border border-ink-600 bg-ink-850 p-1 shadow-xl">
+        <% @editor_candidates.each do |user| %>
+          <% label = user.name.present? ? "#{user.name} (#{user.email})" : user.email %>
+          <li>
+            <button type="button"
+                    role="option"
+                    aria-selected="false"
+                    data-user-typeahead-target="option"
+                    data-user-oid="<%= user.oid %>"
+                    data-label="<%= label %>"
+                    data-search-text="<%= label.downcase %>"
+                    data-action="user-typeahead#select"
+                    class="w-full rounded px-3 py-2 text-left text-sm text-zinc-300 hover:bg-ink-700 focus:bg-ink-700 focus:outline-none">
+              <span class="block truncate"><%= label %></span>
+            </button>
+          </li>
+        <% end %>
+      </ul>
+    </div>
+
+    <div class="mt-3 space-y-2" data-user-typeahead-target="selections">
+      <% @selected_editors.each do |user| %>
+        <% label = user.name.present? ? "#{user.name} (#{user.email})" : user.email %>
+        <div class="flex items-center justify-between gap-3 rounded border border-ink-600 bg-ink-850 px-3 py-2"
+             data-user-typeahead-target="selection"
+             data-user-oid="<%= user.oid %>">
+          <span class="min-w-0 truncate text-sm text-zinc-300"><%= label %></span>
+          <%= hidden_field_tag "skill[editor_oids][]", user.oid %>
+          <button type="button"
+                  data-action="user-typeahead#remove"
+                  class="shrink-0 text-xs text-zinc-500 transition-colors hover:text-red-400">Remove</button>
+        </div>
+      <% end %>
+    </div>
+    <p class="mt-3 text-sm text-zinc-600" data-user-typeahead-target="empty" <%= "hidden" if @selected_editors.any? %>>No additional editors.</p>
+    <p class="mt-2 text-xs text-zinc-500">Editors can read and update this skill. Their names and emails are visible to anyone who can view the skill. Only you can manage editors, visibility, or archiving.</p>
+  </div>
+<% else %>
+  <div>
+    <h2 class="mb-2 text-sm font-medium text-zinc-200">Editors</h2>
+    <div class="space-y-2">
+      <% @selected_editors.each do |user| %>
+        <% label = user.name.present? ? "#{user.name} (#{user.email})" : user.email %>
+        <div class="rounded border border-ink-600 bg-ink-850 px-3 py-2 text-sm text-zinc-300"><%= label %></div>
+      <% end %>
+    </div>
+    <p class="mt-2 text-xs text-zinc-500">Only the skill owner can manage editors.</p>
+  </div>
+<% end %>

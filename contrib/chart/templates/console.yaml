@@ -1,5 +1,4 @@
 {{- $console := include "centaur.consoleValues" . | fromYaml }}
-{{- if $console.enabled }}
 {{- $secretEnv := include "centaur.secretEnvName" . }}
 {{- $prefix := .Values.secretManager.envPrefix }}
 {{- $dbName := $console.database.name }}
@@ -122,6 +121,12 @@ spec:
                   key: {{ printf "%sDATABASE_URL" $prefix }}
             - name: CENTAUR_CONSOLE_SLACKBOTV2_USER_NAME
               value: {{ .Values.slackbotv2.userName | quote }}
+            - name: CENTAUR_CONSOLE_SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sSLACK_BOT_TOKEN" $prefix }}
+                  optional: true
 {{- range $name := tuple "CLAUDE_MODEL" "CODEX_MODEL" }}
 {{- if hasKey $.Values.sandbox.extraEnv $name }}
             # Mirror the deployer's harness default-model override
@@ -171,6 +176,12 @@ spec:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sCENTAUR_JWT_SIGNING_SECRET" $prefix }}
+            # In-cluster console URL exactly as sandboxes dial it (the same
+            # value api-rs receives as IRON_CONTROL_URL). Console derives the
+            # sandbox entitlements injection-rule host from it, so the rule
+            # matches regardless of what Host the sync request carried.
+            - name: CENTAUR_CONSOLE_URL
+              value: {{ include "centaur.consoleUrl" . | quote }}
 {{- if $console.publicUrl }}
             - name: CENTAUR_CONSOLE_PUBLIC_URL
               value: {{ $console.publicUrl | quote }}
@@ -178,6 +189,14 @@ spec:
 {{- if $mcpPublicUrl }}
             - name: CENTAUR_MCP_PUBLIC_URL
               value: {{ $mcpPublicUrl | quote }}
+{{- end }}
+            - name: CENTAUR_CONSOLE_PASSWORD_LOGIN_ENABLED
+              value: {{ $console.passwordLoginEnabled | quote }}
+            - name: CENTAUR_CONSOLE_PUBLIC_SLACK_THREADS_ENABLED
+              value: {{ $console.publicSlackThreadsEnabled | quote }}
+{{- with $console.ssoEmailDomains }}
+            - name: CENTAUR_CONSOLE_SSO_EMAIL_DOMAINS
+              value: {{ join "," . | quote }}
 {{- end }}
 {{- if $console.googleOauth.enabled }}
             # Google OAuth app credentials (sign-in + brokered token refresh).
@@ -328,5 +347,4 @@ spec:
     - ports:
         - protocol: TCP
           port: 443
-{{- end }}
 {{- end }}
