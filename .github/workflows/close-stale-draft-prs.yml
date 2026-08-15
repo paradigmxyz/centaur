@@ -57,7 +57,7 @@ jobs:
                 issue_number: currentPullRequest.number,
                 body:
                   "Draft pull requests with no activity for more than 14 days are automatically closed. " +
-                  "Please reopen this pull request and mark it as ready for review when the work is ready.",
+                  "Please reopen this pull request and mark it as ready for review when you'd like us to take a look.",
               });
 
               await github.rest.pulls.update({
