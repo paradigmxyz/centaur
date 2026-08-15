@@ -55,7 +55,9 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: currentPullRequest.number,
-                body: "Closing due to lack of activity, please reopen when ready.",
+                body:
+                  "Draft pull requests with no activity for more than 14 days are automatically closed. " +
+                  "Please reopen this pull request and mark it as ready for review when the work is ready.",
               });
 
               await github.rest.pulls.update({
