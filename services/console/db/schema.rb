@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_08_14_180000) do
+ActiveRecord::Schema[8.1].define(version: 2026_08_15_180000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
   enable_extension "pg_search"
@@ -309,6 +309,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_14_180000) do
     t.boolean "sandbox_observability_enabled", default: true, null: false
     t.string "sandbox_repo_cache", default: "all", null: false
     t.boolean "sandbox_sessions_read_enabled", default: false, null: false
+    t.boolean "sandbox_slack_app_dm_enabled", default: false, null: false
     t.boolean "sandbox_workflows_read_enabled", default: false, null: false
     t.boolean "sandbox_workflows_write_enabled", default: false, null: false
     t.string "slack_channel_id"
@@ -473,6 +474,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_14_180000) do
     t.boolean "default_sandbox_observability_enabled", default: true, null: false
     t.string "default_sandbox_repo_cache", default: "all", null: false
     t.boolean "default_sandbox_sessions_read_enabled", default: false, null: false
+    t.boolean "default_sandbox_slack_app_dm_enabled", default: false, null: false
     t.boolean "default_sandbox_workflows_read_enabled", default: false, null: false
     t.boolean "default_sandbox_workflows_write_enabled", default: false, null: false
     t.boolean "singleton", default: true, null: false
@@ -573,6 +575,4 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_14_180000) do
   add_foreign_key "thread_shares", "users", column: "created_by_id"
   add_foreign_key "user_identities", "users"
   add_foreign_key "users", "users", column: "approved_by_id"
-
-  add_bm25_index :skills, fields: { id: {}, name: {}, description: {}, content: {} }, key_field: :id, name: "index_skills_on_search_document"
 end

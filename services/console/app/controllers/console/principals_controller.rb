@@ -40,7 +40,8 @@ module Console
         sandbox_observability_enabled: ActiveModel::Type::Boolean.new.cast(params[:sandbox_observability_enabled]),
         sandbox_sessions_read_enabled: ActiveModel::Type::Boolean.new.cast(params[:sandbox_sessions_read_enabled]),
         sandbox_workflows_read_enabled: ActiveModel::Type::Boolean.new.cast(params[:sandbox_workflows_read_enabled]),
-        sandbox_workflows_write_enabled: ActiveModel::Type::Boolean.new.cast(params[:sandbox_workflows_write_enabled])
+        sandbox_workflows_write_enabled: ActiveModel::Type::Boolean.new.cast(params[:sandbox_workflows_write_enabled]),
+        sandbox_slack_app_dm_enabled: ActiveModel::Type::Boolean.new.cast(params[:sandbox_slack_app_dm_enabled])
       )
       redirect_to console_principal_path(@principal.oid), notice: "Updated sandbox access."
     rescue ActiveRecord::RecordInvalid => e

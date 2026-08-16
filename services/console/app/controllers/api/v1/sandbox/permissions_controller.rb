@@ -47,7 +47,8 @@ module Api
             sandbox_observability_enabled: principal.sandbox_observability_enabled,
             sandbox_sessions_read_enabled: principal.sandbox_sessions_read_enabled,
             sandbox_workflows_read_enabled: principal.sandbox_workflows_read_enabled,
-            sandbox_workflows_write_enabled: principal.sandbox_workflows_write_enabled
+            sandbox_workflows_write_enabled: principal.sandbox_workflows_write_enabled,
+            sandbox_slack_app_dm_enabled: principal.sandbox_slack_app_dm_enabled
           }
         end
 

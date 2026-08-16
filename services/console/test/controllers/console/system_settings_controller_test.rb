@@ -29,6 +29,7 @@ module Console
       assert_select "input[name='system_setting[default_sandbox_sessions_read_enabled]']"
       assert_select "input[name='system_setting[default_sandbox_workflows_read_enabled]']"
       assert_select "input[name='system_setting[default_sandbox_workflows_write_enabled]']"
+      assert_select "input[name='system_setting[default_sandbox_slack_app_dm_enabled]']"
       assert_select "input[name='system_setting[default_role_ids][]'][value=?]", roles(:acme_infra).id.to_s
     end
 
@@ -43,6 +44,7 @@ module Console
                 default_sandbox_sessions_read_enabled: "0",
                 default_sandbox_workflows_read_enabled: "0",
                 default_sandbox_workflows_write_enabled: "0",
+                default_sandbox_slack_app_dm_enabled: "1",
                 default_role_ids: [ roles(:acme_infra).id, roles(:globex_infra).id ]
               }
             }
@@ -55,6 +57,7 @@ module Console
       assert_equal false, settings.default_sandbox_sessions_read_enabled
       assert_equal false, settings.default_sandbox_workflows_read_enabled
       assert_equal false, settings.default_sandbox_workflows_write_enabled
+      assert_equal true, settings.default_sandbox_slack_app_dm_enabled
       assert_predicate roles(:acme_infra).reload, :assign_by_default?
       assert_predicate roles(:globex_infra).reload, :assign_by_default?
       assert_not roles(:default_infra).reload.assign_by_default?

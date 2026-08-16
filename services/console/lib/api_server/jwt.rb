@@ -23,10 +23,12 @@ module ApiServer
         now: now,
         claims: {
           "sub" => principal.oid,
+          "actor_name" => principal.name.presence || principal.foreign_id.presence || principal.oid,
           "capabilities" => {
             "sessions_read" => principal.sandbox_sessions_read_enabled,
             "workflows_read" => principal.sandbox_workflows_read_enabled,
-            "workflows_write" => principal.sandbox_workflows_write_enabled
+            "workflows_write" => principal.sandbox_workflows_write_enabled,
+            "slack_app_dm" => principal.sandbox_slack_app_dm_enabled
           },
           "slack" => {
             "upload_channels" => upload_channels,

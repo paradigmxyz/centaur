@@ -73,6 +73,10 @@ mod tests {
     }
 
     fn principal_token(subject: &str) -> String {
+        principal_token_with_slack_app_dm(subject, false)
+    }
+
+    fn principal_token_with_slack_app_dm(subject: &str, slack_app_dm: bool) -> String {
         encode(
             &Header::new(Algorithm::HS256),
             &json!({
@@ -84,7 +88,8 @@ mod tests {
                 "capabilities": {
                     "sessions_read": false,
                     "workflows_read": false,
-                    "workflows_write": false
+                    "workflows_write": false,
+                    "slack_app_dm": slack_app_dm
                 },
                 "slack": {
                     "upload_channels": [],
@@ -448,6 +453,31 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(write_response.status(), StatusCode::FORBIDDEN);
+
+        let app_dm_request = |token: &str| {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/slack/app-dms")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"user_id":"U12345678","text":"hello","idempotency_key":"run-1"}"#,
+                ))
+                .unwrap()
+        };
+        let denied_app_dm = build_router_with_app_state(AppState::unready(test_auth()))
+            .oneshot(app_dm_request(&principal))
+            .await
+            .unwrap();
+        assert_eq!(denied_app_dm.status(), StatusCode::FORBIDDEN);
+
+        let permitted = principal_token_with_slack_app_dm("prn_sandbox", true);
+        let permitted_app_dm = build_router_with_app_state(AppState::unready(test_auth()))
+            .oneshot(app_dm_request(&permitted))
+            .await
+            .unwrap();
+        assert_ne!(permitted_app_dm.status(), StatusCode::UNAUTHORIZED);
+        assert_ne!(permitted_app_dm.status(), StatusCode::FORBIDDEN);
 
         let slack_response = build_router_with_app_state(AppState::unready(test_auth()))
             .oneshot(

@@ -60,6 +60,7 @@ module Api
         assert_equal false, data.dig("capabilities", "sandbox_sessions_read_enabled")
         assert_equal false, data.dig("capabilities", "sandbox_workflows_read_enabled")
         assert_equal false, data.dig("capabilities", "sandbox_workflows_write_enabled")
+        assert_equal false, data.dig("capabilities", "sandbox_slack_app_dm_enabled")
         assert_equal 1, data.fetch("slack_channel_permissions").length
         assert_equal [
           {

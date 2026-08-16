@@ -15,6 +15,7 @@ class SystemSettingTest < ActiveSupport::TestCase
     assert_equal false, settings.default_sandbox_sessions_read_enabled
     assert_equal false, settings.default_sandbox_workflows_read_enabled
     assert_equal false, settings.default_sandbox_workflows_write_enabled
+    assert_equal false, settings.default_sandbox_slack_app_dm_enabled
   end
 
   test "repo-cache setting is validated" do

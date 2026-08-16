@@ -57,6 +57,7 @@ module Api
         assert_equal false, data["sandbox_sessions_read_enabled"]
         assert_equal false, data["sandbox_workflows_read_enabled"]
         assert_equal false, data["sandbox_workflows_write_enabled"]
+        assert_equal false, data["sandbox_slack_app_dm_enabled"]
       end
 
       test "GET returns 404 for an unknown oid" do
@@ -144,7 +145,8 @@ module Api
           default_sandbox_observability_enabled: false,
           default_sandbox_sessions_read_enabled: true,
           default_sandbox_workflows_read_enabled: true,
-          default_sandbox_workflows_write_enabled: true
+          default_sandbox_workflows_write_enabled: true,
+          default_sandbox_slack_app_dm_enabled: true
         )
         body = {
           data: {
@@ -161,6 +163,7 @@ module Api
         assert_equal true, data["sandbox_sessions_read_enabled"]
         assert_equal true, data["sandbox_workflows_read_enabled"]
         assert_equal true, data["sandbox_workflows_write_enabled"]
+        assert_equal true, data["sandbox_slack_app_dm_enabled"]
       end
 
       test "POST applies all configured default roles" do
@@ -183,7 +186,8 @@ module Api
           default_sandbox_observability_enabled: false,
           default_sandbox_sessions_read_enabled: false,
           default_sandbox_workflows_read_enabled: false,
-          default_sandbox_workflows_write_enabled: false
+          default_sandbox_workflows_write_enabled: false,
+          default_sandbox_slack_app_dm_enabled: false
         )
         body = {
           data: {
@@ -192,7 +196,8 @@ module Api
             sandbox_observability_enabled: true,
             sandbox_sessions_read_enabled: true,
             sandbox_workflows_read_enabled: true,
-            sandbox_workflows_write_enabled: true
+            sandbox_workflows_write_enabled: true,
+            sandbox_slack_app_dm_enabled: true
           }
         }
 
@@ -205,6 +210,7 @@ module Api
         assert_equal true, data["sandbox_sessions_read_enabled"]
         assert_equal true, data["sandbox_workflows_read_enabled"]
         assert_equal true, data["sandbox_workflows_write_enabled"]
+        assert_equal true, data["sandbox_slack_app_dm_enabled"]
       end
 
       test "POST overwrites explicit repo-cache label with system default" do

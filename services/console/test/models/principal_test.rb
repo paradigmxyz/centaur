@@ -190,6 +190,7 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_not principal.sandbox_sessions_read_enabled
     assert_not principal.sandbox_workflows_read_enabled
     assert_not principal.sandbox_workflows_write_enabled
+    assert_not principal.sandbox_slack_app_dm_enabled
   end
 
   test "new principals with no roles receive all configured defaults" do

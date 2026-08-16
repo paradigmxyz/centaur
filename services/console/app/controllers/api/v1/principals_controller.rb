@@ -89,6 +89,7 @@ module Api
           sandbox_sessions_read_enabled: principal.sandbox_sessions_read_enabled,
           sandbox_workflows_read_enabled: principal.sandbox_workflows_read_enabled,
           sandbox_workflows_write_enabled: principal.sandbox_workflows_write_enabled,
+          sandbox_slack_app_dm_enabled: principal.sandbox_slack_app_dm_enabled,
           created_at: principal.created_at,
           updated_at: principal.updated_at
         }
@@ -108,6 +109,7 @@ module Api
           :sandbox_sessions_read_enabled,
           :sandbox_workflows_read_enabled,
           :sandbox_workflows_write_enabled,
+          :sandbox_slack_app_dm_enabled,
           labels: {}
         )
       end

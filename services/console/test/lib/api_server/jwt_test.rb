@@ -6,7 +6,8 @@ class ApiServerJwtTest < ActiveSupport::TestCase
     principal.update!(
       sandbox_sessions_read_enabled: false,
       sandbox_workflows_read_enabled: true,
-      sandbox_workflows_write_enabled: true
+      sandbox_workflows_write_enabled: true,
+      sandbox_slack_app_dm_enabled: true
     )
 
     with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
@@ -20,6 +21,8 @@ class ApiServerJwtTest < ActiveSupport::TestCase
       assert_equal false, claims.dig("capabilities", "sessions_read")
       assert_equal true, claims.dig("capabilities", "workflows_read")
       assert_equal true, claims.dig("capabilities", "workflows_write")
+      assert_equal true, claims.dig("capabilities", "slack_app_dm")
+      assert_equal principal.foreign_id, claims.fetch("actor_name")
     end
   end
 

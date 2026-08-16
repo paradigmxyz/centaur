@@ -1873,6 +1873,32 @@ class SlackClient:
             unfurl_media=unfurl_media,
         )
 
+    def send_app_dm(self, user_id: str, text: str, idempotency_key: str) -> dict:
+        """Send an attributed DM as the Centaur Slack app via the API server."""
+        clean_user_id = self._clean_user_ref(user_id).upper()
+        if not self._looks_like_user_id(clean_user_id):
+            raise ValueError("user_id must be a Slack user ID such as U12345678")
+        if not str(idempotency_key).strip():
+            raise ValueError("idempotency_key is required")
+
+        payload = {
+            "user_id": clean_user_id,
+            "text": self._normalize_message_text(text),
+            "idempotency_key": str(idempotency_key),
+        }
+        result = self._centaur_api_post_bytes_json(
+            "/api/slack/app-dms",
+            {},
+            json.dumps(payload).encode("utf-8"),
+            "application/json",
+        )
+        channel = str(result.get("channel", ""))
+        timestamp = str(result.get("ts", ""))
+        result["permalink"] = (
+            f"https://slack.com/archives/{channel}/p{timestamp.replace('.', '')}"
+        )
+        return result
+
     @staticmethod
     def _preview_for_bytes(data: bytes, filename: str) -> dict[str, Any]:
         """Return cheap metadata that helps identify generated artifacts."""
@@ -2613,6 +2639,10 @@ def send_message(*args, **kwargs):
 
 def send_dm(*args, **kwargs):
     return _client().send_dm(*args, **kwargs)
+
+
+def send_app_dm(*args, **kwargs):
+    return _client().send_app_dm(*args, **kwargs)
 
 
 def upload_file(*args, **kwargs):

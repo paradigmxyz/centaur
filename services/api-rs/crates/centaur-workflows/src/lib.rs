@@ -3802,6 +3802,7 @@ async fn post_python_slack_message(
         .ok_or_else(|| {
             WorkflowRuntimeError::BadRequest("ctx.post_to_slack requires channel".to_owned())
         })?;
+    reject_direct_message_target(channel)?;
     let text = message.get("text").and_then(Value::as_str).ok_or_else(|| {
         WorkflowRuntimeError::BadRequest("ctx.post_to_slack requires text".to_owned())
     })?;
@@ -3823,6 +3824,22 @@ async fn post_python_slack_message(
     let response = send_slack_message(&token, payload).await?;
     serde_json::to_value(slack_post_result_from_response(channel, response))
         .map_err(WorkflowRuntimeError::from)
+}
+
+fn reject_direct_message_target(channel: &str) -> Result<(), WorkflowRuntimeError> {
+    let target = channel.trim().to_ascii_uppercase();
+    let is_direct_target = target.len() >= 9
+        && matches!(target.as_bytes().first(), Some(b'D' | b'U' | b'W'))
+        && target
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit());
+    if is_direct_target {
+        return Err(WorkflowRuntimeError::BadRequest(
+            "ctx.post_to_slack cannot send direct messages; use slack.send_app_dm so the principal permission and attribution are enforced"
+                .to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn python_slack_message_payload(
@@ -4382,6 +4399,16 @@ mod tests {
         assert_eq!(payload["reply_broadcast"], json!(true));
         assert_eq!(payload["unfurl_links"], json!(true));
         assert_eq!(payload["unfurl_media"], json!(true));
+    }
+
+    #[test]
+    fn python_slack_rejects_direct_message_targets() {
+        for target in ["U12345678", "W12345678", "D12345678"] {
+            let error = reject_direct_message_target(target).unwrap_err();
+            assert!(error.to_string().contains("slack.send_app_dm"));
+        }
+        assert!(reject_direct_message_target("C12345678").is_ok());
+        assert!(reject_direct_message_target("eng-ai").is_ok());
     }
 
     #[test]

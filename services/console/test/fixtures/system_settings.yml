@@ -5,3 +5,4 @@ default:
   default_sandbox_sessions_read_enabled: false
   default_sandbox_workflows_read_enabled: false
   default_sandbox_workflows_write_enabled: false
+  default_sandbox_slack_app_dm_enabled: false

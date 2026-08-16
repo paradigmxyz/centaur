@@ -204,6 +204,55 @@ def test_send_dm_opens_dm_and_posts_message() -> None:
     assert fake_web_client.last_kwargs["unfurl_links"] is False
 
 
+def test_send_app_dm_calls_centaur_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    import urllib.request
+
+    client, fake_web_client = _make_client()
+    request_info: dict[str, object] = {}
+
+    def fake_urlopen(req, *args, **kwargs):
+        request_info["url"] = req.full_url
+        request_info["authorization"] = req.get_header("Authorization")
+        request_info["content_type"] = req.get_header("Content-type")
+        request_info["body"] = json.loads(req.data.decode("utf-8"))
+        body = json.dumps(
+            {
+                "ok": True,
+                "channel": "D12345678",
+                "ts": "123.456",
+                "requested_by": "Vijith",
+            }
+        ).encode()
+        return _FakeHTTPResponse(body, "application/json")
+
+    monkeypatch.setenv("CENTAUR_API_URL", "http://api.internal:8080")
+    monkeypatch.setenv("CENTAUR_API_BEARER_TOKEN", "test-jwt")
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    result = client.send_app_dm("<@u12345678>", "hello\\nworld", "workflow:run-1:step-2")
+
+    assert request_info == {
+        "url": "http://api.internal:8080/api/slack/app-dms",
+        "authorization": "Bearer test-jwt",
+        "content_type": "application/json",
+        "body": {
+            "user_id": "U12345678",
+            "text": "hello\nworld",
+            "idempotency_key": "workflow:run-1:step-2",
+        },
+    }
+    assert fake_web_client.last_kwargs is None
+    assert result["requested_by"] == "Vijith"
+    assert result["permalink"] == "https://slack.com/archives/D12345678/p123456"
+
+
+def test_send_app_dm_rejects_invalid_user_id() -> None:
+    client, _ = _make_client()
+
+    with pytest.raises(ValueError, match="Slack user ID"):
+        client.send_app_dm("#general", "hello", "run-1")
+
+
 def _restore_real_resolve_channel(client: SlackClient) -> None:
     client._resolve_channel = SlackClient._resolve_channel.__get__(client)  # type: ignore[method-assign]
 

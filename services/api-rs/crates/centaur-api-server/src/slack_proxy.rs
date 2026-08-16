@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, sync::OnceLock, time::Duration};
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     body::Body,
     extract::{DefaultBodyLimit, Path, Query},
     http::{HeaderMap, HeaderValue, header},
@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use crate::{
     ApiError,
     api_jwt::{bearer_token, verify_console_jwt},
+    auth::AuthenticatedCaller,
     routes::{AppState, non_empty_env, positive_env_u64},
 };
 
@@ -21,6 +22,9 @@ const DEFAULT_SLACK_API_URL: &str = "https://slack.com/api";
 const DEFAULT_MAX_UPLOAD_BYTES: u64 = 100 * 1024 * 1024;
 const DEFAULT_SLACK_FILES_LIST_LIMIT: u16 = 100;
 const MAX_SLACK_FILES_LIST_LIMIT: u16 = 200;
+const MAX_SLACK_APP_DM_TEXT_CHARS: usize = 3_500;
+const SLACK_APP_DM_IDEMPOTENCY_NAMESPACE: uuid::Uuid =
+    uuid::Uuid::from_u128(0x3f69d9cc17174f5795b39eafeb5f02e0);
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -37,6 +41,7 @@ fn http_client() -> &'static reqwest::Client {
 
 pub(crate) fn slack_proxy_router() -> Router<AppState> {
     Router::new()
+        .route("/api/slack/app-dms", post(send_slack_app_dm))
         .route("/api/slack/files", get(get_slack_files))
         .route(
             "/api/slack/files/upload",
@@ -125,6 +130,14 @@ struct SlackChannelMembersQuery {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SlackAppDmRequest {
+    user_id: String,
+    text: String,
+    idempotency_key: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct SlackFileProxyClaims {
     slack: SlackProxyClaims,
 }
@@ -185,6 +198,45 @@ struct SlackChannelItem {
     can_upload: bool,
     can_download: bool,
     can_read_history: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct SlackAppDmResponse {
+    ok: bool,
+    channel: String,
+    ts: String,
+    requested_by: String,
+}
+
+async fn send_slack_app_dm(
+    Extension(caller): Extension<AuthenticatedCaller>,
+    Json(request): Json<SlackAppDmRequest>,
+) -> Result<Json<SlackAppDmResponse>, ApiError> {
+    validate_slack_user_id(&request.user_id)?;
+    validate_slack_app_dm_text(&request.text)?;
+    validate_idempotency_key(&request.idempotency_key)?;
+
+    let requested_by = caller
+        .display_name()
+        .unwrap_or_else(|| caller.identity())
+        .trim();
+    let text = attributed_slack_app_dm_text(&request.text, requested_by);
+    let client_msg_id = slack_app_dm_client_msg_id(caller.identity(), &request.idempotency_key);
+    let form = slack_app_dm_form(&request.user_id, &text, &client_msg_id);
+    let value = slack_api_post_form(
+        http_client(),
+        slack_proxy_config()?,
+        "chat.postMessage",
+        &form,
+    )
+    .await?;
+
+    Ok(Json(SlackAppDmResponse {
+        ok: true,
+        channel: required_slack_string(&value, "channel")?,
+        ts: required_slack_string(&value, "ts")?,
+        requested_by: requested_by.to_owned(),
+    }))
 }
 
 async fn upload_slack_file(
@@ -1030,6 +1082,75 @@ fn validate_slack_channel_id(channel_id: &str) -> Result<(), ApiError> {
     Err(ApiError::BadRequest("invalid Slack channel ID".to_owned()))
 }
 
+fn validate_slack_user_id(user_id: &str) -> Result<(), ApiError> {
+    if user_id.len() >= 9
+        && matches!(user_id.as_bytes().first(), Some(b'U' | b'W'))
+        && user_id
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+    {
+        return Ok(());
+    }
+    Err(ApiError::BadRequest("invalid Slack user ID".to_owned()))
+}
+
+fn validate_slack_app_dm_text(text: &str) -> Result<(), ApiError> {
+    let length = text.chars().count();
+    if text.trim().is_empty() || length > MAX_SLACK_APP_DM_TEXT_CHARS {
+        return Err(ApiError::BadRequest(format!(
+            "Slack app DM text must contain 1 to {MAX_SLACK_APP_DM_TEXT_CHARS} characters"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_idempotency_key(key: &str) -> Result<(), ApiError> {
+    if key.is_empty() || key.len() > 256 || key.chars().any(|ch| ch.is_ascii_control()) {
+        return Err(ApiError::BadRequest("invalid idempotency_key".to_owned()));
+    }
+    Ok(())
+}
+
+fn attributed_slack_app_dm_text(text: &str, requested_by: &str) -> String {
+    let actor = requested_by
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(100)
+        .collect::<String>();
+    let safe_actor = actor
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    format!(
+        "{}\n\n_(Triggered by {safe_actor} via Centaur)_",
+        text.trim_end()
+    )
+}
+
+fn slack_app_dm_client_msg_id(principal: &str, idempotency_key: &str) -> String {
+    uuid::Uuid::new_v5(
+        &SLACK_APP_DM_IDEMPOTENCY_NAMESPACE,
+        format!("{principal}\0{idempotency_key}").as_bytes(),
+    )
+    .to_string()
+}
+
+fn slack_app_dm_form(
+    user_id: &str,
+    text: &str,
+    client_msg_id: &str,
+) -> Vec<(&'static str, String)> {
+    vec![
+        ("channel", user_id.to_owned()),
+        ("text", text.to_owned()),
+        ("client_msg_id", client_msg_id.to_owned()),
+        ("unfurl_links", "false".to_owned()),
+        ("unfurl_media", "false".to_owned()),
+    ]
+}
+
 fn validate_slack_file_id(file_id: &str) -> Result<(), ApiError> {
     if file_id.len() >= 9
         && file_id.starts_with('F')
@@ -1587,6 +1708,46 @@ mod tests {
         assert!(channels.contains("D111111111"));
         assert!(channels.contains("C222222222"));
         assert!(channels.contains("G222222222"));
+    }
+
+    #[test]
+    fn app_dm_validates_and_attributes_message() {
+        validate_slack_user_id("U12345678").unwrap();
+        validate_slack_user_id("W12345678").unwrap();
+        for invalid in ["", "D12345678", "U123", "U1234abcd"] {
+            assert!(validate_slack_user_id(invalid).is_err());
+        }
+
+        validate_slack_app_dm_text("hello").unwrap();
+        assert!(validate_slack_app_dm_text("   ").is_err());
+        assert!(validate_slack_app_dm_text(&"x".repeat(3_501)).is_err());
+        assert!(validate_idempotency_key("workflow:run-1:step-2").is_ok());
+        assert!(validate_idempotency_key("bad\nkey").is_err());
+
+        assert_eq!(
+            attributed_slack_app_dm_text("hello\n", "A&B <admin>"),
+            "hello\n\n_(Triggered by A&amp;B &lt;admin&gt; via Centaur)_"
+        );
+    }
+
+    #[test]
+    fn app_dm_form_is_retry_safe_and_disables_unfurls() {
+        let first = slack_app_dm_client_msg_id("prn_test", "run-1:step-2");
+        let retry = slack_app_dm_client_msg_id("prn_test", "run-1:step-2");
+        let other = slack_app_dm_client_msg_id("prn_test", "run-1:step-3");
+        assert_eq!(first, retry);
+        assert_ne!(first, other);
+
+        assert_eq!(
+            slack_app_dm_form("U12345678", "hello", &first),
+            vec![
+                ("channel", "U12345678".to_owned()),
+                ("text", "hello".to_owned()),
+                ("client_msg_id", first),
+                ("unfurl_links", "false".to_owned()),
+                ("unfurl_media", "false".to_owned()),
+            ]
+        );
     }
 
     #[test]

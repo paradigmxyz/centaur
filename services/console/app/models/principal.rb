@@ -145,6 +145,9 @@ class Principal < ApplicationRecord
     unless supplied_key?(supplied, :sandbox_workflows_write_enabled)
       self.sandbox_workflows_write_enabled = defaults[:sandbox_workflows_write_enabled]
     end
+    unless supplied_key?(supplied, :sandbox_slack_app_dm_enabled)
+      self.sandbox_slack_app_dm_enabled = defaults[:sandbox_slack_app_dm_enabled]
+    end
   end
 
   # Slackbot only sends a DM partner's email when that user belongs to the
@@ -371,7 +374,8 @@ class Principal < ApplicationRecord
   def sync_config_fields_changed?
     %w[
       name labels sandbox_sessions_read_enabled sandbox_workflows_read_enabled
-      sandbox_workflows_write_enabled kind slack_user_id slack_channel_id slack_team_id slack_email console_user_id
+      sandbox_workflows_write_enabled sandbox_slack_app_dm_enabled kind slack_user_id slack_channel_id slack_team_id
+      slack_email console_user_id
     ].any? do |field|
       previous_changes.key?(field)
     end

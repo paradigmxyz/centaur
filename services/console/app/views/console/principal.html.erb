@@ -103,6 +103,17 @@
           <span class="block text-xs text-zinc-500">Allow sandbox API tokens to create and cancel workflow runs.</span>
         </span>
       </label>
+      <label class="flex items-start gap-3">
+        <%= hidden_field_tag :sandbox_slack_app_dm_enabled, "0" %>
+        <%= check_box_tag :sandbox_slack_app_dm_enabled,
+                          "1",
+                          @principal.sandbox_slack_app_dm_enabled,
+                          class: checkbox_class %>
+        <span>
+          <span class="block text-sm font-medium text-zinc-100">Send Slack app DMs</span>
+          <span class="block text-xs text-zinc-500">Allow this principal to send attributed DMs as the Slack app.</span>
+        </span>
+      </label>
       <div>
         <%= submit_tag "Save sandbox access", class: "btn-primary" %>
       </div>

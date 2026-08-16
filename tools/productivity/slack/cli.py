@@ -103,6 +103,28 @@ def dm(
         raise typer.Exit(1)
 
 
+@app.command("app-dm")
+def app_dm(
+    user_id: str = typer.Argument(..., help="Slack user ID, e.g. U12345678"),
+    message: str = typer.Argument(..., help="Message text to send"),
+    idempotency_key: str = typer.Option(
+        ...,
+        "--idempotency-key",
+        help="Stable key used to prevent duplicate sends when a workflow retries",
+    ),
+):
+    """Send an attributed direct message as the Centaur Slack app."""
+    from .client import send_app_dm
+
+    try:
+        result = send_app_dm(user_id, message, idempotency_key)
+        console.print("[green]✓ App DM sent[/]")
+        console.print(f"[dim]{result['permalink']}[/]")
+    except (RuntimeError, ValueError) as e:
+        console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1)
+
+
 @app.command()
 def search(
     query: str = typer.Argument(..., help="Text to search for (supports multiple terms)"),

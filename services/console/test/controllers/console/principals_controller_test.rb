@@ -38,7 +38,8 @@ module Console
         default_sandbox_observability_enabled: false,
         default_sandbox_sessions_read_enabled: false,
         default_sandbox_workflows_read_enabled: false,
-        default_sandbox_workflows_write_enabled: false
+        default_sandbox_workflows_write_enabled: false,
+        default_sandbox_slack_app_dm_enabled: false
       )
       Role.update_all(assign_by_default: false)
       roles(:acme_infra).update!(assign_by_default: true)
@@ -73,6 +74,7 @@ module Console
       assert_equal false, principal.sandbox_sessions_read_enabled
       assert_equal false, principal.sandbox_workflows_read_enabled
       assert_equal false, principal.sandbox_workflows_write_enabled
+      assert_equal false, principal.sandbox_slack_app_dm_enabled
       expected = [ roles(:acme_infra), roles(:globex_infra) ].sort_by(&:id)
       assert_equal expected, principal.roles.order(:id).to_a
       assert_equal @operator, principal.created_by
@@ -105,7 +107,8 @@ module Console
               sandbox_observability_enabled: "0",
               sandbox_sessions_read_enabled: "0",
               sandbox_workflows_read_enabled: "0",
-              sandbox_workflows_write_enabled: "0"
+              sandbox_workflows_write_enabled: "0",
+              sandbox_slack_app_dm_enabled: "1"
             }
 
       assert_redirected_to console_principal_path(principal.oid)
@@ -117,6 +120,7 @@ module Console
       assert_equal false, principal.sandbox_sessions_read_enabled
       assert_equal false, principal.sandbox_workflows_read_enabled
       assert_equal false, principal.sandbox_workflows_write_enabled
+      assert_equal true, principal.sandbox_slack_app_dm_enabled
     end
 
     test "update_slack_channel_permissions stores selected Slack channel permissions" do

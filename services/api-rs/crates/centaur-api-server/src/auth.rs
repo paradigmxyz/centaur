@@ -20,6 +20,7 @@ const STATIC_ADMIN_IDENTITY: &str = "api-rs-admin";
 pub(crate) enum Capability {
     SessionsRead,
     SessionsWrite,
+    SlackAppDm,
     SandboxesDrain,
     WorkflowsRead,
     WorkflowsWrite,
@@ -29,9 +30,10 @@ pub(crate) enum Capability {
 }
 
 impl Capability {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::SessionsRead,
         Self::SessionsWrite,
+        Self::SlackAppDm,
         Self::SandboxesDrain,
         Self::WorkflowsRead,
         Self::WorkflowsWrite,
@@ -67,6 +69,7 @@ pub(crate) struct AuthenticatedCaller {
     capabilities: BTreeSet<Capability>,
     platform_prefix: Option<&'static str>,
     principal_subject: Option<String>,
+    display_name: Option<String>,
 }
 
 impl AuthenticatedCaller {
@@ -88,6 +91,10 @@ impl AuthenticatedCaller {
 
     pub(crate) fn principal_subject(&self) -> Option<&str> {
         self.principal_subject.as_deref()
+    }
+
+    pub(crate) fn display_name(&self) -> Option<&str> {
+        self.display_name.as_deref()
     }
 }
 
@@ -248,6 +255,7 @@ impl ApiAuthConfig {
                     capabilities: Capability::ALL.into_iter().collect(),
                     platform_prefix: None,
                     principal_subject: None,
+                    display_name: None,
                 })
             }
             Some(ApiJwtTokenUse::ConsoleService) => Err(ApiError::Unauthorized(
@@ -266,6 +274,9 @@ impl ApiAuthConfig {
                         if jwt_capabilities.workflows_write {
                             capabilities.insert(Capability::WorkflowsWrite);
                         }
+                        if jwt_capabilities.slack_app_dm {
+                            capabilities.insert(Capability::SlackAppDm);
+                        }
                     }
                     // Tokens minted before capability claims were deployed had
                     // session read access. Preserve that access during rolling
@@ -280,6 +291,7 @@ impl ApiAuthConfig {
                     capabilities,
                     platform_prefix: None,
                     principal_subject: Some(subject),
+                    display_name: claims.actor_name.filter(|name| !name.trim().is_empty()),
                 })
             }
         }
@@ -299,6 +311,7 @@ struct ApiJwtClaims {
     sub: String,
     token_use: Option<ApiJwtTokenUse>,
     capabilities: Option<ApiJwtCapabilities>,
+    actor_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -309,6 +322,8 @@ struct ApiJwtCapabilities {
     workflows_read: bool,
     #[serde(default)]
     workflows_write: bool,
+    #[serde(default)]
+    slack_app_dm: bool,
 }
 
 #[derive(Deserialize)]
@@ -339,6 +354,7 @@ fn static_caller(
             capabilities: capabilities.into_iter().collect(),
             platform_prefix,
             principal_subject: None,
+            display_name: None,
         },
     }
 }
@@ -498,10 +514,12 @@ mod tests {
                 "aud": "centaur-api",
                 "iat": 1_700_000_000i64,
                 "exp": 4_102_444_800i64,
+                "actor_name": "Test Operator",
                 "capabilities": {
                     "sessions_read": false,
                     "workflows_read": true,
                     "workflows_write": true,
+                    "slack_app_dm": true,
                 },
             }),
             &EncodingKey::from_secret(b"jwt-secret"),
@@ -517,6 +535,8 @@ mod tests {
         assert!(!caller.has_capability(Capability::SessionsRead));
         assert!(caller.has_capability(Capability::WorkflowsRead));
         assert!(caller.has_capability(Capability::WorkflowsWrite));
+        assert!(caller.has_capability(Capability::SlackAppDm));
+        assert_eq!(caller.display_name(), Some("Test Operator"));
     }
 
     #[test]
