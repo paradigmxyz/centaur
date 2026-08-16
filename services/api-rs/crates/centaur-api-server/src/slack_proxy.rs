@@ -21,7 +21,6 @@ const DEFAULT_SLACK_API_URL: &str = "https://slack.com/api";
 const DEFAULT_MAX_UPLOAD_BYTES: u64 = 100 * 1024 * 1024;
 const DEFAULT_SLACK_FILES_LIST_LIMIT: u16 = 100;
 const MAX_SLACK_FILES_LIST_LIMIT: u16 = 200;
-const MAX_SLACK_APP_DM_TEXT_CHARS: usize = 3_500;
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -38,7 +37,6 @@ fn http_client() -> &'static reqwest::Client {
 
 pub(crate) fn slack_proxy_router() -> Router<AppState> {
     Router::new()
-        .route("/api/slack/app-dms", post(send_slack_app_dm))
         .route("/api/slack/files", get(get_slack_files))
         .route(
             "/api/slack/files/upload",
@@ -127,13 +125,6 @@ struct SlackChannelMembersQuery {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SlackAppDmRequest {
-    user_id: String,
-    text: String,
-}
-
-#[derive(Debug, Deserialize)]
 struct SlackFileProxyClaims {
     slack: SlackProxyClaims,
 }
@@ -194,35 +185,6 @@ struct SlackChannelItem {
     can_upload: bool,
     can_download: bool,
     can_read_history: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct SlackAppDmResponse {
-    ok: bool,
-    channel: String,
-    ts: String,
-}
-
-async fn send_slack_app_dm(
-    Json(request): Json<SlackAppDmRequest>,
-) -> Result<Json<SlackAppDmResponse>, ApiError> {
-    validate_slack_user_id(&request.user_id)?;
-    validate_slack_app_dm_text(&request.text)?;
-
-    let form = slack_app_dm_form(&request.user_id, &request.text);
-    let value = slack_api_post_form(
-        http_client(),
-        slack_proxy_config()?,
-        "chat.postMessage",
-        &form,
-    )
-    .await?;
-
-    Ok(Json(SlackAppDmResponse {
-        ok: true,
-        channel: required_slack_string(&value, "channel")?,
-        ts: required_slack_string(&value, "ts")?,
-    }))
 }
 
 async fn upload_slack_file(
@@ -1068,37 +1030,6 @@ fn validate_slack_channel_id(channel_id: &str) -> Result<(), ApiError> {
     Err(ApiError::BadRequest("invalid Slack channel ID".to_owned()))
 }
 
-fn validate_slack_user_id(user_id: &str) -> Result<(), ApiError> {
-    if user_id.len() >= 9
-        && matches!(user_id.as_bytes().first(), Some(b'U' | b'W'))
-        && user_id
-            .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
-    {
-        return Ok(());
-    }
-    Err(ApiError::BadRequest("invalid Slack user ID".to_owned()))
-}
-
-fn validate_slack_app_dm_text(text: &str) -> Result<(), ApiError> {
-    let length = text.chars().count();
-    if text.trim().is_empty() || length > MAX_SLACK_APP_DM_TEXT_CHARS {
-        return Err(ApiError::BadRequest(format!(
-            "Slack app DM text must contain 1 to {MAX_SLACK_APP_DM_TEXT_CHARS} characters"
-        )));
-    }
-    Ok(())
-}
-
-fn slack_app_dm_form(user_id: &str, text: &str) -> Vec<(&'static str, String)> {
-    vec![
-        ("channel", user_id.to_owned()),
-        ("text", text.to_owned()),
-        ("unfurl_links", "false".to_owned()),
-        ("unfurl_media", "false".to_owned()),
-    ]
-}
-
 fn validate_slack_file_id(file_id: &str) -> Result<(), ApiError> {
     if file_id.len() >= 9
         && file_id.starts_with('F')
@@ -1656,32 +1587,6 @@ mod tests {
         assert!(channels.contains("D111111111"));
         assert!(channels.contains("C222222222"));
         assert!(channels.contains("G222222222"));
-    }
-
-    #[test]
-    fn app_dm_validates_user_and_message() {
-        validate_slack_user_id("U12345678").unwrap();
-        validate_slack_user_id("W12345678").unwrap();
-        for invalid in ["", "D12345678", "U123", "U1234abcd"] {
-            assert!(validate_slack_user_id(invalid).is_err());
-        }
-
-        validate_slack_app_dm_text("hello").unwrap();
-        assert!(validate_slack_app_dm_text("   ").is_err());
-        assert!(validate_slack_app_dm_text(&"x".repeat(3_501)).is_err());
-    }
-
-    #[test]
-    fn app_dm_form_disables_unfurls() {
-        assert_eq!(
-            slack_app_dm_form("U12345678", "hello"),
-            vec![
-                ("channel", "U12345678".to_owned()),
-                ("text", "hello".to_owned()),
-                ("unfurl_links", "false".to_owned()),
-                ("unfurl_media", "false".to_owned()),
-            ]
-        );
     }
 
     #[test]

@@ -27,9 +27,10 @@ packages = ["."]
 
 [tool.centaur]
 module = "client.py"
-secrets = []
-optional_secrets = [
+secrets = [
     {type = "http", name = "SLACK_BOT_TOKEN", match_headers = ["Authorization"], hosts = ["slack.com"]},
+]
+optional_secrets = [
     {type = "http", name = "SLACK_SEARCH_TOKEN", match_headers = ["Authorization"], hosts = ["slack.com"]},
     {type = "http", name = "SLACK_ETL_TOKEN", match_headers = ["Authorization"], hosts = ["slack.com", "files.slack.com"]},
 ]

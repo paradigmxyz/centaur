@@ -115,11 +115,9 @@ class SlackClient:
         self,
         bot_token: str | None = None,
         search_token: str | None = None,
-        *,
-        allow_missing_bot_token: bool = False,
     ):
         token = (bot_token or secret("SLACK_BOT_TOKEN", default="")).strip()
-        if not token and not allow_missing_bot_token:
+        if not token:
             raise RuntimeError(
                 "SLACK_BOT_TOKEN not set.\n"
                 "Get one at https://api.slack.com/apps → OAuth & Permissions → Bot User OAuth Token"
@@ -1909,31 +1907,6 @@ class SlackClient:
             unfurl_media=unfurl_media,
         )
 
-    def send_app_dm(self, user_id: str, text: str) -> dict:
-        """Send a DM as the Centaur Slack app via the authenticated API server."""
-        clean_user_id = self._clean_user_ref(user_id).upper()
-        if not self._looks_like_user_id(clean_user_id):
-            raise ValueError("user_id must be a Slack user ID such as U12345678")
-
-        message_text = self._normalize_message_text(text)
-        attribution = self._format_requester_attribution()
-        if attribution:
-            message_text += attribution
-
-        payload = {"user_id": clean_user_id, "text": message_text}
-        result = self._centaur_api_post_bytes_json(
-            "/api/slack/app-dms",
-            {},
-            json.dumps(payload).encode("utf-8"),
-            "application/json",
-        )
-        channel = str(result.get("channel", ""))
-        timestamp = str(result.get("ts", ""))
-        result["permalink"] = (
-            f"https://slack.com/archives/{channel}/p{timestamp.replace('.', '')}"
-        )
-        return result
-
     @staticmethod
     def _preview_for_bytes(data: bytes, filename: str) -> dict[str, Any]:
         """Return cheap metadata that helps identify generated artifacts."""
@@ -2598,11 +2571,6 @@ def _client() -> SlackClient:
     )
 
 
-def _app_dm_client() -> SlackClient:
-    """Build an API-only client without requiring a personal Slack credential."""
-    return SlackClient(allow_missing_bot_token=True)
-
-
 def get_slack_client() -> SlackClient:
     """Get a cached Slack client instance for CLI compatibility."""
     return _client()
@@ -2699,10 +2667,6 @@ def send_message(*args, **kwargs):
 
 def send_dm(*args, **kwargs):
     return _client().send_dm(*args, **kwargs)
-
-
-def send_app_dm(*args, **kwargs):
-    return _app_dm_client().send_app_dm(*args, **kwargs)
 
 
 def upload_file(*args, **kwargs):
