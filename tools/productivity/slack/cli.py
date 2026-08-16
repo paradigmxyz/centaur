@@ -103,6 +103,23 @@ def dm(
         raise typer.Exit(1)
 
 
+@app.command("app-dm")
+def app_dm(
+    user_id: str = typer.Argument(..., help="Slack user ID, e.g. U12345678"),
+    message: str = typer.Argument(..., help="Message text to send"),
+):
+    """Send a direct message as the Centaur Slack app."""
+    from .client import send_app_dm
+
+    try:
+        result = send_app_dm(user_id, message)
+        console.print("[green]✓ App DM sent[/]")
+        console.print(f"[dim]{result['permalink']}[/]")
+    except (RuntimeError, ValueError) as e:
+        console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1) from e
+
+
 @app.command()
 def search(
     query: str = typer.Argument(..., help="Text to search for (supports multiple terms)"),
