@@ -32,7 +32,6 @@ use centaur_sandbox_manager::{SandboxReaperConfig, WarmPoolConfig};
 use centaur_session_core::HarnessType;
 use centaur_session_runtime::{
     PersonaRegistry, SandboxCapacityConfig, SandboxWorkloadMode, SessionSandboxCleanupConfig,
-    openai_base_url,
 };
 use centaur_workflows::{WorkflowHostSandboxRuntime, WorkflowPrincipalRegistrar};
 use clap::{Args as ClapArgs, Parser, ValueEnum};
@@ -149,6 +148,14 @@ struct ActivitySummaryArgs {
         default_value = "gpt-5.4-nano"
     )]
     model: String,
+    /// Deprecated activity-summary-specific endpoint. `OPENAI_BASE_URL` takes
+    /// precedence when set, but this remains supported for existing deployments.
+    #[arg(
+        long = "session-activity-summary-openai-base-url",
+        env = "SESSION_ACTIVITY_SUMMARY_OPENAI_BASE_URL",
+        default_value = "https://api.openai.com/v1"
+    )]
+    openai_base_url: String,
     #[arg(
         long = "session-activity-summary-min-interval-secs",
         env = "SESSION_ACTIVITY_SUMMARY_MIN_INTERVAL_SECS",
@@ -191,8 +198,11 @@ impl ActivitySummaryArgs {
             );
             return None;
         };
+        let base_url = clean_optional_value(env::var("OPENAI_BASE_URL").ok().as_deref())
+            .map(|value| value.trim_end_matches('/').to_owned())
+            .unwrap_or_else(|| self.openai_base_url.trim_end_matches('/').to_owned());
         Some(ActivitySummaryConfig {
-            base_url: openai_base_url(),
+            base_url,
             api_key,
             max_facts: usize::try_from(self.max_facts).unwrap_or(usize::MAX),
             max_output_tokens: u16::try_from(self.max_output_tokens).unwrap_or(u16::MAX),
@@ -2192,6 +2202,52 @@ mod tests {
 
         let config = args.activity_summary_config().unwrap();
         assert_eq!(config.api_key, "sk-test");
+    }
+
+    #[test]
+    fn activity_summary_preserves_legacy_base_url_when_global_url_is_unset() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[
+            ("OPENAI_API_KEY", "sk-test"),
+            ("OPENAI_BASE_URL", ""),
+            (
+                "SESSION_ACTIVITY_SUMMARY_OPENAI_BASE_URL",
+                "https://legacy-compatible.example/v1/",
+            ),
+        ]);
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-activity-summary-enabled",
+            "true",
+        ])
+        .unwrap();
+
+        let config = args.activity_summary_config().unwrap();
+        assert_eq!(config.base_url, "https://legacy-compatible.example/v1");
+    }
+
+    #[test]
+    fn activity_summary_global_base_url_overrides_legacy_base_url() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[
+            ("OPENAI_API_KEY", "sk-test"),
+            ("OPENAI_BASE_URL", "https://global-compatible.example/v1/"),
+        ]);
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-activity-summary-enabled",
+            "true",
+            "--session-activity-summary-openai-base-url",
+            "https://legacy-compatible.example/v1",
+        ])
+        .unwrap();
+
+        let config = args.activity_summary_config().unwrap();
+        assert_eq!(config.base_url, "https://global-compatible.example/v1");
     }
 
     #[test]

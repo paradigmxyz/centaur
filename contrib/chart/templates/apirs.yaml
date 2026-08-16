@@ -319,6 +319,8 @@ spec:
 {{- if .Values.apiRs.activitySummary.enabled }}
             - name: SESSION_ACTIVITY_SUMMARY_MODEL
               value: {{ .Values.apiRs.activitySummary.model | quote }}
+            - name: SESSION_ACTIVITY_SUMMARY_OPENAI_BASE_URL
+              value: {{ .Values.apiRs.activitySummary.openaiBaseUrl | quote }}
             - name: SESSION_ACTIVITY_SUMMARY_MIN_INTERVAL_SECS
               value: {{ .Values.apiRs.activitySummary.minIntervalSecs | quote }}
             - name: SESSION_ACTIVITY_SUMMARY_TIMEOUT_SECS

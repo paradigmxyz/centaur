@@ -482,6 +482,8 @@ apiRs:
   activitySummary:
     enabled: false
     model: gpt-5.4-nano
+    # Deprecated compatibility fallback. Prefer OPENAI_BASE_URL in apiRs.extraEnv.
+    openaiBaseUrl: https://api.openai.com/v1
     minIntervalSecs: 20
     timeoutSecs: 5
     maxFacts: 12
