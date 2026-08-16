@@ -3853,6 +3853,12 @@ fn python_slack_message_payload(
     if let Some(blocks) = args.get("blocks") {
         payload["blocks"] = blocks.clone();
     }
+    if let Some(username) = args.get("username").and_then(Value::as_str) {
+        payload["username"] = json!(username);
+    }
+    if let Some(icon_emoji) = args.get("icon_emoji").and_then(Value::as_str) {
+        payload["icon_emoji"] = json!(icon_emoji);
+    }
     if let Some(no_attribution) = args.get("no_attribution").and_then(Value::as_bool) {
         payload["no_attribution"] = json!(no_attribution);
     }
@@ -4372,6 +4378,8 @@ mod tests {
                 "reply_broadcast": true,
                 "unfurl_links": true,
                 "unfurl_media": true,
+                "username": "The Date Goblin",
+                "icon_emoji": ":female_mage:",
             }),
         );
 
@@ -4382,6 +4390,16 @@ mod tests {
         assert_eq!(payload["reply_broadcast"], json!(true));
         assert_eq!(payload["unfurl_links"], json!(true));
         assert_eq!(payload["unfurl_media"], json!(true));
+        assert_eq!(payload["username"], json!("The Date Goblin"));
+        assert_eq!(payload["icon_emoji"], json!(":female_mage:"));
+    }
+
+    #[test]
+    fn python_slack_payload_omits_custom_identity_by_default() {
+        let payload = python_slack_message_payload("C123", "hello", "client-1", &json!({}));
+
+        assert!(payload.get("username").is_none());
+        assert!(payload.get("icon_emoji").is_none());
     }
 
     #[test]

@@ -158,7 +158,19 @@ class WorkflowContext:
     async def call_tool(self, tool: str, method: str, args: dict[str, Any] | None = None) -> Any:
         return await WorkflowToolManager(self._rpc).call_tool_raw(tool, method, args or {})
 
-    async def post_to_slack(self, channel: str, text: str, **kwargs: Any) -> Any:
+    async def post_to_slack(
+        self,
+        channel: str,
+        text: str,
+        *,
+        username: str | None = None,
+        icon_emoji: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        if username is not None:
+            kwargs["username"] = username
+        if icon_emoji is not None:
+            kwargs["icon_emoji"] = icon_emoji
         return await self._rpc.request(
             {
                 "type": "ctx.post_to_slack",
