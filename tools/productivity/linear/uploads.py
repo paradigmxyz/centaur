@@ -260,7 +260,25 @@ def validate_upload_file(
     root = Path(uploads_root) if uploads_root is not None else Path.home() / "uploads"
     validated_path, path_snapshots = _confined_file(path, root)
 
-    suffix = validated_path.suffix.lower()
+    filename = validated_path.name
+    if (
+        not filename
+        or len(filename) > 255
+        or not filename.isprintable()
+        or filename in {".", ".."}
+        or "/" in filename
+        or "\\" in filename
+    ):
+        raise UploadValidationError("upload filename must be a printable basename")
+
+    suffix = next(
+        (
+            candidate
+            for candidate in (".png", ".webm")
+            if filename.casefold().endswith(candidate)
+        ),
+        None,
+    )
     if suffix == ".png":
         mime_type = "image/png"
         size_limit = PNG_MAX_BYTES
@@ -312,7 +330,7 @@ def validate_upload_file(
 
     return UploadFile(
         path=validated_path,
-        filename=validated_path.name,
+        filename=filename,
         mime_type=mime_type,
         size_bytes=size_bytes,
         content=content,
@@ -324,11 +342,14 @@ def _validate_linear_url(value: Any, field_name: str, *, allow_query: bool) -> s
         raise UploadValidationError(f"{field_name} must be an exact Linear upload URL")
     if "\\" in value or any(ord(character) < 0x20 for character in value):
         raise UploadValidationError(f"{field_name} contains unsafe URL characters")
+    invalid_url = False
     try:
         parsed = urlsplit(value)
         port = parsed.port
-    except ValueError as exc:
-        raise UploadValidationError(f"{field_name} is not a valid URL") from exc
+    except ValueError:
+        invalid_url = True
+    if invalid_url:
+        raise UploadValidationError(f"{field_name} is not a valid URL")
     if (
         parsed.scheme != "https"
         or parsed.netloc != _LINEAR_UPLOAD_HOST
@@ -337,6 +358,7 @@ def _validate_linear_url(value: Any, field_name: str, *, allow_query: bool) -> s
         or parsed.username is not None
         or parsed.password is not None
         or not parsed.path.startswith("/")
+        or parsed.path == "/"
         or parsed.path.startswith("//")
         or parsed.fragment
         or (parsed.query and not allow_query)

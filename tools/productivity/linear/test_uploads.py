@@ -82,6 +82,39 @@ def test_validate_upload_file_accepts_supported_evidence(
     assert upload.content == content
 
 
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "",
+        ".",
+        "..",
+        "nested/evidence.png",
+        "nested\\evidence.png",
+        "unsafe\nname.png",
+        "unsafe\x00name.png",
+        f"{'x' * 252}.png",
+        "evidence.jpg",
+    ],
+)
+def test_validate_upload_file_rejects_unsafe_filename_before_reading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, filename: str
+) -> None:
+    class UnsafeFilenamePath:
+        name = filename
+
+        def open(self, *args: object, **kwargs: object):
+            raise AssertionError("unsafe filename must be rejected before file access")
+
+    monkeypatch.setattr(
+        uploads_module,
+        "_confined_file",
+        lambda path, root: (UnsafeFilenamePath(), ()),
+    )
+
+    with pytest.raises(UploadValidationError, match="filename|extension"):
+        validate_upload_file("ignored", uploads_root=tmp_path)
+
+
 def test_validated_upload_content_is_an_immutable_snapshot(tmp_path: Path) -> None:
     root = tmp_path / "uploads"
     original = PNG + b" original"
@@ -497,6 +530,32 @@ def test_validate_upload_target_rejects_identical_upload_and_asset_urls() -> Non
     ],
 )
 def test_validate_upload_target_rejects_unsafe_urls(field: str, url: str) -> None:
+    with pytest.raises(UploadValidationError, match=field):
+        validate_upload_target(_target(**{field: url}))
+
+
+def test_validate_upload_target_discards_invalid_port_exception_details() -> None:
+    signed_token = "signed-port-token-do-not-leak"
+    malformed = (
+        f"https://uploads.linear.app:{signed_token}/object?signature={signed_token}"
+    )
+
+    with pytest.raises(UploadValidationError, match="uploadUrl") as caught:
+        validate_upload_target(_target(uploadUrl=malformed))
+
+    error = caught.value
+    assert signed_token not in repr(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+
+
+@pytest.mark.parametrize("field", ["uploadUrl", "assetUrl"])
+@pytest.mark.parametrize(
+    "url", ["https://uploads.linear.app", "https://uploads.linear.app/"]
+)
+def test_validate_upload_target_rejects_root_object_paths(
+    field: str, url: str
+) -> None:
     with pytest.raises(UploadValidationError, match=field):
         validate_upload_target(_target(**{field: url}))
 

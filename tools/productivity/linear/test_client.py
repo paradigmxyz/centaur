@@ -15,7 +15,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from uploads import UploadError
+import uploads as uploads_module
+from uploads import UploadError, UploadValidationError
 
 # client.py inherits from the packaged readonly client. The mutation logic under
 # test never touches readonly behavior, so stub the base class before loading the
@@ -326,6 +327,76 @@ def test_upload_evidence_escapes_filename_in_markdown_asset_link(
             ),
         }
     }
+
+
+def test_markdown_link_label_escapes_brackets_and_backslashes() -> None:
+    assert module._markdown_link_label("evi\\[proof].png") == "evi\\\\\\[proof\\].png"
+
+
+def test_upload_evidence_rejects_unsafe_filename_before_allocation_or_comment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class UnsafeFilenamePath:
+        name = "unsafe\nname.png"
+
+        def open(self, *args: object, **kwargs: object):
+            raise AssertionError("unsafe filename must be rejected before file access")
+
+    monkeypatch.setattr(
+        uploads_module,
+        "_confined_file",
+        lambda path, root: (UnsafeFilenamePath(), ()),
+    )
+    upload_calls = 0
+
+    def record_upload(target: object, upload: object) -> str:
+        nonlocal upload_calls
+        upload_calls += 1
+        return "must-not-upload"
+
+    monkeypatch.setattr(module, "put_upload", record_upload)
+    client = RecordingLinearClient({})
+
+    with pytest.raises(UploadValidationError, match="filename"):
+        client.upload_evidence("NEU-497", "ignored", comment="must not be created")
+
+    assert client.calls == []
+    assert upload_calls == 0
+
+
+@pytest.mark.parametrize("field", ["uploadUrl", "assetUrl"])
+def test_upload_evidence_rejects_root_target_before_put_or_comment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+) -> None:
+    path, _ = _write_png(tmp_path)
+    target = {**_upload_target(), field: "https://uploads.linear.app/"}
+    client = RecordingLinearClient(
+        {
+            "fileUpload": {"success": True, "uploadFile": target},
+            "commentCreate": {
+                "success": True,
+                "comment": {"id": "must-not-exist"},
+            },
+        }
+    )
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    upload_calls = 0
+
+    def record_upload(target: object, upload: object) -> str:
+        nonlocal upload_calls
+        upload_calls += 1
+        return "must-not-upload"
+
+    monkeypatch.setattr(module, "put_upload", record_upload)
+
+    with pytest.raises(UploadValidationError, match=field):
+        client.upload_evidence("NEU-497", path, comment="must not be created")
+
+    assert len(client.calls) == 1
+    assert "fileUpload" in client.calls[0]["query"]
+    assert upload_calls == 0
 
 
 def test_upload_evidence_does_not_comment_after_upload_failure(

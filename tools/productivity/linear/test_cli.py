@@ -587,6 +587,12 @@ MALFORMED_DOCUMENTED_RESULTS = [
     pytest.param(
         {"asset_url": f"https://example.com/{TOKEN}.png"}, id="asset-url-wrong-host"
     ),
+    pytest.param(
+        {"asset_url": "https://uploads.linear.app"}, id="asset-url-missing-path"
+    ),
+    pytest.param(
+        {"asset_url": "https://uploads.linear.app/"}, id="asset-url-root-path"
+    ),
     pytest.param({"filename": f"../{TOKEN}.png"}, id="filename-not-basename"),
     pytest.param({"filename": f"{TOKEN}.jpg"}, id="filename-unsupported"),
     pytest.param({"filename": f"{TOKEN}\n.png"}, id="filename-not-printable"),
