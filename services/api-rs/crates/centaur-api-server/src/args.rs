@@ -20,7 +20,8 @@ use centaur_iron_control::{
     SessionRegistrar, register_role,
 };
 use centaur_iron_proxy::{
-    ProxyFragment, SourceKind, SourcePolicy, bedrock_enabled, harness_auth_fragment, infra_fragment,
+    ProxyFragment, SourceKind, SourcePolicy, bedrock_enabled, custom_provider_auth_fragments,
+    harness_auth_fragment, infra_fragment,
 };
 use centaur_sandbox_agent_k8s::{
     AgentSandboxBackend, AgentSandboxConfig, GitHubTokenRef, IronControlSettings, IronProxyConfig,
@@ -1966,6 +1967,9 @@ impl IronProxyHarnessArgs {
         }
         if let Some(fragment) = harness_auth_fragment("meta-ai", "api_key")? {
             fragments.push(fragment);
+        }
+        if let Ok(raw) = env::var("CODEX_CUSTOM_PROVIDERS") {
+            fragments.extend(custom_provider_auth_fragments(&raw)?);
         }
         // Bedrock is opt-in (not the default codex provider): only register its
         // SigV4 re-signing fragment when the operator has set CODEX_BEDROCK_REGION,

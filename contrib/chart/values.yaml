@@ -267,6 +267,21 @@ overlays:
   #   toolsSubdir: ""
   #   skillsSubdir: ""
 
+codex:
+  # Operator-defined OpenAI-compatible Responses providers. Each provider is
+  # added to sandbox Codex config, exposed through `--provider <id>`, and given
+  # a hostname-scoped iron-proxy bearer-token replacement. `apiKeyEnv` names a
+  # field in the configured secret source; sandboxes receive only a placeholder.
+  # Example:
+  #   customProviders:
+  #     private_responses:
+  #       name: Private Responses
+  #       baseUrl: https://inference.example.com/v1
+  #       apiKeyEnv: PRIVATE_RESPONSES_API_KEY
+  #       # Optional; callers must pass --model when omitted.
+  #       defaultModel: example-model
+  customProviders: {}
+
 sandbox:
   controller: pod
   image:

@@ -1,5 +1,7 @@
 use std::{collections::BTreeMap, path::PathBuf};
 
+use serde::Deserialize;
+
 use crate::{IronProxyConfigError, ProxyFragment, Result};
 
 /// The shared infra secrets, embedded at compile time so the binary carries no
@@ -12,6 +14,143 @@ pub fn load_fragment_str(contents: &str) -> Result<ProxyFragment> {
         path: PathBuf::from("<inline>"),
         source,
     })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CustomProviderConfig {
+    name: String,
+    base_url: String,
+    api_key_env: String,
+    default_model: Option<String>,
+}
+
+/// Build hostname-scoped bearer-token replacements for operator-configured
+/// OpenAI-compatible Codex providers. The same JSON is consumed by the sandbox
+/// entrypoint, so provider config and proxy credentials share one source of
+/// truth without putting real keys in a sandbox.
+pub fn custom_provider_auth_fragments(raw: &str) -> Result<Vec<ProxyFragment>> {
+    if raw.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let providers: BTreeMap<String, CustomProviderConfig> = serde_json::from_str(raw)
+        .map_err(|source| IronProxyConfigError::ParseCustomProviders { source })?;
+    providers
+        .into_iter()
+        .map(|(provider, config)| custom_provider_auth_fragment(&provider, config))
+        .collect()
+}
+
+fn custom_provider_auth_fragment(
+    provider: &str,
+    config: CustomProviderConfig,
+) -> Result<ProxyFragment> {
+    if !valid_provider_id(provider) {
+        return Err(invalid_custom_provider(
+            provider,
+            "id must match [a-z][a-z0-9_-]*",
+        ));
+    }
+    if config.name.trim().is_empty() {
+        return Err(invalid_custom_provider(provider, "name must not be empty"));
+    }
+    if config
+        .default_model
+        .as_ref()
+        .is_some_and(|model| model.trim().is_empty())
+    {
+        return Err(invalid_custom_provider(
+            provider,
+            "defaultModel must not be empty when set",
+        ));
+    }
+    if !valid_env_name(&config.api_key_env) {
+        return Err(invalid_custom_provider(
+            provider,
+            "apiKeyEnv must match [A-Z][A-Z0-9_]*",
+        ));
+    }
+    let host = https_dns_host(&config.base_url).ok_or_else(|| {
+        invalid_custom_provider(
+            provider,
+            "baseUrl must be an HTTPS URL with a DNS hostname and no explicit port",
+        )
+    })?;
+    load_fragment_str(&format!(
+        r#"
+transforms:
+  - name: secrets
+    config:
+      secrets:
+        - id: CODEX_CUSTOM_PROVIDER_{provider}_AUTHORIZATION
+          replace:
+            proxy_value: {api_key_env}
+            match_headers: ["Authorization"]
+          rules: [{{ host: {host} }}]
+"#,
+        api_key_env = config.api_key_env,
+    ))
+}
+
+fn invalid_custom_provider(provider: &str, reason: &'static str) -> IronProxyConfigError {
+    IronProxyConfigError::InvalidCustomProvider {
+        provider: provider.to_owned(),
+        reason,
+    }
+}
+
+fn valid_provider_id(value: &str) -> bool {
+    let mut characters = value.chars();
+    characters
+        .next()
+        .is_some_and(|character| character.is_ascii_lowercase())
+        && characters.all(|character| {
+            character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+                || character == '_'
+                || character == '-'
+        })
+}
+
+fn valid_env_name(value: &str) -> bool {
+    let mut characters = value.chars();
+    characters
+        .next()
+        .is_some_and(|character| character.is_ascii_uppercase())
+        && characters.all(|character| {
+            character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
+        })
+}
+
+fn https_dns_host(base_url: &str) -> Option<&str> {
+    let authority = base_url
+        .trim()
+        .strip_prefix("https://")?
+        .split('/')
+        .next()?;
+    let valid_dns_name = authority.len() <= 253
+        && authority
+            .chars()
+            .any(|character| character.is_ascii_alphabetic())
+        && authority.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '-')
+                && label
+                    .chars()
+                    .next()
+                    .is_some_and(|character| character.is_ascii_alphanumeric())
+                && label
+                    .chars()
+                    .last()
+                    .is_some_and(|character| character.is_ascii_alphanumeric())
+        });
+    if !valid_dns_name {
+        return None;
+    }
+    Some(authority)
 }
 
 /// The harness auth fragment for ``engine`` and ``auth_mode``. These are infra

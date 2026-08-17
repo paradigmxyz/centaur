@@ -88,6 +88,37 @@ describe("extractMessageOverrides", () => {
     });
   });
 
+  test("--provider selects an arbitrary codex provider", () => {
+    expect(
+      extractMessageOverrides(
+        "--provider private_responses --model example-model audit this",
+      ),
+    ).toEqual({
+      cleanedText: "audit this",
+      harnessType: "codex",
+      model: "example-model",
+      provider: "private_responses",
+    });
+  });
+
+  test("--provider uses the configured provider default model", () => {
+    const previous = process.env.CODEX_CUSTOM_PROVIDERS;
+    process.env.CODEX_CUSTOM_PROVIDERS = JSON.stringify({
+      private_responses: { defaultModel: "configured-model" },
+    });
+    try {
+      expect(extractMessageOverrides("--provider=private_responses audit this")).toEqual({
+        cleanedText: "audit this",
+        harnessType: "codex",
+        model: "configured-model",
+        provider: "private_responses",
+      });
+    } finally {
+      if (previous === undefined) delete process.env.CODEX_CUSTOM_PROVIDERS;
+      else process.env.CODEX_CUSTOM_PROVIDERS = previous;
+    }
+  });
+
   test("--model expands claude aliases to full model ids", () => {
     expect(extractMessageOverrides("--claude --model opus go")).toEqual({
       cleanedText: "go",
