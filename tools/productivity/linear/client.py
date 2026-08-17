@@ -2,12 +2,30 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 try:
     from .readonly import LinearReadonlyClient
 except ImportError:  # pragma: no cover - supports file-based plugin loading
     from readonly import LinearReadonlyClient
+
+try:
+    from .uploads import (
+        UploadError,
+        UploadPartialFailure,
+        put_upload,
+        validate_upload_file,
+        validate_upload_target,
+    )
+except ImportError:  # pragma: no cover - supports file-based plugin loading
+    from uploads import (
+        UploadError,
+        UploadPartialFailure,
+        put_upload,
+        validate_upload_file,
+        validate_upload_target,
+    )
 
 
 class LinearClient(LinearReadonlyClient):
@@ -223,6 +241,74 @@ class LinearClient(LinearReadonlyClient):
         """
         result = self._query(mutation, {"input": {"issueId": issue_id, "body": body}})
         return self._mutation_result(result, "commentCreate", "comment")
+
+    def upload_evidence(
+        self,
+        issue_id: str,
+        path: str | Path,
+        comment: str | None = None,
+    ) -> dict[str, Any]:
+        """Upload validated evidence and optionally add one issue comment."""
+
+        upload_file = validate_upload_file(path)
+        mutation = """
+        mutation FileUpload($filename: String!, $contentType: String!, $size: Int!) {
+            fileUpload(filename: $filename, contentType: $contentType, size: $size) {
+                success
+                uploadFile {
+                    uploadUrl
+                    assetUrl
+                    headers { key value }
+                }
+            }
+        }
+        """
+        allocation = self._query(
+            mutation,
+            {
+                "filename": upload_file.filename,
+                "contentType": upload_file.mime_type,
+                "size": upload_file.size_bytes,
+            },
+        ).get("fileUpload", {})
+        if not allocation.get("success") or not allocation.get("uploadFile"):
+            raise UploadError("Linear upload allocation failed")
+
+        target = validate_upload_target(allocation["uploadFile"])
+        put_upload(target, upload_file)
+        result: dict[str, Any] = {
+            "ok": True,
+            "tool": "linear",
+            "issue_id": issue_id,
+            "asset_url": target.asset_url,
+            "filename": upload_file.filename,
+            "mime_type": upload_file.mime_type,
+            "size_bytes": upload_file.size_bytes,
+            "comment_id": None,
+        }
+        if comment is None:
+            return result
+
+        try:
+            comment_result = self.add_comment(issue_id, comment)
+        except Exception:
+            comment_result = {"success": False}
+        if comment_result.get("success") and comment_result.get("id"):
+            result["comment_id"] = comment_result["id"]
+            return result
+
+        partial = UploadPartialFailure(
+            asset_url=target.asset_url,
+            filename=upload_file.filename,
+            mime_type=upload_file.mime_type,
+            size_bytes=upload_file.size_bytes,
+        )
+        return {
+            **result,
+            "ok": False,
+            "stage": partial.stage,
+            "error": str(partial),
+        }
 
     def _resolve_label_ids(self, names: list[str], team_key: str | None = None) -> dict[str, str]:
         """Resolve label names to IDs, preferring a team-scoped label over a

@@ -12,6 +12,8 @@ from types import MappingProxyType
 from typing import Any
 from urllib.parse import urlsplit
 
+import httpx
+
 PNG_MAX_BYTES = 10 * 1024 * 1024
 WEBM_MAX_BYTES = 50 * 1024 * 1024
 
@@ -393,3 +395,30 @@ def validate_upload_target(upload_file: Mapping[str, Any]) -> ValidatedTarget:
         asset_url=asset_url,
         headers=headers,
     )
+
+
+def put_upload(target: ValidatedTarget, upload_file: UploadFile) -> str:
+    """PUT a validated byte snapshot to a validated Linear upload target."""
+
+    headers = {
+        "Content-Type": upload_file.mime_type,
+        "Cache-Control": "public, max-age=31536000",
+        **target.headers,
+    }
+    failed = False
+    try:
+        with httpx.Client(follow_redirects=False) as upload_client:
+            response = upload_client.put(
+                target.upload_url,
+                content=upload_file.content,
+                headers=headers,
+            )
+            response.raise_for_status()
+    except httpx.HTTPError:
+        failed = True
+
+    if failed:
+        # Raise outside the handler so the provider exception (which may contain
+        # the signed URL and headers) is not attached as a visible cause.
+        raise UploadError("Linear evidence upload failed")
+    return target.asset_url

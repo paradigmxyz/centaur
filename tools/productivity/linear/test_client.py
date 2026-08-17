@@ -11,6 +11,12 @@ import types
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from uploads import UploadError
+
 # client.py inherits from the packaged readonly client. The mutation logic under
 # test never touches readonly behavior, so stub the base class before loading the
 # module as a standalone file.
@@ -182,3 +188,175 @@ def test_mutations_surface_failure():
     assert client.create_issue("Test", team_id="team-1") == {"success": False}
     assert client.update_issue("ENG-1", title="New title") == {"success": False}
     assert client.add_comment("ENG-1", "hello") == {"success": False}
+
+
+def _upload_target() -> dict[str, object]:
+    return {
+        "uploadUrl": "https://uploads.linear.app/upload/object?signature=secret",
+        "assetUrl": "https://uploads.linear.app/assets/evidence.png",
+        "headers": [{"key": "x-amz-checksum-sha256", "value": "checksum"}],
+    }
+
+
+def _write_png(tmp_path: Path) -> tuple[Path, bytes]:
+    content = b"\x89PNG\r\n\x1a\nprotocol evidence"
+    path = tmp_path / "uploads" / "evidence.png"
+    path.parent.mkdir()
+    path.write_bytes(content)
+    return path, content
+
+
+def test_upload_evidence_uses_exact_file_upload_mutation_and_variables(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, content = _write_png(tmp_path)
+    client = RecordingLinearClient(
+        {"fileUpload": {"success": True, "uploadFile": _upload_target()}}
+    )
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(module, "put_upload", lambda target, upload: target.asset_url)
+
+    result = client.upload_evidence("NEU-497", path)
+
+    allocation = client.calls[0]
+    compact_query = " ".join(allocation["query"].split())
+    assert (
+        "mutation FileUpload($filename: String!, $contentType: String!, $size: Int!)"
+        in compact_query
+    )
+    assert (
+        "fileUpload(filename: $filename, contentType: $contentType, size: $size)"
+        in compact_query
+    )
+    assert "success uploadFile { uploadUrl assetUrl headers { key value } }" in compact_query
+    assert allocation["variables"] == {
+        "filename": "evidence.png",
+        "contentType": "image/png",
+        "size": len(content),
+    }
+    assert result == {
+        "ok": True,
+        "tool": "linear",
+        "issue_id": "NEU-497",
+        "asset_url": "https://uploads.linear.app/assets/evidence.png",
+        "filename": "evidence.png",
+        "mime_type": "image/png",
+        "size_bytes": len(content),
+        "comment_id": None,
+    }
+
+
+def test_upload_evidence_uploads_before_creating_comment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, content = _write_png(tmp_path)
+    events: list[str] = []
+
+    class OrderedClient(RecordingLinearClient):
+        def _query(self, query: str, variables: dict | None = None) -> dict:
+            events.append("comment" if "commentCreate" in query else "allocate")
+            return super()._query(query, variables)
+
+    client = OrderedClient(
+        {
+            "fileUpload": {"success": True, "uploadFile": _upload_target()},
+            "commentCreate": {
+                "success": True,
+                "comment": {"id": "comment-1", "body": "Evidence"},
+            },
+        }
+    )
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    def record_upload(target, upload) -> str:
+        events.append("upload")
+        assert upload.content == content
+        return target.asset_url
+
+    monkeypatch.setattr(module, "put_upload", record_upload)
+
+    result = client.upload_evidence("NEU-497", path, comment="Evidence")
+
+    assert events == ["allocate", "upload", "comment"]
+    assert result["comment_id"] == "comment-1"
+    assert client.calls[1]["variables"] == {
+        "input": {"issueId": "NEU-497", "body": "Evidence"}
+    }
+
+
+def test_upload_evidence_does_not_comment_after_upload_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, _ = _write_png(tmp_path)
+    client = RecordingLinearClient(
+        {
+            "fileUpload": {"success": True, "uploadFile": _upload_target()},
+            "commentCreate": {
+                "success": True,
+                "comment": {"id": "must-not-exist"},
+            },
+        }
+    )
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    def fail_upload(target, upload) -> str:
+        raise UploadError("Linear evidence upload failed")
+
+    monkeypatch.setattr(module, "put_upload", fail_upload)
+
+    with pytest.raises(UploadError, match="upload failed"):
+        client.upload_evidence("NEU-497", path, comment="must not be created")
+
+    assert len(client.calls) == 1
+    assert "fileUpload" in client.calls[0]["query"]
+
+
+@pytest.mark.parametrize("comment_failure", ["result", "exception"])
+def test_upload_evidence_returns_safe_partial_failure_without_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    comment_failure: str,
+) -> None:
+    path, content = _write_png(tmp_path)
+    upload_calls = 0
+
+    class CommentFailureClient(RecordingLinearClient):
+        def add_comment(self, issue_id: str, body: str) -> dict[str, Any]:
+            if comment_failure == "exception":
+                raise RuntimeError("secret comment transport detail")
+            return super().add_comment(issue_id, body)
+
+    client = CommentFailureClient(
+        {
+            "fileUpload": {"success": True, "uploadFile": _upload_target()},
+            "commentCreate": {"success": False, "comment": None},
+        }
+    )
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    def record_upload(target, upload) -> str:
+        nonlocal upload_calls
+        upload_calls += 1
+        return target.asset_url
+
+    monkeypatch.setattr(module, "put_upload", record_upload)
+
+    result = client.upload_evidence("NEU-497", path, comment="Evidence")
+
+    assert upload_calls == 1
+    assert result == {
+        "ok": False,
+        "tool": "linear",
+        "issue_id": "NEU-497",
+        "asset_url": "https://uploads.linear.app/assets/evidence.png",
+        "filename": "evidence.png",
+        "mime_type": "image/png",
+        "size_bytes": len(content),
+        "comment_id": None,
+        "stage": "comment",
+        "error": "Linear evidence uploaded, but comment creation failed",
+    }
+    rendered = repr(result)
+    assert "signature" not in rendered.lower()
+    assert "checksum" not in rendered.lower()
+    assert "secret comment transport detail" not in rendered

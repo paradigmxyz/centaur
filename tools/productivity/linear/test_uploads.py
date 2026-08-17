@@ -6,7 +6,9 @@ import os
 import stat
 import sys
 from pathlib import Path
+from typing import Any
 
+import httpx
 import pytest
 
 # Pytest is invoked from the repository root; load this independently packaged
@@ -20,6 +22,7 @@ from uploads import (
     UploadError,
     UploadPartialFailure,
     UploadValidationError,
+    put_upload,
     validate_upload_file,
     validate_upload_target,
 )
@@ -586,3 +589,92 @@ def test_upload_partial_failure_rejects_signed_asset_url() -> None:
             mime_type="image/png",
             size_bytes=123,
         )
+
+
+def test_put_upload_uses_bare_non_redirecting_client_and_immutable_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "uploads"
+    original = PNG + b" immutable upload snapshot"
+    path = _write(root / "evidence.png", original)
+    upload = validate_upload_file(path, uploads_root=root)
+    target = validate_upload_target(_target())
+    path.write_bytes(PNG + b" replacement must not be uploaded")
+    captured: dict[str, Any] = {}
+
+    class Response:
+        def raise_for_status(self) -> None:
+            captured["status_checked"] = True
+
+    class BareClient:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["client_kwargs"] = kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def put(self, url: str, **kwargs: Any) -> Response:
+            captured["method"] = "PUT"
+            captured["url"] = url
+            captured.update(kwargs)
+            return Response()
+
+    monkeypatch.setattr(uploads_module.httpx, "Client", BareClient)
+
+    result = put_upload(target, upload)
+
+    assert result == target.asset_url
+    assert captured["client_kwargs"] == {"follow_redirects": False}
+    assert captured["method"] == "PUT"
+    assert captured["url"] == target.upload_url
+    assert captured["content"] == original
+    assert captured["headers"] == {
+        "Content-Type": "image/png",
+        "Cache-Control": "public, max-age=31536000",
+        "x-amz-checksum-sha256": "checksum",
+        "x-amz-meta-test": "value",
+    }
+    assert not any(key.lower() == "authorization" for key in captured["headers"])
+    assert captured["status_checked"] is True
+
+
+def test_put_upload_redacts_signed_target_when_request_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "uploads"
+    upload = validate_upload_file(
+        _write(root / "evidence.png", PNG + b" private bytes"), uploads_root=root
+    )
+    target = validate_upload_target(_target())
+
+    class FailingClient:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def put(self, url: str, **kwargs: Any):
+            request = httpx.Request("PUT", url, headers=kwargs["headers"])
+            response = httpx.Response(403, request=request)
+            raise httpx.HTTPStatusError(
+                "provider rejected signed request", request=request, response=response
+            )
+
+    monkeypatch.setattr(uploads_module.httpx, "Client", FailingClient)
+
+    with pytest.raises(UploadError) as exc_info:
+        put_upload(target, upload)
+
+    rendered = f"{exc_info.value!r} {exc_info.value}"
+    assert "signature" not in rendered.lower()
+    assert "checksum" not in rendered.lower()
+    assert "private bytes" not in rendered.lower()
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
