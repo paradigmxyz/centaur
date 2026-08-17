@@ -66,6 +66,101 @@ def test_validate_upload_file_accepts_supported_evidence(
     assert upload.filename == filename
     assert upload.mime_type == mime_type
     assert upload.size_bytes == len(content)
+    assert upload.content == content
+
+
+def test_validated_upload_content_is_an_immutable_snapshot(tmp_path: Path) -> None:
+    root = tmp_path / "uploads"
+    original = PNG + b" original"
+    path = _write(root / "evidence.png", original)
+
+    upload = validate_upload_file(path, uploads_root=root)
+    path.write_bytes(PNG + b" replaced")
+
+    assert upload.content == original
+    assert upload.size_bytes == len(upload.content)
+
+
+def test_validated_upload_repr_redacts_content(tmp_path: Path) -> None:
+    root = tmp_path / "uploads"
+    secret_marker = b"private-evidence-marker"
+    path = _write(root / "evidence.png", PNG + secret_marker)
+
+    upload = validate_upload_file(path, uploads_root=root)
+
+    assert secret_marker.decode() not in repr(upload)
+
+
+def test_validate_upload_file_rejects_leaf_swap_between_lstat_and_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "uploads"
+    original = PNG + b"A" * 16
+    replacement = PNG + b"B" * 16
+    path = _write(root / "evidence.png", original)
+    replacement_path = _write(root / "replacement.png", replacement)
+    real_open = Path.open
+
+    def swapping_open(candidate: Path, *args, **kwargs):
+        if candidate == path:
+            replacement_path.replace(path)
+        return real_open(candidate, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", swapping_open)
+
+    with pytest.raises(UploadValidationError, match="changed|swapped"):
+        validate_upload_file(path, uploads_root=root)
+
+
+def test_validate_upload_file_rejects_handle_identity_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "uploads"
+    path = _write(root / "evidence.png", PNG)
+    real_fstat = os.fstat
+    calls = 0
+
+    def changing_fstat(file_descriptor: int):
+        nonlocal calls
+        calls += 1
+        result = real_fstat(file_descriptor)
+        if calls < 2:
+            return result
+        changed = list(result)
+        changed[1] += 1
+        return os.stat_result(changed)
+
+    monkeypatch.setattr(os, "fstat", changing_fstat)
+
+    with pytest.raises(UploadValidationError, match="changed|swapped"):
+        validate_upload_file(path, uploads_root=root)
+
+
+def test_validate_upload_file_rejects_ancestor_identity_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "uploads"
+    ancestor = root / "nested"
+    path = _write(ancestor / "evidence.png", PNG)
+    real_lstat = Path.lstat
+    calls = 0
+
+    def changing_lstat(candidate: Path):
+        nonlocal calls
+        result = real_lstat(candidate)
+        if candidate != ancestor:
+            return result
+        calls += 1
+        if calls < 2:
+            return result
+        changed = list(result)
+        changed[1] += 1
+        return os.stat_result(changed)
+
+    monkeypatch.setattr(Path, "lstat", changing_lstat)
+
+    with pytest.raises(UploadValidationError, match="changed|swapped"):
+        validate_upload_file(path, uploads_root=root)
 
 
 def test_validate_upload_file_resolves_relative_paths_from_uploads_root(
@@ -159,6 +254,31 @@ def test_validate_upload_file_rejects_symlink_ancestor(
 
     with pytest.raises(UploadValidationError, match="symlink"):
         validate_upload_file(linked_directory / "evidence.png", uploads_root=root)
+
+
+@pytest.mark.parametrize("junction_location", ["root", "ancestor"])
+def test_validate_upload_file_rejects_windows_junctions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    junction_location: str,
+) -> None:
+    root = tmp_path / "uploads"
+    ancestor = root / "nested"
+    path = _write(ancestor / "evidence.png", PNG)
+    junction = root if junction_location == "root" else ancestor
+    real_is_junction = getattr(Path, "is_junction", None)
+
+    def fake_is_junction(candidate: Path) -> bool:
+        if candidate == junction:
+            return True
+        if real_is_junction is None:
+            return False
+        return real_is_junction(candidate)
+
+    monkeypatch.setattr(Path, "is_junction", fake_is_junction, raising=False)
+
+    with pytest.raises(UploadValidationError, match="junction"):
+        validate_upload_file(path, uploads_root=root)
 
 
 def test_validate_upload_file_rejects_directory(tmp_path: Path) -> None:
@@ -263,6 +383,37 @@ def test_validate_upload_target_accepts_and_normalizes_safe_provider_headers() -
     assert target.follow_redirects is False
 
 
+def test_validate_upload_target_redacts_signed_values_from_repr() -> None:
+    target = validate_upload_target(_target())
+
+    rendered = repr(target)
+    assert "signature" not in rendered
+    assert "checksum" not in rendered
+
+
+def test_validate_upload_target_headers_are_immutable() -> None:
+    target = validate_upload_target(_target())
+
+    with pytest.raises(TypeError):
+        target.headers["x-amz-meta-extra"] = "changed"  # type: ignore[index]
+
+
+def test_validate_upload_target_allows_query_only_on_signed_upload_url() -> None:
+    with pytest.raises(UploadValidationError, match="assetUrl"):
+        validate_upload_target(
+            _target(
+                assetUrl="https://uploads.linear.app/assets/evidence.png?signature=secret"
+            )
+        )
+
+
+def test_validate_upload_target_rejects_identical_upload_and_asset_urls() -> None:
+    same_url = "https://uploads.linear.app/assets/evidence.png"
+
+    with pytest.raises(UploadValidationError, match="different"):
+        validate_upload_target(_target(uploadUrl=same_url, assetUrl=same_url))
+
+
 @pytest.mark.parametrize(
     "field",
     ["uploadUrl", "assetUrl"],
@@ -297,6 +448,15 @@ def test_validate_upload_target_rejects_unsafe_urls(field: str, url: str) -> Non
         "Cookie",
         "Set-Cookie",
         "Host",
+        "Content-Length",
+        "Transfer-Encoding",
+        "Connection",
+        "Upgrade",
+        "TE",
+        "Trailer",
+        "Keep-Alive",
+        "Proxy-Connection",
+        "Expect",
     ],
 )
 def test_validate_upload_target_rejects_forbidden_returned_headers(
@@ -314,6 +474,7 @@ def test_validate_upload_target_rejects_forbidden_returned_headers(
         [{"key": "X-Test\r\nAuthorization", "value": "x"}],
         [{"key": "X-Test", "value": "safe\r\nAuthorization: secret"}],
         [{"key": "X-Test", "value": "safe\x00unsafe"}],
+        [{"key": "X-Test", "value": "caf\N{LATIN SMALL LETTER E WITH ACUTE}"}],
         [{"key": "X-Test", "value": "one"}, {"key": "x-test", "value": "two"}],
         [{"key": "X-Test"}],
         {"X-Test": "not-the-documented-array-shape"},
@@ -356,3 +517,13 @@ def test_upload_partial_failure_preserves_only_safe_asset_metadata() -> None:
     assert error.size_bytes == 123
     assert isinstance(error, UploadError)
     assert "signature" not in str(error).lower()
+
+
+def test_upload_partial_failure_rejects_signed_asset_url() -> None:
+    with pytest.raises(UploadValidationError, match="assetUrl"):
+        UploadPartialFailure(
+            asset_url="https://uploads.linear.app/assets/evidence.png?signature=secret",
+            filename="evidence.png",
+            mime_type="image/png",
+            size_bytes=123,
+        )

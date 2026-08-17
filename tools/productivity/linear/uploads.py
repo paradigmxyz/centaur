@@ -8,6 +8,7 @@ import stat
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -25,6 +26,15 @@ _FORBIDDEN_HEADERS = {
     "cookie",
     "set-cookie",
     "host",
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "upgrade",
+    "te",
+    "trailer",
+    "keep-alive",
+    "proxy-connection",
+    "expect",
 }
 _HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+\Z")
 
@@ -55,7 +65,9 @@ class UploadPartialFailure(UploadError):
         size_bytes: int,
     ) -> None:
         super().__init__("Linear evidence uploaded, but comment creation failed")
-        self.asset_url = asset_url
+        self.asset_url = _validate_linear_url(
+            asset_url, "assetUrl", allow_query=False
+        )
         self.filename = filename
         self.mime_type = mime_type
         self.size_bytes = size_bytes
@@ -69,15 +81,16 @@ class UploadFile:
     filename: str
     mime_type: str
     size_bytes: int
+    content: bytes = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
 class ValidatedTarget:
     """Validated Linear upload allocation with safe provider headers only."""
 
-    upload_url: str
+    upload_url: str = field(repr=False)
     asset_url: str
-    headers: dict[str, str]
+    headers: Mapping[str, str] = field(repr=False)
     follow_redirects: bool = field(default=False, init=False)
 
 
@@ -85,7 +98,31 @@ def _absolute_without_symlink_resolution(path: Path) -> Path:
     return Path(os.path.abspath(os.fspath(path)))
 
 
-def _confined_file(path: str | os.PathLike[str], uploads_root: Path) -> Path:
+def _is_junction(path: Path) -> bool:
+    checker = getattr(path, "is_junction", None)
+    return bool(checker()) if callable(checker) else False
+
+
+def _file_identity(info: os.stat_result) -> tuple[int, int, int]:
+    return info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode)
+
+
+def _path_info(path: Path, *, unavailable_message: str) -> os.stat_result:
+    try:
+        info = path.lstat()
+        junction = _is_junction(path)
+    except OSError as exc:
+        raise UploadValidationError(unavailable_message) from exc
+    if stat.S_ISLNK(info.st_mode):
+        raise UploadValidationError("upload path must not contain symlinks")
+    if junction:
+        raise UploadValidationError("upload path must not contain junctions")
+    return info
+
+
+def _confined_file(
+    path: str | os.PathLike[str], uploads_root: Path
+) -> tuple[Path, tuple[tuple[Path, tuple[int, int, int]], ...]]:
     root = _absolute_without_symlink_resolution(uploads_root.expanduser())
     requested = Path(path).expanduser()
     candidate = _absolute_without_symlink_resolution(
@@ -97,32 +134,21 @@ def _confined_file(path: str | os.PathLike[str], uploads_root: Path) -> Path:
     except ValueError as exc:
         raise UploadValidationError("upload file must be beneath the uploads root") from exc
 
-    try:
-        root_info = root.lstat()
-    except OSError as exc:
-        raise UploadValidationError("uploads root is unavailable") from exc
-    if stat.S_ISLNK(root_info.st_mode):
-        raise UploadValidationError("uploads root must not be a symlink")
+    root_info = _path_info(root, unavailable_message="uploads root is unavailable")
     if not stat.S_ISDIR(root_info.st_mode):
         raise UploadValidationError("uploads root must be a directory")
 
+    snapshots = [(root, _file_identity(root_info))]
     current = root
     parts = relative.parts
     for index, part in enumerate(parts):
         current = current / part
-        try:
-            info = current.lstat()
-        except OSError as exc:
-            raise UploadValidationError("upload file is unavailable") from exc
-        if stat.S_ISLNK(info.st_mode):
-            raise UploadValidationError("upload path must not contain symlinks")
+        info = _path_info(current, unavailable_message="upload file is unavailable")
+        snapshots.append((current, _file_identity(info)))
         if index < len(parts) - 1 and not stat.S_ISDIR(info.st_mode):
             raise UploadValidationError("upload path ancestor must be a directory")
 
-    try:
-        leaf_info = candidate.lstat()
-    except OSError as exc:
-        raise UploadValidationError("upload file is unavailable") from exc
+    leaf_info = root_info if not parts else info
     if not stat.S_ISREG(leaf_info.st_mode):
         raise UploadValidationError("upload path must name a regular file")
 
@@ -132,7 +158,16 @@ def _confined_file(path: str | os.PathLike[str], uploads_root: Path) -> Path:
         resolved_parent.relative_to(resolved_root)
     except (OSError, ValueError) as exc:
         raise UploadValidationError("upload file must resolve beneath the uploads root") from exc
-    return resolved_parent / candidate.name
+    return resolved_parent / candidate.name, tuple(snapshots)
+
+
+def _assert_path_unchanged(
+    snapshots: tuple[tuple[Path, tuple[int, int, int]], ...]
+) -> None:
+    for path, expected_identity in snapshots:
+        info = _path_info(path, unavailable_message="upload path changed during validation")
+        if _file_identity(info) != expected_identity:
+            raise UploadValidationError("upload path changed or was swapped during validation")
 
 
 def _read_vint(data: bytes, offset: int, *, max_width: int) -> tuple[int, int] | None:
@@ -209,39 +244,56 @@ def validate_upload_file(
     """Validate a PNG or WebM regular file confined beneath the uploads root."""
 
     root = Path(uploads_root) if uploads_root is not None else Path.home() / "uploads"
-    validated_path = _confined_file(path, root)
-    try:
-        size_bytes = validated_path.stat().st_size
-    except OSError as exc:
-        raise UploadValidationError("upload file is unavailable") from exc
-    if size_bytes == 0:
-        raise UploadValidationError("upload file must not be empty")
+    validated_path, path_snapshots = _confined_file(path, root)
 
     suffix = validated_path.suffix.lower()
     if suffix == ".png":
         mime_type = "image/png"
         size_limit = PNG_MAX_BYTES
-        bytes_to_read = len(_PNG_SIGNATURE)
     elif suffix == ".webm":
         mime_type = "video/webm"
         size_limit = WEBM_MAX_BYTES
-        bytes_to_read = len(_EBML_HEADER_ID) + 8 + _MAX_EBML_HEADER_BYTES
     else:
         raise UploadValidationError("upload file must have a .png or .webm extension")
 
+    try:
+        with validated_path.open("rb") as handle:
+            before = os.fstat(handle.fileno())
+            leaf_identity = path_snapshots[-1][1]
+            if not stat.S_ISREG(before.st_mode) or _file_identity(before) != leaf_identity:
+                raise UploadValidationError(
+                    "upload file changed or was swapped before it could be opened"
+                )
+            _assert_path_unchanged(path_snapshots)
+            if before.st_size > size_limit:
+                raise UploadValidationError(
+                    f"upload file exceeds the {size_limit}-byte limit for {suffix}"
+                )
+            content = handle.read(size_limit)
+            after = os.fstat(handle.fileno())
+            _assert_path_unchanged(path_snapshots)
+    except OSError as exc:
+        raise UploadValidationError("upload file could not be read") from exc
+
+    if _file_identity(after) != _file_identity(before):
+        raise UploadValidationError("upload file changed or was swapped while being read")
+    if len(content) != before.st_size or len(content) != after.st_size:
+        if after.st_size > size_limit:
+            raise UploadValidationError(
+                f"upload file exceeds the {size_limit}-byte limit for {suffix}"
+            )
+        raise UploadValidationError("upload file changed while being read")
+    size_bytes = len(content)
+    if size_bytes == 0:
+        raise UploadValidationError("upload file must not be empty")
     if size_bytes > size_limit:
         raise UploadValidationError(
             f"upload file exceeds the {size_limit}-byte limit for {suffix}"
         )
-    try:
-        with validated_path.open("rb") as handle:
-            header = handle.read(bytes_to_read)
-    except OSError as exc:
-        raise UploadValidationError("upload file could not be read") from exc
 
-    if suffix == ".png" and not header.startswith(_PNG_SIGNATURE):
+    if suffix == ".png" and not content.startswith(_PNG_SIGNATURE):
         raise UploadValidationError("upload file does not have a valid PNG signature")
-    if suffix == ".webm" and not _has_webm_doctype(header):
+    if suffix == ".webm" and not _has_webm_doctype(content):
         raise UploadValidationError("upload file does not have a valid WebM DocType")
 
     return UploadFile(
@@ -249,10 +301,11 @@ def validate_upload_file(
         filename=validated_path.name,
         mime_type=mime_type,
         size_bytes=size_bytes,
+        content=content,
     )
 
 
-def _validate_linear_url(value: Any, field_name: str) -> str:
+def _validate_linear_url(value: Any, field_name: str, *, allow_query: bool) -> str:
     if not isinstance(value, str) or not value or value != value.strip():
         raise UploadValidationError(f"{field_name} must be an exact Linear upload URL")
     if "\\" in value or any(ord(character) < 0x20 for character in value):
@@ -272,6 +325,7 @@ def _validate_linear_url(value: Any, field_name: str) -> str:
         or not parsed.path.startswith("/")
         or parsed.path.startswith("//")
         or parsed.fragment
+        or (parsed.query and not allow_query)
     ):
         raise UploadValidationError(
             f"{field_name} must use the exact https://{_LINEAR_UPLOAD_HOST} host"
@@ -279,7 +333,7 @@ def _validate_linear_url(value: Any, field_name: str) -> str:
     return value
 
 
-def _validated_headers(value: Any) -> dict[str, str]:
+def _validated_headers(value: Any) -> Mapping[str, str]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         raise UploadValidationError("upload target headers must use Linear's array shape")
 
@@ -294,10 +348,7 @@ def _validated_headers(value: Any) -> dict[str, str]:
             or not key
             or _HEADER_NAME.fullmatch(key) is None
             or not isinstance(header_value, str)
-            or any(
-                ord(character) < 0x20 or ord(character) == 0x7F
-                for character in header_value
-            )
+            or any(not 0x20 <= ord(character) <= 0x7E for character in header_value)
         ):
             raise UploadValidationError("upload target headers contain an unsafe entry")
         normalized_key = key.lower()
@@ -308,7 +359,7 @@ def _validated_headers(value: Any) -> dict[str, str]:
         if normalized_key in normalized:
             raise UploadValidationError("upload target headers contain a duplicate name")
         normalized[normalized_key] = header_value
-    return normalized
+    return MappingProxyType(normalized)
 
 
 def validate_upload_target(upload_file: Mapping[str, Any]) -> ValidatedTarget:
@@ -316,8 +367,14 @@ def validate_upload_target(upload_file: Mapping[str, Any]) -> ValidatedTarget:
 
     if not isinstance(upload_file, Mapping):
         raise UploadValidationError("Linear upload target must be an object")
-    upload_url = _validate_linear_url(upload_file.get("uploadUrl"), "uploadUrl")
-    asset_url = _validate_linear_url(upload_file.get("assetUrl"), "assetUrl")
+    upload_url = _validate_linear_url(
+        upload_file.get("uploadUrl"), "uploadUrl", allow_query=True
+    )
+    asset_url = _validate_linear_url(
+        upload_file.get("assetUrl"), "assetUrl", allow_query=False
+    )
+    if upload_url == asset_url:
+        raise UploadValidationError("uploadUrl and assetUrl must be different")
     headers = _validated_headers(upload_file.get("headers"))
     return ValidatedTarget(
         upload_url=upload_url,
