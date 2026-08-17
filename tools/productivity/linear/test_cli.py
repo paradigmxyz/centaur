@@ -81,27 +81,40 @@ def test_labels_handles_missing_team_key(monkeypatch):
     assert ("org", "loose") in RECORDED_ROWS
 
 
-SAFE_UPLOAD_RESULT = {
-    "ok": True,
-    "tool": "linear",
-    "issue_id": "NEU-497",
-    "asset_url": "https://uploads.linear.app/assets/evidence.png",
-    "filename": "evidence.png",
-    "mime_type": "image/png",
-    "size_bytes": 123,
-    "comment_id": "comment-1",
-}
 SIGNED_URL = "https://uploads.linear.app/upload?signature=do-not-print"
 PROVIDER_HEADER = "x-provider-secret=do-not-print"
 TOKEN = "linear-token-do-not-print"
 FILE_BYTES = "raw-file-bytes-do-not-print"
-
+PARTIAL_ERROR = "Linear evidence uploaded, but comment creation failed"
+SAFE_UPLOAD_RESULT = {
+    "ok": True,
+    "tool": TOKEN,
+    "issue_id": TOKEN,
+    "asset_url": "https://uploads.linear.app/assets/evidence.png",
+    "filename": "evidence.png",
+    "mime_type": "image/png",
+    "size_bytes": 123,
+    "comment_id": "123e4567-e89b-12d3-a456-426614174000",
+}
+GENERIC_UPLOAD_FAILURE = {
+    "ok": False,
+    "tool": "linear",
+    "stage": "upload",
+    "error": "Linear evidence upload failed",
+}
 
 class FakeUploadClient:
-    def __init__(self, result: dict[str, Any] | None = None, error: Exception | None = None):
+    def __init__(
+        self,
+        result: dict[str, Any] | None = None,
+        error: Exception | None = None,
+        close_error: Exception | None = None,
+    ):
         self.result = result
         self.error = error
+        self.close_error = close_error
         self.calls: list[tuple[str, str, str | None]] = []
+        self.close_calls = 0
 
     def upload_evidence(
         self, issue_id: str, path: str, comment: str | None = None
@@ -111,6 +124,11 @@ class FakeUploadClient:
             raise self.error
         assert self.result is not None
         return self.result
+
+    def close(self) -> None:
+        self.close_calls += 1
+        if self.close_error:
+            raise self.close_error
 
 
 class UnsafeUploadFailure(RuntimeError):
@@ -125,6 +143,16 @@ def _run_upload(monkeypatch, client: FakeUploadClient, *args: str):
     from typer.testing import CliRunner
 
     monkeypatch.setattr(cli, "get_client", lambda: client)
+    return CliRunner().invoke(cli.app, ["upload", *args])
+
+
+def _run_upload_with_construction_error(monkeypatch, error: Exception, *args: str):
+    from typer.testing import CliRunner
+
+    def fail_construction():
+        raise error
+
+    monkeypatch.setattr(cli, "get_client", fail_construction)
     return CliRunner().invoke(cli.app, ["upload", *args])
 
 
@@ -152,10 +180,15 @@ def test_upload_json_success_has_exact_safe_shape(monkeypatch):
     )
 
     assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout) == SAFE_UPLOAD_RESULT
+    assert json.loads(result.stdout) == {
+        **SAFE_UPLOAD_RESULT,
+        "tool": "linear",
+        "issue_id": "NEU-497",
+    }
     assert client.calls == [
         ("NEU-497", "/home/agent/uploads/evidence.png", "Evidence")
     ]
+    assert client.close_calls == 1
     _assert_no_unsafe_output(result)
 
 
@@ -177,7 +210,11 @@ def test_upload_json_success_discards_undocumented_sensitive_fields(monkeypatch)
     )
 
     assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout) == SAFE_UPLOAD_RESULT
+    assert json.loads(result.stdout) == {
+        **SAFE_UPLOAD_RESULT,
+        "tool": "linear",
+        "issue_id": "NEU-497",
+    }
     _assert_no_unsafe_output(result)
 
 
@@ -193,12 +230,7 @@ def test_upload_json_rejects_a_signed_asset_url_from_the_client(monkeypatch):
     )
 
     assert result.exit_code == 1
-    assert json.loads(result.stdout) == {
-        "ok": False,
-        "tool": "linear",
-        "stage": "upload",
-        "error": "Linear evidence upload failed",
-    }
+    assert json.loads(result.stdout) == GENERIC_UPLOAD_FAILURE
     _assert_no_unsafe_output(result)
 
 
@@ -214,7 +246,8 @@ def test_upload_human_success_reports_only_stable_metadata(monkeypatch):
     assert "https://uploads.linear.app/assets/evidence.png" in result.stdout
     assert "image/png" in result.stdout
     assert "123 bytes" in result.stdout
-    assert "comment-1" in result.stdout
+    assert "123e4567-e89b-12d3-a456-426614174000" in result.stdout
+    assert client.close_calls == 1
     _assert_no_unsafe_output(result)
 
 
@@ -270,6 +303,7 @@ def test_upload_human_failure_is_nonzero_and_redacts_exception_internals(monkeyp
 
     assert result.exit_code == 1
     assert "Linear evidence upload failed" in result.stdout
+    assert result.exception is not error
     _assert_no_unsafe_output(result)
 
 
@@ -281,7 +315,7 @@ def test_upload_comment_partial_failure_is_nonzero_and_keeps_stable_asset_url(
         "ok": False,
         "comment_id": None,
         "stage": "comment",
-        "error": "Linear evidence uploaded, but comment creation failed",
+        "error": PARTIAL_ERROR,
     }
     unsafe_partial = {
         **partial,
@@ -302,8 +336,215 @@ def test_upload_comment_partial_failure_is_nonzero_and_keeps_stable_asset_url(
     )
 
     assert result.exit_code == 1
-    assert json.loads(result.stdout) == partial
+    assert json.loads(result.stdout) == {
+        **partial,
+        "tool": "linear",
+        "issue_id": "NEU-497",
+    }
     assert "https://uploads.linear.app/assets/evidence.png" in result.stdout
+    _assert_no_unsafe_output(result)
+
+
+def test_upload_human_comment_partial_failure_keeps_only_stable_asset(monkeypatch):
+    partial = {
+        **SAFE_UPLOAD_RESULT,
+        "ok": False,
+        "comment_id": None,
+        "stage": "comment",
+        "error": PARTIAL_ERROR,
+    }
+    client = FakeUploadClient(result=partial)
+
+    result = _run_upload(
+        monkeypatch,
+        client,
+        "NEU-497",
+        "/home/agent/uploads/evidence.png",
+        "--comment",
+        "Evidence",
+    )
+
+    assert result.exit_code == 1
+    assert PARTIAL_ERROR in result.stdout
+    assert "https://uploads.linear.app/assets/evidence.png" in result.stdout
+    assert TOKEN not in result.stdout
+    assert client.close_calls == 1
+
+
+@pytest.mark.parametrize("json_output", [False, True], ids=["human", "json"])
+def test_upload_construction_failure_is_sanitized(monkeypatch, json_output: bool):
+    args = ["NEU-497", "/home/agent/uploads/evidence.png"]
+    if json_output:
+        args.append("--json")
+
+    result = _run_upload_with_construction_error(
+        monkeypatch, RuntimeError(f"construction failed: {TOKEN} {SIGNED_URL}"), *args
+    )
+
+    assert result.exit_code == 1
+    if json_output:
+        assert json.loads(result.stdout) == GENERIC_UPLOAD_FAILURE
+    else:
+        assert "Linear evidence upload failed" in result.stdout
+    _assert_no_unsafe_output(result)
+
+
+def test_upload_failure_closes_client(monkeypatch):
+    client = FakeUploadClient(error=UnsafeUploadFailure(TOKEN))
+
+    result = _run_upload(
+        monkeypatch,
+        client,
+        "NEU-497",
+        "/home/agent/uploads/evidence.png",
+        "--json",
+    )
+
+    assert result.exit_code == 1
+    assert client.close_calls == 1
+    _assert_no_unsafe_output(result)
+
+
+@pytest.mark.parametrize("json_output", [False, True], ids=["human", "json"])
+def test_upload_close_failure_is_sanitized(monkeypatch, json_output: bool):
+    client = FakeUploadClient(
+        result=SAFE_UPLOAD_RESULT,
+        close_error=RuntimeError(f"close failed: {TOKEN} {SIGNED_URL}"),
+    )
+    args = ["NEU-497", "/home/agent/uploads/evidence.png"]
+    if json_output:
+        args.append("--json")
+
+    result = _run_upload(monkeypatch, client, *args)
+
+    assert result.exit_code == 1
+    assert client.close_calls == 1
+    if json_output:
+        assert json.loads(result.stdout) == GENERIC_UPLOAD_FAILURE
+    else:
+        assert "Linear evidence upload failed" in result.stdout
+        assert "Uploaded evidence.png" not in result.stdout
+    _assert_no_unsafe_output(result)
+
+
+MALFORMED_DOCUMENTED_RESULTS = [
+    pytest.param({"ok": TOKEN}, id="ok-not-bool"),
+    pytest.param({"ok": 1}, id="ok-int-not-bool"),
+    pytest.param({"asset_url": SIGNED_URL}, id="asset-url-signed"),
+    pytest.param(
+        {"asset_url": f"https://example.com/{TOKEN}.png"}, id="asset-url-wrong-host"
+    ),
+    pytest.param({"filename": f"../{TOKEN}.png"}, id="filename-not-basename"),
+    pytest.param({"filename": f"{TOKEN}.jpg"}, id="filename-unsupported"),
+    pytest.param({"filename": f"{TOKEN}\n.png"}, id="filename-not-printable"),
+    pytest.param({"filename": f"{TOKEN}{'x' * 240}.png"}, id="filename-too-long"),
+    pytest.param({"mime_type": f"image/png;{TOKEN}"}, id="mime-malformed"),
+    pytest.param({"mime_type": "video/webm"}, id="mime-inconsistent"),
+    pytest.param({"size_bytes": TOKEN}, id="size-not-int"),
+    pytest.param({"size_bytes": True}, id="size-bool"),
+    pytest.param({"size_bytes": 0}, id="size-empty"),
+    pytest.param({"size_bytes": 10 * 1024 * 1024 + 1}, id="size-over-png-cap"),
+    pytest.param(
+        {
+            "filename": "evidence.webm",
+            "mime_type": "video/webm",
+            "size_bytes": 50 * 1024 * 1024 + 1,
+        },
+        id="size-over-webm-cap",
+    ),
+    pytest.param({"comment_id": TOKEN}, id="comment-id-malformed"),
+    pytest.param(
+        {
+            "ok": False,
+            "comment_id": None,
+            "stage": TOKEN,
+            "error": PARTIAL_ERROR,
+        },
+        id="partial-stage-malformed",
+    ),
+    pytest.param(
+        {
+            "ok": False,
+            "comment_id": None,
+            "stage": "comment",
+            "error": TOKEN,
+        },
+        id="partial-error-malformed",
+    ),
+    pytest.param(
+        {
+            "ok": False,
+            "comment_id": TOKEN,
+            "stage": "comment",
+            "error": PARTIAL_ERROR,
+        },
+        id="partial-comment-id-not-none",
+    ),
+]
+
+
+@pytest.mark.parametrize("overrides", MALFORMED_DOCUMENTED_RESULTS)
+@pytest.mark.parametrize("json_output", [False, True], ids=["human", "json"])
+def test_upload_rejects_malformed_documented_result_without_leaking(
+    monkeypatch, overrides: dict[str, Any], json_output: bool
+):
+    client_result = {**SAFE_UPLOAD_RESULT, **overrides}
+    args = ["NEU-497", "/home/agent/uploads/evidence.png"]
+    if json_output:
+        args.append("--json")
+
+    result = _run_upload(monkeypatch, FakeUploadClient(result=client_result), *args)
+
+    assert result.exit_code == 1
+    if json_output:
+        assert json.loads(result.stdout) == GENERIC_UPLOAD_FAILURE
+    else:
+        assert "Linear evidence upload failed" in result.stdout
+    _assert_no_unsafe_output(result)
+
+
+@pytest.mark.parametrize("json_output", [False, True], ids=["human", "json"])
+def test_upload_rejects_missing_comment_id_field(monkeypatch, json_output: bool):
+    client_result = dict(SAFE_UPLOAD_RESULT)
+    client_result.pop("comment_id")
+    args = ["NEU-497", "/home/agent/uploads/evidence.png"]
+    if json_output:
+        args.append("--json")
+
+    result = _run_upload(monkeypatch, FakeUploadClient(result=client_result), *args)
+
+    assert result.exit_code == 1
+    if json_output:
+        assert json.loads(result.stdout) == GENERIC_UPLOAD_FAILURE
+    else:
+        assert "Linear evidence upload failed" in result.stdout
+    _assert_no_unsafe_output(result)
+
+
+def test_upload_accepts_webm_at_cap_with_no_comment(monkeypatch):
+    client_result = {
+        **SAFE_UPLOAD_RESULT,
+        "asset_url": "https://uploads.linear.app/assets/evidence.webm",
+        "filename": "evidence.webm",
+        "mime_type": "video/webm",
+        "size_bytes": 50 * 1024 * 1024,
+        "comment_id": None,
+    }
+
+    result = _run_upload(
+        monkeypatch,
+        FakeUploadClient(result=client_result),
+        "NEU-497",
+        "/home/agent/uploads/evidence.webm",
+        "--json",
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {
+        **client_result,
+        "tool": "linear",
+        "issue_id": "NEU-497",
+    }
     _assert_no_unsafe_output(result)
 
 

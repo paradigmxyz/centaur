@@ -29,11 +29,26 @@ class LinearGraphQLClient:
                 "LINEAR_API_KEY not set.\n"
                 "Get one at https://linear.app/settings/account/security -> Personal API Keys"
             )
-        self._http = http_client or httpx.Client(
-            base_url=GRAPHQL_ENDPOINT,
-            headers={"Authorization": self.api_key, "Content-Type": "application/json"},
-            timeout=timeout,
-        )
+        self._owns_http = http_client is None
+        if http_client is None:
+            self._http = httpx.Client(
+                base_url=GRAPHQL_ENDPOINT,
+                headers={"Authorization": self.api_key, "Content-Type": "application/json"},
+                timeout=timeout,
+            )
+        else:
+            self._http = http_client
+
+    def close(self) -> None:
+        """Close only the HTTP client created by this Linear client."""
+        if self._owns_http:
+            self._http.close()
+
+    def __enter__(self) -> LinearGraphQLClient:
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.close()
 
     def _query(
         self, query: str, variables: dict[str, Any] | None = None

@@ -5,9 +5,13 @@ Run from this directory: uv run --no-project --with pytest --with httpx pytest t
 
 from __future__ import annotations
 
+import importlib.util
+from pathlib import Path
 import sys
 import types
 from typing import Any
+
+import pytest
 
 if "centaur_sdk" not in sys.modules:
     sdk_mod = types.ModuleType("centaur_sdk")
@@ -15,6 +19,56 @@ if "centaur_sdk" not in sys.modules:
     sys.modules["centaur_sdk"] = sdk_mod
 
 from centaur_tool_linear.readonly import LinearReadonlyClient
+
+graphql_spec = importlib.util.spec_from_file_location(
+    "linear_graphql_local", Path(__file__).with_name("graphql.py")
+)
+assert graphql_spec and graphql_spec.loader
+graphql_module = importlib.util.module_from_spec(graphql_spec)
+graphql_spec.loader.exec_module(graphql_module)
+LinearGraphQLClient = graphql_module.LinearGraphQLClient
+
+
+class CloseRecordingHttpClient:
+    def __init__(self) -> None:
+        self.close_calls = 0
+
+    def __bool__(self) -> bool:
+        # An injected client must be honored by identity, even if it is falsey.
+        return False
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+def test_graphql_client_close_does_not_close_injected_http_client():
+    injected = CloseRecordingHttpClient()
+    client = LinearGraphQLClient(api_key="placeholder", http_client=injected)
+
+    client.close()
+
+    assert injected.close_calls == 0
+
+
+def test_graphql_client_context_manager_closes_internally_created_http_client(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    internal = CloseRecordingHttpClient()
+    monkeypatch.setattr(graphql_module.httpx, "Client", lambda **kwargs: internal)
+
+    with LinearGraphQLClient(api_key="placeholder") as client:
+        assert client._http is internal
+
+    assert internal.close_calls == 1
+
+
+def test_graphql_client_context_manager_preserves_injected_client_ownership():
+    injected = CloseRecordingHttpClient()
+
+    with LinearGraphQLClient(api_key="placeholder", http_client=injected):
+        pass
+
+    assert injected.close_calls == 0
 
 
 class RecordingReadonlyClient(LinearReadonlyClient):

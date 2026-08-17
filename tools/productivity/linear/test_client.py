@@ -198,6 +198,9 @@ def _upload_target() -> dict[str, object]:
     }
 
 
+UPLOAD_COMMENT_ID = "123e4567-e89b-12d3-a456-426614174000"
+
+
 def _write_png(tmp_path: Path) -> tuple[Path, bytes]:
     content = b"\x89PNG\r\n\x1a\nprotocol evidence"
     path = tmp_path / "uploads" / "evidence.png"
@@ -262,7 +265,7 @@ def test_upload_evidence_uploads_before_creating_comment(
             "fileUpload": {"success": True, "uploadFile": _upload_target()},
             "commentCreate": {
                 "success": True,
-                "comment": {"id": "comment-1", "body": "Evidence"},
+                "comment": {"id": UPLOAD_COMMENT_ID, "body": "Evidence"},
             },
         }
     )
@@ -278,7 +281,7 @@ def test_upload_evidence_uploads_before_creating_comment(
     result = client.upload_evidence("NEU-497", path, comment="Evidence")
 
     assert events == ["allocate", "upload", "comment"]
-    assert result["comment_id"] == "comment-1"
+    assert result["comment_id"] == UPLOAD_COMMENT_ID
     assert client.calls[1]["variables"] == {
         "input": {
             "issueId": "NEU-497",
@@ -302,7 +305,7 @@ def test_upload_evidence_escapes_filename_in_markdown_asset_link(
             "fileUpload": {"success": True, "uploadFile": _upload_target()},
             "commentCreate": {
                 "success": True,
-                "comment": {"id": "comment-1"},
+                "comment": {"id": UPLOAD_COMMENT_ID},
             },
         }
     )

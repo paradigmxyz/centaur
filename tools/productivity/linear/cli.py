@@ -2,6 +2,7 @@
 
 import base64
 import json
+import re
 import sys
 from urllib.parse import urlsplit
 
@@ -34,56 +35,117 @@ def health():
 
 console = Console()
 
+_PARTIAL_UPLOAD_ERROR = "Linear evidence uploaded, but comment creation failed"
+_UPLOAD_FAILURE = {
+    "ok": False,
+    "tool": "linear",
+    "stage": "upload",
+    "error": "Linear evidence upload failed",
+}
+_COMMENT_ID = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z"
+)
+_UPLOAD_TYPES = {
+    ".png": ("image/png", 10 * 1024 * 1024),
+    ".webm": ("video/webm", 50 * 1024 * 1024),
+}
+
+
+def _stable_asset_url(value: object) -> bool:
+    if not isinstance(value, str) or not value or len(value) > 2048:
+        return False
+    if not all(0x21 <= ord(character) <= 0x7E for character in value):
+        return False
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return False
+    return (
+        parsed.scheme == "https"
+        and parsed.netloc == "uploads.linear.app"
+        and parsed.path not in {"", "/"}
+        and parsed.path.startswith("/")
+        and not parsed.query
+        and not parsed.fragment
+    )
+
+
+def _upload_file_metadata(result: dict) -> tuple[str, str, int] | None:
+    filename = result.get("filename")
+    mime_type = result.get("mime_type")
+    size_bytes = result.get("size_bytes")
+    if (
+        not isinstance(filename, str)
+        or not filename
+        or len(filename) > 255
+        or not filename.isprintable()
+        or filename in {".", ".."}
+        or "/" in filename
+        or "\\" in filename
+    ):
+        return None
+    extension = next(
+        (suffix for suffix in _UPLOAD_TYPES if filename.casefold().endswith(suffix)),
+        None,
+    )
+    if extension is None:
+        return None
+    expected_mime, size_cap = _UPLOAD_TYPES[extension]
+    if mime_type != expected_mime:
+        return None
+    if type(size_bytes) is not int or not 0 < size_bytes <= size_cap:
+        return None
+    return filename, mime_type, size_bytes
+
 
 def safe_upload_result(result: dict, issue_id: str) -> dict:
     """Keep CLI output on the documented, non-sensitive upload schema."""
+    required_fields = {
+        "ok",
+        "asset_url",
+        "filename",
+        "mime_type",
+        "size_bytes",
+        "comment_id",
+    }
+    if not required_fields.issubset(result):
+        return dict(_UPLOAD_FAILURE)
+    if type(result.get("ok")) is not bool:
+        return dict(_UPLOAD_FAILURE)
     asset_url = result.get("asset_url")
-    if not isinstance(asset_url, str):
-        safe_asset_url = False
-    else:
-        try:
-            parsed_asset_url = urlsplit(asset_url)
-            safe_asset_url = (
-                parsed_asset_url.scheme == "https"
-                and parsed_asset_url.netloc == "uploads.linear.app"
-                and parsed_asset_url.path.startswith("/")
-                and not parsed_asset_url.query
-                and not parsed_asset_url.fragment
-            )
-        except ValueError:
-            safe_asset_url = False
-    if not safe_asset_url:
-        return {
-            "ok": False,
-            "tool": "linear",
-            "stage": "upload",
-            "error": "Linear evidence upload failed",
-        }
+    metadata = _upload_file_metadata(result)
+    if not _stable_asset_url(asset_url) or metadata is None:
+        return dict(_UPLOAD_FAILURE)
+    filename, mime_type, size_bytes = metadata
+    comment_id = result.get("comment_id")
 
     safe = {
-        "ok": result.get("ok") is True,
+        "ok": result["ok"],
         "tool": "linear",
         "issue_id": issue_id,
         "asset_url": asset_url,
-        "filename": result.get("filename"),
-        "mime_type": result.get("mime_type"),
-        "size_bytes": result.get("size_bytes"),
-        "comment_id": result.get("comment_id"),
+        "filename": filename,
+        "mime_type": mime_type,
+        "size_bytes": size_bytes,
+        "comment_id": comment_id,
     }
     if safe["ok"]:
+        if comment_id is not None and (
+            not isinstance(comment_id, str) or _COMMENT_ID.fullmatch(comment_id) is None
+        ):
+            return dict(_UPLOAD_FAILURE)
         return safe
-    if result.get("stage") == "comment":
+    if (
+        result.get("stage") == "comment"
+        and result.get("error") == _PARTIAL_UPLOAD_ERROR
+        and comment_id is None
+    ):
         return {
             **safe,
             "stage": "comment",
-            "error": "Linear evidence uploaded, but comment creation failed",
+            "error": _PARTIAL_UPLOAD_ERROR,
         }
-    return {
-        "ok": False,
-        "tool": "linear",
-        "stage": "upload",
-        "error": "Linear evidence upload failed",
-    }
+    return dict(_UPLOAD_FAILURE)
 
 
 def get_client():
@@ -357,8 +419,9 @@ def upload(
     json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
 ):
     """Upload constrained PNG or WebM evidence to a Linear issue."""
-    client = get_client()
+    client = None
     try:
+        client = get_client()
         result = safe_upload_result(
             client.upload_evidence(issue_id, file, comment=comment), issue_id
         )
@@ -372,6 +435,12 @@ def upload(
             "stage": stage,
             "error": f"Linear evidence {stage} failed",
         }
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                result = dict(_UPLOAD_FAILURE)
 
     if json_output:
         print(json.dumps(result, ensure_ascii=False), file=sys.stdout)
