@@ -28,8 +28,8 @@ use centaur_session_core::{
     SessionMessageInput, ThreadKey,
 };
 use centaur_session_sqlx::{
-    ClaimExecutionResult, PgSessionStore, SandboxCapacityCandidate, SessionEventListener,
-    SessionStoreError, default_metadata,
+    PgSessionStore, SandboxCapacityCandidate, SessionEventListener, SessionStoreError,
+    default_metadata,
 };
 use centaur_telemetry::{
     export_thread_trace_root_span, record_sandbox_warm_pool_claim,
@@ -151,14 +151,6 @@ pub struct SessionRuntime {
     session_title_rerun_requested: SessionTitleThreadSet,
     capacity: Option<Arc<SandboxCapacityController>>,
     stdout_owner_id: String,
-    /// Serializes stdout-owner claims with the shutdown fence. A driver either
-    /// commits its running state and owner before shutdown begins, or observes
-    /// the fence while its execution is still queued.
-    execution_claim_gate: Arc<Mutex<()>>,
-    /// Executions owned by this process whose stdin request has not yet been
-    /// accepted. Shutdown requeues these instead of handing them off as live
-    /// executions, because a successor must replay their durable requests.
-    pending_input_deliveries: Arc<DashMap<String, ThreadKey>>,
     /// Set once a shutdown handoff begins; fences new stdout-owner claims
     /// so an execution cannot start on a control plane that is about to
     /// exit and release its leases.
@@ -841,8 +833,6 @@ impl SessionRuntime {
             session_title_rerun_requested: Arc::new(DashSet::new()),
             capacity: None,
             stdout_owner_id: format!("api-rs-{}", uuid::Uuid::new_v4().simple()),
-            execution_claim_gate: Arc::new(Mutex::new(())),
-            pending_input_deliveries: Arc::new(DashMap::new()),
             shutting_down: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -1215,7 +1205,6 @@ impl SessionRuntime {
     }
 
     async fn claim_stdout_owner(&self, execution_id: &str) -> Result<(), SessionRuntimeError> {
-        let _claim_guard = self.execution_claim_gate.lock().await;
         if self.shutting_down.load(Ordering::SeqCst) {
             return Err(SessionRuntimeError::ShuttingDown);
         }
@@ -1232,34 +1221,10 @@ impl SessionRuntime {
         Ok(())
     }
 
-    async fn claim_execution_for_dispatch(
-        &self,
-        execution_id: &str,
-    ) -> Result<ClaimExecutionResult, SessionRuntimeError> {
-        let _claim_guard = self.execution_claim_gate.lock().await;
-        if self.shutting_down.load(Ordering::SeqCst) {
-            return Err(SessionRuntimeError::ShuttingDown);
-        }
-        let claim = self
-            .store
-            .claim_execution_for_stdout(execution_id, &self.stdout_owner_id, STDOUT_OWNER_LEASE)
-            .await?;
-        if claim.claimed {
-            self.pending_input_deliveries
-                .insert(execution_id.to_owned(), claim.execution.thread_key.clone());
-            spawn_stdout_owner_renewer(self.context(), execution_id.to_owned());
-        }
-        Ok(claim)
-    }
-
     async fn claim_expired_stdout_owner(
         &self,
         execution_id: &str,
     ) -> Result<bool, SessionRuntimeError> {
-        let _claim_guard = self.execution_claim_gate.lock().await;
-        if self.shutting_down.load(Ordering::SeqCst) {
-            return Err(SessionRuntimeError::ShuttingDown);
-        }
         let claimed = self
             .store
             .claim_expired_stdout_owner(execution_id, &self.stdout_owner_id, STDOUT_OWNER_LEASE)
@@ -1914,7 +1879,7 @@ impl SessionRuntime {
             let claim = if let Some(execution_id) = persisted_execution_id {
                 span.record("centaur.execution_id", execution_id);
                 span.record("execution_id", execution_id);
-                self.claim_execution_for_dispatch(execution_id).await?
+                self.store.mark_execution_running(execution_id).await?
             } else {
                 let execution = self
                     .store
@@ -1941,7 +1906,8 @@ impl SessionRuntime {
                     );
                     return Ok(execution.execution);
                 }
-                self.claim_execution_for_dispatch(&execution.execution.execution_id)
+                self.store
+                    .mark_execution_running(&execution.execution.execution_id)
                     .await?
             };
             let execution = claim.execution;
@@ -1967,6 +1933,11 @@ impl SessionRuntime {
                     "execution was already claimed or terminal"
                 );
                 return Ok(execution);
+            }
+            if let Err(error) = self.claim_stdout_owner(&execution.execution_id).await {
+                self.handle_stdout_claim_failure(thread_key, &execution.execution_id, &error)
+                    .await;
+                return Err(error);
             }
             let execution_trace_span = info_span!(
                 "centaur.api_rs.session.execution",
@@ -2053,40 +2024,16 @@ impl SessionRuntime {
 
             let trace = SessionTraceContext::new(thread_key, Some(&execution_trace_span));
             let input_lines = input_lines_with_session_context(thread_key, &trace, &input_lines);
-            let write_result = {
-                // Serialize the final pre-delivery shutdown check with the
-                // shutdown fence. Once this block succeeds, handoff may safely
-                // treat the execution as live instead of replaying its request.
-                let _claim_guard = self.execution_claim_gate.lock().await;
-                let result = if self.shutting_down.load(Ordering::SeqCst) {
-                    Err(SessionRuntimeError::ShuttingDown)
-                } else {
-                    write_input_lines(
-                        &pipe,
-                        &input_lines,
-                        thread_key,
-                        &execution.execution_id,
-                        Some(&sandbox_id),
-                    )
-                    .instrument(execution_trace_span.clone())
-                    .await
-                };
-                if result.is_ok() {
-                    self.pending_input_deliveries
-                        .remove(&execution.execution_id);
-                }
-                result
-            };
-            if let Err(error) = write_result {
-                if matches!(error, SessionRuntimeError::ShuttingDown) {
-                    self.requeue_execution_before_input(
-                        thread_key,
-                        &execution.execution_id,
-                        "control_plane_shutdown",
-                    )
-                    .await;
-                    return Err(error);
-                }
+            if let Err(error) = write_input_lines(
+                &pipe,
+                &input_lines,
+                thread_key,
+                &execution.execution_id,
+                Some(&sandbox_id),
+            )
+            .instrument(execution_trace_span.clone())
+            .await
+            {
                 self.record_execution_failure(thread_key, &execution.execution_id, &error)
                     .await;
                 return Err(error);
@@ -2225,7 +2172,6 @@ impl SessionRuntime {
         execution_id: &str,
         error: &SessionRuntimeError,
     ) {
-        self.pending_input_deliveries.remove(execution_id);
         self.execution_spans.lock().await.remove(execution_id);
         let error_message = error.to_string();
         let execution = match self
@@ -2244,7 +2190,6 @@ impl SessionRuntime {
                     event = "session_execution_failure_not_recorded",
                     thread_key = %thread_key,
                     execution_id,
-                    stdout_owner_id = %self.stdout_owner_id,
                     original_error = %error_message,
                     "execution was terminal or stdout ownership changed before failure could be recorded"
                 );
@@ -2256,7 +2201,6 @@ impl SessionRuntime {
                     event = "session_execution_failure_record_failed",
                     thread_key = %thread_key,
                     execution_id,
-                    stdout_owner_id = %self.stdout_owner_id,
                     original_error = %error_message,
                     error = %record_error,
                     "failed to persist execution failure"
@@ -2287,67 +2231,44 @@ impl SessionRuntime {
         .await;
     }
 
-    async fn requeue_execution_before_input(
+    async fn handle_stdout_claim_failure(
         &self,
         thread_key: &ThreadKey,
         execution_id: &str,
-        reason: &str,
-    ) -> bool {
-        let execution = match self
-            .store
-            .requeue_execution_if_active_and_stdout_owner(execution_id, &self.stdout_owner_id)
-            .await
-        {
-            Ok(Some(execution)) => execution,
-            Ok(None) => {
-                warn!(
-                    component = COMPONENT_SESSION_RUNTIME,
-                    event = "session_execution_requeue_not_recorded",
-                    thread_key = %thread_key,
-                    execution_id,
-                    reason,
-                    "execution was terminal or stdout ownership changed before it could be requeued"
-                );
-                return false;
+        error: &SessionRuntimeError,
+    ) {
+        if matches!(error, SessionRuntimeError::ShuttingDown) {
+            match self
+                .store
+                .requeue_execution_if_running_without_stdout_owner(execution_id)
+                .await
+            {
+                Ok(Some(_)) => {
+                    info!(
+                        component = COMPONENT_SESSION_RUNTIME,
+                        event = "session_execution_requeued",
+                        thread_key = %thread_key,
+                        execution_id,
+                        reason = "control_plane_shutdown",
+                        "returned undelivered execution to the durable queue"
+                    );
+                    return;
+                }
+                Ok(None) => {}
+                Err(requeue_error) => {
+                    warn!(
+                        component = COMPONENT_SESSION_RUNTIME,
+                        event = "session_execution_requeue_failed",
+                        thread_key = %thread_key,
+                        execution_id,
+                        error = %requeue_error,
+                        "failed to return undelivered execution to the durable queue"
+                    );
+                }
             }
-            Err(error) => {
-                warn!(
-                    component = COMPONENT_SESSION_RUNTIME,
-                    event = "session_execution_requeue_failed",
-                    thread_key = %thread_key,
-                    execution_id,
-                    reason,
-                    %error,
-                    "failed to return undelivered execution to the durable queue"
-                );
-                return false;
-            }
-        };
-        self.pending_input_deliveries.remove(execution_id);
-        self.execution_spans.lock().await.remove(execution_id);
-        let _ = self
-            .store
-            .append_event(
-                thread_key,
-                Some(execution_id),
-                "session.execution_requeued",
-                json!({
-                    "execution_id": execution_id,
-                    "thread_key": thread_key.as_str(),
-                    "reason": reason,
-                }),
-            )
+        }
+        self.record_execution_failure(thread_key, execution_id, error)
             .await;
-        info!(
-            component = COMPONENT_SESSION_RUNTIME,
-            event = "session_execution_requeued",
-            thread_key = %thread_key,
-            execution_id,
-            status = %execution.status,
-            reason,
-            "returned undelivered execution to the durable queue"
-        );
-        true
     }
 
     async fn forward_messages_to_active_execution(
@@ -3650,17 +3571,10 @@ impl SessionRuntime {
         sandbox_id: &str,
         detail: &str,
     ) {
-        if let Err(error) = self.claim_stdout_owner(execution_id).await {
-            warn!(
-                component = COMPONENT_SESSION_RUNTIME,
-                event = "execution_adoption_failure_claim_failed",
-                thread_key = %thread_key,
-                execution_id,
-                %error,
-                "failed to claim orphaned execution before recording its failure"
-            );
-            return;
-        }
+        let _ = self
+            .store
+            .claim_stdout_owner(execution_id, &self.stdout_owner_id, STDOUT_OWNER_LEASE)
+            .await;
         let error = format!("execution orphaned by control plane restart; {detail}");
         if let Err(record_error) = record_terminal_output(
             &self.context(),
@@ -3694,10 +3608,7 @@ impl SessionRuntime {
         // Fence new stdout-owner claims first: an execution accepted after
         // this point would otherwise claim a lease that outlives the
         // process, stranding it until the lease TTL expires.
-        {
-            let _claim_guard = self.execution_claim_gate.lock().await;
-            self.shutting_down.store(true, Ordering::SeqCst);
-        }
+        self.shutting_down.store(true, Ordering::SeqCst);
         let deadline = Instant::now()
             .checked_add(timeout)
             .unwrap_or_else(|| Instant::now() + Duration::from_secs(3600));
@@ -3747,19 +3658,6 @@ impl SessionRuntime {
                 }
             }
             sleep(EXECUTION_HANDOFF_POLL_INTERVAL).await;
-        }
-        let pending_input_execution_ids = self
-            .pending_input_deliveries
-            .iter()
-            .map(|entry| (entry.key().clone(), entry.value().clone()))
-            .collect::<Vec<_>>();
-        for (execution_id, thread_key) in pending_input_execution_ids {
-            self.requeue_execution_before_input(
-                &thread_key,
-                &execution_id,
-                "control_plane_shutdown_timeout",
-            )
-            .await;
         }
         let released = tokio::time::timeout(
             EXECUTION_HANDOFF_DB_TIMEOUT,
@@ -9265,16 +9163,6 @@ mod adoption_tests {
             .expect("execution exists");
         assert_eq!(latest.execution_id, execution.execution_id);
         assert_eq!(latest.status, ExecutionStatus::Completed);
-        let completed = events(&store, &thread_key)
-            .await
-            .into_iter()
-            .filter(|event| event.event_type == "session.execution_completed")
-            .collect::<Vec<_>>();
-        assert_eq!(completed.len(), 1);
-        assert_eq!(
-            completed[0].execution_id.as_deref(),
-            Some(execution.execution_id.as_str())
-        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11074,40 +10962,14 @@ mod adoption_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn periodic_scan_dispatches_queued_but_graces_young_running_executions() {
+    async fn periodic_scan_graces_young_running_executions() {
         let Some(store) = test_store().await else {
             return;
         };
         let _serial = TEST_LOCK.lock().await;
-        let thread_key =
-            ThreadKey::parse(format!("test:adopt-young-{}", uuid::Uuid::new_v4())).unwrap();
-        orphaned_execution(&store, &thread_key, Some("sbx-mock"), false).await;
-
         let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
-        let (io, mut stdout, _stdin) = mock_io();
-        backend.push_io(io).await;
-        let runtime = runtime_with(&store, backend.clone());
+        let runtime = runtime_with(&store, backend);
         let mut state = OrphanAdoptionState::default();
-        runtime
-            .run_orphan_adoption_scan(&mut state, Some(PRE_SANDBOX_ORPHAN_GRACE))
-            .await;
-
-        assert!(
-            events(&store, &thread_key).await.iter().any(|event| {
-                event.event_type == "session.execution_adopted"
-                    && event.payload["mode"] == json!("queued_request")
-            }),
-            "queued execution should be dispatched immediately"
-        );
-        stdout
-            .write_all(&completed_output_bytes("Recovered on periodic scan."))
-            .await
-            .unwrap();
-        wait_for_event(&store, &thread_key, "session.execution_completed").await;
-
-        // A newly running execution can still be waiting for its warm
-        // sandbox assignment. It gets the same periodic grace, but is failed
-        // if it remains unassigned after the grace window.
         let running_thread =
             ThreadKey::parse(format!("test:adopt-young-running-{}", uuid::Uuid::new_v4())).unwrap();
         let running_execution = orphaned_execution(&store, &running_thread, None, true).await;
@@ -11394,122 +11256,40 @@ mod adoption_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn shutdown_requeues_claimed_execution_before_input_delivery() {
-        let Some(store) = test_store().await else {
-            return;
-        };
-        let _serial = TEST_LOCK.lock().await;
-        let thread_key =
-            ThreadKey::parse(format!("test:handoff-pre-input-{}", uuid::Uuid::new_v4())).unwrap();
-        store
-            .create_or_get_session(
-                &thread_key,
-                &HarnessType::Codex,
-                None,
-                json!({}),
-                Default::default(),
-            )
-            .await
-            .expect("create session");
-
-        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
-        let create_gate = backend.hold_create();
-        let (io, _stdout, _stdin) = mock_io();
-        backend.push_io(io).await;
-        let runtime = runtime_with(&store, backend.clone());
-        let execution = runtime
-            .enqueue_session_execution(
-                &thread_key,
-                ExecuteSessionInput {
-                    idempotency_key: None,
-                    metadata: Some(json!({"source": "shutdown-test"})),
-                    input_lines: vec![json!({"type": "user", "text": "replay me"}).to_string()],
-                    idle_timeout_ms: None,
-                    max_duration_ms: None,
-                },
-            )
-            .await
-            .expect("enqueue execution");
-        timeout(Duration::from_secs(1), backend.create_started.notified())
-            .await
-            .expect("driver should claim execution before sandbox create");
-
-        runtime.handoff_owned_executions(Duration::ZERO).await;
-
-        let ownership = store
-            .list_active_executions_with_ownership()
-            .await
-            .expect("load execution ownership")
-            .into_iter()
-            .find(|candidate| candidate.execution.execution_id == execution.execution_id)
-            .expect("execution remains recoverable");
-        assert_eq!(ownership.execution.status, ExecutionStatus::Queued);
-        assert!(ownership.execution.started_at.is_none());
-        assert!(ownership.stdout_owner_id.is_none());
-        assert!(!ownership.stdout_owner_lease_active);
-        assert!(
-            events(&store, &thread_key)
-                .await
-                .iter()
-                .any(|event| event.event_type == "session.execution_requeued"),
-            "shutdown must record that undelivered input was returned to the queue"
-        );
-
-        create_gate.notify_one();
-        store
-            .fail_execution_if_active(&execution.execution_id, "test cleanup")
-            .await
-            .expect("terminalize execution");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shutdown_fences_new_stdout_claims() {
         let Some(store) = test_store().await else {
             return;
         };
         let _serial = TEST_LOCK.lock().await;
-        let thread_key =
-            ThreadKey::parse(format!("test:handoff-fence-{}", uuid::Uuid::new_v4())).unwrap();
-        let execution_id = orphaned_execution(&store, &thread_key, Some("sbx-mock"), false).await;
         let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
         let runtime = runtime_with(&store, backend);
-        let input = runtime
-            .load_persisted_execute_request(&execution_id)
-            .await
-            .expect("load durable request");
 
         // Nothing owned: the handoff returns immediately but still flips
         // the shutdown fence.
         runtime.handoff_owned_executions(Duration::ZERO).await;
 
+        let thread_key =
+            ThreadKey::parse(format!("test:handoff-fence-{}", uuid::Uuid::new_v4())).unwrap();
+        let execution_id = orphaned_execution(&store, &thread_key, Some("sbx-mock"), true).await;
         let error = runtime
-            .drive_session_execution(&thread_key, &execution_id, input)
+            .claim_stdout_owner(&execution_id)
             .await
-            .expect_err("shutdown must fence the queued execution claim");
+            .expect_err("claims after shutdown must be rejected");
         assert!(
             matches!(error, SessionRuntimeError::ShuttingDown),
             "unexpected error: {error}"
         );
-
-        let ownership = store
-            .list_active_executions_with_ownership()
+        runtime
+            .handle_stdout_claim_failure(&thread_key, &execution_id, &error)
+            .await;
+        let execution = store
+            .latest_execution_for_thread(&thread_key)
             .await
-            .expect("load execution ownership")
-            .into_iter()
-            .find(|candidate| candidate.execution.execution_id == execution_id)
-            .expect("execution remains recoverable");
-        assert_eq!(ownership.execution.status, ExecutionStatus::Queued);
-        assert!(ownership.execution.started_at.is_none());
-        assert!(ownership.stdout_owner_id.is_none());
-        assert!(!ownership.stdout_owner_lease_active);
-        assert!(
-            events(&store, &thread_key)
-                .await
-                .iter()
-                .all(|event| event.event_type != "session.execution_failed"),
-            "shutdown handoff must leave the durable request for a successor"
-        );
-
+            .expect("load execution")
+            .expect("execution exists");
+        assert_eq!(execution.execution_id, execution_id);
+        assert_eq!(execution.status, ExecutionStatus::Queued);
+        assert!(execution.started_at.is_none());
         store
             .fail_execution_if_active(&execution_id, "test cleanup")
             .await
