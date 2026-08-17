@@ -3,6 +3,7 @@
 import base64
 import json
 import sys
+from urllib.parse import urlsplit
 
 import typer
 from rich.console import Console
@@ -32,6 +33,57 @@ def health():
 
 
 console = Console()
+
+
+def safe_upload_result(result: dict, issue_id: str) -> dict:
+    """Keep CLI output on the documented, non-sensitive upload schema."""
+    asset_url = result.get("asset_url")
+    if not isinstance(asset_url, str):
+        safe_asset_url = False
+    else:
+        try:
+            parsed_asset_url = urlsplit(asset_url)
+            safe_asset_url = (
+                parsed_asset_url.scheme == "https"
+                and parsed_asset_url.netloc == "uploads.linear.app"
+                and parsed_asset_url.path.startswith("/")
+                and not parsed_asset_url.query
+                and not parsed_asset_url.fragment
+            )
+        except ValueError:
+            safe_asset_url = False
+    if not safe_asset_url:
+        return {
+            "ok": False,
+            "tool": "linear",
+            "stage": "upload",
+            "error": "Linear evidence upload failed",
+        }
+
+    safe = {
+        "ok": result.get("ok") is True,
+        "tool": "linear",
+        "issue_id": issue_id,
+        "asset_url": asset_url,
+        "filename": result.get("filename"),
+        "mime_type": result.get("mime_type"),
+        "size_bytes": result.get("size_bytes"),
+        "comment_id": result.get("comment_id"),
+    }
+    if safe["ok"]:
+        return safe
+    if result.get("stage") == "comment":
+        return {
+            **safe,
+            "stage": "comment",
+            "error": "Linear evidence uploaded, but comment creation failed",
+        }
+    return {
+        "ok": False,
+        "tool": "linear",
+        "stage": "upload",
+        "error": "Linear evidence upload failed",
+    }
 
 
 def get_client():
@@ -295,6 +347,52 @@ def fetch_asset(
 
     meta = {k: v for k, v in result.items() if k != "data"}
     console.print(json.dumps(meta, indent=2))
+
+
+@app.command()
+def upload(
+    issue_id: str = typer.Argument(..., help="Issue ID or identifier (e.g., ENG-123)"),
+    file: str = typer.Argument(..., help="PNG or WebM evidence beneath ~/uploads"),
+    comment: str = typer.Option(None, "--comment", help="Optional Linear comment text"),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
+    """Upload constrained PNG or WebM evidence to a Linear issue."""
+    client = get_client()
+    try:
+        result = safe_upload_result(
+            client.upload_evidence(issue_id, file, comment=comment), issue_id
+        )
+    except Exception as exc:
+        stage = getattr(exc, "stage", "upload")
+        if stage not in {"validation", "upload", "comment"}:
+            stage = "upload"
+        result = {
+            "ok": False,
+            "tool": "linear",
+            "stage": stage,
+            "error": f"Linear evidence {stage} failed",
+        }
+
+    if json_output:
+        print(json.dumps(result, ensure_ascii=False), file=sys.stdout)
+    elif result.get("ok"):
+        console.print(
+            f"[green]Uploaded {result['filename']} to {result['issue_id']}[/] "
+            f"({result['mime_type']}, {result['size_bytes']} bytes)"
+        )
+        console.print(f"Asset: {result['asset_url']}")
+        if result.get("comment_id"):
+            console.print(f"Comment: {result['comment_id']}")
+    elif result.get("stage") == "comment" and result.get("asset_url"):
+        console.print(
+            f"[red]Linear evidence uploaded, but comment creation failed.[/] "
+            f"Asset: {result['asset_url']}"
+        )
+    else:
+        console.print(f"[red]{result['error']}[/]")
+
+    if not result.get("ok"):
+        raise typer.Exit(1)
 
 
 @app.command()
