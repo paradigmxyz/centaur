@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 app = typer.Typer(name="linear", help="Linear CLI for AI agents")
@@ -98,7 +99,9 @@ def _upload_file_metadata(result: dict) -> tuple[str, str, int] | None:
     return filename, mime_type, size_bytes
 
 
-def safe_upload_result(result: dict, issue_id: str) -> dict:
+def safe_upload_result(
+    result: dict, issue_id: str, *, comment_requested: bool
+) -> dict:
     """Keep CLI output on the documented, non-sensitive upload schema."""
     required_fields = {
         "ok",
@@ -130,13 +133,18 @@ def safe_upload_result(result: dict, issue_id: str) -> dict:
         "comment_id": comment_id,
     }
     if safe["ok"]:
-        if comment_id is not None and (
-            not isinstance(comment_id, str) or _COMMENT_ID.fullmatch(comment_id) is None
-        ):
+        if comment_requested:
+            valid_comment_id = (
+                isinstance(comment_id, str) and _COMMENT_ID.fullmatch(comment_id) is not None
+            )
+        else:
+            valid_comment_id = comment_id is None
+        if not valid_comment_id:
             return dict(_UPLOAD_FAILURE)
         return safe
     if (
-        result.get("stage") == "comment"
+        comment_requested
+        and result.get("stage") == "comment"
         and result.get("error") == _PARTIAL_UPLOAD_ERROR
         and comment_id is None
     ):
@@ -423,7 +431,9 @@ def upload(
     try:
         client = get_client()
         result = safe_upload_result(
-            client.upload_evidence(issue_id, file, comment=comment), issue_id
+            client.upload_evidence(issue_id, file, comment=comment),
+            issue_id,
+            comment_requested=comment is not None,
         )
     except Exception as exc:
         stage = getattr(exc, "stage", "upload")
@@ -440,22 +450,23 @@ def upload(
             try:
                 client.close()
             except Exception:
-                result = dict(_UPLOAD_FAILURE)
+                pass
 
     if json_output:
         print(json.dumps(result, ensure_ascii=False), file=sys.stdout)
     elif result.get("ok"):
         console.print(
-            f"[green]Uploaded {result['filename']} to {result['issue_id']}[/] "
-            f"({result['mime_type']}, {result['size_bytes']} bytes)"
+            f"[green]Uploaded {escape(result['filename'])} "
+            f"to {escape(result['issue_id'])}[/] "
+            f"({escape(result['mime_type'])}, {escape(str(result['size_bytes']))} bytes)"
         )
-        console.print(f"Asset: {result['asset_url']}")
+        console.print(f"Asset: {escape(result['asset_url'])}")
         if result.get("comment_id"):
-            console.print(f"Comment: {result['comment_id']}")
+            console.print(f"Comment: {escape(result['comment_id'])}")
     elif result.get("stage") == "comment" and result.get("asset_url"):
         console.print(
             f"[red]Linear evidence uploaded, but comment creation failed.[/] "
-            f"Asset: {result['asset_url']}"
+            f"Asset: {escape(result['asset_url'])}"
         )
     else:
         console.print(f"[red]{result['error']}[/]")
