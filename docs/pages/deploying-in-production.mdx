@@ -59,13 +59,14 @@ Minimum keys:
 
 | Secret | Required for | Notes |
 |--------|--------------|-------|
-| `DATABASE_URL` | API | Postgres connection string. |
+| `DATABASE_URL` | API | Postgres connection string. Make sure the password is URL-encoded. |
 | `POSTGRES_PASSWORD` | Bundled Postgres | Password used when the chart manages Postgres. |
 | `IRON_MANAGEMENT_API_KEY` | [iron-proxy](https://docs.iron.sh) management API | Generate with `openssl rand -hex 32`. |
 | `SANDBOX_SIGNING_KEY` | Sandbox API tokens | Generate with `openssl rand -hex 32`; keeps sandbox tokens valid across API restarts. |
 | `SLACK_BOT_TOKEN` | Slackbot/API | Bot User OAuth Token from the Slack app. |
 | `SLACK_SIGNING_SECRET` | Slackbot/API | Used to verify Slack webhook signatures. |
-| `SLACKBOT_API_KEY` | Slackbot to API | Static service token; API bootstraps it into Postgres on startup with `agent` scope. |
+| `SLACKBOT_API_KEY` | Slackbot to API | Dedicated static service token restricted to Slack session routes and workflow event emission. |
+| `CENTAUR_APIRS_ADMIN_API_KEY` | Optional administrator access to API | Static bearer token with every api-rs capability. Generate with `openssl rand -hex 32`, store it in the infra Secret, and keep it distinct from all ingress keys. |
 | `OP_CONNECT_TOKEN` | [iron-proxy](https://docs.iron.sh) 1Password Connect source (preferred) | Needed when `ironProxy.secretSource` is `onepassword-connect`. |
 | `OP_SERVICE_ACCOUNT_TOKEN` | [iron-proxy](https://docs.iron.sh) 1Password service-account source | Needed when `ironProxy.secretSource` is `onepassword`. |
 | `OP_VAULT` | [iron-proxy](https://docs.iron.sh) 1Password source | Vault name or id used for `op://` references (either mode). |
@@ -83,15 +84,15 @@ component. Add these keys to the same infra Secret:
 | `IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY` | Console encryption at rest | Generate a separate long random value and keep it stable. |
 | `IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT` | Console encryption at rest | Generate a separate long random value and keep it stable. |
 | `IRON_CONTROL_SECRET_KEY_BASE` | Console sessions and signing | Generate at least 64 random bytes. |
-| `CENTAUR_JWT_SIGNING_SECRET` | Console-issued MCP access tokens | Generate at least 64 random bytes. |
+| `CENTAUR_JWT_SIGNING_SECRET` | Console-issued MCP, Console service, and sandbox api-rs tokens | Generate at least 64 random bytes. Console mints its own purpose-bound service JWT from this existing signing secret. |
 
 The bootstrap user is created only when the Console has no users. Do not rotate
 the ActiveRecord encryption keys as an ordinary credential rotation: existing
 encrypted records become unreadable without an explicit key-migration plan.
 
-`SLACKBOT_API_KEY` is not created with the admin API during initial boot, because
-the API process requires it before it can start. Generate a high-entropy value,
-store it in the infra Secret, and reuse the same value in Slackbot.
+Generate distinct high-entropy values for each enabled ingress service key.
+Store them in the infra Secret. api-rs rejects duplicate configured tokens at
+startup.
 
 ## 3. Configure Harness Credentials
 
@@ -105,6 +106,11 @@ Store one secret per enabled harness credential:
 | Amp | `amp` | `--amp` | `AMP_API_KEY` | `ampcode.com` |
 | Claude Code | `claude-code` | `--claude` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
 | pi-mono | `pi-mono` | `--pi` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
+
+`sandbox.harnessEngine` and the selectors above apply when a session is created.
+A session records its harness and keeps it for the life of the thread, so
+changing the chart value does not move existing threads onto another harness.
+Start a new thread to pick one up.
 
 In normal sandbox mode, containers receive placeholder values such as
 `OPENAI_API_KEY=OPENAI_API_KEY`. [iron-proxy](https://docs.iron.sh) swaps the
@@ -381,21 +387,27 @@ Run one agent turn from inside the api-rs deployment:
 ```bash
 THREAD_KEY=cli:production-smoke-codex
 THREAD_PATH=$(jq -rn --arg v "$THREAD_KEY" '$v|@uri')
+CENTAUR_API_TOKEN=$(kubectl exec -n centaur-system deploy/centaur-centaur-console -- \
+  bin/rails runner 'print ApiServer::Jwt.encode_for_console_service')
 
 SESSION=$(kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- curl -s -X POST "http://localhost:8080/api/session/${THREAD_PATH}" \
+  -H "Authorization: Bearer ${CENTAUR_API_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{"harness_type":"codex","on_harness_conflict":"restart"}')
 
 kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- curl -s -X POST "http://localhost:8080/api/session/${THREAD_PATH}/messages" \
+  -H "Authorization: Bearer ${CENTAUR_API_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{"messages":[{"role":"user","parts":[{"type":"text","text":"Reply with exactly PONG."}]}]}'
 
 EXECUTE=$(kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- curl -s -X POST "http://localhost:8080/api/session/${THREAD_PATH}/execute" \
+  -H "Authorization: Bearer ${CENTAUR_API_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{"input_lines":["{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Reply with exactly PONG.\"}]}}"]}')
 EXECUTION_ID=$(printf '%s' "$EXECUTE" | jq -r '.execution_id')
 
 kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- curl -s -N \
+  -H "Authorization: Bearer ${CENTAUR_API_TOKEN}" \
   "http://localhost:8080/api/session/${THREAD_PATH}/events?execution_id=${EXECUTION_ID}&after_event_id=0"
 ```
 

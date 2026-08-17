@@ -48,10 +48,26 @@
       </label>
 
       <label class="flex items-start gap-3 rounded border border-ink-700 bg-ink-850/60 p-4">
-        <%= form.check_box :default_sandbox_api_server_enabled, class: checkbox_class %>
+        <%= form.check_box :default_sandbox_sessions_read_enabled, class: checkbox_class %>
         <span>
-          <span class="block text-sm font-medium text-zinc-100">API server</span>
-          <span class="block text-xs text-zinc-500">Allow new sandboxes to call the api-rs control plane.</span>
+          <span class="block text-sm font-medium text-zinc-100">Read sessions</span>
+          <span class="block text-xs text-zinc-500">Allow new sandbox API tokens to read sessions and session events.</span>
+        </span>
+      </label>
+
+      <label class="flex items-start gap-3 rounded border border-ink-700 bg-ink-850/60 p-4">
+        <%= form.check_box :default_sandbox_workflows_read_enabled, class: checkbox_class %>
+        <span>
+          <span class="block text-sm font-medium text-zinc-100">Read workflows</span>
+          <span class="block text-xs text-zinc-500">Allow new sandbox API tokens to list workflow schedules and inspect runs.</span>
+        </span>
+      </label>
+
+      <label class="flex items-start gap-3 rounded border border-ink-700 bg-ink-850/60 p-4">
+        <%= form.check_box :default_sandbox_workflows_write_enabled, class: checkbox_class %>
+        <span>
+          <span class="block text-sm font-medium text-zinc-100">Write workflows</span>
+          <span class="block text-xs text-zinc-500">Allow new sandbox API tokens to create and cancel workflow runs.</span>
         </span>
       </label>
     </div>

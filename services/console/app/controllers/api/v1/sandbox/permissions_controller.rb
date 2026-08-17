@@ -45,7 +45,9 @@ module Api
           {
             sandbox_repo_cache: principal.sandbox_repo_cache,
             sandbox_observability_enabled: principal.sandbox_observability_enabled,
-            sandbox_api_server_enabled: principal.sandbox_api_server_enabled
+            sandbox_sessions_read_enabled: principal.sandbox_sessions_read_enabled,
+            sandbox_workflows_read_enabled: principal.sandbox_workflows_read_enabled,
+            sandbox_workflows_write_enabled: principal.sandbox_workflows_write_enabled
           }
         end
 

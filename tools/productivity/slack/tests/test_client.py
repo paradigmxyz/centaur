@@ -854,11 +854,8 @@ def test_file_proxy_methods_validate_inputs() -> None:
         client.get_channel_members_proxy(channel_id="general")
 
 
-def test_search_files_uses_proxy_with_user_cache(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_search_files_uses_proxy_with_user_cache() -> None:
     client, _ = _make_client()
-    monkeypatch.setenv("CENTAUR_SANDBOX_API_SERVER_ENABLED", "true")
     client._get_user_cache = lambda: {"U123456789": "alice"}  # type: ignore[method-assign]
 
     def fake_list_files_proxy(**kwargs):
@@ -912,16 +909,6 @@ def test_search_files_uses_proxy_with_user_cache(
             "created": 1700000000,
         }
     ]
-
-
-def test_search_files_raises_when_api_proxy_disabled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    client, _ = _make_client()
-    monkeypatch.setenv("CENTAUR_SANDBOX_API_SERVER_ENABLED", "false")
-
-    with pytest.raises(RuntimeError, match="proxy requires"):
-        client.search_files("C123456789", "report", max_results=10)
 
 
 def test_search_files_paginates_proxy_until_enough_matches() -> None:
@@ -980,11 +967,8 @@ def test_search_files_paginates_proxy_until_enough_matches() -> None:
     assert [result["id"] for result in results] == ["F123456789"]
 
 
-def test_search_files_direct_uses_direct_files_list_when_api_proxy_enabled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_search_files_direct_uses_direct_files_list() -> None:
     client, fake_web_client = _make_client()
-    monkeypatch.setenv("CENTAUR_SANDBOX_API_SERVER_ENABLED", "true")
     client._get_user_cache = lambda: {"U123456789": "alice"}  # type: ignore[method-assign]
     client.list_files_proxy = pytest.fail  # type: ignore[method-assign]
     fake_web_client.files_list_pages = [

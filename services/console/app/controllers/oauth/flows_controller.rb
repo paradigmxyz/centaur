@@ -28,9 +28,10 @@ module Oauth
     FLOW_TTL = 10.minutes
     FLOW_COOKIE = :oauth_flow
 
-    # Tests swap in an AuthorizationCodeClient built around an http double,
-    # mirroring BrokerCredential#refresh_client.
+    # Tests replace the token-exchange and identity-lookup clients with HTTP
+    # doubles, mirroring BrokerCredential#refresh_client.
     class_attribute :exchange_client_factory, default: -> { Broker::AuthorizationCodeClient.new }
+    class_attribute :identity_http_client_factory, default: -> { HttpClient.new }
 
     before_action :set_app
 
@@ -84,9 +85,13 @@ module Oauth
 
       result = exchange_code(params[:code], flow["code_verifier"])
       validate_provider_result!(result)
-      identity = @provider.identity_from(result, client_id: @app.client_id)
+      identity = @provider.identity_from(
+        result,
+        client_id: @app.client_id,
+        http_client: identity_http_client_factory.call
+      )
       @credential = upsert_credential(state, result, identity)
-      enqueue_identity_enrichment(@credential)
+      enqueue_post_connect_enrichment(@credential)
 
       # Back to the Integrations page the user started from; failures below
       # still render the standalone result page, which offers a retry link.
@@ -221,7 +226,7 @@ module Oauth
     end
 
     def credential_labels(credential, identity)
-      labels = credential.labels || {}
+      labels = (credential.labels || {}).merge(identity[:labels] || {})
       return labels unless @app.provider == Oauth::Providers::Slack::KEY
       return labels if identity[:team_id].blank?
 
@@ -232,17 +237,10 @@ module Oauth
       identity[:name].presence || identity[:email].presence || identity[:subject]
     end
 
-    def enqueue_identity_enrichment(credential)
-      case @app.provider
-      when Oauth::Providers::Attio::KEY
-        Oauth::EnrichAttioCredentialIdentityJob.perform_later(credential.id)
-      when Oauth::Providers::Slack::KEY
-        Oauth::EnrichCredentialIdentityJob.perform_later(credential.id)
-      when Oauth::Providers::Github::KEY
-        Oauth::EnrichGithubCredentialIdentityJob.perform_later(credential.id)
-      when Oauth::Providers::Linear::KEY
-        Oauth::EnrichLinearCredentialIdentityJob.perform_later(credential.id)
-      end
+    def enqueue_post_connect_enrichment(credential)
+      return unless @app.provider == Oauth::Providers::Slack::KEY
+
+      Oauth::EnrichCredentialIdentityJob.perform_later(credential.id)
     end
 
     # Wraps a minted credential in a grantable static secret, so an operator can

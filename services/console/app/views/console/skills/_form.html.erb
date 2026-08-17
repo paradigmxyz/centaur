@@ -33,6 +33,8 @@
     </div>
   </div>
 
+  <%= render "editor_picker", skill: skill %>
+
   <div>
     <%= form.label :content, "Instructions", class: "mb-2 block text-sm font-medium text-zinc-200" %>
     <%= form.text_area :content,

@@ -452,7 +452,6 @@ module Mcp
         principal.name = current_user.name.presence || current_user.email
         principal.kind = "console_user"
         principal.console_user_id = current_user.id
-        principal.console_user_email = current_user.email
         principal.assign_attributes(slack_identity_fields_for(current_user))
         principal.labels = principal.labels.merge(
           "managed-by" => "centaur"

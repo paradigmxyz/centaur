@@ -22,9 +22,8 @@ describe('loadConfig', () => {
     expect(config.teams.requireMention).toBe(false);
   });
 
-  it('prefers the Teamsbot API key over the shared Centaur API key', () => {
+  it('uses the dedicated Teamsbot API key', () => {
     const config = loadConfig({
-      CENTAUR_API_KEY: 'shared-key',
       TEAMSBOT_API_KEY: 'teams-key',
     });
 

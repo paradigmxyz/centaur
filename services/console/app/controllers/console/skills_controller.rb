@@ -16,11 +16,15 @@ class Console::SkillsController < ApplicationController
 
   def new
     @skill = current_user.skills.new(content: "# Instructions")
+    prepare_editor_picker
   end
 
   def create
-    @skill = current_user.skills.new(skill_params)
-    if @skill.save
+    attributes = skill_params
+    editor_oids = attributes.delete(:editor_oids)
+    @skill = current_user.skills.new(attributes)
+    prepare_editor_picker(editor_oids)
+    if save_with_editors
       redirect_to console_skill_path(@skill.oid), notice: "Skill created."
     else
       render :new, status: :unprocessable_entity
@@ -28,12 +32,17 @@ class Console::SkillsController < ApplicationController
   end
 
   def edit
-    @skill = owned_skill
+    @skill = editable_skill
+    prepare_editor_picker
   end
 
   def update
-    @skill = owned_skill
-    if @skill.update(skill_params)
+    @skill = editable_skill
+    attributes = skill_params
+    editor_oids = attributes.delete(:editor_oids)
+    @skill.assign_attributes(attributes)
+    prepare_editor_picker(owner? ? editor_oids : nil)
+    if save_with_editors(manage_editors: owner?)
       redirect_to console_skill_path(@skill.oid), notice: "Skill saved."
     else
       render :edit, status: :unprocessable_entity
@@ -66,7 +75,7 @@ class Console::SkillsController < ApplicationController
     @tab = tab
     @query = params[:q].to_s.strip
     @skills = if @tab == "mine"
-      current_user.skills.active
+      Skill.editable_by(current_user).includes(:user)
     else
       Skill.active.shared.includes(:user)
     end
@@ -82,6 +91,10 @@ class Console::SkillsController < ApplicationController
     current_user.skills.active.find_by_oid!(params[:id])
   end
 
+  def editable_skill
+    Skill.editable_by(current_user).find_by_oid!(params[:id])
+  end
+
   def moderation_skill
     return owned_skill unless acting_admin?
 
@@ -89,6 +102,51 @@ class Console::SkillsController < ApplicationController
   end
 
   def skill_params
-    params.require(:skill).permit(:name, :description, :content, :lock_version)
+    params.require(:skill).permit(:name, :description, :content, :lock_version, editor_oids: [])
+  end
+
+  def owner?
+    @skill.user_id == current_user.id
+  end
+
+  def prepare_editor_picker(submitted_oids = nil)
+    @editor_candidates = User.active.where.not(id: @skill.user_id || current_user.id).order(:email)
+    @selected_editors = if submitted_oids.nil?
+      @skill.persisted? ? @skill.editors.active.order(:email).to_a : []
+    else
+      resolve_editor_users(submitted_oids)
+    end
+  end
+
+  def resolve_editor_users(oids)
+    submitted = Array(oids).compact_blank.uniq
+    ids = submitted.filter_map { |oid| User.decode_oid(oid) }
+    users_by_id = User.active.where(id: ids).index_by(&:id)
+    users = ids.filter_map { |id| users_by_id[id] }.reject { |user| user.id == @skill.user_id }
+
+    if ids.length != submitted.length || users.length != ids.length
+      @skill.errors.add(:editors, "include an unavailable user")
+      @editor_selection_invalid = true
+    end
+    users
+  end
+
+  def save_with_editors(manage_editors: true)
+    return false unless @skill.valid?
+    if @editor_selection_invalid
+      @skill.errors.add(:editors, "include an unavailable user")
+      return false
+    end
+
+    if manage_editors
+      selected_ids = @selected_editors.map(&:id)
+      @skill.updated_at = Time.current if @skill.editor_ids.sort != selected_ids.sort
+    end
+
+    Skill.transaction do
+      @skill.save!
+      @skill.editor_ids = @selected_editors.map(&:id) if manage_editors
+    end
+    true
   end
 end

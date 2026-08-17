@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_08_12_042212) do
+ActiveRecord::Schema[8.1].define(version: 2026_08_14_180000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
   enable_extension "pg_search"
@@ -298,7 +298,6 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_12_042212) do
   end
 
   create_table "principals", force: :cascade do |t|
-    t.string "console_user_email"
     t.bigint "console_user_id"
     t.datetime "created_at", null: false
     t.bigint "created_by_id", null: false
@@ -309,13 +308,15 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_12_042212) do
     t.boolean "sandbox_api_server_enabled", default: true, null: false
     t.boolean "sandbox_observability_enabled", default: true, null: false
     t.string "sandbox_repo_cache", default: "all", null: false
+    t.boolean "sandbox_sessions_read_enabled", default: false, null: false
+    t.boolean "sandbox_workflows_read_enabled", default: false, null: false
+    t.boolean "sandbox_workflows_write_enabled", default: false, null: false
     t.string "slack_channel_id"
     t.string "slack_email"
     t.string "slack_team_id"
     t.string "slack_user_id"
     t.bigint "sync_config_cache_version", default: 0, null: false
     t.datetime "updated_at", null: false
-    t.index ["console_user_email"], name: "index_principals_on_console_user_email"
     t.index ["console_user_id"], name: "index_principals_on_console_user_id"
     t.index ["created_by_id"], name: "index_principals_on_created_by_id"
     t.index ["foreign_id"], name: "index_principals_on_foreign_id", unique: true
@@ -407,6 +408,16 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_12_042212) do
     t.index ["static_secret_id"], name: "index_secret_sources_on_static_secret_id", unique: true
   end
 
+  create_table "skill_editors", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.bigint "skill_id", null: false
+    t.datetime "updated_at", null: false
+    t.bigint "user_id", null: false
+    t.index ["skill_id", "user_id"], name: "index_skill_editors_on_skill_id_and_user_id", unique: true
+    t.index ["skill_id"], name: "index_skill_editors_on_skill_id"
+    t.index ["user_id"], name: "index_skill_editors_on_user_id"
+  end
+
   create_table "skills", force: :cascade do |t|
     t.datetime "archived_at"
     t.text "content", null: false
@@ -461,6 +472,9 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_12_042212) do
     t.boolean "default_sandbox_api_server_enabled", default: true, null: false
     t.boolean "default_sandbox_observability_enabled", default: true, null: false
     t.string "default_sandbox_repo_cache", default: "all", null: false
+    t.boolean "default_sandbox_sessions_read_enabled", default: false, null: false
+    t.boolean "default_sandbox_workflows_read_enabled", default: false, null: false
+    t.boolean "default_sandbox_workflows_write_enabled", default: false, null: false
     t.boolean "singleton", default: true, null: false
     t.datetime "updated_at", null: false
     t.index ["singleton"], name: "index_system_settings_on_singleton", unique: true
@@ -549,6 +563,8 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_12_042212) do
   add_foreign_key "secret_sources", "oauth_token_secrets"
   add_foreign_key "secret_sources", "pg_dsn_secrets"
   add_foreign_key "secret_sources", "static_secrets"
+  add_foreign_key "skill_editors", "skills", on_delete: :cascade
+  add_foreign_key "skill_editors", "users", on_delete: :cascade
   add_foreign_key "skills", "users", on_delete: :cascade
   add_foreign_key "slack_channel_permissions", "principals"
   add_foreign_key "slack_channel_permissions", "roles"

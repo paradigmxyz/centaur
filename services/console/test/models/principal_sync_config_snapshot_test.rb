@@ -177,6 +177,9 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
       assert_equal "centaur-console", claims.fetch("iss")
       assert_equal "centaur-api", claims.fetch("aud")
       assert_equal principal.oid, claims.fetch("sub")
+      assert_equal false, claims.dig("capabilities", "sessions_read")
+      assert_equal false, claims.dig("capabilities", "workflows_read")
+      assert_equal false, claims.dig("capabilities", "workflows_write")
       assert_equal [ "C0123456789" ], claims.dig("slack", "upload_channels")
       assert_equal [ "G9876543210" ], claims.dig("slack", "download_channels")
       assert_equal [ "C0123456789" ], claims.dig("slack", "history_channels")
@@ -186,17 +189,13 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     end
   end
 
-  test "config_for omits api server JWT when sandbox api access is disabled" do
-    with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
+  test "config_for adds api server JWT without Slack channel permissions" do
+    with_env(
+      "CENTAUR_JWT_SIGNING_SECRET" => "test-secret",
+      "CENTAUR_API_URL" => "http://api.internal:8080",
+      "CENTAUR_API_SERVER_PROXY_HOSTS" => nil
+    ) do
       principal = principals(:acme_channel)
-      principal.update!(
-        sandbox_api_server_enabled: false
-      )
-      SlackChannelPermission.create!(
-        principal: principal,
-        channel_id: "C0123456789",
-        upload_enabled: true
-      )
 
       config = PrincipalSyncConfigSnapshot.config_for(principal)
       entry = config.fetch("secrets").find do |secret|
@@ -204,7 +203,12 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
           secret.dig("source", "type") == "control_plane"
       end
 
-      assert_nil entry
+      refute_nil entry
+      claims = jwt_payload(entry.dig("source", "value"))
+      assert_equal principal.oid, claims.fetch("sub")
+      assert_empty claims.dig("slack", "upload_channels")
+      assert_empty claims.dig("slack", "download_channels")
+      assert_empty claims.dig("slack", "history_channels")
     end
   end
 
@@ -517,11 +521,6 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
       "CENTAUR_JWT_SIGNING_SECRET" => "test-secret",
       "CENTAUR_API_URL" => "http://api.internal:8080"
     ) do
-      SlackChannelPermission.create!(
-        principal: @principal,
-        channel_id: "C0123456789",
-        upload_enabled: true
-      )
       boundary = 1_700_001_000 + ApiServer::Jwt.rotation_offset(@principal)
       current_time = Time.zone.at(boundary + 60)
       previous_window_time = Time.zone.at(boundary - 60)
@@ -552,31 +551,6 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
         assert refreshed.fresh_for?(@principal)
         refute_equal original_token, refreshed_token
         refute_equal original_hash, proxy.reload.sync_config_snapshot.fetch(:config_hash)
-      end
-    end
-  end
-
-  test "fetch_for does not rebuild api server JWT snapshots when sandbox api access is disabled" do
-    with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
-      @principal.update!(
-        sandbox_api_server_enabled: false
-      )
-      SlackChannelPermission.create!(
-        principal: @principal,
-        channel_id: "C0123456789",
-        upload_enabled: true
-      )
-      boundary = 1_700_001_000 + ApiServer::Jwt.rotation_offset(@principal)
-      current_time = Time.zone.at(boundary + 60)
-      previous_window_time = Time.zone.at(boundary - 60)
-
-      snapshot = PrincipalSyncConfigSnapshot.fetch_for(@principal)
-      snapshot.update_columns(updated_at: previous_window_time)
-
-      travel_to current_time do
-        assert_no_changes -> { snapshot.reload.updated_at } do
-          assert_equal snapshot, PrincipalSyncConfigSnapshot.fetch_for(@principal)
-        end
       end
     end
   end
@@ -701,7 +675,11 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
       api_server_secrets = removed.config.fetch("secrets").select do |secret|
         secret.dig("inject", "header") == "Authorization"
       end
-      assert_empty api_server_secrets
+      assert_equal 1, api_server_secrets.length
+      claims = jwt_payload(api_server_secrets.first.dig("source", "value"))
+      assert_empty claims.dig("slack", "upload_channels")
+      assert_empty claims.dig("slack", "download_channels")
+      assert_empty claims.dig("slack", "history_channels")
     end
   end
 

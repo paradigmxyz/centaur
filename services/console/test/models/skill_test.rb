@@ -85,6 +85,24 @@ class SkillTest < ActiveSupport::TestCase
     assert_not_includes results, skills(:other_private)
   end
 
+  test "editors can access private skills without becoming owners" do
+    skill = skills(:other_private)
+    editor = users(:member_user)
+    skill.editors << editor
+
+    assert_includes Skill.editable_by(editor), skill
+    assert_includes Skill.catalog_visible_to(editor), skill
+    assert skill.editable_by?(editor)
+    assert_not_equal editor, skill.user
+  end
+
+  test "owner cannot also be assigned as an editor" do
+    assignment = skills(:member_private).skill_editors.new(user: users(:member_user))
+
+    assert_not assignment.valid?
+    assert_includes assignment.errors[:user], "is already the skill owner"
+  end
+
   test "search boosts names over descriptions and instructions" do
     name_match = users(:member_user).skills.create!(
       attributes(name: "deploy-runbook").merge(description: "Check release readiness.", content: "# Steps\n\nReview the checklist.")

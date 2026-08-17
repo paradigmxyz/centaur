@@ -189,15 +189,6 @@ pub struct PersonaDefinition {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct PersonaSummary {
-    pub id: String,
-    pub source_root: String,
-    pub source_path: String,
-    pub source_ref: Option<String>,
-    pub prompt_hash: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PersonaContext {
     pub persona_id: String,
     pub source_root: String,
@@ -239,19 +230,6 @@ impl PersonaRegistry {
     ) -> Self {
         self.public_source_roots = public_source_roots.into_iter().collect();
         self
-    }
-
-    pub fn summaries(&self) -> Vec<PersonaSummary> {
-        self.personas
-            .values()
-            .map(|persona| PersonaSummary {
-                id: persona.id.clone(),
-                source_root: persona.source_root.clone(),
-                source_path: persona.source_path.clone(),
-                source_ref: persona.source_ref.clone(),
-                prompt_hash: persona.prompt_hash.clone(),
-            })
-            .collect()
     }
 
     fn default_persona_id(&self) -> Option<&str> {
@@ -884,18 +862,16 @@ impl SessionRuntime {
         self
     }
 
-    pub fn personas(&self) -> Vec<PersonaSummary> {
-        self.personas
-            .as_ref()
-            .map(|personas| personas.summaries())
-            .unwrap_or_default()
-    }
-
     pub async fn session_title(
         &self,
         thread_key: &ThreadKey,
     ) -> Result<Option<String>, SessionRuntimeError> {
         Ok(self.store.get_session_title(thread_key).await?)
+    }
+
+    /// Load the durable session for API resource authorization.
+    pub async fn session(&self, thread_key: &ThreadKey) -> Result<Session, SessionRuntimeError> {
+        Ok(self.store.get_session(thread_key).await?)
     }
 
     /// Returns the harness already persisted for a thread, if the session
@@ -2389,7 +2365,6 @@ impl SessionRuntime {
             sandbox_repo_cache_access = desired_capabilities.repo_cache.as_str(),
             sandbox_repo_cache_enabled = desired_capabilities.repo_cache_enabled(),
             sandbox_observability_enabled = desired_capabilities.observability_enabled,
-            sandbox_api_server_enabled = desired_capabilities.api_server_enabled,
         );
         let ensure_started = Instant::now();
         let result = async {
@@ -2428,7 +2403,6 @@ impl SessionRuntime {
                         sandbox_repo_cache_access = desired_capabilities.repo_cache.as_str(),
                         sandbox_repo_cache_enabled = desired_capabilities.repo_cache_enabled(),
                         sandbox_observability_enabled = desired_capabilities.observability_enabled,
-                        sandbox_api_server_enabled = desired_capabilities.api_server_enabled,
                         "replacing existing sandbox whose capabilities do not match"
                     );
                 } else {
@@ -5611,7 +5585,6 @@ fn sandbox_capabilities_from_principal(
     SessionSandboxCapabilities {
         repo_cache: sandbox_repo_cache_access_from_principal(principal),
         observability_enabled: principal.sandbox_observability_enabled,
-        api_server_enabled: principal.sandbox_api_server_enabled,
     }
 }
 
@@ -5623,7 +5596,6 @@ fn apply_sandbox_capabilities(spec: &mut SandboxSpec, capabilities: &SessionSand
             SessionRepoCacheAccess::All => RepoCacheAccess::All,
         },
         observability_enabled: capabilities.observability_enabled,
-        api_server_enabled: capabilities.api_server_enabled,
     };
     upsert_spec_env(
         spec,
@@ -5639,11 +5611,6 @@ fn apply_sandbox_capabilities(spec: &mut SandboxSpec, capabilities: &SessionSand
         spec,
         "CENTAUR_SANDBOX_OBSERVABILITY_ENABLED",
         capabilities.observability_enabled.to_string(),
-    );
-    upsert_spec_env(
-        spec,
-        "CENTAUR_SANDBOX_API_SERVER_ENABLED",
-        capabilities.api_server_enabled.to_string(),
     );
     match capabilities.repo_cache {
         SessionRepoCacheAccess::None => {
@@ -7004,7 +6971,6 @@ mod tests {
         let capabilities = SessionSandboxCapabilities {
             repo_cache: SessionRepoCacheAccess::Public,
             observability_enabled: true,
-            api_server_enabled: true,
         };
 
         apply_sandbox_capabilities(&mut spec, &capabilities);
@@ -7032,7 +6998,6 @@ mod tests {
         let capabilities = SessionSandboxCapabilities {
             repo_cache: SessionRepoCacheAccess::Public,
             observability_enabled: true,
-            api_server_enabled: true,
         };
 
         apply_sandbox_capabilities(&mut spec, &capabilities);
@@ -7059,7 +7024,6 @@ mod tests {
         let capabilities = SessionSandboxCapabilities {
             repo_cache: SessionRepoCacheAccess::Public,
             observability_enabled: true,
-            api_server_enabled: true,
         };
 
         apply_sandbox_capabilities(&mut spec, &capabilities);
@@ -7092,7 +7056,6 @@ mod tests {
         let capabilities = SessionSandboxCapabilities {
             repo_cache: SessionRepoCacheAccess::None,
             observability_enabled: true,
-            api_server_enabled: true,
         };
 
         apply_sandbox_capabilities(&mut spec, &capabilities);
@@ -7113,12 +7076,11 @@ mod tests {
             name: "Test".to_owned(),
             labels,
             sandbox_observability_enabled: true,
-            sandbox_api_server_enabled: true,
         }
     }
 
     #[test]
-    fn persona_registry_validates_default_and_summarizes_without_prompt() {
+    fn persona_registry_validates_default_and_omits_prompt_when_serialized() {
         let registry = PersonaRegistry::new(
             [PersonaDefinition {
                 id: "eng".to_owned(),
@@ -7133,10 +7095,6 @@ mod tests {
         )
         .unwrap();
 
-        let summaries = registry.summaries();
-
-        assert_eq!(summaries.len(), 1);
-        assert_eq!(summaries[0].id, "eng");
         assert!(
             serde_json::to_value(registry.get("eng").unwrap())
                 .unwrap()
@@ -8588,7 +8546,6 @@ mod adoption_tests {
             name: "Test".to_owned(),
             labels: BTreeMap::new(),
             sandbox_observability_enabled: true,
-            sandbox_api_server_enabled: true,
         }
     }
 
@@ -9147,7 +9104,6 @@ mod adoption_tests {
         SessionSandboxCapabilities {
             repo_cache: SessionRepoCacheAccess::None,
             observability_enabled: false,
-            api_server_enabled: false,
         }
     }
 
@@ -9252,13 +9208,8 @@ mod adoption_tests {
         let spec = backend.created_specs().pop().expect("created cold spec");
         assert!(!spec.capabilities.repo_cache.enabled());
         assert!(!spec.capabilities.observability_enabled);
-        assert!(!spec.capabilities.api_server_enabled);
         assert_eq!(
             env_value(&spec, "CENTAUR_SANDBOX_OBSERVABILITY_ENABLED"),
-            Some("false")
-        );
-        assert_eq!(
-            env_value(&spec, "CENTAUR_SANDBOX_API_SERVER_ENABLED"),
             Some("false")
         );
         let blocklist = env_value(&spec, "TOOL_BLOCKLIST").unwrap_or("");
@@ -9349,7 +9300,6 @@ mod adoption_tests {
         let spec = backend.created_specs().pop().expect("created cold spec");
         assert!(!spec.capabilities.repo_cache.enabled());
         assert!(!spec.capabilities.observability_enabled);
-        assert!(!spec.capabilities.api_server_enabled);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

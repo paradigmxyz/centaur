@@ -1,18 +1,17 @@
-require "digest"
-
 module Oauth
   module Providers
     # Linear OAuth consent-flow strategy. Linear's token response carries the
     # access token, granted scopes, and rotating refresh token but no account
-    # identity. To keep the callback path free of external API calls, the flow
-    # stores a deterministic pending identity derived from the token and
-    # EnrichLinearCredentialIdentityJob replaces it with the authenticated
-    # Linear viewer id/name/email.
+    # identity. Resolve the authenticated viewer synchronously so the callback
+    # can upsert by the stable Linear user id.
     class Linear
+      include HttpIdentity
+
       KEY = "linear"
       AUTHORIZATION_ENDPOINT = "https://linear.app/oauth/authorize"
       TOKEN_ENDPOINT = "https://api.linear.app/oauth/token"
       GRAPHQL_ENDPOINT = "https://api.linear.app/graphql"
+      VIEWER_QUERY = "{ viewer { id name email } }".freeze
       IDENTITY_SCOPES = [].freeze
       API_HOSTS = %w[api.linear.app].freeze
 
@@ -42,16 +41,38 @@ module Oauth
       # scope field.
       def refresh_scopes(scopes) = Array(scopes)
 
-      def identity_from(result, client_id:)
+      def identity_from(result, client_id:, http_client: HttpClient.new)
         if result.access_token.blank?
           raise Broker::ExchangeError.new("token response returned an empty access_token",
                                           stage: "parse", code: "missing_access_token")
         end
 
+        response = identity_response(provider: display_name) do
+          http_client.post(
+            GRAPHQL_ENDPOINT,
+            json: { query: VIEWER_QUERY },
+            headers: {
+              "Authorization" => "Bearer #{result.access_token}",
+              "User-Agent" => "centaur-console"
+            }
+          )
+        end
+        payload = identity_json(response, provider: display_name)
+        viewer = payload.dig("data", "viewer")
+        unless viewer.is_a?(Hash)
+          raise Broker::ExchangeError.new(
+            "Linear identity endpoint returned no viewer",
+            stage: "parse",
+            code: "missing_identity",
+            status: response.status
+          )
+        end
+        subject = require_identity(viewer["id"], provider: display_name).to_s
+
         {
-          subject: "pending-#{Digest::SHA256.hexdigest(result.access_token)[0, 32]}",
-          email: nil,
-          name: "Pending Linear account"
+          subject: subject,
+          email: viewer["email"].presence,
+          name: viewer["name"].presence || viewer["email"].presence || subject
         }
       end
     end

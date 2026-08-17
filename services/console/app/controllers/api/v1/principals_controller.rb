@@ -27,6 +27,7 @@ module Api
         principal = Principal.new(foreign_id: data_params[:foreign_id], created_by: current_user)
         ActiveRecord::Base.transaction do
           principal.assign_attributes(principal_params)
+          principal.link_console_user_by_slack_email if data_params.key?(:slack_email)
           principal.apply_default_sandbox_capabilities!(principal_params)
           principal.save!
           replace_slack_channel_permissions!(principal) if data_params.key?(:slack_channel_permissions)
@@ -43,6 +44,7 @@ module Api
         was_new = principal.new_record?
         ActiveRecord::Base.transaction do
           principal.assign_attributes(principal_params)
+          principal.link_console_user_by_slack_email if data_params.key?(:slack_email)
           principal.apply_default_sandbox_capabilities!(principal_params) if was_new
           principal.save!
           replace_slack_channel_permissions!(principal) if data_params.key?(:slack_channel_permissions)
@@ -84,7 +86,9 @@ module Api
           effective_slack_channel_permissions: principal.effective_slack_channel_permissions_payload,
           sandbox_repo_cache: principal.sandbox_repo_cache,
           sandbox_observability_enabled: principal.sandbox_observability_enabled,
-          sandbox_api_server_enabled: principal.sandbox_api_server_enabled,
+          sandbox_sessions_read_enabled: principal.sandbox_sessions_read_enabled,
+          sandbox_workflows_read_enabled: principal.sandbox_workflows_read_enabled,
+          sandbox_workflows_write_enabled: principal.sandbox_workflows_write_enabled,
           created_at: principal.created_at,
           updated_at: principal.updated_at
         }
@@ -99,10 +103,11 @@ module Api
           :slack_team_id,
           :slack_email,
           :console_user_id,
-          :console_user_email,
           :sandbox_repo_cache,
           :sandbox_observability_enabled,
-          :sandbox_api_server_enabled,
+          :sandbox_sessions_read_enabled,
+          :sandbox_workflows_read_enabled,
+          :sandbox_workflows_write_enabled,
           labels: {}
         )
       end

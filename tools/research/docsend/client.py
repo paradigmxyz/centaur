@@ -14,7 +14,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from functools import partial
 from io import BytesIO
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from browserbase import APIStatusError, AsyncBrowserbase
@@ -508,7 +508,8 @@ class DocsendClient:
             item_id: Stable item ID returned by list_space() or open_folder().
 
         Returns:
-            Dict containing the original file as base64 when downloading is allowed.
+            Dict containing the original file as base64 when downloading is enabled,
+            or a recovered PDF when DocSend renders the document without a download button.
         """
         item = _decode_space_item_id(item_id)
         if item is None:
@@ -820,72 +821,14 @@ class DocsendClient:
                         items=items,
                     )
 
-                # 5. Get slide count
-                total = 0
-                for _ in range(3):
-                    total = await _slide_count(page)
-                    if total > 0:
-                        break
-                    await asyncio.sleep(2)
-                if total == 0:
-                    return _err("Could not determine page count")
-                LOGGER.info("DocSend document contains %d pages", total)
-
-                # 6. Navigate through ALL slides to force rendering
-                await _navigate_all_slides(page, total)
-
-                # 7. Try DOM extraction first (most reliable)
-                LOGGER.info("Extracting rendered slide image URLs")
-                image_urls = await _extract_dom_image_urls(page)
-
-                if len(image_urls) == total:
-                    LOGGER.info("Found %d rendered slide images", len(image_urls))
-                    good = await _download_images(image_urls)
-                else:
-                    # Fallback: /page_data/ API
-                    LOGGER.info(
-                        "Found %d/%d rendered slide images; using the DocSend page-data fallback",
-                        len(image_urls),
-                        total,
-                    )
-                    api_urls = await _fetch_slide_urls(page, total)
-                    valid = [u for u in api_urls if u]
-                    if len(valid) != total:
-                        return _err(
-                            f"Failed to recover all document pages ({len(valid)}/{total}).",
-                            page_count=total,
-                        )
-                    good = await _download_images(valid)
-
-                if len(good) != total:
-                    return _err(
-                        f"Failed to download all document pages ({len(good)}/{total}).",
-                        page_count=total,
-                    )
-
-                # 8. Assemble PDF
-                LOGGER.info("Assembling %d downloaded pages into a PDF", len(good))
-                buf = BytesIO()
-                good[0].save(
-                    buf,
-                    "PDF",
-                    save_all=True,
-                    append_images=good[1:] if len(good) > 1 else [],
-                )
-
                 slug_m = re.search(r"docsend\.com/view/(?:s/)?([a-zA-Z0-9]+)", url)
                 slug = slug_m.group(1) if slug_m else "document"
-
-                result = {
-                    "status": "ok",
-                    "filename": f"docsend_{slug}.pdf",
-                    "data": base64.b64encode(buf.getvalue()).decode(),
-                    "mime_type": "application/pdf",
-                    "page_count": total,
-                    "downloaded": len(good),
-                    "error": None,
-                }
-                LOGGER.info("DocSend download completed successfully")
+                result = await _recover_rendered_document(
+                    page,
+                    filename=f"docsend_{slug}.pdf",
+                )
+                if result["status"] == "ok":
+                    LOGGER.info("DocSend download completed successfully")
                 return result
 
         except Exception as e:
@@ -1184,12 +1127,15 @@ async def _extract_space_inventory(page, parent_path: str) -> tuple[str, list[di
         if is_folder:
             item_type = "folder"
             downloadable = None
+            download_method = None
         elif is_file:
             item_type = "file"
             downloadable = await download_button.count() == 1 and await download_button.is_enabled()
+            download_method = "original" if downloadable else "rendered_pdf"
         else:
             item_type = "url"
             downloadable = None
+            download_method = None
 
         path = f"{parent_path.rstrip('/')}/{name}" if parent_path else name
         items.append(
@@ -1198,6 +1144,7 @@ async def _extract_space_inventory(page, parent_path: str) -> tuple[str, list[di
                 path=path,
                 item_type=item_type,
                 downloadable=downloadable,
+                download_method=download_method,
             )
         )
 
@@ -1243,6 +1190,7 @@ def _make_space_item(
     path: str,
     item_type: str,
     downloadable: bool | None,
+    download_method: str | None = None,
 ) -> dict:
     identity = json.dumps(
         {"path": path, "type": item_type},
@@ -1258,6 +1206,7 @@ def _make_space_item(
         "path": path,
         "type": item_type,
         "downloadable": downloadable,
+        "download_method": download_method,
     }
 
 
@@ -1330,7 +1279,7 @@ async def _find_unique_space_row(page, name: str, *, folder: bool = False):
     return rows.first
 
 
-async def _click_space_file_download(page, item: dict) -> dict:
+async def _find_space_file_row(page, item: dict):
     parent_path, _, _ = item["path"].rpartition("/")
     try:
         if parent_path:
@@ -1338,14 +1287,22 @@ async def _click_space_file_download(page, item: dict) -> dict:
         else:
             await _navigate_space_root(page)
     except RuntimeError as exc:
-        return _err(str(exc), status="item_not_found")
+        return None, _err(str(exc), status="item_not_found")
 
     row = await _find_unique_space_row(page, item["name"])
     if row is None:
-        return _err(
+        return None, _err(
             f"Could not uniquely locate file {item['name']!r} in the DocSend Space.",
             status="item_not_found",
         )
+    return row, None
+
+
+async def _click_space_file_download(page, item: dict, row=None) -> dict:
+    if row is None:
+        row, error = await _find_space_file_row(page, item)
+        if error is not None:
+            return error
     download_button = row.locator('button[aria-label="Download file"]')
     if await download_button.count() != 1 or not await download_button.is_enabled():
         return _err(
@@ -1356,6 +1313,61 @@ async def _click_space_file_download(page, item: dict) -> dict:
     LOGGER.info("Clicking the download control once for deal-room item %s", item["id"])
     await download_button.click(timeout=SPACE_SELECTOR_TIMEOUT_MS)
     return {"status": "ok", "error": None}
+
+
+def _rendered_pdf_filename(name: str) -> str:
+    filename = name.rsplit("/", 1)[-1].replace("\x00", "").strip() or "docsend_document"
+    stem = re.sub(r"\.[A-Za-z0-9]{1,10}$", "", filename).strip() or "docsend_document"
+    return f"{stem}.pdf"
+
+
+async def _recover_space_document(page, item: dict, row) -> dict:
+    links = row.locator("a[href]")
+    if await links.count() < 1:
+        return _err(
+            "DocSend did not provide a viewer link for this item.",
+            status="download_unavailable",
+        )
+    href = await links.first.get_attribute("href")
+    if not href:
+        return _err(
+            "DocSend did not provide a viewer link for this item.",
+            status="download_unavailable",
+        )
+    try:
+        document_url = _normalize_docsend_url(urljoin(page.url, href))
+    except ValueError as exc:
+        return _err(str(exc), status="download_unavailable")
+
+    LOGGER.info("Recovering rendered pages for deal-room item %s", item["id"])
+    document_page = await page.context.new_page()
+    try:
+        try:
+            await document_page.goto(document_url, wait_until="networkidle", timeout=45000)
+        except Exception:
+            LOGGER.warning(
+                "Deal-room document navigation did not reach network idle; inspecting the page"
+            )
+        state = await _detect_state(document_page)
+        if state == "expired":
+            return _err("Document not found or expired", status="expired")
+        if state == "blocked":
+            return _err("Blocked by CloudFront/WAF", status="blocked")
+        if state != "ready" or await _has_verification_wall(document_page):
+            return _err(
+                "The deal-room session did not unlock this document viewer.",
+                status="download_unavailable",
+            )
+        await _dismiss_cookies(document_page)
+        result = await _recover_rendered_document(
+            document_page,
+            filename=_rendered_pdf_filename(item["name"]),
+        )
+        if result["status"] == "ok":
+            result["download_method"] = "rendered_pdf"
+        return result
+    finally:
+        await document_page.close()
 
 
 async def _fetch_space_item(
@@ -1370,12 +1382,24 @@ async def _fetch_space_item(
             f"{item['name']} is a {item['type']} and cannot be downloaded as a file.",
             status="not_downloadable",
         )
+    row, error = await _find_space_file_row(page, item)
+    if error is not None:
+        return error
+    download_button = row.locator('button[aria-label="Download file"]')
+    has_original_download = (
+        await download_button.count() == 1 and await download_button.is_enabled()
+    )
+    if not has_original_download:
+        result = await _recover_space_document(page, item, row)
+        result["item_id"] = item["id"]
+        return result
+
     existing_downloads = await _browserbase_download_records(api_key, session_id)
     existing_ids = {
         download["id"] for download in existing_downloads if isinstance(download.get("id"), str)
     }
     await _configure_browserbase_downloads(browser)
-    click_result = await _click_space_file_download(page, item)
+    click_result = await _click_space_file_download(page, item, row)
     if click_result["status"] != "ok":
         return click_result
     downloaded = await _wait_for_new_download(
@@ -1401,6 +1425,7 @@ async def _fetch_space_item(
         "filename": filename,
         "mime_type": mime_type,
         "size": len(content),
+        "download_method": "original",
         "data": base64.b64encode(content).decode(),
         "error": None,
     }
@@ -1409,6 +1434,76 @@ async def _fetch_space_item(
 # ---------------------------------------------------------------------------
 # Slide extraction
 # ---------------------------------------------------------------------------
+
+
+async def _recover_rendered_document(page, *, filename: str) -> dict:
+    """Recover a visible DocSend document from its rendered page images."""
+    images = await _capture_spreadsheet_sheets(page)
+    total = len(images)
+    if total:
+        LOGGER.info("Captured %d DocSend spreadsheet sheets", total)
+    else:
+        for _ in range(3):
+            total = await _slide_count(page)
+            if total > 0:
+                break
+            await asyncio.sleep(2)
+        if total == 0:
+            return _err("Could not determine page count")
+        LOGGER.info("DocSend document contains %d pages", total)
+
+        await _navigate_all_slides(page, total)
+
+        LOGGER.info("Extracting rendered slide image URLs")
+        image_urls = await _extract_dom_image_urls(page)
+        if len(image_urls) == total:
+            LOGGER.info("Found %d rendered slide images", len(image_urls))
+            images = await _download_images(image_urls)
+        else:
+            LOGGER.info(
+                "Found %d/%d rendered slide images; using the DocSend page-data fallback",
+                len(image_urls),
+                total,
+            )
+            api_urls = await _fetch_slide_urls(page, total)
+            valid_urls = [url for url in api_urls if url]
+            if len(valid_urls) != total:
+                return _err(
+                    f"Failed to recover all document pages ({len(valid_urls)}/{total}).",
+                    page_count=total,
+                )
+            images = await _download_images(valid_urls)
+
+        if len(images) != total:
+            LOGGER.info(
+                "Downloaded %d/%d rendered slide images; using the viewport capture fallback",
+                len(images),
+                total,
+            )
+            images = await _capture_visible_pages(page, total)
+            if len(images) != total:
+                return _err(
+                    f"Failed to recover all document pages ({len(images)}/{total}).",
+                    page_count=total,
+                )
+
+    LOGGER.info("Assembling %d downloaded pages into a PDF", len(images))
+    buffer = BytesIO()
+    images[0].save(
+        buffer,
+        "PDF",
+        save_all=True,
+        append_images=images[1:] if len(images) > 1 else [],
+    )
+    return {
+        "status": "ok",
+        "filename": filename,
+        "data": base64.b64encode(buffer.getvalue()).decode(),
+        "mime_type": "application/pdf",
+        "page_count": total,
+        "downloaded": len(images),
+        "error": None,
+    }
 
 
 async def _slide_count(page) -> int:
@@ -1450,6 +1545,95 @@ async def _navigate_all_slides(page, total: int) -> None:
         if page_number == total or page_number % 10 == 0:
             LOGGER.info("Rendered page %d/%d", page_number, total)
     await asyncio.sleep(1)
+
+
+async def _capture_visible_pages(page, total: int) -> list[Image.Image]:
+    """Capture every page from the authenticated viewer when image URLs reject downloads.
+
+    Spreadsheet-style DocSend viewers can render pages successfully while their signed
+    image URLs return 403 outside the renderer. In that case, preserve exactly what the
+    authenticated browser can display by stepping through the viewer and capturing each
+    viewport as a PDF page.
+    """
+    LOGGER.info("Capturing all %d DocSend pages from the authenticated viewport", total)
+    for _ in range(total):
+        await page.keyboard.press("ArrowLeft")
+        await asyncio.sleep(0.1)
+    await asyncio.sleep(1)
+
+    images: list[Image.Image] = []
+    for page_number in range(1, total + 1):
+        try:
+            png = await _capture_visible_page(page)
+            images.append(_rgb_image_from_png(png))
+        except Exception as exc:
+            LOGGER.warning("Failed to capture DocSend page %d: %s", page_number, exc)
+            break
+        if page_number < total:
+            await page.keyboard.press("ArrowRight")
+            await asyncio.sleep(0.75)
+    LOGGER.info("Captured %d/%d DocSend pages from the viewport", len(images), total)
+    return images
+
+
+async def _capture_spreadsheet_sheets(page) -> list[Image.Image]:
+    """Click and capture each sheet inside DocSend's spreadsheet preview iframe."""
+    await _hide_capture_overlays(page)
+    iframe = await page.query_selector("#previews-iframe")
+    if iframe is None:
+        return []
+    frame = await iframe.content_frame()
+    if frame is None:
+        return []
+
+    tabs = frame.locator("#tabstrip a.tabstrip-link")
+    sheets = frame.locator(".sheet-content")
+    tab_count = await tabs.count()
+    if tab_count == 0 or await sheets.count() != tab_count:
+        return []
+
+    images: list[Image.Image] = []
+    for index in range(tab_count):
+        tab = tabs.nth(index)
+        sheet = sheets.nth(index)
+        name = (await tab.inner_text()).strip() or f"Sheet {index + 1}"
+        LOGGER.info("Capturing DocSend spreadsheet tab %d/%d: %s", index + 1, tab_count, name)
+        await tab.click(force=True)
+        await frame.wait_for_timeout(500)
+        await sheet.wait_for(state="visible")
+        images.append(_rgb_image_from_png(await iframe.screenshot()))
+    return images
+
+
+def _rgb_image_from_png(png: bytes) -> Image.Image:
+    source = Image.open(BytesIO(png))
+    rgb = Image.new("RGB", source.size, (255, 255, 255))
+    rgb.paste(source, mask=source.split()[3] if source.mode == "RGBA" else None)
+    source.close()
+    return rgb
+
+
+async def _capture_visible_page(page) -> bytes:
+    """Capture the document surface without DocSend's surrounding viewer chrome."""
+    await _hide_capture_overlays(page)
+    spreadsheet = page.locator(
+        'iframe#previews-iframe:visible, iframe[class*="spreadsheet-viewer"]:visible'
+    ).first
+    if await spreadsheet.count() > 0:
+        LOGGER.info("Capturing the visible DocSend spreadsheet frame")
+        return await spreadsheet.screenshot()
+    LOGGER.info("No document-only capture surface found; capturing the viewer viewport")
+    return await page.screenshot(full_page=False)
+
+
+async def _hide_capture_overlays(page) -> None:
+    """Hide DocSend overlays that obscure documents or intercept workbook clicks."""
+    await page.evaluate(
+        """() => {
+          const cookieFrame = document.querySelector('#ccpa-iframe');
+          if (cookieFrame) cookieFrame.style.visibility = 'hidden';
+        }"""
+    )
 
 
 async def _extract_dom_image_urls(page) -> list[str]:

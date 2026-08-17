@@ -1,4 +1,4 @@
-use std::time::SystemTime;
+use std::{collections::BTreeMap, time::SystemTime};
 
 use serde::{Deserialize, Serialize};
 
@@ -98,6 +98,9 @@ pub struct ObservedSandbox {
     pub backend: String,
     /// Current portable lifecycle status.
     pub status: SandboxStatus,
+    /// Backend metadata used to scope lifecycle reconciliation to an owner.
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
     /// Backend-owned diagnostic reason for the observed status.
     pub reason: Option<String>,
     /// When the backend created the sandbox, if the backend records it.
@@ -117,10 +120,16 @@ impl ObservedSandbox {
             id: id.into(),
             backend: backend.into(),
             status,
+            labels: BTreeMap::new(),
             reason: None,
             created_at: None,
             suspended_since: None,
         }
+    }
+
+    pub fn with_labels(mut self, labels: BTreeMap<String, String>) -> Self {
+        self.labels = labels;
+        self
     }
 
     pub fn with_created_at(mut self, created_at: Option<SystemTime>) -> Self {

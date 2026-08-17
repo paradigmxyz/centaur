@@ -17,6 +17,7 @@ module Oauth
 
     setup do
       @exchange_http_mocks = []
+      @identity_http_mocks = []
       @app = oauth_apps(:acme_google) # slug "google"
       @app.update!(client_secret: "app-secret")
       oauth_apps(:acme_slack).update!(client_secret: "slack-secret")
@@ -30,8 +31,10 @@ module Oauth
 
     teardown do
       FlowsController.exchange_client_factory = -> { Broker::AuthorizationCodeClient.new }
+      FlowsController.identity_http_client_factory = -> { HttpClient.new }
       clear_enqueued_jobs
       @exchange_http_mocks.each(&:verify)
+      @identity_http_mocks.each(&:verify)
     end
 
     def stub_exchange(status:, body:, expected: true)
@@ -39,6 +42,17 @@ module Oauth
       expect_http_call(http, status: status, body: body) if expected
       @exchange_http_mocks << http
       FlowsController.exchange_client_factory = -> { Broker::AuthorizationCodeClient.new(http: http) }
+    end
+
+    def stub_identity(status: 200, body:, &assert_request)
+      http = expect_http_call(status: status, body: body, &assert_request)
+      @identity_http_mocks << http
+      FlowsController.identity_http_client_factory = -> { HttpClient.new(http: http) }
+    end
+
+    def stub_identity_network_failure(error)
+      transport = ->(**) { raise error }
+      FlowsController.identity_http_client_factory = -> { HttpClient.new(http: transport) }
     end
 
     def id_token(claims)
@@ -379,20 +393,29 @@ module Oauth
     test "callback happy path supports Attio workspace tokens" do
       state = start_flow(slug: "attio", scopes: "record_permission:read")
       stub_exchange(status: 200, body: attio_token_body)
+      stub_identity(
+        body: {
+          workspace_id: "WS_ABC123",
+          workspace_name: "Acme Sales",
+          workspace_slug: "acme-sales"
+        }.to_json
+      ) do |request|
+        assert_equal :get, request[:method]
+        assert_equal Oauth::Providers::Attio::SELF_ENDPOINT, request[:url]
+        assert_equal "Bearer attio-user-token", request[:headers]["Authorization"]
+      end
 
-      assert_enqueued_with(job: Oauth::EnrichAttioCredentialIdentityJob) do
-        assert_difference -> { BrokerCredential.count } => 1 do
-          get oauth_callback_url(slug: "attio"), params: { state: state, code: "auth-code" }
-        end
+      assert_difference -> { BrokerCredential.count } => 1 do
+        get oauth_callback_url(slug: "attio"), params: { state: state, code: "auth-code" }
       end
       assert_redirected_to console_integrations_path
       assert_match(/\Aattio connected/, flash[:notice])
 
       app = oauth_apps(:acme_attio)
       cred = BrokerCredential.find_by(oauth_app: app)
-      assert_match(/\Aattio-attio-pending-[a-f0-9]{32}\z/, cred.foreign_id)
-      assert_match(/\Apending-[a-f0-9]{32}\z/, cred.provider_subject)
-      assert_equal "Attio – Pending Attio workspace", cred.name
+      assert_equal "attio-attio-ws_abc123", cred.foreign_id
+      assert_equal "WS_ABC123", cred.provider_subject
+      assert_equal "Attio – Acme Sales", cred.name
       assert_equal "https://app.attio.com/oauth/token", cred.token_endpoint
       assert_nil cred.provider_email
       assert_equal %w[record_permission:read], cred.scopes
@@ -400,35 +423,46 @@ module Oauth
       assert_nil cred.refresh_token
       assert_nil cred.next_attempt_at
       assert_equal [ "api.attio.com" ], cred.static_secret.rules.map(&:host)
-      assert_equal "Attio – Pending Attio workspace token", cred.static_secret.name
+      assert_equal "Attio – Acme Sales token", cred.static_secret.name
       refute_includes BrokerCredential.refreshable, cred
     end
 
     test "callback happy path supports GitHub OAuth app tokens" do
       state = start_flow(slug: "github", scopes: "repo read:user")
       stub_exchange(status: 200, body: github_token_body)
+      stub_identity(
+        body: {
+          id: 99_123,
+          login: "octocat",
+          name: "Octo Cat",
+          email: "octo@example.com"
+        }.to_json
+      ) do |request|
+        assert_equal :get, request[:method]
+        assert_equal Oauth::Providers::Github::USER_ENDPOINT, request[:url]
+        assert_equal "Bearer gho-user-token", request[:headers]["Authorization"]
+      end
 
-      assert_enqueued_with(job: Oauth::EnrichGithubCredentialIdentityJob) do
-        assert_difference -> { BrokerCredential.count } => 1 do
-          get oauth_callback_url(slug: "github"), params: { state: state, code: "auth-code" }
-        end
+      assert_difference -> { BrokerCredential.count } => 1 do
+        get oauth_callback_url(slug: "github"), params: { state: state, code: "auth-code" }
       end
       assert_redirected_to console_integrations_path
-      assert_match(/\Agithub connected/, flash[:notice])
+      assert_equal "github connected as octo@example.com.", flash[:notice]
 
       app = oauth_apps(:acme_github)
       cred = BrokerCredential.find_by(oauth_app: app)
-      assert_match(/\Agithub-github-pending-[a-f0-9]{32}\z/, cred.foreign_id)
-      assert_match(/\Apending-[a-f0-9]{32}\z/, cred.provider_subject)
-      assert_equal "GitHub – Pending GitHub account", cred.name
+      assert_equal "github-github-99123", cred.foreign_id
+      assert_equal "99123", cred.provider_subject
+      assert_equal "GitHub – Octo Cat", cred.name
       assert_equal "https://github.com/login/oauth/access_token", cred.token_endpoint
-      assert_nil cred.provider_email
+      assert_equal "octo@example.com", cred.provider_email
+      assert_equal "octocat", cred.labels["github_login"]
       assert_equal %w[repo read:user], cred.scopes
       assert_equal "gho-user-token", cred.access_token
       assert_nil cred.refresh_token
       assert_nil cred.next_attempt_at
       assert_equal [ "api.github.com", "github.com" ], cred.static_secret.rules.map(&:host)
-      assert_equal "GitHub – Pending GitHub account token", cred.static_secret.name
+      assert_equal "GitHub – Octo Cat token", cred.static_secret.name
       assert_equal "github_token", cred.static_secret.kind
       assert_nil cred.static_secret.inject_config
       assert_equal(
@@ -445,28 +479,151 @@ module Oauth
     test "callback happy path supports Linear OAuth app tokens" do
       state = start_flow(slug: "linear", scopes: "read write")
       stub_exchange(status: 200, body: linear_token_body)
+      stub_identity(
+        body: {
+          data: {
+            viewer: { id: "LinUser_123", name: "Ada Lovelace", email: "ada@example.com" }
+          }
+        }.to_json
+      ) do |request|
+        assert_equal :post, request[:method]
+        assert_equal Oauth::Providers::Linear::GRAPHQL_ENDPOINT, request[:url]
+        assert_equal({ "query" => Oauth::Providers::Linear::VIEWER_QUERY }, JSON.parse(request[:body]))
+        assert_equal "Bearer lin-user-token", request[:headers]["Authorization"]
+      end
 
-      assert_enqueued_with(job: Oauth::EnrichLinearCredentialIdentityJob) do
-        assert_difference -> { BrokerCredential.count } => 1 do
-          get oauth_callback_url(slug: "linear"), params: { state: state, code: "auth-code" }
-        end
+      assert_difference -> { BrokerCredential.count } => 1 do
+        get oauth_callback_url(slug: "linear"), params: { state: state, code: "auth-code" }
       end
       assert_redirected_to console_integrations_path
-      assert_match(/\Alinear connected/, flash[:notice])
+      assert_equal "linear connected as ada@example.com.", flash[:notice]
 
       app = oauth_apps(:acme_linear)
       cred = BrokerCredential.find_by(oauth_app: app)
-      assert_match(/\Alinear-linear-pending-[a-f0-9]{32}\z/, cred.foreign_id)
-      assert_match(/\Apending-[a-f0-9]{32}\z/, cred.provider_subject)
-      assert_equal "Linear – Pending Linear account", cred.name
+      assert_equal "linear-linear-linuser_123", cred.foreign_id
+      assert_equal "LinUser_123", cred.provider_subject
+      assert_equal "Linear – Ada Lovelace", cred.name
       assert_equal "https://api.linear.app/oauth/token", cred.token_endpoint
-      assert_nil cred.provider_email
+      assert_equal "ada@example.com", cred.provider_email
       assert_equal %w[read write], cred.scopes
       assert_equal "lin-user-token", cred.access_token
       assert_equal "lin-refresh-token", cred.refresh_token
       assert cred.next_attempt_at.present?
       assert_equal [ "api.linear.app" ], cred.static_secret.rules.map(&:host)
-      assert_equal "Linear – Pending Linear account token", cred.static_secret.name
+      assert_equal "Linear – Ada Lovelace token", cred.static_secret.name
+    end
+
+    test "GitHub re-consent updates the existing credential synchronously" do
+      state = start_flow(slug: "github", scopes: "repo")
+      stub_exchange(status: 200, body: github_token_body(access_token: "gho-old", scope: "repo"))
+      stub_identity(body: { id: 99_123, login: "octocat", name: "Octo Cat", email: "old@example.com" }.to_json)
+      get oauth_callback_url(slug: "github"), params: { state: state, code: "code-1" }
+
+      app = oauth_apps(:acme_github)
+      credential = BrokerCredential.find_by!(oauth_app: app, provider_subject: "99123")
+      wrapper = credential.static_secret
+      credential.update!(name: "operator name", dead: true, dead_reason: "revoked")
+
+      state = start_flow(slug: "github", scopes: "repo read:user")
+      stub_exchange(
+        status: 200,
+        body: github_token_body(access_token: "gho-fresh", scope: "repo,read:user")
+      )
+      stub_identity(
+        body: { id: 99_123, login: "octo-renamed", name: "Octo Renamed", email: "new@example.com" }.to_json
+      )
+
+      assert_no_difference [ -> { BrokerCredential.count }, -> { StaticSecret.count } ] do
+        get oauth_callback_url(slug: "github"), params: { state: state, code: "code-2" }
+      end
+
+      credential.reload
+      assert_equal "gho-fresh", credential.access_token
+      assert_equal %w[repo read:user], credential.scopes
+      assert_equal "new@example.com", credential.provider_email
+      assert_equal "octo-renamed", credential.labels["github_login"]
+      assert_equal "operator name", credential.name
+      assert_not credential.dead?
+      assert_equal wrapper, credential.static_secret
+    end
+
+    test "Attio re-consent recreates a missing wrapper without duplicating the credential" do
+      state = start_flow(slug: "attio", scopes: "record_permission:read")
+      stub_exchange(status: 200, body: attio_token_body(access_token: "attio-old"))
+      stub_identity(body: { workspace_id: "WS_ABC123", workspace_name: "Acme Sales" }.to_json)
+      get oauth_callback_url(slug: "attio"), params: { state: state, code: "code-1" }
+
+      app = oauth_apps(:acme_attio)
+      credential = BrokerCredential.find_by!(oauth_app: app, provider_subject: "WS_ABC123")
+      credential.static_secret.destroy!
+
+      state = start_flow(slug: "attio", scopes: "record_permission:read")
+      stub_exchange(status: 200, body: attio_token_body(access_token: "attio-fresh"))
+      stub_identity(body: { workspace_id: "WS_ABC123", workspace_name: "Acme Sales" }.to_json)
+
+      assert_no_difference -> { BrokerCredential.count } do
+        assert_difference -> { StaticSecret.count } => 1 do
+          get oauth_callback_url(slug: "attio"), params: { state: state, code: "code-2" }
+        end
+      end
+
+      credential.reload
+      assert_equal "attio-fresh", credential.access_token
+      assert_not_nil credential.static_secret
+      assert_equal "Attio – Acme Sales token", credential.static_secret.name
+    end
+
+    test "Linear re-consent rotates the existing credential" do
+      state = start_flow(slug: "linear", scopes: "read")
+      stub_exchange(
+        status: 200,
+        body: linear_token_body(access_token: "lin-old", refresh_token: "lin-refresh-old", scope: "read")
+      )
+      stub_identity(
+        body: { data: { viewer: { id: "LinUser_123", name: "Ada Lovelace", email: "old@example.com" } } }.to_json
+      )
+      get oauth_callback_url(slug: "linear"), params: { state: state, code: "code-1" }
+
+      app = oauth_apps(:acme_linear)
+      credential = BrokerCredential.find_by!(oauth_app: app, provider_subject: "LinUser_123")
+      wrapper = credential.static_secret
+
+      state = start_flow(slug: "linear", scopes: "read write")
+      stub_exchange(
+        status: 200,
+        body: linear_token_body(
+          access_token: "lin-fresh",
+          refresh_token: "lin-refresh-fresh",
+          scope: "read write"
+        )
+      )
+      stub_identity(
+        body: { data: { viewer: { id: "LinUser_123", name: "Ada Lovelace", email: "new@example.com" } } }.to_json
+      )
+
+      assert_no_difference [ -> { BrokerCredential.count }, -> { StaticSecret.count } ] do
+        get oauth_callback_url(slug: "linear"), params: { state: state, code: "code-2" }
+      end
+
+      credential.reload
+      assert_equal "lin-fresh", credential.access_token
+      assert_equal "lin-refresh-fresh", credential.refresh_token
+      assert_equal %w[read write], credential.scopes
+      assert_equal "new@example.com", credential.provider_email
+      assert_equal wrapper, credential.static_secret
+    end
+
+    test "identity lookup network failure renders an error and persists nothing" do
+      state = start_flow(slug: "github", scopes: "repo")
+      stub_exchange(status: 200, body: github_token_body)
+      stub_identity_network_failure(SocketError.new("identity host unavailable"))
+
+      assert_no_difference [ -> { BrokerCredential.count }, -> { StaticSecret.count } ] do
+        get oauth_callback_url(slug: "github"), params: { state: state, code: "auth-code" }
+      end
+
+      assert_response :unprocessable_entity
+      assert_match "identity_lookup_failed", response.body
     end
 
     test "callback wraps the minted credential in a grantable static secret" do

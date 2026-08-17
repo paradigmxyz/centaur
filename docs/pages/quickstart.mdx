@@ -69,8 +69,9 @@ and `SLACKBOT_API_KEY` are API boot requirements in the current chart.
 `SLACK_BOT_TOKEN` is required by the default local bootstrap because Slackbot is
 enabled in `values.dev.yaml`; use a real token if you want to test Slack.
 
-`SLACKBOT_API_KEY` is a static service token. The API bootstraps that value into
-Postgres on startup, so it must exist before `just up`.
+`SLACKBOT_API_KEY` is Slackbot's dedicated static service token. Console uses
+the existing JWT signing secret to mint its own short-lived, purpose-bound
+service tokens for api-rs.
 
 Application-level model and tool secrets, such as `OPENAI_API_KEY`,
 `ANTHROPIC_API_KEY`, `AMP_API_KEY`, and `GITHUB_TOKEN`, should live in

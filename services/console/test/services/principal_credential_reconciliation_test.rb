@@ -389,19 +389,6 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     assert principal.grants.exists?(static_secret: secret)
   end
 
-  test "console user principal ignores a spoofed cached email" do
-    credential = create_credential(oauth_apps(:acme_slack), "slack-sub-carol", "carol@acme.example")
-    secret = wrap(credential)
-
-    principal = create_console_user_principal(
-      users(:member_user),
-      email: "carol@acme.example",
-      foreign_id: "console-user-spoofed-email"
-    )
-
-    refute principal.grants.exists?(static_secret: secret)
-  end
-
   test "console user principal ignores provider subject labels" do
     credential = create_credential(oauth_apps(:acme_google), "google-sub-carol", "carol@acme.example")
     secret = wrap(credential)
@@ -685,15 +672,14 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
   private
 
   # Mirrors the principal shape minted by Mcp::OauthController#principal_for_current_user.
-  # The email/extra_labels overrides simulate tampered or stale cached identity,
-  # which matching must ignore for console-user principals.
-  def create_console_user_principal(user, foreign_id:, email: nil, extra_labels: {})
+  # The label override simulates tampered cached identity, which matching must
+  # ignore for console-user principals.
+  def create_console_user_principal(user, foreign_id:, extra_labels: {})
     Principal.create!(
       foreign_id: foreign_id,
       name: user.name.presence || user.email,
       kind: "console_user",
       console_user_id: user.id,
-      console_user_email: email || user.email,
       labels: {
         "managed-by" => "centaur"
       }.merge(extra_labels),

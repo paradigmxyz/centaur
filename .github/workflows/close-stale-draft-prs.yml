@@ -1,0 +1,71 @@
+name: Close stale draft pull requests
+
+on:
+  schedule:
+    - cron: "17 9 * * *"
+  workflow_dispatch:
+
+permissions:
+  pull-requests: write
+
+jobs:
+  close-stale-drafts:
+    name: Close stale drafts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Close inactive draft pull requests
+        uses: actions/github-script@d746ffe35508b1917358783b479e04febd2b8f71 # v9.0.0
+        with:
+          script: |
+            const inactivityCutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
+            const pullRequests = await github.paginate(github.rest.pulls.list, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              sort: "updated",
+              direction: "asc",
+              per_page: 100,
+            });
+
+            for (const pullRequest of pullRequests) {
+              if (Date.parse(pullRequest.updated_at) > inactivityCutoff) {
+                break;
+              }
+
+              if (!pullRequest.draft) {
+                continue;
+              }
+
+              const { data: currentPullRequest } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pullRequest.number,
+              });
+
+              if (
+                currentPullRequest.state !== "open" ||
+                !currentPullRequest.draft ||
+                Date.parse(currentPullRequest.updated_at) > inactivityCutoff
+              ) {
+                continue;
+              }
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: currentPullRequest.number,
+                body:
+                  "Draft pull requests with no activity for more than 14 days are automatically closed. " +
+                  "Please reopen this pull request and mark it as ready for review when you'd like us to take a look.",
+              });
+
+              await github.rest.pulls.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: currentPullRequest.number,
+                state: "closed",
+              });
+
+              core.info(`Closed draft pull request #${currentPullRequest.number}`);
+            }

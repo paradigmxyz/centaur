@@ -262,6 +262,9 @@ Rails.application.routes.draw do
           member do
             post :share
             post :unshare
+            get :editors
+            post :add_editor, path: "editors"
+            delete :remove_editor, path: "editors"
           end
         end
       end

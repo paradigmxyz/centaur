@@ -27,6 +27,9 @@ struct Args {
     #[arg(long, env = "CENTAUR_API_URL", default_value = "http://127.0.0.1:8080")]
     api_url: ApiBaseUrl,
 
+    #[arg(long, env = "CENTAUR_API_TOKEN", hide_env_values = true)]
+    api_token: String,
+
     #[arg(long)]
     thread_key: Option<ThreadKeyArg>,
 
@@ -79,7 +82,11 @@ async fn main() -> Result<()> {
     if generated_thread_key {
         eprintln!("thread_key={}", thread_key.as_str());
     }
-    let client = CentaurClient::new(args.api_url.as_str());
+    if args.api_token.trim().is_empty() {
+        bail!("CENTAUR_API_TOKEN must not be empty");
+    }
+    let client = CentaurClient::with_bearer_token(args.api_url.as_str(), &args.api_token)
+        .wrap_err("configure API authentication")?;
 
     if attach_mode {
         let events = client
