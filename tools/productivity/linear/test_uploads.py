@@ -632,8 +632,8 @@ def test_put_upload_uses_bare_non_redirecting_client_and_immutable_bytes(
     assert captured["url"] == target.upload_url
     assert captured["content"] == original
     assert captured["headers"] == {
-        "Content-Type": "image/png",
-        "Cache-Control": "public, max-age=31536000",
+        "content-type": "image/png",
+        "cache-control": "public, max-age=31536000",
         "x-amz-checksum-sha256": "checksum",
         "x-amz-meta-test": "value",
     }
@@ -678,3 +678,132 @@ def test_put_upload_redacts_signed_target_when_request_fails(
     assert "private bytes" not in rendered.lower()
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
+
+
+@pytest.mark.parametrize(
+    "provider_headers",
+    [
+        [
+            {"key": "Content-Type", "value": "provider/wrong"},
+            {"key": "Cache-Control", "value": "private"},
+            {"key": "X-Provider", "value": "kept"},
+        ],
+        [
+            {"key": "content-type", "value": "provider/wrong"},
+            {"key": "cache-control", "value": "private"},
+            {"key": "x-provider", "value": "kept"},
+        ],
+    ],
+    ids=["title-case", "lowercase"],
+)
+def test_put_upload_overrides_provider_mime_and_cache_headers_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider_headers: list[dict[str, str]],
+) -> None:
+    root = tmp_path / "uploads"
+    upload = validate_upload_file(
+        _write(root / "evidence.png", PNG), uploads_root=root
+    )
+    target = validate_upload_target(_target(headers=provider_headers))
+    captured: dict[str, Any] = {}
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+    class BareClient:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def put(self, url: str, **kwargs: Any) -> Response:
+            request = httpx.Request("PUT", url, headers=kwargs["headers"])
+            captured["headers"] = kwargs["headers"]
+            captured["serialized"] = request.headers.multi_items()
+            return Response()
+
+    monkeypatch.setattr(uploads_module.httpx, "Client", BareClient)
+
+    put_upload(target, upload)
+
+    assert captured["headers"] == {
+        "content-type": "image/png",
+        "cache-control": "public, max-age=31536000",
+        "x-provider": "kept",
+    }
+    serialized = captured["serialized"]
+    assert [item for item in serialized if item[0] == "content-type"] == [
+        ("content-type", "image/png")
+    ]
+    assert [item for item in serialized if item[0] == "cache-control"] == [
+        ("cache-control", "public, max-age=31536000")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("failure_stage", "error_type"),
+    [
+        ("construct", RuntimeError),
+        ("enter", ValueError),
+        ("put", httpx.InvalidURL),
+        ("status", RuntimeError),
+    ],
+)
+def test_put_upload_redacts_any_exception_from_the_bare_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+    error_type: type[Exception],
+) -> None:
+    root = tmp_path / "uploads"
+    secret_bytes = b"secret-private-evidence"
+    upload = validate_upload_file(
+        _write(root / "evidence.png", PNG + secret_bytes), uploads_root=root
+    )
+    target = validate_upload_target(_target())
+    secret_detail = (
+        f"signature=secret checksum authorization {secret_bytes.decode()}"
+    )
+
+    class Response:
+        def raise_for_status(self) -> None:
+            if failure_stage == "status":
+                raise error_type(secret_detail)
+
+    class FailingClient:
+        def __init__(self, **kwargs: Any) -> None:
+            if failure_stage == "construct":
+                raise error_type(secret_detail)
+
+        def __enter__(self):
+            if failure_stage == "enter":
+                raise error_type(secret_detail)
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def put(self, url: str, **kwargs: Any) -> Response:
+            if failure_stage == "put":
+                raise error_type(secret_detail)
+            return Response()
+
+    monkeypatch.setattr(uploads_module.httpx, "Client", FailingClient)
+
+    with pytest.raises(UploadError) as exc_info:
+        put_upload(target, upload)
+
+    assert str(exc_info.value) == "Linear evidence upload failed"
+    assert repr(exc_info.value) == "UploadError('Linear evidence upload failed')"
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
+    assert "signature" not in repr(exc_info.value).lower()
+    assert "checksum" not in repr(exc_info.value).lower()
+    assert "authorization" not in repr(exc_info.value).lower()
+    assert secret_bytes.decode() not in repr(exc_info.value)

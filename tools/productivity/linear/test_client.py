@@ -280,7 +280,48 @@ def test_upload_evidence_uploads_before_creating_comment(
     assert events == ["allocate", "upload", "comment"]
     assert result["comment_id"] == "comment-1"
     assert client.calls[1]["variables"] == {
-        "input": {"issueId": "NEU-497", "body": "Evidence"}
+        "input": {
+            "issueId": "NEU-497",
+            "body": (
+                "Evidence\n\n"
+                "[evidence.png](https://uploads.linear.app/assets/evidence.png)"
+            ),
+        }
+    }
+
+
+def test_upload_evidence_escapes_filename_in_markdown_asset_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    content = b"\x89PNG\r\n\x1a\nprotocol evidence"
+    path = tmp_path / "uploads" / "evi[proof].png"
+    path.parent.mkdir()
+    path.write_bytes(content)
+    client = RecordingLinearClient(
+        {
+            "fileUpload": {"success": True, "uploadFile": _upload_target()},
+            "commentCreate": {
+                "success": True,
+                "comment": {"id": "comment-1"},
+            },
+        }
+    )
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(module, "put_upload", lambda target, upload: target.asset_url)
+
+    client.upload_evidence("NEU-497", path, comment="Supplied text")
+
+    comment_calls = [call for call in client.calls if "commentCreate" in call["query"]]
+    assert len(comment_calls) == 1
+    assert comment_calls[0]["variables"] == {
+        "input": {
+            "issueId": "NEU-497",
+            "body": (
+                "Supplied text\n\n"
+                "[evi\\[proof\\].png]"
+                "(https://uploads.linear.app/assets/evidence.png)"
+            ),
+        }
     }
 
 
@@ -319,9 +360,11 @@ def test_upload_evidence_returns_safe_partial_failure_without_retry(
 ) -> None:
     path, content = _write_png(tmp_path)
     upload_calls = 0
+    comment_attempts: list[tuple[str, str]] = []
 
     class CommentFailureClient(RecordingLinearClient):
         def add_comment(self, issue_id: str, body: str) -> dict[str, Any]:
+            comment_attempts.append((issue_id, body))
             if comment_failure == "exception":
                 raise RuntimeError("secret comment transport detail")
             return super().add_comment(issue_id, body)
@@ -344,6 +387,13 @@ def test_upload_evidence_returns_safe_partial_failure_without_retry(
     result = client.upload_evidence("NEU-497", path, comment="Evidence")
 
     assert upload_calls == 1
+    assert comment_attempts == [
+        (
+            "NEU-497",
+            "Evidence\n\n"
+            "[evidence.png](https://uploads.linear.app/assets/evidence.png)",
+        )
+    ]
     assert result == {
         "ok": False,
         "tool": "linear",

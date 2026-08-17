@@ -400,11 +400,9 @@ def validate_upload_target(upload_file: Mapping[str, Any]) -> ValidatedTarget:
 def put_upload(target: ValidatedTarget, upload_file: UploadFile) -> str:
     """PUT a validated byte snapshot to a validated Linear upload target."""
 
-    headers = {
-        "Content-Type": upload_file.mime_type,
-        "Cache-Control": "public, max-age=31536000",
-        **target.headers,
-    }
+    headers = dict(target.headers)
+    headers["content-type"] = upload_file.mime_type
+    headers["cache-control"] = "public, max-age=31536000"
     failed = False
     try:
         with httpx.Client(follow_redirects=False) as upload_client:
@@ -414,7 +412,7 @@ def put_upload(target: ValidatedTarget, upload_file: UploadFile) -> str:
                 headers=headers,
             )
             response.raise_for_status()
-    except httpx.HTTPError:
+    except Exception:
         failed = True
 
     if failed:

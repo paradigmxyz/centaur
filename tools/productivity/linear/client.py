@@ -28,6 +28,10 @@ except ImportError:  # pragma: no cover - supports file-based plugin loading
     )
 
 
+def _markdown_link_label(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+
+
 class LinearClient(LinearReadonlyClient):
     """Tool-facing Linear client.
 
@@ -289,8 +293,12 @@ class LinearClient(LinearReadonlyClient):
         if comment is None:
             return result
 
+        comment_body = (
+            f"{comment}\n\n"
+            f"[{_markdown_link_label(upload_file.filename)}]({target.asset_url})"
+        )
         try:
-            comment_result = self.add_comment(issue_id, comment)
+            comment_result = self.add_comment(issue_id, comment_body)
         except Exception:
             comment_result = {"success": False}
         if comment_result.get("success") and comment_result.get("id"):
