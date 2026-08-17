@@ -13,6 +13,7 @@ import pytest
 # tool from its own directory, matching the existing Linear tests.
 sys.path.insert(0, str(Path(__file__).parent))
 
+import uploads as uploads_module
 from uploads import (
     PNG_MAX_BYTES,
     WEBM_MAX_BYTES,
@@ -33,6 +34,15 @@ def _write(path: Path, content: bytes) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(content)
     return path
+
+
+class _StatWithFileAttributes:
+    def __init__(self, base: os.stat_result, file_attributes: int) -> None:
+        self._base = base
+        self.st_file_attributes = file_attributes
+
+    def __getattr__(self, name: str):
+        return getattr(self._base, name)
 
 
 def _target(**overrides: object) -> dict[str, object]:
@@ -279,6 +289,55 @@ def test_validate_upload_file_rejects_windows_junctions(
 
     with pytest.raises(UploadValidationError, match="junction"):
         validate_upload_file(path, uploads_root=root)
+
+
+@pytest.mark.parametrize("reparse_location", ["root", "ancestor"])
+def test_python311_fallback_rejects_windows_reparse_points(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reparse_location: str,
+) -> None:
+    root = tmp_path / "uploads"
+    ancestor = root / "nested"
+    path = _write(ancestor / "evidence.png", PNG)
+    reparse_path = root if reparse_location == "root" else ancestor
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    real_lstat = Path.lstat
+
+    def reparse_lstat(candidate: Path):
+        result = real_lstat(candidate)
+        attributes = reparse_flag if candidate == reparse_path else 0
+        return _StatWithFileAttributes(result, attributes)
+
+    monkeypatch.delattr(Path, "is_junction", raising=False)
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+    monkeypatch.setattr(
+        uploads_module, "_WINDOWS_REPARSE_POINT", reparse_flag, raising=False
+    )
+
+    with pytest.raises(UploadValidationError, match="junction|reparse"):
+        validate_upload_file(path, uploads_root=root)
+
+
+def test_python311_fallback_allows_ordinary_non_windows_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "uploads"
+    path = _write(root / "evidence.png", PNG)
+    real_lstat = Path.lstat
+
+    def attributed_lstat(candidate: Path):
+        return _StatWithFileAttributes(real_lstat(candidate), 0x400)
+
+    monkeypatch.delattr(Path, "is_junction", raising=False)
+    monkeypatch.setattr(Path, "lstat", attributed_lstat)
+    monkeypatch.setattr(
+        uploads_module, "_WINDOWS_REPARSE_POINT", 0, raising=False
+    )
+
+    upload = validate_upload_file(path, uploads_root=root)
+
+    assert upload.content == PNG
 
 
 def test_validate_upload_file_rejects_directory(tmp_path: Path) -> None:

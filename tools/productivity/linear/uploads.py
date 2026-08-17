@@ -20,6 +20,9 @@ _EBML_HEADER_ID = b"\x1a\x45\xdf\xa3"
 _EBML_DOCTYPE_ID = b"\x42\x82"
 _MAX_EBML_HEADER_BYTES = 4096
 _LINEAR_UPLOAD_HOST = "uploads.linear.app"
+_WINDOWS_REPARSE_POINT = (
+    getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400) if os.name == "nt" else 0
+)
 _FORBIDDEN_HEADERS = {
     "authorization",
     "proxy-authorization",
@@ -98,9 +101,18 @@ def _absolute_without_symlink_resolution(path: Path) -> Path:
     return Path(os.path.abspath(os.fspath(path)))
 
 
-def _is_junction(path: Path) -> bool:
+def _is_junction(path: Path, info: os.stat_result) -> bool:
+    file_attributes = getattr(info, "st_file_attributes", None)
+    if (
+        _WINDOWS_REPARSE_POINT
+        and isinstance(file_attributes, int)
+        and file_attributes & _WINDOWS_REPARSE_POINT
+    ):
+        return True
     checker = getattr(path, "is_junction", None)
-    return bool(checker()) if callable(checker) else False
+    if callable(checker):
+        return bool(checker())
+    return bool(_WINDOWS_REPARSE_POINT and not isinstance(file_attributes, int))
 
 
 def _file_identity(info: os.stat_result) -> tuple[int, int, int]:
@@ -110,7 +122,7 @@ def _file_identity(info: os.stat_result) -> tuple[int, int, int]:
 def _path_info(path: Path, *, unavailable_message: str) -> os.stat_result:
     try:
         info = path.lstat()
-        junction = _is_junction(path)
+        junction = _is_junction(path, info)
     except OSError as exc:
         raise UploadValidationError(unavailable_message) from exc
     if stat.S_ISLNK(info.st_mode):
