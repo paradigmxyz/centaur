@@ -527,6 +527,127 @@ impl PgSessionStore {
         })
     }
 
+    /// Atomically transitions a queued execution to running and assigns its
+    /// stdout owner. Keeping both changes in one transaction prevents a
+    /// running execution from becoming visible without an owner during a
+    /// control-plane shutdown.
+    pub async fn claim_execution_for_stdout(
+        &self,
+        execution_id: &str,
+        owner_id: &str,
+        lease: Duration,
+    ) -> Result<ClaimExecutionResult, SessionStoreError> {
+        let lease_expires_at = stdout_lease_expires_at(lease);
+        let mut tx = self.pool.begin().await?;
+        let maybe_row = sqlx::query_as::<_, SessionExecutionRow>(
+            r#"
+            update session_executions
+            set status = $2,
+                started_at = coalesce(started_at, now()),
+                stdout_owner_id = $3,
+                stdout_owner_lease_expires_at = $4,
+                updated_at = now()
+            where execution_id = $1 and status = $5
+            returning execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            "#,
+        )
+        .bind(execution_id)
+        .bind(ExecutionStatus::Running.as_ref())
+        .bind(owner_id)
+        .bind(lease_expires_at)
+        .bind(ExecutionStatus::Queued.as_ref())
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let Some(row) = maybe_row else {
+            let row = sqlx::query_as::<_, SessionExecutionRow>(
+                r#"
+                select execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+                from session_executions
+                where execution_id = $1
+                "#,
+            )
+            .bind(execution_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            return Ok(ClaimExecutionResult {
+                execution: row.try_into()?,
+                claimed: false,
+            });
+        };
+
+        sqlx::query(
+            r#"
+            update sessions
+            set status = $2, updated_at = now()
+            where thread_key = $1
+            "#,
+        )
+        .bind(&row.thread_key)
+        .bind(SessionStatus::Executing.as_ref())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+
+        Ok(ClaimExecutionResult {
+            execution: row.try_into()?,
+            claimed: true,
+        })
+    }
+
+    /// Returns a claimed execution to the durable queue before its input has
+    /// been delivered. The owner predicate prevents a stale control-plane
+    /// process from requeueing work after ownership has moved elsewhere.
+    pub async fn requeue_execution_if_active_and_stdout_owner(
+        &self,
+        execution_id: &str,
+        owner_id: &str,
+    ) -> Result<Option<SessionExecution>, SessionStoreError> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query_as::<_, SessionExecutionRow>(
+            r#"
+            update session_executions
+            set status = $2,
+                error = null,
+                started_at = null,
+                completed_at = null,
+                stdout_owner_id = null,
+                stdout_owner_lease_expires_at = null,
+                updated_at = now()
+            where execution_id = $1
+              and status = $3
+              and stdout_owner_id = $4
+            returning execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            "#,
+        )
+        .bind(execution_id)
+        .bind(ExecutionStatus::Queued.as_ref())
+        .bind(ExecutionStatus::Running.as_ref())
+        .bind(owner_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let Some(row) = row else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        sqlx::query(
+            r#"
+            update sessions
+            set status = $2, updated_at = now()
+            where thread_key = $1
+            "#,
+        )
+        .bind(&row.thread_key)
+        .bind(SessionStatus::Idle.as_ref())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+
+        row.try_into().map(Some)
+    }
+
     pub async fn claim_stdout_owner(
         &self,
         execution_id: &str,
@@ -1943,7 +2064,7 @@ fn stdout_lease_expires_at(lease: Duration) -> OffsetDateTime {
 mod tests {
     use std::{collections::BTreeMap, time::Duration};
 
-    use centaur_session_core::{HarnessType, ThreadKey};
+    use centaur_session_core::{ExecutionStatus, HarnessType, SessionStatus, ThreadKey};
     use serde_json::json;
     use time::{Duration as TimeDuration, OffsetDateTime};
     use uuid::Uuid;
@@ -2136,6 +2257,91 @@ mod tests {
             .complete_execution(&first.execution.execution_id)
             .await
             .expect("complete execution");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn execution_claim_sets_running_status_and_stdout_owner_together() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let thread_key =
+            ThreadKey::parse(format!("test:execution-claim-{}", Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+        let execution_id = store
+            .create_execution(&thread_key, None, json!({}))
+            .await
+            .expect("create execution")
+            .execution
+            .execution_id;
+
+        let claim = store
+            .claim_execution_for_stdout(&execution_id, "claim-owner", Duration::from_secs(30))
+            .await
+            .expect("claim execution and stdout");
+        assert!(claim.claimed);
+        assert_eq!(claim.execution.status, ExecutionStatus::Running);
+
+        let ownership = store
+            .list_active_executions_with_ownership()
+            .await
+            .expect("load execution ownership")
+            .into_iter()
+            .find(|candidate| candidate.execution.execution_id == execution_id)
+            .expect("claimed execution remains active");
+        assert_eq!(ownership.stdout_owner_id.as_deref(), Some("claim-owner"));
+        assert!(ownership.stdout_owner_lease_active);
+        assert_eq!(
+            store
+                .get_session(&thread_key)
+                .await
+                .expect("load session")
+                .status,
+            SessionStatus::Executing
+        );
+
+        let replay = store
+            .claim_execution_for_stdout(&execution_id, "other-owner", Duration::from_secs(30))
+            .await
+            .expect("repeat claim");
+        assert!(!replay.claimed);
+        assert_eq!(replay.execution.status, ExecutionStatus::Running);
+        let requeued = store
+            .requeue_execution_if_active_and_stdout_owner(&execution_id, "claim-owner")
+            .await
+            .expect("requeue execution")
+            .expect("owner should requeue its active execution");
+        assert_eq!(requeued.status, ExecutionStatus::Queued);
+        assert!(requeued.started_at.is_none());
+        let ownership = store
+            .list_active_executions_with_ownership()
+            .await
+            .expect("load requeued execution ownership")
+            .into_iter()
+            .find(|candidate| candidate.execution.execution_id == execution_id)
+            .expect("requeued execution remains active");
+        assert!(ownership.stdout_owner_id.is_none());
+        assert!(!ownership.stdout_owner_lease_active);
+        assert_eq!(
+            store
+                .get_session(&thread_key)
+                .await
+                .expect("load requeued session")
+                .status,
+            SessionStatus::Idle
+        );
+        store
+            .fail_execution_if_active(&execution_id, "test cleanup")
+            .await
+            .expect("terminalize execution");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
