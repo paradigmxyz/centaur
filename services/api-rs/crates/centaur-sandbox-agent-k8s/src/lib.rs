@@ -245,6 +245,7 @@ impl AgentSandboxBackend {
         let pod = self.get_pod(id).await?;
         let status = sandbox_status_from_pod(replicas, pod.as_ref());
         Ok(ObservedSandbox::new(id.clone(), BACKEND_NAME, status)
+            .with_labels(sandbox.metadata.labels.clone().unwrap_or_default())
             .with_created_at(sandbox_creation_time(sandbox))
             .with_suspended_since(sandbox_paused_at(sandbox)))
     }
