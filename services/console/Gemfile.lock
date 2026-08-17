@@ -424,6 +424,7 @@ DEPENDENCIES
   ruby-vips (~> 2.2)
   selenium-webdriver
   sentry-rails (~> 6.7)
+  sentry-ruby (~> 6.7)
   solid_cable
   solid_cache
   solid_queue

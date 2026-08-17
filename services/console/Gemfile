@@ -29,6 +29,7 @@ gem "jbuilder"
 # Collapse multi-line request logs into a single JSON event [https://github.com/roidrage/lograge]
 gem "lograge"
 # Report unhandled Rails and background-job errors when SENTRY_DSN is configured.
+gem "sentry-ruby", "~> 6.7"
 gem "sentry-rails", "~> 6.7"
 
 # Use Active Model has_secure_password [https://guides.rubyonrails.org/active_model_basics.html#securepassword]
