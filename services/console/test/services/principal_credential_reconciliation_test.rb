@@ -426,6 +426,48 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     assert principal.grants.exists?(static_secret: secret)
   end
 
+  test "console user principal matches an owned Slack credential before provider email" do
+    user = users(:member_user)
+    credential = create_credential(
+      oauth_apps(:acme_slack),
+      "U1723456780",
+      "different@example.com",
+      created_by: user
+    )
+    secret = wrap(credential)
+
+    principal = create_console_user_principal(user, foreign_id: "console-user-owned-slack")
+
+    assert principal.grants.exists?(static_secret: secret)
+  end
+
+  test "credential callback grants an owned credential to an existing console user principal" do
+    user = users(:member_user)
+    principal = create_console_user_principal(user, foreign_id: "console-user-existing-owner")
+    credential = create_credential(oauth_apps(:acme_github), "gh-owned-existing", nil, created_by: user)
+
+    secret = wrap(credential)
+
+    assert principal.grants.exists?(static_secret: secret)
+  end
+
+  test "console user principal does not match a credential owned by another user" do
+    credential = create_credential(
+      oauth_apps(:acme_github),
+      "gh-other-owner",
+      nil,
+      created_by: users(:globex_admin)
+    )
+    secret = wrap(credential)
+
+    principal = create_console_user_principal(
+      users(:member_user),
+      foreign_id: "console-user-other-owner"
+    )
+
+    refute principal.grants.exists?(static_secret: secret)
+  end
+
   test "console user principal ignores unverified identity emails" do
     user = users(:member_user)
     user.user_identities.create!(
@@ -579,15 +621,14 @@ class PrincipalCredentialReconciliationTest < ActiveSupport::TestCase
     refute principal.grants.exists?(static_secret: secret)
   end
 
-  test "console user principals do not match through the owner identity" do
+  test "console user principals do not require an owner Slack identity" do
     user = users(:member_user)
-    user.user_identities.create!(provider: "slack", subject: "U1023456789", team_id: "T1023456789")
     credential = create_credential(oauth_apps(:acme_github), "gh-82345", nil, created_by: user)
     secret = wrap(credential)
 
     principal = create_console_user_principal(user, foreign_id: "console-user-owner-identity")
 
-    refute principal.grants.exists?(static_secret: secret)
+    assert principal.grants.exists?(static_secret: secret)
   end
 
   test "requires the owner identity subject to match the principal" do

@@ -30,10 +30,10 @@ class PrincipalCredentialReconciliation
   USER_KIND = "user"
   # Minted by the MCP OAuth flow (Mcp::OauthController#principal_for_current_user)
   # for a console user connecting an MCP client. These principals match
-  # credentials only through their console User record (primary email plus
-  # verified identity emails) -- never through mutable principal labels or
-  # provider-subject labels, which would widen the trust boundary beyond the
-  # authenticated user.
+  # credentials only through their console User record (credential ownership,
+  # primary email, or verified identity emails) -- never through mutable
+  # principal labels or provider-subject labels, which would widen the trust
+  # boundary beyond the authenticated user.
   CONSOLE_USER_KIND = "console_user"
   SLACK_PROVIDER = Oauth::Providers::Slack::KEY
   GOOGLE_PROVIDER = Oauth::Providers::Google::KEY
@@ -154,6 +154,7 @@ class PrincipalCredentialReconciliation
         subject_index: indexes[provider][:subjects],
         email_index: indexes[provider][:emails],
         owner_index: indexes[provider][:owners],
+        console_user_index: indexes[provider][:console_users],
         emails: emails
       )
       acc[provider] = matched if matched.any?
@@ -184,7 +185,8 @@ class PrincipalCredentialReconciliation
       {
         subjects: index_by_subject(credentials),
         emails: index_by_email(credentials),
-        owners: index_by_owner_identity(credentials)
+        owners: index_by_owner_identity(credentials),
+        console_users: index_by_console_user(credentials)
       }
     end
   end
@@ -233,12 +235,39 @@ class PrincipalCredentialReconciliation
     end
   end
 
-  def provider_credentials_for(principal, provider:, subject_index:, email_index:, owner_index:, emails:)
+  def index_by_console_user(credentials)
+    credentials.each_with_object(Hash.new { |hash, key| hash[key] = [] }) do |credential, acc|
+      acc[credential.created_by_id] << credential if credential.created_by_id
+    end
+  end
+
+  def provider_credentials_for(
+    principal,
+    provider:,
+    subject_index:,
+    email_index:,
+    owner_index:,
+    console_user_index:,
+    emails:
+  )
+    if console_user_principal?(principal)
+      return (credentials_for_console_user(principal, provider, console_user_index) +
+        credentials_for_emails(principal, emails, email_index, provider)).uniq
+    end
+
     native = credentials_for_subject_labels(principal, provider, subject_index)
     return native if native.any?
 
     (credentials_for_owner_identity(principal, provider, owner_index) +
       credentials_for_emails(principal, emails, email_index, provider)).uniq
+  end
+
+  def credentials_for_console_user(principal, provider, console_user_index)
+    user_id = principal.console_user_id
+    return [] unless user_id
+
+    (console_user_index[user_id] || [])
+      .select { |credential| credential_matches_principal?(principal, credential, provider) }
   end
 
   def credentials_for_subject_labels(principal, provider, subject_index)
@@ -271,7 +300,8 @@ class PrincipalCredentialReconciliation
     return false unless supported_provider?(credential)
     return false if provider == SLACK_PROVIDER && !slack_team_matches?(principal, credential)
     if console_user_principal?(principal)
-      return principal_emails(principal).include?(normalize_email(credential.provider_email))
+      return credential.created_by_id == principal.console_user_id ||
+             principal_emails(principal).include?(normalize_email(credential.provider_email))
     end
 
     subjects = principal_subjects(principal, provider)
