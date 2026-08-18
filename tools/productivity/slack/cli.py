@@ -116,12 +116,13 @@ def search(
 ):
     """Search messages in bot-accessible channels.
 
-    Searches across Slack native search first, then scans channel history through
-    the Centaur API server proxy. Results are ranked by relevance (exact phrase
-    matches score higher). Use --channels to limit scope.
+    Workspace-wide queries use Slack's native search API. Queries with --channels
+    scan authorized channel history through the Centaur API server proxy and rank
+    results by relevance (exact phrase matches score higher).
 
-    Note: Only searches channels where the bot is a member. To search more channels,
-    invite the bot to those channels first.
+    Native search uses the linked Slack user's token. If the principal has no
+    linked Slack account, search falls back to bot-accessible channel history.
+    Scoped history searches are limited to authorized channels.
 
     Examples:
         slack search "deploy"

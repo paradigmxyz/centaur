@@ -43,12 +43,13 @@ module Oauth
       unless @app.scopes_allowed?(requested_scopes)
         return render_result(:error, status: :unprocessable_entity, message: "One or more requested scopes are not allowed for this integration.")
       end
+      consent_scopes = requested_scopes | provider_required_scopes
 
       nonce = SecureRandom.urlsafe_base64(32)
       code_verifier = SecureRandom.urlsafe_base64(64)
 
       state = Rails.application.message_verifier(STATE_PURPOSE).generate(
-        { "app" => @app.oid, "scopes" => requested_scopes, "nonce" => nonce },
+        { "app" => @app.oid, "scopes" => consent_scopes, "nonce" => nonce },
         purpose: STATE_PURPOSE, expires_in: FLOW_TTL
       )
 
@@ -59,7 +60,7 @@ module Oauth
         expires: FLOW_TTL.from_now, httponly: true, same_site: :lax
       }
 
-      redirect_to authorization_url(requested_scopes, state, code_verifier), allow_other_host: true
+      redirect_to authorization_url(consent_scopes, state, code_verifier), allow_other_host: true
     end
 
     # GET /oauth/:slug/callback?code=&state=  (or ?error=)
@@ -143,6 +144,12 @@ module Oauth
       uri = URI.parse(@provider.authorization_endpoint)
       uri.query = URI.encode_www_form(query)
       uri.to_s
+    end
+
+    def provider_required_scopes
+      return [] unless @provider.respond_to?(:required_scopes)
+
+      Array(@provider.required_scopes)
     end
 
     def exchange_code(code, code_verifier)

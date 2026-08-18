@@ -877,10 +877,11 @@ class SlackClient:
     ) -> list[dict]:
         """Search messages using Slack's native search.messages API.
 
-        Uses Slack's native search.messages API for fast, workspace-wide
-        search. When ``SLACK_SEARCH_TOKEN`` is configured, the native call runs
-        with that dedicated user token and its ``search:read`` scope. Falls
-        back to proxy-backed channel history scanning if the native API fails.
+        Uses Slack's native search.messages API with the current principal's
+        user token for fast, workspace-wide search. Explicitly channel-scoped
+        searches use authorized channel history instead. When no user token is
+        linked, Slack rejects native search and the bot-scoped history path is
+        used as a compatibility fallback.
 
         Supports Slack search modifiers in the query string:
             in:#channel, from:@user, before:YYYY-MM-DD, after:YYYY-MM-DD,
@@ -915,10 +916,23 @@ class SlackClient:
 
         try:
             return self._search_messages_native(search_query, max_results)
-        except (SlackApiError, RuntimeError, SlackRateLimitError):
-            # Fall back to proxy-backed channel history scanning if native search fails.
-            return self._search_messages_local(
-                local_query, max_results, local_channels, local_from_user, messages_per_channel
+        except SlackApiError as error:
+            # search.messages does not accept bot tokens. Preserve the restricted
+            # bot-history path for principals without a linked Slack credential,
+            # but never turn a mis-scoped user token into a workspace-wide scan.
+            if self._slack_error_code(error) == "not_allowed_token_type":
+                return self._search_messages_local(
+                    local_query,
+                    max_results,
+                    local_channels,
+                    local_from_user,
+                    messages_per_channel,
+                )
+            access_path = "search_token" if self._search_client is not self._client else "bot_token"
+            self._raise_slack_api_error(
+                error,
+                slack_method="search.messages",
+                access_path=access_path,
             )
 
     def _search_messages_native(

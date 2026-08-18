@@ -30,10 +30,11 @@
         <div class="mt-auto flex items-center justify-between gap-3 pt-1">
           <% credential = @credentials_by_app_id[app.id] %>
           <% if credential %>
+            <% needs_reconnect = app.credential_needs_reconnect?(credential) %>
             <a href="<%= start_url %>" class="btn-secondary inline-block">Reconnect</a>
-            <span class="flex items-center gap-1.5 text-xs <%= credential.dead? ? "text-amber-300" : "text-emerald-300" %>">
-              <span class="size-1.5 rounded-full <%= credential.dead? ? "bg-amber-400" : "bg-emerald-400" %>"></span>
-              <%= credential.dead? ? "Needs reconnecting" : "Connected" %>
+            <span class="flex items-center gap-1.5 text-xs <%= needs_reconnect ? "text-amber-300" : "text-emerald-300" %>">
+              <span class="size-1.5 rounded-full <%= needs_reconnect ? "bg-amber-400" : "bg-emerald-400" %>"></span>
+              <%= needs_reconnect ? "Needs reconnecting" : "Connected" %>
             </span>
           <% else %>
             <a href="<%= start_url %>" class="btn-primary inline-block">Connect</a>

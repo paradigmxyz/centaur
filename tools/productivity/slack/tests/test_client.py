@@ -1136,6 +1136,68 @@ def test_search_messages_falls_back_to_direct_history_and_threads_when_proxy_fai
     assert results[0]["channel"] == "C123456789"
 
 
+def test_unscoped_search_uses_restricted_history_fallback_for_bot_token() -> None:
+    client, _ = _make_client()
+    fallback_result = [{"text": "matched through authorized history"}]
+    fallback_calls: list[tuple] = []
+
+    def fail_native_search(method: str, *, params: dict) -> None:
+        assert method == "search.messages"
+        assert params["query"] == "fire-drill after:2026-08-10"
+        raise _make_slack_error(error="not_allowed_token_type", status_code=200)
+
+    def search_local(*args):
+        fallback_calls.append(args)
+        return fallback_result
+
+    client._search_client.api_call = fail_native_search  # type: ignore[method-assign]
+    client._search_messages_local = search_local  # type: ignore[method-assign]
+
+    assert client.search_messages("fire-drill after:2026-08-10") == fallback_result
+    assert fallback_calls == [
+        ("fire-drill after:2026-08-10", 20, None, None, 200),
+    ]
+
+
+def test_unscoped_search_surfaces_missing_user_scope_without_scanning_history() -> None:
+    client, _ = _make_client()
+    search_client = _FakeWebClient()
+
+    def fail_native_search(method: str, *, params: dict) -> None:
+        assert method == "search.messages"
+        raise _make_slack_error(error="missing_scope", status_code=200)
+
+    search_client.api_call = fail_native_search  # type: ignore[method-assign]
+    client._search_client = search_client
+    client._search_messages_local = pytest.fail  # type: ignore[method-assign]
+
+    with pytest.raises(SlackAuthError) as exc_info:
+        client.search_messages("fire-drill after:2026-08-10")
+
+    assert exc_info.value.payload == {
+        "error": "slack_auth_failed",
+        "message": "Slack authentication failed for search.messages via search_token",
+        "slack_method": "search.messages",
+        "access_path": "search_token",
+        "error_code": "missing_scope",
+        "status_code": 200,
+        "requested_channel": None,
+        "resolved_channel": None,
+    }
+
+
+def test_unscoped_search_surfaces_native_runtime_failure_without_scanning_history() -> None:
+    client, fake_web_client = _make_client()
+    client._search_messages_local = pytest.fail  # type: ignore[method-assign]
+    fake_web_client.api_call = lambda method, *, params: {  # type: ignore[method-assign]
+        "ok": False,
+        "error": "internal_error",
+    }
+
+    with pytest.raises(RuntimeError, match="internal_error"):
+        client.search_messages("fire-drill after:2026-08-10")
+
+
 def test_list_channels_returns_cache_when_slack_rate_limited() -> None:
     client, fake_web_client = _make_client()
     cached_channels = [{"id": "C123", "name": "cached", "is_private": False}]

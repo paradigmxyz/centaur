@@ -67,7 +67,7 @@ module Oauth
       }.merge(overrides).to_json
     end
 
-    def slack_token_body(sub: "U0R7MFMJM", scope: "chat:write", id_token_value: nil, **overrides)
+    def slack_token_body(sub: "U0R7MFMJM", scope: "chat:write,search:read", id_token_value: nil, **overrides)
       {
         ok: true, access_token: "xoxe.xoxb-1-bot", refresh_token: "xoxe-1-bot-refresh",
         expires_in: 43_200, token_type: "bot", scope: "commands",
@@ -106,7 +106,7 @@ module Oauth
           id: "USTATIC",
           user: "static-grace",
           access_token: "xoxp-non-rotating-user",
-          scope: "chat:write",
+          scope: "chat:write,search:read",
           token_type: "user"
         }
       )
@@ -211,6 +211,7 @@ module Oauth
       scopes = q["user_scope"].split(",")
       assert_includes scopes, "chat:write"
       assert_includes scopes, "channels:history"
+      assert_includes scopes, "search:read"
       refute_includes scopes, "openid"
       refute_includes scopes, "email"
       refute_includes scopes, "profile"
@@ -336,7 +337,7 @@ module Oauth
       assert_equal "Slack – grace", cred.name
       assert_equal "https://slack.com/api/oauth.v2.access", cred.token_endpoint
       assert_nil cred.provider_email
-      assert_equal %w[chat:write], cred.scopes
+      assert_equal %w[chat:write search:read], cred.scopes
       assert_equal "xoxe.xoxp-1-user", cred.access_token
       assert_equal "xoxe-1-refresh", cred.refresh_token
       assert cred.next_attempt_at.present?
@@ -357,7 +358,7 @@ module Oauth
       app = oauth_apps(:acme_slack)
       cred = BrokerCredential.find_by(oauth_app: app, provider_subject: "USTATIC")
       assert_equal "Slack – static-grace", cred.name
-      assert_equal %w[chat:write], cred.scopes
+      assert_equal %w[chat:write search:read], cred.scopes
       assert_equal "xoxp-non-rotating-user", cred.access_token
       assert_nil cred.refresh_token
       assert_nil cred.expires_at
