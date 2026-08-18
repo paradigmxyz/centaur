@@ -59,6 +59,7 @@ Supported v2 primitives:
 | `handler(inp, ctx)` | Supported |
 | `ctx.step(name, fn)` | Supported |
 | `ctx.agent_turn(...)` / `ctx.run_agent(...)` | Supported |
+| `ctx.run_agents(...)` | Supported for bounded concurrent agent turns with ordered outcomes |
 | `ctx.call_tool(...)` | Supported through the generated `centaur-tools call` bridge in the workflow-host sandbox |
 | `ctx.post_to_slack(...)` | Supported |
 | `ctx._pool` | Supported when the workflow-host sandbox receives `DATABASE_URL` |
@@ -133,6 +134,22 @@ session runtime.
     "result_text": "the agent's final text",
 }
 ```
+
+Use `ctx.run_agents(...)` for independent work that should run concurrently:
+
+```python
+reviews = await ctx.run_agents(
+    [
+        {"name": "correctness", "text": "Review the PR for correctness."},
+        {"name": "security", "text": "Review the PR for security issues."},
+    ],
+    max_concurrency=2,
+)
+```
+
+Each item uses a separate workflow-owned session. Results stay in input order.
+An individual agent failure produces an item with `ok: false`; it does not fail
+the whole batch or discard successful results.
 
 #### Declare Workflow-Host Permissions
 

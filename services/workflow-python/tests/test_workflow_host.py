@@ -65,6 +65,20 @@ class RequestRpc(FakeRpc):
             }
         if message_type == "ctx.agent_turn":
             return payload["args"]
+        if message_type == "ctx.run_agents":
+            return {
+                "results": [
+                    {
+                        "index": index,
+                        "name": agent["name"],
+                        "ok": True,
+                        "result": agent,
+                    }
+                    for index, agent in enumerate(payload["agents"])
+                ],
+                "succeeded": len(payload["agents"]),
+                "failed": 0,
+            }
         if message_type == "ctx.workflow.start":
             return {
                 "workflow_name": payload["workflow_name"],
@@ -297,6 +311,77 @@ class WorkflowHostTests(unittest.TestCase):
             result,
             {"model": "claude-opus-4-8", "reasoning": "low", "text": "cheap step"},
         )
+
+    def test_run_agents_applies_defaults_and_preserves_input_order(self) -> None:
+        host = load_workflow_host()
+        rpc = RequestRpc()
+        ctx = host.WorkflowContext(
+            rpc,
+            run_id="run-123",
+            task_id="task-456",
+            workflow_name="sample",
+            agent_defaults={"harness": "codex", "reasoning": "high"},
+        )
+
+        result = asyncio.run(
+            ctx.run_agents(
+                [
+                    {"name": "correctness", "text": "Review correctness"},
+                    {
+                        "name": "security",
+                        "text": "Review security",
+                        "reasoning": "medium",
+                    },
+                ],
+                max_concurrency=2,
+            )
+        )
+
+        self.assertEqual(rpc.requests[-1]["type"], "ctx.run_agents")
+        self.assertEqual(rpc.requests[-1]["max_concurrency"], 2)
+        self.assertEqual(
+            rpc.requests[-1]["agents"],
+            [
+                {
+                    "harness": "codex",
+                    "reasoning": "high",
+                    "name": "correctness",
+                    "text": "Review correctness",
+                },
+                {
+                    "harness": "codex",
+                    "reasoning": "medium",
+                    "name": "security",
+                    "text": "Review security",
+                },
+            ],
+        )
+        self.assertEqual(
+            [item["name"] for item in result["results"]],
+            ["correctness", "security"],
+        )
+
+    def test_run_agents_rejects_non_mapping_items_before_rpc(self) -> None:
+        host = load_workflow_host()
+        rpc = RequestRpc()
+        ctx = host.WorkflowContext(
+            rpc,
+            run_id="run-123",
+            task_id="task-456",
+            workflow_name="sample",
+        )
+
+        with self.assertRaisesRegex(TypeError, "agent at index 1 must be a dict"):
+            asyncio.run(
+                ctx.run_agents(
+                    [
+                        {"name": "correctness", "text": "Review correctness"},
+                        "not-an-agent",  # type: ignore[list-item]
+                    ]
+                )
+            )
+
+        self.assertEqual(rpc.requests, [])
 
     def test_start_workflow_enqueues_durable_child_with_idempotency_key(self) -> None:
         host = load_workflow_host()
@@ -649,6 +734,70 @@ class WorkflowHostTests(unittest.TestCase):
                 response["result"],
                 {"agent_result": {"text": "daily digest"}},
             )
+            proc.wait(timeout=2)
+            self.assertEqual(proc.returncode, 0)
+            assert proc.stderr is not None
+            self.assertEqual(proc.stderr.read(), "")
+
+    def test_workflow_host_round_trips_agent_batch_result(self) -> None:
+        source = (
+            "WORKFLOW_NAME = 'review_workflow'\n"
+            "async def handler(inp, ctx):\n"
+            "    return await ctx.run_agents([\n"
+            "        {'name': 'correctness', 'text': 'Review correctness'},\n"
+            "        {'name': 'security', 'text': 'Review security'},\n"
+            "    ], max_concurrency=2)\n"
+        )
+        with self.workflow_host(source) as proc:
+            self.send_host_message(
+                proc,
+                {
+                    "type": "workflow.start",
+                    "run_id": "run-123",
+                    "task_id": "task-456",
+                    "workflow_name": "review_workflow",
+                    "input": {},
+                },
+            )
+
+            request = self.read_host_message(proc)
+            self.assertEqual(request["type"], "ctx.run_agents")
+            self.assertEqual(request["max_concurrency"], 2)
+            self.assertEqual(
+                [agent["name"] for agent in request["agents"]],
+                ["correctness", "security"],
+            )
+            result = {
+                "results": [
+                    {
+                        "index": 0,
+                        "name": "correctness",
+                        "ok": True,
+                        "result": {"result_text": "looks good"},
+                    },
+                    {
+                        "index": 1,
+                        "name": "security",
+                        "ok": False,
+                        "error": "agent unavailable",
+                    },
+                ],
+                "succeeded": 1,
+                "failed": 1,
+            }
+            self.send_host_message(
+                proc,
+                {
+                    "type": "ctx.response",
+                    "request_id": request["request_id"],
+                    "ok": True,
+                    "value": result,
+                },
+            )
+
+            response = self.read_host_message(proc)
+            self.assertEqual(response["type"], "workflow.result")
+            self.assertEqual(response["result"], result)
             proc.wait(timeout=2)
             self.assertEqual(proc.returncode, 0)
             assert proc.stderr is not None

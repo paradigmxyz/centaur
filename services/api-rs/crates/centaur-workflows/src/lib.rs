@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     env,
+    future::Future,
     path::PathBuf,
     str::FromStr,
     sync::{Arc, RwLock},
@@ -22,7 +23,7 @@ use centaur_session_sqlx::PgSessionStore;
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use cron::Schedule;
-use futures_util::{TryStreamExt, pin_mut};
+use futures_util::{StreamExt, TryStreamExt, pin_mut, stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::Row;
@@ -47,6 +48,10 @@ const PYTHON_HOST_INTERPRETER_ENV: &str = "PYTHON_WORKFLOW_HOST_PYTHON";
 const WORKFLOW_TOOL_API_URL_ENV: &str = "WORKFLOW_TOOL_API_URL";
 const DEFAULT_AGENT_IDLE_TIMEOUT_MS: u64 = 60_000;
 const DEFAULT_AGENT_MAX_DURATION_MS: u64 = 30 * 60 * 1_000;
+const DEFAULT_AGENT_BATCH_CONCURRENCY: usize = 4;
+const MAX_AGENT_BATCH_CONCURRENCY: usize = 16;
+const MAX_AGENT_BATCH_SIZE: usize = 32;
+const MAX_AGENT_BATCH_NAME_BYTES: usize = 128;
 const WORKFLOW_HOST_CLAIM_EXTENSION: Duration = Duration::from_secs(5 * 60);
 const WORKFLOW_HOST_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 const WORKFLOW_RECONCILE_INTERVAL_SECS_ENV: &str = "WORKFLOW_RECONCILE_INTERVAL_SECS";
@@ -3348,7 +3353,22 @@ async fn handle_python_context_request(
         }
         Some("ctx.agent_turn") => {
             let args = message.get("args").cloned().unwrap_or_else(|| json!({}));
-            match run_python_agent_turn(session_runtime.clone(), ctx, input, args, &request_id)
+            match run_python_agent_turn(
+                session_runtime.clone(),
+                ctx,
+                input,
+                args,
+                &request_id,
+                None,
+            )
+            .await
+            {
+                Ok(value) => Ok(value),
+                Err(error) => Err(error.to_string()),
+            }
+        }
+        Some("ctx.run_agents") => {
+            match run_python_agent_batch(session_runtime.clone(), ctx, input, message, &request_id)
                 .await
             {
                 Ok(value) => Ok(value),
@@ -3505,6 +3525,7 @@ async fn run_python_agent_turn(
     input: &WorkflowTaskInput,
     args: Value,
     request_id: &str,
+    default_thread_key: Option<String>,
 ) -> Result<Value, WorkflowRuntimeError> {
     let text = args
         .get("text")
@@ -3535,11 +3556,13 @@ async fn run_python_agent_turn(
         .map(ToOwned::to_owned);
     let workflow_owned_thread = explicit_thread_key.is_none();
     let thread_key = explicit_thread_key.unwrap_or_else(|| {
-        format!(
-            "wf:{}:agent:{}",
-            ctx.task_id().replace('-', ""),
-            input.workflow_name
-        )
+        default_thread_key.unwrap_or_else(|| {
+            format!(
+                "wf:{}:agent:{}",
+                ctx.task_id().replace('-', ""),
+                input.workflow_name
+            )
+        })
     });
     let harness_type = parse_agent_harness(&args)?.unwrap_or_else(|| input.harness_type.clone());
     let persona_id = args
@@ -3623,6 +3646,214 @@ async fn run_python_agent_turn(
     )
     .await?;
     serde_json::to_value(result).map_err(WorkflowRuntimeError::from)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PythonAgentBatchItem {
+    index: usize,
+    name: String,
+    args: Value,
+}
+
+fn parse_python_agent_batch(
+    message: &Value,
+    request_id: &str,
+) -> Result<(Vec<PythonAgentBatchItem>, usize), WorkflowRuntimeError> {
+    let raw_agents = message
+        .get("agents")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            WorkflowRuntimeError::BadRequest("ctx.run_agents requires an agents array".to_owned())
+        })?;
+    if raw_agents.is_empty() {
+        return Err(WorkflowRuntimeError::BadRequest(
+            "ctx.run_agents requires at least one agent".to_owned(),
+        ));
+    }
+    if raw_agents.len() > MAX_AGENT_BATCH_SIZE {
+        return Err(WorkflowRuntimeError::BadRequest(format!(
+            "ctx.run_agents supports at most {MAX_AGENT_BATCH_SIZE} agents"
+        )));
+    }
+
+    let max_concurrency = match message.get("max_concurrency") {
+        Some(value) => value.as_u64().ok_or_else(|| {
+            WorkflowRuntimeError::BadRequest(
+                "ctx.run_agents max_concurrency must be an integer".to_owned(),
+            )
+        })? as usize,
+        None => DEFAULT_AGENT_BATCH_CONCURRENCY,
+    };
+    if !(1..=MAX_AGENT_BATCH_CONCURRENCY).contains(&max_concurrency) {
+        return Err(WorkflowRuntimeError::BadRequest(format!(
+            "ctx.run_agents max_concurrency must be between 1 and {MAX_AGENT_BATCH_CONCURRENCY}"
+        )));
+    }
+
+    let reserved_fields = [
+        "thread_key",
+        "message_id",
+        "client_message_id",
+        "idempotency_key",
+        "execution_idempotency_key",
+    ];
+    let mut names = BTreeSet::new();
+    let mut agents = Vec::with_capacity(raw_agents.len());
+    for (index, raw_agent) in raw_agents.iter().enumerate() {
+        let mut args = raw_agent.as_object().cloned().ok_or_else(|| {
+            WorkflowRuntimeError::BadRequest(format!(
+                "ctx.run_agents agent at index {index} must be an object"
+            ))
+        })?;
+        let name = args
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| {
+                WorkflowRuntimeError::BadRequest(format!(
+                    "ctx.run_agents agent at index {index} requires a non-empty name"
+                ))
+            })?
+            .to_owned();
+        if name.len() > MAX_AGENT_BATCH_NAME_BYTES {
+            return Err(WorkflowRuntimeError::BadRequest(format!(
+                "ctx.run_agents agent name at index {index} must be at most {MAX_AGENT_BATCH_NAME_BYTES} bytes"
+            )));
+        }
+        if !names.insert(name.clone()) {
+            return Err(WorkflowRuntimeError::BadRequest(format!(
+                "ctx.run_agents agent names must be unique; duplicate {name:?}"
+            )));
+        }
+        if let Some(field) = reserved_fields
+            .iter()
+            .find(|field| args.contains_key(**field))
+        {
+            return Err(WorkflowRuntimeError::BadRequest(format!(
+                "ctx.run_agents agent {name:?} cannot set reserved field {field:?}"
+            )));
+        }
+
+        let metadata = args
+            .entry("metadata".to_owned())
+            .or_insert_with(|| json!({}));
+        if !metadata.is_object() {
+            *metadata = json!({});
+        }
+        object_insert(metadata, "workflow_agent_batch_name", json!(name));
+        object_insert(metadata, "workflow_agent_batch_index", json!(index));
+        object_insert(
+            metadata,
+            "workflow_agent_batch_request_id",
+            json!(request_id),
+        );
+
+        agents.push(PythonAgentBatchItem {
+            index,
+            name,
+            args: Value::Object(args),
+        });
+    }
+    Ok((agents, max_concurrency))
+}
+
+async fn run_bounded_ordered<T, R, F, Fut>(
+    items: Vec<T>,
+    max_concurrency: usize,
+    mut run: F,
+) -> Vec<R>
+where
+    F: FnMut(T) -> Fut,
+    Fut: Future<Output = R>,
+{
+    let item_count = items.len();
+    let futures = items
+        .into_iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let future = run(item);
+            async move { (index, future.await) }
+        })
+        .collect::<Vec<_>>();
+    let completed = stream::iter(futures)
+        .buffer_unordered(max_concurrency)
+        .collect::<Vec<_>>()
+        .await;
+    let mut ordered = (0..item_count).map(|_| None).collect::<Vec<_>>();
+    for (index, result) in completed {
+        ordered[index] = Some(result);
+    }
+    ordered
+        .into_iter()
+        .map(|result| result.expect("every bounded batch future must produce one result"))
+        .collect()
+}
+
+async fn run_python_agent_batch(
+    session_runtime: SessionRuntime,
+    ctx: &TaskContext,
+    input: &WorkflowTaskInput,
+    message: &Value,
+    request_id: &str,
+) -> Result<Value, WorkflowRuntimeError> {
+    let (agents, max_concurrency) = parse_python_agent_batch(message, request_id)?;
+    let task_id = ctx.task_id().replace('-', "");
+    let batch_request_id = request_id.to_owned();
+    let outcomes = run_bounded_ordered(agents, max_concurrency, |agent| {
+        let session_runtime = session_runtime.clone();
+        let agent_slug = slugify(&agent.name);
+        let default_thread_key = format!(
+            "wf:{task_id}:agent-batch:{batch_request_id}:{}:{agent_slug}",
+            agent.index,
+        );
+        let agent_request_id = format!("{batch_request_id}:{}", agent.index);
+        async move {
+            let result = run_python_agent_turn(
+                session_runtime,
+                ctx,
+                input,
+                agent.args.clone(),
+                &agent_request_id,
+                Some(default_thread_key),
+            )
+            .await;
+            (agent, result)
+        }
+    })
+    .await;
+
+    let mut succeeded = 0;
+    let mut failed = 0;
+    let results = outcomes
+        .into_iter()
+        .map(|(agent, result)| match result {
+            Ok(result) => {
+                succeeded += 1;
+                json!({
+                    "index": agent.index,
+                    "name": agent.name,
+                    "ok": true,
+                    "result": result,
+                })
+            }
+            Err(error) => {
+                failed += 1;
+                json!({
+                    "index": agent.index,
+                    "name": agent.name,
+                    "ok": false,
+                    "error": error.to_string(),
+                })
+            }
+        })
+        .collect::<Vec<_>>();
+
+    Ok(json!({
+        "results": results,
+        "succeeded": succeeded,
+        "failed": failed,
+    }))
 }
 
 /// Returns the first arg key that holds a non-empty (trimmed) string, owned.
@@ -4198,6 +4429,133 @@ mod tests {
         );
         assert_eq!(first_str_arg(&json!({}), &["model"]), None);
         assert_eq!(first_str_arg(&json!({"model": "   "}), &["model"]), None);
+    }
+
+    #[test]
+    fn parse_agent_batch_requires_unique_names_and_adds_metadata() {
+        let message = json!({
+            "type": "ctx.run_agents",
+            "max_concurrency": 2,
+            "agents": [
+                {
+                    "name": "correctness",
+                    "text": "Review correctness",
+                    "metadata": {"pr": 42}
+                },
+                {"name": "security", "text": "Review security"}
+            ]
+        });
+
+        let (agents, max_concurrency) = parse_python_agent_batch(&message, "7").unwrap();
+
+        assert_eq!(max_concurrency, 2);
+        assert_eq!(
+            agents
+                .iter()
+                .map(|agent| agent.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["correctness", "security"]
+        );
+        assert_eq!(agents[0].args.pointer("/metadata/pr"), Some(&json!(42)));
+        assert_eq!(
+            agents[0]
+                .args
+                .pointer("/metadata/workflow_agent_batch_name"),
+            Some(&json!("correctness"))
+        );
+        assert_eq!(
+            agents[1]
+                .args
+                .pointer("/metadata/workflow_agent_batch_index"),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            agents[1]
+                .args
+                .pointer("/metadata/workflow_agent_batch_request_id"),
+            Some(&json!("7"))
+        );
+    }
+
+    #[test]
+    fn parse_agent_batch_rejects_duplicate_names_and_identity_overrides() {
+        let duplicate = json!({
+            "agents": [
+                {"name": "security", "text": "first"},
+                {"name": "security", "text": "second"}
+            ]
+        });
+        let error = parse_python_agent_batch(&duplicate, "1").unwrap_err();
+        assert!(error.to_string().contains("names must be unique"));
+
+        let overridden_identity = json!({
+            "agents": [{
+                "name": "security",
+                "text": "review",
+                "thread_key": "workflow:shared"
+            }]
+        });
+        let error = parse_python_agent_batch(&overridden_identity, "1").unwrap_err();
+        assert!(error.to_string().contains("reserved field \"thread_key\""));
+    }
+
+    #[test]
+    fn parse_agent_batch_enforces_size_and_concurrency_bounds() {
+        let empty = json!({"agents": []});
+        let error = parse_python_agent_batch(&empty, "1").unwrap_err();
+        assert!(error.to_string().contains("at least one agent"));
+
+        for max_concurrency in [0, MAX_AGENT_BATCH_CONCURRENCY + 1] {
+            let message = json!({
+                "agents": [{"name": "correctness", "text": "review"}],
+                "max_concurrency": max_concurrency,
+            });
+            let error = parse_python_agent_batch(&message, "1").unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("max_concurrency must be between")
+            );
+        }
+
+        let too_many = json!({
+            "agents": (0..=MAX_AGENT_BATCH_SIZE)
+                .map(|index| json!({"name": format!("reviewer-{index}"), "text": "review"}))
+                .collect::<Vec<_>>(),
+        });
+        let error = parse_python_agent_batch(&too_many, "1").unwrap_err();
+        assert!(error.to_string().contains("supports at most"));
+    }
+
+    #[tokio::test]
+    async fn bounded_batch_limits_concurrency_and_restores_input_order() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let results = run_bounded_ordered(vec![0_u64, 1, 2, 3], 2, {
+            let active = active.clone();
+            let peak = peak.clone();
+            move |item| {
+                let active = active.clone();
+                let peak = peak.clone();
+                async move {
+                    let now_active = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now_active, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(4 * (4 - item))).await;
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    if item == 2 {
+                        Err("review failed")
+                    } else {
+                        Ok(item)
+                    }
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(results, vec![Ok(0), Ok(1), Err("review failed"), Ok(3)]);
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
     }
 
     #[test]

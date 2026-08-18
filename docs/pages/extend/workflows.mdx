@@ -83,10 +83,8 @@ disabled.
 | `ctx.sleep_until(name, when)` | Resume at a specific time. |
 | `ctx.wait_for_event(name, event_type, correlation_id)` | Wait for an external event. |
 | `ctx.start_workflow(...)` | Start a child workflow and continue immediately. |
-| `ctx.wait_for_workflow(...)` | Wait for a child workflow to finish. |
-| `ctx.run_workflow(...)` | Start and wait in one call. |
-| `ctx.start_agent(...)` | Start an agent turn. |
-| `ctx.run_agent(...)` | Start an agent turn and wait for the result. |
+| `ctx.agent_turn(...)` / `ctx.run_agent(...)` / `ctx.start_agent(...)` | Run one agent turn and wait for the result. |
+| `ctx.run_agents(...)` | Run a bounded group of named agent turns concurrently and wait for every outcome. |
 
 The handler may re-execute after a restart. Put external side effects behind
 `ctx.step(...)` so completed work is not repeated.
@@ -99,10 +97,50 @@ These primitives compose into larger automations:
   billing state, deploy health, or vendor exports.
 - **Event-driven flows**: wait for a webhook, approval, upload, or callback and
   continue from the last checkpoint.
-- **Fan-out/fan-in orchestration**: start child workflows for independent work
-  and wait for all of them before producing a final result.
+- **Fan-out/fan-in orchestration**: run independent named agents concurrently,
+  then combine their successful results into one final result.
 - **Agent orchestration**: use agents for judgment-heavy steps while the
   workflow owns timing, retries, state, and final delivery.
+
+### Run Agents Concurrently
+
+Use `ctx.run_agents(...)` when independent reviewers or researchers should run
+at the same time:
+
+```python
+reviews = await ctx.run_agents(
+    [
+        {"name": "correctness", "text": "Review the PR for correctness."},
+        {"name": "security", "text": "Review the PR for security issues."},
+        {"name": "tests", "text": "Review the PR's test coverage."},
+    ],
+    max_concurrency=3,
+)
+```
+
+Every agent needs a unique, non-empty `name`. Centaur assigns each one a
+separate workflow-owned session and stable idempotency keys. The maximum
+concurrency defaults to 4 and may be set from 1 through 16. A batch supports up
+to 32 agents.
+
+The result preserves input order and reports individual failures without
+discarding successful reviews:
+
+```json
+{
+  "results": [
+    {"index": 0, "name": "correctness", "ok": true, "result": {"result_text": "..."}},
+    {"index": 1, "name": "security", "ok": false, "error": "agent unavailable"}
+  ],
+  "succeeded": 1,
+  "failed": 1
+}
+```
+
+Batch items accept the same model, provider, reasoning, harness, persona,
+prompt, content, idle timeout, maximum duration, and metadata options as
+`ctx.agent_turn(...)`. Session and idempotency fields are reserved because the
+batch runtime assigns them independently for each agent.
 
 ## Run a workflow
 
