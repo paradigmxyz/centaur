@@ -156,7 +156,9 @@ result = await ctx.agent_turn(
 ```
 
 The principal is resolved before the session is created. An unknown or empty
-foreign ID fails the turn instead of using the thread-derived principal.
+foreign ID fails the turn instead of using the thread-derived principal. If the
+session already exists under another principal, the turn returns a conflict
+instead of rebinding it.
 
 ## Run a workflow
 

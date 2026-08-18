@@ -1428,7 +1428,7 @@ impl SessionRuntime {
             if let Some(context) = persona_resolution.context.as_ref() {
                 add_persona_metadata(&mut session_metadata, context);
             }
-            let session = match self
+            match self
                 .store
                 .create_or_get_session(
                     thread_key,
@@ -1464,6 +1464,14 @@ impl SessionRuntime {
                 }
                 Err(error) => return Err(error.into()),
             };
+            // Persist the principal OID on the session row so a resumed session
+            // can recreate its sandbox after a restart without re-deriving it.
+            // Existing sessions are immutable at this boundary: changing their
+            // credential identity requires a different session.
+            let session = self
+                .store
+                .bind_iron_control_principal(thread_key, &registered_principal.id)
+                .await?;
             if let Some(context) = self.resolve_stored_persona(
                 session.persona_id.as_deref(),
                 harness_type,
@@ -1482,12 +1490,6 @@ impl SessionRuntime {
                     )
                     .await?;
             }
-            // Persist the principal OID on the session row so a resumed session
-            // can recreate its sandbox after a restart without re-deriving it.
-            let session = self
-                .store
-                .set_iron_control_principal(thread_key, Some(&registered_principal.id))
-                .await?;
             info!(
                 component = COMPONENT_SESSION_RUNTIME,
                 event = "session_create_or_get_completed",
@@ -9234,6 +9236,35 @@ mod adoption_tests {
 
         assert_eq!(
             outcome.session.iron_control_principal.as_deref(),
+            Some("finance-automation")
+        );
+
+        let error = runtime
+            .create_or_get_session_with_principal(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                Some(json!({})),
+                HarnessConflictPolicy::Reject,
+                Some("support-automation"),
+            )
+            .await
+            .expect_err("existing session principal must not be rebound");
+        assert!(matches!(
+            error,
+            SessionRuntimeError::Store(SessionStoreError::PrincipalConflict {
+                existing,
+                requested,
+                ..
+            }) if existing == "finance-automation" && requested == "support-automation"
+        ));
+        assert_eq!(
+            store
+                .get_session(&thread_key)
+                .await
+                .expect("get session after conflict")
+                .iron_control_principal
+                .as_deref(),
             Some("finance-automation")
         );
     }

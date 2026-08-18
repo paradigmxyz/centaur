@@ -223,7 +223,9 @@ result = await ctx.agent_turn(
 ```
 
 Principal lookup failures fail the turn. Put `principal` in `AGENT_DEFAULTS`
-when every agent turn in the workflow should use the same principal.
+when every agent turn in the workflow should use the same principal. An
+existing session bound to another principal returns a conflict and is not
+rebound.
 
 ### Declare webhook metadata in the workflow
 
