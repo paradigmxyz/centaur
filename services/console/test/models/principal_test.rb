@@ -5,15 +5,152 @@ class PrincipalTest < ActiveSupport::TestCase
     { created_by: users(:acme_admin) }.merge(overrides)
   end
 
-  test "is valid with namespace and foreign_id" do
-    principal = Principal.new(default_attrs(namespace: "acme", foreign_id: "C-new-1"))
+  test "is valid with foreign_id" do
+    principal = Principal.new(default_attrs(foreign_id: "C-new-1"))
     assert principal.valid?
   end
 
-  test "namespace defaults to 'default'" do
+  test "does not persist a namespace" do
     principal = Principal.new(default_attrs)
-    assert_equal "default", principal.namespace
+    assert_not principal.has_attribute?(:namespace)
+    assert_equal Principal::UNKNOWN_KIND, principal.kind
     assert principal.valid?
+  end
+
+  test "identity fields are stored only in columns" do
+    principal = Principal.create!(default_attrs(
+      kind: "slack_dm",
+      slack_user_id: "U0123456789",
+      slack_channel_id: "D0123456789",
+      slack_team_id: "T0123456789",
+      slack_email: "ada@example.com",
+      labels: { "team" => "platform" }
+    ))
+
+    principal.reload
+    assert_equal "slack_dm", principal.kind
+    assert_equal "U0123456789", principal.slack_user_id
+    assert_equal "D0123456789", principal.slack_channel_id
+    assert_equal "T0123456789", principal.slack_team_id
+    assert_equal "ada@example.com", principal.slack_email
+    assert_equal(
+      { "team" => "platform", Principal::SANDBOX_REPO_CACHE_LABEL => "all" },
+      principal.labels
+    )
+    assert_equal(
+      {
+        "team" => "platform",
+        Principal::SANDBOX_REPO_CACHE_LABEL => "all"
+      },
+      principal.labels_with_sandbox_capabilities
+    )
+  end
+
+  test "identity-named labels remain ordinary metadata" do
+    principal = Principal.create!(default_attrs(
+      kind: "slack_dm",
+      slack_user_id: "U0123456789",
+      labels: {
+        "kind" => "custom",
+        "slack_user_id" => "custom-user",
+        "slack_team_id" => "T0123456789",
+        "slack_email" => "ada@example.com"
+      }
+    ))
+
+    principal.reload
+    assert_equal "slack_dm", principal.kind
+    assert_equal "U0123456789", principal.slack_user_id
+    assert_nil principal.slack_team_id
+    assert_nil principal.slack_email
+    assert_equal "custom", principal.labels["kind"]
+    assert_equal "custom-user", principal.labels["slack_user_id"]
+  end
+
+  test "console user identity is stored as an association" do
+    user = users(:acme_admin)
+    principal = Principal.create!(default_attrs(
+      kind: "console_user",
+      console_user_id: user.id,
+      labels: { "managed-by" => "centaur" }
+    ))
+
+    principal.reload
+    assert_equal user.id, principal.console_user_id
+    assert_empty principal.labels.slice("console-user-id", "email")
+    assert_nil principal.labels_with_sandbox_capabilities["console-user-id"]
+    assert_nil principal.labels_with_sandbox_capabilities["email"]
+  end
+
+  test "kind accepts only known values" do
+    Principal::KINDS.each do |kind|
+      assert Principal.new(default_attrs(kind: kind)).valid?, "expected #{kind.inspect} to be valid"
+    end
+
+    %w[service future_platform].each do |kind|
+      principal = Principal.new(default_attrs(kind: kind))
+      assert_not principal.valid?
+      assert_includes principal.errors[:kind], "must be one of #{Principal::KINDS.join(", ")}"
+    end
+
+    principal = Principal.new(default_attrs(kind: "  "))
+    assert_not principal.valid?
+    assert_includes principal.errors[:kind], "can't be blank"
+  end
+
+  test "Slack identity fields must use canonical formats" do
+    {
+      slack_user_id: %w[U0123456789 W0123456789 USLACK],
+      slack_channel_id: %w[C0123456789 D0123456789 G0123456789],
+      slack_team_id: %w[T0123456789 E0123456789],
+      slack_email: %w[ada@example.com]
+    }.each do |field, values|
+      values.each do |value|
+        assert Principal.new(default_attrs(field => value)).valid?, "expected #{field}=#{value.inspect} to be valid"
+      end
+    end
+
+    {
+      slack_user_id: " U0123456789 ",
+      slack_channel_id: "C123",
+      slack_team_id: "t0123456789",
+      slack_email: "not-an-email"
+    }.each do |field, value|
+      principal = Principal.new(default_attrs(field => value))
+      assert_not principal.valid?
+      assert_predicate principal.errors[field], :any?
+    end
+  end
+
+  test "console user principals permit missing user references" do
+    user = users(:acme_admin)
+    principal = Principal.new(default_attrs(
+      kind: "console_user",
+      console_user_id: user.id
+    ))
+    assert principal.valid?
+
+    principal.console_user_id = nil
+    assert principal.valid?
+  end
+
+  test "unchanged malformed migrated Slack identities do not block unrelated saves" do
+    principal = principals(:acme_user_alice)
+    principal.update_columns(
+      slack_user_id: "U12345",
+      slack_channel_id: "D123",
+      slack_team_id: "TACME",
+      slack_email: "pending"
+    )
+
+    assert principal.reload.update!(name: "Renamed legacy principal")
+
+    principal.slack_user_id = "U67890"
+    assert_not principal.valid?
+    assert_includes principal.errors[:slack_user_id], "is not a valid Slack user ID"
+
+    principal.slack_user_id = nil
+    assert principal.save!
   end
 
   test "is valid with only a name" do
@@ -21,46 +158,74 @@ class PrincipalTest < ActiveSupport::TestCase
   end
 
   test "rejects a foreign_id that starts with the opaque id prefix" do
-    principal = Principal.new(default_attrs(namespace: "acme", foreign_id: "prn_abc123"))
+    principal = Principal.new(default_attrs(foreign_id: "prn_abc123"))
     assert_not principal.valid?
     assert_includes principal.errors[:foreign_id], "must not start with \"prn_\", which is reserved for opaque ids"
   end
 
-  test "is invalid when namespace is blank" do
-    principal = Principal.new(default_attrs(namespace: "", foreign_id: "C-blank"))
-    assert_not principal.valid?
-    assert_includes principal.errors[:namespace], "can't be blank"
-  end
-
-  test "foreign_id is unique within a namespace" do
+  test "foreign_id is globally unique" do
     existing = principals(:acme_channel)
-    dup = Principal.new(default_attrs(namespace: existing.namespace, foreign_id: existing.foreign_id))
+    dup = Principal.new(default_attrs(foreign_id: existing.foreign_id))
     assert_not dup.valid?
     assert_includes dup.errors[:foreign_id], "has already been taken"
   end
 
-  test "same foreign_id is allowed across different namespaces" do
+  test "same foreign_id is rejected globally" do
     existing = principals(:acme_channel)
-    other = Principal.new(default_attrs(namespace: "globex", foreign_id: existing.foreign_id))
-    assert other.valid?
+    other = Principal.new(default_attrs(foreign_id: existing.foreign_id))
+    assert_not other.valid?
   end
 
   test "labels include sandbox repo-cache projection by default" do
-    principal = Principal.create!(default_attrs(namespace: "acme", foreign_id: "C-default-labels"))
+    principal = Principal.create!(default_attrs(foreign_id: "C-default-labels"))
     assert_equal({ Principal::SANDBOX_REPO_CACHE_LABEL => "all" }, principal.reload.labels)
   end
 
-  test "sandbox access defaults to enabled" do
-    principal = Principal.create!(default_attrs(namespace: "acme", foreign_id: "C-default-sandbox-access"))
+  test "API sandbox access defaults to disabled" do
+    principal = Principal.create!(default_attrs(foreign_id: "C-default-sandbox-access"))
     principal.reload
 
     assert_equal "all", principal.sandbox_repo_cache
     assert_predicate principal, :sandbox_observability_enabled
-    assert_predicate principal, :sandbox_api_server_enabled
+    assert_not principal.sandbox_sessions_read_enabled
+    assert_not principal.sandbox_workflows_read_enabled
+    assert_not principal.sandbox_workflows_write_enabled
+  end
+
+  test "new principals with no roles receive all configured defaults" do
+    Role.update_all(assign_by_default: false)
+    [ roles(:acme_infra), roles(:acme_admin_role), roles(:globex_infra) ].each do |role|
+      role.update!(assign_by_default: true)
+    end
+
+    principal = Principal.create!(default_attrs(foreign_id: "U-default-roles"))
+
+    expected = [ roles(:acme_infra), roles(:acme_admin_role), roles(:globex_infra) ].sort_by(&:id)
+    assert_equal expected, principal.roles.order(:id).to_a
+  end
+
+  test "preassigned roles suppress configured defaults" do
+    roles(:acme_infra).update!(assign_by_default: true)
+    principal = Principal.new(default_attrs(foreign_id: "U-explicit-role"))
+    principal.roles = [ roles(:acme_admin_role) ]
+
+    principal.save!
+
+    assert_equal [ roles(:acme_admin_role) ], principal.reload.roles
+  end
+
+  test "configured defaults are not applied to existing roleless principals" do
+    principal = principals(:acme_user_bob)
+    principal.principal_roles.destroy_all
+    roles(:acme_infra).update!(assign_by_default: true)
+
+    principal.update!(name: "Still roleless")
+
+    assert_empty principal.reload.roles
   end
 
   test "default sandbox repo-cache overwrites explicit label assignment" do
-    principal = Principal.new(default_attrs(namespace: "acme", foreign_id: "C-explicit-repo-cache-label"))
+    principal = Principal.new(default_attrs(foreign_id: "C-explicit-repo-cache-label"))
 
     principal.apply_default_sandbox_capabilities!
     principal.assign_attributes(labels: { Principal::SANDBOX_REPO_CACHE_LABEL => "none" })
@@ -71,7 +236,7 @@ class PrincipalTest < ActiveSupport::TestCase
   end
 
   test "sandbox repo-cache stores canonical enum value" do
-    principal = Principal.create!(default_attrs(namespace: "acme", foreign_id: "C-repo-cache-setting"))
+    principal = Principal.create!(default_attrs(foreign_id: "C-repo-cache-setting"))
 
     principal.update!(sandbox_repo_cache: "public")
     principal.reload
@@ -81,7 +246,7 @@ class PrincipalTest < ActiveSupport::TestCase
   end
 
   test "sandbox repo-cache enum survives labels assigned in the same update" do
-    principal = Principal.create!(default_attrs(namespace: "acme", foreign_id: "C-repo-cache-label-order"))
+    principal = Principal.create!(default_attrs(foreign_id: "C-repo-cache-label-order"))
 
     principal.update!(sandbox_repo_cache: "public", labels: { "team" => "platform" })
     principal.reload
@@ -92,7 +257,7 @@ class PrincipalTest < ActiveSupport::TestCase
   end
 
   test "sandbox repo-cache overwrites label with canonical value" do
-    principal = Principal.create!(default_attrs(namespace: "acme", foreign_id: "C-repo-cache-label"))
+    principal = Principal.create!(default_attrs(foreign_id: "C-repo-cache-label"))
 
     principal.update!(labels: { Principal::SANDBOX_REPO_CACHE_LABEL => "public" })
     principal.reload
@@ -102,7 +267,7 @@ class PrincipalTest < ActiveSupport::TestCase
   end
 
   test "sandbox repo-cache param takes precedence over conflicting label" do
-    principal = Principal.create!(default_attrs(namespace: "acme", foreign_id: "C-repo-cache-param-wins"))
+    principal = Principal.create!(default_attrs(foreign_id: "C-repo-cache-param-wins"))
 
     principal.update!(
       sandbox_repo_cache: "public",
@@ -115,7 +280,7 @@ class PrincipalTest < ActiveSupport::TestCase
   end
 
   test "sandbox repo-cache rejects invalid enum values" do
-    principal = Principal.new(default_attrs(namespace: "acme", foreign_id: "C-repo-cache-invalid"))
+    principal = Principal.new(default_attrs(foreign_id: "C-repo-cache-invalid"))
     principal.sandbox_repo_cache = "pub"
 
     assert_not principal.valid?
@@ -124,7 +289,6 @@ class PrincipalTest < ActiveSupport::TestCase
 
   test "labels accepts arbitrary string map" do
     principal = Principal.create!(default_attrs(
-      namespace: "acme",
       foreign_id: "C-labels",
       labels: { "env" => "prod", "team" => "platform" }
     ))
@@ -235,12 +399,15 @@ class PrincipalTest < ActiveSupport::TestCase
     end
   end
 
-  test "api server JWT does not fall back to slack channel label" do
+  test "api server JWT does not infer Slack permissions from channel identity" do
     with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
       principal = principals(:acme_channel)
-      principal.update!(labels: { Principal::SLACK_CHANNEL_ID_LABEL => "C0123456789" })
+      principal.update!(slack_channel_id: "C0123456789")
 
-      assert_nil ApiServer::Jwt.encode_for_principal(principal)
+      claims = jwt_payload(ApiServer::Jwt.encode_for_principal(principal))
+      assert_empty claims.dig("slack", "upload_channels")
+      assert_empty claims.dig("slack", "download_channels")
+      assert_empty claims.dig("slack", "history_channels")
     end
   end
 
@@ -248,7 +415,6 @@ class PrincipalTest < ActiveSupport::TestCase
     with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
       principal = Principal.create!(
         default_attrs(
-          namespace: "acme",
           foreign_id: "C-clear-slack-permissions"
         )
       )
@@ -264,7 +430,10 @@ class PrincipalTest < ActiveSupport::TestCase
       SlackChannelPermission.replace_for!(principal, [])
 
       assert_empty principal.slack_channel_permissions.reload
-      assert_nil ApiServer::Jwt.encode_for_principal(principal)
+      claims = jwt_payload(ApiServer::Jwt.encode_for_principal(principal))
+      assert_empty claims.dig("slack", "upload_channels")
+      assert_empty claims.dig("slack", "download_channels")
+      assert_empty claims.dig("slack", "history_channels")
     end
   end
 
@@ -298,13 +467,6 @@ class PrincipalTest < ActiveSupport::TestCase
     end
   end
 
-  test "namespace is immutable after creation" do
-    principal = principals(:acme_channel)
-    assert_raises(ActiveRecord::ReadonlyAttributeError) do
-      principal.update!(namespace: "other")
-    end
-  end
-
   test "foreign_id is immutable after creation" do
     principal = principals(:acme_channel)
     assert_raises(ActiveRecord::ReadonlyAttributeError) do
@@ -330,12 +492,39 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_equal "Acme Slack channel", principal.reload.name
   end
 
+  test "identity field changes invalidate the sync config cache" do
+    principal = Principal.create!(default_attrs)
+    previous_version = principal.sync_config_cache_version
+
+    principal.update!(
+      kind: "slack_dm",
+      slack_user_id: "U0123456789",
+      slack_team_id: "T0123456789",
+      slack_email: "a@example.com"
+    )
+
+    assert_equal previous_version + 1, principal.reload.sync_config_cache_version
+  end
+
+  test "API JWT capability changes invalidate the sync config cache" do
+    principal = principals(:acme_channel)
+    previous_version = principal.sync_config_cache_version
+
+    principal.update!(
+      sandbox_sessions_read_enabled: true,
+      sandbox_workflows_read_enabled: true,
+      sandbox_workflows_write_enabled: true
+    )
+
+    assert_equal previous_version + 1, principal.reload.sync_config_cache_version
+  end
+
   test "declares prn as its oid prefix" do
     assert_equal "prn", Principal.oid_prefix
   end
 
   test "requires created_by" do
-    principal = Principal.new(namespace: "acme", foreign_id: "C-needs-key")
+    principal = Principal.new(foreign_id: "C-needs-key")
     assert_not principal.valid?
     assert_includes principal.errors[:created_by], "must exist"
   end

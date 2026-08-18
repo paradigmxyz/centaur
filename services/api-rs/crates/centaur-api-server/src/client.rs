@@ -3,7 +3,10 @@ use std::pin::Pin;
 use centaur_session_core::{Session, ThreadKey};
 use eventsource_stream::Eventsource;
 use futures_util::{Stream, StreamExt};
-use reqwest::{Client as HttpClient, StatusCode};
+use reqwest::{
+    Client as HttpClient, StatusCode,
+    header::{AUTHORIZATION, HeaderMap, HeaderValue},
+};
 use thiserror::Error;
 
 use crate::types::{
@@ -20,6 +23,19 @@ pub struct CentaurClient {
 impl CentaurClient {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self::with_client(HttpClient::new(), base_url)
+    }
+
+    pub fn with_bearer_token(
+        base_url: impl Into<String>,
+        token: &str,
+    ) -> Result<Self, ClientError> {
+        let mut value = HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(|_| ClientError::InvalidBearerToken)?;
+        value.set_sensitive(true);
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, value);
+        let client = HttpClient::builder().default_headers(headers).build()?;
+        Ok(Self::with_client(client, base_url))
     }
 
     pub fn with_client(client: HttpClient, base_url: impl Into<String>) -> Self {
@@ -121,4 +137,6 @@ pub enum ClientError {
     Api { status: StatusCode, body: String },
     #[error("event stream parse failed: {0}")]
     EventStream(String),
+    #[error("bearer token cannot be represented as an HTTP header")]
+    InvalidBearerToken,
 }

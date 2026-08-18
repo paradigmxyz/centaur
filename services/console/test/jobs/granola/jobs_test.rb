@@ -5,7 +5,6 @@ module Granola
     def create_credential(app:, access_token: "token", dead: false)
       BrokerCredential.create!(
         oauth_app: app,
-        namespace: "acme",
         foreign_id: "granola-job-#{SecureRandom.hex(6)}",
         token_endpoint: app.provider_strategy.token_endpoint,
         access_token: access_token,
@@ -26,7 +25,6 @@ module Granola
         client_id: "granola-client",
         client_secret: "granola-secret",
         allowed_scopes: %w[meetings:read],
-        credential_namespace: "acme",
         enabled: enabled,
         created_by: users(:acme_admin)
       )

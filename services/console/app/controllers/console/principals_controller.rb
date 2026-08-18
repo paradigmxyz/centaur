@@ -14,7 +14,7 @@ module Console
     before_action :set_principal, except: %i[new create]
 
     def new
-      @principal = Principal.new(namespace: "default")
+      @principal = Principal.new
     end
 
     def create
@@ -38,7 +38,9 @@ module Console
       @principal.update!(
         sandbox_repo_cache: params[:sandbox_repo_cache],
         sandbox_observability_enabled: ActiveModel::Type::Boolean.new.cast(params[:sandbox_observability_enabled]),
-        sandbox_api_server_enabled: ActiveModel::Type::Boolean.new.cast(params[:sandbox_api_server_enabled])
+        sandbox_sessions_read_enabled: ActiveModel::Type::Boolean.new.cast(params[:sandbox_sessions_read_enabled]),
+        sandbox_workflows_read_enabled: ActiveModel::Type::Boolean.new.cast(params[:sandbox_workflows_read_enabled]),
+        sandbox_workflows_write_enabled: ActiveModel::Type::Boolean.new.cast(params[:sandbox_workflows_write_enabled])
       )
       redirect_to console_principal_path(@principal.oid), notice: "Updated sandbox access."
     rescue ActiveRecord::RecordInvalid => e
@@ -97,8 +99,7 @@ module Console
     private
 
     def assign_form(principal)
-      fields = principal_params.permit(:namespace, :foreign_id, :name)
-      fields[:namespace] = fields[:namespace].presence || "default"
+      fields = principal_params.permit(:foreign_id, :name)
       fields[:foreign_id] = fields[:foreign_id].presence
       principal.assign_attributes(fields)
       principal.labels = label_params

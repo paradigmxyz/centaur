@@ -73,20 +73,12 @@ impl SecretSource {
     }
 
     /// A token-broker source; ``credential_id`` names the broker credential
-    /// whose current access token iron-control delivers inline. When
-    /// ``credential_id`` is a ``foreign_id`` (rather than a ``bcr_`` OID),
-    /// ``credential_namespace`` is required so iron-control can resolve it.
-    pub fn token_broker(
-        credential_id: impl Into<String>,
-        credential_namespace: impl Into<String>,
-    ) -> Self {
+    /// whose current access token iron-control delivers inline.
+    pub fn token_broker(credential_id: impl Into<String>) -> Self {
         Self {
             source_type: "token_broker".to_owned(),
             secret: None,
-            config: serde_json::json!({
-                "credential_id": credential_id.into(),
-                "credential_namespace": credential_namespace.into(),
-            }),
+            config: serde_json::json!({ "credential_id": credential_id.into() }),
         }
     }
 }
@@ -155,7 +147,6 @@ pub struct ReplaceConfig {
 // Not `Eq`: holds a `SecretSource` (arbitrary `Value` config).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct StaticSecretInput {
-    pub namespace: String,
     pub foreign_id: String,
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -179,7 +170,6 @@ pub struct StaticSecretInput {
 // Not `Eq`: holds `SecretSource` values (arbitrary `Value` config).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct OAuthTokenSecretInput {
-    pub namespace: String,
     pub foreign_id: String,
     pub name: String,
     pub grant: String,
@@ -207,7 +197,6 @@ pub struct OAuthTokenSecretInput {
 // Not `Eq`: `credentials_provider` is an arbitrary `Value`.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct GcpAuthSecretInput {
-    pub namespace: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub foreign_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -248,7 +237,6 @@ pub fn normalize_gcp_id_token_header(value: &str) -> Option<String> {
 // Not `Eq`: holds a `SecretSource` (arbitrary `Value` config).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct GcpIdTokenSecretInput {
-    pub namespace: String,
     pub foreign_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -278,7 +266,6 @@ pub struct GcpIdTokenSecretInput {
 // Not `Eq`: holds `SecretSource` values (arbitrary `Value` config).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct AwsAuthSecretInput {
-    pub namespace: String,
     pub foreign_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -314,7 +301,6 @@ pub struct AwsAuthSecretInput {
 // Not `Eq`: holds a `SecretSource` (arbitrary `Value` config).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct PgDsnSecretInput {
-    pub namespace: String,
     pub foreign_id: String,
     pub name: String,
     pub database: String,
@@ -370,7 +356,6 @@ pub struct HmacSecretHeader {
 // Not `Eq`: `credentials` holds `SecretSource` values (arbitrary `Value` config).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct HmacSecretInput {
-    pub namespace: String,
     pub foreign_id: String,
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -405,7 +390,6 @@ pub struct HmacSecretInput {
 // Not `Eq`: `early_refresh_fraction` is an `f64`.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct BrokerCredentialInput {
-    pub namespace: String,
     pub foreign_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -439,7 +423,6 @@ pub struct BrokerCredentialInput {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct BrokerCredentialRecord {
     pub id: String,
-    pub namespace: String,
     #[serde(default)]
     pub foreign_id: Option<String>,
     #[serde(default)]
@@ -455,15 +438,35 @@ pub struct BrokerCredentialRecord {
 // Principals and roles
 // ---------------------------------------------------------------------------
 
-/// Request body for ``POST``/``PUT /api/v1/principals`` and ``/roles`` — both
-/// take the same ``namespace``/``foreign_id``/``name``/``labels`` shape.
+/// Request body for ``POST``/``PUT /api/v1/roles``.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct IdentityInput {
-    pub namespace: String,
     pub foreign_id: String,
     pub name: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
+}
+
+/// Request body for ``POST``/``PUT /api/v1/principals``.
+///
+/// Principal identity is stored in first-class iron-control fields. Labels are
+/// reserved for extensible metadata and must not carry copies of these values.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PrincipalInput {
+    pub foreign_id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slack_user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slack_channel_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slack_team_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slack_email: Option<String>,
 }
 
 /// A principal as returned by iron-control. Unknown fields are ignored, so this
@@ -471,15 +474,12 @@ pub struct IdentityInput {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct Principal {
     pub id: String,
-    pub namespace: String,
     pub foreign_id: Option<String>,
     pub name: String,
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
     #[serde(default = "default_true")]
     pub sandbox_observability_enabled: bool,
-    #[serde(default = "default_true")]
-    pub sandbox_api_server_enabled: bool,
 }
 
 /// Request body for creating/updating one Slack permission row on a principal.
@@ -531,7 +531,6 @@ pub struct EffectivePgDsn {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct Role {
     pub id: String,
-    pub namespace: String,
     pub foreign_id: Option<String>,
     pub name: String,
     #[serde(default)]
@@ -543,7 +542,6 @@ pub struct Role {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct SecretRecord {
     pub id: String,
-    pub namespace: String,
     pub foreign_id: Option<String>,
     /// Human label. Optional because some secret types allow a null ``name``.
     #[serde(default)]
@@ -693,6 +691,9 @@ impl Grant {
 pub struct ProxyInput {
     pub name: String,
     pub principal_id: String,
+    /// Always serialized (``null`` when absent) so create and assign share one
+    /// wire shape; the console treats an omitted key as "leave unchanged".
+    pub requester_principal_id: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
 }

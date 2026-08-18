@@ -342,6 +342,44 @@ def test_get_channel_history_page_paginates_with_date_window() -> None:
     assert result["messages"][1]["text"] == "hi @alice"
 
 
+def test_get_channel_history_page_preserves_reactions() -> None:
+    """Reactions ride along on the history payload; the serializer must keep them.
+
+    In channels where people answer by reacting rather than replying, the
+    reaction list is the signal and reply_count is close to noise. Dropping
+    reactions during serialization left callers with no way to tell the
+    difference between "nobody responded" and "everybody responded with an
+    emoji".
+    """
+    client, fake_web_client = _make_client()
+    client._get_user_cache = lambda: {"U1": "alice", "U2": "bob"}  # type: ignore[method-assign]
+    fake_web_client.history_pages = [
+        {
+            "messages": [
+                {
+                    "user": "U1",
+                    "text": "ship it?",
+                    "ts": "200.000000",
+                    "reactions": [
+                        {"name": "white_check_mark", "users": ["U1", "U2"], "count": 2},
+                    ],
+                },
+                {"user": "U2", "text": "no reactions here", "ts": "190.000000"},
+            ],
+            "response_metadata": {"next_cursor": ""},
+        },
+    ]
+
+    result = client.get_channel_history_page("paradigm-pulse", limit=2)
+
+    assert result["messages"][0]["reactions"] == [
+        {"name": "white_check_mark", "users": ["U1", "U2"], "count": 2},
+    ]
+    # A message with no reactions gets an empty list, matching how reply_users
+    # defaults, so callers can index without a guard.
+    assert result["messages"][1]["reactions"] == []
+
+
 def test_get_channel_history_page_surfaces_structured_auth_failure() -> None:
     client, fake_web_client = _make_client()
     client._get_user_cache = lambda: {}  # type: ignore[method-assign]
@@ -816,11 +854,8 @@ def test_file_proxy_methods_validate_inputs() -> None:
         client.get_channel_members_proxy(channel_id="general")
 
 
-def test_search_files_uses_proxy_with_user_cache(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_search_files_uses_proxy_with_user_cache() -> None:
     client, _ = _make_client()
-    monkeypatch.setenv("CENTAUR_SANDBOX_API_SERVER_ENABLED", "true")
     client._get_user_cache = lambda: {"U123456789": "alice"}  # type: ignore[method-assign]
 
     def fake_list_files_proxy(**kwargs):
@@ -874,16 +909,6 @@ def test_search_files_uses_proxy_with_user_cache(
             "created": 1700000000,
         }
     ]
-
-
-def test_search_files_raises_when_api_proxy_disabled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    client, _ = _make_client()
-    monkeypatch.setenv("CENTAUR_SANDBOX_API_SERVER_ENABLED", "false")
-
-    with pytest.raises(RuntimeError, match="proxy requires"):
-        client.search_files("C123456789", "report", max_results=10)
 
 
 def test_search_files_paginates_proxy_until_enough_matches() -> None:
@@ -942,11 +967,8 @@ def test_search_files_paginates_proxy_until_enough_matches() -> None:
     assert [result["id"] for result in results] == ["F123456789"]
 
 
-def test_search_files_direct_uses_direct_files_list_when_api_proxy_enabled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_search_files_direct_uses_direct_files_list() -> None:
     client, fake_web_client = _make_client()
-    monkeypatch.setenv("CENTAUR_SANDBOX_API_SERVER_ENABLED", "true")
     client._get_user_cache = lambda: {"U123456789": "alice"}  # type: ignore[method-assign]
     client.list_files_proxy = pytest.fail  # type: ignore[method-assign]
     fake_web_client.files_list_pages = [
@@ -1112,6 +1134,68 @@ def test_search_messages_falls_back_to_direct_history_and_threads_when_proxy_fai
     assert len(results) == 1
     assert results[0]["text"] == "needle is in the direct thread reply"
     assert results[0]["channel"] == "C123456789"
+
+
+def test_unscoped_search_uses_restricted_history_fallback_for_bot_token() -> None:
+    client, _ = _make_client()
+    fallback_result = [{"text": "matched through authorized history"}]
+    fallback_calls: list[tuple] = []
+
+    def fail_native_search(method: str, *, params: dict) -> None:
+        assert method == "search.messages"
+        assert params["query"] == "fire-drill after:2026-08-10"
+        raise _make_slack_error(error="not_allowed_token_type", status_code=200)
+
+    def search_local(*args):
+        fallback_calls.append(args)
+        return fallback_result
+
+    client._search_client.api_call = fail_native_search  # type: ignore[method-assign]
+    client._search_messages_local = search_local  # type: ignore[method-assign]
+
+    assert client.search_messages("fire-drill after:2026-08-10") == fallback_result
+    assert fallback_calls == [
+        ("fire-drill after:2026-08-10", 20, None, None, 200),
+    ]
+
+
+def test_unscoped_search_surfaces_missing_user_scope_without_scanning_history() -> None:
+    client, _ = _make_client()
+    search_client = _FakeWebClient()
+
+    def fail_native_search(method: str, *, params: dict) -> None:
+        assert method == "search.messages"
+        raise _make_slack_error(error="missing_scope", status_code=200)
+
+    search_client.api_call = fail_native_search  # type: ignore[method-assign]
+    client._search_client = search_client
+    client._search_messages_local = pytest.fail  # type: ignore[method-assign]
+
+    with pytest.raises(SlackAuthError) as exc_info:
+        client.search_messages("fire-drill after:2026-08-10")
+
+    assert exc_info.value.payload == {
+        "error": "slack_auth_failed",
+        "message": "Slack authentication failed for search.messages via search_token",
+        "slack_method": "search.messages",
+        "access_path": "search_token",
+        "error_code": "missing_scope",
+        "status_code": 200,
+        "requested_channel": None,
+        "resolved_channel": None,
+    }
+
+
+def test_unscoped_search_surfaces_native_runtime_failure_without_scanning_history() -> None:
+    client, fake_web_client = _make_client()
+    client._search_messages_local = pytest.fail  # type: ignore[method-assign]
+    fake_web_client.api_call = lambda method, *, params: {  # type: ignore[method-assign]
+        "ok": False,
+        "error": "internal_error",
+    }
+
+    with pytest.raises(RuntimeError, match="internal_error"):
+        client.search_messages("fire-drill after:2026-08-10")
 
 
 def test_list_channels_returns_cache_when_slack_rate_limited() -> None:

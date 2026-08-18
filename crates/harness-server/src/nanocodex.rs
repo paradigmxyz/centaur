@@ -7,13 +7,17 @@ use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use nanocodex::{AgentEvent, AgentEvents, Nanocodex, Prompt, Thinking, Tools, Turn, UserInput};
+use nanocodex::{
+    AgentEvent, AgentEvents, Nanocodex, OpenAiAuth, Prompt, Thinking, Tools, Turn, UserInput,
+    load_chatgpt_auth,
+};
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::nanocodex_subagents::{ChildAgents, with_subagents};
+use crate::util::default_codex_home;
 use crate::{HarnessServerError, Result};
 
 /// Runs the Centaur blocks adapter while preserving Nanocodex's native event
@@ -27,10 +31,7 @@ pub fn run_nanocodex_blocks_server() -> Result<()> {
 }
 
 async fn run() -> Result<()> {
-    let api_key =
-        env::var("OPENAI_API_KEY").map_err(|_| HarnessServerError::MissingEnvironment {
-            name: "OPENAI_API_KEY",
-        })?;
+    let auth = configured_openai_auth()?;
     let cwd = env::current_dir()?;
     let session_id = format!("nanocodex-{}", Uuid::new_v4().simple());
     let child_agents = Arc::new(ChildAgents::default());
@@ -64,7 +65,7 @@ async fn run() -> Result<()> {
             } => {
                 if agent.is_none() {
                     let (new_agent, new_events) = build_agent(
-                        &api_key,
+                        &auth,
                         &cwd,
                         &session_id,
                         &child_agents,
@@ -108,15 +109,44 @@ async fn run() -> Result<()> {
     Ok(())
 }
 
+fn configured_openai_auth() -> Result<OpenAiAuth> {
+    let auth_mode = env::var("CODEX_AUTH_MODE").ok();
+    let api_key = env::var("OPENAI_API_KEY").ok();
+    let codex_home = env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(default_codex_home);
+    openai_auth(auth_mode.as_deref(), api_key, codex_home)
+}
+
+fn openai_auth(
+    auth_mode: Option<&str>,
+    api_key: Option<String>,
+    codex_home: PathBuf,
+) -> Result<OpenAiAuth> {
+    match auth_mode.unwrap_or("api_key").trim() {
+        "access_token" => load_chatgpt_auth(codex_home.join("auth.json"))
+            .map_err(|error| HarnessServerError::Nanocodex(error.to_string())),
+        "api_key" | "" => api_key
+            .filter(|value| !value.trim().is_empty())
+            .map(OpenAiAuth::api_key)
+            .ok_or(HarnessServerError::MissingEnvironment {
+                name: "OPENAI_API_KEY",
+            }),
+        mode => Err(HarnessServerError::Nanocodex(format!(
+            "unsupported CODEX_AUTH_MODE `{mode}`"
+        ))),
+    }
+}
+
 fn build_agent(
-    api_key: &str,
+    auth: &OpenAiAuth,
     cwd: &std::path::Path,
     session_id: &str,
     child_agents: &Arc<ChildAgents>,
     subagents: bool,
     thinking: Thinking,
 ) -> Result<(Nanocodex, AgentEvents)> {
-    let builder = Nanocodex::builder(api_key)
+    let builder = Nanocodex::builder(auth.clone())
         .thinking(thinking)
         .workspace(cwd)
         .session_id(session_id);
@@ -521,6 +551,7 @@ fn required_value_string_alias(value: &Value, name: &str, alias: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nanocodex::OpenAiAuthMode;
 
     #[test]
     fn parses_text_without_codex_protocol_types() {
@@ -623,5 +654,53 @@ mod tests {
             panic!("expected user prompt");
         };
         assert_eq!(thinking, Some(Thinking::High));
+    }
+
+    #[test]
+    fn api_key_auth_remains_the_default() {
+        let auth = openai_auth(None, Some("test-api-key".to_owned()), PathBuf::new()).unwrap();
+
+        assert_eq!(auth.mode(), OpenAiAuthMode::ApiKey);
+    }
+
+    #[test]
+    fn access_token_auth_loads_the_shared_codex_login() {
+        let codex_home = env::temp_dir().join(format!(
+            "centaur-nanocodex-auth-{}",
+            Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&codex_home).unwrap();
+        std::fs::write(
+            codex_home.join("auth.json"),
+            include_str!("../../../services/sandbox/codex-auth.json"),
+        )
+        .unwrap();
+
+        let auth = openai_auth(Some("access_token"), None, codex_home.clone()).unwrap();
+
+        assert_eq!(auth.mode(), OpenAiAuthMode::ChatGpt);
+        std::fs::remove_dir_all(codex_home).unwrap();
+    }
+
+    #[test]
+    fn rejects_unsupported_auth_modes() {
+        let error = openai_auth(Some("chatgpt"), None, PathBuf::new()).unwrap_err();
+
+        assert!(
+            matches!(error, HarnessServerError::Nanocodex(message) if message.contains("unsupported CODEX_AUTH_MODE `chatgpt`"))
+        );
+    }
+
+    #[test]
+    fn api_key_auth_requires_a_non_empty_key() {
+        let error =
+            openai_auth(Some("api_key"), Some("  ".to_owned()), PathBuf::new()).unwrap_err();
+
+        assert!(matches!(
+            error,
+            HarnessServerError::MissingEnvironment {
+                name: "OPENAI_API_KEY"
+            }
+        ));
     }
 }

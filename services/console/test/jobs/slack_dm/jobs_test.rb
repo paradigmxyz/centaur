@@ -9,7 +9,6 @@ module SlackDm
         client_id: "slack-client-#{SecureRandom.hex(4)}",
         client_secret: "secret",
         allowed_scopes: SlackDm::SyncCredential::REQUIRED_SCOPES,
-        credential_namespace: "acme",
         created_by: users(:acme_admin)
       )
     end
@@ -22,7 +21,6 @@ module SlackDm
     )
       BrokerCredential.create!(
         oauth_app: app,
-        namespace: "acme",
         foreign_id: "slack-dms-#{SecureRandom.hex(6)}",
         token_endpoint: "https://slack.com/api/oauth.v2.access",
         access_token: access_token,
@@ -57,6 +55,43 @@ module SlackDm
 
     test "SyncCredentialJob is a no-op for missing credentials" do
       assert_nothing_raised { SlackDm::SyncCredentialJob.perform_now(-1) }
+    end
+
+    test "SyncCredentialJob defers rate-limited work using Retry-After" do
+      credential = slack_credential(app: slack_app)
+      sync = rate_limited_sync(retry_after: 120)
+      now = Time.zone.parse("2026-08-12 12:00:00")
+
+      SlackDm::SyncCredential.stub(:new, ->(*) { sync }) do
+        travel_to(now) { SlackDm::SyncCredentialJob.perform_now(credential.id) }
+      end
+
+      retry_job = enqueued_jobs.sole
+      assert_equal SlackDm::SyncCredentialJob, retry_job[:job]
+      assert_equal [ credential.id ], retry_job[:args]
+      assert_in_delta now.to_f + 120, retry_job[:at], 0.001
+    end
+
+    test "SyncCredentialJob allows only one delayed rate-limit retry" do
+      credential = slack_credential(app: slack_app)
+      job = SlackDm::SyncCredentialJob.new(credential.id)
+      job.executions = SlackDm::SyncCredentialJob::MAX_RATE_LIMIT_EXECUTIONS - 1
+
+      SlackDm::SyncCredential.stub(:new, ->(*) { rate_limited_sync(retry_after: 120) }) do
+        assert_no_enqueued_jobs { job.perform_now }
+      end
+
+      assert_equal SlackDm::SyncCredentialJob::MAX_RATE_LIMIT_EXECUTIONS, job.executions
+    end
+
+    private
+
+    def rate_limited_sync(retry_after:)
+      Object.new.tap do |sync|
+        sync.define_singleton_method(:call) do
+          raise SlackDm::SyncCredential::RateLimitedError.new(retry_after: retry_after)
+        end
+      end
     end
   end
 end

@@ -121,6 +121,19 @@ The workflow host sandbox is separate from the agent sandbox. The workflow
 handler coordinates the run; the agent turn runs through the normal Centaur
 session runtime.
 
+`ctx.agent_turn(...)` resolves to the execution record, not to the answer. Read
+`result_text` for the agent's final text:
+
+```python
+{
+    "thread_key": "wf:<task-id>:agent:<workflow-name>",
+    "execution_id": "...",
+    "status": "completed",
+    "output_lines": [...],
+    "result_text": "the agent's final text",
+}
+```
+
 #### Declare Workflow-Host Permissions
 
 When a workflow calls tools directly from the workflow host with
@@ -277,7 +290,11 @@ EOF
 Then create a real run:
 
 ```bash
+CENTAUR_API_TOKEN=$(kubectl exec -n centaur-system deploy/centaur-centaur-console -- \
+  bin/rails runner 'print ApiServer::Jwt.encode_for_console_service')
+
 curl -s "$CENTAUR_API_URL/api/workflows/runs" \
+  -H "Authorization: Bearer $CENTAUR_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "workflow_name": "nightly_report",

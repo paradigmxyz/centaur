@@ -2,10 +2,9 @@ module SandboxEntitlements
   module Jwt
     DEFAULT_AUDIENCE = "centaur-console-sandbox-entitlements".freeze
     DEFAULT_ISSUER = "centaur-console".freeze
-    # The token is low-sensitivity (scoped to read-only sandbox endpoints). The
-    # permissions endpoint re-validates the proxy -> principal binding against
-    # the database on every request, so reassignment revokes permissions access
-    # immediately regardless of exp. Rotation is
+    # The token is scoped to sandbox endpoints. Each authenticated endpoint
+    # re-validates the proxy -> principal binding against the database, so
+    # reassignment revokes access immediately regardless of exp. Rotation is
     # therefore infrequent: it exists to bound the lifetime of a leaked token,
     # not to enforce freshness. Keep the window long — every rotation changes
     # the synced config hash and forces a full config re-push to the proxy.

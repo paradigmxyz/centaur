@@ -25,11 +25,10 @@ class GrantTest < ActiveSupport::TestCase
     assert grant.valid?
   end
 
-  test "role grants must stay in the secret namespace" do
+  test "role grants can target any secret" do
     grant = Grant.new(valid_attrs(principal: nil, role: roles(:globex_infra),
                                   static_secret: static_secrets(:github_token_inject)))
-    assert_not grant.valid?
-    assert_includes grant.errors[:role], "must be in the same namespace as the secret"
+    assert grant.valid?
   end
 
   test "requires exactly one grantee" do

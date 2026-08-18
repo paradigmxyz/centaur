@@ -76,17 +76,11 @@ class WebSearchClient:
         synthesis_model: str | None = None,
         max_retries: int = 3,
     ) -> None:
-        # PARALLEL_API_KEY / ANTHROPIC_API_KEY: read via secret() so the
-        # firewall (StubBackend → mitmproxy) can swap in real values for
-        # outbound headers. _is_configured() is the routing signal — it
-        # checks ctx.secrets membership rather than relying on secret()'s
-        # stub-as-placeholder fallback.
-        self._has_parallel_key = parallel_api_key is not None or _is_configured("PARALLEL_API_KEY")
+        # Always pass the StubBackend placeholder so the SDK sends x-api-key.
+        # Search falls back to anonymous MCP if injected authentication fails.
+        self._parallel_api_key = parallel_api_key or secret("PARALLEL_API_KEY", "PARALLEL_API_KEY")
         self._has_anthropic_key = anthropic_api_key is not None or _is_configured(
             "ANTHROPIC_API_KEY"
-        )
-        self._parallel_api_key = parallel_api_key or (
-            secret("PARALLEL_API_KEY") if self._has_parallel_key else None
         )
         self._anthropic_api_key = anthropic_api_key or (
             secret("ANTHROPIC_API_KEY") if self._has_anthropic_key else None
@@ -101,7 +95,7 @@ class WebSearchClient:
         self._max_retries = max_retries
         self._progress_callback: Callable[[str], None] | None = None
         self._backend = ParallelBackend(
-            api_key=self._parallel_api_key if self._has_parallel_key else None,
+            api_key=self._parallel_api_key,
             api_base_url=self._api_base_url,
             mcp_url=self._mcp_url,
             deep_research_processor=self._deep_research_processor,

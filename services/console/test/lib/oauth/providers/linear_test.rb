@@ -10,13 +10,27 @@ module Oauth
         )
       end
 
-      test "builds a deterministic pending identity without calling Linear" do
-        identity = Linear.new.identity_from(result, client_id: "unused")
+      test "resolves the authenticated Linear viewer" do
+        http = expect_http_call(
+          status: 200,
+          body: { data: { viewer: { id: "LinUser_123", name: "Ada Lovelace", email: "ada@example.com" } } }.to_json
+        ) do |request|
+          assert_equal :post, request[:method]
+          assert_equal Linear::GRAPHQL_ENDPOINT, request[:url]
+          assert_equal({ "query" => Linear::VIEWER_QUERY }, JSON.parse(request[:body]))
+          assert_equal "Bearer lin_token", request[:headers]["Authorization"]
+        end
 
-        assert_match(/\Apending-[a-f0-9]{32}\z/, identity[:subject])
-        assert_nil identity[:email]
-        assert_equal "Pending Linear account", identity[:name]
-        assert_equal identity, Linear.new.identity_from(result, client_id: "unused")
+        identity = Linear.new.identity_from(
+          result,
+          client_id: "unused",
+          http_client: HttpClient.new(http: http)
+        )
+
+        assert_equal "LinUser_123", identity[:subject]
+        assert_equal "ada@example.com", identity[:email]
+        assert_equal "Ada Lovelace", identity[:name]
+        http.verify
       end
 
       test "missing access token raises a parse error" do
@@ -24,6 +38,21 @@ module Oauth
           Linear.new.identity_from(result(access_token: nil), client_id: "unused")
         end
         assert_equal "missing_access_token", err.code
+      end
+
+      test "missing viewer raises an exchange error" do
+        http = expect_http_call(status: 200, body: { data: { viewer: nil } }.to_json)
+
+        err = assert_raises(Broker::ExchangeError) do
+          Linear.new.identity_from(
+            result,
+            client_id: "unused",
+            http_client: HttpClient.new(http: http)
+          )
+        end
+
+        assert_equal "missing_identity", err.code
+        http.verify
       end
 
       test "parses space separated granted scopes" do

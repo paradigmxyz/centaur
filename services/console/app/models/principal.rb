@@ -4,13 +4,13 @@ class Principal < ApplicationRecord
   oid_prefix "prn"
 
   include ForeignIdCollisionGuard
-
-  attr_readonly :namespace, :foreign_id
+  attr_readonly :foreign_id
 
   has_many :grants, dependent: :destroy
   # Proxies outlive their principal: deleting a principal unassigns its proxies
   # rather than destroying them, leaving them ready for reassignment.
   has_many :proxies, dependent: :nullify
+  has_many :requester_proxies, class_name: "Proxy", foreign_key: :requester_principal_id, dependent: :nullify
   has_many :principal_roles, dependent: :destroy
   has_many :roles, through: :principal_roles
   has_many :slack_channel_permissions, dependent: :destroy
@@ -18,10 +18,12 @@ class Principal < ApplicationRecord
   has_many :mcp_oauth_authorization_codes, dependent: :destroy
   has_many :mcp_oauth_refresh_tokens, dependent: :destroy
   belongs_to :created_by, class_name: "User"
+  belongs_to :console_user, class_name: "User", optional: true
 
   include SlackChannelPermissionOwner
 
   after_commit :auto_grant_matching_oauth_credentials, on: %i[create update]
+  after_create :assign_default_roles, if: :roles_blank_for_defaulting?
   before_validation :apply_sandbox_repo_cache_label
   before_commit :bump_own_sync_config_cache_version, on: :update, if: :sync_config_fields_changed?
 
@@ -29,17 +31,33 @@ class Principal < ApplicationRecord
   URL_SAFE_MESSAGE = "must contain only URL-safe characters (A-Z, a-z, 0-9, -, ., _, ~)"
   SANDBOX_REPO_CACHE_LABEL = "centaur.sandbox_repo_cache".freeze
   SANDBOX_REPO_CACHE_VALUES = %w[none public all].freeze
+  UNKNOWN_KIND = "unknown".freeze
+  KINDS = %w[
+    unknown user console_user workflow slack_channel slack_dm discord_channel linear_issue
+    teams_user teams_conversation
+  ].freeze
+  SLACK_USER_ID_FORMAT = /\A(?:[UW][A-Z0-9]{8,}|USLACK)\z/
+  SLACK_CHANNEL_ID_FORMAT = /\A[CDG][A-Z0-9]{8,}\z/
+  SLACK_TEAM_ID_FORMAT = /\A[TE][A-Z0-9]{8,}\z/
 
-  validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
-  validates :foreign_id, uniqueness: { scope: :namespace, allow_nil: true },
+  validates :foreign_id, uniqueness: { allow_nil: true },
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }, allow_nil: true
   validates :sandbox_repo_cache, inclusion: { in: SANDBOX_REPO_CACHE_VALUES }
+  validates :kind, presence: true,
+                   inclusion: { in: KINDS, message: "must be one of #{KINDS.join(", ")}" }
+  validates :slack_user_id, format: { with: SLACK_USER_ID_FORMAT, message: "is not a valid Slack user ID" },
+                            allow_nil: true, if: :will_save_change_to_slack_user_id?
+  validates :slack_channel_id, format: { with: SLACK_CHANNEL_ID_FORMAT, message: "is not a valid Slack channel ID" },
+                               allow_nil: true, if: :will_save_change_to_slack_channel_id?
+  validates :slack_team_id, format: { with: SLACK_TEAM_ID_FORMAT, message: "is not a valid Slack scope ID" },
+                            allow_nil: true, if: :will_save_change_to_slack_team_id?
+  validates :slack_email, format: { with: URI::MailTo::EMAIL_REGEXP, message: "is not a valid email address" },
+                          allow_nil: true, if: :will_save_change_to_slack_email?
 
   # Stand-in for an inline secret value in redacted config: operator inspection
   # reports that a control_plane source carries a value without revealing it.
   REDACTED = "[redacted]".freeze
   SLACK_CHANNEL_ID_LABEL = "slack_channel_id".freeze
-  SLACK_CHANNEL_ID_FORMAT = /\A[CDG][A-Z0-9]{8,}\z/
 
   # The config of a principal with no effective grants; also what an unassigned
   # proxy resolves to.
@@ -55,6 +73,27 @@ class Principal < ApplicationRecord
   # Static secrets this principal resolves to, via its effective grants.
   def granted_static_secrets
     granted_secrets_by_priority(StaticSecret, :static_secret_id, includes: %i[source rules])
+  end
+
+  # Static wrapper secrets this principal may carry into turns it starts as
+  # the requester: DIRECT grants only (never role grants, so shared role
+  # infrastructure cannot hoist), and only wrappers of broker credentials
+  # whose OAuth app an admin marked always_available. Starting from
+  # StaticSecret structurally excludes every other secret kind.
+  def always_available_static_secrets
+    priorities = grants
+      .where.not(static_secret_id: nil)
+      .group(:static_secret_id)
+      .select("static_secret_id AS secret_id, MAX(priority) AS effective_priority")
+
+    StaticSecret
+      .joins("INNER JOIN (#{priorities.to_sql}) granted_priorities " \
+             "ON granted_priorities.secret_id = static_secrets.id")
+      .joins(broker_credential: :oauth_app)
+      .where(oauth_apps: { always_available: true })
+      .select("static_secrets.*", "granted_priorities.effective_priority")
+      .includes(:source, :rules)
+      .order(Arel.sql("granted_priorities.effective_priority ASC, static_secrets.id ASC"))
   end
 
   # gcp_auth credentials this principal resolves to, via its effective grants.
@@ -97,13 +136,33 @@ class Principal < ApplicationRecord
     unless supplied_key?(supplied, :sandbox_observability_enabled)
       self.sandbox_observability_enabled = defaults[:sandbox_observability_enabled]
     end
-    unless supplied_key?(supplied, :sandbox_api_server_enabled)
-      self.sandbox_api_server_enabled = defaults[:sandbox_api_server_enabled]
+    unless supplied_key?(supplied, :sandbox_sessions_read_enabled)
+      self.sandbox_sessions_read_enabled = defaults[:sandbox_sessions_read_enabled]
+    end
+    unless supplied_key?(supplied, :sandbox_workflows_read_enabled)
+      self.sandbox_workflows_read_enabled = defaults[:sandbox_workflows_read_enabled]
+    end
+    unless supplied_key?(supplied, :sandbox_workflows_write_enabled)
+      self.sandbox_workflows_write_enabled = defaults[:sandbox_workflows_write_enabled]
     end
   end
 
+  # Slackbot only sends a DM partner's email when that user belongs to the
+  # bot's home workspace. Treat an explicitly supplied email as a trusted
+  # bridge to the corresponding Console account. This is called from the API
+  # upsert boundary rather than a model callback so an omitted email never
+  # activates a stale value already stored on the principal. A supplied email
+  # with no matching account clears any previous link.
+  def link_console_user_by_slack_email
+    return unless kind == "slack_dm" && slack_email.present?
+
+    self.console_user = User.find_by(email: slack_email.to_s.strip.downcase)
+  end
+
   def labels_with_sandbox_capabilities
-    labels.to_h.merge(SANDBOX_REPO_CACHE_LABEL => sandbox_repo_cache)
+    labels.to_h.merge(
+      SANDBOX_REPO_CACHE_LABEL => sandbox_repo_cache
+    )
   end
 
   def effective_slack_channel_permissions_payload
@@ -196,6 +255,19 @@ class Principal < ApplicationRecord
   end
 
   private
+
+  def roles_blank_for_defaulting?
+    association(:roles).target.empty? && !roles.exists?
+  end
+
+  def assign_default_roles
+    role_ids = Role.where(assign_by_default: true).ids
+    return if role_ids.empty?
+
+    # These assignments are part of the principal's initial state, so there is
+    # no prior sync config to invalidate.
+    PrincipalRole.insert_all!(role_ids.map { |role_id| { principal_id: id, role_id: role_id } })
+  end
 
   def auto_grant_matching_oauth_credentials
     PrincipalCredentialReconciliation.new.apply_for_principal(self)
@@ -297,9 +369,12 @@ class Principal < ApplicationRecord
   end
 
   def sync_config_fields_changed?
-    previous_changes.key?("name") ||
-      previous_changes.key?("labels") ||
-      previous_changes.key?("sandbox_api_server_enabled")
+    %w[
+      name labels sandbox_sessions_read_enabled sandbox_workflows_read_enabled
+      sandbox_workflows_write_enabled kind slack_user_id slack_channel_id slack_team_id slack_email console_user_id
+    ].any? do |field|
+      previous_changes.key?(field)
+    end
   end
 
   def bump_own_sync_config_cache_version

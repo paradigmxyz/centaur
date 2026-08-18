@@ -23,7 +23,9 @@ module Api
         get api_v1_principal_roles_url(principal_id: principal.oid), headers: auth_headers
         assert_response :ok
 
-        ids = json_body.fetch("data").map { |r| r["id"] }
+        data = json_body.fetch("data")
+        assert data.none? { |role| role.key?("namespace") }
+        ids = data.map { |r| r["id"] }
         assert_equal [ roles(:acme_infra).oid ], ids
       end
 
@@ -66,15 +68,15 @@ module Api
         assert_equal role.oid, json_body.dig("data", "id")
       end
 
-      test "POST returns 422 when the role is in a different namespace" do
+      test "POST allows any role" do
         principal = principals(:globex_user)
         body = { data: { role_id: roles(:acme_infra).oid } }
 
-        assert_no_difference -> { principal.principal_roles.count } do
+        assert_difference -> { principal.principal_roles.count } => 1 do
           post api_v1_principal_roles_url(principal_id: principal.oid),
                params: body.to_json, headers: auth_headers
         end
-        assert_response :unprocessable_content
+        assert_response :created
       end
 
       test "POST is idempotent when the role is already assigned" do

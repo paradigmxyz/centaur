@@ -51,11 +51,6 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sTEAMS_BOT_APP_TENANT_ID" .Values.secretManager.envPrefix }}
-            - name: CENTAUR_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "centaur.secretEnvName" . }}
-                  key: {{ printf "%sTEAMSBOT_API_KEY" .Values.secretManager.envPrefix }}
             - name: TEAMSBOT_API_KEY
               valueFrom:
                 secretKeyRef:

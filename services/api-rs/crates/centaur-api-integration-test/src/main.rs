@@ -8,7 +8,10 @@ use anyhow::{Context, Result, bail};
 use centaur_session_core::HarnessType;
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
-use reqwest::{Client as HttpClient, StatusCode};
+use reqwest::{
+    Client as HttpClient, StatusCode,
+    header::{AUTHORIZATION, HeaderMap, HeaderValue},
+};
 use serde_json::{Value, json};
 use tokio::time::{Instant, sleep, timeout};
 use uuid::Uuid;
@@ -23,7 +26,21 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| DEFAULT_API_URL.to_owned())
         .trim_end_matches('/')
         .to_owned();
-    let http = HttpClient::new();
+    let api_token = env::var("CENTAUR_API_TOKEN")
+        .context("CENTAUR_API_TOKEN must be set for api-rs integration tests")?;
+    if api_token.trim().is_empty() {
+        bail!("CENTAUR_API_TOKEN must not be empty");
+    }
+    let mut default_headers = HeaderMap::new();
+    default_headers.insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {api_token}"))
+            .context("CENTAUR_API_TOKEN is not a valid HTTP bearer credential")?,
+    );
+    let http = HttpClient::builder()
+        .default_headers(default_headers)
+        .build()
+        .context("failed to build authenticated HTTP client")?;
 
     let mut results = Vec::new();
 
@@ -231,6 +248,7 @@ async fn test_harness_wire_values(http: &HttpClient, base_url: &str) -> Result<(
         (HarnessType::Amp, "amp"),
         (HarnessType::ClaudeCode, "claudecode"),
         (HarnessType::Nanocodex, "nanocodex"),
+        (HarnessType::Hermes, "hermes"),
     ];
 
     for (harness_type, expected_wire_value) in cases {
@@ -509,6 +527,7 @@ async fn test_workflows_api(http: &HttpClient, base_url: &str) -> Result<()> {
     let sentinel_name = format!("api_integration_sentinel_{unique}");
     let workflow_name = format!("api_integration_workflow_{unique}");
     let workflow_path = workflow_dir.join(format!("{workflow_name}.py"));
+    let workflow_started_path = workflow_dir.join(format!("{workflow_name}.started"));
 
     write_sentinel_workflow(&workflow_dir, &sentinel_name)?;
     write_test_workflow(&workflow_path, &workflow_name)?;
@@ -549,13 +568,16 @@ async fn test_workflows_api(http: &HttpClient, base_url: &str) -> Result<()> {
         json!({
             "case": "removed-workflow-run",
             "sleep_ms": 60_000,
+            "started_path": workflow_started_path,
         }),
     )
     .await
     .context("create long-running workflow run")?;
-    wait_for_workflow_run_status(http, base_url, &removed_run_id, &["running"])
+    // The queue marks a run as running before the Python host has loaded its
+    // module. Wait for handler entry so removing the file cannot race loading.
+    wait_for_workflow_handler_start(http, base_url, &removed_run_id, &workflow_started_path)
         .await
-        .context("wait for long-running workflow run to start")?;
+        .context("wait for long-running workflow handler to start")?;
 
     fs::remove_file(&workflow_path)
         .with_context(|| format!("remove workflow file {}", workflow_path.display()))?;
@@ -697,6 +719,7 @@ fn write_test_workflow(path: &Path, workflow_name: &str) -> Result<()> {
     let source = format!(
         r#"
 import asyncio
+from pathlib import Path
 
 WORKFLOW_NAME = "{workflow_name}"
 SCHEDULE = {{
@@ -709,6 +732,9 @@ SCHEDULE = {{
 
 
 async def handler(params, ctx):
+    started_path = params.get("started_path")
+    if started_path:
+        Path(started_path).touch()
     sleep_ms = int(params.get("sleep_ms") or 0)
     if sleep_ms:
         await asyncio.sleep(sleep_ms / 1000)
@@ -855,6 +881,41 @@ async fn wait_for_workflow_run_status(
         "workflow run {run_id} did not reach one of {:?} before timeout; last run: {last_run}",
         expected_statuses
     )
+}
+
+async fn wait_for_workflow_handler_start(
+    http: &HttpClient,
+    base_url: &str,
+    run_id: &str,
+    started_path: &Path,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(25);
+    let mut last_run = Value::Null;
+
+    while Instant::now() < deadline {
+        if started_path.is_file() {
+            return Ok(());
+        }
+
+        let body = get_json_ok(http, format!("{base_url}/api/workflows/runs/{run_id}")).await?;
+        let run = body
+            .get("run")
+            .cloned()
+            .context("workflow run response missing run")?;
+        let status = run
+            .get("status")
+            .and_then(Value::as_str)
+            .context("workflow run missing status")?;
+        if matches!(status, "completed" | "failed" | "cancelled") {
+            bail!(
+                "workflow run {run_id} reached terminal status {status} before its handler started: {run}"
+            );
+        }
+        last_run = run;
+        sleep(Duration::from_millis(250)).await;
+    }
+
+    bail!("workflow run {run_id} handler did not start before timeout; last run: {last_run}")
 }
 
 async fn wait_for_workflow_schedule(

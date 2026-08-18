@@ -865,6 +865,16 @@ fn notification_method(value: &Value) -> Option<&str> {
     value.get("method").and_then(Value::as_str)
 }
 
+fn error_notification_will_retry(value: &Value) -> bool {
+    matches!(
+        value
+            .pointer("/params/willRetry")
+            .or_else(|| value.get("willRetry"))
+            .and_then(Value::as_bool),
+        Some(true)
+    )
+}
+
 fn is_terminal_notification(value: &Value, thread_id: &str, turn_id: &str) -> bool {
     match notification_method(value) {
         Some("turn/completed") | Some("turn/failed") => {
@@ -879,7 +889,7 @@ fn is_terminal_notification(value: &Value, thread_id: &str, turn_id: &str) -> bo
                 .unwrap_or(turn_id);
             notification_thread == thread_id && notification_turn == turn_id
         }
-        Some("error") => true,
+        Some("error") => !error_notification_will_retry(value),
         _ => false,
     }
 }
@@ -1106,5 +1116,29 @@ mod tests {
             forwarded,
             vec!["turn/started", "thread/status/changed", "error"]
         );
+    }
+
+    #[test]
+    fn retryable_error_notification_is_not_turn_terminal() {
+        let retryable = json!({
+            "method": "error",
+            "params": {
+                "error": { "message": "Reconnecting... 1/5" },
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "willRetry": true
+            }
+        });
+        let exhausted = json!({
+            "method": "error",
+            "params": {
+                "error": { "message": "Reconnecting... 5/5" },
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "willRetry": false
+            }
+        });
+        assert!(!is_terminal_notification(&retryable, "thread-1", "turn-1"));
+        assert!(is_terminal_notification(&exhausted, "thread-1", "turn-1"));
     }
 }
