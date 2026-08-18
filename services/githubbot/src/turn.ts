@@ -7,6 +7,7 @@ import type { GitHubAdapter } from "@chat-adapter/github";
 import type { Thread } from "chat";
 import { buildCommentReplyBody, CommentReplyCollector } from "./comment-bot";
 import { runExclusive } from "./context";
+import { resolveStickyProvider } from "./overrides";
 import {
   executeSessionTurn,
   forwardToSessionApi,
@@ -291,6 +292,12 @@ export async function runSessionTurn(input: {
   // The 👀 working ack is fired by the caller (handleMessage) before this turn's
   // setup so it lands instantly; here we only settle it to 🚀/😕 at the end.
   const threadState = (await thread.state) ?? {};
+  const provider = resolveStickyProvider(threadState.provider, overrides);
+  if (provider.update !== undefined) {
+    // Commit the selection before execution so a bot/sandbox crash cannot lose
+    // the provider needed to resume this Codex thread on the next turn.
+    await thread.setState({ provider: provider.update });
+  }
   let lastEventId = threadState.lastEventId ?? 0;
   const forwardInput: ForwardSessionInput = {
     afterEventId: lastEventId,
@@ -300,7 +307,7 @@ export async function runSessionTurn(input: {
     harnessType: overrides.harnessType,
     messages: [],
     model: overrides.model,
-    provider: overrides.provider,
+    provider: provider.provider,
     onEventId: (eventId) => {
       lastEventId = Math.max(lastEventId, eventId);
       forwardInput.afterEventId = lastEventId;

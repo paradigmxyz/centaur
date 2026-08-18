@@ -20,6 +20,11 @@ export type MessageOverrides = {
   provider?: string;
 };
 
+export type StickyProviderResolution = {
+  provider?: string;
+  update?: string | null;
+};
+
 // Flag name -> HarnessType wire value (serde lowercase of the Rust enum).
 const HARNESS_FLAGS: Record<string, string> = {
   amp: "amp",
@@ -93,6 +98,23 @@ export function extractMessageOverrides(text: string): MessageOverrides {
     model,
     ...(provider ? { provider } : {}),
   };
+}
+
+/**
+ * Resolve the provider fixed at Codex thread start. A provider selection stays
+ * sticky across later turns, while an explicit harness switch clears it.
+ * `update` is omitted when persisted state should remain unchanged; null is a
+ * deliberate tombstone for a previous selection.
+ */
+export function resolveStickyProvider(
+  current: string | null | undefined,
+  overrides: Pick<MessageOverrides, "harnessType" | "provider">,
+): StickyProviderResolution {
+  if (overrides.provider) {
+    return { provider: overrides.provider, update: overrides.provider };
+  }
+  if (overrides.harnessType) return { update: null };
+  return current ? { provider: current } : {};
 }
 
 function customProviderDefaultModel(provider: string): string | undefined {

@@ -179,6 +179,8 @@ export type Githubbot = {
 export type GithubbotThreadState = {
   /** Set once the thread's first turn has run (gates follow-up ingestion). */
   historyForwarded?: boolean;
+  /** Codex provider pinned for this thread. Null clears a previous selection. */
+  provider?: string | null;
   /**
    * Set once the full PR/issue context (with body) has ridden a turn's execute;
    * later turns prepend only the compact header instead.

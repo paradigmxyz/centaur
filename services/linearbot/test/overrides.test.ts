@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { extractMessageOverrides } from "../src/overrides";
+import {
+  extractMessageOverrides,
+  resolveStickyProvider,
+} from "../src/overrides";
 
 describe("extractMessageOverrides", () => {
   test("returns text untouched without flags", () => {
@@ -207,5 +210,30 @@ describe("extractMessageOverrides", () => {
       harnessType: undefined,
       model: undefined,
     });
+  });
+});
+
+describe("resolveStickyProvider", () => {
+  test("persists a selected provider and reuses it on later turns", () => {
+    expect(
+      resolveStickyProvider(undefined, {
+        harnessType: "codex",
+        provider: "private_responses",
+      }),
+    ).toEqual({
+      provider: "private_responses",
+      update: "private_responses",
+    });
+    expect(resolveStickyProvider("private_responses", {})).toEqual({
+      provider: "private_responses",
+    });
+  });
+
+  test("an explicit harness switch clears a previous provider", () => {
+    expect(
+      resolveStickyProvider("private_responses", {
+        harnessType: "claudecode",
+      }),
+    ).toEqual({ update: null });
   });
 });
