@@ -188,7 +188,7 @@ impl AppState {
             .ok_or_else(|| ApiError::BadRequest("workflow runtime is not enabled".to_owned()))
     }
 
-    fn pool(&self) -> Result<PgPool, ApiError> {
+    pub(crate) fn pool(&self) -> Result<PgPool, ApiError> {
         let initialized = self
             .initialized()
             .ok_or_else(|| ApiError::ServiceUnavailable("api-rs is still starting".to_owned()))?;
@@ -259,6 +259,7 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         )
         .route("/api/session/{thread_key}/events", get(stream_events))
         .route("/api/sandboxes/drain", post(drain_sandboxes))
+        .route("/api/status", get(crate::status::status_report))
         .merge(slack_proxy_router())
         .route("/api/workflows/schedules", get(list_workflow_schedules))
         .route(
@@ -535,9 +536,10 @@ fn route_access(method: &Method, route: &str) -> Option<RouteAccess> {
     let capability = |capability| Some(RouteAccess::Capability(capability));
     match (method, route) {
         (&Method::GET, "/api/session/{thread_key}")
-        | (&Method::GET, "/api/session/{thread_key}/events") => {
-            capability(Capability::SessionsRead)
-        }
+        | (&Method::GET, "/api/session/{thread_key}/events")
+        // The status report exposes thread keys, titles and execution state,
+        // all of which SessionsRead already reaches.
+        | (&Method::GET, "/api/status") => capability(Capability::SessionsRead),
         (&Method::POST, "/api/session/{thread_key}")
         | (&Method::POST, "/api/session/{thread_key}/messages")
         | (&Method::POST, "/api/session/{thread_key}/execute")

@@ -115,6 +115,13 @@ export type DiscordbotOptions = {
   state?: StateAdapter;
   stateKeyPrefix?: string;
   /**
+   * Channel (or thread) ids where a bare "status"/"health" mention gets the
+   * control-plane status reply. Empty/unset disables the fast-path entirely —
+   * the report surfaces cross-platform activity (session titles, requester
+   * names, error snippets), so exposure is an explicit per-channel opt-in.
+   */
+  statusChannelAllowlist?: readonly string[];
+  /**
    * Discord delta (mirrors slackbotv2's `triggerBotAllowlist`): bot user ids
    * whose messages may trigger/append despite being bot-authored.
    */

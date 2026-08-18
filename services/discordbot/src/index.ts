@@ -34,6 +34,12 @@ import {
 } from "./discord-threading";
 import { setGatewayConnected } from "./gateway";
 import {
+  STATUS_FAILURE_REPLY,
+  collectStatus,
+  formatStatus,
+  isStatusCommand,
+} from "./status";
+import {
   collectInitialContext,
   executeSessionTurn,
   forwardToSessionApi,
@@ -259,9 +265,59 @@ export function createDiscordbot(options: DiscordbotOptions): Discordbot {
       DEFAULT_MAX_CONCURRENT_EXECUTIONS_PER_GUILD,
   );
 
+  // A bare "status"/"health" mention answers straight from the control plane
+  // (api-rs /healthz + /api/status over HTTP — no SQL, no sandbox turn) so it
+  // still works when the agent pipeline is what's broken. The feature is
+  // OPT-IN per channel: statusChannelAllowlist empty/unset disables it
+  // entirely (the report exposes cross-platform activity — session titles,
+  // requester names, error snippets — so which channels may see it is a
+  // deployment decision, not a default). The exchange deliberately stays out
+  // of the session transcript: it's operational metadata, not conversation
+  // the agent should later see. Returns true when handled.
+  const statusChannels = new Set(options.statusChannelAllowlist ?? []);
+  const isStatusChannel = (threadKey: string): boolean => {
+    if (statusChannels.size === 0) return false;
+    const { channelId, threadId } = parseDiscordThreadKey(threadKey);
+    return (
+      (channelId !== undefined && statusChannels.has(channelId)) ||
+      (threadId !== undefined && statusChannels.has(threadId))
+    );
+  };
+  const maybeReplyStatus = async (
+    thread: Thread<DiscordbotThreadState>,
+    message: ChatMessage,
+  ): Promise<boolean> => {
+    if (!isStatusCommand(message.text ?? "")) return false;
+    if (!isStatusChannel(thread.id)) return false;
+    try {
+      const report = await collectStatus({
+        apiKey: options.apiKey,
+        apiUrl: options.apiUrl,
+        fetchFn: options.fetch,
+      });
+      await thread.post(formatStatus(report, userName));
+    } catch (error) {
+      // Internals (hostnames, auth errors) stay in the logs; the channel gets
+      // a generic line.
+      logger.warn("discordbot_status_reply_failed", {
+        error: errorMessage(error),
+      });
+      try {
+        await thread.post(STATUS_FAILURE_REPLY);
+      } catch {
+        // best-effort; nothing left to signal with.
+      }
+    }
+    return true;
+  };
+
   chat.onNewMention(async (thread, message) => {
     if (!isAllowedDiscordMessage(message, options, logger)) return;
+    // Subscribe before the status fast-path: the adapter has already created
+    // a thread for the mention, and an unsubscribed thread would silently
+    // ignore follow-ups.
     await thread.subscribe();
+    if (await maybeReplyStatus(thread, message)) return;
     await syncThreadMessageToSession(thread, message, {
       executionLimiter,
       mode: "execute",
@@ -272,6 +328,8 @@ export function createDiscordbot(options: DiscordbotOptions): Discordbot {
 
   chat.onSubscribedMessage(async (thread, message) => {
     if (!isAllowedDiscordMessage(message, options, logger)) return;
+    if (message.isMention === true && (await maybeReplyStatus(thread, message)))
+      return;
     await syncThreadMessageToSession(thread, message, {
       executionLimiter,
       mode: message.isMention === true ? "execute" : "append",

@@ -40,6 +40,9 @@ const options: DiscordbotOptions = {
   publicKey,
   discordApiUrl: optionalEnv("DISCORD_API_URL"),
   guildAllowlist: optionalList("DISCORDBOT_GUILD_ALLOWLIST"),
+  // Channels where "@bot status" answers with the control-plane report;
+  // unset = the status fast-path is disabled.
+  statusChannelAllowlist: optionalList("DISCORDBOT_STATUS_CHANNEL_IDS"),
   idleTimeoutMs: optionalNumberEnv("SESSION_IDLE_TIMEOUT_MS"),
   isGatewayActive: () => gateway.isActive(),
   maxConcurrentExecutionsPerGuild: optionalNumberEnv(
