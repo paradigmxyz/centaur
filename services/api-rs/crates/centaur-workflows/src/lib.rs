@@ -195,7 +195,7 @@ impl WorkflowEnablement {
         });
         metadata
             .principals
-            .retain(|workflow_name| self.is_enabled(workflow_name));
+            .retain(|workflow_name, _| self.is_enabled(workflow_name));
     }
 }
 
@@ -227,6 +227,12 @@ pub struct WorkflowHostSandboxRuntime {
 struct WorkflowPrincipalAssignments {
     required: BTreeSet<String>,
     registered: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum WorkflowPrincipalDeclaration {
+    Managed,
+    Existing(String),
 }
 
 impl WorkflowPrincipalAssignments {
@@ -298,24 +304,30 @@ impl WorkflowPrincipalRegistrar {
 
     async fn register_workflow_principals(
         &self,
-        principals: &BTreeSet<String>,
+        principals: &BTreeMap<String, WorkflowPrincipalDeclaration>,
     ) -> Result<BTreeMap<String, String>, WorkflowRuntimeError> {
         let mut registered = BTreeMap::new();
-        for workflow_name in principals {
-            let foreign_id = canonical_workflow_principal_foreign_id(workflow_name);
-            let record = self
-                .client
-                .upsert_principal(&PrincipalInput {
-                    foreign_id,
-                    name: format!("Workflow {workflow_name}"),
-                    labels: workflow_principal_labels(workflow_name),
-                    kind: Some("workflow".to_owned()),
-                    slack_user_id: None,
-                    slack_channel_id: None,
-                    slack_team_id: None,
-                    slack_email: None,
-                })
-                .await?;
+        for (workflow_name, declaration) in principals {
+            let record = match declaration {
+                WorkflowPrincipalDeclaration::Managed => {
+                    let foreign_id = canonical_workflow_principal_foreign_id(workflow_name);
+                    self.client
+                        .upsert_principal(&PrincipalInput {
+                            foreign_id,
+                            name: format!("Workflow {workflow_name}"),
+                            labels: workflow_principal_labels(workflow_name),
+                            kind: Some("workflow".to_owned()),
+                            slack_user_id: None,
+                            slack_channel_id: None,
+                            slack_team_id: None,
+                            slack_email: None,
+                        })
+                        .await?
+                }
+                WorkflowPrincipalDeclaration::Existing(foreign_id) => {
+                    self.client.get_principal(foreign_id).await?
+                }
+            };
             registered.insert(workflow_name.clone(), record.id);
         }
         Ok(registered)
@@ -1657,7 +1669,14 @@ struct PythonWorkflowDiscovery {
     #[serde(default)]
     schedule: Option<Value>,
     #[serde(default)]
-    principal: Option<bool>,
+    principal: Option<PythonWorkflowPrincipal>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum PythonWorkflowPrincipal {
+    Enabled(bool),
+    ForeignId(String),
 }
 
 #[derive(Debug, Deserialize)]
@@ -1670,7 +1689,7 @@ struct PythonWorkflowMetadata {
     webhooks: Vec<RegisteredWorkflowWebhook>,
     schedules: Vec<Value>,
     workflow_names: BTreeSet<String>,
-    principals: BTreeSet<String>,
+    principals: BTreeMap<String, WorkflowPrincipalDeclaration>,
 }
 
 fn metadata_from_discovery_payload(
@@ -1693,8 +1712,22 @@ fn metadata_from_discovery_payload(
             }
             metadata.schedules.push(schedule);
         }
-        if workflow.principal.unwrap_or(false) {
-            metadata.principals.insert(workflow.workflow_name);
+        match workflow.principal {
+            Some(PythonWorkflowPrincipal::Enabled(true)) => {
+                metadata.principals.insert(
+                    workflow.workflow_name,
+                    WorkflowPrincipalDeclaration::Managed,
+                );
+            }
+            Some(PythonWorkflowPrincipal::ForeignId(foreign_id))
+                if !foreign_id.trim().is_empty() =>
+            {
+                metadata.principals.insert(
+                    workflow.workflow_name,
+                    WorkflowPrincipalDeclaration::Existing(foreign_id.trim().to_owned()),
+                );
+            }
+            _ => {}
         }
     }
     metadata
@@ -1710,7 +1743,7 @@ async fn prepare_workflow_host_sandbox(
         if !discovery.principals.is_empty() {
             let workflow_names = discovery
                 .principals
-                .iter()
+                .keys()
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -1737,15 +1770,16 @@ async fn reconcile_workflow_principals(
     enablement: &WorkflowEnablement,
 ) -> Result<(), WorkflowRuntimeError> {
     let mut principals = discovery.principals.clone();
-    principals.retain(|workflow_name| enablement.is_enabled(workflow_name));
+    principals.retain(|workflow_name, _| enablement.is_enabled(workflow_name));
+    let required = principals.keys().cloned().collect();
     let registered = match registrar.register_workflow_principals(&principals).await {
         Ok(registered) => registered,
         Err(error) => {
-            sandbox.update_workflow_principals(BTreeMap::new(), principals);
+            sandbox.update_workflow_principals(BTreeMap::new(), required);
             return Err(error);
         }
     };
-    sandbox.update_workflow_principals(registered, principals);
+    sandbox.update_workflow_principals(registered, required);
     Ok(())
 }
 
@@ -2661,6 +2695,7 @@ async fn run_centaur_workflow_inner(
                 .get("max_duration_ms")
                 .and_then(Value::as_u64)
                 .unwrap_or(DEFAULT_AGENT_MAX_DURATION_MS);
+            let principal_foreign_id = parse_agent_principal(&input.input).map_err(absurd_error)?;
             let agent = ctx
                 .step("agent_turn", || {
                     let session_runtime = session_runtime.clone();
@@ -2683,6 +2718,7 @@ async fn run_centaur_workflow_inner(
                                 thread_key,
                                 harness_type,
                                 persona_id: None,
+                                principal_foreign_id,
                                 parts: vec![json!({"type": "text", "text": prompt})],
                                 client_message_id: client_message_id.clone(),
                                 session_metadata: metadata.clone(),
@@ -3570,6 +3606,7 @@ async fn run_python_agent_turn(
         .or_else(|| args.get("persona"))
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
+    let principal_foreign_id = parse_agent_principal(&args)?;
     let client_message_id = args
         .get("message_id")
         .or_else(|| args.get("client_message_id"))
@@ -3598,6 +3635,13 @@ async fn run_python_agent_turn(
     }
     if let Some(engine) = args.get("engine").and_then(Value::as_str) {
         object_insert(&mut execution_metadata, "engine", json!(engine));
+    }
+    if let Some(principal) = principal_foreign_id.as_deref() {
+        object_insert(
+            &mut execution_metadata,
+            "principal_foreign_id",
+            json!(principal),
+        );
     }
     let idle_timeout_ms = args
         .get("idle_timeout_ms")
@@ -3630,6 +3674,7 @@ async fn run_python_agent_turn(
             thread_key,
             harness_type,
             persona_id,
+            principal_foreign_id,
             parts,
             client_message_id,
             session_metadata,
@@ -3863,6 +3908,26 @@ fn first_str_arg(args: &Value, keys: &[&str]) -> Option<String> {
         .map(str::trim)
         .find(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn parse_agent_principal(args: &Value) -> Result<Option<String>, WorkflowRuntimeError> {
+    let Some(value) = args
+        .get("principal")
+        .or_else(|| args.get("principal_foreign_id"))
+    else {
+        return Ok(None);
+    };
+    let foreign_id = value.as_str().map(str::trim).ok_or_else(|| {
+        WorkflowRuntimeError::BadRequest(
+            "ctx.agent_turn principal must be a non-empty foreign ID".to_owned(),
+        )
+    })?;
+    if foreign_id.is_empty() {
+        return Err(WorkflowRuntimeError::BadRequest(
+            "ctx.agent_turn principal must be a non-empty foreign ID".to_owned(),
+        ));
+    }
+    Ok(Some(foreign_id.to_owned()))
 }
 
 fn parse_agent_harness(args: &Value) -> Result<Option<HarnessType>, WorkflowRuntimeError> {
@@ -4130,6 +4195,7 @@ struct AgentTurnRequest {
     thread_key: String,
     harness_type: HarnessType,
     persona_id: Option<String>,
+    principal_foreign_id: Option<String>,
     parts: Vec<Value>,
     client_message_id: String,
     session_metadata: Value,
@@ -4185,6 +4251,7 @@ async fn run_agent_session_turn(
         thread_key,
         harness_type,
         persona_id,
+        principal_foreign_id,
         parts,
         client_message_id,
         session_metadata,
@@ -4204,12 +4271,13 @@ async fn run_agent_session_turn(
         object_insert(&mut session_metadata, "workflow_owned_thread", json!(true));
     }
     session_runtime
-        .create_or_get_session(
+        .create_or_get_session_with_principal(
             &thread_key,
             &harness_type,
             persona_id.as_deref(),
             Some(session_metadata),
             HarnessConflictPolicy::Reject,
+            principal_foreign_id.as_deref(),
         )
         .await?;
     session_runtime
@@ -4432,6 +4500,21 @@ mod tests {
     }
 
     #[test]
+    fn parse_agent_principal_accepts_foreign_id_and_rejects_invalid_values() {
+        assert_eq!(
+            parse_agent_principal(&json!({"principal": " finance-automation "})).unwrap(),
+            Some("finance-automation".to_owned())
+        );
+        assert_eq!(
+            parse_agent_principal(&json!({"principal_foreign_id": "support"})).unwrap(),
+            Some("support".to_owned())
+        );
+        assert_eq!(parse_agent_principal(&json!({})).unwrap(), None);
+        assert!(parse_agent_principal(&json!({"principal": "  "})).is_err());
+        assert!(parse_agent_principal(&json!({"principal": true})).is_err());
+    }
+
+    #[test]
     fn parse_agent_batch_requires_unique_names_and_adds_metadata() {
         let message = json!({
             "type": "ctx.run_agents",
@@ -4440,6 +4523,7 @@ mod tests {
                 {
                     "name": "correctness",
                     "text": "Review correctness",
+                    "principal": "security-reviewers",
                     "metadata": {"pr": 42}
                 },
                 {"name": "security", "text": "Review security"}
@@ -4457,6 +4541,10 @@ mod tests {
             vec!["correctness", "security"]
         );
         assert_eq!(agents[0].args.pointer("/metadata/pr"), Some(&json!(42)));
+        assert_eq!(
+            agents[0].args.get("principal"),
+            Some(&json!("security-reviewers"))
+        );
         assert_eq!(
             agents[0]
                 .args
@@ -4836,6 +4924,7 @@ mod tests {
                 {
                     "workflow_name": "manual_workflow",
                     "source_path": "workflows/manual_workflow.py",
+                    "principal": "finance-automation",
                 },
             ],
         }))
@@ -4853,7 +4942,16 @@ mod tests {
             metadata.schedules[0].get("workflow_name"),
             Some(&json!("scheduled_workflow"))
         );
-        assert!(metadata.principals.contains("scheduled_workflow"));
+        assert_eq!(
+            metadata.principals.get("scheduled_workflow"),
+            Some(&WorkflowPrincipalDeclaration::Managed)
+        );
+        assert_eq!(
+            metadata.principals.get("manual_workflow"),
+            Some(&WorkflowPrincipalDeclaration::Existing(
+                "finance-automation".to_owned()
+            ))
+        );
     }
 
     #[test]
@@ -4911,7 +5009,10 @@ mod tests {
     #[tokio::test]
     async fn workflow_principal_requires_workflow_host_sandbox() {
         let discovery = PythonWorkflowMetadata {
-            principals: BTreeSet::from(["nightly_report".to_owned()]),
+            principals: BTreeMap::from([(
+                "nightly_report".to_owned(),
+                WorkflowPrincipalDeclaration::Managed,
+            )]),
             workflow_names: BTreeSet::from(["nightly_report".to_owned()]),
             ..PythonWorkflowMetadata::default()
         };
@@ -5123,7 +5224,7 @@ mod tests {
         assert_eq!(metadata.webhooks.len(), 1);
         assert_eq!(metadata.webhooks[0].workflow_name, "allowed_workflow");
         assert_eq!(
-            metadata.principals.iter().cloned().collect::<Vec<_>>(),
+            metadata.principals.keys().cloned().collect::<Vec<_>>(),
             vec!["allowed_workflow".to_owned()]
         );
     }

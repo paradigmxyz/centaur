@@ -66,11 +66,13 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
 
 `WORKFLOW_PRINCIPAL` is optional. Use it when the workflow host calls tools
 directly with `ctx.call_tool(...)` and should have its own credential boundary.
-The API derives and registers the `workflow-nightly-report` principal from
-`WORKFLOW_NAME` and runs that workflow-host sandbox under it. Workflow code
-cannot choose another principal id, display name, or labels. Grant the required
-tool roles or secrets to the derived principal. `WORKFLOW_PRINCIPAL = True`
-requires `apiRs.workflowHostSandbox=true`, which renders
+Set it to `True` to have the API derive and register the
+`workflow-nightly-report` principal from `WORKFLOW_NAME`. Set it to an existing
+principal foreign ID, such as `WORKFLOW_PRINCIPAL = "finance-automation"`, to
+run the workflow-host sandbox under that principal instead. An unknown foreign
+ID fails startup. Grant the required tool roles or secrets to the selected
+principal. Any `WORKFLOW_PRINCIPAL` value requires
+`apiRs.workflowHostSandbox=true`, which renders
 `WORKFLOW_HOST_SANDBOX=true`; startup fails if workflow-host sandboxing is
 disabled.
 
@@ -139,9 +141,22 @@ discarding successful reviews:
 ```
 
 Batch items accept the same model, provider, reasoning, harness, persona,
-prompt, content, idle timeout, maximum duration, and metadata options as
-`ctx.agent_turn(...)`. Session and idempotency fields are reserved because the
-batch runtime assigns them independently for each agent.
+principal, prompt, content, idle timeout, maximum duration, and metadata
+options as `ctx.agent_turn(...)`. Session and idempotency fields are reserved
+because the batch runtime assigns them independently for each agent.
+
+Set `principal` to an existing principal foreign ID when an agent turn needs a
+specific credential boundary:
+
+```python
+result = await ctx.agent_turn(
+    "Prepare the finance report.",
+    principal="finance-automation",
+)
+```
+
+The principal is resolved before the session is created. An unknown or empty
+foreign ID fails the turn instead of using the thread-derived principal.
 
 ## Run a workflow
 

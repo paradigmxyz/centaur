@@ -312,6 +312,25 @@ class WorkflowHostTests(unittest.TestCase):
             {"model": "claude-opus-4-8", "reasoning": "low", "text": "cheap step"},
         )
 
+    def test_agent_turn_forwards_principal_foreign_id(self) -> None:
+        host = load_workflow_host()
+        rpc = RequestRpc()
+        ctx = host.WorkflowContext(
+            rpc,
+            run_id="run-123",
+            task_id="task-456",
+            workflow_name="sample",
+        )
+
+        result = asyncio.run(
+            ctx.agent_turn("do the thing", principal="finance-automation")
+        )
+
+        self.assertEqual(
+            result,
+            {"principal": "finance-automation", "text": "do the thing"},
+        )
+
     def test_run_agents_applies_defaults_and_preserves_input_order(self) -> None:
         host = load_workflow_host()
         rpc = RequestRpc()
@@ -577,6 +596,21 @@ class WorkflowHostTests(unittest.TestCase):
 
         assert registered is not None
         self.assertEqual(host.normalize_principal(registered), True)
+
+    def test_load_workflow_file_reads_workflow_principal_foreign_id(self) -> None:
+        host = load_workflow_host()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "principal_workflow.py"
+            path.write_text(
+                "WORKFLOW_NAME = 'principal_workflow'\n"
+                "WORKFLOW_PRINCIPAL = ' finance-automation '\n"
+                "def handler(inp, ctx):\n"
+                "    return None\n"
+            )
+            registered = host.load_workflow_file(path)
+
+        assert registered is not None
+        self.assertEqual(host.normalize_principal(registered), "finance-automation")
 
     def test_workflow_name_from_source_reads_string_constant(self) -> None:
         host = load_workflow_host()

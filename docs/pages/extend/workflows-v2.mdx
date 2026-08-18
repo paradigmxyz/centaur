@@ -171,9 +171,16 @@ cargo run -p centaur-perms -- \
   --tool slack
 ```
 
-The principal id is always `workflow-` plus the slugged `WORKFLOW_NAME`.
-Workflow code cannot choose another principal id, display name, or labels.
-`WORKFLOW_PRINCIPAL = True` requires `apiRs.workflowHostSandbox=true`, which
+To use an existing principal instead, declare its foreign ID:
+
+```python
+WORKFLOW_PRINCIPAL = "finance-automation"
+```
+
+The string form resolves the existing principal and fails startup when it does
+not exist. It does not create or update the principal. The `True` form remains
+`workflow-` plus the slugged `WORKFLOW_NAME`. Any `WORKFLOW_PRINCIPAL` value
+requires `apiRs.workflowHostSandbox=true`, which
 renders `WORKFLOW_HOST_SANDBOX=true`; startup fails if a workflow declares a
 principal while workflow-host sandboxing is disabled.
 
@@ -204,6 +211,19 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
 Keep `harness` and `model` together — a model is only meaningful within its
 harness, and because kwargs override `AGENT_DEFAULTS` key by key, overriding one
 without the other can strand a model on the wrong harness.
+
+Agent turns can also select an existing principal by foreign ID. This applies
+to `ctx.agent_turn(...)`, its aliases, and each `ctx.run_agents(...)` item:
+
+```python
+result = await ctx.agent_turn(
+    "Prepare the finance report.",
+    principal="finance-automation",
+)
+```
+
+Principal lookup failures fail the turn. Put `principal` in `AGENT_DEFAULTS`
+when every agent turn in the workflow should use the same principal.
 
 ### Declare webhook metadata in the workflow
 
