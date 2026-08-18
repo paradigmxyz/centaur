@@ -76,7 +76,6 @@ class Console::IntegrationsControllerTest < ActionDispatch::IntegrationTest
 
     credential = BrokerCredential.create!(
       oauth_app: oauth_apps(:acme_slack),
-      namespace: "acme",
       foreign_id: "slack-slack-member-sub",
       name: "Slack – Member",
       token_endpoint: "https://slack.com/api/oauth.v2.access",

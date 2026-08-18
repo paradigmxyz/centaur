@@ -350,7 +350,6 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     PrincipalRole.find_or_create_by!(principal: principal, role: role)
 
     bot_secret = StaticSecret.new(
-      namespace: "globex",
       foreign_id: "slack-bot-#{SecureRandom.hex(4)}",
       replace_config: {
         "proxy_value" => "SLACK_BOT_TOKEN",

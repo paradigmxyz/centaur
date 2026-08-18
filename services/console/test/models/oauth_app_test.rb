@@ -78,7 +78,6 @@ class OauthAppTest < ActiveSupport::TestCase
     app.save!
     credential = BrokerCredential.create!(
       oauth_app: app,
-      namespace: "default",
       foreign_id: "slack-user-#{SecureRandom.hex(4)}",
       token_endpoint: "https://slack.com/api/oauth.v2.access",
       provider_subject: "U123",
