@@ -408,6 +408,41 @@ class AttioClient:
         data = self._request("POST", "/tasks", json=body)
         return data.get("data", {})
 
+    def update_task(
+        self,
+        task_id: str,
+        is_completed: bool | None = None,
+        deadline: str | None = None,
+        assignees: list[str] | None = None,
+        linked_records: list[dict] | None = None,
+    ) -> dict:
+        """Update an existing task's status, deadline, assignees, or linked records."""
+        updates: dict[str, Any] = {}
+        if is_completed is not None:
+            updates["is_completed"] = is_completed
+        if deadline is not None:
+            updates["deadline_at"] = deadline
+        if assignees is not None:
+            updates["assignees"] = [
+                {
+                    "referenced_actor_type": "workspace-member",
+                    "referenced_actor_id": assignee,
+                }
+                for assignee in assignees
+            ]
+        if linked_records is not None:
+            updates["linked_records"] = linked_records
+        if not updates:
+            raise ValueError("At least one task field must be provided")
+
+        data = self._request("PATCH", f"/tasks/{task_id}", json={"data": updates})
+        return data.get("data", {})
+
+    def delete_task(self, task_id: str) -> bool:
+        """Delete a task by ID."""
+        self._request("DELETE", f"/tasks/{task_id}")
+        return True
+
     def list_workspace_members(self) -> list[dict]:
         """List workspace members."""
         data = self._request("GET", "/workspace_members")

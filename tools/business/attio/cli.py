@@ -694,6 +694,31 @@ def add_task(
     console.print(f"[cyan]ID:[/] {task_id}")
 
 
+@app.command("complete-task")
+def complete_task(
+    task_id: str = typer.Argument(..., help="Task ID"),
+):
+    """Mark a task complete."""
+    client = _get_client()
+    task = client.update_task(task_id, is_completed=True)
+    content = task.get("content_plaintext", task_id)
+    console.print(f"[green]✓ Completed {content}[/]")
+
+
+@app.command("delete-task")
+def delete_task(
+    task_id: str = typer.Argument(..., help="Task ID"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
+):
+    """Permanently delete a task."""
+    if not yes and not typer.confirm(f"Delete task {task_id}?"):
+        raise typer.Abort()
+
+    client = _get_client()
+    client.delete_task(task_id)
+    console.print(f"[green]✓ Deleted task {task_id}[/]")
+
+
 @app.command()
 def members():
     """List workspace members."""

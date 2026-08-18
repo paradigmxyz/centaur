@@ -47,3 +47,52 @@ def test_upload_file_rejects_missing_path(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="does not exist"):
         client.upload_file("companies", "record-id", str(tmp_path / "missing.pdf"))
+
+
+def test_update_task_marks_task_complete() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "PATCH"
+        assert request.url.path == "/v2/tasks/task-123"
+        assert request.read() == b'{"data":{"is_completed":true}}'
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "id": {"task_id": "task-123"},
+                    "content_plaintext": "Follow up",
+                    "is_completed": True,
+                }
+            },
+        )
+
+    client = AttioClient(api_key="test-key")
+    client._client = httpx.Client(
+        base_url="https://api.attio.com/v2",
+        transport=httpx.MockTransport(handler),
+    )
+
+    result = client.update_task("task-123", is_completed=True)
+
+    assert result["is_completed"] is True
+
+
+def test_update_task_rejects_empty_update() -> None:
+    client = AttioClient(api_key="test-key")
+
+    with pytest.raises(ValueError, match="At least one task field"):
+        client.update_task("task-123")
+
+
+def test_delete_task() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "DELETE"
+        assert request.url.path == "/v2/tasks/task-123"
+        return httpx.Response(200, json={})
+
+    client = AttioClient(api_key="test-key")
+    client._client = httpx.Client(
+        base_url="https://api.attio.com/v2",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert client.delete_task("task-123") is True
