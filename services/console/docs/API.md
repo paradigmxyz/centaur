@@ -607,7 +607,7 @@ Returns `201`. Response shape (note that `credentials` and `token_endpoint_heade
 
 ## PG DSN secrets
 
-A PG DSN secret is a Postgres upstream credential: a connection string (DSN) resolved from a single secret [source](#secret-sources), plus an optional `SET ROLE` for the upstream session. It is delivered to `iron-proxy` with a required `foreign_id` and a required `database` for routing. The proxy multiplexes upstreams through one listener and routes by the Postgres database name the client sends. Multiple secrets may use the same `database` so different principals can route that database through different upstream roles. A principal's effective proxy config emits only one route per database, with higher-priority grants winning.
+A PG DSN secret is a Postgres upstream credential: a connection string (DSN) resolved from a single secret [source](#secret-sources), plus an optional `SET ROLE` for the upstream session. It is delivered to `iron-proxy` with a required `foreign_id` and a required `database` for routing. The proxy multiplexes upstreams through one listener: `database` identifies the physical database, while clients send `foreign_id` as the `iron.route` Postgres startup parameter to select the permission route. Multiple granted routes may target the same physical database. If a database has more than one route, omitting `iron.route` fails closed; a database with one route remains backward compatible.
 
 Listener and client knobs (bind address, client auth) are deliberately not modeled: they are proxy-host deployment concerns. There are no [request rules](#request-rules) either: a Postgres listener matches by port, not by request.
 
@@ -619,7 +619,7 @@ Listener and client knobs (bind address, client auth) are deliberately not model
 | `name`        | optional    | |
 | `description` | optional    | |
 | `labels`      | optional    | Object; defaults to `{}`. |
-| `database`    | required    | Database name clients connect to through the proxy. Must match the upstream DSN's database. If several granted secrets use the same database, grant priority selects the effective route. |
+| `database`    | required    | Physical database name clients connect to through the proxy. Must match the upstream DSN's database. |
 | `role`        | optional    | Upstream `SET ROLE` applied to the session. |
 | `settings`    | optional    | Ordered array of session variables (GUCs) the proxy SETs at session start, before the `SET ROLE`, and pins so clients cannot override them. Each entry is `{ "name", "value" }` for a literal value, or `{ "name", "value_from" }` to resolve the value from the assigned proxy principal or proxy labels at sync time (see [derived setting values](#derived-setting-values)). Names must be a bare or dotted identifier; `role` and `session_authorization` are reserved. Replaced wholesale on update. |
 | `dsn`         | required    | A [secret source](#secret-sources) resolving to the connection string. Replaced wholesale on update. |
@@ -1637,7 +1637,7 @@ Notes on the proxy-sync payload, which differs from the REST representation:
 - The config hash incorporates the principal assignment, so assigning, swapping, or clearing the principal always changes the hash and the proxy refetches. A swap is a full replacement: the proxy should drop the previously delivered config rather than merge.
 - The delivered config covers the proxy's principal's **effective grants**: secrets granted to the principal directly plus those granted to any [role](#roles) it holds. A secret reachable through more than one path appears once.
 - `secrets` carries one entry per granted static secret that has a source (sourceless static secrets are skipped). `transforms` carries one `gcp_auth` transform per granted GCP auth secret, one `aws_auth` transform per granted AWS auth secret, one `hmac_sign` transform per granted HMAC secret, and a single bundled `oauth_token` transform whose `config.tokens` lists every granted OAuth token secret. An `hmac_sign` transform omits `allow_chunked_body` when it is `false`.
-- `postgres` carries one entry per granted PG DSN secret, with the opaque `id` and `foreign_id` alongside it for sandbox env-var derivation and operator lookup. The proxy routes Postgres sessions by `database`; `role` is omitted when blank, as is `settings` when no session variables are configured.
+- `postgres` carries one entry per granted PG DSN secret, with the opaque `id` and `foreign_id` alongside it. The proxy routes Postgres sessions by physical `database` plus `foreign_id` supplied as `iron.route`; `role` is omitted when blank, as is `settings` when no session variables are configured.
 - Each source is flattened: its `config` keys are merged up and tagged with `type` (the `source_type`). A `control_plane` source delivers its decrypted value inline as `value`.
 - Rules use `methods` here, versus `http_methods` in the REST API. Blank rule fields are omitted.
 - The top-level `rules`, `mcp`, and `ingest_token` fields the proxy also understands are intentionally omitted; iron-control has no models for them. Rules are carried per secret instead.

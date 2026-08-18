@@ -43,18 +43,33 @@
 {{- end -}}
 {{- $toolsUseRepoCache := and .Values.repoCache.enabled (gt (len $toolSources) 0) -}}
 {{- $useOverlayRepoCache := and .Values.repoCache.enabled (gt (len $overlaySources) 0) -}}
+{{- $toolsBaseSource := default "repository" .Values.toolServer.baseSource -}}
+{{- if and (ne $toolsBaseSource "repository") (ne $toolsBaseSource "image") -}}
+{{- fail "toolServer.baseSource must be either repository or image" -}}
+{{- end -}}
+{{- $useImageBaseTools := eq $toolsBaseSource "image" -}}
 {{- $toolDirs := list "/app/tools" -}}
 {{- $workflowDirs := "/app/workflows" -}}
 {{- if $toolsUseRepoCache -}}
+{{- if not $useImageBaseTools -}}
 {{- $toolDirs = list -}}
-{{- range $source := $toolSources }}
+{{- end -}}
+{{- range $index, $source := $toolSources }}
+{{- if or (not $useImageBaseTools) (gt $index 0) }}
 {{- $toolDirs = append $toolDirs (printf "%s/%s/%s" $.Values.repoCache.hostPath (get $source "repo") (get $source "subdir")) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- $publicToolDirs := list -}}
 {{- if and .Values.repoCache.enabled (gt (len $publicToolSources) 0) -}}
-{{- range $source := $publicToolSources }}
+{{- $firstToolSource := index $toolSources 0 -}}
+{{- if and $useImageBaseTools (eq (get $firstToolSource "visibility") "public") -}}
+{{- $publicToolDirs = append $publicToolDirs "/app/tools" -}}
+{{- end -}}
+{{- range $index, $source := $toolSources }}
+{{- if and (or (not $useImageBaseTools) (gt $index 0)) (eq (get $source "visibility") "public") }}
 {{- $publicToolDirs = append $publicToolDirs (printf "%s/%s/%s" $.Values.repoCache.hostPath (get $source "repo") (get $source "subdir")) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- if and .Values.repoCache.enabled (gt (len $apiWorkflowDirList) 0) -}}
@@ -480,11 +495,9 @@ spec:
 {{- $extraToolSources = append $extraToolSources $source }}
 {{- end }}
 {{- end }}
-            # Ordered overlay tools are copied into each sandbox at boot by a
-            # tools-bootstrap init container, so adding a tool is a push to the
-            # repo, not an api-rs image rebuild. api-rs reads the same ordered
-            # source list for tool-secret discovery and refreshes grants
-            # in-process.
+            # The first source comes from repo-cache by default or from both
+            # runtime images in image mode. Later sources remain live overlays;
+            # api-rs and sandbox bootstrap resolve the same ordered chain.
             - name: KUBERNETES_TOOLS_REPO
               value: {{ get $firstToolSource "repo" | quote }}
 {{- with (get $firstToolSource "ref") }}
@@ -495,6 +508,8 @@ spec:
               value: {{ get $firstToolSource "subdir" | quote }}
             - name: KUBERNETES_TOOLS_VISIBILITY
               value: {{ get $firstToolSource "visibility" | default "private" | quote }}
+            - name: KUBERNETES_TOOLS_BASE_SOURCE
+              value: {{ $toolsBaseSource | quote }}
 {{- if $extraToolSources }}
             - name: KUBERNETES_TOOLS_EXTRA_SOURCES
               value: {{ toJson $extraToolSources | quote }}

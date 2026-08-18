@@ -309,7 +309,7 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     )
   end
 
-  test "sync_postgres emits only the highest-priority route for each database" do
+  test "sync_postgres emits every distinct route for a shared database" do
     principal = principals(:globex_user)
     low = pg_dsn_secrets(:acme_analytics_pg)
     high = PgDsnSecret.new(
@@ -326,9 +326,9 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     Grant.create!(principal: principal, pg_dsn_secret: high, created_by: users(:acme_admin), priority: 100)
 
     entries = PrincipalSyncConfigSnapshot.sync_postgres_for(principal)
-    assert_equal 1, entries.length
-    assert_equal "pg-analytics-privileged", entries.first["foreign_id"]
-    assert_equal "PG_PRIVILEGED_DSN", entries.first.dig("dsn", "var")
+    assert_equal 2, entries.length
+    assert_equal [ "pg-analytics", "pg-analytics-privileged" ], entries.pluck("foreign_id")
+    assert_equal [ "PG_ANALYTICS_DSN", "PG_PRIVILEGED_DSN" ], entries.map { |entry| entry.dig("dsn", "var") }
   end
 
   test "sync_postgres is empty without pg_dsn grants" do

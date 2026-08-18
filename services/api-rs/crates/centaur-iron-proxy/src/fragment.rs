@@ -323,8 +323,8 @@ pub fn placeholder_env(fragments: &[ProxyFragment]) -> BTreeMap<String, String> 
 /// [`placeholder_env`] for `pg_dsn` secrets — each tool declares the DSN env
 /// var `name` and `database` verbatim in its `pyproject.toml`, so the shape is
 /// fixed at startup (tools don't hot-reload). iron-proxy multiplexes every
-/// upstream through one listener (routing by database), so the DSNs differ only
-/// by database; api-rs stamps the shared per-sandbox host/credential at create.
+/// upstream through one listener. Clients send the physical database plus the
+/// route foreign_id; api-rs stamps the shared host/credential at create.
 /// This lets every sandbox (warm/bootstrap included) be born with the full DSN
 /// set without resolving a principal — the reassignable proxy enforces
 /// per-principal access at runtime. Sorted and deduped for stable env ordering.

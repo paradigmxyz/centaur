@@ -47,6 +47,7 @@ GOOGLE_DOCS_SOURCE_TYPE = "google_doc"
 COMPANY_CONTEXT_DSN_ENV = "CENTAUR_POSTGRES_DSN"
 COMPANY_CONTEXT_DATABASE_ENV = "COMPANY_CONTEXT_POSTGRES_DATABASE"
 DEFAULT_POSTGRES_DATABASE = "ai_v2"
+POSTGRES_ROUTE = "company-context"
 COMPANY_CONTEXT_LOOKUP_METRICS_ENABLED_ENV = "COMPANY_CONTEXT_LOOKUP_METRICS_ENABLED"
 VICTORIAMETRICS_PUSH_ENABLED_ENV = "VICTORIAMETRICS_PUSH_ENABLED"
 VICTORIAMETRICS_URL_ENV = "VICTORIAMETRICS_URL"
@@ -624,6 +625,7 @@ class CompanyContextClient:
         return await asyncpg.connect(
             _database_url_with_name(self._require_database_url(), _postgres_database_name()),
             command_timeout=30,
+            server_settings={"iron.route": POSTGRES_ROUTE},
         )
 
     async def _query_embedding_async(self, query: str) -> str:

@@ -63,6 +63,31 @@ jobs:
       - name: Lint chart
         run: helm lint contrib/chart
 
+      - name: Validate ordered tool sources
+        run: |
+          set -e
+          render_tools() {
+            helm template centaur contrib/chart \
+              --set secretManager.existingSecretName=test \
+              --set firewall.existingCaSecretName=test \
+              --set firewall.existingCaKeySecretName=test \
+              --set toolServer.baseSource="$1" \
+              --set 'overlays.sources[0].repo=acme/base' \
+              --set 'overlays.sources[1].repo=acme/overlay'
+          }
+
+          repository_rendered="$(render_tools repository)"
+          printf '%s\n' "$repository_rendered" | grep -F 'value: "/var/lib/centaur/repos/acme/base/tools:/var/lib/centaur/repos/acme/overlay/tools"'
+          printf '%s\n' "$repository_rendered" | grep -F 'value: "repository"'
+
+          image_rendered="$(render_tools image)"
+          printf '%s\n' "$image_rendered" | grep -F 'value: "/app/tools:/var/lib/centaur/repos/acme/overlay/tools"'
+          if printf '%s\n' "$image_rendered" | grep -F 'value: "/var/lib/centaur/repos/acme/base/tools'; then
+            echo "image-backed TOOL_DIRS unexpectedly includes the raw base repository" >&2
+            exit 1
+          fi
+          printf '%s\n' "$image_rendered" | grep -F 'value: "image"'
+
       - name: Install yq
         uses: mikefarah/yq@1b9b4ac5187171d2e5e3129be0cfa827c7f9d53d # v4.53.3
 

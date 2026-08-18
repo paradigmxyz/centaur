@@ -77,9 +77,9 @@ pub struct AgentSandboxConfig {
     pub state_volume: Option<StateVolumeConfig>,
     pub iron_proxy: Option<IronProxyConfig>,
     pub iron_control: IronControlSettings,
-    /// When set, every sandbox gets a `tools-bootstrap` init container that
-    /// git-clones the tools repo into the agent's `/app/tools`, and `TOOL_DIRS`
-    /// is set so the agent's shim installer finds them.
+    /// Configures the ordered tool sources exposed to each sandbox. Repository
+    /// sources and image bases with overlays get a `tools-bootstrap` init
+    /// container that publishes the resolved tree into `/app/tools`.
     pub tools: Option<ToolsConfig>,
     /// In-cluster OTLP collector (e.g. Laminar) used for observability-capable
     /// sandboxes. Sandbox pod egress is granted by chart-level label policy;
@@ -704,14 +704,19 @@ fn build_agent_sandbox(
         .as_ref()
         .filter(|_| repo_cache_enabled)
         .map(|tools| tools.scoped_for_repo_cache_access(&spec.capabilities.repo_cache));
-    let repo_cache_tools = scoped_tools.as_ref().filter(|tools| tools.has_sources());
-    let baked_base_tools = config.tools.is_some() && repo_cache_tools.is_none();
+    let bootstrap_tools = scoped_tools
+        .as_ref()
+        .filter(|tools| tools.requires_bootstrap());
+    let use_baked_base_directly = match scoped_tools.as_ref() {
+        Some(tools) => tools.baked_base && !tools.repo.is_empty() && bootstrap_tools.is_none(),
+        None => config.tools.is_some(),
+    };
 
-    if repo_cache_tools.is_some() {
-        for (name, value) in tools::agent_env(repo_cache_tools) {
+    if bootstrap_tools.is_some() {
+        for (name, value) in tools::agent_env(bootstrap_tools) {
             upsert_env(&mut agent_env, &name, value);
         }
-    } else if baked_base_tools {
+    } else if use_baked_base_directly {
         for (name, value) in tools::baked_base_agent_env() {
             upsert_env(&mut agent_env, &name, value);
         }
@@ -744,9 +749,9 @@ fn build_agent_sandbox(
     // Tool sources are bootstrapped into an emptyDir by an init container and
     // mounted into the agent at the same path `TOOL_DIRS` points at. The mount is
     // writable so `centaur-tools refresh` can fetch and republish the tree.
-    if repo_cache_tools.is_some() {
-        volume_mounts.extend(tools::agent_volume_mounts_json(repo_cache_tools));
-        volumes.extend(tools::volumes_json(repo_cache_tools));
+    if bootstrap_tools.is_some() {
+        volume_mounts.extend(tools::agent_volume_mounts_json(bootstrap_tools));
+        volumes.extend(tools::volumes_json(bootstrap_tools));
     }
     insert_optional(
         &mut container,
@@ -754,8 +759,8 @@ fn build_agent_sandbox(
         (!volume_mounts.is_empty()).then_some(volume_mounts),
     );
 
-    // tools-bootstrap publishes the tools repo into /app/tools.
-    if let Some(tools) = repo_cache_tools {
+    // tools-bootstrap publishes the resolved source chain into /app/tools.
+    if let Some(tools) = bootstrap_tools {
         // The sandbox NetworkPolicy only allows egress to the per-sandbox proxy
         // (plus api-rs and DNS), so when iron-proxy is on the clone must ride it.
         // `apply_proxy_env` ran before this builder, so the resolved proxy URL is
@@ -782,7 +787,7 @@ fn build_agent_sandbox(
         "automountServiceAccountToken": false,
         "enableServiceLinks": false,
     });
-    if repo_cache_tools.is_some() {
+    if bootstrap_tools.is_some() {
         pod_spec["securityContext"] = tools::pod_security_context_json();
     }
     insert_optional(
@@ -1408,6 +1413,29 @@ mod tests {
                 .iter()
                 .any(|volume| volume.name == "tools-root" || volume.name == "tools-repo-cache")
         }));
+    }
+
+    #[test]
+    fn public_repo_cache_does_not_expose_private_baked_tools() {
+        let spec = SandboxSpec::new("centaur-agent:latest").capabilities(SandboxCapabilities {
+            repo_cache: RepoCacheAccess::Public,
+            observability_enabled: true,
+            api_server_enabled: true,
+        });
+        let mut tools = ToolsConfig::new("acme/private-tools", "api:test");
+        tools.baked_base = true;
+        tools.repo_cache_path = Some("/var/lib/centaur/repos".to_owned());
+        let config = AgentSandboxConfig::new("centaur", test_iron_control_settings()).tools(tools);
+
+        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+        let pod_spec = &sandbox.spec.pod_template.spec;
+        assert!(pod_spec.init_containers.as_ref().is_none_or(Vec::is_empty));
+        assert!(
+            pod_spec.containers[0]
+                .env
+                .as_ref()
+                .is_none_or(|env| env.iter().all(|env| env.name != "TOOL_DIRS"))
+        );
     }
 
     #[test]

@@ -316,9 +316,7 @@ class PrincipalSyncConfigSnapshot < ApplicationRecord
   private_class_method :sync_postgres_entries_with_templates_for
 
   def self.effective_pg_dsn_secrets_for(principal)
-    principal.granted_pg_dsn_secrets.each_with_object({}) do |pg, winners|
-      winners[pg.database] = pg if pg.dsn_source
-    end.values
+    principal.granted_pg_dsn_secrets.select(&:dsn_source)
   end
   private_class_method :effective_pg_dsn_secrets_for
 
