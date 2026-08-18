@@ -1,0 +1,100 @@
+{{- $console := include "centaur.consoleValues" . | fromYaml }}
+{{- if $console.sqlExporter.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "console-sql-exporter") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "console-sql-exporter") | nindent 4 }}
+data:
+  sql_exporter.yml: |-
+    global:
+      scrape_timeout: {{ $console.sqlExporter.scrapeTimeout }}
+      scrape_timeout_offset: 500ms
+      min_interval: {{ $console.sqlExporter.minInterval }}
+      max_connections: 2
+      max_idle_connections: 2
+      max_connection_lifetime: 10m
+    target:
+      name: console_solid_queue
+      # SQLEXPORTER_TARGET_DSN overrides this placeholder at startup. Keeping
+      # the real credential out of the ConfigMap also keeps it out of rendered
+      # Helm output.
+      data_source_name: postgresql://invalid/invalid
+      collectors: [console_solid_queue]
+    collectors:
+      - collector_name: console_solid_queue
+        metrics:
+          - metric_name: centaur_console_queue_executions
+            type: gauge
+            help: Current Solid Queue execution count by queue and state.
+            key_labels: [queue, state]
+            values: [value]
+            query: |
+              WITH executions AS (
+                SELECT queue_name AS queue, 'ready'::text AS state
+                FROM solid_queue_ready_executions
+                UNION ALL
+                SELECT jobs.queue_name AS queue, 'claimed'::text AS state
+                FROM solid_queue_claimed_executions AS executions
+                JOIN solid_queue_jobs AS jobs ON jobs.id = executions.job_id
+                UNION ALL
+                SELECT queue_name AS queue, 'scheduled'::text AS state
+                FROM solid_queue_scheduled_executions
+                UNION ALL
+                SELECT queue_name AS queue, 'blocked'::text AS state
+                FROM solid_queue_blocked_executions
+                UNION ALL
+                SELECT jobs.queue_name AS queue, 'failed'::text AS state
+                FROM solid_queue_failed_executions AS executions
+                JOIN solid_queue_jobs AS jobs ON jobs.id = executions.job_id
+              )
+              SELECT queue, state, COUNT(*)::double precision AS value
+              FROM executions
+              GROUP BY queue, state
+          - metric_name: centaur_console_queue_oldest_ready_age_seconds
+            type: gauge
+            help: Age in seconds of the oldest execution ready to run in each queue.
+            key_labels: [queue]
+            values: [value]
+            query: |
+              SELECT
+                queue_name AS queue,
+                GREATEST(
+                  EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - MIN(created_at))),
+                  0
+                )::double precision AS value
+              FROM solid_queue_ready_executions
+              GROUP BY queue_name
+          - metric_name: centaur_console_queue_processes
+            type: gauge
+            help: Registered Solid Queue process count by process kind.
+            key_labels: [kind]
+            values: [value]
+            query: |
+              SELECT kind, COUNT(*)::double precision AS value
+              FROM solid_queue_processes
+              GROUP BY kind
+          - metric_name: centaur_console_queue_max_heartbeat_age_seconds
+            type: gauge
+            help: Maximum Solid Queue process heartbeat age in seconds by process kind.
+            key_labels: [kind]
+            values: [value]
+            query: |
+              SELECT
+                kind,
+                GREATEST(
+                  EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - MIN(last_heartbeat_at))),
+                  0
+                )::double precision AS value
+              FROM solid_queue_processes
+              GROUP BY kind
+          - metric_name: centaur_console_queue_paused
+            type: gauge
+            help: Whether a Solid Queue queue is paused. Present with value 1 only for paused queues.
+            key_labels: [queue]
+            static_value: 1
+            query: |
+              SELECT queue_name AS queue
+              FROM solid_queue_pauses
+{{- end }}

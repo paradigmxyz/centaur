@@ -103,17 +103,41 @@ class UserTest < ActiveSupport::TestCase
     { subject: "sub-1", email: "newcomer@example.com", email_verified: true, name: "New Comer" }.merge(overrides)
   end
 
-  test "link_or_provision creates a pending user + identity for an unknown email" do
+  test "link_or_provision creates an active user + identity for an unknown email" do
     user = nil
     assert_difference -> { User.count }, 1 do
       assert_difference -> { UserIdentity.count }, 1 do
         user = User.link_or_provision(provider: "google", identity: identity)
       end
     end
-    assert user.pending?
+    assert user.active?
     assert_not user.admin?
     assert_equal "New Comer", user.name
     assert_equal [ [ "google", "sub-1" ] ], user.user_identities.pluck(:provider, :subject)
+  end
+
+  test "link_or_provision rejects SSO emails outside the configured domain allowlist" do
+    ENV["CENTAUR_CONSOLE_SSO_EMAIL_DOMAINS"] = "acme.example example.org"
+    assert_no_difference [ "User.count", "UserIdentity.count" ] do
+      assert_raises(User::SsoEmailDomainNotAllowed) do
+        User.link_or_provision(provider: "google",
+                              identity: identity(subject: "outside-sub", email: "newcomer@example.com"))
+      end
+    end
+  ensure
+    ENV.delete("CENTAUR_CONSOLE_SSO_EMAIL_DOMAINS")
+  end
+
+  test "link_or_provision allows SSO emails inside the configured domain allowlist" do
+    ENV["CENTAUR_CONSOLE_SSO_EMAIL_DOMAINS"] = "acme.example example.org"
+    user = nil
+    assert_difference -> { User.count }, 1 do
+      user = User.link_or_provision(provider: "google",
+                                    identity: identity(subject: "inside-sub", email: "worker@acme.example"))
+    end
+    assert user.active?
+  ensure
+    ENV.delete("CENTAUR_CONSOLE_SSO_EMAIL_DOMAINS")
   end
 
   test "link_or_provision returns the existing user for a returning identity" do
@@ -126,6 +150,19 @@ class UserTest < ActiveSupport::TestCase
     assert_equal existing.user, user
   end
 
+  test "link_or_provision rejects a returning identity outside the configured domain allowlist" do
+    ENV["CENTAUR_CONSOLE_SSO_EMAIL_DOMAINS"] = "globex.example"
+    existing = user_identities(:acme_admin_google)
+    assert_no_difference [ "User.count", "UserIdentity.count" ] do
+      assert_raises(User::SsoEmailDomainNotAllowed) do
+        User.link_or_provision(provider: existing.provider,
+                              identity: identity(subject: existing.subject, email: existing.email))
+      end
+    end
+  ensure
+    ENV.delete("CENTAUR_CONSOLE_SSO_EMAIL_DOMAINS")
+  end
+
   test "link_or_provision links a new identity to an existing user by verified email" do
     target = users(:globex_admin)
     user = nil
@@ -136,6 +173,16 @@ class UserTest < ActiveSupport::TestCase
       end
     end
     assert_equal target, user
+  end
+
+  test "link_or_provision preserves the Slack workspace id" do
+    user = User.link_or_provision(
+      provider: "slack",
+      identity: identity(subject: "slack-user", email: "slack-user@example.com", team_id: " T123 ")
+    )
+
+    slack_identity = user.user_identities.find_by!(provider: "slack")
+    assert_equal "T123", slack_identity.team_id
   end
 
   test "link_or_provision will not let an unverified email adopt an existing account" do
@@ -160,9 +207,32 @@ class UserTest < ActiveSupport::TestCase
     user = User.link_or_provision(provider: "google",
                                   identity: identity(subject: "boss-sub", email: "boss@example.com",
                                                      email_verified: false))
-    assert user.pending?
+    assert user.active?
     assert_not user.admin?
   ensure
     ENV.delete("CENTAUR_CONSOLE_BOOTSTRAP_ADMINS")
+  end
+
+  test "link_or_provision activates a returning legacy-pending user" do
+    user = User.link_or_provision(provider: "slack",
+                                  identity: identity(subject: "late-sub", email: "worker@acme.example"))
+    user.update!(status: :pending)
+
+    returning = User.link_or_provision(provider: "slack",
+                                       identity: identity(subject: "late-sub", email: "worker@acme.example"))
+    assert_equal user, returning
+    assert returning.active?
+    assert_not returning.admin?
+    assert_not_nil returning.approved_at
+  end
+
+  test "link_or_provision never reactivates a disabled user" do
+    user = User.link_or_provision(provider: "slack",
+                                  identity: identity(subject: "gone-sub", email: "worker@acme.example"))
+    user.update!(status: :disabled)
+
+    returning = User.link_or_provision(provider: "slack",
+                                       identity: identity(subject: "gone-sub", email: "worker@acme.example"))
+    assert returning.disabled?
   end
 end

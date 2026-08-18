@@ -15,7 +15,7 @@
 #
 # Required env vars:
 #   CENTAUR_API_URL   e.g. https://centaur.example.com
-#   CENTAUR_API_KEY   an aiv2_* key with scope `workflows:muesli_meeting_ingest`
+#   MUESLI_API_KEY   an aiv2_* key with scope `workflows:muesli_meeting_ingest`
 #
 # Optional env vars:
 #   MUESLI_CLI            path to muesli-cli (default: /Applications/Muesli.app/Contents/MacOS/muesli-cli)
@@ -43,7 +43,7 @@ die() {
 }
 
 [ -n "${CENTAUR_API_URL:-}" ] || die "CENTAUR_API_URL is not set"
-[ -n "${CENTAUR_API_KEY:-}" ] || die "CENTAUR_API_KEY is not set"
+[ -n "${MUESLI_API_KEY:-}" ] || die "MUESLI_API_KEY is not set"
 command -v jq >/dev/null 2>&1 || die "jq is not installed (brew install jq)"
 command -v curl >/dev/null 2>&1 || die "curl is not installed"
 [ -x "$MUESLI_CLI" ] || die "muesli-cli not found at $MUESLI_CLI (set MUESLI_CLI)"
@@ -104,7 +104,7 @@ log "POST workflow_name=muesli_meeting_ingest trigger=muesli:${HOST_LABEL}:${MEE
 HTTP_CODE="$(curl -sS -o /tmp/muesli-push.resp -w '%{http_code}' \
     -X POST "${CENTAUR_API_URL%/}/workflows/runs" \
     -H "Content-Type: application/json" \
-    -H "x-api-key: $CENTAUR_API_KEY" \
+    -H "x-api-key: $MUESLI_API_KEY" \
     --data-binary "$BODY")"
 
 RESPONSE="$(cat /tmp/muesli-push.resp || true)"

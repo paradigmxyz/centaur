@@ -4,6 +4,7 @@ class SecretSource < ApplicationRecord
   include SyncConfigOwnerInvalidation
 
   SOURCE_TYPES = %w[env aws_sm aws_ssm 1password 1password_connect control_plane token_broker].freeze
+  SYNC_CONFIG_REPLACEMENT_ATTRIBUTES = %w[source_type config secret role role_kind].freeze
 
   UNIVERSAL_OPTIONAL = %w[json_key ttl].freeze
 
@@ -14,16 +15,18 @@ class SecretSource < ApplicationRecord
     "1password" => { required: %w[secret_ref], optional: %w[token_env] },
     "1password_connect" => { required: %w[secret_ref], optional: %w[host_env token_env] },
     "control_plane" => { required: [], optional: [] },
-    "token_broker" => { required: %w[credential_id], optional: %w[credential_namespace] }
+    "token_broker" => { required: %w[credential_id], optional: [] }
   }.freeze
 
   # A source belongs to exactly one owner. static_secret feeds the `secrets`
   # transform; gcp_auth_secret is a gcp_auth keyfile; oauth_token_secret holds
   # one oauth_token entry's credential fields and token-endpoint headers;
+  # gcp_id_token_secret is a gcp_id_token keyfile;
   # pg_dsn_secret is a Postgres upstream's connection string; hmac_secret holds
   # one hmac_sign entry's HMAC key and any additional named credentials.
   belongs_to :static_secret, optional: true
   belongs_to :gcp_auth_secret, optional: true
+  belongs_to :gcp_id_token_secret, optional: true
   belongs_to :aws_auth_secret, optional: true
   belongs_to :oauth_token_secret, optional: true
   belongs_to :pg_dsn_secret, optional: true
@@ -59,26 +62,30 @@ class SecretSource < ApplicationRecord
   # Whether this source can currently deliver a value to a proxy. Always true
   # except for a token_broker source whose credential has not minted an access
   # token yet (bootstrapping) or is dead -- those are omitted from sync so the
-  # proxy never receives an empty inline value (see Principal#sync_secrets).
+  # proxy never receives an empty inline value.
   def deliverable?
     return brokered_credential&.access_token.present? if source_type == "token_broker"
     true
   end
 
-  # token_broker sources that reference the given broker credential, by its oid or
-  # by (namespace, foreign_id). Used to block deleting a credential still in use.
+  # Whether the value this source delivers resolves from ``credential``. Lets a
+  # caller verify that a wrapper's linked credential is the one actually served.
+  def resolves_credential?(credential)
+    credential.present? && brokered_credential&.id == credential.id
+  end
+
+  # token_broker sources that reference the given broker credential by oid or
+  # foreign_id. Used to block deleting a credential still in use.
   def self.referencing_broker_credential(credential)
     scope = where(source_type: "token_broker")
     return scope.where("config->>'credential_id' = ?", credential.oid) if credential.foreign_id.blank?
 
-    scope.where(
-      "config->>'credential_id' = :oid OR " \
-      "(config->>'credential_id' = :fid AND config->>'credential_namespace' = :ns)",
-      oid: credential.oid, fid: credential.foreign_id, ns: credential.namespace
-    )
+    scope.where("config->>'credential_id' IN (:oid, :fid)", oid: credential.oid, fid: credential.foreign_id)
   end
 
-  OWNER_ASSOCIATIONS = %i[static_secret gcp_auth_secret aws_auth_secret oauth_token_secret pg_dsn_secret hmac_secret].freeze
+  OWNER_ASSOCIATIONS = %i[
+    static_secret gcp_auth_secret gcp_id_token_secret aws_auth_secret oauth_token_secret pg_dsn_secret hmac_secret
+  ].freeze
 
   # Owners whose sources fill a named role (credential field or endpoint header).
   # aws_auth's sources are credential fields (access_key_id, secret_access_key,
@@ -96,8 +103,7 @@ class SecretSource < ApplicationRecord
   private
 
   # The BrokerCredential a token_broker source references. credential_id is either
-  # an opaque id (bcr_...) or a foreign_id; the latter is resolved within
-  # credential_namespace. Returns nil when the source is not a token_broker, the
+  # an opaque id (bcr_...) or a globally unique foreign_id. Returns nil when the source is not a token_broker, the
   # reference is incomplete, or nothing matches. Memoized so deliverable?,
   # to_proxy_source, and validation share one lookup.
   def brokered_credential
@@ -112,27 +118,16 @@ class SecretSource < ApplicationRecord
 
     if BrokerCredential.decode_oid(ref)
       BrokerCredential.find_by_oid(ref)
-    elsif config["credential_namespace"].present?
-      BrokerCredential.find_by(namespace: config["credential_namespace"], foreign_id: ref)
+    else
+      BrokerCredential.find_by(foreign_id: ref)
     end
   end
 
-  # A token_broker source must point at a real credential. credential_namespace
-  # is required for a foreign_id reference and forbidden for an oid reference.
+  # A token_broker source must point at a real credential.
   def token_broker_reference_resolves
     return unless source_type == "token_broker" && config.is_a?(Hash)
     ref = config["credential_id"]
     return if ref.blank? # missing-key reported by config_matches_source_type
-
-    if BrokerCredential.decode_oid(ref)
-      if config["credential_namespace"].present?
-        errors.add(:config, "credential_namespace is not allowed when credential_id is an opaque id")
-        return
-      end
-    elsif config["credential_namespace"].blank?
-      errors.add(:config, "credential_namespace is required when credential_id is a foreign_id")
-      return
-    end
 
     if brokered_credential.nil?
       errors.add(:config, "credential_id #{ref.inspect} does not reference an existing broker credential")

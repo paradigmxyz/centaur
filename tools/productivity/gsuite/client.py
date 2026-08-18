@@ -12,10 +12,11 @@ from urllib.parse import quote, urljoin, urlparse, urlsplit
 
 import httplib2
 import socks
-from centaur_sdk import current_thread_key, save_attachment, secret
 from google.auth.credentials import AnonymousCredentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+
+from centaur_sdk import current_thread_key, save_attachment, secret
 
 try:
     from api.integrations.gsuite.http import build_http as _shared_build_http
@@ -145,25 +146,28 @@ def gmail_read(message_id: str) -> dict:
         message_id: The message ID
 
     Returns:
-        Dict with id, subject, from, to, date, body (plain text)
+        Dict with id, subject, from, to, date, body, html, and raw RFC822 content
     """
     service = get_gmail_service()
 
     msg = service.users().messages().get(userId="me", id=message_id, format="full").execute()
+    raw_msg = service.users().messages().get(userId="me", id=message_id, format="raw").execute()
 
     headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
 
-    def get_body(payload):
-        if payload.get("body", {}).get("data"):
-            return base64.urlsafe_b64decode(payload["body"]["data"]).decode("utf-8")
-        if payload.get("parts"):
-            for part in payload["parts"]:
-                if part.get("mimeType") == "text/plain":
-                    if part.get("body", {}).get("data"):
-                        return base64.urlsafe_b64decode(part["body"]["data"]).decode("utf-8")
-                body = get_body(part)
-                if body:
-                    return body
+    def decode_body(data):
+        padded = data + "=" * (-len(data) % 4)
+        return base64.urlsafe_b64decode(padded.encode()).decode("utf-8", errors="replace")
+
+    def get_body(payload, mime_type):
+        if not isinstance(payload, dict):
+            return ""
+        if payload.get("mimeType") == mime_type and payload.get("body", {}).get("data"):
+            return decode_body(payload["body"]["data"])
+        for part in payload.get("parts") or []:
+            body = get_body(part, mime_type)
+            if body:
+                return body
         return ""
 
     return {
@@ -174,7 +178,9 @@ def gmail_read(message_id: str) -> dict:
         "to": headers.get("To", ""),
         "cc": headers.get("Cc", ""),
         "date": headers.get("Date", ""),
-        "body": get_body(msg.get("payload", {})),
+        "body": get_body(msg.get("payload", {}), "text/plain"),
+        "html": get_body(msg.get("payload", {}), "text/html"),
+        "raw": raw_msg.get("raw", ""),
         "label_ids": msg.get("labelIds", []),
     }
 
@@ -283,9 +289,9 @@ def gmail_reply(
         Dict with id, thread_id
     """
     import mimetypes
-    from email.mime.multipart import MIMEMultipart
-    from email.mime.base import MIMEBase
     from email import encoders
+    from email.mime.base import MIMEBase
+    from email.mime.multipart import MIMEMultipart
 
     service = get_gmail_service()
 
@@ -640,19 +646,27 @@ def calendar_rsvp(
 # Drive functions
 
 
+def _drive_query_literal(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{escaped}'"
+
+
 def drive_list(
     query: str | None = None,
     folder_id: str | None = None,
     max_results: int = 50,
     file_type: str | None = None,
+    full_text: bool = False,
 ) -> list[dict]:
     """List files in Google Drive.
 
     Args:
-        query: Search query (Drive query syntax)
+        query: Search query to match against file names by default, or full text
+            when full_text is true
         folder_id: Folder ID to list contents
         max_results: Maximum number of results
         file_type: Filter by MIME type prefix (e.g., "image/", "application/pdf")
+        full_text: Use Drive's fullText contains query term instead of name contains
 
     Returns:
         List of file dicts with id, name, mimeType, size, modifiedTime, webViewLink
@@ -661,14 +675,15 @@ def drive_list(
 
     q_parts = []
     if query:
-        q_parts.append(f"name contains '{query}'")
+        query_term = "fullText" if full_text else "name"
+        q_parts.append(f"{query_term} contains {_drive_query_literal(query)}")
     if folder_id:
-        q_parts.append(f"'{folder_id}' in parents")
+        q_parts.append(f"{_drive_query_literal(folder_id)} in parents")
     if file_type:
         if file_type.endswith("/"):
-            q_parts.append(f"mimeType contains '{file_type}'")
+            q_parts.append(f"mimeType contains {_drive_query_literal(file_type)}")
         else:
-            q_parts.append(f"mimeType = '{file_type}'")
+            q_parts.append(f"mimeType = {_drive_query_literal(file_type)}")
 
     q_parts.append("trashed = false")
 
@@ -762,17 +777,14 @@ def _download_attachment_bytes(
     sep = "&" if urlparse(url).query else "?"
     url = f"{url}{sep}thread_key={quote(current_thread_key(), safe='')}"
 
-    headers: dict[str, str] = {}
-    api_key = secret("CENTAUR_API_KEY", "").strip()
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    request = urllib.request.Request(url, headers=headers)
+    request = urllib.request.Request(url)
     with urllib.request.urlopen(request, timeout=30) as response:
         return response.read()
 
 
 def drive_upload(
     content_base64: str | None = None,
+    content_path: str | None = None,
     name: str | None = None,
     folder_id: str | None = None,
     mime_type: str | None = None,
@@ -783,14 +795,13 @@ def drive_upload(
 ) -> dict:
     """Upload a file to Google Drive.
 
-    Accepts one of: content_base64, attachment_id, or attachment_url.
-    There is deliberately no local-path option: this tool runs in-process on
-    the API server, so a caller-supplied path would read the API host's
-    filesystem. Sandboxes pass bytes via content_base64 or a Centaur attachment
-    handle instead.
+    Accepts one of: content_base64, content_path, attachment_id, or attachment_url.
+    content_path is for workflow files already on the API host filesystem. Sandbox
+    callers should pass a Centaur attachment handle instead.
 
     Args:
         content_base64: Base64-encoded file bytes
+        content_path: Path to a file on the API host filesystem
         name: File name in Drive
         folder_id: Parent folder ID
         mime_type: MIME type (auto-detected if not provided)
@@ -808,6 +819,12 @@ def drive_upload(
     if content_base64:
         upload_bytes = base64.b64decode(content_base64)
         file_name = name or filename or "upload.bin"
+    elif content_path:
+        path = Path(content_path)
+        if not path.is_file():
+            raise ValueError(f"content_path does not exist or is not a file: {content_path}")
+        upload_bytes = path.read_bytes()
+        file_name = name or filename or path.name
     elif attachment_id or attachment_url:
         upload_bytes = _download_attachment_bytes(
             attachment_id=attachment_id,
@@ -815,7 +832,9 @@ def drive_upload(
         )
         file_name = name or filename or f"{attachment_id or 'attachment'}.bin"
     else:
-        raise ValueError("One of content_base64, attachment_id, or attachment_url is required")
+        raise ValueError(
+            "One of content_base64, content_path, attachment_id, or attachment_url is required"
+        )
 
     content_type = mime_type or mimetypes.guess_type(file_name)[0] or "application/octet-stream"
 
@@ -914,6 +933,226 @@ def drive_get(file_id: str) -> dict:
         "parent_ids": result.get("parents", []),
         "owners": [o.get("emailAddress", "") for o in result.get("owners", [])],
     }
+
+
+DRIVE_REVISION_FIELDS = (
+    "id,mimeType,modifiedTime,keepForever,published,publishAuto,"
+    "publishedOutsideDomain,publishedLink,originalFilename,md5Checksum,size,"
+    "lastModifyingUser(displayName,emailAddress,photoLink,me,permissionId),exportLinks"
+)
+DRIVE_EXPORT_FORMATS = {
+    "txt": "text/plain",
+    "pdf": "application/pdf",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "html": "text/html",
+    "csv": "text/csv",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "md": "text/markdown",
+}
+
+
+def _normalize_drive_revision(revision: dict) -> dict:
+    user = revision.get("lastModifyingUser") or {}
+    return {
+        "id": revision.get("id", ""),
+        "mime_type": revision.get("mimeType", ""),
+        "modified_time": revision.get("modifiedTime", ""),
+        "keep_forever": revision.get("keepForever", False),
+        "published": revision.get("published", False),
+        "publish_auto": revision.get("publishAuto", False),
+        "published_outside_domain": revision.get("publishedOutsideDomain", False),
+        "published_link": revision.get("publishedLink", ""),
+        "original_filename": revision.get("originalFilename", ""),
+        "md5_checksum": revision.get("md5Checksum", ""),
+        "size": int(revision.get("size") or 0),
+        "last_modifying_user": {
+            "display_name": user.get("displayName", ""),
+            "email": user.get("emailAddress", ""),
+            "photo_link": user.get("photoLink", ""),
+            "is_me": user.get("me", False),
+            "permission_id": user.get("permissionId", ""),
+        },
+        "export_links": revision.get("exportLinks") or {},
+    }
+
+
+def drive_list_revisions(file_id: str, max_results: int = 200) -> list[dict]:
+    """List revisions for a Google Drive file.
+
+    This supports native Google Docs, Sheets, and Slides files as well as
+    binary files. Google can omit older entries for files with a large or
+    frequently updated revision history.
+
+    Args:
+        file_id: The Google Drive file ID
+        max_results: Maximum number of revisions to return
+
+    Returns:
+        Revision metadata ordered as returned by Google Drive
+    """
+    if max_results < 1:
+        raise ValueError("max_results must be at least 1")
+
+    service = get_drive_service()
+    revisions: list[dict] = []
+    page_token: str | None = None
+
+    while len(revisions) < max_results:
+        request_args = {
+            "fileId": file_id,
+            "pageSize": min(1000, max_results - len(revisions)),
+            "fields": f"nextPageToken,revisions({DRIVE_REVISION_FIELDS})",
+        }
+        if page_token:
+            request_args["pageToken"] = page_token
+
+        result = service.revisions().list(**request_args).execute()
+        revisions.extend(
+            _normalize_drive_revision(revision) for revision in result.get("revisions", [])
+        )
+        page_token = result.get("nextPageToken")
+        if not page_token:
+            break
+
+    return revisions[:max_results]
+
+
+def drive_get_revision(file_id: str, revision_id: str) -> dict:
+    """Get metadata and historical export links for a Drive file revision.
+
+    Args:
+        file_id: The Google Drive file ID
+        revision_id: Revision ID returned by drive_list_revisions
+
+    Returns:
+        Revision metadata, including available export links
+    """
+    service = get_drive_service()
+    result = (
+        service.revisions()
+        .get(
+            fileId=file_id,
+            revisionId=revision_id,
+            fields=DRIVE_REVISION_FIELDS,
+        )
+        .execute()
+    )
+    return _normalize_drive_revision(result)
+
+
+def _drive_export_mime_type(export_format: str) -> str:
+    mime_type = DRIVE_EXPORT_FORMATS.get(export_format)
+    if not mime_type:
+        supported_formats = ", ".join(DRIVE_EXPORT_FORMATS)
+        raise ValueError(
+            f"Unsupported export format: {export_format}. Supported: {supported_formats}"
+        )
+    return mime_type
+
+
+def _drive_export_revision_bytes(
+    file_id: str,
+    revision_id: str,
+    export_format: str = "pdf",
+) -> tuple[dict, str, bytes]:
+    mime_type = _drive_export_mime_type(export_format)
+    metadata = drive_get(file_id)
+    revision = drive_get_revision(file_id, revision_id)
+    export_url = revision["export_links"].get(mime_type)
+    if not export_url:
+        available_formats = sorted(
+            export_format_name
+            for export_format_name, candidate_mime_type in DRIVE_EXPORT_FORMATS.items()
+            if candidate_mime_type in revision["export_links"]
+        )
+        available = ", ".join(available_formats) or "none"
+        raise ValueError(
+            f"Revision {revision_id} cannot be exported as {export_format}. "
+            f"Available formats: {available}"
+        )
+
+    # iron-proxy injects OAuth only for docs.google.com. The sandbox request has
+    # no Authorization header of its own, so a cross-host redirect to Google's
+    # signed content URL cannot forward the bearer token.
+    response, content = _build_http().request(export_url, method="GET")
+    status = int(response.status)
+    if not 200 <= status < 300:
+        raise RuntimeError(f"Google Drive revision export failed with HTTP {status}")
+
+    return metadata, mime_type, bytes(content)
+
+
+def _drive_download_revision_bytes(
+    file_id: str,
+    revision_id: str,
+) -> tuple[dict, dict, bytes]:
+    """Download the original bytes for a non-Google-Workspace revision."""
+    metadata = drive_get(file_id)
+    revision = drive_get_revision(file_id, revision_id)
+    mime_type = revision["mime_type"] or metadata["mime_type"]
+    if mime_type.startswith("application/vnd.google-apps."):
+        raise ValueError(
+            "Google Docs, Sheets, and Slides revisions must be downloaded with "
+            "drive export-revision"
+        )
+
+    encoded_file_id = quote(file_id, safe="")
+    encoded_revision_id = quote(revision_id, safe="")
+    download_url = (
+        "https://www.googleapis.com/drive/v3/files/"
+        f"{encoded_file_id}/revisions/{encoded_revision_id}?alt=media"
+    )
+    response, content = _build_http().request(download_url, method="GET")
+    status = int(response.status)
+    if not 200 <= status < 300:
+        raise RuntimeError(f"Google Drive revision download failed with HTTP {status}")
+
+    return metadata, revision, bytes(content)
+
+
+def drive_export_revision(
+    file_id: str,
+    revision_id: str,
+    export_format: str = "pdf",
+) -> dict:
+    """Export an earlier Docs, Sheets, or Slides revision as an attachment.
+
+    Args:
+        file_id: The Google Drive file ID
+        revision_id: Revision ID returned by drive_list_revisions
+        export_format: Export format (txt, pdf, docx, html, csv, xlsx, pptx, md)
+
+    Returns:
+        Attachment metadata
+    """
+    metadata, mime_type, data = _drive_export_revision_bytes(
+        file_id,
+        revision_id,
+        export_format,
+    )
+    stem = Path(metadata.get("name") or f"drive-{file_id}").stem
+    return save_attachment(
+        name=f"{stem}-revision-{revision_id}.{export_format}",
+        mime_type=mime_type,
+        data=data,
+        source_url=metadata.get("web_view_link"),
+    )
+
+
+def drive_download_revision(file_id: str, revision_id: str) -> dict:
+    """Download an earlier binary Drive revision as an attachment."""
+    metadata, revision, data = _drive_download_revision_bytes(file_id, revision_id)
+    original_name = revision["original_filename"] or metadata.get("name")
+    original_path = Path(original_name or f"drive-{file_id}")
+    safe_revision_id = re.sub(r"[^a-zA-Z0-9_.-]", "_", revision_id)
+    name = f"{original_path.stem}-revision-{safe_revision_id}{original_path.suffix}"
+    return save_attachment(
+        name=name,
+        mime_type=revision["mime_type"] or metadata.get("mime_type"),
+        data=data,
+        source_url=metadata.get("web_view_link"),
+    )
 
 
 def drive_list_permissions(file_id: str) -> list[dict]:
@@ -1250,23 +1489,7 @@ def _drive_export_bytes(file_id: str, export_format: str = "txt") -> tuple[dict,
 
     service = get_drive_service()
 
-    # Map format to MIME type
-    format_map = {
-        "txt": "text/plain",
-        "pdf": "application/pdf",
-        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "html": "text/html",
-        "csv": "text/csv",
-        "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        "md": "text/markdown",
-    }
-
-    mime_type = format_map.get(export_format)
-    if not mime_type:
-        raise ValueError(
-            f"Unsupported export format: {export_format}. Supported: {list(format_map.keys())}"
-        )
+    mime_type = _drive_export_mime_type(export_format)
 
     metadata = service.files().get(
         fileId=file_id,
@@ -2677,14 +2900,17 @@ class GSuiteClient:
         folder_id: str | None = None,
         max_results: int = 50,
         file_type: str | None = None,
+        full_text: bool = False,
     ) -> list[dict]:
         """List files in Google Drive.
 
         Args:
-            query: Search query (Drive query syntax)
+            query: Search query to match against file names by default, or full text
+                when full_text is true
             folder_id: Folder ID to list contents
             max_results: Maximum number of results
             file_type: Filter by MIME type prefix (e.g., "image/", "application/pdf")
+            full_text: Use Drive's fullText contains query term instead of name contains
 
         Returns:
             List of file dicts with id, name, mimeType, size, modifiedTime, webViewLink
@@ -2694,19 +2920,24 @@ class GSuiteClient:
             folder_id=folder_id,
             max_results=max_results,
             file_type=file_type,
+            full_text=full_text,
         )
 
-    def drive_search(self, query: str, max_results: int = 50) -> list[dict]:
-        """Search files in Google Drive by name.
+    def drive_search(
+        self, query: str, max_results: int = 50, full_text: bool = False
+    ) -> list[dict]:
+        """Search files in Google Drive by name or full text.
 
         Args:
-            query: Search query (matches file names)
+            query: Search query to match against file names by default, or full text
+                when full_text is true
             max_results: Maximum number of results
+            full_text: Use Drive's fullText contains query term instead of name contains
 
         Returns:
             List of file dicts with id, name, mimeType, size, modifiedTime, webViewLink
         """
-        return drive_list(query=query, max_results=max_results)
+        return drive_list(query=query, max_results=max_results, full_text=full_text)
 
     def drive_get(self, file_id: str) -> dict:
         """Get file metadata from Google Drive.
@@ -2718,6 +2949,64 @@ class GSuiteClient:
             Dict with file metadata
         """
         return drive_get(file_id)
+
+    def drive_list_revisions(self, file_id: str, max_results: int = 200) -> list[dict]:
+        """List revisions for a Google Drive file.
+
+        This supports native Google Docs, Sheets, and Slides files as well as
+        binary files. Google can omit older entries for files with a large or
+        frequently updated revision history.
+
+        Args:
+            file_id: The Google Drive file ID
+            max_results: Maximum number of revisions to return
+
+        Returns:
+            Revision metadata ordered as returned by Google Drive
+        """
+        return drive_list_revisions(file_id, max_results=max_results)
+
+    def drive_get_revision(self, file_id: str, revision_id: str) -> dict:
+        """Get metadata and historical export links for a Drive file revision.
+
+        Args:
+            file_id: The Google Drive file ID
+            revision_id: Revision ID returned by drive_list_revisions
+
+        Returns:
+            Revision metadata, including available export links
+        """
+        return drive_get_revision(file_id, revision_id)
+
+    def drive_export_revision(
+        self,
+        file_id: str,
+        revision_id: str,
+        export_format: str = "pdf",
+    ) -> dict:
+        """Export an earlier Docs, Sheets, or Slides revision as an attachment.
+
+        Args:
+            file_id: The Google Drive file ID
+            revision_id: Revision ID returned by drive_list_revisions
+            export_format: Export format (txt, pdf, docx, html, csv, xlsx, pptx, md)
+
+        Returns:
+            Attachment metadata
+        """
+        return drive_export_revision(file_id, revision_id, export_format=export_format)
+
+    def drive_download_revision(self, file_id: str, revision_id: str) -> dict:
+        """Download an earlier binary Drive revision as an attachment.
+
+        Args:
+            file_id: The Google Drive file ID
+            revision_id: Revision ID returned by drive_list_revisions
+
+        Returns:
+            Attachment metadata
+        """
+        return drive_download_revision(file_id, revision_id)
 
     def drive_download(self, file_id: str) -> dict:
         """Download a file from Google Drive into a thread-scoped attachment.
@@ -2733,6 +3022,7 @@ class GSuiteClient:
     def drive_upload(
         self,
         content_base64: str | None = None,
+        content_path: str | None = None,
         name: str | None = None,
         folder_id: str | None = None,
         mime_type: str | None = None,
@@ -2745,6 +3035,7 @@ class GSuiteClient:
 
         Args:
             content_base64: Base64-encoded file bytes
+            content_path: Path to a file on the API host filesystem
             name: File name in Drive
             folder_id: Parent folder ID
             mime_type: MIME type (auto-detected if not provided)
@@ -2758,6 +3049,7 @@ class GSuiteClient:
         """
         return drive_upload(
             content_base64=content_base64,
+            content_path=content_path,
             name=name,
             folder_id=folder_id,
             mime_type=mime_type,

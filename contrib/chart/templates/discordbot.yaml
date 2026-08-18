@@ -59,13 +59,6 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sDISCORDBOT_API_KEY" .Values.secretManager.envPrefix }}
-            # api-rs has no auth middleware yet, but discordbot still sends the key as a header;
-            # source it from the same infra secret.
-            - name: CENTAUR_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "centaur.secretEnvName" . }}
-                  key: {{ printf "%sDISCORDBOT_API_KEY" .Values.secretManager.envPrefix }}
             - name: DISCORDBOT_DATABASE_URL
               valueFrom:
                 secretKeyRef:

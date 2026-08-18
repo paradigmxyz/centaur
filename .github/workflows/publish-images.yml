@@ -7,6 +7,8 @@ on:
     paths:
       - .github/workflows/publish-images.yml
       - services/**
+      - crates/harness-server/**
+      - harness/**
       - centaur_sdk/**
       - packages/**
       - tools/**
@@ -20,10 +22,11 @@ on:
 
 concurrency:
   group: publish-images-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
+  id-token: write
   packages: write
 
 env:
@@ -36,17 +39,18 @@ env:
   RUST_BUILD_PROFILE: ${{ (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && 'debug' || 'release' }}
 
 jobs:
-  # Build each image natively per platform (amd64 on x64 runners, arm64 on
-  # arm runners — no QEMU emulation), push by digest, and hand the digests
-  # to the merge job below which assembles the multi-arch manifest.
+  # Build each image with Depot's hosted builders, push by digest, and hand
+  # the digests to the merge job below which assembles the multi-arch manifest.
   # arm64 is only built on pushes to main and release tags — PR and manual
-  # dispatch builds stay amd64-only to keep iteration fast.
+  # dispatch builds stay amd64-only to keep iteration fast. Fork PRs skip both
+  # jobs so untrusted changes do not run on the hosted image builders.
   build:
-    runs-on: ${{ matrix.platform == 'linux/arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork }}
+    runs-on: ${{ matrix.platform == 'linux/arm64' && 'depot-ubuntu-24.04-arm-16' || 'depot-ubuntu-24.04-16' }}
     strategy:
       fail-fast: false
       matrix:
-        service: [api-rs, slackbotv2, agent, iron-proxy, console]
+        service: [api-rs, slackbotv2, linearbot, discordbot, githubbot, teamsbot, agent, iron-proxy, console]
         platform: ${{ github.event_name == 'push' && fromJSON('["linux/amd64", "linux/arm64"]') || fromJSON('["linux/amd64"]') }}
         include:
           - service: api-rs
@@ -59,10 +63,25 @@ jobs:
             context: .
             dockerfile: services/slackbotv2/Dockerfile
             target: ""
+          - service: linearbot
+            image: centaur-linearbot
+            context: .
+            dockerfile: services/linearbot/Dockerfile
+            target: ""
           - service: discordbot
             image: centaur-discordbot
             context: .
             dockerfile: services/discordbot/Dockerfile
+            target: ""
+          - service: githubbot
+            image: centaur-githubbot
+            context: .
+            dockerfile: services/githubbot/Dockerfile
+            target: ""
+          - service: teamsbot
+            image: centaur-teamsbot
+            context: .
+            dockerfile: services/teamsbot/Dockerfile
             target: ""
           - service: agent
             image: centaur-agent
@@ -82,7 +101,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -91,11 +110,11 @@ jobs:
           platform="${{ matrix.platform }}"
           echo "PLATFORM_SLUG=${platform//\//-}" >> "$GITHUB_ENV"
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Set up Depot
+        uses: depot/setup-action@15c09a5f77a0840ad4bce955686522a257853461 # v1.7.1
 
       - name: Log in to GHCR
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -103,7 +122,7 @@ jobs:
 
       - name: Docker metadata for ${{ matrix.image }}
         id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}
           labels: |
@@ -114,27 +133,20 @@ jobs:
 
       - name: Build and push ${{ matrix.image }} (${{ matrix.platform }})
         id: build
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: depot/build-push-action@98e78adca7817480b8185f474a400b451d74e287 # v1.18.0
         with:
+          project: d8qqlh1bmq
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
           target: ${{ matrix.target }}
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           # Tags are applied by the merge job on the multi-arch manifest;
-          # per-arch builds are pushed by digest only. Fork PRs run with a
-          # read-only GITHUB_TOKEN, so they build without pushing.
+          # per-arch builds are pushed by digest only. The fork check is also
+          # enforced at the job level so external PRs do not build.
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=${{ !github.event.pull_request.head.repo.fork }}
           build-args: |
             RUST_BUILD_PROFILE=${{ env.RUST_BUILD_PROFILE }}
-          cache-from: |
-            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}:buildcache-${{ env.PLATFORM_SLUG }}
-            type=gha,scope=${{ matrix.image }}-${{ env.PLATFORM_SLUG }}
-          # Fork PRs run with a read-only GITHUB_TOKEN: exporting the registry
-          # cache would fail the build, so only export it when we can push.
-          cache-to: |
-            ${{ !github.event.pull_request.head.repo.fork && format('type=registry,ref={0}/{1}/{2}:buildcache-{3},mode=max', env.REGISTRY, env.IMAGE_NAMESPACE, matrix.image, env.PLATFORM_SLUG) || '' }}
-            type=gha,mode=max,scope=${{ matrix.image }}-${{ env.PLATFORM_SLUG }}
 
       - name: Export digest
         if: ${{ !github.event.pull_request.head.repo.fork }}
@@ -153,19 +165,22 @@ jobs:
           retention-days: 1
 
   merge:
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04-16
     needs: build
-    if: ${{ !github.event.pull_request.head.repo.fork }}
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - image: centaur-api-rs
           - image: centaur-slackbotv2
+          - image: centaur-linearbot
           - image: centaur-agent
           - image: centaur-iron-proxy
           - image: centaur-console
           - image: centaur-discordbot
+          - image: centaur-githubbot
+          - image: centaur-teamsbot
 
     steps:
       - name: Download digests
@@ -176,10 +191,10 @@ jobs:
           merge-multiple: true
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -187,7 +202,7 @@ jobs:
 
       - name: Docker metadata for ${{ matrix.image }}
         id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}
           flavor: |

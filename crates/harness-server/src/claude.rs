@@ -1,6 +1,7 @@
 use std::env;
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
+use std::time::Duration;
 
 use codex_app_server_protocol::UserInput;
 use serde_json::json;
@@ -44,9 +45,13 @@ impl PendingAgentMessage {
 
 impl ClaudeEventNormalizer {
     pub fn normalize(&mut self, event: AnthropicStreamEvent) -> Vec<NormalizedEvent> {
+        let token_usage = event.token_usage();
         let message_stop_reason = event.message_stop_reason().map(str::to_string);
         let normalized = self.inner.normalize(event);
         let mut out = Vec::new();
+        if let Some(usage) = token_usage {
+            out.push(NormalizedEvent::TokenUsage { usage });
+        }
         if let Some(stop_reason) = message_stop_reason {
             self.flush_pending(Some(stop_reason), &mut out);
         }
@@ -73,6 +78,7 @@ impl ClaudeEventNormalizer {
                 self.flush_pending(None, &mut out);
                 out.push(event);
             }
+            NormalizedEvent::TokenUsage { .. } => {}
             NormalizedEvent::Ignored => {}
             event => out.push(event),
         }
@@ -270,7 +276,27 @@ impl HarnessServer for ClaudeCodeHarness {
         normalizer: &mut Self::EventNormalizer,
         event: Self::Event,
     ) -> Result<Vec<NormalizedEvent>> {
+        // Subagent sidechains (Task tool) interleave their own messages into
+        // the stream, ending with their own `end_turn` while the parent turn
+        // keeps running. Letting them through corrupts the pending-text state
+        // (their message ids clobber the main chain's) and their stop reasons
+        // would settle — and with the stop fallback, terminate — the parent
+        // turn. The subagent's report reaches the turn through the main
+        // chain's Task tool result.
+        if event.is_sidechain() {
+            return Ok(Vec::new());
+        }
         Ok(normalizer.normalize(event))
+    }
+
+    /// Claude Code normally ends a turn with a native `result` line, but
+    /// streams have been observed to stop at `message_delta.stop_reason`
+    /// without one (leaving the execution hung as "thinking" forever). Wait a
+    /// short window for the native result before completing on the stop, so
+    /// the trailing `result` is consumed by this turn instead of instantly
+    /// terminating the next one.
+    fn terminal_assistant_stop_settle(&self) -> Option<Duration> {
+        Some(Duration::from_secs(2))
     }
 }
 

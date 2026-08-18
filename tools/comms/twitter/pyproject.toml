@@ -1,6 +1,6 @@
 [project]
 name = "twitter"
-description = "Twitter CLI for user profiles, followers, tweets, and search"
+description = "X/Twitter API v2 CLI for users, follows, posts, search, timelines, and lists"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
@@ -8,9 +8,6 @@ dependencies = [
     "typer>=0.12.0",
     "rich>=13.0.0",
     "httpx>=0.28.1",
-    "tenacity>=8.0.0",
-    "pydantic>=2.0.0",
-    "pydantic-settings>=2.0.0",
 ]
 
 [project.scripts]
@@ -28,4 +25,4 @@ build-backend = "hatchling.build"
 
 [tool.centaur]
 module = "client.py"
-secrets = [{type = "http", name = "SYNOPTIC_API_KEY", mode = "inject", inject_header = "x-api-key", hosts = ["api.synoptic.com"]}]
+secrets = [{type = "http", name = "X_API_KEY", mode = "inject", inject_header = "Authorization", inject_formatter = "Bearer {{ .Value }}", hosts = ["api.x.com"]}]

@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::env;
 use std::process::Command as ProcessCommand;
+use std::time::Duration;
 
 use codex_app_server_protocol::UserInput;
 use serde_json::json;
@@ -24,8 +25,9 @@ pub struct AmpEventNormalizer {
 
 impl AmpEventNormalizer {
     fn normalize(&mut self, event: AnthropicStreamEvent) -> Vec<NormalizedEvent> {
+        let token_usage = event.token_usage();
         let normalized = self.anthropic.normalize(event);
-        match normalized {
+        let mut out = match normalized {
             NormalizedEvent::AgentTextDelta { ref item_id, delta } => {
                 if !delta.is_empty() {
                     self.pre_final_text_items.insert(item_id.clone());
@@ -49,7 +51,11 @@ impl AmpEventNormalizer {
                 content,
             } => self.chunk_final_assistant_message(stop_reason, content),
             event => vec![event],
+        };
+        if let Some(usage) = token_usage {
+            out.insert(0, NormalizedEvent::TokenUsage { usage });
         }
+        out
     }
 
     fn chunk_final_assistant_message(
@@ -160,8 +166,11 @@ impl HarnessServer for AmpHarness {
         Ok(normalizer.normalize(event))
     }
 
-    fn finish_turn_on_assistant_end_turn(&self) -> bool {
-        true
+    /// Amp's stream has no native `result` event: the terminal assistant stop
+    /// IS the end of the turn, so complete immediately (a settle window would
+    /// add its full length to every turn).
+    fn terminal_assistant_stop_settle(&self) -> Option<Duration> {
+        Some(Duration::ZERO)
     }
 }
 

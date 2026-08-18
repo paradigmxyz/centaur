@@ -10,9 +10,18 @@ dependencies = [
     "python-dotenv>=1.0.0",
 ]
 
+[project.scripts]
+token-terminal = "centaur_tool_token_terminal.cli:app"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_token_terminal"
 
 [tool.centaur]
 module = "client.py"

@@ -3,7 +3,10 @@ use std::collections::HashMap;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::{NormalizedContent, NormalizedEvent, NormalizedToolResult, Result, stable_id};
+use crate::{
+    NormalizedContent, NormalizedEvent, NormalizedTokenUsage, NormalizedToolResult, Result,
+    stable_id,
+};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -16,13 +19,19 @@ pub enum AnthropicStreamEvent {
         #[serde(default)]
         is_partial: bool,
         message: AnthropicMessage,
+        #[serde(default)]
+        parent_tool_use_id: Option<String>,
     },
     User {
         message: AnthropicMessage,
         tool_use_result: Option<Value>,
+        #[serde(default)]
+        parent_tool_use_id: Option<String>,
     },
     StreamEvent {
         event: AnthropicRawStreamEvent,
+        #[serde(default)]
+        parent_tool_use_id: Option<String>,
     },
     Result {
         subtype: Option<String>,
@@ -31,6 +40,7 @@ pub enum AnthropicStreamEvent {
         is_error: bool,
         error: Option<Value>,
         message: Option<String>,
+        usage: Option<Value>,
     },
     Error {
         error: Option<Value>,
@@ -57,7 +67,40 @@ impl AnthropicStreamEvent {
                     AnthropicRawStreamEvent::MessageDelta {
                         delta: Some(delta), ..
                     },
+                ..
             } => delta.stop_reason.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// The Task tool-use id owning this event when it belongs to a subagent
+    /// sidechain. Sidechain messages stop with their own `end_turn` while the
+    /// parent turn keeps running, so they must never settle the turn.
+    pub fn parent_tool_use_id(&self) -> Option<&str> {
+        match self {
+            Self::Assistant {
+                parent_tool_use_id, ..
+            }
+            | Self::User {
+                parent_tool_use_id, ..
+            }
+            | Self::StreamEvent {
+                parent_tool_use_id, ..
+            } => parent_tool_use_id.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn is_sidechain(&self) -> bool {
+        self.parent_tool_use_id().is_some()
+    }
+
+    pub fn token_usage(&self) -> Option<NormalizedTokenUsage> {
+        match self {
+            Self::Assistant { message, .. } => {
+                token_usage_from_value(message.usage.as_ref(), message.model.clone())
+            }
+            Self::Result { usage, .. } => token_usage_from_value(usage.as_ref(), None),
             _ => None,
         }
     }
@@ -126,7 +169,7 @@ pub struct AnthropicEventNormalizer {
 impl AnthropicEventNormalizer {
     pub fn normalize(&mut self, event: AnthropicStreamEvent) -> NormalizedEvent {
         match event {
-            AnthropicStreamEvent::StreamEvent { event } => self.normalize_stream_event(event),
+            AnthropicStreamEvent::StreamEvent { event, .. } => self.normalize_stream_event(event),
             event => self.normalize_message_event(event),
         }
     }
@@ -204,6 +247,7 @@ impl AnthropicEventNormalizer {
             AnthropicStreamEvent::Assistant {
                 is_partial,
                 message,
+                ..
             } => NormalizedEvent::AssistantMessage {
                 partial: is_partial,
                 stop_reason: message.stop_reason.clone(),
@@ -212,6 +256,7 @@ impl AnthropicEventNormalizer {
             AnthropicStreamEvent::User {
                 message,
                 tool_use_result,
+                ..
             } => {
                 let tool_use_result = tool_use_result.as_ref();
                 let results = message
@@ -227,6 +272,7 @@ impl AnthropicEventNormalizer {
                 is_error,
                 error,
                 message,
+                usage: _,
             } => NormalizedEvent::Result {
                 error: result_error_text(subtype, is_error, error, message, result),
             },
@@ -254,7 +300,9 @@ impl From<AnthropicStreamEvent> for NormalizedEvent {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AnthropicMessage {
     pub id: Option<String>,
+    pub model: Option<String>,
     pub stop_reason: Option<String>,
+    pub usage: Option<Value>,
     #[serde(default)]
     pub content: Vec<AnthropicContentBlock>,
 }
@@ -439,6 +487,75 @@ fn runtime_exit_code(value: Option<&Value>) -> Option<i32> {
         .and_then(|code| i32::try_from(code).ok())
 }
 
+fn token_usage_from_value(
+    value: Option<&Value>,
+    model: Option<String>,
+) -> Option<NormalizedTokenUsage> {
+    let value = value?;
+    if value.is_null() {
+        return None;
+    }
+    let usage = NormalizedTokenUsage {
+        model: model.or_else(|| token_string(value, &["model"])),
+        input_tokens: token_count(value, &["input_tokens", "inputTokens", "inputTokenCount"]),
+        output_tokens: token_count(
+            value,
+            &["output_tokens", "outputTokens", "outputTokenCount"],
+        ),
+        cache_creation_input_tokens: token_count(
+            value,
+            &[
+                "cache_creation_input_tokens",
+                "cacheCreationInputTokens",
+                "cacheCreationTokens",
+            ],
+        ),
+        cache_read_input_tokens: token_count(
+            value,
+            &[
+                "cache_read_input_tokens",
+                "cached_input_tokens",
+                "cacheReadInputTokens",
+                "cachedInputTokens",
+            ],
+        ),
+        reasoning_output_tokens: token_count(
+            value,
+            &[
+                "reasoning_output_tokens",
+                "reasoning_tokens",
+                "reasoningOutputTokens",
+                "reasoningTokens",
+            ],
+        ),
+        total_tokens: token_count(value, &["total_tokens", "totalTokens", "totalTokenCount"]),
+    };
+    usage.has_counts().then_some(usage)
+}
+
+fn token_count(value: &Value, keys: &[&str]) -> Option<i64> {
+    keys.iter()
+        .filter_map(|key| value.get(*key))
+        .find_map(value_as_i64)
+}
+
+fn token_string(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .filter_map(|key| value.get(*key))
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn value_as_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+        .or_else(|| value.as_str()?.trim().parse().ok())
+        .filter(|value| *value >= 0)
+}
+
 fn parse_json_tool_result(content: &str) -> Option<(String, Option<i32>)> {
     let value: Value = serde_json::from_str(content).ok()?;
     let object = value.as_object()?;
@@ -458,4 +575,38 @@ fn exit_code_from_prefix(content: &str) -> Option<i32> {
     let rest = content.strip_prefix("Exit code ")?;
     let code_text = rest.split_once('\n').map_or(rest, |(code, _)| code);
     code_text.trim().parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assistant_event_exposes_token_usage() {
+        let event: AnthropicStreamEvent = serde_json::from_str(
+            r#"{"type":"assistant","message":{"model":"claude-fable-5","id":"msg_1","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":2,"cache_creation_input_tokens":3,"cache_read_input_tokens":5,"output_tokens":7}}}"#,
+        )
+        .expect("assistant event");
+        let usage = event.token_usage().expect("usage");
+
+        assert_eq!(usage.model.as_deref(), Some("claude-fable-5"));
+        assert_eq!(usage.input_tokens, Some(2));
+        assert_eq!(usage.cache_creation_input_tokens, Some(3));
+        assert_eq!(usage.cache_read_input_tokens, Some(5));
+        assert_eq!(usage.output_tokens, Some(7));
+    }
+
+    #[test]
+    fn result_event_exposes_camel_case_token_usage() {
+        let event: AnthropicStreamEvent = serde_json::from_str(
+            r#"{"type":"result","subtype":"success","usage":{"inputTokens":11,"cachedInputTokens":13,"outputTokens":17,"totalTokens":41}}"#,
+        )
+        .expect("result event");
+        let usage = event.token_usage().expect("usage");
+
+        assert_eq!(usage.input_tokens, Some(11));
+        assert_eq!(usage.cache_read_input_tokens, Some(13));
+        assert_eq!(usage.output_tokens, Some(17));
+        assert_eq!(usage.total_tokens, Some(41));
+    }
 }

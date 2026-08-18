@@ -11,14 +11,11 @@ import types
 from pathlib import Path
 from typing import Any
 
-# client.py inherits from workflows.linear.readonly.LinearReadonlyClient, which
-# lives in the workflows package and may not be importable in isolation. The
-# mutation logic under test never touches readonly behavior, so stub the base
-# class before loading the module.
-if "workflows.linear.readonly" not in sys.modules:
-    workflows_pkg = types.ModuleType("workflows")
-    linear_pkg = types.ModuleType("workflows.linear")
-    readonly_mod = types.ModuleType("workflows.linear.readonly")
+# client.py inherits from the packaged readonly client. The mutation logic under
+# test never touches readonly behavior, so stub the base class before loading the
+# module as a standalone file.
+if "readonly" not in sys.modules:
+    readonly_mod = types.ModuleType("readonly")
 
     class LinearReadonlyClient:
         def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -28,11 +25,7 @@ if "workflows.linear.readonly" not in sys.modules:
             raise NotImplementedError
 
     readonly_mod.LinearReadonlyClient = LinearReadonlyClient
-    linear_pkg.readonly = readonly_mod
-    workflows_pkg.linear = linear_pkg
-    sys.modules["workflows"] = workflows_pkg
-    sys.modules["workflows.linear"] = linear_pkg
-    sys.modules["workflows.linear.readonly"] = readonly_mod
+    sys.modules["readonly"] = readonly_mod
 
 spec = importlib.util.spec_from_file_location(
     "linear_client", Path(__file__).with_name("client.py")
@@ -79,6 +72,31 @@ def test_create_issue_merges_success_into_issue_fields():
     }
 
 
+def test_create_issue_sets_project_and_milestone():
+    client = RecordingLinearClient(
+        {
+            "issueCreate": {
+                "success": True,
+                "issue": {"id": "issue-1", "identifier": "ENG-1"},
+            }
+        }
+    )
+
+    client.create_issue(
+        "Test",
+        team_id="team-1",
+        project_id="project-1",
+        project_milestone_id="milestone-1",
+    )
+
+    assert client.calls[0]["variables"]["input"] == {
+        "title": "Test",
+        "teamId": "team-1",
+        "projectId": "project-1",
+        "projectMilestoneId": "milestone-1",
+    }
+
+
 def test_update_issue_merges_success_into_issue_fields():
     client = RecordingLinearClient(
         {
@@ -93,6 +111,51 @@ def test_update_issue_merges_success_into_issue_fields():
 
     assert updated["title"] == "Renamed"
     assert updated["success"] is True
+
+
+def test_update_issue_sets_project_milestone():
+    client = RecordingLinearClient(
+        {
+            "issueUpdate": {
+                "success": True,
+                "issue": {"id": "issue-1", "identifier": "ENG-1"},
+            }
+        }
+    )
+
+    client.update_issue("ENG-1", project_milestone_id="milestone-1")
+
+    assert client.calls[0]["variables"]["input"] == {"projectMilestoneId": "milestone-1"}
+
+
+def test_update_issue_clears_project_milestone():
+    client = RecordingLinearClient(
+        {
+            "issueUpdate": {
+                "success": True,
+                "issue": {"id": "issue-1", "identifier": "ENG-1"},
+            }
+        }
+    )
+
+    client.update_issue("ENG-1", clear_project_milestone=True)
+
+    assert client.calls[0]["variables"]["input"] == {"projectMilestoneId": None}
+
+
+def test_update_issue_rejects_set_and_clear_project_milestone():
+    client = RecordingLinearClient({})
+
+    try:
+        client.update_issue(
+            "ENG-1",
+            project_milestone_id="milestone-1",
+            clear_project_milestone=True,
+        )
+    except ValueError as exc:
+        assert "mutually exclusive" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
 
 
 def test_add_comment_merges_success_into_comment_fields():

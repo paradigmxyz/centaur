@@ -55,11 +55,10 @@ type CodexMapperState = {
   firstBufferedTextAt: number | null
   streamedCommentaryText: string
   streamedAnswerText: string
+  answerStreamDiverged: boolean
   agentMessagePhase: AgentMessagePhase | null
   agentMessagePhaseByItemId: Map<string, AgentMessagePhase>
   planText: string
-  reasoningTextByItemId: Map<string, string>
-  reasoningSummaryIndexByItemId: Map<string, number>
   taskByUseId: Map<string, HarnessTask>
   commandOutputById: Map<string, string>
   emittedActivityRunByTaskId: Map<string, string>
@@ -72,6 +71,13 @@ export type CodexAppServerRendererEventMapperOptions = {
   sessionId?: string
   logInfo?: RendererLogInfo
   unknownAgentMessagePhase?: AgentMessagePhase
+  taskOutput?: 'full' | 'omit'
+  // How long buffered assistant text waits for plan/tasks to arrive before it
+  // streams anyway. The check is event-driven — with no tasks and no further
+  // events, buffered text sits until the next event or stream end — so
+  // consumers that stream text into their own surface (discordbot) pass 0 to
+  // emit deltas immediately. Default 500ms (Slack card-first rendering).
+  preStreamGraceMs?: number
 }
 
 export type CodexAppServerToChatStreamOptions = CodexAppServerRendererEventMapperOptions & {
@@ -86,11 +92,15 @@ export class CodexAppServerRendererEventMapper
   private readonly sessionId: string
   private readonly logInfo?: RendererLogInfo
   private readonly unknownAgentMessagePhase: AgentMessagePhase
+  private readonly includeTaskOutput: boolean
+  private readonly preStreamGraceMs: number
 
   constructor(options: CodexAppServerRendererEventMapperOptions = {}) {
     this.sessionId = options.sessionId ?? ''
     this.logInfo = options.logInfo
     this.unknownAgentMessagePhase = options.unknownAgentMessagePhase ?? 'final_answer'
+    this.includeTaskOutput = options.taskOutput === 'full'
+    this.preStreamGraceMs = options.preStreamGraceMs ?? PRE_STREAM_GRACE_MS
   }
 
   process(source: ServerNotification | RustSessionStreamEvent | unknown): RendererEvent[] {
@@ -99,6 +109,8 @@ export class CodexAppServerRendererEventMapper
     const rustMapped = rustSessionEventToServerNotification(source)
     if (rustMapped?.kind === 'failed') return this.fail(rustMapped.error)
     if (rustMapped?.kind === 'completed') return this.complete(rustMapped.resultText)
+    if (rustMapped?.kind === 'status')
+      return [{ type: 'renderer.status', status: rustMapped.status }]
     if (rustMapped?.kind === 'notification') return this.processNotification(rustMapped.notification)
 
     if (!isRecord(source)) return []
@@ -110,7 +122,6 @@ export class CodexAppServerRendererEventMapper
     if (this.state.done) return []
     this.state.done = true
     const out: RendererEvent[] = []
-    completeThinkingTasks(this.state)
     completeOpenTasks(this.state)
     this.emitActivitySummary(out, { final: true })
     this.ensureFinalAnswerText()
@@ -167,9 +178,6 @@ export class CodexAppServerRendererEventMapper
 
     trackAgentMessageLifecycle(event, this.state)
     ensureCommentarySegmentBreak(event, this.state)
-    if (startThinkingTask(this.state, event)) {
-      this.emitActivitySummary(out)
-    }
 
     const structuredPlan = structuredPlanUpdate(event)
     if (structuredPlan) {
@@ -198,16 +206,19 @@ export class CodexAppServerRendererEventMapper
     const command = commandExecution(event)
     if (command) {
       const id = commandId(command)
-      const aggregatedOutput = commandAggregatedOutput(command)
-      if (aggregatedOutput) this.state.commandOutputById.set(id, aggregatedOutput)
+      if (this.includeTaskOutput) {
+        const aggregatedOutput = commandAggregatedOutput(command)
+        if (aggregatedOutput) this.state.commandOutputById.set(id, aggregatedOutput)
+      }
       const existing = this.state.taskByUseId.get(id)
       const commandIndex = commandNumber(this.state, existing)
       const task = commandTask(
         command,
         String(event?.type ?? ''),
         existing,
-        this.state.commandOutputById.get(id),
-        commandIndex
+        this.includeTaskOutput ? this.state.commandOutputById.get(id) : undefined,
+        commandIndex,
+        this.includeTaskOutput
       )
       const merged = mergeTask(existing, task)
       this.state.taskByUseId.set(merged.id, merged)
@@ -224,7 +235,7 @@ export class CodexAppServerRendererEventMapper
     }
 
     const outputDelta = commandOutputDelta(event)
-    if (outputDelta) {
+    if (outputDelta && this.includeTaskOutput) {
       const current = this.state.commandOutputById.get(outputDelta.id) ?? ''
       const output = current + outputDelta.delta
       this.state.commandOutputById.set(outputDelta.id, output)
@@ -287,71 +298,6 @@ export class CodexAppServerRendererEventMapper
       }
       if (update.correction) {
         this.logCanonicalCorrection(event, update.correction)
-      }
-      if (buffer === 'commentary' && event?.type === 'item.completed') {
-        upsertThinkingTask(this.state, event)
-        this.emitActivitySummary(out)
-      }
-    }
-
-    const reasoningMessage = reasoningText(event)
-    if (reasoningMessage.trim()) {
-      const itemId = reasoningEventItemId(event)
-      if (isReasoningDeltaEvent(event) && itemId) {
-        // Accumulate deltas into one task per reasoning item and keep it
-        // in_progress until the item seals (item.completed) or the
-        // execution finishes (flush). Completing earlier makes the Slack
-        // plan card flip between "Thinking", "Thinking completed", and the
-        // running command.
-        const previous = this.state.reasoningTextByItemId.get(itemId) ?? ''
-        const summaryIndex = reasoningSummaryIndex(event)
-        const needsBreak =
-          summaryIndex !== undefined &&
-          this.state.reasoningSummaryIndexByItemId.get(itemId) !== undefined &&
-          this.state.reasoningSummaryIndexByItemId.get(itemId) !== summaryIndex &&
-          previous.trim() !== ''
-        if (summaryIndex !== undefined) {
-          this.state.reasoningSummaryIndexByItemId.set(itemId, summaryIndex)
-        }
-        const accumulated = previous + (needsBreak ? '\n\n' : '') + reasoningMessage
-        this.state.reasoningTextByItemId.set(itemId, accumulated)
-        this.state.taskByUseId.set(itemId, {
-          id: itemId,
-          title: 'Thinking',
-          status: 'in_progress',
-          details: [section([text(accumulated.trim())])],
-          output: []
-        })
-      } else {
-        const id = itemId || `reasoning-${++this.state.stepCounter}`
-        this.state.taskByUseId.set(id, {
-          id,
-          title: 'Thinking',
-          status: 'complete',
-          details: [section([text(reasoningMessage.trim())])],
-          output: []
-        })
-      }
-      this.emitActivitySummary(out)
-    }
-
-    const sealedReasoning = completedReasoningItem(event)
-    if (sealedReasoning) {
-      const id = String(sealedReasoning.id ?? '')
-      const accumulated = id ? this.state.reasoningTextByItemId.get(id) ?? '' : ''
-      const finalText = (reasoningItemText(sealedReasoning) || accumulated).trim()
-      const existing = id ? this.state.taskByUseId.get(id) : undefined
-      if (id && (existing || finalText)) {
-        this.state.taskByUseId.set(id, {
-          id,
-          title: 'Thinking',
-          status: 'complete',
-          details: finalText ? [section([text(finalText)])] : existing?.details ?? [],
-          output: []
-        })
-        this.state.reasoningTextByItemId.delete(id)
-        this.state.reasoningSummaryIndexByItemId.delete(id)
-        this.emitActivitySummary(out)
       }
     }
 
@@ -449,11 +395,36 @@ export class CodexAppServerRendererEventMapper
     const hasPlan = this.state.taskByUseId.size > 0
     const graceExpired =
       this.state.firstBufferedTextAt !== null &&
-      Date.now() - this.state.firstBufferedTextAt >= PRE_STREAM_GRACE_MS
+      Date.now() - this.state.firstBufferedTextAt >= this.preStreamGraceMs
     const canStream = hasPlan || opts.force || graceExpired
     if (!canStream) return
 
     if (this.state.commentaryText.length > this.state.streamedCommentaryText.length) return
+    // Text already streamed to the consumer is immutable: Slack streaming, the
+    // chat adapter, and this delta stream all only ever append. answerText is
+    // recomposed on every event from compose(answerByItemId, harnessAnswerText),
+    // so when a non-trailing item grows, or an item.completed/assistant event
+    // rewrites an already-streamed region, the recomposed answerText stops being
+    // an extension of what we have already sent. Slicing by byte offset would
+    // then append misaligned bytes and interleave the answer with fragments of
+    // its own earlier text. Stream only a genuine continuation; the divergent
+    // text is left to the terminal reconcile rather than corrupting the live
+    // message. When the invariant holds (the common case) this is identical to a
+    // plain suffix slice.
+    if (!this.state.answerText.startsWith(this.state.streamedAnswerText)) {
+      if (!this.state.answerStreamDiverged) {
+        this.state.answerStreamDiverged = true
+        this.log('codex_renderer_stream_divergence_suppressed', {
+          agent_session_id: this.sessionId,
+          codex_session_id: this.state.threadId || undefined,
+          streamed_chars: this.state.streamedAnswerText.length,
+          answer_chars: this.state.answerText.length,
+          streamed_hash: textHash(this.state.streamedAnswerText),
+          answer_hash: textHash(this.state.answerText)
+        })
+      }
+      return
+    }
     if (this.state.answerText.length <= this.state.streamedAnswerText.length) return
     const delta = this.state.answerText.slice(this.state.streamedAnswerText.length)
     if (!delta) return
@@ -662,6 +633,7 @@ export type RustSessionMappingResult =
   | { kind: 'notification'; notification: ServerNotification }
   | { kind: 'failed'; error: string }
   | { kind: 'completed'; resultText?: string }
+  | { kind: 'status'; status: string }
   | null
 
 export function rustSessionEventToServerNotification(source: unknown): RustSessionMappingResult {
@@ -689,6 +661,12 @@ export function rustSessionEventToServerNotification(source: unknown): RustSessi
     }
   }
 
+  if (eventKind === 'session.activity_summary') {
+    const data = isRecord(source.data) ? source.data : source
+    const status = String(data.summary ?? data.status ?? '').trim()
+    return status ? { kind: 'status', status } : null
+  }
+
   if (
     eventKind === 'session.execution_failed' ||
     eventKind === 'session.stream_error' ||
@@ -698,10 +676,17 @@ export function rustSessionEventToServerNotification(source: unknown): RustSessi
     return { kind: 'failed', error: String(data.error ?? 'Execution failed') }
   }
 
-  if (
-    eventKind === 'session.execution_completed' ||
-    eventKind === 'session.execution_cancelled'
-  ) {
+  if (eventKind === 'session.execution_cancelled') {
+    const data = isRecord(source.data) ? source.data : source
+    const resultText =
+      terminalResultText(data).trim() || String(data.error ?? 'Execution interrupted').trim()
+    return {
+      kind: 'completed',
+      ...(resultText ? { resultText } : {})
+    }
+  }
+
+  if (eventKind === 'session.execution_completed') {
     const data = isRecord(source.data) ? source.data : source
     const resultText = terminalResultText(data).trim()
     return {
@@ -736,11 +721,10 @@ function newState(): CodexMapperState {
     firstBufferedTextAt: null,
     streamedCommentaryText: '',
     streamedAnswerText: '',
+    answerStreamDiverged: false,
     agentMessagePhase: null,
     agentMessagePhaseByItemId: new Map(),
     planText: '',
-    reasoningTextByItemId: new Map(),
-    reasoningSummaryIndexByItemId: new Map(),
     taskByUseId: new Map(),
     commandOutputById: new Map(),
     emittedActivityRunByTaskId: new Map(),
@@ -781,11 +765,21 @@ function errorMessage(event: any): string {
     return messageFromError(event?.turn?.error ?? event?.error, event?.message, 'turn failed')
   }
   if (eventType !== 'error' && eventType !== 'turn.failed') return ''
+  if (isRetryableCodexErrorNotification(event)) return ''
   return messageFromError(
     event?.error,
     event?.message,
     eventType === 'turn.failed' ? 'turn failed' : 'Execution failed'
   )
+}
+
+/** Codex reconnects dropped model streams and emits `error` with `willRetry: true`. */
+export function isRetryableCodexErrorNotification(source: unknown): boolean {
+  if (!isRecord(source)) return false
+  const event = normalizeServerNotification(source)
+  if (!event) return false
+  if (String(event.type ?? '') !== 'error') return false
+  return event.willRetry === true
 }
 
 function isFailedTurn(event: any): boolean {
@@ -855,49 +849,6 @@ function lastInsertedKey<K>(map: Map<K, unknown>): K | undefined {
   return last
 }
 
-function commentaryItemId(event: any): string {
-  return String(event?.itemId ?? event?.item_id ?? event?.item?.id ?? '')
-}
-
-function startThinkingTask(state: CodexMapperState, event: any): boolean {
-  if (event?.type !== 'item.started') return false
-  if (agentMessageItemPhase(event?.item) !== 'commentary') return false
-  const id = commentaryItemId(event)
-  if (!id || state.taskByUseId.has(`thinking-${id}`)) return false
-  state.taskByUseId.set(`thinking-${id}`, {
-    id: `thinking-${id}`,
-    title: 'Thinking',
-    status: 'in_progress',
-    details: [],
-    output: []
-  })
-  return true
-}
-
-function upsertThinkingTask(state: CodexMapperState, event: any): void {
-  const id = commentaryItemId(event)
-  if (!id) return
-  const body = String(event?.item?.text ?? state.commentaryByItemId.get(id) ?? '').trim()
-  if (!body) return
-  if (state.commentaryByItemId.get(id) !== body) {
-    state.commentaryByItemId.set(id, body)
-    recomposeBuffers(state)
-  }
-  state.taskByUseId.set(`thinking-${id}`, {
-    id: `thinking-${id}`,
-    title: 'Thinking',
-    status: 'complete',
-    details: [section([text(body)])],
-    output: []
-  })
-}
-
-function completeThinkingTasks(state: CodexMapperState): void {
-  for (const [id, body] of state.commentaryByItemId) {
-    upsertThinkingTask(state, { item: { id, text: body } })
-  }
-}
-
 function eventCarriesAgentMessageText(event: any): boolean {
   if (event?.type === 'item.agentMessage.delta') return Boolean(extractDeltaText(event))
   if (event?.type === 'assistant') return Boolean(assistantTextFromAssistantEvent(event))
@@ -952,52 +903,6 @@ function textHash(value: string): string {
     hash = Math.imul(hash, 0x01000193)
   }
   return (hash >>> 0).toString(16).padStart(8, '0')
-}
-
-function reasoningText(event: any): string {
-  if (
-    event?.type === 'item.reasoning.summaryTextDelta' ||
-    event?.type === 'item.reasoning.textDelta'
-  ) {
-    return String(event.delta ?? '')
-  }
-  if (event?.type !== 'reasoning') return ''
-  return String(event.text ?? event.thinking ?? '')
-}
-
-function isReasoningDeltaEvent(event: any): boolean {
-  return (
-    event?.type === 'item.reasoning.summaryTextDelta' ||
-    event?.type === 'item.reasoning.textDelta'
-  )
-}
-
-function reasoningEventItemId(event: any): string {
-  return String(event?.itemId ?? event?.item_id ?? '')
-}
-
-function reasoningSummaryIndex(event: any): number | undefined {
-  const value = event?.summaryIndex ?? event?.summary_index
-  return typeof value === 'number' ? value : undefined
-}
-
-function completedReasoningItem(event: any): Record<string, any> | null {
-  if (event?.type !== 'item.completed') return null
-  const item = event.item
-  if (!item || item.type !== 'reasoning') return null
-  return item
-}
-
-function reasoningItemText(item: any): string {
-  const parts = [
-    ...(Array.isArray(item?.content) ? item.content : []),
-    ...(Array.isArray(item?.summary) ? item.summary : [])
-  ]
-  const texts = parts
-    .map(part => (typeof part === 'string' ? part : String(part?.text ?? '')))
-    .filter(part => part.trim())
-  if (texts.length) return texts.join('\n\n')
-  return String(item?.text ?? '')
 }
 
 function terminalResultText(event: any): string {
@@ -1153,12 +1058,10 @@ function changedActivityTaskUpdates(
     output?: RendererTaskBlock[]
   }> = []
   // Slack derives the plan card header from task statuses: it shows the
-  // current in_progress task, and falls back to "Thinking completed" when
-  // nothing is in progress — even mid-turn (e.g. while the model thinks
-  // between commands without emitting reasoning events). Mid-turn, present
-  // the most recent finished task as still in progress so the header never
-  // claims completion; its true status is emitted with the next batch or at
-  // the final flush.
+  // current in_progress task, and falls back to a completed-task header when
+  // nothing is in progress. Mid-turn, present the most recent finished task as
+  // still in progress so the header never claims completion; its true status
+  // is emitted with the next batch or at the final flush.
   const report = opts.final ? tasks : holdLastFinishedTask(tasks)
   for (const task of report) {
     let details: RendererTaskBlock[] | undefined
@@ -1213,9 +1116,6 @@ function holdLastFinishedTask(tasks: HarnessTask[]): HarnessTask[] {
 }
 
 function activityRunBlock(task: HarnessTask): RendererTaskBlock[] {
-  if (task.title === 'Thinking' && task.details.length) {
-    return task.details
-  }
   const command = firstPreformattedBody(task.details)
   if (command) {
     return [pre(command, shellLanguage(firstPreformattedLanguage(task.details)))]
@@ -1269,7 +1169,8 @@ function commandTask(
   eventType: string,
   existing?: HarnessTask,
   accumulatedOutput?: string,
-  commandIndex?: number
+  commandIndex?: number,
+  includeOutput = true
 ): HarnessTask {
   const id = commandId(item)
   const rawCommand = String(item.command ?? 'Command')
@@ -1280,7 +1181,7 @@ function commandTask(
   const failed = isCommandFailure(item, eventType)
   const isCompletionUpdate =
     eventType === 'item.completed' || status === 'complete' || status === 'error'
-  const output = commandOutputElements(accumulatedOutput ?? '', exitCode)
+  const output = includeOutput ? commandOutputElements(accumulatedOutput ?? '', exitCode) : []
   return {
     id,
     title: commandExecutionTitle(commandIndex),

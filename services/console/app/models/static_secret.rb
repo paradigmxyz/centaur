@@ -48,6 +48,20 @@ class StaticSecret < ApplicationRecord
   # proxy resolves at sync; this association is the console-level link.
   belongs_to :broker_credential, optional: true
 
+  def apply_kind_defaults(rules: self.rules)
+    CredentialProfiles::Registry.apply_defaults(self, rules: rules)
+  end
+
+  attr_writer :kind_rules_for_validation
+
+  def validate_kind_rules(rules: self.rules)
+    CredentialProfiles::Registry.validate_rules(self, rules: rules)
+  end
+
+  after_commit :auto_grant_wrapped_oauth_credential,
+               on: %i[create update],
+               if: :broker_credential_id?
+
   # Maps to a single entry in the iron-proxy `secrets` transform array. The
   # caller is responsible for skipping secrets without a source.
   def to_proxy_secret
@@ -61,9 +75,9 @@ class StaticSecret < ApplicationRecord
   end
 
   # The request targets this secret writes, normalized for cross-type conflict
-  # detection (see Principal#served_credentials): a header (case-insensitive) or
-  # a query param. A replace with no match_headers rewrites the body/path/query
-  # rather than a header, so it claims no target and never collides with a header
+  # detection during snapshot assembly: a header (case-insensitive) or a query
+  # param. A replace with no match_headers rewrites the body/path/query rather
+  # than a header, so it claims no target and never collides with a header
   # injector.
   def proxy_conflict_targets
     if inject_config.present?
@@ -81,15 +95,21 @@ class StaticSecret < ApplicationRecord
     end
   end
 
-  validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
-  validates :foreign_id, uniqueness: { scope: :namespace, allow_nil: true },
+  validates :kind, presence: true, inclusion: { in: CredentialProfiles::Registry.kinds }
+  validates :foreign_id, uniqueness: { allow_nil: true },
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }, allow_nil: true
   validate :labels_is_a_hash
   validate :exactly_one_of_inject_or_replace
   validate :inject_config_matches_schema
   validate :replace_config_matches_schema
+  validate :kind_config_matches_profile
+  validate :kind_rules_match_profile
 
   private
+
+  def auto_grant_wrapped_oauth_credential
+    PrincipalCredentialReconciliation.new.apply_for_credential(broker_credential)
+  end
 
   def labels_is_a_hash
     errors.add(:labels, "must be a hash") unless labels.is_a?(Hash)
@@ -110,6 +130,14 @@ class StaticSecret < ApplicationRecord
 
   def replace_config_matches_schema
     validate_against_schema(:replace_config, replace_config, REPLACE_CONFIG_SCHEMA)
+  end
+
+  def kind_config_matches_profile
+    CredentialProfiles::Registry.validate_config(self)
+  end
+
+  def kind_rules_match_profile
+    validate_kind_rules(rules: @kind_rules_for_validation || rules)
   end
 
   def validate_against_schema(attr, value, schema)

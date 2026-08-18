@@ -17,6 +17,7 @@ export type DiscordbotApiAuthor = {
 
 export type DiscordbotApiAttachment = {
   dataBase64?: string;
+  dataBase64Omitted?: string;
   fetchError?: string;
   fetchMetadata?: Record<string, string>;
   height?: number;

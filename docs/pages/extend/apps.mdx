@@ -58,8 +58,8 @@ enabled = true
 [[tools]]
 name = "research-tool"
 description = "Search private research data"
-methods = [
-  { name = "search", path = "/tools/research-tool/search" },
+scripts = [
+  { name = "research-tool", command = "research-tool" },
 ]
 
 [[skills]]
@@ -109,7 +109,7 @@ The app plane keeps the API as the registry, auth boundary, and router:
 | Logs | `GET /apps/{name}/logs` |
 | Restart | `POST /apps/{name}/restart` |
 | Delete | `DELETE /apps/{name}` |
-| Tool method | Existing `/tools/{tool}/{method}` route proxies to the app |
+| Tool capability | Registered as a sandbox-visible tool script or workflow-host bridge |
 | Skills | Listed through app skill discovery and fetched lazily |
 | Workflows | Started through the existing workflow run API |
 

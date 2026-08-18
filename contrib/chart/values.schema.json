@@ -5,8 +5,9 @@
     "consoleConfig": {
       "type": "object",
       "properties": {
-        "enabled": { "type": "boolean" },
         "replicaCount": { "type": "integer" },
+        "publicUrl": { "type": "string" },
+        "sentryDsn": { "type": "string" },
         "railsEnv": { "type": "string" },
         "image": {
           "type": "object",
@@ -20,6 +21,12 @@
           "type": "object",
           "properties": {
             "name": { "type": "string" }
+          }
+        },
+        "slackDmSync": {
+          "type": "object",
+          "properties": {
+            "oauthAppSlug": { "type": "string" }
           }
         },
         "service": {
@@ -42,8 +49,38 @@
         "worker": {
           "type": "object",
           "properties": {
-            "enabled": { "type": "boolean" },
             "replicaCount": { "type": "integer" },
+            "resources": { "type": "object" }
+          }
+        },
+        "sqlExporter": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "image": {
+              "type": "object",
+              "properties": {
+                "repository": { "type": "string" },
+                "tag": { "type": "string" },
+                "pullPolicy": { "type": "string" }
+              }
+            },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "databaseUrlSecretKey": { "type": "string", "minLength": 1 },
+            "databasePort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "minInterval": { "type": "string", "minLength": 1 },
+            "scrapeTimeout": { "type": "string", "minLength": 1 },
+            "metrics": {
+              "type": "object",
+              "properties": {
+                "scrapeAnnotations": { "type": "boolean" },
+                "path": { "type": "string" },
+                "annotations": {
+                  "type": "object",
+                  "additionalProperties": { "type": "string" }
+                }
+              }
+            },
             "resources": { "type": "object" }
           }
         },
@@ -87,7 +124,12 @@
           }
         },
         "secretSource": { "type": "string" },
-        "secretTtl": { "type": "string" }
+        "secretTtl": { "type": "string" },
+        "upstreamDenyCidrs": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "resources": { "type": "object" }
       }
     },
     "toolServer": {
@@ -97,6 +139,7 @@
         "port": { "type": "integer" },
         "repo": { "type": "string" },
         "ref": { "type": "string" },
+        "visibility": { "type": "string" },
         "subdir": { "type": "string" },
         "extraSources": {
           "type": "array",
@@ -105,6 +148,7 @@
             "properties": {
               "repo": { "type": "string" },
               "ref": { "type": "string" },
+              "visibility": { "type": "string" },
               "subdir": { "type": "string" }
             },
             "required": ["repo"]
@@ -137,6 +181,7 @@
             "properties": {
               "repo": { "type": "string" },
               "ref": { "type": "string" },
+              "visibility": { "type": "string" },
               "toolsSubdir": { "type": "string" },
               "workflowsSubdir": { "type": "string" },
               "skillsSubdir": { "type": "string" },
@@ -151,6 +196,8 @@
     "sandbox": {
       "type": "object",
       "properties": {
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
         "runtimeClassName": { "type": "string" },
         "reposPath": { "type": "string" },
         "resources": { "type": "object" }
@@ -160,10 +207,24 @@
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean" },
+        "autoReload": { "type": "boolean" },
         "hostPath": { "type": "string" },
         "repositories": {
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "anyOf": [
+              { "type": "string" },
+              {
+                "type": "object",
+                "properties": {
+                  "repo": { "type": "string" },
+                  "ref": { "type": "string" },
+                  "visibility": { "type": "string" }
+                },
+                "required": ["repo"]
+              }
+            ]
+          }
         },
         "repositoryRefs": {
           "type": "object",
@@ -235,6 +296,118 @@
     "apiRs": {
       "type": "object",
       "properties": {
+        "syncInfraSecrets": { "type": "boolean" },
+        "mcpPublicUrl": { "type": "string" },
+        "sandboxRunningLimit": { "type": "integer", "minimum": 0 },
+        "sandboxHotIdleGraceSecs": { "type": "integer", "minimum": 0 },
+        "workflowHostSandbox": { "type": "boolean" },
+        "workflowHostResources": { "type": "object" },
+        "etl": {
+          "type": "object",
+          "properties": {
+            "slack": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "syncIntervalSeconds": { "type": "integer" },
+                "syncBackfillLookbackDays": { "type": "integer" },
+                "syncThreadLookbackDays": { "type": "integer" },
+                "indexPrivateChannels": { "type": "boolean" },
+                "excludedChannelPatterns": { "type": "string" },
+                "attachments": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": { "type": "boolean" },
+                    "maxBytes": { "type": "integer" }
+                  }
+                },
+                "backfill": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": { "type": "boolean" },
+                    "intervalSeconds": { "type": "integer" },
+                    "channelBatchLimit": { "type": "integer" },
+                    "channelPagesPerJob": { "type": "integer" }
+                  }
+                },
+                "retention": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": { "type": "boolean" },
+                    "intervalMinutes": { "type": "integer" },
+                    "etlDays": { "type": "integer" },
+                    "dmDays": { "type": "integer" }
+                  }
+                }
+              }
+            },
+            "linear": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "syncIntervalSeconds": { "type": "integer" }
+              }
+            },
+            "googleDrive": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "syncIntervalSeconds": { "type": "integer" }
+              }
+            },
+            "googleCalendar": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "syncIntervalSeconds": { "type": "integer" }
+              }
+            },
+            "companyContextDocuments": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "intervalSeconds": { "type": "integer" },
+                "maxWindowSeconds": { "type": "integer" },
+                "batchSize": { "type": "integer", "minimum": 1 }
+              }
+            },
+            "companyContextEmbeddings": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "intervalSeconds": { "type": "integer", "minimum": 1 },
+                "batchSize": { "type": "integer", "minimum": 1 },
+                "model": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        },
+        "metrics": {
+          "type": "object",
+          "properties": {
+            "scrapeAnnotations": { "type": "boolean" },
+            "path": { "type": "string" },
+            "annotations": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            }
+          }
+        },
+        "extraEnv": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "slackbotv2": {
+      "type": "object",
+      "properties": {
+        "mcpPublicUrl": { "type": "string" },
+        "responseMetadataMode": {
+          "type": "string",
+          "enum": ["first", "always", "never"]
+        },
+        "responseServiceTierEnabled": { "type": "boolean" },
         "metrics": {
           "type": "object",
           "properties": {
@@ -260,6 +433,13 @@
           "properties": {
             "subPath": { "type": "string" }
           }
+        },
+        "sharedMemory": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "sizeLimit": { "type": "string" }
+          }
         }
       }
     },
@@ -275,9 +455,61 @@
           "type": "array",
           "items": { "type": "string" }
         },
+        "metricsIngressSourceNamespaces": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
         "ingressControllerNamespaces": {
           "type": "array",
           "items": { "type": "string" }
+        },
+        "apiServerPort": { "type": "integer" },
+        "otlpEgress": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "namespace": { "type": "string" },
+            "port": { "type": "integer" }
+          }
+        },
+        "observabilityEgress": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "destinations": {
+              "type": "array",
+              "minItems": 0,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "namespace": { "type": "string" },
+                  "namespaceSelector": { "type": "object" },
+                  "podSelector": { "type": "object" },
+                  "ports": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "port": {
+                          "oneOf": [
+                            { "type": "integer" },
+                            { "type": "string" }
+                          ]
+                        },
+                        "protocol": {
+                          "type": "string",
+                          "enum": ["TCP", "UDP", "SCTP"]
+                        }
+                      },
+                      "required": ["port"]
+                    }
+                  }
+                },
+                "required": ["ports"]
+              }
+            }
+          }
         }
       }
     }

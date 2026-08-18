@@ -2,6 +2,7 @@ use std::io;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command as ProcessCommand};
 use std::sync::mpsc::Receiver;
+use std::time::Duration;
 
 use codex_app_server_protocol::{ThreadStartParams, Turn, UserInput};
 use serde_json::Value;
@@ -41,6 +42,13 @@ impl Drop for HarnessChild {
     }
 }
 
+impl HarnessChild {
+    pub fn kill_and_wait(&mut self) -> io::Result<()> {
+        let _ = self.child.kill();
+        self.child.wait().map(|_| ())
+    }
+}
+
 pub trait AppServerRuntime {
     fn run_stdio(&self) -> Result<()>;
 }
@@ -64,8 +72,17 @@ pub trait HarnessServer {
         normalizer: &mut Self::EventNormalizer,
         event: Self::Event,
     ) -> Result<Vec<NormalizedEvent>>;
-    fn finish_turn_on_assistant_end_turn(&self) -> bool {
-        false
+    /// How to treat an assistant message that stops with a terminal stop
+    /// reason (`end_turn`, ...) when no native terminal event has arrived.
+    /// `None` keeps the turn open until a native result/error (the default).
+    /// `Some(window)` completes the turn once the stream stays quiet for
+    /// `window` after the stop: a zero window completes immediately (for
+    /// streams with no native result event), a nonzero window gives the
+    /// harness's own `result` a chance to settle the turn first — and keeps
+    /// that trailing `result` from being read as the *next* turn's terminal —
+    /// while still completing when the result never comes.
+    fn terminal_assistant_stop_settle(&self) -> Option<Duration> {
+        None
     }
 
     fn thread_state(&self, params: &ThreadStartParams, cwd: PathBuf) -> ThreadState {
@@ -113,6 +130,9 @@ pub enum NormalizedEvent {
         delta: String,
     },
     ToolResults(Vec<NormalizedToolResult>),
+    TokenUsage {
+        usage: NormalizedTokenUsage,
+    },
     Result {
         error: Option<String>,
     },
@@ -136,16 +156,30 @@ impl NormalizedEvent {
         matches!(self, Self::Result { .. } | Self::Error { .. })
     }
 
-    pub(crate) fn is_assistant_end_turn(&self) -> bool {
+    pub(crate) fn token_usage(&self) -> Option<&NormalizedTokenUsage> {
+        match self {
+            Self::TokenUsage { usage } => Some(usage),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn is_terminal_assistant_stop(&self) -> bool {
         matches!(
             self,
             Self::AssistantMessage {
                 partial: false,
                 stop_reason: Some(stop_reason),
                 ..
-            } if stop_reason == "end_turn"
+            } if is_terminal_assistant_stop_reason(stop_reason)
         )
     }
+}
+
+fn is_terminal_assistant_stop_reason(reason: &str) -> bool {
+    matches!(
+        reason,
+        "end_turn" | "stop_sequence" | "max_tokens" | "refusal"
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -171,6 +205,28 @@ pub struct NormalizedToolResult {
     pub content: String,
     pub is_error: bool,
     pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NormalizedTokenUsage {
+    pub model: Option<String>,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cache_creation_input_tokens: Option<i64>,
+    pub cache_read_input_tokens: Option<i64>,
+    pub reasoning_output_tokens: Option<i64>,
+    pub total_tokens: Option<i64>,
+}
+
+impl NormalizedTokenUsage {
+    pub(crate) fn has_counts(&self) -> bool {
+        self.input_tokens.is_some()
+            || self.output_tokens.is_some()
+            || self.cache_creation_input_tokens.is_some()
+            || self.cache_read_input_tokens.is_some()
+            || self.reasoning_output_tokens.is_some()
+            || self.total_tokens.is_some()
+    }
 }
 
 #[derive(Debug)]

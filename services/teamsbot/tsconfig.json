@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+    "noEmit": true,
+    "resolvePackageJsonExports": true,
+    "resolvePackageJsonImports": true,
+    "types": ["node", "bun"],
+    "useUnknownInCatchVariables": true
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

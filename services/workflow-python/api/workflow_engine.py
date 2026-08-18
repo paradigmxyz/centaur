@@ -1,0 +1,199 @@
+from __future__ import annotations
+
+import dataclasses
+import datetime as dt
+import inspect
+from typing import Any
+
+from api.app import WorkflowToolManager, WorkflowTools, bind_context_rpc, reset_context_rpc
+
+
+@dataclasses.dataclass
+class Delivery:
+    channel: str = ""
+    thread_ts: str = ""
+    mode: str = ""
+    metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+class WorkflowContext:
+    def __init__(
+        self,
+        rpc: Any,
+        *,
+        run_id: str,
+        task_id: str,
+        workflow_name: str,
+        pool: Any = None,
+        agent_defaults: dict[str, Any] | None = None,
+    ) -> None:
+        self._rpc = rpc
+        self.run_id = run_id
+        self.task_id = task_id
+        self.workflow_name = workflow_name
+        self._pool = pool
+        # Module-level `AGENT_DEFAULTS` (e.g. {"model": ..., "reasoning": ...})
+        # applied to every ctx.agent_turn as a per-workflow default; explicit
+        # per-call kwargs always win. See agent_turn().
+        self._agent_defaults = dict(agent_defaults or {})
+        self.tools = WorkflowTools(WorkflowToolManager(self._rpc))
+
+    def log(self, event: str, **fields: Any) -> None:
+        self._rpc.notify(
+            {
+                "type": "ctx.log",
+                "message": event,
+                "fields": fields,
+            }
+        )
+
+    async def step(
+        self,
+        name: str,
+        fn: Any,
+        *,
+        retry: Any = None,
+        timeout: Any = None,
+        step_kind: str | None = None,
+    ) -> Any:
+        del retry, timeout
+        request: dict[str, Any] = {"type": "ctx.step.get", "step": name}
+        if step_kind:
+            request["step_kind"] = step_kind
+        started = await self._rpc.request(request)
+        if started.get("done"):
+            return started.get("value")
+
+        token = bind_context_rpc(self._rpc)
+        try:
+            value = fn()
+            if inspect.isawaitable(value):
+                value = await value
+        finally:
+            reset_context_rpc(token)
+        await self._rpc.request(
+            {
+                "type": "ctx.step.put",
+                "checkpoint_name": started["checkpoint_name"],
+                "value": value,
+                **({"step_kind": step_kind} if step_kind else {}),
+            }
+        )
+        return value
+
+    async def sleep(self, name: str, duration: dt.timedelta | int | float) -> None:
+        await self._rpc.request(
+            {
+                "type": "ctx.sleep",
+                "step": name,
+                "duration_seconds": duration_seconds(duration),
+            }
+        )
+
+    async def sleep_until(self, name: str, when: dt.datetime) -> None:
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=dt.timezone.utc)
+        await self._rpc.request(
+            {
+                "type": "ctx.sleep_until",
+                "step": name,
+                "wake_at": when.astimezone(dt.timezone.utc).isoformat(),
+            }
+        )
+
+    async def wait_for_event(
+        self,
+        name: str,
+        event_type: str,
+        correlation_id: str,
+        *,
+        timeout: dt.timedelta | int | float | None = None,
+    ) -> Any:
+        """Suspend until the matching durable workflow event is delivered."""
+        request: dict[str, Any] = {
+            "type": "ctx.event.wait",
+            "step": name,
+            "event_type": event_type,
+            "correlation_id": correlation_id,
+        }
+        if timeout is not None:
+            request["timeout_seconds"] = duration_seconds(timeout)
+        return await self._rpc.request(request)
+
+    async def agent_turn(self, text: str | None = None, **kwargs: Any) -> Any:
+        # Per-workflow AGENT_DEFAULTS (model / provider / reasoning / harness,
+        # ...) form the base; explicit per-call kwargs override them key by key.
+        args = {**self._agent_defaults, **kwargs}
+        if text is not None:
+            args.setdefault("text", text)
+        return await self._rpc.request({"type": "ctx.agent_turn", "args": args})
+
+    async def run_agent(self, *args: Any, text: str | None = None, **kwargs: Any) -> Any:
+        if args:
+            kwargs.setdefault("name", args[0])
+            if len(args) > 1:
+                raise TypeError("run_agent accepts at most one positional name argument")
+        return await self.agent_turn(text, **kwargs)
+
+    async def start_agent(self, *args: Any, text: str | None = None, **kwargs: Any) -> Any:
+        return await self.run_agent(*args, text=text, **kwargs)
+
+    async def run_agents(
+        self,
+        agents: list[dict[str, Any]],
+        *,
+        max_concurrency: int | None = None,
+    ) -> dict[str, Any]:
+        """Run named agent turns concurrently and return every outcome in input order."""
+        if not isinstance(agents, list):
+            raise TypeError("run_agents agents must be a list")
+
+        normalized_agents: list[dict[str, Any]] = []
+        for index, agent in enumerate(agents):
+            if not isinstance(agent, dict):
+                raise TypeError(f"run_agents agent at index {index} must be a dict")
+            normalized_agents.append({**self._agent_defaults, **agent})
+
+        request: dict[str, Any] = {
+            "type": "ctx.run_agents",
+            "agents": normalized_agents,
+        }
+        if max_concurrency is not None:
+            request["max_concurrency"] = max_concurrency
+        return await self._rpc.request(request)
+
+    async def start_workflow(
+        self,
+        workflow_name: str,
+        input: dict[str, Any] | None = None,
+        *,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Queue another workflow and return its durable task identifiers."""
+        request: dict[str, Any] = {
+            "type": "ctx.workflow.start",
+            "workflow_name": workflow_name,
+            "input": input or {},
+        }
+        if idempotency_key:
+            request["idempotency_key"] = idempotency_key
+        return await self._rpc.request(request)
+
+    async def call_tool(self, tool: str, method: str, args: dict[str, Any] | None = None) -> Any:
+        return await WorkflowToolManager(self._rpc).call_tool_raw(tool, method, args or {})
+
+    async def post_to_slack(self, channel: str, text: str, **kwargs: Any) -> Any:
+        return await self._rpc.request(
+            {
+                "type": "ctx.post_to_slack",
+                "channel": channel,
+                "text": text,
+                "args": kwargs,
+            }
+        )
+
+
+def duration_seconds(value: dt.timedelta | int | float) -> float:
+    if isinstance(value, dt.timedelta):
+        return max(value.total_seconds(), 0.0)
+    return max(float(value), 0.0)

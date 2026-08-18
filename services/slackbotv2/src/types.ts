@@ -2,6 +2,9 @@ import type { RustSessionStreamEvent } from '@centaur/harness-events'
 import type { CodexAppServerToChatStreamOptions } from '@centaur/rendering'
 import type { Attachment, Chat, Logger, StateAdapter } from 'chat'
 import type { Hono } from 'hono'
+import type { ChannelDefaults } from './channel-defaults'
+import type { HarnessOverrides } from './overrides'
+import type { SlackDisplayTextSource } from './slack-display-text'
 
 export type JsonPrimitive = string | number | boolean | null
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[]
@@ -29,12 +32,26 @@ export type SlackbotV2ApiAttachment = {
   width?: number
 }
 
+export type SlackbotV2ApiMessageLink = {
+  description?: string
+  imageUrl?: string
+  isSlackMessage?: boolean
+  siteName?: string
+  title?: string
+  url: string
+}
+
 export type SlackbotV2ApiMessage = {
   attachments: SlackbotV2ApiAttachment[]
   author: SlackbotV2ApiAuthor
+  displayText?: string
+  displayTextSource?: SlackDisplayTextSource
   id: string
   isMention: boolean
+  links?: SlackbotV2ApiMessageLink[]
   raw: unknown
+  rawSlackAttachmentCount?: number
+  rawSlackBlockCount?: number
   teamId: string
   text: string
   threadId: string
@@ -61,6 +78,13 @@ export type SlackbotV2CreateSessionRequest = {
   on_harness_conflict?: 'reject' | 'restart'
 }
 
+export type SlackbotV2HarnessAssignment = {
+  experiment: string
+  requestedHarness: string
+  cohort: string
+  rolloutPercent: number
+}
+
 export type SlackbotV2ExecuteSessionRequest = {
   idempotency_key?: string
   idle_timeout_ms?: number
@@ -76,37 +100,131 @@ export type SlackbotV2ExecuteSessionResponse = {
   thread_key: string
 }
 
+export type SlackbotV2InterruptSessionResponse = {
+  execution_id?: string
+  interrupted: boolean
+  ok: boolean
+  thread_key: string
+}
+
 export type SlackbotV2Fetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+
+export type SlackbotV2BlockActionPayload = {
+  action_id: string
+  action_ts?: string
+  block_id?: string
+  channel_id?: string
+  message_id: string
+  message_ts?: string
+  team_id?: string
+  thread_id: string
+  thread_ts?: string
+  type: 'block_actions'
+  user_id: string
+  user_name: string
+  value?: string
+}
 
 export type SlackbotV2Options = {
   allowedExternalTeamIds?: readonly string[]
   apiKey?: string
   apiUrl: string
   assistantStatus?: string
+  /**
+   * When enabled, session.activity_summary events update Slack's assistant
+   * status and structured task output is hidden from the Slack stream.
+   */
+  activitySummaryStatusEnabled?: boolean
+  /** Join public channels after Slack channel_created events. */
+  autoJoinCreatedChannels?: boolean
   botToken: string
   botUserId?: string
   /**
-   * Harness for new threads when no --claude/--amp/--codex flag is given
-   * (HarnessType wire value: codex | amp | claudecode). Defaults to codex.
+   * Public origin of the Console UI (same value the Console itself uses,
+   * `CENTAUR_CONSOLE_PUBLIC_URL`). When set, the first assistant message in a
+   * Slack thread gets an "Open chat in Console" context link. Unset skips the
+   * link; response metadata renders independently according to its configured mode.
+   */
+  consolePublicUrl?: string
+  /** Controls whether response metadata renders on the first, every, or no live responses. */
+  responseMetadataMode?: 'first' | 'always' | 'never'
+  /** Include the Codex service tier in response metadata footers when they render. */
+  responseServiceTierEnabled?: boolean
+  /**
+   * Per-channel default harness/model/provider/reasoning, keyed by Slack
+   * conversation id (SLACKBOTV2_CHANNEL_DEFAULTS). See channel-defaults.ts.
+   */
+  channelDefaults?: ChannelDefaults
+  /**
+   * Harness for new threads when no --claude/--amp/--codex/--nanocodex/--hermes
+   * flag is given (HarnessType wire value: codex | amp | claudecode |
+   * nanocodex | hermes). Defaults to codex.
    */
   defaultHarnessType?: string
   fetch?: SlackbotV2Fetch
+  /**
+   * Deployment-configured default model per harness wire value (claudecode |
+   * codex), from the CLAUDE_MODEL / CODEX_MODEL env vars the chart mirrors
+   * out of sandbox.extraEnv. Display/metadata only — never forwarded to the
+   * harness. Unset harnesses fall back to the models pinned in this repo's
+   * harness config files (see console-session-link.ts).
+   */
+  harnessDefaultModels?: Record<string, string>
+  /**
+   * Deployment-configured default reasoning per Codex-compatible harness,
+   * mirrored from CODEX_MODEL_REASONING_EFFORT. Display only; explicit and
+   * channel reasoning selections are forwarded separately on each turn.
+   */
+  harnessDefaultReasoning?: Record<string, string>
+  /** Strategy for resolving message-level harness/model/provider/reasoning overrides. */
+  messageOverridesStrategy?: MessageOverridesStrategy
+  /**
+   * Backoff delays between in-process retries of a Slack handoff after a
+   * retryable session API failure. Slack's own webhook redelivery cannot
+   * drive these retries: Slack times deliveries out after ~3s, so its
+   * redelivery races the still-running original attempt, is deduped, and is
+   * acknowledged before the original attempt fails. The bot retries locally
+   * instead and posts a visible error once the delays are exhausted.
+   */
+  handoffRetryDelaysMs?: readonly number[]
+  /** Milliseconds before an idle execution pauses its sandbox. Defaults to up to 3h. */
   idleTimeoutMs?: number
   logger?: Logger
   maxDurationMs?: number
   postgresUrl?: string
   recoverRenderObligationsOnStart?: boolean
+  /** Maximum Slack message age eligible for startup render recovery. */
+  renderRecoveryMaxObligationAgeMs?: number
   /** Per-thread deadline for one recovery attempt during the startup scan. */
   renderRecoveryThreadTimeoutMs?: number
+  /** Deadline for Centaur session API HTTP calls made during Slack handoff. */
+  sessionApiTimeoutMs?: number
   signingSecret: string
   slackApiUrl?: string
+  /** Bot workspace team ID resolved once from Slack's auth.test response. */
+  slackHomeTeamId?: string
+  /** Deadline for optional Slack Web API metadata lookups. */
+  slackApiTimeoutMs?: number
   state?: StateAdapter
   stateKeyPrefix?: string
-  streamTaskDisplayMode?: 'plan' | 'timeline'
+  streamTaskDisplayMode?: 'none' | 'plan' | 'timeline'
   triggerBotAllowlist?: readonly string[]
   userName?: string
   mapper?: CodexAppServerToChatStreamOptions
 }
+
+export type MessageOverridesStrategyInput = {
+  text: string
+}
+
+export type MessageOverridesStrategyResult = {
+  cleanedText?: string
+  overrides: HarnessOverrides
+}
+
+export type MessageOverridesStrategy = (
+  input: MessageOverridesStrategyInput
+) => Promise<MessageOverridesStrategyResult>
 
 export type SlackbotV2 = {
   app: Hono
@@ -117,8 +235,14 @@ export type SlackbotV2ThreadState = {
   activeExecution?: boolean
   executedMessageIds?: string[]
   forwardedMessageIds?: string[]
+  /** Last thread-level harness selected by Slack flags. Null clears persisted state. */
+  harnessType?: string | null
   historyForwarded?: boolean
   lastEventId?: number
+  /** Last thread-level model selected by Slack flags. Null clears persisted state. */
+  model?: string | null
+  /** Last thread-level model provider selected by Slack flags. Null clears persisted state. */
+  provider?: string | null
   renderObligation?: SlackbotV2RenderObligation | null
 }
 
@@ -137,6 +261,7 @@ export type SlackbotV2Trace = {
   messageId: string
   mode: SlackbotV2MessageMode
   openStream: boolean
+  slackUserId?: string
   startedAtMs: number
   threadId: string
 }
@@ -152,12 +277,24 @@ export type ForwardSessionInput = {
   contextPreamble?: string
   executionId?: string
   executeMessage?: SlackbotV2ApiMessage
-  /** Harness override parsed from message flags (--claude/--amp/--codex). */
+  /** Effective harness selected by sticky thread flags (including --nanocodex). */
   harnessType?: string
+  /** Harness returned by api-rs after applying control-plane policy. */
+  metadataHarnessType?: string
+  /** Experiment/cohort returned by api-rs and recorded on this execution. */
+  harnessAssignment?: SlackbotV2HarnessAssignment
   messages: SlackbotV2ApiMessage[]
-  /** Per-turn model override parsed from message flags (--model/--opus/...). */
+  /** Effective model selected by sticky thread flags (--model/--opus/...). */
   model?: string
-  /** Per-turn reasoning effort parsed from the `-rsn` flag (codex only). */
+  /**
+   * Model recorded in execute metadata for readers like the Console: the
+   * explicit override when one is set, else the configured/baked harness
+   * default. Metadata only — never forwarded to the harness (that is `model`).
+   */
+  metadataModel?: string
+  /** Effective model provider selected by sticky thread flags (--bedrock); codex only. */
+  provider?: string
+  /** Per-turn reasoning effort parsed from the `-rsn` flag (Codex/Nanocodex). */
   reasoning?: string
   onEventId(eventId: number): void
   openStream: boolean

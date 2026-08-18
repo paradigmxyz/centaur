@@ -1,7 +1,7 @@
 module Oauth
   # Registry of supported OAuth consent-flow providers. A provider strategy owns
   # the IdP-specific parts of the flow: endpoints, extra authorization params,
-  # and how to extract a stable identity from the token response. Everything
+  # and how to resolve a stable identity after the token exchange. Everything
   # else (state signing, PKCE, the code exchange itself, credential upsert) is
   # provider-agnostic, so adding a provider is a new strategy class plus a
   # registry entry -- not a migration.
@@ -10,8 +10,11 @@ module Oauth
     # stateless, so sharing one instance across flows is safe.
     def self.registry
       @registry ||= {
+        Attio::KEY => Attio.new,
         Github::KEY => Github.new,
         Google::KEY => Google.new,
+        Granola::KEY => Granola.new,
+        Linear::KEY => Linear.new,
         Slack::KEY => Slack.new
       }.freeze
     end

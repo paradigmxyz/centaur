@@ -121,6 +121,6 @@ class RequestRuleTest < ActiveSupport::TestCase
                  static_secret: static_secrets(:github_token_inject),
                  oauth_token_secret: oauth_token_secrets(:acme_gmail_oauth))
     assert_not r.valid?
-    assert_includes r.errors[:base], "must belong to at most one of static_secret, gcp_auth_secret, aws_auth_secret, oauth_token_secret, hmac_secret"
+    assert_includes r.errors[:base], "must belong to at most one of static_secret, gcp_auth_secret, gcp_id_token_secret, aws_auth_secret, oauth_token_secret, hmac_secret"
   end
 end

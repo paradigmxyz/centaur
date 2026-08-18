@@ -12,6 +12,28 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_redirected_to login_path
   end
 
+  test "an active non-admin is redirected away from every Control page" do
+    delete logout_url
+    post login_url, params: { email: users(:member_user).email, password: "password123456" }
+
+    [ root_url, console_principals_url, console_roles_url, console_secrets_url,
+      console_credentials_url, console_oauth_apps_url ].each do |url|
+      get url
+      assert_redirected_to console_threads_path
+      assert_nil flash[:alert]
+    end
+  end
+
+  test "a non-admin cannot mutate through the Control form controllers" do
+    delete logout_url
+    post login_url, params: { email: users(:member_user).email, password: "password123456" }
+
+    assert_no_difference -> { Role.count } do
+      post console_roles_url, params: { role: { foreign_id: "sneaky" } }
+    end
+    assert_redirected_to console_threads_path
+  end
+
   test "secrets table shows backend labels (not refs) and links to detail" do
     secret = static_secrets(:acme_prod_api_key)
     get console_secrets_url
@@ -20,9 +42,9 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_select "td span", text: "Env"
     assert_select "body", text: /GITHUB_TOKEN/, count: 0
     # The foreign_id links to the detail page (full value as a hover tooltip),
-    # with the opaque oid and namespace shown beneath it.
+    # with the opaque oid shown beneath it.
     assert_select "a[href=?][title=?]", console_secret_path("static", secret.oid), secret.foreign_id
-    assert_select "div", text: /#{Regexp.escape(secret.oid)}.*#{Regexp.escape(secret.namespace)}/
+    assert_select "div", text: secret.oid
     # The name is plain text (not a link) with the full value as a tooltip.
     assert_select "span[title=?]", secret.name
   end
@@ -52,11 +74,29 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_select "td", text: "op://eng/gmail/refresh-token"
   end
 
+  test "secret detail page renders editable role grants" do
+    secret = static_secrets(:acme_prod_api_key)
+    grant = grants(:acme_infra_prod_api_key)
+    get console_secret_url("static", secret.oid)
+    assert_response :ok
+    assert_select "h2", text: "Roles"
+    assert_select "form[action=?]", console_secret_grant_role_path("static", secret.oid) do
+      assert_select "select[name=role_id][aria-label=?]", "Role to assign"
+      assert_select "option[value=?]", roles(:acme_admin_role).oid
+      assert_select "option[value=?]", roles(:acme_infra).oid, count: 0
+      assert_select "option[value=?]", roles(:globex_infra).oid, count: 1
+    end
+    assert_select "form[action=?]", console_secret_revoke_role_grant_path("static", secret.oid, grant.oid) do
+      assert_select "button[type=submit]", "Unassign"
+    end
+  end
+
   test "secret detail page renders for every secret kind" do
     [
       [ "static", static_secrets(:github_token_inject) ],
       [ "gcp_auth", gcp_auth_secrets(:acme_gcs_keyfile) ],   # keyfile source
       [ "gcp_auth", gcp_auth_secrets(:acme_bigquery) ],      # workload_identity provider
+      [ "gcp_id_token", gcp_id_token_secrets(:acme_cloud_run) ],
       [ "oauth_token", oauth_token_secrets(:acme_gmail_oauth) ],
       [ "pg_dsn", pg_dsn_secrets(:acme_analytics_pg) ],
       [ "hmac", hmac_secrets(:acme_webhook_hmac) ]
@@ -66,13 +106,15 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     end
   end
 
-  test "pg_dsn detail page lists configured session settings" do
-    secret = pg_dsn_secrets(:acme_analytics_pg)
-    secret.update!(settings: [ { "name" => "app.tenant", "value" => "centaur" } ])
-    get console_secret_url("pg_dsn", secret.oid)
+  test "gcp_id_token detail page lists audience header and keyfile source" do
+    secret = gcp_id_token_secrets(:acme_cloud_run)
+    get console_secret_url("gcp_id_token", secret.oid)
     assert_response :ok
-    assert_select "dt", text: "Session settings"
-    assert_select "dd", text: "app.tenant = centaur"
+    assert_select "dt", text: "Audience"
+    assert_select "dd", text: secret.audience
+    assert_select "dt", text: "Header"
+    assert_select "dd", text: "x-serverless-authorization"
+    assert_select "td", text: "CLOUD_RUN_SA_KEYFILE"
   end
 
   test "secret detail page 404s for an unknown kind or id" do
@@ -82,14 +124,162 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_response :not_found
   end
 
-  test "principals table combines id with foreign_id over the oid" do
+  test "principals search matches names and foreign ids case insensitively" do
     principal = principals(:acme_channel)
+    principal.update!(name: "Platform Release Captain")
+
+    get console_principals_url, params: { q: "release captain" }
+
+    assert_response :ok
+    assert_select "input[type=search][name=q][value=?]", "release captain"
+    assert_select "tbody a[href=?]", console_principal_path(principal.oid), count: 1
+    assert_select "tbody tr", count: 1
+
+    get console_principals_url, params: { q: "c012345" }
+
+    assert_response :ok
+    assert_select "tbody a[href=?]", console_principal_path(principal.oid), count: 1
+    assert_select "tbody tr", count: 1
+  end
+
+  test "principals are ordered alphabetically by name with unnamed principals last" do
+    principals(:acme_channel).update!(name: "zulu")
+    principals(:globex_user).update!(name: "Alpha")
+    principals(:acme_user_alice).update!(name: "bravo")
+
+    get console_principals_url
+
+    assert_response :ok
+    names = css_select("tbody td:first-child a").map { |link| link.text.strip }
+    assert_equal [ "Alpha", "bravo", "zulu", "unnamed", "unnamed" ], names
+  end
+
+  test "principals use creation time as secondary ordering" do
+    common = { kind: "user", name: "same", created_by: @operator }
+    newer = Principal.create!(common.merge(foreign_id: "Alpha-sort", created_at: 1.day.ago))
+    older = Principal.create!(common.merge(foreign_id: "zeta-sort", created_at: 2.days.ago))
+
+    get console_principals_url
+
+    assert_response :ok
+    same_name_paths = css_select("tbody td:first-child a")
+      .select { |link| link.text.strip == "same" }
+      .map { |link| link["href"] }
+    assert_equal [ older, newer ].map { |principal| console_principal_path(principal.oid) }, same_name_paths
+  end
+
+  test "principals table paginates fifty records per page" do
+    now = Time.current
+    Principal.insert_all!((1..46).map do |number|
+      {
+        created_at: now,
+        updated_at: now,
+        created_by_id: @operator.id,
+        foreign_id: "pagination-#{number}",
+        kind: "user",
+        name: "Pagination principal #{number}"
+      }
+    end)
+
+    get console_principals_url
+
+    assert_response :ok
+    assert_select "tbody tr", count: 50
+    assert_select "a[href*='page=2']", text: "Next"
+    assert_select "div", text: /51 principals.*page 1 of 2/
+
+    get console_principals_url, params: { page: 2 }
+
+    assert_response :ok
+    assert_select "tbody tr", count: 1
+    assert_select "tbody a", text: "unnamed"
+    assert_select "a[href*='page=1']", text: "Previous"
+  end
+
+  test "principals table links to add principal" do
     get console_principals_url
     assert_response :ok
-    # foreign_id is the primary line (with a hover tooltip); the oid and
-    # namespace sit beneath it.
-    assert_select "div[title=?]", principal.foreign_id, text: principal.foreign_id
-    assert_select "div", text: /#{Regexp.escape(principal.oid)}.*#{Regexp.escape(principal.namespace)}/
+    assert_select "a[href=?]", console_new_principal_path, text: "Add Principal"
+  end
+
+  test "principal pages do not render first-class identity fields as labels" do
+    principal = principals(:acme_channel)
+    principal.update!(
+      kind: "slack_dm",
+      slack_user_id: "U0123456789",
+      slack_channel_id: "D0123456789",
+      slack_team_id: "T0123456789",
+      slack_email: "member@example.com"
+    )
+    expected_labels = {
+      "kind" => "slack_dm",
+      "slack_user_id" => "U0123456789",
+      "slack_channel_id" => "D0123456789",
+      "slack_team_id" => "T0123456789",
+      "slack_email" => "member@example.com"
+    }
+
+    get console_principal_url(principal.oid)
+    assert_response :ok
+    expected_labels.each do |key, value|
+      assert_select ".label-chip", text: "#{key}=#{value}", count: 0
+    end
+  end
+
+  test "principal detail page offers delete" do
+    principal = principals(:acme_channel)
+    get console_principal_url(principal.oid)
+    assert_response :ok
+    assert_select "form[action=?][method=?]", console_delete_principal_path(principal.oid), "post" do
+      assert_select "input[name=_method][value=delete]"
+      assert_select "button[type=submit]", "Delete"
+    end
+  end
+
+  test "principal detail page renders DM permissions as API-managed rows" do
+    principal = principals(:acme_user_bob)
+    principal.update!(name: "Bob")
+    SlackChannelPermission.create!(
+      principal: principal,
+      channel_id: "D0123456789",
+      upload_enabled: true,
+      download_enabled: false,
+      history_enabled: true
+    )
+
+    get console_principal_url(principal.oid)
+    assert_response :ok
+
+    assert_select "td", text: /DM Bob/
+    assert_select "td", text: "API-managed"
+  end
+
+  test "principal detail page resolves direct and inherited Slack channel names from the catalog" do
+    principal = principals(:acme_channel)
+    principal.slack_channel_permissions.create!(
+      channel_id: "C0123456789",
+      upload_enabled: true
+    )
+    roles(:acme_infra).slack_channel_permissions.create!(
+      channel_id: "G9876543210",
+      history_enabled: true
+    )
+    catalog = SlackChannelCatalog::Result.new(
+      channels: [
+        SlackChannelCatalog::Channel.new(id: "C0123456789", name: "general", private: false),
+        SlackChannelCatalog::Channel.new(id: "G9876543210", name: "private", private: true)
+      ],
+      error: nil,
+      configured: true
+    )
+
+    with_slack_channel_catalog(catalog) { get console_principal_url(principal.oid) }
+    assert_response :ok
+
+    assert_select "td", text: /#general/
+    assert_select "h3", text: "Inherited From Roles"
+    assert_select "td", text: /#private/
+    assert_select "input[type=checkbox][disabled]", minimum: 3
   end
 
   test "credentials table combines id, shows status, and links to detail" do
@@ -97,7 +287,7 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     get console_credentials_url
     assert_response :ok
     assert_select "a[href=?][title=?]", console_credential_path(credential.oid), credential.foreign_id
-    assert_select "div", text: /#{Regexp.escape(credential.oid)}.*#{Regexp.escape(credential.namespace)}/
+    assert_select "div", text: credential.oid
     assert_select "span", text: credential.status
   end
 
@@ -173,7 +363,7 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
 
   test "credential detail page shows the provider identity for a flow-minted credential" do
     app = oauth_apps(:acme_google)
-    cred = BrokerCredential.create!(namespace: "acme", foreign_id: "minted-1",
+    cred = BrokerCredential.create!(foreign_id: "minted-1",
                                     token_endpoint: "https://oauth2.googleapis.com/token",
                                     oauth_app: app, provider_subject: "sub-9",
                                     provider_email: "person@example.com", external_user_key: "user-9")
@@ -187,14 +377,86 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     principal = principals(:acme_channel)
     get console_principal_url(principal.oid)
     assert_response :ok
+    assert_select "h2", text: "Roles"
+    assert_select "form[action=?]", console_principal_assign_role_path(principal.oid) do
+      assert_select "select[name=role_id][aria-label=?]", "Role to assign"
+      assert_select "option[value=?]", roles(:acme_admin_role).oid
+      assert_select "option[value=?]", roles(:globex_infra).oid, count: 1
+    end
+    assert_select "form[action=?]", console_principal_unassign_role_path(principal.oid, roles(:acme_infra).oid) do
+      assert_select "button[type=submit]", "Unassign"
+    end
     assert_select "h2", text: "Direct Grants"
-    assert_select "select[name=role_id]"
     assert_select "select[name=grantable] optgroup"
-    # Each direct grant exposes a revoke form; each assigned role chip a remove (×) form.
+    # Each direct grant exposes a revoke form.
     assert_select "form[action=?]", console_principal_revoke_grant_path(principal.oid, grants(:acme_channel_github_token).oid)
-    assert_select "form[action=?]", console_principal_unassign_role_path(principal.oid, roles(:acme_infra).oid)
     # The direct grant's id links to the secret's detail page.
     assert_select "a[href=?]", console_secret_path("static", static_secrets(:github_token_inject).oid)
+  end
+
+  test "principal detail paginates roles, direct grants, and effective grants independently" do
+    principal = principals(:acme_channel)
+    now = Time.current
+    role_ids = Role.insert_all!((1..50).map do |number|
+      {
+        foreign_id: "detail-page-role-#{number}",
+        name: "Detail page role #{number}",
+        labels: {},
+        assign_by_default: false,
+        created_by_id: @operator.id,
+        created_at: now,
+        updated_at: now
+      }
+    end, returning: %w[id]).rows.flatten
+    PrincipalRole.insert_all!(role_ids.map do |role_id|
+      { principal_id: principal.id, role_id: role_id, created_at: now, updated_at: now }
+    end)
+
+    secret_ids = StaticSecret.insert_all!((1..50).map do |number|
+      {
+        foreign_id: "detail-page-secret-#{number}",
+        name: "Detail page secret #{number}",
+        kind: "custom",
+        labels: {},
+        inject_config: { "header" => "X-Detail-Page-#{number}" },
+        created_by_id: @operator.id,
+        created_at: now,
+        updated_at: now
+      }
+    end, returning: %w[id]).rows.flatten
+    Grant.insert_all!(secret_ids.map do |secret_id|
+      {
+        principal_id: principal.id,
+        static_secret_id: secret_id,
+        priority: Grant::DEFAULT_DIRECT_PRIORITY,
+        created_by_id: @operator.id,
+        created_at: now,
+        updated_at: now
+      }
+    end)
+
+    get console_principal_url(principal.oid), params: {
+      roles_page: 2,
+      direct_grants_page: 2,
+      effective_grants_page: 2
+    }
+
+    assert_response :ok
+    assert_select "section#roles" do
+      assert_select "tbody tr", count: 1
+      assert_select "a[href*='roles_page=1'][href$='#roles']", text: "Previous"
+      assert_select "div", text: /51 roles.*page 2 of 2/
+    end
+    assert_select "section#direct-grants" do
+      assert_select "tbody tr", count: 3
+      assert_select "a[href*='direct_grants_page=1'][href$='#direct-grants']", text: "Previous"
+      assert_select "div", text: /53 direct grants.*page 2 of 2/
+    end
+    assert_select "section#effective-grants" do
+      assert_select "tbody tr", count: 4
+      assert_select "a[href*='effective_grants_page=1'][href$='#effective-grants']", text: "Previous"
+      assert_select "div", text: /54 effective grants.*page 2 of 2/
+    end
   end
 
   test "effective grants table sources each secret as direct or via a role" do
@@ -222,6 +484,8 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     # A kind with no direct grant on this principal still lists all its secrets.
     gcp = gcp_auth_secrets(:acme_bigquery)
     assert_select "select[name=grantable] option[value=?]", "gcp_auth:#{gcp.oid}"
+    gcp_id = gcp_id_token_secrets(:acme_cloud_run)
+    assert_select "select[name=grantable] option[value=?]", "gcp_id_token:#{gcp_id.oid}"
   end
 
   test "header shows the signed-in operator and a sign-out control" do
@@ -232,5 +496,16 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
       assert_select "input[name=_method][value=delete]", count: 1
       assert_select "button", text: "Sign out"
     end
+  end
+
+  private
+
+  def with_slack_channel_catalog(catalog)
+    singleton = SlackChannelCatalogProvider.singleton_class
+    original = singleton.instance_method(:fetch)
+    singleton.define_method(:fetch) { catalog }
+    yield
+  ensure
+    singleton.define_method(:fetch, original)
   end
 end

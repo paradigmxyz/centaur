@@ -40,13 +40,12 @@ class GcpAuthSecret < ApplicationRecord
   end
 
   # gcp_auth always sets the Authorization header (a Bearer access token); used
-  # for cross-type conflict detection in Principal#served_credentials.
+  # for cross-type conflict detection during snapshot assembly.
   def proxy_conflict_targets
     [ "header:authorization" ]
   end
 
-  validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
-  validates :foreign_id, uniqueness: { scope: :namespace, allow_nil: true },
+  validates :foreign_id, uniqueness: { allow_nil: true },
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }, allow_nil: true
   validate :labels_is_a_hash
   validate :exactly_one_credential

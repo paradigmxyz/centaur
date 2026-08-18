@@ -31,6 +31,10 @@ fn secret_type_routes_by_oid_prefix() {
         secret_type_for_oid("gas_3").map(|t| t.1),
         Some("gcp_auth_secrets")
     );
+    assert_eq!(
+        secret_type_for_oid("gid_7").map(|t| t.1),
+        Some("gcp_id_token_secrets")
+    );
     assert_eq!(secret_type_for_oid("pgs_4").map(|t| t.0), Some("pg_dsn"));
     assert_eq!(secret_type_for_oid("hms_5").map(|t| t.0), Some("hmac"));
     assert_eq!(
@@ -304,6 +308,37 @@ fn parses_aws_auth_with_session_token_and_regions() {
 }
 
 #[test]
+fn parses_gcp_id_token_secret() {
+    let parsed = tools::parse_secret(
+        &entry(
+            r#"{ type = "gcp_id_token", name = "CLOUD_RUN_KEYFILE", audience = "https://my-service-abc123-uc.a.run.app", header = "X-Serverless-Authorization", hosts = ["my-service-abc123-uc.a.run.app"] }"#,
+        ),
+        &[],
+    )
+    .unwrap();
+    let ParsedSecret::GcpIdToken(gcp) = parsed else {
+        panic!("expected gcp_id_token")
+    };
+    assert_eq!(gcp.name, "CLOUD_RUN_KEYFILE");
+    assert_eq!(gcp.secret_ref, "CLOUD_RUN_KEYFILE");
+    assert_eq!(gcp.audience, "https://my-service-abc123-uc.a.run.app");
+    assert_eq!(gcp.header.as_deref(), Some("x-serverless-authorization"));
+    assert_eq!(gcp.hosts, vec!["my-service-abc123-uc.a.run.app"]);
+}
+
+#[test]
+fn gcp_id_token_requires_audience() {
+    let err = tools::parse_secret(
+        &entry(
+            r#"{ type = "gcp_id_token", name = "CLOUD_RUN_KEYFILE", hosts = ["my-service-abc123-uc.a.run.app"] }"#,
+        ),
+        &[],
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("audience"), "{err}");
+}
+
+#[test]
 fn aws_auth_requires_access_key_id() {
     let err = tools::parse_secret(
         &entry(
@@ -337,7 +372,7 @@ fn aws_auth_requires_hosts() {
 #[test]
 fn parses_pg_dsn_secret() {
     let parsed = tools::parse_secret(
-        &entry(r#"{ type = "pg_dsn", name = "RESHIFT_DSN", database = "pmadmin", secret_ref = "RESHIFT_DSN", role = "centaur_slack_reader", settings = [{ name = "centaur.slack_channel_id", value_from = { principal_label = "slack_channel_id" } }] }"#),
+        &entry(r#"{ type = "pg_dsn", name = "RESHIFT_DSN", database = "pmadmin", secret_ref = "RESHIFT_DSN", role = "centaur_slack_reader", settings = [{ name = "centaur.slack_channel_id", value_from = { principal_field = "slack_channel_id" } }, { name = "centaur.slack_user_id", value_from = { proxy_label = "centaur.slack_user_id" } }] }"#),
         &[],
     )
     .unwrap();
@@ -348,14 +383,36 @@ fn parses_pg_dsn_secret() {
     assert_eq!(pg.database, "pmadmin");
     assert_eq!(pg.secret_ref, "RESHIFT_DSN");
     assert_eq!(pg.role.as_deref(), Some("centaur_slack_reader"));
-    assert_eq!(pg.settings.len(), 1);
+    assert_eq!(pg.settings.len(), 2);
     assert_eq!(pg.settings[0].name, "centaur.slack_channel_id");
     assert_eq!(
         pg.settings[0]
             .value_from
             .as_ref()
-            .and_then(|value_from| value_from.principal_label.as_deref()),
+            .and_then(|value_from| value_from.principal_field.as_deref()),
         Some("slack_channel_id")
+    );
+    assert_eq!(pg.settings[1].name, "centaur.slack_user_id");
+    assert_eq!(
+        pg.settings[1]
+            .value_from
+            .as_ref()
+            .and_then(|value_from| value_from.proxy_label.as_deref()),
+        Some("centaur.slack_user_id")
+    );
+}
+
+#[test]
+fn rejects_pg_dsn_value_from_with_multiple_selectors() {
+    let err = tools::parse_secret(
+        &entry(r#"{ type = "pg_dsn", name = "RESHIFT_DSN", database = "pmadmin", secret_ref = "RESHIFT_DSN", settings = [{ name = "centaur.slack_user_id", value_from = { principal_label = "slack_user_id", proxy_label = "centaur.slack_user_id" } }] }"#),
+        &[],
+    )
+    .unwrap_err();
+
+    assert!(
+        err.to_string().contains("must declare exactly one"),
+        "{err}"
     );
 }
 
@@ -396,7 +453,7 @@ fn translates_http_replace_to_static_input() {
         )
         .unwrap(),
     ];
-    let out = translate::translate("default", "tool-slack", &secrets, &SourcePolicy::env());
+    let out = translate::translate("tool-slack", &secrets, &SourcePolicy::env());
     let SecretInput::Static(input) = &out.inputs[0] else {
         panic!("expected static")
     };
@@ -426,7 +483,7 @@ fn translates_gcp_auth_defaults_scopes_when_unset() {
         )
         .unwrap(),
     ];
-    let out = translate::translate("default", "tool-gcs", &secrets, &SourcePolicy::env());
+    let out = translate::translate("tool-gcs", &secrets, &SourcePolicy::env());
     let SecretInput::GcpAuth(input) = &out.inputs[0] else {
         panic!("expected gcp_auth")
     };
@@ -434,6 +491,43 @@ fn translates_gcp_auth_defaults_scopes_when_unset() {
     assert_eq!(
         input.scopes,
         vec!["https://www.googleapis.com/auth/cloud-platform".to_owned()]
+    );
+}
+
+#[test]
+fn translates_gcp_id_token_to_input() {
+    let secrets = vec![
+        tools::parse_secret(
+            &entry(
+                r#"{ type = "gcp_id_token", name = "CLOUD_RUN_KEYFILE", audience = "https://my-service-abc123-uc.a.run.app", header = "x-serverless-authorization", hosts = ["my-service-abc123-uc.a.run.app"] }"#,
+            ),
+            &[],
+        )
+        .unwrap(),
+    ];
+    let out = translate::translate("tool-cloudrun", &secrets, &SourcePolicy::env());
+    let SecretInput::GcpIdToken(input) = &out.inputs[0] else {
+        panic!("expected gcp_id_token")
+    };
+    assert_eq!(
+        input.foreign_id,
+        "tool-cloudrun-gcp-id-token-cloud-run-keyfile-https-my-service-abc123-uc-a-run-app-x-serverless-authorization"
+    );
+    assert_eq!(input.name.as_deref(), Some("GCP ID Token (tool-cloudrun)"));
+    assert_eq!(
+        input.audience,
+        "https://my-service-abc123-uc.a.run.app".to_owned()
+    );
+    assert_eq!(input.header.as_deref(), Some("x-serverless-authorization"));
+    assert_eq!(input.keyfile.source_type, "env");
+    assert_eq!(
+        input.keyfile.config,
+        serde_json::json!({ "var": "CLOUD_RUN_KEYFILE" })
+    );
+    assert_eq!(input.rules.len(), 1);
+    assert_eq!(
+        input.rules[0].host.as_deref(),
+        Some("my-service-abc123-uc.a.run.app")
     );
 }
 
@@ -448,7 +542,7 @@ fn translates_oauth_with_json_key_fields() {
         )
         .unwrap(),
     ];
-    let out = translate::translate("default", "tool-gsuite", &secrets, &SourcePolicy::env());
+    let out = translate::translate("tool-gsuite", &secrets, &SourcePolicy::env());
     let SecretInput::OAuthToken(input) = &out.inputs[0] else {
         panic!("expected oauth")
     };
@@ -469,12 +563,12 @@ fn translates_oauth_with_json_key_fields() {
 fn translates_pg_dsn_to_input_with_roundtrip_foreign_id() {
     let secrets = vec![
         tools::parse_secret(
-            &entry(r#"{ type = "pg_dsn", name = "RESHIFT_DSN", database = "pmadmin", secret_ref = "RESHIFT_DSN", role = "centaur_slack_reader", settings = [{ name = "centaur.slack_channel_id", value_from = { principal_label = "slack_channel_id" } }] }"#),
+            &entry(r#"{ type = "pg_dsn", name = "RESHIFT_DSN", database = "pmadmin", secret_ref = "RESHIFT_DSN", role = "centaur_slack_reader", settings = [{ name = "centaur.slack_channel_id", value_from = { principal_field = "slack_channel_id" } }, { name = "centaur.slack_user_id", value_from = { proxy_label = "centaur.slack_user_id" } }] }"#),
             &[],
         )
         .unwrap(),
     ];
-    let out = translate::translate("default", "tool-reshift", &secrets, &SourcePolicy::env());
+    let out = translate::translate("tool-reshift", &secrets, &SourcePolicy::env());
     let SecretInput::PgDsn(input) = &out.inputs[0] else {
         panic!("expected pg_dsn")
     };
@@ -485,13 +579,20 @@ fn translates_pg_dsn_to_input_with_roundtrip_foreign_id() {
     assert_eq!(input.name, "RESHIFT_DSN");
     assert_eq!(input.database, "pmadmin");
     assert_eq!(input.role.as_deref(), Some("centaur_slack_reader"));
-    assert_eq!(input.settings.len(), 1);
+    assert_eq!(input.settings.len(), 2);
     assert_eq!(
         input.settings[0]
             .value_from
             .as_ref()
-            .and_then(|value_from| value_from.principal_label.as_deref()),
+            .and_then(|value_from| value_from.principal_field.as_deref()),
         Some("slack_channel_id")
+    );
+    assert_eq!(
+        input.settings[1]
+            .value_from
+            .as_ref()
+            .and_then(|value_from| value_from.proxy_label.as_deref()),
+        Some("centaur.slack_user_id")
     );
     assert_eq!(input.dsn.source_type, "env");
     assert_eq!(
@@ -503,7 +604,7 @@ fn translates_pg_dsn_to_input_with_roundtrip_foreign_id() {
 #[test]
 fn translates_hmac_to_input() {
     let secrets = vec![tools::parse_secret(&entry(FALCONX_HMAC), &[]).unwrap()];
-    let out = translate::translate("default", "tool-falconx", &secrets, &SourcePolicy::env());
+    let out = translate::translate("tool-falconx", &secrets, &SourcePolicy::env());
     let SecretInput::Hmac(input) = &out.inputs[0] else {
         panic!("expected hmac")
     };
@@ -535,7 +636,7 @@ fn translates_hmac_to_input() {
 #[test]
 fn translates_aws_auth_to_input() {
     let secrets = vec![tools::parse_secret(&entry(CLOUDWATCH_AWS), &[]).unwrap()];
-    let out = translate::translate("default", "tool-cloudwatch", &secrets, &SourcePolicy::env());
+    let out = translate::translate("tool-cloudwatch", &secrets, &SourcePolicy::env());
     let SecretInput::AwsAuth(input) = &out.inputs[0] else {
         panic!("expected aws_auth")
     };
@@ -579,7 +680,7 @@ fn translates_aws_auth_session_token_through_policy() {
         )
         .unwrap(),
     ];
-    let out = translate::translate("default", "tool-cw", &secrets, &SourcePolicy::env());
+    let out = translate::translate("tool-cw", &secrets, &SourcePolicy::env());
     let SecretInput::AwsAuth(input) = &out.inputs[0] else {
         panic!("expected aws_auth")
     };
@@ -597,7 +698,7 @@ fn translates_brokered_token_to_token_broker_static_secret() {
         )
         .unwrap(),
     ];
-    let out = translate::translate("default", "tool-codex", &secrets, &SourcePolicy::env());
+    let out = translate::translate("tool-codex", &secrets, &SourcePolicy::env());
     let SecretInput::Static(input) = &out.inputs[0] else {
         panic!("expected static")
     };
@@ -607,7 +708,7 @@ fn translates_brokered_token_to_token_broker_static_secret() {
     assert_eq!(input.source.source_type, "token_broker");
     assert_eq!(
         input.source.config,
-        serde_json::json!({ "credential_id": "openai-codex", "credential_namespace": "default" })
+        serde_json::json!({ "credential_id": "openai-codex", })
     );
     let inject = input.inject_config.as_ref().unwrap();
     assert_eq!(inject.header.as_deref(), Some("Authorization"));
@@ -634,7 +735,7 @@ fn duplicate_secret_names_get_unique_foreign_ids() {
         )
         .unwrap(),
     ];
-    let out = translate::translate("default", "tool-x", &secrets, &SourcePolicy::env());
+    let out = translate::translate("tool-x", &secrets, &SourcePolicy::env());
     let SecretInput::Static(a) = &out.inputs[0] else {
         panic!()
     };
@@ -643,6 +744,40 @@ fn duplicate_secret_names_get_unique_foreign_ids() {
     };
     assert_eq!(a.foreign_id, "tool-x-tok");
     assert_eq!(b.foreign_id, "tool-x-tok-2");
+}
+
+#[test]
+fn translate_for_tool_adds_tool_identity_labels() {
+    let secrets = vec![tools::parse_secret(
+        &entry(
+            r#"{ type = "http", name = "SLACK_BOT_TOKEN", match_headers = ["Authorization"], hosts = ["slack.com"] }"#,
+        ),
+        &[],
+    )
+    .unwrap()];
+    let labels = translate::ToolLabels {
+        tool: "slack".to_owned(),
+        overlay: "centaur-paradigm".to_owned(),
+    };
+    let out = translate::translate_for_tool("tool-slack", &labels, &secrets, &SourcePolicy::env());
+    let SecretInput::Static(secret) = &out.inputs[0] else {
+        panic!()
+    };
+    assert_eq!(
+        secret.labels.get("managed-by").map(String::as_str),
+        Some("centaur")
+    );
+    assert_eq!(
+        secret.labels.get("centaur-tool").map(String::as_str),
+        Some("slack")
+    );
+    assert_eq!(
+        secret
+            .labels
+            .get("centaur-tool-overlay")
+            .map(String::as_str),
+        Some("centaur-paradigm")
+    );
 }
 
 // ----- overlay resolution ---------------------------------------------------
@@ -695,6 +830,21 @@ fn finds_tool_in_category_subdir() {
     let manifest = tools::find_tool(&[base], "slack").unwrap();
     assert_eq!(manifest.name, "slack");
     assert_eq!(manifest.secrets[0].name(), "SLACK_BOT_TOKEN");
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn overlay_name_uses_parent_when_root_is_tools_dir() {
+    let root = tmp_root("overlay-name");
+    let tools_dir = root.join("centaur-paradigm").join("tools");
+    write_tool(&tools_dir, "productivity/slack", SLACK_A);
+
+    let manifest = tools::find_tool(std::slice::from_ref(&tools_dir), "slack").unwrap();
+    assert_eq!(
+        tools::overlay_name_for_tool_dir(&manifest.dir, &[tools_dir]),
+        "centaur-paradigm"
+    );
 
     fs::remove_dir_all(&root).unwrap();
 }
@@ -775,7 +925,6 @@ fn real_slack_tool_parses_and_translates() {
     let manifest = tools::find_tool(&[tools_dir], "slack").unwrap();
     assert_eq!(manifest.name, "slack");
     let out = translate::translate(
-        "default",
         "tool-slack",
         &manifest.all_secrets().cloned().collect::<Vec<_>>(),
         &SourcePolicy::env(),
@@ -795,7 +944,6 @@ fn real_gsuite_tool_parses_oauth() {
     };
     let manifest = tools::find_tool(&[tools_dir], "gsuite").unwrap();
     let out = translate::translate(
-        "default",
         "tool-gsuite",
         &manifest.all_secrets().cloned().collect::<Vec<_>>(),
         &SourcePolicy::env(),

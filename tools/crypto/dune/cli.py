@@ -7,8 +7,7 @@ import typer
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.status import Status
-
-from centaur_sdk import Table
+from rich.table import Table
 
 from .client import DuneClient
 
@@ -23,7 +22,30 @@ def _get_client() -> DuneClient:
         _client = DuneClient()
     return _client
 
+
 app = typer.Typer(name="dune", help="Dune Analytics CLI for executing queries and fetching results")
+
+
+@app.command("health")
+def health():
+    """Assert dune connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = client.raw_request("GET", "/query/2408388/results")
+        payload = {"ok": True, "tool": "dune", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "dune", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console()
 
 

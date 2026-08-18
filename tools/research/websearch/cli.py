@@ -14,6 +14,34 @@ from .client import _client
 load_dotenv()
 
 app = typer.Typer(name="websearch", help="Web search and deep research via Parallel")
+
+
+@app.command("health")
+def health(
+    timeout_seconds: float = typer.Option(30.0, "--timeout-seconds", help="Request timeout"),
+):
+    """Assert websearch connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = asyncio.run(
+            client.search(
+                "health check", num_results=1, timeout_seconds=timeout_seconds, synthesize=False
+            )
+        )
+        payload = {"ok": True, "tool": "websearch", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "websearch", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console(stderr=True)
 
 

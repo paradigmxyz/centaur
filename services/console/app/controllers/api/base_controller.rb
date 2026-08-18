@@ -1,10 +1,10 @@
 module Api
   class BaseController < ActionController::API
+    include ApiRequestSupport
+
     before_action :authenticate_api_key!
 
     rescue_from ActiveRecord::RecordNotFound, with: :render_not_found
-    rescue_from ActionController::ParameterMissing, with: :render_bad_request
-    rescue_from ActionController::BadRequest, with: :render_bad_request
 
     attr_reader :current_api_key
 
@@ -17,29 +17,16 @@ module Api
     def authenticate_api_key!
       token = bearer_token
       @current_api_key = ApiKey.find_by_token(token) if token.present?
-      return if @current_api_key
+      unless current_api_key&.user&.active?
+        return render_error(status: :unauthorized, message: "invalid or missing API key")
+      end
+      return if current_api_key.user.admin?
 
-      render_error(status: :unauthorized, message: "invalid or missing API key")
-    end
-
-    def bearer_token
-      header = request.headers["Authorization"].to_s
-      return nil unless header.start_with?("Bearer ")
-      header.sub(/\ABearer\s+/, "").presence
-    end
-
-    def render_error(status:, message:, details: nil)
-      body = { error: { message: message } }
-      body[:error][:details] = details if details
-      render status: status, json: body
+      render_error(status: :forbidden, message: "API key owner is not an admin")
     end
 
     def render_not_found(e)
       render_error(status: :not_found, message: e.message)
-    end
-
-    def render_bad_request(e)
-      render_error(status: :bad_request, message: e.message)
     end
 
     def render_validation_error(record)
@@ -51,24 +38,16 @@ module Api
       params.require(:data)
     end
 
-    # Namespace for a create/upsert write, taken from the request body
-    # (defaults to "default"), matching the create path.
-    def upsert_namespace
-      data_params[:namespace].presence || "default"
-    end
-
     # Permits the body of a document write (create or PUT upsert) with replace
     # semantics: a permitted field that is omitted from the body, or sent as
     # null (which strong params drops for hash and array filters), is reset to
     # its column default rather than retained from the existing record, so the
-    # body always replaces the whole document. The identity columns (namespace,
-    # foreign_id) are the exception: an upsert by foreign_id sets them on the
+    # body always replaces the whole document. The identity column foreign_id
+    # is the exception: an upsert by foreign_id sets it on the
     # record before assignment, so a blank body value must not wipe them.
     def permit_document(ref, attrs, *scalars, **filters)
-      permitted = attrs.permit(:namespace, :foreign_id, *scalars, **filters)
+      permitted = attrs.permit(:foreign_id, *scalars, **filters)
       permitted.delete(:foreign_id) if permitted[:foreign_id].blank? && ref.foreign_id.present?
-      permitted.delete(:namespace) if permitted[:namespace].blank? && ref.namespace.present?
-      permitted[:namespace] = "default" if permitted[:namespace].blank? && ref.namespace.blank?
 
       defaults = ref.class.column_defaults
       columns = (scalars + filters.keys).map(&:to_s)
@@ -79,7 +58,7 @@ module Api
     #
     # When :id is an opaque id for this model it must reference an existing
     # record (update only; ActiveRecord::RecordNotFound otherwise). Any other
-    # value is treated as a foreign_id within the body namespace and the record
+    # value is treated as a globally unique foreign_id and the record
     # is initialized when absent, so a PUT to a foreign_id creates it. The
     # identity columns come from the URL/body here rather than mass assignment,
     # and a foreign_id can never start with the opaque-id prefix (model
@@ -89,28 +68,53 @@ module Api
       if identifier.start_with?("#{model.oid_prefix}_")
         model.find_by_oid!(identifier)
       else
-        record = model.find_or_initialize_by(namespace: upsert_namespace, foreign_id: identifier)
+        record = model.find_or_initialize_by(foreign_id: identifier)
         record.created_by = current_user if record.new_record?
         record
       end
     end
 
-    # Resolves a record from a namespaced lookup route, where namespace and
-    # foreign_id are explicit, required path segments. Raises
-    # ActiveRecord::RecordNotFound when nothing matches.
+    # Resolves a record from a canonical or default-namespace compatibility
+    # lookup route.
     def find_by_foreign_id!(model)
-      model.find_by!(namespace: params.require(:namespace), foreign_id: params.require(:foreign_id))
+      model.find_by!(foreign_id: params.require(:foreign_id))
+    end
+
+    def build_rules(attrs)
+      request_rule_attributes(attrs).map { |rule_attrs| RequestRule.new(rule_attrs) }
+    end
+
+    def request_rule_attributes(attrs)
+      Array(attrs[:rules]).each_with_index.map do |rule, position|
+        rule_params = if rule.is_a?(ActionController::Parameters)
+          rule
+        else
+          ActionController::Parameters.new(rule || {})
+        end
+
+        rule_params.permit(:host, :cidr, http_methods: [], paths: []).to_h.merge(position: position)
+      end
+    end
+
+    def with_sync_config_replacement_guard(record, attributes, **associations)
+      record.lock! unless record.new_record?
+      return record if !record.new_record? && SyncConfigReplacement.equivalent?(record, attributes, associations)
+
+      yield
     end
 
     DEFAULT_PAGE_LIMIT = 50
     MAX_PAGE_LIMIT = 200
 
-    def paginated_label_search(scope)
-      namespace = params.require(:namespace)
-
+    def paginated_label_search(scope, label_filter: nil)
       labels = label_filter_params
-      filtered = scope.where(namespace: namespace)
-      filtered = filtered.where("labels @> ?", labels.to_json) if labels.any?
+      filtered = if label_filter
+        label_filter.call(scope, labels)
+      elsif labels.any?
+        scope.where("labels @> ?", labels.to_json)
+      else
+        scope
+      end
 
       limit = pagination_limit
       page = pagination_page

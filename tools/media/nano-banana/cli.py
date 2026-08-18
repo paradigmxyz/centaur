@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import json
 import typer
 from dotenv import load_dotenv
 from rich.console import Console
@@ -12,6 +13,33 @@ from .client import DEFAULT_MODEL, MODELS
 load_dotenv()
 
 app = typer.Typer(name="nano-banana", help="Nano Banana CLI for Google Gemini image generation")
+
+
+@app.command("health")
+def health():
+    """Assert nano-banana connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = {
+            "models": [
+                getattr(model, "name", str(model))
+                for model in list(client.client.models.list())[:3]
+            ]
+        }
+        payload = {"ok": True, "tool": "nano-banana", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "nano-banana", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console()
 
 

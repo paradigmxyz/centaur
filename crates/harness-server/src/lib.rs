@@ -3,6 +3,10 @@ pub mod anthropic;
 pub mod claude;
 pub mod codex;
 mod error;
+pub mod hermes;
+mod nanocodex;
+mod nanocodex_subagents;
+mod otel;
 mod server;
 mod traits;
 mod turn;
@@ -11,10 +15,12 @@ mod validation;
 pub mod wire;
 
 pub use error::{HarnessServerError, Result};
+pub use hermes::run_hermes_blocks_server;
+pub use nanocodex::run_nanocodex_blocks_server;
 pub use server::{run_blocks_server, run_harness_server, run_validate_jsonrpc, server_for};
 pub use traits::{
     AppServerNormalizer, AppServerRuntime, HarnessKind, HarnessServer, NormalizedContent,
-    NormalizedEvent, NormalizedToolResult, ThreadState,
+    NormalizedEvent, NormalizedTokenUsage, NormalizedToolResult, ThreadState,
 };
 pub use turn::{BridgeConfig, CodexTurnNormalizer};
 pub use validation::run_validate_agent_deltas;

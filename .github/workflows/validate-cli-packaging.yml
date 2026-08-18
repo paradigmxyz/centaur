@@ -1,0 +1,41 @@
+name: Validate CLI Packaging
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/validate-cli-packaging.yml
+      - scripts/validate_cli_packaging.py
+      - tools/**
+  merge_group:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/validate-cli-packaging.yml
+      - scripts/validate_cli_packaging.py
+      - tools/**
+
+concurrency:
+  group: validate-cli-packaging-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate-cli-packaging:
+    name: Validate CLI pyproject packaging
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Validate CLI pyproject packaging
+        run: python scripts/validate_cli_packaging.py

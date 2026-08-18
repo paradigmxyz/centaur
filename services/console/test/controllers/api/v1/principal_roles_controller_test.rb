@@ -23,8 +23,36 @@ module Api
         get api_v1_principal_roles_url(principal_id: principal.oid), headers: auth_headers
         assert_response :ok
 
-        ids = json_body.fetch("data").map { |r| r["id"] }
+        data = json_body.fetch("data")
+        assert data.none? { |role| role.key?("namespace") }
+        ids = data.map { |r| r["id"] }
         assert_equal [ roles(:acme_infra).oid ], ids
+      end
+
+      test "GET preloads Slack permissions for all assigned roles" do
+        principal = principals(:acme_channel)
+        second_role = roles(:acme_admin_role)
+        principal.principal_roles.create!(role: second_role)
+        roles(:acme_infra).slack_channel_permissions.create!(
+          channel_id: "C0123456789",
+          upload_enabled: true
+        )
+        second_role.slack_channel_permissions.create!(
+          channel_id: "G9876543210",
+          history_enabled: true
+        )
+        permission_queries = []
+        callback = lambda do |_name, _start, _finish, _id, payload|
+          sql = payload[:sql]
+          permission_queries << sql if sql.include?('FROM "slack_channel_permissions"')
+        end
+
+        ActiveSupport::Notifications.subscribed(callback, "sql.active_record") do
+          get api_v1_principal_roles_url(principal_id: principal.oid), headers: auth_headers
+        end
+
+        assert_response :ok
+        assert_equal 1, permission_queries.length
       end
 
       test "POST assigns a role to a principal" do
@@ -40,15 +68,15 @@ module Api
         assert_equal role.oid, json_body.dig("data", "id")
       end
 
-      test "POST returns 422 when the role is in a different namespace" do
+      test "POST allows any role" do
         principal = principals(:globex_user)
         body = { data: { role_id: roles(:acme_infra).oid } }
 
-        assert_no_difference -> { principal.principal_roles.count } do
+        assert_difference -> { principal.principal_roles.count } => 1 do
           post api_v1_principal_roles_url(principal_id: principal.oid),
                params: body.to_json, headers: auth_headers
         end
-        assert_response :unprocessable_content
+        assert_response :created
       end
 
       test "POST is idempotent when the role is already assigned" do

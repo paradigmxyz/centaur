@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tool Health Smoke"
+  short_description: "Run health checks for every tool CLI"
+  default_prompt: "Use $tool-health-smoke to run every available tool health check and report the results."

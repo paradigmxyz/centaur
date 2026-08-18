@@ -1,0 +1,49 @@
+<% content_for :title, "Authorize MCP Client · Centaur Console" %>
+
+<div class="mb-8 text-center">
+  <%= image_tag "centaur-lockup-white.svg", alt: "Centaur", class: "mx-auto h-9 w-auto", width: 497, height: 127 %>
+  <p class="page-subtitle mt-4">Authorize MCP access.</p>
+</div>
+
+<div class="rounded-xl border border-ink-600 bg-ink-850/60 p-6">
+  <div class="space-y-5">
+    <div>
+      <p class="text-sm font-semibold text-zinc-100"><%= @client.name %></p>
+      <p class="mt-1 text-xs text-zinc-500"><%= @redirect_host %></p>
+    </div>
+
+    <dl class="space-y-3 border-y border-ink-600 py-4 text-sm">
+      <div>
+        <dt class="text-xs font-semibold uppercase tracking-wider text-zinc-500">Resource</dt>
+        <dd class="mt-1 break-all text-zinc-200"><%= @resource %></dd>
+      </div>
+      <div>
+        <dt class="text-xs font-semibold uppercase tracking-wider text-zinc-500">Scope</dt>
+        <dd class="mt-1 text-zinc-200"><%= @scopes.join(" ") %></dd>
+      </div>
+      <div>
+        <dt class="text-xs font-semibold uppercase tracking-wider text-zinc-500">Signed in as</dt>
+        <dd class="mt-1 break-all text-zinc-200"><%= current_user.email %></dd>
+      </div>
+    </dl>
+  </div>
+
+  <%= form_with url: "/mcp/oauth/authorize", method: :post, data: { turbo: false }, class: "mt-6" do %>
+    <% @authorization_params.each do |key, value| %>
+      <%= hidden_field_tag key, value %>
+    <% end %>
+
+    <div class="grid grid-cols-2 gap-3">
+      <%= button_tag "Deny",
+            type: "submit",
+            name: "decision",
+            value: "deny",
+            class: "cursor-pointer rounded border border-ink-600 bg-ink-800/60 px-4 py-2 text-sm text-zinc-300 transition-colors hover:border-zinc-500 hover:text-zinc-100" %>
+      <%= button_tag "Allow",
+            type: "submit",
+            name: "decision",
+            value: "approve",
+            class: "cursor-pointer rounded border border-centaur-500/40 bg-centaur-500/10 px-4 py-2 text-sm text-centaur-300 transition-colors hover:bg-centaur-500/20 hover:text-centaur-200" %>
+    </div>
+  <% end %>
+</div>

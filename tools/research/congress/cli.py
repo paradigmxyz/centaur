@@ -8,11 +8,33 @@ import json
 
 import typer
 from rich.console import Console
-from centaur_sdk.cli_tables import Table
+from rich.table import Table
 
 from .client import CongressClient
 
 app = typer.Typer(name="congress", help="Congress.gov API CLI")
+
+
+@app.command("health")
+def health():
+    """Assert congress connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = client.list_bills(limit=1)
+        payload = {"ok": True, "tool": "congress", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "congress", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console()
 
 

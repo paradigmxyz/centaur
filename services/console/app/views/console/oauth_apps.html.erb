@@ -1,15 +1,14 @@
-<% content_for :title, "OAuth Apps · Centaur Console" %>
+<% content_for :title, "Apps · Centaur Console" %>
 
-<div class="mb-8 flex items-start justify-between gap-4">
-  <div>
-    <h1 class="page-title">OAuth Apps</h1>
-    <p class="page-subtitle"><%= pluralize(@oauth_apps.size, "OAuth app") %> driving the public consent flow.</p>
-  </div>
-  <a href="<%= new_console_oauth_app_form_path %>" class="btn-primary">+ Add OAuth App</a>
-</div>
+<%= render "console/control_tabs" %>
+
+<%= render "console/page_header",
+           title: "Apps",
+           subtitle: "#{pluralize(@oauth_apps.size, "OAuth app")} driving the public consent flow.",
+           actions: link_to("+ Add App", new_console_oauth_app_form_path, class: "btn-primary") %>
 
 <% if @oauth_apps.empty? %>
-  <p class="empty-state">No OAuth apps.</p>
+  <p class="empty-state">No apps.</p>
 <% else %>
   <div class="console-scroll-panel">
     <table class="console-table">

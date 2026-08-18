@@ -8,7 +8,7 @@ permissions: {}
 
 jobs:
   publish:
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04-16
     if: github.event.label.name == 'cyclops'
     steps:
       - name: Publish event

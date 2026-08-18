@@ -7,6 +7,28 @@ from rich.console import Console
 from rich.table import Table
 
 app = typer.Typer(name="debank", help="DeBank CLI for DeFi wallet data and protocol positions")
+
+
+@app.command("health")
+def health():
+    """Assert debank connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = client.get_chain_list()
+        payload = {"ok": True, "tool": "debank", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "debank", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console()
 
 

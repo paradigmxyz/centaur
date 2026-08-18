@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+base64.workspace = true
 centaur-iron-proxy.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -13,6 +14,9 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 thiserror.workspace = true
 urlencoding.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread"] }
 
 [lints]
 workspace = true

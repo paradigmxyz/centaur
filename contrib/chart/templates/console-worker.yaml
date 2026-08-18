@@ -1,7 +1,8 @@
 {{- $console := include "centaur.consoleValues" . | fromYaml }}
-{{- if and $console.enabled $console.worker.enabled }}
 {{- $secretEnv := include "centaur.secretEnvName" . }}
 {{- $prefix := .Values.secretManager.envPrefix }}
+{{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") }}
+{{- $mcpPublicUrl := default .Values.slackbotv2.mcpPublicUrl .Values.apiRs.mcpPublicUrl }}
 # console background job worker — runs Solid Queue (`bin/jobs`) so
 # console's enqueued jobs actually execute. The most important of these is
 # the broker-credential OAuth refresh loop, which mints and refreshes the access
@@ -84,6 +85,19 @@ spec:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sIRON_CONTROL_DATABASE_URL" $prefix }}
+            - name: CENTAUR_CONSOLE_CENTAUR_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sDATABASE_URL" $prefix }}
+            # Slack channel catalog refresh jobs run in this worker, so it
+            # needs the same bot token as the web Console process.
+            - name: CENTAUR_CONSOLE_SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sSLACK_BOT_TOKEN" $prefix }}
+                  optional: true
             - name: IRON_CONTROL_INITIAL_USER_EMAIL
               valueFrom:
                 secretKeyRef:
@@ -119,6 +133,23 @@ spec:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sIRON_CONTROL_SECRET_KEY_BASE" $prefix }}
+            - name: CENTAUR_JWT_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sCENTAUR_JWT_SIGNING_SECRET" $prefix }}
+{{- if $console.publicUrl }}
+            - name: CENTAUR_CONSOLE_PUBLIC_URL
+              value: {{ $console.publicUrl | quote }}
+{{- end }}
+{{- with $console.sentryDsn }}
+            - name: SENTRY_DSN
+              value: {{ . | quote }}
+{{- end }}
+{{- if $mcpPublicUrl }}
+            - name: CENTAUR_MCP_PUBLIC_URL
+              value: {{ $mcpPublicUrl | quote }}
+{{- end }}
 {{- if $console.googleOauth.enabled }}
             # Google OAuth app credentials, needed by the broker-credential
             # OAuth refresh loop. Gated on console.googleOauth.enabled.
@@ -135,8 +166,20 @@ spec:
 {{- end }}
             - name: RAILS_ENV
               value: {{ $console.railsEnv | quote }}
+{{- with $console.slackDmSync.oauthAppSlug }}
+            - name: CENTAUR_CONSOLE_SLACK_DM_SYNC_OAUTH_APP_SLUG
+              value: {{ . | quote }}
+{{- end }}
             - name: RAILS_LOG_TO_STDOUT
               value: "1"
+{{- if .Values.apiRs.enabled }}
+            - name: CENTAUR_API_URL
+              value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
+            # Console OAuth sync workers submit normalized provider data to the
+            # in-cluster API; credentials themselves never leave this pod.
+            - name: CENTAUR_CONSOLE_CENTAUR_API_URL
+              value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
+{{- end }}
           securityContext:
 {{ toYaml .Values.containerSecurityContext | nindent 12 }}
             # No readOnlyRootFilesystem — Rails writes to tmp/ at runtime.
@@ -170,10 +213,18 @@ spec:
         - protocol: TCP
           port: 5432
 {{- end }}
+{{- if .Values.apiRs.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.apiRs.port }}
+{{- end }}
     # Outbound HTTPS to OAuth token endpoints for the broker refresh loop.
     - ports:
         - protocol: TCP
           port: 443
     # DNS egress is provided by the namespace-wide allow-dns policy.
-{{- end }}
 {{- end }}

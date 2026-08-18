@@ -7,14 +7,36 @@ load_dotenv()
 from pathlib import Path
 from typing import Optional
 
+import json
 import typer
 from rich.console import Console
-
-from centaur_sdk import Table
+from rich.table import Table
 
 from .client import _client
 
 app = typer.Typer(help="Parse reth logs and generate performance graphs")
+
+
+@app.command("health")
+def health():
+    """Assert reth-log-analyzer connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = {"auth_mode": "local-only", "live_probe": False}
+        payload = {"ok": True, "tool": "reth-log-analyzer", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "reth-log-analyzer", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console()
 
 
@@ -131,9 +153,7 @@ def summary(
     if markdown:
         print("## Reth Big Blocks Performance Analysis\n")
         print("### Dataset Overview")
-        print(
-            f"- **{stats['total_blocks']:,} blocks** analyzed ({block_min} - {block_max})"
-        )
+        print(f"- **{stats['total_blocks']:,} blocks** analyzed ({block_min} - {block_max})")
         print(f"- {stats['empty_blocks']:,} empty blocks, {stats['non_empty_blocks']:,} non-empty")
         print(
             f"- Max gas: **{stats['max_gas_mgas']:.0f} Mgas** | Max latency: **{stats['max_latency_ms']:.0f}ms**\n"
@@ -170,20 +190,20 @@ def summary(
             )
     else:
         console.print("[bold]Reth Big Blocks Performance Analysis[/bold]\n")
+        console.print(f"Blocks analyzed: {stats['total_blocks']:,} ({block_min} - {block_max})")
         console.print(
-            f"Blocks analyzed: {stats['total_blocks']:,} ({block_min} - {block_max})"
+            f"Empty: {stats['empty_blocks']:,} | Non-empty: {stats['non_empty_blocks']:,}"
         )
-        console.print(f"Empty: {stats['empty_blocks']:,} | Non-empty: {stats['non_empty_blocks']:,}")
         console.print(
             f"Max gas: {stats['max_gas_mgas']:.0f} Mgas | Max latency: {stats['max_latency_ms']:.0f}ms\n"
         )
 
         big = stats.get("big_blocks")
         if big:
-            console.print(f"[bold]Big blocks (>{big['min_gas_threshold']:.0f}M gas): {big['count']}[/bold]")
             console.print(
-                f"  Avg throughput: {big['avg_throughput_ggas_s']:.2f} Ggas/s"
+                f"[bold]Big blocks (>{big['min_gas_threshold']:.0f}M gas): {big['count']}[/bold]"
             )
+            console.print(f"  Avg throughput: {big['avg_throughput_ggas_s']:.2f} Ggas/s")
             console.print(f"  Avg execution %: {big['avg_execution_pct']:.1f}%")
             console.print(f"  Avg state root %: {big['avg_state_root_pct']:.1f}%")
 

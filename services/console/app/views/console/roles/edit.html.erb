@@ -1,0 +1,9 @@
+<% title = @role.name.presence || @role.foreign_id.presence || @role.oid %>
+<% content_for :title, "Edit #{title} · Centaur Console" %>
+
+<div class="mb-8">
+  <a href="<%= console_role_path(@role.oid) %>" class="back-link">← back to role</a>
+  <h1 class="mt-2 page-title">Edit Role</h1>
+</div>
+
+<%= render "form", role: @role %>

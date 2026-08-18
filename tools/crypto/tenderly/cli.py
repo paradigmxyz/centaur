@@ -19,11 +19,35 @@ app = typer.Typer(
     name="tenderly",
     help="Tenderly CLI for transaction simulation, tracing, and Virtual TestNets",
 )
+
+
+@app.command("health")
+def health():
+    """Assert tenderly connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = client.get_user()
+        payload = {"ok": True, "tool": "tenderly", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "tenderly", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 vnet_app = typer.Typer(name="vnet", help="Manage and interact with Virtual TestNets")
 app.add_typer(vnet_app)
 console = Console()
 
-SHOW_CHOICES = "summary, trace, skeleton, events, state, assets, balances, failures, error-path, json"
+SHOW_CHOICES = (
+    "summary, trace, skeleton, events, state, assets, balances, failures, error-path, json"
+)
 
 
 def print_rows(rows: list[dict], output: str) -> None:
@@ -416,7 +440,9 @@ def vnet_txs(
 @vnet_app.command("send")
 def vnet_send(
     vnet_id: str = typer.Argument(..., help="Virtual TestNet ID"),
-    from_address: str = typer.Option(..., "--from", "-f", help="Sender (impersonated, no key needed)"),
+    from_address: str = typer.Option(
+        ..., "--from", "-f", help="Sender (impersonated, no key needed)"
+    ),
     to_address: str = typer.Option(..., "--to", "-t", help="Target address"),
     input_data: str = typer.Option("0x", "--input", "-i", help="Calldata (0x...)"),
     value: int = typer.Option(0, "--value", "-v", help="Native value in wei"),
@@ -476,9 +502,7 @@ def vnet_call(
     """Execute a read-only eth_call on a Virtual TestNet."""
     try:
         with TenderlyClient() as client:
-            result = client.vnet_call(
-                vnet_id, to_address, input_data, from_address=from_address
-            )
+            result = client.vnet_call(vnet_id, to_address, input_data, from_address=from_address)
             print(result)
     except Exception as e:
         console.print(f"[red]Error: {e}[/]")

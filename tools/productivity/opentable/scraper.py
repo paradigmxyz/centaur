@@ -3,9 +3,12 @@
 import ast
 import asyncio
 import json
+import os
 import re
 from datetime import datetime
 from urllib.parse import urlencode
+
+from centaur_sdk import secret
 
 
 def build_search_url(
@@ -57,6 +60,10 @@ async def search_restaurants(
     limit: int = 10,
 ) -> list[dict]:
     """Search OpenTable for available reservations using browser automation."""
+    os.environ.setdefault(
+        "BROWSER_USE_API_KEY", secret("BROWSER_USE_API_KEY", "BROWSER_USE_API_KEY")
+    )
+
     # Lazy import: browser_use touches ~/.config on import, which fails in the
     # non-root sandbox tool-server and breaks tool loading.
     from browser_use import Agent, Browser, ChatBrowserUse

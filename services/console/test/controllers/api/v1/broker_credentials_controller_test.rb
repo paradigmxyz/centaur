@@ -12,14 +12,15 @@ module Api
       def json_body = JSON.parse(response.body)
 
       test "rejects requests without an API key" do
-        get api_v1_broker_credentials_url(namespace: "acme")
+        get api_v1_broker_credentials_url
         assert_response :unauthorized
       end
 
-      test "index lists credentials in a namespace without token material" do
-        get api_v1_broker_credentials_url(namespace: "acme"), headers: auth_headers
+      test "index lists credentials without token material" do
+        get api_v1_broker_credentials_url, headers: auth_headers
         assert_response :ok
         row = json_body.fetch("data").first
+        refute row.key?("namespace")
         assert_equal "bootstrapping", row["status"]
         refute row.key?("access_token")
         refute row.key?("refresh_token")
@@ -32,14 +33,18 @@ module Api
         data = json_body.fetch("data")
         assert_equal "https://oauth2.googleapis.com/token", data["token_endpoint"]
         assert_equal "gmail-client-id", data["client_id"]
+        assert_equal "refresh_token", data["grant"]
         refute data.key?("client_secret")
+        refute data.key?("username")
+        refute data.key?("password")
+        refute data.key?("api_key")
         refute data.key?("access_token")
         refute data.key?("refresh_token")
       end
 
       test "serializes oauth_app provenance for flow-minted credentials" do
         app = oauth_apps(:acme_google)
-        cred = BrokerCredential.create!(namespace: "acme", foreign_id: "minted-serialize",
+        cred = BrokerCredential.create!(foreign_id: "minted-serialize",
                                         token_endpoint: "https://oauth2.googleapis.com/token",
                                         oauth_app: app, provider_subject: "sub-ser",
                                         provider_email: "p@example.com", external_user_key: "user-ser")
@@ -55,7 +60,7 @@ module Api
       test "create seeds the refresh_token, schedules it due now, and redacts secrets" do
         body = {
           data: {
-            namespace: "acme", foreign_id: "new-managed",
+            foreign_id: "new-managed",
             token_endpoint: "https://idp.example/token",
             scopes: [ "x" ],
             client_id: "the-client-id",
@@ -82,10 +87,97 @@ module Api
         assert_equal({ "X-Api-Key" => "k" }, created.token_endpoint_headers)
       end
 
+      test "create password grant stores initial values and redacts secrets" do
+        body = {
+          data: {
+            foreign_id: "password-provider",
+            grant: "password",
+            token_endpoint: "https://auth.example.com/token",
+            client_id: "password-client",
+            client_secret: "password-secret",
+            username: "password-user",
+            password: "password-value",
+            token_endpoint_headers: { "x-api-key" => "password-key" }
+          }
+        }
+
+        assert_difference -> { BrokerCredential.count } => 1 do
+          post api_v1_broker_credentials_url, params: body.to_json, headers: auth_headers
+        end
+        assert_response :created
+        data = json_body.fetch("data")
+        assert_equal "password", data["grant"]
+        refute data.key?("client_secret")
+        refute data.key?("username")
+        refute data.key?("password")
+        assert_equal [ "x-api-key" ], data["token_endpoint_header_names"]
+
+        created = BrokerCredential.find_by_oid(data["id"])
+        assert_equal "password-user", created.username
+        assert_equal "password-value", created.password
+        assert_equal "password-secret", created.client_secret
+        assert_equal({ "x-api-key" => "password-key" }, created.token_endpoint_headers)
+        assert created.next_attempt_at.present?
+      end
+
+      test "create client_credentials grant stores client secret and schedules refresh" do
+        body = {
+          data: {
+            foreign_id: "bloomberg",
+            grant: "client_credentials",
+            token_endpoint: "https://bsso.blpprofessional.com/ext/api/as/token.oauth2",
+            client_id: "bloomberg-client",
+            client_secret: "bloomberg-secret"
+          }
+        }
+
+        assert_difference -> { BrokerCredential.count } => 1 do
+          post api_v1_broker_credentials_url, params: body.to_json, headers: auth_headers
+        end
+        assert_response :created
+        data = json_body.fetch("data")
+        assert_equal "client_credentials", data["grant"]
+        assert_equal "bloomberg-client", data["client_id"]
+        refute data.key?("client_secret")
+        refute data.key?("refresh_token")
+
+        created = BrokerCredential.find_by_oid(data["id"])
+        assert_equal "bloomberg-secret", created.client_secret
+        assert_nil created.refresh_token
+        assert created.next_attempt_at.present?
+      end
+
+      test "create preqin grant stores username and API key and redacts secrets" do
+        body = {
+          data: {
+            foreign_id: "preqin",
+            grant: "preqin",
+            username: "preqin-user",
+            api_key: "preqin-api-key"
+          }
+        }
+
+        assert_difference -> { BrokerCredential.count } => 1 do
+          post api_v1_broker_credentials_url, params: body.to_json, headers: auth_headers
+        end
+        assert_response :created
+        data = json_body.fetch("data")
+        assert_equal "preqin", data["grant"]
+        assert_equal BrokerCredential::PREQIN_TOKEN_ENDPOINT, data["token_endpoint"]
+        assert_nil data["client_id"]
+        refute data.key?("username")
+        refute data.key?("api_key")
+
+        created = BrokerCredential.find_by_oid(data["id"])
+        assert_equal "preqin-user", created.username
+        assert_equal "preqin-api-key", created.api_key
+        assert created.next_attempt_at.present?
+      end
+
       test "create rejects a missing client_id" do
         body = {
           data: {
-            namespace: "acme", foreign_id: "incomplete",
+            foreign_id: "incomplete",
             token_endpoint: "https://idp.example/token",
             client_secret: "sec"
           }
@@ -94,6 +186,54 @@ module Api
           post api_v1_broker_credentials_url, params: body.to_json, headers: auth_headers
         end
         assert_response :unprocessable_entity
+      end
+
+      test "create password grant rejects missing password" do
+        body = {
+          data: {
+            foreign_id: "password-incomplete",
+            grant: "password",
+            token_endpoint: "https://idp.example/token",
+            client_id: "cid",
+            username: "user"
+          }
+        }
+        assert_no_difference -> { BrokerCredential.count } do
+          post api_v1_broker_credentials_url, params: body.to_json, headers: auth_headers
+        end
+        assert_response :unprocessable_entity
+        assert json_body.dig("error", "details", "password").present?
+      end
+
+      test "create client_credentials grant rejects missing client secret" do
+        body = {
+          data: {
+            foreign_id: "client-credentials-incomplete",
+            grant: "client_credentials",
+            token_endpoint: "https://idp.example/token",
+            client_id: "cid"
+          }
+        }
+        assert_no_difference -> { BrokerCredential.count } do
+          post api_v1_broker_credentials_url, params: body.to_json, headers: auth_headers
+        end
+        assert_response :unprocessable_entity
+        assert json_body.dig("error", "details", "client_secret").present?
+      end
+
+      test "create preqin grant rejects missing API key" do
+        body = {
+          data: {
+            foreign_id: "preqin-incomplete",
+            grant: "preqin",
+            username: "preqin-user"
+          }
+        }
+        assert_no_difference -> { BrokerCredential.count } do
+          post api_v1_broker_credentials_url, params: body.to_json, headers: auth_headers
+        end
+        assert_response :unprocessable_entity
+        assert json_body.dig("error", "details", "api_key").present?
       end
 
       test "re-auth via PUT clears dead state and reschedules" do
@@ -111,6 +251,79 @@ module Api
         assert_equal "fresh-seed", bc.refresh_token
       end
 
+      test "blank write-only fields preserve existing password grant material" do
+        bc = BrokerCredential.create!(foreign_id: "password-preserve",
+                                      grant: "password", token_endpoint: "https://idp.example/token",
+                                      client_id: "cid", client_secret: "secret",
+                                      username: "user", password: "pass", created_by: users(:acme_admin))
+
+        body = { data: { client_secret: "", username: "", password: "" } }
+        patch api_v1_broker_credential_url(id: bc.oid), params: body.to_json, headers: auth_headers
+        assert_response :ok
+
+        bc.reload
+        assert_equal "secret", bc.client_secret
+        assert_equal "user", bc.username
+        assert_equal "pass", bc.password
+      end
+
+      test "password initial values update clears dead state and reschedules" do
+        bc = BrokerCredential.create!(foreign_id: "password-dead",
+                                      grant: "password", token_endpoint: "https://idp.example/token",
+                                      client_id: "cid", username: "old", password: "old",
+                                      dead: true, dead_reason: "invalid_grant", failure_count: 3,
+                                      created_by: users(:acme_admin))
+
+        body = { data: { username: "new-user", password: "new-pass" } }
+        patch api_v1_broker_credential_url(id: bc.oid), params: body.to_json, headers: auth_headers
+        assert_response :ok
+
+        bc.reload
+        assert_equal "new-user", bc.username
+        assert_equal "new-pass", bc.password
+        refute bc.dead?
+        assert_nil bc.dead_reason
+        assert_equal 0, bc.failure_count
+        assert bc.next_attempt_at.present?
+      end
+
+      test "client_credentials client secret update clears dead state and reschedules" do
+        bc = BrokerCredential.create!(foreign_id: "client-credentials-dead",
+                                      grant: "client_credentials", token_endpoint: "https://idp.example/token",
+                                      client_id: "cid", client_secret: "old",
+                                      dead: true, dead_reason: "invalid_client", failure_count: 3,
+                                      created_by: users(:acme_admin))
+
+        body = { data: { client_secret: "new-secret" } }
+        patch api_v1_broker_credential_url(id: bc.oid), params: body.to_json, headers: auth_headers
+        assert_response :ok
+
+        bc.reload
+        assert_equal "new-secret", bc.client_secret
+        refute bc.dead?
+        assert_nil bc.dead_reason
+        assert_equal 0, bc.failure_count
+        assert bc.next_attempt_at.present?
+      end
+
+      test "preqin API key update clears dead state and reschedules" do
+        bc = BrokerCredential.create!(foreign_id: "preqin-dead",
+                                      grant: "preqin", username: "old", api_key: "old",
+                                      dead: true, dead_reason: "http_400", failure_count: 3,
+                                      created_by: users(:acme_admin))
+
+        body = { data: { api_key: "new-key" } }
+        patch api_v1_broker_credential_url(id: bc.oid), params: body.to_json, headers: auth_headers
+        assert_response :ok
+
+        bc.reload
+        assert_equal "new-key", bc.api_key
+        refute bc.dead?
+        assert_nil bc.dead_reason
+        assert_equal 0, bc.failure_count
+        assert bc.next_attempt_at.present?
+      end
+
       test "destroy removes the credential" do
         bc = broker_credentials(:globex_managed_api)
         assert_difference -> { BrokerCredential.count } => -1 do
@@ -122,7 +335,7 @@ module Api
       test "destroy is blocked with 409 while a token_broker source references it" do
         bc = broker_credentials(:globex_managed_api)
         SecretSource.create!(source_type: "token_broker",
-                             config: { "credential_id" => bc.foreign_id, "credential_namespace" => bc.namespace })
+                             config: { "credential_id" => bc.foreign_id })
         assert_no_difference -> { BrokerCredential.count } do
           delete api_v1_broker_credential_url(id: bc.oid), headers: auth_headers("iak_globex-ci-token")
         end

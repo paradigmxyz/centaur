@@ -61,7 +61,7 @@ export class ChatSDKRenderer implements RendererInterface<ChatSDKOutput> {
       return []
     }
     if (event.type === 'renderer.status') {
-      return [{ type: 'chat.message.upsert', message: { text: event.status } }]
+      return []
     }
     if (event.type === 'renderer.message.delta') {
       return [

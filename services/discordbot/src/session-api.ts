@@ -1,4 +1,5 @@
 import type { RustSessionStreamEvent } from "@centaur/harness-events";
+import { isRetryableCodexErrorNotification } from "@centaur/rendering";
 import type { Attachment, Message } from "chat";
 import { withDiscordEmbedText } from "./discord-starter";
 import type {
@@ -303,8 +304,18 @@ export function sessionStreamError(error: unknown): RustSessionStreamEvent {
 /** Largest attachment we are willing to buffer in memory and inline as base64. */
 export const MAX_INLINE_ATTACHMENT_BYTES = 100 * 1024 * 1024;
 
-async function serializeAttachment(
+/**
+ * Largest JSON codex input line we will emit. A `data:` URL inlined directly in
+ * the user message blows past this for larger images, so anything bigger is
+ * delivered out-of-band as `attachment.chunk` lines and referenced by a staged
+ * attachment id (mirrors slackbotv2).
+ */
+const MAX_CODEX_INPUT_LINE_CHARS = 900 * 1024;
+const STAGED_ATTACHMENT_CHUNK_CHARS = 700 * 1024;
+
+export async function serializeAttachment(
   attachment: Attachment,
+  fetchFn: typeof fetch = fetch,
 ): Promise<DiscordbotApiAttachment> {
   const serialized: DiscordbotApiAttachment = {
     fetchMetadata: attachment.fetchMetadata,
@@ -326,7 +337,15 @@ async function serializeAttachment(
   }
 
   try {
-    const data = attachment.data ?? (await attachment.fetchData?.());
+    // The Discord chat adapter hands us only a public (signed) CDN `url` — it
+    // provides neither `data` nor a `fetchData` closure — so download the bytes
+    // ourselves as a last resort. Without them we can only emit a raw remote
+    // `image_url`, which AWS Bedrock (mantle) rejects (it accepts only `data:`
+    // and `s3://` schemes); inlining as a `data:` URL works on every provider.
+    const data =
+      attachment.data ??
+      (await attachment.fetchData?.()) ??
+      (await fetchAttachmentData(attachment.url, fetchFn));
     if (data) {
       // Re-check the actual byte count: Discord size metadata can be absent.
       const byteLength = Buffer.isBuffer(data) ? data.length : data.size;
@@ -342,6 +361,20 @@ async function serializeAttachment(
   }
 
   return serialized;
+}
+
+async function fetchAttachmentData(
+  url: string | undefined,
+  fetchFn: typeof fetch,
+): Promise<Buffer | undefined> {
+  if (!url) return undefined;
+  const response = await fetchFn(url);
+  if (!response.ok) {
+    throw new Error(
+      `failed to download attachment (${response.status} ${response.statusText})`,
+    );
+  }
+  return Buffer.from(await response.arrayBuffer());
 }
 
 function attachmentTooLargeError(bytes: number): string {
@@ -408,7 +441,7 @@ async function executeSession(
   const body: DiscordbotExecuteSessionRequest = {
     idempotency_key: message.id,
     metadata: sessionMetadata(message, { action: "execute" }),
-    input_lines: [toCodexInputLine(message, threadId)],
+    input_lines: toCodexInputLines(message, threadId),
     ...(options.idleTimeoutMs === undefined
       ? {}
       : { idle_timeout_ms: options.idleTimeoutMs }),
@@ -498,10 +531,7 @@ function ensureTrailingSlash(value: string): string {
 }
 
 function apiHeaders(options: DiscordbotOptions, jsonBody = true): HeadersInit {
-  const apiKey =
-    options.apiKey ??
-    process.env.DISCORDBOT_API_KEY ??
-    process.env.CENTAUR_API_KEY;
+  const apiKey = options.apiKey ?? process.env.DISCORDBOT_API_KEY;
   return {
     ...(jsonBody ? { "content-type": "application/json" } : {}),
     ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
@@ -525,13 +555,27 @@ function sessionMessageParts(message: DiscordbotApiMessage): JsonValue[] {
     parts.push({ type: "text", text: message.text });
   }
   for (const attachment of message.attachments) {
-    parts.push({
-      ...attachment,
-      attachment_type: attachment.type,
-      type: "attachment",
-    });
+    parts.push(sessionAttachmentPart(attachment));
   }
   return parts.length > 0 ? parts : [{ type: "text", text: "" }];
+}
+
+function sessionAttachmentPart(attachment: DiscordbotApiAttachment): JsonObject {
+  const part: JsonObject = {
+    ...attachment,
+    attachment_type: attachment.type,
+    type: "attachment",
+  };
+  // Don't persist megabytes of base64 in the stored session message; the
+  // executing turn delivers the bytes separately (inline or staged chunks).
+  if (
+    typeof attachment.dataBase64 === "string" &&
+    attachment.dataBase64.length > MAX_CODEX_INPUT_LINE_CHARS
+  ) {
+    delete part.dataBase64;
+    part.dataBase64Omitted = `${attachment.dataBase64.length} base64 chars omitted from stored session message`;
+  }
+  return part;
 }
 
 function sessionMetadata(
@@ -551,9 +595,39 @@ function sessionMetadata(
   };
 }
 
-function toCodexInputLine(
+/**
+ * Build the codex input lines for an execute turn. Attachments whose inlined
+ * `data:` URL would push the user-message line past `MAX_CODEX_INPUT_LINE_CHARS`
+ * are streamed ahead of it as `attachment.chunk` lines and referenced by a
+ * staged attachment id; everything else stays inline. Mirrors slackbotv2.
+ */
+export function toCodexInputLines(
   message: DiscordbotApiMessage,
   threadId: string,
+): string[] {
+  const staged = new Map<DiscordbotApiAttachment, string>();
+  const lines: string[] = [];
+  for (const attachment of message.attachments) {
+    if (!attachment.dataBase64) continue;
+    const inlineLine = toCodexInputLineWithStaged(message, threadId, staged);
+    if (
+      inlineLine.length <= MAX_CODEX_INPUT_LINE_CHARS &&
+      attachment.dataBase64.length <= MAX_CODEX_INPUT_LINE_CHARS
+    ) {
+      continue;
+    }
+    const stagedAttachmentId = `att-${message.id}-${staged.size + 1}`;
+    staged.set(attachment, stagedAttachmentId);
+    lines.push(...stagedAttachmentInputLines(attachment, stagedAttachmentId));
+  }
+  lines.push(toCodexInputLineWithStaged(message, threadId, staged));
+  return lines;
+}
+
+function toCodexInputLineWithStaged(
+  message: DiscordbotApiMessage,
+  threadId: string,
+  staged: Map<DiscordbotApiAttachment, string>,
 ): string {
   return JSON.stringify({
     type: "user",
@@ -561,23 +635,71 @@ function toCodexInputLine(
     trace_metadata: sessionMetadata(message, { action: "execute" }),
     message: {
       role: "user",
-      content: codexInputContent(message),
+      content: codexInputContent(message, staged),
     },
   });
 }
 
-function codexInputContent(message: DiscordbotApiMessage): JsonValue[] {
+function stagedAttachmentInputLines(
+  attachment: DiscordbotApiAttachment,
+  stagedAttachmentId: string,
+): string[] {
+  const dataBase64 = attachment.dataBase64;
+  if (!dataBase64) return [];
+  const lines: string[] = [];
+  // Keep chunks on a base64 boundary (multiple of 4) so each decodes cleanly.
+  const chunkSize =
+    STAGED_ATTACHMENT_CHUNK_CHARS - (STAGED_ATTACHMENT_CHUNK_CHARS % 4);
+  for (
+    let offset = 0, index = 0;
+    offset < dataBase64.length;
+    offset += chunkSize, index += 1
+  ) {
+    const chunk = dataBase64.slice(offset, offset + chunkSize);
+    lines.push(
+      JSON.stringify({
+        type: "attachment.chunk",
+        attachmentId: stagedAttachmentId,
+        name: attachment.name,
+        mimeType: attachment.mimeType,
+        attachmentType: attachment.type,
+        chunkIndex: index,
+        final: offset + chunkSize >= dataBase64.length,
+        dataBase64: chunk,
+      }),
+    );
+  }
+  return lines;
+}
+
+function codexInputContent(
+  message: DiscordbotApiMessage,
+  staged: Map<DiscordbotApiAttachment, string> = new Map(),
+): JsonValue[] {
   const content: JsonValue[] = [];
   if (message.text.trim()) {
     content.push({ type: "text", text: message.text });
   }
   for (const attachment of message.attachments) {
-    content.push(codexAttachmentInput(attachment));
+    content.push(codexAttachmentInput(attachment, staged.get(attachment)));
   }
   return content.length > 0 ? content : [{ type: "text", text: "continue" }];
 }
 
-function codexAttachmentInput(attachment: DiscordbotApiAttachment): JsonValue {
+export function codexAttachmentInput(
+  attachment: DiscordbotApiAttachment,
+  stagedAttachmentId?: string,
+): JsonValue {
+  if (stagedAttachmentId) {
+    return {
+      type: "attachment",
+      attachment_type: attachment.type,
+      stagedAttachmentId,
+      name: attachment.name,
+      mimeType: attachment.mimeType,
+      size: attachment.size,
+    };
+  }
   const dataUrl =
     attachment.dataBase64 && attachment.mimeType
       ? `data:${attachment.mimeType};base64,${attachment.dataBase64}`
@@ -588,6 +710,16 @@ function codexAttachmentInput(attachment: DiscordbotApiAttachment): JsonValue {
       url: dataUrl ?? attachment.url,
       detail: "auto",
       name: attachment.name,
+    };
+  }
+  if (attachment.dataBase64) {
+    return {
+      type: "attachment",
+      attachment_type: attachment.type,
+      dataBase64: attachment.dataBase64,
+      mimeType: attachment.mimeType,
+      name: attachment.name,
+      size: attachment.size,
     };
   }
   return {
@@ -602,7 +734,9 @@ function attachmentDescription(attachment: DiscordbotApiAttachment): string {
     `type=${attachment.type}`,
     attachment.mimeType ? `mime=${attachment.mimeType}` : undefined,
     attachment.url ? `url=${attachment.url}` : undefined,
-    attachment.dataBase64 ? `base64=${attachment.dataBase64}` : undefined,
+    attachment.dataBase64Omitted
+      ? `content=${attachment.dataBase64Omitted}`
+      : undefined,
     attachment.fetchError ? `fetch_error=${attachment.fetchError}` : undefined,
   ].filter(Boolean);
   return `[Discord attachment: ${fields.join(" ")}]`;
@@ -628,6 +762,15 @@ async function* parseSessionEventStream(
         eventKind: event.event,
       } satisfies RustSessionStreamEvent;
       if (isTerminalCodexOutputLine(event.data)) return;
+      continue;
+    }
+    if (event.event === "session.activity_summary") {
+      yield {
+        data: sessionEventData(event),
+        event: event.event,
+        eventId: event.id,
+        eventKind: event.event,
+      } satisfies RustSessionStreamEvent;
       continue;
     }
     if (
@@ -763,6 +906,7 @@ function isTerminalCodexOutputLine(line: string): boolean {
     return false;
   }
   if (!isJsonObject(payload)) return false;
+  if (isRetryableCodexErrorNotification(payload)) return false;
 
   return (
     payload.type === "turn.completed" ||

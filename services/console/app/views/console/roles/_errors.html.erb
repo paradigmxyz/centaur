@@ -1,0 +1,10 @@
+<% if role.errors.any? %>
+  <div class="alert-error">
+    <p class="font-semibold">Role could not be saved.</p>
+    <ul class="mt-2 list-disc pl-5">
+      <% role.errors.full_messages.each do |message| %>
+        <li><%= message %></li>
+      <% end %>
+    </ul>
+  </div>
+<% end %>

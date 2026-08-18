@@ -9,8 +9,7 @@ from datetime import datetime
 
 import typer
 from rich.console import Console
-
-from centaur_sdk import Table
+from rich.table import Table
 
 app = typer.Typer(name="arkham", help="Arkham Intelligence CLI for blockchain analytics")
 console = Console()
@@ -65,10 +64,20 @@ def print_markdown_table(headers: list[str], rows: list[list[str]]) -> None:
 
 @app.command()
 def health():
-    """Check API health status."""
-    client = get_client()
-    data = client.health()
-    print(json.dumps(data, indent=2))
+    """Assert Arkham API connectivity and auth."""
+    try:
+        details = get_client().health()
+    except Exception as exc:
+        print(
+            json.dumps(
+                {"ok": False, "tool": "arkham", "error": str(exc), "details": {}},
+                indent=2,
+                default=str,
+            )
+        )
+        raise typer.Exit(1) from exc
+    payload = {"ok": True, "tool": "arkham", "error": None, "details": details}
+    print(json.dumps(payload, indent=2, default=str))
 
 
 @app.command()

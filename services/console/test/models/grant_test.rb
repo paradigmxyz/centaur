@@ -19,6 +19,18 @@ class GrantTest < ActiveSupport::TestCase
     assert grant.valid?
   end
 
+  test "direct principal grants can cross namespaces" do
+    grant = Grant.new(valid_attrs(principal: principals(:globex_user),
+                                  static_secret: static_secrets(:github_token_inject)))
+    assert grant.valid?
+  end
+
+  test "role grants can target any secret" do
+    grant = Grant.new(valid_attrs(principal: nil, role: roles(:globex_infra),
+                                  static_secret: static_secrets(:github_token_inject)))
+    assert grant.valid?
+  end
+
   test "requires exactly one grantee" do
     grant = Grant.new(valid_attrs(principal: nil))
     assert_not grant.valid?
@@ -34,13 +46,13 @@ class GrantTest < ActiveSupport::TestCase
   test "requires exactly one grantable" do
     grant = Grant.new(valid_attrs(static_secret: nil))
     assert_not grant.valid?
-    assert_includes grant.errors[:base], "must reference exactly one of static_secret, gcp_auth_secret, aws_auth_secret, oauth_token_secret, pg_dsn_secret, hmac_secret"
+    assert_includes grant.errors[:base], "must reference exactly one of static_secret, gcp_auth_secret, gcp_id_token_secret, aws_auth_secret, oauth_token_secret, pg_dsn_secret, hmac_secret"
   end
 
   test "rejects more than one grantable" do
     grant = Grant.new(valid_attrs(gcp_auth_secret: gcp_auth_secrets(:acme_bigquery)))
     assert_not grant.valid?
-    assert_includes grant.errors[:base], "must reference exactly one of static_secret, gcp_auth_secret, aws_auth_secret, oauth_token_secret, pg_dsn_secret, hmac_secret"
+    assert_includes grant.errors[:base], "must reference exactly one of static_secret, gcp_auth_secret, gcp_id_token_secret, aws_auth_secret, oauth_token_secret, pg_dsn_secret, hmac_secret"
   end
 
   test "principal is immutable after creation" do
@@ -102,7 +114,8 @@ class GrantTest < ActiveSupport::TestCase
   end
 
   test "a role grant defaults to the lower role priority" do
-    grant = Grant.create!(valid_attrs(principal: nil, role: roles(:globex_infra)))
+    grant = Grant.create!(valid_attrs(principal: nil, role: roles(:globex_infra),
+                                      static_secret: static_secrets(:globex_prod_secret)))
     assert_equal Grant::DEFAULT_ROLE_PRIORITY, grant.priority
     assert_operator Grant::DEFAULT_DIRECT_PRIORITY, :>, Grant::DEFAULT_ROLE_PRIORITY
   end

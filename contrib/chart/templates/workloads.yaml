@@ -75,6 +75,19 @@ spec:
               {{- with .Values.postgres.persistence.subPath }}
               subPath: {{ . | quote }}
               {{- end }}
+            {{- if .Values.postgres.sharedMemory.enabled }}
+            - name: shared-memory
+              mountPath: /dev/shm
+            {{- end }}
+      {{- if .Values.postgres.sharedMemory.enabled }}
+      volumes:
+        - name: shared-memory
+          emptyDir:
+            medium: Memory
+            {{- with .Values.postgres.sharedMemory.sizeLimit }}
+            sizeLimit: {{ . | quote }}
+            {{- end }}
+      {{- end }}
       dnsPolicy: ClusterFirst
       restartPolicy: Always
       schedulerName: default-scheduler

@@ -1,0 +1,333 @@
+require "test_helper"
+
+module SlackDm
+  class SyncCredentialTest < ActiveSupport::TestCase
+    class FakeApiClient
+      attr_reader :batch
+
+      def list_slack_dm_sync_checkpoints(broker_credential_id:, home_team_id:)
+        {
+          "checkpoints" => [
+            {
+              "broker_credential_id" => broker_credential_id,
+              "home_team_id" => home_team_id,
+              "conversation_id" => "D123",
+              "watermark_ts" => "1700000000.000001"
+            }
+          ]
+        }
+      end
+
+      def ingest_slack_dm_sync_batch(payload)
+        @batch = payload
+        { "ok" => true }
+      end
+    end
+
+    class FakeHttpClient
+      def initialize(response)
+        @response = response
+      end
+
+      def get(*)
+        @response
+      end
+    end
+
+    def slack_app
+      OauthApp.create!(
+        provider: "slack",
+        slug: "slack-dms-#{SecureRandom.hex(6)}",
+        client_id: "slack-client-#{SecureRandom.hex(4)}",
+        client_secret: "secret",
+        allowed_scopes: SlackDm::SyncCredential::REQUIRED_SCOPES,
+        created_by: users(:acme_admin)
+      )
+    end
+
+    def credential
+      @credential ||= BrokerCredential.create!(
+        oauth_app: slack_app,
+        foreign_id: "slack-dms-#{SecureRandom.hex(6)}",
+        token_endpoint: "https://slack.com/api/oauth.v2.access",
+        access_token: "xoxp-live",
+        refresh_token: "refresh",
+        last_refresh: Time.current,
+        expires_at: 1.hour.from_now,
+        scopes: SlackDm::SyncCredential::REQUIRED_SCOPES,
+        provider_subject: "U_ME"
+      )
+    end
+
+    test "uses an extended API read timeout by default" do
+      api_client = Object.new
+      client_created = false
+      factory = lambda do |read_timeout:|
+        assert_equal SlackDm::SyncCredential::API_READ_TIMEOUT_SECONDS, read_timeout
+        client_created = true
+        api_client
+      end
+
+      CentaurApiClient.stub(:new, factory) do
+        SlackDm::SyncCredential.new(Object.new)
+      end
+
+      assert client_created
+    end
+
+    test "oauth_app_slug defaults to slack and honors console env prefix" do
+      env_key = "CENTAUR_CONSOLE_SLACK_DM_SYNC_OAUTH_APP_SLUG"
+      legacy_env_key = "IRON_CONTROL_SLACK_DM_SYNC_OAUTH_APP_SLUG"
+      previous = {
+        env_key => ENV[env_key],
+        legacy_env_key => ENV[legacy_env_key]
+      }
+      ENV.delete(env_key)
+      ENV.delete(legacy_env_key)
+
+      assert_equal "slack", SlackDm::SyncCredential.oauth_app_slug
+
+      ENV[env_key] = "custom-slack"
+      assert_equal "custom-slack", SlackDm::SyncCredential.oauth_app_slug
+    ensure
+      previous.each do |key, value|
+        if value.nil?
+          ENV.delete(key)
+        else
+          ENV[key] = value
+        end
+      end
+    end
+
+    test "sync normalizes conversations members messages files and checkpoints" do
+      api_client = FakeApiClient.new
+      slack_http = lambda do |endpoint:, params:, access_token:|
+        assert_equal "xoxp-live", access_token
+        case endpoint
+        when SlackDm::SyncCredential::AUTH_TEST_ENDPOINT
+          { "ok" => true, "team_id" => "T123", "user_id" => "U_ME" }
+        when SlackDm::SyncCredential::CONVERSATIONS_LIST_ENDPOINT
+          assert_equal "im,mpim,private_channel", params["types"]
+          {
+            "ok" => true,
+            "channels" => [
+              {
+                "id" => "D123",
+                "is_im" => true,
+                "is_mpim" => false,
+                "user" => "U_OTHER",
+                "is_archived" => false,
+                "purpose" => { "value" => "direct\u0000message" }
+              }
+            ],
+            "response_metadata" => { "next_cursor" => "" }
+          }
+        when SlackDm::SyncCredential::CONVERSATIONS_MEMBERS_ENDPOINT
+          {
+            "ok" => true,
+            "members" => [ "U_OTHER", "U_ME" ],
+            "response_metadata" => { "next_cursor" => "" }
+          }
+        when SlackDm::SyncCredential::CONVERSATIONS_HISTORY_ENDPOINT
+          assert_equal "D123", params["channel"]
+          assert_equal "1700000000.000001", params["oldest"]
+          {
+            "ok" => true,
+            "messages" => [
+              {
+                "type" => "message",
+                "ts" => "1700000000.000002",
+                "thread_ts" => "1700000000.000002",
+                "user" => "U_OTHER",
+                "text" => "hel\u0000lo",
+                "blocks" => [ { "text" => { "text" => "hel\u0000lo" } } ],
+                "reply_count" => 1,
+                "reply_users" => [ "U_ME" ],
+                "latest_reply" => "1700000000.000003",
+                "files" => [
+                  {
+                    "id" => "F123",
+                    "name" => "no\u0000te.txt",
+                    "title" => "Note",
+                    "mimetype" => "text/plain",
+                    "filetype" => "text",
+                    "size" => 42,
+                    "url_private" => "https://files.example/private",
+                    "permalink" => "https://slack.example/file"
+                  }
+                ]
+              }
+            ],
+            "response_metadata" => { "next_cursor" => "" }
+          }
+        when SlackDm::SyncCredential::CONVERSATIONS_REPLIES_ENDPOINT
+          assert_equal "1700000000.000002", params["ts"]
+          {
+            "ok" => true,
+            "messages" => [
+              {
+                "type" => "message",
+                "ts" => "1700000000.000002",
+                "user" => "U_OTHER",
+                "text" => "hello"
+              },
+              {
+                "type" => "message",
+                "ts" => "1700000000.000003",
+                "user" => "U_ME",
+                "text" => "reply"
+              }
+            ],
+            "response_metadata" => { "next_cursor" => "" }
+          }
+        else
+          flunk "unexpected Slack endpoint #{endpoint}"
+        end
+      end
+
+      SlackDm::SyncCredential.new(
+        credential,
+        api_client: api_client,
+        slack_api_http: slack_http
+      ).call
+
+      batch = api_client.batch
+      assert_equal "completed", batch[:run][:status]
+      assert_equal credential.oid, batch[:run][:broker_credential_id]
+      assert_equal 1, batch[:conversations].length
+      assert_equal "im", batch[:conversations].first[:conversation_type]
+      assert_equal %w[U_OTHER U_ME], batch[:members].map { |member| member[:user_id] }
+      assert_equal 2, batch[:messages].length
+      assert_equal "hello", batch[:messages].first[:text]
+      assert_equal "hello", batch[:messages].first[:raw_payload].dig("blocks", 0, "text", "text")
+      assert_equal "directmessage", batch[:conversations].first[:raw_payload].dig("purpose", "value")
+      assert_equal "1700000000.000002", batch[:messages].last[:parent_message_ts]
+      assert_equal "F123", batch[:attachments].first[:slack_file_id]
+      assert_equal "note.txt", batch[:attachments].first[:name]
+      assert_equal "note.txt", batch[:attachments].first[:raw_payload]["name"]
+      assert_equal "1700000000.000002", batch[:checkpoints].first[:watermark_ts]
+    end
+
+    test "sync ingests private channels and their complete member list" do
+      api_client = FakeApiClient.new
+      slack_http = lambda do |endpoint:, params:, access_token:|
+        assert_equal "xoxp-live", access_token
+        case endpoint
+        when SlackDm::SyncCredential::AUTH_TEST_ENDPOINT
+          { "ok" => true, "team_id" => "T123", "user_id" => "U_ME" }
+        when SlackDm::SyncCredential::CONVERSATIONS_LIST_ENDPOINT
+          assert_equal "im,mpim,private_channel", params["types"]
+          {
+            "ok" => true,
+            "channels" => [
+              {
+                "id" => "G123",
+                "name" => "leadership",
+                "is_private" => true,
+                "is_archived" => false
+              }
+            ],
+            "response_metadata" => { "next_cursor" => "" }
+          }
+        when SlackDm::SyncCredential::CONVERSATIONS_MEMBERS_ENDPOINT
+          assert_equal "G123", params["channel"]
+          {
+            "ok" => true,
+            "members" => %w[U_ME U_OTHER],
+            "response_metadata" => { "next_cursor" => "" }
+          }
+        when SlackDm::SyncCredential::CONVERSATIONS_HISTORY_ENDPOINT
+          {
+            "ok" => true,
+            "messages" => [
+              {
+                "type" => "message",
+                "ts" => "1700000001.000001",
+                "user" => "U_OTHER",
+                "text" => "private roadmap"
+              }
+            ],
+            "response_metadata" => { "next_cursor" => "" }
+          }
+        else
+          flunk "unexpected Slack endpoint #{endpoint}"
+        end
+      end
+
+      SlackDm::SyncCredential.new(
+        credential,
+        api_client: api_client,
+        slack_api_http: slack_http
+      ).call
+
+      batch = api_client.batch
+      assert_equal "private_channel", batch[:conversations].first[:conversation_type]
+      assert_equal "leadership", batch[:conversations].first[:raw_payload]["name"]
+      assert_equal %w[U_ME U_OTHER], batch[:members].map { |member| member[:user_id] }
+      assert_equal "private roadmap", batch[:messages].first[:text]
+    end
+
+    test "sync never replaces membership from truncated pagination" do
+      env_key = "CENTAUR_CONSOLE_SLACK_DM_SYNC_MEMBERS_MAX_PAGES"
+      previous = ENV[env_key]
+      ENV[env_key] = "1"
+      api_client = FakeApiClient.new
+      slack_http = lambda do |endpoint:, params:, access_token:|
+        assert_equal "xoxp-live", access_token
+        case endpoint
+        when SlackDm::SyncCredential::AUTH_TEST_ENDPOINT
+          { "ok" => true, "team_id" => "T123", "user_id" => "U_ME" }
+        when SlackDm::SyncCredential::CONVERSATIONS_LIST_ENDPOINT
+          {
+            "ok" => true,
+            "channels" => [ { "id" => "G123", "is_private" => true } ],
+            "response_metadata" => { "next_cursor" => "" }
+          }
+        when SlackDm::SyncCredential::CONVERSATIONS_MEMBERS_ENDPOINT
+          {
+            "ok" => true,
+            "members" => [ "U_ME" ],
+            "response_metadata" => { "next_cursor" => "more" }
+          }
+        else
+          flunk "unexpected Slack endpoint #{endpoint} with #{params}"
+        end
+      end
+
+      error = assert_raises(SlackDm::SyncCredential::SlackApiError) do
+        SlackDm::SyncCredential.new(
+          credential,
+          api_client: api_client,
+          slack_api_http: slack_http
+        ).call
+      end
+      assert_match "membership pagination truncated", error.message
+      assert_nil api_client.batch
+    ensure
+      previous.nil? ? ENV.delete(env_key) : ENV[env_key] = previous
+    end
+
+    test "429 responses expose Retry-After for deferred job execution" do
+      [
+        [ "120", 120 ],
+        [ "600", 5.minutes.to_i ],
+        [ "invalid", 1 ]
+      ].each do |header, expected|
+        response = HttpClient::Response.new(
+          status: 429,
+          body: "",
+          headers: { "retry-after" => header }
+        )
+
+        error = assert_raises(SlackDm::SyncCredential::RateLimitedError) do
+          SlackDm::SyncCredential.new(
+            credential,
+            http_client: FakeHttpClient.new(response)
+          ).call
+        end
+
+        assert_equal expected, error.retry_after
+      end
+    end
+  end
+end

@@ -1,0 +1,91 @@
+<%# Shared transcript stream for the single-thread view and split-view panels.
+    items: transcript items built by Console::ThreadsController. Thinking items
+    (source: :thinking) render as collapsed disclosures, Claude-app style. %>
+<% if items.empty? %>
+  <div class="rounded-xl border border-dashed border-ink-800/80 bg-ink-850/40 px-5 py-6 text-sm text-zinc-600">
+    No messages have been persisted for this chat yet.
+  </div>
+<% end %>
+
+<% items.each do |item| %>
+  <% if item[:source] == :thinking %>
+    <div class="flex justify-start">
+      <details class="console-thinking <%= "console-thinking--commands" if item[:trace_kind] == "commands" %> w-full max-w-3xl">
+        <summary class="console-thinking-summary">
+          <span class="console-thinking-title"><%= item[:label].presence || "Thinking" %></span>
+          <% if item[:failed_label].present? %>
+            <span class="console-thinking-failed"><%= item[:failed_label] %></span>
+          <% end %>
+          <% if item[:trace_kind] == "commands" %>
+            <% if item[:summary].present? %>
+              <span class="console-thinking-preview"><%= item[:summary].truncate(96) %></span>
+            <% end %>
+          <% else %>
+            <span class="console-thinking-preview"><%= (item[:summary].presence || item[:text].to_s.gsub(/\s+/, " ")).truncate(96) %></span>
+          <% end %>
+          <span class="console-thinking-chevron" aria-hidden="true"><%= console_icon("chevron-right", classes: "size-3") %></span>
+        </summary>
+        <% if item[:trace_kind] == "commands" %>
+          <div class="console-thinking-command-list">
+            <% item[:commands].to_a.each do |command| %>
+              <details class="console-thinking-command">
+                <summary class="console-thinking-command-row">
+                  <span class="console-command-prompt <%= "console-command-prompt--failed" if command[:failed] %>">$</span>
+                  <span class="console-command-text" title="<%= command[:command] %>"><%= command[:command].presence || "command" %></span>
+                  <% if command[:failed] %>
+                    <span class="console-command-status">failed</span>
+                  <% end %>
+                  <span class="console-thinking-command-chevron" aria-hidden="true"><%= console_icon("chevron-right", classes: "size-3") %></span>
+                </summary>
+                <div class="console-thinking-command-output">
+                  <pre class="console-thinking-command-full"><span class="console-command-prompt <%= "console-command-prompt--failed" if command[:failed] %>">$</span> <%= command[:command].presence || "command" %></pre>
+                  <% if command[:output].present? %>
+                    <pre class="console-thinking-command-result"><%= command[:output] %></pre>
+                  <% else %>
+                    <div class="console-thinking-command-empty">No output captured.</div>
+                  <% end %>
+                </div>
+              </details>
+            <% end %>
+          </div>
+        <% else %>
+          <div class="console-thinking-body console-markdown text-sm leading-6">
+            <%= console_markdown(item[:text]) %>
+          </div>
+        <% end %>
+      </details>
+    </div>
+  <% else %>
+    <% user_message = item[:align] == :end %>
+    <div class="group flex <%= user_message ? "justify-end" : "justify-start" %>">
+      <div class="console-message-stack flex flex-col <%= user_message ? "max-w-[72%] items-end" : "w-full max-w-3xl items-start" %>">
+        <div class="<%= user_message ? "w-full rounded-[24px] bg-ink-700 px-4 py-3 text-zinc-100" : "w-full text-zinc-300" %>">
+          <% unless user_message %>
+            <div class="mb-1 text-xs font-medium text-zinc-500"><%= item[:label] || item[:role] %></div>
+          <% end %>
+          <% if item[:text].present? %>
+            <div class="console-markdown text-sm leading-6"><%= console_markdown(item[:text]) %></div>
+          <% elsif item[:images].blank? %>
+            <div class="console-markdown text-sm leading-6"><%= console_markdown("No text content.") %></div>
+          <% end %>
+          <% if item[:images].present? %>
+            <div class="console-message-images <%= "mt-3" if item[:text].present? %>">
+              <% item[:images].each do |image| %>
+                <% dimensions = { width: image[:width], height: image[:height] }.compact %>
+                <%= image_tag image[:src],
+                              alt: image[:alt],
+                              class: "console-message-image",
+                              loading: "lazy",
+                              decoding: "async",
+                              **dimensions %>
+              <% end %>
+            </div>
+          <% end %>
+        </div>
+        <div class="console-message-timestamp <%= "text-right" if user_message %>">
+          <%= local_time(item[:created_at]) if item[:created_at] %>
+        </div>
+      </div>
+    </div>
+  <% end %>
+<% end %>

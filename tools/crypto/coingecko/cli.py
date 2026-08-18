@@ -8,10 +8,38 @@ import json
 
 import typer
 from rich.console import Console
+from rich.table import Table
 
-from centaur_sdk import Table
+app = typer.Typer(
+    name="coingecko",
+    help=(
+        "CoinGecko CLI for cryptocurrency market data. Prefer typed commands "
+        "for common work: price, markets, coin, history, categories, exchanges. "
+        "Raw exchange volume_chart endpoints are not supported by this wrapper."
+    ),
+)
 
-app = typer.Typer(name="coingecko", help="CoinGecko CLI for cryptocurrency market data")
+
+@app.command("health")
+def health():
+    """Assert coingecko connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = client.get_markets(per_page=1)
+        payload = {"ok": True, "tool": "coingecko", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "coingecko", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console()
 
 
@@ -459,7 +487,15 @@ def raw(
     endpoint: str = typer.Argument(..., help="API endpoint (e.g., /ping, /coins/list)"),
     params: str = typer.Option(None, "--params", "-p", help="Query params as key=value,key=value"),
 ):
-    """Make a raw API call."""
+    """Make a raw API call.
+
+    Prefer typed commands when available:
+      - coingecko history bitcoin --days 365 --json for token history
+      - coingecko exchanges --json for exchange volume/rank snapshots
+
+    This wrapper does not support exchange volume_chart raw endpoints such as
+    /exchanges/binance/volume_chart or /exchanges/binance/volume_chart/range.
+    """
     client = get_client()
 
     query_params = None
@@ -469,6 +505,25 @@ def raw(
             if "=" in pair:
                 k, v = pair.split("=", 1)
                 query_params[k.strip()] = v.strip()
+
+    endpoint_lower = endpoint.lower()
+    if endpoint_lower.startswith("/exchanges/") and "/volume_chart" in endpoint_lower:
+        console.print(
+            "[red]CoinGecko exchange volume_chart raw endpoints are not supported by this CLI. "
+            "For token history use: coingecko history <coin-id> --days <n> --json. "
+            "For exchange snapshots use: coingecko exchanges --json.[/]"
+        )
+        raise typer.Exit(2)
+    if endpoint_lower.startswith("/derivatives/exchanges/") and (
+        endpoint_lower.endswith("/open_interest_chart")
+        or endpoint_lower.endswith("/volume_chart")
+    ):
+        console.print(
+            "[red]CoinGecko derivatives exchange chart raw endpoints are not supported by this CLI. "
+            "Use a market-data source with first-class derivatives/OI support, or DefiLlama "
+            "derivatives-volume for venue volume context.[/]"
+        )
+        raise typer.Exit(2)
 
     try:
         data = client._request(endpoint, params=query_params)

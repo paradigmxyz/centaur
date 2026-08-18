@@ -14,6 +14,7 @@ module Api
       GRANTABLE_TYPES = {
         static_secret_id: StaticSecret,
         gcp_auth_secret_id: GcpAuthSecret,
+        gcp_id_token_secret_id: GcpIdTokenSecret,
         aws_auth_secret_id: AwsAuthSecret,
         oauth_token_secret_id: OauthTokenSecret,
         pg_dsn_secret_id: PgDsnSecret,

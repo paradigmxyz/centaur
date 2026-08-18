@@ -1,12 +1,10 @@
-require "net/http"
 require "json"
-require "uri"
 
 module Broker
-  # RefreshClient performs the raw RFC 6749 4.5 refresh_token grant POST against a
-  # token endpoint and returns the parsed response. It owns no retry/backoff
-  # state -- BrokerCredential drives that. Ported from iron-token-broker's
-  # internal/broker/refresh.go.
+  # RefreshClient performs raw token POSTs and returns the parsed response. It
+  # owns no grant-specific request shape and no retry/backoff state:
+  # BrokerCredential drives scheduling, while Broker::CredentialGrants builds the
+  # provider form body.
   #
   # SECURITY: this class never logs the refresh_token, client_secret, the
   # response body, or any decoded token. Callers must keep the same discipline.
@@ -15,65 +13,59 @@ module Broker
     # it -- the caller picks a conservative default).
     Result = Data.define(:access_token, :refresh_token, :expires_in)
 
-    # The minimal HTTP response shape RefreshClient consumes, so tests can inject
-    # a double without Net::HTTP.
-    Response = Data.define(:status, :body)
-
     DEFAULT_TIMEOUT = 30
     MAX_BODY_BYTES = 64 * 1024
 
     # http: an optional callable for testing, invoked as
-    #   http.call(url:, form:, headers:, timeout:) -> Response
+    #   http.call(url:, form:, headers:, timeout:, form_encoding:) -> Response
     # When nil, a Net::HTTP-backed implementation is used.
     def initialize(http: nil)
       @http = http
     end
 
-    # Performs one refresh. Raises Broker::RefreshError on any failure (classified
-    # retryable vs. unrecoverable). scopes is an array; headers is a name=>value
-    # hash applied verbatim to the token POST.
-    def refresh(token_endpoint:, client_id:, refresh_token:, client_secret: nil,
-                scopes: [], headers: {}, timeout: DEFAULT_TIMEOUT)
-      raise ArgumentError, "token endpoint is required" if token_endpoint.blank?
-      raise ArgumentError, "client_id is required" if client_id.blank?
-      raise ArgumentError, "refresh_token is required" if refresh_token.blank?
+    # Performs one token exchange. Raises Broker::RefreshError on any failure
+    # (classified retryable vs. unrecoverable). `form` is posted exactly as
+    # supplied by the caller, encoded as either URL-encoded or multipart data.
+    def refresh(url:, form:, form_encoding: :urlencoded, headers: {},
+                timeout: DEFAULT_TIMEOUT, strict_4xx: false)
+      raise ArgumentError, "url is required" if url.blank?
+      raise ArgumentError, "form must be a hash" unless form.is_a?(Hash)
+      unless %i[urlencoded multipart].include?(form_encoding)
+        raise ArgumentError, "unsupported form encoding #{form_encoding.inspect}"
+      end
 
-      form = {
-        "grant_type" => "refresh_token",
-        "refresh_token" => refresh_token,
-        "client_id" => client_id
-      }
-      form["client_secret"] = client_secret if client_secret.present?
-      form["scope"] = scopes.join(" ") if scopes.present?
+      response = perform(url, form, headers, timeout, form_encoding: form_encoding)
 
-      response = perform(token_endpoint, form, headers, timeout)
-
-      return classify_error(response.status, response.body) if response.status / 100 != 2
+      if response.status / 100 != 2
+        return classify_error(
+          response.status,
+          response.body,
+          strict_4xx: strict_4xx
+        )
+      end
 
       parse_success(response)
     end
 
     private
 
-    def perform(url, form, headers, timeout)
+    def perform(url, form, headers, timeout, form_encoding:)
       if @http
-        return @http.call(url: url, form: form, headers: headers, timeout: timeout)
+        return @http.call(url: url, form: form, headers: headers, timeout: timeout,
+                          form_encoding: form_encoding)
       end
 
-      uri = URI.parse(url)
-      req = Net::HTTP::Post.new(uri)
-      req.set_form_data(form)
-      req["Content-Type"] = "application/x-www-form-urlencoded"
-      req["Accept"] = "application/json"
-      headers.each { |name, value| req[name] = value }
-
-      http = Net::HTTP.new(uri.host, uri.port)
-      http.use_ssl = uri.scheme == "https"
-      http.open_timeout = timeout
-      http.read_timeout = timeout
-
-      res = http.request(req)
-      Response.new(status: res.code.to_i, body: res.body.to_s.byteslice(0, MAX_BODY_BYTES))
+      response = HttpClient.new(
+        open_timeout: timeout,
+        read_timeout: timeout,
+        max_body_bytes: MAX_BODY_BYTES
+      ).post(
+        url,
+        form: form,
+        multipart: form_encoding == :multipart,
+        headers: headers
+      )
+      response
     rescue StandardError => e
       # Network/transport failures are transient: a brief outage must not mark the
       # credential dead. Backoff exhaustion is the louder signal.
@@ -112,19 +104,24 @@ module Broker
     # side: any RFC 6749 5.2 error code is structural and means the credential is
     # dead until a human acts. Transport-shaped failures (5xx, bodyless 4xx) are
     # retryable.
-    def classify_error(status, body)
+    def classify_error(status, body, strict_4xx: false)
       oauth_error = begin
         JSON.parse(body.to_s)["error"]
       rescue JSON::ParserError, TypeError
         nil
       end
 
-      if status / 100 == 5
+      if status / 100 == 5 || status == 429
         raise RefreshError.new("token endpoint http #{status}",
                                stage: "http", code: oauth_error.presence, status: status, retryable: true)
       end
 
       if oauth_error.blank?
+        if strict_4xx
+          raise RefreshError.new("token endpoint http #{status}",
+                                 stage: "http", code: "http_#{status}",
+                                 status: status, retryable: false)
+        end
         # 4xx with no OAuth body: most likely a gateway/rate-limiter, not the IdP.
         raise RefreshError.new("token endpoint http #{status}",
                                stage: "http", status: status, retryable: true)

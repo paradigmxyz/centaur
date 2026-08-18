@@ -2,8 +2,8 @@ module Api
   module V1
     # Operator CRUD for managed broker credentials. Mirrors the secret
     # controllers (oid/foreign_id addressing, label search, PUT-upsert), with two
-    # differences: the initial refresh_token is a write-only seed, and the
-    # rotating token blob (access_token/refresh_token) is NEVER serialized back.
+    # differences: initial values are write-only, and the rotating token blob
+    # (access_token/refresh_token) is NEVER serialized back.
     class BrokerCredentialsController < Api::BaseController
       def index
         records, meta = paginated_label_search(BrokerCredential.all)
@@ -15,7 +15,7 @@ module Api
         render json: { data: record_payload(ref) }
       end
 
-      # GET /api/v1/broker_credentials/lookup/:namespace/:foreign_id
+      # GET /api/v1/broker_credentials/lookup/:foreign_id
       def lookup
         render json: { data: record_payload(find_by_foreign_id!(BrokerCredential)) }
       end
@@ -48,21 +48,20 @@ module Api
       private
 
       def assign_and_save!(ref, attrs)
-        base = attrs.permit(:namespace, :foreign_id, :name, :description, :token_endpoint,
-                            :client_id, :client_secret,
+        base = attrs.permit(:foreign_id, :name, :description, :token_endpoint,
+                            :grant, :client_id,
                             :early_refresh_slack_seconds, :early_refresh_fraction,
                             :max_refresh_interval_seconds, :refresh_timeout_seconds,
                             labels: {}, scopes: [])
         # A PUT upsert by foreign_id sets identity before assignment; a blank body
         # value must not wipe it.
         base.delete(:foreign_id) if base[:foreign_id].blank? && ref.foreign_id.present?
-        base.delete(:namespace) if base[:namespace].blank? && ref.namespace.present?
-        base[:namespace] = "default" if base[:namespace].blank? && ref.namespace.blank?
 
         BrokerCredential.transaction do
           ref.assign_attributes(base)
+          apply_client_secret(ref, attrs)
           apply_token_endpoint_headers(ref, attrs)
-          apply_refresh_token_seed(ref, attrs)
+          apply_initial_values(ref, attrs)
           ref.save!
           ref.reload
         end
@@ -77,32 +76,54 @@ module Api
         ref.token_endpoint_headers = raw.respond_to?(:to_unsafe_h) ? raw.to_unsafe_h : raw
       end
 
-      # The refresh_token is a write-only bootstrap/re-auth seed. Supplying a new
-      # one resets the credential to "due now" and clears any dead state, so the
-      # next poll re-bootstraps it. A blank/absent value leaves the existing seed
-      # (and rotation state) untouched.
-      def apply_refresh_token_seed(ref, attrs)
-        seed = attrs[:refresh_token]
-        return if seed.blank?
+      def apply_client_secret(ref, attrs)
+        secret = attrs[:client_secret]
+        return if secret.blank?
 
-        ref.refresh_token = seed
+        ref.client_secret = secret
+        reset_refresh_state(ref) if ref.grant == "client_credentials"
+      end
+
+      # These fields are write-only initial/re-auth values. Supplying any
+      # fresh value resets the credential to "due now" and clears dead state, so
+      # the next poll refreshes it. Blank/absent values leave stored material
+      # and rotation state untouched.
+      def apply_initial_values(ref, attrs)
+        changed = false
+        %i[refresh_token username password api_key].each do |field|
+          value = attrs[field]
+          next if value.blank?
+
+          ref.public_send("#{field}=", value)
+          changed = true
+        end
+        return unless changed
+
         ref.dead = false
         ref.dead_reason = nil
         ref.failure_count = 0
         ref.next_attempt_at = Time.current
       end
 
-      # Observability only. The client_secret, the token_endpoint_headers values,
-      # the minted access_token, and the refresh_token are deliberately never
-      # included; only the header names are surfaced.
+      def reset_refresh_state(ref)
+        ref.dead = false
+        ref.dead_reason = nil
+        ref.failure_count = 0
+        ref.next_attempt_at = Time.current
+      end
+
+      # Observability only. The client_secret, username/password/api_key, the
+      # token_endpoint_headers values, the minted access_token, and the
+      # refresh_token are deliberately never included; only the header names are
+      # surfaced.
       def record_payload(ref)
         {
           id: ref.oid,
-          namespace: ref.namespace,
           foreign_id: ref.foreign_id,
           name: ref.name,
           description: ref.description,
           labels: ref.labels,
+          grant: ref.grant,
           token_endpoint: ref.token_endpoint,
           scopes: ref.scopes,
           client_id: ref.client_id,

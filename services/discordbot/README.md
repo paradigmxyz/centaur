@@ -40,7 +40,7 @@ ingress** — only a `GET /health` endpoint that reflects the Gateway connection
 | `DISCORD_PUBLIC_KEY` | ✅ | Ed25519 public key (used by the adapter for any HTTP interactions). |
 | `DISCORD_APPLICATION_ID` | ✅ | Doubles as the bot user id for mention detection. |
 | `DISCORDBOT_GUILD_ALLOWLIST` | ✅ to do anything | Comma/space-separated guild IDs. **Fail-closed: empty ⇒ the bot ignores all messages.** |
-| `DISCORDBOT_API_KEY` | – | Bearer to api-rs (falls back to `CENTAUR_API_KEY`). Use a dedicated key, not the Slack one. |
+| `DISCORDBOT_API_KEY` | – | Bearer to api-rs. Use a dedicated key, not the Slack one. |
 | `CENTAUR_API_URL` | – | api-rs base URL (default `http://127.0.0.1:8080`). |
 | `DISCORDBOT_DATABASE_URL` / `DATABASE_URL` / `POSTGRES_URL` | ✅ | Thread-state store. The bot refuses to boot without one (no silent localhost fallback). |
 | `DISCORDBOT_TRIGGER_BOT_ALLOWLIST` | – | Comma/space-separated bot/webhook author IDs whose messages may enter sessions (e.g. a Sentry webhook). Empty (default) ⇒ all bot messages are ignored. Use the ID the message is authored as: the bot's user id, or the webhook id for webhook integrations. |

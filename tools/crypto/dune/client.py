@@ -48,7 +48,7 @@ class DuneClient:
         body = {}
         if params:
             body["query_parameters"] = params
-        return self._request("POST", f"/query/{query_id}/execute", json=body if body else None)
+        return self._request("POST", f"/query/{query_id}/execute", json=body)
 
     def get_execution_status(self, execution_id: str) -> dict:
         """Get the status of a query execution.

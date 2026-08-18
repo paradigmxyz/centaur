@@ -4,7 +4,7 @@ module Broker
   class JobsTest < ActiveJob::TestCase
     def make_credential(**overrides)
       BrokerCredential.create!({
-        namespace: "default", foreign_id: "job-#{SecureRandom.hex(4)}",
+        foreign_id: "job-#{SecureRandom.hex(4)}",
         token_endpoint: "https://idp.example/token", client_id: "cid",
         created_by: users(:acme_admin), refresh_token: "seed"
       }.merge(overrides))
@@ -25,6 +25,31 @@ module Broker
       refute_includes enqueued_ids, future.id
     end
 
+    test "PollRefreshJob enqueues due password grant credentials without refresh tokens" do
+      due = make_credential(grant: "password", username: "user", password: "pass", refresh_token: nil)
+      due.update_columns(last_refresh: 1.hour.ago, next_attempt_at: 1.minute.ago)
+
+      Broker::PollRefreshJob.perform_now
+
+      enqueued_ids = enqueued_jobs
+        .select { |j| j[:job] == Broker::RefreshCredentialJob }
+        .map { |j| j[:args].first }
+      assert_includes enqueued_ids, due.id
+    end
+
+    test "PollRefreshJob enqueues due preqin credentials without refresh tokens" do
+      due = make_credential(grant: "preqin", client_id: nil, username: "user",
+                            api_key: "api-key", refresh_token: nil)
+      due.update_columns(last_refresh: 1.hour.ago, next_attempt_at: 1.minute.ago)
+
+      Broker::PollRefreshJob.perform_now
+
+      enqueued_ids = enqueued_jobs
+        .select { |j| j[:job] == Broker::RefreshCredentialJob }
+        .map { |j| j[:args].first }
+      assert_includes enqueued_ids, due.id
+    end
+
     test "RefreshCredentialJob drives the credential refresh" do
       # No refresh_token seed: refresh! marks the credential dead without any
       # network call, proving the job invoked it.
@@ -32,7 +57,7 @@ module Broker
       Broker::RefreshCredentialJob.perform_now(bc.id)
       bc.reload
       assert bc.dead?
-      assert_equal "blob_not_bootstrapped", bc.dead_reason
+      assert_equal "missing_initial_refresh_token", bc.dead_reason
     end
 
     test "RefreshCredentialJob is a no-op for a missing credential" do

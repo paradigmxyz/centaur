@@ -1,0 +1,76 @@
+diff --git a/dist/index.js b/dist/index.js
+index 3a13b7a581b46e5bd46120a30d423663e9adb988..2941f141ad3124e8907fbb070a9c6742a646b0c2 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -866,15 +866,20 @@ var LinearAdapter = class {
+         });
+         return null;
+       }
+-      if (!agentSession.comment) {
+-        this.logger.warn("Missing comment for agent session", {
+-          agentSessionId: payload.agentSession.id
+-        });
+-        return null;
+-      }
++      // Patched (centaur): a created session may carry no root comment (the
++      // agent was mentioned in the issue description, or the session was
++      // spawned without a comment thread). Upstream dropped the event, so the
++      // session was never acknowledged and sat unresponsive forever.
++      // Synthesize an empty trigger comment instead — the session thread key
++      // never uses the comment id, and the empty body flows downstream as an
++      // empty prompt.
++      const sessionComment = agentSession.comment ?? {
++        id: `agent-session-${agentSession.id}`,
++        body: ""
++      };
+       const commentData = {
+-        id: agentSession.comment.id,
+-        body: agentSession.comment.body,
++        id: sessionComment.id,
++        body: sessionComment.body,
+         issueId,
+         user: agentSession.creator ? {
+           type: "user",
+@@ -884,10 +889,16 @@ var LinearAdapter = class {
+           email: agentSession.creator.email,
+           avatarUrl: agentSession.creator.avatarUrl ?? void 0
+         } : {
++          // Patched (centaur): sessions initiated via automation (e.g. a
++          // triage rule delegating the issue) or by another agent carry no
++          // creator. Upstream attributed them to the bot itself, which the
++          // chat SDK then dropped as a self-message — silently ignoring
++          // every automation-created session. Attribute them to a distinct
++          // automation identity instead.
+           type: "bot",
+-          id: this.botUserId,
+-          displayName: this.userName,
+-          fullName: this.userName,
++          id: "linear-automation",
++          displayName: "Linear automation",
++          fullName: "Linear automation",
+           email: void 0,
+           avatarUrl: void 0
+         },
+@@ -1673,10 +1684,19 @@ var LinearAdapter = class {
+       id: raw.comment.id,
+       isMention: raw.kind === "agent_session_comment",
+       // Agent session comments are treated as mentions as they directly target the bot
+-      threadId: this.encodeThreadId({
++      // Patched (centaur): agent-session messages must all share ONE stable
++      // thread id — linear:{issueId}:s:{agentSessionId} — regardless of which
++      // comment triggered them. Upstream keys the thread by the triggering
++      // comment's own id, so a session's `created` event (root comment) and
++      // every `prompted` follow-up (new source comment) each landed on a
++      // DIFFERENT thread, splitting one Linear agent session across fresh
++      // bot sessions on every reply.
++      threadId: raw.kind === "agent_session_comment" ? this.encodeThreadId({
++        issueId: raw.comment.issueId,
++        agentSessionId: raw.agentSessionId
++      }) : this.encodeThreadId({
+         issueId: raw.comment.issueId,
+-        commentId: raw.comment.id,
+-        agentSessionId: raw.kind === "agent_session_comment" ? raw.agentSessionId : void 0
++        commentId: raw.comment.id
+       }),
+       text,
+       formatted,

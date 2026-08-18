@@ -30,6 +30,17 @@ module Api
         assert_response :unauthorized
       end
 
+      test "rejects API keys for disabled users" do
+        get api_v1_api_keys_url, headers: auth_headers("iak_disabled-token")
+        assert_response :unauthorized
+      end
+
+      test "rejects API keys for non-admin users" do
+        get api_v1_api_keys_url, headers: auth_headers("iak_member-token")
+        assert_response :forbidden
+        assert_equal "API key owner is not an admin", json_body.dig("error", "message")
+      end
+
       test "GET index lists only the caller's keys and never returns plaintext token" do
         get api_v1_api_keys_url, headers: auth_headers
         assert_response :ok

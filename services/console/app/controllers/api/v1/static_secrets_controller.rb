@@ -11,7 +11,7 @@ module Api
         render json: { data: record_payload(ref) }
       end
 
-      # GET /api/v1/static_secrets/lookup/:namespace/:foreign_id
+      # GET /api/v1/static_secrets/lookup/:foreign_id
       def lookup
         render json: { data: record_payload(find_by_foreign_id!(StaticSecret)) }
       end
@@ -27,9 +27,7 @@ module Api
       # PUT/PATCH upserts: an opaque id updates that record, any other identifier
       # is a foreign_id that is created when absent.
       def update
-        ref = resolve_for_upsert(StaticSecret)
-        was_new = ref.new_record?
-        assign_and_save!(ref, data_params)
+        ref, was_new = assign_upsert_with_retry
         render status: (was_new ? :created : :ok), json: { data: record_payload(ref) }
       rescue ActiveRecord::RecordInvalid => e
         render_validation_error(e.record)
@@ -47,47 +45,81 @@ module Api
 
       private
 
+      def assign_upsert_with_retry
+        attempts = 0
+
+        begin
+          attempts += 1
+          ref = resolve_for_upsert(StaticSecret)
+          was_new = ref.new_record?
+          assign_and_save!(ref, data_params)
+          [ ref, was_new ]
+        rescue ActiveRecord::RecordNotUnique
+          raise if attempts >= 2
+
+          retry
+        end
+      end
+
       def assign_and_save!(ref, attrs)
         ss_attrs = permit_document(
-          ref, attrs, :name, :description,
+          ref, attrs, :name, :description, :kind,
           labels: {}, inject_config: {}, replace_config: {}
         )
+        # Older clients do not know about kind. Preserve it on update when the
+        # field is absent, while creates still receive the database default and
+        # an explicitly supplied kind still replaces the existing value.
+        ss_attrs[:kind] = ref.kind if ref.persisted? && !attrs.key?(:kind)
 
         source_attrs = if attrs.key?(:source) && attrs[:source].present?
           attrs.require(:source).permit(:source_type, :secret, config: {})
         end
 
-        rules_attrs = Array(attrs[:rules]).map do |r|
-          ActionController::Parameters.new(r.to_unsafe_h).permit(
-            :host, :cidr, http_methods: [], paths: []
-          )
-        end
+        source = source_attrs ? SecretSource.new(source_attrs.to_h) : nil
+        rules = build_rules(attrs)
+
+        # Resolve profile defaults before the replacement guard so a repeated
+        # write compares the effective persisted document, not the abbreviated
+        # client request.
+        candidate = ref.dup
+        candidate.assign_attributes(ss_attrs)
+        rules = candidate.apply_kind_defaults(rules: rules)
+        ss_attrs = ss_attrs.merge(
+          kind: candidate.kind,
+          inject_config: candidate.inject_config,
+          replace_config: candidate.replace_config
+        )
 
         StaticSecret.transaction do
-          ref.assign_attributes(ss_attrs)
-          ref.save!
+          with_sync_config_replacement_guard(ref, ss_attrs, source: source, rules: rules) do
+            ref.assign_attributes(ss_attrs)
+            ref.kind_rules_for_validation = rules
+            ref.save!
 
-          ref.source&.destroy!
-          if source_attrs
-            SecretSource.create!(source_attrs.to_h.merge(static_secret: ref))
+            ref.source&.destroy!
+            if source
+              source.static_secret = ref
+              source.save!
+            end
+
+            ref.rules.destroy_all
+            rules.each do |rule|
+              rule.static_secret = ref
+              rule.save!
+            end
+
+            ref.reload
           end
-
-          ref.rules.destroy_all
-          rules_attrs.each_with_index do |r, i|
-            RequestRule.create!(r.to_h.merge(position: i, static_secret: ref))
-          end
-
-          ref.reload
         end
       end
 
       def record_payload(ref)
         {
           id: ref.oid,
-          namespace: ref.namespace,
           foreign_id: ref.foreign_id,
           name: ref.name,
           description: ref.description,
+          kind: ref.kind,
           labels: ref.labels,
           inject_config: ref.inject_config,
           replace_config: ref.replace_config,

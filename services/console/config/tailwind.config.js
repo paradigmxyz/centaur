@@ -22,7 +22,16 @@ module.exports = {
         }
       },
       fontFamily: {
-        mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace']
+        mono: [
+          'Berkeley Mono',
+          'Berkeley Mono Variable',
+          'BerkeleyMono',
+          'JetBrains Mono',
+          'ui-monospace',
+          'SFMono-Regular',
+          'Menlo',
+          'monospace'
+        ]
       }
     },
     // Very small radii everywhere for the sharp, terminal-ish look.

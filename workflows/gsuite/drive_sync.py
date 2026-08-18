@@ -10,7 +10,7 @@ from typing import Any, Protocol
 
 from workflows.gsuite.drive import GOOGLE_DOC_MIME_TYPE
 from api.runtime_control import canonical_json
-from api.vm_metrics import (
+from workflows.etl_metrics import (
     record_etl_items_failed,
     record_etl_items_seen,
     record_etl_items_upserted,

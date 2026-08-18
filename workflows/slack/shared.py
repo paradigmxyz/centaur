@@ -16,6 +16,12 @@ from urllib import request as urllib_request
 
 from centaur_sdk import secret
 from api.runtime_control import canonical_json
+from workflows.etl_metrics import (
+    set_etl_active_scopes,
+    set_etl_failed_scopes,
+    set_etl_scope_sync_freshness_seconds,
+)
+from workflows.slack.metrics import record_slack_etl_rate_limit
 
 FALSE_ENV_VALUES = {"0", "false", "no", "off"}
 DEFAULT_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024
@@ -23,12 +29,19 @@ BACKFILL_JOB_CHANNEL_CONTINUATION = "channel_continuation"
 BACKFILL_JOB_CHANNEL_BOOTSTRAP = "channel_bootstrap"
 BACKFILL_JOB_THREAD_REFRESH = "thread_refresh"
 BACKFILL_JOB_PAYLOAD_VERSION = 1
+# Reclaim jobs orphaned in `running` by a dead worker after this long. Must
+# exceed the longest plausible backfill workflow run.
+BACKFILL_JOB_STALE_RUNNING_HOURS = 2
 BACKFILL_JOB_TYPES = (
     BACKFILL_JOB_CHANNEL_BOOTSTRAP,
     BACKFILL_JOB_CHANNEL_CONTINUATION,
     BACKFILL_JOB_THREAD_REFRESH,
 )
 BACKFILL_JOB_STATUSES = ("pending", "running", "completed", "failed")
+PERMANENT_SLACK_BACKFILL_ERRORS = (
+    "channel_not_found",
+    "thread_not_found",
+)
 
 
 def positive_int(value: int | str | None, default: int) -> int:
@@ -62,12 +75,15 @@ def attachment_max_bytes() -> int:
 
 
 class SlackSyncClient(Protocol):
-    """Small protocol for the Slack client methods used by Slack ETL workflows."""
+    """Small protocol for the direct Slack client used by Slack ETL workflows."""
 
     def _etl_access_mode(self) -> str: ...
 
     def _list_etl_channels(
-        self, limit: int = 200, force_refresh: bool = False
+        self,
+        limit: int = 200,
+        force_refresh: bool = False,
+        include_private_channels: bool = False,
     ) -> list[dict]: ...
 
     def _list_etl_users(self, limit: int = 200) -> list[dict]: ...
@@ -168,6 +184,33 @@ def _attachment_raw_payload(attachment: dict[str, Any]) -> dict[str, Any]:
     return {
         key: value for key, value in attachment.items() if key not in {"content_bytes"}
     }
+
+
+def _attachment_fallback_text(attachments: Any) -> str:
+    """Plain-text stand-in for app messages whose content lives in legacy attachments.
+
+    Bot integrations (GitHub, alerting apps) often post with an empty top-level
+    `text` and put everything in `attachments`; Slack defines `fallback` as the
+    plain-text summary for exactly this case.
+    """
+    if not isinstance(attachments, list):
+        return ""
+    parts: list[str] = []
+    for attachment in attachments:
+        if not isinstance(attachment, dict):
+            continue
+        fallback = str(attachment.get("fallback") or "").strip()
+        if fallback:
+            parts.append(fallback)
+            continue
+        pieces = [
+            str(attachment.get(key) or "").strip()
+            for key in ("pretext", "title", "text")
+        ]
+        joined = "\n".join(piece for piece in pieces if piece)
+        if joined:
+            parts.append(joined)
+    return "\n".join(parts)
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
@@ -345,6 +388,39 @@ def failure_reason(error: str) -> str:
     return "unknown_error"
 
 
+def is_permanent_slack_backfill_error(error: str) -> bool:
+    """Return whether a Slack backfill error should terminally skip the job."""
+    lowered = error.lower()
+    return any(
+        f"slack api error: {error_code}" in lowered
+        for error_code in PERMANENT_SLACK_BACKFILL_ERRORS
+    )
+
+
+async def emit_slack_checkpoint_metrics(pool) -> None:
+    """Publish current Slack checkpoint health gauges for Grafana panels."""
+    row = await pool.fetchrow(
+        "SELECT COUNT(*) AS active_scopes, "
+        "COUNT(*) FILTER (WHERE c.last_error <> '') AS failed_scopes, "
+        "COALESCE("
+        "  EXTRACT(EPOCH FROM NOW() - MIN(c.last_success_at) "
+        "    FILTER (WHERE c.last_success_at IS NOT NULL)"
+        "  ), "
+        "  0"
+        ") AS freshness_seconds "
+        "FROM slack_sync_checkpoints c "
+        "JOIN slack_sync_channels ch ON ch.channel_id = c.channel_id "
+        "WHERE ch.is_syncable IS TRUE "
+        "AND ch.is_archived IS FALSE",
+    )
+    set_etl_active_scopes("slack", int(row["active_scopes"] or 0) if row else 0)
+    set_etl_failed_scopes("slack", int(row["failed_scopes"] or 0) if row else 0)
+    set_etl_scope_sync_freshness_seconds(
+        "slack",
+        float(row["freshness_seconds"] or 0.0) if row else 0.0,
+    )
+
+
 _MESSAGE_UPSERT_SQL = (
     "INSERT INTO slack_sync_messages ("
     "channel_id, message_ts, occurred_at, thread_ts, parent_message_ts, "
@@ -371,7 +447,9 @@ _MESSAGE_UPSERT_SQL = (
     "raw_payload = EXCLUDED.raw_payload, "
     "source_run_id = EXCLUDED.source_run_id, "
     "last_seen_at = NOW(), "
-    "updated_at = NOW()"
+    "updated_at = CASE WHEN slack_sync_messages.raw_payload "
+    "IS DISTINCT FROM EXCLUDED.raw_payload "
+    "THEN NOW() ELSE slack_sync_messages.updated_at END"
 )
 
 
@@ -637,7 +715,7 @@ class SlackEtlRateLimitError(RuntimeError):
 
 
 class SlackEtlClient:
-    """Slack user-token client used only by Slack ETL workflows."""
+    """Direct Slack user-token client used only by Slack ETL workflows."""
 
     _MAX_PAGE_SIZE = 200
     _DEFAULT_API_TIMEOUT_SECONDS = 8
@@ -657,16 +735,39 @@ class SlackEtlClient:
         }
     )
 
-    def __init__(self, etl_token: str | None = None) -> None:
+    def __init__(
+        self,
+        etl_token: str | None = None,
+        *,
+        workflow_name: str = "slack_unknown",
+    ) -> None:
         from slack_sdk import WebClient
 
         token = (etl_token or secret("SLACK_ETL_TOKEN", default="")).strip()
         if not token:
             raise RuntimeError("SLACK_ETL_TOKEN not set for Slack ETL workflow")
         self.token = token
+        self._workflow_name = workflow_name
         self._client = WebClient(token=token, timeout=self._api_timeout_seconds())
         self._user_cache: dict[str, str] = {}
         self._ratelimit_deadlines: dict[str, float] = {}
+
+    def _record_rate_limit(
+        self,
+        *,
+        method: str,
+        outcome: str,
+        retry_after_seconds: float,
+    ) -> None:
+        try:
+            record_slack_etl_rate_limit(
+                getattr(self, "_workflow_name", "slack_unknown"),
+                method,
+                outcome,
+                retry_after_seconds,
+            )
+        except Exception:
+            pass
 
     @classmethod
     def _api_timeout_seconds(cls) -> int:
@@ -749,10 +850,20 @@ class SlackEtlClient:
             remaining = blocked_until - time.time()
             if remaining > 0:
                 if remaining > max_sleep:
+                    self._record_rate_limit(
+                        method=key,
+                        outcome="failed_fast",
+                        retry_after_seconds=round(remaining, 3),
+                    )
                     raise SlackEtlRateLimitError(
                         slack_method=key,
                         retry_after=round(remaining, 3),
                     )
+                self._record_rate_limit(
+                    method=key,
+                    outcome="slept_retry",
+                    retry_after_seconds=remaining,
+                )
                 time.sleep(remaining)
 
             try:
@@ -767,8 +878,18 @@ class SlackEtlClient:
                     )
                     self._ratelimit_deadlines[key] = time.time() + retry_after
                     if attempt < max_retries - 1 and retry_after <= max_sleep:
+                        self._record_rate_limit(
+                            method=key,
+                            outcome="slept_retry",
+                            retry_after_seconds=retry_after,
+                        )
                         time.sleep(retry_after)
                         continue
+                    self._record_rate_limit(
+                        method=key,
+                        outcome="failed_fast",
+                        retry_after_seconds=retry_after,
+                    )
                     raise SlackEtlRateLimitError(
                         slack_method=key,
                         retry_after=retry_after,
@@ -930,10 +1051,19 @@ class SlackEtlClient:
             username = msg.get("bot_profile", {}).get("name", "") or user_id
 
         ts = msg.get("ts", "")
+        text = self._resolve_mentions(msg.get("text", ""), user_cache)
+        if not text.strip():
+            text = self._resolve_mentions(
+                _attachment_fallback_text(msg.get("attachments")), user_cache
+            )
+        # Human rich_text blocks just mirror `text`; keep blocks only where they
+        # can carry unique content (app/bot posts or empty-text messages) so
+        # raw_payload doesn't double for every ordinary message.
+        keep_blocks = bool(msg.get("bot_id")) or not (msg.get("text") or "").strip()
         message = {
             "user": username,
             "user_id": user_id,
-            "text": self._resolve_mentions(msg.get("text", ""), user_cache),
+            "text": text,
             "timestamp": ts,
             "permalink": self._message_permalink(channel_id, ts),
             "channel_id": channel_id,
@@ -945,6 +1075,8 @@ class SlackEtlClient:
             "subtype": msg.get("subtype"),
             "parent_user_id": msg.get("parent_user_id"),
             "bot_id": msg.get("bot_id"),
+            "attachments": msg.get("attachments") or [],
+            "blocks": (msg.get("blocks") or []) if keep_blocks else [],
             "files": [
                 normalized
                 for file_obj in msg.get("files", []) or []
@@ -1042,16 +1174,25 @@ class SlackEtlClient:
         self,
         limit: int = 500,
         force_refresh: bool = False,
+        include_private_channels: bool | None = None,
     ) -> list[dict]:
         channels = []
         cursor = None
+        include_private = (
+            env_flag_enabled("SLACK_SYNC_INDEX_PRIVATE_CHANNELS", default=False)
+            if include_private_channels is None
+            else include_private_channels
+        )
+        conversation_types = (
+            "public_channel,private_channel" if include_private else "public_channel"
+        )
 
         while len(channels) < limit:
             try:
                 response = self._retry_on_ratelimit(
                     self._client.conversations_list,
                     method_key="etl.conversations.list",
-                    types="public_channel",
+                    types=conversation_types,
                     limit=min(limit - len(channels), self._MAX_PAGE_SIZE),
                     cursor=cursor,
                     exclude_archived=True,
@@ -1065,17 +1206,19 @@ class SlackEtlClient:
                 )
 
             for channel in response.get("channels", []):
-                if channel.get("is_private", False):
+                is_private = bool(channel.get("is_private", False))
+                if is_private and not include_private:
                     continue
                 channels.append(
                     {
                         "id": channel.get("id", ""),
                         "name": channel.get("name", ""),
+                        "created": channel.get("created"),
                         "purpose": channel.get("purpose", {}).get("value", ""),
                         "topic": channel.get("topic", {}).get("value", ""),
                         "member_count": channel.get("num_members", 0),
                         "is_archived": channel.get("is_archived", False),
-                        "is_private": channel.get("is_private", False),
+                        "is_private": is_private,
                         "is_member": channel.get("is_member", False),
                     }
                 )
@@ -1274,9 +1417,12 @@ class SlackEtlClient:
 
         latest_seen = watermark
         if page["messages"]:
-            latest_seen = self._format_ts(
-                max(float(message["timestamp"]) for message in page["messages"])
-            )
+            page_max = max(float(message["timestamp"]) for message in page["messages"])
+            # An oldest-anchored page can sit entirely below the prior watermark;
+            # never let the returned watermark regress past it.
+            if watermark is not None:
+                page_max = max(page_max, float(watermark))
+            latest_seen = self._format_ts(page_max)
 
         next_state: dict[str, Any] = {
             "cursor": page["next_cursor"] if page["has_more"] else None,
@@ -1340,9 +1486,9 @@ class SlackEtlClient:
         return sorted(users[:limit], key=lambda x: x["name"])
 
 
-def client() -> SlackSyncClient:
+def client(*, workflow_name: str = "slack_unknown") -> SlackSyncClient:
     """Construct the workflow-owned Slack ETL client."""
-    return SlackEtlClient()
+    return SlackEtlClient(workflow_name=workflow_name)
 
 
 async def enqueue_backfill_job(
@@ -1355,15 +1501,30 @@ async def enqueue_backfill_job(
     run_id: str,
     priority: int = 100,
     refresh_completed: bool = True,
+    refresh_pending: bool = True,
 ) -> None:
-    """Store or refresh a queued backfill job outside the incremental checkpoint."""
+    """Store or refresh a queued backfill job outside the incremental checkpoint.
+
+    `refresh_pending=False` protects in-flight work: the conflict update then
+    only reopens finished (or just failed) jobs and never rewrites the payload,
+    status, or attempt count of a `pending`/`running` row. Periodic enqueuers
+    (the incremental sync) must use it so they cannot clobber the cursor a
+    backfill worker is actively advancing under the same job_key.
+    """
     if not payload:
         return
-    completion_guard = (
-        ""
-        if refresh_completed
-        else " WHERE slack_sync_backfill_jobs.status <> 'completed'"
-    )
+    if refresh_pending:
+        completion_guard = (
+            ""
+            if refresh_completed
+            else " WHERE slack_sync_backfill_jobs.status <> 'completed'"
+        )
+    else:
+        completion_guard = (
+            " WHERE slack_sync_backfill_jobs.status IN ('completed', 'failed')"
+            if refresh_completed
+            else " WHERE slack_sync_backfill_jobs.status = 'failed'"
+        )
     await pool.execute(
         "INSERT INTO slack_sync_backfill_jobs ("
         "job_key, job_type, payload_version, channel_id, status, payload_json, "
@@ -1497,7 +1658,12 @@ async def widen_channel_bootstrap_job(
 
 
 async def claim_backfill_jobs(pool, limit: int) -> list[dict[str, Any]]:
-    """Claim a bounded batch of pending backfill jobs for one workflow run."""
+    """Claim a bounded batch of pending backfill jobs for one workflow run.
+
+    Jobs stuck in `running` past the stale interval are reclaimed too: a worker
+    that died mid-job leaves its row `running` forever, and nothing else may
+    touch in-flight rows (see `enqueue_backfill_job(refresh_pending=False)`).
+    """
     async with pool.acquire() as conn:
         async with conn.transaction():
             rows = await conn.fetch(
@@ -1505,6 +1671,8 @@ async def claim_backfill_jobs(pool, limit: int) -> list[dict[str, Any]]:
                 "    SELECT job_id "
                 "    FROM slack_sync_backfill_jobs "
                 "    WHERE status IN ('pending', 'failed') "
+                "       OR (status = 'running' AND last_started_at < "
+                f"           NOW() - INTERVAL '{BACKFILL_JOB_STALE_RUNNING_HOURS} hours') "
                 "    ORDER BY priority, updated_at, job_id "
                 "    LIMIT $1 "
                 "    FOR UPDATE SKIP LOCKED"
@@ -1522,6 +1690,22 @@ async def claim_backfill_jobs(pool, limit: int) -> list[dict[str, Any]]:
                 limit,
             )
     return [dict(row) for row in rows]
+
+
+async def touch_backfill_job_started(pool, job_id: int) -> None:
+    """Re-stamp a claimed job as this worker starts actually processing it.
+
+    A claim batch stamps `last_started_at` once for up to 50 jobs; without the
+    per-job re-stamp, a job at the tail of a slow (rate-limited) but alive run
+    can cross the stale-`running` threshold and be reclaimed by a concurrent
+    run while still owned.
+    """
+    await pool.execute(
+        "UPDATE slack_sync_backfill_jobs "
+        "SET last_started_at = NOW(), updated_at = NOW() "
+        "WHERE job_id = $1 AND status = 'running'",
+        job_id,
+    )
 
 
 async def load_backfill_job_metrics(pool) -> list[dict[str, Any]]:
@@ -1578,6 +1762,32 @@ async def mark_backfill_job_failed(
     await pool.execute(
         "UPDATE slack_sync_backfill_jobs SET "
         "status = 'failed', last_run_id = $2, last_error = $3, updated_at = NOW() "
+        "WHERE job_id = $1",
+        job_id,
+        run_id,
+        error,
+    )
+
+
+async def mark_backfill_job_terminal_skipped(
+    pool,
+    *,
+    job_id: int,
+    run_id: str,
+    error: str,
+) -> None:
+    """Mark a permanently unrefreshable backfill job terminal without retrying."""
+    await pool.execute(
+        "UPDATE slack_sync_backfill_jobs SET "
+        "status = 'completed', "
+        "last_run_id = $2, "
+        "payload_json = COALESCE(payload_json, '{}'::jsonb) || jsonb_build_object("
+        "    'terminal_skip_reason', $3::text, "
+        "    'terminal_skip_at', NOW()::text"
+        "), "
+        "last_completed_at = NOW(), "
+        "last_error = '', "
+        "updated_at = NOW() "
         "WHERE job_id = $1",
         job_id,
         run_id,

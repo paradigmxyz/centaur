@@ -2,8 +2,8 @@ require "test_helper"
 
 module Console
   # Covers the broker credential create/edit form controller: what gets built and
-  # persisted (identity, OAuth config, scopes, headers, refresh policy, the write-
-  # only refresh_token seed), redirects, that blank write-only fields leave the
+  # persisted (identity, OAuth config, scopes, headers, refresh policy, write-
+  # only initial values), redirects, that blank write-only fields leave the
   # stored values in place, and that invalid input is rejected (422) without writing.
   class BrokerCredentialsControllerTest < ActionDispatch::IntegrationTest
     setup do
@@ -22,8 +22,11 @@ module Console
     test "GET new and edit render without error" do
       get new_console_broker_credential_url
       assert_response :ok
+      assert_select "input[name='credential[namespace]']", count: 0
+      assert_select ".form-label", text: "Namespace", count: 0
       get edit_console_broker_credential_url(broker_credentials(:acme_managed_gmail).oid)
       assert_response :ok
+      assert_select ".form-label", text: "Namespace", count: 0
     end
 
     # --- create -----------------------------------------------------------
@@ -32,7 +35,7 @@ module Console
       assert_difference -> { BrokerCredential.count } => 1 do
         post console_broker_credentials_url, params: {
           credential: {
-            namespace: "acme", foreign_id: "new-managed", name: "new-managed",
+            foreign_id: "new-managed", name: "new-managed",
             token_endpoint: "https://idp.example/token", client_id: "cid",
             client_secret: "shhh", scopes: "scope.a\nscope.b\n",
             refresh_token: "seed-token",
@@ -44,7 +47,7 @@ module Console
         }
       end
 
-      cred = BrokerCredential.find_by!(namespace: "acme", foreign_id: "new-managed")
+      cred = BrokerCredential.find_by!(foreign_id: "new-managed")
       assert_redirected_to console_credential_path(cred.oid)
       assert_equal %w[scope.a scope.b], cred.scopes
       assert_equal({ "Authorization" => "Basic abc" }, cred.token_endpoint_headers)
@@ -56,10 +59,79 @@ module Console
       assert_equal @operator, cred.created_by
     end
 
+    test "POST create builds a password grant credential with write-only initial values" do
+      assert_difference -> { BrokerCredential.count } => 1 do
+        post console_broker_credentials_url, params: {
+          credential: {
+            foreign_id: "password-provider", name: "Password Provider",
+            grant: "password", token_endpoint: "https://auth.example.com/token",
+            client_id: "password-client", client_secret: "password-secret",
+            username: "password-user", password: "password-value",
+            early_refresh_fraction: "0.5", early_refresh_slack_seconds: "120",
+            max_refresh_interval_seconds: "3600", refresh_timeout_seconds: "10"
+          },
+          headers: { "0" => { key: "x-api-key", value: "password-key" } }
+        }
+      end
+
+      cred = BrokerCredential.find_by!(foreign_id: "password-provider")
+      assert_redirected_to console_credential_path(cred.oid)
+      assert_equal "password", cred.grant
+      assert_equal "password-user", cred.username
+      assert_equal "password-value", cred.password
+      assert_equal "password-secret", cred.client_secret
+      assert_equal({ "x-api-key" => "password-key" }, cred.token_endpoint_headers)
+    end
+
+    test "POST create builds a client_credentials credential with a client secret" do
+      assert_difference -> { BrokerCredential.count } => 1 do
+        post console_broker_credentials_url, params: {
+          credential: {
+            foreign_id: "bloomberg", name: "Bloomberg",
+            grant: "client_credentials",
+            token_endpoint: "https://bsso.blpprofessional.com/ext/api/as/token.oauth2",
+            client_id: "bloomberg-client", client_secret: "bloomberg-secret",
+            early_refresh_fraction: "0.5", early_refresh_slack_seconds: "120",
+            max_refresh_interval_seconds: "3600", refresh_timeout_seconds: "10"
+          }
+        }
+      end
+
+      cred = BrokerCredential.find_by!(foreign_id: "bloomberg")
+      assert_redirected_to console_credential_path(cred.oid)
+      assert_equal "client_credentials", cred.grant
+      assert_equal "bloomberg-client", cred.client_id
+      assert_equal "bloomberg-secret", cred.client_secret
+      assert_nil cred.refresh_token
+      assert cred.next_attempt_at.present?
+    end
+
+    test "POST create builds a preqin credential with write-only API key" do
+      assert_difference -> { BrokerCredential.count } => 1 do
+        post console_broker_credentials_url, params: {
+          credential: {
+            foreign_id: "preqin", name: "Preqin",
+            grant: "preqin",
+            preqin_username: "preqin-user", api_key: "preqin-api-key",
+            early_refresh_fraction: "0.5", early_refresh_slack_seconds: "120",
+            max_refresh_interval_seconds: "3600", refresh_timeout_seconds: "10"
+          }
+        }
+      end
+
+      cred = BrokerCredential.find_by!(foreign_id: "preqin")
+      assert_redirected_to console_credential_path(cred.oid)
+      assert_equal "preqin", cred.grant
+      assert_equal BrokerCredential::PREQIN_TOKEN_ENDPOINT, cred.token_endpoint
+      assert_nil cred.client_id
+      assert_equal "preqin-user", cred.username
+      assert_equal "preqin-api-key", cred.api_key
+    end
+
     test "POST create without a token endpoint or client id is rejected without writing" do
       assert_no_difference "BrokerCredential.count" do
         post console_broker_credentials_url, params: {
-          credential: { namespace: "acme", foreign_id: "broken", client_id: "" }
+          credential: { foreign_id: "broken", client_id: "" }
         }
       end
       assert_response :unprocessable_entity
@@ -71,7 +143,7 @@ module Console
       cred = broker_credentials(:acme_managed_gmail)
       patch console_broker_credential_url(cred.oid), params: {
         credential: {
-          namespace: cred.namespace, foreign_id: cred.foreign_id, name: "renamed",
+          foreign_id: cred.foreign_id, name: "renamed",
           token_endpoint: cred.token_endpoint, client_id: "new-cid",
           scopes: "only.scope",
           early_refresh_fraction: cred.early_refresh_fraction,
@@ -95,7 +167,7 @@ module Console
 
       patch console_broker_credential_url(cred.oid), params: {
         credential: {
-          namespace: cred.namespace, foreign_id: cred.foreign_id,
+          foreign_id: cred.foreign_id,
           token_endpoint: cred.token_endpoint, client_id: cred.client_id,
           client_secret: "", refresh_token: "",
           early_refresh_fraction: cred.early_refresh_fraction,
@@ -108,17 +180,112 @@ module Console
       cred.reload
       assert_equal "original-secret", cred.client_secret
       assert_equal "original-token", cred.refresh_token
-      # A blank seed must not re-bootstrap: dead state is untouched.
+      # A blank seed must not reschedule: dead state is untouched.
       assert cred.dead?
     end
 
-    test "PATCH update with a fresh refresh_token re-bootstraps the credential" do
+    test "PATCH update with blank password grant fields leaves them in place" do
+      cred = BrokerCredential.create!(foreign_id: "password-console",
+                                      grant: "password", token_endpoint: "https://idp.example/token",
+                                      client_id: "cid", client_secret: "secret",
+                                      username: "user", password: "pass", created_by: @operator)
+
+      patch console_broker_credential_url(cred.oid), params: {
+        credential: {
+          foreign_id: cred.foreign_id,
+          grant: "password", token_endpoint: cred.token_endpoint, client_id: cred.client_id,
+          client_secret: "", username: "", password: "",
+          early_refresh_fraction: cred.early_refresh_fraction,
+          early_refresh_slack_seconds: cred.early_refresh_slack_seconds,
+          max_refresh_interval_seconds: cred.max_refresh_interval_seconds,
+          refresh_timeout_seconds: cred.refresh_timeout_seconds
+        }
+      }
+      assert_redirected_to console_credential_path(cred.oid)
+      cred.reload
+      assert_equal "secret", cred.client_secret
+      assert_equal "user", cred.username
+      assert_equal "pass", cred.password
+    end
+
+    test "PATCH update with a fresh client_credentials client secret reschedules the credential" do
+      cred = BrokerCredential.create!(foreign_id: "client-credentials-console",
+                                      grant: "client_credentials", token_endpoint: "https://idp.example/token",
+                                      client_id: "cid", client_secret: "old-secret",
+                                      dead: true, dead_reason: "invalid_client", failure_count: 3,
+                                      created_by: @operator)
+
+      patch console_broker_credential_url(cred.oid), params: {
+        credential: {
+          foreign_id: cred.foreign_id,
+          grant: "client_credentials", token_endpoint: cred.token_endpoint,
+          client_id: cred.client_id, client_secret: "new-secret",
+          early_refresh_fraction: cred.early_refresh_fraction,
+          early_refresh_slack_seconds: cred.early_refresh_slack_seconds,
+          max_refresh_interval_seconds: cred.max_refresh_interval_seconds,
+          refresh_timeout_seconds: cred.refresh_timeout_seconds
+        }
+      }
+      assert_redirected_to console_credential_path(cred.oid)
+      cred.reload
+      assert_equal "new-secret", cred.client_secret
+      assert_not cred.dead?
+      assert_nil cred.dead_reason
+      assert_equal 0, cred.failure_count
+      assert cred.next_attempt_at.present?
+    end
+
+    test "PATCH update with blank preqin fields leaves them in place" do
+      cred = BrokerCredential.create!(foreign_id: "preqin-console",
+                                      grant: "preqin", username: "user", api_key: "api-key",
+                                      created_by: @operator)
+
+      patch console_broker_credential_url(cred.oid), params: {
+        credential: {
+          foreign_id: cred.foreign_id,
+          grant: "preqin", token_endpoint: cred.token_endpoint,
+          preqin_username: "", api_key: "",
+          early_refresh_fraction: cred.early_refresh_fraction,
+          early_refresh_slack_seconds: cred.early_refresh_slack_seconds,
+          max_refresh_interval_seconds: cred.max_refresh_interval_seconds,
+          refresh_timeout_seconds: cred.refresh_timeout_seconds
+        }
+      }
+      assert_redirected_to console_credential_path(cred.oid)
+      cred.reload
+      assert_equal "user", cred.username
+      assert_equal "api-key", cred.api_key
+    end
+
+    test "PATCH preqin uses preqin username over hidden password username" do
+      cred = BrokerCredential.create!(foreign_id: "preqin-username",
+                                      grant: "preqin", username: "old-user", api_key: "api-key",
+                                      created_by: @operator)
+
+      patch console_broker_credential_url(cred.oid), params: {
+        credential: {
+          foreign_id: cred.foreign_id,
+          grant: "preqin", token_endpoint: cred.token_endpoint,
+          username: "password-panel-user", preqin_username: "preqin-panel-user", api_key: "",
+          early_refresh_fraction: cred.early_refresh_fraction,
+          early_refresh_slack_seconds: cred.early_refresh_slack_seconds,
+          max_refresh_interval_seconds: cred.max_refresh_interval_seconds,
+          refresh_timeout_seconds: cred.refresh_timeout_seconds
+        }
+      }
+      assert_redirected_to console_credential_path(cred.oid)
+      cred.reload
+      assert_equal "preqin-panel-user", cred.username
+      assert_equal "api-key", cred.api_key
+    end
+
+    test "PATCH update with a fresh refresh_token reschedules the credential" do
       cred = broker_credentials(:acme_managed_gmail)
       cred.update!(refresh_token: "old", dead: true, dead_reason: "stale", failure_count: 3)
 
       patch console_broker_credential_url(cred.oid), params: {
         credential: {
-          namespace: cred.namespace, foreign_id: cred.foreign_id,
+          foreign_id: cred.foreign_id,
           token_endpoint: cred.token_endpoint, client_id: cred.client_id,
           refresh_token: "fresh-seed",
           early_refresh_fraction: cred.early_refresh_fraction,
@@ -148,7 +315,7 @@ module Console
     test "DELETE destroy is blocked while a token_broker source references it" do
       cred = broker_credentials(:globex_managed_api)
       SecretSource.create!(source_type: "token_broker",
-                           config: { "credential_id" => cred.foreign_id, "credential_namespace" => cred.namespace })
+                           config: { "credential_id" => cred.foreign_id })
       assert_no_difference -> { BrokerCredential.count } do
         delete console_broker_credential_url(cred.oid)
       end

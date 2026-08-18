@@ -195,6 +195,7 @@ impl CodexTurnNormalizer {
                     self.emit_tool_result(result, &mut out)?;
                 }
             }
+            NormalizedEvent::TokenUsage { .. } => {}
             NormalizedEvent::Result { error } => {
                 if let Some(error) = error {
                     self.last_error = Some(error.clone());
@@ -236,13 +237,28 @@ impl CodexTurnNormalizer {
         if self.completed {
             return Ok(None);
         }
-        self.completed = true;
         let error = failed.or_else(|| self.last_error.clone());
         let status = if error.is_some() {
             TurnStatus::Failed
         } else {
             TurnStatus::Completed
         };
+        self.finish_turn_with_status(status, error)
+    }
+
+    pub fn finish_turn_interrupted(&mut self) -> Result<Option<ServerNotification>> {
+        self.finish_turn_with_status(TurnStatus::Interrupted, None)
+    }
+
+    fn finish_turn_with_status(
+        &mut self,
+        status: TurnStatus,
+        error: Option<String>,
+    ) -> Result<Option<ServerNotification>> {
+        if self.completed {
+            return Ok(None);
+        }
+        self.completed = true;
         let completed_at = now_secs();
         Ok(Some(ServerNotification::TurnCompleted(
             TurnCompletedNotification {

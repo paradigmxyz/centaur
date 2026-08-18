@@ -6,13 +6,36 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import json
 import typer
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
-from centaur_sdk import Table
+from rich.table import Table
 
 app = typer.Typer(name="granola", help="Query Granola meeting notes and transcripts")
+
+
+@app.command("health")
+def health():
+    """Assert granola connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = client.list_notes(page_size=1)
+        payload = {"ok": True, "tool": "granola", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "granola", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console()
 
 
@@ -34,9 +57,9 @@ def list_notes(
     after: str | None = typer.Option(None, "--after", help="Created after (ISO date)"),
 ):
     """List recent meeting notes across the workspace."""
-    from .client import GranolaClient
+    from .client import _client
 
-    client = GranolaClient()
+    client = _client()
     notes = client.list_all_notes(limit=limit, created_after=after)
 
     if not notes:
@@ -69,9 +92,9 @@ def get_note(
     transcript: bool = typer.Option(False, "--transcript", "-t", help="Include transcript"),
 ):
     """Get a specific meeting note by ID."""
-    from .client import GranolaClient
+    from .client import _client
 
-    client = GranolaClient()
+    client = _client()
     note = client.get_note(note_id, include_transcript=transcript)
 
     title = note.get("title") or "Untitled"
@@ -79,9 +102,7 @@ def get_note(
     owner = note.get("owner", {})
     owner_name = owner.get("name") or owner.get("email", "")
     attendees = note.get("attendees", [])
-    attendee_names = ", ".join(
-        a.get("name") or a.get("email", "") for a in attendees
-    )
+    attendee_names = ", ".join(a.get("name") or a.get("email", "") for a in attendees)
     summary = note.get("summary_markdown") or note.get("summary_text") or ""
 
     if raw:
@@ -113,9 +134,9 @@ def get_transcript(
     note_id: str = typer.Argument(..., help="Note ID"),
 ):
     """Get the transcript for a meeting note."""
-    from .client import GranolaClient
+    from .client import _client
 
-    client = GranolaClient()
+    client = _client()
     utterances = client.get_transcript(note_id)
 
     if not utterances:
@@ -134,9 +155,9 @@ def search_notes(
     limit: int = typer.Option(20, "--limit", "-n", help="Max results"),
 ):
     """Search meeting notes by title."""
-    from .client import GranolaClient
+    from .client import _client
 
-    client = GranolaClient()
+    client = _client()
     notes = client.list_all_notes(limit=100)
 
     query_lower = query.lower()
@@ -161,6 +182,47 @@ def search_notes(
         table.add_row(note_id, owner_name, title, created)
 
     console.print(table)
+
+
+@app.command("whoami")
+def whoami():
+    """Show the connected Granola account (MCP backend only)."""
+    from .client import GranolaMcpClient
+
+    client = GranolaMcpClient()
+    try:
+        info = client.get_account_info()
+    finally:
+        client.close()
+    print(json.dumps(info, indent=2, ensure_ascii=False))
+
+
+@app.command("query")
+def query_meetings(
+    query: str = typer.Argument(..., help="Natural-language question about your meetings"),
+):
+    """Ask Granola a question about your meetings (MCP backend only)."""
+    from .client import GranolaMcpClient
+
+    client = GranolaMcpClient()
+    try:
+        answer = client.query(query)
+    finally:
+        client.close()
+    console.print(Markdown(answer))
+
+
+@app.command("folders")
+def list_folders():
+    """List meeting folders (MCP backend only)."""
+    from .client import GranolaMcpClient
+
+    client = GranolaMcpClient()
+    try:
+        text = client.list_folders()
+    finally:
+        client.close()
+    print(text)
 
 
 if __name__ == "__main__":

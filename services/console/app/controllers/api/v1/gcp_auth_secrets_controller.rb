@@ -11,7 +11,7 @@ module Api
         render json: { data: record_payload(ref) }
       end
 
-      # GET /api/v1/gcp_auth_secrets/lookup/:namespace/:foreign_id
+      # GET /api/v1/gcp_auth_secrets/lookup/:foreign_id
       def lookup
         render json: { data: record_payload(find_by_foreign_id!(GcpAuthSecret)) }
       end
@@ -57,28 +57,23 @@ module Api
           attrs.require(:keyfile).permit(:source_type, :secret, config: {})
         end
 
+        keyfile_source = keyfile_attrs ? SecretSource.new(keyfile_attrs.to_h) : nil
         rules_attrs = build_rules(attrs)
 
         GcpAuthSecret.transaction do
-          ref.assign_attributes(base)
-          ref.keyfile_source = keyfile_attrs ? SecretSource.new(keyfile_attrs.to_h) : nil
-          ref.rules = rules_attrs
-          ref.save!
-          ref.reload
-        end
-      end
-
-      def build_rules(attrs)
-        Array(attrs[:rules]).each_with_index.map do |r, i|
-          permitted = ActionController::Parameters.new(r.to_unsafe_h).permit(:host, :cidr, http_methods: [], paths: [])
-          RequestRule.new(permitted.to_h.merge(position: i))
+          with_sync_config_replacement_guard(ref, base, keyfile_source: keyfile_source, rules: rules_attrs) do
+            ref.assign_attributes(base)
+            ref.keyfile_source = keyfile_source
+            ref.rules = rules_attrs
+            ref.save!
+            ref.reload
+          end
         end
       end
 
       def record_payload(ref)
         {
           id: ref.oid,
-          namespace: ref.namespace,
           foreign_id: ref.foreign_id,
           name: ref.name,
           description: ref.description,

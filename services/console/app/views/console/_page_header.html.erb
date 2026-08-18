@@ -1,0 +1,29 @@
+<% title = local_assigns.fetch(:title) %>
+<% subtitle = local_assigns[:subtitle] %>
+<% actions = local_assigns[:actions] %>
+<% icon = local_assigns[:icon] %>
+<% title_class = local_assigns[:title_class].presence || "page-title" %>
+<% subtitle_class = local_assigns[:subtitle_class].presence || "page-subtitle" %>
+<% header_class = [ "console-page-header", local_assigns[:class] ].compact.join(" ") %>
+
+<header class="<%= header_class %>">
+  <div class="console-page-heading">
+    <% if icon.present? %>
+      <span class="console-page-icon">
+        <%= console_icon(icon, classes: "size-4") %>
+      </span>
+    <% end %>
+    <div class="console-page-title-copy">
+      <h1 class="<%= title_class %>" title="<%= local_assigns[:title_attr].presence || title %>"><%= title %></h1>
+      <% if subtitle.present? %>
+        <div class="<%= subtitle_class %>"><%= subtitle %></div>
+      <% end %>
+    </div>
+  </div>
+
+  <% if actions.present? %>
+    <div class="console-page-actions">
+      <%= actions %>
+    </div>
+  <% end %>
+</header>

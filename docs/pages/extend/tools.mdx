@@ -5,11 +5,14 @@ description: Add Centaur tool plugins with client.py, pyproject metadata, and ty
 
 # Creating Tools
 
-Tools are Python plugins that Centaur discovers at API startup and exposes as
-REST endpoints at `/tools/{name}/{method}`. Put organization-specific tools in
-an overlay repo under `tools/` so the base Centaur repo stays generic. See
-[Using an overlay](/extend/overlay) for packaging, mount paths, and chart
-configuration.
+Tools are Python plugins that Centaur discovers from ordered tool directories.
+api-rs reads their metadata for secret grants, while agent sandboxes install
+their `[project.scripts]` entries as local CLI shims. Agents use
+`centaur-tools list`, `<tool> --help`, and the direct tool CLI; api-rs does not
+serve legacy HTTP tool-method routes as the current sandbox registry. Put
+organization-specific tools in an overlay repo under `tools/` so the base
+Centaur repo stays generic. See [Using an overlay](/extend/overlay) for
+packaging, mount paths, and chart configuration.
 
 Tools are loaded from `TOOL_DIRS`. In an overlay deployment, the tool must exist
 under the source's `toolsSubdir` — by default `tools/` — in its repo-cache
@@ -33,6 +36,9 @@ description = "Internal warehouse queries"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = ["httpx>=0.27.0"]
+
+[project.scripts]
+warehouse = "warehouse.cli:app"
 
 [build-system]
 requires = ["hatchling"]
@@ -119,16 +125,40 @@ Do not call `load_dotenv()` in `client.py`. Server-side tools should use
 `secret("KEY")`; standalone CLIs may load local `.env` files in their CLI
 wrapper.
 
-## Verify
+## Write the CLI
 
-After deploy:
+The sandbox shim installer only exposes tools with `[project.scripts]`. Keep
+the CLI thin: parse command-line arguments, call the client, and print JSON or
+plain text that an agent can read.
 
-```bash
-kubectl exec -n centaur-system deploy/centaur-centaur-api -- \
-  curl -fsS http://localhost:8000/health/tools | jq
+```python
+import json
+import typer
+
+from .client import _client
+
+app = typer.Typer()
+
+
+@app.command()
+def query(sql: str) -> None:
+    print(json.dumps(_client().query(sql)))
 ```
 
-Check that the tool appears and that missing-secret warnings match what you
-expect. If a tool is missing, inspect the configured repo/ref in repo-cache,
-`TOOL_DIRS`, the tool directory name, and
-`[tool.centaur] module = "client.py"`.
+
+## Verify
+
+After deploy, verify from a fresh sandbox:
+
+```bash
+kubectl exec -n centaur-system <agent-sandbox-pod> -- centaur-tools list
+kubectl exec -n centaur-system <agent-sandbox-pod> -- warehouse --help
+kubectl exec -n centaur-system <agent-sandbox-pod> -- warehouse query "select 1"
+```
+
+Check that the tool appears, the CLI help is useful, and a real invocation
+works through iron-proxy when credentials are needed. If a tool is missing,
+inspect the configured repo/ref in repo-cache, `TOOL_DIRS`, the tool directory
+name, `[tool.centaur] module = "client.py"`, and the `[project.scripts]` entry.
+For workflow-only use, also run a small workflow that exercises
+`ctx.call_tool(...)`, which uses the generated `centaur-tools call` bridge.

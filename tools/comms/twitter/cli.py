@@ -4,17 +4,38 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-import json
-from datetime import datetime
+import json  # noqa: E402
+from datetime import datetime  # noqa: E402
 
-import typer
-from rich.console import Console
+import typer  # noqa: E402
+from rich.console import Console  # noqa: E402
+from rich.table import Table  # noqa: E402
 
-from centaur_sdk import Table
-
-from .client import _client
+from .client import _client  # noqa: E402
 
 app = typer.Typer(name="twitter", help="Twitter CLI")
+
+
+@app.command("health")
+def health():
+    """Assert twitter connectivity and auth with a safe read-only check."""
+    from .client import _client
+
+    client = _client()
+    try:
+        details = client.get_usage()
+        payload = {"ok": True, "tool": "twitter", "error": None, "details": details}
+    except Exception as exc:
+        payload = {"ok": False, "tool": "twitter", "error": str(exc), "details": {}}
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(1) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
 console = Console()
 
 
@@ -392,6 +413,94 @@ def tweets(
         )
 
 
+@app.command("quote-tweets")
+def quote_tweets(
+    tweet_id: str = typer.Argument(..., help="ID of the quoted tweet"),
+    limit: int = typer.Option(20, "--limit", "-n", help="Max quote tweets to fetch"),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+    markdown: bool = typer.Option(False, "--markdown", "-m", help="Output as markdown"),
+):
+    """Get posts that quote a tweet."""
+    client = _client()
+    quote_posts, meta = client.get_quote_tweets(tweet_id, limit=limit)
+
+    if json_output:
+        print(json.dumps(quote_posts, indent=2))
+        return
+
+    if not quote_posts:
+        console.print(f"[yellow]No quote tweets found for {tweet_id}[/yellow]")
+        return
+
+    if markdown:
+        print(f"# Quote Tweets for {tweet_id}\n")
+        for tweet in quote_posts:
+            print(
+                f"---\n**@{tweet.get('screen_name')}** "
+                f"({format_timestamp(tweet.get('published_at'))})"
+            )
+            print(f"> {tweet.get('text', '')}\n")
+        return
+
+    table = Table(title=f"Quote Tweets for {tweet_id}")
+    table.add_column("Author", style="cyan")
+    table.add_column("Date", style="dim")
+    table.add_column("Post", style="white", max_width=80)
+    for tweet in quote_posts:
+        table.add_row(
+            f"@{tweet.get('screen_name') or 'N/A'}",
+            format_timestamp(tweet.get("published_at")),
+            truncate(tweet.get("text"), 80),
+        )
+    console.print(table)
+    print_metadata(meta)
+
+
+@app.command("retweeted-by")
+def retweeted_by(
+    tweet_id: str = typer.Argument(..., help="ID of the retweeted tweet"),
+    limit: int = typer.Option(100, "--limit", "-n", help="Max users to fetch"),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+    markdown: bool = typer.Option(False, "--markdown", "-m", help="Output as markdown"),
+):
+    """Get users who retweeted a tweet."""
+    client = _client()
+    users, meta = client.get_retweeted_by(tweet_id, limit=limit)
+
+    if json_output:
+        print(json.dumps(users, indent=2))
+        return
+
+    if not users:
+        console.print(f"[yellow]No retweets found for {tweet_id}[/yellow]")
+        return
+
+    if markdown:
+        print(f"# Retweeted By for {tweet_id}\n")
+        print("| Handle | Name | Followers |")
+        print("|--------|------|-----------|")
+        for user_data in users:
+            print(
+                f"| @{user_data.get('screen_name') or 'N/A'} | "
+                f"{user_data.get('name') or 'N/A'} | "
+                f"{format_number(user_data.get('followers_count'))} |"
+            )
+        return
+
+    table = Table(title=f"Retweeted By for {tweet_id}")
+    table.add_column("Handle", style="cyan")
+    table.add_column("Name", style="white", max_width=25)
+    table.add_column("Followers", justify="right", style="green")
+    for user_data in users:
+        table.add_row(
+            f"@{user_data.get('screen_name') or 'N/A'}",
+            truncate(user_data.get("name"), 25),
+            format_number(user_data.get("followers_count")),
+        )
+    console.print(table)
+    print_metadata(meta)
+
+
 @app.command()
 def timeline(
     handle: str = typer.Argument(..., help="Twitter handle (without @)"),
@@ -454,7 +563,7 @@ def usage():
     api_usage = client.get_usage()
 
     console.print("\n[bold]API Usage[/bold]\n")
-    console.print(f"Remaining units: [green]{format_number(api_usage.remaining_units)}[/green]")
+    print(json.dumps(api_usage, indent=2, ensure_ascii=False, default=str))
 
 
 if __name__ == "__main__":

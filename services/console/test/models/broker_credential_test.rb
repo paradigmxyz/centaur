@@ -1,23 +1,38 @@
 require "test_helper"
 
 class BrokerCredentialTest < ActiveSupport::TestCase
-  # A stub refresh client returning a fixed Result or raising a fixed error.
-  class StubClient
-    def initialize(&block) = (@block = block)
-    def refresh(**kw) = @block.call(**kw)
-  end
-
   def result(access_token: "AT", refresh_token: "RT", expires_in: 3600)
     Broker::RefreshClient::Result.new(access_token: access_token, refresh_token: refresh_token, expires_in: expires_in)
   end
 
+  def expect_refresh(client, returns:)
+    client.expect(:refresh, returns) do |**kw|
+      yield kw if block_given?
+      true
+    end
+  end
+
+  def expect_refresh_error(client, error)
+    client.expect(:refresh, nil) do |**kw|
+      yield kw if block_given?
+      raise error
+    end
+  end
+
   def build_credential(refresh_token: "seed-rt", **overrides)
     BrokerCredential.new({
-      namespace: "default", foreign_id: "cred-#{SecureRandom.hex(4)}",
+      foreign_id: "cred-#{SecureRandom.hex(4)}",
       token_endpoint: "https://idp.example/token", scopes: %w[a b],
       client_id: "cid", client_secret: "sec",
       created_by: users(:acme_admin), refresh_token: refresh_token
     }.merge(overrides))
+  end
+
+  def request_grant(request)
+    return "preqin_refresh_token" if request[:url] == Broker::CredentialGrants::PREQIN_REFRESH_TOKEN_ENDPOINT
+    return "preqin" if request[:form].key?("apikey")
+
+    request[:form]["grant_type"]
   end
 
   def create_credential(**kw)
@@ -34,9 +49,9 @@ class BrokerCredentialTest < ActiveSupport::TestCase
 
   test "at most one wrapping static secret per credential" do
     cred = create_credential
-    StaticSecret.create!(namespace: "default", name: "wrapper", broker_credential: cred,
+    StaticSecret.create!(name: "wrapper", broker_credential: cred,
                          inject_config: { "header" => "Authorization" })
-    dup = StaticSecret.new(namespace: "default", name: "dup", broker_credential: cred,
+    dup = StaticSecret.new(name: "dup", broker_credential: cred,
                            inject_config: { "header" => "Authorization" })
     assert_raises(ActiveRecord::RecordNotUnique) { dup.save!(validate: false) }
   end
@@ -47,6 +62,44 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     assert bc.errors[:client_id].any?
   end
 
+  test "password grant is valid with username and password" do
+    bc = build_credential(grant: "password", username: "user", password: "pass", refresh_token: nil)
+    assert bc.valid?, bc.errors.full_messages.to_sentence
+  end
+
+  test "client_credentials grant is valid with client credentials and no refresh token" do
+    bc = build_credential(grant: "client_credentials", refresh_token: nil,
+                          client_id: "cid", client_secret: "sec")
+    assert bc.valid?, bc.errors.full_messages.to_sentence
+  end
+
+  test "client_credentials grant requires a client secret" do
+    bc = build_credential(grant: "client_credentials", refresh_token: nil,
+                          client_id: "cid", client_secret: nil)
+    refute bc.valid?
+    assert bc.errors[:client_secret].any? { |m| m.include?("client_credentials grant") }
+  end
+
+  test "password grant requires username and password" do
+    bc = build_credential(grant: "password", username: "user", password: nil, refresh_token: nil)
+    refute bc.valid?
+    assert bc.errors[:password].any? { |m| m.include?("password grant") }
+  end
+
+  test "preqin grant is valid with username and API key and defaults endpoint" do
+    bc = build_credential(grant: "preqin", token_endpoint: nil, client_id: nil,
+                          username: "user", api_key: "api-key", refresh_token: nil)
+    assert bc.valid?, bc.errors.full_messages.to_sentence
+    assert_equal BrokerCredential::PREQIN_TOKEN_ENDPOINT, bc.token_endpoint
+  end
+
+  test "preqin grant requires username and API key" do
+    bc = build_credential(grant: "preqin", client_id: nil, username: "user",
+                          api_key: nil, refresh_token: nil)
+    refute bc.valid?
+    assert bc.errors[:api_key].any? { |m| m.include?("Preqin broker grant") }
+  end
+
   # --- oauth_app provenance (flow-minted credentials) -----------------------
 
   def build_app(**overrides)
@@ -54,7 +107,7 @@ class BrokerCredentialTest < ActiveSupport::TestCase
       provider: "google", slug: "slug-#{SecureRandom.hex(4)}",
       client_id: "app-cid", client_secret: "app-secret",
       allowed_scopes: %w[a b],
-      credential_namespace: "default", created_by: users(:acme_admin)
+      created_by: users(:acme_admin)
     }.merge(overrides))
   end
 
@@ -85,26 +138,32 @@ class BrokerCredentialTest < ActiveSupport::TestCase
   end
 
   test "refresh uses the app's client secret for an app-linked credential" do
-    captured = {}
+    client = Minitest::Mock.new
+    expect_refresh(client, returns: result) do |request|
+      assert_equal "app-cid", request[:form]["client_id"]
+      assert_equal "app-secret", request[:form]["client_secret"]
+    end
     app = build_app(client_id: "app-cid", client_secret: "app-secret")
     bc = create_credential(client_id: nil, client_secret: nil, oauth_app: app,
                            provider_subject: "sub-4", created_by: nil, refresh_token: "rt")
-    bc.refresh_client = StubClient.new { |**kw| captured = kw; result }
+    bc.refresh_client = client
     bc.refresh!
-    assert_equal "app-cid", captured[:client_id]
-    assert_equal "app-secret", captured[:client_secret]
+    client.verify
   end
 
   test "refresh lets the provider choose refresh scopes" do
-    captured = {}
+    client = Minitest::Mock.new
+    expect_refresh(client, returns: result) do |request|
+      refute request[:form].key?("scope")
+    end
     app = build_app(provider: "slack", client_id: "app-cid", client_secret: "app-secret",
                     allowed_scopes: %w[chat:write])
     bc = create_credential(client_id: nil, client_secret: nil, oauth_app: app,
                            provider_subject: "U123", created_by: nil, refresh_token: "rt",
                            scopes: %w[chat:write openid])
-    bc.refresh_client = StubClient.new { |**kw| captured = kw; result }
+    bc.refresh_client = client
     bc.refresh!
-    assert_equal [], captured[:scopes]
+    client.verify
   end
 
   test "external_user_key must be url-safe and bounded" do
@@ -118,13 +177,20 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     assert bc.valid?, bc.errors.full_messages.to_sentence
   end
 
-  test "client_secret and token_endpoint_headers are encrypted at rest" do
-    bc = create_credential(client_secret: "shh", token_endpoint_headers: { "X-Api-Key" => "k" })
+  test "client_secret, grant fields, and token_endpoint_headers are encrypted at rest" do
+    bc = create_credential(client_secret: "shh", username: "alice", password: "p4ss", api_key: "api-key",
+                           token_endpoint_headers: { "X-Api-Key" => "k" })
     raw = BrokerCredential.connection.select_one(
-      "SELECT client_secret, token_endpoint_headers FROM broker_credentials WHERE id = #{bc.id}"
+      "SELECT client_secret, username, password, api_key, token_endpoint_headers FROM broker_credentials WHERE id = #{bc.id}"
     )
     refute_includes raw["client_secret"].to_s, "shh"
+    refute_includes raw["username"].to_s, "alice"
+    refute_includes raw["password"].to_s, "p4ss"
+    refute_includes raw["api_key"].to_s, "api-key"
     refute_includes raw["token_endpoint_headers"].to_s, "X-Api-Key"
+    assert_equal "alice", bc.reload.username
+    assert_equal "p4ss", bc.password
+    assert_equal "api-key", bc.api_key
     assert_equal({ "X-Api-Key" => "k" }, bc.reload.token_endpoint_headers)
   end
 
@@ -163,9 +229,12 @@ class BrokerCredentialTest < ActiveSupport::TestCase
 
   test "successful refresh advances the blob and schedules the next attempt" do
     now = Time.current
+    client = Minitest::Mock.new
+    expect_refresh(client, returns: result(access_token: "AT-1", refresh_token: "RT-2", expires_in: 3600))
     bc = create_credential
-    bc.refresh_client = StubClient.new { result(access_token: "AT-1", refresh_token: "RT-2", expires_in: 3600) }
+    bc.refresh_client = client
     bc.refresh!(now: now)
+    client.verify
     bc.reload
     assert_equal "live", bc.status
     assert_equal "AT-1", bc.access_token
@@ -175,28 +244,55 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     assert bc.next_attempt_at > now
   end
 
+  test "refresh skips a queued attempt made stale by a successful refresh" do
+    now = Time.current
+    client = Minitest::Mock.new
+    expect_refresh(client, returns: result(access_token: "AT-1", refresh_token: "RT-2", expires_in: 3600))
+    bc = create_credential
+    bc.update!(next_attempt_at: now)
+    bc.refresh_client = client
+
+    bc.refresh!(now: now)
+    bc.refresh!(now: now + 1.minute)
+
+    client.verify
+    bc.reload
+    assert_equal "AT-1", bc.access_token
+    assert_equal "RT-2", bc.refresh_token
+    assert_operator bc.next_attempt_at, :>, now + 1.minute
+  end
+
   test "refresh carries the previous refresh_token forward when the IdP omits it" do
+    client = Minitest::Mock.new
+    expect_refresh(client, returns: result(refresh_token: nil, expires_in: nil))
     bc = create_credential(refresh_token: "RT-keep")
-    bc.refresh_client = StubClient.new { result(refresh_token: nil, expires_in: nil) }
+    bc.refresh_client = client
     bc.refresh!
+    client.verify
     bc.reload
     assert_equal "RT-keep", bc.refresh_token
   end
 
   test "refresh defaults expiry when the IdP omits expires_in" do
     now = Time.current
+    client = Minitest::Mock.new
+    expect_refresh(client, returns: result(expires_in: nil))
     bc = create_credential
-    bc.refresh_client = StubClient.new { result(expires_in: nil) }
+    bc.refresh_client = client
     bc.refresh!(now: now)
+    client.verify
     bc.reload
     assert_in_delta (now + BrokerCredential::DEFAULT_EXPIRES_IN_SECONDS).to_f, bc.expires_at.to_f, 1
   end
 
   test "retryable failure schedules a backoff and does not mark dead" do
     now = Time.current
+    client = Minitest::Mock.new
+    expect_refresh_error(client, Broker::RefreshError.new("net", stage: "network", retryable: true))
     bc = create_credential
-    bc.refresh_client = StubClient.new { raise Broker::RefreshError.new("net", stage: "network", retryable: true) }
+    bc.refresh_client = client
     bc.refresh!(now: now)
+    client.verify
     bc.reload
     refute bc.dead?
     assert_equal 1, bc.failure_count
@@ -204,33 +300,228 @@ class BrokerCredentialTest < ActiveSupport::TestCase
   end
 
   test "unrecoverable failure marks the credential dead" do
+    client = Minitest::Mock.new
+    expect_refresh_error(client, Broker::RefreshError.new("bad", stage: "oauth", code: "invalid_grant", retryable: false))
     bc = create_credential
-    bc.refresh_client = StubClient.new { raise Broker::RefreshError.new("bad", stage: "oauth", code: "invalid_grant", retryable: false) }
+    bc.refresh_client = client
     bc.refresh!
+    client.verify
     bc.reload
     assert bc.dead?
     assert_equal "invalid_grant", bc.dead_reason
   end
 
   test "refresh passes client credentials and token-endpoint headers to the client" do
-    captured = {}
+    client = Minitest::Mock.new
+    expect_refresh(client, returns: result) do |request|
+      assert_equal "the-id", request[:form]["client_id"]
+      assert_equal "the-secret", request[:form]["client_secret"]
+      assert_equal({ "X-Api-Key" => "k" }, request[:headers])
+    end
     bc = create_credential(client_id: "the-id", client_secret: "the-secret",
                            token_endpoint_headers: { "X-Api-Key" => "k" })
-    bc.refresh_client = StubClient.new { |**kw| captured = kw; result }
+    bc.refresh_client = client
     bc.refresh!
-    assert_equal "the-id", captured[:client_id]
-    assert_equal "the-secret", captured[:client_secret]
-    assert_equal({ "X-Api-Key" => "k" }, captured[:headers])
+    client.verify
   end
 
-  test "refresh with no seed marks dead as not bootstrapped" do
+  test "password grant uses initial values and stores returned refresh_token" do
+    client = Minitest::Mock.new
+    expect_refresh(client, returns: result(access_token: "AT", refresh_token: "RT-new")) do |request|
+      assert_equal "password", request_grant(request)
+      assert_equal "user", request[:form]["username"]
+      assert_equal "pass", request[:form]["password"]
+    end
+    bc = create_credential(grant: "password", username: "user", password: "pass", refresh_token: nil)
+    bc.refresh_client = client
+    bc.refresh!
+    client.verify
+    bc.reload
+    assert_equal "RT-new", bc.refresh_token
+    assert_equal "AT", bc.access_token
+  end
+
+  test "client_credentials grant refreshes without a refresh_token" do
+    now = Time.current
+    bc = create_credential(grant: "client_credentials", refresh_token: nil,
+                           client_id: "bloomberg-client", client_secret: "bloomberg-secret",
+                           scopes: [])
+    client = Minitest::Mock.new
+    expect_refresh(client, returns: result(access_token: "AT-client", refresh_token: nil, expires_in: 7199)) do |request|
+      assert_equal "client_credentials", request_grant(request)
+      assert_equal "bloomberg-client", request[:form]["client_id"]
+      assert_equal "bloomberg-secret", request[:form]["client_secret"]
+      refute request[:form].key?("refresh_token")
+    end
+    bc.refresh_client = client
+    bc.refresh!(now: now)
+    client.verify
+    bc.reload
+
+    assert_equal "AT-client", bc.access_token
+    assert_nil bc.refresh_token
+    assert_in_delta (now + 7199).to_f, bc.expires_at.to_f, 1
+    refute bc.dead?
+  end
+
+  test "password grant prefers a stored refresh_token" do
+    client = Minitest::Mock.new
+    expect_refresh(client, returns: result(access_token: "AT", refresh_token: nil)) do |request|
+      assert_equal "refresh_token", request_grant(request)
+      assert_equal "RT-old", request[:form]["refresh_token"]
+    end
+    bc = create_credential(grant: "password", username: "user", password: "pass", refresh_token: "RT-old")
+    bc.refresh_client = client
+    bc.refresh!
+    client.verify
+    bc.reload
+    assert_equal "RT-old", bc.refresh_token
+  end
+
+  test "password grant falls back to password when stored refresh_token is rejected" do
+    grants = []
+    client = Minitest::Mock.new
+    expect_refresh_error(client, Broker::RefreshError.new("bad", stage: "oauth", code: "invalid_grant", retryable: false)) do |kw|
+      grants << request_grant(kw)
+    end
+    expect_refresh(client, returns: result(access_token: "AT-password", refresh_token: "RT-good")) do |kw|
+      grants << request_grant(kw)
+    end
+    bc = create_credential(grant: "password", username: "user", password: "pass", refresh_token: "RT-bad")
+    bc.refresh_client = client
+    bc.refresh!
+    client.verify
+    bc.reload
+    assert_equal %w[refresh_token password], grants
+    assert_equal "AT-password", bc.access_token
+    assert_equal "RT-good", bc.refresh_token
+    refute bc.dead?
+  end
+
+  test "password grant clears stale refresh_token when password fallback succeeds without rotation" do
+    grants = []
+    client = Minitest::Mock.new
+    expect_refresh_error(client, Broker::RefreshError.new("bad", stage: "oauth", code: "invalid_grant", retryable: false)) do |kw|
+      grants << request_grant(kw)
+    end
+    expect_refresh(client, returns: result(access_token: "AT-password", refresh_token: nil)) do |kw|
+      grants << request_grant(kw)
+    end
+    bc = create_credential(grant: "password", username: "user", password: "pass", refresh_token: "RT-bad")
+    bc.refresh_client = client
+    bc.refresh!
+    client.verify
+    bc.reload
+    assert_equal %w[refresh_token password], grants
+    assert_nil bc.refresh_token
+    assert_equal "AT-password", bc.access_token
+  end
+
+  test "password grant does not fall back on retryable refresh_token failure" do
+    grants = []
+    client = Minitest::Mock.new
+    expect_refresh_error(client, Broker::RefreshError.new("net", stage: "network", retryable: true)) do |kw|
+      grants << request_grant(kw)
+    end
+    bc = create_credential(grant: "password", username: "user", password: "pass", refresh_token: "RT-old")
+    bc.refresh_client = client
+    bc.refresh!
+    client.verify
+    bc.reload
+    assert_equal [ "refresh_token" ], grants
+    refute bc.dead?
+    assert_equal 1, bc.failure_count
+  end
+
+  test "preqin grant uses username and API key when no refresh token exists" do
+    client = Minitest::Mock.new
+    expect_refresh(client, returns: result(access_token: "AT", refresh_token: "RT-new")) do |request|
+      assert_equal "preqin", request_grant(request)
+      assert_equal BrokerCredential::PREQIN_TOKEN_ENDPOINT, request[:url]
+      assert_equal "user", request[:form]["username"]
+      assert_equal "api-key", request[:form]["apikey"]
+      refute request[:form].key?("client_id")
+      assert_equal :multipart, request[:form_encoding]
+      assert_equal true, request[:strict_4xx]
+    end
+    bc = create_credential(grant: "preqin", client_id: nil, username: "user",
+                           api_key: "api-key", refresh_token: nil)
+    bc.refresh_client = client
+    bc.refresh!
+    client.verify
+    bc.reload
+    assert_equal "RT-new", bc.refresh_token
+    assert_equal "AT", bc.access_token
+  end
+
+  test "preqin grant prefers the Preqin refresh endpoint when it has a refresh token" do
+    client = Minitest::Mock.new
+    expect_refresh(client, returns: result(access_token: "AT", refresh_token: nil)) do |request|
+      assert_equal "preqin_refresh_token", request_grant(request)
+      assert_equal Broker::CredentialGrants::PREQIN_REFRESH_TOKEN_ENDPOINT, request[:url]
+      assert_equal "RT-old", request[:form]["refresh_token"]
+      assert_equal :multipart, request[:form_encoding]
+      assert_equal true, request[:strict_4xx]
+    end
+    bc = create_credential(grant: "preqin", client_id: nil, username: "user",
+                           api_key: "api-key", refresh_token: "RT-old")
+    bc.refresh_client = client
+    bc.refresh!
+    client.verify
+    bc.reload
+    assert_equal "RT-old", bc.refresh_token
+  end
+
+  test "preqin grant falls back to username and API key when stored refresh token is rejected" do
+    grants = []
+    client = Minitest::Mock.new
+    expect_refresh_error(client, Broker::RefreshError.new("bad", stage: "http", code: "http_400", retryable: false)) do |kw|
+      grants << request_grant(kw)
+    end
+    expect_refresh(client, returns: result(access_token: "AT-preqin", refresh_token: "RT-good")) do |kw|
+      grants << request_grant(kw)
+    end
+    bc = create_credential(grant: "preqin", client_id: nil, username: "user",
+                           api_key: "api-key", refresh_token: "RT-bad")
+    bc.refresh_client = client
+    bc.refresh!
+    client.verify
+    bc.reload
+    assert_equal %w[preqin_refresh_token preqin], grants
+    assert_equal "AT-preqin", bc.access_token
+    assert_equal "RT-good", bc.refresh_token
+    refute bc.dead?
+  end
+
+  test "refresh with no seed marks dead as missing a seed" do
     bc = create_credential(refresh_token: "seed")
     bc.update_columns(refresh_token: nil)
     bc.reload
     bc.refresh!
     bc.reload
     assert bc.dead?
-    assert_equal "blob_not_bootstrapped", bc.dead_reason
+    assert_equal "missing_initial_refresh_token", bc.dead_reason
+  end
+
+  test "password grant with missing initial values marks dead" do
+    bc = create_credential(grant: "password", username: "user", password: "pass", refresh_token: nil)
+    bc.update_columns(username: nil)
+    bc.reload
+    bc.refresh!
+    bc.reload
+    assert bc.dead?
+    assert_equal "password_grant_missing_initial_values", bc.dead_reason
+  end
+
+  test "preqin grant with missing initial values marks dead" do
+    bc = create_credential(grant: "preqin", client_id: nil, username: "user",
+                           api_key: "api-key", refresh_token: nil)
+    bc.update_columns(api_key: nil)
+    bc.reload
+    bc.refresh!
+    bc.reload
+    assert bc.dead?
+    assert_equal "preqin_missing_initial_values", bc.dead_reason
   end
 
   # --- scope ----------------------------------------------------------------
@@ -249,6 +540,29 @@ class BrokerCredentialTest < ActiveSupport::TestCase
     assert_includes ids, never.id
     refute_includes ids, future.id
     refute_includes ids, dead.id
+  end
+
+  test "refreshable includes password grant credentials without a refresh_token" do
+    bc = create_credential(grant: "password", username: "user", password: "pass", refresh_token: nil)
+    bc.update_columns(last_refresh: 1.hour.ago, next_attempt_at: 1.minute.ago)
+
+    assert_includes BrokerCredential.refreshable.pluck(:id), bc.id
+  end
+
+  test "refreshable includes preqin credentials without a refresh_token" do
+    bc = create_credential(grant: "preqin", client_id: nil, username: "user",
+                           api_key: "api-key", refresh_token: nil)
+    bc.update_columns(last_refresh: 1.hour.ago, next_attempt_at: 1.minute.ago)
+
+    assert_includes BrokerCredential.refreshable.pluck(:id), bc.id
+  end
+
+  test "refreshable includes client_credentials without a refresh_token after a prior refresh" do
+    bc = create_credential(grant: "client_credentials", refresh_token: nil,
+                           client_id: "cid", client_secret: "sec")
+    bc.update_columns(last_refresh: 1.hour.ago, next_attempt_at: 1.minute.ago)
+
+    assert_includes BrokerCredential.refreshable.pluck(:id), bc.id
   end
 
   # --- delete guard ---------------------------------------------------------

@@ -10,6 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
+use centaur_iron_control::{GCP_ID_TOKEN_ALLOWED_HEADERS, normalize_gcp_id_token_header};
 use centaur_iron_proxy::{PgDsnSetting, PgDsnSettingValueFrom};
 use eyre::{Context, Result, bail, eyre};
 use toml::Value;
@@ -125,6 +126,16 @@ pub struct GcpAuthSecret {
     pub scopes: Vec<String>,
 }
 
+/// A `type = "gcp_id_token"` secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GcpIdTokenSecret {
+    pub name: String,
+    pub secret_ref: String,
+    pub hosts: Vec<String>,
+    pub audience: String,
+    pub header: Option<String>,
+}
+
 /// A `type = "pg_dsn"` secret: a Postgres upstream the proxy fronts. `name` is
 /// the DSN env var the sandbox reads, `secret_ref` resolves the upstream
 /// connection string, and `database` is the database to connect to. pg_dsn
@@ -208,6 +219,7 @@ pub enum ParsedSecret {
     Http(HttpSecret),
     OAuthToken(OAuthTokenSecret),
     GcpAuth(GcpAuthSecret),
+    GcpIdToken(GcpIdTokenSecret),
     PgDsn(PgDsnSecret),
     Hmac(HmacSignSecret),
     BrokerToken(BrokerTokenSecret),
@@ -221,6 +233,7 @@ impl ParsedSecret {
             ParsedSecret::Http(s) => &s.name,
             ParsedSecret::OAuthToken(s) => &s.name,
             ParsedSecret::GcpAuth(s) => &s.name,
+            ParsedSecret::GcpIdToken(s) => &s.name,
             ParsedSecret::PgDsn(s) => &s.name,
             ParsedSecret::Hmac(s) => &s.name,
             ParsedSecret::BrokerToken(s) => &s.name,
@@ -287,6 +300,32 @@ pub fn find_tool(dirs: &[PathBuf], name: &str) -> Result<ToolManifest> {
     parse_manifest(&tool_dir)
 }
 
+/// Derive the operator-facing overlay identity for the root that supplied a
+/// tool manifest. A root ending in `tools` is treated as a repo/overlay tools
+/// directory, so `/repo/centaur/tools` becomes `centaur`.
+pub fn overlay_name_for_tool_dir(tool_dir: &Path, dirs: &[PathBuf]) -> String {
+    let matching_root = dirs
+        .iter()
+        .filter(|root| tool_dir.starts_with(root))
+        .max_by_key(|root| root.components().count());
+    matching_root
+        .map(|root| overlay_name_for_root(root))
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
+fn overlay_name_for_root(root: &Path) -> String {
+    let candidate = if root.file_name().and_then(|n| n.to_str()) == Some("tools") {
+        root.parent().and_then(|p| p.file_name())
+    } else {
+        root.file_name()
+    };
+    candidate
+        .and_then(|n| n.to_str())
+        .map(centaur_iron_control::slugify)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
 /// Candidate tool directories under `base`: direct children carrying a
 /// `pyproject.toml`, plus the children of category folders (one level deep).
 fn collect_candidate_dirs(base: &Path) -> Vec<PathBuf> {
@@ -330,9 +369,8 @@ pub fn parse_manifest(tool_dir: &Path) -> Result<ToolManifest> {
     let path = tool_dir.join("pyproject.toml");
     let text =
         std::fs::read_to_string(&path).wrap_err_with(|| format!("reading {}", path.display()))?;
-    let doc: Value = text
-        .parse::<Value>()
-        .wrap_err_with(|| format!("parsing {}", path.display()))?;
+    let doc: Value =
+        toml::from_str(&text).wrap_err_with(|| format!("parsing {}", path.display()))?;
     let centaur = doc
         .get("tool")
         .and_then(|t| t.get("centaur"))
@@ -425,6 +463,11 @@ pub fn parse_secret(entry: &Value, default_hosts: &[String]) -> Result<ParsedSec
         )?)),
         "oauth_token" => Ok(ParsedSecret::OAuthToken(parse_oauth(table, &name)?)),
         "gcp_auth" => Ok(ParsedSecret::GcpAuth(parse_gcp(table, &name, &secret_ref)?)),
+        "gcp_id_token" => Ok(ParsedSecret::GcpIdToken(parse_gcp_id_token(
+            table,
+            &name,
+            &secret_ref,
+        )?)),
         "pg_dsn" => Ok(ParsedSecret::PgDsn(parse_pg_dsn(
             table,
             &name,
@@ -623,6 +666,29 @@ fn parse_gcp(table: &toml::Table, name: &str, secret_ref: &str) -> Result<GcpAut
     })
 }
 
+fn parse_gcp_id_token(
+    table: &toml::Table,
+    name: &str,
+    secret_ref: &str,
+) -> Result<GcpIdTokenSecret> {
+    let hosts = non_empty_str_array(table.get("hosts")).ok_or_else(|| {
+        eyre!("gcp_id_token entry {name:?} 'hosts' must be a non-empty array of non-empty strings")
+    })?;
+    let audience = req_str(table, "audience")
+        .wrap_err_with(|| format!("gcp_id_token entry {name:?} requires a non-empty 'audience'"))?;
+    let header = opt_str(table, "header")
+        .map(validate_gcp_id_token_header)
+        .transpose()
+        .wrap_err_with(|| format!("gcp_id_token entry {name:?}"))?;
+    Ok(GcpIdTokenSecret {
+        name: name.to_owned(),
+        secret_ref: secret_ref.to_owned(),
+        hosts,
+        audience,
+        header,
+    })
+}
+
 fn parse_pg_dsn(table: &toml::Table, name: &str, secret_ref: &str) -> Result<PgDsnSecret> {
     let database = req_str(table, "database")
         .wrap_err_with(|| format!("pg_dsn entry {name:?} requires a non-empty 'database'"))?;
@@ -674,12 +740,24 @@ fn parse_pg_dsn_setting_value_from(value: Option<&Value>) -> Result<Option<PgDsn
         .ok_or_else(|| eyre!("pg_dsn setting value_from must be a table"))?;
     let principal_label = opt_str(table, "principal_label");
     let principal_field = opt_str(table, "principal_field");
-    if principal_label.is_none() && principal_field.is_none() {
-        bail!("pg_dsn setting value_from must declare principal_label or principal_field");
+    let proxy_label = opt_str(table, "proxy_label");
+    let declared = [
+        principal_label.as_ref(),
+        principal_field.as_ref(),
+        proxy_label.as_ref(),
+    ]
+    .into_iter()
+    .filter(|value| value.is_some())
+    .count();
+    if declared != 1 {
+        bail!(
+            "pg_dsn setting value_from must declare exactly one of principal_label, principal_field, or proxy_label"
+        );
     }
     Ok(Some(PgDsnSettingValueFrom {
         principal_label,
         principal_field,
+        proxy_label,
     }))
 }
 
@@ -985,6 +1063,15 @@ fn non_empty_str_array(value: Option<&Value>) -> Option<Vec<String>> {
         out.push(s.to_owned());
     }
     Some(out)
+}
+
+fn validate_gcp_id_token_header(value: String) -> Result<String> {
+    normalize_gcp_id_token_header(&value).ok_or_else(|| {
+        eyre!(
+            "header must be one of {}, got {value:?}",
+            GCP_ID_TOKEN_ALLOWED_HEADERS.join(", ")
+        )
+    })
 }
 
 fn reject_keys(table: &toml::Table, name: &str, mode: &str, keys: &[&str]) -> Result<()> {

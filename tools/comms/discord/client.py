@@ -1,24 +1,48 @@
 """Discord self-token client."""
 
-import asyncio
+import json
+import os
 import re
+import time
+from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
-import discord
 from centaur_sdk import secret
 
 BASE_URL = "https://discord.com/api/v10"
 INVITE_RE = re.compile(r"(?:https?://)?(?:discord(?:\.gg|\.com/invite)/)?([A-Za-z0-9-]+)")
 
+# Discord asks automated clients to identify themselves with a descriptive
+# User-Agent (https://discord.com/developers/docs/reference#user-agent). When
+# this client runs under a *bot* token (Authorization: ``Bot <token>``), sending
+# a browser User-Agent trips Discord's edge anti-automation: guild/channel reads
+# come back ``403`` with body ``internal network error`` while ``/users/@me``
+# still succeeds. A proper bot UA keeps reads working under a bot token (and is
+# harmless under a user token).
+USER_AGENT = "DiscordBot (https://github.com/paradigmxyz/centaur, 0.1.0)"
+# Message flag that suppresses link/embed unfurling on a posted message (1 << 2).
+SUPPRESS_EMBEDS = 1 << 2
 
-def _run(coro):
-    return asyncio.run(coro)
+# Discord thread channel types
+# (https://discord.com/developers/docs/resources/channel#channel-object-channel-types).
+THREAD_TYPES = {10: "announcement_thread", 11: "public_thread", 12: "private_thread"}
+PUBLIC_THREAD_TYPE = 11
+PRIVATE_THREAD_TYPE = 12
 
 
 class DiscordClient:
     """High-level Discord client using a regular user token."""
+
+    # Hosts a Discord attachment ``url`` can point at. ``download_url`` refuses
+    # anything else so it can never be aimed at an internal service or metadata
+    # endpoint (it shares the cluster network with the API control plane).
+    _CDN_HOSTS = frozenset({"cdn.discordapp.com", "media.discordapp.net"})
+    # Direct-URL downloads stream to disk, but still cap the total so a hostile
+    # or accidental large URL can't fill the sandbox disk.
+    _MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
 
     def __init__(self, token: str | None = None, timeout: float = 30.0):
         self._token = token
@@ -34,13 +58,18 @@ class DiscordClient:
         headers = {
             "Authorization": self._get_token(),
             "Content-Type": "application/json",
-            "User-Agent": (
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            ),
+            "User-Agent": USER_AGENT,
         }
         with httpx.Client(timeout=self.timeout) as client:
             response = client.request(method, f"{BASE_URL}{endpoint}", headers=headers, **kwargs)
+            if response.status_code == 429:
+                try:
+                    retry_after = float(response.json().get("retry_after", 0))
+                except Exception:
+                    retry_after = 0
+                if 0 < retry_after <= self.timeout:
+                    time.sleep(retry_after)
+                    response = client.request(method, f"{BASE_URL}{endpoint}", headers=headers, **kwargs)
         if response.status_code == 204:
             return {}
         if response.status_code >= 400:
@@ -50,29 +79,6 @@ class DiscordClient:
                 message = response.text
             raise RuntimeError(f"Discord API error ({response.status_code}): {message}")
         return response.json()
-
-    async def _with_client(self, action):
-        client = discord.Client()
-        done = asyncio.Event()
-        result: Any = None
-        error: BaseException | None = None
-
-        @client.event
-        async def on_ready():
-            nonlocal result, error
-            try:
-                result = await action(client)
-            except BaseException as exc:
-                error = exc
-            finally:
-                done.set()
-                await client.close()
-
-        await client.start(self._get_token())
-        await done.wait()
-        if error:
-            raise error
-        return result
 
     def get_me(self) -> dict[str, Any]:
         """Get the current Discord user."""
@@ -93,76 +99,80 @@ class DiscordClient:
 
     def list_servers(self, query: str = "", limit: int = 100) -> list[dict[str, Any]]:
         """List joined servers/guilds."""
-
-        async def action(client):
-            rows = []
-            for guild in client.guilds:
-                if query and query.lower() not in guild.name.lower():
-                    continue
-                rows.append({"id": str(guild.id), "name": guild.name, "member_count": guild.member_count})
-                if len(rows) >= limit:
-                    break
-            return rows
-
-        return _run(self._with_client(action))
+        rows = []
+        for guild in self._request("GET", "/users/@me/guilds"):
+            if query and query.lower() not in guild.get("name", "").lower():
+                continue
+            rows.append(
+                {
+                    "id": str(guild.get("id", "")),
+                    "name": guild.get("name", ""),
+                    "member_count": guild.get("approximate_member_count"),
+                }
+            )
+            if len(rows) >= limit:
+                break
+        return rows
 
     def list_channels(self, guild: str, query: str = "") -> list[dict[str, Any]]:
         """List text channels in a server by name or ID."""
-
-        async def action(client):
-            resolved = self._find_guild(client, guild)
-            rows = []
-            for channel in resolved.text_channels:
-                if query and query.lower().lstrip("#") not in channel.name.lower():
-                    continue
-                rows.append(
-                    {
-                        "id": str(channel.id),
-                        "name": channel.name,
-                        "guild_id": str(resolved.id),
-                        "guild_name": resolved.name,
-                    }
-                )
-            return rows
-
-        return _run(self._with_client(action))
+        resolved = self._find_guild(guild)
+        rows = []
+        needle = query.lower().lstrip("#")
+        for channel in self._guild_channels(resolved["id"]):
+            if channel.get("type") != 0:
+                continue
+            if needle and needle not in channel.get("name", "").lower():
+                continue
+            rows.append(
+                {
+                    "id": str(channel.get("id", "")),
+                    "name": channel.get("name", ""),
+                    "guild_id": str(resolved["id"]),
+                    "guild_name": resolved["name"],
+                }
+            )
+        return rows
 
     def get_messages(self, channel: str, limit: int = 50) -> list[dict[str, Any]]:
         """Get recent messages from a channel by name or ID."""
-
-        async def action(client):
-            resolved = self._find_channel(client, channel)
-            messages = [self._format_message(msg) async for msg in resolved.history(limit=limit)]
-            return list(reversed(messages))
-
-        return _run(self._with_client(action))
+        resolved = self._find_channel(channel)
+        messages = self._request("GET", f"/channels/{resolved['id']}/messages", params={"limit": min(limit, 100)})
+        return list(reversed([self._format_message(msg, resolved.get("name")) for msg in messages]))
 
     def search_messages(self, query: str, channel: str, limit: int = 50) -> list[dict[str, Any]]:
         """Search recent messages in one channel by name or ID."""
-
-        async def action(client):
-            resolved = self._find_channel(client, channel)
-            rows = []
-            async for msg in resolved.history(limit=500):
-                if query.lower() in (msg.content or "").lower():
-                    rows.append(self._format_message(msg))
+        resolved = self._find_channel(channel)
+        rows = []
+        before = None
+        while len(rows) < limit:
+            params: dict[str, Any] = {"limit": 100}
+            if before:
+                params["before"] = before
+            messages = self._request("GET", f"/channels/{resolved['id']}/messages", params=params)
+            if not messages:
+                break
+            for msg in messages:
+                if query.lower() in (msg.get("content") or "").lower():
+                    rows.append(self._format_message(msg, resolved.get("name")))
                     if len(rows) >= limit:
                         break
-            return list(reversed(rows))
-
-        return _run(self._with_client(action))
+            before = messages[-1].get("id")
+        return list(reversed(rows))
 
     def search_all(self, guild: str, query: str, limit: int = 50) -> list[dict[str, Any]]:
         """Search messages across a server by name or ID."""
-
-        async def action(client):
-            resolved = self._find_guild(client, guild)
-            rows = []
-            async for msg in resolved.search(query, limit=limit):
-                rows.append(self._format_message(msg, channel_name=f"#{msg.channel.name}"))
-            return rows
-
-        return _run(self._with_client(action))
+        resolved = self._find_guild(guild)
+        channels = [c for c in self._guild_channels(resolved["id"]) if c.get("type") == 0]
+        rows = []
+        for channel in channels:
+            try:
+                rows.extend(self.search_messages(query, channel["id"], limit=limit - len(rows)))
+            except RuntimeError:
+                continue
+            if len(rows) >= limit:
+                break
+        return rows
 
     def get_context(
         self,
@@ -172,75 +182,285 @@ class DiscordClient:
         after: int = 10,
     ) -> list[dict[str, Any]]:
         """Get messages around a specific message."""
-
-        async def action(client):
-            resolved = self._find_channel(client, channel)
-            target = await resolved.fetch_message(int(message_id))
-            after_msgs = [msg async for msg in resolved.history(limit=after, after=target)]
-            before_msgs = [msg async for msg in resolved.history(limit=before, before=target)]
-            return [self._format_message(msg) for msg in [*reversed(after_msgs), target, *before_msgs]]
-
-        return _run(self._with_client(action))
+        resolved = self._find_channel(channel)
+        target = self._request("GET", f"/channels/{resolved['id']}/messages/{message_id}")
+        before_msgs = self._request(
+            "GET",
+            f"/channels/{resolved['id']}/messages",
+            params={"limit": min(before, 100), "before": message_id},
+        )
+        after_msgs = self._request(
+            "GET",
+            f"/channels/{resolved['id']}/messages",
+            params={"limit": min(after, 100), "after": message_id},
+        )
+        messages = [*reversed(after_msgs), target, *before_msgs]
+        return [self._format_message(msg, resolved.get("name")) for msg in messages]
 
     def post_message(
         self,
         channel: str,
         content: str,
         reply_to_message_id: str | None = None,
+        suppress_embeds: bool = False,
     ) -> dict[str, Any]:
-        """Post a message to a channel by name or ID."""
+        """Post a message to a channel by name or ID.
 
-        async def action(client):
-            resolved = self._find_channel(client, channel)
-            reference = None
-            if reply_to_message_id:
-                reference = await resolved.fetch_message(int(reply_to_message_id))
-            msg = await resolved.send(content, reference=reference)
-            return self._format_message(msg)
+        Set ``suppress_embeds`` to stop Discord unfurling link previews — useful
+        for status/alert posts whose URLs should stay compact.
+        """
+        resolved = self._find_channel(channel)
+        payload: dict[str, Any] = {"content": content}
+        if suppress_embeds:
+            payload["flags"] = SUPPRESS_EMBEDS
+        if reply_to_message_id:
+            payload["message_reference"] = {"message_id": reply_to_message_id}
+        msg = self._request("POST", f"/channels/{resolved['id']}/messages", json=payload)
+        return self._format_message(msg, resolved.get("name"))
 
-        return _run(self._with_client(action))
+    def upload_file(
+        self,
+        channel: str,
+        file_path: str,
+        content: str = "",
+        reply_to_message_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Upload a local file to a channel by name or ID, with optional message text."""
+        if not os.path.isfile(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
+        resolved = self._find_channel(channel)
+        payload: dict[str, Any] = {}
+        if content:
+            payload["content"] = content
+        if reply_to_message_id:
+            payload["message_reference"] = {"message_id": reply_to_message_id}
+        # Multipart upload: the JSON body rides in ``payload_json`` and the file in
+        # ``files[0]``. The shared ``_request`` always sends a JSON content type, so
+        # this request is issued directly, letting httpx set the multipart boundary.
+        headers = {
+            "Authorization": self._get_token(),
+            "User-Agent": USER_AGENT,
+        }
+        with open(file_path, "rb") as handle:
+            files = {"files[0]": (os.path.basename(file_path), handle)}
+            with httpx.Client(timeout=self.timeout) as client:
+                response = client.post(
+                    f"{BASE_URL}/channels/{resolved['id']}/messages",
+                    headers=headers,
+                    data={"payload_json": json.dumps(payload)},
+                    files=files,
+                )
+        if response.status_code >= 400:
+            try:
+                message = response.json().get("message", response.text)
+            except Exception:
+                message = response.text
+            raise RuntimeError(f"Discord API error ({response.status_code}): {message}")
+        return self._format_message(response.json(), resolved.get("name"))
 
-    def _find_guild(self, client, guild_str: str):
+    def download_message_attachments(
+        self,
+        channel: str,
+        message_id: str,
+        output_dir: str = ".",
+    ) -> list[dict[str, Any]]:
+        """Download every attachment on a specific message into output_dir."""
+        resolved = self._find_channel(channel)
+        target = self._request("GET", f"/channels/{resolved['id']}/messages/{message_id}")
+        os.makedirs(output_dir, exist_ok=True)
+        saved = []
+        for attachment in target.get("attachments") or []:
+            url = attachment.get("url")
+            if not url:
+                continue
+            filename = attachment.get("filename") or "attachment"
+            # Never let a Discord-supplied filename escape output_dir.
+            safe_name = os.path.basename(filename) or "attachment"
+            result = self.download_url(url, output_dir=output_dir, filename=safe_name)
+            saved.append(
+                {
+                    "filename": filename,
+                    "path": result["path"],
+                    "size": result.get("size"),
+                    "url": url,
+                }
+            )
+        return saved
+
+    def download_url(
+        self,
+        url: str,
+        output_dir: str = ".",
+        filename: str | None = None,
+    ) -> dict[str, Any]:
+        """Download a direct attachment/CDN URL into output_dir.
+
+        Useful when a message listing already surfaced an attachment ``url`` and a
+        gateway round-trip is unnecessary. Discord CDN links are pre-signed, so no
+        Authorization header is sent. Only ``https`` Discord CDN hosts are
+        accepted, and the response is streamed to disk with a size cap so the URL
+        can't be aimed at an internal endpoint or exhaust sandbox storage.
+        """
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or (parsed.hostname or "").lower() not in self._CDN_HOSTS:
+            raise ValueError(
+                "Discord downloads only accept https Discord CDN URLs "
+                f"(cdn.discordapp.com / media.discordapp.net); refusing {url!r}"
+            )
+        os.makedirs(output_dir, exist_ok=True)
+        name = filename or os.path.basename(parsed.path) or "download"
+        dest = os.path.join(output_dir, name)
+        total = 0
+        with httpx.Client(timeout=self.timeout) as client, client.stream("GET", url) as response:
+            if response.status_code >= 400:
+                raise RuntimeError(f"Discord download failed ({response.status_code}) for {url}")
+            try:
+                with open(dest, "wb") as handle:
+                    for chunk in response.iter_bytes():
+                        total += len(chunk)
+                        if total > self._MAX_DOWNLOAD_BYTES:
+                            raise ValueError(
+                                f"file exceeds the {self._MAX_DOWNLOAD_BYTES}-byte download limit"
+                            )
+                        handle.write(chunk)
+            except ValueError:
+                if os.path.exists(dest):
+                    os.unlink(dest)
+                raise
+        return {"path": dest, "size": total, "url": url}
+
+    def create_thread(
+        self,
+        channel: str,
+        name: str,
+        from_message_id: str | None = None,
+        content: str | None = None,
+        private: bool = False,
+    ) -> dict[str, Any]:
+        """Create a thread in a channel by name or ID.
+
+        Pass from_message_id to branch a public thread off an existing message.
+        Otherwise a standalone thread is created (public by default, or private
+        when private is set), and content, if given, is posted as its first message.
+        """
+        resolved = self._find_channel(channel)
+        if from_message_id:
+            thread = self._request(
+                "POST",
+                f"/channels/{resolved['id']}/messages/{from_message_id}/threads",
+                json={"name": name},
+            )
+            return self._format_thread(thread)
+        thread_type = PRIVATE_THREAD_TYPE if private else PUBLIC_THREAD_TYPE
+        thread = self._request(
+            "POST",
+            f"/channels/{resolved['id']}/threads",
+            json={"name": name, "type": thread_type},
+        )
+        if content:
+            self._request("POST", f"/channels/{thread['id']}/messages", json={"content": content})
+        return self._format_thread(thread)
+
+    def _guild_channels(self, guild_id: str) -> list[dict[str, Any]]:
+        return list(self._request("GET", f"/guilds/{guild_id}/channels"))
+
+    def _find_guild(self, guild_str: str) -> dict[str, Any]:
+        guilds = list(self._request("GET", "/users/@me/guilds"))
         if guild_str.isdigit():
-            guild = client.get_guild(int(guild_str))
-            if guild:
-                return guild
-        for guild in client.guilds:
-            if guild.name.lower() == guild_str.lower():
-                return guild
-        for guild in client.guilds:
-            if guild_str.lower() in guild.name.lower():
-                return guild
+            for guild in guilds:
+                if guild.get("id") == guild_str:
+                    return {"id": str(guild["id"]), "name": guild.get("name", "")}
+        for guild in guilds:
+            if guild.get("name", "").lower() == guild_str.lower():
+                return {"id": str(guild["id"]), "name": guild.get("name", "")}
+        for guild in guilds:
+            if guild_str.lower() in guild.get("name", "").lower():
+                return {"id": str(guild["id"]), "name": guild.get("name", "")}
         raise RuntimeError(f"Guild not found: {guild_str}")
 
-    def _find_channel(self, client, channel_str: str):
+    def _find_channel(self, channel_str: str) -> dict[str, Any]:
         if channel_str.isdigit():
-            channel = client.get_channel(int(channel_str))
-            if channel:
-                return channel
+            channel = dict(self._request("GET", f"/channels/{channel_str}"))
+            return {
+                "id": str(channel["id"]),
+                "name": channel.get("name"),
+                "guild_id": str(channel.get("guild_id", "")),
+                "guild_name": None,
+            }
         needle = channel_str.lstrip("#").lower()
-        for guild in client.guilds:
-            for channel in guild.text_channels:
-                if channel.name.lower() == needle:
-                    return channel
-        for guild in client.guilds:
-            for channel in guild.text_channels:
-                if needle in channel.name.lower():
-                    return channel
+        partial = None
+        for guild in self._request("GET", "/users/@me/guilds"):
+            for channel in self._guild_channels(guild["id"]):
+                if channel.get("type") != 0:
+                    continue
+                name = channel.get("name", "")
+                if name.lower() == needle:
+                    return {
+                        "id": str(channel["id"]),
+                        "name": name,
+                        "guild_id": str(guild["id"]),
+                        "guild_name": guild.get("name"),
+                    }
+                if partial is None and needle in name.lower():
+                    partial = {
+                        "id": str(channel["id"]),
+                        "name": name,
+                        "guild_id": str(guild["id"]),
+                        "guild_name": guild.get("name"),
+                    }
+        if partial:
+            return partial
         raise RuntimeError(f"Channel not found: {channel_str}")
 
-    def _format_message(self, msg, channel_name: str | None = None) -> dict[str, Any]:
+    def _format_message(self, msg: dict[str, Any], channel_name: str | None = None) -> dict[str, Any]:
+        author = msg.get("author") or {}
         return {
-            "id": str(msg.id),
-            "channel_id": str(msg.channel.id),
-            "channel_name": channel_name or getattr(msg.channel, "name", None),
-            "author": getattr(msg.author, "display_name", None) or str(msg.author),
-            "author_id": str(msg.author.id),
-            "timestamp": msg.created_at.isoformat(),
-            "content": msg.content or "",
-            "reply_to": str(msg.reference.message_id) if msg.reference else None,
+            "id": str(msg.get("id", "")),
+            "channel_id": str(msg.get("channel_id", "")),
+            "channel_name": channel_name,
+            "author": author.get("global_name") or author.get("username") or "",
+            "author_id": str(author.get("id", "")),
+            "timestamp": _format_timestamp(msg),
+            "content": msg.get("content") or "",
+            "reply_to": ((msg.get("message_reference") or {}).get("message_id")),
+            "attachments": [
+                {
+                    "id": str(attachment.get("id", "")),
+                    "filename": attachment.get("filename"),
+                    "url": attachment.get("url"),
+                    "size": attachment.get("size"),
+                    "content_type": attachment.get("content_type"),
+                }
+                for attachment in (msg.get("attachments") or [])
+            ],
+        }
+
+    def _format_thread(self, thread: dict[str, Any]) -> dict[str, Any]:
+        metadata = thread.get("thread_metadata") or {}
+        guild_id = str(thread.get("guild_id", ""))
+        thread_id = str(thread.get("id", ""))
+        return {
+            "id": thread_id,
+            "name": thread.get("name"),
+            "parent_id": str(thread.get("parent_id", "")),
+            "guild_id": guild_id,
+            "owner_id": str(thread.get("owner_id", "")),
+            "type": THREAD_TYPES.get(thread.get("type")),
+            "archived": metadata.get("archived", False),
+            "url": f"https://discord.com/channels/{guild_id}/{thread_id}",
         }
 
 
 def _client() -> DiscordClient:
     return DiscordClient()
+
+
+def _format_timestamp(msg: dict[str, Any]) -> str:
+    timestamp = msg.get("timestamp")
+    if timestamp:
+        return str(timestamp)
+    snowflake = msg.get("id")
+    if not snowflake:
+        return ""
+    created_ms = (int(snowflake) >> 22) + 1420070400000
+    return datetime.fromtimestamp(created_ms / 1000, tz=timezone.utc).isoformat()

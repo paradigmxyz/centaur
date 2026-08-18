@@ -1,0 +1,101 @@
+{{- if .Values.linearbot.enabled }}
+{{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "linearbot") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "linearbot") | nindent 4 }}
+spec:
+  replicas: {{ .Values.linearbot.replicaCount }}
+  selector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "linearbot") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
+      labels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "linearbot") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: linearbot
+          image: {{ printf "%s:%s" .Values.linearbot.image.repository .Values.linearbot.image.tag | quote }}
+          imagePullPolicy: {{ .Values.linearbot.image.pullPolicy }}
+          env:
+            - name: PORT
+              value: "3001"
+            - name: CENTAUR_API_URL
+              value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
+            # New threads without an explicit --claude/--amp/--codex flag run
+            # the deployment's default harness.
+            - name: LINEARBOT_DEFAULT_HARNESS
+              value: {{ .Values.sandbox.harnessEngine | quote }}
+            # actor=app OAuth token from the Linear agent install; agent
+            # sessions are unavailable on a plain personal API key.
+            - name: LINEAR_ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sLINEAR_ACCESS_TOKEN" .Values.secretManager.envPrefix }}
+            # linearbot's own webhook signing secret — distinct from the api-rs
+            # linear_webhook workflow's LINEAR_WEBHOOK_SECRET (separate Linear
+            # webhook, separate signing secret).
+            - name: LINEARBOT_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sLINEARBOT_WEBHOOK_SECRET" .Values.secretManager.envPrefix }}
+            - name: LINEARBOT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sLINEARBOT_API_KEY" .Values.secretManager.envPrefix }}
+            - name: LINEARBOT_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sDATABASE_URL" .Values.secretManager.envPrefix }}
+            - name: LINEARBOT_USER_NAME
+              value: {{ .Values.linearbot.userName | quote }}
+{{- range $name, $value := .Values.linearbot.extraEnv }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+{{- end }}
+          ports:
+            - containerPort: 3001
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3001
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3001
+            timeoutSeconds: 5
+          securityContext:
+{{ toYaml .Values.containerSecurityContext | nindent 12 }}
+          resources:
+{{ toYaml .Values.linearbot.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "linearbot") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "linearbot") | nindent 4 }}
+spec:
+  selector:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "linearbot") | nindent 4 }}
+  ports:
+    - name: http
+      port: 3001
+      targetPort: 3001
+{{- end }}

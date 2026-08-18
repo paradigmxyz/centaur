@@ -1,0 +1,159 @@
+{{- $console := include "centaur.consoleValues" . | fromYaml }}
+{{- if $console.sqlExporter.enabled }}
+{{- $sqlExporter := $console.sqlExporter }}
+{{- $name := include "centaur.componentName" (dict "root" . "component" "console-sql-exporter") }}
+{{- $secretEnv := include "centaur.secretEnvName" . }}
+{{- $prefix := .Values.secretManager.envPrefix }}
+{{- $metricsAnnotations := dict }}
+{{- if $sqlExporter.metrics.scrapeAnnotations }}
+{{- $metricsAnnotations = dict "prometheus.io/scrape" "true" "prometheus.io/path" $sqlExporter.metrics.path "prometheus.io/port" (printf "%v" $sqlExporter.port) }}
+{{- $metricsAnnotations = mergeOverwrite $metricsAnnotations ($sqlExporter.metrics.annotations | default dict) }}
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+{{- with $metricsAnnotations }}
+  annotations:
+{{ toYaml . | nindent 4 }}
+{{- end }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "console-sql-exporter") | nindent 4 }}
+spec:
+  selector:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-sql-exporter") | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ $sqlExporter.port }}
+      targetPort: metrics
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "console-sql-exporter") | nindent 4 }}
+spec:
+  # Queue metrics describe one shared database. Keep one exporter replica so
+  # every series has one authoritative source.
+  replicas: 1
+  selector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-sql-exporter") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
+        checksum/config: {{ include (print $.Template.BasePath "/console-sql-exporter-configmap.yaml") . | sha256sum }}
+{{- with $metricsAnnotations }}
+{{ toYaml . | nindent 8 }}
+{{- end }}
+      labels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-sql-exporter") | nindent 8 }}
+        centaur.ai/metrics: console-sql-exporter
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: sql-exporter
+          image: {{ printf "%s:%s" $sqlExporter.image.repository $sqlExporter.image.tag | quote }}
+          imagePullPolicy: {{ $sqlExporter.image.pullPolicy }}
+          # SQL Exporter reads the complete, read-only queue DSN from the
+          # environment. The credential never appears in argv or the rendered
+          # ConfigMap.
+          args:
+            - --config.file=/etc/sql-exporter/sql_exporter.yml
+            - --web.listen-address=:{{ $sqlExporter.port }}
+            - --web.metrics-path={{ $sqlExporter.metrics.path }}
+          env:
+            - name: SQLEXPORTER_TARGET_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%s%s" $prefix $sqlExporter.databaseUrlSecretKey }}
+          ports:
+            - name: metrics
+              containerPort: {{ $sqlExporter.port }}
+          startupProbe:
+            tcpSocket:
+              port: metrics
+            failureThreshold: 30
+            periodSeconds: 2
+            timeoutSeconds: 1
+          readinessProbe:
+            tcpSocket:
+              port: metrics
+            failureThreshold: 3
+            periodSeconds: 10
+            timeoutSeconds: 1
+          livenessProbe:
+            tcpSocket:
+              port: metrics
+            failureThreshold: 3
+            periodSeconds: 10
+            timeoutSeconds: 1
+          securityContext:
+{{ toYaml .Values.containerSecurityContext | nindent 12 }}
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+          resources:
+{{ toYaml $sqlExporter.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/sql-exporter
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $name }}
+{{- if .Values.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "console-sql-exporter") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-sql-exporter") | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        # Metrics collectors deployed in the Centaur namespace.
+        - podSelector: {}
+{{- range .Values.networkPolicy.metricsIngressSourceNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . | quote }}
+{{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ $sqlExporter.port }}
+  egress:
+{{- if .Values.postgres.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ $sqlExporter.databasePort }}
+{{- else }}
+    # The Console queue database is externally managed. Restrict egress to its
+    # configured Postgres port; the DSN still controls the destination host.
+    - ports:
+        - protocol: TCP
+          port: {{ $sqlExporter.databasePort }}
+{{- end }}
+    # DNS egress is provided by the namespace-wide allow-dns policy.
+{{- end }}
+{{- end }}

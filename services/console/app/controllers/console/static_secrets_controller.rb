@@ -17,6 +17,7 @@ module Console
     def assign_form(secret)
       assign_identity(secret)
       st = params.fetch(:static, ActionController::Parameters.new)
+      secret.kind = st[:kind].presence || CredentialProfiles::Registry::CUSTOM_KIND
       if st[:mode] == "replace"
         secret.inject_config = nil
         secret.replace_config = replace_config(st)
@@ -26,6 +27,7 @@ module Console
       end
       secret.source = build_source
       assign_rules(secret)
+      secret.rules = secret.apply_kind_defaults(rules: secret.rules)
     end
 
     def inject_config(st)

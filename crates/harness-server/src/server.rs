@@ -1,11 +1,15 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::time::Duration;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+    mpsc::{self, Receiver, RecvTimeoutError},
+};
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -16,6 +20,9 @@ use codex_app_server_protocol::{
     ThreadStartResponse, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
     TurnStartResponse, TurnStatus, TurnSteerParams, TurnSteerResponse, UserInput,
 };
+use image::codecs::jpeg::JpegEncoder;
+use image::imageops::FilterType;
+use image::{DynamicImage, ImageError};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -23,9 +30,10 @@ use uuid::Uuid;
 use crate::amp::AmpHarness;
 use crate::claude::ClaudeCodeHarness;
 use crate::codex::CodexHarnessServer;
+use crate::otel::{self, HarnessUsageSpan, TraceContext};
 use crate::traits::{
     AppServerNormalizer, AppServerRuntime, HarnessChild, HarnessKind, HarnessServer,
-    NormalizedEvent, ThreadState,
+    NormalizedContent, NormalizedEvent, NormalizedTokenUsage, ThreadState,
 };
 use crate::turn::{BridgeConfig, CodexTurnNormalizer};
 use crate::util::{absolute_path, default_codex_home, write_value};
@@ -74,50 +82,101 @@ pub fn run_validate_jsonrpc() -> Result<()> {
 }
 
 pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()> {
-    let stdin = io::stdin();
     let mut stdout = io::stdout().lock();
     let mut state = initial_blocks_thread_state(harness)?;
-    let mut blocks_state = BlocksState::default();
-    let (_request_tx, request_rx) = mpsc::channel();
+    let (command_tx, command_rx) = mpsc::channel();
+    let (request_tx, request_rx) = mpsc::channel();
+    let turn_active = Arc::new(AtomicBool::new(false));
 
-    for raw in stdin.lock().lines() {
-        let line = raw?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
+    {
+        let turn_active = Arc::clone(&turn_active);
+        std::thread::spawn(move || {
+            let stdin = io::stdin();
+            let mut blocks_state = BlocksState::default();
+            for raw in stdin.lock().lines() {
+                let Ok(line) = raw else {
+                    break;
+                };
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
 
-        match parse_blocks_line_with_state(trimmed, &mut blocks_state) {
-            Ok(BlocksCommand::User {
+                match parse_blocks_line_with_state(trimmed, &mut blocks_state) {
+                    Ok(BlocksCommand::Interrupt) if turn_active.load(Ordering::SeqCst) => {
+                        if request_tx.send(ActiveTurnRequest::BlocksInterrupt).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(command @ BlocksCommand::User { .. }) => {
+                        turn_active.store(true, Ordering::SeqCst);
+                        if command_tx
+                            .send(BlocksReaderInput::Command(command))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Ok(command) => {
+                        if command_tx
+                            .send(BlocksReaderInput::Command(command))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        if command_tx
+                            .send(BlocksReaderInput::Error(error.to_string()))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    while let Ok(input) = command_rx.recv() {
+        match input {
+            BlocksReaderInput::Command(BlocksCommand::User {
                 input,
                 client_user_message_id,
                 model,
-                // Reasoning effort only applies to the codex harness; the
-                // emulated (claude/amp) app-server has no equivalent knob.
+                // Provider selection and reasoning effort only apply to the codex
+                // harness; the emulated (claude/amp) app-server has no equivalent
+                // knob (its provider is fixed at thread start from session params).
+                provider: _,
                 reasoning: _,
+                trace_context,
             }) => {
                 if let Some(model) = model {
                     state.model = model;
                 }
-                if let Err(error) = run_blocks_turn(
+                let result = run_blocks_turn(
                     harness,
                     &mut state,
                     input,
                     client_user_message_id,
+                    &trace_context,
                     &mut stdout,
                     &request_rx,
-                ) {
+                    &turn_active,
+                );
+                drain_active_turn_requests(&request_rx);
+                if let Err(error) = result {
                     eprintln!("blocks turn failed: {error:#}");
                     write_blocks_error(&mut stdout, &state.id, "turn", error.to_string())?;
                 }
             }
-            Ok(BlocksCommand::Interrupt) => {
-                eprintln!("blocks interrupt ignored: no active stdin reader while a turn runs");
+            BlocksReaderInput::Command(BlocksCommand::Interrupt) => {
+                eprintln!("blocks interrupt ignored: no active turn runs");
             }
-            Ok(BlocksCommand::AttachmentChunk) => {}
-            Err(error) => {
-                eprintln!("invalid blocks input: {error:#}");
-                write_blocks_error(&mut stdout, &state.id, "input", error.to_string())?;
+            BlocksReaderInput::Command(BlocksCommand::AttachmentChunk) => {}
+            BlocksReaderInput::Error(error) => {
+                eprintln!("invalid blocks input: {error}");
+                write_blocks_error(&mut stdout, &state.id, "input", error)?;
             }
         }
     }
@@ -147,7 +206,10 @@ pub(crate) fn run_app_server<H: HarnessServer>(harness: &H) -> Result<()> {
             let JSONRPCMessage::Request(request) = message else {
                 continue;
             };
-            if request_tx.send(request).is_err() {
+            if request_tx
+                .send(ActiveTurnRequest::JsonRpc(request))
+                .is_err()
+            {
                 break;
             }
         }
@@ -157,9 +219,17 @@ pub(crate) fn run_app_server<H: HarnessServer>(harness: &H) -> Result<()> {
     let mut threads: HashMap<String, ThreadState> = HashMap::new();
 
     while let Ok(request) = request_rx.recv() {
-        if let Err(error) = handle_request(harness, request, &request_rx, &mut threads, &mut stdout)
-        {
-            eprintln!("request failed: {error:#}");
+        match request {
+            ActiveTurnRequest::JsonRpc(request) => {
+                if let Err(error) =
+                    handle_request(harness, request, &request_rx, &mut threads, &mut stdout)
+                {
+                    eprintln!("request failed: {error:#}");
+                }
+            }
+            ActiveTurnRequest::BlocksInterrupt => {
+                eprintln!("blocks interrupt ignored: no active turn runs");
+            }
         }
     }
 
@@ -172,34 +242,58 @@ fn initial_blocks_thread_state<H: HarnessServer>(harness: &H) -> Result<ThreadSt
     Ok(harness.thread_state(&params, cwd))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_blocks_turn<H: HarnessServer, W: Write>(
     harness: &H,
     state: &mut ThreadState,
     input: Vec<UserInput>,
     client_user_message_id: Option<String>,
+    trace_context: &TraceContext,
     stdout: &mut W,
-    request_rx: &Receiver<JSONRPCRequest>,
+    request_rx: &Receiver<ActiveTurnRequest>,
+    turn_active: &AtomicBool,
 ) -> Result<()> {
     let turn_id = format!("turn-{}", Uuid::new_v4().simple());
     let mut normalizer = normalizer_for(harness, state, &turn_id);
-    run_normalized_turn(
+    turn_active.store(true, Ordering::SeqCst);
+    let result = run_normalized_turn(
         harness,
         state,
         &input,
         client_user_message_id,
+        Some(trace_context),
         &mut normalizer,
         stdout,
         request_rx,
-    )
+    );
+    turn_active.store(false, Ordering::SeqCst);
+    result
+}
+
+enum BlocksReaderInput {
+    Command(BlocksCommand),
+    Error(String),
+}
+
+enum ActiveTurnRequest {
+    JsonRpc(JSONRPCRequest),
+    BlocksInterrupt,
+}
+
+fn drain_active_turn_requests(rx: &Receiver<ActiveTurnRequest>) {
+    while rx.try_recv().is_ok() {}
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum BlocksCommand {
     User {
         input: Vec<UserInput>,
         client_user_message_id: Option<String>,
         model: Option<String>,
+        provider: Option<String>,
         reasoning: Option<String>,
+        trace_context: TraceContext,
     },
     Interrupt,
     AttachmentChunk,
@@ -233,7 +327,17 @@ struct BlocksLine {
     #[serde(default)]
     model: Option<String>,
     #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
     reasoning: Option<String>,
+    #[serde(default)]
+    thread_key: Option<String>,
+    #[serde(default)]
+    trace_id: Option<String>,
+    #[serde(default)]
+    traceparent: Option<String>,
+    #[serde(default)]
+    trace_metadata: Option<Value>,
     #[serde(rename = "attachmentId", default)]
     attachment_id: Option<String>,
     #[serde(default)]
@@ -246,6 +350,27 @@ struct BlocksLine {
     final_chunk: bool,
     #[serde(rename = "dataBase64", default)]
     data_base64: Option<String>,
+}
+
+impl BlocksLine {
+    fn trace_context(&self) -> TraceContext {
+        TraceContext {
+            thread_key: clean_string(self.thread_key.as_deref()),
+            trace_id: clean_string(self.trace_id.as_deref()),
+            traceparent: clean_string(self.traceparent.as_deref()),
+            metadata: self
+                .trace_metadata
+                .as_ref()
+                .and_then(Value::as_object)
+                .map(|metadata| {
+                    metadata
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect::<BTreeMap<_, _>>()
+                })
+                .unwrap_or_default(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -265,6 +390,7 @@ enum BlocksContent {
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
+#[allow(clippy::large_enum_variant)]
 enum BlocksInput {
     UserInput(UserInput),
     Attachment(AttachmentBlock),
@@ -274,9 +400,16 @@ enum BlocksInput {
 struct AttachmentBlock {
     #[serde(rename = "type")]
     kind: String,
+    #[serde(
+        rename = "attachment_id",
+        alias = "attachmentId",
+        alias = "id",
+        default
+    )]
+    attachment_id: Option<String>,
     #[serde(default)]
     name: Option<String>,
-    #[serde(rename = "mimeType", default)]
+    #[serde(rename = "mimeType", alias = "mime_type", default)]
     mime_type: Option<String>,
     #[serde(rename = "attachment_type", default)]
     attachment_type: Option<String>,
@@ -310,13 +443,14 @@ pub(crate) fn parse_blocks_line_with_state(
 
     match parsed.kind.as_str() {
         "user" => {
+            let trace_context = parsed.trace_context();
             let content = parsed
                 .message
                 .as_ref()
                 .and_then(|message| message.content.as_ref())
                 .or(parsed.content.as_ref());
             let mut input = match content {
-                Some(content) => blocks_content_to_user_input(content, state)?,
+                Some(content) => blocks_content_to_user_input(content, state, &trace_context)?,
                 None => parsed
                     .text
                     .map(|text| {
@@ -342,10 +476,15 @@ pub(crate) fn parse_blocks_line_with_state(
                     .model
                     .map(|model| model.trim().to_owned())
                     .filter(|model| !model.is_empty()),
+                provider: parsed
+                    .provider
+                    .map(|provider| provider.trim().to_owned())
+                    .filter(|provider| !provider.is_empty()),
                 reasoning: parsed
                     .reasoning
                     .map(|reasoning| reasoning.trim().to_owned())
                     .filter(|reasoning| !reasoning.is_empty()),
+                trace_context,
             })
         }
         "attachment.chunk" => {
@@ -362,11 +501,12 @@ pub(crate) fn parse_blocks_line_with_state(
 fn blocks_content_to_user_input(
     content: &BlocksContent,
     state: &mut BlocksState,
+    trace_context: &TraceContext,
 ) -> Result<Vec<UserInput>> {
     match content {
         BlocksContent::Inputs(input) => input
             .iter()
-            .map(|item| blocks_input_to_user_input(item, state))
+            .map(|item| blocks_input_to_user_input(item, state, trace_context))
             .collect::<Result<Vec<_>>>()
             .map(|items| items.into_iter().flatten().collect()),
         BlocksContent::Text(text) => Ok(vec![UserInput::Text {
@@ -379,17 +519,48 @@ fn blocks_content_to_user_input(
 fn blocks_input_to_user_input(
     input: &BlocksInput,
     state: &mut BlocksState,
+    _trace_context: &TraceContext,
 ) -> Result<Vec<UserInput>> {
     match input {
         BlocksInput::UserInput(input) => Ok(vec![input.clone()]),
         BlocksInput::Attachment(block) if block.kind == "attachment" => {
             attachment_block_to_user_input(block, state)
         }
+        BlocksInput::Attachment(block) if block.kind == "attachment_ref" => {
+            Ok(attachment_ref_block_to_user_input(block))
+        }
         BlocksInput::Attachment(block) => Ok(vec![UserInput::Text {
             text: format!("[Unsupported attachment block type: {}]", block.kind),
             text_elements: Vec::new(),
         }]),
     }
+}
+
+fn attachment_ref_block_to_user_input(block: &AttachmentBlock) -> Vec<UserInput> {
+    let attachment_id = non_empty(block.attachment_id.as_deref());
+    let mime_type = non_empty(block.mime_type.as_deref());
+    let name = non_empty(block.name.as_deref()).unwrap_or("attachment");
+
+    let mut fields = Vec::new();
+    if let Some(attachment_id) = attachment_id {
+        fields.push(format!("id={attachment_id}"));
+    }
+    fields.push(format!("name={name}"));
+    if let Some(mime_type) = mime_type {
+        fields.push(format!("mime={mime_type}"));
+    }
+
+    let summary = if fields.is_empty() {
+        "attachment_ref".to_string()
+    } else {
+        format!("attachment_ref {}", fields.join(" "))
+    };
+    vec![UserInput::Text {
+        text: format!(
+            "[Attachment reference: {summary}. The file was not provided to this sandbox. Ask the caller to resend the attachment as an upload, inline file data, or staged attachment chunk before inspecting it.]"
+        ),
+        text_elements: Vec::new(),
+    }]
 }
 
 fn attachment_block_to_user_input(
@@ -414,17 +585,17 @@ fn attachment_block_to_user_input(
     }
 
     if let Some(staged_attachment_id) = non_empty(block.staged_attachment_id.as_deref()) {
-        if let Some(staged) = state.staged.get(staged_attachment_id) {
-            if staged.path.exists() {
-                return Ok(local_file_inputs(
-                    &staged.path,
+        if let Some(staged) = state.staged.get(staged_attachment_id)
+            && staged.path.exists()
+        {
+            return Ok(local_file_inputs(
+                &staged.path,
+                staged.mime_type.as_deref().or(mime_type),
+                is_image_attachment(
+                    staged.attachment_type.as_deref(),
                     staged.mime_type.as_deref().or(mime_type),
-                    is_image_attachment(
-                        staged.attachment_type.as_deref(),
-                        staged.mime_type.as_deref().or(mime_type),
-                    ),
-                ));
-            }
+                ),
+            ));
         }
         return Ok(vec![UserInput::Text {
             text: format!("[Attachment was not staged successfully: {name}]"),
@@ -493,33 +664,103 @@ fn handle_attachment_chunk(parsed: BlocksLine, state: &mut BlocksState) -> Resul
         file.write_all(&bytes)?;
     }
 
-    if parsed.final_chunk {
-        if let Some(upload) = state.uploads.remove(attachment_id) {
-            state.staged.insert(attachment_id.to_string(), upload);
-        }
+    if parsed.final_chunk
+        && let Some(upload) = state.uploads.remove(attachment_id)
+    {
+        state.staged.insert(attachment_id.to_string(), upload);
     }
 
     Ok(())
 }
 
 fn local_file_inputs(path: &Path, mime_type: Option<&str>, is_image: bool) -> Vec<UserInput> {
-    let display_path = path.display();
     if is_image || mime_type.is_some_and(|value| value.starts_with("image/")) {
+        // Model providers reject images past their per-image caps (Bedrock/mantle
+        // and the Anthropic API cap at ~5 MB / 8000 px) and nothing upstream of
+        // the model downscales, so a large pasted screenshot or photo fails the
+        // turn at validation. Normalize oversized images here — the single choke
+        // point every attachment path funnels through — before handing the model
+        // a LocalImage. Best-effort: the original file is used unchanged if the
+        // image is already within limits or re-encoding fails for any reason.
+        let path = downscale_oversized_image(path);
         return vec![
             UserInput::Text {
-                text: format!("[Attached image saved to {display_path}]"),
+                text: format!("[Attached image saved to {}]", path.display()),
                 text_elements: Vec::new(),
             },
             UserInput::LocalImage {
-                path: path.to_path_buf(),
+                path: path.clone(),
                 detail: None,
             },
         ];
     }
     vec![UserInput::Text {
-        text: format!("[Attached file saved to {display_path}]"),
+        text: format!("[Attached file saved to {}]", path.display()),
         text_elements: Vec::new(),
     }]
+}
+
+/// Longest edge (px) oversized images are downscaled to before the model sees
+/// them. 1568 px is the Anthropic-recommended max before their API downscales
+/// server-side, and stays well under Bedrock/mantle's 8000 px hard cap.
+const MAX_IMAGE_EDGE: u32 = 1568;
+/// Byte budget above which an image is re-encoded even when its dimensions are
+/// already small. Kept safely under mantle's ~5 MB per-image cap.
+const MAX_IMAGE_BYTES: u64 = 4 * 1024 * 1024;
+/// JPEG quality for re-encoded images — ample for model vision while keeping
+/// re-encoded output comfortably under the byte cap.
+const DOWNSCALE_JPEG_QUALITY: u8 = 80;
+
+/// Downscale an image that exceeds the model provider's caps, returning the path
+/// to feed the model. Best-effort: on any failure (unknown/unsupported format,
+/// decode or I/O error) the original path is returned unchanged, so a
+/// normalization miss never breaks a turn that would otherwise succeed.
+fn downscale_oversized_image(path: &Path) -> PathBuf {
+    match try_downscale_oversized_image(path) {
+        Ok(Some(scaled)) => scaled,
+        Ok(None) => path.to_path_buf(),
+        Err(error) => {
+            eprintln!(
+                "harness image downscale skipped for {}: {error}",
+                path.display()
+            );
+            path.to_path_buf()
+        }
+    }
+}
+
+/// Returns `Ok(Some(new_path))` when the image was downscaled/re-encoded,
+/// `Ok(None)` when it was already within limits, and `Err` on any decode/encode
+/// failure (handled as best-effort by the caller).
+fn try_downscale_oversized_image(path: &Path) -> std::result::Result<Option<PathBuf>, ImageError> {
+    let byte_len = std::fs::metadata(path)?.len();
+    let (width, height) = image::image_dimensions(path)?;
+    if byte_len <= MAX_IMAGE_BYTES && width.max(height) <= MAX_IMAGE_EDGE {
+        return Ok(None);
+    }
+
+    let decoded = image::open(path)?;
+    let resized = if width.max(height) > MAX_IMAGE_EDGE {
+        // `resize` preserves aspect ratio and only ever shrinks here, since we
+        // pass the original long edge cap as the bounding box.
+        decoded.resize(MAX_IMAGE_EDGE, MAX_IMAGE_EDGE, FilterType::Triangle)
+    } else {
+        decoded
+    };
+
+    // Re-encode as JPEG (which drops alpha) so the byte cap is met even for
+    // photo-like PNGs whose lossless re-encode could stay over the limit.
+    let mut encoded = Vec::new();
+    let encoder = JpegEncoder::new_with_quality(&mut encoded, DOWNSCALE_JPEG_QUALITY);
+    DynamicImage::ImageRgb8(resized.to_rgb8()).write_with_encoder(encoder)?;
+
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("attachment");
+    let scaled_path = path.with_file_name(format!("{stem}-scaled-{}.jpg", Uuid::new_v4().simple()));
+    std::fs::write(&scaled_path, &encoded)?;
+    Ok(Some(scaled_path))
 }
 
 fn write_base64_upload(data_base64: &str, name: &str, mime_type: Option<&str>) -> Result<PathBuf> {
@@ -615,10 +856,14 @@ fn non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
+fn clean_string(value: Option<&str>) -> Option<String> {
+    non_empty(value).map(ToOwned::to_owned)
+}
+
 fn handle_request<H: HarnessServer, W: Write>(
     harness: &H,
     request: JSONRPCRequest,
-    request_rx: &Receiver<JSONRPCRequest>,
+    request_rx: &Receiver<ActiveTurnRequest>,
     threads: &mut HashMap<String, ThreadState>,
     stdout: &mut W,
 ) -> Result<()> {
@@ -690,7 +935,7 @@ fn handle_request<H: HarnessServer, W: Write>(
                 .get_mut(&thread_id)
                 .expect("thread state inserted or existed");
             apply_resume_overrides(state, &params)?;
-            let normalizer = normalizer_for(harness, &state, "turn-placeholder");
+            let normalizer = normalizer_for(harness, state, "turn-placeholder");
             let mut thread = normalizer.thread_snapshot()?;
             if !params.exclude_turns {
                 thread.turns = state.completed_turns.clone();
@@ -742,6 +987,7 @@ fn handle_request<H: HarnessServer, W: Write>(
                 state,
                 &params.input,
                 params.client_user_message_id.clone(),
+                None,
                 &mut normalizer,
                 stdout,
                 request_rx,
@@ -842,9 +1088,14 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
     harness: &H,
     process: &mut HarnessChild,
     normalizer: &mut CodexTurnNormalizer,
-    request: JSONRPCRequest,
+    request: ActiveTurnRequest,
     stdout: &mut W,
-) -> Result<()> {
+) -> Result<bool> {
+    let ActiveTurnRequest::JsonRpc(request) = request else {
+        process.kill_and_wait()?;
+        return Ok(true);
+    };
+
     match request.method.as_str() {
         "turn/steer" => {
             let params: TurnSteerParams = request_params(request.params)?;
@@ -855,7 +1106,7 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
                     -32600,
                     format!("unknown threadId {}", params.thread_id),
                 )?;
-                return Ok(());
+                return Ok(false);
             }
             if params.expected_turn_id != normalizer.turn_id() {
                 write_error(
@@ -868,7 +1119,7 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
                         normalizer.turn_id()
                     ),
                 )?;
-                return Ok(());
+                return Ok(false);
             }
             process
                 .stdin
@@ -888,9 +1139,33 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
             {
                 write_value(stdout, &notification_to_wire_value(&notification)?)?;
             }
-            Ok(())
+            Ok(false)
         }
         "turn/interrupt" => {
+            let params: TurnInterruptParams = request_params(request.params)?;
+            if params.thread_id != normalizer.thread_id() {
+                write_error(
+                    stdout,
+                    request.id,
+                    -32600,
+                    format!("unknown threadId {}", params.thread_id),
+                )?;
+                return Ok(false);
+            }
+            if params.turn_id != normalizer.turn_id() {
+                write_error(
+                    stdout,
+                    request.id,
+                    -32600,
+                    format!(
+                        "expected active turn id `{}` but found `{}`",
+                        params.turn_id,
+                        normalizer.turn_id()
+                    ),
+                )?;
+                return Ok(false);
+            }
+            process.kill_and_wait()?;
             write_client_response(
                 stdout,
                 ClientResponse::TurnInterrupt {
@@ -898,7 +1173,7 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
                     response: TurnInterruptResponse {},
                 },
             )?;
-            Ok(())
+            Ok(true)
         }
         _ => {
             write_error(
@@ -907,19 +1182,21 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
                 -32600,
                 format!("cannot handle {} while a turn is active", request.method),
             )?;
-            Ok(())
+            Ok(false)
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_normalized_turn<H: HarnessServer, W: Write>(
     harness: &H,
     state: &mut ThreadState,
     input: &[UserInput],
     client_user_message_id: Option<String>,
+    trace_context: Option<&TraceContext>,
     normalizer: &mut CodexTurnNormalizer,
     stdout: &mut W,
-    request_rx: &Receiver<JSONRPCRequest>,
+    request_rx: &Receiver<ActiveTurnRequest>,
 ) -> Result<()> {
     for notification in normalizer.start_notifications(!state.thread_started_sent)? {
         if matches!(notification, ServerNotification::ThreadStarted(_)) {
@@ -931,10 +1208,39 @@ fn run_normalized_turn<H: HarnessServer, W: Write>(
         write_value(stdout, &notification_to_wire_value(&notification)?)?;
     }
 
-    match run_harness_turn(harness, state, input, normalizer, stdout, request_rx) {
+    match run_harness_turn(
+        harness,
+        state,
+        input,
+        trace_context,
+        normalizer,
+        stdout,
+        request_rx,
+    ) {
         Ok(Some(turn)) => state.completed_turns.push(turn),
         Ok(None) => {}
-        Err(error) => finish_turn_with_error(state, normalizer, stdout, error)?,
+        Err(HarnessServerError::TurnInterrupted { .. }) => {
+            state.process = None;
+            finish_turn_interrupted(state, normalizer, stdout)?;
+        }
+        Err(error) => {
+            state.process = None;
+            finish_turn_with_error(state, normalizer, stdout, error)?;
+        }
+    }
+    Ok(())
+}
+
+fn finish_turn_interrupted<W: Write>(
+    state: &mut ThreadState,
+    normalizer: &mut CodexTurnNormalizer,
+    stdout: &mut W,
+) -> Result<()> {
+    if let Some(notification) = normalizer.finish_turn_interrupted()? {
+        if let ServerNotification::TurnCompleted(completed) = &notification {
+            state.completed_turns.push(completed.turn.clone());
+        }
+        write_value(stdout, &notification_to_wire_value(&notification)?)?;
     }
     Ok(())
 }
@@ -965,58 +1271,142 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
     harness: &H,
     state: &mut ThreadState,
     input: &[UserInput],
+    trace_context: Option<&TraceContext>,
     normalizer: &mut CodexTurnNormalizer,
     stdout: &mut W,
-    request_rx: &Receiver<JSONRPCRequest>,
+    request_rx: &Receiver<ActiveTurnRequest>,
 ) -> Result<Option<codex_app_server_protocol::Turn>> {
+    let usage_span_start = otel::unix_time_nanos();
+    let usage_span_model = state.model.clone();
+    let usage_span_model_provider = state.model_provider.clone();
+    let usage_span_turn_id = normalizer.turn_id().to_string();
+    let usage_span_input = usage_span_input_value(input);
+    let mut usage_span_output = UsageSpanOutput::default();
     ensure_harness_process(harness, state)?;
-    let process = state
-        .process
-        .as_mut()
-        .ok_or(HarnessServerError::HarnessStdinUnavailable)?;
-    process.stdin.write_all(&harness.stdin_for_turn(input)?)?;
-    process.stdin.flush()?;
+    {
+        let process = state
+            .process
+            .as_mut()
+            .ok_or(HarnessServerError::HarnessStdinUnavailable)?;
+        // Anything already buffered predates this turn's input: a previous
+        // turn completed via the terminal-stop fallback can leave the CLI's
+        // late `result` (and trailing rate-limit noise) behind, which would
+        // otherwise read as this turn's instant terminal.
+        while process.stdout.try_recv().is_ok() {}
+        process.stdin.write_all(&harness.stdin_for_turn(input)?)?;
+        process.stdin.flush()?;
+    }
 
+    let settle_window = harness.terminal_assistant_stop_settle();
+    // Armed after a terminal assistant stop with no native terminal event yet:
+    // once the stream stays quiet past this deadline the turn completes via
+    // the fallback. Any further output (the native result on its way, trailing
+    // noise, or a continuation of the turn) pushes the deadline back.
+    let mut settle_deadline: Option<Instant> = None;
     let mut last_session_id = state.harness_session_id.clone();
     let mut event_normalizer = H::EventNormalizer::default();
     let mut completed_turn = None;
+    let mut latest_usage = None;
     loop {
         while let Ok(request) = request_rx.try_recv() {
-            handle_active_turn_request(harness, process, normalizer, request, stdout)?;
-        }
-
-        let line = match process.stdout.recv_timeout(Duration::from_millis(50)) {
-            Ok(line) => line?,
-            Err(RecvTimeoutError::Timeout) => continue,
-            Err(RecvTimeoutError::Disconnected) => {
-                let status = process.child.wait()?;
-                return Err(HarnessServerError::HarnessExited {
+            let process = state
+                .process
+                .as_mut()
+                .ok_or(HarnessServerError::HarnessStdinUnavailable)?;
+            if handle_active_turn_request(harness, process, normalizer, request, stdout)? {
+                state.process = None;
+                return Err(HarnessServerError::TurnInterrupted {
                     kind: harness.kind(),
-                    status,
-                    stderr: String::new(),
                 });
             }
-        };
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+            // A steer re-opens the turn: the harness now owes a response whose
+            // first token can take longer than the settle window, so the
+            // pending fallback completion no longer applies. The response's
+            // own terminal stop re-arms it.
+            settle_deadline = None;
         }
-        let event = harness.parse_stdout_line(trimmed)?;
-        let normalized_events = harness.normalize_events(&mut event_normalizer, event)?;
+
         let mut terminal = false;
-        for normalized in normalized_events {
-            if let Some(session_id) = normalized.session_id() {
-                last_session_id = Some(session_id.to_string());
-                state.harness_session_id = Some(session_id.to_string());
+        match state
+            .process
+            .as_mut()
+            .ok_or(HarnessServerError::HarnessStdoutUnavailable)?
+            .stdout
+            .recv_timeout(Duration::from_millis(50))
+        {
+            Ok(line) => {
+                let line = line?;
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let event = harness.parse_stdout_line(trimmed)?;
+                let normalized_events = harness.normalize_events(&mut event_normalizer, event)?;
+                let mut terminal_stop = false;
+                for normalized in normalized_events {
+                    if let Some(usage) = normalized.token_usage() {
+                        latest_usage = Some(usage.clone());
+                    }
+                    append_usage_span_output(&normalized, &mut usage_span_output);
+                    if let Some(session_id) = normalized.session_id() {
+                        last_session_id = Some(session_id.to_string());
+                        state.harness_session_id = Some(session_id.to_string());
+                    }
+                    for notification in normalizer.process_event(&normalized)? {
+                        write_value(stdout, &notification_to_wire_value(&notification)?)?;
+                    }
+                    terminal |= normalized.is_terminal();
+                    terminal_stop |=
+                        settle_window.is_some() && normalized.is_terminal_assistant_stop();
+                }
+                if !terminal {
+                    match settle_window {
+                        Some(window) if terminal_stop && window.is_zero() => terminal = true,
+                        Some(window) if terminal_stop || settle_deadline.is_some() => {
+                            settle_deadline = Some(Instant::now() + window);
+                        }
+                        _ => {}
+                    }
+                }
             }
-            for notification in normalizer.process_event(&normalized)? {
-                write_value(stdout, &notification_to_wire_value(&notification)?)?;
+            Err(RecvTimeoutError::Timeout) => match settle_deadline {
+                Some(deadline) if Instant::now() >= deadline => terminal = true,
+                _ => continue,
+            },
+            Err(RecvTimeoutError::Disconnected) => {
+                let status = state
+                    .process
+                    .as_mut()
+                    .ok_or(HarnessServerError::HarnessStdoutUnavailable)?
+                    .child
+                    .wait()?;
+                // A clean exit while waiting out the settle window means the
+                // native result is never coming: the terminal stop already
+                // seen ends the turn.
+                if settle_deadline.is_some() && status.success() {
+                    state.process = None;
+                    terminal = true;
+                } else {
+                    return Err(HarnessServerError::HarnessExited {
+                        kind: harness.kind(),
+                        status,
+                        stderr: String::new(),
+                    });
+                }
             }
-            terminal |= normalized.is_terminal()
-                || (harness.finish_turn_on_assistant_end_turn()
-                    && normalized.is_assistant_end_turn());
         }
         if terminal {
+            export_harness_usage_if_available(
+                trace_context,
+                harness.kind(),
+                &usage_span_model,
+                &usage_span_model_provider,
+                &usage_span_turn_id,
+                usage_span_input.as_deref(),
+                usage_span_output.value().as_deref(),
+                usage_span_start,
+                latest_usage.as_ref(),
+            );
             if let Some(notification) = normalizer.finish_turn(None)? {
                 if let ServerNotification::TurnCompleted(completed) = &notification {
                     completed_turn = Some(completed.turn.clone());
@@ -1039,9 +1429,132 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
     Ok(completed_turn)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn export_harness_usage_if_available(
+    trace_context: Option<&TraceContext>,
+    harness: HarnessKind,
+    model: &str,
+    model_provider: &str,
+    turn_id: &str,
+    input: Option<&str>,
+    output: Option<&str>,
+    start_unix_nano: u64,
+    usage: Option<&NormalizedTokenUsage>,
+) {
+    let (Some(trace_context), Some(usage)) = (trace_context, usage) else {
+        return;
+    };
+    let span = HarnessUsageSpan {
+        harness,
+        model,
+        model_provider,
+        turn_id,
+        input,
+        output,
+        start_unix_nano,
+        end_unix_nano: otel::unix_time_nanos(),
+    };
+    if let Err(error) = otel::export_harness_usage_span(trace_context, span, usage) {
+        eprintln!("harness usage OTLP export failed: {error:#}");
+    }
+}
+
+fn usage_span_input_value(input: &[UserInput]) -> Option<String> {
+    let mut parts = Vec::new();
+    for item in input {
+        match item {
+            UserInput::Text { text, .. } => parts.push(text.clone()),
+            UserInput::Image { url, .. } => parts.push(format!("[image: {url}]")),
+            UserInput::LocalImage { path, .. } => {
+                parts.push(format!("[local image: {}]", path.display()));
+            }
+            UserInput::Skill { name, path } => {
+                parts.push(format!("[skill: {name} at {}]", path.display()));
+            }
+            UserInput::Mention { name, path } => {
+                parts.push(format!("[mention: {name} at {path}]"));
+            }
+        }
+    }
+    let joined = parts.join("\n");
+    non_empty(Some(&joined)).map(str::to_owned)
+}
+
+#[derive(Debug, Default)]
+struct UsageSpanOutput {
+    item_order: Vec<String>,
+    text_by_item_id: HashMap<String, String>,
+    fallback: Option<String>,
+}
+
+impl UsageSpanOutput {
+    fn append_delta(&mut self, item_id: &str, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+        self.remember_item(item_id);
+        self.text_by_item_id
+            .entry(item_id.to_string())
+            .or_default()
+            .push_str(delta);
+    }
+
+    fn set_item_text(&mut self, item_id: &str, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.remember_item(item_id);
+        self.text_by_item_id
+            .insert(item_id.to_string(), text.to_string());
+    }
+
+    fn set_fallback_if_empty(&mut self, value: &str) {
+        if self.value().is_none() {
+            self.fallback = clean_string(Some(value));
+        }
+    }
+
+    fn value(&self) -> Option<String> {
+        let mut text = String::new();
+        for item_id in &self.item_order {
+            if let Some(item_text) = self.text_by_item_id.get(item_id) {
+                text.push_str(item_text);
+            }
+        }
+        clean_string(Some(&text)).or_else(|| self.fallback.clone())
+    }
+
+    fn remember_item(&mut self, item_id: &str) {
+        if self.text_by_item_id.contains_key(item_id) {
+            return;
+        }
+        self.item_order.push(item_id.to_string());
+        self.text_by_item_id
+            .insert(item_id.to_string(), String::new());
+    }
+}
+
+fn append_usage_span_output(event: &NormalizedEvent, output: &mut UsageSpanOutput) {
+    match event {
+        NormalizedEvent::AssistantMessage { content, .. } => {
+            for item in content {
+                if let NormalizedContent::AgentText { item_id, text } = item {
+                    output.set_item_text(item_id, text);
+                }
+            }
+        }
+        NormalizedEvent::AgentTextDelta { item_id, delta } => output.append_delta(item_id, delta),
+        NormalizedEvent::Error { message } => output.set_fallback_if_empty(message),
+        _ => {}
+    }
+}
+
 fn ensure_harness_process<H: HarnessServer>(harness: &H, state: &mut ThreadState) -> Result<()> {
-    if state.process.is_some() {
-        return Ok(());
+    if let Some(process) = state.process.as_mut() {
+        if process.child.try_wait()?.is_none() {
+            return Ok(());
+        }
+        state.process = None;
     }
 
     let mut command = harness.command_for_turn(state);
@@ -1069,7 +1582,12 @@ fn ensure_harness_process<H: HarnessServer>(harness: &H, state: &mut ThreadState
         .take()
         .ok_or(HarnessServerError::HarnessStderrUnavailable)?;
     std::thread::spawn(move || {
-        let mut parent_stderr = io::stderr().lock();
+        // Copy through the unlocked handle (it locks per write): the harness
+        // process outlives each turn, so its stderr never EOFs, and holding
+        // the StderrLock here for the copy's lifetime deadlocks every other
+        // eprintln! in the server — including turn-completion paths, which
+        // then never emit turn/completed.
+        let mut parent_stderr = io::stderr();
         let _ = io::copy(&mut stderr, &mut parent_stderr);
     });
     let (stdout_tx, stdout_rx) = mpsc::channel();
@@ -1155,6 +1673,47 @@ mod tests {
         path
     }
 
+    fn write_gradient_png(dir: &Path, name: &str, width: u32, height: u32) -> PathBuf {
+        let mut img = image::RgbImage::new(width, height);
+        for (x, y, pixel) in img.enumerate_pixels_mut() {
+            *pixel = image::Rgb([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8]);
+        }
+        let path = dir.join(name);
+        img.save(&path).expect("write test png");
+        path
+    }
+
+    #[test]
+    fn downscales_image_past_the_edge_cap() {
+        let dir = temp_upload_dir();
+        let original = write_gradient_png(&dir, "big.png", 3000, 2000);
+
+        let scaled = downscale_oversized_image(&original);
+
+        assert_ne!(
+            scaled, original,
+            "oversized image should be re-encoded to a new path"
+        );
+        assert_eq!(scaled.extension().and_then(|e| e.to_str()), Some("jpg"));
+        let (width, height) = image::image_dimensions(&scaled).expect("scaled image decodes");
+        assert_eq!(
+            width.max(height),
+            MAX_IMAGE_EDGE,
+            "long edge clamped to cap"
+        );
+        image::open(&scaled).expect("scaled file is a valid image");
+    }
+
+    #[test]
+    fn leaves_within_limit_image_untouched() {
+        let dir = temp_upload_dir();
+        let original = write_gradient_png(&dir, "small.png", 320, 240);
+
+        let same = downscale_oversized_image(&original);
+
+        assert_eq!(same, original, "within-limit image is returned unchanged");
+    }
+
     #[test]
     fn parses_blocks_user_line_with_model_override() {
         let line = r#"{"type":"user","thread_key":"web:t1","model":"claude-sonnet-4-6","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#;
@@ -1167,12 +1726,75 @@ mod tests {
     }
 
     #[test]
+    fn parses_blocks_user_line_with_trace_context() {
+        let line = r#"{"type":"user","thread_key":"web:t1","trace_id":"01234567-89ab-cdef-0123-456789abcdef","traceparent":"00-0123456789abcdef0123456789abcdef-0123456789abcdef-01","trace_metadata":{"execution_id":"exe_123"},"text":"hi"}"#;
+        let BlocksCommand::User { trace_context, .. } = parse_blocks_line(line).expect("parses")
+        else {
+            panic!("expected user command");
+        };
+
+        assert_eq!(trace_context.thread_key.as_deref(), Some("web:t1"));
+        assert_eq!(
+            trace_context.trace_id.as_deref(),
+            Some("01234567-89ab-cdef-0123-456789abcdef")
+        );
+        assert_eq!(
+            trace_context.traceparent.as_deref(),
+            Some("00-0123456789abcdef0123456789abcdef-0123456789abcdef-01")
+        );
+        assert_eq!(
+            trace_context
+                .metadata
+                .get("execution_id")
+                .and_then(Value::as_str),
+            Some("exe_123")
+        );
+    }
+
+    #[test]
     fn ignores_blank_model_on_blocks_user_line() {
         let line = r#"{"type":"user","model":"  ","text":"hi"}"#;
         let BlocksCommand::User { model, .. } = parse_blocks_line(line).expect("parses") else {
             panic!("expected user command");
         };
         assert_eq!(model, None);
+    }
+
+    #[test]
+    fn parses_attachment_ref_as_recoverable_reference() {
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"inspect this"},{"type":"attachment_ref","attachment_id":"att_123","name":"report.pdf","mime_type":"application/pdf"}]}}"#;
+        let BlocksCommand::User { input, .. } = parse_blocks_line(line).expect("parses") else {
+            panic!("expected user command");
+        };
+
+        assert_eq!(input.len(), 2);
+        let UserInput::Text { text, .. } = &input[1] else {
+            panic!("expected attachment_ref to become text guidance");
+        };
+        assert!(text.contains("Attachment reference"));
+        assert!(text.contains("id=att_123"));
+        assert!(text.contains("name=report.pdf"));
+        assert!(text.contains("mime=application/pdf"));
+        assert!(text.contains("not provided to this sandbox"));
+        assert!(!text.contains("Unsupported attachment block type"));
+    }
+
+    #[test]
+    fn parses_blocks_user_line_with_provider_override() {
+        let line = r#"{"type":"user","thread_key":"web:t1","provider":"amazon-bedrock","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#;
+        let BlocksCommand::User { provider, .. } = parse_blocks_line(line).expect("parses") else {
+            panic!("expected user command");
+        };
+        assert_eq!(provider.as_deref(), Some("amazon-bedrock"));
+    }
+
+    #[test]
+    fn ignores_blank_provider_on_blocks_user_line() {
+        let line = r#"{"type":"user","provider":"  ","text":"hi"}"#;
+        let BlocksCommand::User { provider, .. } = parse_blocks_line(line).expect("parses") else {
+            panic!("expected user command");
+        };
+        assert_eq!(provider, None);
     }
 
     #[test]
@@ -1200,6 +1822,38 @@ mod tests {
             panic!("expected user command");
         };
         assert_eq!(reasoning, None);
+    }
+
+    #[test]
+    fn usage_span_output_replaces_delta_reconstruction_with_canonical_text() {
+        let mut output = UsageSpanOutput::default();
+        append_usage_span_output(
+            &NormalizedEvent::AgentTextDelta {
+                item_id: "msg-1".to_string(),
+                delta: "hel".to_string(),
+            },
+            &mut output,
+        );
+        append_usage_span_output(
+            &NormalizedEvent::AgentTextDelta {
+                item_id: "msg-1".to_string(),
+                delta: "lo".to_string(),
+            },
+            &mut output,
+        );
+        append_usage_span_output(
+            &NormalizedEvent::AssistantMessage {
+                partial: false,
+                stop_reason: Some("end_turn".to_string()),
+                content: vec![NormalizedContent::AgentText {
+                    item_id: "msg-1".to_string(),
+                    text: "hello".to_string(),
+                }],
+            },
+            &mut output,
+        );
+
+        assert_eq!(output.value().as_deref(), Some("hello"));
     }
 
     #[test]
@@ -1267,5 +1921,33 @@ mod tests {
         };
         assert!(text.starts_with("[Attached file saved to "));
         assert!(text.ends_with("notes.txt]"));
+    }
+
+    #[test]
+    fn inline_image_attachment_block_becomes_local_image_input() {
+        let _upload_dir = temp_upload_dir();
+        let mut state = BlocksState::default();
+        let user = r#"{"type":"user","message":{"role":"user","content":[{"type":"attachment","attachment_type":"image","dataBase64":"aGVsbG8=","name":"image.png","mimeType":"image/png","size":5}]}}"#;
+        let BlocksCommand::User { input, .. } =
+            parse_blocks_line_with_state(user, &mut state).expect("user parses")
+        else {
+            panic!("expected user command");
+        };
+
+        assert_eq!(input.len(), 2);
+        let UserInput::Text { text, .. } = &input[0] else {
+            panic!("expected image attachment notice");
+        };
+        assert!(text.starts_with("[Attached image saved to "));
+        assert!(text.ends_with("image.png]"));
+
+        let UserInput::LocalImage { path, .. } = &input[1] else {
+            panic!("expected inline image attachment to become a local image");
+        };
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("image.png")
+        );
+        assert_eq!(std::fs::read(path).expect("read image bytes"), b"hello");
     }
 }

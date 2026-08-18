@@ -201,7 +201,7 @@ else:
 # config default stands) rather than written.
 effort = (os.environ.get("CODEX_MODEL_REASONING_EFFORT") or "").strip().lower()
 if effort:
-    valid = {"none", "minimal", "low", "medium", "high", "xhigh"}
+    valid = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
     if effort not in valid:
         print(
             f"ignoring invalid CODEX_MODEL_REASONING_EFFORT={effort!r}; "
@@ -222,6 +222,28 @@ if effort:
             lines.insert(first_table, override)
 
 text = "\n".join(lines).rstrip() + "\n"
+
+# CODEX_BEDROCK_REGION: when codex's built-in `amazon-bedrock` provider is enabled
+# (the api-rs sandbox env injects this), pin its AWS region from the SAME env var
+# that scopes iron-proxy's SigV4 re-signing, so the in-sandbox client signs/sends
+# for the region the proxy is bound to. One source of truth instead of a
+# hand-written CODEX_CONFIG_OVERLAY that can silently disagree and fail signing.
+# Applied before the overlay below, so an operator can still override it. tomli_w
+# quotes the value (no TOML injection); a parse failure just skips the patch.
+bedrock_region = (os.environ.get("CODEX_BEDROCK_REGION") or "").strip()
+if bedrock_region:
+    import tomllib
+    import tomli_w
+
+    try:
+        config = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        print(f"ignoring CODEX_BEDROCK_REGION patch: {exc}", file=sys.stderr)
+    else:
+        config.setdefault("model_providers", {}).setdefault(
+            "amazon-bedrock", {}
+        ).setdefault("aws", {})["region"] = bedrock_region
+        text = tomli_w.dumps(config)
 
 # CODEX_CONFIG_OVERLAY: deep-merge an operator-supplied TOML fragment over the
 # baked config so a deployment can configure codex -- e.g. point it at a custom
@@ -368,28 +390,35 @@ mkdir -p "$HOME_DIR/uploads"
 WORKSPACE_DIR="$WORKSPACE_DIR" install-tool-shims --refresh-skills \
     || echo "warning: failed to reload Centaur skills" >&2
 
+# ── Background: refresh repo-cache-backed tools/skills in running sandboxes ───
+case "${CENTAUR_TOOLS_AUTO_RELOAD:-true}" in
+    0|false|False|FALSE|no|No|NO|off|Off|OFF) _centaur_tools_auto_reload=0 ;;
+    *) _centaur_tools_auto_reload=1 ;;
+esac
+if [ "$_centaur_tools_auto_reload" = "1" ] \
+    && [ "${CENTAUR_SANDBOX_REPO_CACHE_ENABLED:-true}" != "false" ] \
+    && [ -n "${TOOL_DIRS:-}" ]; then
+    (
+        WORKSPACE_DIR="$WORKSPACE_DIR" repo-cache-watch \
+            || echo "warning: Centaur tool auto-reload watcher stopped" >&2
+    ) &
+fi
+unset _centaur_tools_auto_reload
+
 # ── Assemble system prompt from bind mounts ──────────────────────────────────
 # Base prompt: mounted as AGENTS_BASE.md when present, fallback to baked-in AGENTS.md.
-# Org/persona overlays are mounted alongside the base prompt when present.
+# Prompt overlays from mounted repos are appended when present.
 TARGET_PROMPT="$WORKSPACE_DIR/AGENTS.md"
-if [ -f "$HOME_DIR/AGENTS_BASE.md" ]; then
-    cp "$HOME_DIR/AGENTS_BASE.md" "$TARGET_PROMPT"
-elif [ -f "$HOME_DIR/AGENTS.md" ]; then
-    cp "$HOME_DIR/AGENTS.md" "$TARGET_PROMPT"
-fi
+compose-system-prompt --home-dir "$HOME_DIR" --target-prompt "$TARGET_PROMPT"
 
-if [ -f "$HOME_DIR/AGENTS_OVERLAY.md" ] && [ -f "$TARGET_PROMPT" ]; then
-    printf '\n\n---\n\n' >> "$TARGET_PROMPT"
-    cat "$HOME_DIR/AGENTS_OVERLAY.md" >> "$TARGET_PROMPT"
-# Repo-cache-era org prompt: with overlay images gone, point CENTAUR_OVERLAY_DIR
-# at the org repo's clone under the repos mount (e.g. ~/github/<owner>/<repo>)
-# and its SYSTEM_PROMPT.md is appended here, same contract the overlay-bootstrap
-# init container used to fulfil by staging $HOME/AGENTS_OVERLAY.md.
-elif [ -n "${CENTAUR_OVERLAY_DIR:-}" ] \
-    && [ -f "${CENTAUR_OVERLAY_DIR}/services/sandbox/SYSTEM_PROMPT.md" ] \
-    && [ -f "$TARGET_PROMPT" ]; then
-    printf '\n\n---\n\n' >> "$TARGET_PROMPT"
-    cat "${CENTAUR_OVERLAY_DIR}/services/sandbox/SYSTEM_PROMPT.md" >> "$TARGET_PROMPT"
+if [ "${CENTAUR_SANDBOX_OBSERVABILITY_ENABLED:-true}" = "false" ] && [ -f "$TARGET_PROMPT" ]; then
+    cat >> "$TARGET_PROMPT" <<'EOF'
+
+---
+
+[Observability access]
+This sandbox does not have Centaur observability access. Do not use vlogs, vmetrics, Grafana, or related internal logs/metrics tools.
+EOF
 fi
 
 # Persona prompt injection is done by the API when it writes AGENTS_BASE.md.
@@ -426,17 +455,18 @@ if [ -n "${CENTAUR_TOOLS_URL:-}" ]; then
     done
 fi
 
-# Signal readiness
-touch "$HOME_DIR/.ready"
-
-# ── Background: slow auth tasks ─────────────────────────────────────────────
-{
-    if [ -n "${GITHUB_TOKEN:-}" ]; then
-        git config --global credential.helper store
-        printf 'https://oauth2:%s@github.com\n' "$GITHUB_TOKEN" > "$HOME_DIR/.git-credentials"
-        echo "${GITHUB_TOKEN}" | gh auth login --with-token 2>/dev/null || true
-        gh auth setup-git 2>/dev/null || true
+# Git and gh both read the placeholder token from the environment. Install gh's
+# credential helper before signalling readiness so Git can present that
+# placeholder as the HTTP Basic password for iron-proxy to replace. setup-git is
+# local-only; unlike `gh auth login`, it does not verify or persist the token.
+if [ -n "${GITHUB_TOKEN:-}" ]; then
+    if ! gh auth setup-git >/dev/null 2>&1; then
+        echo "failed to configure the GitHub credential helper" >&2
+        exit 1
     fi
-} &
+fi
+
+# Signal readiness only after every client-side credential helper is installed.
+touch "$HOME_DIR/.ready"
 
 exec "$@"

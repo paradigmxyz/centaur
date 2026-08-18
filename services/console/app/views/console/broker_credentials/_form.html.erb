@@ -1,13 +1,10 @@
+<% selected_grant = credential.grant.presence || "refresh_token" %>
+
 <%= form_with model: [ :console, credential ], data: { turbo: false } do %>
   <div class="space-y-6">
     <section class="form-section">
       <h2 class="form-section-heading">Identity</h2>
       <div class="grid gap-5 sm:grid-cols-2">
-        <div>
-          <label class="form-label" for="credential_namespace">Namespace</label>
-          <%= text_field_tag "credential[namespace]", credential.namespace.presence || "default", id: "credential_namespace", class: "form-input #{field_error_class(credential, :namespace)}" %>
-          <%= field_error(credential, :namespace) %>
-        </div>
         <div>
           <label class="form-label" for="credential_foreign_id">Foreign ID</label>
           <%= text_field_tag "credential[foreign_id]", credential.foreign_id, id: "credential_foreign_id", class: "form-input #{field_error_class(credential, :foreign_id)}", placeholder: "stable-handle" %>
@@ -28,30 +25,30 @@
     </section>
 
     <section class="form-section">
-      <h2 class="form-section-heading">OAuth Client</h2>
+      <h2 class="form-section-heading">Token Client</h2>
       <div class="grid gap-5 sm:grid-cols-2">
         <div>
           <label class="form-label" for="credential_token_endpoint">Token endpoint *</label>
-          <%= text_field_tag "credential[token_endpoint]", credential.token_endpoint, id: "credential_token_endpoint", class: "form-input #{field_error_class(credential, :token_endpoint)}", placeholder: "https://oauth2.googleapis.com/token" %>
+          <%= text_field_tag "credential[token_endpoint]", credential.token_endpoint, id: "credential_token_endpoint", class: "form-input #{field_error_class(credential, :token_endpoint)}", placeholder: selected_grant == "preqin" ? BrokerCredential::PREQIN_TOKEN_ENDPOINT : "https://oauth2.googleapis.com/token" %>
           <%= field_error(credential, :token_endpoint) %>
-          <p class="form-hint">The IdP endpoint control refreshes against.</p>
+          <p class="form-hint">The token endpoint control refreshes against. Preqin uses its fixed Operational API endpoint.</p>
         </div>
         <div>
-          <label class="form-label" for="credential_client_id">Client ID *</label>
+          <label class="form-label" for="credential_client_id">Client ID<%= " *" unless selected_grant == "preqin" %></label>
           <%= text_field_tag "credential[client_id]", credential.client_id, id: "credential_client_id", class: "form-input #{field_error_class(credential, :client_id)}" %>
           <%= field_error(credential, :client_id) %>
-          <p class="form-hint">Not secret. Sent on every refresh.</p>
+          <p class="form-hint">Not secret. Not used for Preqin.</p>
         </div>
         <div>
           <label class="form-label" for="credential_client_secret">Client secret</label>
           <%= password_field_tag "credential[client_secret]", nil, id: "credential_client_secret", class: "form-input", autocomplete: "off", placeholder: credential.new_record? ? nil : "•••••••• (unchanged)" %>
-          <p class="form-hint">Stored encrypted.<%= " Leave blank to keep the current secret." unless credential.new_record? %></p>
+          <p class="form-hint">Stored encrypted. Not used for Preqin.<%= " Leave blank to keep the current secret." unless credential.new_record? %></p>
         </div>
         <div>
           <label class="form-label" for="credential_scopes">Scopes</label>
           <%= text_area_tag "credential[scopes]", Array(credential.scopes).join("\n"), id: "credential_scopes", rows: 3, class: "form-input #{field_error_class(credential, :scopes)}", placeholder: "https://www.googleapis.com/auth/gmail.readonly" %>
           <%= field_error(credential, :scopes) %>
-          <p class="form-hint">One scope per line.</p>
+          <p class="form-hint">One scope per line. Not used for Preqin.</p>
         </div>
       </div>
     </section>
@@ -88,19 +85,57 @@
       </div>
     </section>
 
-    <section class="form-section">
+    <section class="form-section" data-controller="toggle">
       <h2 class="form-section-heading">Bootstrap</h2>
-      <div>
-        <label class="form-label" for="credential_refresh_token">Refresh token<%= " *".html_safe if credential.new_record? %></label>
-        <%= text_area_tag "credential[refresh_token]", nil, id: "credential_refresh_token", rows: 3, class: "form-input", autocomplete: "off", placeholder: credential.new_record? ? "the initial refresh token to seed the loop" : "•••••••• (unchanged)" %>
-        <p class="form-hint">
-          Write-only seed, stored encrypted. The refresh loop rotates it from here.
-          <% if credential.new_record? %>
-            Required to leave bootstrapping.
-          <% else %>
-            Leave blank to keep the current token; entering a new one re-bootstraps the credential and clears any dead state.
-          <% end %>
-        </p>
+      <div class="mb-4 flex flex-wrap gap-3">
+        <% BrokerCredential::GRANTS.each do |grant| %>
+          <label class="inline-flex items-center gap-2 rounded border border-ink-600 px-3 py-2 text-sm text-zinc-200">
+            <%= radio_button_tag "credential[grant]", grant, selected_grant == grant,
+                  data: { action: "toggle#update" } %>
+            <span><%= grant.tr("_", " ").titleize %></span>
+          </label>
+        <% end %>
+      </div>
+      <%= field_error(credential, :grant) %>
+
+      <div data-toggle-target="panel" data-toggle-key="client_credentials">
+        <p class="form-hint">Uses the client ID and client secret above to mint each access token. No refresh token is required.</p>
+      </div>
+
+      <div data-toggle-target="panel" data-toggle-key="refresh_token">
+        <label class="form-label" for="credential_refresh_token">Refresh Token</label>
+        <%= text_area_tag "credential[refresh_token]", nil, id: "credential_refresh_token", rows: 3, class: "form-input", autocomplete: "off", placeholder: credential.new_record? ? "initial refresh token for the loop" : "•••••••• (unchanged)" %>
+        <p class="form-hint">Write-only initial value, stored encrypted. Leave blank to keep the current token; entering a new one reschedules the credential and clears any dead state.</p>
+      </div>
+
+      <div data-toggle-target="panel" data-toggle-key="password" class="grid gap-5 sm:grid-cols-2">
+        <div>
+          <label class="form-label" for="credential_username">Username *</label>
+          <%= text_field_tag "credential[username]", nil, id: "credential_username", class: "form-input #{field_error_class(credential, :username)}", autocomplete: "off", placeholder: credential.new_record? ? nil : "•••••••• (unchanged)" %>
+          <%= field_error(credential, :username) %>
+          <p class="form-hint">Stored encrypted. Leave blank to keep the current username.</p>
+        </div>
+        <div>
+          <label class="form-label" for="credential_password">Password *</label>
+          <%= password_field_tag "credential[password]", nil, id: "credential_password", class: "form-input #{field_error_class(credential, :password)}", autocomplete: "off", placeholder: credential.new_record? ? nil : "•••••••• (unchanged)" %>
+          <%= field_error(credential, :password) %>
+          <p class="form-hint">Stored encrypted. Leave blank to keep the current password.</p>
+        </div>
+      </div>
+
+      <div data-toggle-target="panel" data-toggle-key="preqin" class="grid gap-5 sm:grid-cols-2">
+        <div>
+          <label class="form-label" for="credential_preqin_username">Username *</label>
+          <%= text_field_tag "credential[preqin_username]", nil, id: "credential_preqin_username", class: "form-input #{field_error_class(credential, :username)}", autocomplete: "off", placeholder: credential.new_record? ? nil : "•••••••• (unchanged)" %>
+          <%= field_error(credential, :username) %>
+          <p class="form-hint">Stored encrypted. Leave blank to keep the current username.</p>
+        </div>
+        <div>
+          <label class="form-label" for="credential_api_key">API key *</label>
+          <%= password_field_tag "credential[api_key]", nil, id: "credential_api_key", class: "form-input #{field_error_class(credential, :api_key)}", autocomplete: "off", placeholder: credential.new_record? ? nil : "•••••••• (unchanged)" %>
+          <%= field_error(credential, :api_key) %>
+          <p class="form-hint">Stored encrypted. Leave blank to keep the current API key.</p>
+        </div>
       </div>
     </section>
 

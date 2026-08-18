@@ -32,6 +32,7 @@ const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const INITIAL_BACKOFF: Duration = Duration::from_millis(50);
 const MAX_BACKOFF: Duration = Duration::from_secs(1);
 const MIN_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(500);
+const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const UNKNOWN_TASK_DEFER_BASE_SECONDS: u64 = 15;
 const UNKNOWN_TASK_DEFER_JITTER_SECONDS: u64 = 15;
 
@@ -998,12 +999,25 @@ impl Client {
             })
         };
 
-        let run_result = if let Some(hook) = &self.hooks.wrap_task_execution {
-            AssertUnwindSafe(hook(ctx.clone(), execute))
-                .catch_unwind()
-                .await
+        let execution = if let Some(hook) = &self.hooks.wrap_task_execution {
+            AssertUnwindSafe(hook(ctx.clone(), execute)).catch_unwind()
         } else {
-            AssertUnwindSafe(execute()).catch_unwind().await
+            AssertUnwindSafe(execute()).catch_unwind()
+        };
+        tokio::pin!(execution);
+        let cancellation = wait_for_run_cancellation(
+            self.pool.clone(),
+            self.queue_name.clone(),
+            task.run_id.clone(),
+        );
+        tokio::pin!(cancellation);
+
+        let run_result = tokio::select! {
+            result = &mut execution => result,
+            result = &mut cancellation => match result {
+                Ok(()) => Ok(Err(Error::Cancelled)),
+                Err(error) => Ok(Err(error)),
+            },
         };
 
         watchdog.stop();
@@ -1730,6 +1744,35 @@ async fn complete_task_run(
     Ok(())
 }
 
+async fn wait_for_run_cancellation(pool: PgPool, queue_name: String, run_id: String) -> Result<()> {
+    let queue_name = validate_queue_name(&queue_name)?;
+    let run_table = format!("r_{queue_name}");
+
+    loop {
+        sleep(CANCELLATION_POLL_INTERVAL).await;
+        let row = sqlx::query(&format!(
+            r#"
+            SELECT state
+            FROM absurd.{run_table}
+            WHERE run_id = $1::uuid
+            "#
+        ))
+        .bind(&run_id)
+        .fetch_optional(&pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Err(Error::TaskNotFound(run_id));
+        };
+        let state: String = row.try_get("state")?;
+        match state.as_str() {
+            "cancelled" => return Ok(()),
+            "failed" => return Err(Error::FailedRun),
+            _ => {}
+        }
+    }
+}
+
 async fn fail_task_run(
     pool: &PgPool,
     queue_name: &str,
@@ -1997,6 +2040,7 @@ mod tests {
         sync::OnceLock,
         time::{SystemTime, UNIX_EPOCH},
     };
+    use tokio::sync::Notify;
 
     fn schema_setup_lock() -> &'static tokio::sync::Mutex<()> {
         static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
@@ -2336,6 +2380,64 @@ mod tests {
         assert_eq!(retry_snapshot.result::<Value>()?, Some(json!({"ok": true})));
         assert_eq!(retry_calls.load(Ordering::SeqCst), 2);
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_cancelled_running_task_releases_worker_permit_when_database_url_is_set(
+    ) -> Result<()> {
+        let Some(pool) = optional_test_pool().await? else {
+            return Ok(());
+        };
+
+        let queue = unique_queue("rust_cancel_releases_permit");
+        let app = Client::from_pool_with_options(
+            pool,
+            ClientOptions {
+                queue_name: queue.clone(),
+                ..ClientOptions::default()
+            },
+        )?;
+        app.create_queue(None, Default::default()).await?;
+
+        let hanging_started = Arc::new(Notify::new());
+        app.register_task("hang", {
+            let hanging_started = hanging_started.clone();
+            move |_params: Value, _ctx| {
+                let hanging_started = hanging_started.clone();
+                async move {
+                    hanging_started.notify_one();
+                    std::future::pending::<Result<Value>>().await
+                }
+            }
+        })?;
+        app.register_task("quick", |_params: Value, _ctx| async move {
+            Ok(json!({"ok": true}))
+        })?;
+
+        let hanging = app.spawn("hang", json!({}), Default::default()).await?;
+        let worker = app.start_worker(WorkerOptions {
+            worker_id: Some("rust-cancel-release-worker".to_string()),
+            concurrency: 1,
+            poll_interval: Duration::from_millis(25),
+            fatal_on_lease_timeout: false,
+            ..WorkerOptions::default()
+        });
+        tokio::time::timeout(Duration::from_secs(2), hanging_started.notified())
+            .await
+            .map_err(|_| {
+                Error::Timeout("timed out waiting for hanging task to start".to_string())
+            })?;
+
+        app.cancel_task(&hanging.task_id, None).await?;
+
+        let quick = app.spawn("quick", json!({}), Default::default()).await?;
+        let snapshot = app
+            .await_task_result(&quick.task_id, None, Some(Duration::from_secs(2)))
+            .await?;
+        assert_eq!(snapshot.result::<Value>()?, Some(json!({"ok": true})));
+
+        drop(worker);
         Ok(())
     }
 }

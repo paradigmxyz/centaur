@@ -1,10 +1,15 @@
 import { describe, expect, it } from "bun:test";
+import type { Attachment } from "chat";
 import {
+  codexAttachmentInput,
   forwardToSessionApi,
   isContentlessApiMessage,
   isDiscordPermissionError,
   isRetryableSessionApiError,
+  MAX_INLINE_ATTACHMENT_BYTES,
+  serializeAttachment,
   SessionApiError,
+  toCodexInputLines,
 } from "../src/session-api";
 import type {
   DiscordbotApiMessage,
@@ -12,6 +17,12 @@ import type {
   DiscordbotOptions,
   ForwardSessionInput,
 } from "../src/types";
+
+type JsonRecord = Record<string, unknown>;
+
+function bytesResponse(body: Buffer): Response {
+  return new Response(new Uint8Array(body), { status: 200 });
+}
 
 function apiMessage(
   overrides: Partial<DiscordbotApiMessage> = {},
@@ -200,5 +211,171 @@ describe("isContentlessApiMessage", () => {
         apiMessage({ text: "", attachments: [{ type: "image" }] }),
       ),
     ).toBe(false);
+  });
+});
+
+describe("serializeAttachment", () => {
+  it("downloads the CDN url and inlines as base64 when the adapter supplies no bytes", async () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4]);
+    let requestedUrl: string | undefined;
+    const fetchFn = (async (url: string) => {
+      requestedUrl = url;
+      return bytesResponse(png);
+    }) as unknown as typeof fetch;
+    const attachment = {
+      type: "image",
+      url: "https://cdn.discordapp.com/attachments/1/2/image.png?ex=1&hm=2",
+      name: "image.png",
+      mimeType: "image/png",
+      size: png.length,
+    } as Attachment;
+
+    const result = await serializeAttachment(attachment, fetchFn);
+
+    expect(requestedUrl).toBe(attachment.url);
+    expect(result.dataBase64).toBe(png.toString("base64"));
+    expect(result.fetchError).toBeUndefined();
+  });
+
+  it("prefers adapter-provided bytes over a network fetch", async () => {
+    const data = Buffer.from("hello world");
+    let fetched = false;
+    const fetchFn = (async () => {
+      fetched = true;
+      return new Response("x", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const result = await serializeAttachment(
+      { type: "image", mimeType: "image/png", data } as Attachment,
+      fetchFn,
+    );
+
+    expect(fetched).toBe(false);
+    expect(result.dataBase64).toBe(data.toString("base64"));
+  });
+
+  it("skips the download and records fetchError when over the size limit", async () => {
+    const fetchFn = (async () => {
+      throw new Error("should not be called");
+    }) as unknown as typeof fetch;
+
+    const result = await serializeAttachment(
+      {
+        type: "image",
+        url: "https://cdn.discordapp.com/x.png",
+        size: MAX_INLINE_ATTACHMENT_BYTES + 1,
+      } as Attachment,
+      fetchFn,
+    );
+
+    expect(result.dataBase64).toBeUndefined();
+    expect(result.fetchError).toContain("too large");
+  });
+
+  it("records fetchError when the download fails", async () => {
+    const fetchFn = (async () =>
+      new Response("nope", {
+        status: 403,
+        statusText: "Forbidden",
+      })) as unknown as typeof fetch;
+
+    const result = await serializeAttachment(
+      {
+        type: "image",
+        url: "https://cdn.discordapp.com/x.png",
+        mimeType: "image/png",
+      } as Attachment,
+      fetchFn,
+    );
+
+    expect(result.dataBase64).toBeUndefined();
+    expect(result.fetchError).toContain("403");
+  });
+});
+
+describe("codexAttachmentInput", () => {
+  it("inlines an image with bytes as a data: URL, never a remote url", () => {
+    const out = codexAttachmentInput({
+      type: "image",
+      mimeType: "image/png",
+      dataBase64: "QUJD",
+      url: "https://cdn.discordapp.com/x.png",
+      name: "image.png",
+    }) as JsonRecord;
+    expect(out.type).toBe("image");
+    expect(out.url).toBe("data:image/png;base64,QUJD");
+  });
+
+  it("references a staged attachment id instead of inlining", () => {
+    const out = codexAttachmentInput(
+      { type: "image", mimeType: "image/png", dataBase64: "QUJD" },
+      "att-m1-1",
+    ) as JsonRecord;
+    expect(out).toMatchObject({
+      type: "attachment",
+      stagedAttachmentId: "att-m1-1",
+    });
+    expect(out.dataBase64).toBeUndefined();
+    expect(out.url).toBeUndefined();
+  });
+
+  it("falls back to the raw url only when no bytes are available", () => {
+    const out = codexAttachmentInput({
+      type: "image",
+      url: "https://cdn.discordapp.com/x.png",
+    }) as JsonRecord;
+    expect(out.url).toBe("https://cdn.discordapp.com/x.png");
+  });
+});
+
+describe("toCodexInputLines", () => {
+  it("inlines a small image in a single user line as a data: URL", () => {
+    const message = apiMessage({
+      attachments: [
+        {
+          type: "image",
+          mimeType: "image/png",
+          dataBase64: "QUJD",
+          name: "image.png",
+        },
+      ],
+    });
+
+    const lines = toCodexInputLines(message, message.threadId);
+
+    expect(lines).toHaveLength(1);
+    const content = JSON.parse(lines[0]!).message.content as JsonRecord[];
+    const image = content.find((part) => part.type === "image");
+    expect(image?.url).toBe("data:image/png;base64,QUJD");
+  });
+
+  it("stages a large image as chunk lines plus a referencing user line", () => {
+    const dataBase64 = Buffer.alloc(700 * 1024, 1).toString("base64");
+    const message = apiMessage({
+      attachments: [
+        {
+          type: "image",
+          mimeType: "image/png",
+          dataBase64,
+          name: "image.png",
+        },
+      ],
+    });
+
+    const lines = toCodexInputLines(message, message.threadId);
+
+    expect(lines.length).toBeGreaterThan(1);
+    const chunks = lines.slice(0, -1).map((line) => JSON.parse(line));
+    expect(chunks.every((c) => c.type === "attachment.chunk")).toBe(true);
+    expect(chunks.at(-1).final).toBe(true);
+    // The chunks must reassemble to the original base64 payload.
+    expect(chunks.map((c) => c.dataBase64).join("")).toBe(dataBase64);
+
+    const lastLine = lines[lines.length - 1]!;
+    const content = JSON.parse(lastLine).message.content as JsonRecord[];
+    const ref = content.find((part) => part.type === "attachment");
+    expect(ref?.stagedAttachmentId).toBe(chunks[0].attachmentId);
+    // The huge payload must NOT also be inlined in the user line.
+    expect(lastLine.length).toBeLessThan(dataBase64.length);
   });
 });
