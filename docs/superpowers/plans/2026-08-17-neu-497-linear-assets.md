@@ -160,4 +160,3 @@ The reviewer must trace the authenticated GraphQL request and bare PUT separatel
 - [ ] **Step 4: Record the live smoke as human input**
 
 Once the normal Centaur Linear credential is provisioned, upload one disposable PNG to NEU-497, add a disposable evidence comment, verify the asset resolves, and remove only the disposable comment if policy permits. Never paste the credential or signed URL into chat or a report.
-
