@@ -31,7 +31,9 @@ module Console
       params.require(:system_setting).permit(
         :default_sandbox_repo_cache,
         :default_sandbox_observability_enabled,
-        :default_sandbox_api_server_enabled
+        :default_sandbox_sessions_read_enabled,
+        :default_sandbox_workflows_read_enabled,
+        :default_sandbox_workflows_write_enabled
       )
     end
 

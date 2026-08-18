@@ -42,8 +42,10 @@ jobs:
   # Build each image with Depot's hosted builders, push by digest, and hand
   # the digests to the merge job below which assembles the multi-arch manifest.
   # arm64 is only built on pushes to main and release tags — PR and manual
-  # dispatch builds stay amd64-only to keep iteration fast.
+  # dispatch builds stay amd64-only to keep iteration fast. Fork PRs skip both
+  # jobs so untrusted changes do not run on the hosted image builders.
   build:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork }}
     runs-on: ${{ matrix.platform == 'linux/arm64' && 'depot-ubuntu-24.04-arm-16' || 'depot-ubuntu-24.04-16' }}
     strategy:
       fail-fast: false
@@ -140,8 +142,8 @@ jobs:
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           # Tags are applied by the merge job on the multi-arch manifest;
-          # per-arch builds are pushed by digest only. Fork PRs run with a
-          # read-only GITHUB_TOKEN, so they build without pushing.
+          # per-arch builds are pushed by digest only. The fork check is also
+          # enforced at the job level so external PRs do not build.
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=${{ !github.event.pull_request.head.repo.fork }}
           build-args: |
             RUST_BUILD_PROFILE=${{ env.RUST_BUILD_PROFILE }}
@@ -165,7 +167,7 @@ jobs:
   merge:
     runs-on: depot-ubuntu-24.04-16
     needs: build
-    if: ${{ !github.event.pull_request.head.repo.fork }}
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork }}
     strategy:
       fail-fast: false
       matrix:

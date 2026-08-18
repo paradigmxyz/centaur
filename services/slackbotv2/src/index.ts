@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { Buffer } from 'node:buffer'
 import { randomUUID } from 'node:crypto'
 import { Hono, type Context } from 'hono'
 import {
@@ -398,14 +399,19 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     const route = c.req.path
     const rawBody = await c.req.raw.clone().text()
     const eventType = slackWebhookEventType(rawBody)
+    const webhookFields = slackWebhookLogFields(rawBody)
     let outcome = 'success'
     try {
+      traceLog(options, 'slackbotv2_webhook_received', undefined, {
+        body_bytes: Buffer.byteLength(rawBody, 'utf8'),
+        route,
+        ...webhookFields
+      })
       if (!isAllowedSlackWebhookBody(rawBody, options, logger)) {
         outcome = 'ignored'
         return new globalThis.Response('ok', { status: 200 })
       }
       const awaitHandoff = shouldAwaitSlackHandoff(rawBody)
-      const webhookFields = slackWebhookLogFields(rawBody)
       const handoffTasks: Promise<unknown>[] = []
       const context: SlackbotV2RequestContext = {
         waitUntil: promise => waitUntil(c, promise)
@@ -3064,6 +3070,7 @@ function slackWebhookLogFields(rawBody: string): JsonObject {
   const payload = parseSlackWebhookPayload(rawBody)
   if (!payload) return { slack_payload_parse_error: true }
   const event = isJsonObject(payload.event) ? payload.event : {}
+  const eventChannel = isJsonObject(event.channel) ? event.channel : {}
   const team = isJsonObject(payload.team) ? payload.team : {}
   const channel = isJsonObject(payload.channel) ? payload.channel : {}
   const message = isJsonObject(payload.message) ? payload.message : {}
@@ -3073,7 +3080,11 @@ function slackWebhookLogFields(rawBody: string): JsonObject {
   setStringField(fields, 'slack_event_id', payload.event_id)
   setStringField(fields, 'slack_event_type', event.type ?? payload.type)
   setStringField(fields, 'slack_action_id', action?.action_id)
-  setStringField(fields, 'slack_channel', event.channel ?? channel.id ?? container.channel_id)
+  setStringField(
+    fields,
+    'slack_channel',
+    stringValue(event.channel) ?? eventChannel.id ?? channel.id ?? container.channel_id
+  )
   setStringField(fields, 'slack_message_ts', event.ts ?? message.ts ?? container.message_ts)
   setStringField(
     fields,

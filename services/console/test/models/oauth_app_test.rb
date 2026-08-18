@@ -73,6 +73,24 @@ class OauthAppTest < ActiveSupport::TestCase
     refute app.scopes_allowed?(%w[a z])
   end
 
+  test "Slack credentials missing the provider-required search scope need reconnecting" do
+    app = build_app(provider: "slack", allowed_scopes: %w[chat:write])
+    app.save!
+    credential = BrokerCredential.create!(
+      oauth_app: app,
+      foreign_id: "slack-user-#{SecureRandom.hex(4)}",
+      token_endpoint: "https://slack.com/api/oauth.v2.access",
+      provider_subject: "U123",
+      scopes: %w[chat:write]
+    )
+
+    assert_equal %w[search:read], app.required_scopes
+    assert app.credential_needs_reconnect?(credential)
+
+    credential.update!(scopes: %w[chat:write search:read])
+    refute app.credential_needs_reconnect?(credential)
+  end
+
   # --- delete guard ---------------------------------------------------------
 
   test "cannot be destroyed while it has minted credentials" do

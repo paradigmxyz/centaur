@@ -891,6 +891,15 @@ def test_upsert_messages_batches_writes_in_one_executemany():
     assert message_calls[0][1][1][0:2] == ("C123", "1770000000.000400")
 
 
+def test_message_upsert_only_updates_timestamp_when_content_changes():
+    assert (
+        "updated_at = CASE WHEN slack_sync_messages.raw_payload "
+        "IS DISTINCT FROM EXCLUDED.raw_payload "
+        "THEN NOW() ELSE slack_sync_messages.updated_at END"
+        in shared._MESSAGE_UPSERT_SQL
+    )
+
+
 def test_upsert_messages_dedupes_duplicate_message_keys_last_row_wins():
     conn = FakeConn()
     pool = FakePool(conn)

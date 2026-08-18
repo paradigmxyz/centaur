@@ -2,6 +2,7 @@ export {
   CodexAppServerRendererEventMapper,
   codexAppServerToChatSdkStream,
   codexAppServerToRendererEvents,
+  isRetryableCodexErrorNotification,
   isTerminalCodexAppServerEvent,
   rustSessionEventToServerNotification
 } from './codex-app-server'

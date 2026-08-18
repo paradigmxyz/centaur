@@ -1,13 +1,12 @@
-require "digest"
-
 module Oauth
   module Providers
     # GitHub OAuth App consent-flow strategy. GitHub's OAuth App token response
-    # carries the access token and scopes but no account identity. To keep the
-    # callback path free of external API calls, the flow stores a deterministic
-    # pending identity derived from the token and EnrichGithubCredentialIdentityJob
-    # replaces it with the authenticated GitHub user id/name/email.
+    # carries the access token and scopes but no account identity. Resolve the
+    # authenticated user synchronously so the callback can upsert by the stable
+    # GitHub user id instead of creating a token-derived pending credential.
     class Github
+      include HttpIdentity
+
       KEY = "github"
       AUTHORIZATION_ENDPOINT = "https://github.com/login/oauth/authorize"
       TOKEN_ENDPOINT = "https://github.com/login/oauth/access_token"
@@ -32,16 +31,32 @@ module Oauth
 
       def refresh_scopes(_scopes) = []
 
-      def identity_from(result, client_id:)
+      def identity_from(result, client_id:, http_client: HttpClient.new)
         if result.access_token.blank?
           raise Broker::ExchangeError.new("token response returned an empty access_token",
                                           stage: "parse", code: "missing_access_token")
         end
 
+        response = identity_response(provider: display_name) do
+          http_client.get(
+            USER_ENDPOINT,
+            headers: {
+              "Accept" => "application/vnd.github+json",
+              "Authorization" => "Bearer #{result.access_token}",
+              "X-GitHub-Api-Version" => "2022-11-28",
+              "User-Agent" => "centaur-console"
+            }
+          )
+        end
+        profile = identity_json(response, provider: display_name)
+        subject = require_identity(profile["id"], provider: display_name).to_s
+        login = require_identity(profile["login"], provider: display_name).to_s
+
         {
-          subject: "pending-#{Digest::SHA256.hexdigest(result.access_token)[0, 32]}",
-          email: nil,
-          name: "Pending GitHub account"
+          subject: subject,
+          email: profile["email"].presence,
+          name: profile["name"].presence || login,
+          labels: { "github_login" => login }
         }
       end
     end

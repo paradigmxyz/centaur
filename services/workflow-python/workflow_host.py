@@ -356,9 +356,14 @@ def normalize_schedule(workflow: RegisteredWorkflow) -> dict[str, Any] | None:
     return schedule
 
 
-def normalize_principal(workflow: RegisteredWorkflow) -> bool | None:
+def normalize_principal(workflow: RegisteredWorkflow) -> bool | str | None:
     raw = workflow.principal
-    return raw if isinstance(raw, bool) and raw else None
+    if isinstance(raw, bool):
+        return raw or None
+    if isinstance(raw, str):
+        foreign_id = raw.strip()
+        return foreign_id or None
+    return None
 
 
 async def run_workflow(message: dict[str, Any], rpc: RpcClient) -> dict[str, Any]:

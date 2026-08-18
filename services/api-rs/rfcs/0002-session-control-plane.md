@@ -229,9 +229,11 @@ that should be written to the sandbox.
 POST /api/session/{thread_key}/execute
 ```
 
-Requests one execution of the session. The API serializes executions per
-session, ensures there is a usable current sandbox, writes caller-supplied input
-lines to sandbox stdin, and stores each stdout line as a durable session event.
+Requests one execution of the session. The API validates and durably stores the
+complete request with a queued execution before responding. A background driver
+serializes executions per session, ensures there is a usable current sandbox,
+writes caller-supplied input lines to sandbox stdin, and stores each stdout line
+as a durable session event.
 
 The API is deliberately oblivious to the producer/consumer format. Codex
 app-server JSONL, Anthropic-shaped turns, or any future protocol are just opaque
@@ -265,7 +267,11 @@ Example response:
 
 Execution rules:
 
+- A successful response means the opaque execution request is committed in
+  Postgres and can be replayed after a control-plane restart.
 - Only one execution may run for a session at a time.
+- Queued executions are claimed atomically, so the accepting process and the
+  recovery scanner may safely race without writing the input twice.
 - If no sandbox is assigned, the API creates one and stores its `sandbox_id`.
 - If the assigned sandbox is gone, the API replaces it and overwrites
   `sandbox_id`.
@@ -347,7 +353,9 @@ Internally, execution follows this shape:
 
 ```text
 load session
-claim session execution lock
+persist queued execution and opaque input_lines
+return execution_id to caller
+claim queued execution in background
 ensure current sandbox exists
 write request input_lines to sandbox stdin
 persist stdout lines as session.output.line events

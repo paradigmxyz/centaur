@@ -12,7 +12,7 @@ SANDBOX_SKILLS_PATH = "/api/v1/sandbox/skills"
 
 
 class SkillsClient:
-    """Read Console skills visible to the current sandbox principal."""
+    """Read and author Console skills for the current sandbox principal."""
 
     def __init__(
         self,
@@ -30,7 +30,11 @@ class SkillsClient:
     @property
     def base_url(self) -> str:
         # Non-secret endpoint config. Sandboxes receive this from api-rs.
-        url = (self._url or os.getenv("CENTAUR_CONSOLE_URL", "http://centaur-console:3000")).strip().rstrip("/")  # noqa: TID251
+        url = (
+            (self._url or os.getenv("CENTAUR_CONSOLE_URL", "http://centaur-console:3000"))  # noqa: TID251
+            .strip()
+            .rstrip("/")
+        )
         if url and not url.startswith(("http://", "https://")):
             url = f"http://{url}"
         return url
@@ -82,19 +86,109 @@ class SkillsClient:
             raise RuntimeError("centaur-skills response did not include a data object")
         return result
 
+    def create(self, name: str, description: str, instructions: str) -> dict[str, Any]:
+        """Create a shared Console skill owned by the current Console user."""
+        result = self._request(
+            SANDBOX_SKILLS_PATH,
+            method="POST",
+            json={
+                "data": {
+                    "name": name,
+                    "description": description,
+                    "instructions": instructions,
+                }
+            },
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError("centaur-skills response did not include a data object")
+        return result
+
+    def edit(
+        self,
+        identifier: str,
+        name: str | None = None,
+        description: str | None = None,
+        instructions: str | None = None,
+        lock_version: int | None = None,
+    ) -> dict[str, Any]:
+        """Edit an owned or editable Console skill by OID."""
+        attributes: dict[str, str | int] = {}
+        if name is not None:
+            attributes["name"] = name
+        if description is not None:
+            attributes["description"] = description
+        if instructions is not None:
+            attributes["instructions"] = instructions
+        if not attributes:
+            raise ValueError("at least one skill field must be provided")
+        if lock_version is not None:
+            attributes["lock_version"] = lock_version
+
+        result = self._request(
+            f"{SANDBOX_SKILLS_PATH}/{quote(identifier, safe='')}",
+            method="PATCH",
+            json={"data": attributes},
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError("centaur-skills response did not include a data object")
+        return result
+
+    def delete(self, identifier: str) -> None:
+        """Archive an owned Console skill by OID."""
+        self._request(
+            f"{SANDBOX_SKILLS_PATH}/{quote(identifier, safe='')}",
+            method="DELETE",
+        )
+
+    def list_editors(self, identifier: str) -> dict[str, Any]:
+        """List editors for a visible Console skill by exact name or OID."""
+        result = self._request(
+            f"{SANDBOX_SKILLS_PATH}/{quote(identifier, safe='')}/editors"
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError("centaur-skills response did not include a data object")
+        return result
+
+    def add_editor(self, identifier: str, user: str) -> dict[str, Any]:
+        """Add an editor to an owned skill by exact email or Console user OID."""
+        return self._manage_editor(identifier, user, method="POST")
+
+    def remove_editor(self, identifier: str, user: str) -> dict[str, Any]:
+        """Remove an editor from an owned skill by exact email or Console user OID."""
+        return self._manage_editor(identifier, user, method="DELETE")
+
+    def _manage_editor(self, identifier: str, user: str, *, method: str) -> dict[str, Any]:
+        normalized_user = user.strip()
+        if not normalized_user:
+            raise ValueError("user email or OID must not be empty")
+
+        result = self._request(
+            f"{SANDBOX_SKILLS_PATH}/{quote(identifier, safe='')}/editors",
+            method=method,
+            json={"data": {"user": normalized_user}},
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError("centaur-skills response did not include a data object")
+        return result
+
     def _request(
         self,
         path: str,
+        method: str = "GET",
         params: dict[str, str | int] | None = None,
-    ) -> dict[str, Any] | list[dict[str, Any]]:
-        response = self.client.get(path, params=params)
+        json: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | list[dict[str, Any]] | None:
         try:
+            response = self.client.request(method, path, params=params, json=json)
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             detail = _response_error_detail(exc.response)
             raise RuntimeError(f"centaur-skills request failed: {detail}") from exc
         except httpx.RequestError as exc:
             raise RuntimeError(f"centaur-skills request failed: {exc}") from exc
+
+        if not response.content:
+            return None
 
         payload = response.json()
         data = payload.get("data")

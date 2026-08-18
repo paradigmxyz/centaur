@@ -26,7 +26,9 @@ module Console
       assert_select ".console-control-tab-active", text: "Settings"
       assert_select "select[name='system_setting[default_sandbox_repo_cache]']"
       assert_select "input[name='system_setting[default_sandbox_observability_enabled]']"
-      assert_select "input[name='system_setting[default_sandbox_api_server_enabled]']"
+      assert_select "input[name='system_setting[default_sandbox_sessions_read_enabled]']"
+      assert_select "input[name='system_setting[default_sandbox_workflows_read_enabled]']"
+      assert_select "input[name='system_setting[default_sandbox_workflows_write_enabled]']"
       assert_select "input[name='system_setting[default_role_ids][]'][value=?]", roles(:acme_infra).id.to_s
     end
 
@@ -38,7 +40,9 @@ module Console
               system_setting: {
                 default_sandbox_repo_cache: "public",
                 default_sandbox_observability_enabled: "0",
-                default_sandbox_api_server_enabled: "0",
+                default_sandbox_sessions_read_enabled: "0",
+                default_sandbox_workflows_read_enabled: "0",
+                default_sandbox_workflows_write_enabled: "0",
                 default_role_ids: [ roles(:acme_infra).id, roles(:globex_infra).id ]
               }
             }
@@ -48,7 +52,9 @@ module Console
       settings = system_settings(:default).reload
       assert_equal "public", settings.default_sandbox_repo_cache
       assert_equal false, settings.default_sandbox_observability_enabled
-      assert_equal false, settings.default_sandbox_api_server_enabled
+      assert_equal false, settings.default_sandbox_sessions_read_enabled
+      assert_equal false, settings.default_sandbox_workflows_read_enabled
+      assert_equal false, settings.default_sandbox_workflows_write_enabled
       assert_predicate roles(:acme_infra).reload, :assign_by_default?
       assert_predicate roles(:globex_infra).reload, :assign_by_default?
       assert_not roles(:default_infra).reload.assign_by_default?

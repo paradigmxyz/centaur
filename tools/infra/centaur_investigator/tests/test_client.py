@@ -12,9 +12,36 @@ import client as centaur_client
 from client import (
     CentaurInvestigatorClient,
     _database_url_with_name,
+    _record_to_dict,
     _postgres_database_name,
     parse_slack_reference,
 )
+
+
+class _FakeRecord:
+    """Match asyncpg.Record: iteration yields values while keys() yields column names."""
+
+    def __init__(self, **values) -> None:
+        self._values = values
+
+    def __iter__(self):
+        return iter(self._values.values())
+
+    def keys(self):
+        return self._values.keys()
+
+    def __getitem__(self, key):
+        return self._values[key]
+
+
+def test_record_to_dict_uses_asyncpg_record_column_names() -> None:
+    created_at = dt.datetime(2026, 8, 11, 12, 0, tzinfo=dt.UTC)
+    row = _FakeRecord(thread_key="slack:C123:123.456", created_at=created_at)
+
+    assert _record_to_dict(row) == {
+        "thread_key": "slack:C123:123.456",
+        "created_at": created_at.isoformat(),
+    }
 
 
 def test_database_url_with_name_appends_database_to_base_dsn() -> None:

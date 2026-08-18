@@ -377,14 +377,40 @@ async fn mcp_centaur_tool_result(
             true,
         ));
     }
-    run_tool_host_centaur_tool(
-        state.runtime()?,
-        principal,
-        &tool,
-        &method,
-        params.arguments,
-    )
-    .await
+    let arguments = match normalize_centaur_tool_arguments(params.arguments) {
+        Ok(arguments) => arguments,
+        Err(kind) => {
+            return Ok(mcp_text_result(
+                format!(
+                    "centaur tool {}.{method} arguments must be an object; got {kind}",
+                    tool.name
+                ),
+                true,
+            ));
+        }
+    };
+    run_tool_host_centaur_tool(state.runtime()?, principal, &tool, &method, arguments).await
+}
+
+fn normalize_centaur_tool_arguments(arguments: Value) -> Result<Value, &'static str> {
+    if arguments.is_null() {
+        return Ok(json!({}));
+    }
+    if arguments.is_object() {
+        return Ok(arguments);
+    }
+    Err(json_type_name(&arguments))
+}
+
+fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 async fn run_tool_host_centaur_tool(
@@ -982,7 +1008,7 @@ def search(query, limit=20):
         .unwrap();
 
         let result = mcp_centaur_tool_result(
-            &AppState::unready(),
+            &AppState::unready(crate::ApiAuthConfig::testing("test-secret")),
             &McpPrincipal {
                 principal_id: "mcp:test".to_owned(),
                 token_id: "mcp_tok_test".to_owned(),
@@ -1011,7 +1037,7 @@ def search(query, limit=20):
         fs::write(temp.join("client.py"), "def _hidden():\n    return None\n").unwrap();
 
         let result = mcp_centaur_tool_result(
-            &AppState::unready(),
+            &AppState::unready(crate::ApiAuthConfig::testing("test-secret")),
             &McpPrincipal {
                 principal_id: "mcp:test".to_owned(),
                 token_id: "mcp_tok_test".to_owned(),
@@ -1030,6 +1056,58 @@ def search(query, limit=20):
         assert!(text.contains("has no method missing"));
 
         let _ = fs::remove_dir_all(temp);
+    }
+
+    #[tokio::test]
+    async fn mcp_tool_arguments_must_be_an_object_before_running_sandbox() {
+        let temp = temp_dir("centaur-api-rs-mcp-arguments-object");
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(
+            temp.join("client.py"),
+            r#"
+def search(query, limit=20):
+    return []
+"#,
+        )
+        .unwrap();
+
+        let result = mcp_centaur_tool_result(
+            &AppState::unready(crate::ApiAuthConfig::testing("test-secret")),
+            &McpPrincipal {
+                principal_id: "mcp:test".to_owned(),
+                token_id: "mcp_tok_test".to_owned(),
+                name: "test".to_owned(),
+                scopes: vec!["mcp:tools".to_owned()],
+                expires_at: None,
+            },
+            test_tool(temp.clone()),
+            json!({"method": "search", "arguments": ["not", "an", "object"]}),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("arguments must be an object"));
+        assert!(text.contains("demo.search"));
+
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn mcp_tool_arguments_default_to_empty_object() {
+        assert_eq!(
+            normalize_centaur_tool_arguments(Value::Null).unwrap(),
+            json!({})
+        );
+        assert_eq!(
+            normalize_centaur_tool_arguments(json!({"query": "hello"})).unwrap(),
+            json!({"query": "hello"})
+        );
+        assert_eq!(
+            normalize_centaur_tool_arguments(json!(["not", "object"])).unwrap_err(),
+            "array"
+        );
     }
 
     #[test]

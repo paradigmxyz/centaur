@@ -41,7 +41,7 @@ module Api
         refute data.key?("namespace")
         assert_equal principal.oid, data["id"]
         assert_equal "C0123456789", data["foreign_id"]
-        %w[kind slack_user_id slack_channel_id slack_team_id slack_email console_user_id console_user_email].each do |field|
+        %w[kind slack_user_id slack_channel_id slack_team_id slack_email console_user_id].each do |field|
           assert_not data.key?(field)
         end
         assert_equal(
@@ -54,7 +54,9 @@ module Api
         assert_equal "all", data["sandbox_repo_cache"]
         assert_not data.key?("sandbox_repo_cache_enabled")
         assert_equal true, data["sandbox_observability_enabled"]
-        assert_equal true, data["sandbox_api_server_enabled"]
+        assert_equal false, data["sandbox_sessions_read_enabled"]
+        assert_equal false, data["sandbox_workflows_read_enabled"]
+        assert_equal false, data["sandbox_workflows_write_enabled"]
       end
 
       test "GET returns 404 for an unknown oid" do
@@ -115,7 +117,9 @@ module Api
         assert_equal "all", data["sandbox_repo_cache"]
         assert_not data.key?("sandbox_repo_cache_enabled")
         assert_equal true, data["sandbox_observability_enabled"]
-        assert_equal true, data["sandbox_api_server_enabled"]
+        assert_equal false, data["sandbox_sessions_read_enabled"]
+        assert_equal false, data["sandbox_workflows_read_enabled"]
+        assert_equal false, data["sandbox_workflows_write_enabled"]
       end
 
       test "POST preserves a label named namespace" do
@@ -138,7 +142,9 @@ module Api
         system_settings(:default).update!(
           default_sandbox_repo_cache: "public",
           default_sandbox_observability_enabled: false,
-          default_sandbox_api_server_enabled: false
+          default_sandbox_sessions_read_enabled: true,
+          default_sandbox_workflows_read_enabled: true,
+          default_sandbox_workflows_write_enabled: true
         )
         body = {
           data: {
@@ -152,7 +158,9 @@ module Api
         data = json_body.fetch("data")
         assert_equal "public", data["sandbox_repo_cache"]
         assert_equal false, data["sandbox_observability_enabled"]
-        assert_equal false, data["sandbox_api_server_enabled"]
+        assert_equal true, data["sandbox_sessions_read_enabled"]
+        assert_equal true, data["sandbox_workflows_read_enabled"]
+        assert_equal true, data["sandbox_workflows_write_enabled"]
       end
 
       test "POST applies all configured default roles" do
@@ -173,14 +181,18 @@ module Api
         system_settings(:default).update!(
           default_sandbox_repo_cache: "none",
           default_sandbox_observability_enabled: false,
-          default_sandbox_api_server_enabled: false
+          default_sandbox_sessions_read_enabled: false,
+          default_sandbox_workflows_read_enabled: false,
+          default_sandbox_workflows_write_enabled: false
         )
         body = {
           data: {
             foreign_id: "U-explicit-capabilities",
             sandbox_repo_cache: "all",
             sandbox_observability_enabled: true,
-            sandbox_api_server_enabled: true
+            sandbox_sessions_read_enabled: true,
+            sandbox_workflows_read_enabled: true,
+            sandbox_workflows_write_enabled: true
           }
         }
 
@@ -190,7 +202,9 @@ module Api
         data = json_body.fetch("data")
         assert_equal "all", data["sandbox_repo_cache"]
         assert_equal true, data["sandbox_observability_enabled"]
-        assert_equal true, data["sandbox_api_server_enabled"]
+        assert_equal true, data["sandbox_sessions_read_enabled"]
+        assert_equal true, data["sandbox_workflows_read_enabled"]
+        assert_equal true, data["sandbox_workflows_write_enabled"]
       end
 
       test "POST overwrites explicit repo-cache label with system default" do
@@ -252,7 +266,9 @@ module Api
         principal.update!(
           sandbox_repo_cache: "none",
           sandbox_observability_enabled: false,
-          sandbox_api_server_enabled: false
+          sandbox_sessions_read_enabled: false,
+          sandbox_workflows_read_enabled: false,
+          sandbox_workflows_write_enabled: false
         )
         body = { data: { name: "Acme Slack channel" } }
 
@@ -263,7 +279,9 @@ module Api
         assert_equal "Acme Slack channel", principal.name
         assert_equal "none", principal.sandbox_repo_cache
         assert_equal false, principal.sandbox_observability_enabled
-        assert_equal false, principal.sandbox_api_server_enabled
+        assert_equal false, principal.sandbox_sessions_read_enabled
+        assert_equal false, principal.sandbox_workflows_read_enabled
+        assert_equal false, principal.sandbox_workflows_write_enabled
       end
 
       test "PUT updates sandbox access flags" do
@@ -272,7 +290,9 @@ module Api
           data: {
             sandbox_repo_cache: "public",
             sandbox_observability_enabled: false,
-            sandbox_api_server_enabled: false
+            sandbox_sessions_read_enabled: false,
+            sandbox_workflows_read_enabled: false,
+            sandbox_workflows_write_enabled: false
           }
         }
 
@@ -282,13 +302,17 @@ module Api
         principal.reload
         assert_equal "public", principal.sandbox_repo_cache
         assert_equal false, principal.sandbox_observability_enabled
-        assert_equal false, principal.sandbox_api_server_enabled
+        assert_equal false, principal.sandbox_sessions_read_enabled
+        assert_equal false, principal.sandbox_workflows_read_enabled
+        assert_equal false, principal.sandbox_workflows_write_enabled
 
         data = json_body.fetch("data")
         assert_equal "public", data["sandbox_repo_cache"]
         assert_not data.key?("sandbox_repo_cache_enabled")
         assert_equal false, data["sandbox_observability_enabled"]
-        assert_equal false, data["sandbox_api_server_enabled"]
+        assert_equal false, data["sandbox_sessions_read_enabled"]
+        assert_equal false, data["sandbox_workflows_read_enabled"]
+        assert_equal false, data["sandbox_workflows_write_enabled"]
       end
 
       test "POST returns 422 when foreign_id already exists" do
@@ -329,9 +353,149 @@ module Api
         assert_equal "T0123456789", principal.slack_team_id
         assert_equal "ada@example.com", principal.slack_email
         assert_equal "centaur", principal.labels["managed-by"]
-        %w[kind slack_user_id slack_channel_id slack_team_id slack_email console_user_id console_user_email].each do |field|
+        %w[kind slack_user_id slack_channel_id slack_team_id slack_email console_user_id].each do |field|
           assert_not json_body.fetch("data").key?(field)
         end
+      end
+
+      test "POST links a Slack DM principal to the Console user with the same email" do
+        user = users(:member_user)
+
+        post api_v1_principals_url,
+             params: {
+               data: {
+                 foreign_id: "linked-slack-dm",
+                 kind: "slack_dm",
+                 slack_user_id: "U0123456789",
+                 slack_team_id: "T0123456789",
+                 slack_email: user.email.upcase
+               }
+             }.to_json,
+             headers: auth_headers
+
+        assert_response :created
+        principal = Principal.find_by!(foreign_id: "linked-slack-dm")
+        assert_equal user, principal.console_user
+      end
+
+      test "POST leaves a Slack DM unlinked when no Console user has the supplied email" do
+        email = "missing-console-user@example.com"
+
+        post api_v1_principals_url,
+             params: {
+               data: {
+                 foreign_id: "unmatched-slack-dm",
+                 kind: "slack_dm",
+                 slack_user_id: "U1123456789",
+                 slack_team_id: "T1123456789",
+                 slack_email: email
+               }
+             }.to_json,
+             headers: auth_headers
+
+        assert_response :created
+        principal = Principal.find_by!(foreign_id: "unmatched-slack-dm")
+        assert_equal email, principal.slack_email
+        assert_nil principal.console_user
+      end
+
+      test "PUT links an existing Slack DM when the trusted email is supplied again" do
+        user = users(:member_user)
+        principal = Principal.create!(
+          foreign_id: "existing-unlinked-slack-dm",
+          kind: "slack_dm",
+          slack_email: user.email,
+          created_by: users(:acme_admin)
+        )
+
+        put api_v1_principal_url(id: principal.oid),
+            params: { data: { slack_email: user.email } }.to_json,
+            headers: auth_headers
+
+        assert_response :ok
+        assert_equal user, principal.reload.console_user
+      end
+
+      test "PUT relinks a Slack DM when its trusted email changes to another Console user" do
+        first_user = users(:member_user)
+        second_user = users(:globex_admin)
+
+        post api_v1_principals_url,
+             params: {
+               data: {
+                 foreign_id: "relinked-slack-dm",
+                 kind: "slack_dm",
+                 slack_user_id: "U2123456789",
+                 slack_team_id: "T2123456789",
+                 slack_email: first_user.email
+               }
+             }.to_json,
+             headers: auth_headers
+        assert_response :created
+        principal = Principal.find_by!(foreign_id: "relinked-slack-dm")
+        assert_equal first_user, principal.console_user
+
+        put api_v1_principal_url(id: principal.oid),
+            params: { data: { slack_email: second_user.email } }.to_json,
+            headers: auth_headers
+
+        assert_response :ok
+        assert_equal second_user, principal.reload.console_user
+      end
+
+      test "PUT unlinks a Slack DM when its trusted email no longer matches a Console user" do
+        user = users(:member_user)
+        principal = Principal.create!(
+          foreign_id: "formerly-linked-slack-dm",
+          kind: "slack_dm",
+          slack_email: user.email,
+          console_user: user,
+          created_by: users(:acme_admin)
+        )
+
+        put api_v1_principal_url(id: principal.oid),
+            params: { data: { slack_email: "unmatched-new-email@example.com" } }.to_json,
+            headers: auth_headers
+
+        assert_response :ok
+        principal.reload
+        assert_equal "unmatched-new-email@example.com", principal.slack_email
+        assert_nil principal.console_user
+      end
+
+      test "PUT does not link from a stored Slack email when the request omits it" do
+        user = users(:member_user)
+        principal = Principal.create!(
+          foreign_id: "untrusted-stored-slack-email",
+          kind: "slack_dm",
+          slack_email: user.email,
+          created_by: users(:acme_admin)
+        )
+
+        put api_v1_principal_url(id: principal.oid),
+            params: { data: { name: "External Slack DM" } }.to_json,
+            headers: auth_headers
+
+        assert_response :ok
+        assert_nil principal.reload.console_user
+      end
+
+      test "POST does not link a non-DM principal by Slack email" do
+        user = users(:member_user)
+
+        post api_v1_principals_url,
+             params: {
+               data: {
+                 foreign_id: "channel-with-user-email",
+                 kind: "slack_channel",
+                 slack_email: user.email
+               }
+             }.to_json,
+             headers: auth_headers
+
+        assert_response :created
+        principal = Principal.find_by!(foreign_id: "channel-with-user-email")
+        assert_nil principal.console_user
       end
 
       test "POST keeps identity-named labels separate from first-class fields" do
@@ -343,7 +507,6 @@ module Api
                  foreign_id: "matching-console-user-identity",
                  kind: "console_user",
                  console_user_id: user.id,
-                 console_user_email: user.email,
                  labels: {
                    "kind" => "custom",
                    "console-user-id" => "custom-user",
@@ -357,7 +520,6 @@ module Api
         assert_response :created
         principal = Principal.find_by!(foreign_id: "matching-console-user-identity")
         assert_equal user.id, principal.console_user_id
-        assert_equal user.email, principal.console_user_email
         assert_equal "centaur", principal.labels["managed-by"]
         assert_equal "custom", principal.labels["kind"]
         assert_equal "custom-user", principal.labels["console-user-id"]
@@ -863,7 +1025,9 @@ module Api
         system_settings(:default).update!(
           default_sandbox_repo_cache: "public",
           default_sandbox_observability_enabled: false,
-          default_sandbox_api_server_enabled: false
+          default_sandbox_sessions_read_enabled: false,
+          default_sandbox_workflows_read_enabled: false,
+          default_sandbox_workflows_write_enabled: false
         )
         body = { data: { name: "Upserted" } }
         assert_difference -> { Principal.count } => 1 do
@@ -876,7 +1040,9 @@ module Api
         assert_equal "Upserted", data["name"]
         assert_equal "public", data["sandbox_repo_cache"]
         assert_equal false, data["sandbox_observability_enabled"]
-        assert_equal false, data["sandbox_api_server_enabled"]
+        assert_equal false, data["sandbox_sessions_read_enabled"]
+        assert_equal false, data["sandbox_workflows_read_enabled"]
+        assert_equal false, data["sandbox_workflows_write_enabled"]
       end
 
       test "PUT by foreign_id updates an existing principal without creating" do
@@ -951,7 +1117,6 @@ module Api
           foreign_id: "console-user-admin",
           kind: "console_user",
           console_user_id: user.id,
-          console_user_email: user.email,
           labels: {
             "kind" => "custom",
             "console-user-id" => "custom-user",

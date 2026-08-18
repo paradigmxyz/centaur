@@ -776,6 +776,7 @@ describe('slackbotv2', () => {
     expect(
       await sharedState.get<Record<string, unknown>>(`thread-state:${threadKey(parent.ts)}`)
     ).toEqual(expect.objectContaining({ model: null }))
+    expect(await threadText(parent.ts)).toContain("The requested model '5.6-sol' does not exist.")
 
     await runTurn(
       'Ev-after-invalid-sticky-model',

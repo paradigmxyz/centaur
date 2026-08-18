@@ -107,6 +107,9 @@ console:
   # When set, the slackbotv2 deployment also links the first assistant message
   # in a Slack thread to the Console session view; leave empty to omit the link.
   publicUrl: ""
+  # Optional Sentry DSN for Console web requests and background jobs. Empty by
+  # default, so the Sentry SDK remains disabled unless explicitly configured.
+  sentryDsn: ""
   # Break-glass email/password login. Disable when console is reachable from
   # the public internet and SSO is configured.
   passwordLoginEnabled: true

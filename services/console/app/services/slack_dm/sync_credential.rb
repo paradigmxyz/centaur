@@ -12,6 +12,7 @@ module SlackDm
     CONVERSATIONS_MEMBERS_ENDPOINT = "https://slack.com/api/conversations.members"
     CONVERSATIONS_HISTORY_ENDPOINT = "https://slack.com/api/conversations.history"
     CONVERSATIONS_REPLIES_ENDPOINT = "https://slack.com/api/conversations.replies"
+    API_READ_TIMEOUT_SECONDS = 120
 
     SlackApiError = Class.new(StandardError)
     class RateLimitedError < SlackApiError
@@ -44,9 +45,9 @@ module SlackDm
       end
     end
 
-    def initialize(credential, api_client: CentaurApiClient.new, slack_api_http: nil, http_client: nil)
+    def initialize(credential, api_client: nil, slack_api_http: nil, http_client: nil)
       @credential = credential
-      @api_client = api_client
+      @api_client = api_client || CentaurApiClient.new(read_timeout: API_READ_TIMEOUT_SECONDS)
       @slack_api_http = slack_api_http || self.class.slack_api_http
       @http_client = http_client
       @run_id = "sdms_#{SecureRandom.hex(16)}"

@@ -7,6 +7,10 @@ module Oauth
 
       def strategy = Slack.new
 
+      test "requires user search scope for MCP message search" do
+        assert_equal %w[search:read], strategy.required_scopes
+      end
+
       def result_with(claims:, scope: "openid,email,profile", **overrides)
         payload = Base64.urlsafe_encode64(claims.to_json, padding: false)
         id_token = "h.#{payload}.s"

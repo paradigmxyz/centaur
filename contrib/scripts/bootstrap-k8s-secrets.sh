@@ -20,11 +20,6 @@ set to onepassword-connect in the Helm values):
                                creates Secret centaur-onepassword-connect-credentials
   OP_CONNECT_TOKEN             Connect API token; added to centaur-infra-env
 
-Optional local-dev admin key:
-  LOCAL_DEV_API_KEY            seeded as the admin bearer for the API service
-                               (envFrom centaur-infra-env). Re-run with --force
-                               or kubectl patch to rotate.
-
 Optional repo-cache GitHub token:
   GITHUB_TOKEN                 added to centaur-infra-env when present; the
                                repo-cache DaemonSet reads it (repoCache.githubToken
@@ -209,9 +204,6 @@ if secret_exists centaur-infra-env; then
   if ! secret_key_present IRON_BROKER_TOKEN; then
     patch_data+=("\"IRON_BROKER_TOKEN\":\"$(rand_hex | base64 | tr -d '\n')\"")
   fi
-  if [[ -n "${LOCAL_DEV_API_KEY:-}" ]]; then
-    patch_data+=("\"LOCAL_DEV_API_KEY\":\"$(printf '%s' "$LOCAL_DEV_API_KEY" | base64 | tr -d '\n')\"")
-  fi
   # GITHUB_TOKEN for the repo-cache DaemonSet. Set whenever present so it can be
   # rotated; harmless when repoCache is disabled.
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then
@@ -365,9 +357,6 @@ else
   fi
   if [[ -n "${OP_CONNECT_TOKEN:-}" ]]; then
     secret_args+=(--from-literal=OP_CONNECT_TOKEN="$OP_CONNECT_TOKEN")
-  fi
-  if [[ -n "${LOCAL_DEV_API_KEY:-}" ]]; then
-    secret_args+=(--from-literal=LOCAL_DEV_API_KEY="$LOCAL_DEV_API_KEY")
   fi
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then
     secret_args+=(--from-literal=GITHUB_TOKEN="$GITHUB_TOKEN")
