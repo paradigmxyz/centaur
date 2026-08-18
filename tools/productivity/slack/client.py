@@ -1991,8 +1991,6 @@ class SlackClient:
             )
             if comment:
                 kwargs["initial_comment"] = comment
-            elif effective_filename:
-                kwargs["initial_comment"] = f"Uploaded `{effective_filename}`."
             if effective_thread_ts:
                 kwargs["thread_ts"] = effective_thread_ts
             # We intentionally do NOT forward alt_text to Slack. Passing alt_txt

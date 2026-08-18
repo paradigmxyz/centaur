@@ -1355,6 +1355,22 @@ def test_upload_file_accepts_channel_id_alias_and_returns_preview() -> None:
         "csv_rows_sampled": 1,
         "csv_columns": 2,
     }
+    assert "initial_comment" not in fake_web_client.last_kwargs
+
+
+def test_upload_file_preserves_explicit_comment() -> None:
+    client, fake_web_client = _make_client()
+
+    client.upload_file(
+        channel_id="C123",
+        thread_ts="1780035646.228899",
+        content_base64="dGVzdA==",
+        filename="chart.png",
+        comment="Here is the chart.",
+    )
+
+    assert fake_web_client.last_kwargs is not None
+    assert fake_web_client.last_kwargs["initial_comment"] == "Here is the chart."
 
 
 def test_upload_file_uses_explicit_destination() -> None:
