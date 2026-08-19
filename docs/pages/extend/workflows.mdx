@@ -66,11 +66,13 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
 
 `WORKFLOW_PRINCIPAL` is optional. Use it when the workflow host calls tools
 directly with `ctx.call_tool(...)` and should have its own credential boundary.
-The API derives and registers the `workflow-nightly-report` principal from
-`WORKFLOW_NAME` and runs that workflow-host sandbox under it. Workflow code
-cannot choose another principal id, display name, or labels. Grant the required
-tool roles or secrets to the derived principal. `WORKFLOW_PRINCIPAL = True`
-requires `apiRs.workflowHostSandbox=true`, which renders
+Set it to `True` to have the API derive and register the
+`workflow-nightly-report` principal from `WORKFLOW_NAME`. Set it to an existing
+principal foreign ID, such as `WORKFLOW_PRINCIPAL = "finance-automation"`, to
+run the workflow-host sandbox under that principal instead. An unknown foreign
+ID fails startup. Grant the required tool roles or secrets to the selected
+principal. Any `WORKFLOW_PRINCIPAL` value requires
+`apiRs.workflowHostSandbox=true`, which renders
 `WORKFLOW_HOST_SANDBOX=true`; startup fails if workflow-host sandboxing is
 disabled.
 
@@ -83,10 +85,8 @@ disabled.
 | `ctx.sleep_until(name, when)` | Resume at a specific time. |
 | `ctx.wait_for_event(name, event_type, correlation_id)` | Wait for an external event. |
 | `ctx.start_workflow(...)` | Start a child workflow and continue immediately. |
-| `ctx.wait_for_workflow(...)` | Wait for a child workflow to finish. |
-| `ctx.run_workflow(...)` | Start and wait in one call. |
-| `ctx.start_agent(...)` | Start an agent turn. |
-| `ctx.run_agent(...)` | Start an agent turn and wait for the result. |
+| `ctx.agent_turn(...)` / `ctx.run_agent(...)` / `ctx.start_agent(...)` | Run one agent turn and wait for the result. |
+| `ctx.run_agents(...)` | Run a bounded group of named agent turns concurrently and wait for every outcome. |
 
 The handler may re-execute after a restart. Put external side effects behind
 `ctx.step(...)` so completed work is not repeated.
@@ -99,10 +99,66 @@ These primitives compose into larger automations:
   billing state, deploy health, or vendor exports.
 - **Event-driven flows**: wait for a webhook, approval, upload, or callback and
   continue from the last checkpoint.
-- **Fan-out/fan-in orchestration**: start child workflows for independent work
-  and wait for all of them before producing a final result.
+- **Fan-out/fan-in orchestration**: run independent named agents concurrently,
+  then combine their successful results into one final result.
 - **Agent orchestration**: use agents for judgment-heavy steps while the
   workflow owns timing, retries, state, and final delivery.
+
+### Run Agents Concurrently
+
+Use `ctx.run_agents(...)` when independent reviewers or researchers should run
+at the same time:
+
+```python
+reviews = await ctx.run_agents(
+    [
+        {"name": "correctness", "text": "Review the PR for correctness."},
+        {"name": "security", "text": "Review the PR for security issues."},
+        {"name": "tests", "text": "Review the PR's test coverage."},
+    ],
+    max_concurrency=3,
+)
+```
+
+Every agent needs a unique, non-empty `name`. Centaur assigns each one a
+separate workflow-owned session and stable idempotency keys. The maximum
+concurrency defaults to 4 and may be set from 1 through 16. A batch supports up
+to 32 agents.
+
+The result preserves input order and reports individual failures without
+discarding successful reviews:
+
+```json
+{
+  "results": [
+    {"index": 0, "name": "correctness", "ok": true, "result": {"result_text": "..."}},
+    {"index": 1, "name": "security", "ok": false, "error": "agent unavailable"},
+    {"index": 2, "name": "tests", "ok": true, "result": {"result_text": "..."}}
+  ],
+  "succeeded": 2,
+  "failed": 1
+}
+```
+
+Batch items accept the same model, provider, reasoning, harness, persona,
+principal, prompt, content, idle timeout, maximum duration, and metadata
+options as `ctx.agent_turn(...)`. Session and idempotency fields are reserved
+because the batch runtime assigns them independently for each agent.
+
+Set `principal` to an existing principal foreign ID when an agent turn needs a
+specific credential boundary:
+
+```python
+result = await ctx.agent_turn(
+    "Prepare the finance report.",
+    principal="finance-automation",
+)
+```
+
+The principal is resolved before the session is created. An unknown or empty
+foreign ID fails the turn instead of using the thread-derived principal. If the
+session already exists under another principal, the turn returns a conflict
+instead of rebinding it.
 
 ## Run a workflow
 
@@ -275,8 +331,37 @@ that content type is listed in `allowed_content_types`.
 Webhook requests do not use Centaur API keys. The API verifies the provider
 signature before creating workflow state. `HmacAuth.github(...)` verifies
 `X-Hub-Signature-256`; a plain `HmacAuth(...)` can be used for other
-SHA-256 HMAC providers. During local development or for trusted internal
-routes, `auth="none"` is allowed.
+SHA-256 HMAC providers that sign the raw request body. During local development
+or for trusted internal routes, `auth="none"` is allowed.
+
+For providers that implement the [Standard Webhooks
+specification](https://www.standardwebhooks.com/), use the explicit
+`standard_webhooks` auth type:
+
+```python
+WEBHOOKS = [
+    {
+        "slug": "feed-ingest",
+        "provider": "feed-provider",
+        "auth": {
+            "type": "standard_webhooks",
+            "secret_ref": "FEED_WEBHOOK_SECRET",
+        },
+        "trigger_key": {"type": "header", "header": "webhook-id"},
+        "allowed_methods": ["POST"],
+        "allowed_content_types": ["application/json"],
+    }
+]
+```
+
+Set `FEED_WEBHOOK_SECRET` in the API deployment to the provider's signing
+secret (normally a `whsec_`-prefixed, base64-encoded value). Centaur requires
+the `webhook-id`, `webhook-timestamp`, and `webhook-signature` headers, verifies
+the `v1` signature over the exact raw body, supports space-separated signatures
+for key rotation, and rejects timestamps outside a five-minute window. Using
+`webhook-id` as the trigger key also gives retries the same durable workflow
+identity. Auth schemes are selected by `auth.type`; Centaur does not infer one
+from the headers.
 
 The workflow receives input in this shape:
 

@@ -59,6 +59,7 @@ Supported v2 primitives:
 | `handler(inp, ctx)` | Supported |
 | `ctx.step(name, fn)` | Supported |
 | `ctx.agent_turn(...)` / `ctx.run_agent(...)` | Supported |
+| `ctx.run_agents(...)` | Supported for bounded concurrent agent turns with ordered outcomes |
 | `ctx.call_tool(...)` | Supported through the generated `centaur-tools call` bridge in the workflow-host sandbox |
 | `ctx.post_to_slack(...)` | Supported |
 | `ctx._pool` | Supported when the workflow-host sandbox receives `DATABASE_URL` |
@@ -97,10 +98,19 @@ be wrapped in `ctx.step(...)` so the result is checkpointed:
 async def handler(inp: dict, ctx: WorkflowContext) -> dict:
     posted = await ctx.step(
         "post_summary",
-        lambda: ctx.post_to_slack(inp["channel"], inp["summary"]),
+        lambda: ctx.post_to_slack(
+            inp["channel"],
+            inp["summary"],
+            username="Summary Bot",
+            icon_emoji=":memo:",
+        ),
     )
     return {"posted": posted}
 ```
+
+`username` and `icon_emoji` are optional. They customize the Slack app identity
+for that message and require the app installation to grant
+`chat:write.customize`. Omitting them preserves the app's default identity.
 
 ### Make agent turns explicit
 
@@ -134,6 +144,22 @@ session runtime.
 }
 ```
 
+Use `ctx.run_agents(...)` for independent work that should run concurrently:
+
+```python
+reviews = await ctx.run_agents(
+    [
+        {"name": "correctness", "text": "Review the PR for correctness."},
+        {"name": "security", "text": "Review the PR for security issues."},
+    ],
+    max_concurrency=2,
+)
+```
+
+Each item uses a separate workflow-owned session. Results stay in input order.
+An individual agent failure produces an item with `ok: false`; it does not fail
+the whole batch or discard successful results.
+
 #### Declare Workflow-Host Permissions
 
 When a workflow calls tools directly from the workflow host with
@@ -154,9 +180,16 @@ cargo run -p centaur-perms -- \
   --tool slack
 ```
 
-The principal id is always `workflow-` plus the slugged `WORKFLOW_NAME`.
-Workflow code cannot choose another principal id, display name, or labels.
-`WORKFLOW_PRINCIPAL = True` requires `apiRs.workflowHostSandbox=true`, which
+To use an existing principal instead, declare its foreign ID:
+
+```python
+WORKFLOW_PRINCIPAL = "finance-automation"
+```
+
+The string form resolves the existing principal and fails startup when it does
+not exist. It does not create or update the principal. The `True` form remains
+`workflow-` plus the slugged `WORKFLOW_NAME`. Any `WORKFLOW_PRINCIPAL` value
+requires `apiRs.workflowHostSandbox=true`, which
 renders `WORKFLOW_HOST_SANDBOX=true`; startup fails if a workflow declares a
 principal while workflow-host sandboxing is disabled.
 
@@ -187,6 +220,21 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
 Keep `harness` and `model` together — a model is only meaningful within its
 harness, and because kwargs override `AGENT_DEFAULTS` key by key, overriding one
 without the other can strand a model on the wrong harness.
+
+Agent turns can also select an existing principal by foreign ID. This applies
+to `ctx.agent_turn(...)`, its aliases, and each `ctx.run_agents(...)` item:
+
+```python
+result = await ctx.agent_turn(
+    "Prepare the finance report.",
+    principal="finance-automation",
+)
+```
+
+Principal lookup failures fail the turn. Put `principal` in `AGENT_DEFAULTS`
+when every agent turn in the workflow should use the same principal. An
+existing session bound to another principal returns a conflict and is not
+rebound.
 
 ### Declare webhook metadata in the workflow
 

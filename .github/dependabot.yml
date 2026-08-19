@@ -27,6 +27,11 @@ updates:
       prefix: chore
       include: scope
     open-pull-requests-limit: 5
+    ignore:
+      # rails-paradedb 0.10+ requires ParadeDB 0.25+, while Console runs 0.23.
+      - dependency-name: rails-paradedb
+        versions:
+          - ">= 0.10.0"
     groups:
       ruby-dependencies:
         patterns:

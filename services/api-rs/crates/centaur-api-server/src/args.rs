@@ -149,6 +149,8 @@ struct ActivitySummaryArgs {
         default_value = "gpt-5.4-nano"
     )]
     model: String,
+    /// Deprecated activity-summary-specific endpoint. `OPENAI_BASE_URL` takes
+    /// precedence when set, but this remains supported for existing deployments.
     #[arg(
         long = "session-activity-summary-openai-base-url",
         env = "SESSION_ACTIVITY_SUMMARY_OPENAI_BASE_URL",
@@ -197,8 +199,11 @@ impl ActivitySummaryArgs {
             );
             return None;
         };
+        let base_url = clean_optional_value(env::var("OPENAI_BASE_URL").ok().as_deref())
+            .map(|value| value.trim_end_matches('/').to_owned())
+            .unwrap_or_else(|| self.openai_base_url.trim_end_matches('/').to_owned());
         Some(ActivitySummaryConfig {
-            base_url: self.openai_base_url.clone(),
+            base_url,
             api_key,
             max_facts: usize::try_from(self.max_facts).unwrap_or(usize::MAX),
             max_output_tokens: u16::try_from(self.max_output_tokens).unwrap_or(u16::MAX),
@@ -1013,6 +1018,12 @@ impl SandboxArgs {
         let codex_auth_mode = clean_optional_value(env::var("CODEX_AUTH_MODE").ok().as_deref())
             .unwrap_or_else(|| "api_key".to_owned());
         envs.push(("CODEX_AUTH_MODE".to_owned(), codex_auth_mode.clone()));
+        if codex_auth_mode == "api_key"
+            && let Some(base_url) =
+                clean_optional_value(env::var("OPENAI_BASE_URL").ok().as_deref())
+        {
+            envs.push(("OPENAI_BASE_URL".to_owned(), base_url));
+        }
         if let Some(mode) = clean_optional_value(env::var("CLAUDE_CODE_AUTH_MODE").ok().as_deref())
         {
             envs.push(("CLAUDE_CODE_AUTH_MODE".to_owned(), mode));
@@ -1021,8 +1032,8 @@ impl SandboxArgs {
         // Inject the infra/harness placeholder credentials so env-based
         // consumers send the proxy_value iron-proxy replaces with the real
         // secret: codex's OPENAI_API_KEY (api_key mode -> codex logs in and
-        // hits api.openai.com instead of falling back to the ChatGPT
-        // auth.json), git/gh's GITHUB_TOKEN, the slack tool's
+        // hits OPENAI_BASE_URL (api.openai.com by default) instead of falling
+        // back to the ChatGPT auth.json), git/gh's GITHUB_TOKEN, the slack tool's
         // SLACK_BOT_TOKEN, and the rest of the infra set.
         for (name, value) in self.iron_proxy.sandbox_placeholder_env()? {
             if !envs.iter().any(|(existing, _)| existing == &name) {
@@ -2198,6 +2209,52 @@ mod tests {
     }
 
     #[test]
+    fn activity_summary_preserves_legacy_base_url_when_global_url_is_unset() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[
+            ("OPENAI_API_KEY", "sk-test"),
+            ("OPENAI_BASE_URL", ""),
+            (
+                "SESSION_ACTIVITY_SUMMARY_OPENAI_BASE_URL",
+                "https://legacy-compatible.example/v1/",
+            ),
+        ]);
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-activity-summary-enabled",
+            "true",
+        ])
+        .unwrap();
+
+        let config = args.activity_summary_config().unwrap();
+        assert_eq!(config.base_url, "https://legacy-compatible.example/v1");
+    }
+
+    #[test]
+    fn activity_summary_global_base_url_overrides_legacy_base_url() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[
+            ("OPENAI_API_KEY", "sk-test"),
+            ("OPENAI_BASE_URL", "https://global-compatible.example/v1/"),
+        ]);
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-activity-summary-enabled",
+            "true",
+            "--session-activity-summary-openai-base-url",
+            "https://legacy-compatible.example/v1",
+        ])
+        .unwrap();
+
+        let config = args.activity_summary_config().unwrap();
+        assert_eq!(config.base_url, "https://global-compatible.example/v1");
+    }
+
+    #[test]
     fn activity_summary_uses_mounted_openai_key_even_with_onepassword_connect_source() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _env = EnvGuard::set(&[
@@ -2656,6 +2713,8 @@ mod tests {
 
     #[test]
     fn codex_app_server_env_template_injects_auth_mode_and_placeholder() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[("OPENAI_BASE_URL", "https://compatible-api.example/v1")]);
         let args = Args::try_parse_from([
             "centaur-api-server",
             "--database-url",
@@ -2679,6 +2738,9 @@ mod tests {
         // The codex auth mode is propagated so the sandbox agent matches the
         // proxy's registered credential.
         assert!(env.iter().any(|(name, _)| name == "CODEX_AUTH_MODE"));
+        assert!(env.iter().any(|(name, value)| {
+            name == "OPENAI_BASE_URL" && value == "https://compatible-api.example/v1"
+        }));
         // api_key mode (the default) injects the placeholder the egress proxy
         // replaces, so codex logs in and hits api.openai.com instead of
         // falling back to the ChatGPT auth.json.

@@ -1372,6 +1372,47 @@ impl PgSessionStore {
         row.try_into()
     }
 
+    /// Bind a principal to a session without allowing an existing binding to
+    /// change. The conditional update makes concurrent first bindings atomic:
+    /// one caller wins, and a caller selecting a different principal receives
+    /// a conflict instead of rebinding the session.
+    pub async fn bind_iron_control_principal(
+        &self,
+        thread_key: &ThreadKey,
+        iron_control_principal: &str,
+    ) -> Result<Session, SessionStoreError> {
+        let row = sqlx::query_as::<_, SessionRow>(
+            r#"
+            update sessions
+            set iron_control_principal = $2, updated_at = now()
+            where thread_key = $1
+              and (iron_control_principal is null or iron_control_principal = $2)
+            returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, proxy_labels, sandbox_last_active_at, created_at, updated_at
+            "#,
+        )
+        .bind(thread_key.as_str())
+        .bind(iron_control_principal)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        if let Some(row) = row {
+            return row.try_into();
+        }
+
+        let session = self.get_session(thread_key).await?;
+        match session.iron_control_principal {
+            Some(existing) => Err(SessionStoreError::PrincipalConflict {
+                thread_key: thread_key.as_str().to_owned(),
+                existing,
+                requested: iron_control_principal.to_owned(),
+            }),
+            None => Err(SessionStoreError::InvalidPersistedValue(format!(
+                "session {} remained unbound after principal binding",
+                thread_key.as_str()
+            ))),
+        }
+    }
+
     pub async fn insert_ready_warm_sandbox(
         &self,
         sandbox_id: &str,
@@ -1649,6 +1690,12 @@ pub enum SessionStoreError {
         thread_key: String,
         existing: Option<String>,
         requested: Option<String>,
+    },
+    #[error("session {thread_key} already exists with principal {existing}, requested {requested}")]
+    PrincipalConflict {
+        thread_key: String,
+        existing: String,
+        requested: String,
     },
     #[error("invalid persisted value: {0}")]
     InvalidPersistedValue(String),

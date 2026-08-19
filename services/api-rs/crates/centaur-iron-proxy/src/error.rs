@@ -16,6 +16,8 @@ pub enum IronProxyConfigError {
         provider: String,
         reason: &'static str,
     },
+    #[error("invalid OPENAI_BASE_URL {value:?}: {reason}")]
+    InvalidOpenAiBaseUrl { value: String, reason: String },
 }
 
 pub type Result<T> = std::result::Result<T, IronProxyConfigError>;

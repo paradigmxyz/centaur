@@ -215,6 +215,7 @@ const REDACTED_WEBHOOK_HEADERS: &[&str] = &[
     "x-hub-signature",
     "x-hub-signature-256",
     "x-slack-signature",
+    "webhook-signature",
     "stripe-signature",
 ];
 
@@ -3828,6 +3829,9 @@ fn verify_webhook_auth(
             headers,
             raw_body,
         ),
+        WorkflowWebhookAuth::StandardWebhooks { secret_ref } => {
+            verify_standard_webhook_signature(secret_ref, headers, raw_body)
+        }
         WorkflowWebhookAuth::Hmac {
             secret_ref,
             signature_header,
@@ -3843,6 +3847,33 @@ fn verify_webhook_auth(
             raw_body,
         ),
     }
+}
+
+fn verify_standard_webhook_signature(
+    secret_ref: &str,
+    headers: &HeaderMap,
+    raw_body: &[u8],
+) -> Result<(), ApiError> {
+    let secret = env::var(secret_ref).map_err(|_| {
+        ApiError::Internal(format!(
+            "webhook auth secret {secret_ref} is not configured"
+        ))
+    })?;
+    let secret = secret.trim();
+    let encoded_secret = secret.strip_prefix("whsec_").unwrap_or(secret);
+    if encoded_secret.is_empty() {
+        return Err(ApiError::Internal(format!(
+            "webhook auth secret {secret_ref} is not valid Standard Webhooks key material"
+        )));
+    }
+    let webhook = standardwebhooks::Webhook::new(secret).map_err(|_| {
+        ApiError::Internal(format!(
+            "webhook auth secret {secret_ref} is not valid Standard Webhooks key material"
+        ))
+    })?;
+    webhook
+        .verify(raw_body, headers)
+        .map_err(|_| ApiError::Unauthorized("invalid webhook signature".to_owned()))
 }
 
 fn verify_hmac_signature(
@@ -3896,6 +3927,7 @@ fn signature_header_name(auth: &WorkflowWebhookAuth) -> Option<&str> {
     match auth {
         WorkflowWebhookAuth::None | WorkflowWebhookAuth::Bearer { .. } => None,
         WorkflowWebhookAuth::Github { .. } => Some("X-Hub-Signature-256"),
+        WorkflowWebhookAuth::StandardWebhooks { .. } => Some("webhook-signature"),
         WorkflowWebhookAuth::Hmac {
             signature_header, ..
         } => Some(signature_header),
@@ -4262,6 +4294,35 @@ mod webhook_tests {
     }
 
     #[test]
+    fn redacts_standard_webhooks_signature_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("webhook-signature", "v1,c2lnbmF0dXJl".parse().unwrap());
+        headers.insert("webhook-id", "msg_test".parse().unwrap());
+        headers.insert("webhook-timestamp", "1700000000".parse().unwrap());
+        let spec = WorkflowWebhookSpec {
+            slug: "unit".to_owned(),
+            provider: None,
+            auth: WorkflowWebhookAuth::StandardWebhooks {
+                secret_ref: "TEST_WEBHOOK_SECRET".to_owned(),
+            },
+            trigger_key: None,
+            allowed_methods: vec!["POST".to_owned()],
+            allowed_content_types: vec!["application/json".to_owned()],
+            filter: None,
+        };
+
+        let safe = safe_webhook_headers(&headers, &spec);
+
+        assert_eq!(
+            safe,
+            json!({
+                "webhook-id": "msg_test",
+                "webhook-timestamp": "1700000000"
+            })
+        );
+    }
+
+    #[test]
     fn derives_header_trigger_key() {
         let mut headers = HeaderMap::new();
         headers.insert("x-test-delivery", "delivery-1".parse().unwrap());
@@ -4303,6 +4364,97 @@ mod webhook_tests {
             raw_body,
         )
         .unwrap();
+    }
+
+    fn standard_webhook_headers(
+        secret: &str,
+        message_id: &str,
+        timestamp: i64,
+        raw_body: &[u8],
+    ) -> HeaderMap {
+        let encoded_secret = secret.strip_prefix("whsec_").unwrap_or(secret);
+        let key = general_purpose::STANDARD.decode(encoded_secret).unwrap();
+        let mut signed_content = Vec::new();
+        signed_content.extend_from_slice(message_id.as_bytes());
+        signed_content.push(b'.');
+        signed_content.extend_from_slice(timestamp.to_string().as_bytes());
+        signed_content.push(b'.');
+        signed_content.extend_from_slice(raw_body);
+        let mut mac = Hmac::<Sha256>::new_from_slice(&key).unwrap();
+        mac.update(&signed_content);
+        let signature = general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+
+        let mut headers = HeaderMap::new();
+        headers.insert("webhook-id", message_id.parse().unwrap());
+        headers.insert("webhook-timestamp", timestamp.to_string().parse().unwrap());
+        headers.insert(
+            "webhook-signature",
+            format!("v2,ignored v1,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= v1,{signature}")
+                .parse()
+                .unwrap(),
+        );
+        headers
+    }
+
+    #[test]
+    fn verifies_standard_webhooks_signature() {
+        let raw_body = br#"{"hello":"signed"}"#;
+        let secret_ref = "CENTRAUR_TEST_STANDARD_WEBHOOK_SECRET";
+        let secret = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw";
+        let timestamp = OffsetDateTime::now_utc().unix_timestamp();
+        unsafe {
+            env::set_var(secret_ref, secret);
+        }
+        let headers = standard_webhook_headers(secret, "msg_test", timestamp, raw_body);
+
+        verify_standard_webhook_signature(secret_ref, &headers, raw_body).unwrap();
+    }
+
+    #[test]
+    fn rejects_invalid_or_stale_standard_webhooks_signature() {
+        let raw_body = br#"{"hello":"signed"}"#;
+        let secret_ref = "CENTRAUR_TEST_STANDARD_WEBHOOK_SECRET_REJECT";
+        let secret = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw";
+        unsafe {
+            env::set_var(secret_ref, secret);
+        }
+
+        let timestamp = OffsetDateTime::now_utc().unix_timestamp();
+        let headers = standard_webhook_headers(secret, "msg_test", timestamp, raw_body);
+        let error =
+            verify_standard_webhook_signature(secret_ref, &headers, br#"{"hello":"tampered"}"#)
+                .unwrap_err();
+        assert!(matches!(error, ApiError::Unauthorized(_)));
+
+        let stale_headers = standard_webhook_headers(secret, "msg_test", timestamp - 301, raw_body);
+        let error =
+            verify_standard_webhook_signature(secret_ref, &stale_headers, raw_body).unwrap_err();
+        assert!(matches!(error, ApiError::Unauthorized(_)));
+    }
+
+    #[test]
+    fn malformed_or_empty_standard_webhooks_secret_is_internal_error() {
+        let secret_ref = "CENTRAUR_TEST_STANDARD_WEBHOOK_SECRET_INVALID";
+        unsafe {
+            env::set_var(secret_ref, "whsec_not-base64");
+        }
+        let headers = standard_webhook_headers(
+            "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw",
+            "msg_test",
+            OffsetDateTime::now_utc().unix_timestamp(),
+            b"{}",
+        );
+
+        let error = verify_standard_webhook_signature(secret_ref, &headers, b"{}").unwrap_err();
+
+        assert!(matches!(error, ApiError::Internal(_)));
+
+        unsafe {
+            env::set_var(secret_ref, "whsec_");
+        }
+        let error = verify_standard_webhook_signature(secret_ref, &headers, b"{}").unwrap_err();
+
+        assert!(matches!(error, ApiError::Internal(_)));
     }
 
     fn webhook_filter(value: Value) -> WebhookFilter {

@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     env,
+    future::Future,
     path::PathBuf,
     str::FromStr,
     sync::{Arc, RwLock},
@@ -22,7 +23,7 @@ use centaur_session_sqlx::PgSessionStore;
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use cron::Schedule;
-use futures_util::{TryStreamExt, pin_mut};
+use futures_util::{StreamExt, TryStreamExt, pin_mut, stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::Row;
@@ -47,6 +48,10 @@ const PYTHON_HOST_INTERPRETER_ENV: &str = "PYTHON_WORKFLOW_HOST_PYTHON";
 const WORKFLOW_TOOL_API_URL_ENV: &str = "WORKFLOW_TOOL_API_URL";
 const DEFAULT_AGENT_IDLE_TIMEOUT_MS: u64 = 60_000;
 const DEFAULT_AGENT_MAX_DURATION_MS: u64 = 30 * 60 * 1_000;
+const DEFAULT_AGENT_BATCH_CONCURRENCY: usize = 4;
+const MAX_AGENT_BATCH_CONCURRENCY: usize = 16;
+const MAX_AGENT_BATCH_SIZE: usize = 32;
+const MAX_AGENT_BATCH_NAME_BYTES: usize = 128;
 const WORKFLOW_HOST_CLAIM_EXTENSION: Duration = Duration::from_secs(5 * 60);
 const WORKFLOW_HOST_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 const WORKFLOW_RECONCILE_INTERVAL_SECS_ENV: &str = "WORKFLOW_RECONCILE_INTERVAL_SECS";
@@ -190,7 +195,7 @@ impl WorkflowEnablement {
         });
         metadata
             .principals
-            .retain(|workflow_name| self.is_enabled(workflow_name));
+            .retain(|workflow_name, _| self.is_enabled(workflow_name));
     }
 }
 
@@ -222,6 +227,12 @@ pub struct WorkflowHostSandboxRuntime {
 struct WorkflowPrincipalAssignments {
     required: BTreeSet<String>,
     registered: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum WorkflowPrincipalDeclaration {
+    Managed,
+    Existing(String),
 }
 
 impl WorkflowPrincipalAssignments {
@@ -293,24 +304,30 @@ impl WorkflowPrincipalRegistrar {
 
     async fn register_workflow_principals(
         &self,
-        principals: &BTreeSet<String>,
+        principals: &BTreeMap<String, WorkflowPrincipalDeclaration>,
     ) -> Result<BTreeMap<String, String>, WorkflowRuntimeError> {
         let mut registered = BTreeMap::new();
-        for workflow_name in principals {
-            let foreign_id = canonical_workflow_principal_foreign_id(workflow_name);
-            let record = self
-                .client
-                .upsert_principal(&PrincipalInput {
-                    foreign_id,
-                    name: format!("Workflow {workflow_name}"),
-                    labels: workflow_principal_labels(workflow_name),
-                    kind: Some("workflow".to_owned()),
-                    slack_user_id: None,
-                    slack_channel_id: None,
-                    slack_team_id: None,
-                    slack_email: None,
-                })
-                .await?;
+        for (workflow_name, declaration) in principals {
+            let record = match declaration {
+                WorkflowPrincipalDeclaration::Managed => {
+                    let foreign_id = canonical_workflow_principal_foreign_id(workflow_name);
+                    self.client
+                        .upsert_principal(&PrincipalInput {
+                            foreign_id,
+                            name: format!("Workflow {workflow_name}"),
+                            labels: workflow_principal_labels(workflow_name),
+                            kind: Some("workflow".to_owned()),
+                            slack_user_id: None,
+                            slack_channel_id: None,
+                            slack_team_id: None,
+                            slack_email: None,
+                        })
+                        .await?
+                }
+                WorkflowPrincipalDeclaration::Existing(foreign_id) => {
+                    self.client.get_principal(foreign_id).await?
+                }
+            };
             registered.insert(workflow_name.clone(), record.id);
         }
         Ok(registered)
@@ -433,6 +450,9 @@ pub enum WorkflowWebhookAuth {
         encoding: String,
     },
     Github {
+        secret_ref: String,
+    },
+    StandardWebhooks {
         secret_ref: String,
     },
     Bearer {
@@ -1250,7 +1270,9 @@ fn normalize_webhook(webhook: &mut RegisteredWorkflowWebhook) -> Result<(), Work
                 ));
             }
         }
-        WorkflowWebhookAuth::Github { secret_ref } | WorkflowWebhookAuth::Bearer { secret_ref } => {
+        WorkflowWebhookAuth::Github { secret_ref }
+        | WorkflowWebhookAuth::StandardWebhooks { secret_ref }
+        | WorkflowWebhookAuth::Bearer { secret_ref } => {
             if secret_ref.trim().is_empty() {
                 return Err(WorkflowRuntimeError::BadRequest(format!(
                     "workflow webhook {:?} auth requires secret_ref",
@@ -1652,7 +1674,14 @@ struct PythonWorkflowDiscovery {
     #[serde(default)]
     schedule: Option<Value>,
     #[serde(default)]
-    principal: Option<bool>,
+    principal: Option<PythonWorkflowPrincipal>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum PythonWorkflowPrincipal {
+    Enabled(bool),
+    ForeignId(String),
 }
 
 #[derive(Debug, Deserialize)]
@@ -1665,7 +1694,7 @@ struct PythonWorkflowMetadata {
     webhooks: Vec<RegisteredWorkflowWebhook>,
     schedules: Vec<Value>,
     workflow_names: BTreeSet<String>,
-    principals: BTreeSet<String>,
+    principals: BTreeMap<String, WorkflowPrincipalDeclaration>,
 }
 
 fn metadata_from_discovery_payload(
@@ -1688,8 +1717,22 @@ fn metadata_from_discovery_payload(
             }
             metadata.schedules.push(schedule);
         }
-        if workflow.principal.unwrap_or(false) {
-            metadata.principals.insert(workflow.workflow_name);
+        match workflow.principal {
+            Some(PythonWorkflowPrincipal::Enabled(true)) => {
+                metadata.principals.insert(
+                    workflow.workflow_name,
+                    WorkflowPrincipalDeclaration::Managed,
+                );
+            }
+            Some(PythonWorkflowPrincipal::ForeignId(foreign_id))
+                if !foreign_id.trim().is_empty() =>
+            {
+                metadata.principals.insert(
+                    workflow.workflow_name,
+                    WorkflowPrincipalDeclaration::Existing(foreign_id.trim().to_owned()),
+                );
+            }
+            _ => {}
         }
     }
     metadata
@@ -1705,7 +1748,7 @@ async fn prepare_workflow_host_sandbox(
         if !discovery.principals.is_empty() {
             let workflow_names = discovery
                 .principals
-                .iter()
+                .keys()
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -1732,15 +1775,16 @@ async fn reconcile_workflow_principals(
     enablement: &WorkflowEnablement,
 ) -> Result<(), WorkflowRuntimeError> {
     let mut principals = discovery.principals.clone();
-    principals.retain(|workflow_name| enablement.is_enabled(workflow_name));
+    principals.retain(|workflow_name, _| enablement.is_enabled(workflow_name));
+    let required = principals.keys().cloned().collect();
     let registered = match registrar.register_workflow_principals(&principals).await {
         Ok(registered) => registered,
         Err(error) => {
-            sandbox.update_workflow_principals(BTreeMap::new(), principals);
+            sandbox.update_workflow_principals(BTreeMap::new(), required);
             return Err(error);
         }
     };
-    sandbox.update_workflow_principals(registered, principals);
+    sandbox.update_workflow_principals(registered, required);
     Ok(())
 }
 
@@ -2656,6 +2700,7 @@ async fn run_centaur_workflow_inner(
                 .get("max_duration_ms")
                 .and_then(Value::as_u64)
                 .unwrap_or(DEFAULT_AGENT_MAX_DURATION_MS);
+            let principal_foreign_id = parse_agent_principal(&input.input).map_err(absurd_error)?;
             let agent = ctx
                 .step("agent_turn", || {
                     let session_runtime = session_runtime.clone();
@@ -2678,6 +2723,7 @@ async fn run_centaur_workflow_inner(
                                 thread_key,
                                 harness_type,
                                 persona_id: None,
+                                principal_foreign_id,
                                 parts: vec![json!({"type": "text", "text": prompt})],
                                 client_message_id: client_message_id.clone(),
                                 session_metadata: metadata.clone(),
@@ -3348,7 +3394,22 @@ async fn handle_python_context_request(
         }
         Some("ctx.agent_turn") => {
             let args = message.get("args").cloned().unwrap_or_else(|| json!({}));
-            match run_python_agent_turn(session_runtime.clone(), ctx, input, args, &request_id)
+            match run_python_agent_turn(
+                session_runtime.clone(),
+                ctx,
+                input,
+                args,
+                &request_id,
+                None,
+            )
+            .await
+            {
+                Ok(value) => Ok(value),
+                Err(error) => Err(error.to_string()),
+            }
+        }
+        Some("ctx.run_agents") => {
+            match run_python_agent_batch(session_runtime.clone(), ctx, input, message, &request_id)
                 .await
             {
                 Ok(value) => Ok(value),
@@ -3505,6 +3566,7 @@ async fn run_python_agent_turn(
     input: &WorkflowTaskInput,
     args: Value,
     request_id: &str,
+    default_thread_key: Option<String>,
 ) -> Result<Value, WorkflowRuntimeError> {
     let text = args
         .get("text")
@@ -3535,11 +3597,13 @@ async fn run_python_agent_turn(
         .map(ToOwned::to_owned);
     let workflow_owned_thread = explicit_thread_key.is_none();
     let thread_key = explicit_thread_key.unwrap_or_else(|| {
-        format!(
-            "wf:{}:agent:{}",
-            ctx.task_id().replace('-', ""),
-            input.workflow_name
-        )
+        default_thread_key.unwrap_or_else(|| {
+            format!(
+                "wf:{}:agent:{}",
+                ctx.task_id().replace('-', ""),
+                input.workflow_name
+            )
+        })
     });
     let harness_type = parse_agent_harness(&args)?.unwrap_or_else(|| input.harness_type.clone());
     let persona_id = args
@@ -3547,6 +3611,7 @@ async fn run_python_agent_turn(
         .or_else(|| args.get("persona"))
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
+    let principal_foreign_id = parse_agent_principal(&args)?;
     let client_message_id = args
         .get("message_id")
         .or_else(|| args.get("client_message_id"))
@@ -3575,6 +3640,13 @@ async fn run_python_agent_turn(
     }
     if let Some(engine) = args.get("engine").and_then(Value::as_str) {
         object_insert(&mut execution_metadata, "engine", json!(engine));
+    }
+    if let Some(principal) = principal_foreign_id.as_deref() {
+        object_insert(
+            &mut execution_metadata,
+            "principal_foreign_id",
+            json!(principal),
+        );
     }
     let idle_timeout_ms = args
         .get("idle_timeout_ms")
@@ -3607,6 +3679,7 @@ async fn run_python_agent_turn(
             thread_key,
             harness_type,
             persona_id,
+            principal_foreign_id,
             parts,
             client_message_id,
             session_metadata,
@@ -3625,6 +3698,214 @@ async fn run_python_agent_turn(
     serde_json::to_value(result).map_err(WorkflowRuntimeError::from)
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct PythonAgentBatchItem {
+    index: usize,
+    name: String,
+    args: Value,
+}
+
+fn parse_python_agent_batch(
+    message: &Value,
+    request_id: &str,
+) -> Result<(Vec<PythonAgentBatchItem>, usize), WorkflowRuntimeError> {
+    let raw_agents = message
+        .get("agents")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            WorkflowRuntimeError::BadRequest("ctx.run_agents requires an agents array".to_owned())
+        })?;
+    if raw_agents.is_empty() {
+        return Err(WorkflowRuntimeError::BadRequest(
+            "ctx.run_agents requires at least one agent".to_owned(),
+        ));
+    }
+    if raw_agents.len() > MAX_AGENT_BATCH_SIZE {
+        return Err(WorkflowRuntimeError::BadRequest(format!(
+            "ctx.run_agents supports at most {MAX_AGENT_BATCH_SIZE} agents"
+        )));
+    }
+
+    let max_concurrency = match message.get("max_concurrency") {
+        Some(value) => value.as_u64().ok_or_else(|| {
+            WorkflowRuntimeError::BadRequest(
+                "ctx.run_agents max_concurrency must be an integer".to_owned(),
+            )
+        })? as usize,
+        None => DEFAULT_AGENT_BATCH_CONCURRENCY,
+    };
+    if !(1..=MAX_AGENT_BATCH_CONCURRENCY).contains(&max_concurrency) {
+        return Err(WorkflowRuntimeError::BadRequest(format!(
+            "ctx.run_agents max_concurrency must be between 1 and {MAX_AGENT_BATCH_CONCURRENCY}"
+        )));
+    }
+
+    let reserved_fields = [
+        "thread_key",
+        "message_id",
+        "client_message_id",
+        "idempotency_key",
+        "execution_idempotency_key",
+    ];
+    let mut names = BTreeSet::new();
+    let mut agents = Vec::with_capacity(raw_agents.len());
+    for (index, raw_agent) in raw_agents.iter().enumerate() {
+        let mut args = raw_agent.as_object().cloned().ok_or_else(|| {
+            WorkflowRuntimeError::BadRequest(format!(
+                "ctx.run_agents agent at index {index} must be an object"
+            ))
+        })?;
+        let name = args
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| {
+                WorkflowRuntimeError::BadRequest(format!(
+                    "ctx.run_agents agent at index {index} requires a non-empty name"
+                ))
+            })?
+            .to_owned();
+        if name.len() > MAX_AGENT_BATCH_NAME_BYTES {
+            return Err(WorkflowRuntimeError::BadRequest(format!(
+                "ctx.run_agents agent name at index {index} must be at most {MAX_AGENT_BATCH_NAME_BYTES} bytes"
+            )));
+        }
+        if !names.insert(name.clone()) {
+            return Err(WorkflowRuntimeError::BadRequest(format!(
+                "ctx.run_agents agent names must be unique; duplicate {name:?}"
+            )));
+        }
+        if let Some(field) = reserved_fields
+            .iter()
+            .find(|field| args.contains_key(**field))
+        {
+            return Err(WorkflowRuntimeError::BadRequest(format!(
+                "ctx.run_agents agent {name:?} cannot set reserved field {field:?}"
+            )));
+        }
+
+        let metadata = args
+            .entry("metadata".to_owned())
+            .or_insert_with(|| json!({}));
+        if !metadata.is_object() {
+            *metadata = json!({});
+        }
+        object_insert(metadata, "workflow_agent_batch_name", json!(name));
+        object_insert(metadata, "workflow_agent_batch_index", json!(index));
+        object_insert(
+            metadata,
+            "workflow_agent_batch_request_id",
+            json!(request_id),
+        );
+
+        agents.push(PythonAgentBatchItem {
+            index,
+            name,
+            args: Value::Object(args),
+        });
+    }
+    Ok((agents, max_concurrency))
+}
+
+async fn run_bounded_ordered<T, R, F, Fut>(
+    items: Vec<T>,
+    max_concurrency: usize,
+    mut run: F,
+) -> Vec<R>
+where
+    F: FnMut(T) -> Fut,
+    Fut: Future<Output = R>,
+{
+    let item_count = items.len();
+    let futures = items
+        .into_iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let future = run(item);
+            async move { (index, future.await) }
+        })
+        .collect::<Vec<_>>();
+    let completed = stream::iter(futures)
+        .buffer_unordered(max_concurrency)
+        .collect::<Vec<_>>()
+        .await;
+    let mut ordered = (0..item_count).map(|_| None).collect::<Vec<_>>();
+    for (index, result) in completed {
+        ordered[index] = Some(result);
+    }
+    ordered
+        .into_iter()
+        .map(|result| result.expect("every bounded batch future must produce one result"))
+        .collect()
+}
+
+async fn run_python_agent_batch(
+    session_runtime: SessionRuntime,
+    ctx: &TaskContext,
+    input: &WorkflowTaskInput,
+    message: &Value,
+    request_id: &str,
+) -> Result<Value, WorkflowRuntimeError> {
+    let (agents, max_concurrency) = parse_python_agent_batch(message, request_id)?;
+    let task_id = ctx.task_id().replace('-', "");
+    let batch_request_id = request_id.to_owned();
+    let outcomes = run_bounded_ordered(agents, max_concurrency, |agent| {
+        let session_runtime = session_runtime.clone();
+        let agent_slug = slugify(&agent.name);
+        let default_thread_key = format!(
+            "wf:{task_id}:agent-batch:{batch_request_id}:{}:{agent_slug}",
+            agent.index,
+        );
+        let agent_request_id = format!("{batch_request_id}:{}", agent.index);
+        async move {
+            let result = run_python_agent_turn(
+                session_runtime,
+                ctx,
+                input,
+                agent.args.clone(),
+                &agent_request_id,
+                Some(default_thread_key),
+            )
+            .await;
+            (agent, result)
+        }
+    })
+    .await;
+
+    let mut succeeded = 0;
+    let mut failed = 0;
+    let results = outcomes
+        .into_iter()
+        .map(|(agent, result)| match result {
+            Ok(result) => {
+                succeeded += 1;
+                json!({
+                    "index": agent.index,
+                    "name": agent.name,
+                    "ok": true,
+                    "result": result,
+                })
+            }
+            Err(error) => {
+                failed += 1;
+                json!({
+                    "index": agent.index,
+                    "name": agent.name,
+                    "ok": false,
+                    "error": error.to_string(),
+                })
+            }
+        })
+        .collect::<Vec<_>>();
+
+    Ok(json!({
+        "results": results,
+        "succeeded": succeeded,
+        "failed": failed,
+    }))
+}
+
 /// Returns the first arg key that holds a non-empty (trimmed) string, owned.
 fn first_str_arg(args: &Value, keys: &[&str]) -> Option<String> {
     keys.iter()
@@ -3632,6 +3913,26 @@ fn first_str_arg(args: &Value, keys: &[&str]) -> Option<String> {
         .map(str::trim)
         .find(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn parse_agent_principal(args: &Value) -> Result<Option<String>, WorkflowRuntimeError> {
+    let Some(value) = args
+        .get("principal")
+        .or_else(|| args.get("principal_foreign_id"))
+    else {
+        return Ok(None);
+    };
+    let foreign_id = value.as_str().map(str::trim).ok_or_else(|| {
+        WorkflowRuntimeError::BadRequest(
+            "ctx.agent_turn principal must be a non-empty foreign ID".to_owned(),
+        )
+    })?;
+    if foreign_id.is_empty() {
+        return Err(WorkflowRuntimeError::BadRequest(
+            "ctx.agent_turn principal must be a non-empty foreign ID".to_owned(),
+        ));
+    }
+    Ok(Some(foreign_id.to_owned()))
 }
 
 fn parse_agent_harness(args: &Value) -> Result<Option<HarnessType>, WorkflowRuntimeError> {
@@ -3853,6 +4154,12 @@ fn python_slack_message_payload(
     if let Some(blocks) = args.get("blocks") {
         payload["blocks"] = blocks.clone();
     }
+    if let Some(username) = args.get("username").and_then(Value::as_str) {
+        payload["username"] = json!(username);
+    }
+    if let Some(icon_emoji) = args.get("icon_emoji").and_then(Value::as_str) {
+        payload["icon_emoji"] = json!(icon_emoji);
+    }
     if let Some(no_attribution) = args.get("no_attribution").and_then(Value::as_bool) {
         payload["no_attribution"] = json!(no_attribution);
     }
@@ -3899,6 +4206,7 @@ struct AgentTurnRequest {
     thread_key: String,
     harness_type: HarnessType,
     persona_id: Option<String>,
+    principal_foreign_id: Option<String>,
     parts: Vec<Value>,
     client_message_id: String,
     session_metadata: Value,
@@ -3954,6 +4262,7 @@ async fn run_agent_session_turn(
         thread_key,
         harness_type,
         persona_id,
+        principal_foreign_id,
         parts,
         client_message_id,
         session_metadata,
@@ -3973,12 +4282,13 @@ async fn run_agent_session_turn(
         object_insert(&mut session_metadata, "workflow_owned_thread", json!(true));
     }
     session_runtime
-        .create_or_get_session(
+        .create_or_get_session_with_principal(
             &thread_key,
             &harness_type,
             persona_id.as_deref(),
             Some(session_metadata),
             HarnessConflictPolicy::Reject,
+            principal_foreign_id.as_deref(),
         )
         .await?;
     session_runtime
@@ -4201,6 +4511,153 @@ mod tests {
     }
 
     #[test]
+    fn parse_agent_principal_accepts_foreign_id_and_rejects_invalid_values() {
+        assert_eq!(
+            parse_agent_principal(&json!({"principal": " finance-automation "})).unwrap(),
+            Some("finance-automation".to_owned())
+        );
+        assert_eq!(
+            parse_agent_principal(&json!({"principal_foreign_id": "support"})).unwrap(),
+            Some("support".to_owned())
+        );
+        assert_eq!(parse_agent_principal(&json!({})).unwrap(), None);
+        assert!(parse_agent_principal(&json!({"principal": "  "})).is_err());
+        assert!(parse_agent_principal(&json!({"principal": true})).is_err());
+    }
+
+    #[test]
+    fn parse_agent_batch_requires_unique_names_and_adds_metadata() {
+        let message = json!({
+            "type": "ctx.run_agents",
+            "max_concurrency": 2,
+            "agents": [
+                {
+                    "name": "correctness",
+                    "text": "Review correctness",
+                    "principal": "security-reviewers",
+                    "metadata": {"pr": 42}
+                },
+                {"name": "security", "text": "Review security"}
+            ]
+        });
+
+        let (agents, max_concurrency) = parse_python_agent_batch(&message, "7").unwrap();
+
+        assert_eq!(max_concurrency, 2);
+        assert_eq!(
+            agents
+                .iter()
+                .map(|agent| agent.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["correctness", "security"]
+        );
+        assert_eq!(agents[0].args.pointer("/metadata/pr"), Some(&json!(42)));
+        assert_eq!(
+            agents[0].args.get("principal"),
+            Some(&json!("security-reviewers"))
+        );
+        assert_eq!(
+            agents[0]
+                .args
+                .pointer("/metadata/workflow_agent_batch_name"),
+            Some(&json!("correctness"))
+        );
+        assert_eq!(
+            agents[1]
+                .args
+                .pointer("/metadata/workflow_agent_batch_index"),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            agents[1]
+                .args
+                .pointer("/metadata/workflow_agent_batch_request_id"),
+            Some(&json!("7"))
+        );
+    }
+
+    #[test]
+    fn parse_agent_batch_rejects_duplicate_names_and_identity_overrides() {
+        let duplicate = json!({
+            "agents": [
+                {"name": "security", "text": "first"},
+                {"name": "security", "text": "second"}
+            ]
+        });
+        let error = parse_python_agent_batch(&duplicate, "1").unwrap_err();
+        assert!(error.to_string().contains("names must be unique"));
+
+        let overridden_identity = json!({
+            "agents": [{
+                "name": "security",
+                "text": "review",
+                "thread_key": "workflow:shared"
+            }]
+        });
+        let error = parse_python_agent_batch(&overridden_identity, "1").unwrap_err();
+        assert!(error.to_string().contains("reserved field \"thread_key\""));
+    }
+
+    #[test]
+    fn parse_agent_batch_enforces_size_and_concurrency_bounds() {
+        let empty = json!({"agents": []});
+        let error = parse_python_agent_batch(&empty, "1").unwrap_err();
+        assert!(error.to_string().contains("at least one agent"));
+
+        for max_concurrency in [0, MAX_AGENT_BATCH_CONCURRENCY + 1] {
+            let message = json!({
+                "agents": [{"name": "correctness", "text": "review"}],
+                "max_concurrency": max_concurrency,
+            });
+            let error = parse_python_agent_batch(&message, "1").unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("max_concurrency must be between")
+            );
+        }
+
+        let too_many = json!({
+            "agents": (0..=MAX_AGENT_BATCH_SIZE)
+                .map(|index| json!({"name": format!("reviewer-{index}"), "text": "review"}))
+                .collect::<Vec<_>>(),
+        });
+        let error = parse_python_agent_batch(&too_many, "1").unwrap_err();
+        assert!(error.to_string().contains("supports at most"));
+    }
+
+    #[tokio::test]
+    async fn bounded_batch_limits_concurrency_and_restores_input_order() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let results = run_bounded_ordered(vec![0_u64, 1, 2, 3], 2, {
+            let active = active.clone();
+            let peak = peak.clone();
+            move |item| {
+                let active = active.clone();
+                let peak = peak.clone();
+                async move {
+                    let now_active = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now_active, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(4 * (4 - item))).await;
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    if item == 2 {
+                        Err("review failed")
+                    } else {
+                        Ok(item)
+                    }
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(results, vec![Ok(0), Ok(1), Err("review failed"), Ok(3)]);
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
     fn parse_worker_concurrency_uses_override_or_default() {
         // Override wins.
         assert_eq!(parse_worker_concurrency(Some("16"), 4), 16);
@@ -4372,6 +4829,8 @@ mod tests {
                 "reply_broadcast": true,
                 "unfurl_links": true,
                 "unfurl_media": true,
+                "username": "The Date Goblin",
+                "icon_emoji": ":female_mage:",
             }),
         );
 
@@ -4382,6 +4841,16 @@ mod tests {
         assert_eq!(payload["reply_broadcast"], json!(true));
         assert_eq!(payload["unfurl_links"], json!(true));
         assert_eq!(payload["unfurl_media"], json!(true));
+        assert_eq!(payload["username"], json!("The Date Goblin"));
+        assert_eq!(payload["icon_emoji"], json!(":female_mage:"));
+    }
+
+    #[test]
+    fn python_slack_payload_omits_custom_identity_by_default() {
+        let payload = python_slack_message_payload("C123", "hello", "client-1", &json!({}));
+
+        assert!(payload.get("username").is_none());
+        assert!(payload.get("icon_emoji").is_none());
     }
 
     #[test]
@@ -4478,6 +4947,7 @@ mod tests {
                 {
                     "workflow_name": "manual_workflow",
                     "source_path": "workflows/manual_workflow.py",
+                    "principal": "finance-automation",
                 },
             ],
         }))
@@ -4495,7 +4965,16 @@ mod tests {
             metadata.schedules[0].get("workflow_name"),
             Some(&json!("scheduled_workflow"))
         );
-        assert!(metadata.principals.contains("scheduled_workflow"));
+        assert_eq!(
+            metadata.principals.get("scheduled_workflow"),
+            Some(&WorkflowPrincipalDeclaration::Managed)
+        );
+        assert_eq!(
+            metadata.principals.get("manual_workflow"),
+            Some(&WorkflowPrincipalDeclaration::Existing(
+                "finance-automation".to_owned()
+            ))
+        );
     }
 
     #[test]
@@ -4553,7 +5032,10 @@ mod tests {
     #[tokio::test]
     async fn workflow_principal_requires_workflow_host_sandbox() {
         let discovery = PythonWorkflowMetadata {
-            principals: BTreeSet::from(["nightly_report".to_owned()]),
+            principals: BTreeMap::from([(
+                "nightly_report".to_owned(),
+                WorkflowPrincipalDeclaration::Managed,
+            )]),
             workflow_names: BTreeSet::from(["nightly_report".to_owned()]),
             ..PythonWorkflowMetadata::default()
         };
@@ -4626,6 +5108,52 @@ mod tests {
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].source.as_deref(), Some("header"));
         assert_eq!(all[1].key.as_deref(), Some("repository.full_name"));
+    }
+
+    #[test]
+    fn discovery_metadata_preserves_standard_webhooks_auth() {
+        let payload: PythonWorkflowDiscoveryPayload = serde_json::from_value(json!({
+            "workflows": [
+                {
+                    "workflow_name": "feed_ingest",
+                    "source_path": "workflows/feed_ingest.py",
+                    "webhooks": [
+                        {
+                            "workflow_name": "feed_ingest",
+                            "source_path": "workflows/feed_ingest.py",
+                            "spec": {
+                                "slug": "feed-ingest",
+                                "auth": {
+                                    "type": "standard_webhooks",
+                                    "secret_ref": "FEED_WEBHOOK_SECRET"
+                                },
+                                "trigger_key": {
+                                    "type": "header",
+                                    "header": "webhook-id"
+                                }
+                            }
+                        }
+                    ]
+                }
+            ],
+        }))
+        .unwrap();
+
+        let metadata = metadata_from_discovery_payload(payload);
+        let registry =
+            build_webhook_registry(&metadata, &WorkflowEnablement::allowlist("feed_ingest"))
+                .unwrap();
+        let webhook = registry.get("feed-ingest").unwrap();
+
+        assert!(matches!(
+            &webhook.spec.auth,
+            WorkflowWebhookAuth::StandardWebhooks { secret_ref }
+                if secret_ref == "FEED_WEBHOOK_SECRET"
+        ));
+        assert!(matches!(
+            &webhook.spec.trigger_key,
+            Some(WorkflowWebhookTriggerKey::Header { header }) if header == "webhook-id"
+        ));
     }
 
     fn webhook_with_filter(filter: Value) -> RegisteredWorkflowWebhook {
@@ -4765,7 +5293,7 @@ mod tests {
         assert_eq!(metadata.webhooks.len(), 1);
         assert_eq!(metadata.webhooks[0].workflow_name, "allowed_workflow");
         assert_eq!(
-            metadata.principals.iter().cloned().collect::<Vec<_>>(),
+            metadata.principals.keys().cloned().collect::<Vec<_>>(),
             vec!["allowed_workflow".to_owned()]
         );
     }

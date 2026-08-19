@@ -586,7 +586,10 @@ class SlackClient:
     def _resolve_message_destination(self, channel: str) -> str:
         """Resolve a send_message destination from channel, channel ID, or user ID."""
         if self._looks_like_user_id(channel):
-            return self._open_dm_channel(channel)
+            # chat.postMessage accepts a user ID directly and opens the bot's
+            # one-on-one DM when needed. Calling conversations.open first adds
+            # an unnecessary im:write scope requirement.
+            return self._clean_user_ref(channel).upper()
         return self._resolve_channel(channel)
 
     def _resolve_mentions(self, text: str, user_cache: dict[str, str]) -> str:
@@ -877,10 +880,11 @@ class SlackClient:
     ) -> list[dict]:
         """Search messages using Slack's native search.messages API.
 
-        Uses Slack's native search.messages API for fast, workspace-wide
-        search. When ``SLACK_SEARCH_TOKEN`` is configured, the native call runs
-        with that dedicated user token and its ``search:read`` scope. Falls
-        back to proxy-backed channel history scanning if the native API fails.
+        Uses Slack's native search.messages API with the current principal's
+        user token for fast, workspace-wide search. Explicitly channel-scoped
+        searches use authorized channel history instead. When no user token is
+        linked, Slack rejects native search and the bot-scoped history path is
+        used as a compatibility fallback.
 
         Supports Slack search modifiers in the query string:
             in:#channel, from:@user, before:YYYY-MM-DD, after:YYYY-MM-DD,
@@ -915,10 +919,23 @@ class SlackClient:
 
         try:
             return self._search_messages_native(search_query, max_results)
-        except (SlackApiError, RuntimeError, SlackRateLimitError):
-            # Fall back to proxy-backed channel history scanning if native search fails.
-            return self._search_messages_local(
-                local_query, max_results, local_channels, local_from_user, messages_per_channel
+        except SlackApiError as error:
+            # search.messages does not accept bot tokens. Preserve the restricted
+            # bot-history path for principals without a linked Slack credential,
+            # but never turn a mis-scoped user token into a workspace-wide scan.
+            if self._slack_error_code(error) == "not_allowed_token_type":
+                return self._search_messages_local(
+                    local_query,
+                    max_results,
+                    local_channels,
+                    local_from_user,
+                    messages_per_channel,
+                )
+            access_path = "search_token" if self._search_client is not self._client else "bot_token"
+            self._raise_slack_api_error(
+                error,
+                slack_method="search.messages",
+                access_path=access_path,
             )
 
     def _search_messages_native(
@@ -1834,10 +1851,11 @@ class SlackClient:
             if unfurl_media is not None:
                 kwargs["unfurl_media"] = unfurl_media
             response = self._client.chat_postMessage(**kwargs)
+            response_channel = str(response.get("channel") or channel_id)
             return {
-                "channel": channel_id,
+                "channel": response_channel,
                 "ts": response.get("ts", ""),
-                "permalink": f"https://slack.com/archives/{channel_id}/p{response.get('ts', '').replace('.', '')}",
+                "permalink": f"https://slack.com/archives/{response_channel}/p{response.get('ts', '').replace('.', '')}",
             }
         except SlackApiError as e:
             raise RuntimeError(f"Slack API error: {e.response['error']}") from e
@@ -1977,8 +1995,6 @@ class SlackClient:
             )
             if comment:
                 kwargs["initial_comment"] = comment
-            elif effective_filename:
-                kwargs["initial_comment"] = f"Uploaded `{effective_filename}`."
             if effective_thread_ts:
                 kwargs["thread_ts"] = effective_thread_ts
             # We intentionally do NOT forward alt_text to Slack. Passing alt_txt

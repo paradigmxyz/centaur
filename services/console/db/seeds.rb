@@ -51,7 +51,7 @@ unless Rails.env.production?
       slug: "slack",
       provider: "slack",
       description: "Slack workspace access for messages and channels",
-      allowed_scopes: %w[chat:write channels:history channels:read users:read]
+      allowed_scopes: %w[chat:write channels:history channels:read users:read search:read]
     },
     {
       slug: "github",

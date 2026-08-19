@@ -107,6 +107,10 @@ console:
   # When set, the slackbotv2 deployment also links the first assistant message
   # in a Slack thread to the Console session view; leave empty to omit the link.
   publicUrl: ""
+  # Additional exact Host headers accepted by Rails Host Authorization. Use for
+  # service DNS names that differ from the chart's short in-cluster URL;
+  # publicUrl and the short service host are already included.
+  allowedHosts: []
   # Optional Sentry DSN for Console web requests and background jobs. Empty by
   # default, so the Sentry SDK remains disabled unless explicitly configured.
   sentryDsn: ""
@@ -500,6 +504,7 @@ apiRs:
   activitySummary:
     enabled: false
     model: gpt-5.4-nano
+    # Deprecated compatibility fallback. Prefer OPENAI_BASE_URL in apiRs.extraEnv.
     openaiBaseUrl: https://api.openai.com/v1
     minIntervalSecs: 20
     timeoutSecs: 5

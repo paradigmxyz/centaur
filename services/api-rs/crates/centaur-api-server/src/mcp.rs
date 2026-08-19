@@ -13,7 +13,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use base64::{Engine as _, engine::general_purpose};
-use centaur_session_runtime::{SessionRuntime, ToolHostCallInput};
+use centaur_session_runtime::{SessionRuntime, ToolHostCallInput, ToolHostCallOutput};
 use hmac::{Hmac, KeyInit, Mac};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -433,8 +433,10 @@ async fn run_tool_host_centaur_tool(
     if output.timed_out {
         return Ok(mcp_text_result(
             format!(
-                "centaur tool {}.{method} timed out in sandbox {}: {}",
-                tool.name, output.sandbox_id, output.stderr
+                "centaur tool {}.{method} timed out in {}: {}",
+                tool.name,
+                tool_host_error_context(&output),
+                output.stderr
             ),
             true,
         ));
@@ -448,8 +450,11 @@ async fn run_tool_host_centaur_tool(
         let detail = mcp_tool_failure_detail(raw);
         return Ok(mcp_text_result(
             format!(
-                "centaur tool {}.{method} failed in sandbox {} with status {:?}: {detail}\n\nCall the {} tool with method \"help\" to list available methods and their signatures.",
-                tool.name, output.sandbox_id, output.exit_status, tool.name
+                "centaur tool {}.{method} failed in {} with status {:?}: {detail}\n\nCall the {} tool with method \"help\" to list available methods and their signatures.",
+                tool.name,
+                tool_host_error_context(&output),
+                output.exit_status,
+                tool.name
             ),
             true,
         ));
@@ -465,12 +470,35 @@ async fn run_tool_host_centaur_tool(
         )),
         Err(error) => Ok(mcp_text_result(
             format!(
-                "centaur tool {}.{method} returned non-json output in sandbox {}: {error}: {stdout}",
-                tool.name, output.sandbox_id
+                "centaur tool {}.{method} returned non-json output in {}: {error}: {stdout}",
+                tool.name,
+                tool_host_error_context(&output)
             ),
             true,
         )),
     }
+}
+
+fn tool_host_error_context(output: &ToolHostCallOutput) -> String {
+    let mut parts = Vec::new();
+    let sandbox_id = output.sandbox_id.trim();
+    parts.push(if sandbox_id.is_empty() {
+        "sandbox unknown".to_owned()
+    } else {
+        format!("sandbox {sandbox_id}")
+    });
+
+    let execution_id = output.execution_id.trim();
+    if !execution_id.is_empty() {
+        parts.push(format!("execution {execution_id}"));
+    }
+
+    let request_id = output.request_id.trim();
+    if !request_id.is_empty() {
+        parts.push(format!("request {request_id}"));
+    }
+
+    parts.join(", ")
 }
 
 /// Reduce a Python traceback to its final exception message: agents act on
@@ -992,6 +1020,42 @@ RuntimeError: X API error: 401 - {
 
         let plain = "invalid arguments for search_tweets(query, limit=10): got an unexpected keyword argument 'max_results'";
         assert_eq!(mcp_tool_failure_detail(plain), plain);
+    }
+
+    #[test]
+    fn mcp_tool_host_error_context_includes_correlation_ids() {
+        let output = ToolHostCallOutput {
+            request_id: "mcp-call-123".to_owned(),
+            execution_id: "exe-456".to_owned(),
+            sandbox_id: "sbx-789".to_owned(),
+            stdout: String::new(),
+            stderr: "boom".to_owned(),
+            exit_status: Some(1),
+            timed_out: false,
+        };
+
+        assert_eq!(
+            tool_host_error_context(&output),
+            "sandbox sbx-789, execution exe-456, request mcp-call-123"
+        );
+    }
+
+    #[test]
+    fn mcp_tool_host_error_context_handles_missing_sandbox_id() {
+        let output = ToolHostCallOutput {
+            request_id: "mcp-call-123".to_owned(),
+            execution_id: "exe-456".to_owned(),
+            sandbox_id: String::new(),
+            stdout: String::new(),
+            stderr: "boom".to_owned(),
+            exit_status: None,
+            timed_out: true,
+        };
+
+        assert_eq!(
+            tool_host_error_context(&output),
+            "sandbox unknown, execution exe-456, request mcp-call-123"
+        );
     }
 
     #[tokio::test]
