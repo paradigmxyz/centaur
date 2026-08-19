@@ -64,6 +64,11 @@ updates:
       prefix: chore
       include: scope
     open-pull-requests-limit: 5
+    ignore:
+      # Starlark 0.13 uses hashbrown 0.14, which allocative 0.3.6+ no longer supports.
+      - dependency-name: allocative
+        versions:
+          - ">= 0.3.6"
     groups:
       harness-server-dependencies:
         patterns:
