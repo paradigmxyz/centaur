@@ -62,7 +62,6 @@ Minimum keys:
 | `DATABASE_URL` | API | Postgres connection string. Make sure the password is URL-encoded. |
 | `POSTGRES_PASSWORD` | Bundled Postgres | Password used when the chart manages Postgres. |
 | `IRON_MANAGEMENT_API_KEY` | [iron-proxy](https://docs.iron.sh) management API | Generate with `openssl rand -hex 32`. |
-| `SANDBOX_SIGNING_KEY` | Sandbox API tokens | Generate with `openssl rand -hex 32`; keeps sandbox tokens valid across API restarts. |
 | `SLACK_BOT_TOKEN` | Slackbot/API | Bot User OAuth Token from the Slack app. |
 | `SLACK_SIGNING_SECRET` | Slackbot/API | Used to verify Slack webhook signatures. |
 | `SLACKBOT_API_KEY` | Slackbot to API | Dedicated static service token restricted to Slack session routes and workflow event emission. |

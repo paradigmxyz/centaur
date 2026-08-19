@@ -324,8 +324,8 @@ fi
 #   - access_token: Claude Code runs as a Claude.ai Pro or Max subscription
 #     user. We install a dummy ~/.claude/.credentials.json so the CLI emits
 #     OAuth-shaped requests, unset the API-key stub so it does not fall back
-#     to X-Api-Key, and let iron-token-broker mint a real Bearer at request
-#     time via the anthropic-claude brokered_token secret.
+#     to X-Api-Key, and let iron-proxy inject the current Console-managed
+#     Bearer via the anthropic-claude brokered_token secret.
 CLAUDE_CODE_AUTH_MODE="${CLAUDE_CODE_AUTH_MODE:-api_key}"
 case "$CLAUDE_CODE_AUTH_MODE" in
     api_key)
