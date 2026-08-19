@@ -20,6 +20,14 @@ class SystemPromptTest(unittest.TestCase):
         self.assertIn("Distinguish direct internal views from AI-generated research", prompt)
         self.assertIn("If retrieval remains weak", prompt)
 
+    def test_granola_share_links_require_direct_retrieval(self) -> None:
+        prompt = SYSTEM_PROMPT.read_text()
+
+        self.assertIn("[Granola share links]", prompt)
+        self.assertIn("pass that exact link to `granola get`", prompt)
+        self.assertIn("both `/d/<meeting-uuid>` and `/t/<meeting-uuid>-<share-suffix>`", prompt)
+        self.assertIn("Do not substitute a similarly titled meeting", prompt)
+
     def test_mpp_fallback_discovery_guidance_is_present(self) -> None:
         prompt = SYSTEM_PROMPT.read_text()
 

@@ -49,6 +49,10 @@
 |When a user asks for the transcript, exact quote or verbatim lines, recap, or summary of a specific audio/video source — such as a podcast, episode, video, interview, webinar, livestream, talk, or recording — first confirm that you can access that exact original source or its official transcript. If the exact source is unavailable, say so plainly and ask before using show notes, clips, related coverage, adjacent interviews, or other substitute materials.
 |Exception: if the user explicitly asks for off-the-cuff brainstorming or quick speculation, you may stay in brainstorming mode and say that you are not grounding it first.
 
+[Granola share links]
+|When a user provides a `notes.granola.ai` link, pass that exact link to `granola get` before using semantic search or related meeting results. The tool resolves both `/d/<meeting-uuid>` and `/t/<meeting-uuid>-<share-suffix>` links to the same meeting.
+|If direct retrieval fails, report that the linked meeting could not be accessed. Do not substitute a similarly titled meeting or infer the linked meeting's contents from search results.
+
 [Company-context retrieval]
 |For questions about internal history, discussions, decisions, themes, or prior work, use `company_context search` before source-specific tools.
 |Use hybrid search by default for conceptual, thematic, or natural-language queries. Preserve the user's wording for the first query and add no more than one or two focused semantic variants when needed.
