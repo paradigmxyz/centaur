@@ -71,13 +71,14 @@ Each entry in `secrets` declares one credential the tool can request with
   Console's broker credential system instead of through each iron-proxy. Use
   this when the upstream IdP rotates refresh tokens with strict reuse detection
   (OpenAI Codex, Anthropic Claude Code OAuth, modern Okta or Auth0 with rotation
-  enabled) and more than one proxy shares the credential. Required `fields`:
-  `client_id`, `refresh_token`. Optional: `client_secret`. The `refresh_token`
-  field names the writable credential blob the Console rewrites on every
-  rotation; the other fields are read-only. Read-side fields and
-  `token_endpoint_headers` entries accept `json_key` to pluck a value out of a
-  JSON-encoded secret; the `refresh_token` field does not (the Console rewrites
-  the whole document).
+  enabled) and more than one proxy shares the credential. The entry is only the
+  consumer side: `name` identifies the injected secret, `hosts` defines its
+  request rules, and optional `credential` names the Console broker credential
+  by foreign ID (defaulting to `name`). Create that credential separately in
+  the Console or with `centaur-perms broker create`. Optional `inject_header`
+  and `inject_formatter` override the default Bearer authorization injection.
+  Legacy `fields`, `token_endpoint`, and `scopes` keys are ignored and should
+  not be declared.
 - `type = "gcp_auth"` is for Google service-account JSON. iron-proxy resolves
   the keyfile, mints Google OAuth tokens for `scopes`, and injects them for the
   configured Google API `hosts`. If omitted, hosts default to

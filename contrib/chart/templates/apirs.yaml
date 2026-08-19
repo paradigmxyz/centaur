@@ -461,8 +461,7 @@ spec:
               value: {{ $sandboxEnvList | toJson | quote }}
 {{- end }}
             # console control plane: principals/roles/grants + per-sandbox
-            # proxy sync. Required because api-rs fails fast without it:
-            # iron-control is the only proxy configuration mode.
+            # proxy sync.
             - name: IRON_CONTROL_URL
               value: {{ include "centaur.consoleUrl" . | quote }}
             - name: IRON_CONTROL_API_KEY

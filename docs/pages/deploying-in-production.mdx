@@ -154,7 +154,7 @@ Codex supports two authentication modes, selected per deployment with the
 | Mode | Upstream | Secrets required |
 |------|----------|------------------|
 | `api_key` (default) | `api.openai.com` | `OPENAI_API_KEY` |
-| `access_token` | `chatgpt.com` | `OPENAI_CODEX_CLIENT_ID`, `OPENAI_CODEX_BLOB`, `OPENAI_CODEX_ACCOUNT_ID` |
+| `access_token` | `chatgpt.com` | Console broker credential `openai-codex`; `OPENAI_CODEX_ACCOUNT_ID` |
 
 `access_token` mode routes Codex through a ChatGPT account rather than a raw
 API key. The Console holds the refresh token and its background worker mints
@@ -162,25 +162,18 @@ and refreshes short-lived access tokens. Proxy sync delivers the current token
 to iron-proxy, which injects it on outbound requests so the sandbox never sees
 it.
 
-Store these three items in your secrets backend (1Password vault, Kubernetes
-Secret, etc.) when running in `access_token` mode:
+Run `codex login` locally, then create a Console broker credential with:
 
-- `OPENAI_CODEX_CLIENT_ID`: the Codex CLI's OAuth client id. This is a
-  fixed, publicly known constant: `app_EMoamEEZ73f0CkXaXp7hrann`. It is
-  the same for every Codex install and never rotates, but the broker
-  still resolves it through your secrets backend, so store the literal
-  value as-is.
-- `OPENAI_CODEX_BLOB`: a JSON document `{"refresh_token": "..."}`. The
-  broker rotates this in place on every refresh, so the backing item must
-  be writable.
-- `OPENAI_CODEX_ACCOUNT_ID`: the ChatGPT account UUID the credential is
-  bound to. It is static, but iron-proxy injects it as the
-  `chatgpt-account-id` header so the backend can route to the right
-  workspace. Store it alongside the other two, not in code.
+- Foreign ID: `openai-codex`.
+- Token endpoint: `https://auth.openai.com/oauth/token`.
+- Client ID: `app_EMoamEEZ73f0CkXaXp7hrann`.
+- Refresh token: the value from `~/.codex/auth.json`.
 
-To bootstrap, run `codex login` locally, then copy the refresh token and
-account id from `~/.codex/auth.json` into the matching secret items. Use
-the constant above for `OPENAI_CODEX_CLIENT_ID`.
+The Console encrypts the refresh token at rest and updates it after every
+rotation. Store `OPENAI_CODEX_ACCOUNT_ID`, the ChatGPT account UUID from the
+same login file, in the configured secrets backend. iron-proxy injects it as
+the `chatgpt-account-id` header so the backend can route to the correct
+workspace.
 
 ### Claude Auth Modes
 
@@ -201,7 +194,7 @@ with the `CLAUDE_CODE_AUTH_MODE` env var on the sandbox (set it via
 | Mode | Upstream | Secrets required |
 |------|----------|------------------|
 | `api_key` (default) | `api.anthropic.com` | `ANTHROPIC_API_KEY` |
-| `access_token` | `api.anthropic.com` | `CLAUDE_CODE_CLIENT_ID`, `CLAUDE_CODE_BLOB` |
+| `access_token` | `api.anthropic.com` | Console broker credential `anthropic-claude` |
 
 `access_token` mode routes Claude Code through a Claude.ai Pro or Max
 subscription rather than a raw API key. The Console holds the refresh token and
@@ -211,22 +204,17 @@ so the sandbox never sees it. The entrypoint plants a dummy
 `~/.claude/.credentials.json` so the CLI emits OAuth-shaped requests;
 iron-proxy overwrites the Bearer at request time.
 
-Store these two items in your secrets backend (1Password vault, Kubernetes
-Secret, etc.) when running in `access_token` mode:
+Run `claude login` locally, then create a Console broker credential with:
 
-- `CLAUDE_CODE_CLIENT_ID`: the Claude Code CLI's OAuth client id. This
-  is a fixed, publicly known constant:
-  `9d1c250a-e61b-44d9-88ed-5944d1962f5e`. It is the same for every Claude
-  Code install and never rotates, but the broker still resolves it through
-  your secrets backend, so store the literal value as-is.
-- `CLAUDE_CODE_BLOB`: a JSON document `{"refresh_token": "..."}`. The
-  broker rotates this in place on every refresh, so the backing item must be
-  writable.
+- Foreign ID: `anthropic-claude`.
+- Token endpoint: `https://console.anthropic.com/v1/oauth/token`.
+- Client ID: `9d1c250a-e61b-44d9-88ed-5944d1962f5e`.
+- Refresh token: the value from `~/.claude/.credentials.json`, or from the
+  `Claude Code-credentials` keychain item on macOS.
 
-To bootstrap, run `claude login` locally, then copy the refresh token from
-`~/.claude/.credentials.json` (or from the `Claude Code-credentials` keychain
-item on macOS) into `CLAUDE_CODE_BLOB`. Use the constant above for
-`CLAUDE_CODE_CLIENT_ID`.
+The Console encrypts the refresh token at rest and updates it after every
+rotation. No Claude OAuth credential needs to be copied into the deployment's
+environment or 1Password secret source.
 
 ## 4. Configure Advanced Permissioning
 
