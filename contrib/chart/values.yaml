@@ -402,8 +402,9 @@ apiRs:
   port: 8080
   # Sticky percentage of session requests for Codex assigned to Nanocodex.
   # The API hashes the thread key once and persists the resolved harness on the
-  # session. Set to 0 to keep new Codex requests on Codex.
-  codexNanocodexRolloutPercent: 50
+  # session. 0 keeps all Codex requests on Codex (the server default); raise to
+  # opt into the Nanocodex experiment.
+  codexNanocodexRolloutPercent: 0
   # Public/local MCP endpoint advertised through OAuth protected-resource
   # metadata. Empty falls back to slackbotv2.mcpPublicUrl.
   mcpPublicUrl: ""
