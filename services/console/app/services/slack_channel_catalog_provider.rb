@@ -18,6 +18,24 @@ class SlackChannelCatalogProvider
       payload ? deserialize_result(payload) : loading_result
     end
 
+    def search(query:, limit:, exclude_ids: [])
+      result = fetch
+      excluded = Array(exclude_ids).index_with(true)
+      needle = query.to_s.strip.downcase
+      channels = result.channels.reject { |channel| excluded.key?(channel.id) }
+      if needle.present?
+        channels = channels.select do |channel|
+          channel.name.downcase.include?(needle) || channel.id.downcase.include?(needle)
+        end
+      end
+
+      SlackChannelCatalog::Result.new(
+        channels: channels.first(limit),
+        error: result.error,
+        configured: result.configured
+      )
+    end
+
     def refresh(cache_key:)
       config = configuration
       return unless config && cache_key == self.cache_key(**config)

@@ -89,6 +89,10 @@ spec:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "repo-cache") | nindent 6 }}
   template:
     metadata:
+{{- if $repoCacheHasGithubToken }}
+      annotations:
+        checksum/github-token: {{ include "centaur.secretResourceVersion" (dict "root" . "name" (include "centaur.repoCacheGithubTokenSecretName" .)) | sha256sum }}
+{{- end }}
       labels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "repo-cache") | nindent 8 }}
     spec:

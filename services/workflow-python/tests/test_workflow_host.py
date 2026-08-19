@@ -86,6 +86,8 @@ class RequestRpc(FakeRpc):
                 "run_id": "run-child",
                 "created": True,
             }
+        if message_type == "ctx.post_to_slack":
+            return {"channel": payload["channel"], "ts": "1710000000.000100"}
         if message_type == "ctx.sleep":
             return {"slept": True}
         if message_type == "ctx.event.wait":
@@ -429,6 +431,41 @@ class WorkflowHostTests(unittest.TestCase):
                     "workflow_name": "company_context_documents",
                     "input": {"scope": "slack_thread"},
                     "idempotency_key": "company-context:slack-thread:42",
+                }
+            ],
+        )
+
+    def test_post_to_slack_sends_optional_custom_identity(self) -> None:
+        host = load_workflow_host()
+        rpc = RequestRpc()
+        ctx = host.WorkflowContext(
+            rpc,
+            run_id="run-123",
+            task_id="task-456",
+            workflow_name="sample",
+        )
+
+        result = asyncio.run(
+            ctx.post_to_slack(
+                "U12345678",
+                "Your date is approaching.",
+                username="The Date Goblin",
+                icon_emoji=":female_mage:",
+            )
+        )
+
+        self.assertEqual(result["channel"], "U12345678")
+        self.assertEqual(
+            rpc.requests,
+            [
+                {
+                    "type": "ctx.post_to_slack",
+                    "channel": "U12345678",
+                    "text": "Your date is approaching.",
+                    "args": {
+                        "username": "The Date Goblin",
+                        "icon_emoji": ":female_mage:",
+                    },
                 }
             ],
         )

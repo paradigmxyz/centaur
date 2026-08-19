@@ -98,10 +98,19 @@ be wrapped in `ctx.step(...)` so the result is checkpointed:
 async def handler(inp: dict, ctx: WorkflowContext) -> dict:
     posted = await ctx.step(
         "post_summary",
-        lambda: ctx.post_to_slack(inp["channel"], inp["summary"]),
+        lambda: ctx.post_to_slack(
+            inp["channel"],
+            inp["summary"],
+            username="Summary Bot",
+            icon_emoji=":memo:",
+        ),
     )
     return {"posted": posted}
 ```
+
+`username` and `icon_emoji` are optional. They customize the Slack app identity
+for that message and require the app installation to grant
+`chat:write.customize`. Omitting them preserves the app's default identity.
 
 ### Make agent turns explicit
 

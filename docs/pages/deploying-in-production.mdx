@@ -62,7 +62,6 @@ Minimum keys:
 | `DATABASE_URL` | API | Postgres connection string. Make sure the password is URL-encoded. |
 | `POSTGRES_PASSWORD` | Bundled Postgres | Password used when the chart manages Postgres. |
 | `IRON_MANAGEMENT_API_KEY` | [iron-proxy](https://docs.iron.sh) management API | Generate with `openssl rand -hex 32`. |
-| `SANDBOX_SIGNING_KEY` | Sandbox API tokens | Generate with `openssl rand -hex 32`; keeps sandbox tokens valid across API restarts. |
 | `SLACK_BOT_TOKEN` | Slackbot/API | Bot User OAuth Token from the Slack app. |
 | `SLACK_SIGNING_SECRET` | Slackbot/API | Used to verify Slack webhook signatures. |
 | `SLACKBOT_API_KEY` | Slackbot to API | Dedicated static service token restricted to Slack session routes and workflow event emission. |
@@ -149,38 +148,67 @@ token family is revoked, logging both sides out at random. Use a separate
 ChatGPT account for any non-Centaur Codex work.
 :::
 
-Codex supports two authentication modes, selected per deployment with the
-`CODEX_AUTH_MODE` env var on the sandbox (set it via `sandbox.extraEnv`):
+Codex supports two authentication modes, selected per deployment with
+`sandbox.codexAuthMode` in the chart values. api-rs reads the resulting
+`CODEX_AUTH_MODE` env var to register the matching proxy credential with the
+console and propagates it into each sandbox, so the agent's `auth.json` and
+the injected credential always agree. Do not set `CODEX_AUTH_MODE` through
+`sandbox.extraEnv`: that reaches sandbox pods but not api-rs, which is the
+component that acts on the mode.
 
-| Mode | Upstream | Secrets required |
-|------|----------|------------------|
-| `api_key` (default) | `api.openai.com` | `OPENAI_API_KEY` |
-| `access_token` | `chatgpt.com` | `OPENAI_CODEX_CLIENT_ID`, `OPENAI_CODEX_BLOB`, `OPENAI_CODEX_ACCOUNT_ID` |
+| Mode | Upstream | Credentials required |
+|------|----------|----------------------|
+| `api_key` (default) | `api.openai.com` | `OPENAI_API_KEY` in the secrets backend |
+| `access_token` | `chatgpt.com` | `OPENAI_CODEX_ACCOUNT_ID` in the secrets backend, plus the `openai-codex` broker credential in the console |
 
 `access_token` mode routes Codex through a ChatGPT account rather than a raw
-API key. [iron-token-broker](https://docs.iron.sh) holds the refresh token
-and mints short-lived access tokens, which iron-proxy injects on outbound
-requests so the sandbox never sees them.
+API key. The console owns the refresh token as the `openai-codex` broker
+credential: its background worker refreshes it and mints short-lived access
+tokens, which the per-sandbox proxy injects on outbound requests so the
+sandbox never sees them. The refresh token is stored encrypted in the
+console's own database. It is not read from or synced to your secrets
+backend.
 
-Store these three items in your secrets backend (1Password vault, Kubernetes
-Secret, etc.) when running in `access_token` mode:
+The commands below assume you are at the root of a Centaur checkout and have
+configured `IRON_CONTROL_URL` and `IRON_CONTROL_API_KEY` as described in
+[Configure the Operator CLI](/secrets/advanced-permissioning#configure-the-operator-cli).
 
-- `OPENAI_CODEX_CLIENT_ID`: the Codex CLI's OAuth client id. This is a
-  fixed, publicly known constant: `app_EMoamEEZ73f0CkXaXp7hrann`. It is
-  the same for every Codex install and never rotates, but the broker
-  still resolves it through your secrets backend, so store the literal
-  value as-is.
-- `OPENAI_CODEX_BLOB`: a JSON document `{"refresh_token": "..."}`. The
-  broker rotates this in place on every refresh, so the backing item must
-  be writable.
-- `OPENAI_CODEX_ACCOUNT_ID`: the ChatGPT account UUID the credential is
-  bound to. It is static, but iron-proxy injects it as the
-  `chatgpt-account-id` header so the backend can route to the right
-  workspace. Store it alongside the other two, not in code.
+To bootstrap `access_token` mode:
 
-To bootstrap, run `codex login` locally, then copy the refresh token and
-account id from `~/.codex/auth.json` into the matching secret items. Use
-the constant above for `OPENAI_CODEX_CLIENT_ID`.
+1. Log in locally with the dedicated ChatGPT account and force this login to
+   use a file-backed credential store:
+
+   ```bash
+   codex login -c 'cli_auth_credentials_store="file"'
+   CODEX_AUTH_FILE="${CODEX_HOME:-$HOME/.codex}/auth.json"
+   export OPENAI_CODEX_ACCOUNT_ID="$(jq -er '.tokens.account_id' "$CODEX_AUTH_FILE")"
+   export OPENAI_CODEX_REFRESH_TOKEN="$(jq -er '.tokens.refresh_token' "$CODEX_AUTH_FILE")"
+   ```
+
+   The credential-store override is intentional. Codex can otherwise use the
+   operating system keyring, which leaves no `auth.json` file to read.
+2. Store `OPENAI_CODEX_ACCOUNT_ID` in your secrets backend (1Password vault,
+   Kubernetes Secret, etc.). iron-proxy injects this ChatGPT account UUID as
+   the `chatgpt-account-id` header so the backend routes to the right
+   workspace.
+3. Create the broker credential with the refresh token from the same login:
+
+   ```bash
+   cargo run --manifest-path services/api-rs/Cargo.toml -p centaur-perms -- \
+     broker create --foreign-id openai-codex \
+     --token-endpoint https://auth.openai.com/oauth/token \
+     --client-id app_EMoamEEZ73f0CkXaXp7hrann \
+     --refresh-token "$OPENAI_CODEX_REFRESH_TOKEN"
+   unset OPENAI_CODEX_REFRESH_TOKEN
+   ```
+
+   The client id is the Codex CLI's fixed, publicly known OAuth client id:
+   the same for every Codex install; it is passed here, not stored in the
+   secrets backend.
+4. Start (or restart) api-rs. At startup it registers the access-token
+   fragment with the console; if the `openai-codex` broker credential does
+   not exist yet, the console rejects the registration with a 422 and api-rs
+   fails fast, so create the credential first.
 
 ### Claude Auth Modes
 
@@ -194,38 +222,62 @@ entire token family is revoked, logging both sides out at random. Use a
 separate Claude.ai account for any non-Centaur Claude Code work.
 :::
 
-Claude Code supports two authentication modes, selected per deployment
-with the `CLAUDE_CODE_AUTH_MODE` env var on the sandbox (set it via
-`sandbox.extraEnv`):
+Claude Code supports two authentication modes, selected per deployment with
+`sandbox.claudeCodeAuthMode` in the chart values. It has the same contract as
+`sandbox.codexAuthMode` above: api-rs registers the matching proxy credential
+and propagates `CLAUDE_CODE_AUTH_MODE` into each sandbox, so do not set the
+env var through `sandbox.extraEnv`.
 
-| Mode | Upstream | Secrets required |
-|------|----------|------------------|
-| `api_key` (default) | `api.anthropic.com` | `ANTHROPIC_API_KEY` |
-| `access_token` | `api.anthropic.com` | `CLAUDE_CODE_CLIENT_ID`, `CLAUDE_CODE_BLOB` |
+| Mode | Upstream | Credentials required |
+|------|----------|----------------------|
+| `api_key` (default) | `api.anthropic.com` | `ANTHROPIC_API_KEY` in the secrets backend |
+| `access_token` | `api.anthropic.com` | the `anthropic-claude` broker credential in the console |
 
 `access_token` mode routes Claude Code through a Claude.ai Pro or Max
-subscription rather than a raw API key. [iron-token-broker](https://docs.iron.sh)
-holds the refresh token and mints short-lived access tokens, which iron-proxy
-injects on outbound requests so the sandbox never sees them. The entrypoint
-plants a dummy `~/.claude/.credentials.json` so the CLI emits OAuth-shaped
-requests; the broker overwrites the Bearer at request time.
+subscription rather than a raw API key. The console owns the refresh token as
+the `anthropic-claude` broker credential and mints short-lived access tokens,
+which the per-sandbox proxy injects as the Bearer on outbound requests so the
+sandbox never sees them. The sandbox entrypoint plants a dummy
+`~/.claude/.credentials.json` so the CLI emits OAuth-shaped requests; the
+proxy overwrites the Bearer at request time. This mode needs no
+secrets-backend items.
 
-Store these two items in your secrets backend (1Password vault, Kubernetes
-Secret, etc.) when running in `access_token` mode:
+The commands below assume you are at the root of a Centaur checkout and have
+configured `IRON_CONTROL_URL` and `IRON_CONTROL_API_KEY` as described in
+[Configure the Operator CLI](/secrets/advanced-permissioning#configure-the-operator-cli).
 
-- `CLAUDE_CODE_CLIENT_ID`: the Claude Code CLI's OAuth client id. This
-  is a fixed, publicly known constant:
-  `9d1c250a-e61b-44d9-88ed-5944d1962f5e`. It is the same for every Claude
-  Code install and never rotates, but the broker still resolves it through
-  your secrets backend, so store the literal value as-is.
-- `CLAUDE_CODE_BLOB`: a JSON document `{"refresh_token": "..."}`. The
-  broker rotates this in place on every refresh, so the backing item must be
-  writable.
+To bootstrap, run `claude login` locally with the dedicated Claude.ai
+account, then export the refresh token. On systems where Claude Code writes a
+credentials file, run:
 
-To bootstrap, run `claude login` locally, then copy the refresh token from
-`~/.claude/.credentials.json` (or from the `Claude Code-credentials` keychain
-item on macOS) into `CLAUDE_CODE_BLOB`. Use the constant above for
-`CLAUDE_CODE_CLIENT_ID`.
+```bash
+export CLAUDE_CODE_REFRESH_TOKEN="$(
+  jq -er '.claudeAiOauth.refreshToken' "$HOME/.claude/.credentials.json"
+)"
+```
+
+If Claude Code used the macOS keychain instead, run:
+
+```bash
+export CLAUDE_CODE_REFRESH_TOKEN="$(
+  security find-generic-password -s 'Claude Code-credentials' -w |
+    jq -er '.claudeAiOauth.refreshToken'
+)"
+```
+
+Create the broker credential from the root of the checkout:
+
+```bash
+cargo run --manifest-path services/api-rs/Cargo.toml -p centaur-perms -- \
+  broker create --foreign-id anthropic-claude \
+  --token-endpoint https://platform.claude.com/v1/oauth/token \
+  --client-id 9d1c250a-e61b-44d9-88ed-5944d1962f5e \
+  --refresh-token "$CLAUDE_CODE_REFRESH_TOKEN"
+unset CLAUDE_CODE_REFRESH_TOKEN
+```
+
+The client id is Claude Code's fixed, publicly known OAuth client id. As with
+Codex, api-rs fails fast at startup if the broker credential is missing.
 
 ## 4. Configure Advanced Permissioning
 

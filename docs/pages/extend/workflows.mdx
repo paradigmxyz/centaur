@@ -331,8 +331,37 @@ that content type is listed in `allowed_content_types`.
 Webhook requests do not use Centaur API keys. The API verifies the provider
 signature before creating workflow state. `HmacAuth.github(...)` verifies
 `X-Hub-Signature-256`; a plain `HmacAuth(...)` can be used for other
-SHA-256 HMAC providers. During local development or for trusted internal
-routes, `auth="none"` is allowed.
+SHA-256 HMAC providers that sign the raw request body. During local development
+or for trusted internal routes, `auth="none"` is allowed.
+
+For providers that implement the [Standard Webhooks
+specification](https://www.standardwebhooks.com/), use the explicit
+`standard_webhooks` auth type:
+
+```python
+WEBHOOKS = [
+    {
+        "slug": "feed-ingest",
+        "provider": "feed-provider",
+        "auth": {
+            "type": "standard_webhooks",
+            "secret_ref": "FEED_WEBHOOK_SECRET",
+        },
+        "trigger_key": {"type": "header", "header": "webhook-id"},
+        "allowed_methods": ["POST"],
+        "allowed_content_types": ["application/json"],
+    }
+]
+```
+
+Set `FEED_WEBHOOK_SECRET` in the API deployment to the provider's signing
+secret (normally a `whsec_`-prefixed, base64-encoded value). Centaur requires
+the `webhook-id`, `webhook-timestamp`, and `webhook-signature` headers, verifies
+the `v1` signature over the exact raw body, supports space-separated signatures
+for key rotation, and rejects timestamps outside a five-minute window. Using
+`webhook-id` as the trigger key also gives retries the same durable workflow
+identity. Auth schemes are selected by `auth.type`; Centaur does not infer one
+from the headers.
 
 The workflow receives input in this shape:
 

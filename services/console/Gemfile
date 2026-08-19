@@ -8,7 +8,8 @@ gem "propshaft"
 gem "tailwindcss-rails", "4.6.0"
 # Use pg as the database for Active Record
 gem "pg", "~> 1.5"
-# Preserve ParadeDB indexes in Rails schema dumps and migrations.
+# Preserve ParadeDB indexes in Rails schema dumps and migrations. Versions 0.10+
+# require ParadeDB 0.25+, while Console currently runs ParadeDB 0.23.
 gem "rails-paradedb", "0.7.0", require: "parade_db"
 # Opaque ID encoding (bigint <-> short string) for externally-exposed IDs
 gem "sqids", "~> 0.2"
