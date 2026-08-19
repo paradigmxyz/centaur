@@ -28,9 +28,9 @@ class FigmaClient:
     BASE_URL = "https://api.figma.com/v1"
 
     def __init__(self, token: str | None = None):
-        self.token = token or secret("FIGMA_ACCESS_TOKEN", "") or secret("FIGMA", "")
+        self.token = token or secret("FIGMA_ACCESS_TOKEN", "")
         if not self.token:
-            raise ValueError("FIGMA token not found. Set FIGMA_ACCESS_TOKEN env var or pass token.")
+            raise ValueError("Figma token not found. Set FIGMA_ACCESS_TOKEN or pass token.")
 
     def _request(self, endpoint: str, retries: int = 3) -> dict:
         """Make authenticated request to Figma API with retry on rate limit."""

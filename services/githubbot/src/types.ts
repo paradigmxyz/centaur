@@ -179,6 +179,8 @@ export type Githubbot = {
 export type GithubbotThreadState = {
   /** Set once the thread's first turn has run (gates follow-up ingestion). */
   historyForwarded?: boolean;
+  /** Codex provider pinned for this thread. Null clears a previous selection. */
+  provider?: string | null;
   /**
    * Set once the full PR/issue context (with body) has ridden a turn's execute;
    * later turns prepend only the compact header instead.
@@ -243,6 +245,8 @@ export type ForwardSessionInput = {
   messages: GithubbotApiMessage[];
   /** Per-turn model override parsed from message flags (--model/--opus/...). */
   model?: string;
+  /** Effective model provider selected by a message flag; codex only. */
+  provider?: string;
   onEventId(eventId: number): void;
   openStream: boolean;
   threadId: string;

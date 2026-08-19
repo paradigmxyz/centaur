@@ -452,6 +452,9 @@ pub enum WorkflowWebhookAuth {
     Github {
         secret_ref: String,
     },
+    StandardWebhooks {
+        secret_ref: String,
+    },
     Bearer {
         secret_ref: String,
     },
@@ -1267,7 +1270,9 @@ fn normalize_webhook(webhook: &mut RegisteredWorkflowWebhook) -> Result<(), Work
                 ));
             }
         }
-        WorkflowWebhookAuth::Github { secret_ref } | WorkflowWebhookAuth::Bearer { secret_ref } => {
+        WorkflowWebhookAuth::Github { secret_ref }
+        | WorkflowWebhookAuth::StandardWebhooks { secret_ref }
+        | WorkflowWebhookAuth::Bearer { secret_ref } => {
             if secret_ref.trim().is_empty() {
                 return Err(WorkflowRuntimeError::BadRequest(format!(
                     "workflow webhook {:?} auth requires secret_ref",
@@ -5103,6 +5108,52 @@ mod tests {
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].source.as_deref(), Some("header"));
         assert_eq!(all[1].key.as_deref(), Some("repository.full_name"));
+    }
+
+    #[test]
+    fn discovery_metadata_preserves_standard_webhooks_auth() {
+        let payload: PythonWorkflowDiscoveryPayload = serde_json::from_value(json!({
+            "workflows": [
+                {
+                    "workflow_name": "feed_ingest",
+                    "source_path": "workflows/feed_ingest.py",
+                    "webhooks": [
+                        {
+                            "workflow_name": "feed_ingest",
+                            "source_path": "workflows/feed_ingest.py",
+                            "spec": {
+                                "slug": "feed-ingest",
+                                "auth": {
+                                    "type": "standard_webhooks",
+                                    "secret_ref": "FEED_WEBHOOK_SECRET"
+                                },
+                                "trigger_key": {
+                                    "type": "header",
+                                    "header": "webhook-id"
+                                }
+                            }
+                        }
+                    ]
+                }
+            ],
+        }))
+        .unwrap();
+
+        let metadata = metadata_from_discovery_payload(payload);
+        let registry =
+            build_webhook_registry(&metadata, &WorkflowEnablement::allowlist("feed_ingest"))
+                .unwrap();
+        let webhook = registry.get("feed-ingest").unwrap();
+
+        assert!(matches!(
+            &webhook.spec.auth,
+            WorkflowWebhookAuth::StandardWebhooks { secret_ref }
+                if secret_ref == "FEED_WEBHOOK_SECRET"
+        ));
+        assert!(matches!(
+            &webhook.spec.trigger_key,
+            Some(WorkflowWebhookTriggerKey::Header { header }) if header == "webhook-id"
+        ));
     }
 
     fn webhook_with_filter(filter: Value) -> RegisteredWorkflowWebhook {

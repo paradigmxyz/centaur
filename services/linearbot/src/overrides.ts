@@ -3,6 +3,7 @@
  * the v1 slackbot):
  *   --claude | --claude-code | --amp | --codex   pick the harness for the thread
  *   --meta                                       codex via Meta AI direct
+ *   --provider <name>                            codex via a configured provider
  *   --model <name> (or --model=<name>)           pick the model within that harness
  *   --fable | --opus | --sonnet | --haiku        model shortcuts (imply claude-code)
  *
@@ -20,6 +21,11 @@ export type MessageOverrides = {
   provider?: string;
 };
 
+export type StickyProviderResolution = {
+  provider?: string;
+  update?: string | null;
+};
+
 // Flag name -> HarnessType wire value (serde lowercase of the Rust enum).
 const HARNESS_FLAGS: Record<string, string> = {
   amp: "amp",
@@ -30,7 +36,9 @@ const HARNESS_FLAGS: Record<string, string> = {
   nanocodex: "nanocodex",
 };
 
-const PROVIDER_FLAGS: Record<string, { provider: string; harnessType: string }> = {
+type ProviderMapping = { provider: string; harnessType: string; model?: string };
+
+const PROVIDER_FLAGS: Record<string, ProviderMapping> = {
   meta: { provider: "responses", harnessType: "codex" },
 };
 
@@ -61,6 +69,11 @@ const MODEL_FLAG_PATTERN = new RegExp(
   "i",
 );
 
+const PROVIDER_FLAG_PATTERN = new RegExp(
+  String.raw`(?:^|\s)--provider${MODEL_VALUE_SEPARATOR}([A-Za-z][A-Za-z0-9_-]*)${FLAG_VALUE_BOUNDARY}`,
+  "i",
+);
+
 export function extractMessageOverrides(text: string): MessageOverrides {
   let cleaned = text;
   let harnessType: string | undefined;
@@ -72,6 +85,15 @@ export function extractMessageOverrides(text: string): MessageOverrides {
     const value = modelMatch[1]!;
     model = CLAUDE_MODEL_ALIASES[value.toLowerCase()] ?? value;
     cleaned = stripMatch(cleaned, modelMatch);
+  }
+
+  const providerMatch = PROVIDER_FLAG_PATTERN.exec(cleaned);
+  if (providerMatch) {
+    const mapping = providerMapping(providerMatch[1]!);
+    provider = mapping.provider;
+    harnessType ??= mapping.harnessType;
+    model ??= mapping.model;
+    cleaned = stripMatch(cleaned, providerMatch);
   }
 
   for (const [flag, harness] of Object.entries(HARNESS_FLAGS)) {
@@ -94,6 +116,7 @@ export function extractMessageOverrides(text: string): MessageOverrides {
     if (!match) continue;
     provider ??= mapping.provider;
     harnessType ??= mapping.harnessType;
+    model ??= mapping.model;
     cleaned = stripMatch(cleaned, match);
   }
 
@@ -103,6 +126,46 @@ export function extractMessageOverrides(text: string): MessageOverrides {
     model,
     provider,
   };
+}
+
+/**
+ * Resolve the provider fixed at Codex thread start. A provider selection stays
+ * sticky across later turns, while an explicit harness switch clears it.
+ * `update` is omitted when persisted state should remain unchanged; null is a
+ * deliberate tombstone for a previous selection.
+ */
+export function resolveStickyProvider(
+  current: string | null | undefined,
+  overrides: Pick<MessageOverrides, "harnessType" | "provider">,
+): StickyProviderResolution {
+  if (overrides.provider) {
+    return { provider: overrides.provider, update: overrides.provider };
+  }
+  if (overrides.harnessType) return { update: null };
+  return current ? { provider: current } : {};
+}
+
+function providerMapping(value: string): ProviderMapping {
+  const provider = value.toLowerCase();
+  return (
+    PROVIDER_FLAGS[provider] ?? {
+      provider,
+      harnessType: "codex",
+      model: customProviderDefaultModel(provider),
+    }
+  );
+}
+
+function customProviderDefaultModel(provider: string): string | undefined {
+  const raw = process.env.CODEX_CUSTOM_PROVIDERS;
+  if (!raw) return undefined;
+  try {
+    const config = JSON.parse(raw)?.[provider];
+    const model = config?.defaultModel;
+    return typeof model === "string" && model.trim() ? model.trim() : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function flagPattern(flag: string): RegExp {

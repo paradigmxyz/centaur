@@ -302,7 +302,11 @@ async function handleMessage(
         contextPreamble: githubContextPreamble(threadKey, reviewComment),
         executeMessage: serialized,
         options,
-        overrides: { harnessType: overrides.harnessType, model: overrides.model },
+        overrides: {
+          harnessType: overrides.harnessType,
+          model: overrides.model,
+          provider: overrides.provider,
+        },
         reactMessageId: message.id,
         sessionThreadKey,
         thread,

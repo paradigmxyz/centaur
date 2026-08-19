@@ -102,6 +102,7 @@ Store one secret per enabled harness credential:
 | Codex default | `codex` | none or `--codex` | `OPENAI_API_KEY` | `api.openai.com` |
 | Codex with OpenRouter provider | `codex` | none or `--codex` | `OPENROUTER_API_KEY` | `openrouter.ai` |
 | Codex with Meta AI direct | `codex` | `--meta` | `META_AI_API_KEY` | `api.ai.meta.com` |
+| Codex with a custom provider | `codex` | `--provider <id>` | Provider `apiKeyEnv` | Provider `baseUrl` host |
 | Amp | `amp` | `--amp` | `AMP_API_KEY` | `ampcode.com` |
 | Claude Code | `claude-code` | `--claude` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
 | pi-mono | `pi-mono` | `--pi` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
@@ -128,6 +129,27 @@ provider even when `OPENROUTER_MODEL` is unset.
 To run Codex through Meta AI direct, store `META_AI_API_KEY` and select the
 provider with `--meta`. Pair it with `--model <model-id>` when choosing a
 provider-specific model for a turn.
+
+To register a private OpenAI-compatible Responses provider, add it once under
+`codex.customProviders`:
+
+```yaml
+codex:
+  customProviders:
+    private_responses:
+      name: Private Responses
+      baseUrl: https://inference.example.com/v1
+      apiKeyEnv: PRIVATE_RESPONSES_API_KEY
+      defaultModel: example-model
+```
+
+Store the named key in the configured iron-proxy secret source. The chart sends
+the non-secret provider catalog to api-rs, sandboxes, chat ingresses, and the
+Console. api-rs registers a bearer-token replacement restricted to the
+`baseUrl` DNS host; sandboxes receive only the `apiKeyEnv` placeholder. Select
+the provider with `--provider private_responses`; `--model` overrides its
+configured default for that turn. If `defaultModel` is omitted, callers must
+pass `--model`; the Console lists only custom providers that define a default.
 
 The backing vault can be shared across the deployment, but access is not. The
 Centaur Console grants each user, channel, issue, or workflow principal only

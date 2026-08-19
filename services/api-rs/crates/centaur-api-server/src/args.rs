@@ -20,7 +20,8 @@ use centaur_iron_control::{
     SessionRegistrar, register_role,
 };
 use centaur_iron_proxy::{
-    ProxyFragment, SourceKind, SourcePolicy, bedrock_enabled, harness_auth_fragment, infra_fragment,
+    ProxyFragment, SourceKind, SourcePolicy, bedrock_enabled, custom_provider_auth_fragments,
+    harness_auth_fragment, infra_fragment,
 };
 use centaur_sandbox_agent_k8s::{
     AgentSandboxBackend, AgentSandboxConfig, GitHubTokenRef, IronControlSettings, IronProxyConfig,
@@ -113,10 +114,6 @@ impl Args {
 
     pub(crate) fn shutdown_execution_drain_timeout(&self) -> Duration {
         Duration::from_secs(self.server.shutdown_execution_drain_timeout_secs)
-    }
-
-    pub(crate) fn codex_nanocodex_rollout_percent(&self) -> u8 {
-        self.server.codex_nanocodex_rollout_percent
     }
 
     pub(crate) fn execution_adoption_interval(&self) -> Option<Duration> {
@@ -474,16 +471,6 @@ pub(crate) struct ServerArgs {
     pub(crate) bind_addr: SocketAddr,
     #[arg(long, env = "RUN_MIGRATIONS", default_value_t = false)]
     pub(crate) run_migrations: bool,
-    /// Percentage of sessions requesting Codex that are assigned to
-    /// Nanocodex. The assignment is deterministic by thread key and the
-    /// resolved harness is persisted on the session.
-    #[arg(
-        long = "session-codex-nanocodex-rollout-percent",
-        env = "SESSION_CODEX_NANOCODEX_ROLLOUT_PERCENT",
-        default_value_t = 0,
-        value_parser = clap::value_parser!(u8).range(0..=100)
-    )]
-    codex_nanocodex_rollout_percent: u8,
     /// How long shutdown waits for in-flight executions to finish before
     /// releasing their stdout-owner leases for adoption by a peer. Keep
     /// below the pod's terminationGracePeriodSeconds (35s in the chart) so
@@ -1978,6 +1965,9 @@ impl IronProxyHarnessArgs {
         if let Some(fragment) = harness_auth_fragment("meta-ai", "api_key")? {
             fragments.push(fragment);
         }
+        if let Ok(raw) = env::var("CODEX_CUSTOM_PROVIDERS") {
+            fragments.extend(custom_provider_auth_fragments(&raw)?);
+        }
         // Bedrock is opt-in (not the default codex provider): only register its
         // SigV4 re-signing fragment when the operator has set CODEX_BEDROCK_REGION,
         // since the fragment expects AWS keys in the secrets backend.
@@ -2302,33 +2292,6 @@ mod tests {
         assert_eq!(args.sandbox.k8s_namespace, "centaur-test");
         assert_eq!(args.sandbox.ready_timeout_secs, 17);
         assert_eq!(args.sandbox.k8s_context.as_deref(), Some("kind-test"));
-    }
-
-    #[test]
-    fn parses_codex_nanocodex_rollout_percent() {
-        let args = Args::try_parse_from([
-            "centaur-api-server",
-            "--database-url",
-            "postgres://postgres:postgres@localhost/centaur",
-            "--session-codex-nanocodex-rollout-percent",
-            "50",
-        ])
-        .unwrap();
-
-        assert_eq!(args.codex_nanocodex_rollout_percent(), 50);
-    }
-
-    #[test]
-    fn rejects_invalid_codex_nanocodex_rollout_percent() {
-        let result = Args::try_parse_from([
-            "centaur-api-server",
-            "--database-url",
-            "postgres://postgres:postgres@localhost/centaur",
-            "--session-codex-nanocodex-rollout-percent",
-            "101",
-        ]);
-
-        assert!(result.is_err());
     }
 
     #[test]
