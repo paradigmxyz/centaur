@@ -85,8 +85,8 @@ Console bootstrap:
 Note: harness access-token modes (sandbox.codexAuthMode / claudeCodeAuthMode
 set to access_token) also need a console broker credential (openai-codex /
 anthropic-claude) created out of band with `centaur-perms broker create`;
-without it api-rs fails registration at startup. This script cannot seed it —
-see the Codex/Claude Auth Modes sections in docs/pages/deploying-in-production.mdx.
+without it api-rs fails registration at startup. This script cannot seed it.
+See the Codex/Claude Auth Modes sections in docs/pages/deploying-in-production.mdx.
 EOF
 }
 

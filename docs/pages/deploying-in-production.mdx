@@ -167,27 +167,43 @@ API key. The console owns the refresh token as the `openai-codex` broker
 credential: its background worker refreshes it and mints short-lived access
 tokens, which the per-sandbox proxy injects on outbound requests so the
 sandbox never sees them. The refresh token is stored encrypted in the
-console's own database — it is not read from or synced to your secrets
+console's own database. It is not read from or synced to your secrets
 backend.
+
+The commands below assume you are at the root of a Centaur checkout and have
+configured `IRON_CONTROL_URL` and `IRON_CONTROL_API_KEY` as described in
+[Configure the Operator CLI](/secrets/advanced-permissioning#configure-the-operator-cli).
 
 To bootstrap `access_token` mode:
 
-1. Run `codex login` locally with the dedicated ChatGPT account.
-2. Store `OPENAI_CODEX_ACCOUNT_ID` in your secrets backend (1Password vault,
-   Kubernetes Secret, etc.): the ChatGPT account UUID from
-   `~/.codex/auth.json`. iron-proxy injects it as the `chatgpt-account-id`
-   header so the backend routes to the right workspace.
-3. Create the broker credential with the refresh token from the same
-   `~/.codex/auth.json` (`.tokens.refresh_token`):
+1. Log in locally with the dedicated ChatGPT account and force this login to
+   use a file-backed credential store:
 
    ```bash
-   centaur-perms broker create --foreign-id openai-codex \
+   codex login -c 'cli_auth_credentials_store="file"'
+   CODEX_AUTH_FILE="${CODEX_HOME:-$HOME/.codex}/auth.json"
+   export OPENAI_CODEX_ACCOUNT_ID="$(jq -er '.tokens.account_id' "$CODEX_AUTH_FILE")"
+   export OPENAI_CODEX_REFRESH_TOKEN="$(jq -er '.tokens.refresh_token' "$CODEX_AUTH_FILE")"
+   ```
+
+   The credential-store override is intentional. Codex can otherwise use the
+   operating system keyring, which leaves no `auth.json` file to read.
+2. Store `OPENAI_CODEX_ACCOUNT_ID` in your secrets backend (1Password vault,
+   Kubernetes Secret, etc.). iron-proxy injects this ChatGPT account UUID as
+   the `chatgpt-account-id` header so the backend routes to the right
+   workspace.
+3. Create the broker credential with the refresh token from the same login:
+
+   ```bash
+   cargo run --manifest-path services/api-rs/Cargo.toml -p centaur-perms -- \
+     broker create --foreign-id openai-codex \
      --token-endpoint https://auth.openai.com/oauth/token \
      --client-id app_EMoamEEZ73f0CkXaXp7hrann \
      --refresh-token "$OPENAI_CODEX_REFRESH_TOKEN"
+   unset OPENAI_CODEX_REFRESH_TOKEN
    ```
 
-   The client id is the Codex CLI's fixed, publicly known OAuth client id —
+   The client id is the Codex CLI's fixed, publicly known OAuth client id:
    the same for every Codex install; it is passed here, not stored in the
    secrets backend.
 4. Start (or restart) api-rs. At startup it registers the access-token
@@ -208,7 +224,7 @@ separate Claude.ai account for any non-Centaur Claude Code work.
 :::
 
 Claude Code supports two authentication modes, selected per deployment with
-`sandbox.claudeCodeAuthMode` in the chart values — the same contract as
+`sandbox.claudeCodeAuthMode` in the chart values. It has the same contract as
 `sandbox.codexAuthMode` above: api-rs registers the matching proxy credential
 and propagates `CLAUDE_CODE_AUTH_MODE` into each sandbox, so do not set the
 env var through `sandbox.extraEnv`.
@@ -227,16 +243,38 @@ sandbox never sees them. The sandbox entrypoint plants a dummy
 proxy overwrites the Bearer at request time. This mode needs no
 secrets-backend items.
 
+The commands below assume you are at the root of a Centaur checkout and have
+configured `IRON_CONTROL_URL` and `IRON_CONTROL_API_KEY` as described in
+[Configure the Operator CLI](/secrets/advanced-permissioning#configure-the-operator-cli).
+
 To bootstrap, run `claude login` locally with the dedicated Claude.ai
-account, copy the refresh token from `~/.claude/.credentials.json` (or from
-the `Claude Code-credentials` keychain item on macOS), and create the broker
-credential:
+account, then export the refresh token. On systems where Claude Code writes a
+credentials file, run:
 
 ```bash
-centaur-perms broker create --foreign-id anthropic-claude \
+export CLAUDE_CODE_REFRESH_TOKEN="$(
+  jq -er '.claudeAiOauth.refreshToken' "$HOME/.claude/.credentials.json"
+)"
+```
+
+If Claude Code used the macOS keychain instead, run:
+
+```bash
+export CLAUDE_CODE_REFRESH_TOKEN="$(
+  security find-generic-password -s 'Claude Code-credentials' -w |
+    jq -er '.claudeAiOauth.refreshToken'
+)"
+```
+
+Create the broker credential from the root of the checkout:
+
+```bash
+cargo run --manifest-path services/api-rs/Cargo.toml -p centaur-perms -- \
+  broker create --foreign-id anthropic-claude \
   --token-endpoint https://platform.claude.com/v1/oauth/token \
   --client-id 9d1c250a-e61b-44d9-88ed-5944d1962f5e \
   --refresh-token "$CLAUDE_CODE_REFRESH_TOKEN"
+unset CLAUDE_CODE_REFRESH_TOKEN
 ```
 
 The client id is Claude Code's fixed, publicly known OAuth client id. As with

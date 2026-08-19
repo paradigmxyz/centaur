@@ -735,9 +735,7 @@ impl SandboxArgs {
             let policy = self.iron_proxy.source_policy();
             let roles = self.iron_proxy.roles_to_register()?;
             for (spec, fragment) in &roles {
-                register_role_with_retry(&client, spec, fragment, &policy)
-                    .await
-                    .map_err(with_broker_credential_hint)?;
+                register_role_with_retry(&client, spec, fragment, &policy).await?;
             }
         } else {
             let spec = RoleSpec::infra();
@@ -1407,25 +1405,6 @@ async fn register_role_with_retry(
         }
     }
     unreachable!("iron-control registration retry loop always returns");
-}
-
-// A 422 naming a missing broker credential means the out-of-band bootstrap step
-// (`centaur-perms broker create`) was skipped; say so instead of only relaying the console error.
-fn with_broker_credential_hint(error: RegisterError) -> ServerError {
-    let missing_credential = matches!(
-        &error,
-        RegisterError::Control(IronControlError::Status { status: 422, body, .. })
-            if body.contains("does not reference an existing broker credential")
-    );
-    if missing_credential {
-        return ServerError::UnsupportedConfig(format!(
-            "{error}; broker credentials are provisioned out of band — create it with: \
-             centaur-perms broker create --foreign-id <credential-id> \
-             --token-endpoint <idp-token-endpoint> --client-id <oauth-client-id> \
-             --refresh-token <refresh-token> (see the harness auth modes docs)"
-        ));
-    }
-    error.into()
 }
 
 fn should_retry_iron_control_register(error: &RegisterError) -> bool {
@@ -2200,44 +2179,6 @@ mod tests {
                 what: "unsupported transform".to_owned(),
             })
         ));
-    }
-
-    #[test]
-    fn missing_broker_credential_422_gets_bootstrap_hint() {
-        let status_error = |status: u16, body: &str| {
-            RegisterError::Control(IronControlError::Status {
-                method: "PUT".to_owned(),
-                path: "/api/v1/static_secrets/harness-codex".to_owned(),
-                status,
-                body: body.to_owned(),
-            })
-        };
-
-        let missing = status_error(
-            422,
-            r#"{"error":{"message":"Validation failed","details":{"config":["credential_id \"openai-codex\" does not reference an existing broker credential"]}}}"#,
-        );
-        let hinted = with_broker_credential_hint(missing).to_string();
-        assert!(hinted.contains("centaur-perms broker create"));
-        assert!(hinted.contains("openai-codex"));
-
-        let other_422 =
-            with_broker_credential_hint(status_error(422, "some other validation error"));
-        assert!(
-            !other_422
-                .to_string()
-                .contains("centaur-perms broker create")
-        );
-
-        let other_status = with_broker_credential_hint(status_error(
-            500,
-            "does not reference an existing broker credential",
-        ));
-        assert!(
-            !other_status
-                .to_string()
-                .contains("centaur-perms broker create")
-        );
     }
 
     #[test]
