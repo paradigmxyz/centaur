@@ -480,7 +480,9 @@ export async function forwardToSessionApi(
       options,
       input.threadId,
       input.harnessType,
-      sessionRequesterMessage(input)
+      sessionRequesterMessage(input),
+      input.restartOnHarnessConflict,
+      input.harnessAssignment
     ),
     sessionApiTimeoutMs(options),
     'create session'
@@ -759,9 +761,9 @@ export function clearConversationNameCacheForTests(): void {
 }
 
 type CreateSessionOutcome = {
-  /** The harness persisted by the API after applying control-plane policy. */
+  /** The harness persisted by the API. */
   harnessType?: string
-  /** The experiment/cohort used to select the persisted harness. */
+  /** The Slack-owned experiment/cohort used to select the persisted harness. */
   harnessAssignment?: SlackbotV2HarnessAssignment
   /** The API restarted the thread onto the requested harness. */
   harnessSwitched: boolean
@@ -771,7 +773,9 @@ async function createSession(
   options: SlackbotV2Options,
   threadId: string,
   harnessType?: string,
-  message?: SlackbotV2ApiMessage
+  message?: SlackbotV2ApiMessage,
+  restartOnHarnessConflict?: boolean,
+  harnessAssignment?: SlackbotV2HarnessAssignment
 ): Promise<CreateSessionOutcome> {
   const requested = harnessType ?? options.defaultHarnessType ?? DEFAULT_HARNESS_TYPE
   // A sticky --claude/--amp/--codex/--nanocodex selection restarts a thread
@@ -781,10 +785,11 @@ async function createSession(
     threadId,
     requested,
     message,
-    harnessType ? 'restart' : undefined
+    (restartOnHarnessConflict ?? Boolean(harnessType)) ? 'restart' : undefined,
+    harnessAssignment
   )
   if (response.ok) {
-    return sessionOutcomeFromResponse(response)
+    return sessionOutcomeFromResponse(response, harnessAssignment)
   }
 
   let body = ''
@@ -799,9 +804,16 @@ async function createSession(
   // harness instead of failing the message.
   const existing = response.status === 409 ? existingHarnessFromConflict(body) : undefined
   if (existing && existing !== requested) {
-    const retry = await postCreateSession(options, threadId, existing, message)
+    const retry = await postCreateSession(
+      options,
+      threadId,
+      existing,
+      message,
+      undefined,
+      harnessAssignment
+    )
     await ensureApiOk(retry, 'create session')
-    return sessionOutcomeFromResponse(retry)
+    return sessionOutcomeFromResponse(retry, harnessAssignment)
   }
   throw new SessionApiError({
     action: 'create session',
@@ -817,7 +829,8 @@ async function postCreateSession(
   threadId: string,
   harnessType: string,
   message?: SlackbotV2ApiMessage,
-  onHarnessConflict?: 'reject' | 'restart'
+  onHarnessConflict?: 'reject' | 'restart',
+  harnessAssignment?: SlackbotV2HarnessAssignment
 ): Promise<Response> {
   const fetchFn = options.fetch ?? fetch
   // The conversation name becomes the session principal's display name in
@@ -836,6 +849,9 @@ async function postCreateSession(
       thread_id: threadId,
       ...slackHomeTeamMetadata(options),
       ...sessionRequesterMetadata(message, requesterIdentity),
+      ...(harnessAssignment
+        ? { harness_assignment: harnessAssignmentMetadata(harnessAssignment) }
+        : {}),
       ...(conversationName ? { slack_conversation_name: conversationName } : {})
     },
     ...(onHarnessConflict ? { on_harness_conflict: onHarnessConflict } : {})
@@ -853,39 +869,38 @@ async function postCreateSession(
   )
 }
 
-async function sessionOutcomeFromResponse(response: Response): Promise<CreateSessionOutcome> {
+async function sessionOutcomeFromResponse(
+  response: Response,
+  harnessAssignment?: SlackbotV2HarnessAssignment
+): Promise<CreateSessionOutcome> {
   try {
     const payload = await response.json()
     const harnessType = isJsonObject(payload) ? stringValue(payload.harness_type) : undefined
-    const harnessAssignment = isJsonObject(payload)
-      ? harnessAssignmentFromResponse(payload.harness_assignment)
-      : undefined
+    const resolvedAssignment =
+      harnessAssignment &&
+      (!harnessType || harnessType === 'codex' || harnessType === 'nanocodex')
+        ? { ...harnessAssignment, cohort: harnessType ?? harnessAssignment.cohort }
+        : undefined
     return {
       harnessSwitched: isJsonObject(payload) && payload.harness_switched === true,
       ...(harnessType ? { harnessType } : {}),
-      ...(harnessAssignment ? { harnessAssignment } : {})
+      ...(resolvedAssignment ? { harnessAssignment: resolvedAssignment } : {})
     }
   } catch {
-    return { harnessSwitched: false }
+    return {
+      harnessSwitched: false,
+      ...(harnessAssignment ? { harnessAssignment } : {})
+    }
   }
 }
 
-function harnessAssignmentFromResponse(value: unknown): SlackbotV2HarnessAssignment | undefined {
-  if (!isJsonObject(value)) return undefined
-  const experiment = stringValue(value.experiment)
-  const requestedHarness = stringValue(value.requested_harness)
-  const cohort = stringValue(value.cohort)
-  const rolloutPercent = value.rollout_percent
-  if (
-    !experiment ||
-    !requestedHarness ||
-    !cohort ||
-    typeof rolloutPercent !== 'number' ||
-    !Number.isFinite(rolloutPercent)
-  ) {
-    return undefined
+function harnessAssignmentMetadata(assignment: SlackbotV2HarnessAssignment): JsonObject {
+  return {
+    experiment: assignment.experiment,
+    requested_harness: assignment.requestedHarness,
+    cohort: assignment.cohort,
+    rollout_percent: assignment.rolloutPercent
   }
-  return { experiment, requestedHarness, cohort, rolloutPercent }
 }
 
 function existingHarnessFromConflict(body: string): string | undefined {
@@ -1342,14 +1357,7 @@ async function executeSession(
         ...(recordedModel ? { model: recordedModel } : {}),
         ...(metadataHarnessType ? { harness_type: metadataHarnessType } : {}),
         ...(harnessAssignment
-          ? {
-              harness_assignment: {
-                experiment: harnessAssignment.experiment,
-                requested_harness: harnessAssignment.requestedHarness,
-                cohort: harnessAssignment.cohort,
-                rollout_percent: harnessAssignment.rolloutPercent
-              }
-            }
+          ? { harness_assignment: harnessAssignmentMetadata(harnessAssignment) }
           : {})
       },
       requesterIdentity
