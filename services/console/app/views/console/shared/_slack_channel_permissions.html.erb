@@ -152,11 +152,7 @@
         <div class="px-5 pb-5">
           <%= submit_tag "Save Slack channel permissions",
                          class: "btn-primary disabled:cursor-not-allowed disabled:opacity-50",
-                         disabled: true,
                          data: { slack_channel_autocomplete_target: "submit" } %>
-          <noscript>
-            <%= submit_tag "Save Slack channel permissions", class: "btn-primary" %>
-          </noscript>
         </div>
       </div>
     <% end %>

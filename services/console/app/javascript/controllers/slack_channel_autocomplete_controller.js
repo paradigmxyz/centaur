@@ -152,7 +152,9 @@ export default class extends Controller {
   }
 
   updateSubmitState() {
-    this.submitTarget.disabled = this.valueTarget.value.trim() === ""
+    const hasInput = this.inputTarget.value.trim() !== ""
+    const hasChannelId = this.valueTarget.value.trim() !== ""
+    this.submitTarget.disabled = hasInput && !hasChannelId
   }
 
   resultStatus() {

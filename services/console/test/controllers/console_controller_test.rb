@@ -284,7 +284,7 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_select "input[role=combobox][aria-controls]"
     assert_select "[data-slack-channel-autocomplete-url-value=?]",
                   console_principal_slack_channel_options_path(principal.oid)
-    assert_select "input[type=submit][data-slack-channel-autocomplete-target=submit][disabled]",
+    assert_select "input[type=submit][data-slack-channel-autocomplete-target=submit]:not([disabled])",
                   value: "Save Slack channel permissions"
     assert_select "select[name$='[channel_id]']", count: 0
     assert_select "body", text: /#unused/, count: 0
