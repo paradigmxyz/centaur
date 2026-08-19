@@ -408,6 +408,11 @@
       "type": "object",
       "properties": {
         "mcpPublicUrl": { "type": "string" },
+        "codexNanocodexRolloutPercent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
         "responseMetadataMode": {
           "type": "string",
           "enum": ["first", "always", "never"]
