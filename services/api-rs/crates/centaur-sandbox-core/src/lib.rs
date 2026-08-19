@@ -17,5 +17,6 @@ pub use lifecycle::{
     DesiredSandboxState, ObservedSandbox, SandboxHandle, SandboxId, SandboxStatus,
 };
 pub use spec::{
-    EnvVar, Mount, MountKind, RepoCacheAccess, ResourceLimits, SandboxCapabilities, SandboxSpec,
+    EnvVar, Mount, MountKind, RepoCacheAccess, ResourceClaim, ResourceRequirements,
+    SandboxCapabilities, SandboxSpec,
 };

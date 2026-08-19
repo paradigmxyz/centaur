@@ -1,8 +1,8 @@
 module Login
   # Registry of console-login provider strategies. A strategy owns the
   # IdP-specific parts of the login flow (endpoints, scopes, id_token identity
-  # extraction); state signing, PKCE, the code exchange, and user provisioning
-  # are provider-agnostic and live in SessionOauthController.
+  # extraction and whether the authorization request uses PKCE); state signing,
+  # the code exchange, and user provisioning live in SessionOauthController.
   module Providers
     def self.registry
       @registry ||= { Google::KEY => Google.new, Slack::KEY => Slack.new }.freeze

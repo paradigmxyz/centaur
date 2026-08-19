@@ -28,9 +28,12 @@ pub fn harness_auth_fragment(engine: &str, auth_mode: &str) -> Result<Option<Pro
     if engine == "amazon-bedrock" && normalize_auth_mode(auth_mode) == "api_key" {
         return bedrock_aws_auth_fragment().map(Some);
     }
+    if engine == "codex" && normalize_auth_mode(auth_mode) == "api_key" {
+        return codex_api_key_fragment().map(Some);
+    }
     let yaml = match (engine, normalize_auth_mode(auth_mode).as_str()) {
-        ("codex", "api_key") => CODEX_API_KEY_FRAGMENT,
         ("codex", "access_token") => CODEX_ACCESS_TOKEN_FRAGMENT,
+        ("hermes", "api_key") => HERMES_API_KEY_FRAGMENT,
         ("openrouter", "api_key") => OPENROUTER_API_KEY_FRAGMENT,
         ("meta-ai", "api_key") => META_AI_API_KEY_FRAGMENT,
         ("claude-code", "api_key") => CLAUDE_CODE_API_KEY_FRAGMENT,
@@ -38,6 +41,39 @@ pub fn harness_auth_fragment(engine: &str, auth_mode: &str) -> Result<Option<Pro
         _ => return Ok(None),
     };
     load_fragment_str(yaml).map(Some)
+}
+
+fn codex_api_key_fragment() -> Result<ProxyFragment> {
+    codex_api_key_fragment_for_base_url(std::env::var("OPENAI_BASE_URL").ok().as_deref())
+}
+
+fn codex_api_key_fragment_for_base_url(configured_base_url: Option<&str>) -> Result<ProxyFragment> {
+    let base_url = configured_base_url
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("https://api.openai.com/v1");
+    let parsed =
+        url::Url::parse(base_url).map_err(|error| IronProxyConfigError::InvalidOpenAiBaseUrl {
+            value: base_url.to_owned(),
+            reason: error.to_string(),
+        })?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(IronProxyConfigError::InvalidOpenAiBaseUrl {
+            value: base_url.to_owned(),
+            reason: "scheme must be http or https".to_owned(),
+        });
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| IronProxyConfigError::InvalidOpenAiBaseUrl {
+            value: base_url.to_owned(),
+            reason: "URL must include a host".to_owned(),
+        })?;
+
+    let mut fragment = load_fragment_str(CODEX_API_KEY_FRAGMENT)?;
+    fragment.transforms[0].config.secrets[0].rules[0]["host"] =
+        serde_yaml::Value::String(host.to_owned());
+    Ok(fragment)
 }
 
 /// The deployment's Bedrock region. iron-proxy re-signs Bedrock requests for
@@ -166,7 +202,7 @@ transforms:
           replace:
             proxy_value: OPENAI_API_KEY
             match_headers: ["Authorization"]
-          rules: [{ host: api.openai.com }]
+          rules: [{ host: OPENAI_API_HOST }]
 "#;
 
 const OPENROUTER_API_KEY_FRAGMENT: &str = r#"
@@ -179,6 +215,22 @@ transforms:
             proxy_value: OPENROUTER_API_KEY
             match_headers: ["Authorization"]
           rules: [{ host: openrouter.ai }]
+"#;
+
+// Hermes's native Nous Portal provider authenticates with NOUS_API_KEY. Other
+// providers Hermes can use (OpenRouter, OpenAI, and Anthropic) are registered
+// as their own fragments by api-rs so their existing host scopes stay shared
+// with the other harnesses.
+const HERMES_API_KEY_FRAGMENT: &str = r#"
+transforms:
+  - name: secrets
+    config:
+      secrets:
+        - id: NOUS_API_KEY_AUTHORIZATION
+          replace:
+            proxy_value: NOUS_API_KEY
+            match_headers: ["Authorization"]
+          rules: [{ host: inference-api.nousresearch.com }]
 "#;
 
 const META_AI_API_KEY_FRAGMENT: &str = r#"
@@ -343,5 +395,27 @@ mod bedrock_tests {
             "AWS_SESSION_TOKEN".to_owned(),
             "AWS_SESSION_TOKEN".to_owned()
         )));
+    }
+}
+
+#[cfg(test)]
+mod openai_tests {
+    use super::*;
+
+    #[test]
+    fn codex_api_key_fragment_derives_host_from_configured_base_url() {
+        let fragment =
+            codex_api_key_fragment_for_base_url(Some(" https://us.api.openai.com/v1/ ")).unwrap();
+        assert_eq!(
+            fragment.transforms[0].config.secrets[0].rules[0]["host"].as_str(),
+            Some("us.api.openai.com")
+        );
+    }
+
+    #[test]
+    fn codex_api_key_fragment_rejects_invalid_base_url() {
+        let error =
+            codex_api_key_fragment_for_base_url(Some("api.example.com\n- injected")).unwrap_err();
+        assert!(error.to_string().contains("invalid OPENAI_BASE_URL"));
     }
 }

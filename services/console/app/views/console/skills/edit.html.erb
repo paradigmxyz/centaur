@@ -1,0 +1,8 @@
+<% content_for :title, "Edit #{@skill.name} · Centaur Console" %>
+<div class="mb-6">
+  <h1 class="text-xl font-semibold text-zinc-100">Edit <%= @skill.name %></h1>
+  <% if @skill.shared? %>
+    <p class="mt-1 text-sm text-amber-300">This skill is shared. Saving changes makes them live immediately.</p>
+  <% end %>
+</div>
+<%= render "form", skill: @skill %>

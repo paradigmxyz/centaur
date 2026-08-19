@@ -2,7 +2,8 @@ import { describe, expect, it } from 'bun:test'
 import {
   CodexAppServerRendererEventMapper,
   codexAppServerToChatSdkStream,
-  codexAppServerToRendererEvents
+  codexAppServerToRendererEvents,
+  isRetryableCodexErrorNotification
 } from './codex-app-server'
 
 describe('CodexAppServerRendererEventMapper', () => {
@@ -789,6 +790,84 @@ describe('codexAppServerToRendererEvents', () => {
     expect(done).toMatchObject({
       type: 'renderer.done',
       answerMarkdown: 'Final answer text.'
+    })
+  })
+})
+
+describe('isRetryableCodexErrorNotification', () => {
+  const retryable = {
+    method: 'error',
+    params: {
+      error: {
+        message: 'Reconnecting... 1/5',
+        additionalDetails: 'stream disconnected before completion: provider error'
+      },
+      willRetry: true
+    }
+  }
+
+  it('recognizes Codex reconnect error notifications', () => {
+    expect(isRetryableCodexErrorNotification(retryable)).toBe(true)
+    expect(
+      isRetryableCodexErrorNotification({
+        type: 'error',
+        error: { message: 'Reconnecting... 1/5' },
+        willRetry: true
+      })
+    ).toBe(true)
+  })
+
+  it('does not treat exhausted or terminal turn failures as retryable', () => {
+    expect(
+      isRetryableCodexErrorNotification({
+        ...retryable,
+        params: { ...retryable.params, willRetry: false }
+      })
+    ).toBe(false)
+    expect(
+      isRetryableCodexErrorNotification({
+        type: 'turn.failed',
+        error: { message: 'Reconnecting... 2/5' }
+      })
+    ).toBe(false)
+  })
+})
+
+describe('CodexAppServerRendererEventMapper retryable errors', () => {
+  it('does not fail the mapper on retryable Codex error notifications', () => {
+    const mapper = new CodexAppServerRendererEventMapper()
+    const events = mapper.process({
+      method: 'error',
+      params: {
+        error: {
+          message: 'Reconnecting... 1/5',
+          additionalDetails: 'stream disconnected before completion: provider error'
+        },
+        willRetry: true
+      }
+    })
+    expect(events.some(event => event.type === 'renderer.done')).toBe(false)
+    expect(mapper.isDone()).toBe(false)
+  })
+
+  it('fails the mapper on non-retryable Codex error notifications', () => {
+    const mapper = new CodexAppServerRendererEventMapper()
+    const events = mapper.process({
+      method: 'error',
+      params: {
+        error: {
+          message: 'Reconnecting... 5/5',
+          additionalDetails: 'stream disconnected before completion: provider error'
+        },
+        willRetry: false
+      }
+    })
+    const done = events.find(event => event.type === 'renderer.done')
+    expect(mapper.isDone()).toBe(true)
+    expect(done).toMatchObject({
+      type: 'renderer.done',
+      error:
+        'Reconnecting... 5/5: stream disconnected before completion: provider error'
     })
   })
 })

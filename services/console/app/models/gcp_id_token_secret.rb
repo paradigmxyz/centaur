@@ -15,7 +15,7 @@ class GcpIdTokenSecret < ApplicationRecord
   has_many :grants, dependent: :destroy
   belongs_to :created_by, class_name: "User"
 
-  before_validation :normalize_header
+  normalizes :header, with: ->(value) { value.to_s.strip.downcase.presence }
 
   # Maps to one entry in the iron-proxy `transforms` array as a gcp_id_token
   # transform. The proxy defaults to Authorization when header is omitted.
@@ -33,8 +33,7 @@ class GcpIdTokenSecret < ApplicationRecord
     [ "header:#{header.presence || DEFAULT_HEADER}" ]
   end
 
-  validates :namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
-  validates :foreign_id, uniqueness: { scope: :namespace, allow_nil: true },
+  validates :foreign_id, uniqueness: { allow_nil: true },
             format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }, allow_nil: true
   validates :audience, presence: true
   validate :labels_is_a_hash
@@ -43,10 +42,6 @@ class GcpIdTokenSecret < ApplicationRecord
   validate :at_least_one_rule
 
   private
-
-  def normalize_header
-    self.header = header.to_s.strip.downcase.presence
-  end
 
   def labels_is_a_hash
     errors.add(:labels, "must be a hash") unless labels.is_a?(Hash)

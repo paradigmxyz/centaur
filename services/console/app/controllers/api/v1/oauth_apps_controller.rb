@@ -64,8 +64,7 @@ module Api
         end
       end
 
-      # List all apps (no namespace scoping), with optional label filtering and
-      # pagination. Reuses the base helpers but without the required namespace.
+      # List all apps with optional label filtering and pagination.
       def paginated_apps
         scope = OauthApp.all
         labels = label_filter_params
@@ -82,7 +81,7 @@ module Api
 
       def assign_and_save!(app, attrs)
         base = attrs.permit(:slug, :description, :provider, :client_id, :client_secret,
-                            :credential_namespace, :enabled, labels: {}, allowed_scopes: [])
+                            :enabled, :always_available, labels: {}, allowed_scopes: [])
         # A PUT upsert by slug sets the slug before assignment; a blank body value
         # must not wipe it.
         base.delete(:slug) if base[:slug].blank? && app.slug.present?
@@ -105,8 +104,8 @@ module Api
           provider: app.provider,
           client_id: app.client_id,
           allowed_scopes: app.allowed_scopes,
-          credential_namespace: app.credential_namespace,
           enabled: app.enabled,
+          always_available: app.always_available,
           created_at: app.created_at,
           updated_at: app.updated_at
         }

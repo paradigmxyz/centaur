@@ -35,7 +35,6 @@ class Grant < ApplicationRecord
 
   validate :exactly_one_grantee
   validate :exactly_one_grantable
-  validate :role_grant_same_namespace
   validates :priority, presence: true, numericality: { only_integer: true }
 
   # The grantee this grant attaches the secret to: a principal or a role.
@@ -50,11 +49,11 @@ class Grant < ApplicationRecord
 
   private
 
-  def sync_config_affected_principal_ids
-    ids = []
-    ids << principal_id if principal_id.present?
-    ids += PrincipalRole.where(role_id: role_id).pluck(:principal_id) if role_id.present?
-    ids
+  def sync_config_affected_principals
+    return Principal.where(id: principal_id) if principal_id.present?
+    return Principal.where(id: PrincipalRole.where(role_id: role_id).select(:principal_id)) if role_id.present?
+
+    Principal.none
   end
 
   # A grant left without an explicit priority defaults by grantee: direct grants
@@ -76,12 +75,5 @@ class Grant < ApplicationRecord
     set = GRANTABLE_ASSOCIATIONS.count { |assoc| send(assoc).present? }
     return if set == 1
     errors.add(:base, "must reference exactly one of #{GRANTABLE_ASSOCIATIONS.join(", ")}")
-  end
-
-  def role_grant_same_namespace
-    return unless role.present?
-    secret = grantable
-    return unless secret.present?
-    errors.add(:role, "must be in the same namespace as the secret") if role.namespace != secret.namespace
   end
 end

@@ -7,7 +7,6 @@ class HmacSecretTest < ActiveSupport::TestCase
 
   def build(roles: %w[secret], overrides: {})
     secret = HmacSecret.new({
-      namespace: "acme",
       foreign_id: "new-hmac",
       timestamp_format: "unix_seconds",
       signature_algorithm: "sha256",

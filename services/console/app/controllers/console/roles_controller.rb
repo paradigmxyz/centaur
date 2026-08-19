@@ -1,20 +1,23 @@
 module Console
   # Operator UI for roles: list/detail/create/edit and role-scoped secret grants.
-  # Roles are namespace-scoped bundles of secrets that principals can inherit.
   class RolesController < ApplicationController
     include KvRowParams
     include SecretKinds
+    include Console::SlackChannelPermissionManagement
 
     layout "console"
 
     before_action :require_admin
-    before_action :set_role, only: %i[show edit update grant_secret revoke_grant]
+    before_action :set_role, only: %i[
+      show edit update grant_secret revoke_grant update_slack_channel_permissions
+    ]
 
     def index
-      @roles = Role.order(:namespace, :id)
+      @roles = Role.order(:id)
     end
 
     def show
+      load_slack_channel_permission_form(@role)
       @grants = @role.grants.includes(Grant::GRANTABLE_ASSOCIATIONS).order(:id)
       granted_ids = Hash.new { |h, k| h[k] = [] }
       @grants.each do |grant|
@@ -23,15 +26,12 @@ module Console
         granted_ids[assoc.to_s.delete_suffix("_secret")] << grant.public_send("#{assoc}_id")
       end
       @assignable_secrets = SECRET_KINDS.each_with_object({}) do |(kind, cfg), acc|
-        acc[kind] = cfg[:model]
-          .where(namespace: @role.namespace)
-          .where.not(id: granted_ids[kind])
-          .order(:id)
+        acc[kind] = cfg[:model].where.not(id: granted_ids[kind]).order(:id)
       end
     end
 
     def new
-      @role = Role.new(namespace: "default")
+      @role = Role.new
     end
 
     def create
@@ -58,11 +58,6 @@ module Console
     def grant_secret
       secret = resolve_grantable(params[:grantable])
       return redirect_to console_role_path(@role.oid), alert: "Pick a secret to grant." unless secret
-      unless secret.namespace == @role.namespace
-        return redirect_to console_role_path(@role.oid),
-                           alert: "Secret must be in the same namespace as the role."
-      end
-
       @role.grants.create_with(created_by: current_user)
            .find_or_create_by!(grantable_assoc(secret) => secret)
       redirect_to console_role_path(@role.oid), notice: "Granted #{secret_label(secret)}."
@@ -80,17 +75,20 @@ module Console
       redirect_to console_role_path(@role.oid), notice: "Revoked grant."
     end
 
+    def update_slack_channel_permissions
+      update_slack_channel_permissions_from_form(@role, console_role_path(@role.oid))
+    end
+
     private
 
     def assign_form(role, include_readonly:)
       fields =
         if include_readonly
-          role_params.permit(:namespace, :foreign_id, :name)
+          role_params.permit(:foreign_id, :name)
         else
           role_params.permit(:name)
         end
       if include_readonly
-        fields[:namespace] = fields[:namespace].presence || "default"
         fields[:foreign_id] = fields[:foreign_id].presence
       end
       role.assign_attributes(fields)

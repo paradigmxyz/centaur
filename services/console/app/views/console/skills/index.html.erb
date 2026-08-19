@@ -1,0 +1,93 @@
+<% content_for :title, "Skills · Centaur Console" %>
+<% current_skills_path = @tab == "mine" ? mine_console_skills_path : console_skills_path %>
+
+<nav class="console-control-tabs" aria-label="Skill sections">
+  <%= link_to "Public Skills",
+              console_skills_path(q: @query.presence),
+              class: "console-control-tab #{'console-control-tab-active' if @tab == 'directory'}",
+              aria: { current: (@tab == "directory" ? "page" : nil) } %>
+  <%= link_to "My Skills",
+              mine_console_skills_path(q: @query.presence),
+              class: "console-control-tab #{'console-control-tab-active' if @tab == 'mine'}",
+              aria: { current: (@tab == "mine" ? "page" : nil) } %>
+</nav>
+
+<%= render "console/page_header",
+           title: @tab == "mine" ? "My Skills" : "Public Skills",
+           subtitle: @tab == "mine" ? "Create and manage your private and public skills." : "Browse skills available to every agent.",
+           actions: link_to("New Skill", new_console_skill_path, class: "btn-primary") %>
+
+<%= form_with url: current_skills_path, method: :get, class: "mb-3 flex flex-wrap items-center gap-2" do %>
+  <div class="relative w-full max-w-md">
+    <span class="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-zinc-500">
+      <%= console_icon("magnifying-glass", classes: "size-4") %>
+    </span>
+    <%= search_field_tag :q,
+                         @query,
+                         placeholder: @tab == "mine" ? "Search my skills" : "Search public skills",
+                         aria: { label: "Search skills" },
+                         class: "form-input py-2 pl-9" %>
+  </div>
+  <%= submit_tag "Search", class: "btn-secondary py-2" %>
+  <% if @query.present? %>
+    <%= link_to "Clear", current_skills_path, class: "px-2 py-2 text-sm text-zinc-500 hover:text-centaur-300" %>
+  <% end %>
+<% end %>
+
+<div class="console-panel">
+  <table class="console-table console-table-fixed">
+    <colgroup>
+      <col class="w-[24%]">
+      <col class="w-[46%]">
+      <col class="w-[15%]">
+      <col class="w-[15%]">
+    </colgroup>
+    <thead class="console-table-head">
+      <tr>
+        <th class="px-5 py-2.5 font-medium">Name</th>
+        <th class="px-5 py-2.5 font-medium">Description</th>
+        <th class="px-5 py-2.5 font-medium"><%= @tab == "mine" ? "Visibility" : "Author" %></th>
+        <th class="px-5 py-2.5 font-medium">Updated</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-ink-700">
+      <% if @skills.empty? %>
+        <tr>
+          <td colspan="4" class="px-5 py-10 text-center text-zinc-600">
+            <% if @query.present? %>
+              No skills match “<%= @query %>”.
+            <% elsif @tab == "mine" %>
+              You have not created any skills yet.
+            <% else %>
+              No public skills yet.
+            <% end %>
+          </td>
+        </tr>
+      <% end %>
+      <% @skills.each do |skill| %>
+        <tr class="console-row-hover">
+          <td class="min-w-0 overflow-hidden px-5 py-3">
+            <%= link_to skill.name,
+                        console_skill_path(skill.oid),
+                        class: "console-link console-cell-truncate font-medium",
+                        title: skill.name %>
+          </td>
+          <td class="min-w-0 overflow-hidden px-5 py-3 text-sm text-zinc-500">
+            <span class="console-cell-truncate" title="<%= skill.description %>"><%= skill.description %></span>
+          </td>
+          <td class="min-w-0 overflow-hidden px-5 py-3 text-sm text-zinc-400">
+            <% if @tab == "mine" %>
+              <% badge_class = skill.shared? ? "resource-badge" : "role-pill" %>
+              <span class="<%= badge_class %>"><%= skill.shared? ? "PUBLIC" : "PRIVATE" %></span>
+            <% else %>
+              <span class="console-cell-truncate"><%= skill.user_id == current_user.id ? "You" : skill.user.name.presence || skill.user.email %></span>
+            <% end %>
+          </td>
+          <td class="overflow-hidden px-5 py-3 whitespace-nowrap text-xs text-zinc-500">
+            <%= local_time(skill.updated_at, relative: true, format: :compact) %>
+          </td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+</div>

@@ -6,7 +6,7 @@ class OauthAppTest < ActiveSupport::TestCase
       provider: "google", slug: "slug-#{SecureRandom.hex(4)}",
       client_id: "cid", client_secret: "sec",
       allowed_scopes: %w[scope.a scope.b],
-      credential_namespace: "default", created_by: users(:acme_admin)
+      created_by: users(:acme_admin)
     }.merge(overrides))
   end
 
@@ -26,10 +26,6 @@ class OauthAppTest < ActiveSupport::TestCase
   test "client_id and client_secret are required" do
     refute build_app(client_id: nil).valid?
     refute build_app(client_secret: nil).valid?
-  end
-
-  test "credential_namespace must be url-safe" do
-    refute build_app(credential_namespace: "not/safe").valid?
   end
 
   test "slug is required, url-safe, and globally unique" do
@@ -62,6 +58,12 @@ class OauthAppTest < ActiveSupport::TestCase
     assert_equal "shh", app.reload.client_secret
   end
 
+  test "always_available defaults to false" do
+    app = build_app
+    app.save!
+    refute_predicate app.reload, :always_available?
+  end
+
   # --- scopes_allowed? ------------------------------------------------------
 
   test "scopes_allowed? subset check" do
@@ -71,12 +73,30 @@ class OauthAppTest < ActiveSupport::TestCase
     refute app.scopes_allowed?(%w[a z])
   end
 
+  test "Slack credentials missing the provider-required search scope need reconnecting" do
+    app = build_app(provider: "slack", allowed_scopes: %w[chat:write])
+    app.save!
+    credential = BrokerCredential.create!(
+      oauth_app: app,
+      foreign_id: "slack-user-#{SecureRandom.hex(4)}",
+      token_endpoint: "https://slack.com/api/oauth.v2.access",
+      provider_subject: "U123",
+      scopes: %w[chat:write]
+    )
+
+    assert_equal %w[search:read], app.required_scopes
+    assert app.credential_needs_reconnect?(credential)
+
+    credential.update!(scopes: %w[chat:write search:read])
+    refute app.credential_needs_reconnect?(credential)
+  end
+
   # --- delete guard ---------------------------------------------------------
 
   test "cannot be destroyed while it has minted credentials" do
     app = build_app
     app.save!
-    BrokerCredential.create!(namespace: "default", foreign_id: "minted-#{SecureRandom.hex(4)}",
+    BrokerCredential.create!(foreign_id: "minted-#{SecureRandom.hex(4)}",
                              token_endpoint: "https://oauth2.googleapis.com/token",
                              oauth_app: app, provider_subject: "sub-1")
     refute app.destroy

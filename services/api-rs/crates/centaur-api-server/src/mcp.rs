@@ -13,8 +13,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use base64::{Engine as _, engine::general_purpose};
-use centaur_session_runtime::{SessionRuntime, ToolHostCallInput};
-use hmac::{Hmac, Mac};
+use centaur_session_runtime::{SessionRuntime, ToolHostCallInput, ToolHostCallOutput};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -377,14 +377,40 @@ async fn mcp_centaur_tool_result(
             true,
         ));
     }
-    run_tool_host_centaur_tool(
-        state.runtime()?,
-        principal,
-        &tool,
-        &method,
-        params.arguments,
-    )
-    .await
+    let arguments = match normalize_centaur_tool_arguments(params.arguments) {
+        Ok(arguments) => arguments,
+        Err(kind) => {
+            return Ok(mcp_text_result(
+                format!(
+                    "centaur tool {}.{method} arguments must be an object; got {kind}",
+                    tool.name
+                ),
+                true,
+            ));
+        }
+    };
+    run_tool_host_centaur_tool(state.runtime()?, principal, &tool, &method, arguments).await
+}
+
+fn normalize_centaur_tool_arguments(arguments: Value) -> Result<Value, &'static str> {
+    if arguments.is_null() {
+        return Ok(json!({}));
+    }
+    if arguments.is_object() {
+        return Ok(arguments);
+    }
+    Err(json_type_name(&arguments))
+}
+
+fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 async fn run_tool_host_centaur_tool(
@@ -407,8 +433,10 @@ async fn run_tool_host_centaur_tool(
     if output.timed_out {
         return Ok(mcp_text_result(
             format!(
-                "centaur tool {}.{method} timed out in sandbox {}: {}",
-                tool.name, output.sandbox_id, output.stderr
+                "centaur tool {}.{method} timed out in {}: {}",
+                tool.name,
+                tool_host_error_context(&output),
+                output.stderr
             ),
             true,
         ));
@@ -422,8 +450,11 @@ async fn run_tool_host_centaur_tool(
         let detail = mcp_tool_failure_detail(raw);
         return Ok(mcp_text_result(
             format!(
-                "centaur tool {}.{method} failed in sandbox {} with status {:?}: {detail}\n\nCall the {} tool with method \"help\" to list available methods and their signatures.",
-                tool.name, output.sandbox_id, output.exit_status, tool.name
+                "centaur tool {}.{method} failed in {} with status {:?}: {detail}\n\nCall the {} tool with method \"help\" to list available methods and their signatures.",
+                tool.name,
+                tool_host_error_context(&output),
+                output.exit_status,
+                tool.name
             ),
             true,
         ));
@@ -439,12 +470,35 @@ async fn run_tool_host_centaur_tool(
         )),
         Err(error) => Ok(mcp_text_result(
             format!(
-                "centaur tool {}.{method} returned non-json output in sandbox {}: {error}: {stdout}",
-                tool.name, output.sandbox_id
+                "centaur tool {}.{method} returned non-json output in {}: {error}: {stdout}",
+                tool.name,
+                tool_host_error_context(&output)
             ),
             true,
         )),
     }
+}
+
+fn tool_host_error_context(output: &ToolHostCallOutput) -> String {
+    let mut parts = Vec::new();
+    let sandbox_id = output.sandbox_id.trim();
+    parts.push(if sandbox_id.is_empty() {
+        "sandbox unknown".to_owned()
+    } else {
+        format!("sandbox {sandbox_id}")
+    });
+
+    let execution_id = output.execution_id.trim();
+    if !execution_id.is_empty() {
+        parts.push(format!("execution {execution_id}"));
+    }
+
+    let request_id = output.request_id.trim();
+    if !request_id.is_empty() {
+        parts.push(format!("request {request_id}"));
+    }
+
+    parts.join(", ")
 }
 
 /// Reduce a Python traceback to its final exception message: agents act on
@@ -968,6 +1022,42 @@ RuntimeError: X API error: 401 - {
         assert_eq!(mcp_tool_failure_detail(plain), plain);
     }
 
+    #[test]
+    fn mcp_tool_host_error_context_includes_correlation_ids() {
+        let output = ToolHostCallOutput {
+            request_id: "mcp-call-123".to_owned(),
+            execution_id: "exe-456".to_owned(),
+            sandbox_id: "sbx-789".to_owned(),
+            stdout: String::new(),
+            stderr: "boom".to_owned(),
+            exit_status: Some(1),
+            timed_out: false,
+        };
+
+        assert_eq!(
+            tool_host_error_context(&output),
+            "sandbox sbx-789, execution exe-456, request mcp-call-123"
+        );
+    }
+
+    #[test]
+    fn mcp_tool_host_error_context_handles_missing_sandbox_id() {
+        let output = ToolHostCallOutput {
+            request_id: "mcp-call-123".to_owned(),
+            execution_id: "exe-456".to_owned(),
+            sandbox_id: String::new(),
+            stdout: String::new(),
+            stderr: "boom".to_owned(),
+            exit_status: None,
+            timed_out: true,
+        };
+
+        assert_eq!(
+            tool_host_error_context(&output),
+            "sandbox unknown, execution exe-456, request mcp-call-123"
+        );
+    }
+
     #[tokio::test]
     async fn mcp_unknown_method_returns_available_methods_without_running_tool() {
         let temp = temp_dir("centaur-api-rs-mcp-unknown-method");
@@ -982,7 +1072,7 @@ def search(query, limit=20):
         .unwrap();
 
         let result = mcp_centaur_tool_result(
-            &AppState::unready(),
+            &AppState::unready(crate::ApiAuthConfig::testing("test-secret")),
             &McpPrincipal {
                 principal_id: "mcp:test".to_owned(),
                 token_id: "mcp_tok_test".to_owned(),
@@ -1011,7 +1101,7 @@ def search(query, limit=20):
         fs::write(temp.join("client.py"), "def _hidden():\n    return None\n").unwrap();
 
         let result = mcp_centaur_tool_result(
-            &AppState::unready(),
+            &AppState::unready(crate::ApiAuthConfig::testing("test-secret")),
             &McpPrincipal {
                 principal_id: "mcp:test".to_owned(),
                 token_id: "mcp_tok_test".to_owned(),
@@ -1030,6 +1120,58 @@ def search(query, limit=20):
         assert!(text.contains("has no method missing"));
 
         let _ = fs::remove_dir_all(temp);
+    }
+
+    #[tokio::test]
+    async fn mcp_tool_arguments_must_be_an_object_before_running_sandbox() {
+        let temp = temp_dir("centaur-api-rs-mcp-arguments-object");
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(
+            temp.join("client.py"),
+            r#"
+def search(query, limit=20):
+    return []
+"#,
+        )
+        .unwrap();
+
+        let result = mcp_centaur_tool_result(
+            &AppState::unready(crate::ApiAuthConfig::testing("test-secret")),
+            &McpPrincipal {
+                principal_id: "mcp:test".to_owned(),
+                token_id: "mcp_tok_test".to_owned(),
+                name: "test".to_owned(),
+                scopes: vec!["mcp:tools".to_owned()],
+                expires_at: None,
+            },
+            test_tool(temp.clone()),
+            json!({"method": "search", "arguments": ["not", "an", "object"]}),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("arguments must be an object"));
+        assert!(text.contains("demo.search"));
+
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn mcp_tool_arguments_default_to_empty_object() {
+        assert_eq!(
+            normalize_centaur_tool_arguments(Value::Null).unwrap(),
+            json!({})
+        );
+        assert_eq!(
+            normalize_centaur_tool_arguments(json!({"query": "hello"})).unwrap(),
+            json!({"query": "hello"})
+        );
+        assert_eq!(
+            normalize_centaur_tool_arguments(json!(["not", "object"])).unwrap_err(),
+            "array"
+        );
     }
 
     #[test]

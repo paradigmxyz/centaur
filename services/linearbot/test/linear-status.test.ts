@@ -101,6 +101,30 @@ describe("markerTargetState", () => {
       markerTargetState(status({ stateType: "completed" }), "done"),
     ).toBeUndefined();
   });
+
+  it("does not mark review states as done", () => {
+    expect(
+      markerTargetState(
+        status({ stateName: "In Review", stateType: "started" }),
+        "done",
+      ),
+    ).toBeUndefined();
+  });
+
+  it("still allows review states to move back to todo or in progress", () => {
+    expect(
+      markerTargetState(
+        status({ stateName: "In Review", stateType: "started" }),
+        "todo",
+      )?.id,
+    ).toBe("st-todo");
+    expect(
+      markerTargetState(
+        status({ stateName: "In Review", stateType: "unstarted" }),
+        "in_progress",
+      )?.id,
+    ).toBe("st-progress");
+  });
 });
 
 function stubClient(data: unknown): LinearRawRequestClient {
@@ -115,7 +139,7 @@ describe("fetchIssueStatus", () => {
       stubClient({
         issue: {
           delegate: { id: "bot-user-1" },
-          state: { id: "st-todo", type: "unstarted" },
+          state: { id: "st-todo", name: "Todo", type: "unstarted" },
           team: {
             states: {
               nodes: [
@@ -136,6 +160,7 @@ describe("fetchIssueStatus", () => {
     expect(result).toEqual({
       delegateId: "bot-user-1",
       stateId: "st-todo",
+      stateName: "Todo",
       stateType: "unstarted",
       states: [
         {

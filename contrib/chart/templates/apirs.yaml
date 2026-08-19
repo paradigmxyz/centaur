@@ -70,6 +70,8 @@
 {{- $apiRsMetricsAnnotations = mergeOverwrite $apiRsMetricsAnnotations (.Values.apiRs.metrics.annotations | default dict) -}}
 {{- end -}}
 {{- $apiRsEtl := .Values.apiRs.etl | default dict -}}
+{{- $companyContextEmbeddingsEnabled := dig "companyContextEmbeddings" "enabled" false $apiRsEtl -}}
+{{- $companyContextEmbeddingsModel := dig "companyContextEmbeddings" "model" "text-embedding-3-small" $apiRsEtl -}}
 {{- $apiRsEtlEnv := list
   (dict "name" "SLACK_ETL_ENABLED" "value" (dig "slack" "enabled" false $apiRsEtl))
   (dict "name" "SLACK_SYNC_INTERVAL_SECONDS" "value" (dig "slack" "syncIntervalSeconds" 3600 $apiRsEtl))
@@ -96,6 +98,11 @@
   (dict "name" "COMPANY_CONTEXT_DOCUMENTS_ENABLED" "value" (dig "companyContextDocuments" "enabled" true $apiRsEtl))
   (dict "name" "COMPANY_CONTEXT_DOCUMENTS_INTERVAL_SECONDS" "value" (dig "companyContextDocuments" "intervalSeconds" 14400 $apiRsEtl))
   (dict "name" "COMPANY_CONTEXT_DOCUMENTS_MAX_WINDOW_SECONDS" "value" (dig "companyContextDocuments" "maxWindowSeconds" 21600 $apiRsEtl))
+  (dict "name" "COMPANY_CONTEXT_DOCUMENTS_BATCH_SIZE" "value" (dig "companyContextDocuments" "batchSize" 50 $apiRsEtl))
+  (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_ENABLED" "value" $companyContextEmbeddingsEnabled)
+  (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_INTERVAL_SECONDS" "value" (dig "companyContextEmbeddings" "intervalSeconds" 300 $apiRsEtl))
+  (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_BATCH_SIZE" "value" (dig "companyContextEmbeddings" "batchSize" 250 $apiRsEtl))
+  (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_MODEL" "value" $companyContextEmbeddingsModel)
 -}}
 {{- $apiRsEtlPassthroughNames := list -}}
 {{- range $env := $apiRsEtlEnv -}}
@@ -190,6 +197,7 @@ spec:
 {{- end }}
       labels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 8 }}
+        centaur.ai/observability-enabled: "true"
     spec:
       terminationGracePeriodSeconds: {{ .Values.apiRs.terminationGracePeriodSeconds }}
       automountServiceAccountToken: true
@@ -213,6 +221,21 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sCENTAUR_JWT_SIGNING_SECRET" .Values.secretManager.envPrefix }}
+{{- range $ingress := list
+  (dict "enabled" .Values.slackbotv2.enabled "key" "SLACKBOT_API_KEY")
+  (dict "enabled" .Values.discordbot.enabled "key" "DISCORDBOT_API_KEY")
+  (dict "enabled" .Values.githubbot.enabled "key" "GITHUBBOT_API_KEY")
+  (dict "enabled" .Values.linearbot.enabled "key" "LINEARBOT_API_KEY")
+  (dict "enabled" .Values.teamsbot.enabled "key" "TEAMSBOT_API_KEY")
+}}
+{{- if $ingress.enabled }}
+            - name: {{ $ingress.key }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" $ }}
+                  key: {{ printf "%s%s" $.Values.secretManager.envPrefix $ingress.key }}
+{{- end }}
+{{- end }}
             - name: BIND_ADDR
               value: {{ printf "0.0.0.0:%v" .Values.apiRs.port | quote }}
             - name: SLACK_BOT_TOKEN
@@ -231,6 +254,8 @@ spec:
 {{- end }}
             - name: RUN_MIGRATIONS
               value: {{ .Values.apiRs.runMigrations | quote }}
+            - name: SESSION_CODEX_NANOCODEX_ROLLOUT_PERCENT
+              value: {{ .Values.apiRs.codexNanocodexRolloutPercent | quote }}
             - name: IRON_CONTROL_SYNC_INFRA_SECRETS
               value: {{ .Values.apiRs.syncInfraSecrets | quote }}
             - name: RUST_LOG
@@ -247,6 +272,10 @@ spec:
             - name: KUBERNETES_WORKFLOW_DIRS
               value: {{ $sandboxWorkflowDirs | quote }}
 {{- end }}
+{{- if not (hasKey .Values.apiRs.extraEnv "WORKFLOW_HOST_SANDBOX") }}
+            - name: WORKFLOW_HOST_SANDBOX
+              value: {{ .Values.apiRs.workflowHostSandbox | quote }}
+{{- end }}
 {{- if not (hasKey .Values.apiRs.extraEnv "WORKFLOW_ENABLE_MODE") }}
             - name: WORKFLOW_ENABLE_MODE
               value: {{ .Values.apiRs.workflowEnableMode | quote }}
@@ -254,6 +283,10 @@ spec:
 {{- if not (hasKey .Values.apiRs.extraEnv "WORKFLOW_ALLOWED_NAMES") }}
             - name: WORKFLOW_ALLOWED_NAMES
               value: {{ .Values.apiRs.workflowAllowedNames | quote }}
+{{- end }}
+{{- if and .Values.apiRs.workflowHostResources (not (hasKey .Values.apiRs.extraEnv "WORKFLOW_HOST_RESOURCES")) }}
+            - name: WORKFLOW_HOST_RESOURCES
+              value: {{ toJson .Values.apiRs.workflowHostResources | quote }}
 {{- end }}
 {{- range $env := $apiRsEtlEnv }}
 {{- if not (hasKey $.Values.apiRs.extraEnv $env.name) }}
@@ -318,9 +351,28 @@ spec:
               value: {{ printf "%s:%s" .Values.sandbox.image.repository .Values.sandbox.image.tag | quote }}
             - name: SESSION_SANDBOX_IMAGE_PULL_POLICY
               value: {{ .Values.sandbox.image.pullPolicy | quote }}
+{{- if and .Values.sandbox.resources (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_RESOURCES")) }}
+            - name: SESSION_SANDBOX_RESOURCES
+              value: {{ toJson .Values.sandbox.resources | quote }}
+{{- end }}
 {{- if .Values.global.imagePullSecrets }}
             - name: SESSION_SANDBOX_IMAGE_PULL_SECRETS
               value: "{{- range $index, $secret := .Values.global.imagePullSecrets }}{{- if $index }},{{ end -}}{{ $secret.name }}{{- end }}"
+{{- end }}
+            # Node steering for sandbox + iron-proxy pods. Passed to the control
+            # plane rather than templated onto a pod: api-rs creates those pods
+            # at runtime, so nothing this chart renders can reach them.
+{{- if and .Values.sandbox.nodeSelector (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_NODE_SELECTOR")) }}
+            - name: SESSION_SANDBOX_NODE_SELECTOR
+              value: {{ toJson .Values.sandbox.nodeSelector | quote }}
+{{- end }}
+{{- if and .Values.sandbox.tolerations (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_TOLERATIONS")) }}
+            - name: SESSION_SANDBOX_TOLERATIONS
+              value: {{ toJson .Values.sandbox.tolerations | quote }}
+{{- end }}
+{{- if and .Values.sandbox.runtimeClassName (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_RUNTIME_CLASS_NAME")) }}
+            - name: SESSION_SANDBOX_RUNTIME_CLASS_NAME
+              value: {{ .Values.sandbox.runtimeClassName | quote }}
 {{- end }}
             # Sandboxes call back into this control plane via the in-cluster Service.
             - name: SESSION_SANDBOX_CENTAUR_API_URL
@@ -333,14 +385,16 @@ spec:
               value: {{ $repoCachePvcName | quote }}
 {{- end }}
 {{- end }}
-            - name: KUBERNETES_SANDBOX_IRON_PROXY_MODE
-              value: {{ .Values.apiRs.ironProxy.mode | quote }}
             - name: KUBERNETES_IRON_PROXY_IMAGE
               value: {{ printf "%s:%s" .Values.ironProxy.image.repository .Values.ironProxy.image.tag | quote }}
             - name: KUBERNETES_IRON_PROXY_IMAGE_PULL_POLICY
               value: {{ .Values.ironProxy.image.pullPolicy | quote }}
             - name: KUBERNETES_IRON_PROXY_UPSTREAM_DENY_CIDRS
               value: {{ join "," .Values.ironProxy.upstreamDenyCidrs | quote }}
+{{- if and .Values.ironProxy.resources (not (hasKey .Values.apiRs.extraEnv "KUBERNETES_IRON_PROXY_RESOURCES")) }}
+            - name: KUBERNETES_IRON_PROXY_RESOURCES
+              value: {{ toJson .Values.ironProxy.resources | quote }}
+{{- end }}
             - name: KUBERNETES_FIREWALL_CA_SECRET_NAME
               value: {{ include "centaur.trustedCaSecretName" . | quote }}
             - name: KUBERNETES_FIREWALL_CA_KEY_SECRET_NAME
@@ -387,6 +441,12 @@ spec:
 {{- if and .Values.repoCache.enabled (gt (len $publicSkillDirs) 0) }}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" "CENTAUR_PUBLIC_SKILL_DIRS" "value" (join ":" $publicSkillDirs)) }}
 {{- end }}
+{{- if not (hasKey .Values.sandbox.extraEnv "COMPANY_CONTEXT_EMBEDDINGS_ENABLED") }}
+{{- $sandboxEnvList = append $sandboxEnvList (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_ENABLED" "value" ($companyContextEmbeddingsEnabled | toString)) }}
+{{- end }}
+{{- if not (hasKey .Values.sandbox.extraEnv "COMPANY_CONTEXT_EMBEDDINGS_MODEL") }}
+{{- $sandboxEnvList = append $sandboxEnvList (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_MODEL" "value" $companyContextEmbeddingsModel) }}
+{{- end }}
 {{- range $k, $v := .Values.sandbox.extraEnv }}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" $k "value" ($v | toString)) }}
 {{- end }}
@@ -400,10 +460,9 @@ spec:
             - name: SESSION_SANDBOX_EXTRA_ENV
               value: {{ $sandboxEnvList | toJson | quote }}
 {{- end }}
-{{- if $console.enabled }}
             # console control plane: principals/roles/grants + per-sandbox
-            # proxy sync. Required whenever iron-proxy is enabled — api-rs
-            # fails fast without it (iron-control is the only proxy mode).
+            # proxy sync. Required because api-rs fails fast without it:
+            # iron-control is the only proxy configuration mode.
             - name: IRON_CONTROL_URL
               value: {{ include "centaur.consoleUrl" . | quote }}
             - name: IRON_CONTROL_API_KEY
@@ -411,7 +470,6 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sIRON_CONTROL_INITIAL_API_KEY" .Values.secretManager.envPrefix }}
-{{- end }}
 {{- if and .Values.toolServer.enabled (not .Values.toolServer.repo) (eq (len $toolSources) 0) }}
 {{- fail "toolServer.repo (owner/name) must be set when toolServer.enabled=true" }}
 {{- end }}

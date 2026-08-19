@@ -1,11 +1,37 @@
 <%# One panel of the split-view grid. panel: {session:, thread_key:,
-    transcript_items:}; panels: all panels, used to build the close link that
-    drops this panel and promotes the first remaining thread to primary. The
-    thread param carries all open keys comma-separated, primary first. %>
+    transcript_items:} — or {new_chat: true} for a composer pane; panels: all
+    panels, used to build the close link that drops this panel and promotes
+    the first remaining thread to primary. The thread param carries all open
+    keys comma-separated, primary first. %>
 <% session = panel[:session] %>
 <% remaining_keys = panels.map { |other| other[:thread_key] } - [ panel[:thread_key] ] %>
 <% close_path = console_threads_path(thread: remaining_keys.join(",")) %>
-<section class="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-xl border border-ink-700 bg-ink-900/35"
+<% if panel[:new_chat] %>
+  <section class="flex min-h-[75vh] min-w-0 flex-col overflow-hidden rounded-xl border border-ink-700 bg-ink-900/35 md:min-h-0"
+           data-thread-panel="<%= panel[:thread_key] %>">
+    <header class="flex shrink-0 items-center gap-2 border-b border-ink-700 px-4 py-2.5">
+      <div class="min-w-0 flex-1">
+        <span class="block truncate text-sm font-semibold text-zinc-100">New chat</span>
+      </div>
+      <a href="<%= close_path %>"
+         class="console-panel-close"
+         aria-label="Close panel"
+         title="Close panel">
+        <%= console_icon("x-mark", classes: "size-4") %>
+      </a>
+    </header>
+    <%# Mirrors the thread-panel structure 1:1 — empty transcript scroll in
+        the middle, composer docked at the bottom — so a new-chat pane sizes
+        exactly like its conversation siblings. %>
+    <div class="console-transcript-scroll min-h-0 flex-1 overflow-y-auto px-4 py-4">
+      <div class="flex flex-col gap-5"></div>
+    </div>
+    <div class="console-composer-dock console-composer-dock--panel">
+      <%= render "console/threads/composer", mode: :new, compact: true %>
+    </div>
+  </section>
+<% else %>
+<section class="flex min-h-[75vh] min-w-0 flex-col overflow-hidden rounded-xl border border-ink-700 bg-ink-900/35 md:min-h-0"
          data-thread-panel="<%= session.thread_key %>">
   <header class="flex shrink-0 items-center gap-2 border-b border-ink-700 px-4 py-2.5">
     <div class="min-w-0 flex-1">
@@ -27,6 +53,7 @@
         <%= local_time(session.updated_at || session.created_at, relative: true, format: :compact) %>
       </div>
     </div>
+    <%= render "console/threads/thread_menu", session: session if panel[:owned] %>
     <a href="<%= close_path %>"
        class="console-panel-close"
        aria-label="Close panel"
@@ -34,9 +61,20 @@
       <%= console_icon("x-mark", classes: "size-4") %>
     </a>
   </header>
-  <div class="console-transcript-scroll min-h-0 flex-1 overflow-y-auto px-4 py-4">
-    <div class="flex flex-col gap-5">
-      <%= render "console/threads/transcript", items: panel[:transcript_items] %>
+  <div class="console-transcript-scroll min-h-0 flex-1 overflow-y-auto px-4 py-4"
+       data-controller="thread-poller"
+       data-thread-poller-url-value="<%= console_thread_panel_path(thread_key: session.thread_key) %>"
+       data-thread-poller-active-value="<%= thread_execution_active?(session.thread_key) %>">
+    <div class="flex flex-col gap-5" data-thread-poller-target="transcript">
+      <%= render "console/threads/panel_transcript",
+                 items: panel[:transcript_items],
+                 active: thread_execution_active?(session.thread_key) %>
     </div>
   </div>
+  <% if panel[:writable] %>
+    <div class="console-composer-dock console-composer-dock--panel">
+      <%= render "console/threads/composer", mode: :thread, session: session %>
+    </div>
+  <% end %>
 </section>
+<% end %>

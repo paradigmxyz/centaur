@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
-  codexAppServerToChatSdkStream,
+  harnessToChatSdkStream,
   type CodexAppServerToChatStreamOptions,
   type RendererEvent,
 } from "@centaur/rendering";
@@ -917,7 +917,7 @@ async function runThreadTurn(input: {
       );
       const collector = new CommentReplyCollector();
       const fallback = new LinearRenderFallback();
-      for await (const chunk of codexAppServerToChatSdkStream(
+      for await (const chunk of harnessToChatSdkStream(
         fallback.collectSource(
           streamSessionAfterHandoff(options, forwardInput),
         ),

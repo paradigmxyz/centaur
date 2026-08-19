@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
-  codexAppServerToChatSdkStream,
+  harnessToChatSdkStream,
   type ChatSDKStreamChunk,
   type CodexAppServerToChatStreamOptions,
   type RendererEvent,
@@ -1244,7 +1244,7 @@ async function renderSplitExecutionStreams(
   let answerPost: Promise<unknown> | null = null;
   let sourceFailed = false;
   try {
-    for await (const chunk of codexAppServerToChatSdkStream(
+    for await (const chunk of harnessToChatSdkStream(
       stream,
       rendererOptions(options, narrator),
     )) {
@@ -1428,7 +1428,7 @@ async function renderPlainTextExecutionStream(
   let sawError = false;
   try {
     const chatStream = fallback.collectChatSdk(
-      codexAppServerToChatSdkStream(
+      harnessToChatSdkStream(
         fallback.collectSource(stream),
         rendererOptions(options),
       ),

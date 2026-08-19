@@ -12,11 +12,6 @@ module Console
 
     def grant_role
       role = Role.find_by_oid!(params[:role_id])
-      unless role.namespace == @secret.namespace
-        return redirect_to console_secret_path(@kind, @secret.oid),
-                           alert: "Role must be in the same namespace as the secret."
-      end
-
       Grant.create_with(created_by: current_user)
            .find_or_create_by!(role: role, grantable_assoc => @secret)
       redirect_to console_secret_path(@kind, @secret.oid),

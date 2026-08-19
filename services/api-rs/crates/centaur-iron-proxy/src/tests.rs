@@ -27,6 +27,17 @@ fn harness_auth_fragments_are_baked_in() {
         Some("OPENROUTER_API_KEY")
     );
 
+    let hermes = harness_auth_fragment("hermes", "api_key").unwrap().unwrap();
+    assert_eq!(
+        hermes.transforms[0].config.secrets[0].rules[0]["host"].as_str(),
+        Some("inference-api.nousresearch.com")
+    );
+    let hermes_placeholders = placeholder_env(&[hermes]);
+    assert_eq!(
+        hermes_placeholders.get("NOUS_API_KEY").map(String::as_str),
+        Some("NOUS_API_KEY")
+    );
+
     let meta_ai = harness_auth_fragment("meta-ai", "api_key")
         .unwrap()
         .unwrap();
@@ -105,7 +116,7 @@ fn access_token_fragment_carries_no_broker_credentials_block() {
 }
 
 #[test]
-fn shipped_proxy_allowlist_preserves_railway_project_tokens() {
+fn shipped_proxy_allowlist_preserves_integration_headers() {
     let config: serde_yaml::Value =
         serde_yaml::from_str(include_str!("../../../../iron-proxy/iron-proxy.yaml")).unwrap();
     let transforms = config["transforms"].as_sequence().unwrap();
@@ -119,5 +130,15 @@ fn shipped_proxy_allowlist_preserves_railway_project_tokens() {
         headers
             .iter()
             .any(|header| header.as_str() == Some("project-access-token"))
+    );
+    assert!(
+        headers
+            .iter()
+            .any(|header| header.as_str() == Some("originator"))
+    );
+    assert!(
+        headers
+            .iter()
+            .any(|header| header.as_str() == Some("version"))
     );
 }

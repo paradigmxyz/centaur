@@ -505,7 +505,7 @@ fn load_plugin_meta(
     })?;
     let prompt_hash = {
         let digest = Sha256::digest(prompt.as_bytes());
-        format!("sha256:{digest:x}")
+        format!("sha256:{}", hex::encode(digest))
     };
     Ok(Some(LoadedPluginMeta::Persona(PersonaDefinition {
         id,
@@ -984,14 +984,24 @@ fn parse_pg_dsn_setting_value_from(
     })?;
     let principal_label = optional_str(table, "principal_label").map(ToOwned::to_owned);
     let principal_field = optional_str(table, "principal_field").map(ToOwned::to_owned);
-    if principal_label.is_none() && principal_field.is_none() {
+    let proxy_label = optional_str(table, "proxy_label").map(ToOwned::to_owned);
+    let declared = [
+        principal_label.as_ref(),
+        principal_field.as_ref(),
+        proxy_label.as_ref(),
+    ]
+    .into_iter()
+    .filter(|value| value.is_some())
+    .count();
+    if declared != 1 {
         return Err(ToolDiscoveryError::Invalid(
-            "pg_dsn setting value_from must declare principal_label or principal_field".to_owned(),
+            "pg_dsn setting value_from must declare exactly one of principal_label, principal_field, or proxy_label".to_owned(),
         ));
     }
     Ok(Some(PgDsnSettingValueFrom {
         principal_label,
         principal_field,
+        proxy_label,
     }))
 }
 
@@ -1619,15 +1629,41 @@ mod tests {
             secret_ref: "RESHIFT_DSN".to_owned(),
             labels: tool_labels("company_context", "centaur"),
             database: "warehouse".to_owned(),
-            role: Some("centaur_slack_reader".to_owned()),
-            settings: vec![PgDsnSetting {
-                name: "centaur.slack_channel_id".to_owned(),
-                value: None,
-                value_from: Some(PgDsnSettingValueFrom {
-                    principal_label: Some("slack_channel_id".to_owned()),
-                    principal_field: None,
-                }),
-            }],
+            role: Some("centaur_company_context_reader".to_owned()),
+            settings: vec![
+                PgDsnSetting {
+                    name: "centaur.slack_channel_id".to_owned(),
+                    value: None,
+                    value_from: Some(PgDsnSettingValueFrom {
+                        principal_label: None,
+                        principal_field: Some("slack_channel_id".to_owned()),
+                        proxy_label: None,
+                    }),
+                },
+                PgDsnSetting {
+                    name: "centaur.slack_user_id".to_owned(),
+                    value: None,
+                    value_from: Some(PgDsnSettingValueFrom {
+                        principal_label: None,
+                        principal_field: None,
+                        proxy_label: Some("centaur.slack_user_id".to_owned()),
+                    }),
+                },
+                PgDsnSetting {
+                    name: "centaur.slack_history_channel_ids".to_owned(),
+                    value: None,
+                    value_from: Some(PgDsnSettingValueFrom {
+                        principal_label: None,
+                        principal_field: Some("slack_history_channel_ids".to_owned()),
+                        proxy_label: None,
+                    }),
+                },
+                PgDsnSetting {
+                    name: "centaur.slack_include_public".to_owned(),
+                    value: Some("true".to_owned()),
+                    value_from: None,
+                },
+            ],
         })])
         .unwrap();
 
@@ -1636,10 +1672,55 @@ mod tests {
         assert_eq!(sandbox_env.database.as_deref(), Some("warehouse"));
         assert_eq!(
             listeners[0].extra.get("role").and_then(YamlValue::as_str),
-            Some("centaur_slack_reader")
+            Some("centaur_company_context_reader")
         );
-        assert_eq!(listeners[0].settings.len(), 1);
+        assert_eq!(listeners[0].settings.len(), 4);
         assert_eq!(listeners[0].settings[0].name, "centaur.slack_channel_id");
+        assert_eq!(listeners[0].settings[1].name, "centaur.slack_user_id");
+        assert_eq!(
+            listeners[0].settings[1]
+                .value_from
+                .as_ref()
+                .and_then(|value_from| value_from.proxy_label.as_deref()),
+            Some("centaur.slack_user_id")
+        );
+        assert_eq!(
+            listeners[0].settings[2].name,
+            "centaur.slack_history_channel_ids"
+        );
+        assert_eq!(
+            listeners[0].settings[2]
+                .value_from
+                .as_ref()
+                .and_then(|value_from| value_from.principal_field.as_deref()),
+            Some("slack_history_channel_ids")
+        );
+        assert_eq!(listeners[0].settings[3].value.as_deref(), Some("true"));
+    }
+
+    #[test]
+    fn rejects_pg_dsn_value_from_with_multiple_selectors() {
+        let value: TomlValue = toml::from_str(
+            r#"
+database = "warehouse"
+settings = [
+  { name = "centaur.slack_user_id", value_from = { principal_label = "slack_user_id", proxy_label = "centaur.slack_user_id" } }
+]
+"#,
+        )
+        .unwrap();
+        let err = parse_pg_dsn_secret(
+            value.as_table().unwrap(),
+            "RESHIFT_DSN".to_owned(),
+            "RESHIFT_DSN".to_owned(),
+            &BTreeMap::new(),
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("must declare exactly one"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1728,21 +1809,24 @@ secrets = [
         let registry =
             discover_persona_registry(&[base.clone(), overlay.clone()], Some("eng".to_owned()))
                 .unwrap();
-        let personas = registry.summaries();
+        let registry = serde_json::to_value(registry).unwrap();
+        let personas = registry["personas"].as_object().unwrap();
 
         assert_eq!(personas.len(), 2);
-        let eng = personas
-            .iter()
-            .find(|persona| persona.id == "eng")
-            .expect("eng persona");
-        assert_eq!(eng.source_root, overlay.display().to_string());
-        assert!(eng.source_path.ends_with("personas/eng"));
+        let eng = personas.get("eng").expect("eng persona");
+        assert_eq!(eng["source_root"], overlay.display().to_string());
+        assert!(
+            eng["source_path"]
+                .as_str()
+                .unwrap()
+                .ends_with("personas/eng")
+        );
         assert_ne!(
-            eng.prompt_hash,
+            eng["prompt_hash"],
             "sha256:c41ac32f8b086eecbd1c70d06689eb428de2a2c740d086640851985f26c4e2fc"
         );
         assert_eq!(
-            eng.prompt_hash,
+            eng["prompt_hash"],
             "sha256:af70f573f4496a1cf92865966cb522c2c142a5789e075660a56bea66080bc738"
         );
         assert!(
