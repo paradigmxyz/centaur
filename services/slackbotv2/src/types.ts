@@ -155,6 +155,8 @@ export type SlackbotV2Options = {
    * conversation id (SLACKBOTV2_CHANNEL_DEFAULTS). See channel-defaults.ts.
    */
   channelDefaults?: ChannelDefaults
+  /** Percentage of otherwise-default Codex threads assigned to Nanocodex. */
+  codexNanocodexRolloutPercent?: number
   /**
    * Harness for new threads when no --claude/--amp/--codex/--nanocodex/--hermes
    * flag is given (HarnessType wire value: codex | amp | claudecode |
@@ -277,11 +279,11 @@ export type ForwardSessionInput = {
   contextPreamble?: string
   executionId?: string
   executeMessage?: SlackbotV2ApiMessage
-  /** Effective harness selected by sticky thread flags (including --nanocodex). */
+  /** Effective harness selected by Slack policy, including any rollout cohort. */
   harnessType?: string
-  /** Harness returned by api-rs after applying control-plane policy. */
+  /** Harness persisted by api-rs. */
   metadataHarnessType?: string
-  /** Experiment/cohort returned by api-rs and recorded on this execution. */
+  /** Slack-owned experiment/cohort recorded on the session and execution. */
   harnessAssignment?: SlackbotV2HarnessAssignment
   messages: SlackbotV2ApiMessage[]
   /** Effective model selected by sticky thread flags (--model/--opus/...). */
@@ -296,6 +298,8 @@ export type ForwardSessionInput = {
   provider?: string
   /** Per-turn reasoning effort parsed from the `-rsn` flag (Codex/Nanocodex). */
   reasoning?: string
+  /** Whether an explicit Slack override may restart a thread on harness conflict. */
+  restartOnHarnessConflict?: boolean
   onEventId(eventId: number): void
   openStream: boolean
   threadId: string

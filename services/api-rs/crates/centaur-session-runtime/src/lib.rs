@@ -876,20 +876,6 @@ impl SessionRuntime {
         Ok(self.store.get_session(thread_key).await?)
     }
 
-    /// Returns the harness already persisted for a thread, if the session
-    /// exists. API policy uses this to keep rollout assignments sticky across
-    /// configuration changes without exposing the session store itself.
-    pub async fn existing_session_harness(
-        &self,
-        thread_key: &ThreadKey,
-    ) -> Result<Option<HarnessType>, SessionRuntimeError> {
-        match self.store.get_session(thread_key).await {
-            Ok(session) => Ok(Some(session.harness_type)),
-            Err(SessionStoreError::NotFound { .. }) => Ok(None),
-            Err(error) => Err(error.into()),
-        }
-    }
-
     fn resolve_persona_for_create(
         &self,
         requested_persona_id: Option<&str>,

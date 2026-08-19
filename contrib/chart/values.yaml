@@ -415,10 +415,6 @@ apiRs:
     tag: latest
     pullPolicy: Always
   port: 8080
-  # Sticky percentage of session requests for Codex assigned to Nanocodex.
-  # The API hashes the thread key once and persists the resolved harness on the
-  # session. Set to 0 to keep new Codex requests on Codex.
-  codexNanocodexRolloutPercent: 50
   # Public/local MCP endpoint advertised through OAuth protected-resource
   # metadata. Empty falls back to slackbotv2.mcpPublicUrl.
   mcpPublicUrl: ""
@@ -551,6 +547,9 @@ slackbotv2:
   # Join newly-created public channels after subscribed channel_created events.
   # Requires the Slack app to grant channels:read and channels:join.
   autoJoinCreatedChannels: false
+  # Sticky percentage of otherwise-default Codex Slack threads assigned to
+  # Nanocodex. A non-default model selection bypasses the rollout.
+  codexNanocodexRolloutPercent: 0
   # Append model, harness, and reasoning effort to the first live streamed
   # Slack assistant response, every response, or no responses. Independent of
   # the optional Console link below.
