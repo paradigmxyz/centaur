@@ -13,7 +13,6 @@ const envSchema = z.object({
   TEAMSBOT_STATE_KEY_PREFIX: z.string().optional(),
   CENTAUR_API_URL: z.string().url().default('http://127.0.0.1:8080'),
   TEAMSBOT_API_KEY: z.string().optional(),
-  CENTAUR_API_KEY: z.string().optional(),
   CENTAUR_REQUEST_MAX_RETRIES: z.coerce.number().int().min(0).default(2),
   CENTAUR_REQUEST_RETRY_DELAY_MS: z.coerce.number().int().min(0).default(250),
   TEAMS_BOT_APP_ID: z.string().default(''),
@@ -75,7 +74,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): TeamsbotConfig
   const parsed = envSchema.parse(env);
   return {
     centaur: {
-      apiKey: parsed.TEAMSBOT_API_KEY ?? parsed.CENTAUR_API_KEY,
+      apiKey: parsed.TEAMSBOT_API_KEY,
       apiUrl: parsed.CENTAUR_API_URL,
       requestMaxRetries: parsed.CENTAUR_REQUEST_MAX_RETRIES,
       requestRetryDelayMs: parsed.CENTAUR_REQUEST_RETRY_DELAY_MS,

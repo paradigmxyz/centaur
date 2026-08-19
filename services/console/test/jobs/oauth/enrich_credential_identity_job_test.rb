@@ -14,7 +14,6 @@ module Oauth
       app = oauth_apps(:acme_slack)
       app.update!(client_secret: "slack-secret")
       BrokerCredential.create!({
-        namespace: "acme",
         foreign_id: "slack-slack-u12345",
         name: "Slack – U12345",
         token_endpoint: Oauth::Providers::Slack::TOKEN_ENDPOINT,
@@ -28,7 +27,6 @@ module Oauth
 
     def wrap_credential(credential, name: "#{credential.name} token")
       StaticSecret.create!(
-        namespace: credential.namespace,
         name: name,
         broker_credential: credential,
         inject_config: { "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" }

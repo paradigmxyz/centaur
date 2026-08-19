@@ -3,7 +3,7 @@
 //! A session is the public control-plane object for one ongoing agent
 //! conversation. `thread_key` is the canonical identifier.
 
-use std::{fmt, str::FromStr};
+use std::{collections::BTreeMap, fmt, str::FromStr};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
@@ -361,6 +361,7 @@ pub enum HarnessType {
     Amp,
     ClaudeCode,
     Nanocodex,
+    Hermes,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, AsRefStr, Display, EnumString)]
@@ -415,7 +416,6 @@ pub struct SandboxCapabilities {
     #[serde(default)]
     pub repo_cache: SandboxRepoCacheAccess,
     pub observability_enabled: bool,
-    pub api_server_enabled: bool,
 }
 
 impl SandboxCapabilities {
@@ -423,14 +423,11 @@ impl SandboxCapabilities {
         Self {
             repo_cache: SandboxRepoCacheAccess::All,
             observability_enabled: true,
-            api_server_enabled: true,
         }
     }
 
     pub const fn is_default_enabled(&self) -> bool {
-        matches!(self.repo_cache, SandboxRepoCacheAccess::All)
-            && self.observability_enabled
-            && self.api_server_enabled
+        matches!(self.repo_cache, SandboxRepoCacheAccess::All) && self.observability_enabled
     }
 
     pub const fn repo_cache_enabled(&self) -> bool {
@@ -462,6 +459,10 @@ pub struct Session {
     /// iron-control principal OID this session's egress proxy binds to,
     /// captured at registration so a resumed session can recreate its sandbox.
     pub iron_control_principal: Option<String>,
+    /// Per-proxy labels captured at session creation and applied whenever this
+    /// session's egress proxy is created, repaired, or rebound.
+    #[serde(default)]
+    pub proxy_labels: BTreeMap<String, String>,
     /// Last meaningful activity for the currently assigned sandbox. This is
     /// the eviction signal for capacity pressure and intentionally separate
     /// from `updated_at`, which also changes for metadata/status writes.

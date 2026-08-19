@@ -11,6 +11,9 @@ class User < ApplicationRecord
   has_many :api_keys, dependent: :destroy
   has_many :mcp_oauth_refresh_tokens, dependent: :destroy
   has_many :user_identities, dependent: :destroy
+  has_many :skills, dependent: :destroy
+  has_many :skill_editor_assignments, class_name: "SkillEditor", dependent: :destroy
+  has_many :edited_skills, through: :skill_editor_assignments, source: :skill
   belongs_to :approved_by, class_name: "User", optional: true
 
   after_update :revoke_mcp_oauth_refresh_tokens_when_disabled,

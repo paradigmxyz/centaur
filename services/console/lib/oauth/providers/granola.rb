@@ -46,7 +46,7 @@ module Oauth
       # 3.1.3.7.6 accepts as sufficient. Sanity-checks aud == client_id and
       # iss in the known Granola issuer. Raises Broker::ExchangeError on any
       # mismatch or a missing/undecodable id_token.
-      def identity_from(result, client_id:)
+      def identity_from(result, client_id:, http_client: nil)
         if result.id_token.blank?
           raise Broker::ExchangeError.new("token response carried no id_token",
                                           stage: "oauth", code: "missing_id_token")

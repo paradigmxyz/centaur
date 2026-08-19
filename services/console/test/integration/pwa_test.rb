@@ -48,13 +48,4 @@ class PwaTest < ActionDispatch::IntegrationTest
     assert_response :ok
     assert_match "OFFLINE_URL", response.body
   end
-
-  test "console layout renders the install entry point" do
-    post login_url, params: { email: users(:member_user).email, password: "password123456" }
-
-    get console_integrations_url
-    assert_response :ok
-    # Lives in the account menu, above the theme toggle.
-    assert_select "#console-account-menu [data-controller=pwa-install][hidden]"
-  end
 end

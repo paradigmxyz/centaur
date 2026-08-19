@@ -106,7 +106,7 @@ module ApplicationHelper
   def secret_option_label(secret)
     primary = secret.try(:name).presence || secret.foreign_id.presence || secret.oid
     identifier = secret.foreign_id.presence || secret.oid
-    details = [ (identifier unless identifier == primary), secret.namespace ].compact_blank
+    details = [ (identifier unless identifier == primary) ].compact_blank
 
     details.any? ? "#{primary} (#{details.join(", ")})" : primary
   end
@@ -201,6 +201,11 @@ module ApplicationHelper
       outline_icon(
         classes,
         "M12 16.5V3m0 0L7.5 7.5M12 3l4.5 4.5M6.75 10.5h-.75A2.25 2.25 0 0 0 3.75 12.75v6A2.25 2.25 0 0 0 6 21h12a2.25 2.25 0 0 0 2.25-2.25v-6A2.25 2.25 0 0 0 18 10.5h-.75"
+      )
+    when "trash"
+      outline_icon(
+        classes,
+        "M3.75 6h16.5M9.75 6V4.5A1.5 1.5 0 0 1 11.25 3h1.5a1.5 1.5 0 0 1 1.5 1.5V6m3.75 0-.75 13.5A1.5 1.5 0 0 1 15.75 21h-7.5a1.5 1.5 0 0 1-1.5-1.5L6 6m4.5 4.5v6m3-6v6"
       )
     when "slack"
       tag.svg(
@@ -366,18 +371,9 @@ module ApplicationHelper
     record.broker_credential
   end
 
-  # The muted secondary line shown under a record's primary identifier in console
-  # tables: the namespace, optionally preceded by the opaque oid and a small dot.
-  # Pass oid: when the primary line is the foreign_id (so the oid still shows);
-  # omit it when the oid is already the primary line.
-  def id_meta_line(namespace, oid: nil)
-    inner =
-      if oid
-        safe_join([ oid, tag.span("·", class: "mx-1 text-zinc-600"), namespace ])
-      else
-        namespace
-      end
-    tag.div(inner, class: "text-xs text-zinc-500")
+  # The muted opaque-id line shown when a table uses foreign_id as its primary label.
+  def id_meta_line(oid)
+    tag.div(oid, class: "text-xs text-zinc-500")
   end
 
   # Renders a UTC timestamp that the `localtime` Stimulus controller rewrites in
@@ -577,8 +573,9 @@ module ApplicationHelper
     text = text.gsub(/(?<!\*)\*([^*\n]+)\*(?!\*)/, '<em>\1</em>')
     text = text.gsub(/(?<!_)_([^_\n]+)_(?!_)/, '<em>\1</em>')
 
-    placeholders.each_with_index do |html, offset|
-      text = text.gsub(markdown_token(offset), html)
+    text = text.gsub(/%%MDPH(\d+)%%/) do |token|
+      offset = token.delete_prefix("%%MDPH").delete_suffix("%%").to_i
+      placeholders[offset] || token
     end
 
     text

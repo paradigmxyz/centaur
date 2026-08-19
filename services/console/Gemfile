@@ -5,13 +5,17 @@ gem "rails", "~> 8.1.3"
 # The modern asset pipeline for Rails [https://github.com/rails/propshaft]
 gem "propshaft"
 # Tailwind CSS, compiled by a standalone binary into app/assets/builds.
-gem "tailwindcss-rails", "4.4.0"
+gem "tailwindcss-rails", "4.6.0"
 # Use pg as the database for Active Record
 gem "pg", "~> 1.5"
+# Preserve ParadeDB indexes in Rails schema dumps and migrations.
+gem "rails-paradedb", "0.7.0", require: "parade_db"
 # Opaque ID encoding (bigint <-> short string) for externally-exposed IDs
 gem "sqids", "~> 0.2"
 # JSON Schema validation for jsonb config columns
 gem "json_schemer", "~> 2.3"
+# Parse Granola MCP meeting XML
+gem "nokogiri", "~> 1.19"
 # Use the Puma web server [https://github.com/puma/puma]
 gem "puma", ">= 5.0"
 # Use JavaScript with ESM import maps [https://github.com/rails/importmap-rails]
@@ -24,6 +28,9 @@ gem "stimulus-rails"
 gem "jbuilder"
 # Collapse multi-line request logs into a single JSON event [https://github.com/roidrage/lograge]
 gem "lograge"
+# Report unhandled Rails and background-job errors when SENTRY_DSN is configured.
+gem "sentry-ruby", "~> 6.7"
+gem "sentry-rails", "~> 6.7"
 
 # Use Active Model has_secure_password [https://guides.rubyonrails.org/active_model_basics.html#securepassword]
 gem "bcrypt", "~> 3.1.7"
@@ -47,6 +54,7 @@ gem "thruster", require: false
 
 # Use Active Storage variants [https://guides.rubyonrails.org/active_storage_overview.html#transforming-images]
 gem "image_processing", "~> 2.0"
+gem "ruby-vips", "~> 2.2", require: false
 
 group :development, :test do
   # See https://guides.rubyonrails.org/debugging_rails_applications.html#debugging-with-the-debug-gem
@@ -70,5 +78,6 @@ end
 group :test do
   # Use system testing [https://guides.rubyonrails.org/testing.html#system-testing]
   gem "capybara"
+  gem "minitest-mock", "~> 5.27", require: false
   gem "selenium-webdriver"
 end

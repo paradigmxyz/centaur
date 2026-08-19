@@ -16,10 +16,8 @@ EOF
   exit 1
 fi
 
-if rg -i -q \
-  -e 'generated with (claude|codex|amp)' \
-  -e 'co-authored-by:.*(claude|codex|anthropic|openai|amp)' \
-  -e 'co-authored-by:.*(centaur[[:space:]]+ai|ai@centaur\.local)' \
+if grep -Eiq \
+  'generated with (claude|codex|amp)|co-authored-by:.*(claude|codex|anthropic|openai|amp)|co-authored-by:.*(centaur[[:space:]]+ai|ai@centaur\.local)' \
   "$message_file"; then
   cat >&2 <<'EOF'
 Commit message contains generated-by or AI co-author attribution.

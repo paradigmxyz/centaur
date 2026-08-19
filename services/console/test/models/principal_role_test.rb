@@ -1,15 +1,14 @@
 require "test_helper"
 
 class PrincipalRoleTest < ActiveSupport::TestCase
-  test "is valid when principal and role share a namespace" do
+  test "is valid with a principal and role" do
     pr = PrincipalRole.new(principal: principals(:acme_user_bob), role: roles(:acme_admin_role))
     assert pr.valid?
   end
 
-  test "rejects a role from a different namespace" do
+  test "allows any role to be assigned" do
     pr = PrincipalRole.new(principal: principals(:globex_user), role: roles(:acme_infra))
-    assert_not pr.valid?
-    assert_includes pr.errors[:role], "must be in the same namespace as the principal"
+    assert pr.valid?
   end
 
   test "rejects assigning the same role twice" do

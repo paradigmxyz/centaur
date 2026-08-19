@@ -6,6 +6,9 @@ use tracing::{info, warn};
 
 use crate::{RuntimeContext, SessionRuntimeError, record_idle_pause};
 
+const COMPONENT_LABEL: &str = "centaur.ai/component";
+const WORKFLOW_RUN_COMPONENT: &str = "workflow-run";
+
 #[derive(Clone, Copy, Debug)]
 pub struct SessionSandboxCleanupConfig {
     /// How often to sweep. `None` disables the cleanup worker entirely.
@@ -171,6 +174,9 @@ fn orphan_reap_eligible(sandbox: &ObservedSandbox, referenced: &BTreeSet<String>
     if referenced.contains(sandbox.id.as_str()) {
         return false;
     }
+    if sandbox.labels.get(COMPONENT_LABEL).map(String::as_str) == Some(WORKFLOW_RUN_COMPONENT) {
+        return false;
+    }
     !matches!(
         sandbox.status,
         SandboxStatus::Created | SandboxStatus::Stopped | SandboxStatus::Gone
@@ -179,10 +185,19 @@ fn orphan_reap_eligible(sandbox: &ObservedSandbox, referenced: &BTreeSet<String>
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
 
     fn observed(id: &str, status: SandboxStatus) -> ObservedSandbox {
         ObservedSandbox::new(SandboxId::new(id), "test", status)
+    }
+
+    fn workflow_observed(id: &str, status: SandboxStatus) -> ObservedSandbox {
+        ObservedSandbox::new(SandboxId::new(id), "test", status).with_labels(BTreeMap::from([(
+            COMPONENT_LABEL.to_owned(),
+            WORKFLOW_RUN_COMPONENT.to_owned(),
+        )]))
     }
 
     fn referenced(ids: &[&str]) -> BTreeSet<String> {
@@ -256,6 +271,20 @@ mod tests {
         assert_eq!(
             select_orphan_reap_candidates(&[], &referenced(&[]), &mut pending),
             Vec::<String>::new()
+        );
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn workflow_sandbox_is_not_owned_by_session_cleanup() {
+        let observed = [workflow_observed("asbx-workflow", SandboxStatus::Running)];
+        let mut pending = BTreeSet::new();
+
+        assert!(
+            select_orphan_reap_candidates(&observed, &referenced(&[]), &mut pending).is_empty()
+        );
+        assert!(
+            select_orphan_reap_candidates(&observed, &referenced(&[]), &mut pending).is_empty()
         );
         assert!(pending.is_empty());
     }

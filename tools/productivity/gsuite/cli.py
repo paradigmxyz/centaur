@@ -475,6 +475,25 @@ def calendar_rsvp_cmd(
 # Drive commands
 
 
+def extract_drive_file_id(file_id_or_url: str) -> str:
+    """Extract a Drive file ID from an editor/Drive URL or return an ID as-is."""
+    import re
+    from urllib.parse import parse_qs, urlparse
+
+    if not file_id_or_url.startswith(("http://", "https://")):
+        return file_id_or_url
+
+    path_match = re.search(r"/d/([a-zA-Z0-9_-]+)", file_id_or_url)
+    if path_match:
+        return path_match.group(1)
+
+    query_ids = parse_qs(urlparse(file_id_or_url).query).get("id")
+    if query_ids and query_ids[0]:
+        return query_ids[0]
+
+    raise ValueError(f"Could not extract Drive file ID from URL: {file_id_or_url}")
+
+
 @drive_app.command("list")
 def drive_list(
     limit: int = typer.Option(50, "--limit", "-n", help="Max results"),
@@ -727,6 +746,214 @@ def drive_info(
     except Exception as e:
         console.print(f"[red]Error: {e}[/]")
         raise typer.Exit(1)
+
+
+@drive_app.command("revisions")
+def drive_revisions_cmd(
+    file_id_or_url: str = typer.Argument(
+        ...,
+        help="Drive file ID or Google Docs, Sheets, or Slides URL",
+    ),
+    limit: int = typer.Option(200, "--limit", "-n", help="Max revisions"),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
+    """List revisions for a Drive file, including Docs, Sheets, and Slides.
+
+    Google can omit older revisions for files with large or frequently updated
+    histories.
+
+    Examples:
+        gsuite drive revisions "1abc123"
+        gsuite drive revisions "https://docs.google.com/document/d/1abc123/edit"
+        gsuite drive revisions "https://docs.google.com/spreadsheets/d/1abc123/edit" -n 50
+        gsuite drive revisions "https://docs.google.com/presentation/d/1abc123/edit" --json
+    """
+    from .client import drive_list_revisions
+
+    try:
+        file_id = extract_drive_file_id(file_id_or_url)
+        revisions = drive_list_revisions(file_id, max_results=limit)
+        if json_output:
+            print(json.dumps(revisions, indent=2, ensure_ascii=False))
+            return
+        if not revisions:
+            console.print("[yellow]No revisions found.[/]")
+            return
+
+        table = Table(title=f"Drive Revisions ({len(revisions)})")
+        table.add_column("Revision ID", style="cyan")
+        table.add_column("Modified", style="green")
+        table.add_column("Modified By")
+        table.add_column("Published", justify="center")
+        table.add_column("Exports", style="dim")
+
+        for revision in revisions:
+            user = revision["last_modifying_user"]
+            modified_by = user["display_name"] or user["email"] or "-"
+            export_formats = ", ".join(sorted(revision["export_links"])) or "-"
+            table.add_row(
+                revision["id"],
+                revision["modified_time"],
+                modified_by,
+                "yes" if revision["published"] else "no",
+                export_formats,
+            )
+
+        console.print(table)
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1) from e
+
+
+@drive_app.command("revision")
+def drive_revision_cmd(
+    file_id_or_url: str = typer.Argument(
+        ...,
+        help="Drive file ID or Google Docs, Sheets, or Slides URL",
+    ),
+    revision_id: str = typer.Argument(..., help="Revision ID"),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
+    """Get metadata and export links for a Drive file revision.
+
+    Examples:
+        gsuite drive revision "1abc123" "42"
+        gsuite drive revision "https://docs.google.com/spreadsheets/d/1abc123/edit" "42"
+        gsuite drive revision "https://docs.google.com/presentation/d/1abc123/edit" "42" --json
+    """
+    from .client import drive_get_revision
+
+    try:
+        file_id = extract_drive_file_id(file_id_or_url)
+        revision = drive_get_revision(file_id, revision_id)
+        if json_output:
+            print(json.dumps(revision, indent=2, ensure_ascii=False))
+            return
+
+        user = revision["last_modifying_user"]
+        modified_by = user["display_name"] or user["email"] or "-"
+        console.print(f"[bold cyan]Revision {revision['id']}[/]")
+        console.print(f"[green]Modified:[/] {revision['modified_time'] or '-'}")
+        console.print(f"[green]Modified by:[/] {modified_by}")
+        console.print(f"[green]MIME type:[/] {revision['mime_type'] or '-'}")
+        console.print(f"[green]Published:[/] {'yes' if revision['published'] else 'no'}")
+        if revision["published_link"]:
+            console.print(
+                f"[green]Published link:[/] {revision['published_link']}",
+                soft_wrap=True,
+            )
+        if revision["export_links"]:
+            console.print("[green]Historical exports:[/]")
+            for mime_type, link in sorted(revision["export_links"].items()):
+                console.print(f"  {mime_type}: {link}", soft_wrap=True)
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1) from e
+
+
+@drive_app.command("export-revision")
+def drive_export_revision_cmd(
+    file_id_or_url: str = typer.Argument(
+        ...,
+        help="Drive file ID or Google Docs, Sheets, or Slides URL",
+    ),
+    revision_id: str = typer.Argument(..., help="Revision ID"),
+    format: str = typer.Option(
+        "pdf",
+        "--format",
+        "-f",
+        help="Export format: txt, pdf, docx, html, csv, xlsx, pptx, md",
+    ),
+    output: str = typer.Option(
+        ".",
+        "--output",
+        "-o",
+        help="Output directory or file path",
+    ),
+    stdout: bool = typer.Option(
+        False,
+        "--stdout",
+        help="Print text-based exports instead of writing a file",
+    ),
+):
+    """Export an earlier Docs, Sheets, or Slides revision.
+
+    Examples:
+        gsuite drive export-revision "1abc123" "42"
+        gsuite drive export-revision "https://docs.google.com/document/d/1abc123/edit" "42" -f docx
+        gsuite drive export-revision "https://docs.google.com/spreadsheets/d/1abc123/edit" "42" -f xlsx -o old.xlsx
+        gsuite drive export-revision "https://docs.google.com/presentation/d/1abc123/edit" "42" -f pptx
+        gsuite drive export-revision "1abc123" "42" -f txt --stdout
+    """
+    import re
+
+    from .client import _drive_export_revision_bytes
+
+    try:
+        if stdout and format not in {"txt", "csv", "html", "md"}:
+            raise ValueError("--stdout requires a text-based export format")
+
+        file_id = extract_drive_file_id(file_id_or_url)
+        metadata, _mime_type, data = _drive_export_revision_bytes(
+            file_id,
+            revision_id,
+            format,
+        )
+        if stdout:
+            console.print(data.decode("utf-8", errors="replace"), markup=False)
+            return
+
+        output_path = Path(output)
+        if output_path.is_dir():
+            stem = Path(metadata.get("name") or f"drive-{file_id}").stem
+            safe_revision_id = re.sub(r"[^a-zA-Z0-9_.-]", "_", revision_id)
+            output_path = output_path / f"{stem}-revision-{safe_revision_id}.{format}"
+        output_path.write_bytes(data)
+        console.print(f"[green]✓ Exported revision {revision_id} to {output_path}[/]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1) from e
+
+
+@drive_app.command("download-revision")
+def drive_download_revision_cmd(
+    file_id_or_url: str = typer.Argument(..., help="Drive file ID or URL"),
+    revision_id: str = typer.Argument(..., help="Revision ID"),
+    output: str = typer.Option(
+        ".",
+        "--output",
+        "-o",
+        help="Output directory or file path",
+    ),
+):
+    """Download the original bytes of an earlier binary Drive revision.
+
+    Use export-revision for native Google Docs, Sheets, and Slides files.
+
+    Examples:
+        gsuite drive download-revision "1abc123" "42"
+        gsuite drive download-revision "1abc123" "42" -o old-image.png
+    """
+    import re
+
+    from .client import _drive_download_revision_bytes
+
+    try:
+        file_id = extract_drive_file_id(file_id_or_url)
+        metadata, revision, data = _drive_download_revision_bytes(file_id, revision_id)
+        output_path = Path(output)
+        if output_path.is_dir():
+            original_name = revision["original_filename"] or metadata.get("name")
+            original_path = Path(original_name or f"drive-{file_id}")
+            safe_revision_id = re.sub(r"[^a-zA-Z0-9_.-]", "_", revision_id)
+            output_path = output_path / (
+                f"{original_path.stem}-revision-{safe_revision_id}{original_path.suffix}"
+            )
+        output_path.write_bytes(data)
+        console.print(f"[green]✓ Downloaded revision {revision_id} to {output_path}[/]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1) from e
 
 
 @drive_app.command("permissions")

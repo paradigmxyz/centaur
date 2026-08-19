@@ -1,0 +1,30 @@
+member_private:
+  user: member_user
+  name: incident-triage
+  description: Investigate production incidents using logs and metrics.
+  content: |
+    # Incident Triage
+
+    Inspect logs before proposing a remediation.
+  visibility: private
+
+admin_shared:
+  user: acme_admin
+  name: customer-research
+  description: Research a customer using approved internal sources.
+  content: |
+    # Customer Research
+
+    Use the company context tool before source-specific searches.
+  visibility: shared
+  shared_at: 2026-08-10 13:45:08
+
+other_private:
+  user: acme_admin
+  name: finance-private
+  description: Private finance guidance for the owner.
+  content: |
+    # Finance
+
+    Keep this guidance private.
+  visibility: private

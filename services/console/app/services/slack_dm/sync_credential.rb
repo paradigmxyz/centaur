@@ -1,7 +1,3 @@
-require "json"
-require "net/http"
-require "uri"
-
 module SlackDm
   class SyncCredential
     DM_REQUIRED_SCOPES = %w[im:read im:history].freeze
@@ -16,8 +12,17 @@ module SlackDm
     CONVERSATIONS_MEMBERS_ENDPOINT = "https://slack.com/api/conversations.members"
     CONVERSATIONS_HISTORY_ENDPOINT = "https://slack.com/api/conversations.history"
     CONVERSATIONS_REPLIES_ENDPOINT = "https://slack.com/api/conversations.replies"
+    API_READ_TIMEOUT_SECONDS = 120
 
     SlackApiError = Class.new(StandardError)
+    class RateLimitedError < SlackApiError
+      attr_reader :retry_after
+
+      def initialize(retry_after:)
+        @retry_after = retry_after
+        super("Slack API rate limited; retry after #{retry_after} seconds")
+      end
+    end
 
     class << self
       attr_accessor :slack_api_http
@@ -40,10 +45,11 @@ module SlackDm
       end
     end
 
-    def initialize(credential, api_client: CentaurApiClient.new, slack_api_http: nil)
+    def initialize(credential, api_client: nil, slack_api_http: nil, http_client: nil)
       @credential = credential
-      @api_client = api_client
+      @api_client = api_client || CentaurApiClient.new(read_timeout: API_READ_TIMEOUT_SECONDS)
       @slack_api_http = slack_api_http || self.class.slack_api_http
+      @http_client = http_client
       @run_id = "sdms_#{SecureRandom.hex(16)}"
       @messages_fetched = 0
       @replies_fetched = 0
@@ -65,6 +71,7 @@ module SlackDm
         sync_history(conversation, home_team_id, checkpoints[conversation.fetch("id")], batch)
         batch[:run][:conversations_synced] += 1
       rescue StandardError => e
+        raise if e.is_a?(RateLimitedError)
         raise if Rails.env.test?
 
         batch[:run][:conversations_failed] += 1
@@ -79,7 +86,7 @@ module SlackDm
       batch[:run][:replies_fetched] = @replies_fetched
       batch[:run][:replies_upserted] = batch[:messages].count { |message| message[:parent_message_ts].present? }
       batch[:run][:finished] = true
-      @api_client.ingest_slack_dm_sync_batch(batch)
+      @api_client.ingest_slack_dm_sync_batch(sanitize_for_postgres(batch))
     end
 
     private
@@ -326,21 +333,20 @@ module SlackDm
         )
       end
 
-      uri = URI.parse(endpoint)
-      uri.query = URI.encode_www_form(params) if params.any?
-      request = Net::HTTP::Get.new(uri)
-      request["Authorization"] = "Bearer #{@credential.access_token}"
-      request["Accept"] = "application/json"
+      http_client = @http_client || HttpClient.new(open_timeout: slack_timeout, read_timeout: slack_timeout)
+      response = http_client.get(
+        endpoint,
+        params: params,
+        headers: { "Authorization" => "Bearer #{@credential.access_token}" }
+      )
+      if response.status == 429
+        retry_after = Float(response["retry-after"], exception: false)
+        retry_after = 1 unless retry_after&.positive?
+        raise RateLimitedError.new(retry_after: [ retry_after, rate_limit_max_wait ].min)
+      end
 
-      http = Net::HTTP.new(uri.host, uri.port)
-      http.use_ssl = uri.scheme == "https"
-      http.open_timeout = slack_timeout
-      http.read_timeout = slack_timeout
-      response = http.request(request)
-      raise SlackApiError, "Slack API rate limited" if response.code.to_i == 429
-
-      parsed = JSON.parse(response.body.to_s)
-      raise SlackApiError, "Slack API returned HTTP #{response.code}" unless response.code.to_i.between?(200, 299)
+      parsed = response.json
+      raise SlackApiError, "Slack API returned HTTP #{response.status}" unless response.success?
       raise SlackApiError, "Slack API returned #{parsed['error']}" unless parsed["ok"] == true
 
       parsed
@@ -358,7 +364,23 @@ module SlackDm
       [ seconds.to_i, micros.to_s.ljust(6, "0")[0, 6].to_i ]
     end
 
+    def sanitize_for_postgres(value)
+      case value
+      when Hash
+        value.to_h do |key, nested_value|
+          [ sanitize_for_postgres(key), sanitize_for_postgres(nested_value) ]
+        end
+      when Array
+        value.map { |nested_value| sanitize_for_postgres(nested_value) }
+      when String
+        value.delete("\u0000")
+      else
+        value
+      end
+    end
+
     def slack_timeout = positive_env("SLACK_DM_SYNC_TIMEOUT_SECONDS", 20)
+    def rate_limit_max_wait = positive_env("SLACK_DM_SYNC_RATE_LIMIT_MAX_WAIT_SECONDS", 5.minutes.to_i)
     def list_page_size = positive_env("SLACK_DM_SYNC_LIST_PAGE_SIZE", 200)
     def list_max_pages = positive_env("SLACK_DM_SYNC_LIST_MAX_PAGES", 10)
     def members_page_size = positive_env("SLACK_DM_SYNC_MEMBERS_PAGE_SIZE", 200)

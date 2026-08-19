@@ -6,8 +6,8 @@ module Broker
     PREQIN_TOKEN_ENDPOINT = "https://api.preqin.com/connect/token".freeze
     PREQIN_REFRESH_TOKEN_ENDPOINT = "https://api.preqin.com/connect/refresh_token".freeze
 
-    GRANTS = %w[refresh_token password preqin].freeze
-    REFRESHABLE_WITHOUT_TOKEN_GRANTS = %w[password preqin].freeze
+    GRANTS = %w[refresh_token client_credentials password preqin].freeze
+    REFRESHABLE_WITHOUT_TOKEN_GRANTS = %w[client_credentials password preqin].freeze
 
     Outcome = Data.define(:result, :clear_refresh_token, :dead_reason)
 
@@ -22,6 +22,8 @@ module Broker
 
       def validate(credential)
         case credential.grant
+        when "client_credentials"
+          validate_client_credentials(credential)
         when "password"
           validate_password(credential)
         when "preqin"
@@ -31,6 +33,8 @@ module Broker
 
       def refresh(credential)
         case credential.grant
+        when "client_credentials"
+          refresh_client_credentials(credential)
         when "password"
           refresh_password(credential)
         when "preqin"
@@ -78,6 +82,15 @@ module Broker
         result = post_token_form(credential, url: credential.token_endpoint,
                                              form: password_form(credential))
         success(result, clear_refresh_token: clear_stale_refresh_token && result.refresh_token.blank?)
+      end
+
+      def refresh_client_credentials(credential)
+        result = post_token_form(
+          credential,
+          url: credential.token_endpoint,
+          form: client_credentials_form(credential)
+        )
+        success(result)
       end
 
       def refresh_preqin(credential)
@@ -161,6 +174,18 @@ module Broker
         add_oauth_optional_fields(form, credential)
       end
 
+      def client_credentials_form(credential)
+        require_value!("client_id", credential.effective_client_id)
+        require_value!("client_secret", credential.effective_client_secret)
+
+        form = {
+          "grant_type" => "client_credentials",
+          "client_id" => credential.effective_client_id,
+          "client_secret" => credential.effective_client_secret
+        }
+        add_oauth_optional_fields(form, credential)
+      end
+
       def preqin_token_form(credential)
         require_value!("username", credential.username)
         require_value!("api_key", credential.api_key)
@@ -192,6 +217,12 @@ module Broker
       def validate_password(credential)
         credential.errors.add(:username, "can't be blank for the password grant") if credential.username.blank?
         credential.errors.add(:password, "can't be blank for the password grant") if credential.password.blank?
+      end
+
+      def validate_client_credentials(credential)
+        if credential.effective_client_secret.blank?
+          credential.errors.add(:client_secret, "can't be blank for the client_credentials grant")
+        end
       end
 
       def validate_preqin(credential)

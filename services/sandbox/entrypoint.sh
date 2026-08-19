@@ -407,27 +407,9 @@ unset _centaur_tools_auto_reload
 
 # ── Assemble system prompt from bind mounts ──────────────────────────────────
 # Base prompt: mounted as AGENTS_BASE.md when present, fallback to baked-in AGENTS.md.
-# Org/persona overlays are mounted alongside the base prompt when present.
+# Prompt overlays from mounted repos are appended when present.
 TARGET_PROMPT="$WORKSPACE_DIR/AGENTS.md"
-if [ -f "$HOME_DIR/AGENTS_BASE.md" ]; then
-    cp "$HOME_DIR/AGENTS_BASE.md" "$TARGET_PROMPT"
-elif [ -f "$HOME_DIR/AGENTS.md" ]; then
-    cp "$HOME_DIR/AGENTS.md" "$TARGET_PROMPT"
-fi
-
-if [ -f "$HOME_DIR/AGENTS_OVERLAY.md" ] && [ -f "$TARGET_PROMPT" ]; then
-    printf '\n\n---\n\n' >> "$TARGET_PROMPT"
-    cat "$HOME_DIR/AGENTS_OVERLAY.md" >> "$TARGET_PROMPT"
-# Repo-cache-era org prompt: with overlay images gone, point CENTAUR_OVERLAY_DIR
-# at the org repo's clone under the repos mount (e.g. ~/github/<owner>/<repo>)
-# and its SYSTEM_PROMPT.md is appended here, same contract the overlay-bootstrap
-# init container used to fulfil by staging $HOME/AGENTS_OVERLAY.md.
-elif [ -n "${CENTAUR_OVERLAY_DIR:-}" ] \
-    && [ -f "${CENTAUR_OVERLAY_DIR}/services/sandbox/SYSTEM_PROMPT.md" ] \
-    && [ -f "$TARGET_PROMPT" ]; then
-    printf '\n\n---\n\n' >> "$TARGET_PROMPT"
-    cat "${CENTAUR_OVERLAY_DIR}/services/sandbox/SYSTEM_PROMPT.md" >> "$TARGET_PROMPT"
-fi
+compose-system-prompt --home-dir "$HOME_DIR" --target-prompt "$TARGET_PROMPT"
 
 if [ "${CENTAUR_SANDBOX_OBSERVABILITY_ENABLED:-true}" = "false" ] && [ -f "$TARGET_PROMPT" ]; then
     cat >> "$TARGET_PROMPT" <<'EOF'
@@ -436,16 +418,6 @@ if [ "${CENTAUR_SANDBOX_OBSERVABILITY_ENABLED:-true}" = "false" ] && [ -f "$TARG
 
 [Observability access]
 This sandbox does not have Centaur observability access. Do not use vlogs, vmetrics, Grafana, or related internal logs/metrics tools.
-EOF
-fi
-
-if [ "${CENTAUR_SANDBOX_API_SERVER_ENABLED:-true}" = "false" ] && [ -f "$TARGET_PROMPT" ]; then
-    cat >> "$TARGET_PROMPT" <<'EOF'
-
----
-
-[API server access]
-This sandbox does not have Centaur API server access. Do not use workflows or tool options that call the api-rs control plane, such as dispatching background agent sessions or downloading Centaur attachment handles.
 EOF
 fi
 
@@ -483,17 +455,18 @@ if [ -n "${CENTAUR_TOOLS_URL:-}" ]; then
     done
 fi
 
-# Signal readiness
-touch "$HOME_DIR/.ready"
-
-# ── Background: slow auth tasks ─────────────────────────────────────────────
-{
-    if [ -n "${GITHUB_TOKEN:-}" ]; then
-        git config --global credential.helper store
-        printf 'https://oauth2:%s@github.com\n' "$GITHUB_TOKEN" > "$HOME_DIR/.git-credentials"
-        echo "${GITHUB_TOKEN}" | gh auth login --with-token 2>/dev/null || true
-        gh auth setup-git 2>/dev/null || true
+# Git and gh both read the placeholder token from the environment. Install gh's
+# credential helper before signalling readiness so Git can present that
+# placeholder as the HTTP Basic password for iron-proxy to replace. setup-git is
+# local-only; unlike `gh auth login`, it does not verify or persist the token.
+if [ -n "${GITHUB_TOKEN:-}" ]; then
+    if ! gh auth setup-git >/dev/null 2>&1; then
+        echo "failed to configure the GitHub credential helper" >&2
+        exit 1
     fi
-} &
+fi
+
+# Signal readiness only after every client-side credential helper is installed.
+touch "$HOME_DIR/.ready"
 
 exec "$@"

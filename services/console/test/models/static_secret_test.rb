@@ -3,7 +3,6 @@ require "test_helper"
 class StaticSecretTest < ActiveSupport::TestCase
   def valid_inject_attrs(overrides = {})
     {
-      namespace: "acme",
       foreign_id: "new-ref",
       name: "a friendly name",
       inject_config: { "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" },
@@ -13,7 +12,6 @@ class StaticSecretTest < ActiveSupport::TestCase
 
   def valid_replace_attrs(overrides = {})
     {
-      namespace: "acme",
       foreign_id: "new-ref",
       replace_config: { "proxy_value" => "__TOKEN__" },
       created_by: users(:acme_admin)
@@ -28,25 +26,29 @@ class StaticSecretTest < ActiveSupport::TestCase
     assert StaticSecret.new(valid_replace_attrs).valid?
   end
 
+  test "kind defaults to custom" do
+    assert_equal "custom", StaticSecret.new.kind
+  end
+
+  test "rejects an unknown credential kind" do
+    ref = StaticSecret.new(valid_inject_attrs(kind: "githubish"))
+
+    assert_not ref.valid?
+    assert_includes ref.errors[:kind], "is not included in the list"
+  end
+
   test "rejects a foreign_id that starts with the opaque id prefix" do
     ref = StaticSecret.new(valid_inject_attrs(foreign_id: "ssr_abc123"))
     assert_not ref.valid?
     assert_includes ref.errors[:foreign_id], "must not start with \"ssr_\", which is reserved for opaque ids"
   end
 
-  test "namespace defaults to 'default' and is valid with no foreign_id or name" do
+  test "is valid with no foreign_id or name" do
     ref = StaticSecret.new(
       inject_config: { "header" => "Authorization" },
       created_by: users(:acme_admin)
     )
-    assert_equal "default", ref.namespace
     assert ref.valid?, ref.errors.full_messages.inspect
-  end
-
-  test "is invalid when namespace is blank" do
-    ref = StaticSecret.new(valid_inject_attrs(namespace: ""))
-    assert_not ref.valid?
-    assert_includes ref.errors[:namespace], "can't be blank"
   end
 
   test "name is free-form and accepts arbitrary characters" do
@@ -54,7 +56,7 @@ class StaticSecretTest < ActiveSupport::TestCase
     assert ref.valid?, ref.errors.full_messages.inspect
   end
 
-  test "foreign_id is unique within a namespace" do
+  test "foreign_id is globally unique" do
     existing_attrs = valid_inject_attrs(foreign_id: "shared-fid")
     StaticSecret.create!(existing_attrs)
     dup = StaticSecret.new(existing_attrs.merge(name: "another label"))
@@ -62,10 +64,10 @@ class StaticSecretTest < ActiveSupport::TestCase
     assert_includes dup.errors[:foreign_id], "has already been taken"
   end
 
-  test "same foreign_id is allowed across different namespaces" do
+  test "same foreign_id is rejected globally" do
     StaticSecret.create!(valid_inject_attrs(foreign_id: "shared-fid"))
-    other = StaticSecret.new(valid_inject_attrs(namespace: "globex", foreign_id: "shared-fid"))
-    assert other.valid?
+    other = StaticSecret.new(valid_inject_attrs(foreign_id: "shared-fid"))
+    assert_not other.valid?
   end
 
   test "foreign_id rejects non-URL-safe characters" do
@@ -82,14 +84,13 @@ class StaticSecretTest < ActiveSupport::TestCase
   end
 
   test "must define one of inject_config or replace_config" do
-    ref = StaticSecret.new(namespace: "acme", foreign_id: "neither", created_by: users(:acme_admin))
+    ref = StaticSecret.new(foreign_id: "neither", created_by: users(:acme_admin))
     assert_not ref.valid?
     assert_includes ref.errors[:base], "must define one of inject_config or replace_config"
   end
 
   test "cannot define both inject_config and replace_config" do
     ref = StaticSecret.new(
-      namespace: "acme",
       foreign_id: "both",
       inject_config: { "header" => "Authorization" },
       replace_config: { "proxy_value" => "__TOKEN__" },

@@ -40,7 +40,7 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
     get console_credentials_url(kind: "oauth")
     assert_equal "/console/credentials?kind=oauth", session[:return_to]
 
-    post console_roles_url, params: { role: { foreign_id: "new-role", namespace: "default" } }
+    post console_roles_url, params: { role: { foreign_id: "new-role" } }
     assert_redirected_to login_path
     assert_equal "/console/credentials?kind=oauth", session[:return_to]
   end

@@ -41,6 +41,8 @@ ironProxy:
     - "10.43.0.0/16"
   secretSource: onepassword
   secretTtl: 10m
+  # Requests/limits for each per-sandbox iron-proxy pod (k8s resources map).
+  resources: {}
 
 # Base tools delivery for api-rs sandboxes. When enabled, repo-cache keeps `repo`
 # fresh on each node and a tools-bootstrap init container copies `subdir` into
@@ -85,7 +87,7 @@ toolServer:
     secretKey: token
 
 # console — Rails control plane (formerly "iron-control") for authenticated API
-# access + encrypted secret storage. Off by default; enable per-environment.
+# access + encrypted secret storage. The console is a required chart component.
 # Uses a dedicated `iron_control_production` database on the bundled Postgres
 # (its own logical DB so its Rails schema_migrations table never collides with
 # the API's migration table); an init container creates the DB idempotently.
@@ -98,7 +100,6 @@ toolServer:
 # on top of these `console` defaults (see the `centaur.consoleValues` helper), so
 # existing values files keep working. Prefer `console` for new configuration.
 console:
-  enabled: false
   replicaCount: 1
   # Public URL users reach in a browser (e.g. https://console.example.com), used
   # as CENTAUR_CONSOLE_PUBLIC_URL. Set this when console is exposed behind
@@ -110,6 +111,9 @@ console:
   # service DNS names that differ from the chart's short in-cluster URL;
   # publicUrl and the short service host are already included.
   allowedHosts: []
+  # Optional Sentry DSN for Console web requests and background jobs. Empty by
+  # default, so the Sentry SDK remains disabled unless explicitly configured.
+  sentryDsn: ""
   # Break-glass email/password login. Disable when console is reachable from
   # the public internet and SSO is configured.
   passwordLoginEnabled: true
@@ -188,10 +192,37 @@ console:
   # most importantly the broker-credential OAuth refresh loop that mints and
   # refreshes the access tokens delivered inline via `token_broker` sources
   # (e.g. the `openai-codex` brokered token). The web Puma pod runs no worker, so
-  # without this those jobs never execute. Active only when console.enabled.
+  # without this those jobs never execute.
   worker:
-    enabled: true
     replicaCount: 1
+    resources: {}
+  # Prometheus SQL Exporter for Console database metrics, initially Solid Queue.
+  # This runs as one internal-only replica because every instance would report
+  # the same global database state. The exporter reads a dedicated, read-only DSN
+  # from secretManager.existingSecretName without writing the credential into
+  # its ConfigMap or command-line arguments.
+  sqlExporter:
+    # Enable after CONSOLE_SQLEXPORTER_DATABASE_URL has been added to the
+    # shared infra Secret and its PostgreSQL role has been granted SELECT on
+    # every table queried by a configured collector.
+    enabled: false
+    image:
+      repository: burningalchemist/sql_exporter
+      tag: 0.24.4
+      pullPolicy: IfNotPresent
+    port: 9399
+    # Key in secretManager.existingSecretName containing the complete database
+    # URL for a dedicated read-only PostgreSQL role.
+    databaseUrlSecretKey: CONSOLE_SQLEXPORTER_DATABASE_URL
+    # Used by NetworkPolicy when postgres.enabled=false and the queue database
+    # is externally managed.
+    databasePort: 5432
+    minInterval: 15s
+    scrapeTimeout: 5s
+    metrics:
+      scrapeAnnotations: true
+      path: /metrics
+      annotations: {}
     resources: {}
 
 # Values for the upstream 1Password Connect subchart
@@ -246,6 +277,22 @@ sandbox:
     repository: centaur-agent
     tag: latest
     pullPolicy: Always
+  # Node steering for sandbox pods **and** their paired iron-proxy pods. These
+  # reach the pod through the control plane, not through this chart's templates:
+  # api-rs creates them at runtime, so a Helm or kustomize patch cannot touch
+  # them. They are passed through to `Sandbox.spec.podTemplate.spec` and the
+  # iron-proxy PodSpec.
+  #
+  # Set these to keep untrusted agent workloads on a dedicated (usually tainted)
+  # node pool and/or under a stronger RuntimeClass such as gVisor. Empty leaves
+  # placement to the default scheduler.
+  nodeSelector: {}
+  #   workload: centaur-sandbox
+  tolerations: []
+  # - key: centaur.ai/sandbox
+  #   operator: Exists
+  #   effect: NoSchedule
+  # RuntimeClass for sandbox + iron-proxy pods, e.g. gVisor.
   runtimeClassName: ""
   reposPath: ""
   # How the in-sandbox harness authenticates upstream. Single source of truth:
@@ -266,19 +313,18 @@ sandbox:
   # their session's harness via container args; the sandbox image CMD only
   # matters for containers started outside api-rs.
   harnessEngine: codex
-  # Copied into every sandbox pod. CLAUDE_MODEL / CODEX_MODEL set here (the
-  # harness default-model overrides) are also mirrored into slackbotv2 and the
-  # Console so their model displays match what sandboxes actually run.
+  # Copied into every sandbox pod. CLAUDE_MODEL / CODEX_MODEL set here are also
+  # mirrored into slackbotv2 and the Console; CODEX_MODEL_REASONING_EFFORT is
+  # mirrored into slackbotv2. This keeps Slack's model/thinking footer aligned
+  # with the policy the sandbox actually runs.
   extraEnv: {}
   stateVolume:
     enabled: false
     size: 10Gi
     storageClassName: ""
-  resources:
-    limits: {}
-    requests:
-      cpu: 100m
-      memory: 512Mi
+  # Requests/limits for the agent container of every sandbox pod, per-session
+  # and warm (k8s resources map).
+  resources: {}
 
 repoCache:
   enabled: true
@@ -354,6 +400,10 @@ apiRs:
     tag: latest
     pullPolicy: Always
   port: 8080
+  # Sticky percentage of session requests for Codex assigned to Nanocodex.
+  # The API hashes the thread key once and persists the resolved harness on the
+  # session. Set to 0 to keep new Codex requests on Codex.
+  codexNanocodexRolloutPercent: 50
   # Public/local MCP endpoint advertised through OAuth protected-resource
   # metadata. Empty falls back to slackbotv2.mcpPublicUrl.
   mcpPublicUrl: ""
@@ -379,6 +429,8 @@ apiRs:
   workflowHostSandbox: true
   workflowEnableMode: all
   workflowAllowedNames: ""
+  # Requests/limits for the workflow-host sandbox pod (k8s resources map).
+  workflowHostResources: {}
   # Scheduled ETL workflow configuration. The chart renders these into api-rs
   # env so workflow discovery sees the right schedules, then derives the
   # workflow-host passthrough list from the same non-secret config.
@@ -417,6 +469,13 @@ apiRs:
       intervalSeconds: 14400
       maxWindowSeconds: 21600
       batchSize: 50
+    companyContextEmbeddings:
+      # Enables the embedding workflow and hybrid search in agent sandboxes.
+      enabled: false
+      intervalSeconds: 300
+      batchSize: 250
+      # Shared by the embedding workflow and company-context searches in agent sandboxes.
+      model: text-embedding-3-small
   # Reaper: stop sandboxes older than the max lifetime, regardless of whether
   # they are running or suspended. 0 disables the sweep. Interval must be >= 1.
   sandboxMaxLifetimeSecs: 259200 # 3 days
@@ -430,13 +489,12 @@ apiRs:
   activitySummary:
     enabled: false
     model: gpt-5.4-nano
+    # Deprecated compatibility fallback. Prefer OPENAI_BASE_URL in apiRs.extraEnv.
     openaiBaseUrl: https://api.openai.com/v1
     minIntervalSecs: 20
     timeoutSecs: 5
     maxFacts: 12
     maxOutputTokens: 128
-  ironProxy:
-    mode: enabled
   metrics:
     # The Rust API always serves Prometheus text metrics at /metrics. This flag
     # only controls scrape annotations for Prometheus/VictoriaMetrics-style
@@ -475,6 +533,16 @@ slackbotv2:
     pullPolicy: Always
   userName: centaur
   assistantStatus: ""
+  # Join newly-created public channels after subscribed channel_created events.
+  # Requires the Slack app to grant channels:read and channels:join.
+  autoJoinCreatedChannels: false
+  # Append model, harness, and reasoning effort to the first live streamed
+  # Slack assistant response, every response, or no responses. Independent of
+  # the optional Console link below.
+  responseMetadataMode: first
+  # Include the Codex service tier when a response metadata footer is rendered.
+  # This does not cause the footer to appear on additional responses.
+  responseServiceTierEnabled: false
   # Public/local MCP endpoint shown in MCP SSO setup messages. The default
   # assumes users connect through `kubectl port-forward ... 3000:8080`.
   mcpPublicUrl: "http://localhost:3000"
@@ -483,7 +551,7 @@ slackbotv2:
   # Per-channel default harness / model / provider / reasoning, keyed by Slack
   # conversation id (the C…/G…/D… id). Each value is an object of optional
   # harness / model / provider / reasoning fields, using the same vocabulary as
-  # the inline Slack flags (harness: claude|codex|amp, provider: bedrock|meta,
+  # the inline Slack flags (harness: claude|codex|nanocodex|amp, provider: bedrock|meta,
   # model accepts Claude aliases like opus). A model is only meaningful within a
   # harness, so name the harness alongside it. Applied when a message in that
   # channel carries no explicit/sticky per-thread flag, below such a flag and
@@ -551,6 +619,8 @@ githubbot:
   # / draft status.
   autoMerge: true
   mergeMethod: squash
+  # Emit CI and review workflow events to api-rs.
+  workflowEvents: false
   # Fallback @handle (no leading @) the bot tags when it gives up; empty = none.
   escalationHandle: ""
   # Optional review / issue-work methodology overrides. When set, the chart writes
@@ -661,6 +731,10 @@ networkPolicy:
   enabled: true
   ingressSourceNamespaces: []
   apiIngressSourceNamespaces: []
+  # Namespaces containing Prometheus-compatible collectors that may scrape
+  # internal metrics-only Services such as the Console queue SQL Exporter.
+  # Same-namespace collectors are always admitted.
+  metricsIngressSourceNamespaces: []
   ingressControllerNamespaces:
     - kube-system
   # Port the kubernetes.default ClusterIP forwards to for the API server. The

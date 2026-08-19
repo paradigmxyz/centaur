@@ -52,8 +52,7 @@
 <%= def_section.call("OAuth Client", [
   [ "Provider", @oauth_app.provider ],
   [ "Client ID", @oauth_app.client_id ],
-  [ "Client secret", @oauth_app.client_secret.present? ? "set" : "not set" ],
-  [ "Credential namespace", @oauth_app.credential_namespace ]
+  [ "Client secret", @oauth_app.client_secret.present? ? "set" : "not set" ]
 ]) %>
 
 <%= def_section.call("Flow Config", [
