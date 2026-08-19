@@ -6,7 +6,13 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
   TranscriptSession = Struct.new(:metadata_hash, :harness_type, :title, keyword_init: true)
   ModelSession = Struct.new(:thread_key, :metadata_hash, :harness_type, keyword_init: true)
   ModelExecution = Struct.new(:metadata, keyword_init: true)
-  TranscriptEvent = Struct.new(:event_type, :payload_hash, :created_at, keyword_init: true)
+  TranscriptEvent = Struct.new(
+    :event_type,
+    :payload_hash,
+    :created_at,
+    :execution_id,
+    keyword_init: true
+  )
   SelectedSession = Struct.new(:thread_key, keyword_init: true)
 
   setup do
@@ -36,51 +42,18 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_select ".console-thread-group-title", text: /Chats/
   end
 
-  test "threads page does not render composer when session database is unavailable" do
+  test "threads page falls back to the new chat screen when session database is unavailable" do
     with_recent_first_error do
       get console_threads_url
     end
 
     assert_response :ok
-    assert_select "input[name=q]", count: 0
-    assert_select ".console-main-thread-frame aside", count: 0
-    # No chat selected: like the not-found state, the page renders only the
-    # centered empty state — no detail header.
+    # No chat selected: the new-chat composer renders (posting goes through
+    # the API, not the sessions DB), alongside the unavailability note.
     assert_select ".console-thread-detail-header", count: 0
-    assert_select "a[aria-label=?]", "New chat", count: 0
-    assert_select "span[aria-label=?]", "New chat disabled", count: 0
-    assert_select "textarea[name=prompt]", count: 0
-    assert_select "select[name=harness_type]", count: 0
-    assert_select "form[action=?]", console_threads_path, count: 0
-    assert_select "body", text: /No chats yet/
+    assert_select "a[aria-label=?]", "New chat", count: 1
+    assert_select "textarea[name=prompt]", count: 1
     assert_select "body", text: /Chat database is unavailable/
-  end
-
-  test "blank prompt is blocked by read only mode" do
-    post console_threads_url, params: { prompt: " " }
-
-    assert_redirected_to console_threads_path
-    assert_equal "Chats are read-only while browsing a mirrored production snapshot.", flash[:alert]
-  end
-
-  test "threads page hides composer controls" do
-    with_recent_first_error do
-      get console_threads_url
-    end
-
-    assert_response :ok
-    assert_select "textarea[name=prompt]", count: 0
-    assert_select "form[action=?]", console_threads_path, count: 0
-    assert_select "body", text: /Read-only snapshot/, count: 0
-    assert_select "span[aria-label=?]", "New chat disabled", count: 0
-    assert_select "a[aria-label=?]", "New chat", count: 0
-  end
-
-  test "posts are blocked without calling the session api" do
-    post console_threads_url, params: { prompt: "Do not run this." }
-
-    assert_redirected_to console_threads_path
-    assert_equal "Chats are read-only while browsing a mirrored production snapshot.", flash[:alert]
   end
 
   test "plain threads page redirects to first visible thread" do
@@ -134,6 +107,158 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_select "body", text: /Chat not found/
   end
 
+  test "public Slack channel threads are readable by every console user only when enabled" do
+    skip_unless_session_table
+    skip_unless_slack_channel_table
+
+    public_channel_id = "C#{SecureRandom.hex(6).upcase}"
+    private_channel_id = "C#{SecureRandom.hex(6).upcase}"
+    removed_channel_id = "C#{SecureRandom.hex(6).upcase}"
+    public_thread_key = "slack:#{public_channel_id}:#{SecureRandom.hex(6)}"
+    private_thread_key = "slack:#{private_channel_id}:#{SecureRandom.hex(6)}"
+    removed_thread_key = "slack:#{removed_channel_id}:#{SecureRandom.hex(6)}"
+    insert_slack_sync_channel(public_channel_id, is_private: false)
+    insert_slack_sync_channel(private_channel_id, is_private: true)
+    insert_slack_sync_channel(removed_channel_id, is_private: false, is_syncable: false)
+    insert_slack_session(public_thread_key, slack_user_id: "U_OTHER", slack_user_name: "someone-else")
+    insert_slack_session(private_thread_key, slack_user_id: "U_OTHER", slack_user_name: "someone-else")
+    insert_slack_session(removed_thread_key, slack_user_id: "U_OTHER", slack_user_name: "someone-else")
+
+    with_env(
+      "CENTAUR_CONSOLE_PUBLIC_SLACK_THREADS_ENABLED" => nil,
+      "IRON_CONTROL_PUBLIC_SLACK_THREADS_ENABLED" => nil
+    ) do
+      get console_threads_url(thread: public_thread_key)
+      assert_response :not_found
+    end
+
+    with_env("CENTAUR_CONSOLE_PUBLIC_SLACK_THREADS_ENABLED" => "true") do
+      get console_threads_url(thread: public_thread_key)
+      assert_response :ok
+      assert_select ".console-thread-detail-header", count: 1
+      assert_select "textarea[name=prompt]", count: 1
+
+      get console_threads_url(thread: private_thread_key)
+      assert_response :not_found
+
+      get console_threads_url(thread: removed_thread_key)
+      assert_response :not_found
+    end
+  end
+
+  test "public Slack channel threads stay out of the personal chat list" do
+    skip_unless_session_table
+    skip_unless_slack_channel_table
+
+    owned_thread_key = "console:owned-list-#{SecureRandom.hex(6)}"
+    public_channel_id = "C#{SecureRandom.hex(6).upcase}"
+    public_thread_key = "slack:#{public_channel_id}:#{SecureRandom.hex(6)}"
+    insert_console_session(owned_thread_key)
+    insert_slack_sync_channel(public_channel_id, is_private: false)
+    insert_slack_session(public_thread_key, slack_user_id: "U_OTHER", slack_user_name: "someone-else")
+
+    with_env("CENTAUR_CONSOLE_PUBLIC_SLACK_THREADS_ENABLED" => "true") do
+      get console_sidebar_threads_url
+      assert_response :ok
+      assert_select "a[href=?]", console_threads_path(thread: owned_thread_key), count: 1
+      assert_select "a[href=?]", console_threads_path(thread: public_thread_key), count: 0
+
+      # Even an active globally readable chat must not be injected into the
+      # user's personal sidebar.
+      get console_sidebar_threads_url(thread: public_thread_key)
+      assert_response :ok
+      assert_select "a[href=?]", console_threads_path(thread: public_thread_key), count: 0
+
+      # The default Chats landing also discovers only owned chats.
+      get console_threads_url
+      assert_redirected_to console_threads_path(thread: owned_thread_key)
+
+      # Global access itself is unchanged: a direct link remains readable and
+      # can be continued by a non-owner.
+      get console_threads_url(thread: public_thread_key)
+      assert_response :ok
+      assert_select ".console-thread-detail-header", count: 1
+      assert_select "textarea[name=prompt]", count: 1
+    end
+  end
+
+  test "sharing publishes a direct writable link from an in-page copy dialog" do
+    skip_unless_session_table
+
+    thread_key = "console:shared-#{SecureRandom.hex(6)}"
+    insert_console_session(thread_key)
+
+    get console_threads_url(thread: thread_key)
+
+    assert_response :ok
+    assert_select "button.console-thread-share-trigger[aria-label=?][data-action=?]",
+                  "Share chat", "thread-share#open", count: 1 do
+      assert_select "svg", count: 1
+    end
+    assert_select ".console-thread-menu", count: 0
+    assert_select "button[data-turbo-confirm]", count: 0
+    assert_select "dialog.console-share-dialog[data-thread-share-target=dialog]" do
+      assert_select "h2", text: "Share chat"
+      assert_select "p", text: "Anyone with access to Centaur Console will be able to view and continue this chat."
+      assert_select "form[action=?][data-action*=?]", console_thread_share_path, "thread-share#copyLink" do
+        assert_select "input[name=thread_key][value=?]", thread_key
+        assert_select "button.btn-secondary[type=button]", text: "Cancel"
+        assert_select "button.btn-primary[type=submit]", text: "Copy link"
+      end
+    end
+
+    post console_thread_share_url, params: { thread_key: thread_key }, as: :json
+
+    assert_response :ok
+    assert_equal console_threads_url(thread: thread_key), response.parsed_body.fetch("url")
+    assert_equal @operator, ThreadShare.find_by!(thread_key: thread_key).created_by
+
+    post console_thread_share_url, params: { thread_key: thread_key }
+
+    assert_redirected_to console_threads_path(thread: thread_key)
+    assert_nil flash[:notice]
+    assert_equal 1, ThreadShare.where(thread_key: thread_key).count
+
+    delete logout_url
+    post login_url, params: { email: users(:member_user).email, password: "password123456" }
+    get console_threads_url(thread: thread_key)
+
+    assert_response :ok
+    assert_select ".console-thread-detail-header", count: 1
+    assert_select "textarea[name=prompt]", count: 1
+  end
+
+  test "a user cannot share a chat they cannot read" do
+    skip_unless_session_table
+
+    thread_key = "slack:G0PRIVATE12:#{SecureRandom.hex(6)}"
+    insert_slack_session(thread_key, slack_user_id: "U_OTHER", slack_user_name: "someone-else")
+
+    post console_thread_share_url, params: { thread_key: thread_key }
+
+    assert_redirected_to console_threads_path
+    assert_equal "Chat not found.", flash[:alert]
+    assert_not ThreadShare.exists?(thread_key: thread_key)
+  end
+
+  test "a non-owner cannot persistently share a deployment-public Slack thread" do
+    skip_unless_session_table
+    skip_unless_slack_channel_table
+
+    channel_id = "C#{SecureRandom.hex(6).upcase}"
+    thread_key = "slack:#{channel_id}:#{SecureRandom.hex(6)}"
+    insert_slack_sync_channel(channel_id, is_private: false)
+    insert_slack_session(thread_key, slack_user_id: "U_OTHER", slack_user_name: "someone-else")
+
+    with_env("CENTAUR_CONSOLE_PUBLIC_SLACK_THREADS_ENABLED" => "true") do
+      post console_thread_share_url, params: { thread_key: thread_key }
+    end
+
+    assert_redirected_to console_threads_path
+    assert_equal "Chat not found.", flash[:alert]
+    assert_not ThreadShare.exists?(thread_key: thread_key)
+  end
+
   test "slack assistant-role messages from the current Slack user render as user authored" do
     controller = Console::ThreadsController.new
     controller.define_singleton_method(:current_slack_user_ids) { [ "u123" ] }
@@ -165,6 +290,63 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_equal "Goksu Toprak", item[:label]
     assert_equal :end, item[:align]
     assert_equal "Root Slack bot post", item[:text]
+  end
+
+  test "transcript messages expose stored image attachments as bounded inline data" do
+    controller = Console::ThreadsController.new
+    controller.define_singleton_method(:current_slack_user_ids) { [] }
+    controller.instance_variable_set(:@selected_session, TranscriptSession.new(metadata_hash: {}))
+    image_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    message = TranscriptMessage.new(
+      role: "user",
+      parts_array: [
+        { "type" => "text", "text" => "See attached." },
+        {
+          "type" => "attachment",
+          "attachment_type" => "image",
+          "dataBase64" => image_data,
+          "mimeType" => "image/png",
+          "name" => "screenshot.png",
+          "width" => 1440,
+          "height" => 900
+        }
+      ],
+      metadata_hash: {},
+      created_at: Time.zone.parse("2026-06-26 17:15:58 UTC")
+    )
+
+    item = controller.send(:transcript_item_for_message, message)
+
+    assert_equal "See attached.", item[:text]
+    assert_equal [
+      {
+        src: "data:image/png;base64,#{image_data}",
+        alt: "screenshot.png",
+        width: 1440,
+        height: 900
+      }
+    ], item[:images]
+  end
+
+  test "transcript images reject remote, unsafe, malformed, and oversized image data" do
+    controller = Console::ThreadsController.new
+    message = TranscriptMessage.new(
+      role: "user",
+      parts_array: [
+        { "type" => "attachment", "attachment_type" => "image", "mimeType" => "image/png",
+          "url" => "https://files.example.test/private.png" },
+        { "type" => "attachment", "attachment_type" => "image", "mimeType" => "image/svg+xml",
+          "dataBase64" => "PHN2Zz4=" },
+        { "type" => "attachment", "attachment_type" => "image", "mimeType" => "image/png",
+          "dataBase64" => "not base64" },
+        { "type" => "attachment", "attachment_type" => "image", "mimeType" => "image/png",
+          "dataBase64" => "A" * (Console::ThreadsController::MAX_INLINE_IMAGE_BASE64_CHARS + 1) }
+      ],
+      metadata_hash: {},
+      created_at: Time.zone.now
+    )
+
+    assert_empty controller.send(:transcript_message_images, message)
   end
 
   test "slack message text resolves mentions from bot identity and selected actor metadata" do
@@ -425,6 +607,8 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_equal "Slack", controller.send(:thread_source_label, session)
     assert_equal "slack", controller.send(:thread_source_icon, session)
     assert_equal "Codex", controller.send(:thread_harness_label, session)
+    session.harness_type = "nanocodex"
+    assert_equal "Nanocodex", controller.send(:thread_harness_label, session)
   end
 
   test "thread model label prefers the latest execution's recorded model override" do
@@ -528,6 +712,33 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     refute_includes sql, "slack_user_id"
   end
 
+  test "public Slack thread visibility defaults off and never expands the owner scope" do
+    controller = threads_controller_for(@operator)
+
+    with_env(
+      "CENTAUR_CONSOLE_PUBLIC_SLACK_THREADS_ENABLED" => nil,
+      "IRON_CONTROL_PUBLIC_SLACK_THREADS_ENABLED" => nil
+    ) do
+      refute_includes controller.send(:visible_thread_scope).to_sql, "slack_sync_channels"
+    end
+
+    with_env("CENTAUR_CONSOLE_PUBLIC_SLACK_THREADS_ENABLED" => "true") do
+      if slack_channel_privacy_catalog_available?
+        assert_includes controller.send(:visible_thread_scope).to_sql, "slack_sync_channels"
+      end
+      refute_includes controller.send(:owned_thread_scope).to_sql, "slack_sync_channels"
+    end
+  end
+
+  test "public Slack visibility fails closed without the synchronized channel catalog" do
+    connection = CentaurSession.connection
+    replacement = ->(_table) { false }
+
+    with_singleton_method(connection, :data_source_exists?, replacement) do
+      assert_nil CentaurSession.public_slack_channel_sql
+    end
+  end
+
   test "visible thread scope matches Slack threads by user id when the credential has no team" do
     app = oauth_apps(:acme_slack)
     app.update!(client_secret: "slack-secret", labels: {})
@@ -606,42 +817,497 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_includes sql, "ussoonly"
   end
 
-  test "selected session resolves a directly linked thread only within the owner scope" do
-    controller = Console::ThreadsController.new
-    owned_thread = SelectedSession.new(thread_key: "slack:C123:1782339173.755169")
-    scoped_relation = Object.new
-    scoped_relation.define_singleton_method(:where) do |thread_key:|
-      thread_key == owned_thread.thread_key ? [ owned_thread ] : []
+  test "sidebar scope never expands to public Slack threads" do
+    controller = threads_controller_for(@operator)
+
+    with_env("CENTAUR_CONSOLE_PUBLIC_SLACK_THREADS_ENABLED" => "true") do
+      sql = controller.send(:console_sidebar_visible_thread_scope).to_sql
+
+      refute_includes sql, "slack_sync_channels"
     end
-    controller.instance_variable_set(:@starting_new_thread, false)
-    controller.instance_variable_set(:@sessions, [])
-
-    # An owned key outside the base window is recovered through the scope.
-    controller.instance_variable_set(:@selected_thread_key, owned_thread.thread_key)
-    assert_equal owned_thread, controller.send(:selected_session, scoped_relation, [])
-
-    # A key the scope does not own has no unscoped fallback, so it stays hidden.
-    controller.instance_variable_set(:@selected_thread_key, "slack:C999:1782339173.999999")
-    assert_nil controller.send(:selected_session, scoped_relation, [])
   end
 
-  test "starting a thread is blocked without calling the session api" do
-    post console_threads_url, params: { prompt: "Reply with PONG.", harness_type: "amp" }
+  test "opening a direct thread skips recent chat discovery" do
+    skip_unless_session_table
+    thread_key = "console:direct-load-#{SecureRandom.hex(6)}"
+    insert_console_session(thread_key)
 
+    without_session_list_query do
+      get console_threads_url(thread: thread_key)
+    end
+
+    assert_response :ok
+    assert_select ".console-thread-detail-header", count: 1
+  end
+
+  test "renders the full-page composer without loading sessions" do
+    without_session_list_query do
+      with_composer do
+        get console_threads_url(new: 1)
+      end
+    end
+
+    assert_response :ok
+    assert_select "a[aria-label=?]", "New chat", count: 1
+    assert_select "form[action=?]", console_threads_path do
+      assert_select "textarea[name=prompt]", count: 1
+      # The model picker is a custom menu (account-dropdown style) posting
+      # through a hidden field, not a native select.
+      assert_select "input[type=hidden][name=model]", count: 1
+      assert_select "[data-console-model-option][data-value=?]", "amp"
+      assert_select "[data-console-model-option][data-value=?]", "claude-opus-5"
+      assert_select "select", count: 0
+    end
+    picker = css_select("[data-console-model-picker]").first
+    agents = JSON.parse(picker["data-agents"])
+    assert_equal(
+      { "label" => "Claude Opus 5", "efforts" => [ %w[fast Fast] ] },
+      agents["claude-opus-5"]
+    )
+    # Submitting replaces the centered empty state with a full-height,
+    # bottom-aligned optimistic transcript while the request is in flight.
+    assert_includes response.body, 'container.classList.add("console-new-chat--optimistic")'
+    assert_includes response.body, ".console-new-chat--optimistic"
+  end
+
+  test "shows the new chat screen when nothing is selected" do
+    with_composer do
+      with_recent_first_error do
+        get console_threads_url
+      end
+    end
+
+    assert_response :ok
+    assert_select "textarea[name=prompt]", count: 1
+    assert_select "body", text: /No chats yet/, count: 0
+  end
+
+  test "an active execution renders a thinking indicator" do
+    skip_unless_session_table
+    insert_console_session("console:thinking-active")
+    insert_session_execution("console:thinking-active", status: "running")
+
+    get console_threads_url(thread: "console:thinking-active")
+
+    assert_response :ok
+    assert_select "[data-console-thinking-indicator]", count: 1
+  end
+
+  test "a completed execution renders no thinking indicator" do
+    skip_unless_session_table
+    insert_console_session("console:thinking-done")
+    insert_session_execution("console:thinking-done", status: "completed")
+
+    get console_threads_url(thread: "console:thinking-done")
+
+    assert_response :ok
+    assert_select "[data-console-thinking-indicator]", count: 0
+  end
+
+  test "an active thread wires a per-panel poller instead of a full-page refresh" do
+    skip_unless_session_table
+    thread_key = "console:poller-active-#{SecureRandom.hex(6)}"
+    insert_console_session(thread_key)
+    insert_session_execution(thread_key, status: "running")
+
+    get console_threads_url(thread: thread_key)
+
+    assert_response :ok
+    assert_select "[data-controller=thread-poller][data-thread-poller-active-value=true]", count: 1
+    assert_select "[data-thread-poller-url-value=?]",
+                  console_thread_panel_path(thread_key: thread_key),
+                  count: 1
+    # The old behavior re-rendered the whole console with a Turbo visit while
+    # any pane was executing; that script must stay gone.
+    assert_no_match "Turbo.visit(window.location.href", response.body
+  end
+
+  test "panel poll renders one thread's transcript with the active header" do
+    skip_unless_session_table
+    thread_key = "console:poller-panel-#{SecureRandom.hex(6)}"
+    insert_console_session(thread_key)
+    insert_session_message(thread_key, index: 1)
+    insert_session_execution(thread_key, status: "running")
+
+    get console_thread_panel_url(thread_key: thread_key)
+
+    assert_response :ok
+    assert_equal "true", response.headers["X-Console-Execution-Active"]
+    assert_select "[data-console-thinking-indicator]", count: 1
+    assert_match "message 1", response.body
+    # Transcript stream only: no layout, no composer, no panel chrome.
+    assert_select "textarea[name=prompt]", count: 0
+    assert_select "[data-thread-panel]", count: 0
+  end
+
+  test "panel poll reports inactive once the execution completes" do
+    skip_unless_session_table
+    thread_key = "console:poller-done-#{SecureRandom.hex(6)}"
+    insert_console_session(thread_key)
+    insert_session_execution(thread_key, status: "completed")
+
+    get console_thread_panel_url(thread_key: thread_key)
+
+    assert_response :ok
+    assert_equal "false", response.headers["X-Console-Execution-Active"]
+    assert_select "[data-console-thinking-indicator]", count: 0
+  end
+
+  test "panel poll is scoped to threads the current user can read" do
+    skip_unless_session_table
+    thread_key = "slack:C0POLL:#{SecureRandom.hex(6)}"
+    insert_slack_session(thread_key, slack_user_id: "U_OTHER", slack_user_name: "someone-else")
+
+    get console_thread_panel_url(thread_key: thread_key)
+
+    assert_response :not_found
+  end
+
+  test "a new sentinel pane opens a composer panel alongside a thread" do
+    skip_unless_session_table
+    insert_console_session("console:with-new-pane")
+
+    with_composer do
+      get console_threads_url(thread: "console:with-new-pane,new")
+    end
+
+    assert_response :ok
+    assert_select "[data-thread-panel]", count: 2
+    assert_select "[data-thread-panel=new]", count: 1
+    assert_select "[data-thread-panel=new] textarea[name=prompt]", count: 1
+    assert_select "[data-thread-panel=new] [data-console-model-picker]", count: 1
+  end
+
+  test "the new sentinel alone renders the full-page new chat screen" do
+    without_session_list_query do
+      with_composer do
+        get console_threads_url(thread: "new")
+      end
+    end
+
+    assert_response :ok
+    assert_select "[data-thread-panel]", count: 0
+    assert_select "textarea[name=prompt]", count: 1
+  end
+
+  test "starting a chat from a pane swaps the sentinel for the created thread" do
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      post console_threads_url,
+           params: {
+             prompt: "Reply with PONG.",
+             model: "gpt-5.5",
+             open_threads: "console:other,new"
+           }
+    end
+
+    thread_key = client.calls[0].last[:thread_key]
+    assert_redirected_to console_threads_path(thread: "console:other,#{thread_key}")
+  end
+
+  test "renders a follow-up composer on an open chat" do
+    skip_unless_session_table
+    insert_console_session("console:composer-open")
+
+    with_composer do
+      get console_threads_url(thread: "console:composer-open")
+    end
+
+    assert_response :ok
+    assert_select "form[action=?]", console_threads_path do
+      assert_select "input[type=hidden][name=thread_key][value=?]", "console:composer-open"
+      assert_select "textarea[name=prompt]", count: 1
+      # Follow-ups stay on the chat's existing harness/model: no picker.
+      assert_select "[data-console-model-picker]", count: 0
+    end
+    # Optimistic rendering must not clear the textarea until Turbo has copied
+    # its value into FormData, or the controller receives a blank prompt.
+    assert_includes response.body, 'form.addEventListener("formdata"'
+  end
+
+  test "starting a chat creates a session, appends the prompt, and executes it" do
+    @operator.update!(name: "Ada Admin")
+    UserIdentity.create!(user: @operator, provider: "slack", subject: "UADA")
+    client = RecordingApiClient.new
+    identity = SlackRequesterIdentity::Result.new(
+      handle: "@ada", source: 'Slack profile custom field "GitHub"', reason: nil
+    )
+    test_case = self
+    with_singleton_method(SlackRequesterIdentity, :resolve, ->(user_ids:) {
+      test_case.assert_includes user_ids, "uada"
+      identity
+    }) do
+      with_composer(client: client) do
+        post console_threads_url,
+             params: { prompt: "Reply with PONG.", model: "claude-opus-4-8" }
+      end
+    end
+
+    assert_equal %i[create_session append_session_messages execute_session], client.calls.map(&:first)
+
+    create = client.calls[0].last
+    assert create[:thread_key].start_with?("console:"), "expected a console:-namespaced thread key"
+    assert_equal "claudecode", create[:harness_type]
+    assert_equal "console", create[:metadata][:platform]
+    assert_equal "console", create[:metadata][:source]
+    assert_equal @operator.email, create[:metadata][:actor_email]
+    assert_equal "@ada", create[:metadata][:github_handle]
+    assert_equal "claude-opus-4-8", create[:metadata][:model]
+
+    append = client.calls[1].last
+    assert_equal create[:thread_key], append[:thread_key]
+    message = append[:messages].first
+    assert_equal "user", message[:role]
+    assert_equal "Reply with PONG.", message[:parts].first[:text]
+    assert_equal @operator.email, message[:metadata][:user_email]
+    assert_equal "@ada", message[:metadata][:github_handle]
+
+    execute = client.calls[2].last
+    assert_equal create[:thread_key], execute[:thread_key]
+    assert execute[:idempotency_key].present?
+    assert_equal "claude-opus-4-8", execute[:metadata][:model]
+    assert_equal "@ada", execute[:metadata][:github_handle]
+    line = JSON.parse(execute[:input_lines].first)
+    assert_equal "user", line["type"]
+    assert_equal create[:thread_key], line["thread_key"]
+    assert_equal "claude-opus-4-8", line["model"]
+    assert_equal message[:client_message_id], line["client_user_message_id"]
+    requester_context = line.dig("message", "content", 0, "text")
+    assert_includes requester_context, "# Requester Context"
+    assert_includes requester_context, "Prompted by: @ada"
+    assert_includes requester_context, 'GitHub handle source: Slack profile custom field "GitHub"'
+    assert_includes requester_context, "GitHub handle verified: yes"
+    assert_equal "Reply with PONG.", line.dig("message", "content", 1, "text")
+
+    assert_redirected_to console_threads_path(thread: create[:thread_key])
+  end
+
+  test "starting a chat prefers the Console user's connected GitHub login" do
+    @operator.update!(name: "Goksu Toprak")
+    client = RecordingApiClient.new
+    identity = GithubRequesterIdentity::Result.new(
+      handle: "@goksu", source: "connected GitHub account", reason: nil
+    )
+    test_case = self
+    operator = @operator
+    with_singleton_method(GithubRequesterIdentity, :resolve, ->(user:) {
+      test_case.assert_equal operator, user
+      identity
+    }) do
+      with_singleton_method(SlackRequesterIdentity, :resolve, ->(**) {
+        flunk("Slack fallback should not run when GitHub is connected")
+      }) do
+        with_composer(client: client) do
+          post console_threads_url, params: { prompt: "Open the PR.", model: "gpt-5.5" }
+        end
+      end
+    end
+
+    line = JSON.parse(client.calls[2].last[:input_lines].first)
+    requester_context = line.dig("message", "content", 0, "text")
+    assert_includes requester_context, "Prompted by: @goksu"
+    assert_includes requester_context, "GitHub handle source: connected GitHub account"
+    refute_includes requester_context, "Prompted by: Goksu Toprak"
+  end
+
+  test "picking Amp starts an amp chat and sends no model" do
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      post console_threads_url, params: { prompt: "Reply with PONG.", model: "amp" }
+    end
+
+    create = client.calls[0].last
+    assert_equal "amp", create[:harness_type]
+    assert_not create[:metadata].key?(:model)
+
+    execute = client.calls[2].last
+    assert_not execute[:metadata].key?(:model)
+    line = JSON.parse(execute[:input_lines].first)
+    assert_not line.key?("model")
+  end
+
+  test "starting a chat with an unknown model is rejected" do
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      post console_threads_url, params: { prompt: "Reply with PONG.", model: "hal9000" }
+    end
+
+    assert_empty client.calls
+    assert_redirected_to console_threads_path(new: 1)
+    assert_match(/Unknown model/, flash[:alert])
+  end
+
+  test "a gpt model pick starts a codex chat" do
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      post console_threads_url, params: { prompt: "Reply with PONG.", model: "gpt-5.5" }
+    end
+
+    create = client.calls[0].last
+    assert_equal "codex", create[:harness_type]
+    assert_equal "gpt-5.5", create[:metadata][:model]
+  end
+
+  test "a codex chat carries the picked reasoning effort" do
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      post console_threads_url,
+           params: { prompt: "Reply with PONG.", model: "gpt-5.6-sol", effort: "max" }
+    end
+
+    execute = client.calls[2].last
+    assert_equal "max", execute[:metadata][:reasoning]
+    line = JSON.parse(execute[:input_lines].first)
+    assert_equal "max", line["reasoning"]
+  end
+
+  test "Claude Opus 5 Fast selects the native fast model variant" do
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      post console_threads_url,
+           params: { prompt: "Reply with PONG.", model: "claude-opus-5", effort: "fast" }
+    end
+
+    create = client.calls[0].last
+    assert_equal "claudecode", create[:harness_type]
+    assert_equal "claude-opus-5-fast", create[:metadata][:model]
+
+    execute = client.calls[2].last
+    assert_equal "claude-opus-5-fast", execute[:metadata][:model]
+    assert_not execute[:metadata].key?(:reasoning)
+    line = JSON.parse(execute[:input_lines].first)
+    assert_equal "claude-opus-5-fast", line["model"]
+    assert_not line.key?("reasoning")
+  end
+
+  test "Claude Opus 5 uses the standard model by default" do
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      post console_threads_url,
+           params: { prompt: "Reply with PONG.", model: "claude-opus-5" }
+    end
+
+    create = client.calls[0].last
+    assert_equal "claudecode", create[:harness_type]
+    assert_equal "claude-opus-5", create[:metadata][:model]
+
+    execute = client.calls[2].last
+    assert_equal "claude-opus-5", execute[:metadata][:model]
+    line = JSON.parse(execute[:input_lines].first)
+    assert_equal "claude-opus-5", line["model"]
+  end
+
+  test "an effort the model does not offer is dropped" do
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      # max is 5.6-only; Opus 4.8 does not offer model-variant efforts.
+      post console_threads_url,
+           params: { prompt: "Reply with PONG.", model: "gpt-5.5", effort: "max" }
+      post console_threads_url,
+           params: { prompt: "Reply with PONG.", model: "claude-opus-4-8", effort: "high" }
+    end
+
+    [ 2, 5 ].each do |index|
+      execute = client.calls[index].last
+      assert_not execute[:metadata].key?(:reasoning)
+      assert_not JSON.parse(execute[:input_lines].first).key?("reasoning")
+    end
+  end
+
+  test "a blank prompt asks for a message" do
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      post console_threads_url, params: { prompt: "   " }
+    end
+
+    assert_empty client.calls
+    assert_redirected_to console_threads_path(new: 1)
+    assert_equal "Type a message first.", flash[:alert]
+  end
+
+  test "replying appends and executes on an owned chat without creating a session" do
+    skip_unless_session_table
+    insert_console_session("console:composer-reply")
+
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      post console_threads_url,
+           params: {
+             prompt: "Continue from here.",
+             thread_key: "console:composer-reply",
+             open_threads: "console:composer-reply,console:other"
+           }
+    end
+
+    assert_equal %i[append_session_messages execute_session], client.calls.map(&:first)
+    assert_equal "console:composer-reply", client.calls[0].last[:thread_key]
+    assert_redirected_to console_threads_path(thread: "console:composer-reply,console:other")
+  end
+
+  test "replying appends and executes on a deployment-public chat" do
+    skip_unless_session_table
+    skip_unless_slack_channel_table
+
+    channel_id = "C#{SecureRandom.hex(6).upcase}"
+    thread_key = "slack:#{channel_id}:#{SecureRandom.hex(6)}"
+    insert_slack_sync_channel(channel_id, is_private: false)
+    insert_slack_session(thread_key, slack_user_id: "U_OTHER", slack_user_name: "someone-else")
+
+    client = RecordingApiClient.new
+    with_env("CENTAUR_CONSOLE_PUBLIC_SLACK_THREADS_ENABLED" => "true") do
+      with_composer(client: client) do
+        post console_threads_url,
+             params: { prompt: "Continue from here.", thread_key: thread_key }
+      end
+    end
+
+    assert_equal %i[append_session_messages execute_session], client.calls.map(&:first)
+    assert_equal thread_key, client.calls[0].last[:thread_key]
+    assert_redirected_to console_threads_path(thread: thread_key)
+  end
+
+  test "replying appends and executes on an explicitly shared chat" do
+    skip_unless_session_table
+
+    thread_key = "console:shared-reply-#{SecureRandom.hex(6)}"
+    insert_console_session(thread_key)
+    ThreadShare.create!(thread_key: thread_key, created_by: @operator)
+    delete logout_url
+    post login_url, params: { email: users(:member_user).email, password: "password123456" }
+
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      post console_threads_url,
+           params: { prompt: "Continue from here.", thread_key: thread_key }
+    end
+
+    assert_equal %i[append_session_messages execute_session], client.calls.map(&:first)
+    assert_equal thread_key, client.calls[0].last[:thread_key]
+    assert_redirected_to console_threads_path(thread: thread_key)
+  end
+
+  test "replying into a chat outside the readable scope is rejected" do
+    skip_unless_session_table
+
+    client = RecordingApiClient.new
+    with_composer(client: client) do
+      post console_threads_url,
+           params: { prompt: "Continue from here.", thread_key: "console:not-mine" }
+    end
+
+    assert_empty client.calls
     assert_redirected_to console_threads_path
-    assert_equal "Chats are read-only while browsing a mirrored production snapshot.", flash[:alert]
+    assert_equal "Chat not found.", flash[:alert]
   end
 
-  test "posting to an existing thread is blocked without calling the session api" do
-    post console_threads_url,
-         params: {
-           prompt: "Continue from here.",
-           thread_key: "console:existing",
-           harness_type: "codex"
-         }
+  test "a session api error surfaces as a flash alert" do
+    client = RecordingApiClient.new(error: CentaurApiClient::Error.new("boom"))
+    with_composer(client: client) do
+      post console_threads_url, params: { prompt: "Reply with PONG.", harness_type: "codex" }
+    end
 
-    assert_redirected_to console_threads_path(thread: "console:existing")
-    assert_equal "Chats are read-only while browsing a mirrored production snapshot.", flash[:alert]
+    assert_redirected_to console_threads_path(new: 1)
+    assert_match(/boom/, flash[:alert])
   end
 
   # Fix 6: the sidebar thread list is loaded lazily via a Turbo Frame so the
@@ -726,6 +1392,61 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
 
   OutputLineEvent = Struct.new(:payload, :created_at, :execution_id, :event_id, keyword_init: true)
 
+  test "thinking transcript item consumes native nanocodex events" do
+    controller = Console::ThreadsController.new
+    now = Time.zone.now
+    reasoning = OutputLineEvent.new(
+      payload: {
+        protocol_version: 1,
+        request_id: "nano-1",
+        seq: 2,
+        type: "reasoning.summary.delta",
+        payload: { text: "Checking the runtime." }
+      }.to_json,
+      created_at: now
+    )
+    tool = OutputLineEvent.new(
+      payload: {
+        protocol_version: 1,
+        request_id: "nano-1",
+        seq: 3,
+        type: "tool.call",
+        payload: { call_id: "call-1", tool: "shell", arguments: { cmd: "pwd" } }
+      }.to_json,
+      created_at: now
+    )
+
+    assert_equal "Checking the runtime.", controller.send(:thinking_transcript_item, reasoning)[:text]
+    tool_item = controller.send(:thinking_transcript_item, tool)
+    assert_equal "Tool call", tool_item[:label]
+    assert_includes tool_item[:text], "shell"
+    assert_includes tool_item[:text], '"cmd": "pwd"'
+  end
+
+  test "compact trace grouping joins native nanocodex reasoning deltas" do
+    controller = Console::ThreadsController.new
+    now = Time.zone.now
+    items = [ "Checking ", "the ", "runtime." ].map.with_index do |text, index|
+      event = OutputLineEvent.new(
+        payload: {
+          protocol_version: 1,
+          request_id: "nano-1",
+          seq: index + 1,
+          type: "reasoning.summary.delta",
+          payload: { text: text }
+        }.to_json,
+        execution_id: "exe-1",
+        event_id: index + 1,
+        created_at: now
+      )
+      controller.send(:thinking_transcript_item, event)
+    end
+
+    grouped = controller.send(:compact_trace_items, items)
+    assert_equal 1, grouped.length
+    assert_equal "Checking the runtime.", grouped.first[:text]
+  end
+
   test "thinking transcript item is extracted from a completed reasoning output line" do
     controller = Console::ThreadsController.new
     line = {
@@ -797,6 +1518,23 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_includes item[:text], "```text\nok\n```"
   end
 
+  test "thinking extraction omits file change status events" do
+    controller = Console::ThreadsController.new
+    line = {
+      method: "item/completed",
+      params: {
+        item: {
+          type: "fileChange",
+          status: "completed",
+          changes: [ { path: "app/models/thread.rb", kind: "update" } ]
+        }
+      }
+    }.to_json
+    event = OutputLineEvent.new(payload: line, created_at: Time.zone.now)
+
+    assert_nil controller.send(:thinking_transcript_item, event)
+  end
+
   test "compact trace grouping combines adjacent command executions for one run" do
     controller = Console::ThreadsController.new
     now = Time.zone.now
@@ -859,6 +1597,32 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     # summaries preceding every trace item are dropped.
     assert_equal "I'm writing the query", items[0][:summary]
     assert_nil items[1][:summary]
+  end
+
+  test "activity summaries do not attach to trace items from another execution" do
+    controller = Console::ThreadsController.new
+    items = [
+      { event_id: 10, execution_id: "exe-1", text: "first execution" },
+      { event_id: 20, execution_id: "exe-2", text: "second execution" }
+    ]
+    summaries = [
+      TranscriptEvent.new(
+        event_type: "session.activity_summary",
+        execution_id: "exe-2",
+        payload_hash: { "summary" => "I'm starting the second execution", "source_event_id" => 15 }
+      ),
+      TranscriptEvent.new(
+        event_type: "session.activity_summary",
+        execution_id: "exe-2",
+        payload_hash: { "summary" => "I'm working in the second execution", "source_event_id" => 21 }
+      )
+    ]
+    controller.define_singleton_method(:selected_activity_summaries) { summaries }
+
+    controller.send(:apply_activity_summaries, items)
+
+    assert_nil items[0][:summary]
+    assert_equal "I'm working in the second execution", items[1][:summary]
   end
 
   test "thinking extraction formats claude stream-json tool calls" do
@@ -1098,6 +1862,15 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
                   console_threads_path(thread: thread_key)
   end
 
+  test "sidebar keeps an already-open thread selected on plain click" do
+    get console_threads_url(thread: "console:sidebar-active")
+
+    assert_response :ok
+    assert_includes response.body, "if (isOpen && !modified) {"
+    assert_includes response.body, "event.preventDefault();"
+    assert_includes response.body, "event.stopPropagation();"
+  end
+
   # The sidebar list loads out of band via a lazy Turbo Frame, so the page must
   # forward the current thread selection on the frame src for the active
   # highlight to render.
@@ -1153,14 +1926,37 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
 
   private
 
-  # Sets each env var for the block (nil deletes) and restores the previous
-  # values afterwards.
-  def with_env(overrides)
-    previous = overrides.keys.index_with { |name| ENV[name] }
-    overrides.each { |name, value| value.nil? ? ENV.delete(name) : ENV[name] = value }
-    yield
+  # Fake CentaurApiClient recording every composer call; raises `error` from
+  # each method instead when given, to exercise the failure paths.
+  class RecordingApiClient
+    attr_reader :calls
+
+    def initialize(error: nil)
+      @calls = []
+      @error = error
+    end
+
+    def create_session(**kwargs) = record(:create_session, kwargs)
+    def append_session_messages(**kwargs) = record(:append_session_messages, kwargs)
+    def execute_session(**kwargs) = record(:execute_session, kwargs)
+
+    private
+
+    def record(name, kwargs)
+      raise @error if @error
+
+      @calls << [ name, kwargs ]
+      {}
+    end
+  end
+
+  # Runs the block with the injected fake session client.
+  def with_composer(client: RecordingApiClient.new)
+    original_factory = Console::ThreadsController.client_factory
+    Console::ThreadsController.client_factory = -> { client }
+    yield client
   ensure
-    previous.each { |name, value| value.nil? ? ENV.delete(name) : ENV[name] = value }
+    Console::ThreadsController.client_factory = original_factory
   end
 
   def with_recent_first_error
@@ -1172,6 +1968,16 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     singleton.define_method(:recent_first, original)
   end
 
+  def without_session_list_query
+    calls = 0
+    replacement = -> {
+      calls += 1
+      raise ActiveRecord::ConnectionNotEstablished
+    }
+    with_singleton_method(CentaurSession, :recent_first, replacement) { yield }
+    assert_equal 0, calls, "explicit chat loads must not query the recent session list"
+  end
+
   def threads_controller_for(user)
     Console::ThreadsController.new.tap do |controller|
       controller.define_singleton_method(:current_user) { user }
@@ -1180,7 +1986,6 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
 
   def create_slack_oauth_credential(app, subject:, email:, labels: {})
     BrokerCredential.create!(
-      namespace: app.credential_namespace,
       oauth_app: app,
       provider_subject: subject,
       provider_email: email,
@@ -1204,6 +2009,36 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     skip("api-rs session tables are unavailable") unless CentaurSession.connection.data_source_exists?("sessions")
   end
 
+  def skip_unless_slack_channel_table
+    return if slack_channel_privacy_catalog_available?
+
+    skip("Slack channel privacy catalog is unavailable")
+  end
+
+  def slack_channel_privacy_catalog_available?
+    return false unless CentaurSession.connection.data_source_exists?(:slack_sync_channels)
+
+    %i[is_private is_syncable].all? do |column|
+      CentaurSession.connection.column_exists?(:slack_sync_channels, column)
+    end
+  end
+
+  def insert_slack_sync_channel(channel_id, is_private:, is_syncable: true)
+    connection = CentaurSession.connection
+    connection.execute(<<~SQL.squish)
+      insert into slack_sync_channels (channel_id, channel_name, is_private, is_syncable)
+      values (
+        #{connection.quote(channel_id)},
+        #{connection.quote(channel_id.downcase)},
+        #{connection.quote(is_private)},
+        #{connection.quote(is_syncable)}
+      )
+      on conflict (channel_id) do update set
+        is_private = excluded.is_private,
+        is_syncable = excluded.is_syncable
+    SQL
+  end
+
   def insert_slack_session(thread_key, slack_user_id:, slack_user_name:)
     metadata = {
       source: "slackbotv2",
@@ -1213,6 +2048,21 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
       slack_user_name: slack_user_name
     }.to_json
     insert_session(thread_key, metadata)
+  end
+
+  def insert_session_execution(thread_key, status:)
+    connection = CentaurSession.connection
+    connection.execute(<<~SQL.squish)
+      insert into session_executions (execution_id, thread_key, status, metadata, created_at, updated_at)
+      values (
+        #{connection.quote("#{thread_key}-exec")},
+        #{connection.quote(thread_key)},
+        #{connection.quote(status)},
+        '{}'::jsonb,
+        now(),
+        now()
+      )
+    SQL
   end
 
   def insert_session_message(thread_key, index:)
@@ -1301,5 +2151,14 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
         now() + interval '1 day'
       )
     SQL
+  end
+
+  def with_singleton_method(object, method_name, replacement)
+    singleton = object.singleton_class
+    original = singleton.instance_method(method_name)
+    singleton.define_method(method_name, replacement)
+    yield
+  ensure
+    singleton.define_method(method_name, original)
   end
 end

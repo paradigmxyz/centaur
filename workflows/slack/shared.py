@@ -75,7 +75,7 @@ def attachment_max_bytes() -> int:
 
 
 class SlackSyncClient(Protocol):
-    """Small protocol for the Slack client methods used by Slack ETL workflows."""
+    """Small protocol for the direct Slack client used by Slack ETL workflows."""
 
     def _etl_access_mode(self) -> str: ...
 
@@ -447,7 +447,9 @@ _MESSAGE_UPSERT_SQL = (
     "raw_payload = EXCLUDED.raw_payload, "
     "source_run_id = EXCLUDED.source_run_id, "
     "last_seen_at = NOW(), "
-    "updated_at = NOW()"
+    "updated_at = CASE WHEN slack_sync_messages.raw_payload "
+    "IS DISTINCT FROM EXCLUDED.raw_payload "
+    "THEN NOW() ELSE slack_sync_messages.updated_at END"
 )
 
 
@@ -713,7 +715,7 @@ class SlackEtlRateLimitError(RuntimeError):
 
 
 class SlackEtlClient:
-    """Slack user-token client used only by Slack ETL workflows."""
+    """Direct Slack user-token client used only by Slack ETL workflows."""
 
     _MAX_PAGE_SIZE = 200
     _DEFAULT_API_TIMEOUT_SECONDS = 8

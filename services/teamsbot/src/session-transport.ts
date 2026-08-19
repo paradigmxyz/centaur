@@ -1,3 +1,5 @@
+import { isRetryableCodexErrorNotification } from "@centaur/rendering";
+
 export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
 export type SessionStreamEvent = {
@@ -256,6 +258,9 @@ function isTerminalCodexOutputLine(line: string): boolean {
     return false;
   }
   if (!isJsonObject(payload)) {
+    return false;
+  }
+  if (isRetryableCodexErrorNotification(payload)) {
     return false;
   }
   return (

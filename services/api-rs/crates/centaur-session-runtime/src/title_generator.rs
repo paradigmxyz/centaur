@@ -11,6 +11,7 @@ const SESSION_TITLE_REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
 #[derive(Clone)]
 pub(crate) struct OpenAiSessionTitleGenerator {
     api_key: Arc<str>,
+    responses_url: Arc<str>,
     client: reqwest::Client,
 }
 
@@ -21,12 +22,14 @@ impl OpenAiSessionTitleGenerator {
         if api_key.is_empty() || api_key == "OPENAI_API_KEY" {
             return None;
         }
+        let responses_url = format!("{}/responses", openai_base_url());
         let client = reqwest::Client::builder()
             .timeout(SESSION_TITLE_REQUEST_TIMEOUT)
             .build()
             .ok()?;
         Some(Self {
             api_key: Arc::from(api_key.to_owned()),
+            responses_url: Arc::from(responses_url),
             client,
         })
     }
@@ -43,7 +46,7 @@ impl OpenAiSessionTitleGenerator {
         });
         let response = self
             .client
-            .post("https://api.openai.com/v1/responses")
+            .post(self.responses_url.as_ref())
             .bearer_auth(self.api_key.as_ref())
             .json(&body)
             .send()
@@ -55,6 +58,14 @@ impl OpenAiSessionTitleGenerator {
         }
         openai_response_output_text(&text).ok_or(SessionTitleGenerationError::MissingOutput)
     }
+}
+
+pub fn openai_base_url() -> String {
+    env::var("OPENAI_BASE_URL")
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "https://api.openai.com/v1".to_owned())
 }
 
 pub(crate) fn session_title_source_from_parts(parts: &[Value]) -> Option<String> {

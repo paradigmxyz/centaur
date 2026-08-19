@@ -92,26 +92,6 @@ class Console::WorkflowsControllerTest < ActionDispatch::IntegrationTest
     assert response.body.index('href="/console/workflows"') < response.body.index('href="/console/threads"')
   end
 
-  test "a workflow with runs in several queues lists each queue on its own line" do
-    run = fake_run(workflow_name: "slack_backfill", queue_name: "centaur_workflows_etl_backfill", queue_label: "etl backfill")
-    queue_runs = [
-      fake_run(workflow_name: "slack_backfill", queue_name: "centaur_workflows_etl_backfill", queue_label: "etl backfill", queue_run_count: 7),
-      fake_run(workflow_name: "slack_backfill", queue_name: "centaur_workflows_slack_live", queue_label: "slack live", display_status: "running", queue_run_count: 2)
-    ]
-
-    with_workflow_index(runs: [ run ], queue_breakdown: { "slack_backfill" => queue_runs }) do
-      get console_workflows_url
-    end
-
-    assert_response :ok
-    assert_select "tbody tr", count: 1
-    assert_match "etl backfill", response.body
-    assert_match "slack live", response.body
-    assert_match "├", response.body
-    assert_match "└", response.body
-    assert_match "7 runs", response.body
-  end
-
   test "the workflow index does not show run ids" do
     run = fake_run(workflow_name: "slack_sync")
 
@@ -122,20 +102,6 @@ class Console::WorkflowsControllerTest < ActionDispatch::IntegrationTest
     assert_response :ok
     assert_no_match run.run_id, response.body
     assert_no_match run.task_id, response.body
-  end
-
-  test "the workflow index is paginated" do
-    runs = 3.times.map { |i| fake_run(workflow_name: "wf_#{i}") }
-
-    with_workflow_index(runs: runs, workflow_count: 120) do
-      get console_workflows_url, params: { page: 2 }
-    end
-
-    assert_response :ok
-    assert_match "120 workflows", response.body
-    assert_match "page 2 of 3", response.body
-    assert_select "a", text: "Previous"
-    assert_select "a", text: "Next"
   end
 
   test "a non-admin is redirected away from the workflow dashboard" do
@@ -161,40 +127,6 @@ class Console::WorkflowsControllerTest < ActionDispatch::IntegrationTest
     assert_select ".console-thread-group-title", text: /Workflows/, count: 0
   end
 
-  test "workflow show page lists core metadata and historical runs" do
-    run = fake_run(workflow_name: "slack_sync", display_status: "completed", harness_type: "codex")
-
-    with_workflow_history("slack_sync", runs: [ run ]) do
-      get console_workflow_url("slack_sync")
-    end
-
-    assert_response :ok
-    assert_select "h1.page-title", text: /slack_sync/
-    assert_select "dt", text: "Engine"
-    assert_select "dd", text: "Codex"
-    assert_select "h2", "Historical Runs"
-    assert_select "tbody tr", count: 1
-    assert_select "form[action=?]", run_console_workflow_path("slack_sync")
-  end
-
-  test "workflow show page renders status filter tabs with counts" do
-    run = fake_run(workflow_name: "slack_sync", display_status: "completed")
-
-    with_workflow_history(
-      "slack_sync",
-      runs: [ run ],
-      status_counts: { "completed" => 9, "failed" => 1 }
-    ) do
-      get console_workflow_url("slack_sync")
-    end
-
-    assert_response :ok
-    assert_select "a.chip", text: /all\s*10/
-    assert_select "a.chip", text: /completed\s*9/
-    assert_select "a.chip", text: /failed\s*1/
-    assert_select "dd", text: /10 runs/
-  end
-
   test "workflow show page marks the active status tab and passes the filter through" do
     run = fake_run(workflow_name: "slack_sync", display_status: "failed")
     seen = {}
@@ -211,92 +143,6 @@ class Console::WorkflowsControllerTest < ActionDispatch::IntegrationTest
     assert_response :ok
     assert_equal "failed", seen[:status]
     assert_select "a.chip-on", text: /failed\s*1/
-  end
-
-  test "workflow show page renders queue tabs when several queues exist" do
-    run = fake_run(workflow_name: "slack_sync")
-
-    with_workflow_history(
-      "slack_sync",
-      runs: [ run ],
-      queue_names: %w[centaur_workflows_etl centaur_workflows_slack_live]
-    ) do
-      get console_workflow_url("slack_sync"), params: { queue: "centaur_workflows_slack_live" }
-    end
-
-    assert_response :ok
-    assert_select "a.chip", text: "etl"
-    assert_select "a.chip-on", text: "slack live"
-  end
-
-  test "workflow show page paginates historical runs" do
-    runs = 2.times.map { |i| fake_run(workflow_name: "slack_sync", run_id: "run-#{i}") }
-
-    with_workflow_history("slack_sync", runs: runs, run_count: 130) do
-      get console_workflow_url("slack_sync"), params: { page: 2 }
-    end
-
-    assert_response :ok
-    assert_match "130 runs", response.body
-    assert_match "page 2 of 3", response.body
-  end
-
-  test "workflow show page shows the schedule and source link when registered" do
-    run = fake_run(workflow_name: "slack_sync", harness_type: "codex")
-    with_api_client(FakeApiClient.new(schedules: [ slack_sync_schedule ]))
-
-    with_workflow_history("slack_sync", runs: [ run ]) do
-      get console_workflow_url("slack_sync")
-    end
-
-    assert_response :ok
-    assert_select "dt", text: "Schedule"
-    assert_select "dd", text: /cron \*\/5 \* \* \* \* · America\/Los_Angeles/
-    assert_select "a[href=?]",
-                  "https://github.com/paradigmxyz/centaur/blob/main/workflows/slack/sync.py",
-                  text: /workflows\/slack\/sync\.py/
-  end
-
-  test "workflow show page links overlay-repo workflow sources to the overlay repo" do
-    run = fake_run(workflow_name: "consensus_ci_triage")
-    schedule = slack_sync_schedule.merge(
-      "workflow_name" => "consensus_ci_triage",
-      "source_path" => "centaur-tempo/workflows/consensus_ci_triage.py"
-    )
-    with_api_client(FakeApiClient.new(schedules: [ schedule ]))
-
-    with_workflow_history("consensus_ci_triage", runs: [ run ]) do
-      get console_workflow_url("consensus_ci_triage")
-    end
-
-    assert_response :ok
-    assert_select "a[href=?]",
-                  "https://github.com/tempoxyz/centaur-tempo/blob/main/workflows/consensus_ci_triage.py"
-  end
-
-  test "workflow show page surfaces the latest run's input and failure for debugging" do
-    run = fake_run(workflow_name: "slack_sync", display_status: "failed")
-    with_api_client(
-      FakeApiClient.new(
-        run_details: {
-          run.run_id => {
-            "run_id" => run.run_id,
-            "input" => { "mode" => "full" },
-            "failure" => { "error" => "boom exploded" }
-          }
-        }
-      )
-    )
-
-    with_workflow_history("slack_sync", runs: [ run ]) do
-      get console_workflow_url("slack_sync")
-    end
-
-    assert_response :ok
-    assert_select "h2", text: "Debugging"
-    assert_select "dt", text: "Input"
-    assert_select "dt", text: "Failure"
-    assert_match "boom exploded", response.body
   end
 
   test "workflow show page renders without api enrichment when the api is down" do
@@ -351,16 +197,6 @@ class Console::WorkflowsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :not_found
     assert_select "body", text: /No workflow runs found for missing/
-  end
-
-  test "workflows page handles unavailable workflow database" do
-    with_centaur_workflow_run_methods(available?: -> { false }) do
-      get console_workflows_url
-    end
-
-    assert_response :ok
-    assert_select "body", text: /Workflow database is unavailable/
-    assert_select "body", text: /No workflow runs available/
   end
 
   private

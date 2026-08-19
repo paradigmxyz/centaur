@@ -1,5 +1,5 @@
 import {
-  codexAppServerToChatSdkStream,
+  harnessToChatSdkStream,
   type CodexAppServerToChatStreamOptions,
   type RendererEvent,
 } from "@centaur/rendering";
@@ -204,7 +204,7 @@ async function runTurnStreamInner(
       );
       const collector = new CommentReplyCollector();
       const fallback = new GithubRenderFallback();
-      for await (const chunk of codexAppServerToChatSdkStream(
+      for await (const chunk of harnessToChatSdkStream(
         fallback.collectSource(streamSessionAfterHandoff(options, forwardInput)),
         rendererOptions(options),
       )) {

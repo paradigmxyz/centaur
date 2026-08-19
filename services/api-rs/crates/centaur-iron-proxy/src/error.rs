@@ -9,6 +9,8 @@ pub enum IronProxyConfigError {
         path: PathBuf,
         source: serde_yaml::Error,
     },
+    #[error("invalid OPENAI_BASE_URL {value:?}: {reason}")]
+    InvalidOpenAiBaseUrl { value: String, reason: String },
 }
 
 pub type Result<T> = std::result::Result<T, IronProxyConfigError>;

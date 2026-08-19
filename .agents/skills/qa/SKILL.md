@@ -127,7 +127,7 @@ Pass when the command succeeds and returns valid search output. Empty results ar
 Find another accessible Slack file from the current channel. Prefer a result outside the current thread, but do not use files from other channels. `search_files` filters by filename or title, so start broad with an empty query:
 
 ```bash
-centaur-tools call slack search_files '{"query":"", "max_results":5}'
+centaur-tools call slack search_files '{"channel_id":"'"${SLACK_CHANNEL_ID}"'","query":"","max_results":5}'
 ```
 
 Pick a result whose `channels` includes `${SLACK_CHANNEL_ID}`. If possible, avoid the file uploaded earlier in this QA run so the check proves download-and-reupload of an existing channel file. Download it:

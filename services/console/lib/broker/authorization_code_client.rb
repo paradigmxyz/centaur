@@ -1,9 +1,7 @@
-require "net/http"
 require "json"
-require "uri"
 
 module Broker
-  # Performs the RFC 6749 4.1.3 authorization_code grant POST (with PKCE) and
+  # Performs the RFC 6749 4.1.3 authorization_code grant POST (optionally with PKCE) and
   # returns the parsed response. Used once per consent flow; it owns no
   # retry/backoff state -- a consent flow is synchronous and any failure surfaces
   # to the end user as a redirect. Provider-agnostic: the caller supplies the
@@ -18,10 +16,6 @@ module Broker
     # absent -- the provider strategy decides whether that is fatal). response is
     # the parsed provider response for provider-specific metadata.
     Result = Data.define(:access_token, :refresh_token, :expires_in, :scope, :id_token, :response)
-
-    # The minimal HTTP response shape consumed, so tests can inject a double
-    # without Net::HTTP.
-    Response = Data.define(:status, :body)
 
     DEFAULT_TIMEOUT = 30
     MAX_BODY_BYTES = 64 * 1024
@@ -47,16 +41,14 @@ module Broker
       raise ArgumentError, "client_id is required" if client_id.blank?
       raise ArgumentError, "code is required" if code.blank?
       raise ArgumentError, "redirect_uri is required" if redirect_uri.blank?
-      raise ArgumentError, "code_verifier is required" if code_verifier.blank?
-
       form = {
         "grant_type" => "authorization_code",
         "code" => code,
         "client_id" => client_id,
-        "redirect_uri" => redirect_uri,
-        "code_verifier" => code_verifier
+        "redirect_uri" => redirect_uri
       }
       form["client_secret"] = client_secret if client_secret.present?
+      form["code_verifier"] = code_verifier if code_verifier.present?
 
       response = perform(token_endpoint, form, timeout)
 
@@ -72,19 +64,15 @@ module Broker
         return @http.call(url: url, form: form, headers: {}, timeout: timeout)
       end
 
-      uri = URI.parse(url)
-      req = Net::HTTP::Post.new(uri)
-      req.set_form_data(form)
-      req["Content-Type"] = "application/x-www-form-urlencoded"
-      req["Accept"] = "application/json"
-
-      http = Net::HTTP.new(uri.host, uri.port)
-      http.use_ssl = uri.scheme == "https"
-      http.open_timeout = timeout
-      http.read_timeout = timeout
-
-      res = http.request(req)
-      Response.new(status: res.code.to_i, body: res.body.to_s.byteslice(0, MAX_BODY_BYTES))
+      response = HttpClient.new(
+        open_timeout: timeout,
+        read_timeout: timeout,
+        max_body_bytes: MAX_BODY_BYTES
+      ).post(
+        url,
+        form: form
+      )
+      response
     rescue StandardError => e
       raise ExchangeError.new("token endpoint request failed: #{e.class}", stage: "network")
     end

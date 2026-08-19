@@ -8,20 +8,34 @@ import { Controller } from "@hotwired/stimulus"
 //                                            local time as a hover tooltip.
 //   data-localtime-format-value="compact" -> "4d", with the absolute local time
 //                                            as a hover tooltip.
+//
+// Relative displays re-render every 30s so "now" ages into "1m" without a
+// page visit, and truncate toward zero so 90s reads as 1m, not 2m.
 export default class extends Controller {
   static values = { datetime: String, format: String, relative: Boolean }
 
   connect() {
-    const date = new Date(this.datetimeValue)
-    if (isNaN(date.getTime())) return
+    this.date = new Date(this.datetimeValue)
+    if (isNaN(this.date.getTime())) return
 
-    const absolute = this.formatAbsolute(date)
+    this.render()
+    if (this.formatValue === "compact" || this.relativeValue) {
+      this.timer = setInterval(() => this.render(), 30000)
+    }
+  }
+
+  disconnect() {
+    if (this.timer) clearInterval(this.timer)
+  }
+
+  render() {
+    const absolute = this.formatAbsolute(this.date)
 
     if (this.formatValue === "compact") {
-      this.element.textContent = this.compactRelativeFrom(date)
+      this.element.textContent = this.compactRelativeFrom(this.date)
       this.element.title = absolute
     } else if (this.relativeValue) {
-      this.element.textContent = this.relativeFrom(date)
+      this.element.textContent = this.relativeFrom(this.date)
       this.element.title = absolute
     } else {
       this.element.textContent = absolute
@@ -38,26 +52,26 @@ export default class extends Controller {
   }
 
   relativeFrom(date) {
-    const seconds = Math.round((date.getTime() - Date.now()) / 1000)
+    const seconds = Math.trunc((date.getTime() - Date.now()) / 1000)
     const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" })
     const units = [
       ["year", 31536000], ["month", 2592000], ["day", 86400],
       ["hour", 3600], ["minute", 60]
     ]
     for (const [unit, secs] of units) {
-      if (Math.abs(seconds) >= secs) return rtf.format(Math.round(seconds / secs), unit)
+      if (Math.abs(seconds) >= secs) return rtf.format(Math.trunc(seconds / secs), unit)
     }
     return rtf.format(seconds, "second")
   }
 
   compactRelativeFrom(date) {
-    const seconds = Math.abs(Math.round((Date.now() - date.getTime()) / 1000))
+    const seconds = Math.abs(Math.trunc((Date.now() - date.getTime()) / 1000))
     const units = [
       ["y", 31536000], ["mo", 2592000], ["w", 604800],
       ["d", 86400], ["h", 3600], ["m", 60]
     ]
     for (const [unit, secs] of units) {
-      if (seconds >= secs) return `${Math.max(1, Math.round(seconds / secs))}${unit}`
+      if (seconds >= secs) return `${Math.floor(seconds / secs)}${unit}`
     }
     return "now"
   }

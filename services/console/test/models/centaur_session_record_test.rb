@@ -19,21 +19,6 @@ class CentaurSessionRecordTest < ActiveSupport::TestCase
     CentaurSessionRecord.send(:session_database_configuration)
   end
 
-  def with_env(overrides)
-    originals = {}
-    overrides.each do |key, value|
-      originals[key] = ENV[key]
-      if value.nil?
-        ENV.delete(key)
-      else
-        ENV[key] = value
-      end
-    end
-    yield
-  ensure
-    originals.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
-  end
-
   # Override the (private) primary-config source without touching the live
   # connection, matching the define_singleton_method pattern used elsewhere in
   # the suite.

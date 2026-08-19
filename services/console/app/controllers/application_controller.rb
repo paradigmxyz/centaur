@@ -9,7 +9,7 @@ class ApplicationController < ActionController::Base
   # controllers don't each hand-roll a rescue. Mirrors Api::BaseController.
   rescue_from ActiveRecord::RecordNotFound, with: :render_not_found
 
-  helper_method :current_user, :acting_admin?, :descoped?
+  helper_method :current_user, :acting_admin?, :descoped?, :password_login_enabled?
   helper_method :public_base_url, :oauth_callback_redirect_uri
 
   # The public origin the console is reached at. Derived from the request by
@@ -76,6 +76,10 @@ class ApplicationController < ActionController::Base
     false
   end
 
+  def password_login_enabled?
+    ConsoleAuth.password_login_enabled?
+  end
+
   # The permission check console gates use instead of current_user.admin?: a
   # real admin who is not currently descoped. Keeping current_user untouched
   # means audit trails and data displays still see the true account.
@@ -86,7 +90,10 @@ class ApplicationController < ActionController::Base
   # before_action gate for console pages: bounce anonymous requests to the login
   # form rather than rendering the page.
   def require_login
-    redirect_to login_path unless current_user
+    return if current_user
+
+    store_return_to_for_login
+    redirect_to login_path
   end
 
   # Second gate, after require_login: a disabled user is signed out; a pending
@@ -169,6 +176,12 @@ class ApplicationController < ActionController::Base
     path
   end
 
+  def store_return_to_for_login
+    return unless request.request_method == "GET"
+
+    session[:return_to] = request.fullpath
+  end
+
   def safe_console_return_path(default: default_console_landing_path)
     raw = params[:return_to].presence || params[:next].presence
     return default if raw.blank?
@@ -209,10 +222,12 @@ class ApplicationController < ActionController::Base
     thread_keys = console_sidebar_selected_thread_keys - threads.map(&:thread_key)
     return [] if thread_keys.empty?
 
-    # Resolve through the owner scope, not a raw find_by, so a directly linked
-    # thread only surfaces in the sidebar when the current user started it. This
-    # mirrors Console::ThreadsController#selected_session.
-    console_sidebar_visible_thread_scope.where(thread_key: thread_keys).to_a
+    # Global and explicitly shared chats remain readable from their direct
+    # links, but the sidebar is a personal navigation surface. Only recover a
+    # selected thread here when it belongs to the signed-in user.
+    visible = console_sidebar_visible_thread_scope.where(thread_key: thread_keys).to_a
+    sessions_by_key = visible.index_by(&:thread_key)
+    thread_keys.filter_map { |thread_key| sessions_by_key[thread_key] }
   end
 
   # The thread param carries up to PANEL_LIMIT comma-separated keys when the

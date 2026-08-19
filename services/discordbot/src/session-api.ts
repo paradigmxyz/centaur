@@ -1,4 +1,5 @@
 import type { RustSessionStreamEvent } from "@centaur/harness-events";
+import { isRetryableCodexErrorNotification } from "@centaur/rendering";
 import type { Attachment, Message } from "chat";
 import { withDiscordEmbedText } from "./discord-starter";
 import type {
@@ -905,6 +906,7 @@ function isTerminalCodexOutputLine(line: string): boolean {
     return false;
   }
   if (!isJsonObject(payload)) return false;
+  if (isRetryableCodexErrorNotification(payload)) return false;
 
   return (
     payload.type === "turn.completed" ||

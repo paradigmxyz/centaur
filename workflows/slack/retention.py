@@ -180,12 +180,12 @@ async def prune_slack_dm(pool, *, retention_days: int, dry_run: bool = False) ->
         "messages": await _count_or_delete(
             pool,
             count_sql=(
-                "SELECT COUNT(*) FROM slack_dm_sync_messages "
+                "SELECT COUNT(*) FROM slack_private_sync_messages "
                 "WHERE occurred_at < NOW() - make_interval(days => $1)"
             ),
             delete_sql=(
                 "WITH deleted AS ("
-                "    DELETE FROM slack_dm_sync_messages "
+                "    DELETE FROM slack_private_sync_messages "
                 "    WHERE occurred_at < NOW() - make_interval(days => $1) "
                 "    RETURNING 1"
                 ") SELECT COUNT(*) FROM deleted"
@@ -196,20 +196,20 @@ async def prune_slack_dm(pool, *, retention_days: int, dry_run: bool = False) ->
         "conversations": await _count_or_delete(
             pool,
             count_sql=(
-                "SELECT COUNT(*) FROM slack_dm_sync_conversations c "
+                "SELECT COUNT(*) FROM slack_private_sync_conversations c "
                 "WHERE c.last_seen_at < NOW() - make_interval(days => $1) "
                 "  AND NOT EXISTS ("
-                "      SELECT 1 FROM slack_dm_sync_messages m "
+                "      SELECT 1 FROM slack_private_sync_messages m "
                 "      WHERE m.home_team_id = c.home_team_id "
                 "        AND m.conversation_id = c.conversation_id"
                 "  )"
             ),
             delete_sql=(
                 "WITH deleted AS ("
-                "    DELETE FROM slack_dm_sync_conversations c "
+                "    DELETE FROM slack_private_sync_conversations c "
                 "    WHERE c.last_seen_at < NOW() - make_interval(days => $1) "
                 "      AND NOT EXISTS ("
-                "          SELECT 1 FROM slack_dm_sync_messages m "
+                "          SELECT 1 FROM slack_private_sync_messages m "
                 "          WHERE m.home_team_id = c.home_team_id "
                 "            AND m.conversation_id = c.conversation_id"
                 "      ) "
@@ -222,13 +222,13 @@ async def prune_slack_dm(pool, *, retention_days: int, dry_run: bool = False) ->
         "backfill_jobs": await _count_or_delete(
             pool,
             count_sql=(
-                "SELECT COUNT(*) FROM slack_dm_sync_backfill_jobs "
+                "SELECT COUNT(*) FROM slack_private_sync_backfill_jobs "
                 "WHERE status IN ('completed', 'failed') "
                 "  AND updated_at < NOW() - make_interval(days => $1)"
             ),
             delete_sql=(
                 "WITH deleted AS ("
-                "    DELETE FROM slack_dm_sync_backfill_jobs "
+                "    DELETE FROM slack_private_sync_backfill_jobs "
                 "    WHERE status IN ('completed', 'failed') "
                 "      AND updated_at < NOW() - make_interval(days => $1) "
                 "    RETURNING 1"
@@ -240,13 +240,13 @@ async def prune_slack_dm(pool, *, retention_days: int, dry_run: bool = False) ->
         "runs": await _count_or_delete(
             pool,
             count_sql=(
-                "SELECT COUNT(*) FROM slack_dm_sync_runs "
+                "SELECT COUNT(*) FROM slack_private_sync_runs "
                 "WHERE status <> 'running' "
                 "  AND COALESCE(finished_at, started_at) < NOW() - make_interval(days => $1)"
             ),
             delete_sql=(
                 "WITH deleted AS ("
-                "    DELETE FROM slack_dm_sync_runs "
+                "    DELETE FROM slack_private_sync_runs "
                 "    WHERE status <> 'running' "
                 "      AND COALESCE(finished_at, started_at) "
                 "          < NOW() - make_interval(days => $1) "

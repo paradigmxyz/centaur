@@ -3,7 +3,6 @@ require "test_helper"
 class GcpIdTokenSecretTest < ActiveSupport::TestCase
   def base_attrs(overrides = {})
     {
-      namespace: "acme",
       foreign_id: "new-cloud-run",
       audience: "https://service-abc123-uc.a.run.app",
       created_by: users(:acme_admin)

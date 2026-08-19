@@ -446,17 +446,15 @@ module Mcp
     def principal_for_current_user
       Principal.transaction do
         foreign_id = principal_foreign_id(current_user.email)
-        principal = Principal.find_or_initialize_by(
-          namespace: mcp_principal_namespace, foreign_id: foreign_id
-        )
+        principal = Principal.find_or_initialize_by(foreign_id: foreign_id)
         newly_created = principal.new_record?
         principal.created_by ||= current_user
         principal.name = current_user.name.presence || current_user.email
+        principal.kind = "console_user"
+        principal.console_user_id = current_user.id
+        principal.assign_attributes(slack_identity_fields_for(current_user))
         principal.labels = principal.labels.merge(
-          "managed-by" => "centaur",
-          "kind" => "console_user",
-          "console-user-id" => current_user.oid,
-          "email" => current_user.email
+          "managed-by" => "centaur"
         )
         principal.save!
         assign_user_mcp_role(principal) if newly_created
@@ -477,11 +475,20 @@ module Mcp
           labels: { "managed-by" => "centaur" },
           created_by: current_user
         )
-        .find_or_create_by!(
-          namespace: principal.namespace,
-          foreign_id: USER_MCP_ROLE_FOREIGN_ID
-        )
+        .find_or_create_by!(foreign_id: USER_MCP_ROLE_FOREIGN_ID)
       principal.principal_roles.find_or_create_by!(role: role)
+    end
+
+    # Slack's OIDC id_token is the authenticated source of the user's native
+    # Slack identity. Refuse an ambiguous account rather than guessing which
+    # workspace should determine company-context RLS.
+    def slack_identity_fields_for(user)
+      slack_user_id, slack_team_id = UserIdentity.unambiguous_slack_identity(
+        user.user_identities.slack.order(:id)
+      )
+      return {} unless slack_user_id
+
+      { "slack_user_id" => slack_user_id, "slack_team_id" => slack_team_id }
     end
 
     def principal_foreign_id(email)
@@ -489,12 +496,6 @@ module Mcp
       safe = normalized.gsub(/[^A-Za-z0-9\-._~]/, "-").gsub(/-+/, "-").first(48)
       digest = Digest::SHA256.hexdigest(normalized).first(12)
       "console-user-#{safe}-#{digest}"
-    end
-
-    def mcp_principal_namespace
-      ENV["CENTAUR_MCP_PRINCIPAL_NAMESPACE"].presence ||
-        ConsoleEnv["MCP_PRINCIPAL_NAMESPACE"].presence ||
-        "default"
     end
 
     def access_token_ttl_seconds

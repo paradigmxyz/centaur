@@ -39,7 +39,6 @@ class OauthApp < ApplicationRecord
   validates :provider, inclusion: { in: ->(_) { Oauth::Providers.keys }, message: "is not a supported provider" }
   validates :client_id, presence: true
   validates :client_secret, presence: true
-  validates :credential_namespace, presence: true, format: { with: URL_SAFE_FORMAT, message: URL_SAFE_MESSAGE }
   validate :labels_is_a_hash
   validate :allowed_scopes_valid
 
@@ -49,6 +48,18 @@ class OauthApp < ApplicationRecord
 
   # True when every requested scope is within the allowlist.
   def scopes_allowed?(requested) = (Array(requested) - Array(allowed_scopes)).empty?
+
+  # Provider-level scopes are capabilities Centaur itself requires, independent
+  # of the operator-selectable allowlist. A credential minted before one was
+  # introduced must be re-consented before it can satisfy the current contract.
+  def required_scopes
+    strategy = provider_strategy
+    strategy.respond_to?(:required_scopes) ? Array(strategy.required_scopes) : []
+  end
+
+  def credential_needs_reconnect?(credential)
+    credential.dead? || (required_scopes - Array(credential.scopes)).any?
+  end
 
   private
 

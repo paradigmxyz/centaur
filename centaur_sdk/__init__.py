@@ -8,6 +8,10 @@ from __future__ import annotations
 
 from centaur_sdk.tool_sdk import (
     ToolContext,
+    current_chat_destination,
+    current_discord_thread,
+    current_github_thread,
+    current_linear_thread,
     current_session_context,
     current_slack_thread,
     current_thread_key,
@@ -21,6 +25,10 @@ from centaur_sdk.tool_sdk import (
 
 __all__ = [
     "ToolContext",
+    "current_chat_destination",
+    "current_discord_thread",
+    "current_github_thread",
+    "current_linear_thread",
     "current_session_context",
     "current_slack_thread",
     "current_thread_key",

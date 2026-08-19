@@ -72,6 +72,31 @@ def test_create_issue_merges_success_into_issue_fields():
     }
 
 
+def test_create_issue_sets_project_and_milestone():
+    client = RecordingLinearClient(
+        {
+            "issueCreate": {
+                "success": True,
+                "issue": {"id": "issue-1", "identifier": "ENG-1"},
+            }
+        }
+    )
+
+    client.create_issue(
+        "Test",
+        team_id="team-1",
+        project_id="project-1",
+        project_milestone_id="milestone-1",
+    )
+
+    assert client.calls[0]["variables"]["input"] == {
+        "title": "Test",
+        "teamId": "team-1",
+        "projectId": "project-1",
+        "projectMilestoneId": "milestone-1",
+    }
+
+
 def test_update_issue_merges_success_into_issue_fields():
     client = RecordingLinearClient(
         {
@@ -86,6 +111,51 @@ def test_update_issue_merges_success_into_issue_fields():
 
     assert updated["title"] == "Renamed"
     assert updated["success"] is True
+
+
+def test_update_issue_sets_project_milestone():
+    client = RecordingLinearClient(
+        {
+            "issueUpdate": {
+                "success": True,
+                "issue": {"id": "issue-1", "identifier": "ENG-1"},
+            }
+        }
+    )
+
+    client.update_issue("ENG-1", project_milestone_id="milestone-1")
+
+    assert client.calls[0]["variables"]["input"] == {"projectMilestoneId": "milestone-1"}
+
+
+def test_update_issue_clears_project_milestone():
+    client = RecordingLinearClient(
+        {
+            "issueUpdate": {
+                "success": True,
+                "issue": {"id": "issue-1", "identifier": "ENG-1"},
+            }
+        }
+    )
+
+    client.update_issue("ENG-1", clear_project_milestone=True)
+
+    assert client.calls[0]["variables"]["input"] == {"projectMilestoneId": None}
+
+
+def test_update_issue_rejects_set_and_clear_project_milestone():
+    client = RecordingLinearClient({})
+
+    try:
+        client.update_issue(
+            "ENG-1",
+            project_milestone_id="milestone-1",
+            clear_project_milestone=True,
+        )
+    except ValueError as exc:
+        assert "mutually exclusive" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
 
 
 def test_add_comment_merges_success_into_comment_fields():
