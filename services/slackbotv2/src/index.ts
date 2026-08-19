@@ -1127,8 +1127,7 @@ async function syncThreadMessageToSession(
     rolloutPercent: input.options.codexNanocodexRolloutPercent ?? 0,
     threadId: thread.id
   })
-  const rolloutSelected =
-    harnessRollout.assignment !== undefined || harnessRollout.harnessType !== effectiveHarnessType
+  const rolloutSelected = harnessRollout.assignment !== undefined
   const resolvedReasoning = reasoningForModel(
     effectiveHarnessType,
     effectiveModel,
