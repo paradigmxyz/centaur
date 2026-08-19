@@ -40,7 +40,6 @@ module Api
       def role_payload(role)
         {
           id: role.oid,
-          namespace: role.namespace,
           foreign_id: role.foreign_id,
           name: role.name,
           labels: role.labels,

@@ -79,6 +79,9 @@ Start a `/view/s/` URL with `login`:
 docsend login '<docsend-space-url>' --email '<email>'
 ```
 
+For a larger bulk download, add `--session-timeout 1800` to the initial `login`
+command so the agent has time to traverse folders and fetch each document.
+
 After login or verification returns `deal_room_ready`, keep its `session_id` for every following command.
 
 List the Space root:
@@ -95,7 +98,13 @@ docsend open-folder '<session-id>' --folder-id '<folder-item-id>'
 
 Both commands return only one directory level. Read each folder's ID from the preceding JSON response and call `open-folder` again to traverse deeper.
 
-Download the selected file using its returned item ID:
+For bulk downloads, inspect the returned `items`, traverse any folders, and call
+`fetch` once for each item whose `type` is `file`. Fetch files sequentially so
+the agent can choose output paths and report an individual failure without
+losing the rest of the inventory. Treat every fetch as independent: if one item
+does not return `status: ok`, record its path, status, and error, then move on to
+the next file. Do not stop the bulk download because one item failed. This is
+common for unsupported file types such as videos.
 
 ```bash
 docsend fetch '<session-id>' \
@@ -103,7 +112,12 @@ docsend fetch '<session-id>' \
   --output '<output-path>'
 ```
 
-The downloaded filename may differ from the visible Space title. Fetch files sequentially, and do not pass folder or external URL item IDs to `fetch`.
+When the owner enabled downloads, `fetch` uses DocSend's regular download button
+and returns the original file with `download_method: original`. When the button
+is disabled, `fetch` opens the document viewer in the authenticated Space
+session and uses the standalone rendered-page recovery to return a PDF with
+`download_method: rendered_pdf`. The downloaded filename may differ from the
+visible Space title. Do not pass folder or external URL item IDs to `fetch`.
 
 Close the session when finished:
 
@@ -117,5 +131,6 @@ docsend close '<session-id>'
 - For `email_required`, ask for an email unless the user already supplied one.
 - For `passcode_required`, ask only for the document passcode.
 - Preserve session fields on verification and failure responses.
-- Report statuses such as `blocked`, `expired`, `item_not_found`, `not_downloadable`, and `download_unavailable` exactly. Do not bypass access or download controls.
+- During a bulk download, continue to the next file after any per-item failure and summarize all skipped or failed items after attempting the full inventory.
+- Report statuses such as `blocked`, `expired`, `item_not_found`, `not_downloadable`, and `download_unavailable` exactly. Only recover pages that the authenticated DocSend viewer renders; do not bypass access controls.
 - Do not expose email addresses, passcodes, verification URLs, API keys, or downloaded file data in the final response.

@@ -4,7 +4,6 @@ require Rails.root.join("db/migrate/20260806190000_replace_github_bearer_injecti
 class ReplaceGithubBearerInjectionTest < ActiveSupport::TestCase
   test "converts GitHub host Bearer injection and invalidates granted principal snapshots" do
     secret = StaticSecret.create!(
-      namespace: "acme",
       name: "legacy GitHub token",
       inject_config: { "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" },
       created_by: users(:acme_admin)
@@ -24,14 +23,12 @@ class ReplaceGithubBearerInjectionTest < ActiveSupport::TestCase
 
   test "leaves API-only and non-Bearer GitHub credentials unchanged" do
     api_only = StaticSecret.create!(
-      namespace: "acme",
       name: "API token",
       inject_config: { "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" },
       created_by: users(:acme_admin)
     )
     RequestRule.create!(host: "api.github.com", static_secret: api_only)
     custom = StaticSecret.create!(
-      namespace: "acme",
       name: "custom GitHub header",
       inject_config: { "header" => "Authorization", "formatter" => "token {{ .Value }}" },
       created_by: users(:acme_admin)

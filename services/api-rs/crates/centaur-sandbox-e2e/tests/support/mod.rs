@@ -386,7 +386,6 @@ async fn agent_k8s_implementation() -> SandboxImplementation {
         IronControlSettings {
             client: IronControlClient::new("http://127.0.0.1:1", "test-key"),
             control_url: "http://iron-control".to_owned(),
-            namespace: "default".to_owned(),
         },
     );
     config.ready_timeout = Duration::from_secs(90);

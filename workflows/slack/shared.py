@@ -447,7 +447,9 @@ _MESSAGE_UPSERT_SQL = (
     "raw_payload = EXCLUDED.raw_payload, "
     "source_run_id = EXCLUDED.source_run_id, "
     "last_seen_at = NOW(), "
-    "updated_at = NOW()"
+    "updated_at = CASE WHEN slack_sync_messages.raw_payload "
+    "IS DISTINCT FROM EXCLUDED.raw_payload "
+    "THEN NOW() ELSE slack_sync_messages.updated_at END"
 )
 
 

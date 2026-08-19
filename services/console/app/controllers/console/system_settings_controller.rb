@@ -24,14 +24,16 @@ module Console
 
     def set_system_setting
       @system_setting = SystemSetting.current
-      @roles = Role.order(:namespace, :name, :foreign_id, :id)
+      @roles = Role.order(:name, :foreign_id, :id)
     end
 
     def system_setting_params
       params.require(:system_setting).permit(
         :default_sandbox_repo_cache,
         :default_sandbox_observability_enabled,
-        :default_sandbox_api_server_enabled
+        :default_sandbox_sessions_read_enabled,
+        :default_sandbox_workflows_read_enabled,
+        :default_sandbox_workflows_write_enabled
       )
     end
 

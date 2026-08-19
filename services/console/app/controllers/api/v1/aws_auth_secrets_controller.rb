@@ -14,7 +14,7 @@ module Api
         render json: { data: record_payload(ref) }
       end
 
-      # GET /api/v1/aws_auth_secrets/lookup/:namespace/:foreign_id
+      # GET /api/v1/aws_auth_secrets/lookup/:foreign_id
       def lookup
         render json: { data: record_payload(find_by_foreign_id!(AwsAuthSecret)) }
       end
@@ -88,7 +88,6 @@ module Api
         by_role = ref.sources.index_by(&:role)
         {
           id: ref.oid,
-          namespace: ref.namespace,
           foreign_id: ref.foreign_id,
           name: ref.name,
           description: ref.description,

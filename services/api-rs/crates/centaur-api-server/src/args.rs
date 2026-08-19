@@ -148,6 +148,8 @@ struct ActivitySummaryArgs {
         default_value = "gpt-5.4-nano"
     )]
     model: String,
+    /// Deprecated activity-summary-specific endpoint. `OPENAI_BASE_URL` takes
+    /// precedence when set, but this remains supported for existing deployments.
     #[arg(
         long = "session-activity-summary-openai-base-url",
         env = "SESSION_ACTIVITY_SUMMARY_OPENAI_BASE_URL",
@@ -196,8 +198,11 @@ impl ActivitySummaryArgs {
             );
             return None;
         };
+        let base_url = clean_optional_value(env::var("OPENAI_BASE_URL").ok().as_deref())
+            .map(|value| value.trim_end_matches('/').to_owned())
+            .unwrap_or_else(|| self.openai_base_url.trim_end_matches('/').to_owned());
         Some(ActivitySummaryConfig {
-            base_url: self.openai_base_url.clone(),
+            base_url,
             api_key,
             max_facts: usize::try_from(self.max_facts).unwrap_or(usize::MAX),
             max_output_tokens: u16::try_from(self.max_output_tokens).unwrap_or(u16::MAX),
@@ -427,12 +432,6 @@ struct IronControlArgs {
     url: Option<String>,
     #[arg(long = "iron-control-api-key", env = "IRON_CONTROL_API_KEY")]
     api_key: Option<String>,
-    #[arg(
-        long = "iron-control-namespace",
-        env = "IRON_CONTROL_NAMESPACE",
-        default_value = "default"
-    )]
-    namespace: String,
 }
 
 impl IronControlArgs {
@@ -459,7 +458,6 @@ impl IronControlArgs {
         Ok(IronControlSettings {
             client,
             control_url: url.to_owned(),
-            namespace: self.namespace.clone(),
         })
     }
 }
@@ -733,18 +731,16 @@ impl SandboxArgs {
     /// stays roleless until claim-time reassignment binds the session principal.
     async fn iron_control_runtime(&self) -> Result<IronControlRuntime, ServerError> {
         let client = self.iron_control.required_client()?;
-        let namespace = self.iron_control.namespace.clone();
         if self.iron_control_sync_infra_secrets {
             let policy = self.iron_proxy.source_policy();
             let roles = self.iron_proxy.roles_to_register()?;
             for (spec, fragment) in &roles {
-                register_role_with_retry(&client, &namespace, spec, fragment, &policy).await?;
+                register_role_with_retry(&client, spec, fragment, &policy).await?;
             }
         } else {
             let spec = RoleSpec::infra();
             client
                 .upsert_role(&IdentityInput {
-                    namespace: namespace.clone(),
                     foreign_id: spec.foreign_id,
                     name: spec.name,
                     labels: BTreeMap::from([("managed-by".to_owned(), "centaur".to_owned())]),
@@ -753,7 +749,6 @@ impl SandboxArgs {
         }
         let bootstrap = client
             .upsert_principal(&PrincipalInput {
-                namespace: namespace.clone(),
                 foreign_id: "warm-pool-bootstrap".to_owned(),
                 name: "Warm pool bootstrap".to_owned(),
                 labels: BTreeMap::from([
@@ -769,7 +764,6 @@ impl SandboxArgs {
             .await?;
         let workflow_host = client
             .upsert_principal(&PrincipalInput {
-                namespace: namespace.clone(),
                 foreign_id: "workflow-host".to_owned(),
                 name: "Workflow host".to_owned(),
                 labels: BTreeMap::from([
@@ -784,10 +778,10 @@ impl SandboxArgs {
             })
             .await?;
         Ok(IronControlRuntime {
-            registrar: SessionRegistrar::new(client.clone(), namespace.clone()),
+            registrar: SessionRegistrar::new(client.clone()),
             warm_pool_bootstrap_principal: bootstrap.id,
             workflow_host_principal: workflow_host.id,
-            workflow_principal_registrar: WorkflowPrincipalRegistrar::new(client, namespace),
+            workflow_principal_registrar: WorkflowPrincipalRegistrar::new(client),
         })
     }
 
@@ -1023,6 +1017,12 @@ impl SandboxArgs {
         let codex_auth_mode = clean_optional_value(env::var("CODEX_AUTH_MODE").ok().as_deref())
             .unwrap_or_else(|| "api_key".to_owned());
         envs.push(("CODEX_AUTH_MODE".to_owned(), codex_auth_mode.clone()));
+        if codex_auth_mode == "api_key"
+            && let Some(base_url) =
+                clean_optional_value(env::var("OPENAI_BASE_URL").ok().as_deref())
+        {
+            envs.push(("OPENAI_BASE_URL".to_owned(), base_url));
+        }
         if let Some(mode) = clean_optional_value(env::var("CLAUDE_CODE_AUTH_MODE").ok().as_deref())
         {
             envs.push(("CLAUDE_CODE_AUTH_MODE".to_owned(), mode));
@@ -1031,8 +1031,8 @@ impl SandboxArgs {
         // Inject the infra/harness placeholder credentials so env-based
         // consumers send the proxy_value iron-proxy replaces with the real
         // secret: codex's OPENAI_API_KEY (api_key mode -> codex logs in and
-        // hits api.openai.com instead of falling back to the ChatGPT
-        // auth.json), git/gh's GITHUB_TOKEN, the slack tool's
+        // hits OPENAI_BASE_URL (api.openai.com by default) instead of falling
+        // back to the ChatGPT auth.json), git/gh's GITHUB_TOKEN, the slack tool's
         // SLACK_BOT_TOKEN, and the rest of the infra set.
         for (name, value) in self.iron_proxy.sandbox_placeholder_env()? {
             if !envs.iter().any(|(existing, _)| existing == &name) {
@@ -1378,14 +1378,13 @@ const IRON_CONTROL_REGISTER_INITIAL_BACKOFF: Duration = Duration::from_millis(25
 
 async fn register_role_with_retry(
     client: &IronControlClient,
-    namespace: &str,
     spec: &RoleSpec,
     fragment: &ProxyFragment,
     policy: &SourcePolicy,
 ) -> Result<String, RegisterError> {
     let mut backoff = IRON_CONTROL_REGISTER_INITIAL_BACKOFF;
     for attempt in 1..=IRON_CONTROL_REGISTER_MAX_ATTEMPTS {
-        match register_role(client, namespace, spec, fragment, policy).await {
+        match register_role(client, spec, fragment, policy).await {
             Ok(role_id) => return Ok(role_id),
             Err(error)
                 if attempt < IRON_CONTROL_REGISTER_MAX_ATTEMPTS
@@ -1411,6 +1410,7 @@ async fn register_role_with_retry(
 fn should_retry_iron_control_register(error: &RegisterError) -> bool {
     match error {
         RegisterError::Translate(_) => false,
+        RegisterError::Control(IronControlError::PrincipalDerivation(_)) => false,
         RegisterError::Control(IronControlError::Transport { .. }) => true,
         RegisterError::Control(IronControlError::Decode { .. }) => false,
         RegisterError::Control(IronControlError::Status { status, .. }) => {
@@ -2028,6 +2028,7 @@ fn harness_fragment_engine_name(engine: &HarnessType) -> &'static str {
         HarnessType::Amp => "amp",
         HarnessType::ClaudeCode => "claude-code",
         HarnessType::Nanocodex => "codex",
+        HarnessType::Hermes => "hermes",
     }
 }
 
@@ -2045,6 +2046,9 @@ fn harness_auth_mode_env(engine: &HarnessType) -> Option<String> {
         HarnessType::Codex | HarnessType::Nanocodex => env::var("CODEX_AUTH_MODE").ok(),
         HarnessType::ClaudeCode => env::var("CLAUDE_CODE_AUTH_MODE").ok(),
         HarnessType::Amp => None,
+        // Hermes resolves providers through its own credential store /
+        // iron-proxy placeholder injection; no dedicated auth-mode env.
+        HarnessType::Hermes => None,
     }
 }
 
@@ -2198,6 +2202,52 @@ mod tests {
 
         let config = args.activity_summary_config().unwrap();
         assert_eq!(config.api_key, "sk-test");
+    }
+
+    #[test]
+    fn activity_summary_preserves_legacy_base_url_when_global_url_is_unset() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[
+            ("OPENAI_API_KEY", "sk-test"),
+            ("OPENAI_BASE_URL", ""),
+            (
+                "SESSION_ACTIVITY_SUMMARY_OPENAI_BASE_URL",
+                "https://legacy-compatible.example/v1/",
+            ),
+        ]);
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-activity-summary-enabled",
+            "true",
+        ])
+        .unwrap();
+
+        let config = args.activity_summary_config().unwrap();
+        assert_eq!(config.base_url, "https://legacy-compatible.example/v1");
+    }
+
+    #[test]
+    fn activity_summary_global_base_url_overrides_legacy_base_url() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[
+            ("OPENAI_API_KEY", "sk-test"),
+            ("OPENAI_BASE_URL", "https://global-compatible.example/v1/"),
+        ]);
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-activity-summary-enabled",
+            "true",
+            "--session-activity-summary-openai-base-url",
+            "https://legacy-compatible.example/v1",
+        ])
+        .unwrap();
+
+        let config = args.activity_summary_config().unwrap();
+        assert_eq!(config.base_url, "https://global-compatible.example/v1");
     }
 
     #[test]
@@ -2659,6 +2709,8 @@ mod tests {
 
     #[test]
     fn codex_app_server_env_template_injects_auth_mode_and_placeholder() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[("OPENAI_BASE_URL", "https://compatible-api.example/v1")]);
         let args = Args::try_parse_from([
             "centaur-api-server",
             "--database-url",
@@ -2682,6 +2734,9 @@ mod tests {
         // The codex auth mode is propagated so the sandbox agent matches the
         // proxy's registered credential.
         assert!(env.iter().any(|(name, _)| name == "CODEX_AUTH_MODE"));
+        assert!(env.iter().any(|(name, value)| {
+            name == "OPENAI_BASE_URL" && value == "https://compatible-api.example/v1"
+        }));
         // api_key mode (the default) injects the placeholder the egress proxy
         // replaces, so codex logs in and hits api.openai.com instead of
         // falling back to the ChatGPT auth.json.
@@ -2705,6 +2760,7 @@ mod tests {
             env.iter()
                 .any(|(name, value)| name == "META_AI_API_KEY" && value == "META_AI_API_KEY")
         );
+        assert!(env.iter().all(|(name, _)| name != "NOUS_API_KEY"));
     }
 
     #[test]
@@ -3214,6 +3270,27 @@ mod tests {
         assert_eq!(
             harness_auth_mode_env(&HarnessType::Nanocodex).as_deref(),
             Some("access_token")
+        );
+    }
+
+    #[test]
+    fn hermes_default_has_a_native_provider_proxy_fragment() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--kubernetes-iron-proxy-harness-engine",
+            "hermes",
+            "--kubernetes-iron-proxy-harness-auth-mode",
+            "api_key",
+        ])
+        .unwrap();
+
+        let fragment = args.sandbox.iron_proxy.harness.fragment().unwrap();
+        let placeholders = centaur_iron_proxy::placeholder_env(&[fragment]);
+        assert_eq!(
+            placeholders.get("NOUS_API_KEY").map(String::as_str),
+            Some("NOUS_API_KEY")
         );
     }
 }

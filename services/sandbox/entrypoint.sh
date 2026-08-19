@@ -324,8 +324,8 @@ fi
 #   - access_token: Claude Code runs as a Claude.ai Pro or Max subscription
 #     user. We install a dummy ~/.claude/.credentials.json so the CLI emits
 #     OAuth-shaped requests, unset the API-key stub so it does not fall back
-#     to X-Api-Key, and let iron-token-broker mint a real Bearer at request
-#     time via the anthropic-claude brokered_token secret.
+#     to X-Api-Key, and let iron-proxy inject the current Console-managed
+#     Bearer via the anthropic-claude brokered_token secret.
 CLAUDE_CODE_AUTH_MODE="${CLAUDE_CODE_AUTH_MODE:-api_key}"
 case "$CLAUDE_CODE_AUTH_MODE" in
     api_key)
@@ -418,16 +418,6 @@ if [ "${CENTAUR_SANDBOX_OBSERVABILITY_ENABLED:-true}" = "false" ] && [ -f "$TARG
 
 [Observability access]
 This sandbox does not have Centaur observability access. Do not use vlogs, vmetrics, Grafana, or related internal logs/metrics tools.
-EOF
-fi
-
-if [ "${CENTAUR_SANDBOX_API_SERVER_ENABLED:-true}" = "false" ] && [ -f "$TARGET_PROMPT" ]; then
-    cat >> "$TARGET_PROMPT" <<'EOF'
-
----
-
-[API server access]
-This sandbox does not have Centaur API server access. Do not use workflows or tool options that call the api-rs control plane, such as dispatching background agent sessions or downloading Centaur attachment handles.
 EOF
 fi
 

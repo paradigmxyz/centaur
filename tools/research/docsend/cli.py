@@ -168,7 +168,7 @@ def fetch(
     ),
     output: str | None = typer.Option(None, "--output", "-o", help="Output file path"),
 ) -> None:
-    """Download one permitted item from a verified DocSend Space."""
+    """Download or recover one document from a verified DocSend Space."""
     _handle_result(
         get_client().fetch(session_id=session_id, item_id=item_id),
         output,

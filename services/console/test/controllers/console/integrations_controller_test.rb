@@ -29,7 +29,6 @@ class Console::IntegrationsControllerTest < ActionDispatch::IntegrationTest
 
     credential = BrokerCredential.create!(
       oauth_app: oauth_apps(:acme_google),
-      namespace: "acme",
       foreign_id: "google-google-member-sub",
       name: "Google – Member",
       token_endpoint: "https://oauth2.googleapis.com/token",
@@ -57,7 +56,6 @@ class Console::IntegrationsControllerTest < ActionDispatch::IntegrationTest
 
     BrokerCredential.create!(
       oauth_app: oauth_apps(:acme_google),
-      namespace: "acme",
       foreign_id: "google-google-personal-sub",
       name: "Google – Personal",
       token_endpoint: "https://oauth2.googleapis.com/token",
@@ -73,12 +71,35 @@ class Console::IntegrationsControllerTest < ActionDispatch::IntegrationTest
     assert_select "a.btn-secondary[href=?]", "http://www.example.com/oauth/google/start", text: "Reconnect"
   end
 
+  test "a Slack credential without search scope asks the user to reconnect" do
+    post login_url, params: { email: users(:member_user).email, password: "password123456" }
+
+    credential = BrokerCredential.create!(
+      oauth_app: oauth_apps(:acme_slack),
+      foreign_id: "slack-slack-member-sub",
+      name: "Slack – Member",
+      token_endpoint: "https://slack.com/api/oauth.v2.access",
+      provider_subject: "U-MEMBER",
+      provider_email: users(:member_user).email,
+      external_user_key: "slack-member-key",
+      scopes: %w[chat:write]
+    )
+
+    get console_integrations_url
+    assert_response :ok
+    assert_select "a.btn-secondary[href=?]", "http://www.example.com/oauth/slack/start", text: "Reconnect"
+    assert_match "Needs reconnecting", response.body
+
+    credential.update!(scopes: %w[chat:write search:read])
+    get console_integrations_url
+    assert_match "Connected", response.body
+  end
+
   test "a credential minted for someone else's email does not mark the app connected" do
     post login_url, params: { email: users(:member_user).email, password: "password123456" }
 
     BrokerCredential.create!(
       oauth_app: oauth_apps(:acme_google),
-      namespace: "acme",
       foreign_id: "google-google-other-sub",
       name: "Google – Other",
       token_endpoint: "https://oauth2.googleapis.com/token",
@@ -92,6 +113,26 @@ class Console::IntegrationsControllerTest < ActionDispatch::IntegrationTest
     assert_response :ok
     assert_select "a.btn-primary[href=?]", "http://www.example.com/oauth/google/start", text: "Connect"
     assert_no_match "Reconnect", response.body
+  end
+
+  test "an integration that is not always available discloses DM-only use" do
+    post login_url, params: { email: users(:member_user).email, password: "password123456" }
+
+    get console_integrations_url
+    assert_response :ok
+    assert_match "Used only in your DMs with the bot", response.body
+    assert_no_match "Used automatically whenever you ask the bot", response.body
+  end
+
+  test "an always-available integration discloses automatic use" do
+    oauth_apps(:acme_google).update!(client_secret: "shh", always_available: true)
+    post login_url, params: { email: users(:member_user).email, password: "password123456" }
+
+    get console_integrations_url
+    assert_response :ok
+    assert_match "Used automatically whenever you ask the bot", response.body
+    # The other apps still disclose DM-only use.
+    assert_match "Used only in your DMs with the bot", response.body
   end
 
   test "an admin sees the same page" do

@@ -28,9 +28,10 @@ module Oauth
     FLOW_TTL = 10.minutes
     FLOW_COOKIE = :oauth_flow
 
-    # Tests swap in an AuthorizationCodeClient built around an http double,
-    # mirroring BrokerCredential#refresh_client.
+    # Tests replace the token-exchange and identity-lookup clients with HTTP
+    # doubles, mirroring BrokerCredential#refresh_client.
     class_attribute :exchange_client_factory, default: -> { Broker::AuthorizationCodeClient.new }
+    class_attribute :identity_http_client_factory, default: -> { HttpClient.new }
 
     before_action :set_app
 
@@ -42,12 +43,13 @@ module Oauth
       unless @app.scopes_allowed?(requested_scopes)
         return render_result(:error, status: :unprocessable_entity, message: "One or more requested scopes are not allowed for this integration.")
       end
+      consent_scopes = requested_scopes | provider_required_scopes
 
       nonce = SecureRandom.urlsafe_base64(32)
       code_verifier = SecureRandom.urlsafe_base64(64)
 
       state = Rails.application.message_verifier(STATE_PURPOSE).generate(
-        { "app" => @app.oid, "scopes" => requested_scopes, "nonce" => nonce },
+        { "app" => @app.oid, "scopes" => consent_scopes, "nonce" => nonce },
         purpose: STATE_PURPOSE, expires_in: FLOW_TTL
       )
 
@@ -58,7 +60,7 @@ module Oauth
         expires: FLOW_TTL.from_now, httponly: true, same_site: :lax
       }
 
-      redirect_to authorization_url(requested_scopes, state, code_verifier), allow_other_host: true
+      redirect_to authorization_url(consent_scopes, state, code_verifier), allow_other_host: true
     end
 
     # GET /oauth/:slug/callback?code=&state=  (or ?error=)
@@ -84,9 +86,13 @@ module Oauth
 
       result = exchange_code(params[:code], flow["code_verifier"])
       validate_provider_result!(result)
-      identity = @provider.identity_from(result, client_id: @app.client_id)
+      identity = @provider.identity_from(
+        result,
+        client_id: @app.client_id,
+        http_client: identity_http_client_factory.call
+      )
       @credential = upsert_credential(state, result, identity)
-      enqueue_identity_enrichment(@credential)
+      enqueue_post_connect_enrichment(@credential)
 
       # Back to the Integrations page the user started from; failures below
       # still render the standalone result page, which offers a retry link.
@@ -140,6 +146,12 @@ module Oauth
       uri.to_s
     end
 
+    def provider_required_scopes
+      return [] unless @provider.respond_to?(:required_scopes)
+
+      Array(@provider.required_scopes)
+    end
+
     def exchange_code(code, code_verifier)
       exchange_client_factory.call.exchange(
         token_endpoint: @provider.token_endpoint,
@@ -166,7 +178,6 @@ module Oauth
         # overwritten: the first linked user keeps the credential.
         credential.created_by ||= current_user
         if credential.new_record?
-          credential.namespace = @app.credential_namespace
           credential.foreign_id = "#{@app.provider}-#{@app.slug}-#{identity[:subject].downcase}"
           credential.name = "#{@provider.display_name} – #{identity_display_name(identity)}"
           credential.token_endpoint = @provider.token_endpoint
@@ -222,7 +233,7 @@ module Oauth
     end
 
     def credential_labels(credential, identity)
-      labels = credential.labels || {}
+      labels = (credential.labels || {}).merge(identity[:labels] || {})
       return labels unless @app.provider == Oauth::Providers::Slack::KEY
       return labels if identity[:team_id].blank?
 
@@ -233,17 +244,10 @@ module Oauth
       identity[:name].presence || identity[:email].presence || identity[:subject]
     end
 
-    def enqueue_identity_enrichment(credential)
-      case @app.provider
-      when Oauth::Providers::Attio::KEY
-        Oauth::EnrichAttioCredentialIdentityJob.perform_later(credential.id)
-      when Oauth::Providers::Slack::KEY
-        Oauth::EnrichCredentialIdentityJob.perform_later(credential.id)
-      when Oauth::Providers::Github::KEY
-        Oauth::EnrichGithubCredentialIdentityJob.perform_later(credential.id)
-      when Oauth::Providers::Linear::KEY
-        Oauth::EnrichLinearCredentialIdentityJob.perform_later(credential.id)
-      end
+    def enqueue_post_connect_enrichment(credential)
+      return unless @app.provider == Oauth::Providers::Slack::KEY
+
+      Oauth::EnrichCredentialIdentityJob.perform_later(credential.id)
     end
 
     # Wraps a minted credential in a grantable static secret, so an operator can
@@ -264,7 +268,6 @@ module Oauth
       secret = StaticSecret.find_or_initialize_by(broker_credential: credential)
       return secret unless secret.new_record?
 
-      secret.namespace = credential.namespace
       secret.name = "#{credential.name} token"
       secret.kind = wrapping_secret_kind
       secret.assign_attributes(wrapping_secret_config) if secret.kind == CredentialProfiles::Registry::CUSTOM_KIND

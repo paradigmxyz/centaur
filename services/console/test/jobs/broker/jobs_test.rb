@@ -4,7 +4,7 @@ module Broker
   class JobsTest < ActiveJob::TestCase
     def make_credential(**overrides)
       BrokerCredential.create!({
-        namespace: "default", foreign_id: "job-#{SecureRandom.hex(4)}",
+        foreign_id: "job-#{SecureRandom.hex(4)}",
         token_endpoint: "https://idp.example/token", client_id: "cid",
         created_by: users(:acme_admin), refresh_token: "seed"
       }.merge(overrides))

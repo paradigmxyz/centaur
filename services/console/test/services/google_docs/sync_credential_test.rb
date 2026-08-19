@@ -30,7 +30,6 @@ module GoogleDocs
           GoogleDocs::SyncCredential::DRIVE_METADATA_SCOPE,
           GoogleDocs::SyncCredential::DOCS_READONLY_SCOPE
         ],
-        credential_namespace: "acme",
         created_by: users(:acme_admin)
       )
     end
@@ -38,7 +37,6 @@ module GoogleDocs
     def credential
       @credential ||= BrokerCredential.create!(
         oauth_app: google_app,
-        namespace: "acme",
         foreign_id: "google-docs-#{SecureRandom.hex(6)}",
         token_endpoint: "https://oauth2.googleapis.com/token",
         access_token: "ya29.live",

@@ -81,7 +81,7 @@ def _serialize(value: Any) -> Any:
 def _record_to_dict(row: Any) -> dict[str, Any]:
     if isinstance(row, dict):
         return {key: _serialize(value) for key, value in row.items()}
-    return {key: _serialize(row[key]) for key in row}
+    return {key: _serialize(row[key]) for key in row.keys()}
 
 
 def _connection_role(connection: dict[str, Any]) -> str | None:

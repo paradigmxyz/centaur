@@ -1,5 +1,4 @@
 default_infra:
-  namespace: default
   foreign_id: infra
   name: Infra
   labels:
@@ -8,7 +7,6 @@ default_infra:
   created_by: acme_admin
 
 acme_infra:
-  namespace: acme
   foreign_id: acme-infra
   name: Infra
   labels:
@@ -16,7 +14,6 @@ acme_infra:
   created_by: acme_admin
 
 acme_admin_role:
-  namespace: acme
   foreign_id: admin
   name: Admin
   labels:
@@ -24,7 +21,6 @@ acme_admin_role:
   created_by: acme_admin
 
 globex_infra:
-  namespace: globex
   foreign_id: globex-infra
   name: Infra
   created_by: globex_admin

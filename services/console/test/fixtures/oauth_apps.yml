@@ -9,7 +9,6 @@ acme_attio:
   allowed_scopes:
     - record_permission:read
     - object_configuration:read
-  credential_namespace: acme
   enabled: true
   created_by: acme_admin
 
@@ -23,7 +22,6 @@ acme_google:
   allowed_scopes:
     - https://www.googleapis.com/auth/gmail.readonly
     - https://www.googleapis.com/auth/calendar.readonly
-  credential_namespace: acme
   enabled: true
   created_by: acme_admin
 
@@ -34,7 +32,6 @@ acme_google_disabled:
   client_id: acme-google-disabled-client-id
   allowed_scopes:
     - https://www.googleapis.com/auth/gmail.readonly
-  credential_namespace: acme
   enabled: false
   created_by: acme_admin
 
@@ -46,7 +43,6 @@ acme_slack:
   allowed_scopes:
     - chat:write
     - channels:history
-  credential_namespace: acme
   enabled: true
   created_by: acme_admin
 
@@ -58,7 +54,6 @@ acme_github:
   allowed_scopes:
     - repo
     - read:user
-  credential_namespace: acme
   enabled: true
   created_by: acme_admin
 
@@ -70,6 +65,5 @@ acme_linear:
   allowed_scopes:
     - read
     - write
-  credential_namespace: acme
   enabled: true
   created_by: acme_admin

@@ -16,6 +16,7 @@ Use these as the main extension points:
 | `api.extraEnv` | API feature flags, worker tuning, retention, observability, and deployment-specific overrides. |
 | `apiRs.extraEnv` | Rust API feature flags, telemetry exporter settings, and deployment-specific overrides. |
 | `apiRs.metrics.*` | Prometheus/VictoriaMetrics scrape metadata for the Rust API `/metrics` endpoint. |
+| `console.sqlExporter.*` | SQL Exporter configuration and scrape metadata for Console database metrics. |
 | `slackbot.extraEnv` | Slackbot HTTP, Slack, feedback, and cross-org behavior. |
 | `sandbox.extraEnv` | Extra variables copied into every sandbox pod through `KUBERNETES_SANDBOX_EXTRA_ENV`. |
 | `overlays.sources` | Ordered repo-cache-backed overlay repos for tools, workflows, and skills; subdirs default to `tools`, `workflows`, and `.agents/skills`. |
@@ -34,11 +35,9 @@ These must exist for the normal Helm deployment. For local development,
 | --- | --- | --- |
 | `DATABASE_URL` | `secretManager.existingSecretName`; local bootstrap generates it. | API and Slackbot Postgres connection. |
 | `SLACK_SIGNING_SECRET` | `secretManager.existingSecretName`; local bootstrap reads shell env. | Slack request signature verification. |
-| `SLACKBOT_API_KEY` | `secretManager.existingSecretName`; local bootstrap reads shell env. | Static API key bootstrapped for Slackbot. |
+| `SLACKBOT_API_KEY` | `secretManager.existingSecretName`; local bootstrap reads shell env. | Dedicated Slackbot key accepted by api-rs for the Slack session namespace and workflow events. |
 | `SLACK_BOT_TOKEN` | `secretManager.existingSecretName`; local bootstrap reads shell env. | Slack Web API access for Slackbot and api-rs Slack helpers. |
-| `SANDBOX_SIGNING_KEY` | `secretManager.existingSecretName`; local bootstrap generates it. | Signing key for short-lived sandbox API tokens. |
 | `IRON_MANAGEMENT_API_KEY` | `secretManager.existingSecretName`; local bootstrap generates it. | Management key for API-created iron-proxy pods. |
-| `IRON_BROKER_TOKEN` | `secretManager.existingSecretName`; required when `tokenBroker.enabled=true`. | Bearer token iron-proxy presents to iron-token-broker and the broker enforces on its HTTP API. |
 | `OP_SERVICE_ACCOUNT_TOKEN` | Local shell, then `centaur-infra-env`; production Secret. | 1Password service-account auth when using `onepassword` secret source. |
 | `OP_VAULT` | Local shell, then `centaur-infra-env`; defaults to `ai-agents` in code. | 1Password vault used for `op://...` secret refs. |
 
@@ -48,9 +47,10 @@ Optional required-by-mode variables:
 | --- | --- | --- |
 | `OP_CONNECT_CREDENTIALS_FILE` | Local shell before `just deploy`. | Enables the 1Password Connect subchart and creates its credentials Secret. |
 | `OP_CONNECT_TOKEN` | Secret or local bootstrap shell env. | Token used by iron-proxy when `ironProxy.secretSource=onepassword-connect`. |
-| `LOCAL_DEV_API_KEY` | API env. | Static local admin/dev key bootstrapped into Postgres. |
 | `TEAMS_BOT_APP_ID`, `TEAMS_BOT_APP_PASSWORD`, `TEAMS_BOT_APP_TENANT_ID` | Local shell before `just bootstrap-secrets`; production Secret. | Required by Teamsbot when `teamsbot.enabled=true`. |
 | `TEAMSBOT_API_KEY` | `secretManager.existingSecretName`; local bootstrap generates it when Teams credentials are present and it is omitted. | Static API key used by Teamsbot. |
+| `CENTAUR_APIRS_ADMIN_API_KEY` | `secretManager.existingSecretName` or the api-rs environment. | Optional static bearer token with every api-rs capability. Generate a distinct value with `openssl rand -hex 32`. |
+| `CONSOLE_SQLEXPORTER_DATABASE_URL` | `secretManager.existingSecretName`; local bootstrap copies it from the shell when provided. | Database URL for a separately provisioned read-only PostgreSQL role. Required when `console.sqlExporter.enabled=true`. |
 
 ## Console and Permission Control Plane
 
@@ -66,12 +66,16 @@ for the operator workflow.
 | `IRON_CONTROL_INITIAL_API_KEY` | `secretManager.existingSecretName`; local bootstrap generates it when absent. | Admin API key used by api-rs and `centaur-perms`. |
 | `IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY`, `IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY`, `IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT` | `secretManager.existingSecretName`; local bootstrap generates them when absent. | Encrypts credential material at rest. Keep these stable after first boot. |
 | `IRON_CONTROL_SECRET_KEY_BASE` | `secretManager.existingSecretName`; local bootstrap generates it when absent. | Console session and application signing secret. |
-| `CENTAUR_JWT_SIGNING_SECRET` | `secretManager.existingSecretName`; local bootstrap generates it when absent. | Signs Console-issued MCP access tokens. |
+| `CENTAUR_JWT_SIGNING_SECRET` | `secretManager.existingSecretName`; local bootstrap generates it when absent. | Signs Console-issued MCP tokens, Console service tokens, and sandbox api-rs principal tokens. |
 | `console.publicUrl` | Helm value. | Public Console origin used for links and MCP authorization metadata. |
 | `console.passwordLoginEnabled` | Helm value, default `true`. | Enables the break-glass email and password login. Disable after SSO is configured for a public Console. |
 | `console.ssoEmailDomains` | Helm value. | Limits Google or Slack SSO admission by email domain. Empty accepts any IdP-authenticated email. |
+| `console.sqlExporter.enabled` | Helm value, default `false`. | Runs one internal SQL Exporter replica, initially configured with Solid Queue collectors. Enable it after the read-only database role and Secret key exist. |
+| `console.sqlExporter.metrics.*` | Helm values. | Configures the SQL Exporter metrics path and Prometheus-compatible scrape annotations. |
+| `console.sqlExporter.databaseUrlSecretKey` | Helm value, default `CONSOLE_SQLEXPORTER_DATABASE_URL`. | Selects the key in `secretManager.existingSecretName` containing the database URL for a dedicated read-only PostgreSQL role. |
+| `networkPolicy.metricsIngressSourceNamespaces` | Helm value. | Allows Prometheus-compatible collectors in the listed namespaces to scrape internal metrics Services. Collectors in the Centaur namespace are always allowed. |
 | `apiRs.syncInfraSecrets`, `IRON_CONTROL_SYNC_INFRA_SECRETS` | Helm value, default `true`. | Upserts the shared `infra` role and its harness/platform secrets. Set false only when another process owns that shared Console state. |
-| `IRON_CONTROL_URL`, `IRON_CONTROL_API_KEY`, `IRON_CONTROL_NAMESPACE` | Chart-rendered for api-rs; operator shell for `centaur-perms`. | Connects the runtime or CLI to the same Console namespace. |
+| `IRON_CONTROL_URL`, `IRON_CONTROL_API_KEY` | Chart-rendered for api-rs; operator shell for `centaur-perms`. | Connects the runtime or CLI to the Console. |
 
 Default roles and default sandbox capabilities are stored in the Console, not
 as Helm values. Configure them in **System Settings** before new principals are
@@ -113,6 +117,8 @@ created. Changing a default does not rewrite existing principals.
 | `apiRs.activitySummary.*` | Helm values, default disabled. | Enables API-RS to summarize live session activity into durable `session.activity_summary` events. |
 | `SLACK_BOT_TOKEN` | Explicit `secretKeyRef` from `secretManager.existingSecretName`. | Slack Web API access for api-rs Slack proxy and workflow Slack helpers. |
 | `OPENAI_API_KEY` | Secret mounted into api-rs, or `apiRs.extraEnv` for local/dev overrides. | OpenAI credential for activity summaries; the feature stays disabled when no key is present. |
+| `OPENAI_BASE_URL` | `apiRs.extraEnv`; default `https://api.openai.com/v1`. | OpenAI-compatible Responses API base URL for every api-rs OpenAI caller: Codex, generated session titles, and activity summaries. API-RS passes it into Codex sandboxes and derives iron-proxy's `OPENAI_API_KEY` host scope from it. |
+| `SESSION_ACTIVITY_SUMMARY_OPENAI_BASE_URL` | Deprecated `apiRs.activitySummary.openaiBaseUrl` compatibility setting. | Existing activity-summary endpoint override. `OPENAI_BASE_URL` takes precedence when both are set. |
 | `SESSION_ACTIVITY_SUMMARY_MODEL` | `apiRs.activitySummary.model`, default `gpt-5.4-nano`. | Model used for the short live activity sentence. |
 
 Sandbox lifecycle:
@@ -173,7 +179,7 @@ Execution tuning:
 | `PORT` | Runtime env. | Teamsbot HTTP port; defaults to `3100`. |
 | `LOG_LEVEL` | Runtime env. | Teamsbot JSON log level: `debug`, `info`, `warn`, `error`, or `silent`. |
 | `CENTAUR_API_URL` | Chart-rendered API service URL. | API base URL used by Teamsbot; local default is `http://127.0.0.1:8080`. |
-| `CENTAUR_API_KEY`, `TEAMSBOT_API_KEY` | Secret/env fallback. | Static API key used by Teamsbot to call the API. |
+| `TEAMSBOT_API_KEY` | `secretManager.existingSecretName`. | Dedicated API key used by Teamsbot to call api-rs. |
 | `TEAMSBOT_DATABASE_URL`, `DATABASE_URL`, `POSTGRES_URL` | Secret. | Teamsbot Postgres state store. The service refuses to boot without one unless tests/dev inject a state store. |
 | `TEAMSBOT_STATE_KEY_PREFIX` | Runtime env. | Postgres state namespace; defaults to `centaur-teamsbot`. |
 | `TEAMS_BOT_APP_ID`, `TEAMS_BOT_APP_PASSWORD`, `TEAMS_BOT_APP_TENANT_ID` | Secret. | Required Bot Framework app credentials. |
@@ -218,9 +224,7 @@ Kubernetes backend:
 | `KUBERNETES_FIREWALL_CA_SECRET_NAME`, `KUBERNETES_FIREWALL_CA_KEY_SECRET_NAME` | `firewall.existingCa*` or generated CA Secrets. | CA material for sandbox/proxy TLS interception. |
 | `KUBERNETES_SECRET_ENV_NAME`, `KUBERNETES_SECRET_ENV_PREFIX`, `KUBERNETES_BOOTSTRAP_SECRET_NAME` | `secretManager.*`, `secrets.bootstrapSecretName`. | Secrets read by API-created proxy/sandbox pods. |
 | `KUBERNETES_IRON_PROXY_IMAGE`, `KUBERNETES_IRON_PROXY_IMAGE_PULL_POLICY`, `KUBERNETES_IRON_PROXY_PORT`, `KUBERNETES_IRON_PROXY_MANAGEMENT_PORT`, `KUBERNETES_IRON_PROXY_HEALTH_PORT` | `ironProxy.*`. | Per-sandbox iron-proxy image and ports. |
-| `FIREWALL_MANAGER_SECRET_SOURCE`, `FIREWALL_MANAGER_SECRET_TTL`, `KUBERNETES_FIREWALL_MANAGER_SECRET_SOURCE` | `ironProxy.secretSource`, `ironProxy.secretTtl`. | Secret source and cache TTL for rendered proxy config. |
-| `FIREWALL_MANAGER_TOKEN_BROKER_TTL` | `tokenBroker.ttl`. | Proxy-side cache TTL for access tokens minted by iron-token-broker. Applied to every `brokered_token` secret. |
-| `KUBERNETES_TOKEN_BROKER_NAME`, `KUBERNETES_TOKEN_BROKER_URL` | `tokenBroker.*`. | iron-token-broker Deployment name and ClusterIP URL. The chart owns the broker Deployment, Service, and NetworkPolicies; the API reconciles its ConfigMap and triggers a rolling restart when the rendered content changes. |
+| `FIREWALL_MANAGER_SECRET_SOURCE`, `FIREWALL_MANAGER_SECRET_TTL` | `ironProxy.secretSource`, `ironProxy.secretTtl`. | Secret source and cache TTL for rendered proxy config. |
 | `KUBERNETES_OP_CONNECT_HOST`, `KUBERNETES_OP_CONNECT_APP_NAME`, `KUBERNETES_OP_CONNECT_PORT` | Chart helper or `api.extraEnv`. | 1Password Connect endpoint details. |
 | `KUBERNETES_API_POD_LABEL_SELECTOR` | Chart-rendered labels or `api.extraEnv`. | API pod selector for API-managed proxy policies. |
 | `KUBERNETES_EGRESS_DISCOVERY_ENABLED`, `KUBERNETES_EGRESS_SERVICE_NAMESPACE`, `KUBERNETES_CLUSTER_DOMAIN`, `KUBERNETES_EGRESS_TAILNET_FQDN_ANNOTATION` | `api.egressDiscovery.*`. | Egress service discovery for sandbox NetworkPolicies. |

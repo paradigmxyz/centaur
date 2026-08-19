@@ -20,11 +20,6 @@ set to onepassword-connect in the Helm values):
                                creates Secret centaur-onepassword-connect-credentials
   OP_CONNECT_TOKEN             Connect API token; added to centaur-infra-env
 
-Optional local-dev admin key:
-  LOCAL_DEV_API_KEY            seeded as the admin bearer for the API service
-                               (envFrom centaur-infra-env). Re-run with --force
-                               or kubectl patch to rotate.
-
 Optional repo-cache GitHub token:
   GITHUB_TOKEN                 added to centaur-infra-env when present; the
                                repo-cache DaemonSet reads it (repoCache.githubToken
@@ -78,6 +73,10 @@ Console bootstrap:
   IRON_CONTROL_DATABASE_URL    overrides the derived DSN (default points at the
                                bundled Postgres server with no database path, so
                                Rails resolves db names from its database.yml)
+  CONSOLE_SQLEXPORTER_DATABASE_URL
+                               database DSN for a separately
+                               provisioned read-only PostgreSQL role; copied
+                               into centaur-infra-env when set
   IRON_CONTROL_INITIAL_USER_EMAIL
                                initial admin email (default admin@centaur.local)
   The initial password, API key, the three ActiveRecord encryption keys, and
@@ -199,15 +198,6 @@ if secret_exists centaur-infra-env; then
   if [[ -n "${OP_CONNECT_TOKEN:-}" ]]; then
     patch_data+=("\"OP_CONNECT_TOKEN\":\"$(printf '%s' "$OP_CONNECT_TOKEN" | base64 | tr -d '\n')\"")
   fi
-  # Top-up IRON_BROKER_TOKEN for clusters bootstrapped before iron-token-broker
-  # support landed. Only generated when absent so we don't rotate it out from
-  # under cached iron-proxy access tokens on every script run.
-  if ! secret_key_present IRON_BROKER_TOKEN; then
-    patch_data+=("\"IRON_BROKER_TOKEN\":\"$(rand_hex | base64 | tr -d '\n')\"")
-  fi
-  if [[ -n "${LOCAL_DEV_API_KEY:-}" ]]; then
-    patch_data+=("\"LOCAL_DEV_API_KEY\":\"$(printf '%s' "$LOCAL_DEV_API_KEY" | base64 | tr -d '\n')\"")
-  fi
   # GITHUB_TOKEN for the repo-cache DaemonSet. Set whenever present so it can be
   # rotated; harmless when repoCache is disabled.
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then
@@ -249,6 +239,10 @@ if secret_exists centaur-infra-env; then
       ic_db_url="${existing_db_url%/ai_v2}"
     fi
     patch_data+=("\"IRON_CONTROL_DATABASE_URL\":\"$(printf '%s' "$ic_db_url" | base64 | tr -d '\n')\"")
+  fi
+  if [[ -n "${CONSOLE_SQLEXPORTER_DATABASE_URL:-}" ]] && \
+     ! secret_key_present CONSOLE_SQLEXPORTER_DATABASE_URL; then
+    patch_data+=("\"CONSOLE_SQLEXPORTER_DATABASE_URL\":\"$(printf '%s' "$CONSOLE_SQLEXPORTER_DATABASE_URL" | base64 | tr -d '\n')\"")
   fi
   if ! secret_key_present IRON_CONTROL_INITIAL_USER_EMAIL; then
     ic_email="${IRON_CONTROL_INITIAL_USER_EMAIL:-admin@centaur.local}"
@@ -315,8 +309,6 @@ else
   secret_args=(
     -n "$NAMESPACE" create secret generic centaur-infra-env
     --from-literal=IRON_MANAGEMENT_API_KEY="$(rand_hex)"
-    --from-literal=IRON_BROKER_TOKEN="$(rand_hex)"
-    --from-literal=SANDBOX_SIGNING_KEY="$(rand_hex)"
     --from-literal=OP_SERVICE_ACCOUNT_TOKEN="$OP_SERVICE_ACCOUNT_TOKEN"
     --from-literal=OP_VAULT="$OP_VAULT"
     --from-literal=SLACK_BOT_TOKEN="$SLACK_BOT_TOKEN"
@@ -334,6 +326,11 @@ else
     --from-literal=IRON_CONTROL_SECRET_KEY_BASE="$(rand_hex)$(rand_hex)"
     --from-literal=CENTAUR_JWT_SIGNING_SECRET="$(rand_hex)$(rand_hex)"
   )
+  if [[ -n "${CONSOLE_SQLEXPORTER_DATABASE_URL:-}" ]]; then
+    secret_args+=(
+      --from-literal=CONSOLE_SQLEXPORTER_DATABASE_URL="$CONSOLE_SQLEXPORTER_DATABASE_URL"
+    )
+  fi
   if [[ -n "${DISCORD_BOT_TOKEN:-}" ]]; then
     secret_args+=(
       --from-literal=DISCORD_BOT_TOKEN="$DISCORD_BOT_TOKEN"
@@ -352,9 +349,6 @@ else
   fi
   if [[ -n "${OP_CONNECT_TOKEN:-}" ]]; then
     secret_args+=(--from-literal=OP_CONNECT_TOKEN="$OP_CONNECT_TOKEN")
-  fi
-  if [[ -n "${LOCAL_DEV_API_KEY:-}" ]]; then
-    secret_args+=(--from-literal=LOCAL_DEV_API_KEY="$LOCAL_DEV_API_KEY")
   fi
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then
     secret_args+=(--from-literal=GITHUB_TOKEN="$GITHUB_TOKEN")

@@ -11,8 +11,10 @@
 //! identified by their Slack prefix rather than position, because the optional
 //! team id shifts everything after it (``T`` = team, ``C``/``G`` = channel,
 //! ``D`` = DM; a ``thread_ts`` is numeric). When a team id is present it is
-//! folded into the principal key so the same channel/user id in two workspaces
-//! never collides onto one principal.
+//! folded into a DM principal key so the same user id in two workspaces never
+//! collides onto one principal. Slack DMs require both a team id and acting user
+//! id; derivation fails rather than emitting a legacy teamless or
+//! conversation-keyed DM principal.
 //!
 //! [`derive_principal`] is pure so the mapping is unit-tested directly; callers
 //! upsert the returned [`PrincipalRef`] at session start.
@@ -21,11 +23,11 @@ use std::collections::BTreeMap;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use thiserror::Error;
 
 use crate::models::PrincipalInput;
 use crate::util::{managed_labels, slugify};
 
-const KIND_LABEL: &str = "kind";
 const SLACK_DM_KIND: &str = "slack_dm";
 const SLACK_CHANNEL_KIND: &str = "slack_channel";
 const DISCORD_CHANNEL_KIND: &str = "discord_channel";
@@ -33,29 +35,42 @@ const LINEAR_ISSUE_KIND: &str = "linear_issue";
 const TEAMS_USER_KIND: &str = "teams_user";
 const TEAMS_CONVERSATION_KIND: &str = "teams_conversation";
 
-/// The principal a session resolves to, as a stable upsert key plus a label.
+/// The principal a session resolves to, as a stable upsert key plus identity
+/// fields and extensible labels.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrincipalRef {
     pub foreign_id: String,
     pub name: String,
+    pub kind: Option<String>,
+    pub slack_user_id: Option<String>,
+    pub slack_channel_id: Option<String>,
+    pub slack_team_id: Option<String>,
     pub labels: BTreeMap<String, String>,
 }
 
+/// A chat thread does not contain enough identity information to derive its
+/// canonical principal.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum PrincipalDerivationError {
+    #[error("Slack DM principal requires a Slack team ID")]
+    MissingSlackTeamId,
+    #[error("Slack DM principal requires an acting Slack user ID")]
+    MissingSlackUserId,
+}
+
 impl PrincipalRef {
-    /// Build the upsert body for this principal in ``namespace``, tagging it as
-    /// Centaur-managed.
-    pub fn to_principal_input(&self, namespace: &str) -> PrincipalInput {
+    /// Build the upsert body for this principal, tagging it as Centaur-managed.
+    pub fn to_principal_input(&self) -> PrincipalInput {
         let mut labels = managed_labels();
         labels.extend(self.labels.clone());
         PrincipalInput {
-            namespace: namespace.to_owned(),
             foreign_id: self.foreign_id.clone(),
             name: self.name.clone(),
-            kind: labels.remove(KIND_LABEL),
-            slack_user_id: labels.remove("slack_user_id"),
-            slack_channel_id: labels.remove("slack_channel_id"),
-            slack_team_id: labels.remove("slack_team_id"),
-            slack_email: labels.remove("slack_email"),
+            kind: self.kind.clone(),
+            slack_user_id: self.slack_user_id.clone(),
+            slack_channel_id: self.slack_channel_id.clone(),
+            slack_team_id: self.slack_team_id.clone(),
+            slack_email: None,
             labels,
         }
     }
@@ -64,11 +79,11 @@ impl PrincipalRef {
 /// Resolve the principal for a thread.
 ///
 /// ``actor_user_id`` is the acting user, when known (carried in session
-/// metadata). It is used to key 1:1 Slack DMs and Teams chats without a team;
-/// channel threads key on the channel/conversation so everyone in the channel
-/// shares one principal. When the thread key is not a recognizable chat
-/// conversation, the whole key is slugged so every thread still maps to a
-/// deterministic, distinct principal.
+/// metadata). It is used to key 1:1 Slack DMs and Teams chats without a team.
+/// Slack DMs additionally require a team id. Channel threads key on the
+/// channel/conversation so everyone in the channel shares one principal. When
+/// the thread key is not a recognizable chat conversation, the whole key is
+/// slugged so every thread still maps to a deterministic, distinct principal.
 ///
 /// ``conversation_name`` is the human-readable channel name (or DM partner's
 /// display name) the slackbot resolves and carries in session metadata. When
@@ -82,7 +97,7 @@ pub fn derive_principal(
     thread_key: &str,
     actor_user_id: Option<&str>,
     conversation_name: Option<&str>,
-) -> PrincipalRef {
+) -> Result<PrincipalRef, PrincipalDerivationError> {
     derive_principal_with_slack_team(thread_key, actor_user_id, None, conversation_name)
 }
 
@@ -93,7 +108,7 @@ pub fn derive_principal_with_slack_team(
     actor_user_id: Option<&str>,
     slack_team_id: Option<&str>,
     conversation_name: Option<&str>,
-) -> PrincipalRef {
+) -> Result<PrincipalRef, PrincipalDerivationError> {
     let display_name = conversation_name
         .map(str::trim)
         .filter(|name| !name.is_empty());
@@ -104,20 +119,23 @@ pub fn derive_principal_with_slack_team(
     // into the key so the same channel id in two guilds never collides.
     if let Some((guild_id, channel_id)) = parse_discord_segments(thread_key) {
         let mut labels = BTreeMap::new();
-        labels.insert(KIND_LABEL.to_owned(), DISCORD_CHANNEL_KIND.to_owned());
         labels.insert("discord_guild_id".to_owned(), guild_id.to_owned());
         let scope = format!("{}-", slugify(guild_id));
         let key_id = channel_id.unwrap_or(guild_id);
         if let Some(channel) = channel_id {
             labels.insert("discord_channel_id".to_owned(), channel.to_owned());
         }
-        return PrincipalRef {
+        return Ok(PrincipalRef {
             foreign_id: format!("discord-channel-{scope}{}", slugify(key_id)),
             name: display_name
                 .map(|name| format!("Discord Channel #{name}"))
                 .unwrap_or_else(|| format!("Discord Channel {key_id} (guild {guild_id})")),
+            kind: Some(DISCORD_CHANNEL_KIND.to_owned()),
+            slack_user_id: None,
+            slack_channel_id: None,
+            slack_team_id: None,
             labels,
-        };
+        });
     }
 
     // Linear sessions key on the issue so every agent session on an issue shares
@@ -126,15 +144,18 @@ pub fn derive_principal_with_slack_team(
     // linearbot resolves — cosmetic, since the key stays derived from the id.
     if let Some(issue_id) = parse_linear_issue(thread_key) {
         let mut labels = BTreeMap::new();
-        labels.insert(KIND_LABEL.to_owned(), LINEAR_ISSUE_KIND.to_owned());
         labels.insert("linear_issue_id".to_owned(), issue_id.to_owned());
-        return PrincipalRef {
+        return Ok(PrincipalRef {
             foreign_id: format!("linear-issue-{}", slugify(issue_id)),
             name: display_name
                 .map(|name| format!("Linear Issue #{name}"))
                 .unwrap_or_else(|| format!("Linear Issue {issue_id}")),
+            kind: Some(LINEAR_ISSUE_KIND.to_owned()),
+            slack_user_id: None,
+            slack_channel_id: None,
+            slack_team_id: None,
             labels,
-        };
+        });
     }
 
     if let Some((conversation_id, service_url, thread_id)) =
@@ -152,44 +173,51 @@ pub fn derive_principal_with_slack_team(
         if let Some(user) = actor_user_id.map(str::trim).filter(|user| !user.is_empty())
             && !conversation_id.starts_with("19:")
         {
-            labels.insert(KIND_LABEL.to_owned(), TEAMS_USER_KIND.to_owned());
             labels.insert("teams_user_id".to_owned(), user.to_owned());
-            return PrincipalRef {
+            return Ok(PrincipalRef {
                 foreign_id: format!("teams-user-{}", slugify(user)),
                 name: display_name
                     .map(|name| format!("Teams User @{name}"))
                     .unwrap_or_else(|| format!("Teams User {user}")),
+                kind: Some(TEAMS_USER_KIND.to_owned()),
+                slack_user_id: None,
+                slack_channel_id: None,
+                slack_team_id: None,
                 labels,
-            };
+            });
         }
-        labels.insert(KIND_LABEL.to_owned(), TEAMS_CONVERSATION_KIND.to_owned());
-        return PrincipalRef {
+        return Ok(PrincipalRef {
             foreign_id: format!("teams-conversation-{}", slugify(&conversation_id)),
             name: display_name
                 .map(|name| format!("Teams Conversation {name}"))
                 .unwrap_or_else(|| format!("Teams Conversation {conversation_id}")),
+            kind: Some(TEAMS_CONVERSATION_KIND.to_owned()),
+            slack_user_id: None,
+            slack_channel_id: None,
+            slack_team_id: None,
             labels,
-        };
+        });
     }
 
     let (thread_team_id, conversation_id) = parse_slack_segments(thread_key);
     let metadata_team_id = slack_team_id.map(str::trim).filter(|team| !team.is_empty());
+    if is_direct_message(conversation_id) {
+        let team = thread_team_id
+            .or(metadata_team_id)
+            .ok_or(PrincipalDerivationError::MissingSlackTeamId)?;
+        let user = actor_user_id
+            .map(str::trim)
+            .filter(|user| !user.is_empty())
+            .ok_or(PrincipalDerivationError::MissingSlackUserId)?;
+        return Ok(slack_user_principal(user, team, display_name));
+    }
+
     // Channel principals must never be scoped by the message-derived metadata
     // team: in Slack Connect shared channels that team can identify an external
     // requester's workspace, which would fork a separate principal from the
-    // host channel's. A Slack channel id is globally unique, so an un-teamed
-    // scope is correct and collision-free. DM principals stay team-scoped so
-    // legacy DM keys that omit the team still resolve to the right per-user
-    // identity (see #882).
-    let team_id = if is_direct_message(conversation_id) {
-        thread_team_id.or(metadata_team_id)
-    } else {
-        thread_team_id
-    };
-    let mut labels = BTreeMap::new();
-    if let Some(team) = team_id {
-        labels.insert("slack_team_id".to_owned(), team.to_owned());
-    }
+    // host channel's. Thread-key team ids remain part of the established
+    // channel identity format.
+    let team_id = thread_team_id;
     let scope = team_id
         .map(|team| format!("{}-", slugify(team)))
         .unwrap_or_default();
@@ -197,43 +225,86 @@ pub fn derive_principal_with_slack_team(
         .map(|team| format!(" (team {team})"))
         .unwrap_or_default();
 
-    if is_direct_message(conversation_id)
-        && let Some(user) = actor_user_id.map(str::trim).filter(|user| !user.is_empty())
-    {
-        labels.insert(KIND_LABEL.to_owned(), SLACK_DM_KIND.to_owned());
-        labels.insert("slack_user_id".to_owned(), user.to_owned());
-        return PrincipalRef {
-            foreign_id: format!("slack-user-{scope}{}", slugify(user)),
-            name: display_name
-                .map(|name| format!("Slack DM @{name}"))
-                .unwrap_or_else(|| format!("Slack User {user}{team_suffix}")),
-            labels,
-        };
-    }
-
     if let Some(conversation_id) = conversation_id {
-        let principal_kind = if is_direct_message(Some(conversation_id)) {
-            SLACK_DM_KIND
-        } else {
-            SLACK_CHANNEL_KIND
-        };
-        labels.insert(KIND_LABEL.to_owned(), principal_kind.to_owned());
-        labels.insert("slack_channel_id".to_owned(), conversation_id.to_owned());
-        return PrincipalRef {
+        return Ok(PrincipalRef {
             foreign_id: format!("slack-channel-{scope}{}", slugify(conversation_id)),
             name: display_name
                 .map(|name| format!("Slack Channel #{name}"))
                 .unwrap_or_else(|| format!("Slack Channel {conversation_id}{team_suffix}")),
-            labels,
-        };
+            kind: Some(SLACK_CHANNEL_KIND.to_owned()),
+            slack_user_id: None,
+            slack_channel_id: Some(conversation_id.to_owned()),
+            slack_team_id: team_id.map(ToOwned::to_owned),
+            labels: BTreeMap::new(),
+        });
     }
 
-    PrincipalRef {
+    Ok(PrincipalRef {
         foreign_id: format!("thread-{}", slugify(thread_key)),
         name: display_name
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| thread_key.to_owned()),
-        labels,
+        kind: None,
+        slack_user_id: None,
+        slack_channel_id: None,
+        slack_team_id: None,
+        labels: BTreeMap::new(),
+    })
+}
+
+/// Resolve the requesting user's principal for a Slack channel thread. This is
+/// the same per-user principal a 1:1 DM with that user resolves to (both key on
+/// the user's own workspace), so a user first seen in a channel and later in a
+/// DM (or vice versa) maps to one identity. Returns `None` for DM threads (the
+/// conversation principal already is the user's) and for non-Slack thread keys,
+/// which have no Slack requester.
+///
+/// ``slack_team_id`` must be a workspace the user is proven to belong to —
+/// callers pass the home-team-gate-validated metadata team. The thread key's
+/// team segment is deliberately never used: it names where the conversation
+/// lives, not where the user belongs, and Slack user ids are only unique
+/// within a workspace, so keying a user on the thread's team could mint (or
+/// collide with) an identity in a workspace the user is not a member of.
+pub fn derive_slack_requester_principal(
+    thread_key: &str,
+    slack_user_id: &str,
+    slack_team_id: &str,
+    display_name: Option<&str>,
+) -> Option<PrincipalRef> {
+    let (_, conversation_id) = parse_slack_segments(thread_key);
+    let conversation_id = conversation_id?;
+    if is_direct_message(Some(conversation_id)) {
+        return None;
+    }
+    let user = slack_user_id.trim();
+    let team = slack_team_id.trim();
+    if user.is_empty() || team.is_empty() {
+        return None;
+    }
+    Some(slack_user_principal(
+        user,
+        team,
+        display_name.map(str::trim).filter(|name| !name.is_empty()),
+    ))
+}
+
+/// The per-user Slack principal shared by the DM branch of
+/// [`derive_principal_with_slack_team`] and
+/// [`derive_slack_requester_principal`], so the two can never mint diverging
+/// foreign ids or labels for the same user. ``team`` must be a workspace the
+/// user is proven to belong to, never one inferred from where the message
+/// happened to land.
+fn slack_user_principal(user: &str, team: &str, display_name: Option<&str>) -> PrincipalRef {
+    PrincipalRef {
+        foreign_id: format!("slack-user-{}-{}", slugify(team), slugify(user)),
+        name: display_name
+            .map(|name| format!("Slack DM @{name}"))
+            .unwrap_or_else(|| format!("Slack User {user} (team {team})")),
+        kind: Some(SLACK_DM_KIND.to_owned()),
+        slack_user_id: Some(user.to_owned()),
+        slack_channel_id: None,
+        slack_team_id: Some(team.to_owned()),
+        labels: BTreeMap::new(),
     }
 }
 
@@ -323,28 +394,54 @@ pub(crate) fn is_direct_message(conversation_id: Option<&str>) -> bool {
 mod tests {
     use super::*;
 
+    fn derive_principal(
+        thread_key: &str,
+        actor_user_id: Option<&str>,
+        conversation_name: Option<&str>,
+    ) -> PrincipalRef {
+        super::derive_principal(thread_key, actor_user_id, conversation_name)
+            .expect("principal should be derivable")
+    }
+
+    fn derive_principal_with_slack_team(
+        thread_key: &str,
+        actor_user_id: Option<&str>,
+        slack_team_id: Option<&str>,
+        conversation_name: Option<&str>,
+    ) -> PrincipalRef {
+        super::derive_principal_with_slack_team(
+            thread_key,
+            actor_user_id,
+            slack_team_id,
+            conversation_name,
+        )
+        .expect("principal should be derivable")
+    }
+
     #[test]
     fn dm_with_user_keys_on_the_user() {
-        let principal = derive_principal("slack:D0420:1780000000.0001", Some("U07ABC"), None);
-        assert_eq!(principal.foreign_id, "slack-user-u07abc");
-        assert_eq!(principal.name, "Slack User U07ABC");
+        let principal = derive_principal("slack:T123:D0420:1780000000.0001", Some("U07ABC"), None);
+        assert_eq!(principal.foreign_id, "slack-user-t123-u07abc");
+        assert_eq!(principal.name, "Slack User U07ABC (team T123)");
+        assert_eq!(principal.slack_user_id.as_deref(), Some("U07ABC"));
+        assert_eq!(principal.slack_team_id.as_deref(), Some("T123"));
+        assert_eq!(principal.kind.as_deref(), Some("slack_dm"));
+        assert!(principal.labels.is_empty());
+    }
+
+    #[test]
+    fn dm_without_team_id_is_rejected() {
         assert_eq!(
-            principal.labels.get("slack_user_id").map(String::as_str),
-            Some("U07ABC")
-        );
-        assert_eq!(
-            principal.labels.get("kind").map(String::as_str),
-            Some("slack_dm")
+            super::derive_principal("slack:D0420:1780000000.0001", Some("U07ABC"), None),
+            Err(PrincipalDerivationError::MissingSlackTeamId)
         );
     }
 
     #[test]
-    fn dm_without_user_falls_back_to_the_conversation() {
-        let principal = derive_principal("slack:D0420:1780000000.0001", None, None);
-        assert_eq!(principal.foreign_id, "slack-channel-d0420");
+    fn dm_without_user_id_is_rejected() {
         assert_eq!(
-            principal.labels.get("kind").map(String::as_str),
-            Some("slack_dm")
+            super::derive_principal("slack:T123:D0420:1780000000.0001", None, None),
+            Err(PrincipalDerivationError::MissingSlackUserId)
         );
     }
 
@@ -353,14 +450,9 @@ mod tests {
         let principal = derive_principal("chat:C123:1780000000.000000", Some("U07ABC"), None);
         assert_eq!(principal.foreign_id, "slack-channel-c123");
         assert_eq!(principal.name, "Slack Channel C123");
-        assert_eq!(
-            principal.labels.get("slack_channel_id").map(String::as_str),
-            Some("C123")
-        );
-        assert_eq!(
-            principal.labels.get("kind").map(String::as_str),
-            Some("slack_channel")
-        );
+        assert_eq!(principal.slack_channel_id.as_deref(), Some("C123"));
+        assert_eq!(principal.kind.as_deref(), Some("slack_channel"));
+        assert!(principal.labels.is_empty());
     }
 
     #[test]
@@ -374,14 +466,8 @@ mod tests {
         let principal = derive_principal("slack:T123:C456:1780000000.0001", Some("U1"), None);
         assert_eq!(principal.foreign_id, "slack-channel-t123-c456");
         assert_eq!(principal.name, "Slack Channel C456 (team T123)");
-        assert_eq!(
-            principal.labels.get("slack_team_id").map(String::as_str),
-            Some("T123")
-        );
-        assert_eq!(
-            principal.labels.get("slack_channel_id").map(String::as_str),
-            Some("C456")
-        );
+        assert_eq!(principal.slack_team_id.as_deref(), Some("T123"));
+        assert_eq!(principal.slack_channel_id.as_deref(), Some("C456"));
     }
 
     #[test]
@@ -392,7 +478,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_team_id_is_folded_into_legacy_dm_user_key() {
+    fn teamless_dm_thread_key_uses_metadata_team_id() {
         let principal = derive_principal_with_slack_team(
             "slack:D9:ts",
             Some("U07ABC"),
@@ -401,14 +487,8 @@ mod tests {
         );
         assert_eq!(principal.foreign_id, "slack-user-t123-u07abc");
         assert_eq!(principal.name, "Slack DM @Ada Lovelace");
-        assert_eq!(
-            principal.labels.get("slack_team_id").map(String::as_str),
-            Some("T123")
-        );
-        assert_eq!(
-            principal.labels.get("slack_user_id").map(String::as_str),
-            Some("U07ABC")
-        );
+        assert_eq!(principal.slack_team_id.as_deref(), Some("T123"));
+        assert_eq!(principal.slack_user_id.as_deref(), Some("U07ABC"));
     }
 
     #[test]
@@ -422,11 +502,8 @@ mod tests {
             None,
         );
         assert_eq!(principal.foreign_id, "slack-channel-c456");
-        assert_eq!(principal.labels.get("slack_team_id"), None);
-        assert_eq!(
-            principal.labels.get("slack_channel_id").map(String::as_str),
-            Some("C456")
-        );
+        assert_eq!(principal.slack_team_id, None);
+        assert_eq!(principal.slack_channel_id.as_deref(), Some("C456"));
     }
 
     #[test]
@@ -438,10 +515,7 @@ mod tests {
             None,
         );
         assert_eq!(principal.foreign_id, "slack-user-t-from-key-u07abc");
-        assert_eq!(
-            principal.labels.get("slack_team_id").map(String::as_str),
-            Some("T_FROM_KEY")
-        );
+        assert_eq!(principal.slack_team_id.as_deref(), Some("T_FROM_KEY"));
     }
 
     #[test]
@@ -461,8 +535,9 @@ mod tests {
 
     #[test]
     fn conversation_name_overrides_the_dm_display_name() {
-        let principal = derive_principal("slack:D0420:ts", Some("U07ABC"), Some("Ada Lovelace"));
-        assert_eq!(principal.foreign_id, "slack-user-u07abc");
+        let principal =
+            derive_principal("slack:T123:D0420:ts", Some("U07ABC"), Some("Ada Lovelace"));
+        assert_eq!(principal.foreign_id, "slack-user-t123-u07abc");
         assert_eq!(principal.name, "Slack DM @Ada Lovelace");
     }
 
@@ -491,10 +566,8 @@ mod tests {
             thread_a.labels.get("discord_guild_id").map(String::as_str),
             Some("111")
         );
-        assert_eq!(
-            thread_a.labels.get("kind").map(String::as_str),
-            Some("discord_channel")
-        );
+        assert_eq!(thread_a.kind.as_deref(), Some("discord_channel"));
+        assert!(!thread_a.labels.contains_key("kind"));
     }
 
     #[test]
@@ -509,10 +582,8 @@ mod tests {
             session_a.labels.get("linear_issue_id").map(String::as_str),
             Some("issue-1")
         );
-        assert_eq!(
-            session_a.labels.get("kind").map(String::as_str),
-            Some("linear_issue")
-        );
+        assert_eq!(session_a.kind.as_deref(), Some("linear_issue"));
+        assert!(!session_a.labels.contains_key("kind"));
     }
 
     #[test]
@@ -565,10 +636,8 @@ mod tests {
                 .map(String::as_str),
             Some("https://smba.trafficmanager.net/amer/")
         );
-        assert_eq!(
-            principal.labels.get("kind").map(String::as_str),
-            Some("teams_conversation")
-        );
+        assert_eq!(principal.kind.as_deref(), Some("teams_conversation"));
+        assert!(!principal.labels.contains_key("kind"));
     }
 
     #[test]
@@ -613,16 +682,116 @@ mod tests {
             principal.labels.get("teams_user_id").map(String::as_str),
             Some("aad-user-1")
         );
+        assert_eq!(principal.kind.as_deref(), Some("teams_user"));
+        assert!(!principal.labels.contains_key("kind"));
+    }
+
+    #[test]
+    fn requester_channel_thread_keys_on_the_user() {
+        let principal = derive_slack_requester_principal(
+            "slack:T123:C456:1780000000.0001",
+            "U07ABC",
+            "T123",
+            Some("Ada Lovelace"),
+        )
+        .unwrap();
+        assert_eq!(principal.foreign_id, "slack-user-t123-u07abc");
+        assert_eq!(principal.name, "Slack DM @Ada Lovelace");
+        assert_eq!(principal.kind.as_deref(), Some("slack_dm"));
+        assert_eq!(principal.slack_user_id.as_deref(), Some("U07ABC"));
+        assert_eq!(principal.slack_team_id.as_deref(), Some("T123"));
+        assert!(principal.labels.is_empty());
+    }
+
+    #[test]
+    fn requester_matches_the_dm_principal_for_the_same_user() {
+        let requester = derive_slack_requester_principal(
+            "slack:T123:C456:1780000000.0001",
+            "U07ABC",
+            "T123",
+            None,
+        )
+        .unwrap();
+        let dm = derive_principal("slack:T123:D9:ts", Some("U07ABC"), None);
+        assert_eq!(requester.foreign_id, dm.foreign_id);
+        assert_eq!(requester.kind, dm.kind);
+        assert_eq!(requester.slack_user_id, dm.slack_user_id);
+        assert_eq!(requester.slack_team_id, dm.slack_team_id);
+    }
+
+    #[test]
+    fn requester_dm_thread_resolves_none() {
         assert_eq!(
-            principal.labels.get("kind").map(String::as_str),
-            Some("teams_user")
+            derive_slack_requester_principal("slack:T123:D9:ts", "U07ABC", "T123", None),
+            None
         );
     }
 
     #[test]
+    fn requester_non_slack_threads_resolve_none() {
+        for thread_key in [
+            "discord:111:222:333",
+            "linear:issue-1:s:sess-a",
+            "teams:abc:def",
+            "mcp:prn_x",
+            "api",
+        ] {
+            assert_eq!(
+                derive_slack_requester_principal(thread_key, "U07ABC", "T123", None),
+                None,
+                "expected no requester for {thread_key}"
+            );
+        }
+    }
+
+    #[test]
+    fn requester_teamless_thread_key_uses_verified_team() {
+        let principal = derive_slack_requester_principal("chat:C123:ts", "U1", "T9", None).unwrap();
+        assert_eq!(principal.foreign_id, "slack-user-t9-u1");
+        assert_eq!(principal.slack_team_id.as_deref(), Some("T9"));
+    }
+
+    #[test]
+    fn requester_ignores_the_thread_key_team() {
+        let principal = derive_slack_requester_principal(
+            "slack:T_FROM_KEY:C456:ts",
+            "U1",
+            "T_FROM_METADATA",
+            None,
+        )
+        .unwrap();
+        assert_eq!(principal.foreign_id, "slack-user-t-from-metadata-u1");
+        assert_eq!(principal.slack_team_id.as_deref(), Some("T_FROM_METADATA"));
+    }
+
+    // The thread key's team must never substitute for a missing verified team:
+    // it names where the conversation lives, not where the user belongs.
+    #[test]
+    fn requester_blank_team_resolves_none() {
+        assert_eq!(
+            derive_slack_requester_principal("slack:T123:C456:ts", "U07ABC", "  ", None),
+            None
+        );
+    }
+
+    #[test]
+    fn requester_blank_user_resolves_none() {
+        assert_eq!(
+            derive_slack_requester_principal("slack:T123:C456:ts", "  ", "T123", None),
+            None
+        );
+    }
+
+    #[test]
+    fn requester_synthetic_name_without_display_name() {
+        let principal =
+            derive_slack_requester_principal("slack:T123:C456:ts", "U07ABC", "T123", None).unwrap();
+        assert_eq!(principal.name, "Slack User U07ABC (team T123)");
+    }
+
+    #[test]
     fn principal_input_uses_first_class_slack_identity_fields() {
-        let input = derive_principal("chat:C1:ts", None, None).to_principal_input("default");
-        assert_eq!(input.namespace, "default");
+        let input = derive_principal("chat:C1:ts", None, None).to_principal_input();
         assert_eq!(input.foreign_id, "slack-channel-c1");
         assert_eq!(
             input.labels.get("managed-by").map(String::as_str),

@@ -14,7 +14,7 @@ module Console
     before_action :set_credential, only: %i[edit update destroy]
 
     def new
-      @credential = BrokerCredential.new(namespace: "default")
+      @credential = BrokerCredential.new
     end
 
     def create
@@ -57,11 +57,10 @@ module Console
     # stored values in place. Fresh initial values reschedule the credential and
     # mirror the API controller's handling.
     def assign_form(credential)
-      fields = credential_params.permit(:namespace, :foreign_id, :name, :description,
+      fields = credential_params.permit(:foreign_id, :name, :description,
                                         :grant, :token_endpoint, :client_id,
                                         :early_refresh_slack_seconds, :early_refresh_fraction,
                                         :max_refresh_interval_seconds, :refresh_timeout_seconds)
-      fields[:namespace] = fields[:namespace].presence || "default"
       fields[:foreign_id] = fields[:foreign_id].presence
       credential.assign_attributes(fields)
       credential.scopes = scope_params

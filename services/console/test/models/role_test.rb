@@ -3,14 +3,13 @@ require "test_helper"
 class RoleTest < ActiveSupport::TestCase
   def valid_attrs(overrides = {})
     {
-      namespace: "acme",
       foreign_id: "observability",
       name: "Observability",
       created_by: users(:acme_admin)
     }.merge(overrides)
   end
 
-  test "is valid with namespace and created_by" do
+  test "is valid with created_by" do
     assert Role.new(valid_attrs).valid?
   end
 
@@ -31,7 +30,6 @@ class RoleTest < ActiveSupport::TestCase
 
     role = Role.ensure_default_infra!(created_by: owner)
 
-    assert_equal "default", role.namespace
     assert_equal "infra", role.foreign_id
     assert_equal "Infra", role.name
     assert_equal({ "managed-by" => "centaur" }, role.labels)
@@ -60,28 +58,14 @@ class RoleTest < ActiveSupport::TestCase
     assert_not roles(:default_infra).reload.assign_by_default?
   end
 
-  test "requires namespace" do
-    role = Role.new(valid_attrs(namespace: nil))
-    assert_not role.valid?
-    assert_includes role.errors[:namespace], "can't be blank"
-  end
-
-  test "rejects non-url-safe namespace" do
-    role = Role.new(valid_attrs(namespace: "bad space"))
-    assert_not role.valid?
-    assert_includes role.errors[:namespace], Role::URL_SAFE_MESSAGE
-  end
-
   test "foreign_id is globally unique" do
-    dup = Role.new(valid_attrs(foreign_id: "acme-infra"))
+    dup = Role.new(valid_attrs(foreign_id: "infra"))
     assert_not dup.valid?
     assert_includes dup.errors[:foreign_id], "has already been taken"
   end
 
-  test "rejects the same foreign_id in different namespaces" do
-    role = Role.new(valid_attrs(namespace: "globex", foreign_id: "admin"))
-    assert_not role.valid?
-    assert_includes role.errors[:foreign_id], "has already been taken"
+  test "rejects the same foreign_id globally" do
+    assert_not Role.new(valid_attrs(foreign_id: "admin")).valid?
   end
 
   test "allows a nil foreign_id" do
@@ -94,9 +78,8 @@ class RoleTest < ActiveSupport::TestCase
     assert_includes role.errors[:foreign_id], "must not start with \"role_\", which is reserved for opaque ids"
   end
 
-  test "namespace and foreign_id are immutable after creation" do
-    role = roles(:acme_infra)
-    assert_raises(ActiveRecord::ReadonlyAttributeError) { role.update!(namespace: "globex") }
+  test "foreign_id is immutable after creation" do
+    role = roles(:acme_admin_role)
     assert_raises(ActiveRecord::ReadonlyAttributeError) { role.update!(foreign_id: "other") }
   end
 

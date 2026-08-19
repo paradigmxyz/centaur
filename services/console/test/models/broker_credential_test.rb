@@ -21,7 +21,7 @@ class BrokerCredentialTest < ActiveSupport::TestCase
 
   def build_credential(refresh_token: "seed-rt", **overrides)
     BrokerCredential.new({
-      namespace: "default", foreign_id: "cred-#{SecureRandom.hex(4)}",
+      foreign_id: "cred-#{SecureRandom.hex(4)}",
       token_endpoint: "https://idp.example/token", scopes: %w[a b],
       client_id: "cid", client_secret: "sec",
       created_by: users(:acme_admin), refresh_token: refresh_token
@@ -49,9 +49,9 @@ class BrokerCredentialTest < ActiveSupport::TestCase
 
   test "at most one wrapping static secret per credential" do
     cred = create_credential
-    StaticSecret.create!(namespace: "default", name: "wrapper", broker_credential: cred,
+    StaticSecret.create!(name: "wrapper", broker_credential: cred,
                          inject_config: { "header" => "Authorization" })
-    dup = StaticSecret.new(namespace: "default", name: "dup", broker_credential: cred,
+    dup = StaticSecret.new(name: "dup", broker_credential: cred,
                            inject_config: { "header" => "Authorization" })
     assert_raises(ActiveRecord::RecordNotUnique) { dup.save!(validate: false) }
   end
@@ -107,7 +107,7 @@ class BrokerCredentialTest < ActiveSupport::TestCase
       provider: "google", slug: "slug-#{SecureRandom.hex(4)}",
       client_id: "app-cid", client_secret: "app-secret",
       allowed_scopes: %w[a b],
-      credential_namespace: "default", created_by: users(:acme_admin)
+      created_by: users(:acme_admin)
     }.merge(overrides))
   end
 

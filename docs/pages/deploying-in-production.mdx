@@ -59,13 +59,13 @@ Minimum keys:
 
 | Secret | Required for | Notes |
 |--------|--------------|-------|
-| `DATABASE_URL` | API | Postgres connection string. |
+| `DATABASE_URL` | API | Postgres connection string. Make sure the password is URL-encoded. |
 | `POSTGRES_PASSWORD` | Bundled Postgres | Password used when the chart manages Postgres. |
 | `IRON_MANAGEMENT_API_KEY` | [iron-proxy](https://docs.iron.sh) management API | Generate with `openssl rand -hex 32`. |
-| `SANDBOX_SIGNING_KEY` | Sandbox API tokens | Generate with `openssl rand -hex 32`; keeps sandbox tokens valid across API restarts. |
 | `SLACK_BOT_TOKEN` | Slackbot/API | Bot User OAuth Token from the Slack app. |
 | `SLACK_SIGNING_SECRET` | Slackbot/API | Used to verify Slack webhook signatures. |
-| `SLACKBOT_API_KEY` | Slackbot to API | Static service token; API bootstraps it into Postgres on startup with `agent` scope. |
+| `SLACKBOT_API_KEY` | Slackbot to API | Dedicated static service token restricted to Slack session routes and workflow event emission. |
+| `CENTAUR_APIRS_ADMIN_API_KEY` | Optional administrator access to API | Static bearer token with every api-rs capability. Generate with `openssl rand -hex 32`, store it in the infra Secret, and keep it distinct from all ingress keys. |
 | `OP_CONNECT_TOKEN` | [iron-proxy](https://docs.iron.sh) 1Password Connect source (preferred) | Needed when `ironProxy.secretSource` is `onepassword-connect`. |
 | `OP_SERVICE_ACCOUNT_TOKEN` | [iron-proxy](https://docs.iron.sh) 1Password service-account source | Needed when `ironProxy.secretSource` is `onepassword`. |
 | `OP_VAULT` | [iron-proxy](https://docs.iron.sh) 1Password source | Vault name or id used for `op://` references (either mode). |
@@ -83,15 +83,15 @@ component. Add these keys to the same infra Secret:
 | `IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY` | Console encryption at rest | Generate a separate long random value and keep it stable. |
 | `IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT` | Console encryption at rest | Generate a separate long random value and keep it stable. |
 | `IRON_CONTROL_SECRET_KEY_BASE` | Console sessions and signing | Generate at least 64 random bytes. |
-| `CENTAUR_JWT_SIGNING_SECRET` | Console-issued MCP access tokens | Generate at least 64 random bytes. |
+| `CENTAUR_JWT_SIGNING_SECRET` | Console-issued MCP, Console service, and sandbox api-rs tokens | Generate at least 64 random bytes. Console mints its own purpose-bound service JWT from this existing signing secret. |
 
 The bootstrap user is created only when the Console has no users. Do not rotate
 the ActiveRecord encryption keys as an ordinary credential rotation: existing
 encrypted records become unreadable without an explicit key-migration plan.
 
-`SLACKBOT_API_KEY` is not created with the admin API during initial boot, because
-the API process requires it before it can start. Generate a high-entropy value,
-store it in the infra Secret, and reuse the same value in Slackbot.
+Generate distinct high-entropy values for each enabled ingress service key.
+Store them in the infra Secret. api-rs rejects duplicate configured tokens at
+startup.
 
 ## 3. Configure Harness Credentials
 
@@ -105,6 +105,11 @@ Store one secret per enabled harness credential:
 | Amp | `amp` | `--amp` | `AMP_API_KEY` | `ampcode.com` |
 | Claude Code | `claude-code` | `--claude` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
 | pi-mono | `pi-mono` | `--pi` | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
+
+`sandbox.harnessEngine` and the selectors above apply when a session is created.
+A session records its harness and keeps it for the life of the thread, so
+changing the chart value does not move existing threads onto another harness.
+Start a new thread to pick one up.
 
 In normal sandbox mode, containers receive placeholder values such as
 `OPENAI_API_KEY=OPENAI_API_KEY`. [iron-proxy](https://docs.iron.sh) swaps the
@@ -149,32 +154,26 @@ Codex supports two authentication modes, selected per deployment with the
 | Mode | Upstream | Secrets required |
 |------|----------|------------------|
 | `api_key` (default) | `api.openai.com` | `OPENAI_API_KEY` |
-| `access_token` | `chatgpt.com` | `OPENAI_CODEX_CLIENT_ID`, `OPENAI_CODEX_BLOB`, `OPENAI_CODEX_ACCOUNT_ID` |
+| `access_token` | `chatgpt.com` | Console broker credential `openai-codex`; `OPENAI_CODEX_ACCOUNT_ID` |
 
 `access_token` mode routes Codex through a ChatGPT account rather than a raw
-API key. [iron-token-broker](https://docs.iron.sh) holds the refresh token
-and mints short-lived access tokens, which iron-proxy injects on outbound
-requests so the sandbox never sees them.
+API key. The Console holds the refresh token and its background worker mints
+and refreshes short-lived access tokens. Proxy sync delivers the current token
+to iron-proxy, which injects it on outbound requests so the sandbox never sees
+it.
 
-Store these three items in your secrets backend (1Password vault, Kubernetes
-Secret, etc.) when running in `access_token` mode:
+Run `codex login` locally, then create a Console broker credential with:
 
-- `OPENAI_CODEX_CLIENT_ID`: the Codex CLI's OAuth client id. This is a
-  fixed, publicly known constant: `app_EMoamEEZ73f0CkXaXp7hrann`. It is
-  the same for every Codex install and never rotates, but the broker
-  still resolves it through your secrets backend, so store the literal
-  value as-is.
-- `OPENAI_CODEX_BLOB`: a JSON document `{"refresh_token": "..."}`. The
-  broker rotates this in place on every refresh, so the backing item must
-  be writable.
-- `OPENAI_CODEX_ACCOUNT_ID`: the ChatGPT account UUID the credential is
-  bound to. It is static, but iron-proxy injects it as the
-  `chatgpt-account-id` header so the backend can route to the right
-  workspace. Store it alongside the other two, not in code.
+- Foreign ID: `openai-codex`.
+- Token endpoint: `https://auth.openai.com/oauth/token`.
+- Client ID: `app_EMoamEEZ73f0CkXaXp7hrann`.
+- Refresh token: the value from `~/.codex/auth.json`.
 
-To bootstrap, run `codex login` locally, then copy the refresh token and
-account id from `~/.codex/auth.json` into the matching secret items. Use
-the constant above for `OPENAI_CODEX_CLIENT_ID`.
+The Console encrypts the refresh token at rest and updates it after every
+rotation. Store `OPENAI_CODEX_ACCOUNT_ID`, the ChatGPT account UUID from the
+same login file, in the configured secrets backend. iron-proxy injects it as
+the `chatgpt-account-id` header so the backend can route to the correct
+workspace.
 
 ### Claude Auth Modes
 
@@ -195,31 +194,27 @@ with the `CLAUDE_CODE_AUTH_MODE` env var on the sandbox (set it via
 | Mode | Upstream | Secrets required |
 |------|----------|------------------|
 | `api_key` (default) | `api.anthropic.com` | `ANTHROPIC_API_KEY` |
-| `access_token` | `api.anthropic.com` | `CLAUDE_CODE_CLIENT_ID`, `CLAUDE_CODE_BLOB` |
+| `access_token` | `api.anthropic.com` | Console broker credential `anthropic-claude` |
 
 `access_token` mode routes Claude Code through a Claude.ai Pro or Max
-subscription rather than a raw API key. [iron-token-broker](https://docs.iron.sh)
-holds the refresh token and mints short-lived access tokens, which iron-proxy
-injects on outbound requests so the sandbox never sees them. The entrypoint
-plants a dummy `~/.claude/.credentials.json` so the CLI emits OAuth-shaped
-requests; the broker overwrites the Bearer at request time.
+subscription rather than a raw API key. The Console holds the refresh token and
+its background worker mints and refreshes short-lived access tokens. Proxy sync
+delivers the current token to iron-proxy, which injects it on outbound requests
+so the sandbox never sees it. The entrypoint plants a dummy
+`~/.claude/.credentials.json` so the CLI emits OAuth-shaped requests;
+iron-proxy overwrites the Bearer at request time.
 
-Store these two items in your secrets backend (1Password vault, Kubernetes
-Secret, etc.) when running in `access_token` mode:
+Run `claude login` locally, then create a Console broker credential with:
 
-- `CLAUDE_CODE_CLIENT_ID`: the Claude Code CLI's OAuth client id. This
-  is a fixed, publicly known constant:
-  `9d1c250a-e61b-44d9-88ed-5944d1962f5e`. It is the same for every Claude
-  Code install and never rotates, but the broker still resolves it through
-  your secrets backend, so store the literal value as-is.
-- `CLAUDE_CODE_BLOB`: a JSON document `{"refresh_token": "..."}`. The
-  broker rotates this in place on every refresh, so the backing item must be
-  writable.
+- Foreign ID: `anthropic-claude`.
+- Token endpoint: `https://console.anthropic.com/v1/oauth/token`.
+- Client ID: `9d1c250a-e61b-44d9-88ed-5944d1962f5e`.
+- Refresh token: the value from `~/.claude/.credentials.json`, or from the
+  `Claude Code-credentials` keychain item on macOS.
 
-To bootstrap, run `claude login` locally, then copy the refresh token from
-`~/.claude/.credentials.json` (or from the `Claude Code-credentials` keychain
-item on macOS) into `CLAUDE_CODE_BLOB`. Use the constant above for
-`CLAUDE_CODE_CLIENT_ID`.
+The Console encrypts the refresh token at rest and updates it after every
+rotation. No Claude OAuth credential needs to be copied into the deployment's
+environment or 1Password secret source.
 
 ## 4. Configure Advanced Permissioning
 
@@ -276,6 +271,10 @@ validates Slack's signature and then calls the Centaur API separately.
 The Slackbot accepts Slack events at `/api/webhooks/slack`. It also registers
 compatibility paths for `/api/slack/events`, `/api/slack/actions`,
 `/api/slack/options`, and `/api/slack/commands`.
+
+For Slack Connect channels, follow [Enable Centaur for External Slack
+Channels](/secrets/advanced-permissioning#enable-centaur-for-external-slack-channels)
+before adding Centaur to the channel.
 
 ## 6. Deploy With Helm
 
@@ -377,21 +376,27 @@ Run one agent turn from inside the api-rs deployment:
 ```bash
 THREAD_KEY=cli:production-smoke-codex
 THREAD_PATH=$(jq -rn --arg v "$THREAD_KEY" '$v|@uri')
+CENTAUR_API_TOKEN=$(kubectl exec -n centaur-system deploy/centaur-centaur-console -- \
+  bin/rails runner 'print ApiServer::Jwt.encode_for_console_service')
 
 SESSION=$(kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- curl -s -X POST "http://localhost:8080/api/session/${THREAD_PATH}" \
+  -H "Authorization: Bearer ${CENTAUR_API_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{"harness_type":"codex","on_harness_conflict":"restart"}')
 
 kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- curl -s -X POST "http://localhost:8080/api/session/${THREAD_PATH}/messages" \
+  -H "Authorization: Bearer ${CENTAUR_API_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{"messages":[{"role":"user","parts":[{"type":"text","text":"Reply with exactly PONG."}]}]}'
 
 EXECUTE=$(kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- curl -s -X POST "http://localhost:8080/api/session/${THREAD_PATH}/execute" \
+  -H "Authorization: Bearer ${CENTAUR_API_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{"input_lines":["{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Reply with exactly PONG.\"}]}}"]}')
 EXECUTION_ID=$(printf '%s' "$EXECUTE" | jq -r '.execution_id')
 
 kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- curl -s -N \
+  -H "Authorization: Bearer ${CENTAUR_API_TOKEN}" \
   "http://localhost:8080/api/session/${THREAD_PATH}/events?execution_id=${EXECUTION_ID}&after_event_id=0"
 ```
 

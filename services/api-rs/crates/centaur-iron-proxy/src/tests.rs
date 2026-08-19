@@ -27,6 +27,17 @@ fn harness_auth_fragments_are_baked_in() {
         Some("OPENROUTER_API_KEY")
     );
 
+    let hermes = harness_auth_fragment("hermes", "api_key").unwrap().unwrap();
+    assert_eq!(
+        hermes.transforms[0].config.secrets[0].rules[0]["host"].as_str(),
+        Some("inference-api.nousresearch.com")
+    );
+    let hermes_placeholders = placeholder_env(&[hermes]);
+    assert_eq!(
+        hermes_placeholders.get("NOUS_API_KEY").map(String::as_str),
+        Some("NOUS_API_KEY")
+    );
+
     let meta_ai = harness_auth_fragment("meta-ai", "api_key")
         .unwrap()
         .unwrap();

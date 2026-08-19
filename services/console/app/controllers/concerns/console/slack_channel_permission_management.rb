@@ -5,7 +5,7 @@ module Console
     private
 
     def load_slack_channel_permission_form(owner)
-      @slack_channel_catalog = SlackChannelCatalog.fetch
+      @slack_channel_catalog = SlackChannelCatalogProvider.fetch
       @slack_channel_names = @slack_channel_catalog.channels.to_h { |channel| [ channel.id, channel.name ] }
       @slack_channel_permissions = owner.slack_channel_permissions.ordered
       @slack_channel_options = @slack_channel_catalog.channels.map do |channel|

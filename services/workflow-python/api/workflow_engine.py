@@ -138,6 +138,30 @@ class WorkflowContext:
     async def start_agent(self, *args: Any, text: str | None = None, **kwargs: Any) -> Any:
         return await self.run_agent(*args, text=text, **kwargs)
 
+    async def run_agents(
+        self,
+        agents: list[dict[str, Any]],
+        *,
+        max_concurrency: int | None = None,
+    ) -> dict[str, Any]:
+        """Run named agent turns concurrently and return every outcome in input order."""
+        if not isinstance(agents, list):
+            raise TypeError("run_agents agents must be a list")
+
+        normalized_agents: list[dict[str, Any]] = []
+        for index, agent in enumerate(agents):
+            if not isinstance(agent, dict):
+                raise TypeError(f"run_agents agent at index {index} must be a dict")
+            normalized_agents.append({**self._agent_defaults, **agent})
+
+        request: dict[str, Any] = {
+            "type": "ctx.run_agents",
+            "agents": normalized_agents,
+        }
+        if max_concurrency is not None:
+            request["max_concurrency"] = max_concurrency
+        return await self._rpc.request(request)
+
     async def start_workflow(
         self,
         workflow_name: str,

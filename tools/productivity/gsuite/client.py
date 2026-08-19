@@ -756,11 +756,6 @@ def _download_attachment_bytes(
     attachment_url: str | None = None,
 ) -> bytes:
     """Fetch bytes from Centaur's thread-scoped attachment API."""
-    if secret("CENTAUR_SANDBOX_API_SERVER_ENABLED", "true").strip().lower() == "false":
-        raise RuntimeError(
-            "Drive uploads from Centaur attachments require the API server sandbox capability, "
-            "but it is disabled for this principal."
-        )
     path = attachment_url
     if attachment_id:
         path = f"/agent/attachments/{attachment_id}/download"
@@ -938,6 +933,226 @@ def drive_get(file_id: str) -> dict:
         "parent_ids": result.get("parents", []),
         "owners": [o.get("emailAddress", "") for o in result.get("owners", [])],
     }
+
+
+DRIVE_REVISION_FIELDS = (
+    "id,mimeType,modifiedTime,keepForever,published,publishAuto,"
+    "publishedOutsideDomain,publishedLink,originalFilename,md5Checksum,size,"
+    "lastModifyingUser(displayName,emailAddress,photoLink,me,permissionId),exportLinks"
+)
+DRIVE_EXPORT_FORMATS = {
+    "txt": "text/plain",
+    "pdf": "application/pdf",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "html": "text/html",
+    "csv": "text/csv",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "md": "text/markdown",
+}
+
+
+def _normalize_drive_revision(revision: dict) -> dict:
+    user = revision.get("lastModifyingUser") or {}
+    return {
+        "id": revision.get("id", ""),
+        "mime_type": revision.get("mimeType", ""),
+        "modified_time": revision.get("modifiedTime", ""),
+        "keep_forever": revision.get("keepForever", False),
+        "published": revision.get("published", False),
+        "publish_auto": revision.get("publishAuto", False),
+        "published_outside_domain": revision.get("publishedOutsideDomain", False),
+        "published_link": revision.get("publishedLink", ""),
+        "original_filename": revision.get("originalFilename", ""),
+        "md5_checksum": revision.get("md5Checksum", ""),
+        "size": int(revision.get("size") or 0),
+        "last_modifying_user": {
+            "display_name": user.get("displayName", ""),
+            "email": user.get("emailAddress", ""),
+            "photo_link": user.get("photoLink", ""),
+            "is_me": user.get("me", False),
+            "permission_id": user.get("permissionId", ""),
+        },
+        "export_links": revision.get("exportLinks") or {},
+    }
+
+
+def drive_list_revisions(file_id: str, max_results: int = 200) -> list[dict]:
+    """List revisions for a Google Drive file.
+
+    This supports native Google Docs, Sheets, and Slides files as well as
+    binary files. Google can omit older entries for files with a large or
+    frequently updated revision history.
+
+    Args:
+        file_id: The Google Drive file ID
+        max_results: Maximum number of revisions to return
+
+    Returns:
+        Revision metadata ordered as returned by Google Drive
+    """
+    if max_results < 1:
+        raise ValueError("max_results must be at least 1")
+
+    service = get_drive_service()
+    revisions: list[dict] = []
+    page_token: str | None = None
+
+    while len(revisions) < max_results:
+        request_args = {
+            "fileId": file_id,
+            "pageSize": min(1000, max_results - len(revisions)),
+            "fields": f"nextPageToken,revisions({DRIVE_REVISION_FIELDS})",
+        }
+        if page_token:
+            request_args["pageToken"] = page_token
+
+        result = service.revisions().list(**request_args).execute()
+        revisions.extend(
+            _normalize_drive_revision(revision) for revision in result.get("revisions", [])
+        )
+        page_token = result.get("nextPageToken")
+        if not page_token:
+            break
+
+    return revisions[:max_results]
+
+
+def drive_get_revision(file_id: str, revision_id: str) -> dict:
+    """Get metadata and historical export links for a Drive file revision.
+
+    Args:
+        file_id: The Google Drive file ID
+        revision_id: Revision ID returned by drive_list_revisions
+
+    Returns:
+        Revision metadata, including available export links
+    """
+    service = get_drive_service()
+    result = (
+        service.revisions()
+        .get(
+            fileId=file_id,
+            revisionId=revision_id,
+            fields=DRIVE_REVISION_FIELDS,
+        )
+        .execute()
+    )
+    return _normalize_drive_revision(result)
+
+
+def _drive_export_mime_type(export_format: str) -> str:
+    mime_type = DRIVE_EXPORT_FORMATS.get(export_format)
+    if not mime_type:
+        supported_formats = ", ".join(DRIVE_EXPORT_FORMATS)
+        raise ValueError(
+            f"Unsupported export format: {export_format}. Supported: {supported_formats}"
+        )
+    return mime_type
+
+
+def _drive_export_revision_bytes(
+    file_id: str,
+    revision_id: str,
+    export_format: str = "pdf",
+) -> tuple[dict, str, bytes]:
+    mime_type = _drive_export_mime_type(export_format)
+    metadata = drive_get(file_id)
+    revision = drive_get_revision(file_id, revision_id)
+    export_url = revision["export_links"].get(mime_type)
+    if not export_url:
+        available_formats = sorted(
+            export_format_name
+            for export_format_name, candidate_mime_type in DRIVE_EXPORT_FORMATS.items()
+            if candidate_mime_type in revision["export_links"]
+        )
+        available = ", ".join(available_formats) or "none"
+        raise ValueError(
+            f"Revision {revision_id} cannot be exported as {export_format}. "
+            f"Available formats: {available}"
+        )
+
+    # iron-proxy injects OAuth only for docs.google.com. The sandbox request has
+    # no Authorization header of its own, so a cross-host redirect to Google's
+    # signed content URL cannot forward the bearer token.
+    response, content = _build_http().request(export_url, method="GET")
+    status = int(response.status)
+    if not 200 <= status < 300:
+        raise RuntimeError(f"Google Drive revision export failed with HTTP {status}")
+
+    return metadata, mime_type, bytes(content)
+
+
+def _drive_download_revision_bytes(
+    file_id: str,
+    revision_id: str,
+) -> tuple[dict, dict, bytes]:
+    """Download the original bytes for a non-Google-Workspace revision."""
+    metadata = drive_get(file_id)
+    revision = drive_get_revision(file_id, revision_id)
+    mime_type = revision["mime_type"] or metadata["mime_type"]
+    if mime_type.startswith("application/vnd.google-apps."):
+        raise ValueError(
+            "Google Docs, Sheets, and Slides revisions must be downloaded with "
+            "drive export-revision"
+        )
+
+    encoded_file_id = quote(file_id, safe="")
+    encoded_revision_id = quote(revision_id, safe="")
+    download_url = (
+        "https://www.googleapis.com/drive/v3/files/"
+        f"{encoded_file_id}/revisions/{encoded_revision_id}?alt=media"
+    )
+    response, content = _build_http().request(download_url, method="GET")
+    status = int(response.status)
+    if not 200 <= status < 300:
+        raise RuntimeError(f"Google Drive revision download failed with HTTP {status}")
+
+    return metadata, revision, bytes(content)
+
+
+def drive_export_revision(
+    file_id: str,
+    revision_id: str,
+    export_format: str = "pdf",
+) -> dict:
+    """Export an earlier Docs, Sheets, or Slides revision as an attachment.
+
+    Args:
+        file_id: The Google Drive file ID
+        revision_id: Revision ID returned by drive_list_revisions
+        export_format: Export format (txt, pdf, docx, html, csv, xlsx, pptx, md)
+
+    Returns:
+        Attachment metadata
+    """
+    metadata, mime_type, data = _drive_export_revision_bytes(
+        file_id,
+        revision_id,
+        export_format,
+    )
+    stem = Path(metadata.get("name") or f"drive-{file_id}").stem
+    return save_attachment(
+        name=f"{stem}-revision-{revision_id}.{export_format}",
+        mime_type=mime_type,
+        data=data,
+        source_url=metadata.get("web_view_link"),
+    )
+
+
+def drive_download_revision(file_id: str, revision_id: str) -> dict:
+    """Download an earlier binary Drive revision as an attachment."""
+    metadata, revision, data = _drive_download_revision_bytes(file_id, revision_id)
+    original_name = revision["original_filename"] or metadata.get("name")
+    original_path = Path(original_name or f"drive-{file_id}")
+    safe_revision_id = re.sub(r"[^a-zA-Z0-9_.-]", "_", revision_id)
+    name = f"{original_path.stem}-revision-{safe_revision_id}{original_path.suffix}"
+    return save_attachment(
+        name=name,
+        mime_type=revision["mime_type"] or metadata.get("mime_type"),
+        data=data,
+        source_url=metadata.get("web_view_link"),
+    )
 
 
 def drive_list_permissions(file_id: str) -> list[dict]:
@@ -1274,23 +1489,7 @@ def _drive_export_bytes(file_id: str, export_format: str = "txt") -> tuple[dict,
 
     service = get_drive_service()
 
-    # Map format to MIME type
-    format_map = {
-        "txt": "text/plain",
-        "pdf": "application/pdf",
-        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "html": "text/html",
-        "csv": "text/csv",
-        "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        "md": "text/markdown",
-    }
-
-    mime_type = format_map.get(export_format)
-    if not mime_type:
-        raise ValueError(
-            f"Unsupported export format: {export_format}. Supported: {list(format_map.keys())}"
-        )
+    mime_type = _drive_export_mime_type(export_format)
 
     metadata = service.files().get(
         fileId=file_id,
@@ -2750,6 +2949,64 @@ class GSuiteClient:
             Dict with file metadata
         """
         return drive_get(file_id)
+
+    def drive_list_revisions(self, file_id: str, max_results: int = 200) -> list[dict]:
+        """List revisions for a Google Drive file.
+
+        This supports native Google Docs, Sheets, and Slides files as well as
+        binary files. Google can omit older entries for files with a large or
+        frequently updated revision history.
+
+        Args:
+            file_id: The Google Drive file ID
+            max_results: Maximum number of revisions to return
+
+        Returns:
+            Revision metadata ordered as returned by Google Drive
+        """
+        return drive_list_revisions(file_id, max_results=max_results)
+
+    def drive_get_revision(self, file_id: str, revision_id: str) -> dict:
+        """Get metadata and historical export links for a Drive file revision.
+
+        Args:
+            file_id: The Google Drive file ID
+            revision_id: Revision ID returned by drive_list_revisions
+
+        Returns:
+            Revision metadata, including available export links
+        """
+        return drive_get_revision(file_id, revision_id)
+
+    def drive_export_revision(
+        self,
+        file_id: str,
+        revision_id: str,
+        export_format: str = "pdf",
+    ) -> dict:
+        """Export an earlier Docs, Sheets, or Slides revision as an attachment.
+
+        Args:
+            file_id: The Google Drive file ID
+            revision_id: Revision ID returned by drive_list_revisions
+            export_format: Export format (txt, pdf, docx, html, csv, xlsx, pptx, md)
+
+        Returns:
+            Attachment metadata
+        """
+        return drive_export_revision(file_id, revision_id, export_format=export_format)
+
+    def drive_download_revision(self, file_id: str, revision_id: str) -> dict:
+        """Download an earlier binary Drive revision as an attachment.
+
+        Args:
+            file_id: The Google Drive file ID
+            revision_id: Revision ID returned by drive_list_revisions
+
+        Returns:
+            Attachment metadata
+        """
+        return drive_download_revision(file_id, revision_id)
 
     def drive_download(self, file_id: str) -> dict:
         """Download a file from Google Drive into a thread-scoped attachment.

@@ -221,6 +221,21 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sCENTAUR_JWT_SIGNING_SECRET" .Values.secretManager.envPrefix }}
+{{- range $ingress := list
+  (dict "enabled" .Values.slackbotv2.enabled "key" "SLACKBOT_API_KEY")
+  (dict "enabled" .Values.discordbot.enabled "key" "DISCORDBOT_API_KEY")
+  (dict "enabled" .Values.githubbot.enabled "key" "GITHUBBOT_API_KEY")
+  (dict "enabled" .Values.linearbot.enabled "key" "LINEARBOT_API_KEY")
+  (dict "enabled" .Values.teamsbot.enabled "key" "TEAMSBOT_API_KEY")
+}}
+{{- if $ingress.enabled }}
+            - name: {{ $ingress.key }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" $ }}
+                  key: {{ printf "%s%s" $.Values.secretManager.envPrefix $ingress.key }}
+{{- end }}
+{{- end }}
             - name: BIND_ADDR
               value: {{ printf "0.0.0.0:%v" .Values.apiRs.port | quote }}
             - name: SLACK_BOT_TOKEN

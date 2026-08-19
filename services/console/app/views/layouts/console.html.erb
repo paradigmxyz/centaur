@@ -1816,6 +1816,7 @@
 
   <% threads_view = request.path.start_with?("/console/threads") %>
   <% workflows_view = request.path.start_with?("/console/workflows") %>
+  <% skills_view = request.path.start_with?("/console/skills") %>
   <%# The Control and Data Sync sections are admin-only (each controller enforces
       require_admin server-side); Integrations is for everyone -- it lists the
       public consent start links any team member can use. %>
@@ -1864,6 +1865,15 @@
               </a>
             <% end %>
           </nav>
+
+          <div class="console-thread-group">
+            <a href="<%= console_skills_path %>"
+               class="console-thread-group-title <%= "console-thread-group-title-active" if skills_view %>"
+               title="Skills">
+              <span class="console-nav-icon"><%= console_icon("workflow", classes: "size-4") %></span>
+              <span class="console-nav-label">Skills</span>
+            </a>
+          </div>
 
           <% if acting_admin? %>
             <div class="console-thread-group">

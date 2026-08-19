@@ -158,7 +158,6 @@ module Mcp
       assert_match(/\Aprn_/, stored_code.principal.oid)
       assert_equal "console_user", stored_code.principal.kind
       assert_equal @operator.id, stored_code.principal.console_user_id
-      assert_equal @operator.email, stored_code.principal.console_user_email
       assert_empty stored_code.principal.labels.slice("console-user-id", "email")
 
       exchange_authorization_code(client, code)
@@ -183,7 +182,7 @@ module Mcp
       code = authorize_code(client)
 
       principal = McpOauthAuthorizationCode.find_usable(code).principal
-      role = Role.find_by(namespace: principal.namespace, foreign_id: "user-mcp")
+      role = Role.find_by(foreign_id: "user-mcp")
       assert role, "expected the user-mcp role to be created"
       assert_equal "User MCP", role.name
       assert_equal "centaur", role.labels["managed-by"]
@@ -253,7 +252,6 @@ module Mcp
 
     test "authorization approval reuses an existing user-mcp role" do
       existing = Role.create!(
-        namespace: "default",
         foreign_id: "user-mcp",
         name: "Custom user role",
         created_by: @operator

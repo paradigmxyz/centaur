@@ -140,7 +140,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
           components: rustfmt, clippy
@@ -183,7 +183,7 @@ jobs:
           working-directory: services/console
           bundler-cache: true
 
-      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
           components: rustfmt, clippy
@@ -219,6 +219,7 @@ jobs:
           CENTAUR_CONSOLE_INITIAL_USER_EMAIL: api-integration@example.com
           CENTAUR_CONSOLE_INITIAL_USER_PASSWORD: api-integration-password
           CENTAUR_API_URL: http://127.0.0.1:18080
+          CENTAUR_JWT_SIGNING_SECRET: api-integration-jwt-signing-secret
           DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/centaur?sslmode=disable
           IRON_CONTROL_API_KEY: iak_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
           IRON_CONTROL_URL: http://127.0.0.1:18081
@@ -241,6 +242,7 @@ jobs:
           pushd ../console
           bin/rails db:schema:load
           bin/rails runner 'Iron::Bootstrap.run!'
+          export CENTAUR_API_TOKEN="$(bin/rails runner 'print ApiServer::Jwt.encode_for_console_service')"
           bin/rails server --binding 127.0.0.1 --port 18081 > "$RUNNER_TEMP/iron-control.log" 2>&1 &
           iron_control_pid="$!"
           echo "$iron_control_pid" > "$RUNNER_TEMP/iron-control.pid"
@@ -320,7 +322,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
           prune-cache: true
@@ -352,7 +354,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
           prune-cache: true

@@ -35,7 +35,7 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
   # Builds a static secret injecting `header` on `host`, granted directly to
   # globex_user (priority 100).
   def grant_direct_static(host:, header:)
-    secret = StaticSecret.new(namespace: "globex", foreign_id: "static-#{SecureRandom.hex(4)}",
+    secret = StaticSecret.new(foreign_id: "static-#{SecureRandom.hex(4)}",
                               inject_config: { "header" => header, "formatter" => "Bearer {{ .Value }}" },
                               created_by: users(:globex_admin))
     secret.build_source(source_type: "control_plane", secret: "direct-token")
@@ -49,7 +49,7 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
   # globex_user through the globex_infra role (priority 0).
   def grant_role_gcp(host:)
     PrincipalRole.find_or_create_by!(principal: principals(:globex_user), role: roles(:globex_infra))
-    secret = GcpAuthSecret.new(namespace: "globex", foreign_id: "gcp-#{SecureRandom.hex(4)}",
+    secret = GcpAuthSecret.new(foreign_id: "gcp-#{SecureRandom.hex(4)}",
                                credentials_provider: { "type" => "workload_identity" },
                                scopes: [ "https://www.googleapis.com/auth/cloud-platform" ],
                                created_by: users(:globex_admin))
@@ -60,7 +60,7 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
   end
 
   def grant_direct_gcp(host:)
-    secret = GcpAuthSecret.new(namespace: "globex", foreign_id: "gcp-#{SecureRandom.hex(4)}",
+    secret = GcpAuthSecret.new(foreign_id: "gcp-#{SecureRandom.hex(4)}",
                                credentials_provider: { "type" => "workload_identity" },
                                scopes: [ "https://www.googleapis.com/auth/cloud-platform" ],
                                created_by: users(:globex_admin))
@@ -74,7 +74,6 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     PrincipalRole.find_or_create_by!(principal: principals(:globex_user), role: roles(:globex_infra))
     unless secret
       secret = OauthTokenSecret.new(
-        namespace: "globex",
         foreign_id: "oauth-#{SecureRandom.hex(4)}",
         name: "gmail",
         grant: "refresh_token",
@@ -90,6 +89,55 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
       secret.save!
     end
     Grant.create!(role: roles(:globex_infra), oauth_token_secret: secret, created_by: users(:globex_admin))
+    secret
+  end
+
+  def without_live_union_config
+    original = PrincipalSyncConfigSnapshot.method(:live_union_config_for_proxy)
+    PrincipalSyncConfigSnapshot.define_singleton_method(:live_union_config_for_proxy) do |*_args|
+      raise "the union should not be assembled live without a requester"
+    end
+    yield
+  ensure
+    PrincipalSyncConfigSnapshot.define_singleton_method(:live_union_config_for_proxy, original)
+    PrincipalSyncConfigSnapshot.private_class_method(:live_union_config_for_proxy)
+  end
+
+  def build_requester
+    Principal.create!(foreign_id: "requester-#{SecureRandom.hex(4)}",
+                      kind: "user", created_by: users(:globex_admin))
+  end
+
+  # Builds an always_available (unless overridden) OAuth app, a minted (unless
+  # overridden) broker credential, its wrapper static secret injecting `header`
+  # on `host`, and a grant: direct to `granted_to`, or via `via_role` when set.
+  def build_hoistable_wrapper(granted_to:, host:, header: "Authorization", always_available: true,
+                              minted: true, via_role: nil)
+    app = OauthApp.create!(
+      slug: "wrapper-#{SecureRandom.hex(4)}", provider: "github", client_id: "wrapper-client-id",
+      client_secret: "wrapper-client-secret",
+      allowed_scopes: [ "repo" ], always_available: always_available, created_by: users(:globex_admin)
+    )
+    cred = BrokerCredential.create!(
+      foreign_id: "wrapper-cred-#{SecureRandom.hex(4)}",
+      token_endpoint: "https://idp.example/token", client_id: "wrapper-client-id",
+      refresh_token: "seed", oauth_app: app, created_by: users(:globex_admin)
+    )
+    cred.update!(access_token: "hoisted-token", expires_at: 1.hour.from_now, last_refresh: Time.current) if minted
+    secret = StaticSecret.new(
+      foreign_id: "wrapper-#{SecureRandom.hex(4)}",
+      inject_config: { "header" => header, "formatter" => "Bearer {{ .Value }}" },
+      broker_credential: cred, created_by: users(:globex_admin)
+    )
+    secret.build_source(source_type: "token_broker", config: { "credential_id" => cred.oid })
+    secret.rules.build(host: host, position: 0)
+    secret.save!
+    if via_role
+      PrincipalRole.find_or_create_by!(principal: granted_to, role: via_role)
+      Grant.create!(role: via_role, static_secret: secret, created_by: users(:globex_admin))
+    else
+      Grant.create!(principal: granted_to, static_secret: secret, created_by: users(:globex_admin))
+    end
     secret
   end
 
@@ -129,6 +177,9 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
       assert_equal "centaur-console", claims.fetch("iss")
       assert_equal "centaur-api", claims.fetch("aud")
       assert_equal principal.oid, claims.fetch("sub")
+      assert_equal false, claims.dig("capabilities", "sessions_read")
+      assert_equal false, claims.dig("capabilities", "workflows_read")
+      assert_equal false, claims.dig("capabilities", "workflows_write")
       assert_equal [ "C0123456789" ], claims.dig("slack", "upload_channels")
       assert_equal [ "G9876543210" ], claims.dig("slack", "download_channels")
       assert_equal [ "C0123456789" ], claims.dig("slack", "history_channels")
@@ -138,17 +189,13 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     end
   end
 
-  test "config_for omits api server JWT when sandbox api access is disabled" do
-    with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
+  test "config_for adds api server JWT without Slack channel permissions" do
+    with_env(
+      "CENTAUR_JWT_SIGNING_SECRET" => "test-secret",
+      "CENTAUR_API_URL" => "http://api.internal:8080",
+      "CENTAUR_API_SERVER_PROXY_HOSTS" => nil
+    ) do
       principal = principals(:acme_channel)
-      principal.update!(
-        sandbox_api_server_enabled: false
-      )
-      SlackChannelPermission.create!(
-        principal: principal,
-        channel_id: "C0123456789",
-        upload_enabled: true
-      )
 
       config = PrincipalSyncConfigSnapshot.config_for(principal)
       entry = config.fetch("secrets").find do |secret|
@@ -156,16 +203,21 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
           secret.dig("source", "type") == "control_plane"
       end
 
-      assert_nil entry
+      refute_nil entry
+      claims = jwt_payload(entry.dig("source", "value"))
+      assert_equal principal.oid, claims.fetch("sub")
+      assert_empty claims.dig("slack", "upload_channels")
+      assert_empty claims.dig("slack", "download_channels")
+      assert_empty claims.dig("slack", "history_channels")
     end
   end
 
   test "sync_secrets delivers a brokered token inline and omits it until minted" do
-    cred = BrokerCredential.create!(namespace: "default", foreign_id: "sync-#{SecureRandom.hex(4)}",
+    cred = BrokerCredential.create!(foreign_id: "sync-#{SecureRandom.hex(4)}",
                                     token_endpoint: "https://idp.example/token", client_id: "cid",
                                     created_by: users(:globex_admin), refresh_token: "seed")
 
-    secret = StaticSecret.new(namespace: "default", foreign_id: "brokered-#{SecureRandom.hex(4)}",
+    secret = StaticSecret.new(foreign_id: "brokered-#{SecureRandom.hex(4)}",
                               inject_config: { "header" => "Authorization" }, created_by: users(:globex_admin))
     secret.build_source(source_type: "token_broker", config: { "credential_id" => cred.oid })
     secret.rules.build(host: "api.example.com", position: 0)
@@ -236,12 +288,12 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
 
   test "sync_postgres resolves value_from settings against the principal" do
     principal = principals(:globex_user)
-    principal.update!(labels: { "slack_channel_id" => "C9999999999" })
+    principal.update!(slack_channel_id: "C9999999999")
     pg = pg_dsn_secrets(:acme_analytics_pg)
     pg.update!(settings: [
       {
         "name" => "centaur.slack_channel_id",
-        "value_from" => { "principal_label" => "slack_channel_id" }
+        "value_from" => { "principal_field" => "slack_channel_id" }
       },
       { "name" => "centaur.principal", "value_from" => { "principal_field" => "foreign_id" } }
     ])
@@ -261,7 +313,6 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
     principal = principals(:globex_user)
     low = pg_dsn_secrets(:acme_analytics_pg)
     high = PgDsnSecret.new(
-      namespace: low.namespace,
       foreign_id: "pg-analytics-privileged",
       name: "analytics privileged",
       database: low.database,
@@ -291,6 +342,34 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
 
     assert_equal 1, PrincipalSyncConfigSnapshot.sync_secrets_for(principal).length
     assert_empty PrincipalSyncConfigSnapshot.sync_transforms_for(principal), "the lower-priority role gcp_auth should be withheld"
+  end
+
+  test "a directly linked Slack user token suppresses the MCP role bot token" do
+    principal = principals(:globex_user)
+    role = roles(:globex_infra)
+    PrincipalRole.find_or_create_by!(principal: principal, role: role)
+
+    bot_secret = StaticSecret.new(
+      foreign_id: "slack-bot-#{SecureRandom.hex(4)}",
+      replace_config: {
+        "proxy_value" => "SLACK_BOT_TOKEN",
+        "match_headers" => [ "Authorization" ]
+      },
+      created_by: users(:globex_admin)
+    )
+    bot_secret.build_source(source_type: "control_plane", secret: "bot-token")
+    bot_secret.rules.build(host: "slack.com", position: 0)
+    bot_secret.save!
+    Grant.create!(role: role, static_secret: bot_secret, created_by: users(:globex_admin))
+
+    user_secret = grant_direct_static(host: "slack.com", header: "Authorization")
+    served = PrincipalSyncConfigSnapshot.sync_secrets_for(principal)
+
+    assert_equal 1, served.length
+    assert_equal "direct-token", served.first.dig("source", "value")
+    assert_equal "Authorization", served.first.dig("inject", "header")
+    refute_includes served, bot_secret.to_proxy_secret
+    assert_equal user_secret.to_proxy_secret, served.first
   end
 
   test "credentials writing different headers on the same host both serve" do
@@ -470,11 +549,6 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
       "CENTAUR_JWT_SIGNING_SECRET" => "test-secret",
       "CENTAUR_API_URL" => "http://api.internal:8080"
     ) do
-      SlackChannelPermission.create!(
-        principal: @principal,
-        channel_id: "C0123456789",
-        upload_enabled: true
-      )
       boundary = 1_700_001_000 + ApiServer::Jwt.rotation_offset(@principal)
       current_time = Time.zone.at(boundary + 60)
       previous_window_time = Time.zone.at(boundary - 60)
@@ -505,31 +579,6 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
         assert refreshed.fresh_for?(@principal)
         refute_equal original_token, refreshed_token
         refute_equal original_hash, proxy.reload.sync_config_snapshot.fetch(:config_hash)
-      end
-    end
-  end
-
-  test "fetch_for does not rebuild api server JWT snapshots when sandbox api access is disabled" do
-    with_env("CENTAUR_JWT_SIGNING_SECRET" => "test-secret") do
-      @principal.update!(
-        sandbox_api_server_enabled: false
-      )
-      SlackChannelPermission.create!(
-        principal: @principal,
-        channel_id: "C0123456789",
-        upload_enabled: true
-      )
-      boundary = 1_700_001_000 + ApiServer::Jwt.rotation_offset(@principal)
-      current_time = Time.zone.at(boundary + 60)
-      previous_window_time = Time.zone.at(boundary - 60)
-
-      snapshot = PrincipalSyncConfigSnapshot.fetch_for(@principal)
-      snapshot.update_columns(updated_at: previous_window_time)
-
-      travel_to current_time do
-        assert_no_changes -> { snapshot.reload.updated_at } do
-          assert_equal snapshot, PrincipalSyncConfigSnapshot.fetch_for(@principal)
-        end
       end
     end
   end
@@ -654,7 +703,11 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
       api_server_secrets = removed.config.fetch("secrets").select do |secret|
         secret.dig("inject", "header") == "Authorization"
       end
-      assert_empty api_server_secrets
+      assert_equal 1, api_server_secrets.length
+      claims = jwt_payload(api_server_secrets.first.dig("source", "value"))
+      assert_empty claims.dig("slack", "upload_channels")
+      assert_empty claims.dig("slack", "download_channels")
+      assert_empty claims.dig("slack", "history_channels")
     end
   end
 
@@ -663,6 +716,162 @@ class PrincipalSyncConfigSnapshotTest < ActiveSupport::TestCase
       snapshot = PrincipalSyncConfigSnapshot.fetch_for(@principal)
       assert_equal @principal.sync_config_cache_version, snapshot.principal_cache_version
     end
+  end
+
+  # --- requester principal union ------------------------------------------
+
+  test "a proxy without a requester renders identically without assembling the union live" do
+    grant_direct_static(host: "api.test.com", header: "Authorization")
+    proxy = Proxy.create!(name: "no-requester", principal: principals(:globex_user))
+    expected = proxy.sync_config_snapshot
+
+    without_live_union_config do
+      actual = proxy.reload.sync_config_snapshot
+      assert_equal expected.fetch(:config), actual.fetch(:config)
+      assert_equal expected.fetch(:config_hash), actual.fetch(:config_hash)
+    end
+  end
+
+  test "a requester's always_available wrapper joins the union alongside conversation grants" do
+    grant_direct_static(host: "conv.test.com", header: "Authorization")
+    baseline = Proxy.create!(name: "baseline", principal: principals(:globex_user))
+                    .sync_config_snapshot.fetch(:config)
+
+    requester = build_requester
+    build_hoistable_wrapper(granted_to: requester, host: "github.com")
+    proxy = Proxy.create!(name: "union", principal: principals(:globex_user), requester_principal: requester)
+
+    config = proxy.sync_config_snapshot.fetch(:config)
+    hoisted = config.fetch("secrets").find { |s| s.dig("source", "value") == "hoisted-token" }
+    refute_nil hoisted
+    assert_equal({ "type" => "control_plane", "value" => "hoisted-token" }, hoisted["source"])
+    assert_equal baseline.fetch("secrets"), config.fetch("secrets") - [ hoisted ]
+    assert_equal baseline.fetch("transforms"), config.fetch("transforms")
+    assert_equal baseline.fetch("postgres"), config.fetch("postgres")
+  end
+
+  test "a wrapper whose oauth app is not always_available does not hoist" do
+    requester = build_requester
+    build_hoistable_wrapper(granted_to: requester, host: "github.com", always_available: false)
+    proxy = Proxy.create!(name: "not-whitelisted", principal: principals(:globex_user), requester_principal: requester)
+
+    assert_empty proxy.sync_config_snapshot.fetch(:config).fetch("secrets")
+  end
+
+  test "a wrapper granted to the requester through a role does not hoist" do
+    requester = build_requester
+    build_hoistable_wrapper(granted_to: requester, host: "github.com", via_role: roles(:globex_infra))
+    proxy = Proxy.create!(name: "role-granted", principal: principals(:globex_user), requester_principal: requester)
+
+    assert_empty proxy.sync_config_snapshot.fetch(:config).fetch("secrets")
+  end
+
+  test "non-static secret kinds granted directly to the requester do not hoist" do
+    requester = build_requester
+    admin = users(:globex_admin)
+    Grant.create!(principal: requester, gcp_auth_secret: gcp_auth_secrets(:acme_bigquery), created_by: admin)
+    Grant.create!(principal: requester, oauth_token_secret: oauth_token_secrets(:acme_gmail_oauth), created_by: admin)
+    Grant.create!(principal: requester, pg_dsn_secret: pg_dsn_secrets(:acme_analytics_pg), created_by: admin)
+    proxy = Proxy.create!(name: "other-kinds", principal: principals(:globex_user), requester_principal: requester)
+
+    config = proxy.sync_config_snapshot.fetch(:config)
+    assert_empty config.fetch("secrets")
+    assert_empty config.fetch("transforms")
+    assert_empty config.fetch("postgres")
+  end
+
+  test "an unminted wrapper credential is omitted from the union" do
+    requester = build_requester
+    build_hoistable_wrapper(granted_to: requester, host: "github.com", minted: false)
+    proxy = Proxy.create!(name: "bootstrapping", principal: principals(:globex_user), requester_principal: requester)
+
+    assert_empty proxy.sync_config_snapshot.fetch(:config).fetch("secrets")
+  end
+
+  test "a plain static secret directly granted to the requester does not hoist" do
+    requester = build_requester
+    secret = StaticSecret.new(
+      foreign_id: "plain-#{SecureRandom.hex(4)}",
+      inject_config: { "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" },
+      created_by: users(:globex_admin)
+    )
+    secret.build_source(source_type: "env", config: { "var" => "PLAIN_TOKEN" })
+    secret.rules.build(host: "plain.example", position: 0)
+    secret.save!
+    Grant.create!(principal: requester, static_secret: secret, created_by: users(:globex_admin))
+    proxy = Proxy.create!(name: "plain-static", principal: principals(:globex_user), requester_principal: requester)
+
+    assert_empty proxy.sync_config_snapshot.fetch(:config).fetch("secrets")
+  end
+
+  test "a wrapper whose source points at a different credential does not hoist" do
+    requester = build_requester
+    secret = build_hoistable_wrapper(granted_to: requester, host: "github.com")
+    other = BrokerCredential.create!(
+      foreign_id: "other-cred-#{SecureRandom.hex(4)}",
+      token_endpoint: "https://idp.example/token", client_id: "other-client-id",
+      refresh_token: "seed", created_by: users(:globex_admin)
+    )
+    other.update!(access_token: "other-token", expires_at: 1.hour.from_now, last_refresh: Time.current)
+    secret.source.update!(config: { "credential_id" => other.oid })
+    proxy = Proxy.create!(name: "mismatched-source", principal: principals(:globex_user), requester_principal: requester)
+
+    assert_empty proxy.sync_config_snapshot.fetch(:config).fetch("secrets")
+  end
+
+  test "a requester wrapper suppresses a conversation role-granted transform on the same host and header" do
+    grant_role_gcp(host: "api.github.com")
+    requester = build_requester
+    build_hoistable_wrapper(granted_to: requester, host: "api.github.com", header: "Authorization")
+    proxy = Proxy.create!(name: "suppression", principal: principals(:globex_user), requester_principal: requester)
+
+    config = proxy.sync_config_snapshot.fetch(:config)
+    assert_equal 1, config.fetch("secrets").length
+    assert_empty config.fetch("transforms"), "the lower-priority role gcp_auth should be withheld"
+
+    proxy.update!(requester_principal: nil)
+    config = proxy.reload.sync_config_snapshot.fetch(:config)
+    assert_empty config.fetch("secrets")
+    assert_equal 1, config.fetch("transforms").count { |t| t["name"] == "gcp_auth" }
+  end
+
+  test "a secret granted to both principals collapses to one entry at the strongest priority" do
+    requester = build_requester
+    secret = build_hoistable_wrapper(granted_to: requester, host: "github.com", header: "Authorization")
+    Grant.create!(principal: principals(:globex_user), static_secret: secret,
+                  created_by: users(:globex_admin), priority: 0)
+    gcp = grant_role_gcp(host: "github.com")
+    Grant.find_by!(gcp_auth_secret: gcp).update!(priority: 50)
+    proxy = Proxy.create!(name: "both-pools", principal: principals(:globex_user), requester_principal: requester)
+
+    config = proxy.sync_config_snapshot.fetch(:config)
+    assert_equal 1, config.fetch("secrets").length
+    assert_empty config.fetch("transforms"),
+                 "the wrapper should carry the requester's direct priority, beating the promoted role grant"
+  end
+
+  test "config_hash distinguishes requester identity even when configs coincide" do
+    proxy = Proxy.create!(name: "hash-identity", principal: principals(:globex_user),
+                          requester_principal: build_requester)
+    hash_a = proxy.sync_config_snapshot.fetch(:config_hash)
+
+    proxy.update!(requester_principal: build_requester)
+    hash_b = proxy.sync_config_snapshot.fetch(:config_hash)
+    refute_equal hash_a, hash_b
+
+    proxy.update!(requester_principal: nil)
+    refute_equal hash_b, proxy.sync_config_snapshot.fetch(:config_hash)
+  end
+
+  test "a requester on an unassigned proxy still renders the empty config" do
+    requester = build_requester
+    build_hoistable_wrapper(granted_to: requester, host: "github.com")
+    proxy = Proxy.create!(name: "unassigned-with-requester", principal: nil, requester_principal: requester)
+
+    config = proxy.sync_config_snapshot.fetch(:config)
+    assert_empty config.fetch("secrets")
+    assert_empty config.fetch("transforms")
+    assert_empty config.fetch("postgres")
   end
 
   def jwt_payload(token)
