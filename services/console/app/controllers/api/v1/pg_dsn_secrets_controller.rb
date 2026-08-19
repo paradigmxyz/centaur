@@ -11,7 +11,7 @@ module Api
         render json: { data: record_payload(ref) }
       end
 
-      # GET /api/v1/pg_dsn_secrets/lookup/:namespace/:foreign_id
+      # GET /api/v1/pg_dsn_secrets/lookup/:foreign_id
       def lookup
         render json: { data: record_payload(find_by_foreign_id!(PgDsnSecret)) }
       end
@@ -59,21 +59,24 @@ module Api
           attrs.require(:dsn).permit(:source_type, :secret, config: {})
         end
 
+        dsn_source = source_attrs ? SecretSource.new(source_attrs.to_h) : nil
+
         # Build the whole graph in memory and save once so the cross-record
         # validation (dsn_source_present) sees the source. Assigning the has_one
         # replaces (and destroys) any prior source; a PUT is a full replace.
         PgDsnSecret.transaction do
-          ref.assign_attributes(base)
-          ref.dsn_source = source_attrs ? SecretSource.new(source_attrs.to_h) : nil
-          ref.save!
-          ref.reload
+          with_sync_config_replacement_guard(ref, base, dsn_source: dsn_source) do
+            ref.assign_attributes(base)
+            ref.dsn_source = dsn_source
+            ref.save!
+            ref.reload
+          end
         end
       end
 
       def record_payload(ref)
         {
           id: ref.oid,
-          namespace: ref.namespace,
           foreign_id: ref.foreign_id,
           name: ref.name,
           description: ref.description,

@@ -81,6 +81,11 @@ export type IssueAssignmentEvent = {
  *   unrelated edit (a label, a description, or the bot's own status write
  *   bouncing back) and must not re-run the agent. When `updatedFrom` is absent
  *   we fall back to the membership check alone, to stay robust.
+ * - Never fires when the webhook's `actor` is the bot itself: a handoff turn
+ *   exists to pick up work someone GAVE the bot, and the bot self-assigning
+ *   mid-turn (a natural "I'm taking this" tool call) must not spawn a second
+ *   turn on work already underway. When `actor` is absent (older payload
+ *   shapes) we keep the prior fire-on-membership behavior.
  */
 export function parseIssueAssignmentWebhook(
   rawBody: string,
@@ -103,6 +108,8 @@ export function parseIssueAssignmentWebhook(
   const assignedToBot = stringValue(data.assigneeId) === botUserId;
   const delegatedToBot = stringValue(data.delegateId) === botUserId;
   if (!assignedToBot && !delegatedToBot) return null;
+  const actor = isJsonObject(payload.actor) ? payload.actor : undefined;
+  if (actor && stringValue(actor.id) === botUserId) return null;
   if (action === "update") {
     const updatedFrom = isJsonObject(payload.updatedFrom)
       ? payload.updatedFrom

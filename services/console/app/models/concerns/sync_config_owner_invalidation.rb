@@ -15,8 +15,8 @@ module SyncConfigOwnerInvalidation
 
   private
 
-  def sync_config_affected_principal_ids
+  def sync_config_affected_principals
     owner = sync_config_owner
-    owner ? Principal.effective_grantee_ids_for_grantable(owner) : []
+    owner ? Principal.effective_grantees_for_grantable(owner) : Principal.none
   end
 end

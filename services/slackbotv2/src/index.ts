@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { Buffer } from 'node:buffer'
 import { randomUUID } from 'node:crypto'
 import { Hono, type Context } from 'hono'
 import {
@@ -6,6 +7,7 @@ import {
   Message as ChatSdkMessage,
   parseMarkdown,
   type Adapter,
+  type ActionEvent,
   type Attachment,
   type Logger,
   type Message as ChatMessage,
@@ -13,11 +15,15 @@ import {
   type Thread
 } from 'chat'
 import { createSlackAdapter } from '@chat-adapter/slack'
-import { fetchSlackThreadReplies } from '@chat-adapter/slack/api'
+import {
+  assertSlackOk,
+  callSlackApi,
+  fetchSlackThreadReplies
+} from '@chat-adapter/slack/api'
 import { createPostgresState } from '@chat-adapter/state-pg'
 import pg from 'pg'
 import {
-  codexAppServerToChatSdkStream,
+  harnessToChatSdkStream,
   EMPTY_FINAL_ANSWER_TEXT,
   type CodexAppServerToChatStreamOptions,
   type ChatSDKStreamChunk,
@@ -25,10 +31,16 @@ import {
 } from '@centaur/rendering'
 import { conflateChatSdkStream } from './conflate'
 import { observeSeconds, slackbotMetrics } from './metrics'
-import { renderSlackDisplayText, slackMessagePromptText } from './slack-display-text'
+import {
+  renderSlackDisplayText,
+  slackMessagePromptText,
+  slackRichTextMentionsUser
+} from './slack-display-text'
 import { slackUserIdForMessage } from './slack-user'
 import {
   collectInitialContext,
+  dispatchSlackBlockAction,
+  fetchWithTimeout,
   forwardToSessionApi,
   harnessRestartPreamble,
   interruptSessionExecution,
@@ -38,21 +50,32 @@ import {
   serializeMessageLinks,
   serializeMessage,
   sessionStreamError,
+  slackApiTimeoutMs,
   withSlackApiTimeout
 } from './session-api'
 import {
-  buildConsoleSessionContextBlock,
+  buildSlackResponseContextBlock,
   defaultModelForHarness,
+  defaultServiceTierForHarness,
+  effectiveReasoningForHarness,
+  reasoningForModel,
   type SlackContextBlock
 } from './console-session-link'
-import { extractMessageOverrides } from './overrides'
-import { isAllowedSlackMessage, isAllowedSlackWebhookBody } from './slack-events'
+import { resolveChannelDefault } from './channel-defaults'
+import { extractMessageOverrides, type HarnessOverrides } from './overrides'
+import { createFlagMessageOverridesStrategy } from './message-overrides-strategy'
+import {
+  isAllowedSlackMessage,
+  isAllowedSlackWebhookBody,
+  parseSlackWebhookPayload
+} from './slack-events'
 import { isSlackStopCommand } from './stop-command'
 import type {
   ForwardSessionInput,
   JsonObject,
   SlackbotV2,
   SlackbotV2ApiAttachment,
+  SlackbotV2BlockActionPayload,
   SlackbotV2ApiMessage,
   SlackbotV2ExecuteSessionResponse,
   SlackbotV2MessageMode,
@@ -78,6 +101,7 @@ export type {
   SlackbotV2,
   SlackbotV2ApiAttachment,
   SlackbotV2ApiAuthor,
+  SlackbotV2BlockActionPayload,
   SlackbotV2ApiMessage,
   SlackbotV2AppendMessagesRequest,
   SlackbotV2CreateSessionRequest,
@@ -109,6 +133,12 @@ type SlackbotV2RequestContext = {
   waitUntil(promise: Promise<unknown>): void
 }
 
+type StateConnectionStatus = {
+  attempts: number
+  connected: boolean
+  lastError?: string
+}
+
 const requestContext = new AsyncLocalStorage<SlackbotV2RequestContext>()
 const RENDER_OBLIGATION_INDEX_KEY = 'slackbotv2:render:index'
 const RENDER_OBLIGATION_INDEX_MAX_LENGTH = 2000
@@ -132,6 +162,8 @@ const LATE_SLACK_FILE_CONSUMED_TTL_MS = 5 * 60_000
 const LATE_SLACK_FILE_IDLE_WAIT_MS = 90_000
 const LATE_SLACK_FILE_IDLE_POLL_MS = 500
 const LATE_SLACK_FILE_MESSAGE_TEXT = 'Late Slack file attachment for the previous message.'
+const SLACK_BLOCK_ACTION_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000
+const SLACK_BLOCK_ACTION_LEASE_TTL_MS = 60 * 1000
 
 type PendingLateSlackFileMention = {
   channel: string
@@ -143,6 +175,23 @@ type PendingLateSlackFileMention = {
 }
 
 type StickyThreadOverrides = Pick<SlackbotV2ThreadState, 'harnessType' | 'model' | 'provider'>
+const DEFAULT_MESSAGE_OVERRIDES_STRATEGY = createFlagMessageOverridesStrategy()
+
+export async function messageOverridesForText(
+  options: SlackbotV2Options,
+  text: string,
+  trace: SlackbotV2Trace
+): Promise<{ cleanedText?: string; overrides: HarnessOverrides }> {
+  const strategy = options.messageOverridesStrategy ?? DEFAULT_MESSAGE_OVERRIDES_STRATEGY
+  try {
+    return await strategy({ text })
+  } catch (error) {
+    traceWarn(options, 'slackbotv2_message_overrides_strategy_failed', trace, {
+      error: errorMessage(error)
+    })
+    return { overrides: {} }
+  }
+}
 
 function stickyThreadOverrideUpdate(
   overrides: StickyThreadOverrides
@@ -159,6 +208,10 @@ function stickyThreadOverrideUpdate(
     if (!overrides.model) update.model = null
   }
   return Object.keys(update).length > 0 ? update : undefined
+}
+
+function hasStickyThreadOverride(overrides: StickyThreadOverrides): boolean {
+  return Boolean(overrides.harnessType || overrides.model || overrides.provider)
 }
 
 function resolveStickyThreadOverrides(
@@ -185,6 +238,17 @@ function stickyOverrideValue(
   return stringValue(state[key])
 }
 
+// Like stickyOverrideValue but keeps an explicit `null` — the tombstone a
+// harness switch writes to clear the old model/provider — so callers can tell
+// "cleared" (null) from "never set" (undefined).
+function stickyOverrideRaw(
+  state: SlackbotV2ThreadState,
+  update: StickyThreadOverrides | undefined,
+  key: keyof StickyThreadOverrides
+): string | null | undefined {
+  return update && Object.prototype.hasOwnProperty.call(update, key) ? update[key] : state[key]
+}
+
 export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   const userName = options.userName ?? 'centaur'
   const logger = options.logger ?? noopLogger
@@ -205,9 +269,74 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     logger
   })
   const lateSlackFiles = createLateSlackFileRepair(options, state)
+  const stateConnectionStatus: StateConnectionStatus = { attempts: 0, connected: false }
+  const stateConnected = ensureStateConnected(state, options, stateConnectionStatus)
+  backgroundWaitUntil(stateConnected)
+
+  chat.onAction(async event => {
+    const payload = slackBlockActionPayload(event)
+    const dedupeKey = slackBlockActionDedupeKey(payload)
+    const leaseToken = randomUUID()
+    if (
+      dedupeKey
+      && !(await state.setIfNotExists(dedupeKey, leaseToken, SLACK_BLOCK_ACTION_LEASE_TTL_MS))
+    ) {
+      traceLog(options, 'slackbotv2_block_action_duplicate_ignored', undefined, {
+        action_id: payload.action_id,
+        action_ts: payload.action_ts,
+        channel_id: payload.channel_id,
+        message_ts: payload.message_ts,
+        team_id: payload.team_id
+      })
+      return
+    }
+    try {
+      await dispatchSlackBlockAction(options, payload)
+    } catch (error) {
+      try {
+        if (dedupeKey && (await state.get(dedupeKey)) === leaseToken) {
+          await state.delete(dedupeKey)
+        }
+      } catch (cleanupError) {
+        traceWarn(options, 'slackbotv2_block_action_dedupe_cleanup_failed', undefined, {
+          action_id: payload.action_id,
+          action_ts: payload.action_ts,
+          error: errorMessage(cleanupError)
+        })
+      }
+      traceWarn(options, 'slackbotv2_block_action_dispatch_failed', undefined, {
+        action_id: payload.action_id,
+        channel_id: payload.channel_id,
+        error: errorMessage(error),
+        message_ts: payload.message_ts,
+        team_id: payload.team_id,
+        thread_ts: payload.thread_ts
+      })
+      throw error
+    }
+    if (dedupeKey) {
+      try {
+        await state.set(dedupeKey, true, SLACK_BLOCK_ACTION_DEDUPE_TTL_MS)
+      } catch (error) {
+        traceWarn(options, 'slackbotv2_block_action_dedupe_persist_failed', undefined, {
+          action_id: payload.action_id,
+          action_ts: payload.action_ts,
+          error: errorMessage(error)
+        })
+      }
+    }
+    traceLog(options, 'slackbotv2_block_action_dispatched', undefined, {
+      action_id: payload.action_id,
+      channel_id: payload.channel_id,
+      message_ts: payload.message_ts,
+      team_id: payload.team_id,
+      thread_ts: payload.thread_ts,
+      workflow_event_name: `slack.block_action.${payload.action_id}`
+    })
+  })
 
   chat.onNewMention(async (thread, message) => {
-    if (!isAllowedSlackMessage(message, options, logger)) return
+    if (!(await isAllowedSlackMessage(message, options, logger))) return
     lateSlackFiles.rememberFilelessMention(thread, message)
     await handleSlackMessageHandoff(thread, message, {
       assistantStatusRequested: true,
@@ -219,12 +348,39 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     })
   })
 
+  // Slack does not classify mentions inside Block Kit or legacy attachments as
+  // app_mention events. Alertmanager uses attachment.pretext, so inspect rich
+  // payloads after Chat SDK has verified the webhook and before executing.
+  chat.onNewMessage(/^.*$/s, async (thread, message) => {
+    if (!slackRichTextMentionsUser(message.raw, options.botUserId)) return
+    if (!(await isAllowedSlackMessage(message, options, logger))) return
+    message.isMention = true
+    await handleSlackMessageHandoff(thread, message, {
+      assistantStatusRequested: true,
+      mode: 'execute',
+      options,
+      state,
+      subscribe: true,
+      trigger: 'new_mention'
+    })
+  })
+
   chat.onSubscribedMessage(async (thread, message) => {
-    if (!isAllowedSlackMessage(message, options, logger)) return
+    if (!(await isAllowedSlackMessage(message, options, logger))) return
+    if (slackRichTextMentionsUser(message.raw, options.botUserId)) message.isMention = true
+    if (message.isMention !== true) {
+      traceLog(
+        options,
+        'slackbotv2_subscribed_message_without_mention_ignored',
+        createHandoffTrace(thread, message, 'append'),
+        { trigger: 'subscribed_message' }
+      )
+      return
+    }
     lateSlackFiles.rememberFilelessMention(thread, message)
     await handleSlackMessageHandoff(thread, message, {
-      assistantStatusRequested: message.isMention === true,
-      mode: message.isMention === true ? 'execute' : 'append',
+      assistantStatusRequested: true,
+      mode: 'execute',
       options,
       state,
       trigger: 'subscribed_message'
@@ -232,7 +388,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   })
 
   const app = new Hono()
-  app.get('/health', c => c.json({ ok: true, service: 'slackbotv2' }))
+  app.get('/health', c => healthResponse(c, stateConnectionStatus))
   app.get('/metrics', c =>
     c.text(slackbotMetrics.expose(), 200, {
       'Content-Type': 'text/plain; version=0.0.4; charset=utf-8'
@@ -243,14 +399,19 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     const route = c.req.path
     const rawBody = await c.req.raw.clone().text()
     const eventType = slackWebhookEventType(rawBody)
+    const webhookFields = slackWebhookLogFields(rawBody)
     let outcome = 'success'
     try {
+      traceLog(options, 'slackbotv2_webhook_received', undefined, {
+        body_bytes: Buffer.byteLength(rawBody, 'utf8'),
+        route,
+        ...webhookFields
+      })
       if (!isAllowedSlackWebhookBody(rawBody, options, logger)) {
         outcome = 'ignored'
         return new globalThis.Response('ok', { status: 200 })
       }
       const awaitHandoff = shouldAwaitSlackHandoff(rawBody)
-      const webhookFields = slackWebhookLogFields(rawBody)
       const handoffTasks: Promise<unknown>[] = []
       const context: SlackbotV2RequestContext = {
         waitUntil: promise => waitUntil(c, promise)
@@ -266,6 +427,10 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
           }
         })
       })
+      const channelCreatedJoinTask = response.ok && options.autoJoinCreatedChannels === true
+        ? joinSlackChannelCreatedEvent(rawBody, options)
+        : null
+      if (channelCreatedJoinTask) waitUntil(c, channelCreatedJoinTask)
       if (awaitHandoff && response.ok) {
         const waitStartedAtMs = nowMs()
         const waitFields = {
@@ -315,9 +480,12 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   }
   app.post('/api/webhooks/slack', handleSlackWebhook)
   app.post('/api/slack/events', handleSlackWebhook)
+  app.post('/api/slack/actions', handleSlackWebhook)
+  app.post('/api/slack/options', handleSlackWebhook)
+  app.post('/api/slack/commands', handleSlackWebhook)
 
   if (options.recoverRenderObligationsOnStart !== false) {
-    scheduleRenderObligationRecovery(chat, state, options)
+    scheduleRenderObligationRecovery(chat, state, options, stateConnected)
   }
 
   return { app, chat }
@@ -477,15 +645,146 @@ function createHandoffTrace(
 }
 
 function slackWebhookEventType(rawBody: string): string {
-  try {
-    const payload = JSON.parse(rawBody)
-    if (!isJsonObject(payload)) return 'unknown'
-    const event = payload.event
-    if (isJsonObject(event)) return stringValue(event.type) ?? 'unknown'
-    return stringValue(payload.type) ?? 'unknown'
-  } catch {
-    return 'invalid_json'
+  const payload = parseSlackWebhookPayload(rawBody)
+  if (!payload) return 'invalid_payload'
+  const event = payload.event
+  if (isJsonObject(event)) return stringValue(event.type) ?? 'unknown'
+  return stringValue(payload.type) ?? 'unknown'
+}
+
+function slackChannelCreatedJoinInput(rawBody: string): {
+  channelId: string
+  channelName?: string
+  eventId?: string
+  teamId?: string
+} | null {
+  const payload = slackWebhookPayload(rawBody)
+  if (!payload || payload.type !== 'event_callback') return null
+  const event = slackWebhookEvent(payload)
+  if (!event || stringValue(event.type) !== 'channel_created') return null
+  const channel = isJsonObject(event.channel) ? event.channel : undefined
+  const channelId = stringValue(channel?.id) ?? stringValue(event.channel)
+  if (!channelId) return null
+  return {
+    channelId,
+    channelName: stringValue(channel?.name),
+    eventId: stringValue(payload.event_id),
+    teamId: slackEventTeamId(payload, event) || undefined
   }
+}
+
+function joinSlackChannelCreatedEvent(
+  rawBody: string,
+  options: SlackbotV2Options
+): Promise<void> | null {
+  const input = slackChannelCreatedJoinInput(rawBody)
+  if (!input) return null
+
+  return (async () => {
+    const startedAtMs = nowMs()
+    const fields = {
+      channel_id: input.channelId,
+      channel_name: input.channelName,
+      slack_event_id: input.eventId,
+      team_id: input.teamId
+    }
+    traceLog(options, 'slackbotv2_channel_created_join_started', undefined, fields)
+    try {
+      const result = await joinSlackChannel(input.channelId, options)
+      traceLog(options, 'slackbotv2_channel_created_join_complete', undefined, {
+        ...fields,
+        already_joined: result.alreadyJoined,
+        phase_ms: elapsedMs(startedAtMs)
+      })
+    } catch (error) {
+      traceWarn(options, 'slackbotv2_channel_created_join_failed', undefined, {
+        ...fields,
+        error: errorMessage(error),
+        phase_ms: elapsedMs(startedAtMs)
+      })
+    }
+  })()
+}
+
+async function joinSlackChannel(
+  channelId: string,
+  options: SlackbotV2Options
+): Promise<{ alreadyJoined: boolean }> {
+  const fetchFn = options.fetch ?? fetch
+  const timeoutFetch = Object.assign(
+    (input: RequestInfo | URL, init?: RequestInit) =>
+      fetchWithTimeout(
+        fetchFn,
+        input,
+        init ?? {},
+        slackApiTimeoutMs(options),
+        'Slack API conversations.join'
+      ),
+    { preconnect: fetch.preconnect }
+  )
+  const payload = await callSlackApi(
+    'conversations.join',
+    { channel: channelId },
+    {
+      apiUrl: options.slackApiUrl,
+      fetch: timeoutFetch,
+      token: options.botToken
+    }
+  )
+  const alreadyJoined =
+    stringValue(payload.warning) === 'already_in_channel'
+    || payload.response_metadata?.warnings?.includes('already_in_channel') === true
+  assertSlackOk('conversations.join', payload)
+  return { alreadyJoined }
+}
+
+function slackBlockActionPayload(event: ActionEvent): SlackbotV2BlockActionPayload {
+  const raw = isJsonObject(event.raw) ? event.raw : {}
+  const action = Array.isArray(raw.actions)
+    ? raw.actions.find(value => isJsonObject(value) && value.action_id === event.actionId)
+    : undefined
+  const rawAction = isJsonObject(action) ? action : {}
+  const team = isJsonObject(raw.team) ? raw.team : {}
+  const user = isJsonObject(raw.user) ? raw.user : {}
+  const channel = isJsonObject(raw.channel) ? raw.channel : {}
+  const message = isJsonObject(raw.message) ? raw.message : {}
+  const container = isJsonObject(raw.container) ? raw.container : {}
+  const messageTs = stringValue(message.ts) ?? stringValue(container.message_ts)
+  const messageId = event.messageId.startsWith('ephemeral:') ? (messageTs ?? '') : event.messageId
+  return removeUndefinedValues({
+    action_id: event.actionId,
+    action_ts: stringValue(rawAction.action_ts),
+    block_id: stringValue(rawAction.block_id),
+    channel_id: stringValue(channel.id) ?? stringValue(container.channel_id),
+    message_id: messageId,
+    message_ts: messageTs,
+    team_id: stringValue(team.id) ?? stringValue(user.team_id),
+    thread_id: event.threadId,
+    thread_ts: stringValue(message.thread_ts) ?? stringValue(container.thread_ts) ?? messageTs,
+    type: 'block_actions',
+    user_id: event.user.userId,
+    user_name: event.user.userName,
+    value: event.value
+  }) as SlackbotV2BlockActionPayload
+}
+
+function slackBlockActionDedupeKey(payload: SlackbotV2BlockActionPayload): string | undefined {
+  if (!payload.action_ts) return undefined
+  return [
+    'slackbotv2:block-action',
+    payload.team_id,
+    payload.channel_id,
+    payload.message_ts,
+    payload.user_id,
+    payload.action_id,
+    payload.action_ts
+  ].join(':')
+}
+
+function removeUndefinedValues<T extends Record<string, unknown>>(value: T): Partial<T> {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, item]) => item !== undefined)
+  ) as Partial<T>
 }
 
 function recordForward(
@@ -576,6 +875,26 @@ function createDefaultState(options: SlackbotV2Options, logger: Logger): StateAd
   })
 }
 
+function healthResponse(c: Context, stateConnectionStatus: StateConnectionStatus): Response {
+  if (stateConnectionStatus.connected) {
+    return c.json({
+      ok: true,
+      service: 'slackbotv2',
+      database_connected: true
+    })
+  }
+  return c.json(
+    {
+      ok: false,
+      service: 'slackbotv2',
+      database_connected: false,
+      database_status: 'connecting',
+      database_connect_attempts: stateConnectionStatus.attempts
+    },
+    503
+  )
+}
+
 /**
  * Blocks until the state backend accepts a connection, retrying with exponential
  * backoff. The first DB connection fires within milliseconds of process start and
@@ -583,15 +902,24 @@ function createDefaultState(options: SlackbotV2Options, logger: Logger): StateAd
  * Retrying instead of throwing absorbs that race; the first successful connect
  * also flips the adapter's `connected` flag, so the message path comes alive too.
  */
-async function ensureStateConnected(state: StateAdapter, options: SlackbotV2Options): Promise<void> {
+async function ensureStateConnected(
+  state: StateAdapter,
+  options: SlackbotV2Options,
+  status: StateConnectionStatus
+): Promise<void> {
   for (let attempt = 0; ; attempt++) {
+    status.attempts = attempt + 1
     try {
       await state.connect()
+      status.connected = true
+      status.lastError = undefined
       if (attempt > 0) {
         traceLog(options, 'slackbotv2_postgres_connected', undefined, { attempts: attempt + 1 })
       }
       return
     } catch (error) {
+      status.connected = false
+      status.lastError = errorMessage(error)
       const delayMs = Math.min(
         POSTGRES_CONNECT_INITIAL_DELAY_MS * 2 ** attempt,
         POSTGRES_CONNECT_MAX_DELAY_MS
@@ -599,7 +927,7 @@ async function ensureStateConnected(state: StateAdapter, options: SlackbotV2Opti
       traceLog(options, 'slackbotv2_postgres_connect_retry', undefined, {
         attempt: attempt + 1,
         delay_ms: delayMs,
-        error: errorMessage(error)
+        error: status.lastError
       })
       await sleep(delayMs)
     }
@@ -613,6 +941,8 @@ type SyncThreadMessageInput = {
   options: SlackbotV2Options
   /** Number of in-process retries already spent on this message's handoff. */
   retryAttempt?: number
+  /** Resolved once per local handoff chain so retryable failures stay idempotent. */
+  resolvedMessageOverrides?: Awaited<ReturnType<typeof messageOverridesForText>>
   state: StateAdapter
 }
 
@@ -726,9 +1056,37 @@ async function syncThreadMessageToSession(
 
   const serializeStartedAtMs = nowMs()
   const serializedMessage = await serializeMessage(message, input.options)
-  const overrides = extractMessageOverrides(serializedMessage.text)
-  setMessageText(serializedMessage, overrides.cleanedText)
-  const stickyOverridesUpdate = stickyThreadOverrideUpdate(overrides)
+  // Inspect the original text before the strategy strips recognized flags.
+  // This is the authority for whether a sticky thread selection may change.
+  const explicitOverrides = extractMessageOverrides(serializedMessage.text)
+  const messageOverrides =
+    input.resolvedMessageOverrides ??
+    (input.resolvedMessageOverrides = await messageOverridesForText(
+      input.options,
+      serializedMessage.text,
+      trace
+    ))
+  if (messageOverrides.cleanedText !== undefined) {
+    setMessageText(serializedMessage, messageOverrides.cleanedText)
+  }
+  const overrides = messageOverrides.overrides
+  const requestedStickyOverrides = stickyThreadOverrideUpdate(overrides)
+  // Once a thread is pinned, only another explicit flag may move it. The LLM
+  // strategy can still infer per-turn reasoning, but a false-positive harness,
+  // model, or provider selection must not replace --claude/--amp/--codex/
+  // --nanocodex state.
+  const preserveStickyOverrides = Boolean(
+    requestedStickyOverrides &&
+      hasStickyThreadOverride(state) &&
+      !hasStickyThreadOverride(explicitOverrides)
+  )
+  const stickyOverridesUpdate = preserveStickyOverrides ? undefined : requestedStickyOverrides
+  if (preserveStickyOverrides) {
+    traceLog(input.options, 'slackbotv2_forward_sticky_overrides_preserved', trace, {
+      pinned_harness_type: state.harnessType,
+      requested_harness_type: requestedStickyOverrides?.harnessType
+    })
+  }
   const effectiveOverrides = resolveStickyThreadOverrides(state, stickyOverridesUpdate)
   // Slack-only "Open chat in Console" link on the FIRST assistant message in
   // a thread (the reply to the first message that starts an execution). The
@@ -736,20 +1094,55 @@ async function syncThreadMessageToSession(
   // (`slack:CHANNEL:THREAD_TS`) is the exact value sent to the session API as
   // `thread_key`, which the Console indexes by.
   const isFirstAssistantMessage = shouldStartExecution && executedMessageIds.size === 0
-  const effectiveHarnessType =
-    effectiveOverrides.harnessType ?? input.options.defaultHarnessType ?? 'codex'
-  // Without an explicit --model/--opus/... override the harness runs its
+  // Channel default: below a per-thread flag, above the deployment default, and
+  // (unlike it) ridden on the input line to take effect. harness/model/provider
+  // are sticky (effectiveOverrides); reasoning is per-turn.
+  const channelDefault = resolveChannelDefault(input.options.channelDefaults, thread.id)
+  const resolvedHarnessType = effectiveOverrides.harnessType ?? channelDefault?.harnessType
+  // A `null` sticky model/provider is a tombstone from a harness switch: honor
+  // it, don't re-pair a stale channel default with the new harness. Only
+  // `undefined` (never set) falls through to the channel default.
+  const resolvedModel =
+    stickyOverrideRaw(state, stickyOverridesUpdate, 'model') === null
+      ? undefined
+      : effectiveOverrides.model ?? channelDefault?.model
+  const resolvedProvider =
+    stickyOverrideRaw(state, stickyOverridesUpdate, 'provider') === null
+      ? undefined
+      : effectiveOverrides.provider ?? channelDefault?.provider
+  const effectiveHarnessType = resolvedHarnessType ?? input.options.defaultHarnessType ?? 'codex'
+  // Without an explicit override or channel default the harness runs its
   // configured default (CLAUDE_MODEL/CODEX_MODEL, else the baked harness
   // config); show and record that instead of dropping the model entirely.
   const effectiveModel =
-    effectiveOverrides.model ??
+    resolvedModel ??
     defaultModelForHarness(effectiveHarnessType, input.options.harnessDefaultModels)
-  const consoleSessionBlock = isFirstAssistantMessage
-    ? buildConsoleSessionContextBlock({
-        consoleBaseUrl: input.options.consolePublicUrl,
+  const resolvedReasoning = reasoningForModel(
+    effectiveHarnessType,
+    effectiveModel,
+    overrides.reasoning ?? channelDefault?.reasoning
+  )
+  const effectiveReasoning = effectiveReasoningForHarness(
+    effectiveHarnessType,
+    resolvedReasoning,
+    input.options.harnessDefaultReasoning
+  )
+  const responseMetadataMode = input.options.responseMetadataMode ?? 'first'
+  const includeResponseMetadata =
+    responseMetadataMode === 'always' ||
+    (responseMetadataMode === 'first' && isFirstAssistantMessage)
+  let responseContextBlock = isFirstAssistantMessage || includeResponseMetadata
+    ? buildSlackResponseContextBlock({
+        consoleBaseUrl: isFirstAssistantMessage ? input.options.consolePublicUrl : undefined,
         threadKey: thread.id,
         harnessType: effectiveHarnessType,
-        model: effectiveModel
+        metadataEnabled: includeResponseMetadata,
+        model: effectiveModel,
+        reasoning: effectiveReasoning,
+        serviceTier:
+          input.options.responseServiceTierEnabled === true && !resolvedProvider
+            ? defaultServiceTierForHarness(effectiveHarnessType)
+            : undefined
       })
     : undefined
   if (overrides.harnessType || overrides.model || overrides.provider || overrides.reasoning) {
@@ -817,12 +1210,13 @@ async function syncThreadMessageToSession(
     executeMessage: shouldStartExecution ? serializedMessage : undefined,
     // Sticky harness changes only apply when a message starts an execution;
     // restarting the thread out from under an active execution would kill it.
-    harnessType: shouldStartExecution ? effectiveOverrides.harnessType : undefined,
+    harnessType: shouldStartExecution ? resolvedHarnessType : undefined,
+    metadataHarnessType: shouldStartExecution ? effectiveHarnessType : undefined,
     messages: messagesToAppend,
-    model: shouldStartExecution ? effectiveOverrides.model : undefined,
+    model: shouldStartExecution ? resolvedModel : undefined,
     metadataModel: shouldStartExecution ? effectiveModel : undefined,
-    provider: shouldStartExecution ? effectiveOverrides.provider : undefined,
-    reasoning: overrides.reasoning,
+    provider: shouldStartExecution ? resolvedProvider : undefined,
+    reasoning: resolvedReasoning,
     onEventId: eventId => {
       lastEventId = Math.max(lastEventId, eventId)
     },
@@ -949,6 +1343,44 @@ async function syncThreadMessageToSession(
     await forwardToSessionApi(input.options, forwardInput, {
       onExecutionStarted: commitExecutionStarted,
       onMessagesAppended: commitMessagesAppended,
+      onSessionCreated: async outcome => {
+        const harnessType = outcome.harnessType ?? effectiveHarnessType
+        const abTested = outcome.harnessAssignment?.experiment === 'codex_nanocodex_ab'
+        forwardInput.metadataHarnessType = harnessType
+        forwardInput.harnessAssignment = outcome.harnessAssignment
+        if (harnessType === effectiveHarnessType && !abTested) return
+        const model =
+          resolvedModel ?? defaultModelForHarness(harnessType, input.options.harnessDefaultModels)
+        const requestedReasoning = reasoningForModel(harnessType, model, resolvedReasoning)
+        const reasoning = effectiveReasoningForHarness(
+          harnessType,
+          requestedReasoning,
+          input.options.harnessDefaultReasoning
+        )
+        forwardInput.metadataModel = model
+        forwardInput.reasoning = requestedReasoning
+        if (isFirstAssistantMessage || includeResponseMetadata) {
+          responseContextBlock = buildSlackResponseContextBlock({
+            consoleBaseUrl: isFirstAssistantMessage ? input.options.consolePublicUrl : undefined,
+            threadKey: thread.id,
+            harnessType,
+            metadataEnabled: includeResponseMetadata,
+            model,
+            reasoning,
+            serviceTier:
+              input.options.responseServiceTierEnabled === true && !resolvedProvider
+                ? defaultServiceTierForHarness(harnessType)
+                : undefined
+          })
+        }
+        traceLog(input.options, 'slackbotv2_session_harness_resolved', trace, {
+          ab_tested: abTested,
+          ab_test_experiment: outcome.harnessAssignment?.experiment,
+          ab_test_cohort: outcome.harnessAssignment?.cohort,
+          requested_harness_type: effectiveHarnessType,
+          resolved_harness_type: harnessType
+        })
+      },
       onSessionRestarted: handleSessionRestarted
     })
     scheduleExecutionRender(
@@ -960,7 +1392,7 @@ async function syncThreadMessageToSession(
       renderLease,
       assistantStatusVisible,
       trace,
-      consoleSessionBlock
+      responseContextBlock
     )
     traceLog(input.options, 'slackbotv2_forward_complete', trace, {
       last_event_id: lastEventId
@@ -1029,7 +1461,7 @@ function scheduleExecutionRender(
   renderLease: { release: (() => Promise<void>) | null },
   assistantStatusVisible: boolean,
   trace?: SlackbotV2Trace,
-  consoleSessionBlock?: SlackContextBlock
+  responseContextBlock?: SlackContextBlock
 ): void {
   const promise = (async () => {
     slackbotMetrics.activeLiveRenders.inc()
@@ -1044,7 +1476,7 @@ function scheduleExecutionRender(
           getLastEventId,
           assistantStatusVisible,
           trace,
-          consoleSessionBlock
+          responseContextBlock
         )
         if (result === 'complete') return
         const delayMs = renderRetryDelayMs(attempt)
@@ -1088,7 +1520,7 @@ async function renderExecutionAttempt(
   getLastEventId: () => number,
   assistantStatusVisible: boolean,
   trace?: SlackbotV2Trace,
-  consoleSessionBlock?: SlackContextBlock
+  responseContextBlock?: SlackContextBlock
 ): Promise<'complete' | 'retry'> {
   const renderStartedAtMs = nowMs()
   let outcome = 'failure'
@@ -1098,12 +1530,12 @@ async function renderExecutionAttempt(
   try {
     const streamResult = await renderExecutionStream(
       thread,
-      streamSessionAfterHandoff(options, input),
+      clearRejectedStickyModel(thread, input, streamSessionAfterHandoff(options, input), options),
       message,
       options,
       trace,
       assistantStatusVisible,
-      consoleSessionBlock
+      responseContextBlock
     )
     rendered = true
     outcome = 'complete'
@@ -1240,6 +1672,47 @@ async function renderExecutionAttempt(
   }
 }
 
+async function* clearRejectedStickyModel(
+  thread: Thread<SlackbotV2ThreadState>,
+  input: ForwardSessionInput,
+  stream: AsyncIterable<SlackbotV2RendererSource>,
+  options: SlackbotV2Options
+): AsyncIterable<SlackbotV2RendererSource> {
+  for await (const event of stream) {
+    if (input.model && isRejectedModelEvent(event)) {
+      const latest = (await thread.state) ?? {}
+      // A newer turn may already have replaced the sticky model while this
+      // stream was finishing. Clear only the value rejected by this execution.
+      if (latest.model === input.model) {
+        await thread.setState({ model: null })
+        traceLog(options, 'slackbotv2_rejected_sticky_model_cleared', input.trace, {
+          model: input.model
+        })
+      }
+    }
+    yield event
+  }
+}
+
+function isRejectedModelEvent(event: SlackbotV2RendererSource): boolean {
+  if (!event || typeof event !== 'object') return false
+  const eventKind = String(
+    'eventKind' in event ? event.eventKind : 'event' in event ? event.event : ''
+  )
+  if (eventKind !== 'session.execution_failed' && eventKind !== 'session.stream_error') {
+    return false
+  }
+  const detail = JSON.stringify('data' in event ? event.data : event).toLowerCase()
+  return (
+    detail.includes('model_not_found') ||
+    (/\bmodel\b/.test(detail) &&
+      (detail.includes('does not exist') ||
+        detail.includes('not supported') ||
+        detail.includes('unsupported model') ||
+        detail.includes('invalid model')))
+  )
+}
+
 /**
  * Reads the delivery annotation the Slack chat adapter attaches to streaming
  * errors. `false` means the stream's final answer was confirmed visible before
@@ -1320,7 +1793,7 @@ async function renderFallbackFinalAnswer(
     const fallback = new SlackRenderFallback()
     const chatStream = fallback.collectChatSdk(
       slackSafeChatSdkStream(
-        codexAppServerToChatSdkStream(
+        harnessToChatSdkStream(
           fallback.collectSource(stream),
           fallbackRendererOptions(options)
         )
@@ -1374,21 +1847,22 @@ async function renderFallbackFinalAnswer(
 function scheduleRenderObligationRecovery(
   chat: Chat<Record<string, Adapter>, SlackbotV2ThreadState>,
   state: StateAdapter,
-  options: SlackbotV2Options
+  options: SlackbotV2Options,
+  stateConnected: Promise<void>
 ): void {
   backgroundWaitUntil(
-    recoverRenderObligationsWithRetry(chat, state, options)
+    recoverRenderObligationsWithRetry(chat, state, options, stateConnected)
   )
 }
 
 async function recoverRenderObligationsWithRetry(
   chat: Chat<Record<string, Adapter>, SlackbotV2ThreadState>,
   state: StateAdapter,
-  options: SlackbotV2Options
+  options: SlackbotV2Options,
+  stateConnected: Promise<void>
 ): Promise<void> {
-  // Wait for Postgres before scanning for obligations. This is also what warms the
-  // shared pool at startup, so transient connect failures don't wedge the bot.
-  await ensureStateConnected(state, options)
+  // Wait for the startup Postgres connection before scanning for obligations.
+  await stateConnected
   const failureCounts = new Map<string, number>()
   let attempt = 0
   while (true) {
@@ -1916,7 +2390,7 @@ async function renderExecutionStream(
   options: SlackbotV2Options,
   trace?: SlackbotV2Trace,
   assistantStatusVisible = false,
-  consoleSessionBlock?: SlackContextBlock
+  responseContextBlock?: SlackContextBlock
 ): Promise<{ diverged: boolean; messageId?: string }> {
   const promptText = slackMessagePromptText(message)
   if (isPlainTextOnlyRequest(promptText)) {
@@ -1946,7 +2420,7 @@ async function renderExecutionStream(
       conflateChatSdkStream(
         slackSafeChatSdkStream(
           slackVisibleChatSdkStream(
-            codexAppServerToChatSdkStream(
+            harnessToChatSdkStream(
               stream,
               rendererOptions(thread, options, capture, trace)
             ),
@@ -1966,9 +2440,9 @@ async function renderExecutionStream(
       recipientUserId: message.author.userId,
       ...(taskDisplayMode === 'none' ? {} : { taskDisplayMode }),
       // stopBlocks are appended to the end of the finalized Slack message via
-      // chat.stopStream. Present only for the first assistant message so the
-      // Console link renders once per thread.
-      ...(consoleSessionBlock ? { stopBlocks: [consoleSessionBlock] } : {})
+      // chat.stopStream. The Console link is only included on the first assistant
+      // message; optional response metadata may be appended on every live response.
+      ...(responseContextBlock ? { stopBlocks: [responseContextBlock] } : {})
     })
     return { diverged: capture.diverged, messageId: sent?.id }
   } finally {
@@ -2001,7 +2475,7 @@ async function renderRecoveredExecutionStream(
       conflateChatSdkStream(
         slackSafeChatSdkStream(
           slackVisibleChatSdkStream(
-            codexAppServerToChatSdkStream(
+            harnessToChatSdkStream(
               stream,
               rendererOptions(thread, options, capture, trace)
             ),
@@ -2052,7 +2526,7 @@ async function renderPlainTextExecutionStream(
   try {
     const chatStream = fallback.collectChatSdk(
       slackSafeChatSdkStream(
-        codexAppServerToChatSdkStream(
+        harnessToChatSdkStream(
           fallback.collectSource(stream),
           rendererOptions(thread, options, undefined, trace)
         )
@@ -2541,12 +3015,7 @@ function isLateSlackFileEvent(
 }
 
 function slackWebhookPayload(rawBody: string): Record<string, unknown> | null {
-  try {
-    const payload = JSON.parse(rawBody)
-    return isJsonObject(payload) ? (payload as Record<string, unknown>) : null
-  } catch {
-    return null
-  }
+  return parseSlackWebhookPayload(rawBody)
 }
 
 function slackWebhookEvent(payload: Record<string, unknown>): Record<string, unknown> | null {
@@ -2591,34 +3060,39 @@ function slackTsToMs(ts: string): number {
 }
 
 function shouldAwaitSlackHandoff(rawBody: string): boolean {
-  try {
-    const payload = JSON.parse(rawBody) as { event?: { type?: unknown }; type?: unknown }
-    const eventType = payload.event?.type
-    return payload.type === 'event_callback' && (eventType === 'message' || eventType === 'app_mention')
-  } catch {
-    return false
-  }
+  const payload = parseSlackWebhookPayload(rawBody)
+  const event = payload && isJsonObject(payload.event) ? payload.event : undefined
+  const eventType = stringValue(event?.type)
+  return payload?.type === 'event_callback' && (eventType === 'message' || eventType === 'app_mention')
 }
 
 function slackWebhookLogFields(rawBody: string): JsonObject {
-  try {
-    const payload = JSON.parse(rawBody) as Record<string, unknown>
-    const rawEvent = payload.event
-    const event =
-      rawEvent && typeof rawEvent === 'object' && !Array.isArray(rawEvent)
-        ? (rawEvent as Record<string, unknown>)
-        : {}
-    const fields: JsonObject = {}
-    setStringField(fields, 'slack_event_id', payload.event_id)
-    setStringField(fields, 'slack_event_type', event.type)
-    setStringField(fields, 'slack_channel', event.channel)
-    setStringField(fields, 'slack_message_ts', event.ts)
-    setStringField(fields, 'slack_thread_ts', event.thread_ts)
-    setStringField(fields, 'slack_team_id', payload.team_id || event.team)
-    return fields
-  } catch {
-    return { slack_payload_parse_error: true }
-  }
+  const payload = parseSlackWebhookPayload(rawBody)
+  if (!payload) return { slack_payload_parse_error: true }
+  const event = isJsonObject(payload.event) ? payload.event : {}
+  const eventChannel = isJsonObject(event.channel) ? event.channel : {}
+  const team = isJsonObject(payload.team) ? payload.team : {}
+  const channel = isJsonObject(payload.channel) ? payload.channel : {}
+  const message = isJsonObject(payload.message) ? payload.message : {}
+  const container = isJsonObject(payload.container) ? payload.container : {}
+  const action = Array.isArray(payload.actions) ? payload.actions.find(isJsonObject) : undefined
+  const fields: JsonObject = {}
+  setStringField(fields, 'slack_event_id', payload.event_id)
+  setStringField(fields, 'slack_event_type', event.type ?? payload.type)
+  setStringField(fields, 'slack_action_id', action?.action_id)
+  setStringField(
+    fields,
+    'slack_channel',
+    stringValue(event.channel) ?? eventChannel.id ?? channel.id ?? container.channel_id
+  )
+  setStringField(fields, 'slack_message_ts', event.ts ?? message.ts ?? container.message_ts)
+  setStringField(
+    fields,
+    'slack_thread_ts',
+    event.thread_ts ?? message.thread_ts ?? container.thread_ts
+  )
+  setStringField(fields, 'slack_team_id', payload.team_id ?? event.team ?? team.id)
+  return fields
 }
 
 function setStringField(fields: JsonObject, key: string, value: unknown): void {
@@ -2695,7 +3169,7 @@ async function slackApiMessageFromSlack(
     author: {
       fullName: actorId,
       isBot,
-      isMe: Boolean(actorId && actorId === currentMessage.author.userId),
+      isMe: Boolean(actorId && options.botUserId && actorId === options.botUserId),
       userId: actorId,
       userName: actorId
     },

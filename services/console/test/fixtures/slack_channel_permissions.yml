@@ -1,0 +1,2 @@
+# Empty by default. Tests create Slack channel permission rows explicitly so legacy
+# slack_channel_id label fallback remains covered by existing principal fixtures.

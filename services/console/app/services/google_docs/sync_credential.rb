@@ -1,8 +1,6 @@
 require "digest"
 require "cgi"
 require "json"
-require "net/http"
-require "uri"
 
 module GoogleDocs
   class SyncCredential
@@ -358,32 +356,27 @@ module GoogleDocs
     end
 
     def google_api(endpoint, params = {})
-      uri = URI.parse(endpoint)
-      query = URI.decode_www_form(uri.query.to_s) + params.compact.map { |key, value| [ key, value.to_s ] }
-      uri.query = URI.encode_www_form(query)
       response = if @google_api_http
         @google_api_http.call(endpoint: endpoint, params: params, access_token: @credential.access_token)
       else
-        net_http_get(uri)
+        net_http_get(endpoint, params)
       end
       return response if response.is_a?(Hash)
 
       raise GoogleApiError, "Google API returned invalid response"
     end
 
-    def net_http_get(uri)
-      request = Net::HTTP::Get.new(uri)
-      request["Accept"] = "application/json"
-      request["Authorization"] = "Bearer #{@credential.access_token}"
-      response = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == "https") do |http|
-        http.request(request)
-      end
-      body = response.body.to_s
-      parsed = body.present? ? JSON.parse(body) : {}
-      return parsed if response.code.to_i.between?(200, 299)
+    def net_http_get(endpoint, params)
+      response = HttpClient.new.get(
+        endpoint,
+        params: params,
+        headers: { "Authorization" => "Bearer #{@credential.access_token}" }
+      )
+      parsed = response.json
+      return parsed if response.success?
 
       message = parsed.dig("error", "message") if parsed.is_a?(Hash)
-      raise GoogleApiError, message.presence || "Google API returned HTTP #{response.code}"
+      raise GoogleApiError, message.presence || "Google API returned HTTP #{response.status}"
     rescue JSON::ParserError
       raise GoogleApiError, "Google API returned invalid JSON"
     end

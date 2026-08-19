@@ -9,21 +9,17 @@ module Oauth
   # BrokerCredential linked to the OauthApp, then sends the user back to the
   # console Integrations page (or renders a result page on failure).
   #
-  # Deliberately unauthenticated -- a team member connects an integration by
-  # clicking a well-known link; there is no external app to integrate with, so
-  # there is no return_to or user key. Safety comes from: a credential is only
-  # minted after a successful consent + code exchange, and re-consent for the
-  # same (app, provider account) upserts the existing credential. All
-  # provider-specific behavior comes from the strategy (Oauth::Providers), which
-  # is derived from the app.
+  # Authenticated console consent flow. A team member connects an integration by
+  # clicking a console link; a credential is only minted after an active console
+  # session, successful consent, and code exchange. Re-consent for the same (app,
+  # provider account) upserts the existing credential. All provider-specific
+  # behavior comes from the strategy (Oauth::Providers), which is derived from
+  # the app.
   #
   # SECURITY: never logs the code, tokens, client_secret, or response bodies --
   # only oids and error codes, like the rest of the Broker/Oauth subsystem.
   class FlowsController < ApplicationController
     layout "auth"
-
-    skip_before_action :require_login
-    skip_before_action :require_active_account
 
     # The message_verifier purpose binding the signed state to this flow, the
     # state/cookie lifetime, and the encrypted cookie that ties a callback back to
@@ -32,9 +28,10 @@ module Oauth
     FLOW_TTL = 10.minutes
     FLOW_COOKIE = :oauth_flow
 
-    # Tests swap in an AuthorizationCodeClient built around an http double,
-    # mirroring BrokerCredential#refresh_client.
+    # Tests replace the token-exchange and identity-lookup clients with HTTP
+    # doubles, mirroring BrokerCredential#refresh_client.
     class_attribute :exchange_client_factory, default: -> { Broker::AuthorizationCodeClient.new }
+    class_attribute :identity_http_client_factory, default: -> { HttpClient.new }
 
     before_action :set_app
 
@@ -46,12 +43,13 @@ module Oauth
       unless @app.scopes_allowed?(requested_scopes)
         return render_result(:error, status: :unprocessable_entity, message: "One or more requested scopes are not allowed for this integration.")
       end
+      consent_scopes = requested_scopes | provider_required_scopes
 
       nonce = SecureRandom.urlsafe_base64(32)
       code_verifier = SecureRandom.urlsafe_base64(64)
 
       state = Rails.application.message_verifier(STATE_PURPOSE).generate(
-        { "app" => @app.oid, "scopes" => requested_scopes, "nonce" => nonce },
+        { "app" => @app.oid, "scopes" => consent_scopes, "nonce" => nonce },
         purpose: STATE_PURPOSE, expires_in: FLOW_TTL
       )
 
@@ -62,7 +60,7 @@ module Oauth
         expires: FLOW_TTL.from_now, httponly: true, same_site: :lax
       }
 
-      redirect_to authorization_url(requested_scopes, state, code_verifier), allow_other_host: true
+      redirect_to authorization_url(consent_scopes, state, code_verifier), allow_other_host: true
     end
 
     # GET /oauth/:slug/callback?code=&state=  (or ?error=)
@@ -87,9 +85,14 @@ module Oauth
       end
 
       result = exchange_code(params[:code], flow["code_verifier"])
-      identity = @provider.identity_from(result, client_id: @app.client_id)
+      validate_provider_result!(result)
+      identity = @provider.identity_from(
+        result,
+        client_id: @app.client_id,
+        http_client: identity_http_client_factory.call
+      )
       @credential = upsert_credential(state, result, identity)
-      enqueue_identity_enrichment(@credential)
+      enqueue_post_connect_enrichment(@credential)
 
       # Back to the Integrations page the user started from; failures below
       # still render the standalone result page, which offers a retry link.
@@ -143,6 +146,12 @@ module Oauth
       uri.to_s
     end
 
+    def provider_required_scopes
+      return [] unless @provider.respond_to?(:required_scopes)
+
+      Array(@provider.required_scopes)
+    end
+
     def exchange_code(code, code_verifier)
       exchange_client_factory.call.exchange(
         token_endpoint: @provider.token_endpoint,
@@ -151,26 +160,24 @@ module Oauth
         code: code.to_s,
         redirect_uri: oauth_callback_redirect_uri(@app.slug),
         code_verifier: code_verifier.to_s,
-        require_refresh_token: @provider.refreshable?
+        require_refresh_token: provider_requires_refresh_token?
       )
     end
 
     # Upserts one credential per (app, provider account). A new record gets its
-    # identity/endpoint fixed (and an auto-generated external_user_key, since the
-    # flow has no caller-supplied user); every consent (re)applies the rotating
-    # blob, including the freshly-exchanged access token so the credential is live
-    # immediately, and revives a dead credential.
+    # identity/endpoint fixed (and an auto-generated external_user_key); every
+    # consent (re)applies the rotating blob, including the freshly-exchanged
+    # access token so the credential is live immediately, and revives a dead
+    # credential.
     def upsert_credential(state, result, identity)
       BrokerCredential.transaction do
         credential = BrokerCredential.find_or_initialize_by(oauth_app: @app, provider_subject: identity[:subject])
-        # When the consenting browser carries a signed-in console session,
-        # remember which user connected this account. The Integrations page
-        # matches on it, so the card flips to "Connected" even when the
-        # provider account's email differs from the console login email.
-        # Never overwritten: the first linked user keeps the credential.
+        # Remember which user connected this account. The Integrations page
+        # matches on it, so the card flips to "Connected" even when the provider
+        # account's email differs from the console login email. Never
+        # overwritten: the first linked user keeps the credential.
         credential.created_by ||= current_user
         if credential.new_record?
-          credential.namespace = @app.credential_namespace
           credential.foreign_id = "#{@app.provider}-#{@app.slug}-#{identity[:subject].downcase}"
           credential.name = "#{@provider.display_name} – #{identity_display_name(identity)}"
           credential.token_endpoint = @provider.token_endpoint
@@ -178,22 +185,46 @@ module Oauth
         end
 
         now = Time.current
-        expires_in = result.expires_in&.positive? ? result.expires_in : BrokerCredential::DEFAULT_EXPIRES_IN_SECONDS
+        refreshable_result = provider_refreshable_result?(result)
         credential.assign_attributes(
           provider_email: identity[:email],
           # Store exactly what the IdP granted, so the refresh POST re-requests it.
           scopes: granted_scopes(result, state),
+          labels: credential_labels(credential, identity),
           refresh_token: result.refresh_token,
           access_token: result.access_token,
-          expires_at: now + expires_in,
+          expires_at: credential_expires_at(result, now: now, refreshable_result: refreshable_result),
           last_refresh: now,
           failure_count: 0, dead: false, dead_reason: nil
         )
-        credential.next_attempt_at = @provider.refreshable? ? credential.compute_next_attempt_at(now: now) : nil
+        credential.next_attempt_at = refreshable_result ? credential.compute_next_attempt_at(now: now) : nil
         credential.save!
         ensure_wrapping_secret(credential)
         credential
       end
+    end
+
+    def validate_provider_result!(result)
+      @provider.validate_result!(result) if @provider.respond_to?(:validate_result!)
+    end
+
+    def provider_requires_refresh_token?
+      return @provider.require_refresh_token? if @provider.respond_to?(:require_refresh_token?)
+
+      @provider.refreshable?
+    end
+
+    def provider_refreshable_result?(result)
+      return @provider.refreshable_result?(result) if @provider.respond_to?(:refreshable_result?)
+
+      @provider.refreshable?
+    end
+
+    def credential_expires_at(result, now:, refreshable_result:)
+      return now + result.expires_in if result.expires_in&.positive?
+      return nil unless refreshable_result
+
+      now + BrokerCredential::DEFAULT_EXPIRES_IN_SECONDS
     end
 
     def granted_scopes(result, state)
@@ -201,29 +232,31 @@ module Oauth
       @provider.parse_granted_scopes(result.scope)
     end
 
+    def credential_labels(credential, identity)
+      labels = (credential.labels || {}).merge(identity[:labels] || {})
+      return labels unless @app.provider == Oauth::Providers::Slack::KEY
+      return labels if identity[:team_id].blank?
+
+      labels.merge("slack_team_id" => identity[:team_id])
+    end
+
     def identity_display_name(identity)
       identity[:name].presence || identity[:email].presence || identity[:subject]
     end
 
-    def enqueue_identity_enrichment(credential)
-      case @app.provider
-      when Oauth::Providers::Attio::KEY
-        Oauth::EnrichAttioCredentialIdentityJob.perform_later(credential.id)
-      when Oauth::Providers::Slack::KEY
-        Oauth::EnrichCredentialIdentityJob.perform_later(credential.id)
-      when Oauth::Providers::Github::KEY
-        Oauth::EnrichGithubCredentialIdentityJob.perform_later(credential.id)
-      when Oauth::Providers::Linear::KEY
-        Oauth::EnrichLinearCredentialIdentityJob.perform_later(credential.id)
-      end
+    def enqueue_post_connect_enrichment(credential)
+      return unless @app.provider == Oauth::Providers::Slack::KEY
+
+      Oauth::EnrichCredentialIdentityJob.perform_later(credential.id)
     end
 
     # Wraps a minted credential in a grantable static secret, so an operator can
     # grant the integration's token to a principal straight from the console (a
-    # broker credential is not grantable on its own). The secret injects the live
-    # access token as `Authorization: Bearer <token>` through a token_broker source
-    # pointing at the credential, scoped to the provider's API hosts. The token
-    # stays fresh because the source resolves the credential live at sync time.
+    # broker credential is not grantable on its own). Most providers inject the
+    # live access token as `Authorization: Bearer <token>`. A provider can select
+    # a credential profile when its clients need a different proxy contract. The
+    # token stays fresh because the source resolves the credential live at sync
+    # time.
     #
     # Created once per credential (keyed on the broker_credential association, which
     # a unique index enforces) and left untouched on re-consent, so any operator
@@ -235,15 +268,32 @@ module Oauth
       secret = StaticSecret.find_or_initialize_by(broker_credential: credential)
       return secret unless secret.new_record?
 
-      secret.namespace = credential.namespace
       secret.name = "#{credential.name} token"
-      secret.inject_config = { "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" }
+      secret.kind = wrapping_secret_kind
+      secret.assign_attributes(wrapping_secret_config) if secret.kind == CredentialProfiles::Registry::CUSTOM_KIND
       secret.source = SecretSource.new(source_type: "token_broker", config: { "credential_id" => credential.oid })
-      secret.rules = Array(@provider.api_hosts).each_with_index.map do |host, position|
-        RequestRule.new(host: host, http_methods: [], paths: [], position: position)
+      rules = if secret.kind == CredentialProfiles::Registry::CUSTOM_KIND
+        Array(@provider.api_hosts).each_with_index.map do |host, position|
+          RequestRule.new(host: host, http_methods: [], paths: [], position: position)
+        end
+      else
+        []
       end
+      secret.rules = secret.apply_kind_defaults(rules: rules)
       secret.save!
       secret
+    end
+
+    def wrapping_secret_kind
+      return @provider.wrapping_secret_kind if @provider.respond_to?(:wrapping_secret_kind)
+
+      CredentialProfiles::Registry::CUSTOM_KIND
+    end
+
+    def wrapping_secret_config
+      return @provider.wrapping_secret_config if @provider.respond_to?(:wrapping_secret_config)
+
+      { inject_config: { "header" => "Authorization", "formatter" => "Bearer {{ .Value }}" } }
     end
 
     def read_and_clear_flow_cookie

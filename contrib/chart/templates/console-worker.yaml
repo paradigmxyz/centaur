@@ -1,5 +1,4 @@
 {{- $console := include "centaur.consoleValues" . | fromYaml }}
-{{- if and $console.enabled $console.worker.enabled }}
 {{- $secretEnv := include "centaur.secretEnvName" . }}
 {{- $prefix := .Values.secretManager.envPrefix }}
 {{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") }}
@@ -91,6 +90,14 @@ spec:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sDATABASE_URL" $prefix }}
+            # Slack channel catalog refresh jobs run in this worker, so it
+            # needs the same bot token as the web Console process.
+            - name: CENTAUR_CONSOLE_SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sSLACK_BOT_TOKEN" $prefix }}
+                  optional: true
             - name: IRON_CONTROL_INITIAL_USER_EMAIL
               valueFrom:
                 secretKeyRef:
@@ -135,6 +142,10 @@ spec:
             - name: CENTAUR_CONSOLE_PUBLIC_URL
               value: {{ $console.publicUrl | quote }}
 {{- end }}
+{{- with $console.sentryDsn }}
+            - name: SENTRY_DSN
+              value: {{ . | quote }}
+{{- end }}
 {{- if $mcpPublicUrl }}
             - name: CENTAUR_MCP_PUBLIC_URL
               value: {{ $mcpPublicUrl | quote }}
@@ -164,6 +175,8 @@ spec:
 {{- if .Values.apiRs.enabled }}
             - name: CENTAUR_API_URL
               value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
+            # Console OAuth sync workers submit normalized provider data to the
+            # in-cluster API; credentials themselves never leave this pod.
             - name: CENTAUR_CONSOLE_CENTAUR_API_URL
               value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
 {{- end }}
@@ -214,5 +227,4 @@ spec:
         - protocol: TCP
           port: 443
     # DNS egress is provided by the namespace-wide allow-dns policy.
-{{- end }}
 {{- end }}

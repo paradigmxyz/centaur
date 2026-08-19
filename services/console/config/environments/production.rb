@@ -1,4 +1,5 @@
 require "active_support/core_ext/integer/time"
+require "uri"
 
 Rails.application.configure do
   # Settings specified here will take precedence over those in config/application.rb.
@@ -24,14 +25,10 @@ Rails.application.configure do
   # Store uploaded files on the local file system (see config/storage.yml for options).
   config.active_storage.service = :local
 
-  # Assume all access to the app is happening through a SSL-terminating reverse proxy.
+  # Do not assume or force SSL here: in-cluster callers reach the service over
+  # plain HTTP. Public TLS enforcement belongs at the ingress/proxy layer.
   # config.assume_ssl = true
-
-  # Force all access to the app over SSL, use Strict-Transport-Security, and use secure cookies.
   # config.force_ssl = true
-
-  # Skip http-to-https redirect for the default health check endpoint.
-  # config.ssl_options = { redirect: { exclude: ->(request) { request.path == "/up" } } }
 
   # Log to STDOUT as single-line JSON with the current request id as a default log tag.
   config.log_tags = [ :request_id ]
@@ -48,6 +45,7 @@ Rails.application.configure do
   # request. The Raw formatter emits a hash that JsonLogFormatter merges into
   # the JSON log entry.
   config.lograge.enabled = true
+  config.lograge.base_controller_class = %w[ActionController::Base ActionController::API]
   config.lograge.formatter = Lograge::Formatters::Raw.new
   config.lograge.custom_payload do |controller|
     { request_id: controller.request.request_id }
@@ -92,12 +90,18 @@ Rails.application.configure do
   # Only use :id for inspections in production.
   config.active_record.attributes_for_inspect = [ :id ]
 
-  # Enable DNS rebinding protection and other `Host` header attacks.
-  # config.hosts = [
-  #   "example.com",     # Allow requests from example.com
-  #   /.*\.example\.com/ # Allow requests from subdomains like `www.example.com`
-  # ]
-  #
+  # Enable DNS rebinding protection and other `Host` header attacks. Public
+  # deployments should set CENTAUR_CONSOLE_PUBLIC_URL; add any extra internal
+  # health-check or ingress hosts with CENTAUR_CONSOLE_ALLOWED_HOSTS.
+  public_url = ConsoleEnv["PUBLIC_URL"].presence
+  internal_url = ConsoleEnv["URL"].presence
+  allowed_hosts = ConsoleEnv["ALLOWED_HOSTS"].to_s.split(/[,\s]+/).map(&:strip).reject(&:blank?)
+  [ public_url, internal_url ].compact.each do |url|
+    host = URI.parse(url).host
+    allowed_hosts << host if host.present?
+  end
+  config.hosts.concat(allowed_hosts.uniq) if allowed_hosts.any?
+
   # Skip DNS rebinding protection for the default health check endpoint.
-  # config.host_authorization = { exclude: ->(request) { request.path == "/up" } }
+  config.host_authorization = { exclude: ->(request) { request.path == "/up" } }
 end

@@ -26,6 +26,7 @@ module Iron
         # The initial operator predates any approver, so it is created active and
         # admin -- it is the account that approves everyone else.
         user = User.create!(email: email, password: password, status: "active", admin: true)
+        Role.ensure_default_infra!(created_by: user)
 
         api_key = ApiKey.new(user: user, name: "bootstrap")
         unless supplied_token.empty?
