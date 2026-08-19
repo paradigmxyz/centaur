@@ -61,12 +61,8 @@ jobs:
       - name: Build docs
         run: npm run build
 
-      - name: Skip Cloudflare deploy
-        if: ${{ env.CLOUDFLARE_ACCOUNT_ID == '' || env.CLOUDFLARE_API_TOKEN == '' }}
-        run: echo "Cloudflare credentials are not configured; docs build completed without deployment."
-
       - name: Deploy
-        if: github.event_name != 'pull_request'
+        if: ${{ github.event_name != 'pull_request' && env.CLOUDFLARE_ACCOUNT_ID != '' && env.CLOUDFLARE_API_TOKEN != '' }}
         uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0 # v4.0.0
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
