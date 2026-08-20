@@ -7,7 +7,7 @@ class SlackChannelCatalogMembershipRefreshJob < ApplicationJob
 
   def perform(channel_id = nil)
     SlackChannelCatalogProvider.refresh_memberships(channel_id: channel_id)
-  rescue SlackChannelCatalog::RetryableApiError => e
+  rescue SlackApi::RetryableError => e
     if executions >= MAX_RETRYABLE_EXECUTIONS
       Rails.logger.warn("Slack channel membership refresh dropped after repeated retryable API failures")
       return

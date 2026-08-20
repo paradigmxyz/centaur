@@ -7,7 +7,7 @@ class SlackChannelCatalogRefreshJob < ApplicationJob
 
   def perform
     SlackChannelCatalogProvider.refresh
-  rescue SlackChannelCatalog::RetryableApiError => e
+  rescue SlackApi::RetryableError => e
     if executions >= MAX_RETRYABLE_EXECUTIONS
       Rails.logger.warn("Slack channel catalog discovery dropped after repeated retryable API failures")
       return

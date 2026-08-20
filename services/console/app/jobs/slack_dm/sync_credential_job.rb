@@ -15,7 +15,7 @@ module SlackDm
       return unless SlackDm::SyncCredential.required_scopes_granted?(credential.scopes)
 
       SlackDm::SyncCredential.new(credential).call
-    rescue SlackDm::SyncCredential::RetryableApiError => e
+    rescue SlackApi::RetryableError => e
       if executions >= MAX_RETRYABLE_EXECUTIONS
         Rails.logger.warn do
           "Slack sync job dropped after repeated retryable API failures: " \

@@ -64,7 +64,7 @@ class SlackChannelCatalogProvider
       channels = client.fetch_channels
       persist_discovery!(config, identity, channels)
       fetch
-    rescue SlackChannelCatalog::RetryableApiError => e
+    rescue SlackApi::RetryableError => e
       record_refresh_error(config, e.message)
       raise
     rescue StandardError => e
@@ -88,7 +88,7 @@ class SlackChannelCatalogProvider
 
       channels.each do |channel|
         refresh_channel_membership!(client, channel)
-      rescue SlackChannelCatalog::RetryableApiError
+      rescue SlackApi::RetryableError
         channel.update!(membership_last_attempted_at: nil)
         raise
       rescue StandardError => e
@@ -217,7 +217,7 @@ class SlackChannelCatalogProvider
       channel.update!(membership_last_attempted_at: Time.current, membership_error: nil)
       member_ids = client.fetch_member_user_ids(channel.channel_id)
       unless member_ids.include?(channel.bot_user_id)
-        raise SlackChannelCatalog::Error, "Slack membership for #{channel.channel_id} omitted the bot user."
+        raise SlackApi::Error, "Slack membership for #{channel.channel_id} omitted the bot user."
       end
 
       channel.update!(

@@ -88,7 +88,7 @@ module SlackDm
       credential = slack_credential(app: slack_app)
       sync = Object.new
       sync.define_singleton_method(:call) do
-        raise SlackDm::SyncCredential::TransientApiError.new(retry_after: 30)
+        raise SlackApi::TransientError.new(retry_after: 30)
       end
 
       SlackDm::SyncCredential.stub(:new, ->(*) { sync }) do
@@ -105,7 +105,7 @@ module SlackDm
     def rate_limited_sync(retry_after:)
       Object.new.tap do |sync|
         sync.define_singleton_method(:call) do
-          raise SlackDm::SyncCredential::RateLimitedError.new(retry_after: retry_after)
+          raise SlackApi::RateLimitedError.new(retry_after: retry_after)
         end
       end
     end

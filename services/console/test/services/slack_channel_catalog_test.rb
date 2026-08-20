@@ -55,18 +55,18 @@ class SlackChannelCatalogTest < ActiveSupport::TestCase
     api.verify
   end
 
-  test "rate limits expose a bounded retry delay" do
+  test "rate limits use the shared Slack API error" do
     api = Minitest::Mock.new
     api.expect(:get, HttpClient::Response.new(status: 429, body: "", headers: { "retry-after" => "900" }),
                [ "#{API_URL}/conversations.members" ],
                params: { channel: "C0123456789", limit: "200" }, headers: HEADERS)
     catalog = SlackChannelCatalog.new(token: TOKEN, api_url: API_URL, api: api)
 
-    error = assert_raises(SlackChannelCatalog::RetryableApiError) do
+    error = assert_raises(SlackApi::RateLimitedError) do
       catalog.fetch_member_user_ids("C0123456789")
     end
 
-    assert_equal SlackChannelCatalog::MAX_RATE_LIMIT_WAIT_SECONDS, error.retry_after
+    assert_equal SlackApi::DEFAULT_MAX_RATE_LIMIT_WAIT_SECONDS, error.retry_after
     api.verify
   end
 

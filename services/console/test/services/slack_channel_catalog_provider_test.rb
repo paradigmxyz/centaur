@@ -54,7 +54,7 @@ class SlackChannelCatalogProviderTest < ActiveJob::TestCase
     channel = create_channel(channel_id: "C0123456789", name: "general")
     client = Object.new
     client.define_singleton_method(:fetch_identity) do
-      raise SlackChannelCatalog::Error, "Slack unavailable"
+      raise SlackApi::Error, "Slack unavailable"
     end
 
     with_catalog do
@@ -155,12 +155,12 @@ class SlackChannelCatalogProviderTest < ActiveJob::TestCase
     )
     client = Object.new
     client.define_singleton_method(:fetch_member_user_ids) do |_channel_id|
-      raise SlackChannelCatalog::RetryableApiError.new("rate limited", retry_after: 12)
+      raise SlackApi::RateLimitedError.new("rate limited", retry_after: 12)
     end
 
     with_catalog do
       SlackChannelCatalog.stub(:new, ->(**) { client }) do
-        error = assert_raises(SlackChannelCatalog::RetryableApiError) do
+        error = assert_raises(SlackApi::RetryableError) do
           SlackChannelCatalogProvider.refresh_memberships
         end
         assert_equal 12, error.retry_after

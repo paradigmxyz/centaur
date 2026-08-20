@@ -10,26 +10,13 @@ class SlackChannelCatalog
     end
   end
 
-  class Error < StandardError; end
-  class RetryableApiError < Error
-    attr_reader :retry_after
-
-    def initialize(message, retry_after:)
-      @retry_after = retry_after
-      super(message)
-    end
-  end
-
-  class ChannelNotJoinedError < Error; end
+  class ChannelNotJoinedError < SlackApi::Error; end
 
   DEFAULT_API_URL = "https://slack.com/api".freeze
   DEFAULT_TYPES = "public_channel,private_channel".freeze
   OPEN_TIMEOUT_SECONDS = 2
   READ_TIMEOUT_SECONDS = 5
   WRITE_TIMEOUT_SECONDS = 2
-  MAX_RATE_LIMIT_WAIT_SECONDS = 5.minutes.to_i
-  TRANSIENT_API_ERRORS = %w[fatal_error internal_error].freeze
-  TRANSIENT_RETRY_AFTER_SECONDS = 30
 
   def initialize(token:, api_url:, api: nil)
     @token = token
@@ -48,7 +35,7 @@ class SlackChannelCatalog
       error: nil,
       configured: true
     )
-  rescue Error, JSON::ParserError => e
+  rescue SlackApi::Error => e
     Result.new(channels: [], error: e.message, configured: true)
   rescue StandardError => e
     Result.new(channels: [], error: "Slack API request failed: #{e.message}", configured: true)
@@ -58,8 +45,8 @@ class SlackChannelCatalog
     body = request("auth.test")
     team_id = body["team_id"].to_s
     bot_user_id = body["user_id"].to_s
-    raise Error, "Slack auth.test did not return a team ID." if team_id.blank?
-    raise Error, "Slack auth.test did not return a bot user ID." if bot_user_id.blank?
+    raise SlackApi::Error, "Slack auth.test did not return a team ID." if team_id.blank?
+    raise SlackApi::Error, "Slack auth.test did not return a bot user ID." if bot_user_id.blank?
 
     Identity.new(team_id: team_id, bot_user_id: bot_user_id)
   end
@@ -78,7 +65,7 @@ class SlackChannelCatalog
     body = request("conversations.info", channel: channel_id)
     payload = body["channel"]
     channel = parse_channel(payload)
-    raise Error, "Slack conversations.info did not return channel #{channel_id}." unless channel
+    raise SlackApi::Error, "Slack conversations.info did not return channel #{channel_id}." unless channel
     if payload.is_a?(Hash) && payload["is_member"] == false
       raise ChannelNotJoinedError, "The Slack bot is not a member of #{channel_id}."
     end
@@ -114,28 +101,7 @@ class SlackChannelCatalog
       params: params.compact_blank,
       headers: { "Authorization" => "Bearer #{@token}" }
     )
-    if response.status == 429
-      retry_after = Float(response["retry-after"], exception: false)
-      retry_after = 1 unless retry_after&.positive?
-      raise RetryableApiError.new(
-        "Slack API rate limited #{method}.",
-        retry_after: [ retry_after, MAX_RATE_LIMIT_WAIT_SECONDS ].min
-      )
-    end
-
-    body = response.json
-    raise Error, "Slack API returned HTTP #{response.status}." unless response.success?
-    if TRANSIENT_API_ERRORS.include?(body["error"])
-      raise RetryableApiError.new(
-        "Slack API returned #{body['error']} for #{method}.",
-        retry_after: TRANSIENT_RETRY_AFTER_SECONDS
-      )
-    end
-    raise Error, "Slack API returned #{body.fetch('error', 'an unknown error')} for #{method}." unless body["ok"] == true
-
-    body
-  rescue JSON::ParserError
-    raise Error, "Slack API response for #{method} was not JSON."
+    SlackApi.parse_response!(response, operation: method)
   end
 
   def parse_channel(channel)
