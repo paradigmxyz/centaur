@@ -83,13 +83,7 @@ module Console
         channel_id: "C0123456789",
         upload_enabled: true
       )
-      catalog = SlackChannelCatalog::Result.new(
-        channels: [ SlackChannelCatalog::Channel.new(id: permission.channel_id, name: "general", private: false) ],
-        error: nil,
-        configured: true
-      )
-
-      with_slack_channel_catalog(catalog) { get console_role_url(role.oid) }
+      get console_role_url(role.oid)
       assert_response :ok
       assert_select "tbody tr" do
         assert_select "td", text: /#general/
@@ -321,17 +315,6 @@ module Console
     test "unknown role returns 404" do
       get console_role_url("role_missing")
       assert_response :not_found
-    end
-
-    private
-
-    def with_slack_channel_catalog(catalog)
-      singleton = SlackChannelCatalogProvider.singleton_class
-      original = singleton.instance_method(:fetch)
-      singleton.define_method(:fetch) { catalog }
-      yield
-    ensure
-      singleton.define_method(:fetch, original)
     end
   end
 end

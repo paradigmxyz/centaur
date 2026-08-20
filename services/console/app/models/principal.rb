@@ -258,7 +258,7 @@ class Principal < ApplicationRecord
   private
 
   def slack_channel_catalog_refreshable?
-    kind == "slack_channel" && slack_channel_id.present? && SlackChannelCatalogProvider.configured?
+    kind == "slack_channel" && slack_channel_id.present? && SlackChannelCatalogSync.configured?
   end
 
   def enqueue_slack_channel_catalog_refresh

@@ -15,6 +15,6 @@ class SlackChannelCatalogRefreshJob < ApplicationJob
 
     retry_job wait: e.retry_after.seconds, error: e
   ensure
-    Rails.cache.delete(SlackChannelCatalogProvider::REFRESH_LOCK_KEY)
+    Rails.cache.delete(SlackChannelCatalogSync::REFRESH_LOCK_KEY)
   end
 end

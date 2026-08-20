@@ -1,12 +1,12 @@
 require "test_helper"
 
 class SlackBotChannelTest < ActiveSupport::TestCase
-  test "catalog channel preserves the provider contract" do
-    channel = slack_bot_channels(:general).catalog_channel
+  test "catalog scopes filter and order channels" do
+    channel = slack_bot_channels(:general)
 
-    assert_equal "C0123456789", channel.id
-    assert_equal "general", channel.name
-    refute channel.private
+    assert_equal [ channel ], SlackBotChannel.active.matching("GEN").ordered.to_a
+    assert_empty SlackBotChannel.active.excluding_channel_ids([ channel.channel_id ]).matching("GEN")
+    assert_equal [ channel ], SlackBotChannel.active.with_members([ "U0123456789" ]).matching("GEN").to_a
   end
 
   test "channel identity is unique within a team" do

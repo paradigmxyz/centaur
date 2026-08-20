@@ -1,7 +1,19 @@
 class SlackChannelCatalogSync
+  RemoteChannel = Data.define(:id, :name, :private, :archived)
+  Identity = Data.define(:team_id, :bot_user_id)
+
+  DEFAULT_API_URL = "https://slack.com/api".freeze
+  CHANNEL_TYPES = "public_channel,private_channel".freeze
+  OPEN_TIMEOUT_SECONDS = 2
+  READ_TIMEOUT_SECONDS = 5
+  WRITE_TIMEOUT_SECONDS = 2
   MEMBERSHIP_TTL = 24.hours
   MEMBERSHIP_RETRY_TTL = 1.hour
   MEMBERSHIP_BATCH_SIZE = 25
+  REFRESH_LOCK_KEY = "slack_channel_catalog/refreshing".freeze
+  REFRESH_LOCK_TTL = 1.minute
+
+  class ChannelNotJoinedError < SlackApi::Error; end
 
   class << self
     def configured?
@@ -13,19 +25,35 @@ class SlackChannelCatalogSync
     end
 
     def api_url
-      ENV["SLACK_API_URL"].presence || SlackChannelCatalog::DEFAULT_API_URL
+      ENV["SLACK_API_URL"].presence || DEFAULT_API_URL
+    end
+
+    def enqueue_if_empty
+      return unless configured? && SlackBotChannel.none?
+      return unless Rails.cache.write(REFRESH_LOCK_KEY, true, expires_in: REFRESH_LOCK_TTL, unless_exist: true)
+
+      SlackChannelCatalogRefreshJob.perform_later
+    rescue StandardError => e
+      Rails.cache.delete(REFRESH_LOCK_KEY)
+      Rails.logger.warn("Could not enqueue Slack channel catalog sync: #{e.class}: #{e.message}")
     end
   end
 
-  def initialize(client: nil)
-    raise SlackApi::Error, "SLACK_BOT_TOKEN is not configured." unless client || self.class.configured?
+  def initialize(token: self.class.token, api_url: self.class.api_url, api: nil)
+    raise SlackApi::Error, "SLACK_BOT_TOKEN is not configured." if token.blank?
 
-    @client = client || SlackChannelCatalog.new(token: self.class.token, api_url: self.class.api_url)
+    @token = token
+    @api_url = api_url
+    @api = api || HttpClient.new(
+      open_timeout: OPEN_TIMEOUT_SECONDS,
+      read_timeout: READ_TIMEOUT_SECONDS,
+      write_timeout: WRITE_TIMEOUT_SECONDS
+    )
   end
 
   def sync_channels
-    identity = client.fetch_identity
-    channels = client.fetch_channels
+    identity = fetch_identity
+    channels = fetch_channels
     now = Time.current
 
     SlackBotChannel.transaction do
@@ -38,9 +66,9 @@ class SlackChannelCatalogSync
 
   def import_channel(channel_id)
     identity = catalog_identity
-    remote = client.fetch_channel(channel_id)
+    remote = fetch_channel(channel_id)
     import_remote_channel(identity, remote, now: Time.current)
-  rescue SlackChannelCatalog::ChannelNotJoinedError
+  rescue ChannelNotJoinedError
     SlackBotChannel.where(team_id: identity.team_id, channel_id: channel_id)
                    .update_all(active: false, updated_at: Time.current)
     nil
@@ -61,7 +89,7 @@ class SlackChannelCatalogSync
   def channel_members(channel_id)
     channel = SlackBotChannel.find_by!(channel_id: channel_id)
     channel.update!(membership_last_attempted_at: Time.current, membership_error: nil)
-    member_ids = client.fetch_member_user_ids(channel.channel_id)
+    member_ids = fetch_member_user_ids(channel.channel_id)
     unless member_ids.include?(channel.bot_user_id)
       raise SlackApi::Error, "Slack membership for #{channel.channel_id} omitted the bot user."
     end
@@ -82,13 +110,88 @@ class SlackChannelCatalogSync
 
   private
 
-  attr_reader :client
+  def fetch_identity
+    body = request("auth.test")
+    team_id = body["team_id"].to_s
+    bot_user_id = body["user_id"].to_s
+    raise SlackApi::Error, "Slack auth.test did not return a team ID." if team_id.blank?
+    raise SlackApi::Error, "Slack auth.test did not return a bot user ID." if bot_user_id.blank?
+
+    Identity.new(team_id: team_id, bot_user_id: bot_user_id)
+  end
+
+  def fetch_channels
+    each_page(
+      "users.conversations",
+      types: CHANNEL_TYPES,
+      exclude_archived: "false",
+      limit: "200"
+    ).filter_map { |channel| parse_channel(channel) }
+      .sort_by { |channel| [ channel.name.downcase, channel.id ] }
+  end
+
+  def fetch_channel(channel_id)
+    body = request("conversations.info", channel: channel_id)
+    payload = body["channel"]
+    channel = parse_channel(payload)
+    raise SlackApi::Error, "Slack conversations.info did not return channel #{channel_id}." unless channel
+    if payload.is_a?(Hash) && payload["is_member"] == false
+      raise ChannelNotJoinedError, "The Slack bot is not a member of #{channel_id}."
+    end
+
+    channel
+  end
+
+  def fetch_member_user_ids(channel_id)
+    each_page("conversations.members", channel: channel_id, limit: "200")
+      .map(&:to_s)
+      .reject(&:blank?)
+      .uniq
+      .sort
+  end
+
+  def each_page(method, params)
+    rows = []
+    cursor = nil
+    loop do
+      body = request(method, **params, cursor: cursor)
+      rows.concat(Array(body[method == "users.conversations" ? "channels" : "members"]))
+      cursor = body.dig("response_metadata", "next_cursor").to_s
+      break if cursor.blank?
+    end
+    rows
+  end
+
+  def request(method, **params)
+    response = @api.get(
+      "#{@api_url}/#{method}",
+      params: params.compact_blank,
+      headers: { "Authorization" => "Bearer #{@token}" }
+    )
+    SlackApi.parse_response!(response, operation: method)
+  end
+
+  def parse_channel(channel)
+    return unless channel.is_a?(Hash)
+
+    id = channel["id"].to_s
+    name = channel["name_normalized"].presence || channel["name"].to_s
+    return if id.blank? || name.blank?
+    return unless id.start_with?("C", "G")
+
+    RemoteChannel.new(
+      id: id,
+      name: name,
+      private: channel["is_private"] == true,
+      archived: channel["is_archived"] == true
+    )
+  end
 
   def catalog_identity
     team_id, bot_user_id = SlackBotChannel.limit(1).pick(:team_id, :bot_user_id)
-    return SlackChannelCatalog::Identity.new(team_id: team_id, bot_user_id: bot_user_id) if team_id && bot_user_id
+    return Identity.new(team_id: team_id, bot_user_id: bot_user_id) if team_id && bot_user_id
 
-    client.fetch_identity
+    fetch_identity
   end
 
   def import_remote_channel(identity, remote, now:)

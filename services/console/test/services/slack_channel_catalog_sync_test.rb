@@ -1,33 +1,50 @@
 require "test_helper"
 
-class SlackChannelCatalogSyncTest < ActiveSupport::TestCase
+class SlackChannelCatalogSyncTest < ActiveJob::TestCase
+  TOKEN = "xoxb-test-token"
+  API_URL = "https://slack.test/api"
   TEAM_ID = "T0123456789"
   BOT_USER_ID = "U0999999999"
+  HEADERS = { "Authorization" => "Bearer #{TOKEN}" }.freeze
 
   setup do
     SlackBotChannel.delete_all
   end
 
+  test "empty catalogs enqueue one channel sync" do
+    cache = ActiveSupport::Cache::MemoryStore.new
+
+    with_env("CENTAUR_CONSOLE_SLACK_BOT_TOKEN" => TOKEN) do
+      Rails.stub(:cache, cache) do
+        assert_enqueued_jobs 1, only: SlackChannelCatalogRefreshJob do
+          2.times { SlackChannelCatalogSync.enqueue_if_empty }
+        end
+      end
+    end
+  end
+
   test "sync channels imports the complete list and deactivates missing channels" do
     old = create_channel(channel_id: "C0000000001", name: "old")
-    client = mock_client
-    client.expect(:fetch_identity, identity)
-    client.expect(:fetch_channels, [ remote_channel(id: "C0123456789", name: "general") ])
+    sync = build_sync
 
-    assert_equal 1, SlackChannelCatalogSync.new(client: client).sync_channels
+    sync.stub(:fetch_identity, identity) do
+      sync.stub(:fetch_channels, [ remote_channel(id: "C0123456789", name: "general") ]) do
+        assert_equal 1, sync.sync_channels
+      end
+    end
 
     assert_not old.reload.active
     assert SlackBotChannel.find_by!(channel_id: "C0123456789").active
-    client.verify
   end
 
   test "failed channel sync retains existing rows" do
     channel = create_channel(channel_id: "C0123456789", name: "general")
-    client = Object.new
-    client.define_singleton_method(:fetch_identity) { raise SlackApi::Error, "Slack unavailable" }
+    sync = build_sync
 
     error = assert_raises(SlackApi::Error) do
-      SlackChannelCatalogSync.new(client: client).sync_channels
+      sync.stub(:fetch_identity, -> { raise SlackApi::Error, "Slack unavailable" }) do
+        sync.sync_channels
+      end
     end
 
     assert_equal "Slack unavailable", error.message
@@ -35,15 +52,16 @@ class SlackChannelCatalogSyncTest < ActiveSupport::TestCase
   end
 
   test "import channel creates a newly used channel" do
-    client = mock_client
-    client.expect(:fetch_identity, identity)
-    client.expect(:fetch_channel, remote_channel(id: "C0123456789", name: "general"), [ "C0123456789" ])
+    sync = build_sync
 
-    channel = SlackChannelCatalogSync.new(client: client).import_channel("C0123456789")
+    channel = sync.stub(:fetch_identity, identity) do
+      sync.stub(:fetch_channel, remote_channel(id: "C0123456789", name: "general")) do
+        sync.import_channel("C0123456789")
+      end
+    end
 
     assert_equal "general", channel.name
     assert channel.active
-    client.verify
   end
 
   test "channel members replaces only a complete membership array" do
@@ -53,15 +71,15 @@ class SlackChannelCatalogSyncTest < ActiveSupport::TestCase
       member_user_ids: [ BOT_USER_ID, "U_OLD" ],
       membership_refreshed_at: 2.days.ago
     )
-    client = mock_client
-    client.expect(:fetch_member_user_ids, [ BOT_USER_ID, "U_NEW" ], [ channel.channel_id ])
+    sync = build_sync
 
-    members = SlackChannelCatalogSync.new(client: client).channel_members(channel.channel_id)
+    members = sync.stub(:fetch_member_user_ids, [ BOT_USER_ID, "U_NEW" ]) do
+      sync.channel_members(channel.channel_id)
+    end
 
     assert_equal [ BOT_USER_ID, "U_NEW" ], members
     assert_equal members, channel.reload.member_user_ids
     assert_nil channel.membership_error
-    client.verify
   end
 
   test "incomplete membership keeps the previous array and records an error" do
@@ -71,16 +89,14 @@ class SlackChannelCatalogSyncTest < ActiveSupport::TestCase
       member_user_ids: [ BOT_USER_ID, "U_OLD" ],
       membership_refreshed_at: 2.days.ago
     )
-    client = mock_client
-    client.expect(:fetch_member_user_ids, [ "U_NEW" ], [ channel.channel_id ])
+    sync = build_sync
 
     assert_raises(SlackApi::Error) do
-      SlackChannelCatalogSync.new(client: client).channel_members(channel.channel_id)
+      sync.stub(:fetch_member_user_ids, [ "U_NEW" ]) { sync.channel_members(channel.channel_id) }
     end
 
     assert_equal [ BOT_USER_ID, "U_OLD" ], channel.reload.member_user_ids
     assert_match(/omitted the bot user/, channel.membership_error)
-    client.verify
   end
 
   test "rate limits preserve membership for a retry" do
@@ -90,13 +106,11 @@ class SlackChannelCatalogSyncTest < ActiveSupport::TestCase
       member_user_ids: [ BOT_USER_ID, "U_OLD" ],
       membership_refreshed_at: 2.days.ago
     )
-    client = Object.new
-    client.define_singleton_method(:fetch_member_user_ids) do |_channel_id|
-      raise SlackApi::RateLimitedError.new("rate limited", retry_after: 12)
-    end
+    sync = build_sync
+    fetch_members = ->(*) { raise SlackApi::RateLimitedError.new("rate limited", retry_after: 12) }
 
     error = assert_raises(SlackApi::RetryableError) do
-      SlackChannelCatalogSync.new(client: client).channel_members(channel.channel_id)
+      sync.stub(:fetch_member_user_ids, fetch_members) { sync.channel_members(channel.channel_id) }
     end
 
     assert_equal 12, error.retry_after
@@ -113,19 +127,72 @@ class SlackChannelCatalogSyncTest < ActiveSupport::TestCase
       )
     end
     refreshed = []
-    client = Object.new
-    client.define_singleton_method(:fetch_member_user_ids) do |channel_id|
+    sync = build_sync
+    fetch_members = lambda do |channel_id|
       refreshed << channel_id
       [ BOT_USER_ID ]
     end
 
-    count = SlackChannelCatalogSync.new(client: client).sync_memberships
+    count = sync.stub(:fetch_member_user_ids, fetch_members) { sync.sync_memberships }
 
     assert_equal SlackChannelCatalogSync::MEMBERSHIP_BATCH_SIZE, count
     assert_equal SlackChannelCatalogSync::MEMBERSHIP_BATCH_SIZE, refreshed.length
   end
 
+  test "Slack requests paginate channels and configure short timeouts" do
+    api = Minitest::Mock.new
+    api.expect(:get, response(ok: true, team_id: TEAM_ID, user_id: BOT_USER_ID),
+               [ "#{API_URL}/auth.test" ], params: {}, headers: HEADERS)
+    api.expect(
+      :get,
+      response(ok: true, channels: [
+        { id: "C0123456789", name: "general", is_private: false },
+        { id: "D0123456789", user: "U0123456789", is_im: true }
+      ]),
+      [ "#{API_URL}/users.conversations" ],
+      params: {
+        types: SlackChannelCatalogSync::CHANNEL_TYPES,
+        exclude_archived: "false",
+        limit: "200"
+      },
+      headers: HEADERS
+    )
+    captured_options = nil
+
+    HttpClient.stub(:new, ->(**options) { captured_options = options; api }) do
+      assert_equal 1, build_sync.sync_channels
+    end
+
+    assert_equal [ "C0123456789" ], SlackBotChannel.pluck(:channel_id)
+    assert_equal SlackChannelCatalogSync::OPEN_TIMEOUT_SECONDS, captured_options.fetch(:open_timeout)
+    assert_equal SlackChannelCatalogSync::READ_TIMEOUT_SECONDS, captured_options.fetch(:read_timeout)
+    assert_equal SlackChannelCatalogSync::WRITE_TIMEOUT_SECONDS, captured_options.fetch(:write_timeout)
+    api.verify
+  end
+
+  test "Slack membership requests fully paginate" do
+    channel = create_channel(channel_id: "C0123456789", name: "general")
+    api = Minitest::Mock.new
+    api.expect(:get, response(ok: true, members: [ BOT_USER_ID, "U1111111111" ],
+                              response_metadata: { next_cursor: "next" }),
+               [ "#{API_URL}/conversations.members" ],
+               params: { channel: channel.channel_id, limit: "200" }, headers: HEADERS)
+    api.expect(:get, response(ok: true, members: %w[U2222222222 U1111111111],
+                              response_metadata: { next_cursor: "" }),
+               [ "#{API_URL}/conversations.members" ],
+               params: { channel: channel.channel_id, limit: "200", cursor: "next" }, headers: HEADERS)
+
+    members = build_sync(api: api).channel_members(channel.channel_id)
+
+    assert_equal [ BOT_USER_ID, "U1111111111", "U2222222222" ], members
+    api.verify
+  end
+
   private
+
+  def build_sync(api: nil)
+    SlackChannelCatalogSync.new(token: TOKEN, api_url: API_URL, api: api)
+  end
 
   def create_channel(channel_id:, name:, member_user_ids: [ BOT_USER_ID ],
                      membership_refreshed_at: Time.current)
@@ -144,14 +211,14 @@ class SlackChannelCatalogSyncTest < ActiveSupport::TestCase
   end
 
   def identity
-    SlackChannelCatalog::Identity.new(team_id: TEAM_ID, bot_user_id: BOT_USER_ID)
+    SlackChannelCatalogSync::Identity.new(team_id: TEAM_ID, bot_user_id: BOT_USER_ID)
   end
 
   def remote_channel(id:, name:, private: false, archived: false)
-    SlackChannelCatalog::RemoteChannel.new(id: id, name: name, private: private, archived: archived)
+    SlackChannelCatalogSync::RemoteChannel.new(id: id, name: name, private: private, archived: archived)
   end
 
-  def mock_client
-    Minitest::Mock.new
+  def response(payload)
+    HttpClient::Response.new(status: 200, body: payload.to_json)
   end
 end
