@@ -33,20 +33,22 @@ Prometheus/VictoriaMetrics metrics, and domain spans in the session runtime.
 - Metrics scrape readiness is implemented: the Helm chart emits Prometheus
   scrape annotations for `api-rs` by default. Dashboard and Grafana provisioning
   artifacts are intentionally not checked in with this slice.
-- Codex app-server event spans are implemented: parsed sandbox stdout JSON
-  emits `centaur.api_rs.codex_app_server.event` spans, and recognized tool-call
-  envelopes emit `centaur.api_rs.codex_app_server.tool_call` spans with bounded
-  tool identity and status attributes only.
+- Codex app-server protocol messages are recorded as events on the execution
+  tree. Recognized tool-call envelopes create
+  `centaur.api_rs.codex_app_server.tool_call` spans that stay open from tool
+  start through completion and use Laminar's `TOOL` span type.
 - Process-local trace continuity is implemented for spawned stdout work:
   `centaur.api_rs.session.execution` is created when an execution is claimed,
   kept active until terminal state, and used as the parent for stdout-pump,
   codex app-server event, and tool-call spans emitted by the background pump.
 - Harness trace export wiring is implemented: every sandbox stdin line carries
-  `thread_key`, a deterministic per-thread `trace_id` (UUIDv5 of the thread
-  key — no `thread_traces` table), and the execution span's `traceparent`, so
-  the Rust harness server can configure Codex's OTLP export and the harness's
-  `session_task.turn` spans (token usage that Laminar prices into cost) join
-  the execution trace. The api-rs process's own OTLP env
+  `thread_key` and the durable execution span's `traceparent`, so the Rust
+  harness server can configure Codex's OTLP export and the harness's
+  `session_task.turn` spans join the execution trace. Harness LLM spans use
+  Laminar's `LLM` span type and standard GenAI usage attributes. Non-Codex
+  harness usage is handed to a bounded background batch exporter so telemetry
+  delivery cannot delay the terminal protocol message. The api-rs process's
+  own OTLP env
   (`OTEL_EXPORTER_OTLP_{ENDPOINT,TRACES_ENDPOINT,HEADERS}` and
   `OTEL_RESOURCE_ATTRIBUTES`) is always forwarded into codex sandboxes —
   the same hardcoded passthrough set the Python control plane used — so the
@@ -244,14 +246,13 @@ stdout-pump work by keeping a process-local execution span registry keyed by
 `execution_id`.
 
 Trace context needs to be persisted or explicitly propagated before spawning
-background work. The stdout pump now uses the registered execution span as the
-parent for `centaur.api_rs.session.stdout_pump`,
-`centaur.api_rs.codex_app_server.event`, and
-`centaur.api_rs.codex_app_server.tool_call`.
-
-Cross-process continuity after an API restart remains future work. If `api-rs`
-needs that, reuse `thread_traces(thread_key, trace_id, root_span_id)` when
-available or add equivalent columns to `sessions`.
+background work. Each `centaur.api_rs.session.execution` span starts a new
+trace, carries `thread_key` as the Laminar session association, and carries
+`execution_id` as Laminar metadata. Its W3C `traceparent` is persisted in the
+execution metadata before sandbox input is delivered. Steering reuses that
+context, and restart adoption creates a continuation span in the same trace.
+The thread is never used as a trace identity, so multiple turns appear as
+separate traces grouped into one Laminar session.
 
 ## Implementation Plan
 
@@ -287,8 +288,8 @@ available or add equivalent columns to `sessions`.
 6. Add trace continuity.
    - Propagate context into background tasks.
    - Keep execution spans active until terminal state.
-   - Reuse `thread_traces` when available for cross-process continuity.
-   - Persist root trace/span context if restart continuity is required.
+   - Persist the execution `traceparent` before delivering sandbox input.
+   - Continue the persisted trace when adopting an execution after restart.
 
 7. Verify locally.
    - Run Rust unit tests.

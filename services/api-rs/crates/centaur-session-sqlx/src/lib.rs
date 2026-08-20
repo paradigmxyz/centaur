@@ -391,6 +391,35 @@ impl PgSessionStore {
         })
     }
 
+    /// Persist the execution trace context before input is delivered to the
+    /// sandbox. Keeping it on the durable execution row lets recovery and
+    /// steering continue the same trace after a control-plane restart.
+    pub async fn set_execution_traceparent(
+        &self,
+        execution_id: &str,
+        traceparent: &str,
+    ) -> Result<(), SessionStoreError> {
+        let updated = sqlx::query_scalar::<_, String>(
+            r#"
+            update session_executions
+            set metadata = metadata || jsonb_build_object('centaur.traceparent', $2::text),
+                updated_at = now()
+            where execution_id = $1
+            returning execution_id
+            "#,
+        )
+        .bind(execution_id)
+        .bind(traceparent)
+        .fetch_optional(&self.pool)
+        .await?;
+        if updated.is_none() {
+            return Err(SessionStoreError::ExecutionNotFound {
+                execution_id: execution_id.to_owned(),
+            });
+        }
+        Ok(())
+    }
+
     pub async fn active_execution_for_thread(
         &self,
         thread_key: &ThreadKey,
@@ -2195,6 +2224,22 @@ mod tests {
         assert!(first.created);
         assert!(!replay.created);
         assert_eq!(replay.execution.execution_id, first.execution.execution_id);
+        store
+            .set_execution_traceparent(
+                &first.execution.execution_id,
+                "00-0123456789abcdef0123456789abcdef-1111111111111111-01",
+            )
+            .await
+            .expect("persist execution traceparent");
+        assert_eq!(
+            store
+                .latest_execution_for_thread(&thread_key)
+                .await
+                .expect("load traced execution")
+                .expect("execution exists")
+                .metadata["centaur.traceparent"],
+            "00-0123456789abcdef0123456789abcdef-1111111111111111-01"
+        );
         assert_eq!(
             store
                 .execution_request(&first.execution.execution_id)

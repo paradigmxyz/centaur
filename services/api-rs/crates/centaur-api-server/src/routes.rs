@@ -30,12 +30,12 @@ use base64::{Engine as _, engine::general_purpose};
 use centaur_session_core::{ChatDestination, ThreadKey};
 use centaur_session_runtime::{
     ExecuteSessionInput, HarnessConflictPolicy, SandboxRuntime, SessionPrincipalRegistrar,
-    SessionRuntime, thread_trace_id, thread_trace_parent_span_id,
+    SessionRuntime,
 };
 use centaur_session_sqlx::PgSessionStore;
 use centaur_telemetry::{
     PrometheusHandle, http_status_class, prometheus_handle, record_api_authentication,
-    record_http_request_finished, record_http_request_started, set_span_parent_trace,
+    record_http_request_finished, record_http_request_started,
 };
 use centaur_workflows::{
     CreateWorkflowRunRequest, WebhookFilter, WorkflowRuntime, WorkflowWebhookAuth,
@@ -361,11 +361,6 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
                 if let Some(thread_key) = session_thread_key_from_request(request) {
                     span.record("centaur.thread_key", thread_key.as_str());
                     span.record("thread_key", thread_key.as_str());
-                    set_span_parent_trace(
-                        &span,
-                        &thread_trace_id(&thread_key),
-                        &thread_trace_parent_span_id(&thread_key),
-                    );
                 }
                 span
             })

@@ -30,7 +30,6 @@ opentelemetry-proto = { version = "0.32.0", default-features = false, features =
 prost = "0.14"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sha2 = "0.11"
 thiserror = "2.0"
 tokio = { version = "1.49", features = ["rt-multi-thread", "sync"] }
 url = "2.5"

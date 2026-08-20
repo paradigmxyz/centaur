@@ -4,7 +4,10 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{
+    OnceLock,
+    mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel},
+};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -14,7 +17,6 @@ use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span, span};
 use prost::Message as _;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use url::Url;
 use uuid::Uuid;
 
@@ -24,11 +26,10 @@ const CODEX_SPAN_PREFIX: &str = "codex.";
 const LAMINAR_METADATA_PREFIX: &str = "lmnr.association.properties.metadata.";
 
 static OTLP_PROXY_ENDPOINT: OnceLock<String> = OnceLock::new();
-static OTLP_TRACE_METADATA: OnceLock<BTreeMap<String, Value>> = OnceLock::new();
-static OTLP_TRACE_ID: OnceLock<Vec<u8>> = OnceLock::new();
-// Stable thread-root parent for parentless Codex startup/background spans.
-// Per-execution parentage still comes from each input line's traceparent.
-static OTLP_THREAD_ROOT_SPAN_ID: OnceLock<Vec<u8>> = OnceLock::new();
+static USAGE_EXPORTER: OnceLock<UsageExporter> = OnceLock::new();
+
+const USAGE_EXPORT_QUEUE_CAPACITY: usize = 256;
+const USAGE_EXPORT_BATCH_SIZE: usize = 32;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TraceContext {
@@ -40,13 +41,10 @@ pub(crate) struct TraceContext {
 
 impl TraceContext {
     pub(crate) fn effective_trace_id(&self) -> Option<String> {
-        self.trace_id
-            .clone()
-            .or_else(|| {
-                self.traceparent
-                    .as_deref()
-                    .and_then(trace_id_from_traceparent)
-            })
+        self.traceparent
+            .as_deref()
+            .and_then(trace_id_from_traceparent)
+            .or_else(|| self.trace_id.clone())
             .or_else(|| clean_optional(env::var("CENTAUR_TRACE_ID").ok().as_deref()))
     }
 
@@ -62,21 +60,12 @@ impl TraceContext {
 }
 
 pub(crate) fn configure_codex_otel_for_startup(trace: &TraceContext) -> Result<()> {
-    let Some(trace_id) = trace.effective_trace_id() else {
+    if trace.effective_trace_id().is_none() {
         return Ok(());
-    };
+    }
     let Some(endpoint) = otlp_traces_endpoint() else {
         return Ok(());
     };
-    if !trace.metadata.is_empty() {
-        let _ = OTLP_TRACE_METADATA.set(trace.metadata.clone());
-    }
-    if let Some(trace_id) = trace_id_to_bytes(&trace_id) {
-        let _ = OTLP_TRACE_ID.set(trace_id);
-    }
-    if let Some(thread_root_span_id) = thread_root_parent_span_id(trace.thread_key.as_deref()) {
-        let _ = OTLP_THREAD_ROOT_SPAN_ID.set(thread_root_span_id);
-    }
     let proxy_endpoint = start_otlp_proxy(&endpoint)?;
     let config_path = codex_config_path();
     let base = config_path
@@ -89,7 +78,6 @@ pub(crate) fn configure_codex_otel_for_startup(trace: &TraceContext) -> Result<(
     let next = codex_otel_config_contents(
         &base,
         &proxy_endpoint,
-        &trace_id,
         trace.thread_key.as_deref(),
         api_key.as_deref(),
         &environment,
@@ -138,14 +126,56 @@ pub(crate) fn export_harness_usage_span(
         return Ok(());
     };
     let request = harness_usage_trace_request(trace, span, usage)?;
-    let mut headers = otel_forward_headers();
-    if let Some(trace_id) = trace.effective_trace_id() {
-        headers.insert("x-trace-id".to_string(), trace_id);
+    let exporter = USAGE_EXPORTER.get_or_init(|| UsageExporter::start(endpoint));
+    exporter.enqueue(request)
+}
+
+struct UsageExporter {
+    sender: SyncSender<ExportTraceServiceRequest>,
+}
+
+impl UsageExporter {
+    fn start(endpoint: String) -> Self {
+        let headers = otel_forward_headers();
+        let (sender, receiver) = sync_channel(USAGE_EXPORT_QUEUE_CAPACITY);
+        if let Err(error) = thread::Builder::new()
+            .name("harness-otel-export".to_owned())
+            .spawn(move || run_usage_exporter(receiver, endpoint, headers))
+        {
+            eprintln!("failed to start harness OTLP exporter: {error}");
+        }
+        Self { sender }
     }
-    if let Some(thread_key) = clean_optional(trace.thread_key.as_deref()) {
-        headers.insert("x-centaur-thread-key".to_string(), thread_key);
+
+    fn enqueue(&self, request: ExportTraceServiceRequest) -> Result<()> {
+        self.sender.try_send(request).map_err(|error| match error {
+            TrySendError::Full(_) => HarnessServerError::Protocol(
+                "harness OTLP export queue is full; dropping usage span".to_owned(),
+            ),
+            TrySendError::Disconnected(_) => {
+                HarnessServerError::Protocol("harness OTLP export worker stopped".to_owned())
+            }
+        })
     }
-    post_otlp_trace_payload(&endpoint, &headers, &request.encode_to_vec())
+}
+
+fn run_usage_exporter(
+    receiver: Receiver<ExportTraceServiceRequest>,
+    endpoint: String,
+    headers: BTreeMap<String, String>,
+) {
+    while let Ok(first) = receiver.recv() {
+        let mut batch = first;
+        for _ in 1..USAGE_EXPORT_BATCH_SIZE {
+            match receiver.try_recv() {
+                Ok(mut request) => batch.resource_spans.append(&mut request.resource_spans),
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+            }
+        }
+        if let Err(error) = post_otlp_trace_payload(&endpoint, &headers, &batch.encode_to_vec()) {
+            eprintln!("harness usage OTLP export failed: {error:#}");
+        }
+    }
 }
 
 fn codex_config_path() -> Option<PathBuf> {
@@ -202,12 +232,11 @@ fn toml_string(value: &str) -> String {
 fn codex_otel_config_contents(
     base: &str,
     endpoint: &str,
-    trace_id: &str,
     thread_key: Option<&str>,
     api_key: Option<&str>,
     environment: &str,
 ) -> String {
-    let mut headers = vec![format!("x-trace-id = {}", toml_string(trace_id))];
+    let mut headers = Vec::new();
     if let Some(thread_key) = clean_optional(thread_key) {
         headers.push(format!(
             "x-centaur-thread-key = {}",
@@ -450,7 +479,13 @@ fn handle_otlp_proxy_connection(mut stream: TcpStream, target: &OtlpTarget) -> s
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     match read_http_request(&mut stream) {
         Ok(request) if request.method == "POST" && request.path == "/v1/traces" => {
-            match rewrite_otlp_trace_payload(&request.body) {
+            match rewrite_otlp_trace_payload_with_context(
+                &request.body,
+                request
+                    .headers
+                    .get("x-centaur-thread-key")
+                    .map(String::as_str),
+            ) {
                 Ok(body) => forward_otlp_request(&mut stream, target, &request.headers, &body),
                 Err(error) => {
                     write_http_response(&mut stream, 400, "Bad Request", error.as_bytes())
@@ -679,6 +714,11 @@ fn harness_usage_trace_request(
     set_attribute_string(&mut attributes, "centaur.turn_id", span_context.turn_id);
     if let Some(thread_key) = trace.thread_key.as_deref() {
         set_attribute_string(&mut attributes, "centaur.thread_key", thread_key);
+        set_attribute_string(
+            &mut attributes,
+            "lmnr.association.properties.session_id",
+            thread_key,
+        );
     }
     apply_laminar_trace_metadata_to_attributes(&mut attributes, &trace.metadata);
 
@@ -736,19 +776,8 @@ fn harness_usage_span_trace_ids(trace: &TraceContext) -> Result<(Vec<u8>, Vec<u8
                 None
             }
         })
-        .or_else(|| thread_root_parent_span_id(trace.thread_key.as_deref()))
         .unwrap_or_default();
     Ok((trace_id, parent_span_id))
-}
-
-fn thread_root_parent_span_id(thread_key: Option<&str>) -> Option<Vec<u8>> {
-    let thread_key = clean_optional(thread_key)?;
-    let digest = Sha256::digest(format!("centaur:thread-parent:{thread_key}"));
-    let mut bytes = digest[..8].to_vec();
-    if bytes.iter().all(|byte| *byte == 0) {
-        bytes[7] = 1;
-    }
-    Some(bytes)
 }
 
 fn set_harness_span_io_attributes(
@@ -803,15 +832,12 @@ fn apply_laminar_trace_metadata_to_attributes(
     attributes: &mut Vec<KeyValue>,
     metadata: &BTreeMap<String, Value>,
 ) {
-    for (key, value) in metadata {
-        let key = key.trim();
-        if !key.is_empty() {
-            set_attribute_json(
-                attributes,
-                &format!("{LAMINAR_METADATA_PREFIX}{key}"),
-                value,
-            );
-        }
+    if let Some(execution_id) = metadata.get("execution_id") {
+        set_attribute_json(
+            attributes,
+            &format!("{LAMINAR_METADATA_PREFIX}execution_id"),
+            execution_id,
+        );
     }
 }
 
@@ -1050,42 +1076,26 @@ fn kv_string(key: &str, value: &str) -> KeyValue {
     }
 }
 
-pub(crate) fn rewrite_otlp_trace_payload(payload: &[u8]) -> std::result::Result<Vec<u8>, String> {
+fn rewrite_otlp_trace_payload_with_context(
+    payload: &[u8],
+    thread_key: Option<&str>,
+) -> std::result::Result<Vec<u8>, String> {
     let mut request = ExportTraceServiceRequest::decode(payload)
         .map_err(|error| format!("invalid OTLP trace payload: {error}"))?;
     for resource_span in &mut request.resource_spans {
         for scope_span in &mut resource_span.scope_spans {
             for span in &mut scope_span.spans {
-                attach_thread_root_parent_span(span);
                 if !span.name.is_empty() && !span.name.starts_with(CODEX_SPAN_PREFIX) {
                     span.name = format!("{}{}", CODEX_SPAN_PREFIX, span.name);
                 }
-                normalize_codex_llm_span(span);
+                normalize_codex_llm_span(span, thread_key);
             }
         }
     }
     Ok(request.encode_to_vec())
 }
 
-fn attach_thread_root_parent_span(span: &mut Span) {
-    if !span.parent_span_id.is_empty() {
-        return;
-    }
-    let Some(parent_span_id) = OTLP_THREAD_ROOT_SPAN_ID.get() else {
-        return;
-    };
-    if parent_span_id.as_slice() == span.span_id.as_slice() {
-        return;
-    }
-    if let Some(trace_id) = OTLP_TRACE_ID.get()
-        && trace_id.as_slice() != span.trace_id.as_slice()
-    {
-        return;
-    }
-    span.parent_span_id = parent_span_id.clone();
-}
-
-fn normalize_codex_llm_span(span: &mut Span) {
+fn normalize_codex_llm_span(span: &mut Span, thread_key: Option<&str>) {
     if span.name != "codex.session_task.turn" {
         return;
     }
@@ -1102,8 +1112,13 @@ fn normalize_codex_llm_span(span: &mut Span) {
     );
     let total_tokens = attribute_int(&span.attributes, "codex.turn.token_usage.total_tokens");
 
-    if let Some(metadata) = OTLP_TRACE_METADATA.get() {
-        apply_laminar_trace_metadata(span, metadata);
+    set_attribute_string(&mut span.attributes, "lmnr.span.type", "LLM");
+    if let Some(thread_key) = clean_optional(thread_key) {
+        set_attribute_string(
+            &mut span.attributes,
+            "lmnr.association.properties.session_id",
+            &thread_key,
+        );
     }
     set_attribute_string(&mut span.attributes, "gen_ai.operation.name", "chat");
     set_attribute_string(&mut span.attributes, "gen_ai.system", "openai");
@@ -1134,19 +1149,6 @@ fn normalize_codex_llm_span(span: &mut Span) {
         "gen_ai.usage.total_tokens",
         total_tokens,
     );
-}
-
-pub(crate) fn apply_laminar_trace_metadata(span: &mut Span, metadata: &BTreeMap<String, Value>) {
-    for (key, value) in metadata {
-        let key = key.trim();
-        if !key.is_empty() {
-            set_attribute_json(
-                &mut span.attributes,
-                &format!("{LAMINAR_METADATA_PREFIX}{key}"),
-                value,
-            );
-        }
-    }
 }
 
 fn attribute_string(attributes: &[KeyValue], key: &str) -> String {
@@ -1321,7 +1323,6 @@ trust_level = "trusted"
         let config = codex_otel_config_contents(
             &base,
             "http://127.0.0.1:1234/v1/traces",
-            "01234567-89ab-cdef-0123-456789abcdef",
             Some("slack:T:C:1.0"),
             Some("secret"),
             "production",
@@ -1331,30 +1332,29 @@ trust_level = "trusted"
         assert!(config.contains("[projects.\"/\"]"));
         assert!(config.contains("[otel]"));
         assert!(config.contains("environment = \"production\""));
-        assert!(config.contains("x-trace-id = \"01234567-89ab-cdef-0123-456789abcdef\""));
+        assert!(!config.contains("x-trace-id"));
         assert!(config.contains("x-centaur-thread-key = \"slack:T:C:1.0\""));
         assert!(config.contains("authorization = \"Bearer secret\""));
         assert!(!config.contains("environment = \"old\""));
     }
 
     #[test]
-    fn explicit_thread_trace_id_wins_over_foreign_traceparent() {
-        let thread_trace_id = "01234567-89ab-cdef-0123-456789abcdef";
+    fn execution_traceparent_wins_over_legacy_trace_id() {
+        let legacy_trace_id = "01234567-89ab-cdef-0123-456789abcdef";
         let execution_traceparent = "00-fedcba9876543210fedcba9876543210-0123456789abcdef-01";
         let trace = TraceContext {
             thread_key: Some("slack:T:C:1.0".to_string()),
-            trace_id: Some(thread_trace_id.to_string()),
+            trace_id: Some(legacy_trace_id.to_string()),
             traceparent: Some(execution_traceparent.to_string()),
             metadata: BTreeMap::new(),
         };
 
-        assert_eq!(trace.effective_trace_id().as_deref(), Some(thread_trace_id));
-        let effective_traceparent = trace.effective_traceparent().expect("traceparent");
-        assert_ne!(effective_traceparent, execution_traceparent);
         assert_eq!(
-            trace_id_from_traceparent(&effective_traceparent).as_deref(),
-            Some(thread_trace_id)
+            trace.effective_trace_id().as_deref(),
+            Some("fedcba98-7654-3210-fedc-ba9876543210")
         );
+        let effective_traceparent = trace.effective_traceparent().expect("traceparent");
+        assert_eq!(effective_traceparent, execution_traceparent);
     }
 
     #[test]
@@ -1380,11 +1380,20 @@ trust_level = "trusted"
             }],
         };
 
-        let rewritten = rewrite_otlp_trace_payload(&request.encode_to_vec()).expect("rewrite");
+        let rewritten = rewrite_otlp_trace_payload_with_context(
+            &request.encode_to_vec(),
+            Some("slack:T:C:1.0"),
+        )
+        .expect("rewrite");
         let decoded = ExportTraceServiceRequest::decode(rewritten.as_slice()).expect("decode");
         let span = &decoded.resource_spans[0].scope_spans[0].spans[0];
 
         assert_eq!(span.name, "codex.session_task.turn");
+        assert_eq!(attribute_string(&span.attributes, "lmnr.span.type"), "LLM");
+        assert_eq!(
+            attribute_string(&span.attributes, "lmnr.association.properties.session_id"),
+            "slack:T:C:1.0"
+        );
         assert_eq!(
             attribute_string(&span.attributes, "gen_ai.request.model"),
             "gpt-5.5"
@@ -1411,10 +1420,16 @@ trust_level = "trusted"
             traceparent: Some(
                 "00-0123456789abcdef0123456789abcdef-1111111111111111-01".to_string(),
             ),
-            metadata: BTreeMap::from([(
-                "execution_id".to_string(),
-                Value::String("exe_123".to_string()),
-            )]),
+            metadata: BTreeMap::from([
+                (
+                    "execution_id".to_string(),
+                    Value::String("exe_123".to_string()),
+                ),
+                (
+                    "raw_request_metadata".to_string(),
+                    Value::String("must-not-export".to_string()),
+                ),
+            ]),
         };
         let usage = NormalizedTokenUsage {
             model: Some("claude-fable-5".to_string()),
@@ -1528,14 +1543,25 @@ trust_level = "trusted"
             ),
             "exe_123"
         );
+        assert_eq!(
+            attribute_string(&span.attributes, "lmnr.association.properties.session_id"),
+            "slack:C123:123.456"
+        );
+        assert_eq!(
+            attribute_string(
+                &span.attributes,
+                "lmnr.association.properties.metadata.raw_request_metadata"
+            ),
+            ""
+        );
     }
 
     #[test]
     fn harness_usage_trace_request_uses_matching_traceparent_for_api_parentage() {
-        let thread_trace_id = "01234567-89ab-cdef-0123-456789abcdef";
+        let execution_trace_id = "01234567-89ab-cdef-0123-456789abcdef";
         let trace = TraceContext {
             thread_key: Some("slack:C123:123.456".to_string()),
-            trace_id: Some(thread_trace_id.to_string()),
+            trace_id: Some(execution_trace_id.to_string()),
             traceparent: Some(
                 "00-0123456789abcdef0123456789abcdef-1111111111111111-01".to_string(),
             ),
@@ -1569,8 +1595,8 @@ trust_level = "trusted"
 
         assert_eq!(
             span.trace_id,
-            Uuid::parse_str(thread_trace_id)
-                .expect("thread trace uuid")
+            Uuid::parse_str(execution_trace_id)
+                .expect("execution trace uuid")
                 .as_bytes()
                 .to_vec()
         );
@@ -1581,11 +1607,11 @@ trust_level = "trusted"
     }
 
     #[test]
-    fn harness_usage_trace_request_ignores_foreign_traceparent_parentage() {
-        let thread_trace_id = "01234567-89ab-cdef-0123-456789abcdef";
+    fn harness_usage_trace_request_prefers_execution_traceparent() {
+        let legacy_trace_id = "01234567-89ab-cdef-0123-456789abcdef";
         let trace = TraceContext {
             thread_key: Some("slack:C123:123.456".to_string()),
-            trace_id: Some(thread_trace_id.to_string()),
+            trace_id: Some(legacy_trace_id.to_string()),
             traceparent: Some(
                 "00-fedcba9876543210fedcba9876543210-1111111111111111-01".to_string(),
             ),
@@ -1619,23 +1645,23 @@ trust_level = "trusted"
 
         assert_eq!(
             span.trace_id,
-            Uuid::parse_str(thread_trace_id)
-                .expect("thread trace uuid")
+            Uuid::parse_str("fedcba98-7654-3210-fedc-ba9876543210")
+                .expect("execution trace uuid")
                 .as_bytes()
                 .to_vec()
         );
         assert_eq!(
             span.parent_span_id,
-            thread_root_parent_span_id(trace.thread_key.as_deref()).expect("thread root parent")
+            vec![0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11]
         );
     }
 
     #[test]
-    fn harness_usage_trace_request_falls_back_to_explicit_thread_trace_id() {
-        let thread_trace_id = "01234567-89ab-cdef-0123-456789abcdef";
+    fn harness_usage_trace_request_falls_back_to_legacy_trace_id() {
+        let legacy_trace_id = "01234567-89ab-cdef-0123-456789abcdef";
         let trace = TraceContext {
             thread_key: Some("slack:C123:123.456".to_string()),
-            trace_id: Some(thread_trace_id.to_string()),
+            trace_id: Some(legacy_trace_id.to_string()),
             traceparent: None,
             metadata: BTreeMap::new(),
         };
@@ -1667,15 +1693,12 @@ trust_level = "trusted"
 
         assert_eq!(
             span.trace_id,
-            Uuid::parse_str(thread_trace_id)
-                .expect("thread trace uuid")
+            Uuid::parse_str(legacy_trace_id)
+                .expect("legacy trace uuid")
                 .as_bytes()
                 .to_vec()
         );
-        assert_eq!(
-            span.parent_span_id,
-            thread_root_parent_span_id(trace.thread_key.as_deref()).expect("thread root parent")
-        );
+        assert!(span.parent_span_id.is_empty());
     }
 
     #[test]
