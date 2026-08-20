@@ -5,7 +5,7 @@ class Console::ScheduledTasksController < ApplicationController
 
   def index
     @tasks = ScheduledTask.includes(:author, :principal).order(:name, :id)
-    @slack_channel_names = slack_channel_names
+    @slack_destination_names = slack_destination_names
   end
 
   def new
@@ -88,8 +88,15 @@ class Console::ScheduledTasksController < ApplicationController
     @principals = Principal.where.not(foreign_id: nil).order(:name, :foreign_id)
   end
 
-  def slack_channel_names
-    SlackChannelCatalogProvider.fetch.channels.to_h { |channel| [ channel.id, channel.name ] }
+  def slack_destination_names
+    names = SlackChannelCatalogProvider.fetch.channels.to_h { |channel| [ channel.id, "##{channel.name}" ] }
+    @tasks.each do |task|
+      user_id = SlackDeliveryPolicy.new(task.author).direct_message_user_id
+      next unless task.delivery_channel == user_id
+
+      names[user_id] = task.author == current_user ? "Direct message to you" : "Direct message to #{task.author.email}"
+    end
+    names
   rescue StandardError => e
     Rails.logger.warn("scheduled_task_slack_channels_load_failed error=#{e.class}: #{e.message}")
     {}

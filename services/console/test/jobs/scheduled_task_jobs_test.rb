@@ -16,6 +16,17 @@ class ScheduledTaskJobsTest < ActiveJob::TestCase
 
   setup do
     @original_client_factory = ScheduledTaskRunJob.client_factory
+    user = users(:acme_admin)
+    user.user_identities.create!(
+      provider: "slack",
+      subject: "U0123456789",
+      team_id: "T0123456789"
+    )
+    @delivery_principal = ConsoleUserPrincipalProvisioner.call(user)
+    @delivery_permission = @delivery_principal.slack_channel_permissions.create!(
+      channel_id: "C0123456789",
+      upload_enabled: true
+    )
   end
 
   teardown do
@@ -75,6 +86,18 @@ class ScheduledTaskJobsTest < ActiveJob::TestCase
     assert_equal ScheduledTaskRunJob::MAX_ATTEMPTS, request[:max_attempts]
     assert_equal "run-123", task.reload.last_run_id
     assert_equal Time.utc(2026, 8, 19, 12, 5), task.last_run_at
+  end
+
+  test "runner refuses a destination after the author's permission is revoked" do
+    task = create_task
+    client = FakeApiClient.new
+    ScheduledTaskRunJob.client_factory = -> { client }
+    @delivery_permission.destroy!
+
+    assert_raises(ScheduledTask::DeliveryDestinationUnavailable) do
+      ScheduledTaskRunJob.perform_now(task.id, "2026-08-19T12:00:00Z")
+    end
+    assert_empty client.requests
   end
 
   private

@@ -175,7 +175,7 @@ Subscribe to the `app_mention` bot event. For a minimal channel-mention test,
 the app also needs Bot Token Scopes that let it read mentions and write replies,
 for example `app_mentions:read` and `chat:write`. If you enable DM events such
 as `message.im`, Slack will also require direct-message scopes such as
-`im:history`.
+`im:history`. Scheduled task delivery to a user's DM requires `im:write`.
 
 Save changes and reinstall the app.
 

@@ -1,6 +1,20 @@
 require "test_helper"
 
 class ScheduledTaskTest < ActiveSupport::TestCase
+  setup do
+    user = users(:acme_admin)
+    user.user_identities.create!(
+      provider: "slack",
+      subject: "U0123456789",
+      team_id: "T0123456789"
+    )
+    principal = ConsoleUserPrincipalProvisioner.call(user)
+    principal.slack_channel_permissions.create!(
+      channel_id: "C0123456789",
+      upload_enabled: true
+    )
+  end
+
   test "maps schedule presets to cron and calculates the next run in Pacific Time" do
     travel_to Time.utc(2026, 8, 19, 12) do
       task = ScheduledTask.create!(
@@ -30,7 +44,16 @@ class ScheduledTaskTest < ActiveSupport::TestCase
 
     assert_not task.valid?
     assert_includes task.errors[:cron_expression], "is not a valid cron schedule"
-    assert_includes task.errors[:delivery_channel], "must be a Slack channel ID"
+    assert_includes task.errors[:delivery_channel], "must be a Slack channel or user ID"
+  end
+
+  test "allows the author's direct message and rejects an unavailable channel" do
+    direct_message_task = ScheduledTask.new(valid_attributes(delivery_channel: "U0123456789"))
+    unavailable_task = ScheduledTask.new(valid_attributes(delivery_channel: "C9999999999"))
+
+    assert direct_message_task.valid?
+    assert_not unavailable_task.valid?
+    assert_includes unavailable_task.errors[:delivery_channel], "is not available to the author"
   end
 
   test "disabling a task clears its next run" do

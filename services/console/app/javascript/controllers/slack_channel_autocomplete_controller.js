@@ -147,7 +147,7 @@ export default class extends Controller {
 
   syncManualChannelId() {
     const value = this.inputTarget.value.trim().toUpperCase()
-    this.valueTarget.value = /^[CDG][A-Z0-9]{8,}$/.test(value) ? value : ""
+    this.valueTarget.value = /^[CDGUW][A-Z0-9]{8,}$/.test(value) ? value : ""
     this.updateSubmitState()
   }
 
@@ -158,7 +158,7 @@ export default class extends Controller {
   }
 
   resultStatus() {
-    if (this.options.length === 0) return "No matching channels. You can enter a channel ID directly."
+    if (this.options.length === 0) return "No matching Slack destinations."
     if (this.options.length === 20) {
       return this.currentQuery === ""
         ? "Showing the first 20 channels. Type to search all channels."

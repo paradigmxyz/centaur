@@ -42,9 +42,9 @@
               <% end %>
             </td>
             <td class="console-td text-xs text-zinc-400">
-              <% channel_name = @slack_channel_names[task.delivery_channel] %>
-              <div><%= channel_name.present? ? "##{channel_name}" : task.delivery_channel %></div>
-              <% if channel_name.present? %>
+              <% destination_name = @slack_destination_names[task.delivery_channel] %>
+              <div><%= destination_name.presence || task.delivery_channel %></div>
+              <% if destination_name.present? %>
                 <div class="mt-1 text-zinc-600"><%= task.delivery_channel %></div>
               <% end %>
             </td>

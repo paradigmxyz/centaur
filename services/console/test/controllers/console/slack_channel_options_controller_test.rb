@@ -4,6 +4,12 @@ module Console
   class SlackChannelOptionsControllerTest < ActionDispatch::IntegrationTest
     setup do
       @operator = users(:acme_admin)
+      @operator.user_identities.create!(
+        provider: "slack",
+        subject: "U0123456789",
+        team_id: "T0123456789"
+      )
+      @delivery_principal = ConsoleUserPrincipalProvisioner.call(@operator)
       post login_url, params: { email: @operator.email, password: "password123456" }
     end
 
@@ -49,8 +55,12 @@ module Console
       assert_equal [], response.parsed_body.fetch("options")
     end
 
-    test "scheduled task options include all matching channels" do
+    test "scheduled task options include only channels the author can upload to" do
       captured = nil
+      @delivery_principal.slack_channel_permissions.create!(
+        channel_id: "C1111111111",
+        upload_enabled: true
+      )
       result = SlackChannelCatalog::Result.new(
         channels: [ SlackChannelCatalog::Channel.new(id: "C1111111111", name: "engineering", private: false) ],
         error: nil,
@@ -66,8 +76,26 @@ module Console
       end
 
       assert_response :ok
-      assert_equal [], captured.fetch(:exclude_ids)
+      assert_equal [ "C1111111111" ], captured.fetch(:include_ids)
       assert_equal "C1111111111", response.parsed_body.fetch("options").sole.fetch("value")
+    end
+
+    test "scheduled task options include the author's direct message" do
+      result = SlackChannelCatalog::Result.new(channels: [], error: nil, configured: true)
+
+      SlackChannelCatalogProvider.stub(:search, result) do
+        get slack_channel_options_console_scheduled_tasks_url
+      end
+
+      assert_response :ok
+      assert_equal(
+        {
+          "value" => "U0123456789",
+          "label" => "Direct message to you",
+          "description" => "U0123456789 · Slack DM"
+        },
+        response.parsed_body.fetch("options").sole
+      )
     end
 
     test "non-admins cannot search the catalog" do

@@ -3,6 +3,16 @@ require "test_helper"
 class Console::ScheduledTasksControllerTest < ActionDispatch::IntegrationTest
   setup do
     @operator = users(:acme_admin)
+    @operator.user_identities.create!(
+      provider: "slack",
+      subject: "U0123456789",
+      team_id: "T0123456789"
+    )
+    @delivery_principal = ConsoleUserPrincipalProvisioner.call(@operator)
+    @delivery_principal.slack_channel_permissions.create!(
+      channel_id: "C0123456789",
+      upload_enabled: true
+    )
     post login_url, params: { email: @operator.email, password: "password123456" }
   end
 
@@ -38,6 +48,26 @@ class Console::ScheduledTasksControllerTest < ActionDispatch::IntegrationTest
     assert_equal "0 9 * * 1-5", task.cron_expression
     assert_equal ScheduledTask::DEFAULT_TIMEZONE, task.timezone
     assert_not_nil task.next_run_at
+  end
+
+  test "creates a task that delivers to the author's Slack DM" do
+    post console_scheduled_tasks_url, params: {
+      scheduled_task: task_params.merge(delivery_channel: "U0123456789")
+    }
+
+    assert_redirected_to console_scheduled_tasks_path
+    assert_equal "U0123456789", ScheduledTask.order(:id).last.delivery_channel
+  end
+
+  test "rejects a delivery channel outside the author's Slack permissions" do
+    assert_no_difference -> { ScheduledTask.count } do
+      post console_scheduled_tasks_url, params: {
+        scheduled_task: task_params.merge(delivery_channel: "C9999999999")
+      }
+    end
+
+    assert_response :unprocessable_entity
+    assert_select "li", text: "Delivery channel is not available to the author"
   end
 
   test "edit form preserves the selected delivery channel" do
@@ -82,6 +112,16 @@ class Console::ScheduledTasksControllerTest < ActionDispatch::IntegrationTest
     assert_select "td", text: /#general/
     assert_select "td", text: /#{task.delivery_channel}/
     assert_no_match task.timezone, response.body
+  end
+
+  test "shows the author's direct message name on the task table" do
+    create_task.update!(delivery_channel: "U0123456789")
+
+    get console_scheduled_tasks_url
+
+    assert_response :ok
+    assert_select "td", text: /Direct message to you/
+    assert_select "td", text: /U0123456789/
   end
 
   test "creates a task with a defined principal" do

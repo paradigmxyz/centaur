@@ -4118,10 +4118,57 @@ async fn post_python_slack_message(
                 "SLACK_BOT_TOKEN or SLACK_BOT_TOKEN_OVERRIDE must be set".to_owned(),
             )
         })?;
-    let payload = python_slack_message_payload(channel, text, &client_msg_id, &args);
+    let channel = resolve_slack_message_channel(&token, channel).await?;
+    let payload = python_slack_message_payload(&channel, text, &client_msg_id, &args);
     let response = send_slack_message(&token, payload).await?;
-    serde_json::to_value(slack_post_result_from_response(channel, response))
+    serde_json::to_value(slack_post_result_from_response(&channel, response))
         .map_err(WorkflowRuntimeError::from)
+}
+
+async fn resolve_slack_message_channel(
+    token: &str,
+    destination: &str,
+) -> Result<String, WorkflowRuntimeError> {
+    if !is_slack_user_id(destination) {
+        return Ok(destination.to_owned());
+    }
+
+    let response: Value = reqwest::Client::new()
+        .post("https://slack.com/api/conversations.open")
+        .bearer_auth(token)
+        .json(&json!({ "users": destination }))
+        .send()
+        .await?
+        .json()
+        .await?;
+    slack_dm_channel_from_response(response)
+}
+
+fn is_slack_user_id(destination: &str) -> bool {
+    matches!(destination.as_bytes().first(), Some(b'U' | b'W'))
+}
+
+fn slack_dm_channel_from_response(response: Value) -> Result<String, WorkflowRuntimeError> {
+    if response.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err(WorkflowRuntimeError::Upstream(format!(
+            "Slack conversations.open failed: {}",
+            response
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown_error")
+        )));
+    }
+
+    response
+        .pointer("/channel/id")
+        .and_then(Value::as_str)
+        .filter(|channel| !channel.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            WorkflowRuntimeError::Upstream(
+                "Slack conversations.open returned no channel ID".to_owned(),
+            )
+        })
 }
 
 fn python_slack_message_payload(
@@ -4967,6 +5014,39 @@ mod tests {
 
         assert!(payload.get("username").is_none());
         assert!(payload.get("icon_emoji").is_none());
+    }
+
+    #[test]
+    fn slack_user_destinations_are_distinct_from_conversation_ids() {
+        assert!(is_slack_user_id("U0123456789"));
+        assert!(is_slack_user_id("W0123456789"));
+        assert!(!is_slack_user_id("C0123456789"));
+        assert!(!is_slack_user_id("D0123456789"));
+    }
+
+    #[test]
+    fn extracts_the_dm_channel_from_conversations_open() {
+        let channel = slack_dm_channel_from_response(json!({
+            "ok": true,
+            "channel": { "id": "D0123456789" }
+        }))
+        .unwrap();
+
+        assert_eq!(channel, "D0123456789");
+    }
+
+    #[test]
+    fn reports_conversations_open_errors() {
+        let error = slack_dm_channel_from_response(json!({
+            "ok": false,
+            "error": "missing_scope"
+        }))
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "Slack conversations.open failed: missing_scope"
+        );
     }
 
     #[test]

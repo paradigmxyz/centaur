@@ -1,6 +1,8 @@
 require "fugit"
 
 class ScheduledTask < ApplicationRecord
+  class DeliveryDestinationUnavailable < StandardError; end
+
   oid_prefix "tsk"
 
   WORKFLOW_NAME = "console_workflow".freeze
@@ -15,7 +17,7 @@ class ScheduledTask < ApplicationRecord
     "daily" => "Daily at 9:00 PT",
     "weekdays" => "Weekdays at 9:00 PT"
   }.freeze
-  DELIVERY_CHANNEL_FORMAT = /\A[CDG][A-Z0-9]{8,}\z/
+  DELIVERY_DESTINATION_FORMAT = /\A[CDGUW][A-Z0-9]{8,}\z/
 
   belongs_to :author, class_name: "User"
   belongs_to :principal, optional: true
@@ -34,13 +36,14 @@ class ScheduledTask < ApplicationRecord
   validates :prompt, presence: true, length: { maximum: 64.kilobytes }
   validates :delivery_channel, presence: true,
                                format: {
-                                 with: DELIVERY_CHANNEL_FORMAT,
-                                 message: "must be a Slack channel ID"
+                                 with: DELIVERY_DESTINATION_FORMAT,
+                                 message: "must be a Slack channel or user ID"
                                }
   validates :cron_expression, presence: true
   validates :timezone, presence: true
   validate :cron_schedule_is_valid
   validate :selected_principal_has_foreign_id
+  validate :delivery_destination_is_available_to_author
 
   def self.cron_for(preset, custom_expression)
     return custom_expression.to_s.strip if preset.to_s == "cron"
@@ -69,6 +72,10 @@ class ScheduledTask < ApplicationRecord
   end
 
   def api_input
+    unless SlackDeliveryPolicy.new(author).allowed?(delivery_channel)
+      raise DeliveryDestinationUnavailable, "Slack delivery destination is no longer available to the author"
+    end
+
     {
       prompt: prompt,
       principal: execution_principal.foreign_id,
@@ -107,5 +114,13 @@ class ScheduledTask < ApplicationRecord
     return if principal.blank? || principal.foreign_id.present?
 
     errors.add(:principal, "must have a foreign ID")
+  end
+
+  def delivery_destination_is_available_to_author
+    return if author.blank? || delivery_channel.blank?
+    return unless DELIVERY_DESTINATION_FORMAT.match?(delivery_channel)
+    return if SlackDeliveryPolicy.new(author).allowed?(delivery_channel)
+
+    errors.add(:delivery_channel, "is not available to the author")
   end
 end

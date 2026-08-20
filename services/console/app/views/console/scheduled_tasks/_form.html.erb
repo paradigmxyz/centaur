@@ -2,7 +2,7 @@
               class: "space-y-5",
               data: {
                 controller: "slack-channel-autocomplete",
-                slack_channel_autocomplete_url_value: slack_channel_options_console_scheduled_tasks_path
+                slack_channel_autocomplete_url_value: slack_channel_options_console_scheduled_tasks_path(task_id: task.oid)
               } do |form| %>
   <% if task.errors.any? %>
     <div class="rounded border border-red-500/30 bg-red-500/[0.08] px-4 py-3 text-sm text-red-200">
@@ -58,7 +58,7 @@
                  field: form,
                  attribute: :delivery_channel,
                  picker_id: delivery_channel_picker_id %>
-      <p class="text-xs text-zinc-500">Search Slack channels or enter the channel ID that receives the final agent response.</p>
+      <p class="text-xs text-zinc-500">Choose your Slack DM or a channel where you have upload permission.</p>
     </div>
   </div>
 
