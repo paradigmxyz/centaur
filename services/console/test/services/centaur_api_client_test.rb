@@ -222,7 +222,7 @@ class CentaurApiClientTest < ActiveSupport::TestCase
     http.verify
   end
 
-  test "creates workflow runs with optional input" do
+  test "creates workflow runs with optional input and idempotency key" do
     http = Minitest::Mock.new
     expect_request(http, status: 200, body: { ok: true, run_id: "r1" }.to_json) do |request|
       assert_equal :post, request[:method]
@@ -235,10 +235,17 @@ class CentaurApiClientTest < ActiveSupport::TestCase
         JSON.parse(request[:body])
       )
     end
+    expect_request(http, status: 200, body: { ok: true, run_id: "r1" }.to_json) do |request|
+      assert_equal(
+        { "workflow_name" => "console_workflow", "idempotency_key" => "scheduled:1" },
+        JSON.parse(request[:body])
+      )
+    end
     client = api_client(base_url: "http://api.internal:8080", http: http)
 
     client.create_workflow_run(workflow_name: "slack_sync")
     client.create_workflow_run(workflow_name: "slack_sync", input: { "mode" => "full" })
+    client.create_workflow_run(workflow_name: "console_workflow", idempotency_key: "scheduled:1")
 
     http.verify
   end

@@ -1,0 +1,6 @@
+<% content_for :title, "Edit #{@workflow.name} · Centaur Console" %>
+<div class="mb-6">
+  <h1 class="page-title">Edit Workflow</h1>
+  <p class="page-subtitle"><%= @workflow.name %></p>
+</div>
+<%= render "form", workflow: @workflow %>

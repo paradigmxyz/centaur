@@ -407,6 +407,7 @@ DEPENDENCIES
   bundler-audit
   capybara
   debug
+  fugit (~> 1.13)
   image_processing (~> 2.0)
   importmap-rails
   jbuilder

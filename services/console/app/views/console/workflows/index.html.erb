@@ -1,5 +1,65 @@
 <% content_for :title, "Workflows · Centaur Console" %>
 
+<section class="mb-8">
+  <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
+    <div>
+      <h2 class="text-sm font-semibold text-zinc-200">Authored Workflows</h2>
+      <p class="mt-1 text-xs text-zinc-500">Scheduled single-turn prompts delivered to Slack.</p>
+    </div>
+    <%= link_to "New Workflow", new_console_authored_workflow_path, class: "btn-primary" %>
+  </div>
+
+  <div class="console-panel">
+    <table class="console-table">
+      <thead class="console-table-head">
+        <tr>
+          <th class="console-th">Name</th>
+          <th class="console-th">Principal</th>
+          <th class="console-th">Schedule</th>
+          <th class="console-th">Delivery</th>
+          <th class="console-th"><span class="sr-only">Actions</span></th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-ink-700">
+        <% if @authored_workflows.empty? %>
+          <tr>
+            <td colspan="5" class="px-5 py-8 text-center text-zinc-600">No authored workflows yet.</td>
+          </tr>
+        <% end %>
+        <% @authored_workflows.each do |workflow| %>
+          <tr class="console-row-hover">
+            <td class="console-td">
+              <%= link_to workflow.name, edit_console_authored_workflow_path(workflow.oid), class: "console-link font-medium" %>
+              <% if workflow.last_error.present? %>
+                <div class="mt-1 text-xs text-red-400" title="<%= workflow.last_error %>">Last dispatch failed</div>
+              <% elsif workflow.last_run_at.present? %>
+                <div class="mt-1 text-xs text-zinc-600">Last run <%= local_time(workflow.last_run_at, relative: true, format: :compact) %></div>
+              <% end %>
+            </td>
+            <td class="console-td text-xs text-zinc-400"><%= workflow.principal&.name.presence || workflow.principal&.foreign_id || "Author: #{workflow.author.email}" %></td>
+            <td class="console-td text-xs text-zinc-400">
+              <div class="font-mono"><%= workflow.cron_expression %></div>
+              <div class="mt-1 text-zinc-600"><%= workflow.timezone %><%= " · disabled" unless workflow.enabled? %></div>
+            </td>
+            <td class="console-td text-xs text-zinc-400"><%= workflow.delivery_channel %></td>
+            <td class="console-td">
+              <div class="flex justify-end gap-2">
+                <%= button_to "Run now", run_console_authored_workflow_path(workflow.oid), method: :post, class: "btn-secondary py-1.5" %>
+                <%= link_to "Edit", edit_console_authored_workflow_path(workflow.oid), class: "btn-secondary py-1.5" %>
+                <%= button_to "Delete", console_authored_workflow_path(workflow.oid), method: :delete,
+                      class: "btn-secondary py-1.5 text-red-300",
+                      data: { turbo_confirm: "Delete #{workflow.name}?" } %>
+              </div>
+            </td>
+          </tr>
+        <% end %>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<h2 class="mb-3 text-sm font-semibold text-zinc-200">Workflow Runs</h2>
+
 <% if @workflow_db_unavailable %>
   <div class="mb-4 rounded border border-amber-500/30 bg-amber-500/[0.08] px-4 py-3 text-sm text-amber-200">
     Workflow database is unavailable. Console needs the API workflow read-only views to show runs.

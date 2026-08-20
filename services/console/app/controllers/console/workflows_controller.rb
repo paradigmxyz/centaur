@@ -7,6 +7,7 @@ class Console::WorkflowsController < ApplicationController
   PER_PAGE = 50
 
   def index
+    @authored_workflows = AuthoredWorkflow.includes(:author, :principal).order(:name, :id)
     @workflow_db_unavailable = false
     @workflow_runs = []
     @queue_breakdown = {}

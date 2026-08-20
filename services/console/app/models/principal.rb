@@ -17,6 +17,7 @@ class Principal < ApplicationRecord
   has_many :sync_config_snapshots, class_name: "PrincipalSyncConfigSnapshot", dependent: :destroy
   has_many :mcp_oauth_authorization_codes, dependent: :destroy
   has_many :mcp_oauth_refresh_tokens, dependent: :destroy
+  has_many :authored_workflows, dependent: :restrict_with_error
   belongs_to :created_by, class_name: "User"
   belongs_to :console_user, class_name: "User", optional: true
 

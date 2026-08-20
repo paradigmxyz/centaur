@@ -27,6 +27,28 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_20_174601) do
     t.index ["user_id"], name: "index_api_keys_on_user_id"
   end
 
+  create_table "authored_workflows", force: :cascade do |t|
+    t.bigint "author_id", null: false
+    t.datetime "created_at", null: false
+    t.string "cron_expression", null: false
+    t.string "delivery_channel", null: false
+    t.boolean "enabled", default: true, null: false
+    t.datetime "last_enqueued_at"
+    t.text "last_error"
+    t.datetime "last_run_at"
+    t.string "last_run_id"
+    t.string "name", null: false
+    t.datetime "next_run_at"
+    t.bigint "principal_id"
+    t.text "prompt", null: false
+    t.string "timezone", default: "UTC", null: false
+    t.datetime "updated_at", null: false
+    t.index ["author_id", "name"], name: "index_authored_workflows_on_author_id_and_name", unique: true
+    t.index ["author_id"], name: "index_authored_workflows_on_author_id"
+    t.index ["enabled", "next_run_at"], name: "index_authored_workflows_on_enabled_and_next_run_at"
+    t.index ["principal_id"], name: "index_authored_workflows_on_principal_id"
+  end
+
   create_table "aws_auth_secrets", force: :cascade do |t|
     t.jsonb "allowed_regions", default: [], null: false
     t.jsonb "allowed_services", default: [], null: false
@@ -537,6 +559,8 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_20_174601) do
   end
 
   add_foreign_key "api_keys", "users"
+  add_foreign_key "authored_workflows", "principals"
+  add_foreign_key "authored_workflows", "users", column: "author_id"
   add_foreign_key "aws_auth_secrets", "users", column: "created_by_id"
   add_foreign_key "broker_credentials", "oauth_apps"
   add_foreign_key "broker_credentials", "users", column: "created_by_id"

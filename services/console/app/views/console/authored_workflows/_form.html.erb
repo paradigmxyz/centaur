@@ -1,0 +1,100 @@
+<%= form_with model: [ :console, workflow ], class: "space-y-5" do |form| %>
+  <% if workflow.errors.any? %>
+    <div class="rounded border border-red-500/30 bg-red-500/[0.08] px-4 py-3 text-sm text-red-200">
+      <p class="font-semibold">Could not save this workflow:</p>
+      <ul class="mt-2 list-disc space-y-1 pl-5">
+        <% workflow.errors.full_messages.each do |message| %>
+          <li><%= message %></li>
+        <% end %>
+      </ul>
+    </div>
+  <% end %>
+
+  <div>
+    <%= form.label :name, class: "mb-2 block text-sm font-medium text-zinc-200" %>
+    <%= form.text_field :name,
+          required: true,
+          maxlength: 100,
+          autofocus: !workflow.persisted?,
+          placeholder: "Daily support summary",
+          class: "form-input" %>
+    <p class="mt-2 text-xs text-zinc-500">A label for finding and managing this workflow in the console.</p>
+  </div>
+
+  <div>
+    <%= form.label :prompt, "Agent prompt", class: "mb-2 block text-sm font-medium text-zinc-200" %>
+    <%= form.text_area :prompt,
+          rows: 12,
+          required: true,
+          placeholder: "Review open support issues and summarize the most important changes.",
+          class: "min-h-64 w-full resize-y rounded-lg border border-ink-600 bg-ink-900 px-4 py-3 text-sm leading-6 text-zinc-100 outline-none focus:border-centaur-500 focus:ring-1 focus:ring-centaur-500" %>
+    <p class="mt-2 text-xs text-zinc-500">Each run sends this prompt through one agent turn.</p>
+  </div>
+
+  <div class="grid gap-5 lg:grid-cols-2">
+    <div>
+      <%= form.label :principal_oid, "Run as", class: "mb-2 block text-sm font-medium text-zinc-200" %>
+      <% principal_options = [ [ "Author: #{workflow.author&.email || current_user.email}", "" ] ] +
+           @principals.map { |principal| [ principal.name.presence || principal.foreign_id, principal.oid ] } %>
+      <%= form.select :principal_oid,
+            options_for_select(principal_options, workflow.principal&.oid),
+            {},
+            class: "form-input" %>
+      <p class="mt-2 text-xs text-zinc-500">Author uses your Console principal and its grants. Or select a defined principal.</p>
+    </div>
+
+    <div>
+      <%= form.label :delivery_channel, "Deliver to", class: "mb-2 block text-sm font-medium text-zinc-200" %>
+      <%= form.text_field :delivery_channel,
+            required: true,
+            placeholder: "C0123456789",
+            class: "form-input" %>
+      <p class="mt-2 text-xs text-zinc-500">The Slack channel ID that receives the final agent response.</p>
+    </div>
+  </div>
+
+  <div class="grid gap-5 lg:grid-cols-3">
+    <div>
+      <%= form.label :schedule_preset, "Schedule", class: "mb-2 block text-sm font-medium text-zinc-200" %>
+      <%= form.select :schedule_preset,
+            options_for_select([
+              [ "Hourly", "hourly" ],
+              [ "Daily at 9:00", "daily" ],
+              [ "Weekdays at 9:00", "weekdays" ],
+              [ "Custom cron", "custom" ]
+            ], workflow.schedule_preset),
+            {},
+            class: "form-input" %>
+    </div>
+
+    <div>
+      <%= form.label :cron_expression, "Cron expression", class: "mb-2 block text-sm font-medium text-zinc-200" %>
+      <%= form.text_field :cron_expression,
+            required: true,
+            placeholder: "0 9 * * 1-5",
+            class: "form-input font-mono" %>
+      <p class="mt-2 text-xs text-zinc-500">Used when Schedule is Custom cron.</p>
+    </div>
+
+    <div>
+      <%= form.label :timezone, class: "mb-2 block text-sm font-medium text-zinc-200" %>
+      <%= form.select :timezone,
+            options_for_select(@timezone_options, workflow.timezone),
+            {},
+            class: "form-input" %>
+    </div>
+  </div>
+
+  <label class="flex items-start gap-3 rounded border border-ink-700 bg-ink-900/50 px-4 py-3">
+    <%= form.check_box :enabled, class: "mt-0.5 rounded border-ink-500 bg-ink-900 text-centaur-500" %>
+    <span>
+      <span class="block text-sm font-medium text-zinc-200">Schedule enabled</span>
+      <span class="mt-1 block text-xs text-zinc-500">Disabled workflows remain saved and can still be run manually.</span>
+    </span>
+  </label>
+
+  <div class="flex flex-wrap items-center gap-3">
+    <%= form.submit workflow.persisted? ? "Save workflow" : "Create workflow", class: "btn-primary cursor-pointer" %>
+    <%= link_to "Cancel", console_workflows_path, class: "btn-secondary" %>
+  </div>
+<% end %>

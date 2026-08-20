@@ -57,6 +57,9 @@ Rails.application.routes.draw do
         post :run, action: :force_start
       end
     end
+    resources :authored_workflows, except: %i[index show] do
+      post :run, on: :member
+    end
     resources :skills do
       collection do
         get :mine
