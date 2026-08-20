@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 from workflows import console_workflow
 
@@ -9,8 +10,9 @@ class FakeContext:
     run_id = "run-123"
     task_id = "task-456"
 
-    def __init__(self, result_text: str = "Daily summary") -> None:
+    def __init__(self, result_text: str = "Daily summary", output_lines=None) -> None:
         self.result_text = result_text
+        self.output_lines = output_lines or []
         self.agent_calls = []
         self.step_calls = []
         self.step_results = {}
@@ -18,7 +20,11 @@ class FakeContext:
 
     async def agent_turn(self, prompt, **kwargs):
         self.agent_calls.append((prompt, kwargs))
-        return {"result_text": self.result_text, "execution_id": "exec-123"}
+        return {
+            "result_text": self.result_text,
+            "output_lines": self.output_lines,
+            "execution_id": "exec-123",
+        }
 
     async def step(self, name, fn):
         self.step_calls.append(name)
@@ -82,6 +88,66 @@ def test_handler_truncates_long_slack_results():
     assert len(context.slack_calls[0][1]) == console_workflow.SLACK_MESSAGE_MAX_LENGTH
     assert context.slack_calls[0][2] == {}
     assert result["delivery"]["ts"] == "123.1"
+
+
+def test_handler_delivers_only_the_completed_final_agent_message():
+    output_lines = [
+        json.dumps(
+            {
+                "method": "item/completed",
+                "params": {
+                    "item": {
+                        "type": "agentMessage",
+                        "phase": "commentary",
+                        "text": "I’ll keep it classic: three lines, 5–7–5.",
+                    }
+                },
+            }
+        ),
+        json.dumps({"delta": "Downloading packages...\nTraceback...\n"}),
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "agentMessage",
+                    "phase": "final_answer",
+                    "text": (
+                        "Cold scoops kiss the cone\n"
+                        "Summer sunlight melts to cream\n"
+                        "Sweet stars on my tongue"
+                    ),
+                },
+            }
+        ),
+    ]
+    context = FakeContext(
+        result_text=(
+            "I’ll keep it classic: three lines, 5–7–5. "
+            "Downloading packages... Traceback... "
+            "Cold scoops kiss the cone"
+        ),
+        output_lines=output_lines,
+    )
+
+    asyncio.run(
+        console_workflow.handler(
+            {
+                "prompt": "Write a haiku about ice cream",
+                "principal": "console-user-author",
+                "channel": "C0123456789",
+                "scheduled_task_id": "tsk_123",
+            },
+            context,
+        )
+    )
+
+    assert context.slack_calls == [
+        (
+            "C0123456789",
+            "Cold scoops kiss the cone\nSummer sunlight melts to cream\nSweet stars on my tongue",
+            {},
+        )
+    ]
 
 
 def test_handler_does_not_repeat_checkpointed_slack_posts():

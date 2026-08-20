@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 WORKFLOW_NAME = "console_workflow"
@@ -25,6 +26,37 @@ async def _deliver_to_slack(ctx: Any, channel: str, text: str) -> Any:
     )
 
 
+def _response_text(result: Any) -> str:
+    if not isinstance(result, dict):
+        return ""
+
+    for line in reversed(result.get("output_lines") or []):
+        if not isinstance(line, str):
+            continue
+        try:
+            event = json.loads(line)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(event, dict):
+            continue
+
+        method = event.get("method")
+        event_type = event.get("type")
+        if method != "item/completed" and event_type != "item.completed":
+            continue
+        params = event.get("params") if isinstance(event.get("params"), dict) else {}
+        item = event.get("item") or params.get("item")
+        if not isinstance(item, dict) or item.get("type") not in {"agentMessage", "agent_message"}:
+            continue
+        if item.get("phase") not in {None, "final_answer", "answer"}:
+            continue
+        text = item.get("text")
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+
+    return str(result.get("result_text") or "").strip()
+
+
 async def handler(params: Any, ctx: Any) -> dict[str, Any]:
     prompt = _required_string(params, "prompt")
     principal = _required_string(params, "principal")
@@ -39,7 +71,7 @@ async def handler(params: Any, ctx: Any) -> dict[str, Any]:
             "scheduled_task_name": str(params.get("scheduled_task_name") or ""),
         },
     )
-    response_text = str(result.get("result_text") or "").strip()
+    response_text = _response_text(result)
     if not response_text:
         response_text = "The task completed without a text response."
     delivery = await _deliver_to_slack(ctx, channel, response_text)
