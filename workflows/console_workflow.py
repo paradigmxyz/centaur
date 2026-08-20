@@ -6,7 +6,8 @@ from typing import Any
 
 WORKFLOW_NAME = "console_workflow"
 SLACK_MESSAGE_MAX_LENGTH = 50_000
-SLACK_DM_CHUNK_MAX_LENGTH = 3_800
+# Stay below Slack's 4,000-character soft limit so it cannot create extra roots.
+SLACK_MESSAGE_CHUNK_MAX_LENGTH = 3_800
 SLACK_MRKDWN_INSTRUCTIONS = """\
 Format the final response for Slack using Slack mrkdwn, not standard Markdown.
 Use *bold*, _italics_, ~strikethrough~, `inline code`, and <https://example.com|link text>.
@@ -25,11 +26,7 @@ def _required_string(params: Any, key: str) -> str:
 
 async def _deliver_to_slack(ctx: Any, channel: str, text: str) -> Any:
     truncated = text[:SLACK_MESSAGE_MAX_LENGTH]
-    chunks = (
-        _split_slack_text(truncated, SLACK_DM_CHUNK_MAX_LENGTH)
-        if _is_direct_message_destination(channel)
-        else [truncated]
-    )
+    chunks = _split_slack_text(truncated, SLACK_MESSAGE_CHUNK_MAX_LENGTH)
     root = await ctx.step(
         "post_result",
         lambda: ctx.post_to_slack(channel, chunks[0], mrkdwn=True),
@@ -56,10 +53,6 @@ async def _deliver_to_slack(ctx: Any, channel: str, text: str) -> Any:
         )
         replies.append(reply)
     return {**root, "replies": replies}
-
-
-def _is_direct_message_destination(channel: str) -> bool:
-    return channel[:1].upper() in {"D", "U", "W"}
 
 
 def _split_slack_text(text: str, limit: int) -> list[str]:
