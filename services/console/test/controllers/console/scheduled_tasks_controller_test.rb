@@ -3,16 +3,11 @@ require "test_helper"
 class Console::ScheduledTasksControllerTest < ActionDispatch::IntegrationTest
   setup do
     @operator = users(:acme_admin)
-    @operator.user_identities.create!(
+      @operator.user_identities.create!(
       provider: "slack",
       subject: "U0123456789",
-      team_id: "T0123456789"
-    )
-    @delivery_principal = ConsoleUserPrincipalProvisioner.call(@operator)
-    @delivery_principal.slack_channel_permissions.create!(
-      channel_id: "C0123456789",
-      upload_enabled: true
-    )
+        team_id: "T0123456789"
+      )
     post login_url, params: { email: @operator.email, password: "password123456" }
   end
 
@@ -94,15 +89,7 @@ class Console::ScheduledTasksControllerTest < ActionDispatch::IntegrationTest
 
   test "shows scheduled tasks on their dedicated page" do
     task = create_task
-    catalog = SlackChannelCatalog::Result.new(
-      channels: [ SlackChannelCatalog::Channel.new(id: task.delivery_channel, name: "general", private: false) ],
-      error: nil,
-      configured: true
-    )
-
-    SlackChannelCatalogProvider.stub(:fetch, catalog) do
-      get console_scheduled_tasks_url
-    end
+    get console_scheduled_tasks_url
 
     assert_response :ok
     assert_select ".console-thread-group-title-active", text: /Scheduled/

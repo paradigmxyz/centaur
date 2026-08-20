@@ -42,9 +42,7 @@ module Console
       return "Connect your Slack account to choose a channel." if scheduled_task_delivery_policy.slack_user_id.blank?
 
       team_channels = SlackBotChannel.active.for_team(scheduled_task_delivery_policy.slack_team_id)
-      if team_channels.where(membership_refreshed_at: nil).exists?
-        "Slack channel memberships are loading."
-      end
+      "Slack channel memberships are loading." if team_channels.where(membership_refreshed_at: nil).exists?
     end
 
     def find_owner

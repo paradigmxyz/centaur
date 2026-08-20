@@ -9,7 +9,6 @@ module Console
         subject: "U0123456789",
         team_id: "T0123456789"
       )
-      @delivery_principal = ConsoleUserPrincipalProvisioner.call(@operator)
       post login_url, params: { email: @operator.email, password: "password123456" }
     end
 
@@ -21,7 +20,8 @@ module Console
         bot_user_id: "U0999999999",
         channel_id: "C1111111111",
         name: "engineering",
-        active: true
+        active: true,
+        member_user_ids: [ "U0999999999" ]
       )
 
       with_catalog do
@@ -55,36 +55,43 @@ module Console
       assert_equal [], response.parsed_body.fetch("options")
     end
 
-    test "scheduled task options include only channels the author can upload to" do
-      captured = nil
-      @delivery_principal.slack_channel_permissions.create!(
+    test "scheduled task options include only channels shared by the author and bot" do
+      shared = SlackBotChannel.create!(
+        team_id: "T0123456789",
+        bot_user_id: "U0999999999",
         channel_id: "C1111111111",
-        upload_enabled: true
+        name: "engineering",
+        active: true,
+        member_user_ids: [ "U0123456789", "U0999999999" ]
       )
-      result = SlackChannelCatalog::Result.new(
-        channels: [ SlackChannelCatalog::Channel.new(id: "C1111111111", name: "engineering", private: false) ],
-        error: nil,
-        configured: true
+      SlackBotChannel.create!(
+        team_id: "T0123456789",
+        bot_user_id: "U0999999999",
+        channel_id: "C2222222222",
+        name: "engineering-user-only",
+        active: true,
+        member_user_ids: [ "U0123456789" ]
+      )
+      SlackBotChannel.create!(
+        team_id: "T0123456789",
+        bot_user_id: "U0999999999",
+        channel_id: "C3333333333",
+        name: "engineering-bot-only",
+        active: true,
+        member_user_ids: [ "U0999999999" ]
       )
 
-      search = lambda do |**args|
-        captured = args
-        result
-      end
-      SlackChannelCatalogProvider.stub(:search, search) do
+      with_catalog do
         get slack_channel_options_console_scheduled_tasks_url, params: { q: "eng" }
       end
 
       assert_response :ok
-      assert_equal [ "C1111111111" ], captured.fetch(:include_ids)
-      assert_equal "C1111111111", response.parsed_body.fetch("options").sole.fetch("value")
+      assert_equal shared.channel_id, response.parsed_body.fetch("options").sole.fetch("value")
     end
 
     test "scheduled task options include the author's direct message" do
-      result = SlackChannelCatalog::Result.new(channels: [], error: nil, configured: true)
-
-      SlackChannelCatalogProvider.stub(:search, result) do
-        get slack_channel_options_console_scheduled_tasks_url
+      with_catalog do
+        get slack_channel_options_console_scheduled_tasks_url, params: { q: "dm" }
       end
 
       assert_response :ok
@@ -96,6 +103,34 @@ module Console
         },
         response.parsed_body.fetch("options").sole
       )
+    end
+
+    test "editing a scheduled task uses its author memberships" do
+      author = users(:globex_admin)
+      author.user_identities.create!(provider: "slack", subject: "U2222222222", team_id: "T0123456789")
+      SlackBotChannel.create!(
+        team_id: "T0123456789",
+        bot_user_id: "U0999999999",
+        channel_id: "C2222222222",
+        name: "globex",
+        private: true,
+        active: true,
+        member_user_ids: [ "U0999999999", "U2222222222" ]
+      )
+      task = ScheduledTask.create!(
+        name: "Globex task",
+        prompt: "Summarize updates.",
+        author: author,
+        delivery_channel: "C2222222222",
+        cron_expression: "0 * * * *"
+      )
+
+      with_catalog do
+        get slack_channel_options_console_scheduled_tasks_url, params: { task_id: task.oid, q: "globex" }
+      end
+
+      assert_response :ok
+      assert_equal "C2222222222", response.parsed_body.fetch("options").sole.fetch("value")
     end
 
     test "non-admins cannot search the catalog" do

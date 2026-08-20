@@ -89,7 +89,7 @@ class Console::ScheduledTasksController < ApplicationController
   end
 
   def slack_destination_names
-    names = SlackChannelCatalogProvider.fetch.channels.to_h { |channel| [ channel.id, "##{channel.name}" ] }
+    names = SlackBotChannel.pluck(:channel_id, :name).to_h { |channel_id, name| [ channel_id, "##{name}" ] }
     @tasks.each do |task|
       user_id = SlackDeliveryPolicy.new(task.author).direct_message_user_id
       next unless task.delivery_channel == user_id

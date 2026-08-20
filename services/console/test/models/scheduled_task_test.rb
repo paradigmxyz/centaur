@@ -8,11 +8,6 @@ class ScheduledTaskTest < ActiveSupport::TestCase
       subject: "U0123456789",
       team_id: "T0123456789"
     )
-    principal = ConsoleUserPrincipalProvisioner.call(user)
-    principal.slack_channel_permissions.create!(
-      channel_id: "C0123456789",
-      upload_enabled: true
-    )
   end
 
   test "maps schedule presets to cron and calculates the next run in Pacific Time" do

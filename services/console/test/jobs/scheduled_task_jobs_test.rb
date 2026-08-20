@@ -22,11 +22,6 @@ class ScheduledTaskJobsTest < ActiveJob::TestCase
       subject: "U0123456789",
       team_id: "T0123456789"
     )
-    @delivery_principal = ConsoleUserPrincipalProvisioner.call(user)
-    @delivery_permission = @delivery_principal.slack_channel_permissions.create!(
-      channel_id: "C0123456789",
-      upload_enabled: true
-    )
   end
 
   teardown do
@@ -88,11 +83,11 @@ class ScheduledTaskJobsTest < ActiveJob::TestCase
     assert_equal Time.utc(2026, 8, 19, 12, 5), task.last_run_at
   end
 
-  test "runner refuses a destination after the author's permission is revoked" do
+  test "runner refuses a destination after the author or bot leaves the channel" do
     task = create_task
     client = FakeApiClient.new
     ScheduledTaskRunJob.client_factory = -> { client }
-    @delivery_permission.destroy!
+    slack_bot_channels(:general).update!(member_user_ids: [ "U0999999999" ])
 
     assert_raises(ScheduledTask::DeliveryDestinationUnavailable) do
       ScheduledTaskRunJob.perform_now(task.id, "2026-08-19T12:00:00Z")
