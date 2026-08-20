@@ -320,16 +320,16 @@ sandbox:
   #                  subscription token (proxy injects the brokered credential).
   codexAuthMode: api_key
   claudeCodeAuthMode: api_key
-  # The deployment's default harness: codex | amp | claudecode. Decides what
-  # warm sandboxes boot (SESSION_SANDBOX_HARNESS) and which harness auth
+  # The deployment's default harness: codex | amp | claudecode | nanocodex | hermes | pi.
+  # Decides what warm sandboxes boot (SESSION_SANDBOX_HARNESS) and which harness auth
   # fragment is required at startup (the other harnesses' fragments are
-  # registered too when available, so per-session --claude/--amp/--codex
+  # registered too when available, so per-session --claude/--amp/--codex/--pi
   # overrides keep working credentials). Per-session sandboxes always run
   # their session's harness via container args; the sandbox image CMD only
   # matters for containers started outside api-rs.
   harnessEngine: codex
-  # Copied into every sandbox pod. CLAUDE_MODEL / CODEX_MODEL set here are also
-  # mirrored into slackbotv2 and the Console; CODEX_MODEL_REASONING_EFFORT is
+  # Copied into every sandbox pod. CLAUDE_MODEL / CODEX_MODEL / PI_MODEL set here are also
+  # mirrored into slackbotv2 and the Console; CODEX_MODEL_REASONING_EFFORT / PI_THINKING are
   # mirrored into slackbotv2. This keeps Slack's model/thinking footer aligned
   # with the policy the sandbox actually runs.
   extraEnv: {}
@@ -565,7 +565,7 @@ slackbotv2:
   # Per-channel default harness / model / provider / reasoning, keyed by Slack
   # conversation id (the C…/G…/D… id). Each value is an object of optional
   # harness / model / provider / reasoning fields, using the same vocabulary as
-  # the inline Slack flags (harness: claude|codex|nanocodex|amp, provider: bedrock|meta,
+  # the inline Slack flags (harness: claude|codex|nanocodex|amp|hermes|pi, provider: bedrock|meta,
   # model accepts Claude aliases like opus). A model is only meaningful within a
   # harness, so name the harness alongside it. Applied when a message in that
   # channel carries no explicit/sticky per-thread flag, below such a flag and

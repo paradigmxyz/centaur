@@ -13,7 +13,7 @@ const SYSTEM_PROMPT = [
   'Decide whether the Slack message asks to use a specific AI harness, model, provider, or reasoning effort.',
   'Return only canonical override values from the schema.',
   'Use null for every field when the message does not ask to change model selection.',
-  'Allowed harness values: codex, claudecode, amp, nanocodex.',
+  'Allowed harness values: codex, claudecode, amp, nanocodex, pi.',
   'Allowed provider values: responses, amazon-bedrock, openrouter.',
   'Allowed reasoning values: none, minimal, low, medium, high, xhigh, max.',
   'Treat inline flags such as "--claude", "--claude --model=fable", and "--fable" as model selection requests.',
@@ -56,7 +56,7 @@ const MESSAGE_OVERRIDES_SCHEMA = {
   additionalProperties: false,
   properties: {
     harness: {
-      enum: ['codex', 'claudecode', 'amp', 'nanocodex', null],
+      enum: ['codex', 'claudecode', 'amp', 'nanocodex', 'pi', null],
       type: ['string', 'null']
     },
     model: {

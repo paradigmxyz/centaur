@@ -1,7 +1,8 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use harness_server::{
     HarnessKind, Result, run_blocks_server, run_harness_server, run_hermes_blocks_server,
-    run_nanocodex_blocks_server, run_validate_agent_deltas, run_validate_jsonrpc,
+    run_nanocodex_blocks_server, run_pi_blocks_server, run_validate_agent_deltas,
+    run_validate_jsonrpc,
 };
 
 #[derive(Debug, Parser)]
@@ -26,6 +27,8 @@ enum CliCommand {
     /// Drive Hermes Agent's long-lived JSON-RPC gateway (sessions, memory,
     /// skills, crons survive across turns).
     Hermes,
+    /// Drive the official Pi CLI's long-lived RPC mode.
+    Pi,
     ValidateJsonrpc,
     ValidateAgentDeltas,
 }
@@ -60,6 +63,7 @@ fn run() -> Result<()> {
         CliCommand::Amp(command) => run_mode(HarnessKind::Amp, command.mode),
         CliCommand::Nanocodex => run_nanocodex_blocks_server(),
         CliCommand::Hermes => run_hermes_blocks_server(),
+        CliCommand::Pi => run_pi_blocks_server(),
         CliCommand::ValidateJsonrpc => run_validate_jsonrpc(),
         CliCommand::ValidateAgentDeltas => run_validate_agent_deltas(),
     }

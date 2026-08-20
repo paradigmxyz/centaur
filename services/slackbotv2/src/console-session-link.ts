@@ -16,7 +16,8 @@ const HARNESS_DISPLAY_NAMES: Record<string, string> = {
   amp: 'Amp',
   claudecode: 'Claude Code',
   codex: 'Codex',
-  nanocodex: 'Nanocodex'
+  nanocodex: 'Nanocodex',
+  pi: 'Pi'
 }
 
 const REASONING_DISPLAY_NAMES: Record<string, string> = {
@@ -74,7 +75,8 @@ const CODEX_CONFIG = codexConfig as {
 const BAKED_DEFAULT_MODELS: Record<string, string | undefined> = {
   claudecode: typeof claudeSettings.model === 'string' ? claudeSettings.model : undefined,
   codex: typeof CODEX_CONFIG.model === 'string' ? CODEX_CONFIG.model : undefined,
-  nanocodex: typeof CODEX_CONFIG.model === 'string' ? CODEX_CONFIG.model : undefined
+  nanocodex: typeof CODEX_CONFIG.model === 'string' ? CODEX_CONFIG.model : undefined,
+  pi: typeof CODEX_CONFIG.model === 'string' ? CODEX_CONFIG.model : undefined
 }
 
 // Nanocodex deliberately shares Codex's default reasoning policy. Its harness
@@ -86,6 +88,10 @@ const BAKED_DEFAULT_REASONING: Record<string, string | undefined> = {
       ? CODEX_CONFIG.model_reasoning_effort
       : undefined,
   nanocodex:
+    typeof CODEX_CONFIG.model_reasoning_effort === 'string'
+      ? CODEX_CONFIG.model_reasoning_effort
+      : undefined,
+  pi:
     typeof CODEX_CONFIG.model_reasoning_effort === 'string'
       ? CODEX_CONFIG.model_reasoning_effort
       : undefined
@@ -162,7 +168,7 @@ export function effectiveReasoningForHarness(
   configured?: Record<string, string>
 ): string | undefined {
   const key = harnessType?.trim().toLowerCase()
-  if (key !== 'codex' && key !== 'nanocodex') return undefined
+  if (key !== 'codex' && key !== 'nanocodex' && key !== 'pi') return undefined
   const reasoning = requested?.trim().toLowerCase() || defaultReasoningForHarness(key, configured)
   // Nanocodex has no distinct Minimal level; its adapter maps Minimal to Low.
   return key === 'nanocodex' && reasoning === 'minimal' ? 'low' : reasoning
@@ -178,7 +184,7 @@ export function reasoningForModel(
   const selectedModel = model?.trim().toLowerCase()
   const effort = reasoning?.trim().toLowerCase()
   if (!selectedModel || !effort) return undefined
-  if (harness !== 'codex' && harness !== 'nanocodex') return undefined
+  if (harness !== 'codex' && harness !== 'nanocodex' && harness !== 'pi') return undefined
   // Nanocodex maps its compatibility-only Minimal value to Low before it
   // reaches the Responses API, so validate the effective value against the
   // selected model while preserving Minimal for the adapter to normalize.

@@ -609,6 +609,8 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_equal "Codex", controller.send(:thread_harness_label, session)
     session.harness_type = "nanocodex"
     assert_equal "Nanocodex", controller.send(:thread_harness_label, session)
+    session.harness_type = "pi"
+    assert_equal "Pi", controller.send(:thread_harness_label, session)
   end
 
   test "thread model label prefers the latest execution's recorded model override" do
@@ -646,6 +648,10 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
         :thread_model_label,
         TranscriptSession.new(metadata_hash: {}, harness_type: "codex")
       )
+      assert_equal "GPT-6", controller.send(
+        :thread_model_label,
+        TranscriptSession.new(metadata_hash: {}, harness_type: "pi")
+      )
     end
   end
 
@@ -669,6 +675,10 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
         assert_equal "GPT-BAKED-1", controller.send(
           :thread_model_label,
           TranscriptSession.new(metadata_hash: {}, harness_type: "codex")
+        )
+        assert_equal "GPT-BAKED-1", controller.send(
+          :thread_model_label,
+          TranscriptSession.new(metadata_hash: {}, harness_type: "pi")
         )
       end
     end

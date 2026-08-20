@@ -73,7 +73,8 @@ class Console::ThreadsController < ApplicationController
   # the chart. Amp has no fixed default model, so it is intentionally absent.
   HARNESS_DEFAULT_MODEL_ENVS = {
     "claudecode" => "CLAUDE_MODEL",
-    "codex" => "CODEX_MODEL"
+    "codex" => "CODEX_MODEL",
+    "pi" => "PI_MODEL"
   }.freeze
   # Harness config files carrying each harness's baked-in default model, used
   # when no env override is set. Resolved against CENTAUR_HARNESS_CONFIG_DIR
@@ -82,7 +83,8 @@ class Console::ThreadsController < ApplicationController
   # is services/console) simply yield no default.
   HARNESS_CONFIG_FILES = {
     "claudecode" => "claude/settings.json",
-    "codex" => "codex/config.toml"
+    "codex" => "codex/config.toml",
+    "pi" => "codex/config.toml"
   }.freeze
 
   SlackThreadOwner = Struct.new(:user_id, :team_id, keyword_init: true)
@@ -119,6 +121,8 @@ class Console::ThreadsController < ApplicationController
                       efforts: CODEX_EFFORTS + [ %w[max Max] ]),
     ComposerAgent.new(value: "nanocodex", label: "Nanocodex (GPT-5.6 Sol)",
                       harness: "nanocodex", model: nil, efforts: []),
+    ComposerAgent.new(value: "pi", label: "Pi",
+                      harness: "pi", model: nil, efforts: CODEX_EFFORTS),
     ComposerAgent.new(value: "gpt-5.5", label: "GPT-5.5",
                       harness: "codex", model: "gpt-5.5",
                       efforts: CODEX_EFFORTS),
@@ -1520,6 +1524,7 @@ class Console::ThreadsController < ApplicationController
     when "claudecode" then "Claude Code"
     when "amp" then "Amp"
     when "nanocodex" then "Nanocodex"
+    when "pi" then "Pi"
     else source_label(session.harness_type)
     end
   end
@@ -1527,7 +1532,7 @@ class Console::ThreadsController < ApplicationController
   # Model the thread most recently ran on. slackbotv2 records the effective
   # model in execution metadata; for older rows without it, fall back to the
   # deployment's default the way the sandbox resolves it: CLAUDE_MODEL /
-  # CODEX_MODEL env override first, then the model pinned in the harness
+  # CODEX_MODEL / PI_MODEL env override first, then the model pinned in the harness
   # config files when they are present. Nil (segment omitted) when none of
   # those sources know the model.
   def thread_model_label(session)
@@ -1554,7 +1559,9 @@ class Console::ThreadsController < ApplicationController
     env_name = HARNESS_DEFAULT_MODEL_ENVS[harness_type]
     return unless env_name
 
-    ENV[env_name].presence || self.class.baked_harness_default_model(harness_type)
+    ENV[env_name].presence ||
+      (ENV["CODEX_MODEL"].presence if harness_type == "pi") ||
+      self.class.baked_harness_default_model(harness_type)
   end
 
   # Cached per (config dir, harness): the files are immutable within a deploy,
