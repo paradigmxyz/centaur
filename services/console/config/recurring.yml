@@ -22,6 +22,12 @@ production:
   slack_dm_poll_sync:
     class: "SlackDm::PollSyncJob"
     schedule: every 10 minutes
+  slack_channel_catalog_refresh:
+    class: "SlackChannelCatalogRefreshJob"
+    schedule: every hour
+  slack_channel_catalog_membership_refresh:
+    class: "SlackChannelCatalogMembershipRefreshJob"
+    schedule: every 10 minutes
   google_docs_poll_sync:
     class: "GoogleDocs::PollSyncJob"
     schedule: every 30 minutes

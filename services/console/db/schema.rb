@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_08_14_180000) do
+ActiveRecord::Schema[8.1].define(version: 2026_08_20_174601) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
   enable_extension "pg_search"
@@ -432,6 +432,27 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_14_180000) do
     t.index ["name"], name: "index_active_skills_on_name", unique: true, where: "(archived_at IS NULL)"
     t.index ["user_id"], name: "index_skills_on_user_id"
     t.index ["visibility", "updated_at"], name: "index_active_skills_for_catalog", where: "(archived_at IS NULL)"
+  end
+
+  create_table "slack_bot_channels", force: :cascade do |t|
+    t.boolean "active", default: true, null: false
+    t.boolean "archived", default: false, null: false
+    t.string "bot_user_id", null: false
+    t.string "channel_id", null: false
+    t.string "configuration_digest", null: false
+    t.datetime "created_at", null: false
+    t.datetime "last_seen_at"
+    t.text "member_user_ids", default: [], null: false, array: true
+    t.text "membership_error"
+    t.datetime "membership_last_attempted_at"
+    t.datetime "membership_refreshed_at"
+    t.string "name", null: false
+    t.boolean "private", default: false, null: false
+    t.string "team_id", null: false
+    t.datetime "updated_at", null: false
+    t.index ["configuration_digest", "team_id", "active", "name"], name: "index_slack_bot_channels_for_catalog_search"
+    t.index ["configuration_digest", "team_id", "channel_id"], name: "index_slack_bot_channels_on_config_team_channel", unique: true
+    t.index ["member_user_ids"], name: "index_slack_bot_channels_on_member_user_ids", using: :gin
   end
 
   create_table "slack_channel_permissions", force: :cascade do |t|

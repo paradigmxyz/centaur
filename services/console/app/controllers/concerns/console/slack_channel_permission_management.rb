@@ -8,6 +8,9 @@ module Console
       @slack_channel_catalog = SlackChannelCatalogProvider.fetch
       @slack_channel_names = @slack_channel_catalog.channels.to_h { |channel| [ channel.id, channel.name ] }
       @slack_channel_permissions = owner.slack_channel_permissions.ordered
+      @slack_channel_names.merge!(
+        SlackChannelCatalogProvider.names_for(@slack_channel_permissions.map(&:channel_id))
+      )
       @slack_channel_options_url = slack_channel_options_url(owner)
     end
 
