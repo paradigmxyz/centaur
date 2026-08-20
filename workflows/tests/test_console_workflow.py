@@ -9,9 +9,15 @@ class FakeContext:
     run_id = "run-123"
     task_id = "task-456"
 
-    def __init__(self, result_text: str = "Daily summary", output_lines=None) -> None:
+    def __init__(
+        self,
+        result_text: str = "Daily summary",
+        output_lines=None,
+        slack_response_channel=None,
+    ) -> None:
         self.result_text = result_text
         self.output_lines = output_lines or []
+        self.slack_response_channel = slack_response_channel
         self.agent_calls = []
         self.step_calls = []
         self.step_results = {}
@@ -33,7 +39,10 @@ class FakeContext:
 
     async def post_to_slack(self, channel, text, **kwargs):
         self.slack_calls.append((channel, text, kwargs))
-        return {"channel": channel, "ts": f"123.{len(self.slack_calls)}"}
+        return {
+            "channel": self.slack_response_channel or channel,
+            "ts": f"123.{len(self.slack_calls)}",
+        }
 
 
 def test_handler_runs_one_scoped_agent_turn_and_delivers_its_text():
@@ -92,6 +101,50 @@ def test_handler_truncates_long_slack_results():
     assert len(context.slack_calls[0][1]) == console_workflow.SLACK_MESSAGE_MAX_LENGTH
     assert context.slack_calls[0][2] == {"mrkdwn": True}
     assert result["delivery"]["ts"] == "123.1"
+
+
+def test_handler_posts_long_dm_results_as_replies_to_the_first_message():
+    response_text = "a" * (console_workflow.SLACK_DM_CHUNK_MAX_LENGTH * 2 + 25)
+    context = FakeContext(result_text=response_text, slack_response_channel="D0123456789")
+    params = {
+        "prompt": "Summarize open incidents",
+        "principal": "console-user-author",
+        "channel": "U0123456789",
+        "scheduled_task_id": "tsk_123",
+    }
+
+    result = asyncio.run(console_workflow.handler(params, context))
+
+    assert context.step_calls == [
+        "post_result",
+        "post_result_reply_1",
+        "post_result_reply_2",
+    ]
+    assert "".join(call[1] for call in context.slack_calls) == response_text
+    assert all(
+        len(call[1]) <= console_workflow.SLACK_DM_CHUNK_MAX_LENGTH
+        for call in context.slack_calls
+    )
+    assert context.slack_calls[0] == (
+        "U0123456789",
+        "a" * console_workflow.SLACK_DM_CHUNK_MAX_LENGTH,
+        {"mrkdwn": True},
+    )
+    assert all(
+        call[0] == "D0123456789"
+        and call[2] == {"mrkdwn": True, "thread_ts": "123.1"}
+        for call in context.slack_calls[1:]
+    )
+    assert len(result["delivery"]["replies"]) == 2
+
+    asyncio.run(console_workflow.handler(params, context))
+
+    assert context.step_calls == [
+        "post_result",
+        "post_result_reply_1",
+        "post_result_reply_2",
+    ] * 2
+    assert len(context.slack_calls) == 3
 
 
 def test_handler_delivers_canonical_result_text_instead_of_output_lines():
