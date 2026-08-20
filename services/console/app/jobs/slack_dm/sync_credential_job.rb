@@ -1,6 +1,6 @@
 module SlackDm
   class SyncCredentialJob < ApplicationJob
-    MAX_RATE_LIMIT_EXECUTIONS = 2
+    MAX_RETRYABLE_EXECUTIONS = 2
 
     queue_as :default
 
@@ -15,10 +15,10 @@ module SlackDm
       return unless SlackDm::SyncCredential.required_scopes_granted?(credential.scopes)
 
       SlackDm::SyncCredential.new(credential).call
-    rescue SlackDm::SyncCredential::RateLimitedError => e
-      if executions >= MAX_RATE_LIMIT_EXECUTIONS
+    rescue SlackDm::SyncCredential::RetryableApiError => e
+      if executions >= MAX_RETRYABLE_EXECUTIONS
         Rails.logger.warn do
-          "Slack sync job dropped after repeated rate limits: " \
+          "Slack sync job dropped after repeated retryable API failures: " \
             "credential_id=#{credential_id} executions=#{executions}"
         end
         return
