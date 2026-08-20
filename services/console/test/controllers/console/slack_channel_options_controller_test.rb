@@ -126,7 +126,7 @@ module Console
       )
 
       with_catalog do
-        get slack_channel_options_console_scheduled_tasks_url, params: { task_id: task.oid, q: "globex" }
+        get slack_channel_options_console_scheduled_tasks_url, params: { task_id: task.oid, q: "C222" }
       end
 
       assert_response :ok
