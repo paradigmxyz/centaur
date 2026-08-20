@@ -38,10 +38,16 @@
             </td>
             <td class="console-td text-xs text-zinc-400"><%= workflow.principal&.name.presence || workflow.principal&.foreign_id || "Author: #{workflow.author.email}" %></td>
             <td class="console-td text-xs text-zinc-400">
-              <div class="font-mono"><%= workflow.cron_expression %></div>
+              <div class="<%= "font-mono" if workflow.schedule_preset == "cron" %>"><%= workflow.schedule_label %></div>
               <div class="mt-1 text-zinc-600"><%= workflow.timezone %><%= " · disabled" unless workflow.enabled? %></div>
             </td>
-            <td class="console-td text-xs text-zinc-400"><%= workflow.delivery_channel %></td>
+            <td class="console-td text-xs text-zinc-400">
+              <% channel_name = @slack_channel_names[workflow.delivery_channel] %>
+              <div><%= channel_name.present? ? "##{channel_name}" : workflow.delivery_channel %></div>
+              <% if channel_name.present? %>
+                <div class="mt-1 text-zinc-600"><%= workflow.delivery_channel %></div>
+              <% end %>
+            </td>
             <td class="console-td">
               <div class="flex justify-end gap-2">
                 <%= button_to "Run now", run_console_authored_workflow_path(workflow.oid), method: :post, class: "btn-secondary py-1.5" %>

@@ -13,7 +13,14 @@ class AuthoredWorkflowTest < ActiveSupport::TestCase
       assert_equal AuthoredWorkflow::DEFAULT_TIMEZONE, workflow.timezone
       assert_equal Time.utc(2026, 8, 19, 16), workflow.next_run_at
       assert_equal "daily", workflow.schedule_preset
+      assert_equal "Daily at 9:00 PT", workflow.schedule_label
     end
+  end
+
+  test "uses the cron expression as the schedule label when it does not match a preset" do
+    workflow = AuthoredWorkflow.new(valid_attributes(cron_expression: "15 6 * * *"))
+
+    assert_equal "15 6 * * *", workflow.schedule_label
   end
 
   test "validates custom cron schedules and Slack delivery channels" do

@@ -63,14 +63,23 @@ class Console::AuthoredWorkflowsControllerTest < ActionDispatch::IntegrationTest
 
   test "shows authored workflows on the workflow dashboard" do
     workflow = create_workflow
+    catalog = SlackChannelCatalog::Result.new(
+      channels: [ SlackChannelCatalog::Channel.new(id: workflow.delivery_channel, name: "general", private: false) ],
+      error: nil,
+      configured: true
+    )
 
-    CentaurWorkflowRun.stub(:available?, false) do
-      get console_workflows_url
+    SlackChannelCatalogProvider.stub(:fetch, catalog) do
+      CentaurWorkflowRun.stub(:available?, false) do
+        get console_workflows_url
+      end
     end
 
     assert_response :ok
     assert_select "a[href=?]", edit_console_authored_workflow_path(workflow.oid), text: workflow.name
-    assert_match workflow.delivery_channel, response.body
+    assert_select "td", text: /Hourly/
+    assert_select "td", text: /#general/
+    assert_select "td", text: /#{workflow.delivery_channel}/
   end
 
   test "creates a workflow with a defined principal" do

@@ -67,12 +67,10 @@
     <div>
       <%= form.label :schedule_preset, "Schedule", class: "mb-2 block text-sm font-medium text-zinc-200" %>
       <%= form.select :schedule_preset,
-            options_for_select([
-              [ "Hourly", "hourly" ],
-              [ "Daily at 9:00 PT", "daily" ],
-              [ "Weekdays at 9:00 PT", "weekdays" ],
-              [ "Cron", "cron" ]
-            ], workflow.schedule_preset),
+            options_for_select(
+              AuthoredWorkflow::SCHEDULE_PRESET_LABELS.map { |preset, label| [ label, preset ] } + [ [ "Cron", "cron" ] ],
+              workflow.schedule_preset
+            ),
             {},
             class: "form-input",
             data: {

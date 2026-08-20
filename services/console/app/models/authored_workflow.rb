@@ -10,6 +10,11 @@ class AuthoredWorkflow < ApplicationRecord
     "daily" => "0 9 * * *",
     "weekdays" => "0 9 * * 1-5"
   }.freeze
+  SCHEDULE_PRESET_LABELS = {
+    "hourly" => "Hourly",
+    "daily" => "Daily at 9:00 PT",
+    "weekdays" => "Weekdays at 9:00 PT"
+  }.freeze
   DELIVERY_CHANNEL_FORMAT = /\A[CDG][A-Z0-9]{8,}\z/
 
   belongs_to :author, class_name: "User"
@@ -47,6 +52,10 @@ class AuthoredWorkflow < ApplicationRecord
 
   def schedule_preset
     @schedule_preset.presence || SCHEDULE_PRESETS.key(cron_expression) || "cron"
+  end
+
+  def schedule_label
+    SCHEDULE_PRESET_LABELS.fetch(schedule_preset, cron_expression)
   end
 
   def principal_oid
