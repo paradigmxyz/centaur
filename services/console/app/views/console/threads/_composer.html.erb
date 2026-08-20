@@ -33,7 +33,7 @@
       <span class="console-composer-spacer"></span>
       <% unless thread_mode %>
         <% default_value = composer_default_agent_value %>
-        <% default_agent = Console::ThreadsController::COMPOSER_AGENTS.find { |agent| agent.value == default_value } %>
+        <% default_agent = composer_agents.find { |agent| agent.value == default_value } %>
         <div class="console-composer-model"
              data-console-model-picker
              data-agents="<%= composer_agents_json %>">

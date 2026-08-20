@@ -87,7 +87,7 @@ def list_notes(
 
 @app.command("get")
 def get_note(
-    note_id: str = typer.Argument(..., help="Note ID (e.g. not_xxxxxxxxxxxxx)"),
+    note_id: str = typer.Argument(..., help="Note ID, meeting UUID, or Granola share link"),
     raw: bool = typer.Option(False, "--raw", "-r", help="Output raw markdown"),
     transcript: bool = typer.Option(False, "--transcript", "-t", help="Include transcript"),
 ):
@@ -131,7 +131,7 @@ def get_note(
 
 @app.command("transcript")
 def get_transcript(
-    note_id: str = typer.Argument(..., help="Note ID"),
+    note_id: str = typer.Argument(..., help="Note ID, meeting UUID, or Granola share link"),
 ):
     """Get the transcript for a meeting note."""
     from .client import _client

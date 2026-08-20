@@ -1,8 +1,7 @@
 require "digest"
 
 class SlackChannelCatalogProvider
-  FRESH_TTL = 5.minutes
-  STALE_TTL = 24.hours
+  FRESH_TTL = 1.hour
   ERROR_TTL = 30.seconds
   REFRESH_LOCK_TTL = 1.minute
 
@@ -18,6 +17,24 @@ class SlackChannelCatalogProvider
       payload ? deserialize_result(payload) : loading_result
     end
 
+    def search(query:, limit:, exclude_ids: [])
+      result = fetch
+      excluded = Array(exclude_ids).index_with(true)
+      needle = query.to_s.strip.downcase
+      channels = result.channels.reject { |channel| excluded.key?(channel.id) }
+      if needle.present?
+        channels = channels.select do |channel|
+          channel.name.downcase.include?(needle) || channel.id.downcase.include?(needle)
+        end
+      end
+
+      SlackChannelCatalog::Result.new(
+        channels: channels.first(limit),
+        error: result.error,
+        configured: result.configured
+      )
+    end
+
     def refresh(cache_key:)
       config = configuration
       return unless config && cache_key == self.cache_key(**config)
@@ -25,7 +42,7 @@ class SlackChannelCatalogProvider
       cached = Rails.cache.read(cache_key)
       result = SlackChannelCatalog.new(**config).fetch
       if result.ok?
-        Rails.cache.write(cache_key, serialize_result(result), expires_in: STALE_TTL)
+        Rails.cache.write(cache_key, serialize_result(result))
       elsif cached.nil?
         Rails.cache.write(cache_key, serialize_result(result), expires_in: ERROR_TTL)
       end

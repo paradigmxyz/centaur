@@ -7,6 +7,11 @@
       "properties": {
         "replicaCount": { "type": "integer" },
         "publicUrl": { "type": "string" },
+        "allowedHosts": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
         "sentryDsn": { "type": "string" },
         "railsEnv": { "type": "string" },
         "image": {
@@ -189,6 +194,26 @@
               "personasSubdir": { "type": "string" }
             },
             "required": ["repo"]
+          }
+        }
+      }
+    },
+    "codex": {
+      "type": "object",
+      "properties": {
+        "customProviders": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[a-z][a-z0-9_-]*$" },
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "baseUrl": { "type": "string", "pattern": "^https://" },
+              "apiKeyEnv": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+              "defaultModel": { "type": "string", "minLength": 1 }
+            },
+            "required": ["name", "baseUrl", "apiKeyEnv"],
+            "additionalProperties": false
           }
         }
       }
@@ -403,6 +428,11 @@
       "type": "object",
       "properties": {
         "mcpPublicUrl": { "type": "string" },
+        "codexNanocodexRolloutPercent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
         "responseMetadataMode": {
           "type": "string",
           "enum": ["first", "always", "never"]

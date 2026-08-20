@@ -128,6 +128,7 @@ mkdir -p "$HOME_DIR/.codex"
 if [ "$CODEX_AUTH_MODE" = "access_token" ] && [ -f /etc/centaur/codex-auth.default.json ]; then
     cp /etc/centaur/codex-auth.default.json "$HOME_DIR/.codex/auth.json"
     chmod 600 "$HOME_DIR/.codex/auth.json"
+    seed-hermes-codex-auth "$HOME_DIR/.codex/auth.json" "$HOME_DIR/.hermes/auth.json"
 elif [ ! -f "$HOME_DIR/.codex/auth.json" ] && [ -f /etc/centaur/codex-auth.default.json ]; then
     cp /etc/centaur/codex-auth.default.json "$HOME_DIR/.codex/auth.json"
     chmod 600 "$HOME_DIR/.codex/auth.json"
@@ -245,6 +246,37 @@ if bedrock_region:
         ).setdefault("aws", {})["region"] = bedrock_region
         text = tomli_w.dumps(config)
 
+# CODEX_CUSTOM_PROVIDERS is the chart-rendered map of private OpenAI-compatible
+# Responses providers. Codex reads placeholder API keys from the environment;
+# iron-proxy replaces each one only for its configured base URL's host. Applied
+# before CODEX_CONFIG_OVERLAY so operators can still override provider details.
+custom_providers_raw = (os.environ.get("CODEX_CUSTOM_PROVIDERS") or "").strip()
+if custom_providers_raw:
+    import json
+    import tomllib
+    import tomli_w
+
+    try:
+        custom_providers = json.loads(custom_providers_raw)
+        if not isinstance(custom_providers, dict):
+            raise ValueError("expected an object keyed by provider id")
+        config = tomllib.loads(text)
+        model_providers = config.setdefault("model_providers", {})
+        for provider_id, provider in custom_providers.items():
+            if not isinstance(provider, dict):
+                raise ValueError(f"provider {provider_id!r} must be an object")
+            model_providers[provider_id] = {
+                "name": provider["name"],
+                "base_url": provider["baseUrl"],
+                "env_key": provider["apiKeyEnv"],
+                "wire_api": "responses",
+                "requires_openai_auth": False,
+            }
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError, tomllib.TOMLDecodeError) as exc:
+        print(f"ignoring invalid CODEX_CUSTOM_PROVIDERS: {exc}", file=sys.stderr)
+    else:
+        text = tomli_w.dumps(config)
+
 # CODEX_CONFIG_OVERLAY: deep-merge an operator-supplied TOML fragment over the
 # baked config so a deployment can configure codex -- e.g. point it at a custom
 # model provider via a [model_providers.*] block -- through sandbox.extraEnv,
@@ -324,8 +356,8 @@ fi
 #   - access_token: Claude Code runs as a Claude.ai Pro or Max subscription
 #     user. We install a dummy ~/.claude/.credentials.json so the CLI emits
 #     OAuth-shaped requests, unset the API-key stub so it does not fall back
-#     to X-Api-Key, and let iron-token-broker mint a real Bearer at request
-#     time via the anthropic-claude brokered_token secret.
+#     to X-Api-Key, and let iron-proxy inject the current Console-managed
+#     Bearer via the anthropic-claude brokered_token secret.
 CLAUDE_CODE_AUTH_MODE="${CLAUDE_CODE_AUTH_MODE:-api_key}"
 case "$CLAUDE_CODE_AUTH_MODE" in
     api_key)

@@ -126,6 +126,10 @@ spec:
             # final flush + exit still fit before the pod is force-killed.
             - name: GITHUBBOT_SHUTDOWN_DRAIN_MS
               value: {{ mul (sub (int .Values.githubbot.terminationGracePeriodSeconds) 10) 1000 | quote }}
+{{- if .Values.codex.customProviders }}
+            - name: CODEX_CUSTOM_PROVIDERS
+              value: {{ .Values.codex.customProviders | toJson | quote }}
+{{- end }}
 {{- range $name, $value := .Values.githubbot.extraEnv }}
             - name: {{ $name }}
               value: {{ $value | quote }}

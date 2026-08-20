@@ -56,7 +56,7 @@ reviewer** like any other collaborator.
   `GITHUBBOT_ISSUE_PROMPT` / `GITHUBBOT_ISSUE_PROMPT_FILE` (used verbatim, like the review prompt).
 - **Per-turn context**: every turn prepends a compact header naming the PR/issue so a recycled
   sandbox always knows which subject to act on and where to reply.
-- `--claude` / `--codex` / `--amp` / `--model …` / `--opus|--sonnet|--haiku` inline flags pick the
+- `--claude` / `--codex` / `--amp` / `--provider …` / `--model …` / `--opus|--sonnet|--haiku` inline flags pick the
   harness/model, same as the other bots.
 
 ## PR self-management (v2)

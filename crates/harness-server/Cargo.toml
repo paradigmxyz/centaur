@@ -9,6 +9,8 @@ name = "harness-server"
 path = "src/main.rs"
 
 [dependencies]
+# Starlark 0.13 uses hashbrown 0.14, which is no longer supported by
+# allocative 0.3.6's hashbrown integration.
 allocative = "=0.3.4"
 base64 = "0.23"
 clap = { version = "4.5", features = ["derive"] }

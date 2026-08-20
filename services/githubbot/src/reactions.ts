@@ -57,3 +57,47 @@ export async function settleSubjectReaction(
     });
   }
 }
+
+// The REST reactions API has no endpoint for PR reviews, so the review-feedback
+// ack goes through GraphQL with the review's node id — the reaction lands on
+// the reviewer's own review in the timeline, where they look for it.
+const ADD_REACTION_MUTATION = `mutation($subjectId: ID!, $content: ReactionContent!) {
+  addReaction(input: { subjectId: $subjectId, content: $content }) {
+    clientMutationId
+  }
+}`;
+
+export async function reactWorkingOnReview(
+  octokit: Octokit,
+  reviewNodeId: string,
+  logger?: Logger,
+): Promise<void> {
+  try {
+    await octokit.graphql(ADD_REACTION_MUTATION, {
+      subjectId: reviewNodeId,
+      content: "EYES",
+    });
+  } catch (error) {
+    (logger ?? noopLogger).debug("githubbot_review_react_failed", {
+      error: errorMessage(error),
+    });
+  }
+}
+
+export async function settleReviewReaction(
+  octokit: Octokit,
+  reviewNodeId: string,
+  failed: boolean,
+  logger?: Logger,
+): Promise<void> {
+  try {
+    await octokit.graphql(ADD_REACTION_MUTATION, {
+      subjectId: reviewNodeId,
+      content: failed ? "CONFUSED" : "ROCKET",
+    });
+  } catch (error) {
+    (logger ?? noopLogger).debug("githubbot_review_react_settle_failed", {
+      error: errorMessage(error),
+    });
+  }
+}

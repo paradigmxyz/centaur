@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { extractMessageOverrides } from "../src/overrides";
+import {
+  extractMessageOverrides,
+  resolveStickyProvider,
+} from "../src/overrides";
 
 describe("extractMessageOverrides", () => {
   test("returns text untouched without flags", () => {
@@ -60,6 +63,37 @@ describe("extractMessageOverrides", () => {
       harnessType: "codex",
       model: "gpt-5.2",
     });
+  });
+
+  test("--provider selects an arbitrary codex provider", () => {
+    expect(
+      extractMessageOverrides(
+        "--provider private_responses --model example-model audit this",
+      ),
+    ).toEqual({
+      cleanedText: "audit this",
+      harnessType: "codex",
+      model: "example-model",
+      provider: "private_responses",
+    });
+  });
+
+  test("--provider uses the configured provider default model", () => {
+    const previous = process.env.CODEX_CUSTOM_PROVIDERS;
+    process.env.CODEX_CUSTOM_PROVIDERS = JSON.stringify({
+      private_responses: { defaultModel: "configured-model" },
+    });
+    try {
+      expect(extractMessageOverrides("--provider=private_responses audit this")).toEqual({
+        cleanedText: "audit this",
+        harnessType: "codex",
+        model: "configured-model",
+        provider: "private_responses",
+      });
+    } finally {
+      if (previous === undefined) delete process.env.CODEX_CUSTOM_PROVIDERS;
+      else process.env.CODEX_CUSTOM_PROVIDERS = previous;
+    }
   });
 
   test("model shortcuts set model and imply claude-code", () => {
@@ -135,5 +169,30 @@ describe("extractMessageOverrides", () => {
       harnessType: undefined,
       model: undefined,
     });
+  });
+});
+
+describe("resolveStickyProvider", () => {
+  test("persists a selected provider and reuses it on later turns", () => {
+    expect(
+      resolveStickyProvider(undefined, {
+        harnessType: "codex",
+        provider: "private_responses",
+      }),
+    ).toEqual({
+      provider: "private_responses",
+      update: "private_responses",
+    });
+    expect(resolveStickyProvider("private_responses", {})).toEqual({
+      provider: "private_responses",
+    });
+  });
+
+  test("an explicit harness switch clears a previous provider", () => {
+    expect(
+      resolveStickyProvider("private_responses", {
+        harnessType: "claudecode",
+      }),
+    ).toEqual({ update: null });
   });
 });

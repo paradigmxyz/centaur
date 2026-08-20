@@ -27,6 +27,11 @@ updates:
       prefix: chore
       include: scope
     open-pull-requests-limit: 5
+    ignore:
+      # rails-paradedb 0.10+ requires ParadeDB 0.25+, while Console runs 0.23.
+      - dependency-name: rails-paradedb
+        versions:
+          - ">= 0.10.0"
     groups:
       ruby-dependencies:
         patterns:
@@ -59,6 +64,11 @@ updates:
       prefix: chore
       include: scope
     open-pull-requests-limit: 5
+    ignore:
+      # Starlark 0.13 uses hashbrown 0.14, which allocative 0.3.6+ no longer supports.
+      - dependency-name: allocative
+        versions:
+          - ">= 0.3.6"
     groups:
       harness-server-dependencies:
         patterns:

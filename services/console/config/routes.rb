@@ -74,6 +74,8 @@ Rails.application.routes.draw do
   namespace :console do
     resources :roles, only: %i[index show new create edit update] do
       member do
+        get "slack_channel_options", to: "slack_channel_options#index",
+            defaults: { owner_type: "role" }, as: :slack_channel_options
         post "grants", to: "roles#grant_secret", as: :grant_secret
         delete "grants/:grant_id", to: "roles#revoke_grant", as: :revoke_grant
         patch "slack_channel_permissions", to: "roles#update_slack_channel_permissions",
@@ -88,6 +90,8 @@ Rails.application.routes.draw do
   # and avoid clobbering the console_principal_path helper.
   namespace :console do
     delete "principals/:id",                  to: "principals#destroy", as: :delete_principal
+    get    "principals/:id/slack_channel_options", to: "slack_channel_options#index",
+           defaults: { owner_type: "principal" }, as: :principal_slack_channel_options
     patch  "principals/:id/sandbox_access",   to: "principals#update_sandbox_access", as: :principal_sandbox_access
     patch  "principals/:id/slack_channel_permissions", to: "principals#update_slack_channel_permissions", as: :principal_slack_channel_permissions
     post   "principals/:id/roles",            to: "principals#assign_role",   as: :principal_assign_role

@@ -149,6 +149,28 @@ class SlackChannelCatalogProviderTest < ActiveJob::TestCase
     end
   end
 
+  test "search returns bounded matches and excludes assigned channels" do
+    result = SlackChannelCatalog::Result.new(
+      channels: [
+        SlackChannelCatalog::Channel.new(id: "C000000001", name: "engineering", private: false),
+        SlackChannelCatalog::Channel.new(id: "C000000002", name: "engineering-private", private: true),
+        SlackChannelCatalog::Channel.new(id: "C000000003", name: "general", private: false)
+      ],
+      error: nil,
+      configured: true
+    )
+
+    SlackChannelCatalogProvider.stub(:fetch, result) do
+      matches = SlackChannelCatalogProvider.search(
+        query: "ENGINEER",
+        limit: 1,
+        exclude_ids: [ "C000000001" ]
+      )
+
+      assert_equal [ "C000000002" ], matches.channels.map(&:id)
+    end
+  end
+
   private
 
   def with_catalog_env(&)
