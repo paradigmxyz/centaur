@@ -64,6 +64,22 @@ class SlackChannelCatalogSyncTest < ActiveJob::TestCase
     assert channel.active
   end
 
+  test "import channel treats inaccessible private channels as not joined" do
+    existing = create_channel(channel_id: "G0123456789", name: "private")
+    api = Minitest::Mock.new
+    api.expect(
+      :get,
+      response(ok: false, error: "channel_not_found"),
+      [ "#{API_URL}/conversations.info" ],
+      params: { channel: existing.channel_id },
+      headers: HEADERS
+    )
+
+    assert_nil build_sync(api: api).import_channel(existing.channel_id)
+    assert_not existing.reload.active
+    api.verify
+  end
+
   test "channel members replaces only a complete membership array" do
     channel = create_channel(
       channel_id: "C0123456789",

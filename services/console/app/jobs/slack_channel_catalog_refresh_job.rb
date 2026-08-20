@@ -6,6 +6,8 @@ class SlackChannelCatalogRefreshJob < ApplicationJob
   limits_concurrency to: 1, key: -> { "slack_channel_catalog_discovery" }
 
   def perform
+    return unless SlackChannelCatalogSync.configured?
+
     SlackChannelCatalogSync.new.sync_channels
   rescue SlackApi::RetryableError => e
     if executions >= MAX_RETRYABLE_EXECUTIONS

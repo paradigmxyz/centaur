@@ -38,5 +38,6 @@ class SlackApiTest < ActiveSupport::TestCase
     error = assert_raises(SlackApi::Error) { SlackApi.parse_response!(response) }
 
     assert_match "missing_scope", error.message
+    assert_equal "missing_scope", error.code
   end
 end

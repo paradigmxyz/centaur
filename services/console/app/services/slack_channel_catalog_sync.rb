@@ -140,6 +140,10 @@ class SlackChannelCatalogSync
     end
 
     channel
+  rescue SlackApi::Error => e
+    raise unless e.code == "channel_not_found"
+
+    raise ChannelNotJoinedError, "The Slack bot cannot access #{channel_id}."
   end
 
   def fetch_member_user_ids(channel_id)

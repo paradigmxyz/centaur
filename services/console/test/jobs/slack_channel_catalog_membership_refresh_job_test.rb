@@ -13,8 +13,10 @@ class SlackChannelCatalogMembershipRefreshJobTest < ActiveJob::TestCase
       calls << [ :channel_members, channel_id ]
     end
 
-    SlackChannelCatalogSync.stub(:new, sync) do
-      SlackChannelCatalogMembershipRefreshJob.perform_now("C0123456789")
+    SlackChannelCatalogSync.stub(:configured?, true) do
+      SlackChannelCatalogSync.stub(:new, sync) do
+        SlackChannelCatalogMembershipRefreshJob.perform_now("C0123456789")
+      end
     end
 
     assert_equal(
@@ -28,10 +30,20 @@ class SlackChannelCatalogMembershipRefreshJobTest < ActiveJob::TestCase
     sync = Object.new
     sync.define_singleton_method(:sync_memberships) { called = true }
 
-    SlackChannelCatalogSync.stub(:new, sync) do
-      SlackChannelCatalogMembershipRefreshJob.perform_now
+    SlackChannelCatalogSync.stub(:configured?, true) do
+      SlackChannelCatalogSync.stub(:new, sync) do
+        SlackChannelCatalogMembershipRefreshJob.perform_now
+      end
     end
 
     assert called
+  end
+
+  test "does nothing when the catalog is unconfigured" do
+    SlackChannelCatalogSync.stub(:configured?, false) do
+      SlackChannelCatalogSync.stub(:new, -> { flunk("must not construct the sync") }) do
+        assert_nothing_raised { SlackChannelCatalogMembershipRefreshJob.perform_now }
+      end
+    end
   end
 end

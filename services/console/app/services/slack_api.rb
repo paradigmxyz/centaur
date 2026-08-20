@@ -5,14 +5,21 @@ module SlackApi
   DEFAULT_TRANSIENT_RETRY_AFTER_SECONDS = 30
   TRANSIENT_ERRORS = %w[fatal_error internal_error].freeze
 
-  class Error < StandardError; end
+  class Error < StandardError
+    attr_reader :code
+
+    def initialize(message = nil, code: nil)
+      @code = code
+      super(message)
+    end
+  end
 
   class RetryableError < Error
     attr_reader :retry_after
 
-    def initialize(message = nil, retry_after:)
+    def initialize(message = nil, retry_after:, code: nil)
       @retry_after = retry_after
-      super(message || "Slack API request is retryable after #{retry_after} seconds")
+      super(message || "Slack API request is retryable after #{retry_after} seconds", code: code)
     end
   end
 
@@ -30,7 +37,8 @@ module SlackApi
       retry_after = 1 unless retry_after&.positive?
       raise RateLimitedError.new(
         "Slack API rate limited#{context}.",
-        retry_after: [ retry_after, max_rate_limit_wait ].min
+        retry_after: [ retry_after, max_rate_limit_wait ].min,
+        code: "ratelimited"
       )
     end
 
@@ -39,11 +47,16 @@ module SlackApi
     if TRANSIENT_ERRORS.include?(body["error"])
       raise TransientError.new(
         "Slack API returned #{body['error']}#{context}.",
-        retry_after: transient_retry_after
+        retry_after: transient_retry_after,
+        code: body["error"]
       )
     end
     unless body["ok"] == true
-      raise Error, "Slack API returned #{body.fetch('error', 'an unknown error')}#{context}."
+      error_code = body["error"]
+      raise Error.new(
+        "Slack API returned #{error_code || 'an unknown error'}#{context}.",
+        code: error_code
+      )
     end
 
     body

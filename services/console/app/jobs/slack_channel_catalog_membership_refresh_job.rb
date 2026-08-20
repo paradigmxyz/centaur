@@ -6,6 +6,8 @@ class SlackChannelCatalogMembershipRefreshJob < ApplicationJob
   limits_concurrency to: 1, key: ->(*) { "slack_channel_catalog_membership" }
 
   def perform(channel_id = nil)
+    return unless SlackChannelCatalogSync.configured?
+
     sync = SlackChannelCatalogSync.new
     if channel_id
       channel = sync.import_channel(channel_id)
