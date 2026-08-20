@@ -13,7 +13,7 @@ class SlackChannelCatalogSync
   REFRESH_LOCK_KEY = "slack_channel_catalog/refreshing".freeze
   REFRESH_LOCK_TTL = 1.minute
 
-  class ChannelNotJoinedError < SlackApi::Error; end
+  class ChannelNotFoundError < SlackApi::Error; end
 
   class << self
     def configured?
@@ -68,7 +68,7 @@ class SlackChannelCatalogSync
     identity = catalog_identity
     remote = fetch_channel(channel_id)
     import_remote_channel(identity, remote, now: Time.current)
-  rescue ChannelNotJoinedError
+  rescue ChannelNotFoundError
     SlackBotChannel.where(team_id: identity.team_id, channel_id: channel_id)
                    .update_all(active: false, updated_at: Time.current)
     nil
@@ -90,9 +90,6 @@ class SlackChannelCatalogSync
     channel = SlackBotChannel.find_by!(channel_id: channel_id)
     channel.update!(membership_last_attempted_at: Time.current, membership_error: nil)
     member_ids = fetch_member_user_ids(channel.channel_id)
-    unless member_ids.include?(channel.bot_user_id)
-      raise SlackApi::Error, "Slack membership for #{channel.channel_id} omitted the bot user."
-    end
 
     channel.update!(
       member_user_ids: member_ids,
@@ -122,7 +119,7 @@ class SlackChannelCatalogSync
 
   def fetch_channels
     each_page(
-      "users.conversations",
+      "conversations.list",
       types: CHANNEL_TYPES,
       exclude_archived: "false",
       limit: "200"
@@ -135,15 +132,11 @@ class SlackChannelCatalogSync
     payload = body["channel"]
     channel = parse_channel(payload)
     raise SlackApi::Error, "Slack conversations.info did not return channel #{channel_id}." unless channel
-    if payload.is_a?(Hash) && payload["is_member"] == false
-      raise ChannelNotJoinedError, "The Slack bot is not a member of #{channel_id}."
-    end
-
     channel
   rescue SlackApi::Error => e
     raise unless e.code == "channel_not_found"
 
-    raise ChannelNotJoinedError, "The Slack bot cannot access #{channel_id}."
+    raise ChannelNotFoundError, "The Slack bot cannot access #{channel_id}."
   end
 
   def fetch_member_user_ids(channel_id)
@@ -159,7 +152,7 @@ class SlackChannelCatalogSync
     cursor = nil
     loop do
       body = request(method, **params, cursor: cursor)
-      rows.concat(Array(body[method == "users.conversations" ? "channels" : "members"]))
+      rows.concat(Array(body[method == "conversations.list" ? "channels" : "members"]))
       cursor = body.dig("response_metadata", "next_cursor").to_s
       break if cursor.blank?
     end

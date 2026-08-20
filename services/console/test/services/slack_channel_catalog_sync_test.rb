@@ -98,7 +98,7 @@ class SlackChannelCatalogSyncTest < ActiveJob::TestCase
     assert_nil channel.membership_error
   end
 
-  test "incomplete membership keeps the previous array and records an error" do
+  test "channel members stores complete membership when the bot is not joined" do
     channel = create_channel(
       channel_id: "C0123456789",
       name: "general",
@@ -107,12 +107,11 @@ class SlackChannelCatalogSyncTest < ActiveJob::TestCase
     )
     sync = build_sync
 
-    assert_raises(SlackApi::Error) do
-      sync.stub(:fetch_member_user_ids, [ "U_NEW" ]) { sync.channel_members(channel.channel_id) }
-    end
+    members = sync.stub(:fetch_member_user_ids, [ "U_NEW" ]) { sync.channel_members(channel.channel_id) }
 
-    assert_equal [ BOT_USER_ID, "U_OLD" ], channel.reload.member_user_ids
-    assert_match(/omitted the bot user/, channel.membership_error)
+    assert_equal [ "U_NEW" ], members
+    assert_equal members, channel.reload.member_user_ids
+    assert_nil channel.membership_error
   end
 
   test "rate limits preserve membership for a retry" do
@@ -165,7 +164,7 @@ class SlackChannelCatalogSyncTest < ActiveJob::TestCase
         { id: "C0123456789", name: "general", is_private: false },
         { id: "D0123456789", user: "U0123456789", is_im: true }
       ]),
-      [ "#{API_URL}/users.conversations" ],
+      [ "#{API_URL}/conversations.list" ],
       params: {
         types: SlackChannelCatalogSync::CHANNEL_TYPES,
         exclude_archived: "false",
