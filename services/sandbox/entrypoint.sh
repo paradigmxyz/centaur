@@ -355,6 +355,23 @@ cat > "$HOME_DIR/.pi/agent/settings.json" <<EOF
 }
 EOF
 
+# Route Anthropic through the HAIP proxy when ANTHROPIC_BASE_URL is set.
+# pi's built-in model registry hardcodes https://api.anthropic.com, ignoring
+# the ANTHROPIC_BASE_URL env var. A models.json override is the supported way
+# to redirect all Anthropic models to a proxy. This also ensures pi-subagents
+# child processes (which inherit the parent env) use the same proxy.
+if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
+  cat > "$HOME_DIR/.pi/agent/models.json" <<EOF
+{
+  "providers": {
+    "anthropic": {
+      "baseUrl": "${ANTHROPIC_BASE_URL}"
+    }
+  }
+}
+EOF
+fi
+
 # ── Per-session workspace clone (no shared worktree metadata) ────────────────
 if [ "${CENTAUR_PERSISTENT_STATE:-0}" = "1" ]; then
     WORKSPACE_DIR="$STATE_DIR/workspace"
