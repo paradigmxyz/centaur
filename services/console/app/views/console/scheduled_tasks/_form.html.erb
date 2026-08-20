@@ -104,6 +104,6 @@
     <%= form.submit task.persisted? ? "Save task" : "Create task",
                     class: "btn-primary cursor-pointer disabled:cursor-not-allowed disabled:opacity-50",
                     data: { slack_channel_autocomplete_target: "submit" } %>
-    <%= link_to "Cancel", console_workflows_path, class: "btn-secondary" %>
+    <%= link_to "Cancel", console_scheduled_tasks_path, class: "btn-secondary" %>
   </div>
 <% end %>

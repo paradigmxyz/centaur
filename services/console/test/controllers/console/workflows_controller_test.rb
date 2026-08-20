@@ -124,6 +124,7 @@ class Console::WorkflowsControllerTest < ActionDispatch::IntegrationTest
     assert_select ".console-nav-link", text: "Control", count: 0
     assert_select ".console-nav-link", text: "Data Sync", count: 0
     assert_select ".console-thread-group-title", text: /Chats/
+    assert_select ".console-thread-group-title", text: /Scheduled/, count: 0
     assert_select ".console-thread-group-title", text: /Workflows/, count: 0
   end
 

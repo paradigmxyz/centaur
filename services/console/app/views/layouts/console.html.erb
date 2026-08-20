@@ -252,7 +252,7 @@
         font-weight: 500;
       }
 
-      /* Keep stacked group tabs (Workflows / New chat / Chats) on the same
+      /* Keep stacked group tabs (Scheduled / Workflows / New chat / Chats) on the same
          0.125rem rhythm as the nav rows above them. */
       .console-thread-group + .console-thread-group {
         margin-top: 0.125rem;
@@ -1815,6 +1815,7 @@
   </head>
 
   <% threads_view = request.path.start_with?("/console/threads") %>
+  <% scheduled_tasks_view = request.path.start_with?("/console/scheduled_tasks") %>
   <% workflows_view = request.path.start_with?("/console/workflows") %>
   <% skills_view = request.path.start_with?("/console/skills") %>
   <%# The Control and Data Sync sections are admin-only (each controller enforces
@@ -1876,6 +1877,15 @@
           </div>
 
           <% if acting_admin? %>
+            <div class="console-thread-group">
+              <a href="<%= console_scheduled_tasks_path %>"
+                 class="console-thread-group-title <%= "console-thread-group-title-active" if scheduled_tasks_view %>"
+                 title="Scheduled">
+                <span class="console-nav-icon"><%= console_icon("clock", classes: "size-4") %></span>
+                <span class="console-nav-label">Scheduled</span>
+              </a>
+            </div>
+
             <div class="console-thread-group">
               <a href="<%= console_workflows_path %>"
                  class="console-thread-group-title <%= "console-thread-group-title-active" if workflows_view %>"

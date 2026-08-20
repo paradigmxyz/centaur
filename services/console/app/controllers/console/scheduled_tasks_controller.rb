@@ -3,6 +3,11 @@ class Console::ScheduledTasksController < ApplicationController
   before_action :require_admin
   before_action :set_task, only: %i[edit update destroy run]
 
+  def index
+    @tasks = ScheduledTask.includes(:author, :principal).order(:name, :id)
+    @slack_channel_names = slack_channel_names
+  end
+
   def new
     @task = current_user.scheduled_tasks.new(
       cron_expression: ScheduledTask::SCHEDULE_PRESETS.fetch("daily"),
@@ -14,7 +19,7 @@ class Console::ScheduledTasksController < ApplicationController
   def create
     @task = current_user.scheduled_tasks.new
     if @task.update(task_attributes)
-      redirect_to console_workflows_path, notice: "Task created."
+      redirect_to console_scheduled_tasks_path, notice: "Task created."
     else
       prepare_form
       render :new, status: :unprocessable_entity
@@ -27,7 +32,7 @@ class Console::ScheduledTasksController < ApplicationController
 
   def update
     if @task.update(task_attributes)
-      redirect_to console_workflows_path, notice: "Task saved."
+      redirect_to console_scheduled_tasks_path, notice: "Task saved."
     else
       prepare_form
       render :edit, status: :unprocessable_entity
@@ -36,12 +41,12 @@ class Console::ScheduledTasksController < ApplicationController
 
   def destroy
     @task.destroy!
-    redirect_to console_workflows_path, notice: "Task deleted."
+    redirect_to console_scheduled_tasks_path, notice: "Task deleted."
   end
 
   def run
     ScheduledTaskRunJob.perform_later(@task.id, Time.current.iso8601)
-    redirect_to console_workflows_path, notice: "Task queued."
+    redirect_to console_scheduled_tasks_path, notice: "Task queued."
   end
 
   private
@@ -81,5 +86,12 @@ class Console::ScheduledTasksController < ApplicationController
 
   def prepare_form
     @principals = Principal.where.not(foreign_id: nil).order(:name, :foreign_id)
+  end
+
+  def slack_channel_names
+    SlackChannelCatalogProvider.fetch.channels.to_h { |channel| [ channel.id, channel.name ] }
+  rescue StandardError => e
+    Rails.logger.warn("scheduled_task_slack_channels_load_failed error=#{e.class}: #{e.message}")
+    {}
   end
 end

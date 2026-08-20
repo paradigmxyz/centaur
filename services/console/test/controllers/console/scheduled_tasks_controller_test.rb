@@ -23,6 +23,7 @@ class Console::ScheduledTasksControllerTest < ActionDispatch::IntegrationTest
     assert_select "input[type=hidden][name='scheduled_task[delivery_channel]'][data-slack-channel-autocomplete-target=value]"
     assert_select "input[role=combobox][placeholder='Search channels or enter an ID']"
     assert_select "input[type=submit][data-slack-channel-autocomplete-target=submit]:not([disabled])"
+    assert_select "a[href=?]", console_scheduled_tasks_path, text: "Cancel"
   end
 
   test "creates an author-principal task from a schedule preset" do
@@ -31,7 +32,7 @@ class Console::ScheduledTasksControllerTest < ActionDispatch::IntegrationTest
     end
 
     task = ScheduledTask.order(:id).last
-    assert_redirected_to console_workflows_path
+    assert_redirected_to console_scheduled_tasks_path
     assert_equal @operator, task.author
     assert_nil task.principal
     assert_equal "0 9 * * 1-5", task.cron_expression
@@ -61,7 +62,7 @@ class Console::ScheduledTasksControllerTest < ActionDispatch::IntegrationTest
     assert_select "input[name='scheduled_task[cron_expression]'][required]:not([disabled])"
   end
 
-  test "shows scheduled tasks on the workflow dashboard" do
+  test "shows scheduled tasks on their dedicated page" do
     task = create_task
     catalog = SlackChannelCatalog::Result.new(
       channels: [ SlackChannelCatalog::Channel.new(id: task.delivery_channel, name: "general", private: false) ],
@@ -70,12 +71,12 @@ class Console::ScheduledTasksControllerTest < ActionDispatch::IntegrationTest
     )
 
     SlackChannelCatalogProvider.stub(:fetch, catalog) do
-      CentaurWorkflowRun.stub(:available?, false) do
-        get console_workflows_url
-      end
+      get console_scheduled_tasks_url
     end
 
     assert_response :ok
+    assert_select ".console-thread-group-title-active", text: /Scheduled/
+    assert_select "h1", text: "Scheduled Tasks"
     assert_select "a[href=?]", edit_console_scheduled_task_path(task.oid), text: task.name
     assert_select "td", text: /Hourly/
     assert_select "td", text: /#general/
@@ -110,7 +111,7 @@ class Console::ScheduledTasksControllerTest < ActionDispatch::IntegrationTest
       post run_console_scheduled_task_url(task.oid)
     end
 
-    assert_redirected_to console_workflows_path
+    assert_redirected_to console_scheduled_tasks_path
   end
 
   test "non-admins cannot author tasks" do

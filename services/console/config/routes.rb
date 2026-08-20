@@ -57,7 +57,7 @@ Rails.application.routes.draw do
         post :run, action: :force_start
       end
     end
-    resources :scheduled_tasks, except: %i[index show] do
+    resources :scheduled_tasks, except: :show do
       post :run, on: :member
       get :slack_channel_options,
           on: :collection,

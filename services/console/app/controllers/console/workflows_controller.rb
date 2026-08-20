@@ -7,8 +7,6 @@ class Console::WorkflowsController < ApplicationController
   PER_PAGE = 50
 
   def index
-    @scheduled_tasks = ScheduledTask.includes(:author, :principal).order(:name, :id)
-    @slack_channel_names = scheduled_task_slack_channel_names
     @workflow_db_unavailable = false
     @workflow_runs = []
     @queue_breakdown = {}
@@ -104,13 +102,6 @@ class Console::WorkflowsController < ApplicationController
   end
 
   private
-
-  def scheduled_task_slack_channel_names
-    SlackChannelCatalogProvider.fetch.channels.to_h { |channel| [ channel.id, channel.name ] }
-  rescue StandardError => e
-    Rails.logger.warn("scheduled_task_slack_channels_load_failed error=#{e.class}: #{e.message}")
-    {}
-  end
 
   # Best-effort enrichment from the workflows API: the registered schedule
   # (cron/interval, source path for the GitHub link) and the latest run's
