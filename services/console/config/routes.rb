@@ -57,12 +57,12 @@ Rails.application.routes.draw do
         post :run, action: :force_start
       end
     end
-    resources :authored_workflows, except: %i[index show] do
+    resources :scheduled_tasks, except: %i[index show] do
       post :run, on: :member
       get :slack_channel_options,
           on: :collection,
           to: "slack_channel_options#index",
-          defaults: { owner_type: "authored_workflow" }
+          defaults: { owner_type: "scheduled_task" }
     end
     resources :skills do
       collection do

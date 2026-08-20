@@ -49,7 +49,7 @@ module Console
       assert_equal [], response.parsed_body.fetch("options")
     end
 
-    test "authored workflow options include all matching channels" do
+    test "scheduled task options include all matching channels" do
       captured = nil
       result = SlackChannelCatalog::Result.new(
         channels: [ SlackChannelCatalog::Channel.new(id: "C1111111111", name: "engineering", private: false) ],
@@ -62,7 +62,7 @@ module Console
         result
       end
       SlackChannelCatalogProvider.stub(:search, search) do
-        get slack_channel_options_console_authored_workflows_url, params: { q: "eng" }
+        get slack_channel_options_console_scheduled_tasks_url, params: { q: "eng" }
       end
 
       assert_response :ok

@@ -1,7 +1,7 @@
 require "fugit"
 
-class AuthoredWorkflow < ApplicationRecord
-  oid_prefix "awf"
+class ScheduledTask < ApplicationRecord
+  oid_prefix "tsk"
 
   WORKFLOW_NAME = "console_workflow".freeze
   DEFAULT_TIMEZONE = "America/Los_Angeles".freeze
@@ -73,8 +73,8 @@ class AuthoredWorkflow < ApplicationRecord
       prompt: prompt,
       principal: execution_principal.foreign_id,
       channel: delivery_channel,
-      authored_workflow_id: oid,
-      authored_workflow_name: name
+      scheduled_task_id: oid,
+      scheduled_task_name: name
     }
   end
 

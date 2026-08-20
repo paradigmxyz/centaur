@@ -40,8 +40,8 @@ def test_handler_runs_one_scoped_agent_turn_and_delivers_its_text():
                 "prompt": "Summarize open incidents",
                 "principal": "console-user-author",
                 "channel": "C0123456789",
-                "authored_workflow_id": "awf_123",
-                "authored_workflow_name": "Incident summary",
+                "scheduled_task_id": "tsk_123",
+                "scheduled_task_name": "Incident summary",
             },
             context,
         )
@@ -53,8 +53,8 @@ def test_handler_runs_one_scoped_agent_turn_and_delivers_its_text():
     assert kwargs["principal"] == "console-user-author"
     assert "thread_key" not in kwargs
     assert kwargs["metadata"] == {
-        "authored_workflow_id": "awf_123",
-        "authored_workflow_name": "Incident summary",
+        "scheduled_task_id": "tsk_123",
+        "scheduled_task_name": "Incident summary",
     }
     assert context.step_calls == ["post_result"]
     assert context.slack_calls == [("C0123456789", "Daily summary", {})]
@@ -71,7 +71,7 @@ def test_handler_truncates_long_slack_results():
                 "prompt": "Summarize open incidents",
                 "principal": "console-user-author",
                 "channel": "C0123456789",
-                "authored_workflow_id": "awf_123",
+                "scheduled_task_id": "tsk_123",
             },
             context,
         )
@@ -90,7 +90,7 @@ def test_handler_does_not_repeat_checkpointed_slack_posts():
         "prompt": "Summarize open incidents",
         "principal": "console-user-author",
         "channel": "C0123456789",
-        "authored_workflow_id": "awf_123",
+        "scheduled_task_id": "tsk_123",
     }
 
     asyncio.run(console_workflow.handler(params, context))

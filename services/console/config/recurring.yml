@@ -37,6 +37,6 @@ production:
   prune_principal_sync_config_snapshots:
     class: "PrunePrincipalSyncConfigSnapshotsJob"
     schedule: every 10 minutes
-  authored_workflow_scheduler:
-    class: "AuthoredWorkflowSchedulerJob"
+  scheduled_task_scheduler:
+    class: "ScheduledTaskSchedulerJob"
     schedule: every minute

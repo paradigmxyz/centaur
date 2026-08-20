@@ -7,8 +7,8 @@ class Console::WorkflowsController < ApplicationController
   PER_PAGE = 50
 
   def index
-    @authored_workflows = AuthoredWorkflow.includes(:author, :principal).order(:name, :id)
-    @slack_channel_names = authored_workflow_slack_channel_names
+    @scheduled_tasks = ScheduledTask.includes(:author, :principal).order(:name, :id)
+    @slack_channel_names = scheduled_task_slack_channel_names
     @workflow_db_unavailable = false
     @workflow_runs = []
     @queue_breakdown = {}
@@ -105,10 +105,10 @@ class Console::WorkflowsController < ApplicationController
 
   private
 
-  def authored_workflow_slack_channel_names
+  def scheduled_task_slack_channel_names
     SlackChannelCatalogProvider.fetch.channels.to_h { |channel| [ channel.id, channel.name ] }
   rescue StandardError => e
-    Rails.logger.warn("authored_workflow_slack_channels_load_failed error=#{e.class}: #{e.message}")
+    Rails.logger.warn("scheduled_task_slack_channels_load_failed error=#{e.class}: #{e.message}")
     {}
   end
 

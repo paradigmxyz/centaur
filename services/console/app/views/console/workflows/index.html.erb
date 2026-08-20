@@ -3,10 +3,10 @@
 <section class="mb-8">
   <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
     <div>
-      <h2 class="text-sm font-semibold text-zinc-200">Authored Workflows</h2>
+      <h2 class="text-sm font-semibold text-zinc-200">Scheduled Tasks</h2>
       <p class="mt-1 text-xs text-zinc-500">Scheduled single-turn prompts delivered to Slack.</p>
     </div>
-    <%= link_to "New Workflow", new_console_authored_workflow_path, class: "btn-primary" %>
+    <%= link_to "New Task", new_console_scheduled_task_path, class: "btn-primary" %>
   </div>
 
   <div class="console-panel">
@@ -21,42 +21,42 @@
         </tr>
       </thead>
       <tbody class="divide-y divide-ink-700">
-        <% if @authored_workflows.empty? %>
+        <% if @scheduled_tasks.empty? %>
           <tr>
-            <td colspan="5" class="px-5 py-8 text-center text-zinc-600">No authored workflows yet.</td>
+            <td colspan="5" class="px-5 py-8 text-center text-zinc-600">No scheduled tasks yet.</td>
           </tr>
         <% end %>
-        <% @authored_workflows.each do |workflow| %>
+        <% @scheduled_tasks.each do |task| %>
           <tr class="console-row-hover">
             <td class="console-td">
-              <%= link_to workflow.name, edit_console_authored_workflow_path(workflow.oid), class: "console-link font-medium" %>
-              <% if workflow.last_error.present? %>
-                <div class="mt-1 text-xs text-red-400" title="<%= workflow.last_error %>">Last dispatch failed</div>
-              <% elsif workflow.last_run_at.present? %>
-                <div class="mt-1 text-xs text-zinc-600">Last run <%= local_time(workflow.last_run_at, relative: true, format: :compact) %></div>
+              <%= link_to task.name, edit_console_scheduled_task_path(task.oid), class: "console-link font-medium" %>
+              <% if task.last_error.present? %>
+                <div class="mt-1 text-xs text-red-400" title="<%= task.last_error %>">Last dispatch failed</div>
+              <% elsif task.last_run_at.present? %>
+                <div class="mt-1 text-xs text-zinc-600">Last run <%= local_time(task.last_run_at, relative: true, format: :compact) %></div>
               <% end %>
             </td>
-            <td class="console-td text-xs text-zinc-400"><%= workflow.principal&.name.presence || workflow.principal&.foreign_id || "Author: #{workflow.author.email}" %></td>
+            <td class="console-td text-xs text-zinc-400"><%= task.principal&.name.presence || task.principal&.foreign_id || "Author: #{task.author.email}" %></td>
             <td class="console-td text-xs text-zinc-400">
-              <div class="<%= "font-mono" if workflow.schedule_preset == "cron" %>"><%= workflow.schedule_label %></div>
-              <% unless workflow.enabled? %>
+              <div class="<%= "font-mono" if task.schedule_preset == "cron" %>"><%= task.schedule_label %></div>
+              <% unless task.enabled? %>
                 <div class="mt-1 text-zinc-600">Disabled</div>
               <% end %>
             </td>
             <td class="console-td text-xs text-zinc-400">
-              <% channel_name = @slack_channel_names[workflow.delivery_channel] %>
-              <div><%= channel_name.present? ? "##{channel_name}" : workflow.delivery_channel %></div>
+              <% channel_name = @slack_channel_names[task.delivery_channel] %>
+              <div><%= channel_name.present? ? "##{channel_name}" : task.delivery_channel %></div>
               <% if channel_name.present? %>
-                <div class="mt-1 text-zinc-600"><%= workflow.delivery_channel %></div>
+                <div class="mt-1 text-zinc-600"><%= task.delivery_channel %></div>
               <% end %>
             </td>
             <td class="console-td">
               <div class="flex justify-end gap-2">
-                <%= button_to "Run now", run_console_authored_workflow_path(workflow.oid), method: :post, class: "btn-secondary py-1.5" %>
-                <%= link_to "Edit", edit_console_authored_workflow_path(workflow.oid), class: "btn-secondary py-1.5" %>
-                <%= button_to "Delete", console_authored_workflow_path(workflow.oid), method: :delete,
+                <%= button_to "Run now", run_console_scheduled_task_path(task.oid), method: :post, class: "btn-secondary py-1.5" %>
+                <%= link_to "Edit", edit_console_scheduled_task_path(task.oid), class: "btn-secondary py-1.5" %>
+                <%= button_to "Delete", console_scheduled_task_path(task.oid), method: :delete,
                       class: "btn-secondary py-1.5 text-red-300",
-                      data: { turbo_confirm: "Delete #{workflow.name}?" } %>
+                      data: { turbo_confirm: "Delete #{task.name}?" } %>
               </div>
             </td>
           </tr>

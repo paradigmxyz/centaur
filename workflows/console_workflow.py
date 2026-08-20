@@ -1,4 +1,4 @@
-"""Run one Console-authored agent prompt and deliver the response to Slack."""
+"""Run one Console scheduled task and deliver the response to Slack."""
 
 from __future__ import annotations
 
@@ -29,23 +29,23 @@ async def handler(params: Any, ctx: Any) -> dict[str, Any]:
     prompt = _required_string(params, "prompt")
     principal = _required_string(params, "principal")
     channel = _required_string(params, "channel")
-    authored_workflow_id = _required_string(params, "authored_workflow_id")
+    scheduled_task_id = _required_string(params, "scheduled_task_id")
 
     result = await ctx.agent_turn(
         prompt,
         principal=principal,
         metadata={
-            "authored_workflow_id": authored_workflow_id,
-            "authored_workflow_name": str(params.get("authored_workflow_name") or ""),
+            "scheduled_task_id": scheduled_task_id,
+            "scheduled_task_name": str(params.get("scheduled_task_name") or ""),
         },
     )
     response_text = str(result.get("result_text") or "").strip()
     if not response_text:
-        response_text = "The workflow completed without a text response."
+        response_text = "The task completed without a text response."
     delivery = await _deliver_to_slack(ctx, channel, response_text)
 
     return {
         "agent_result": result,
         "delivery": delivery,
-        "authored_workflow_id": authored_workflow_id,
+        "scheduled_task_id": scheduled_task_id,
     }

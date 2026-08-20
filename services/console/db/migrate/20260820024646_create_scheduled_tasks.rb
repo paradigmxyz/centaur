@@ -1,6 +1,6 @@
-class CreateAuthoredWorkflows < ActiveRecord::Migration[8.1]
+class CreateScheduledTasks < ActiveRecord::Migration[8.1]
   def change
-    create_table :authored_workflows do |t|
+    create_table :scheduled_tasks do |t|
       t.string :name, null: false
       t.text :prompt, null: false
       t.references :author, null: false, foreign_key: { to_table: :users }
