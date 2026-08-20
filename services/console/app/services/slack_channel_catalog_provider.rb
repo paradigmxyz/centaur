@@ -1,8 +1,7 @@
 require "digest"
 
 class SlackChannelCatalogProvider
-  FRESH_TTL = 5.minutes
-  STALE_TTL = 24.hours
+  FRESH_TTL = 1.hour
   ERROR_TTL = 30.seconds
   REFRESH_LOCK_TTL = 1.minute
 
@@ -43,7 +42,7 @@ class SlackChannelCatalogProvider
       cached = Rails.cache.read(cache_key)
       result = SlackChannelCatalog.new(**config).fetch
       if result.ok?
-        Rails.cache.write(cache_key, serialize_result(result), expires_in: STALE_TTL)
+        Rails.cache.write(cache_key, serialize_result(result))
       elsif cached.nil?
         Rails.cache.write(cache_key, serialize_result(result), expires_in: ERROR_TTL)
       end
