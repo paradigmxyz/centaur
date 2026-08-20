@@ -7,6 +7,7 @@ from typing import Any
 
 WORKFLOW_NAME = "console_workflow"
 SLACK_MESSAGE_MAX_LENGTH = 50_000
+RESULT_FIELD = "result"
 
 
 def _required_string(params: Any, key: str) -> str:
@@ -26,9 +27,43 @@ async def _deliver_to_slack(ctx: Any, channel: str, text: str) -> Any:
     )
 
 
+def _agent_prompt(prompt: str) -> str:
+    return f"""Complete the following scheduled task:
+
+<scheduled-task>
+{prompt}
+</scheduled-task>
+
+Return exactly one JSON object and nothing else. Do not use markdown fences. The object must
+have one string field named `{RESULT_FIELD}` containing the complete final response that should
+be delivered to Slack.
+"""
+
+
+def _json_result(text: Any) -> str:
+    candidate = str(text or "").strip()
+    if candidate.startswith("```") and candidate.endswith("```"):
+        lines = candidate.splitlines()
+        candidate = "\n".join(lines[1:-1]).strip()
+    try:
+        payload = json.loads(candidate)
+    except (TypeError, json.JSONDecodeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    response = payload.get(RESULT_FIELD)
+    return response.strip() if isinstance(response, str) else ""
+
+
 def _response_text(result: Any) -> str:
     if not isinstance(result, dict):
         return ""
+
+    output_json = result.get("output_json")
+    if isinstance(output_json, dict):
+        response = output_json.get(RESULT_FIELD)
+        if isinstance(response, str) and response.strip():
+            return response.strip()
 
     for line in reversed(result.get("output_lines") or []):
         if not isinstance(line, str):
@@ -50,11 +85,11 @@ def _response_text(result: Any) -> str:
             continue
         if item.get("phase") not in {None, "final_answer", "answer"}:
             continue
-        text = item.get("text")
-        if isinstance(text, str) and text.strip():
-            return text.strip()
+        response = _json_result(item.get("text"))
+        if response:
+            return response
 
-    return str(result.get("result_text") or "").strip()
+    return _json_result(result.get("result_text"))
 
 
 async def handler(params: Any, ctx: Any) -> dict[str, Any]:
@@ -64,7 +99,7 @@ async def handler(params: Any, ctx: Any) -> dict[str, Any]:
     scheduled_task_id = _required_string(params, "scheduled_task_id")
 
     result = await ctx.agent_turn(
-        prompt,
+        _agent_prompt(prompt),
         principal=principal,
         metadata={
             "scheduled_task_id": scheduled_task_id,

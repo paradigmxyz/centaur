@@ -10,9 +10,15 @@ class FakeContext:
     run_id = "run-123"
     task_id = "task-456"
 
-    def __init__(self, result_text: str = "Daily summary", output_lines=None) -> None:
+    def __init__(
+        self,
+        result_text: str = '{"result":"Daily summary"}',
+        output_lines=None,
+        output_json=None,
+    ) -> None:
         self.result_text = result_text
         self.output_lines = output_lines or []
+        self.output_json = output_json
         self.agent_calls = []
         self.step_calls = []
         self.step_results = {}
@@ -20,11 +26,14 @@ class FakeContext:
 
     async def agent_turn(self, prompt, **kwargs):
         self.agent_calls.append((prompt, kwargs))
-        return {
+        result = {
             "result_text": self.result_text,
             "output_lines": self.output_lines,
             "execution_id": "exec-123",
         }
+        if self.output_json is not None:
+            result["output_json"] = self.output_json
+        return result
 
     async def step(self, name, fn):
         self.step_calls.append(name)
@@ -55,7 +64,8 @@ def test_handler_runs_one_scoped_agent_turn_and_delivers_its_text():
 
     assert len(context.agent_calls) == 1
     prompt, kwargs = context.agent_calls[0]
-    assert prompt == "Summarize open incidents"
+    assert "<scheduled-task>\nSummarize open incidents\n</scheduled-task>" in prompt
+    assert "one string field named `result`" in prompt
     assert kwargs["principal"] == "console-user-author"
     assert "thread_key" not in kwargs
     assert kwargs["metadata"] == {
@@ -69,7 +79,7 @@ def test_handler_runs_one_scoped_agent_turn_and_delivers_its_text():
 
 def test_handler_truncates_long_slack_results():
     response_text = "x" * (console_workflow.SLACK_MESSAGE_MAX_LENGTH + 25)
-    context = FakeContext(result_text=response_text)
+    context = FakeContext(output_json={"result": response_text})
 
     result = asyncio.run(
         console_workflow.handler(
@@ -111,21 +121,21 @@ def test_handler_delivers_only_the_completed_final_agent_message():
                 "item": {
                     "type": "agentMessage",
                     "phase": "final_answer",
-                    "text": (
-                        "Cold scoops kiss the cone\n"
-                        "Summer sunlight melts to cream\n"
-                        "Sweet stars on my tongue"
+                    "text": json.dumps(
+                        {
+                            "result": (
+                                "Cold scoops kiss the cone\n"
+                                "Summer sunlight melts to cream\n"
+                                "Sweet stars on my tongue"
+                            )
+                        }
                     ),
                 },
             }
         ),
     ]
     context = FakeContext(
-        result_text=(
-            "I’ll keep it classic: three lines, 5–7–5. "
-            "Downloading packages... Traceback... "
-            "Cold scoops kiss the cone"
-        ),
+        result_text="I’ll keep it classic. Downloading packages... Traceback...",
         output_lines=output_lines,
     )
 
@@ -147,6 +157,26 @@ def test_handler_delivers_only_the_completed_final_agent_message():
             "Cold scoops kiss the cone\nSummer sunlight melts to cream\nSweet stars on my tongue",
             {},
         )
+    ]
+
+
+def test_handler_does_not_deliver_a_raw_agent_transcript():
+    context = FakeContext(result_text="Commentary...\nTraceback...\nFinal answer")
+
+    asyncio.run(
+        console_workflow.handler(
+            {
+                "prompt": "Summarize open incidents",
+                "principal": "console-user-author",
+                "channel": "C0123456789",
+                "scheduled_task_id": "tsk_123",
+            },
+            context,
+        )
+    )
+
+    assert context.slack_calls == [
+        ("C0123456789", "The task completed without a text response.", {})
     ]
 
 
