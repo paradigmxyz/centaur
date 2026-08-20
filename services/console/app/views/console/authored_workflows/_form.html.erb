@@ -62,35 +62,35 @@
     </div>
   </div>
 
-  <div class="grid gap-5 lg:grid-cols-3">
+  <% cron_schedule = workflow.schedule_preset == "cron" %>
+  <div class="grid gap-5 lg:grid-cols-2" data-controller="schedule-fields">
     <div>
       <%= form.label :schedule_preset, "Schedule", class: "mb-2 block text-sm font-medium text-zinc-200" %>
       <%= form.select :schedule_preset,
             options_for_select([
               [ "Hourly", "hourly" ],
-              [ "Daily at 9:00", "daily" ],
-              [ "Weekdays at 9:00", "weekdays" ],
-              [ "Custom cron", "custom" ]
+              [ "Daily at 9:00 PT", "daily" ],
+              [ "Weekdays at 9:00 PT", "weekdays" ],
+              [ "Cron", "cron" ]
             ], workflow.schedule_preset),
             {},
-            class: "form-input" %>
+            class: "form-input",
+            data: {
+              schedule_fields_target: "preset",
+              action: "schedule-fields#update"
+            } %>
+      <p class="mt-2 text-xs text-zinc-500">All schedules use Pacific Time.</p>
     </div>
 
-    <div>
+    <div data-schedule-fields-target="cron" <%= "hidden" unless cron_schedule %>>
       <%= form.label :cron_expression, "Cron expression", class: "mb-2 block text-sm font-medium text-zinc-200" %>
       <%= form.text_field :cron_expression,
-            required: true,
+            required: cron_schedule,
+            disabled: !cron_schedule,
             placeholder: "0 9 * * 1-5",
-            class: "form-input font-mono" %>
-      <p class="mt-2 text-xs text-zinc-500">Used when Schedule is Custom cron.</p>
-    </div>
-
-    <div>
-      <%= form.label :timezone, class: "mb-2 block text-sm font-medium text-zinc-200" %>
-      <%= form.select :timezone,
-            options_for_select(@timezone_options, workflow.timezone),
-            {},
-            class: "form-input" %>
+            class: "form-input font-mono",
+            data: { schedule_fields_target: "expression" } %>
+      <p class="mt-2 text-xs text-zinc-500">Cron expressions are evaluated in Pacific Time.</p>
     </div>
   </div>
 

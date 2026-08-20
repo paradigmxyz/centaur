@@ -6,7 +6,6 @@ class Console::AuthoredWorkflowsController < ApplicationController
   def new
     @workflow = current_user.authored_workflows.new(
       cron_expression: AuthoredWorkflow::SCHEDULE_PRESETS.fetch("daily"),
-      timezone: Time.zone.tzinfo.name,
       enabled: true
     )
     prepare_form
@@ -83,13 +82,11 @@ class Console::AuthoredWorkflowsController < ApplicationController
       :delivery_channel,
       :schedule_preset,
       :cron_expression,
-      :timezone,
       :enabled
     )
   end
 
   def prepare_form
     @principals = Principal.where.not(foreign_id: nil).order(:name, :foreign_id)
-    @timezone_options = ActiveSupport::TimeZone.all.map { |zone| zone.tzinfo.name }.uniq.sort
   end
 end

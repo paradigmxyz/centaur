@@ -86,7 +86,6 @@ class AuthoredWorkflowJobsTest < ActiveJob::TestCase
       principal: principal,
       delivery_channel: "C0123456789",
       cron_expression: "0 * * * *",
-      timezone: "UTC",
       enabled: true
     )
   end

@@ -1,17 +1,17 @@
 require "test_helper"
 
 class AuthoredWorkflowTest < ActiveSupport::TestCase
-  test "maps schedule presets to cron and calculates the next run in its timezone" do
+  test "maps schedule presets to cron and calculates the next run in Pacific Time" do
     travel_to Time.utc(2026, 8, 19, 12) do
       workflow = AuthoredWorkflow.create!(
         valid_attributes(
-          cron_expression: AuthoredWorkflow.cron_for("daily", nil),
-          timezone: "America/Denver"
+          cron_expression: AuthoredWorkflow.cron_for("daily", nil)
         )
       )
 
       assert_equal "0 9 * * *", workflow.cron_expression
-      assert_equal Time.utc(2026, 8, 19, 15), workflow.next_run_at
+      assert_equal AuthoredWorkflow::DEFAULT_TIMEZONE, workflow.timezone
+      assert_equal Time.utc(2026, 8, 19, 16), workflow.next_run_at
       assert_equal "daily", workflow.schedule_preset
     end
   end
@@ -59,7 +59,6 @@ class AuthoredWorkflowTest < ActiveSupport::TestCase
       author: users(:acme_admin),
       delivery_channel: "C0123456789",
       cron_expression: "0 * * * *",
-      timezone: "UTC",
       enabled: true
     }.merge(overrides)
   end

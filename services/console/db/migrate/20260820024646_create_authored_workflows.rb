@@ -7,7 +7,7 @@ class CreateAuthoredWorkflows < ActiveRecord::Migration[8.1]
       t.references :principal, null: true, foreign_key: true
       t.string :delivery_channel, null: false
       t.string :cron_expression, null: false
-      t.string :timezone, null: false, default: "UTC"
+      t.string :timezone, null: false, default: "America/Los_Angeles"
       t.boolean :enabled, null: false, default: true
       t.datetime :next_run_at
       t.datetime :last_enqueued_at

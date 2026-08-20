@@ -41,7 +41,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_20_174601) do
     t.datetime "next_run_at"
     t.bigint "principal_id"
     t.text "prompt", null: false
-    t.string "timezone", default: "UTC", null: false
+    t.string "timezone", default: "America/Los_Angeles", null: false
     t.datetime "updated_at", null: false
     t.index ["author_id", "name"], name: "index_authored_workflows_on_author_id_and_name", unique: true
     t.index ["author_id"], name: "index_authored_workflows_on_author_id"

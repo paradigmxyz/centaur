@@ -4,6 +4,7 @@ class AuthoredWorkflow < ApplicationRecord
   oid_prefix "awf"
 
   WORKFLOW_NAME = "console_workflow".freeze
+  DEFAULT_TIMEZONE = "America/Los_Angeles".freeze
   SCHEDULE_PRESETS = {
     "hourly" => "0 * * * *",
     "daily" => "0 9 * * *",
@@ -39,13 +40,13 @@ class AuthoredWorkflow < ApplicationRecord
   validate :selected_principal_has_foreign_id
 
   def self.cron_for(preset, custom_expression)
-    return custom_expression.to_s.strip if preset.to_s == "custom"
+    return custom_expression.to_s.strip if preset.to_s == "cron"
 
     SCHEDULE_PRESETS.fetch(preset.to_s, custom_expression.to_s.strip)
   end
 
   def schedule_preset
-    @schedule_preset.presence || SCHEDULE_PRESETS.key(cron_expression) || "custom"
+    @schedule_preset.presence || SCHEDULE_PRESETS.key(cron_expression) || "cron"
   end
 
   def principal_oid
@@ -79,7 +80,7 @@ class AuthoredWorkflow < ApplicationRecord
   end
 
   def set_default_timezone
-    self.timezone = "UTC" if timezone.blank?
+    self.timezone = DEFAULT_TIMEZONE if timezone.blank?
   end
 
   def schedule_requires_refresh?

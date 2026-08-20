@@ -13,6 +13,10 @@ class Console::AuthoredWorkflowsControllerTest < ActionDispatch::IntegrationTest
     assert_select "textarea[name='authored_workflow[prompt]']"
     assert_select "select[name='authored_workflow[principal_oid]']"
     assert_select "select[name='authored_workflow[schedule_preset]']"
+    assert_select "select[name='authored_workflow[timezone]']", count: 0
+    assert_select "[data-schedule-fields-target=cron][hidden]"
+    assert_select "input[name='authored_workflow[cron_expression]'][disabled]"
+    assert_select "p", text: "All schedules use Pacific Time."
     assert_select "form[data-controller='slack-channel-autocomplete']"
     assert_select "[data-slack-channel-autocomplete-url-value=?]",
                   slack_channel_options_console_authored_workflows_path
@@ -31,6 +35,7 @@ class Console::AuthoredWorkflowsControllerTest < ActionDispatch::IntegrationTest
     assert_equal @operator, workflow.author
     assert_nil workflow.principal
     assert_equal "0 9 * * 1-5", workflow.cron_expression
+    assert_equal AuthoredWorkflow::DEFAULT_TIMEZONE, workflow.timezone
     assert_not_nil workflow.next_run_at
   end
 
@@ -42,6 +47,18 @@ class Console::AuthoredWorkflowsControllerTest < ActionDispatch::IntegrationTest
     assert_response :ok
     assert_select "input[type=hidden][name='authored_workflow[delivery_channel]'][value=?]", workflow.delivery_channel
     assert_select "input[role=combobox][value=?]", workflow.delivery_channel
+  end
+
+  test "edit form shows the cron expression for a cron schedule" do
+    workflow = create_workflow
+    workflow.update!(cron_expression: "15 6 * * *")
+
+    get edit_console_authored_workflow_url(workflow.oid)
+
+    assert_response :ok
+    assert_select "option[value=cron][selected]"
+    assert_select "[data-schedule-fields-target=cron]:not([hidden])"
+    assert_select "input[name='authored_workflow[cron_expression]'][required]:not([disabled])"
   end
 
   test "shows authored workflows on the workflow dashboard" do
@@ -121,7 +138,6 @@ class Console::AuthoredWorkflowsControllerTest < ActionDispatch::IntegrationTest
       principal: principals(:acme_channel),
       delivery_channel: "C0123456789",
       cron_expression: "0 * * * *",
-      timezone: "UTC",
       enabled: true
     )
   end
