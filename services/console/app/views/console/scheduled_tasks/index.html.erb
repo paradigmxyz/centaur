@@ -12,7 +12,6 @@
       <thead class="console-table-head">
         <tr>
           <th class="console-th">Name</th>
-          <th class="console-th">Principal</th>
           <th class="console-th">Schedule</th>
           <th class="console-th">Delivery</th>
           <th class="console-th"><span class="sr-only">Actions</span></th>
@@ -21,7 +20,7 @@
       <tbody class="divide-y divide-ink-700">
         <% if @tasks.empty? %>
           <tr>
-            <td colspan="5" class="px-5 py-8 text-center text-zinc-600">No scheduled tasks yet.</td>
+            <td colspan="4" class="px-5 py-8 text-center text-zinc-600">No scheduled tasks yet.</td>
           </tr>
         <% end %>
         <% @tasks.each do |task| %>
@@ -34,7 +33,6 @@
                 <div class="mt-1 text-xs text-zinc-600">Last run <%= local_time(task.last_run_at, relative: true, format: :compact) %></div>
               <% end %>
             </td>
-            <td class="console-td text-xs text-zinc-400"><%= task.principal&.name.presence || task.principal&.foreign_id || "Author: #{task.author.email}" %></td>
             <td class="console-td text-xs text-zinc-400">
               <div class="<%= "font-mono" if task.schedule_preset == "cron" %>"><%= task.schedule_label %></div>
               <% unless task.enabled? %>

@@ -2,7 +2,8 @@
               class: "space-y-5",
               data: {
                 controller: "slack-channel-autocomplete",
-                slack_channel_autocomplete_url_value: slack_channel_options_console_scheduled_tasks_path(task_id: task.oid)
+                slack_channel_autocomplete_url_value: slack_channel_options_console_scheduled_tasks_path,
+                slack_channel_autocomplete_dm_user_id_value: @slack_dm_user_id
               } do |form| %>
   <% if task.errors.any? %>
     <div class="rounded border border-red-500/30 bg-red-500/[0.08] px-4 py-3 text-sm text-red-200">
@@ -36,31 +37,54 @@
     <p class="mt-2 text-xs text-zinc-500">Each run sends this prompt through one agent turn.</p>
   </div>
 
-  <div class="grid gap-5 lg:grid-cols-2">
-    <div>
-      <%= form.label :principal_oid, "Run as", class: "mb-2 block text-sm font-medium text-zinc-200" %>
-      <% principal_options = [ [ "Author: #{task.author&.email || current_user.email}", "" ] ] +
-           @principals.map { |principal| [ principal.name.presence || principal.foreign_id, principal.oid ] } %>
-      <%= form.select :principal_oid,
-            options_for_select(principal_options, task.principal&.oid),
-            {},
-            class: "form-input" %>
-      <p class="mt-2 text-xs text-zinc-500">Author uses your Console principal and its grants. Or select a defined principal.</p>
+  <fieldset>
+    <legend class="mb-2 block text-sm font-medium text-zinc-200">Deliver to</legend>
+    <% delivery_mode = if task.delivery_channel.to_s.start_with?("U", "W")
+         "dm"
+       elsif task.delivery_channel.present?
+         "channel"
+       else
+         @slack_dm_user_id.present? ? "dm" : "channel"
+       end %>
+    <div class="flex flex-wrap gap-4">
+      <label class="flex items-center gap-2 text-sm text-zinc-300">
+        <%= radio_button_tag "scheduled_task[delivery_mode]",
+                             "dm",
+                             delivery_mode == "dm",
+                             disabled: @slack_dm_user_id.blank?,
+                             data: {
+                               slack_channel_autocomplete_target: "deliveryMode",
+                               action: "slack-channel-autocomplete#deliveryModeChanged"
+                             } %>
+        <span>Deliver to my DM</span>
+      </label>
+      <label class="flex items-center gap-2 text-sm text-zinc-300">
+        <%= radio_button_tag "scheduled_task[delivery_mode]",
+                             "channel",
+                             delivery_mode == "channel",
+                             data: {
+                               slack_channel_autocomplete_target: "deliveryMode",
+                               action: "slack-channel-autocomplete#deliveryModeChanged"
+                             } %>
+        <span>Deliver to a channel</span>
+      </label>
     </div>
 
-    <div>
-      <% delivery_channel_picker_id = dom_id(task, :delivery_channel_picker) %>
-      <%= form.label :delivery_channel,
-                     "Deliver to",
-                     for: delivery_channel_picker_id,
-                     class: "mb-2 block text-sm font-medium text-zinc-200" %>
+    <% delivery_channel_picker_id = dom_id(task, :delivery_channel_picker) %>
+    <div class="mt-3"
+         <%= "hidden" if delivery_mode == "dm" %>
+         data-slack-channel-autocomplete-target="channelFields">
       <%= render "console/shared/slack_channel_autocomplete",
                  field: form,
                  attribute: :delivery_channel,
-                 picker_id: delivery_channel_picker_id %>
-      <p class="text-xs text-zinc-500">Choose your Slack DM or a channel that both you and the Centaur bot have joined.</p>
+                 picker_id: delivery_channel_picker_id,
+                 display_value: delivery_mode == "channel" ? task.delivery_channel.presence : nil %>
+      <p class="text-xs text-zinc-500">Public channels are always available. Private channels require both you and the Centaur bot to be members.</p>
     </div>
-  </div>
+    <% if @slack_dm_user_id.blank? %>
+      <p class="mt-2 text-xs text-zinc-500">Connect your Slack account to deliver to your DM.</p>
+    <% end %>
+  </fieldset>
 
   <% cron_schedule = task.schedule_preset == "cron" %>
   <div class="grid gap-5 lg:grid-cols-2" data-controller="schedule-fields">

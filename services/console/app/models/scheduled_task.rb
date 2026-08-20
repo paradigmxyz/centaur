@@ -20,7 +20,6 @@ class ScheduledTask < ApplicationRecord
   DELIVERY_DESTINATION_FORMAT = /\A[CDGUW][A-Z0-9]{8,}\z/
 
   belongs_to :author, class_name: "User"
-  belongs_to :principal, optional: true
 
   scope :due, ->(now = Time.current) { where(enabled: true, next_run_at: ..now) }
 
@@ -42,7 +41,6 @@ class ScheduledTask < ApplicationRecord
   validates :cron_expression, presence: true
   validates :timezone, presence: true
   validate :cron_schedule_is_valid
-  validate :selected_principal_has_foreign_id
   validate :delivery_destination_is_available_to_author
 
   def self.cron_for(preset, custom_expression)
@@ -59,16 +57,12 @@ class ScheduledTask < ApplicationRecord
     SCHEDULE_PRESET_LABELS.fetch(schedule_preset, cron_expression)
   end
 
-  def principal_oid
-    principal&.oid
-  end
-
   def next_occurrence(after: Time.current)
     parsed_cron&.next_time(after)&.to_t
   end
 
   def execution_principal
-    principal || ConsoleUserPrincipalProvisioner.call(author)
+    ConsoleUserPrincipalProvisioner.call(author)
   end
 
   def api_input
@@ -108,12 +102,6 @@ class ScheduledTask < ApplicationRecord
 
   def cron_schedule_is_valid
     errors.add(:cron_expression, "is not a valid cron schedule") unless parsed_cron
-  end
-
-  def selected_principal_has_foreign_id
-    return if principal.blank? || principal.foreign_id.present?
-
-    errors.add(:principal, "must have a foreign ID")
   end
 
   def delivery_destination_is_available_to_author

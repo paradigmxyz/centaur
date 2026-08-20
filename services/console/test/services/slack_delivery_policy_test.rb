@@ -1,19 +1,36 @@
 require "test_helper"
 
 class SlackDeliveryPolicyTest < ActiveSupport::TestCase
-  test "allows the user's Slack DM and channels shared with the bot" do
+  test "allows the user's Slack DM, public channels, and shared private channels" do
     user = users(:acme_admin)
     user.user_identities.create!(
       provider: "slack",
       subject: "U0123456789",
       team_id: "T0123456789"
     )
+    shared_private = SlackBotChannel.create!(
+      team_id: "T0123456789",
+      bot_user_id: "U0999999999",
+      channel_id: "G1111111111",
+      name: "shared-private",
+      private: true,
+      active: true,
+      member_user_ids: [ "U0123456789", "U0999999999" ]
+    )
     policy = SlackDeliveryPolicy.new(user)
 
     assert policy.allowed?("U0123456789")
     assert policy.allowed?("C0123456789")
+    assert policy.allowed?(shared_private.channel_id)
     assert_not policy.allowed?("G9876543210")
     assert_not policy.allowed?("C9999999999")
+  end
+
+  test "allows public channels without a linked Slack identity" do
+    policy = SlackDeliveryPolicy.new(users(:member_user))
+
+    assert policy.allowed?("C0123456789")
+    assert_not policy.allowed?("G9876543210")
   end
 
   test "resolves Slack identity from the user's connected Slack credential" do
@@ -57,6 +74,7 @@ class SlackDeliveryPolicyTest < ActiveSupport::TestCase
 
     assert_nil policy.slack_user_id
     assert_nil policy.slack_team_id
-    assert_not policy.allowed?("C0123456789")
+    assert policy.allowed?("C0123456789")
+    assert_not policy.allowed?("G9876543210")
   end
 end

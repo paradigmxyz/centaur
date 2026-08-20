@@ -392,14 +392,12 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_20_191500) do
     t.string "last_run_id"
     t.string "name", null: false
     t.datetime "next_run_at"
-    t.bigint "principal_id"
     t.text "prompt", null: false
     t.string "timezone", default: "America/Los_Angeles", null: false
     t.datetime "updated_at", null: false
     t.index ["author_id", "name"], name: "index_scheduled_tasks_on_author_id_and_name", unique: true
     t.index ["author_id"], name: "index_scheduled_tasks_on_author_id"
     t.index ["enabled", "next_run_at"], name: "index_scheduled_tasks_on_enabled_and_next_run_at"
-    t.index ["principal_id"], name: "index_scheduled_tasks_on_principal_id"
   end
 
   create_table "secret_sources", force: :cascade do |t|
@@ -598,7 +596,6 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_20_191500) do
   add_foreign_key "request_rules", "oauth_token_secrets"
   add_foreign_key "request_rules", "static_secrets"
   add_foreign_key "roles", "users", column: "created_by_id"
-  add_foreign_key "scheduled_tasks", "principals"
   add_foreign_key "scheduled_tasks", "users", column: "author_id"
   add_foreign_key "secret_sources", "aws_auth_secrets"
   add_foreign_key "secret_sources", "gcp_auth_secrets"

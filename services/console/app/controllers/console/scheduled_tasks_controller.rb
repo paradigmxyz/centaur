@@ -4,7 +4,7 @@ class Console::ScheduledTasksController < ApplicationController
   before_action :set_task, only: %i[edit update destroy run]
 
   def index
-    @tasks = ScheduledTask.includes(:author, :principal).order(:name, :id)
+    @tasks = current_user.scheduled_tasks.order(:name, :id)
     @slack_destination_names = slack_destination_names
   end
 
@@ -52,13 +52,14 @@ class Console::ScheduledTasksController < ApplicationController
   private
 
   def set_task
-    @task = ScheduledTask.find_by_oid!(params[:id])
+    @task = current_user.scheduled_tasks.find_by_oid!(params[:id])
   end
 
   def task_attributes
     attributes = task_params
-    attributes.except(:schedule_preset, :principal_oid).merge(
-      principal: resolve_principal!(attributes[:principal_oid]),
+    delivery_mode = attributes.delete(:delivery_mode)
+    attributes.except(:schedule_preset).merge(
+      delivery_channel: delivery_channel_for(delivery_mode, attributes[:delivery_channel]),
       cron_expression: ScheduledTask.cron_for(
         attributes[:schedule_preset],
         attributes[:cron_expression]
@@ -66,17 +67,18 @@ class Console::ScheduledTasksController < ApplicationController
     )
   end
 
-  def resolve_principal!(oid)
-    return if oid.blank?
+  def delivery_channel_for(delivery_mode, channel_id)
+    return SlackDeliveryPolicy.new(current_user).direct_message_user_id if delivery_mode == "dm"
+    return channel_id if delivery_mode == "channel"
 
-    Principal.where.not(foreign_id: nil).find_by_oid!(oid)
+    nil
   end
 
   def task_params
     params.require(:scheduled_task).permit(
       :name,
       :prompt,
-      :principal_oid,
+      :delivery_mode,
       :delivery_channel,
       :schedule_preset,
       :cron_expression,
@@ -85,7 +87,7 @@ class Console::ScheduledTasksController < ApplicationController
   end
 
   def prepare_form
-    @principals = Principal.where.not(foreign_id: nil).order(:name, :foreign_id)
+    @slack_dm_user_id = SlackDeliveryPolicy.new(current_user).direct_message_user_id
   end
 
   def slack_destination_names
@@ -94,7 +96,7 @@ class Console::ScheduledTasksController < ApplicationController
       user_id = SlackDeliveryPolicy.new(task.author).direct_message_user_id
       next unless task.delivery_channel == user_id
 
-      names[user_id] = task.author == current_user ? "Direct message to you" : "Direct message to #{task.author.email}"
+      names[user_id] = "Direct message to you"
     end
     names
   rescue StandardError => e

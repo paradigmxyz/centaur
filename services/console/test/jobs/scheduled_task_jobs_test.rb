@@ -63,8 +63,7 @@ class ScheduledTaskJobsTest < ActiveJob::TestCase
   end
 
   test "runner sends the scheduled task input and a stable idempotency key" do
-    principal = principals(:acme_channel)
-    task = create_task(principal: principal)
+    task = create_task
     client = FakeApiClient.new
     ScheduledTaskRunJob.client_factory = -> { client }
 
@@ -74,7 +73,8 @@ class ScheduledTaskJobsTest < ActiveJob::TestCase
 
     request = client.requests.fetch(0)
     assert_equal "console_workflow", request[:workflow_name]
-    assert_equal principal.foreign_id, request.dig(:input, :principal)
+    assert_equal task.execution_principal.foreign_id, request.dig(:input, :principal)
+    assert_equal users(:acme_admin), task.execution_principal.console_user
     assert_equal "Summarize open incidents.", request.dig(:input, :prompt)
     assert_equal "C0123456789", request.dig(:input, :channel)
     assert_equal "scheduled-task:#{task.id}:2026-08-19T12:00:00Z", request[:idempotency_key]
@@ -83,11 +83,20 @@ class ScheduledTaskJobsTest < ActiveJob::TestCase
     assert_equal Time.utc(2026, 8, 19, 12, 5), task.last_run_at
   end
 
-  test "runner refuses a destination after the author or bot leaves the channel" do
-    task = create_task
+  test "runner refuses a private destination after the author or bot leaves the channel" do
+    channel = SlackBotChannel.create!(
+      team_id: "T0123456789",
+      bot_user_id: "U0999999999",
+      channel_id: "G1111111111",
+      name: "private-shared",
+      private: true,
+      active: true,
+      member_user_ids: [ "U0123456789", "U0999999999" ]
+    )
+    task = create_task(delivery_channel: channel.channel_id)
     client = FakeApiClient.new
     ScheduledTaskRunJob.client_factory = -> { client }
-    slack_bot_channels(:general).update!(member_user_ids: [ "U0999999999" ])
+    channel.update!(member_user_ids: [ "U0999999999" ])
 
     assert_raises(ScheduledTask::DeliveryDestinationUnavailable) do
       ScheduledTaskRunJob.perform_now(task.id, "2026-08-19T12:00:00Z")
@@ -97,13 +106,12 @@ class ScheduledTaskJobsTest < ActiveJob::TestCase
 
   private
 
-  def create_task(principal: nil)
+  def create_task(delivery_channel: "C0123456789")
     ScheduledTask.create!(
       name: "Incident summary #{SecureRandom.hex(4)}",
       prompt: "Summarize open incidents.",
       author: users(:acme_admin),
-      principal: principal,
-      delivery_channel: "C0123456789",
+      delivery_channel: delivery_channel,
       cron_expression: "0 * * * *",
       enabled: true
     )

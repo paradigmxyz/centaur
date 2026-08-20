@@ -55,28 +55,39 @@ module Console
       assert_equal [], response.parsed_body.fetch("options")
     end
 
-    test "scheduled task options include only channels shared by the author and bot" do
-      shared = SlackBotChannel.create!(
+    test "scheduled task options include public channels and shared private channels" do
+      public_channel = SlackBotChannel.create!(
         team_id: "T0123456789",
         bot_user_id: "U0999999999",
         channel_id: "C1111111111",
-        name: "engineering",
+        name: "engineering-public",
+        active: true,
+        member_user_ids: []
+      )
+      private_channel = SlackBotChannel.create!(
+        team_id: "T0123456789",
+        bot_user_id: "U0999999999",
+        channel_id: "G1111111111",
+        name: "engineering-private-shared",
+        private: true,
         active: true,
         member_user_ids: [ "U0123456789", "U0999999999" ]
       )
       SlackBotChannel.create!(
         team_id: "T0123456789",
         bot_user_id: "U0999999999",
-        channel_id: "C2222222222",
-        name: "engineering-user-only",
+        channel_id: "G2222222222",
+        name: "engineering-private-user-only",
+        private: true,
         active: true,
         member_user_ids: [ "U0123456789" ]
       )
       SlackBotChannel.create!(
         team_id: "T0123456789",
         bot_user_id: "U0999999999",
-        channel_id: "C3333333333",
-        name: "engineering-bot-only",
+        channel_id: "G3333333333",
+        name: "engineering-private-bot-only",
+        private: true,
         active: true,
         member_user_ids: [ "U0999999999" ]
       )
@@ -86,51 +97,31 @@ module Console
       end
 
       assert_response :ok
-      assert_equal shared.channel_id, response.parsed_body.fetch("options").sole.fetch("value")
+      assert_equal [ public_channel.channel_id, private_channel.channel_id ].sort,
+                   response.parsed_body.fetch("options").pluck("value").sort
     end
 
-    test "scheduled task options include the author's direct message" do
+    test "scheduled task channel options do not mix in the author's direct message" do
       with_catalog do
         get slack_channel_options_console_scheduled_tasks_url, params: { q: "dm" }
       end
 
       assert_response :ok
-      assert_equal(
-        {
-          "value" => "U0123456789",
-          "label" => "Direct message to you",
-          "description" => "U0123456789 · Slack DM"
-        },
-        response.parsed_body.fetch("options").sole
-      )
+      assert_empty response.parsed_body.fetch("options")
     end
 
-    test "editing a scheduled task uses its author memberships" do
-      author = users(:globex_admin)
-      author.user_identities.create!(provider: "slack", subject: "U2222222222", team_id: "T0123456789")
-      SlackBotChannel.create!(
-        team_id: "T0123456789",
-        bot_user_id: "U0999999999",
-        channel_id: "C2222222222",
-        name: "globex",
-        private: true,
-        active: true,
-        member_user_ids: [ "U0999999999", "U2222222222" ]
-      )
-      task = ScheduledTask.create!(
-        name: "Globex task",
-        prompt: "Summarize updates.",
-        author: author,
-        delivery_channel: "C2222222222",
-        cron_expression: "0 * * * *"
-      )
+    test "scheduled task options include public channels without a linked Slack identity" do
+      delete logout_url
+      user = users(:globex_admin)
+      post login_url, params: { email: user.email, password: "password123456" }
 
       with_catalog do
-        get slack_channel_options_console_scheduled_tasks_url, params: { task_id: task.oid, q: "C222" }
+        get slack_channel_options_console_scheduled_tasks_url, params: { q: "general" }
       end
 
       assert_response :ok
-      assert_equal "C2222222222", response.parsed_body.fetch("options").sole.fetch("value")
+      assert_nil response.parsed_body["error"]
+      assert_equal "C0123456789", response.parsed_body.fetch("options").sole.fetch("value")
     end
 
     test "scheduled task options use a connected Slack credential identity" do
@@ -154,8 +145,9 @@ module Console
       SlackBotChannel.create!(
         team_id: "T0123456789",
         bot_user_id: "U0999999999",
-        channel_id: "C2222222222",
+        channel_id: "G2222222222",
         name: "credential-shared",
+        private: true,
         active: true,
         member_user_ids: [ "U0999999999", "U2222222222" ],
         membership_refreshed_at: Time.current
@@ -168,7 +160,7 @@ module Console
 
       assert_response :ok
       assert_nil response.parsed_body["error"]
-      assert_equal "C2222222222", response.parsed_body.fetch("options").sole.fetch("value")
+      assert_equal "G2222222222", response.parsed_body.fetch("options").sole.fetch("value")
     end
 
     test "non-admins cannot search the catalog" do

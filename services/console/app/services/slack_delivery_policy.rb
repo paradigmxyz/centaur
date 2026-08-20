@@ -9,11 +9,13 @@ class SlackDeliveryPolicy
   end
 
   def allowed_channels
-    return SlackBotChannel.none unless slack_user_id && slack_team_id
+    channels = SlackBotChannel.active
+    channels = channels.for_team(slack_team_id) if slack_team_id
+    public_channels = channels.where(private: false)
+    return public_channels unless slack_user_id
 
-    SlackBotChannel.active
-                   .for_team(slack_team_id)
-                   .with_members([ slack_user_id ])
+    private_channels = channels.where(private: true).with_members([ slack_user_id ])
+    public_channels.or(private_channels)
   end
 
   def allowed_channel_ids

@@ -4,7 +4,6 @@ class CreateScheduledTasks < ActiveRecord::Migration[8.1]
       t.string :name, null: false
       t.text :prompt, null: false
       t.references :author, null: false, foreign_key: { to_table: :users }
-      t.references :principal, null: true, foreign_key: true
       t.string :delivery_channel, null: false
       t.string :cron_expression, null: false
       t.string :timezone, null: false, default: "America/Los_Angeles"

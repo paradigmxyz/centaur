@@ -59,10 +59,12 @@ class ScheduledTaskTest < ActiveSupport::TestCase
     assert_nil task.next_run_at
   end
 
-  test "builds api input with an explicitly selected principal" do
-    principal = principals(:acme_channel)
-    task = ScheduledTask.create!(valid_attributes(principal: principal))
+  test "builds api input with the author's Console principal" do
+    task = ScheduledTask.create!(valid_attributes)
+    principal = task.execution_principal
 
+    assert_equal "console_user", principal.kind
+    assert_equal task.author, principal.console_user
     assert_equal(
       {
         prompt: "Summarize open incidents.",
