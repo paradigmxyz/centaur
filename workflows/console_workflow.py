@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 WORKFLOW_NAME = "console_workflow"
-SLACK_MESSAGE_CHUNK_SIZE = 3500
+SLACK_MESSAGE_MAX_LENGTH = 50_000
 
 
 def _required_string(params: Any, key: str) -> str:
@@ -17,30 +17,12 @@ def _required_string(params: Any, key: str) -> str:
     return value.strip()
 
 
-def _slack_chunks(text: str) -> list[str]:
-    return [
-        text[offset : offset + SLACK_MESSAGE_CHUNK_SIZE]
-        for offset in range(0, len(text), SLACK_MESSAGE_CHUNK_SIZE)
-    ]
-
-
-async def _deliver_to_slack(ctx: Any, channel: str, text: str) -> list[Any]:
-    deliveries = []
-    thread_ts = None
-    for index, chunk in enumerate(_slack_chunks(text), start=1):
-        kwargs = {"thread_ts": thread_ts} if thread_ts else {}
-        delivery = await ctx.step(
-            f"post_result_{index}",
-            lambda chunk=chunk, kwargs=kwargs: ctx.post_to_slack(
-                channel,
-                chunk,
-                **kwargs,
-            ),
-        )
-        deliveries.append(delivery)
-        if thread_ts is None and isinstance(delivery, dict):
-            thread_ts = delivery.get("ts") or None
-    return deliveries
+async def _deliver_to_slack(ctx: Any, channel: str, text: str) -> Any:
+    truncated = text[:SLACK_MESSAGE_MAX_LENGTH]
+    return await ctx.step(
+        "post_result",
+        lambda: ctx.post_to_slack(channel, truncated),
+    )
 
 
 async def handler(params: Any, ctx: Any) -> dict[str, Any]:
@@ -61,11 +43,10 @@ async def handler(params: Any, ctx: Any) -> dict[str, Any]:
     response_text = str(result.get("result_text") or "").strip()
     if not response_text:
         response_text = "The workflow completed without a text response."
-    deliveries = await _deliver_to_slack(ctx, channel, response_text)
+    delivery = await _deliver_to_slack(ctx, channel, response_text)
 
     return {
         "agent_result": result,
-        "delivery": deliveries[0],
-        "deliveries": deliveries,
+        "delivery": delivery,
         "authored_workflow_id": authored_workflow_id,
     }

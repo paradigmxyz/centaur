@@ -53,14 +53,13 @@ def test_handler_runs_one_scoped_agent_turn_and_delivers_its_text():
     assert kwargs["principal"] == "console-user-author"
     assert "thread_key" not in kwargs
     assert kwargs["metadata"]["authored_workflow_name"] == "Incident summary"
-    assert context.step_calls == ["post_result_1"]
+    assert context.step_calls == ["post_result"]
     assert context.slack_calls == [("C0123456789", "Daily summary", {})]
     assert result["delivery"]["ts"] == "123.1"
-    assert result["deliveries"] == [result["delivery"]]
 
 
-def test_handler_chunks_long_slack_results_into_durable_threaded_posts():
-    response_text = "x" * (console_workflow.SLACK_MESSAGE_CHUNK_SIZE + 25)
+def test_handler_truncates_long_slack_results():
+    response_text = "x" * (console_workflow.SLACK_MESSAGE_MAX_LENGTH + 25)
     context = FakeContext(result_text=response_text)
 
     result = asyncio.run(
@@ -75,14 +74,11 @@ def test_handler_chunks_long_slack_results_into_durable_threaded_posts():
         )
     )
 
-    assert context.step_calls == ["post_result_1", "post_result_2"]
-    assert [len(call[1]) for call in context.slack_calls] == [
-        console_workflow.SLACK_MESSAGE_CHUNK_SIZE,
-        25,
-    ]
+    assert context.step_calls == ["post_result"]
+    assert len(context.slack_calls) == 1
+    assert len(context.slack_calls[0][1]) == console_workflow.SLACK_MESSAGE_MAX_LENGTH
     assert context.slack_calls[0][2] == {}
-    assert context.slack_calls[1][2] == {"thread_ts": "123.1"}
-    assert len(result["deliveries"]) == 2
+    assert result["delivery"]["ts"] == "123.1"
 
 
 def test_handler_does_not_repeat_checkpointed_slack_posts():
@@ -97,7 +93,7 @@ def test_handler_does_not_repeat_checkpointed_slack_posts():
     asyncio.run(console_workflow.handler(params, context))
     asyncio.run(console_workflow.handler(params, context))
 
-    assert context.step_calls == ["post_result_1", "post_result_1"]
+    assert context.step_calls == ["post_result", "post_result"]
     assert context.slack_calls == [("C0123456789", "Daily summary", {})]
 
 
