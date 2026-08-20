@@ -361,8 +361,8 @@ def normalize_principal(workflow: RegisteredWorkflow) -> bool | str | None:
     if isinstance(raw, bool):
         return raw or None
     if isinstance(raw, str):
-        foreign_id = raw.strip()
-        return foreign_id or None
+        reference = raw.strip()
+        return reference or None
     return None
 
 

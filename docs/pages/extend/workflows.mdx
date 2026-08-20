@@ -68,11 +68,11 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
 directly with `ctx.call_tool(...)` and should have its own credential boundary.
 Set it to `True` to have the API derive and register the
 `workflow-nightly-report` principal from `WORKFLOW_NAME`. Set it to an existing
-principal foreign ID, such as `WORKFLOW_PRINCIPAL = "finance-automation"`, to
-run the workflow-host sandbox under that principal instead. An unknown foreign
-ID fails startup. Grant the required tool roles or secrets to the selected
-principal. Any `WORKFLOW_PRINCIPAL` value requires
-`apiRs.workflowHostSandbox=true`, which renders
+principal foreign ID, such as `WORKFLOW_PRINCIPAL = "finance-automation"`, or
+to a `prn_`-prefixed OID to run the workflow-host sandbox under that principal
+instead. An unknown principal reference fails startup. Grant the required tool
+roles or secrets to the selected principal. Any `WORKFLOW_PRINCIPAL` value
+requires `apiRs.workflowHostSandbox=true`, which renders
 `WORKFLOW_HOST_SANDBOX=true`; startup fails if workflow-host sandboxing is
 disabled.
 

@@ -180,16 +180,17 @@ cargo run -p centaur-perms -- \
   --tool slack
 ```
 
-To use an existing principal instead, declare its foreign ID:
+To use an existing principal instead, declare its foreign ID or `prn_`-prefixed
+OID:
 
 ```python
 WORKFLOW_PRINCIPAL = "finance-automation"
 ```
 
-The string form resolves the existing principal and fails startup when it does
-not exist. It does not create or update the principal. The `True` form remains
-`workflow-` plus the slugged `WORKFLOW_NAME`. Any `WORKFLOW_PRINCIPAL` value
-requires `apiRs.workflowHostSandbox=true`, which
+The string form resolves the existing principal by foreign ID or OID and fails
+startup when it does not exist. It does not create or update the principal. The
+`True` form remains `workflow-` plus the slugged `WORKFLOW_NAME`. Any
+`WORKFLOW_PRINCIPAL` value requires `apiRs.workflowHostSandbox=true`, which
 renders `WORKFLOW_HOST_SANDBOX=true`; startup fails if a workflow declares a
 principal while workflow-host sandboxing is disabled.
 

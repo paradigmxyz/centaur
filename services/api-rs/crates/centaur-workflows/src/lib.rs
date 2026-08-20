@@ -324,8 +324,8 @@ impl WorkflowPrincipalRegistrar {
                         })
                         .await?
                 }
-                WorkflowPrincipalDeclaration::Existing(foreign_id) => {
-                    self.client.get_principal(foreign_id).await?
+                WorkflowPrincipalDeclaration::Existing(reference) => {
+                    self.client.get_principal(reference).await?
                 }
             };
             registered.insert(workflow_name.clone(), record.id);
@@ -1681,7 +1681,7 @@ struct PythonWorkflowDiscovery {
 #[serde(untagged)]
 enum PythonWorkflowPrincipal {
     Enabled(bool),
-    ForeignId(String),
+    Reference(String),
 }
 
 #[derive(Debug, Deserialize)]
@@ -1724,12 +1724,10 @@ fn metadata_from_discovery_payload(
                     WorkflowPrincipalDeclaration::Managed,
                 );
             }
-            Some(PythonWorkflowPrincipal::ForeignId(foreign_id))
-                if !foreign_id.trim().is_empty() =>
-            {
+            Some(PythonWorkflowPrincipal::Reference(reference)) if !reference.trim().is_empty() => {
                 metadata.principals.insert(
                     workflow.workflow_name,
-                    WorkflowPrincipalDeclaration::Existing(foreign_id.trim().to_owned()),
+                    WorkflowPrincipalDeclaration::Existing(reference.trim().to_owned()),
                 );
             }
             _ => {}
@@ -4973,6 +4971,27 @@ mod tests {
             metadata.principals.get("manual_workflow"),
             Some(&WorkflowPrincipalDeclaration::Existing(
                 "finance-automation".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn discovery_metadata_preserves_workflow_principal_oid() {
+        let payload: PythonWorkflowDiscoveryPayload = serde_json::from_value(json!({
+            "workflows": [{
+                "workflow_name": "oid_workflow",
+                "source_path": "workflows/oid_workflow.py",
+                "principal": " prn_01k2m3n4p5 ",
+            }],
+        }))
+        .unwrap();
+
+        let metadata = metadata_from_discovery_payload(payload);
+
+        assert_eq!(
+            metadata.principals.get("oid_workflow"),
+            Some(&WorkflowPrincipalDeclaration::Existing(
+                "prn_01k2m3n4p5".to_owned()
             ))
         );
     }

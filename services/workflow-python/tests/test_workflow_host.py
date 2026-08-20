@@ -634,7 +634,7 @@ class WorkflowHostTests(unittest.TestCase):
         assert registered is not None
         self.assertEqual(host.normalize_principal(registered), True)
 
-    def test_load_workflow_file_reads_workflow_principal_foreign_id(self) -> None:
+    def test_load_workflow_file_reads_workflow_principal_reference(self) -> None:
         host = load_workflow_host()
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "principal_workflow.py"
@@ -648,6 +648,9 @@ class WorkflowHostTests(unittest.TestCase):
 
         assert registered is not None
         self.assertEqual(host.normalize_principal(registered), "finance-automation")
+
+        registered.principal = " prn_01k2m3n4p5 "
+        self.assertEqual(host.normalize_principal(registered), "prn_01k2m3n4p5")
 
     def test_workflow_name_from_source_reads_string_constant(self) -> None:
         host = load_workflow_host()
