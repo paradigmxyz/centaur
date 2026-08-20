@@ -131,20 +131,6 @@ Both providers request the `openid`, `email`, and `profile` scopes. Client crede
 
 Google OAuth consent apps for broker credentials are configured separately in the console under **OAuth Apps**. Those app callbacks use `/oauth/<slug>/callback` and currently support Google only; Slack support here applies to operator console sign-in.
 
-## Slack Bot Channel Catalog
-
-When `CENTAUR_CONSOLE_SLACK_BOT_TOKEN` or `SLACK_BOT_TOKEN` is configured, the
-Console worker maintains a Postgres catalog of public and private channels the
-bot has joined. Discovery runs hourly. Complete channel membership is refreshed
-in bounded batches every 10 minutes and retained when Slack returns an error or
-an incomplete response. The bot token needs the Slack scopes required by
-`users.conversations`, `conversations.info`, and `conversations.members` for
-public and private channels.
-
-This catalog supports Console channel pickers independently of the optional
-Slack company-context ETL. It stores channel metadata and Slack user IDs only;
-it does not ingest Slack messages or direct messages.
-
 ## Encryption Keys
 
 `iron-control` uses ActiveRecord encryption to protect secrets stored in the control plane (for example, the `control_plane` secret source type). The following environment variables configure the encryption keys:
