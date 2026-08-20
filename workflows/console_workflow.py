@@ -35,7 +35,6 @@ async def handler(params: Any, ctx: Any) -> dict[str, Any]:
         prompt,
         principal=principal,
         metadata={
-            "source": "console_workflow",
             "authored_workflow_id": authored_workflow_id,
             "authored_workflow_name": str(params.get("authored_workflow_name") or ""),
         },

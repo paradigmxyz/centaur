@@ -52,7 +52,10 @@ def test_handler_runs_one_scoped_agent_turn_and_delivers_its_text():
     assert prompt == "Summarize open incidents"
     assert kwargs["principal"] == "console-user-author"
     assert "thread_key" not in kwargs
-    assert kwargs["metadata"]["authored_workflow_name"] == "Incident summary"
+    assert kwargs["metadata"] == {
+        "authored_workflow_id": "awf_123",
+        "authored_workflow_name": "Incident summary",
+    }
     assert context.step_calls == ["post_result"]
     assert context.slack_calls == [("C0123456789", "Daily summary", {})]
     assert result["delivery"]["ts"] == "123.1"
