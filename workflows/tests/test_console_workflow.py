@@ -7,19 +7,28 @@ from workflows import console_workflow
 
 class FakeContext:
     run_id = "run-123"
+    task_id = "task-456"
 
     def __init__(self, result_text: str = "Daily summary") -> None:
         self.result_text = result_text
         self.agent_calls = []
+        self.step_calls = []
+        self.step_results = {}
         self.slack_calls = []
 
     async def agent_turn(self, prompt, **kwargs):
         self.agent_calls.append((prompt, kwargs))
         return {"result_text": self.result_text, "execution_id": "exec-123"}
 
-    async def post_to_slack(self, channel, text):
-        self.slack_calls.append((channel, text))
-        return {"channel": channel, "ts": "123.456"}
+    async def step(self, name, fn):
+        self.step_calls.append(name)
+        if name not in self.step_results:
+            self.step_results[name] = await fn()
+        return self.step_results[name]
+
+    async def post_to_slack(self, channel, text, **kwargs):
+        self.slack_calls.append((channel, text, kwargs))
+        return {"channel": channel, "ts": f"123.{len(self.slack_calls)}"}
 
 
 def test_handler_runs_one_scoped_agent_turn_and_delivers_its_text():
@@ -42,10 +51,54 @@ def test_handler_runs_one_scoped_agent_turn_and_delivers_its_text():
     prompt, kwargs = context.agent_calls[0]
     assert prompt == "Summarize open incidents"
     assert kwargs["principal"] == "console-user-author"
-    assert kwargs["thread_key"] == "console-workflow:awf_123:run-123"
+    assert "thread_key" not in kwargs
     assert kwargs["metadata"]["authored_workflow_name"] == "Incident summary"
-    assert context.slack_calls == [("C0123456789", "Daily summary")]
-    assert result["delivery"]["ts"] == "123.456"
+    assert context.step_calls == ["post_result_1"]
+    assert context.slack_calls == [("C0123456789", "Daily summary", {})]
+    assert result["delivery"]["ts"] == "123.1"
+    assert result["deliveries"] == [result["delivery"]]
+
+
+def test_handler_chunks_long_slack_results_into_durable_threaded_posts():
+    response_text = "x" * (console_workflow.SLACK_MESSAGE_CHUNK_SIZE + 25)
+    context = FakeContext(result_text=response_text)
+
+    result = asyncio.run(
+        console_workflow.handler(
+            {
+                "prompt": "Summarize open incidents",
+                "principal": "console-user-author",
+                "channel": "C0123456789",
+                "authored_workflow_id": "awf_123",
+            },
+            context,
+        )
+    )
+
+    assert context.step_calls == ["post_result_1", "post_result_2"]
+    assert [len(call[1]) for call in context.slack_calls] == [
+        console_workflow.SLACK_MESSAGE_CHUNK_SIZE,
+        25,
+    ]
+    assert context.slack_calls[0][2] == {}
+    assert context.slack_calls[1][2] == {"thread_ts": "123.1"}
+    assert len(result["deliveries"]) == 2
+
+
+def test_handler_does_not_repeat_checkpointed_slack_posts():
+    context = FakeContext()
+    params = {
+        "prompt": "Summarize open incidents",
+        "principal": "console-user-author",
+        "channel": "C0123456789",
+        "authored_workflow_id": "awf_123",
+    }
+
+    asyncio.run(console_workflow.handler(params, context))
+    asyncio.run(console_workflow.handler(params, context))
+
+    assert context.step_calls == ["post_result_1", "post_result_1"]
+    assert context.slack_calls == [("C0123456789", "Daily summary", {})]
 
 
 def test_handler_rejects_missing_required_input_before_starting_an_agent():
@@ -59,4 +112,5 @@ def test_handler_rejects_missing_required_input_before_starting_an_agent():
         raise AssertionError("expected invalid input to fail")
 
     assert context.agent_calls == []
+    assert context.step_calls == []
     assert context.slack_calls == []

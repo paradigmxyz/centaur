@@ -108,10 +108,11 @@ class CentaurApiClient
     get("/api/workflows/runs/#{escape_path(run_id)}")
   end
 
-  def create_workflow_run(workflow_name:, input: nil, idempotency_key: nil)
+  def create_workflow_run(workflow_name:, input: nil, idempotency_key: nil, max_attempts: nil)
     payload = { workflow_name: workflow_name }
     payload[:input] = input unless input.nil?
     payload[:idempotency_key] = idempotency_key if idempotency_key.present?
+    payload[:max_attempts] = max_attempts unless max_attempts.nil?
 
     post("/api/workflows/runs", payload)
   end

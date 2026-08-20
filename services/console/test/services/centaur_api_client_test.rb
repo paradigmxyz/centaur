@@ -237,7 +237,11 @@ class CentaurApiClientTest < ActiveSupport::TestCase
     end
     expect_request(http, status: 200, body: { ok: true, run_id: "r1" }.to_json) do |request|
       assert_equal(
-        { "workflow_name" => "console_workflow", "idempotency_key" => "scheduled:1" },
+        {
+          "workflow_name" => "console_workflow",
+          "idempotency_key" => "scheduled:1",
+          "max_attempts" => 3
+        },
         JSON.parse(request[:body])
       )
     end
@@ -245,7 +249,11 @@ class CentaurApiClientTest < ActiveSupport::TestCase
 
     client.create_workflow_run(workflow_name: "slack_sync")
     client.create_workflow_run(workflow_name: "slack_sync", input: { "mode" => "full" })
-    client.create_workflow_run(workflow_name: "console_workflow", idempotency_key: "scheduled:1")
+    client.create_workflow_run(
+      workflow_name: "console_workflow",
+      idempotency_key: "scheduled:1",
+      max_attempts: 3
+    )
 
     http.verify
   end

@@ -72,6 +72,7 @@ class AuthoredWorkflowJobsTest < ActiveJob::TestCase
     assert_equal "Summarize open incidents.", request.dig(:input, :prompt)
     assert_equal "C0123456789", request.dig(:input, :channel)
     assert_equal "authored-workflow:#{workflow.id}:2026-08-19T12:00:00Z", request[:idempotency_key]
+    assert_equal AuthoredWorkflowRunJob::MAX_ATTEMPTS, request[:max_attempts]
     assert_equal "run-123", workflow.reload.last_run_id
     assert_equal Time.utc(2026, 8, 19, 12, 5), workflow.last_run_at
   end

@@ -1,4 +1,6 @@
 class AuthoredWorkflowRunJob < ApplicationJob
+  MAX_ATTEMPTS = 3
+
   queue_as :default
 
   retry_on CentaurApiClient::Error, wait: :polynomially_longer, attempts: 5
@@ -11,7 +13,8 @@ class AuthoredWorkflowRunJob < ApplicationJob
     result = client_factory.call.create_workflow_run(
       workflow_name: AuthoredWorkflow::WORKFLOW_NAME,
       input: workflow.api_input,
-      idempotency_key: idempotency_key(workflow, scheduled_for)
+      idempotency_key: idempotency_key(workflow, scheduled_for),
+      max_attempts: MAX_ATTEMPTS
     )
     workflow.update!(
       last_run_id: result.fetch("run_id"),
