@@ -67,6 +67,9 @@ impl IntoResponse for ApiError {
             Self::Runtime(SessionRuntimeError::Store(SessionStoreError::PersonaConflict {
                 ..
             })) => StatusCode::CONFLICT,
+            Self::Runtime(SessionRuntimeError::Store(SessionStoreError::PrincipalConflict {
+                ..
+            })) => StatusCode::CONFLICT,
             Self::Runtime(SessionRuntimeError::IronControl(
                 centaur_iron_control::IronControlError::PrincipalDerivation(_),
             )) => StatusCode::BAD_REQUEST,
@@ -109,6 +112,16 @@ impl IntoResponse for ApiError {
             body["existing_harness"] = json!(existing);
             body["requested_harness"] = json!(requested);
         }
+        if let Self::Runtime(SessionRuntimeError::Store(SessionStoreError::PrincipalConflict {
+            existing,
+            requested,
+            ..
+        })) = &self
+        {
+            body["code"] = json!("principal_conflict");
+            body["existing_principal"] = json!(existing);
+            body["requested_principal"] = json!(requested);
+        }
         let mut response = (status, Json(body)).into_response();
         if status == StatusCode::UNAUTHORIZED {
             response
@@ -138,6 +151,7 @@ pub(crate) fn error_chain(error: &dyn std::error::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
     use centaur_iron_control::{IronControlError, PrincipalDerivationError};
 
     #[test]
@@ -148,5 +162,26 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn principal_conflicts_include_structured_details() {
+        let response = ApiError::Runtime(SessionRuntimeError::Store(
+            SessionStoreError::PrincipalConflict {
+                thread_key: "workflow:report".to_owned(),
+                existing: "prn_finance".to_owned(),
+                requested: "prn_support".to_owned(),
+            },
+        ))
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("decode response body");
+        assert_eq!(body["code"], json!("principal_conflict"));
+        assert_eq!(body["existing_principal"], json!("prn_finance"));
+        assert_eq!(body["requested_principal"], json!("prn_support"));
     }
 }

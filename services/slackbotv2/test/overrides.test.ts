@@ -84,6 +84,35 @@ describe('extractMessageOverrides', () => {
     })
   })
 
+  test('--provider selects an arbitrary codex provider', () => {
+    expect(extractMessageOverrides('--provider private_responses --model example-model audit this')).toEqual({
+      cleanedText: 'audit this',
+      harnessType: 'codex',
+      model: 'example-model',
+      provider: 'private_responses',
+      reasoning: undefined
+    })
+  })
+
+  test('--provider uses the configured provider default model', () => {
+    const previous = process.env.CODEX_CUSTOM_PROVIDERS
+    process.env.CODEX_CUSTOM_PROVIDERS = JSON.stringify({
+      private_responses: { defaultModel: 'configured-model' }
+    })
+    try {
+      expect(extractMessageOverrides('--provider=private_responses audit this')).toEqual({
+        cleanedText: 'audit this',
+        harnessType: 'codex',
+        model: 'configured-model',
+        provider: 'private_responses',
+        reasoning: undefined
+      })
+    } finally {
+      if (previous === undefined) delete process.env.CODEX_CUSTOM_PROVIDERS
+      else process.env.CODEX_CUSTOM_PROVIDERS = previous
+    }
+  })
+
   test('--model expands claude aliases to full model ids', () => {
     expect(extractMessageOverrides('--claude --model opus go')).toEqual({
       cleanedText: 'go',
@@ -283,6 +312,15 @@ describe('normalizeHarnessOverrides', () => {
     })
   })
 
+  test('a custom provider is accepted by channel defaults', () => {
+    expect(normalizeHarnessOverrides({ provider: 'private_responses', model: 'example-model' })).toEqual({
+      harnessType: 'codex',
+      model: 'example-model',
+      provider: 'private_responses',
+      reasoning: undefined
+    })
+  })
+
   test('expands a model alias but does not imply a harness (fields are independent)', () => {
     // Like `--model opus` (not `--opus`): the alias expands, harness is left to
     // the explicit `harness` field / thread / deployment default.
@@ -297,7 +335,7 @@ describe('normalizeHarnessOverrides', () => {
   test('reports and drops unrecognized enum-like values', () => {
     const errors: string[] = []
     const result = normalizeHarnessOverrides(
-      { harness: 'gpt', provider: 'openai', reasoning: 'turbo' },
+      { harness: 'gpt', provider: 'not valid', reasoning: 'turbo' },
       message => errors.push(message)
     )
     expect(result).toEqual({
@@ -307,7 +345,7 @@ describe('normalizeHarnessOverrides', () => {
       reasoning: undefined
     })
     expect(errors.some(e => e.includes('unknown harness'))).toBe(true)
-    expect(errors.some(e => e.includes('unknown provider'))).toBe(true)
+    expect(errors.some(e => e.includes('invalid provider id'))).toBe(true)
     expect(errors.some(e => e.includes('unknown reasoning effort'))).toBe(true)
   })
 })

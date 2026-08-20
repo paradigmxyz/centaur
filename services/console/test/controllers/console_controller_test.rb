@@ -267,7 +267,8 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     catalog = SlackChannelCatalog::Result.new(
       channels: [
         SlackChannelCatalog::Channel.new(id: "C0123456789", name: "general", private: false),
-        SlackChannelCatalog::Channel.new(id: "G9876543210", name: "private", private: true)
+        SlackChannelCatalog::Channel.new(id: "G9876543210", name: "private", private: true),
+        SlackChannelCatalog::Channel.new(id: "C1111111111", name: "unused", private: false)
       ],
       error: nil,
       configured: true
@@ -280,6 +281,13 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     assert_select "h3", text: "Inherited From Roles"
     assert_select "td", text: /#private/
     assert_select "input[type=checkbox][disabled]", minimum: 3
+    assert_select "input[role=combobox][aria-controls]"
+    assert_select "[data-slack-channel-autocomplete-url-value=?]",
+                  console_principal_slack_channel_options_path(principal.oid)
+    assert_select "input[type=submit][data-slack-channel-autocomplete-target=submit]:not([disabled])",
+                  value: "Save Slack channel permissions"
+    assert_select "select[name$='[channel_id]']", count: 0
+    assert_select "body", text: /#unused/, count: 0
   end
 
   test "credentials table combines id, shows status, and links to detail" do

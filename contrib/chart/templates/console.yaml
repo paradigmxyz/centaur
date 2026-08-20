@@ -127,6 +127,10 @@ spec:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sSLACK_BOT_TOKEN" $prefix }}
                   optional: true
+{{- if .Values.codex.customProviders }}
+            - name: CODEX_CUSTOM_PROVIDERS
+              value: {{ .Values.codex.customProviders | toJson | quote }}
+{{- end }}
 {{- range $name := tuple "CLAUDE_MODEL" "CODEX_MODEL" }}
 {{- if hasKey $.Values.sandbox.extraEnv $name }}
             # Mirror the deployer's harness default-model override
@@ -185,6 +189,10 @@ spec:
 {{- if $console.publicUrl }}
             - name: CENTAUR_CONSOLE_PUBLIC_URL
               value: {{ $console.publicUrl | quote }}
+{{- end }}
+{{- with $console.allowedHosts }}
+            - name: CENTAUR_CONSOLE_ALLOWED_HOSTS
+              value: {{ join "," . | quote }}
 {{- end }}
 {{- with $console.sentryDsn }}
             - name: SENTRY_DSN

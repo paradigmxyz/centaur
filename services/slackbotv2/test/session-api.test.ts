@@ -797,36 +797,57 @@ describe('forwardToSessionApi harness restart', () => {
     expect('on_harness_conflict' in (create?.body as object)).toBe(false)
   })
 
-  test('reports the harness resolved by api-rs', async () => {
+  test('records a Slack-owned harness assignment on session creation and execution', async () => {
     const { fetchFn, requests } = fakeApi({
       createSession: [
         {
           body: {
             harness_switched: false,
-            harness_type: 'nanocodex',
-            harness_assignment: {
-              experiment: 'codex_nanocodex_ab',
-              requested_harness: 'codex',
-              cohort: 'nanocodex',
-              rollout_percent: 50
-            }
+            harness_type: 'nanocodex'
           },
           status: 200
         }
       ]
     })
+    const harnessAssignment = {
+      experiment: 'codex_nanocodex_ab',
+      requestedHarness: 'codex',
+      cohort: 'nanocodex',
+      rolloutPercent: 50
+    }
     let resolvedHarness: string | undefined
     let resolvedExperiment: string | undefined
 
-    await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hi')), {
-      onSessionCreated: async outcome => {
-        resolvedHarness = outcome.harnessType
-        resolvedExperiment = outcome.harnessAssignment?.experiment
+    await forwardToSessionApi(
+      options(fetchFn),
+      forwardInput(apiMessage('hi'), {
+        harnessAssignment,
+        harnessType: 'nanocodex',
+        restartOnHarnessConflict: false
+      }),
+      {
+        onSessionCreated: async outcome => {
+          resolvedHarness = outcome.harnessType
+          resolvedExperiment = outcome.harnessAssignment?.experiment
+        }
       }
-    })
+    )
 
     expect(resolvedHarness).toBe('nanocodex')
     expect(resolvedExperiment).toBe('codex_nanocodex_ab')
+    const create = requests.find(request => request.url.endsWith('.000100'))
+    expect(create?.body).toMatchObject({
+      harness_type: 'nanocodex',
+      metadata: {
+        harness_assignment: {
+          experiment: 'codex_nanocodex_ab',
+          requested_harness: 'codex',
+          cohort: 'nanocodex',
+          rollout_percent: 50
+        }
+      }
+    })
+    expect('on_harness_conflict' in (create?.body as object)).toBe(false)
     expect(executeBody(requests).metadata).toMatchObject({
       harness_type: 'nanocodex',
       harness_assignment: {

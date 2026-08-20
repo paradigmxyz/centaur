@@ -1,6 +1,7 @@
 import type { GitHubAdapter } from "@chat-adapter/github";
 import type { StateAdapter } from "chat";
 import { backgroundWaitUntil } from "./context";
+import { reactWorkingOnReview, settleReviewReaction } from "./reactions";
 import { runTurnStream } from "./turn";
 import {
   fetchCiEvaluation,
@@ -369,7 +370,11 @@ export async function handleReviewEvent(
     return;
   }
   if (reviewState === "changes_requested" || reviewState === "commented") {
-    fireAddressReviewTurn(ctx, repo.owner, repo.repo, pr, reviewer ?? "the reviewer", reviewId);
+    fireAddressReviewTurn(ctx, repo.owner, repo.repo, pr, {
+      reviewer: reviewer ?? "the reviewer",
+      reviewId,
+      reviewNodeId: stringValue(reviewNode.node_id),
+    });
   }
 }
 
@@ -633,9 +638,9 @@ function fireAddressReviewTurn(
   owner: string,
   repo: string,
   pr: PullRequestSummary,
-  reviewer: string,
-  reviewId: number,
+  review: { reviewer: string; reviewId: number; reviewNodeId?: string },
 ): void {
+  const { reviewer, reviewId, reviewNodeId } = review;
   const preamble =
     `A review was submitted on pull request ${owner}/${repo}#${pr.number} ` +
     `(head ${pr.headSha}). Address it as the PR author, working in your sandbox:\n` +
@@ -647,11 +652,19 @@ function fireAddressReviewTurn(
     `explain why, briefly and respectfully. Resolve the threads you've addressed.\n` +
     `- Re-request review from @${reviewer} once you've pushed.\n` +
     `- If a request is unclear or you can't address it, say so in the thread and ask.`;
-  fireManagementTurn(ctx, owner, repo, pr, preamble, {
-    id: `review-resp-${owner}/${repo}#${pr.number}-${reviewId}`,
-    label: "address-review",
-    text: `Address the review on ${owner}/${repo}#${pr.number} from @${reviewer}.`,
-  });
+  fireManagementTurn(
+    ctx,
+    owner,
+    repo,
+    pr,
+    preamble,
+    {
+      id: `review-resp-${owner}/${repo}#${pr.number}-${reviewId}`,
+      label: "address-review",
+      text: `Address the review on ${owner}/${repo}#${pr.number} from @${reviewer}.`,
+    },
+    reviewNodeId,
+  );
 }
 
 function fireConflictTurn(
@@ -680,6 +693,7 @@ function fireManagementTurn(
   pr: PullRequestSummary,
   preamble: string,
   message: { id: string; label: string; text: string },
+  reviewNodeId?: string,
 ): void {
   const threadKey = managementThreadKey(owner, repo, pr.number);
   const trace = makeTrace(threadKey, message.id);
@@ -707,19 +721,38 @@ function fireManagementTurn(
     pr: `${owner}/${repo}#${pr.number}`,
     work: message.label,
   });
+  // Review-triggered turns ack on the reviewer's own review — instant 👀,
+  // settled to 🚀/😕 when the turn finishes (same lifecycle as @-mention acks).
+  // Not awaited: the ack must not delay the turn, and a failed reaction is only
+  // a missing ack. Turns with no triggering review (CI-fix, conflicts) stay
+  // silent — a reaction on the PR's top post isn't clearly tied to anything.
+  if (reviewNodeId) {
+    void reactWorkingOnReview(ctx.octokit, reviewNodeId, logger(ctx));
+  }
   backgroundWaitUntil(
     runTurnStream(ctx.options, forwardInput)
-      .then((result) => {
+      .then(async (result) => {
         traceLog(ctx.options, "githubbot_management_turn_complete", trace, {
           failed: result.failed,
           work: message.label,
         });
+        if (reviewNodeId) {
+          await settleReviewReaction(
+            ctx.octokit,
+            reviewNodeId,
+            result.failed,
+            logger(ctx),
+          );
+        }
       })
-      .catch((error) => {
+      .catch(async (error) => {
         logger(ctx).warn("githubbot_management_turn_failed", {
           error: errorMessage(error),
           work: message.label,
         });
+        if (reviewNodeId) {
+          await settleReviewReaction(ctx.octokit, reviewNodeId, true, logger(ctx));
+        }
       }),
   );
 }

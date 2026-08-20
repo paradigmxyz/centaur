@@ -190,6 +190,52 @@ describe("linearbot comment-thread pipeline", () => {
     ).toBe(false);
   });
 
+  it("reuses a persisted Codex provider on a later turn", async () => {
+    const threadKey = `linear:${ISSUE_ID}:c:comment-provider`;
+    await postWebhook(
+      commentCreatedPayload({
+        id: "comment-provider",
+        body: "@centaur --provider private_responses --model example-model first",
+      }),
+    );
+    await waitFor(() =>
+      codexApi.executes.some((e) => e.threadKey === threadKey),
+    );
+    codexApi.emitOutputLines(threadKey, sampleCodexOutputLines("One."));
+    await waitFor(() =>
+      linearApi.botComments.some(
+        (c) => c.parentId === "comment-provider" && c.body.includes("One."),
+      ),
+    );
+
+    await postWebhook(
+      commentCreatedPayload({
+        id: "comment-provider-2",
+        parentId: "comment-provider",
+        body: "@centaur second",
+      }),
+    );
+    await waitFor(
+      () =>
+        codexApi.executes.filter((e) => e.threadKey === threadKey).length === 2,
+    );
+    const secondExecute = codexApi.executes
+      .filter((e) => e.threadKey === threadKey)
+      .at(-1)!;
+    const secondInput = JSON.parse(secondExecute.body.input_lines.at(-1)!) as {
+      provider?: string;
+    };
+    expect(secondInput.provider).toBe("private_responses");
+
+    codexApi.emitOutputLines(threadKey, sampleCodexOutputLines("Two."));
+    await waitFor(() =>
+      linearApi.botComments.some(
+        (c) =>
+          c.parentId === "comment-provider" && c.body.includes("Two."),
+      ),
+    );
+  });
+
   it("posts a live 'Thinking…' comment on the first thought, then swaps it to the answer in place", async () => {
     const threadKey = `linear:${ISSUE_ID}:c:comment-live`;
     await postWebhook(

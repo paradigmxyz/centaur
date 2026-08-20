@@ -43,10 +43,11 @@ spec:
             - name: CENTAUR_API_URL
               value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
             # New threads without an explicit --claude/--amp/--codex/
-            # --nanocodex flag run the deployment's default harness. api-rs
-            # applies any configured Codex/Nanocodex rollout.
+            # --nanocodex flag run the deployment's default harness.
             - name: SLACKBOTV2_DEFAULT_HARNESS
               value: {{ .Values.sandbox.harnessEngine | quote }}
+            - name: SLACKBOTV2_CODEX_NANOCODEX_ROLLOUT_PERCENT
+              value: {{ .Values.slackbotv2.codexNanocodexRolloutPercent | quote }}
             - name: SLACK_BOT_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -121,6 +122,10 @@ spec:
             # so it takes effect.
             - name: SLACKBOTV2_CHANNEL_DEFAULTS
               value: {{ .Values.slackbotv2.channelDefaults | toJson | quote }}
+{{- end }}
+{{- if .Values.codex.customProviders }}
+            - name: CODEX_CUSTOM_PROVIDERS
+              value: {{ .Values.codex.customProviders | toJson | quote }}
 {{- end }}
 {{- range $name := tuple "CLAUDE_MODEL" "CODEX_MODEL" "CODEX_MODEL_REASONING_EFFORT" }}
 {{- if and (hasKey $.Values.sandbox.extraEnv $name) (not (hasKey $.Values.slackbotv2.extraEnv $name)) }}

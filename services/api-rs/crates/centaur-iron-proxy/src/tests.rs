@@ -74,6 +74,67 @@ fn harness_auth_fragments_are_baked_in() {
 }
 
 #[test]
+fn custom_provider_fragments_are_scoped_and_declare_placeholders() {
+    let fragments = custom_provider_auth_fragments(
+        r#"{
+            "private_responses": {
+                "name": "Private Responses",
+                "baseUrl": "https://inference.example.com/v1",
+                "apiKeyEnv": "PRIVATE_RESPONSES_API_KEY",
+                "defaultModel": "example-model"
+            }
+        }"#,
+    )
+    .unwrap();
+    let placeholders = placeholder_env(&fragments);
+    assert_eq!(
+        placeholders
+            .get("PRIVATE_RESPONSES_API_KEY")
+            .map(String::as_str),
+        Some("PRIVATE_RESPONSES_API_KEY")
+    );
+
+    let yaml = serde_yaml::to_string(&fragments[0]).unwrap();
+    assert!(yaml.contains("host: inference.example.com"));
+    assert!(yaml.contains("proxy_value: PRIVATE_RESPONSES_API_KEY"));
+    assert!(!yaml.contains("https://"));
+}
+
+#[test]
+fn custom_provider_default_model_is_optional() {
+    let fragments = custom_provider_auth_fragments(
+        r#"{
+            "private_responses": {
+                "name": "Private Responses",
+                "baseUrl": "https://inference.example.com/v1",
+                "apiKeyEnv": "PRIVATE_RESPONSES_API_KEY"
+            }
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(fragments.len(), 1);
+}
+
+#[test]
+fn custom_provider_fragments_reject_unsafe_or_malformed_config() {
+    for raw in [
+        r#"{"bad.id":{"name":"Bad","baseUrl":"https://inference.example.com/v1","apiKeyEnv":"BAD_API_KEY","defaultModel":"model"}}"#,
+        r#"{"private":{"name":"Bad","baseUrl":"http://inference.example.com/v1","apiKeyEnv":"BAD_API_KEY","defaultModel":"model"}}"#,
+        r#"{"private":{"name":"Bad","baseUrl":"https://user@inference.example.com/v1","apiKeyEnv":"BAD_API_KEY","defaultModel":"model"}}"#,
+        r#"{"private":{"name":"Bad","baseUrl":"https://inference.example.com:443/v1","apiKeyEnv":"BAD_API_KEY","defaultModel":"model"}}"#,
+        r#"{"private":{"name":"Bad","baseUrl":"https://127.0.0.1/v1","apiKeyEnv":"BAD_API_KEY","defaultModel":"model"}}"#,
+        r#"{"private":{"name":"Bad","baseUrl":"https://inference.example.com/v1","apiKeyEnv":"bad-key","defaultModel":"model"}}"#,
+        r#"{"private":{"name":"Bad","baseUrl":"https://inference.example.com/v1","apiKeyEnv":"BAD_API_KEY","defaultModel":""}}"#,
+        "not-json",
+    ] {
+        assert!(
+            custom_provider_auth_fragments(raw).is_err(),
+            "accepted {raw}"
+        );
+    }
+}
+
+#[test]
 fn pg_sandbox_dsns_reads_name_and_database_from_fragments() {
     // A listener with a sandbox_env (the api-rs-internal annotation api-rs
     // stamps from each tool's declared pg_dsn name/database) is surfaced; a

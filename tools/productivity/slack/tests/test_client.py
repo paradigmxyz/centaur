@@ -49,7 +49,8 @@ class _FakeWebClient:
 
     def chat_postMessage(self, **kwargs):
         self.last_kwargs = kwargs
-        return {"ts": "123.456"}
+        channel = "D123" if kwargs["channel"].startswith("U") else kwargs["channel"]
+        return {"channel": channel, "ts": "123.456"}
 
     def conversations_history(self, **kwargs):
         self.history_calls.append(kwargs)
@@ -180,27 +181,27 @@ def test_send_message_normalizes_escaped_line_breaks() -> None:
     assert fake_web_client.last_kwargs["text"] == "*Title*\n- one\n- two"
 
 
-def test_send_message_opens_dm_for_user_id_destination() -> None:
+def test_send_message_posts_directly_to_user_id_without_im_write_scope() -> None:
     client, fake_web_client = _make_client()
 
     result = client.send_message("<@U123ABC>", "hello", no_attribution=True)
 
-    assert fake_web_client.open_calls == [{"users": "U123ABC"}]
+    assert fake_web_client.open_calls == []
     assert fake_web_client.last_kwargs is not None
-    assert fake_web_client.last_kwargs["channel"] == "D123"
+    assert fake_web_client.last_kwargs["channel"] == "U123ABC"
     assert fake_web_client.last_kwargs["text"] == "hello"
     assert result["channel"] == "D123"
     assert result["permalink"] == "https://slack.com/archives/D123/p123456"
 
 
-def test_send_dm_opens_dm_and_posts_message() -> None:
+def test_send_dm_posts_directly_to_user_id() -> None:
     client, fake_web_client = _make_client()
 
     client.send_dm("U234ABC", "hello", no_attribution=True, unfurl_links=False)
 
-    assert fake_web_client.open_calls == [{"users": "U234ABC"}]
+    assert fake_web_client.open_calls == []
     assert fake_web_client.last_kwargs is not None
-    assert fake_web_client.last_kwargs["channel"] == "D123"
+    assert fake_web_client.last_kwargs["channel"] == "U234ABC"
     assert fake_web_client.last_kwargs["unfurl_links"] is False
 
 
@@ -1355,6 +1356,22 @@ def test_upload_file_accepts_channel_id_alias_and_returns_preview() -> None:
         "csv_rows_sampled": 1,
         "csv_columns": 2,
     }
+    assert "initial_comment" not in fake_web_client.last_kwargs
+
+
+def test_upload_file_preserves_explicit_comment() -> None:
+    client, fake_web_client = _make_client()
+
+    client.upload_file(
+        channel_id="C123",
+        thread_ts="1780035646.228899",
+        content_base64="dGVzdA==",
+        filename="chart.png",
+        comment="Here is the chart.",
+    )
+
+    assert fake_web_client.last_kwargs is not None
+    assert fake_web_client.last_kwargs["initial_comment"] == "Here is the chart."
 
 
 def test_upload_file_uses_explicit_destination() -> None:

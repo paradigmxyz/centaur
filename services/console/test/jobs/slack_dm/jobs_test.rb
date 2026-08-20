@@ -75,13 +75,29 @@ module SlackDm
     test "SyncCredentialJob allows only one delayed rate-limit retry" do
       credential = slack_credential(app: slack_app)
       job = SlackDm::SyncCredentialJob.new(credential.id)
-      job.executions = SlackDm::SyncCredentialJob::MAX_RATE_LIMIT_EXECUTIONS - 1
+      job.executions = SlackDm::SyncCredentialJob::MAX_RETRYABLE_EXECUTIONS - 1
 
       SlackDm::SyncCredential.stub(:new, ->(*) { rate_limited_sync(retry_after: 120) }) do
         assert_no_enqueued_jobs { job.perform_now }
       end
 
-      assert_equal SlackDm::SyncCredentialJob::MAX_RATE_LIMIT_EXECUTIONS, job.executions
+      assert_equal SlackDm::SyncCredentialJob::MAX_RETRYABLE_EXECUTIONS, job.executions
+    end
+
+    test "SyncCredentialJob defers transient Slack API failures" do
+      credential = slack_credential(app: slack_app)
+      sync = Object.new
+      sync.define_singleton_method(:call) do
+        raise SlackDm::SyncCredential::TransientApiError.new(retry_after: 30)
+      end
+
+      SlackDm::SyncCredential.stub(:new, ->(*) { sync }) do
+        SlackDm::SyncCredentialJob.perform_now(credential.id)
+      end
+
+      retry_job = enqueued_jobs.sole
+      assert_equal SlackDm::SyncCredentialJob, retry_job[:job]
+      assert_equal [ credential.id ], retry_job[:args]
     end
 
     private

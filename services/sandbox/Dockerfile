@@ -57,6 +57,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     "openai>=2.53.0" \
     opentelemetry-proto==1.42.1 \
     "psycopg[binary]>=3.2.0" \
+    "githubkit>=0.16.1" \
     pysocks>=1.7.1 \
     rich>=13.0.0 \
     slack-sdk==3.39.0 \
@@ -293,6 +294,7 @@ COPY --link --chmod=755 services/workflow-python/workflow_host.py /usr/local/bin
 COPY --link services/workflow-python/api/ /usr/local/bin/api/
 COPY --link --chmod=755 services/sandbox/git-branch.sh /usr/local/bin/git-branch
 COPY --link --chmod=755 services/sandbox/install_tool_shims.py /usr/local/bin/install-tool-shims
+COPY --link --chmod=755 services/sandbox/seed_hermes_codex_auth.py /usr/local/bin/seed-hermes-codex-auth
 COPY --link --chmod=755 services/sandbox/centaur_tool_host.py /usr/local/bin/centaur-tool-host
 COPY --link --chmod=755 services/sandbox/compose_system_prompt.py /usr/local/bin/compose-system-prompt
 COPY --link --chmod=755 services/sandbox/repo_cache_sync.py /usr/local/bin/repo-cache-sync

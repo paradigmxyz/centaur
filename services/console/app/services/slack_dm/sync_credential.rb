@@ -13,16 +13,21 @@ module SlackDm
     CONVERSATIONS_HISTORY_ENDPOINT = "https://slack.com/api/conversations.history"
     CONVERSATIONS_REPLIES_ENDPOINT = "https://slack.com/api/conversations.replies"
     API_READ_TIMEOUT_SECONDS = 120
+    TRANSIENT_API_ERRORS = %w[fatal_error internal_error].freeze
+    TRANSIENT_API_RETRY_AFTER_SECONDS = 30
 
     SlackApiError = Class.new(StandardError)
-    class RateLimitedError < SlackApiError
+    class RetryableApiError < SlackApiError
       attr_reader :retry_after
 
       def initialize(retry_after:)
         @retry_after = retry_after
-        super("Slack API rate limited; retry after #{retry_after} seconds")
+        super("Slack API request is retryable after #{retry_after} seconds")
       end
     end
+
+    class RateLimitedError < RetryableApiError; end
+    class TransientApiError < RetryableApiError; end
 
     class << self
       attr_accessor :slack_api_http
@@ -71,7 +76,7 @@ module SlackDm
         sync_history(conversation, home_team_id, checkpoints[conversation.fetch("id")], batch)
         batch[:run][:conversations_synced] += 1
       rescue StandardError => e
-        raise if e.is_a?(RateLimitedError)
+        raise if e.is_a?(RetryableApiError)
         raise if Rails.env.test?
 
         batch[:run][:conversations_failed] += 1
@@ -347,6 +352,9 @@ module SlackDm
 
       parsed = response.json
       raise SlackApiError, "Slack API returned HTTP #{response.status}" unless response.success?
+      if TRANSIENT_API_ERRORS.include?(parsed["error"])
+        raise TransientApiError.new(retry_after: TRANSIENT_API_RETRY_AFTER_SECONDS)
+      end
       raise SlackApiError, "Slack API returned #{parsed['error']}" unless parsed["ok"] == true
 
       parsed

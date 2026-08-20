@@ -130,6 +130,8 @@ export type Linearbot = {
 export type LinearbotThreadState = {
   /** Set once the thread's first turn has run (gates follow-up ingestion). */
   historyForwarded?: boolean;
+  /** Codex provider pinned for this thread. Null clears a previous selection. */
+  provider?: string | null;
   /**
    * Set once the full issue context (with description) has ridden a turn's
    * execute; later turns prepend only the compact id/title header instead.

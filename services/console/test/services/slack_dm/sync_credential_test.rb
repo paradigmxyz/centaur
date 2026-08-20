@@ -329,5 +329,24 @@ module SlackDm
         assert_equal expected, error.retry_after
       end
     end
+
+    test "transient Slack API errors request deferred job execution" do
+      %w[fatal_error internal_error].each do |error_code|
+        response = HttpClient::Response.new(
+          status: 200,
+          body: { ok: false, error: error_code }.to_json,
+          headers: { "content-type" => "application/json" }
+        )
+
+        error = assert_raises(SlackDm::SyncCredential::TransientApiError) do
+          SlackDm::SyncCredential.new(
+            credential,
+            http_client: FakeHttpClient.new(response)
+          ).call
+        end
+
+        assert_equal SlackDm::SyncCredential::TRANSIENT_API_RETRY_AFTER_SECONDS, error.retry_after
+      end
+    end
   end
 end

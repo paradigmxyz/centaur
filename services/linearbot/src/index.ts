@@ -53,7 +53,7 @@ import {
   updateIssueState,
   type LinearStatusMarker,
 } from "./linear-status";
-import { extractMessageOverrides } from "./overrides";
+import { extractMessageOverrides, resolveStickyProvider } from "./overrides";
 import {
   executeSessionTurn,
   forwardToSessionApi,
@@ -769,6 +769,12 @@ async function runThreadTurn(input: {
     }
   }
   const threadState = (await thread.state) ?? {};
+  const provider = resolveStickyProvider(threadState.provider, overrides);
+  if (provider.update !== undefined) {
+    // Commit the selection before execution so a bot/sandbox crash cannot lose
+    // the provider needed to resume this Codex thread on the next turn.
+    await thread.setState({ provider: provider.update });
+  }
   // Resolve the issue context up front — including whether it's delegated to us.
   // The context rides inline in the execute (contextPreamble lands directly in
   // the prompt's input lines) rather than as a one-time appended session
@@ -832,7 +838,7 @@ async function runThreadTurn(input: {
     harnessType: overrides.harnessType,
     messages: [],
     model: overrides.model,
-    provider: overrides.provider,
+    provider: provider.provider,
     onEventId: (eventId) => {
       lastEventId = Math.max(lastEventId, eventId);
       // Keep afterEventId in sync so a mid-stream retry resumes after the last

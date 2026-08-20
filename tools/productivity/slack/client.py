@@ -586,7 +586,10 @@ class SlackClient:
     def _resolve_message_destination(self, channel: str) -> str:
         """Resolve a send_message destination from channel, channel ID, or user ID."""
         if self._looks_like_user_id(channel):
-            return self._open_dm_channel(channel)
+            # chat.postMessage accepts a user ID directly and opens the bot's
+            # one-on-one DM when needed. Calling conversations.open first adds
+            # an unnecessary im:write scope requirement.
+            return self._clean_user_ref(channel).upper()
         return self._resolve_channel(channel)
 
     def _resolve_mentions(self, text: str, user_cache: dict[str, str]) -> str:
@@ -1848,10 +1851,11 @@ class SlackClient:
             if unfurl_media is not None:
                 kwargs["unfurl_media"] = unfurl_media
             response = self._client.chat_postMessage(**kwargs)
+            response_channel = str(response.get("channel") or channel_id)
             return {
-                "channel": channel_id,
+                "channel": response_channel,
                 "ts": response.get("ts", ""),
-                "permalink": f"https://slack.com/archives/{channel_id}/p{response.get('ts', '').replace('.', '')}",
+                "permalink": f"https://slack.com/archives/{response_channel}/p{response.get('ts', '').replace('.', '')}",
             }
         except SlackApiError as e:
             raise RuntimeError(f"Slack API error: {e.response['error']}") from e
@@ -1991,8 +1995,6 @@ class SlackClient:
             )
             if comment:
                 kwargs["initial_comment"] = comment
-            elif effective_filename:
-                kwargs["initial_comment"] = f"Uploaded `{effective_filename}`."
             if effective_thread_ts:
                 kwargs["thread_ts"] = effective_thread_ts
             # We intentionally do NOT forward alt_text to Slack. Passing alt_txt
