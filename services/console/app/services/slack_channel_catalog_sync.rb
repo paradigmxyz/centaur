@@ -9,7 +9,7 @@ class SlackChannelCatalogSync
   WRITE_TIMEOUT_SECONDS = 2
   MEMBERSHIP_TTL = 24.hours
   MEMBERSHIP_RETRY_TTL = 1.hour
-  MEMBERSHIP_BATCH_SIZE = 25
+  MEMBERSHIP_BATCH_SIZE = 100
   REFRESH_LOCK_KEY = "slack_channel_catalog/refreshing".freeze
   REFRESH_LOCK_TTL = 1.minute
 
