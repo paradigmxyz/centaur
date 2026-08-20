@@ -80,6 +80,7 @@ class Console::AuthoredWorkflowsControllerTest < ActionDispatch::IntegrationTest
     assert_select "td", text: /Hourly/
     assert_select "td", text: /#general/
     assert_select "td", text: /#{workflow.delivery_channel}/
+    assert_no_match workflow.timezone, response.body
   end
 
   test "creates a workflow with a defined principal" do

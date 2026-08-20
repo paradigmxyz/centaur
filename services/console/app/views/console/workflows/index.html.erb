@@ -39,7 +39,9 @@
             <td class="console-td text-xs text-zinc-400"><%= workflow.principal&.name.presence || workflow.principal&.foreign_id || "Author: #{workflow.author.email}" %></td>
             <td class="console-td text-xs text-zinc-400">
               <div class="<%= "font-mono" if workflow.schedule_preset == "cron" %>"><%= workflow.schedule_label %></div>
-              <div class="mt-1 text-zinc-600"><%= workflow.timezone %><%= " · disabled" unless workflow.enabled? %></div>
+              <% unless workflow.enabled? %>
+                <div class="mt-1 text-zinc-600">Disabled</div>
+              <% end %>
             </td>
             <td class="console-td text-xs text-zinc-400">
               <% channel_name = @slack_channel_names[workflow.delivery_channel] %>
