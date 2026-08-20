@@ -9,7 +9,7 @@ module Console
       owner = find_owner
       SlackChannelCatalogSync.enqueue_if_empty
       channels = SlackBotChannel.active
-                                .excluding_channel_ids(owner.slack_channel_permissions.pluck(:channel_id))
+                                .excluding_channel_ids(owner&.slack_channel_permissions&.pluck(:channel_id))
                                 .matching(params[:q])
                                 .ordered
                                 .limit(MAX_RESULTS)
@@ -37,6 +37,7 @@ module Console
       case params[:owner_type]
       when "principal" then Principal.find_by_oid!(params[:id])
       when "role" then Role.find_by_oid!(params[:id])
+      when "authored_workflow" then nil
       else raise ActiveRecord::RecordNotFound
       end
     end

@@ -49,6 +49,27 @@ module Console
       assert_equal [], response.parsed_body.fetch("options")
     end
 
+    test "authored workflow options include all matching channels" do
+      captured = nil
+      result = SlackChannelCatalog::Result.new(
+        channels: [ SlackChannelCatalog::Channel.new(id: "C1111111111", name: "engineering", private: false) ],
+        error: nil,
+        configured: true
+      )
+
+      search = lambda do |**args|
+        captured = args
+        result
+      end
+      SlackChannelCatalogProvider.stub(:search, search) do
+        get slack_channel_options_console_authored_workflows_url, params: { q: "eng" }
+      end
+
+      assert_response :ok
+      assert_equal [], captured.fetch(:exclude_ids)
+      assert_equal "C1111111111", response.parsed_body.fetch("options").sole.fetch("value")
+    end
+
     test "non-admins cannot search the catalog" do
       delete logout_url
       post login_url, params: { email: users(:member_user).email, password: "password123456" }

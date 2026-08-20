@@ -1,4 +1,9 @@
-<%= form_with model: [ :console, workflow ], class: "space-y-5" do |form| %>
+<%= form_with model: [ :console, workflow ],
+              class: "space-y-5",
+              data: {
+                controller: "slack-channel-autocomplete",
+                slack_channel_autocomplete_url_value: slack_channel_options_console_authored_workflows_path
+              } do |form| %>
   <% if workflow.errors.any? %>
     <div class="rounded border border-red-500/30 bg-red-500/[0.08] px-4 py-3 text-sm text-red-200">
       <p class="font-semibold">Could not save this workflow:</p>
@@ -44,12 +49,16 @@
     </div>
 
     <div>
-      <%= form.label :delivery_channel, "Deliver to", class: "mb-2 block text-sm font-medium text-zinc-200" %>
-      <%= form.text_field :delivery_channel,
-            required: true,
-            placeholder: "C0123456789",
-            class: "form-input" %>
-      <p class="mt-2 text-xs text-zinc-500">The Slack channel ID that receives the final agent response.</p>
+      <% delivery_channel_picker_id = dom_id(workflow, :delivery_channel_picker) %>
+      <%= form.label :delivery_channel,
+                     "Deliver to",
+                     for: delivery_channel_picker_id,
+                     class: "mb-2 block text-sm font-medium text-zinc-200" %>
+      <%= render "console/shared/slack_channel_autocomplete",
+                 field: form,
+                 attribute: :delivery_channel,
+                 picker_id: delivery_channel_picker_id %>
+      <p class="text-xs text-zinc-500">Search Slack channels or enter the channel ID that receives the final agent response.</p>
     </div>
   </div>
 
@@ -94,7 +103,9 @@
   </label>
 
   <div class="flex flex-wrap items-center gap-3">
-    <%= form.submit workflow.persisted? ? "Save workflow" : "Create workflow", class: "btn-primary cursor-pointer" %>
+    <%= form.submit workflow.persisted? ? "Save workflow" : "Create workflow",
+                    class: "btn-primary cursor-pointer disabled:cursor-not-allowed disabled:opacity-50",
+                    data: { slack_channel_autocomplete_target: "submit" } %>
     <%= link_to "Cancel", console_workflows_path, class: "btn-secondary" %>
   </div>
 <% end %>

@@ -13,7 +13,12 @@ class Console::AuthoredWorkflowsControllerTest < ActionDispatch::IntegrationTest
     assert_select "textarea[name='authored_workflow[prompt]']"
     assert_select "select[name='authored_workflow[principal_oid]']"
     assert_select "select[name='authored_workflow[schedule_preset]']"
-    assert_select "input[name='authored_workflow[delivery_channel]']"
+    assert_select "form[data-controller='slack-channel-autocomplete']"
+    assert_select "[data-slack-channel-autocomplete-url-value=?]",
+                  slack_channel_options_console_authored_workflows_path
+    assert_select "input[type=hidden][name='authored_workflow[delivery_channel]'][data-slack-channel-autocomplete-target=value]"
+    assert_select "input[role=combobox][placeholder='Search channels or enter an ID']"
+    assert_select "input[type=submit][data-slack-channel-autocomplete-target=submit]:not([disabled])"
   end
 
   test "creates an author-principal workflow from a schedule preset" do
@@ -27,6 +32,16 @@ class Console::AuthoredWorkflowsControllerTest < ActionDispatch::IntegrationTest
     assert_nil workflow.principal
     assert_equal "0 9 * * 1-5", workflow.cron_expression
     assert_not_nil workflow.next_run_at
+  end
+
+  test "edit form preserves the selected delivery channel" do
+    workflow = create_workflow
+
+    get edit_console_authored_workflow_url(workflow.oid)
+
+    assert_response :ok
+    assert_select "input[type=hidden][name='authored_workflow[delivery_channel]'][value=?]", workflow.delivery_channel
+    assert_select "input[role=combobox][value=?]", workflow.delivery_channel
   end
 
   test "shows authored workflows on the workflow dashboard" do
