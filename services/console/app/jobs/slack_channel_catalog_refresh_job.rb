@@ -6,7 +6,7 @@ class SlackChannelCatalogRefreshJob < ApplicationJob
   limits_concurrency to: 1, key: -> { "slack_channel_catalog_discovery" }
 
   def perform
-    SlackChannelCatalogProvider.refresh
+    SlackChannelCatalogSync.new.sync_channels
   rescue SlackApi::RetryableError => e
     if executions >= MAX_RETRYABLE_EXECUTIONS
       Rails.logger.warn("Slack channel catalog discovery dropped after repeated retryable API failures")
@@ -14,5 +14,7 @@ class SlackChannelCatalogRefreshJob < ApplicationJob
     end
 
     retry_job wait: e.retry_after.seconds, error: e
+  ensure
+    Rails.cache.delete(SlackChannelCatalogProvider::REFRESH_LOCK_KEY)
   end
 end

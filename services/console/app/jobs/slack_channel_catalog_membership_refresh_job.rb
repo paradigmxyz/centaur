@@ -6,7 +6,13 @@ class SlackChannelCatalogMembershipRefreshJob < ApplicationJob
   limits_concurrency to: 1, key: ->(*) { "slack_channel_catalog_membership" }
 
   def perform(channel_id = nil)
-    SlackChannelCatalogProvider.refresh_memberships(channel_id: channel_id)
+    sync = SlackChannelCatalogSync.new
+    if channel_id
+      channel = sync.import_channel(channel_id)
+      sync.channel_members(channel.channel_id) if channel
+    else
+      sync.sync_memberships
+    end
   rescue SlackApi::RetryableError => e
     if executions >= MAX_RETRYABLE_EXECUTIONS
       Rails.logger.warn("Slack channel membership refresh dropped after repeated retryable API failures")
