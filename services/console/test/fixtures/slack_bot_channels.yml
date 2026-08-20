@@ -1,5 +1,4 @@
 general:
-  configuration_digest: fixture-digest
   team_id: T0123456789
   bot_user_id: U0999999999
   channel_id: C0123456789
@@ -14,7 +13,6 @@ general:
   last_seen_at: 2026-08-20 11:46:01
 
 private_channel:
-  configuration_digest: fixture-digest
   team_id: T0123456789
   bot_user_id: U0999999999
   channel_id: G9876543210

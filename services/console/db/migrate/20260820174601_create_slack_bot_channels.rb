@@ -1,7 +1,6 @@
 class CreateSlackBotChannels < ActiveRecord::Migration[8.1]
   def change
     create_table :slack_bot_channels do |t|
-      t.string :configuration_digest, null: false
       t.string :team_id, null: false
       t.string :bot_user_id, null: false
       t.string :channel_id, null: false
@@ -18,14 +17,8 @@ class CreateSlackBotChannels < ActiveRecord::Migration[8.1]
       t.timestamps
     end
 
-
-    add_index :slack_bot_channels,
-              %i[configuration_digest team_id channel_id],
-              unique: true,
-              name: "index_slack_bot_channels_on_config_team_channel"
-    add_index :slack_bot_channels,
-              %i[configuration_digest team_id active name],
-              name: "index_slack_bot_channels_for_catalog_search"
+    add_index :slack_bot_channels, %i[team_id channel_id], unique: true
+    add_index :slack_bot_channels, %i[team_id active name], name: "index_slack_bot_channels_for_catalog_search"
     add_index :slack_bot_channels, :member_user_ids, using: :gin
   end
 end

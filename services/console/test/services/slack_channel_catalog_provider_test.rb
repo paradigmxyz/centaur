@@ -199,7 +199,7 @@ class SlackChannelCatalogProviderTest < ActiveJob::TestCase
     assert_equal SlackChannelCatalogProvider::MEMBERSHIP_BATCH_SIZE, refreshed.length
   end
 
-  test "a token change cannot read rows from the previous catalog configuration" do
+  test "a token rotation continues serving the durable catalog" do
     create_channel(channel_id: "C0123456789", name: "general")
 
     with_catalog do
@@ -212,9 +212,11 @@ class SlackChannelCatalogProviderTest < ActiveJob::TestCase
       "SLACK_API_URL" => API_URL
     ) do
       Rails.stub(:cache, @cache) do
-        result = SlackChannelCatalogProvider.fetch
-        assert_empty result.channels
-        assert_match(/loading/, result.error)
+        assert_no_enqueued_jobs do
+          result = SlackChannelCatalogProvider.fetch
+          assert_equal [ "C0123456789" ], result.channels.map(&:id)
+          assert_nil result.error
+        end
       end
     end
   end
@@ -259,15 +261,9 @@ class SlackChannelCatalogProviderTest < ActiveJob::TestCase
     end
   end
 
-  def digest
-    key = SlackChannelCatalogProvider.cache_key(token: TOKEN, api_url: API_URL)
-    Digest::SHA256.hexdigest(key)
-  end
-
   def create_channel(channel_id:, name:, private: false, member_user_ids: [ BOT_USER_ID ],
                      membership_refreshed_at: Time.current)
     SlackBotChannel.create!(
-      configuration_digest: digest,
       team_id: TEAM_ID,
       bot_user_id: BOT_USER_ID,
       channel_id: channel_id,

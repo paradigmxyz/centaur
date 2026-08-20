@@ -9,7 +9,7 @@ class SlackBotChannelTest < ActiveSupport::TestCase
     refute channel.private
   end
 
-  test "channel identity is unique within a configuration and team" do
+  test "channel identity is unique within a team" do
     duplicate = slack_bot_channels(:general).dup
 
     refute duplicate.valid?

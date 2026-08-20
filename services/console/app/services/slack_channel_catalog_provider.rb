@@ -12,7 +12,7 @@ class SlackChannelCatalogProvider
       config = configuration
       return unconfigured_result unless config
 
-      relation = active_scope(config)
+      relation = active_scope
       state = state_for(config)
       enqueue_refresh(config) unless fresh?(relation, state)
       relation_result(relation.ordered, error: cold_error(relation, state))
@@ -22,7 +22,7 @@ class SlackChannelCatalogProvider
       config = configuration
       return unconfigured_result unless config
 
-      relation = active_scope(config)
+      relation = active_scope
       state = state_for(config)
       enqueue_refresh(config) unless fresh?(relation, state)
       relation = relation.where(team_id: team_id) if team_id.present?
@@ -41,14 +41,14 @@ class SlackChannelCatalogProvider
         relation = relation.where("member_user_ids @> ARRAY[?]::text[]", required_members)
       end
 
-      relation_result(relation.ordered.limit(limit), error: cold_error(active_scope(config), state))
+      relation_result(relation.ordered.limit(limit), error: cold_error(active_scope, state))
     end
 
     def names_for(channel_ids)
       config = configuration
       return {} unless config
 
-      configured_scope(config)
+      catalog_scope
         .where(channel_id: Array(channel_ids))
         .pluck(:channel_id, :name)
         .to_h
@@ -81,9 +81,9 @@ class SlackChannelCatalogProvider
       client = SlackChannelCatalog.new(token: config.fetch(:token), api_url: config.fetch(:api_url))
       identity = catalog_identity(config, client)
       channels = if channel_id.present?
-        [ find_or_refresh_channel!(config, identity, client, channel_id) ].compact
+        [ find_or_refresh_channel!(identity, client, channel_id) ].compact
       else
-        stale_memberships(config, identity)
+        stale_memberships(identity)
       end
 
       channels.each do |channel|
@@ -116,26 +116,20 @@ class SlackChannelCatalogProvider
       { token: token, api_url: ENV["SLACK_API_URL"].presence || SlackChannelCatalog::DEFAULT_API_URL }
     end
 
-    def configuration_digest(config)
-      Digest::SHA256.hexdigest(cache_key(**config))
+    def catalog_scope
+      SlackBotChannel.all
     end
 
-    def configured_scope(config)
-      SlackBotChannel.where(configuration_digest: configuration_digest(config))
-    end
-
-    def active_scope(config)
-      configured_scope(config).active
+    def active_scope
+      catalog_scope.active
     end
 
     def persist_discovery!(config, identity, channels)
-      digest = configuration_digest(config)
       now = Time.current
       SlackBotChannel.transaction do
-        configured_scope(config).update_all(active: false, updated_at: now)
+        catalog_scope.update_all(active: false, updated_at: now)
         channels.each do |remote|
           channel = SlackBotChannel.find_or_initialize_by(
-            configuration_digest: digest,
             team_id: identity.team_id,
             channel_id: remote.id
           )
@@ -148,7 +142,6 @@ class SlackChannelCatalogProvider
             last_seen_at: now
           )
         end
-        SlackBotChannel.where.not(configuration_digest: digest).update_all(active: false, updated_at: now)
       end
       write_state(
         config,
@@ -167,7 +160,7 @@ class SlackChannelCatalogProvider
       team_id = state["team_id"].presence
       bot_user_id = state["bot_user_id"].presence
       if team_id.blank? || bot_user_id.blank?
-        team_id, bot_user_id = configured_scope(config).limit(1).pick(:team_id, :bot_user_id)
+        team_id, bot_user_id = catalog_scope.limit(1).pick(:team_id, :bot_user_id)
       end
       return SlackChannelCatalog::Identity.new(team_id: team_id, bot_user_id: bot_user_id) if team_id && bot_user_id
 
@@ -176,10 +169,9 @@ class SlackChannelCatalogProvider
       identity
     end
 
-    def find_or_refresh_channel!(config, identity, client, channel_id)
+    def find_or_refresh_channel!(identity, client, channel_id)
       remote = client.fetch_channel(channel_id)
       channel = SlackBotChannel.find_or_initialize_by(
-        configuration_digest: configuration_digest(config),
         team_id: identity.team_id,
         channel_id: remote.id
       )
@@ -193,24 +185,25 @@ class SlackChannelCatalogProvider
       )
       channel
     rescue SlackChannelCatalog::ChannelNotJoinedError
-      configured_scope(config).where(channel_id: channel_id).update_all(active: false, updated_at: Time.current)
+      catalog_scope.where(team_id: identity.team_id, channel_id: channel_id)
+                   .update_all(active: false, updated_at: Time.current)
       nil
     end
 
-    def stale_memberships(config, identity)
-      configured_scope(config).active
-                              .where(team_id: identity.team_id, bot_user_id: identity.bot_user_id)
-                              .where(
-                                "membership_refreshed_at IS NULL OR membership_refreshed_at < ?",
-                                MEMBERSHIP_TTL.ago
-                              )
-                              .where(
-                                "membership_last_attempted_at IS NULL OR membership_last_attempted_at < ?",
-                                MEMBERSHIP_RETRY_TTL.ago
-                              )
-                              .order(Arel.sql("membership_refreshed_at ASC NULLS FIRST"), :id)
-                              .limit(MEMBERSHIP_BATCH_SIZE)
-                              .to_a
+    def stale_memberships(identity)
+      catalog_scope.active
+                   .where(team_id: identity.team_id, bot_user_id: identity.bot_user_id)
+                   .where(
+                     "membership_refreshed_at IS NULL OR membership_refreshed_at < ?",
+                     MEMBERSHIP_TTL.ago
+                   )
+                   .where(
+                     "membership_last_attempted_at IS NULL OR membership_last_attempted_at < ?",
+                     MEMBERSHIP_RETRY_TTL.ago
+                   )
+                   .order(Arel.sql("membership_refreshed_at ASC NULLS FIRST"), :id)
+                   .limit(MEMBERSHIP_BATCH_SIZE)
+                   .to_a
     end
 
     def refresh_channel_membership!(client, channel)

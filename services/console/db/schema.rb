@@ -439,7 +439,6 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_20_174601) do
     t.boolean "archived", default: false, null: false
     t.string "bot_user_id", null: false
     t.string "channel_id", null: false
-    t.string "configuration_digest", null: false
     t.datetime "created_at", null: false
     t.datetime "last_seen_at"
     t.text "member_user_ids", default: [], null: false, array: true
@@ -450,9 +449,9 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_20_174601) do
     t.boolean "private", default: false, null: false
     t.string "team_id", null: false
     t.datetime "updated_at", null: false
-    t.index ["configuration_digest", "team_id", "active", "name"], name: "index_slack_bot_channels_for_catalog_search"
-    t.index ["configuration_digest", "team_id", "channel_id"], name: "index_slack_bot_channels_on_config_team_channel", unique: true
     t.index ["member_user_ids"], name: "index_slack_bot_channels_on_member_user_ids", using: :gin
+    t.index ["team_id", "active", "name"], name: "index_slack_bot_channels_for_catalog_search"
+    t.index ["team_id", "channel_id"], name: "index_slack_bot_channels_on_team_id_and_channel_id", unique: true
   end
 
   create_table "slack_channel_permissions", force: :cascade do |t|
