@@ -57,6 +57,27 @@ class AuthoredWorkflowTest < ActiveSupport::TestCase
     )
   end
 
+  test "assigns schedule and principal form attributes" do
+    principal = principals(:acme_channel)
+    workflow = AuthoredWorkflow.new(valid_attributes.except(:cron_expression))
+
+    workflow.update!(
+      schedule_preset: "weekdays",
+      cron_expression: "",
+      principal_oid: principal.oid
+    )
+
+    assert_equal "0 9 * * 1-5", workflow.cron_expression
+    assert_equal principal, workflow.principal
+  end
+
+  test "rejects an unavailable principal oid" do
+    workflow = AuthoredWorkflow.new(valid_attributes)
+
+    assert_not workflow.update(principal_oid: "prn_missing")
+    assert_includes workflow.errors[:principal], "is unavailable"
+  end
+
   private
 
   def valid_attributes(overrides = {})

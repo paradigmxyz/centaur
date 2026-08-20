@@ -28,6 +28,7 @@ class AuthoredWorkflow < ApplicationRecord
              with: ->(value) { value.to_s.strip }
   normalizes :prompt, with: ->(value) { value.to_s.gsub("\r\n", "\n").strip }
 
+  before_validation :apply_schedule_preset
   before_validation :set_default_timezone
   before_validation :refresh_next_run_at, if: :schedule_requires_refresh?
 
@@ -42,6 +43,7 @@ class AuthoredWorkflow < ApplicationRecord
   validates :cron_expression, presence: true
   validates :timezone, presence: true
   validate :cron_schedule_is_valid
+  validate :selected_principal_is_available
   validate :selected_principal_has_foreign_id
 
   def self.cron_for(preset, custom_expression)
@@ -59,7 +61,14 @@ class AuthoredWorkflow < ApplicationRecord
   end
 
   def principal_oid
-    principal&.oid
+    @principal_oid.presence || principal&.oid
+  end
+
+  def principal_oid=(oid)
+    @principal_oid = oid.to_s.strip
+    self.principal = if @principal_oid.present?
+      Principal.where.not(foreign_id: nil).find_by_oid(@principal_oid)
+    end
   end
 
   def next_occurrence(after: Time.current)
@@ -82,6 +91,14 @@ class AuthoredWorkflow < ApplicationRecord
 
   private
 
+  def apply_schedule_preset
+    return if @schedule_preset.blank?
+
+    preset = @schedule_preset
+    @schedule_preset = nil
+    self.cron_expression = self.class.cron_for(preset, cron_expression)
+  end
+
   def parsed_cron
     Fugit::Cron.parse("#{cron_expression} #{timezone}")
   rescue ArgumentError
@@ -103,6 +120,12 @@ class AuthoredWorkflow < ApplicationRecord
 
   def cron_schedule_is_valid
     errors.add(:cron_expression, "is not a valid cron schedule") unless parsed_cron
+  end
+
+  def selected_principal_is_available
+    return if @principal_oid.blank? || principal.present?
+
+    errors.add(:principal, "is unavailable")
   end
 
   def selected_principal_has_foreign_id
