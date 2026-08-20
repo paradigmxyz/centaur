@@ -37,8 +37,38 @@ class SlackDeliveryPolicy
   attr_reader :user
 
   def slack_identity
-    @slack_identity ||= UserIdentity.unambiguous_slack_identity(
-      user.user_identities.slack.order(:id)
-    )
+    return @slack_identity if defined?(@slack_identity)
+
+    identities = user_identity_candidates + principal_identity_candidates + credential_identity_candidates
+    @slack_identity = identities.filter_map { |identity| valid_identity(identity) }.uniq.sole
+  rescue Enumerable::SoleItemExpectedError
+    @slack_identity = nil
+  end
+
+  def user_identity_candidates
+    user.user_identities.slack.pluck(:subject, :team_id)
+  end
+
+  def principal_identity_candidates
+    Principal.where(kind: "console_user", console_user: user).pluck(:slack_user_id, :slack_team_id)
+  end
+
+  def credential_identity_candidates
+    BrokerCredential.includes(:oauth_app)
+                    .joins(:oauth_app)
+                    .where(created_by: user, oauth_apps: { provider: Oauth::Providers::Slack::KEY })
+                    .map do |credential|
+      team_id = credential.labels.to_h["slack_team_id"].presence ||
+                credential.oauth_app.labels.to_h["slack_team_id"].presence
+      [ credential.provider_subject, team_id ]
+    end
+  end
+
+  def valid_identity(identity)
+    user_id, team_id = identity
+    return unless Principal::SLACK_USER_ID_FORMAT.match?(user_id.to_s)
+    return unless Principal::SLACK_TEAM_ID_FORMAT.match?(team_id.to_s)
+
+    [ user_id, team_id ]
   end
 end

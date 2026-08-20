@@ -133,6 +133,44 @@ module Console
       assert_equal "C2222222222", response.parsed_body.fetch("options").sole.fetch("value")
     end
 
+    test "scheduled task options use a connected Slack credential identity" do
+      delete logout_url
+      user = users(:globex_admin)
+      app = oauth_apps(:acme_slack)
+      app.client_secret = "slack-client-secret"
+      app.update!(labels: app.labels.merge("slack_team_id" => "T0123456789"))
+      BrokerCredential.create!(
+        oauth_app: app,
+        provider_subject: "U2222222222",
+        provider_email: user.email,
+        token_endpoint: app.provider_strategy.token_endpoint,
+        refresh_token: "refresh-slack-options",
+        access_token: "access-slack-options",
+        expires_at: 1.hour.from_now,
+        last_refresh: Time.current,
+        external_user_key: "user-slack-options",
+        created_by: user
+      )
+      SlackBotChannel.create!(
+        team_id: "T0123456789",
+        bot_user_id: "U0999999999",
+        channel_id: "C2222222222",
+        name: "credential-shared",
+        active: true,
+        member_user_ids: [ "U0999999999", "U2222222222" ],
+        membership_refreshed_at: Time.current
+      )
+      post login_url, params: { email: user.email, password: "password123456" }
+
+      with_catalog do
+        get slack_channel_options_console_scheduled_tasks_url, params: { q: "credential" }
+      end
+
+      assert_response :ok
+      assert_nil response.parsed_body["error"]
+      assert_equal "C2222222222", response.parsed_body.fetch("options").sole.fetch("value")
+    end
+
     test "non-admins cannot search the catalog" do
       delete logout_url
       post login_url, params: { email: users(:member_user).email, password: "password123456" }
