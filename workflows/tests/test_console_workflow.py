@@ -54,7 +54,10 @@ def test_handler_runs_one_scoped_agent_turn_and_delivers_its_text():
 
     assert len(context.agent_calls) == 1
     prompt, kwargs = context.agent_calls[0]
-    assert prompt == "Summarize open incidents"
+    assert prompt == (
+        "Summarize open incidents\n\n"
+        f"{console_workflow.SLACK_MRKDWN_INSTRUCTIONS}"
+    )
     assert kwargs["principal"] == "console-user-author"
     assert "thread_key" not in kwargs
     assert kwargs["metadata"] == {
@@ -62,7 +65,9 @@ def test_handler_runs_one_scoped_agent_turn_and_delivers_its_text():
         "scheduled_task_name": "Incident summary",
     }
     assert context.step_calls == ["post_result"]
-    assert context.slack_calls == [("C0123456789", "Daily summary", {})]
+    assert context.slack_calls == [
+        ("C0123456789", "Daily summary", {"mrkdwn": True})
+    ]
     assert result["delivery"]["ts"] == "123.1"
 
 
@@ -85,7 +90,7 @@ def test_handler_truncates_long_slack_results():
     assert context.step_calls == ["post_result"]
     assert len(context.slack_calls) == 1
     assert len(context.slack_calls[0][1]) == console_workflow.SLACK_MESSAGE_MAX_LENGTH
-    assert context.slack_calls[0][2] == {}
+    assert context.slack_calls[0][2] == {"mrkdwn": True}
     assert result["delivery"]["ts"] == "123.1"
 
 
@@ -115,7 +120,7 @@ def test_handler_delivers_canonical_result_text_instead_of_output_lines():
         (
             "C0123456789",
             "Cold scoops kiss the cone\nSummer sunlight melts to cream\nSweet stars on my tongue",
-            {},
+            {"mrkdwn": True},
         )
     ]
 
@@ -133,7 +138,9 @@ def test_handler_does_not_repeat_checkpointed_slack_posts():
     asyncio.run(console_workflow.handler(params, context))
 
     assert context.step_calls == ["post_result", "post_result"]
-    assert context.slack_calls == [("C0123456789", "Daily summary", {})]
+    assert context.slack_calls == [
+        ("C0123456789", "Daily summary", {"mrkdwn": True})
+    ]
 
 
 def test_handler_rejects_missing_required_input_before_starting_an_agent():

@@ -6,6 +6,11 @@ from typing import Any
 
 WORKFLOW_NAME = "console_workflow"
 SLACK_MESSAGE_MAX_LENGTH = 50_000
+SLACK_MRKDWN_INSTRUCTIONS = """\
+Format the final response for Slack using Slack mrkdwn, not standard Markdown.
+Use *bold*, _italics_, ~strikethrough~, `inline code`, and <https://example.com|link text>.
+Use bold text instead of Markdown headings and lists instead of Markdown tables.
+Return only the message that should be posted to Slack."""
 
 
 def _required_string(params: Any, key: str) -> str:
@@ -21,8 +26,12 @@ async def _deliver_to_slack(ctx: Any, channel: str, text: str) -> Any:
     truncated = text[:SLACK_MESSAGE_MAX_LENGTH]
     return await ctx.step(
         "post_result",
-        lambda: ctx.post_to_slack(channel, truncated),
+        lambda: ctx.post_to_slack(channel, truncated, mrkdwn=True),
     )
+
+
+def _prompt_for_slack(prompt: str) -> str:
+    return f"{prompt}\n\n{SLACK_MRKDWN_INSTRUCTIONS}"
 
 
 async def handler(params: Any, ctx: Any) -> dict[str, Any]:
@@ -32,7 +41,7 @@ async def handler(params: Any, ctx: Any) -> dict[str, Any]:
     scheduled_task_id = _required_string(params, "scheduled_task_id")
 
     result = await ctx.agent_turn(
-        prompt,
+        _prompt_for_slack(prompt),
         principal=principal,
         metadata={
             "scheduled_task_id": scheduled_task_id,

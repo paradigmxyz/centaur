@@ -4149,6 +4149,9 @@ fn python_slack_message_payload(
     if let Some(reply_broadcast) = args.get("reply_broadcast").and_then(Value::as_bool) {
         payload["reply_broadcast"] = json!(reply_broadcast);
     }
+    if let Some(mrkdwn) = args.get("mrkdwn").and_then(Value::as_bool) {
+        payload["mrkdwn"] = json!(mrkdwn);
+    }
     if let Some(blocks) = args.get("blocks") {
         payload["blocks"] = blocks.clone();
     }
@@ -4945,6 +4948,7 @@ mod tests {
                 "reply_broadcast": true,
                 "unfurl_links": true,
                 "unfurl_media": true,
+                "mrkdwn": true,
                 "username": "The Date Goblin",
                 "icon_emoji": ":female_mage:",
             }),
@@ -4957,6 +4961,7 @@ mod tests {
         assert_eq!(payload["reply_broadcast"], json!(true));
         assert_eq!(payload["unfurl_links"], json!(true));
         assert_eq!(payload["unfurl_media"], json!(true));
+        assert_eq!(payload["mrkdwn"], json!(true));
         assert_eq!(payload["username"], json!("The Date Goblin"));
         assert_eq!(payload["icon_emoji"], json!(":female_mage:"));
     }
