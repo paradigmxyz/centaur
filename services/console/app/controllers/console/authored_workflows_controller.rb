@@ -13,7 +13,7 @@ class Console::AuthoredWorkflowsController < ApplicationController
 
   def create
     @workflow = current_user.authored_workflows.new
-    if save_workflow
+    if @workflow.update(workflow_attributes)
       redirect_to console_workflows_path, notice: "Workflow created."
     else
       prepare_form
@@ -26,7 +26,7 @@ class Console::AuthoredWorkflowsController < ApplicationController
   end
 
   def update
-    if save_workflow
+    if @workflow.update(workflow_attributes)
       redirect_to console_workflows_path, notice: "Workflow saved."
     else
       prepare_form
@@ -50,21 +50,21 @@ class Console::AuthoredWorkflowsController < ApplicationController
     @workflow = AuthoredWorkflow.find_by_oid!(params[:id])
   end
 
-  def save_workflow
-    principal_oid = workflow_params[:principal_oid]
-    principal = resolve_principal(principal_oid)
-    unless principal_oid.blank? || principal
-      @workflow.errors.add(:principal, "is unavailable")
-      return false
-    end
-
-    @workflow.update(workflow_params.except(:principal_oid).merge(principal: principal))
+  def workflow_attributes
+    attributes = workflow_params
+    attributes.except(:schedule_preset, :principal_oid).merge(
+      principal: resolve_principal!(attributes[:principal_oid]),
+      cron_expression: AuthoredWorkflow.cron_for(
+        attributes[:schedule_preset],
+        attributes[:cron_expression]
+      )
+    )
   end
 
-  def resolve_principal(oid)
+  def resolve_principal!(oid)
     return if oid.blank?
 
-    Principal.where.not(foreign_id: nil).find_by_oid(oid)
+    Principal.where.not(foreign_id: nil).find_by_oid!(oid)
   end
 
   def workflow_params

@@ -93,15 +93,14 @@ class Console::AuthoredWorkflowsControllerTest < ActionDispatch::IntegrationTest
     assert_equal principal, AuthoredWorkflow.order(:id).last.principal
   end
 
-  test "rejects an unavailable principal selection" do
+  test "returns not found for an unavailable principal selection" do
     assert_no_difference -> { AuthoredWorkflow.count } do
       post console_authored_workflows_url, params: {
         authored_workflow: workflow_params.merge(principal_oid: "prn_missing")
       }
     end
 
-    assert_response :unprocessable_entity
-    assert_match "Principal is unavailable", response.body
+    assert_response :not_found
   end
 
   test "queues a manual run" do

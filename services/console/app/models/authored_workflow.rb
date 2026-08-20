@@ -22,13 +22,10 @@ class AuthoredWorkflow < ApplicationRecord
 
   scope :due, ->(now = Time.current) { where(enabled: true, next_run_at: ..now) }
 
-  attr_writer :schedule_preset
-
   normalizes :name, :delivery_channel, :cron_expression, :timezone,
              with: ->(value) { value.to_s.strip }
   normalizes :prompt, with: ->(value) { value.to_s.gsub("\r\n", "\n").strip }
 
-  before_validation :apply_schedule_preset
   before_validation :set_default_timezone
   before_validation :refresh_next_run_at, if: :schedule_requires_refresh?
 
@@ -52,7 +49,7 @@ class AuthoredWorkflow < ApplicationRecord
   end
 
   def schedule_preset
-    @schedule_preset.presence || SCHEDULE_PRESETS.key(cron_expression) || "cron"
+    SCHEDULE_PRESETS.key(cron_expression) || "cron"
   end
 
   def schedule_label
@@ -82,14 +79,6 @@ class AuthoredWorkflow < ApplicationRecord
   end
 
   private
-
-  def apply_schedule_preset
-    return if @schedule_preset.blank?
-
-    preset = @schedule_preset
-    @schedule_preset = nil
-    self.cron_expression = self.class.cron_for(preset, cron_expression)
-  end
 
   def parsed_cron
     Fugit::Cron.parse("#{cron_expression} #{timezone}")

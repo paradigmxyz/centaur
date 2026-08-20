@@ -57,17 +57,6 @@ class AuthoredWorkflowTest < ActiveSupport::TestCase
     )
   end
 
-  test "assigns schedule form attributes" do
-    workflow = AuthoredWorkflow.new(valid_attributes.except(:cron_expression))
-
-    workflow.update!(
-      schedule_preset: "weekdays",
-      cron_expression: ""
-    )
-
-    assert_equal "0 9 * * 1-5", workflow.cron_expression
-  end
-
   private
 
   def valid_attributes(overrides = {})
