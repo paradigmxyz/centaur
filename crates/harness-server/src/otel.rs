@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::SystemTime;
 
@@ -18,8 +18,10 @@ use crate::{HarnessKind, NormalizedContent, NormalizedEvent, NormalizedTokenUsag
 
 const LAMINAR_METADATA_PREFIX: &str = "lmnr.association.properties.metadata.";
 const MAX_SPAN_IO_BYTES: usize = 60 * 1024;
-/// Transcript capture is opt-in: LLM span prompt and response text are only
-/// exported when this env var is set to a truthy value.
+const MAX_TOOL_COMMAND_BYTES: usize = 8 * 1024;
+const TRUNCATION_SUFFIX: &str = "…[truncated]";
+/// Transcript capture is opt-in: LLM prompt/response text and shell commands
+/// are only exported when this env var is set to a truthy value.
 const TRANSCRIPT_CAPTURE_ENV: &str = "CENTAUR_TELEMETRY_CAPTURE_TRANSCRIPTS";
 
 static TELEMETRY: OnceLock<Option<TelemetryRuntime>> = OnceLock::new();
@@ -112,6 +114,13 @@ struct ToolLabels {
     kind: String,
     name: String,
     method: String,
+}
+
+#[derive(Debug)]
+struct ToolCommandDetails {
+    executable: String,
+    command: Option<String>,
+    cwd: Option<String>,
 }
 
 impl TurnTelemetry {
@@ -253,7 +262,8 @@ impl TurnTelemetry {
                     && let Some(id) = string_at_path(item, &["id"])
                     && let Some(labels) = tool_labels_from_item(item, &self.centaur_tool_names)
                 {
-                    self.start_tool(id, labels);
+                    let command = tool_command_details(item, self.capture_transcripts);
+                    self.start_tool(id, labels, command);
                 }
             }
             Some("item/completed" | "item.completed") => {
@@ -295,29 +305,38 @@ impl TurnTelemetry {
         }
     }
 
-    fn start_tool(&mut self, id: String, labels: ToolLabels) {
+    fn start_tool(&mut self, id: String, labels: ToolLabels, command: Option<ToolCommandDetails>) {
         let (Some(tracer), Some(parent)) = (self.tracer.as_ref(), self.parent.as_ref()) else {
             return;
         };
         if let Some(mut previous) = self.tools.remove(&id) {
             finish_tool_span(&mut previous.span, "failed");
         }
+        let mut span_input = json!({
+            "kind": labels.kind,
+            "name": labels.name,
+            "method": labels.method,
+        });
         let mut attributes = self.common_attributes();
         attributes.extend([
             KeyValue::new("lmnr.span.type", "TOOL"),
             KeyValue::new("tool.kind", labels.kind.clone()),
             KeyValue::new("tool.name", labels.name.clone()),
             KeyValue::new("tool.method", labels.method.clone()),
-            KeyValue::new(
-                "lmnr.span.input",
-                json!({
-                    "kind": labels.kind,
-                    "name": labels.name,
-                    "method": labels.method,
-                })
-                .to_string(),
-            ),
         ]);
+        if let Some(command) = command {
+            attributes.push(KeyValue::new("tool.executable", command.executable.clone()));
+            span_input["executable"] = Value::String(command.executable);
+            if let Some(value) = command.command {
+                attributes.push(KeyValue::new("tool.command", value.clone()));
+                span_input["command"] = Value::String(value);
+            }
+            if let Some(value) = command.cwd {
+                attributes.push(KeyValue::new("tool.cwd", value.clone()));
+                span_input["cwd"] = Value::String(value);
+            }
+        }
+        attributes.push(KeyValue::new("lmnr.span.input", span_input.to_string()));
         let span = SpanBuilder::from_name(format!(
             "{}.tool.{}",
             harness_name(self.harness),
@@ -352,7 +371,8 @@ impl TurnTelemetry {
         let Some(labels) = tool_labels_from_item(item, &self.centaur_tool_names) else {
             return;
         };
-        self.start_tool(id.clone(), labels);
+        let command = tool_command_details(item, self.capture_transcripts);
+        self.start_tool(id.clone(), labels, command);
         if let Some(mut tool) = self.tools.remove(&id) {
             finish_tool_span(&mut tool.span, status);
         }
@@ -773,15 +793,58 @@ fn centaur_tool_labels(item: &Value, centaur_tool_names: &BTreeSet<String>) -> O
     })
 }
 
-fn unwrap_shell_words(command: &str) -> Option<Vec<String>> {
-    let words = shell_words::split(command).ok()?;
+fn tool_command_details(item: &Value, capture_transcripts: bool) -> Option<ToolCommandDetails> {
+    if !matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("commandExecution" | "command_execution")
+    ) {
+        return None;
+    }
+    let raw_command = string_at_path(item, &["command"])?;
+    let command = unwrap_shell_command(&raw_command);
+    let words = shell_words::split(&command).ok()?;
+    let executable = executable_name(words.first()?).to_owned();
+    Some(ToolCommandDetails {
+        executable,
+        command: capture_transcripts.then(|| bounded_tool_command(&command)),
+        cwd: if capture_transcripts {
+            workspace_relative_cwd(item)
+        } else {
+            None
+        },
+    })
+}
+
+fn unwrap_shell_command(command: &str) -> String {
+    let Ok(words) = shell_words::split(command) else {
+        return command.trim().to_owned();
+    };
     let executable = words.first().map(|word| executable_name(word));
     if matches!(executable, Some("bash" | "sh" | "zsh"))
         && matches!(words.get(1).map(String::as_str), Some("-c" | "-lc"))
+        && let Some(inner) = words.get(2)
     {
-        return shell_words::split(words.get(2)?).ok();
+        return inner.trim().to_owned();
     }
-    Some(words)
+    command.trim().to_owned()
+}
+
+fn workspace_relative_cwd(item: &Value) -> Option<String> {
+    let cwd = string_at_path(item, &["cwd"])?;
+    let cwd = Path::new(&cwd);
+    let workspace = env::var_os("CENTAUR_WORKSPACE_DIR")
+        .map(PathBuf::from)
+        .or_else(|| env::current_dir().ok())?;
+    let relative = cwd.strip_prefix(workspace).ok()?;
+    if relative.as_os_str().is_empty() {
+        Some(".".to_owned())
+    } else {
+        Some(relative.to_string_lossy().into_owned())
+    }
+}
+
+fn unwrap_shell_words(command: &str) -> Option<Vec<String>> {
+    shell_words::split(&unwrap_shell_command(command)).ok()
 }
 
 fn executable_name(value: &str) -> &str {
@@ -876,14 +939,22 @@ fn clean_optional(value: Option<&str>) -> Option<String> {
 }
 
 fn bounded_span_value(value: &str) -> String {
-    if value.len() <= MAX_SPAN_IO_BYTES {
+    bounded_value(value, MAX_SPAN_IO_BYTES)
+}
+
+fn bounded_tool_command(value: &str) -> String {
+    bounded_value(value, MAX_TOOL_COMMAND_BYTES)
+}
+
+fn bounded_value(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
         return value.to_owned();
     }
-    let mut end = MAX_SPAN_IO_BYTES;
+    let mut end = max_bytes.saturating_sub(TRUNCATION_SUFFIX.len());
     while !value.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}…[truncated]", &value[..end])
+    format!("{}{}", &value[..end], TRUNCATION_SUFFIX)
 }
 
 #[derive(Debug, Default)]
@@ -1188,7 +1259,15 @@ mod tests {
         tracer: SdkTracer,
         names: impl IntoIterator<Item = &'static str>,
     ) -> TurnTelemetry {
-        let mut turn = test_turn(tracer);
+        test_turn_with_centaur_tools_and_capture(tracer, names, false)
+    }
+
+    fn test_turn_with_centaur_tools_and_capture(
+        tracer: SdkTracer,
+        names: impl IntoIterator<Item = &'static str>,
+        capture_transcripts: bool,
+    ) -> TurnTelemetry {
+        let mut turn = test_turn_with_transcript_capture(tracer, capture_transcripts);
         turn.centaur_tool_names = names.into_iter().map(str::to_owned).collect();
         turn
     }
@@ -1267,6 +1346,17 @@ mod tests {
             attribute(usage, "lmnr.association.properties.session_id").as_deref(),
             Some("slack:T:C:1.0")
         );
+        for key in [
+            "gen_ai.usage.input_cost",
+            "gen_ai.usage.output_cost",
+            "gen_ai.usage.cost",
+        ] {
+            let cost = attribute(usage, key)
+                .unwrap_or_else(|| panic!("missing Laminar cost attribute {key}"))
+                .parse::<f64>()
+                .unwrap_or_else(|error| panic!("invalid {key}: {error}"));
+            assert!(cost > 0.0, "expected positive {key}");
+        }
     }
 
     #[test]
@@ -1317,11 +1407,58 @@ mod tests {
         assert_eq!(attribute(tool, "tool.kind").as_deref(), Some("centaur"));
         assert_eq!(attribute(tool, "tool.name").as_deref(), Some("websearch"));
         assert_eq!(attribute(tool, "tool.method").as_deref(), Some("cli"));
+        assert_eq!(
+            attribute(tool, "tool.executable").as_deref(),
+            Some("websearch")
+        );
+        assert_eq!(attribute(tool, "tool.command"), None);
+        assert_eq!(attribute(tool, "tool.cwd"), None);
         assert!(
             !attribute(tool, "lmnr.span.input")
                 .unwrap_or_default()
                 .contains("secret-value")
         );
+    }
+
+    #[test]
+    fn transcript_capture_exports_bounded_command_and_relative_cwd() {
+        let (exporter, provider, tracer) = test_telemetry();
+        let mut turn = test_turn_with_centaur_tools_and_capture(tracer, ["websearch"], true);
+        let cwd = env::current_dir().expect("current dir").join("src");
+        for method in ["item/started", "item/completed"] {
+            turn.observe_wire_value(&json!({
+                "method": method,
+                "params": {"item": {
+                    "id": "tool-1",
+                    "type": "commandExecution",
+                    "command": "/bin/bash -lc 'websearch search --query private-query'",
+                    "cwd": cwd,
+                    "exitCode": 0
+                }}
+            }));
+        }
+        provider.force_flush().expect("flush");
+
+        let spans = exporter.get_finished_spans().expect("spans");
+        assert_eq!(spans.len(), 1);
+        let tool = &spans[0];
+        assert_eq!(
+            attribute(tool, "tool.command").as_deref(),
+            Some("websearch search --query private-query")
+        );
+        assert_eq!(attribute(tool, "tool.cwd").as_deref(), Some("src"));
+        let input = attribute(tool, "lmnr.span.input").expect("tool input");
+        assert!(input.contains("private-query"));
+        assert!(input.contains("\"cwd\":\"src\""));
+    }
+
+    #[test]
+    fn captured_tool_commands_are_bounded() {
+        let command = format!("printf {}", "x".repeat(MAX_TOOL_COMMAND_BYTES));
+        let bounded = bounded_tool_command(&command);
+
+        assert!(bounded.ends_with(TRUNCATION_SUFFIX));
+        assert!(bounded.len() <= MAX_TOOL_COMMAND_BYTES);
     }
 
     #[test]
@@ -1558,7 +1695,8 @@ mod tests {
     fn bounded_span_value_preserves_utf8_boundary() {
         let value = format!("{}é", "a".repeat(MAX_SPAN_IO_BYTES - 1));
         let bounded = bounded_span_value(&value);
-        assert!(bounded.ends_with("…[truncated]"));
+        assert!(bounded.ends_with(TRUNCATION_SUFFIX));
+        assert!(bounded.len() <= MAX_SPAN_IO_BYTES);
         assert!(bounded.is_char_boundary(bounded.len()));
     }
 }

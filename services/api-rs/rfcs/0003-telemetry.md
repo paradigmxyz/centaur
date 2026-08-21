@@ -236,12 +236,16 @@ Spans may carry:
 - `tool.kind`
 - `tool.name`
 - `tool.method`
+- `tool.executable`
+- `tool.command`
+- `tool.cwd`
 - `tool.status`
 
-Tool spans must not carry tool arguments, command output, tool results, or
-prompt content. LLM input and output are exported only when
-`CENTAUR_TELEMETRY_CAPTURE_TRANSCRIPTS` is explicitly enabled, and are bounded
-before export. No span may carry raw metadata or secrets.
+Tool spans must not carry command output, tool results, or prompt content.
+Bounded shell commands, including their arguments, workspace-relative working
+directories, and LLM input and output are exported only when
+`CENTAUR_TELEMETRY_CAPTURE_TRANSCRIPTS` is explicitly enabled. No span may
+carry raw metadata or secrets.
 
 ## Trace Continuity
 
@@ -329,10 +333,11 @@ spans.
 - Setting `OTEL_EXPORTER_OTLP_ENDPOINT` enables trace export.
 - Dropping the telemetry guard flushes pending spans.
 - Metrics labels stay bounded.
-- Logs and tool spans do not record message text or stdout lines. LLM input and
-  output attributes are absent by default; when
-  `CENTAUR_TELEMETRY_CAPTURE_TRANSCRIPTS` is enabled, they are bounded. No
-  telemetry path records raw metadata, secrets, or auth headers.
+- Logs and tool spans do not record message text, stdout lines, or tool results.
+  LLM input, LLM output, shell command text, and working-directory attributes
+  are absent by default; when `CENTAUR_TELEMETRY_CAPTURE_TRANSCRIPTS` is
+  enabled, they are bounded. Executable names remain available without content
+  capture. No telemetry path records raw metadata, secrets, or auth headers.
 - Harness tool spans close at the end of their turn, including failure and
   cancellation paths.
 - Every harness LLM and tool span is searchable by Laminar session ID and
