@@ -329,6 +329,12 @@ module SlackDm
         headers: { "Authorization" => "Bearer #{@credential.access_token}" }
       )
       SlackApi.parse_response!(response, max_rate_limit_wait: rate_limit_max_wait)
+    rescue Socket::ResolutionError => e
+      raise SlackApi::TransientError.new(
+        "Slack API hostname resolution failed: #{e.message}",
+        retry_after: SlackApi::DEFAULT_TRANSIENT_RETRY_AFTER_SECONDS,
+        code: "hostname_resolution_failed"
+      )
     end
 
     def max_slack_ts(left, right)
