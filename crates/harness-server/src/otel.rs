@@ -1216,10 +1216,7 @@ mod tests {
             .iter()
             .find(|span| span.name == "codex.tool.command_execution")
             .expect("tool span");
-        assert_eq!(
-            attribute(tool, "tool.status").as_deref(),
-            Some("failed")
-        );
+        assert_eq!(attribute(tool, "tool.status").as_deref(), Some("failed"));
         let turn = spans
             .iter()
             .find(|span| span.name == "codex.session_task.turn")
