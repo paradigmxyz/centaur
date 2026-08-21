@@ -26,10 +26,36 @@ class ScheduledTaskTest < ActiveSupport::TestCase
     end
   end
 
-  test "uses the cron expression as the schedule label when it does not match a preset" do
-    task = ScheduledTask.new(valid_attributes(cron_expression: "15 6 * * *"))
+  test "maps the requested weekday presets to cron schedules" do
+    assert_equal "0 9 * * 1-5", ScheduledTask.cron_for("weekdays")
+    assert_equal "0 9 * * 1", ScheduledTask.cron_for("mondays")
+    assert_equal "0 9 * * 5", ScheduledTask.cron_for("fridays")
+  end
 
-    assert_equal "15 6 * * *", task.schedule_label
+  test "builds a custom cron schedule from selected days and time" do
+    cron = ScheduledTask.cron_for(
+      "custom",
+      custom_days: %w[5 1 3 9],
+      custom_time: "14:30"
+    )
+    task = ScheduledTask.new(valid_attributes(cron_expression: cron))
+
+    assert_equal "30 14 * * 1,3,5", cron
+    assert_equal "custom", task.schedule_preset
+    assert_equal %w[1 3 5], task.custom_schedule_days
+    assert_equal "14:30", task.custom_schedule_time
+    assert_equal "Mon, Wed, Fri at 2:30 PM PT", task.schedule_label
+  end
+
+  test "rejects incomplete custom schedules" do
+    assert_empty ScheduledTask.cron_for("custom", custom_days: [], custom_time: "09:00")
+    assert_empty ScheduledTask.cron_for("custom", custom_days: %w[1], custom_time: "25:00")
+  end
+
+  test "uses the cron expression as the schedule label when it cannot be edited as a weekly schedule" do
+    task = ScheduledTask.new(valid_attributes(cron_expression: "0 * * * *"))
+
+    assert_equal "0 * * * *", task.schedule_label
   end
 
   test "validates custom cron schedules and Slack delivery channels" do
