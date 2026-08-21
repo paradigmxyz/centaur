@@ -1438,6 +1438,23 @@ Returns `201`. The plaintext `token` is included **only** in this create respons
 | `GET`    | `/api/v1/api_keys/:id` | Fetch one (no token). |
 | `DELETE` | `/api/v1/api_keys/:id` | Revoke (soft delete). Returns `204`. Revoking the key used for the current request returns `422` with `"cannot revoke the API key used for this request"`. |
 
+## Scheduled Tasks
+
+Scheduled tasks run one agent prompt on a five-field cron schedule in Pacific Time and deliver the result to Slack. Task IDs use the `tsk_` prefix. The `delivery_channel` can be a Slack channel ID available to the task author, or the special value `dm`, which resolves to the linked user's Slack direct message when the task is created or updated.
+
+These endpoints use the sandbox entitlement JWT injected by `iron-proxy`. Every operation requires an active Console user linked to the sandbox principal and is scoped to tasks owned by that user. A task owned by another user returns `404`.
+
+| Method | Path | Notes |
+| ------ | ---- | ----- |
+| `GET` | `/api/v1/sandbox/scheduled_tasks` | List the linked user's tasks. |
+| `GET` | `/api/v1/sandbox/scheduled_tasks/:id` | Read one owned task by `tsk_...` OID. |
+| `POST` | `/api/v1/sandbox/scheduled_tasks` | Create a task from `data.name`, `data.prompt`, `data.cron_expression`, `data.delivery_channel`, and optional `data.enabled`. |
+| `PUT`/`PATCH` | `/api/v1/sandbox/scheduled_tasks/:id` | Update any supplied task fields. |
+| `DELETE` | `/api/v1/sandbox/scheduled_tasks/:id` | Delete an owned task. Returns `204`. |
+| `POST` | `/api/v1/sandbox/scheduled_tasks/:id/run` | Queue an immediate run. Returns `202`. |
+
+Responses include the task's cron expression, fixed timezone, human-readable schedule, enabled state, next run time, and latest run metadata. The `centaur-console` CLI exposes the same operations through `tasks`, `task`, `create-task`, `update-task`, `delete-task`, and `run-task`.
+
 ## Skills
 
 Skills are mutable `SKILL.md` documents authored by signed-in users in Console. There is no revision or draft resource: updating a public skill changes the document returned to agents immediately. Skill IDs use the `skl_` prefix.
