@@ -1088,14 +1088,21 @@ fn rewrite_otlp_trace_payload_with_context(
                 if !span.name.is_empty() && !span.name.starts_with(CODEX_SPAN_PREFIX) {
                     span.name = format!("{}{}", CODEX_SPAN_PREFIX, span.name);
                 }
-                normalize_codex_llm_span(span, thread_key);
+                if let Some(thread_key) = clean_optional(thread_key) {
+                    set_attribute_string(
+                        &mut span.attributes,
+                        "lmnr.association.properties.session_id",
+                        &thread_key,
+                    );
+                }
+                normalize_codex_llm_span(span);
             }
         }
     }
     Ok(request.encode_to_vec())
 }
 
-fn normalize_codex_llm_span(span: &mut Span, thread_key: Option<&str>) {
+fn normalize_codex_llm_span(span: &mut Span) {
     if span.name != "codex.session_task.turn" {
         return;
     }
@@ -1113,13 +1120,6 @@ fn normalize_codex_llm_span(span: &mut Span, thread_key: Option<&str>) {
     let total_tokens = attribute_int(&span.attributes, "codex.turn.token_usage.total_tokens");
 
     set_attribute_string(&mut span.attributes, "lmnr.span.type", "LLM");
-    if let Some(thread_key) = clean_optional(thread_key) {
-        set_attribute_string(
-            &mut span.attributes,
-            "lmnr.association.properties.session_id",
-            &thread_key,
-        );
-    }
     set_attribute_string(&mut span.attributes, "gen_ai.operation.name", "chat");
     set_attribute_string(&mut span.attributes, "gen_ai.system", "openai");
     set_attribute_string(&mut span.attributes, "gen_ai.request.model", &model);
@@ -1362,18 +1362,24 @@ trust_level = "trusted"
         let request = ExportTraceServiceRequest {
             resource_spans: vec![ResourceSpans {
                 scope_spans: vec![ScopeSpans {
-                    spans: vec![Span {
-                        name: "session_task.turn".to_string(),
-                        attributes: vec![
-                            kv_string("model", "gpt-5.5"),
-                            kv_int("codex.turn.token_usage.input_tokens", 10),
-                            kv_int("codex.turn.token_usage.output_tokens", 20),
-                            kv_int("codex.turn.token_usage.cached_input_tokens", 7),
-                            kv_int("codex.turn.token_usage.reasoning_output_tokens", 3),
-                            kv_int("codex.turn.token_usage.total_tokens", 30),
-                        ],
-                        ..Default::default()
-                    }],
+                    spans: vec![
+                        Span {
+                            name: "session_task.turn".to_string(),
+                            attributes: vec![
+                                kv_string("model", "gpt-5.5"),
+                                kv_int("codex.turn.token_usage.input_tokens", 10),
+                                kv_int("codex.turn.token_usage.output_tokens", 20),
+                                kv_int("codex.turn.token_usage.cached_input_tokens", 7),
+                                kv_int("codex.turn.token_usage.reasoning_output_tokens", 3),
+                                kv_int("codex.turn.token_usage.total_tokens", 30),
+                            ],
+                            ..Default::default()
+                        },
+                        Span {
+                            name: "app_server.startup".to_string(),
+                            ..Default::default()
+                        },
+                    ],
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -1409,6 +1415,15 @@ trust_level = "trusted"
         assert_eq!(
             attribute_int(&span.attributes, "gen_ai.usage.cache_read_input_tokens"),
             Some(7)
+        );
+        let startup_span = &decoded.resource_spans[0].scope_spans[0].spans[1];
+        assert_eq!(startup_span.name, "codex.app_server.startup");
+        assert_eq!(
+            attribute_string(
+                &startup_span.attributes,
+                "lmnr.association.properties.session_id"
+            ),
+            "slack:T:C:1.0"
         );
     }
 
