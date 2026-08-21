@@ -1,310 +1,505 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
-use std::fs;
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
-use std::sync::{
-    OnceLock,
-    mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel},
+use std::sync::OnceLock;
+use std::time::SystemTime;
+
+use opentelemetry::trace::{
+    Span as _, SpanBuilder, SpanContext, SpanId, SpanKind, Status, TraceContextExt as _,
+    TraceFlags, TraceId, TraceState, TracerProvider as _,
 };
-use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
-use opentelemetry_proto::tonic::common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value};
-use opentelemetry_proto::tonic::resource::v1::Resource;
-use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span, span};
-use prost::Message as _;
+use opentelemetry::{Context, KeyValue};
+use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::trace::{SdkTracer, SdkTracerProvider, Span as SdkSpan};
 use serde_json::{Value, json};
-use url::Url;
-use uuid::Uuid;
 
-use crate::{HarnessKind, HarnessServerError, NormalizedTokenUsage, Result};
+use crate::{HarnessKind, NormalizedContent, NormalizedEvent, NormalizedTokenUsage};
 
-const CODEX_SPAN_PREFIX: &str = "codex.";
 const LAMINAR_METADATA_PREFIX: &str = "lmnr.association.properties.metadata.";
+const MAX_SPAN_IO_BYTES: usize = 60 * 1024;
 
-static OTLP_PROXY_ENDPOINT: OnceLock<String> = OnceLock::new();
-static USAGE_EXPORTER: OnceLock<UsageExporter> = OnceLock::new();
+static TELEMETRY: OnceLock<Option<TelemetryRuntime>> = OnceLock::new();
 
-const USAGE_EXPORT_QUEUE_CAPACITY: usize = 256;
-const USAGE_EXPORT_BATCH_SIZE: usize = 32;
+struct TelemetryRuntime {
+    _provider: SdkTracerProvider,
+    tracer: SdkTracer,
+}
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TraceContext {
     pub(crate) thread_key: Option<String>,
-    pub(crate) trace_id: Option<String>,
     pub(crate) traceparent: Option<String>,
     pub(crate) metadata: BTreeMap<String, Value>,
 }
 
 impl TraceContext {
-    pub(crate) fn effective_trace_id(&self) -> Option<String> {
-        self.traceparent
-            .as_deref()
-            .and_then(trace_id_from_traceparent)
-            .or_else(|| self.trace_id.clone())
-            .or_else(|| clean_optional(env::var("CENTAUR_TRACE_ID").ok().as_deref()))
-    }
-
     pub(crate) fn effective_traceparent(&self) -> Option<String> {
-        let trace_id = self.effective_trace_id()?;
-        if let Some(traceparent) = self.traceparent.as_deref().and_then(validate_traceparent)
-            && trace_id_from_traceparent(traceparent).as_deref() == Some(trace_id.as_str())
-        {
-            return Some(traceparent.to_owned());
+        validate_traceparent(self.traceparent.as_deref()?).map(str::to_owned)
+    }
+
+    fn parent_context(&self) -> Option<Context> {
+        let traceparent = validate_traceparent(self.traceparent.as_deref()?)?;
+        let mut fields = traceparent.split('-');
+        let _version = fields.next()?;
+        let trace_id = TraceId::from_hex(fields.next()?).ok()?;
+        let span_id = SpanId::from_hex(fields.next()?).ok()?;
+        let flags = u8::from_str_radix(fields.next()?, 16).ok()?;
+        let span_context = SpanContext::new(
+            trace_id,
+            span_id,
+            TraceFlags::new(flags),
+            true,
+            TraceState::default(),
+        );
+        Some(Context::new().with_remote_span_context(span_context))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TurnStatus {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl TurnStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
         }
-        traceparent_from_trace_id(&trace_id)
+    }
+
+    fn otel_status(self) -> Status {
+        match self {
+            Self::Completed => Status::Ok,
+            Self::Failed => Status::error("turn failed"),
+            Self::Cancelled => Status::error("turn cancelled"),
+        }
     }
 }
 
-pub(crate) fn configure_codex_otel_for_startup(trace: &TraceContext) -> Result<()> {
-    if trace.effective_trace_id().is_none() {
-        return Ok(());
-    }
-    let Some(endpoint) = otlp_traces_endpoint() else {
-        return Ok(());
-    };
-    let proxy_endpoint = start_otlp_proxy(&endpoint)?;
-    let config_path = codex_config_path();
-    let base = config_path
-        .as_ref()
-        .and_then(|path| fs::read_to_string(path).ok())
-        .map(|contents| strip_otel_toml_sections(&contents))
-        .unwrap_or_default();
-    let environment = otel_environment();
-    let api_key = otel_authorization_token();
-    let next = codex_otel_config_contents(
-        &base,
-        &proxy_endpoint,
-        trace.thread_key.as_deref(),
-        api_key.as_deref(),
-        &environment,
-    );
-    let Some(config_path) = config_path else {
-        return Err(HarnessServerError::Protocol(
-            "CODEX_HOME/HOME unavailable; cannot write Codex OTEL config".to_string(),
-        ));
-    };
-    if let Some(parent) = config_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(config_path, next)?;
-    Ok(())
+pub(crate) struct TurnTelemetry {
+    tracer: Option<SdkTracer>,
+    parent: Option<Context>,
+    trace: TraceContext,
+    harness: HarnessKind,
+    model: String,
+    model_provider: String,
+    turn_id: String,
+    input: Option<String>,
+    output: SpanOutput,
+    usage: Option<NormalizedTokenUsage>,
+    started_at: SystemTime,
+    tools: HashMap<String, ActiveTool>,
+    observed_status: Option<TurnStatus>,
+    finished: bool,
 }
 
-pub(crate) fn unix_time_nanos() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos()
-        .min(u128::from(u64::MAX)) as u64
+struct ActiveTool {
+    span: SdkSpan,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct HarnessUsageSpan<'a> {
-    pub(crate) harness: HarnessKind,
-    pub(crate) model: &'a str,
-    pub(crate) model_provider: &'a str,
-    pub(crate) turn_id: &'a str,
-    pub(crate) input: Option<&'a str>,
-    pub(crate) output: Option<&'a str>,
-    pub(crate) start_unix_nano: u64,
-    pub(crate) end_unix_nano: u64,
+struct ToolLabels {
+    kind: String,
+    name: String,
+    method: String,
 }
 
-pub(crate) fn export_harness_usage_span(
-    trace: &TraceContext,
-    span: HarnessUsageSpan<'_>,
-    usage: &NormalizedTokenUsage,
-) -> Result<()> {
-    if !usage.has_counts() {
-        return Ok(());
+impl TurnTelemetry {
+    pub(crate) fn new(
+        trace: Option<&TraceContext>,
+        harness: HarnessKind,
+        model: impl Into<String>,
+        model_provider: impl Into<String>,
+        turn_id: impl Into<String>,
+        input: Option<String>,
+    ) -> Self {
+        let trace = trace.cloned().unwrap_or_default();
+        let parent = trace.parent_context();
+        let tracer = parent.as_ref().and_then(|_| telemetry_tracer());
+        Self::with_tracer(
+            trace,
+            parent,
+            tracer,
+            harness,
+            model.into(),
+            model_provider.into(),
+            turn_id.into(),
+            input,
+        )
     }
-    let Some(endpoint) = otlp_traces_endpoint() else {
-        return Ok(());
-    };
-    let request = harness_usage_trace_request(trace, span, usage)?;
-    let exporter = USAGE_EXPORTER.get_or_init(|| UsageExporter::start(endpoint));
-    exporter.enqueue(request)
-}
 
-struct UsageExporter {
-    sender: SyncSender<ExportTraceServiceRequest>,
-}
-
-impl UsageExporter {
-    fn start(endpoint: String) -> Self {
-        let headers = otel_forward_headers();
-        let (sender, receiver) = sync_channel(USAGE_EXPORT_QUEUE_CAPACITY);
-        if let Err(error) = thread::Builder::new()
-            .name("harness-otel-export".to_owned())
-            .spawn(move || run_usage_exporter(receiver, endpoint, headers))
-        {
-            eprintln!("failed to start harness OTLP exporter: {error}");
+    #[allow(clippy::too_many_arguments)]
+    fn with_tracer(
+        trace: TraceContext,
+        parent: Option<Context>,
+        tracer: Option<SdkTracer>,
+        harness: HarnessKind,
+        model: String,
+        model_provider: String,
+        turn_id: String,
+        input: Option<String>,
+    ) -> Self {
+        Self {
+            tracer,
+            parent,
+            trace,
+            harness,
+            model,
+            model_provider,
+            turn_id,
+            input: input.map(|value| bounded_span_value(&value)),
+            output: SpanOutput::default(),
+            usage: None,
+            started_at: SystemTime::now(),
+            tools: HashMap::new(),
+            observed_status: None,
+            finished: false,
         }
-        Self { sender }
     }
 
-    fn enqueue(&self, request: ExportTraceServiceRequest) -> Result<()> {
-        self.sender.try_send(request).map_err(|error| match error {
-            TrySendError::Full(_) => HarnessServerError::Protocol(
-                "harness OTLP export queue is full; dropping usage span".to_owned(),
+    pub(crate) fn observe_normalized(&mut self, event: &NormalizedEvent) {
+        if let Some(usage) = event.token_usage() {
+            self.usage = Some(usage.clone());
+        }
+        match event {
+            NormalizedEvent::AssistantMessage { content, .. } => {
+                for item in content {
+                    if let NormalizedContent::AgentText { item_id, text } = item {
+                        self.output.set_item_text(item_id, text);
+                    }
+                }
+            }
+            NormalizedEvent::AgentTextDelta { item_id, delta } => {
+                self.output.append_delta(item_id, delta);
+            }
+            NormalizedEvent::Error { message } => self.output.set_fallback_if_empty(message),
+            _ => {}
+        }
+    }
+
+    pub(crate) fn observe_wire_value(&mut self, value: &Value) {
+        self.observe_tool_notification(value);
+        self.remember_turn_id(value);
+        let Some(method) = value.get("method").and_then(Value::as_str) else {
+            return;
+        };
+        match method {
+            "item/completed" | "item.completed" => {
+                if let Some(item) = protocol_item(value) {
+                    self.observe_completed_output(item);
+                }
+            }
+            "item/agentMessage/delta" => {
+                if let (Some(item_id), Some(delta)) = (
+                    string_at_path(value, &["params", "itemId"]),
+                    string_at_path(value, &["params", "delta"]),
+                ) {
+                    self.output.append_delta(&item_id, &delta);
+                }
+            }
+            "thread/tokenUsage/updated" => self.observe_codex_usage(value),
+            "turn/completed" => {
+                self.observed_status = value
+                    .pointer("/params/turn/status")
+                    .and_then(Value::as_str)
+                    .and_then(|status| match status {
+                        "completed" => Some(TurnStatus::Completed),
+                        "interrupted" | "cancelled" => Some(TurnStatus::Cancelled),
+                        "failed" => Some(TurnStatus::Failed),
+                        _ => None,
+                    });
+            }
+            "turn/failed" | "error" => self.observed_status = Some(TurnStatus::Failed),
+            "thread/status/changed"
+                if value.pointer("/params/status/type").and_then(Value::as_str)
+                    == Some("systemError") =>
+            {
+                self.observed_status = Some(TurnStatus::Failed);
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn observe_tool_notification(&mut self, value: &Value) {
+        self.remember_turn_id(value);
+        match value.get("method").and_then(Value::as_str) {
+            Some("item/started" | "item.started") => {
+                if let Some(item) = protocol_item(value)
+                    && let Some(id) = string_at_path(item, &["id"])
+                    && let Some(labels) = tool_labels_from_item(item)
+                {
+                    self.start_tool(id, labels);
+                }
+            }
+            Some("item/completed" | "item.completed") => {
+                if let Some(item) = protocol_item(value) {
+                    self.finish_completed_tool(item);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn finish(&mut self, status: TurnStatus) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        let status = self.observed_status.unwrap_or(status);
+
+        let dangling_status = match status {
+            TurnStatus::Cancelled => "cancelled",
+            TurnStatus::Completed | TurnStatus::Failed => "failed",
+        };
+        for (_id, mut tool) in std::mem::take(&mut self.tools) {
+            finish_tool_span(&mut tool.span, dangling_status);
+        }
+        self.finish_usage_span(status);
+    }
+
+    fn remember_turn_id(&mut self, value: &Value) {
+        let turn_id = [
+            &["params", "turnId"][..],
+            &["params", "turn", "id"][..],
+            &["result", "turn", "id"][..],
+        ]
+        .into_iter()
+        .find_map(|path| string_at_path(value, path));
+        if let Some(turn_id) = turn_id {
+            self.turn_id = turn_id;
+        }
+    }
+
+    fn start_tool(&mut self, id: String, labels: ToolLabels) {
+        let (Some(tracer), Some(parent)) = (self.tracer.as_ref(), self.parent.as_ref()) else {
+            return;
+        };
+        if let Some(mut previous) = self.tools.remove(&id) {
+            finish_tool_span(&mut previous.span, "failed");
+        }
+        let mut attributes = self.common_attributes();
+        attributes.extend([
+            KeyValue::new("lmnr.span.type", "TOOL"),
+            KeyValue::new("tool.kind", labels.kind.clone()),
+            KeyValue::new("tool.name", labels.name.clone()),
+            KeyValue::new("tool.method", labels.method.clone()),
+            KeyValue::new(
+                "lmnr.span.input",
+                json!({
+                    "kind": labels.kind,
+                    "name": labels.name,
+                    "method": labels.method,
+                })
+                .to_string(),
             ),
-            TrySendError::Disconnected(_) => {
-                HarnessServerError::Protocol("harness OTLP export worker stopped".to_owned())
+        ]);
+        let span = SpanBuilder::from_name(format!(
+            "{}.tool.{}",
+            harness_name(self.harness),
+            labels.name
+        ))
+        .with_kind(SpanKind::Internal)
+        .with_attributes(attributes)
+        .start_with_context(tracer, parent);
+        self.tools.insert(id, ActiveTool { span });
+    }
+
+    fn observe_completed_output(&mut self, item: &Value) {
+        if matches!(
+            item.get("type").and_then(Value::as_str),
+            Some("agentMessage" | "agent_message")
+        ) && let Some(item_id) = string_at_path(item, &["id"])
+            && let Some(text) = string_at_path(item, &["text"])
+        {
+            self.output.set_item_text(&item_id, &text);
+        }
+    }
+
+    fn finish_completed_tool(&mut self, item: &Value) {
+        let Some(id) = string_at_path(item, &["id"]) else {
+            return;
+        };
+        let status = completed_tool_status(item);
+        if let Some(mut tool) = self.tools.remove(&id) {
+            finish_tool_span(&mut tool.span, status);
+            return;
+        }
+        let Some(labels) = tool_labels_from_item(item) else {
+            return;
+        };
+        self.start_tool(id.clone(), labels);
+        if let Some(mut tool) = self.tools.remove(&id) {
+            finish_tool_span(&mut tool.span, status);
+        }
+    }
+
+    fn observe_codex_usage(&mut self, value: &Value) {
+        let usage = value
+            .pointer("/params/tokenUsage/last")
+            .or_else(|| value.pointer("/params/token_usage/last"))
+            .and_then(normalized_usage_from_value);
+        let Some(usage) = usage else {
+            return;
+        };
+        if let Some(total) = self.usage.as_mut() {
+            add_usage(total, &usage);
+        } else {
+            self.usage = Some(usage);
+        }
+    }
+
+    fn finish_usage_span(&mut self, status: TurnStatus) {
+        let (Some(tracer), Some(parent), Some(usage)) = (
+            self.tracer.as_ref(),
+            self.parent.as_ref(),
+            self.usage.as_ref(),
+        ) else {
+            return;
+        };
+        if !usage.has_counts() {
+            return;
+        }
+
+        let harness = harness_name(self.harness);
+        let system = gen_ai_system(self.harness, &self.model_provider);
+        let model = usage
+            .model
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(&self.model);
+        let mut attributes = self.common_attributes();
+        attributes.extend([
+            KeyValue::new("lmnr.span.type", "LLM"),
+            KeyValue::new("gen_ai.operation.name", "chat"),
+            KeyValue::new("gen_ai.system", system),
+            KeyValue::new("gen_ai.request.model", model.to_owned()),
+            KeyValue::new("gen_ai.response.model", model.to_owned()),
+            KeyValue::new("centaur.harness", harness),
+            KeyValue::new("centaur.model_provider", self.model_provider.clone()),
+            KeyValue::new("centaur.turn_id", self.turn_id.clone()),
+            KeyValue::new("centaur.turn_status", status.as_str()),
+        ]);
+        add_usage_attributes(&mut attributes, usage);
+        add_io_attributes(
+            &mut attributes,
+            self.input.as_deref(),
+            self.output.value().as_deref(),
+        );
+        if let Some(cost) = estimate_usage_cost(self.harness, system, model, usage) {
+            attributes.extend([
+                KeyValue::new("gen_ai.usage.input_cost", cost.input_cost),
+                KeyValue::new("gen_ai.usage.output_cost", cost.output_cost),
+                KeyValue::new("gen_ai.usage.cost", cost.total_cost()),
+                KeyValue::new("gen_ai.usage.cost_currency", "USD"),
+                KeyValue::new("centaur.usage.input_cost_usd", cost.input_cost),
+                KeyValue::new("centaur.usage.output_cost_usd", cost.output_cost),
+                KeyValue::new("centaur.usage.estimated_cost_usd", cost.total_cost()),
+                KeyValue::new("centaur.usage.cost_source", cost.source),
+                KeyValue::new("centaur.usage.cost_estimated", true),
+            ]);
+        }
+
+        let mut span = SpanBuilder::from_name(format!("{harness}.session_task.turn"))
+            .with_kind(SpanKind::Internal)
+            .with_start_time(self.started_at)
+            .with_attributes(attributes)
+            .start_with_context(tracer, parent);
+        span.set_status(status.otel_status());
+        span.end();
+    }
+
+    fn common_attributes(&self) -> Vec<KeyValue> {
+        let mut attributes = Vec::new();
+        if let Some(thread_key) = self.trace.thread_key.as_deref() {
+            attributes.push(KeyValue::new("centaur.thread_key", thread_key.to_owned()));
+            attributes.push(KeyValue::new(
+                "lmnr.association.properties.session_id",
+                thread_key.to_owned(),
+            ));
+        }
+        if let Some(execution_id) = self
+            .trace
+            .metadata
+            .get("execution_id")
+            .and_then(Value::as_str)
+        {
+            attributes.push(KeyValue::new(
+                "centaur.execution_id",
+                execution_id.to_owned(),
+            ));
+            attributes.push(KeyValue::new(
+                format!("{LAMINAR_METADATA_PREFIX}execution_id"),
+                execution_id.to_owned(),
+            ));
+        }
+        attributes
+    }
+}
+
+impl Drop for TurnTelemetry {
+    fn drop(&mut self) {
+        self.finish(TurnStatus::Failed);
+    }
+}
+
+fn telemetry_tracer() -> Option<SdkTracer> {
+    TELEMETRY
+        .get_or_init(|| match build_telemetry_runtime() {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                eprintln!("failed to initialize harness OTLP exporter: {error}");
+                None
             }
         })
-    }
+        .as_ref()
+        .map(|runtime| runtime.tracer.clone())
 }
 
-fn run_usage_exporter(
-    receiver: Receiver<ExportTraceServiceRequest>,
-    endpoint: String,
-    headers: BTreeMap<String, String>,
-) {
-    while let Ok(first) = receiver.recv() {
-        let mut batch = first;
-        for _ in 1..USAGE_EXPORT_BATCH_SIZE {
-            match receiver.try_recv() {
-                Ok(mut request) => batch.resource_spans.append(&mut request.resource_spans),
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
-            }
-        }
-        if let Err(error) = post_otlp_trace_payload(&endpoint, &headers, &batch.encode_to_vec()) {
-            eprintln!("harness usage OTLP export failed: {error:#}");
-        }
+fn build_telemetry_runtime() -> Result<Option<TelemetryRuntime>, String> {
+    if traces_export_disabled() || otlp_traces_endpoint().is_none() {
+        return Ok(None);
     }
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_http()
+        .build()
+        .map_err(|error| error.to_string())?;
+    let provider = SdkTracerProvider::builder()
+        .with_resource(
+            Resource::builder()
+                .with_service_name("harness-server")
+                .with_attribute(KeyValue::new("deployment.environment", otel_environment()))
+                .build(),
+        )
+        .with_batch_exporter(exporter)
+        .build();
+    let tracer = provider.tracer("centaur.harness-server");
+    Ok(Some(TelemetryRuntime {
+        _provider: provider,
+        tracer,
+    }))
 }
 
-fn codex_config_path() -> Option<PathBuf> {
-    env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
-        .map(|home| home.join("config.toml"))
+fn traces_export_disabled() -> bool {
+    matches!(
+        env::var("OTEL_TRACES_EXPORTER")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "none" | "false" | "0" | "off"
+    )
 }
 
 fn otlp_traces_endpoint() -> Option<String> {
-    let traces_endpoint = clean_optional(
+    clean_optional(
         env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
             .ok()
             .as_deref(),
-    );
-    if traces_endpoint.is_some() {
-        return traces_endpoint;
-    }
-    let base = clean_optional(env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok().as_deref())?;
-    if base.ends_with("/v1/traces") {
-        Some(base)
-    } else {
-        Some(format!("{}/v1/traces", base.trim_end_matches('/')))
-    }
-}
-
-fn clean_optional(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-}
-
-fn strip_otel_toml_sections(contents: &str) -> String {
-    let mut kept = Vec::new();
-    let mut skipping = false;
-    for line in contents.lines() {
-        let stripped = line.trim();
-        if stripped.starts_with('[') && stripped.ends_with(']') {
-            let section = stripped.trim_matches(['[', ']']).trim();
-            skipping = section == "otel" || section.starts_with("otel.");
-        }
-        if !skipping {
-            kept.push(line);
-        }
-    }
-    kept.join("\n").trim_end().to_owned()
-}
-
-fn toml_string(value: &str) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
-}
-
-fn codex_otel_config_contents(
-    base: &str,
-    endpoint: &str,
-    thread_key: Option<&str>,
-    api_key: Option<&str>,
-    environment: &str,
-) -> String {
-    let mut headers = Vec::new();
-    if let Some(thread_key) = clean_optional(thread_key) {
-        headers.push(format!(
-            "x-centaur-thread-key = {}",
-            toml_string(&thread_key)
-        ));
-    }
-    if let Some(api_key) = clean_optional(api_key) {
-        headers.push(format!(
-            "authorization = {}",
-            toml_string(&format!("Bearer {api_key}"))
-        ));
-    }
-    let otel_block = [
-        "[otel]".to_string(),
-        format!("environment = {}", toml_string(environment)),
-        "log_user_prompt = true".to_string(),
-        format!(
-            "span_attributes = {{ \"service.name\" = {}, \"centaur.span_prefix\" = {} }}",
-            toml_string("codex"),
-            toml_string(CODEX_SPAN_PREFIX)
-        ),
-        format!(
-            "trace_exporter = {{ otlp-http = {{ endpoint = {}, protocol = \"binary\", headers = {{ {} }} }} }}",
-            toml_string(endpoint),
-            headers.join(", ")
-        ),
-    ]
-    .join("\n");
-    if base.trim().is_empty() {
-        format!("{otel_block}\n")
-    } else {
-        format!("{}\n\n{otel_block}\n", base.trim_end())
-    }
-}
-
-fn otel_headers() -> BTreeMap<String, String> {
-    let mut headers = BTreeMap::new();
-    let Some(raw) = clean_optional(env::var("OTEL_EXPORTER_OTLP_HEADERS").ok().as_deref()) else {
-        return headers;
-    };
-    for item in raw.split(',') {
-        let Some((key, value)) = item.split_once('=') else {
-            continue;
-        };
-        let key = key.trim().to_ascii_lowercase();
-        if !key.is_empty() {
-            headers.insert(key, percent_decode(value.trim()));
-        }
-    }
-    headers
-}
-
-fn otel_authorization_token() -> Option<String> {
-    let authorization = clean_optional(otel_headers().get("authorization").map(String::as_str))?;
-    authorization
-        .strip_prefix("Bearer ")
-        .or_else(|| authorization.strip_prefix("bearer "))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .or(Some(authorization))
-}
-
-fn otel_forward_headers() -> BTreeMap<String, String> {
-    otel_headers()
-        .into_iter()
-        .filter(|(name, _)| name == "authorization")
-        .collect()
+    )
+    .or_else(|| clean_optional(env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok().as_deref()))
 }
 
 fn otel_environment() -> String {
@@ -313,8 +508,10 @@ fn otel_environment() -> String {
             let Some((key, value)) = item.split_once('=') else {
                 continue;
             };
-            if key.trim() == "deployment.environment"
-                && let Some(value) = clean_optional(Some(value))
+            if matches!(
+                key.trim(),
+                "deployment.environment" | "deployment.environment.name"
+            ) && let Some(value) = clean_optional(Some(value))
             {
                 return value;
             }
@@ -325,315 +522,43 @@ fn otel_environment() -> String {
         .unwrap_or_else(|| "dev".to_string())
 }
 
-fn percent_decode(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%'
-            && index + 2 < bytes.len()
-            && let (Some(hi), Some(lo)) = (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
-        {
-            out.push((hi << 4) | lo);
-            index += 3;
-            continue;
-        }
-        out.push(bytes[index]);
-        index += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn hex_value(value: u8) -> Option<u8> {
-    match value {
-        b'0'..=b'9' => Some(value - b'0'),
-        b'a'..=b'f' => Some(value - b'a' + 10),
-        b'A'..=b'F' => Some(value - b'A' + 10),
-        _ => None,
-    }
-}
-
-fn start_otlp_proxy(endpoint: &str) -> Result<String> {
-    if let Some(existing) = OTLP_PROXY_ENDPOINT.get() {
-        return Ok(existing.clone());
-    }
-    let target = OtlpTarget::parse(endpoint)?;
-    let listener = TcpListener::bind(("127.0.0.1", 0))?;
-    let local = listener.local_addr()?;
-    thread::spawn(move || run_otlp_proxy(listener, target));
-    let endpoint = format!("http://{local}/v1/traces");
-    let _ = OTLP_PROXY_ENDPOINT.set(endpoint.clone());
-    Ok(endpoint)
-}
-
-#[derive(Clone, Debug)]
-struct OtlpTarget {
-    host: String,
-    port: u16,
-    path: String,
-    host_header: String,
-}
-
-impl OtlpTarget {
-    fn parse(endpoint: &str) -> Result<Self> {
-        let url = Url::parse(endpoint).map_err(|error| {
-            HarnessServerError::Protocol(format!("invalid OTLP endpoint: {error}"))
-        })?;
-        if url.scheme() != "http" {
-            return Err(HarnessServerError::Protocol(format!(
-                "harness OTLP proxy only supports http endpoints, got {}",
-                url.scheme()
-            )));
-        }
-        let host = url
-            .host_str()
-            .ok_or_else(|| HarnessServerError::Protocol("OTLP endpoint missing host".to_string()))?
-            .to_string();
-        let port = url.port_or_known_default().unwrap_or(80);
-        let mut path = url.path().to_string();
-        if path.is_empty() {
-            path = "/".to_string();
-        }
-        if let Some(query) = url.query() {
-            path.push('?');
-            path.push_str(query);
-        }
-        let host_header = if url.port().is_some() {
-            format!("{host}:{port}")
-        } else {
-            host.clone()
-        };
-        Ok(Self {
-            host,
-            port,
-            path,
-            host_header,
-        })
-    }
-}
-
-fn post_otlp_trace_payload(
-    endpoint: &str,
-    headers: &BTreeMap<String, String>,
-    body: &[u8],
-) -> Result<()> {
-    let target = OtlpTarget::parse(endpoint)?;
-    let mut upstream = TcpStream::connect((target.host.as_str(), target.port))?;
-    upstream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    upstream.set_write_timeout(Some(Duration::from_secs(10)))?;
-    write!(
-        upstream,
-        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/x-protobuf\r\nContent-Length: {}\r\nConnection: close\r\n",
-        target.path,
-        target.host_header,
-        body.len()
-    )?;
-    for (name, value) in headers {
-        if matches!(
-            name.as_str(),
-            "authorization" | "x-trace-id" | "x-centaur-thread-key"
-        ) {
-            write!(upstream, "{name}: {value}\r\n")?;
-        }
-    }
-    upstream.write_all(b"\r\n")?;
-    upstream.write_all(body)?;
-    upstream.flush()?;
-
-    let mut response = Vec::new();
-    upstream.read_to_end(&mut response)?;
-    let status = http_status_code(&response).unwrap_or(0);
-    if (200..300).contains(&status) {
-        Ok(())
+fn finish_tool_span(span: &mut SdkSpan, status: &str) {
+    span.set_attribute(KeyValue::new("tool.status", status.to_owned()));
+    span.set_attribute(KeyValue::new(
+        "lmnr.span.output",
+        json!({ "status": status }).to_string(),
+    ));
+    span.set_status(if status == "completed" {
+        Status::Ok
     } else {
-        Err(HarnessServerError::Protocol(format!(
-            "OTLP trace export failed with HTTP status {status}"
-        )))
-    }
+        Status::error(format!("tool {status}"))
+    });
+    span.end();
 }
 
-fn http_status_code(response: &[u8]) -> Option<u16> {
-    let line = String::from_utf8_lossy(response)
-        .lines()
-        .next()?
-        .to_string();
-    let mut parts = line.split_whitespace();
-    let _version = parts.next()?;
-    parts.next()?.parse().ok()
-}
-
-fn run_otlp_proxy(listener: TcpListener, target: OtlpTarget) {
-    for stream in listener.incoming() {
-        let Ok(stream) = stream else {
-            continue;
-        };
-        let target = target.clone();
-        thread::spawn(move || {
-            let _ = handle_otlp_proxy_connection(stream, &target);
-        });
-    }
-}
-
-fn handle_otlp_proxy_connection(mut stream: TcpStream, target: &OtlpTarget) -> std::io::Result<()> {
-    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
-    match read_http_request(&mut stream) {
-        Ok(request) if request.method == "POST" && request.path == "/v1/traces" => {
-            match rewrite_otlp_trace_payload_with_context(
-                &request.body,
-                request
-                    .headers
-                    .get("x-centaur-thread-key")
-                    .map(String::as_str),
-            ) {
-                Ok(body) => forward_otlp_request(&mut stream, target, &request.headers, &body),
-                Err(error) => {
-                    write_http_response(&mut stream, 400, "Bad Request", error.as_bytes())
-                }
-            }
-        }
-        Ok(_) => write_http_response(&mut stream, 404, "Not Found", b"not found"),
-        Err(error) => write_http_response(
-            &mut stream,
-            400,
-            "Bad Request",
-            error.to_string().as_bytes(),
-        ),
-    }
-}
-
-#[derive(Debug)]
-struct HttpRequest {
-    method: String,
-    path: String,
-    headers: BTreeMap<String, String>,
-    body: Vec<u8>,
-}
-
-fn read_http_request(stream: &mut TcpStream) -> std::io::Result<HttpRequest> {
-    let mut data = Vec::new();
-    let header_end = loop {
-        let mut buffer = [0_u8; 4096];
-        let read = stream.read(&mut buffer)?;
-        if read == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "connection closed before headers",
-            ));
-        }
-        data.extend_from_slice(&buffer[..read]);
-        if let Some(index) = find_header_end(&data) {
-            break index;
-        }
-        if data.len() > 64 * 1024 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "headers too large",
-            ));
-        }
-    };
-    let body_start = header_end + 4;
-    let headers_text = String::from_utf8_lossy(&data[..header_end]);
-    let mut lines = headers_text.lines();
-    let request_line = lines.next().unwrap_or_default();
-    let mut parts = request_line.split_whitespace();
-    let method = parts.next().unwrap_or_default().to_string();
-    let path = parts.next().unwrap_or_default().to_string();
-    let mut headers = BTreeMap::new();
-    for line in lines {
-        if let Some((key, value)) = line.split_once(':') {
-            headers.insert(key.trim().to_ascii_lowercase(), value.trim().to_string());
-        }
-    }
-    let content_length = headers
-        .get("content-length")
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(0);
-    let mut body = data[body_start..].to_vec();
-    if body.len() < content_length {
-        let mut remaining = vec![0_u8; content_length - body.len()];
-        stream.read_exact(&mut remaining)?;
-        body.extend_from_slice(&remaining);
-    }
-    body.truncate(content_length);
-    Ok(HttpRequest {
-        method,
-        path,
-        headers,
-        body,
-    })
-}
-
-fn find_header_end(data: &[u8]) -> Option<usize> {
-    data.windows(4).position(|window| window == b"\r\n\r\n")
-}
-
-fn forward_otlp_request(
-    client: &mut TcpStream,
-    target: &OtlpTarget,
-    incoming_headers: &BTreeMap<String, String>,
-    body: &[u8],
-) -> std::io::Result<()> {
-    let mut upstream = TcpStream::connect((target.host.as_str(), target.port))?;
-    upstream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    upstream.set_write_timeout(Some(Duration::from_secs(10)))?;
-    write!(
-        upstream,
-        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/x-protobuf\r\nContent-Length: {}\r\nConnection: close\r\n",
-        target.path,
-        target.host_header,
-        body.len()
-    )?;
-    for (name, value) in incoming_headers {
-        if matches!(
-            name.as_str(),
-            "authorization" | "x-trace-id" | "x-centaur-thread-key"
-        ) {
-            write!(upstream, "{name}: {value}\r\n")?;
-        }
-    }
-    upstream.write_all(b"\r\n")?;
-    upstream.write_all(body)?;
-    upstream.flush()?;
-
-    let mut response = Vec::new();
-    upstream.read_to_end(&mut response)?;
-    if response.is_empty() {
-        write_http_response(client, 502, "Bad Gateway", b"empty upstream response")
-    } else {
-        client.write_all(&response)
-    }
-}
-
-fn write_http_response(
-    stream: &mut TcpStream,
-    status: u16,
-    reason: &str,
-    body: &[u8],
-) -> std::io::Result<()> {
-    write!(
-        stream,
-        "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    )?;
-    stream.write_all(body)
-}
-
-fn harness_usage_trace_request(
-    trace: &TraceContext,
-    span_context: HarnessUsageSpan<'_>,
-    usage: &NormalizedTokenUsage,
-) -> Result<ExportTraceServiceRequest> {
-    let (trace_id, parent_span_id) = harness_usage_span_trace_ids(trace)?;
-    let mut attributes = Vec::new();
-    let harness_name = harness_name(span_context.harness);
-    let system = gen_ai_system(span_context.harness, span_context.model_provider);
-    let model = usage
-        .model
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(span_context.model);
-    let total_tokens = usage.total_tokens.or_else(|| {
+fn add_usage_attributes(attributes: &mut Vec<KeyValue>, usage: &NormalizedTokenUsage) {
+    push_i64(attributes, "gen_ai.usage.input_tokens", usage.input_tokens);
+    push_i64(
+        attributes,
+        "gen_ai.usage.output_tokens",
+        usage.output_tokens,
+    );
+    push_i64(
+        attributes,
+        "gen_ai.usage.cache_creation_input_tokens",
+        usage.cache_creation_input_tokens,
+    );
+    push_i64(
+        attributes,
+        "gen_ai.usage.cache_read_input_tokens",
+        usage.cache_read_input_tokens,
+    );
+    push_i64(
+        attributes,
+        "gen_ai.usage.reasoning_tokens",
+        usage.reasoning_output_tokens,
+    );
+    let total = usage.total_tokens.or_else(|| {
         [
             usage.input_tokens,
             usage.output_tokens,
@@ -643,173 +568,39 @@ fn harness_usage_trace_request(
         ]
         .into_iter()
         .flatten()
-        .try_fold(0_i64, |acc, value| acc.checked_add(value))
+        .try_fold(0_i64, i64::checked_add)
     });
-
-    set_attribute_string(&mut attributes, "gen_ai.operation.name", "chat");
-    set_attribute_string(&mut attributes, "lmnr.span.type", "LLM");
-    set_attribute_string(&mut attributes, "gen_ai.system", system);
-    set_attribute_string(&mut attributes, "gen_ai.request.model", model);
-    set_attribute_string(&mut attributes, "gen_ai.response.model", model);
-    set_harness_span_io_attributes(&mut attributes, span_context.input, span_context.output);
-    set_attribute_int(
-        &mut attributes,
-        "gen_ai.usage.input_tokens",
-        usage.input_tokens,
-    );
-    set_attribute_int(
-        &mut attributes,
-        "gen_ai.usage.output_tokens",
-        usage.output_tokens,
-    );
-    set_attribute_int(
-        &mut attributes,
-        "gen_ai.usage.cache_creation_input_tokens",
-        usage.cache_creation_input_tokens,
-    );
-    set_attribute_int(
-        &mut attributes,
-        "gen_ai.usage.cache_read_input_tokens",
-        usage.cache_read_input_tokens,
-    );
-    set_attribute_int(
-        &mut attributes,
-        "gen_ai.usage.reasoning_tokens",
-        usage.reasoning_output_tokens,
-    );
-    set_attribute_int(&mut attributes, "gen_ai.usage.total_tokens", total_tokens);
-    if let Some(cost) = estimate_usage_cost(span_context.harness, system, model, usage) {
-        set_attribute_double(&mut attributes, "gen_ai.usage.input_cost", cost.input_cost);
-        set_attribute_double(
-            &mut attributes,
-            "gen_ai.usage.output_cost",
-            cost.output_cost,
-        );
-        set_attribute_double(&mut attributes, "gen_ai.usage.cost", cost.total_cost());
-        set_attribute_string(&mut attributes, "gen_ai.usage.cost_currency", "USD");
-        set_attribute_double(
-            &mut attributes,
-            "centaur.usage.input_cost_usd",
-            cost.input_cost,
-        );
-        set_attribute_double(
-            &mut attributes,
-            "centaur.usage.output_cost_usd",
-            cost.output_cost,
-        );
-        set_attribute_double(
-            &mut attributes,
-            "centaur.usage.estimated_cost_usd",
-            cost.total_cost(),
-        );
-        set_attribute_string(&mut attributes, "centaur.usage.cost_source", cost.source);
-        set_attribute_bool(&mut attributes, "centaur.usage.cost_estimated", true);
-    }
-    set_attribute_string(&mut attributes, "centaur.harness", harness_name);
-    set_attribute_string(
-        &mut attributes,
-        "centaur.model_provider",
-        span_context.model_provider,
-    );
-    set_attribute_string(&mut attributes, "centaur.turn_id", span_context.turn_id);
-    if let Some(thread_key) = trace.thread_key.as_deref() {
-        set_attribute_string(&mut attributes, "centaur.thread_key", thread_key);
-        set_attribute_string(
-            &mut attributes,
-            "lmnr.association.properties.session_id",
-            thread_key,
-        );
-    }
-    apply_laminar_trace_metadata_to_attributes(&mut attributes, &trace.metadata);
-
-    let start = span_context.start_unix_nano.min(span_context.end_unix_nano);
-    let end = span_context.end_unix_nano.max(start);
-    Ok(ExportTraceServiceRequest {
-        resource_spans: vec![ResourceSpans {
-            resource: Some(Resource {
-                attributes: vec![
-                    kv_string("service.name", "harness-server"),
-                    kv_string("deployment.environment", &otel_environment()),
-                ],
-                ..Default::default()
-            }),
-            scope_spans: vec![ScopeSpans {
-                scope: Some(InstrumentationScope {
-                    name: "centaur.harness-server".to_string(),
-                    version: env!("CARGO_PKG_VERSION").to_string(),
-                    ..Default::default()
-                }),
-                spans: vec![Span {
-                    trace_id,
-                    span_id: random_span_id(),
-                    parent_span_id,
-                    name: format!("{harness_name}.session_task.turn"),
-                    kind: span::SpanKind::Internal as i32,
-                    start_time_unix_nano: start,
-                    end_time_unix_nano: end,
-                    attributes,
-                    flags: 1,
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }],
-            ..Default::default()
-        }],
-    })
+    push_i64(attributes, "gen_ai.usage.total_tokens", total);
 }
 
-fn harness_usage_span_trace_ids(trace: &TraceContext) -> Result<(Vec<u8>, Vec<u8>)> {
-    let trace_id = trace.effective_trace_id().ok_or_else(|| {
-        HarnessServerError::Protocol("missing trace id for harness usage span".to_string())
-    })?;
-    let trace_id = trace_id_to_bytes(&trace_id).ok_or_else(|| {
-        HarnessServerError::Protocol("invalid trace id for harness usage span".to_string())
-    })?;
-    let parent_span_id = trace
-        .traceparent
-        .as_deref()
-        .and_then(trace_ids_from_traceparent)
-        .and_then(|(parent_trace_id, parent_span_id)| {
-            if parent_trace_id == trace_id {
-                Some(parent_span_id)
-            } else {
-                None
-            }
-        })
-        .unwrap_or_default();
-    Ok((trace_id, parent_span_id))
+fn push_i64(attributes: &mut Vec<KeyValue>, key: &'static str, value: Option<i64>) {
+    if let Some(value) = value {
+        attributes.push(KeyValue::new(key, value));
+    }
 }
 
-fn set_harness_span_io_attributes(
-    attributes: &mut Vec<KeyValue>,
-    input: Option<&str>,
-    output: Option<&str>,
-) {
+fn add_io_attributes(attributes: &mut Vec<KeyValue>, input: Option<&str>, output: Option<&str>) {
     if let Some(input) = clean_optional(input) {
-        set_attribute_string(attributes, "input.value", &input);
-        set_attribute_string(
-            attributes,
-            "lmnr.span.input",
-            &legacy_chat_message_json("user", &input),
-        );
-        set_attribute_string(
-            attributes,
-            "gen_ai.input.messages",
-            &gen_ai_message_json("user", &input),
-        );
+        let input = bounded_span_value(&input);
+        attributes.extend([
+            KeyValue::new("input.value", input.clone()),
+            KeyValue::new("lmnr.span.input", legacy_chat_message_json("user", &input)),
+            KeyValue::new("gen_ai.input.messages", gen_ai_message_json("user", &input)),
+        ]);
     }
     if let Some(output) = clean_optional(output) {
-        set_attribute_string(attributes, "output.value", &output);
-        set_attribute_string(
-            attributes,
-            "lmnr.span.output",
-            &legacy_chat_message_json("assistant", &output),
-        );
-        set_attribute_string(
-            attributes,
-            "gen_ai.output.messages",
-            &gen_ai_message_json("assistant", &output),
-        );
+        let output = bounded_span_value(&output);
+        attributes.extend([
+            KeyValue::new("output.value", output.clone()),
+            KeyValue::new(
+                "lmnr.span.output",
+                legacy_chat_message_json("assistant", &output),
+            ),
+            KeyValue::new(
+                "gen_ai.output.messages",
+                gen_ai_message_json("assistant", &output),
+            ),
+        ]);
     }
 }
 
@@ -828,46 +619,216 @@ fn gen_ai_message_json(role: &str, content: &str) -> String {
     .unwrap_or_else(|_| "[]".to_string())
 }
 
-fn apply_laminar_trace_metadata_to_attributes(
-    attributes: &mut Vec<KeyValue>,
-    metadata: &BTreeMap<String, Value>,
-) {
-    if let Some(execution_id) = metadata.get("execution_id") {
-        set_attribute_json(
-            attributes,
-            &format!("{LAMINAR_METADATA_PREFIX}execution_id"),
-            execution_id,
-        );
+fn normalized_usage_from_value(value: &Value) -> Option<NormalizedTokenUsage> {
+    let usage = NormalizedTokenUsage {
+        model: value
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        input_tokens: integer_at(value, &["inputTokens", "input_tokens"]),
+        output_tokens: integer_at(value, &["outputTokens", "output_tokens"]),
+        cache_creation_input_tokens: integer_at(
+            value,
+            &["cacheWriteInputTokens", "cache_write_input_tokens"],
+        ),
+        cache_read_input_tokens: integer_at(value, &["cachedInputTokens", "cached_input_tokens"]),
+        reasoning_output_tokens: integer_at(
+            value,
+            &["reasoningOutputTokens", "reasoning_output_tokens"],
+        ),
+        total_tokens: integer_at(value, &["totalTokens", "total_tokens"]),
+    };
+    usage.has_counts().then_some(usage)
+}
+
+fn integer_at(value: &Value, keys: &[&str]) -> Option<i64> {
+    keys.iter().find_map(|key| value.get(*key)?.as_i64())
+}
+
+fn add_usage(total: &mut NormalizedTokenUsage, next: &NormalizedTokenUsage) {
+    total.model = next.model.clone().or_else(|| total.model.clone());
+    total.input_tokens = add_optional(total.input_tokens, next.input_tokens);
+    total.output_tokens = add_optional(total.output_tokens, next.output_tokens);
+    total.cache_creation_input_tokens = add_optional(
+        total.cache_creation_input_tokens,
+        next.cache_creation_input_tokens,
+    );
+    total.cache_read_input_tokens =
+        add_optional(total.cache_read_input_tokens, next.cache_read_input_tokens);
+    total.reasoning_output_tokens =
+        add_optional(total.reasoning_output_tokens, next.reasoning_output_tokens);
+    total.total_tokens = add_optional(total.total_tokens, next.total_tokens);
+}
+
+fn add_optional(left: Option<i64>, right: Option<i64>) -> Option<i64> {
+    match (left, right) {
+        (Some(left), Some(right)) => left.checked_add(right),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
     }
 }
 
-fn trace_ids_from_traceparent(traceparent: &str) -> Option<(Vec<u8>, Vec<u8>)> {
-    let parts = validate_traceparent(traceparent)?
-        .split('-')
-        .collect::<Vec<_>>();
-    Some((hex_bytes(parts[1])?, hex_bytes(parts[2])?))
+fn protocol_item(value: &Value) -> Option<&Value> {
+    value
+        .get("params")
+        .and_then(|params| params.get("item"))
+        .or_else(|| value.get("item"))
 }
 
-fn trace_id_to_bytes(trace_id: &str) -> Option<Vec<u8>> {
-    Some(Uuid::parse_str(trace_id).ok()?.as_bytes().to_vec())
-}
-
-fn hex_bytes(value: &str) -> Option<Vec<u8>> {
-    if !value.len().is_multiple_of(2) {
-        return None;
+fn tool_labels_from_item(item: &Value) -> Option<ToolLabels> {
+    let item_type = string_at_path(item, &["type"])?;
+    match item_type.as_str() {
+        "mcpToolCall" | "mcp_tool_call" => Some(ToolLabels {
+            kind: "mcp".to_owned(),
+            name: string_at_path(item, &["tool"]).unwrap_or_else(|| "unknown".to_owned()),
+            method: string_at_path(item, &["server"]).unwrap_or_else(|| "call".to_owned()),
+        }),
+        "dynamicToolCall" | "dynamic_tool_call" => Some(ToolLabels {
+            kind: "dynamic".to_owned(),
+            name: string_at_path(item, &["tool"]).unwrap_or_else(|| "unknown".to_owned()),
+            method: string_at_path(item, &["namespace"]).unwrap_or_else(|| "call".to_owned()),
+        }),
+        "collabAgentToolCall" | "collab_agent_tool_call" => Some(ToolLabels {
+            kind: "collab_agent".to_owned(),
+            name: string_at_path(item, &["tool"]).unwrap_or_else(|| "agent".to_owned()),
+            method: "call".to_owned(),
+        }),
+        "commandExecution" | "command_execution" => Some(ToolLabels {
+            kind: "command".to_owned(),
+            name: "command_execution".to_owned(),
+            method: "shell".to_owned(),
+        }),
+        _ => None,
     }
-    let bytes = value.as_bytes();
-    let mut out = Vec::with_capacity(value.len() / 2);
-    for pair in bytes.chunks_exact(2) {
-        let hi = hex_value(pair[0])?;
-        let lo = hex_value(pair[1])?;
-        out.push((hi << 4) | lo);
-    }
-    Some(out)
 }
 
-fn random_span_id() -> Vec<u8> {
-    Uuid::new_v4().as_bytes()[..8].to_vec()
+fn completed_tool_status(item: &Value) -> &'static str {
+    if item
+        .get("success")
+        .and_then(Value::as_bool)
+        .is_some_and(|success| !success)
+        || item.get("error").is_some()
+    {
+        return "failed";
+    }
+    if let Some(exit_code) = item.get("exitCode").and_then(Value::as_i64) {
+        return if exit_code == 0 {
+            "completed"
+        } else {
+            "failed"
+        };
+    }
+    match item
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("completed")
+    {
+        "failed" | "error" | "cancelled" | "declined" => "failed",
+        _ => "completed",
+    }
+}
+
+fn string_at_path(value: &Value, path: &[&str]) -> Option<String> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    let text = current.as_str()?.trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
+fn validate_traceparent(traceparent: &str) -> Option<&str> {
+    let traceparent = traceparent.trim();
+    let parts = traceparent.split('-').collect::<Vec<_>>();
+    if parts.len() == 4
+        && parts[0].len() == 2
+        && parts[1].len() == 32
+        && parts[2].len() == 16
+        && parts[3].len() == 2
+        && parts
+            .iter()
+            .all(|part| part.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        && parts[1] != "00000000000000000000000000000000"
+        && parts[2] != "0000000000000000"
+    {
+        Some(traceparent)
+    } else {
+        None
+    }
+}
+
+fn clean_optional(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn bounded_span_value(value: &str) -> String {
+    if value.len() <= MAX_SPAN_IO_BYTES {
+        return value.to_owned();
+    }
+    let mut end = MAX_SPAN_IO_BYTES;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…[truncated]", &value[..end])
+}
+
+#[derive(Debug, Default)]
+struct SpanOutput {
+    item_order: Vec<String>,
+    text_by_item_id: HashMap<String, String>,
+    fallback: Option<String>,
+}
+
+impl SpanOutput {
+    fn append_delta(&mut self, item_id: &str, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+        self.remember_item(item_id);
+        self.text_by_item_id
+            .entry(item_id.to_owned())
+            .or_default()
+            .push_str(delta);
+    }
+
+    fn set_item_text(&mut self, item_id: &str, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.remember_item(item_id);
+        self.text_by_item_id
+            .insert(item_id.to_owned(), text.to_owned());
+    }
+
+    fn set_fallback_if_empty(&mut self, value: &str) {
+        if self.value().is_none() {
+            self.fallback = clean_optional(Some(value));
+        }
+    }
+
+    fn value(&self) -> Option<String> {
+        let mut text = String::new();
+        for item_id in &self.item_order {
+            if let Some(item_text) = self.text_by_item_id.get(item_id) {
+                text.push_str(item_text);
+            }
+        }
+        clean_optional(Some(&text))
+            .or_else(|| self.fallback.clone())
+            .map(|value| bounded_span_value(&value))
+    }
+
+    fn remember_item(&mut self, item_id: &str) {
+        if self.text_by_item_id.contains_key(item_id) {
+            return;
+        }
+        self.item_order.push(item_id.to_owned());
+        self.text_by_item_id
+            .insert(item_id.to_owned(), String::new());
+    }
 }
 
 fn harness_name(kind: HarnessKind) -> &'static str {
@@ -930,12 +891,10 @@ fn estimate_usage_cost(
     } else {
         input_tokens
     };
-
     let input_cost = mtok_cost(non_cached_input_tokens, pricing.input_per_mtok)
         + mtok_cost(cache_creation_tokens, pricing.cache_creation_per_mtok)
         + mtok_cost(cache_read_tokens, pricing.cache_read_per_mtok);
     let output_cost = mtok_cost(output_tokens, pricing.output_per_mtok);
-
     Some(UsageCost {
         input_cost,
         output_cost,
@@ -1066,746 +1025,257 @@ fn mtok_cost(tokens: f64, price_per_mtok: f64) -> f64 {
     tokens * price_per_mtok / 1_000_000.0
 }
 
-fn kv_string(key: &str, value: &str) -> KeyValue {
-    KeyValue {
-        key: key.to_string(),
-        value: Some(AnyValue {
-            value: Some(any_value::Value::StringValue(value.to_string())),
-        }),
-        ..Default::default()
-    }
-}
-
-fn rewrite_otlp_trace_payload_with_context(
-    payload: &[u8],
-    thread_key: Option<&str>,
-) -> std::result::Result<Vec<u8>, String> {
-    let mut request = ExportTraceServiceRequest::decode(payload)
-        .map_err(|error| format!("invalid OTLP trace payload: {error}"))?;
-    for resource_span in &mut request.resource_spans {
-        for scope_span in &mut resource_span.scope_spans {
-            for span in &mut scope_span.spans {
-                if !span.name.is_empty() && !span.name.starts_with(CODEX_SPAN_PREFIX) {
-                    span.name = format!("{}{}", CODEX_SPAN_PREFIX, span.name);
-                }
-                if let Some(thread_key) = clean_optional(thread_key) {
-                    set_attribute_string(
-                        &mut span.attributes,
-                        "lmnr.association.properties.session_id",
-                        &thread_key,
-                    );
-                }
-                normalize_codex_llm_span(span);
-            }
-        }
-    }
-    Ok(request.encode_to_vec())
-}
-
-fn normalize_codex_llm_span(span: &mut Span) {
-    if span.name != "codex.session_task.turn" {
-        return;
-    }
-    let model = attribute_string(&span.attributes, "model");
-    let input_tokens = attribute_int(&span.attributes, "codex.turn.token_usage.input_tokens");
-    let output_tokens = attribute_int(&span.attributes, "codex.turn.token_usage.output_tokens");
-    let cached_tokens = attribute_int(
-        &span.attributes,
-        "codex.turn.token_usage.cached_input_tokens",
-    );
-    let reasoning_tokens = attribute_int(
-        &span.attributes,
-        "codex.turn.token_usage.reasoning_output_tokens",
-    );
-    let total_tokens = attribute_int(&span.attributes, "codex.turn.token_usage.total_tokens");
-
-    set_attribute_string(&mut span.attributes, "lmnr.span.type", "LLM");
-    set_attribute_string(&mut span.attributes, "gen_ai.operation.name", "chat");
-    set_attribute_string(&mut span.attributes, "gen_ai.system", "openai");
-    set_attribute_string(&mut span.attributes, "gen_ai.request.model", &model);
-    set_attribute_string(&mut span.attributes, "gen_ai.response.model", &model);
-    set_attribute_int(
-        &mut span.attributes,
-        "gen_ai.usage.input_tokens",
-        input_tokens,
-    );
-    set_attribute_int(
-        &mut span.attributes,
-        "gen_ai.usage.output_tokens",
-        output_tokens,
-    );
-    set_attribute_int(
-        &mut span.attributes,
-        "gen_ai.usage.cache_read_input_tokens",
-        cached_tokens,
-    );
-    set_attribute_int(
-        &mut span.attributes,
-        "gen_ai.usage.reasoning_tokens",
-        reasoning_tokens,
-    );
-    set_attribute_int(
-        &mut span.attributes,
-        "gen_ai.usage.total_tokens",
-        total_tokens,
-    );
-}
-
-fn attribute_string(attributes: &[KeyValue], key: &str) -> String {
-    attributes
-        .iter()
-        .find(|attribute| attribute.key == key)
-        .and_then(|attribute| attribute.value.as_ref())
-        .and_then(|value| match value.value.as_ref()? {
-            any_value::Value::StringValue(value) => Some(value.clone()),
-            any_value::Value::IntValue(value) => Some(value.to_string()),
-            any_value::Value::DoubleValue(value) => Some(value.to_string()),
-            any_value::Value::BoolValue(value) => Some(value.to_string()),
-            _ => None,
-        })
-        .unwrap_or_default()
-}
-
-fn attribute_int(attributes: &[KeyValue], key: &str) -> Option<i64> {
-    attributes
-        .iter()
-        .find(|attribute| attribute.key == key)
-        .and_then(|attribute| attribute.value.as_ref())
-        .and_then(|value| match value.value.as_ref()? {
-            any_value::Value::IntValue(value) => Some(*value),
-            any_value::Value::DoubleValue(value) => Some(*value as i64),
-            any_value::Value::StringValue(value) => value.parse().ok(),
-            _ => None,
-        })
-}
-
-fn set_attribute_string(attributes: &mut Vec<KeyValue>, key: &str, value: &str) {
-    if value.is_empty() {
-        return;
-    }
-    set_attribute_value(
-        attributes,
-        key,
-        AnyValue {
-            value: Some(any_value::Value::StringValue(value.to_string())),
-        },
-    );
-}
-
-fn set_attribute_int(attributes: &mut Vec<KeyValue>, key: &str, value: Option<i64>) {
-    let Some(value) = value else {
-        return;
-    };
-    set_attribute_value(
-        attributes,
-        key,
-        AnyValue {
-            value: Some(any_value::Value::IntValue(value)),
-        },
-    );
-}
-
-fn set_attribute_double(attributes: &mut Vec<KeyValue>, key: &str, value: f64) {
-    if !value.is_finite() {
-        return;
-    }
-    set_attribute_value(
-        attributes,
-        key,
-        AnyValue {
-            value: Some(any_value::Value::DoubleValue(value)),
-        },
-    );
-}
-
-fn set_attribute_bool(attributes: &mut Vec<KeyValue>, key: &str, value: bool) {
-    set_attribute_value(
-        attributes,
-        key,
-        AnyValue {
-            value: Some(any_value::Value::BoolValue(value)),
-        },
-    );
-}
-
-fn set_attribute_json(attributes: &mut Vec<KeyValue>, key: &str, value: &Value) {
-    let any_value = match value {
-        Value::Bool(value) => AnyValue {
-            value: Some(any_value::Value::BoolValue(*value)),
-        },
-        Value::Number(value) => {
-            if let Some(int) = value.as_i64() {
-                AnyValue {
-                    value: Some(any_value::Value::IntValue(int)),
-                }
-            } else if let Some(float) = value.as_f64() {
-                AnyValue {
-                    value: Some(any_value::Value::DoubleValue(float)),
-                }
-            } else {
-                AnyValue {
-                    value: Some(any_value::Value::StringValue(value.to_string())),
-                }
-            }
-        }
-        Value::String(value) => AnyValue {
-            value: Some(any_value::Value::StringValue(value.clone())),
-        },
-        _ => AnyValue {
-            value: Some(any_value::Value::StringValue(value.to_string())),
-        },
-    };
-    set_attribute_value(attributes, key, any_value);
-}
-
-fn set_attribute_value(attributes: &mut Vec<KeyValue>, key: &str, value: AnyValue) {
-    if let Some(attribute) = attributes.iter_mut().find(|attribute| attribute.key == key) {
-        attribute.value = Some(value);
-        return;
-    }
-    attributes.push(KeyValue {
-        key: key.to_string(),
-        value: Some(value),
-        ..Default::default()
-    });
-}
-
-fn trace_id_from_traceparent(traceparent: &str) -> Option<String> {
-    let parts = validate_traceparent(traceparent)?
-        .split('-')
-        .collect::<Vec<_>>();
-    Uuid::parse_str(parts[1]).ok().map(|uuid| uuid.to_string())
-}
-
-fn traceparent_from_trace_id(trace_id: &str) -> Option<String> {
-    let trace_hex = Uuid::parse_str(trace_id).ok()?.simple().to_string();
-    if trace_hex == "0".repeat(32) {
-        return None;
-    }
-    let span_id = Uuid::new_v4().simple().to_string()[..16].to_string();
-    Some(format!("00-{trace_hex}-{span_id}-01"))
-}
-
-fn validate_traceparent(traceparent: &str) -> Option<&str> {
-    let traceparent = traceparent.trim();
-    let parts = traceparent.split('-').collect::<Vec<_>>();
-    if parts.len() == 4
-        && parts[0] == "00"
-        && parts[1].len() == 32
-        && parts[2].len() == 16
-        && parts[1].chars().all(|char| char.is_ascii_hexdigit())
-        && parts[2].chars().all(|char| char.is_ascii_hexdigit())
-    {
-        Some(traceparent)
-    } else {
-        None
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans};
+    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+    use serde_json::json;
 
-    #[test]
-    fn config_contents_replace_otel_section() {
-        let base = strip_otel_toml_sections(
-            r#"model = "gpt-5.5"
-
-[otel]
-environment = "old"
-
-[projects."/"]
-trust_level = "trusted"
-"#,
-        );
-
-        let config = codex_otel_config_contents(
-            &base,
-            "http://127.0.0.1:1234/v1/traces",
-            Some("slack:T:C:1.0"),
-            Some("secret"),
-            "production",
-        );
-
-        assert!(config.contains("model = \"gpt-5.5\""));
-        assert!(config.contains("[projects.\"/\"]"));
-        assert!(config.contains("[otel]"));
-        assert!(config.contains("environment = \"production\""));
-        assert!(!config.contains("x-trace-id"));
-        assert!(config.contains("x-centaur-thread-key = \"slack:T:C:1.0\""));
-        assert!(config.contains("authorization = \"Bearer secret\""));
-        assert!(!config.contains("environment = \"old\""));
+    fn test_telemetry() -> (InMemorySpanExporter, SdkTracerProvider, SdkTracer) {
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let tracer = provider.tracer("test");
+        (exporter, provider, tracer)
     }
 
-    #[test]
-    fn execution_traceparent_wins_over_legacy_trace_id() {
-        let legacy_trace_id = "01234567-89ab-cdef-0123-456789abcdef";
-        let execution_traceparent = "00-fedcba9876543210fedcba9876543210-0123456789abcdef-01";
-        let trace = TraceContext {
-            thread_key: Some("slack:T:C:1.0".to_string()),
-            trace_id: Some(legacy_trace_id.to_string()),
-            traceparent: Some(execution_traceparent.to_string()),
-            metadata: BTreeMap::new(),
-        };
-
-        assert_eq!(
-            trace.effective_trace_id().as_deref(),
-            Some("fedcba98-7654-3210-fedc-ba9876543210")
-        );
-        let effective_traceparent = trace.effective_traceparent().expect("traceparent");
-        assert_eq!(effective_traceparent, execution_traceparent);
-    }
-
-    #[test]
-    fn rewrite_otlp_trace_payload_prefixes_and_normalizes_codex_turn_span() {
-        let request = ExportTraceServiceRequest {
-            resource_spans: vec![ResourceSpans {
-                scope_spans: vec![ScopeSpans {
-                    spans: vec![
-                        Span {
-                            name: "session_task.turn".to_string(),
-                            attributes: vec![
-                                kv_string("model", "gpt-5.5"),
-                                kv_int("codex.turn.token_usage.input_tokens", 10),
-                                kv_int("codex.turn.token_usage.output_tokens", 20),
-                                kv_int("codex.turn.token_usage.cached_input_tokens", 7),
-                                kv_int("codex.turn.token_usage.reasoning_output_tokens", 3),
-                                kv_int("codex.turn.token_usage.total_tokens", 30),
-                            ],
-                            ..Default::default()
-                        },
-                        Span {
-                            name: "app_server.startup".to_string(),
-                            ..Default::default()
-                        },
-                    ],
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }],
-        };
-
-        let rewritten = rewrite_otlp_trace_payload_with_context(
-            &request.encode_to_vec(),
-            Some("slack:T:C:1.0"),
-        )
-        .expect("rewrite");
-        let decoded = ExportTraceServiceRequest::decode(rewritten.as_slice()).expect("decode");
-        let span = &decoded.resource_spans[0].scope_spans[0].spans[0];
-
-        assert_eq!(span.name, "codex.session_task.turn");
-        assert_eq!(attribute_string(&span.attributes, "lmnr.span.type"), "LLM");
-        assert_eq!(
-            attribute_string(&span.attributes, "lmnr.association.properties.session_id"),
-            "slack:T:C:1.0"
-        );
-        assert_eq!(
-            attribute_string(&span.attributes, "gen_ai.request.model"),
-            "gpt-5.5"
-        );
-        assert_eq!(
-            attribute_int(&span.attributes, "gen_ai.usage.input_tokens"),
-            Some(10)
-        );
-        assert_eq!(
-            attribute_int(&span.attributes, "gen_ai.usage.output_tokens"),
-            Some(20)
-        );
-        assert_eq!(
-            attribute_int(&span.attributes, "gen_ai.usage.cache_read_input_tokens"),
-            Some(7)
-        );
-        let startup_span = &decoded.resource_spans[0].scope_spans[0].spans[1];
-        assert_eq!(startup_span.name, "codex.app_server.startup");
-        assert_eq!(
-            attribute_string(
-                &startup_span.attributes,
-                "lmnr.association.properties.session_id"
-            ),
-            "slack:T:C:1.0"
-        );
-    }
-
-    #[test]
-    fn harness_usage_trace_request_builds_laminar_priced_span() {
-        let trace = TraceContext {
-            thread_key: Some("slack:C123:123.456".to_string()),
-            trace_id: None,
-            traceparent: Some(
-                "00-0123456789abcdef0123456789abcdef-1111111111111111-01".to_string(),
-            ),
-            metadata: BTreeMap::from([
-                (
-                    "execution_id".to_string(),
-                    Value::String("exe_123".to_string()),
-                ),
-                (
-                    "raw_request_metadata".to_string(),
-                    Value::String("must-not-export".to_string()),
-                ),
-            ]),
-        };
-        let usage = NormalizedTokenUsage {
-            model: Some("claude-fable-5".to_string()),
-            input_tokens: Some(2),
-            output_tokens: Some(7),
-            cache_creation_input_tokens: Some(3),
-            cache_read_input_tokens: Some(5),
-            reasoning_output_tokens: None,
-            total_tokens: None,
-        };
-        let request = harness_usage_trace_request(
-            &trace,
-            HarnessUsageSpan {
-                harness: HarnessKind::ClaudeCode,
-                model: "fallback-model",
-                model_provider: "anthropic",
-                turn_id: "turn-1",
-                input: Some("say hi"),
-                output: Some("hi there"),
-                start_unix_nano: 100,
-                end_unix_nano: 200,
-            },
-            &usage,
-        )
-        .expect("usage trace request");
-        let span = &request.resource_spans[0].scope_spans[0].spans[0];
-
-        assert_eq!(span.name, "claude.session_task.turn");
-        assert_eq!(span.trace_id.len(), 16);
-        assert_eq!(span.parent_span_id.len(), 8);
-        assert_eq!(
-            attribute_string(&span.attributes, "gen_ai.system"),
-            "anthropic"
-        );
-        assert_eq!(
-            attribute_string(&span.attributes, "gen_ai.response.model"),
-            "claude-fable-5"
-        );
-        assert_eq!(attribute_string(&span.attributes, "lmnr.span.type"), "LLM");
-        assert_eq!(attribute_string(&span.attributes, "input.value"), "say hi");
-        assert_eq!(
-            serde_json::from_str::<Value>(&attribute_string(
-                &span.attributes,
-                "gen_ai.input.messages"
-            ))
-            .expect("input messages JSON"),
-            json!([{
-                "role": "user",
-                "parts": [{ "type": "text", "content": "say hi" }]
-            }])
-        );
-        assert_eq!(
-            attribute_string(&span.attributes, "output.value"),
-            "hi there"
-        );
-        assert_eq!(
-            serde_json::from_str::<Value>(&attribute_string(
-                &span.attributes,
-                "gen_ai.output.messages"
-            ))
-            .expect("output messages JSON"),
-            json!([{
-                "role": "assistant",
-                "parts": [{ "type": "text", "content": "hi there" }]
-            }])
-        );
-        assert_eq!(
-            attribute_int(&span.attributes, "gen_ai.usage.input_tokens"),
-            Some(2)
-        );
-        assert_eq!(
-            attribute_int(&span.attributes, "gen_ai.usage.cache_creation_input_tokens"),
-            Some(3)
-        );
-        assert_eq!(
-            attribute_int(&span.attributes, "gen_ai.usage.cache_read_input_tokens"),
-            Some(5)
-        );
-        assert_eq!(
-            attribute_int(&span.attributes, "gen_ai.usage.total_tokens"),
-            Some(17)
-        );
-        assert_eq!(
-            attribute_double(&span.attributes, "gen_ai.usage.input_cost"),
-            Some(0.0000625)
-        );
-        assert_eq!(
-            attribute_double(&span.attributes, "gen_ai.usage.output_cost"),
-            Some(0.00035)
-        );
-        assert_eq!(
-            attribute_double(&span.attributes, "gen_ai.usage.cost"),
-            Some(0.0004125)
-        );
-        assert_eq!(
-            attribute_double(&span.attributes, "centaur.usage.estimated_cost_usd"),
-            Some(0.0004125)
-        );
-        assert_eq!(
-            attribute_string(&span.attributes, "gen_ai.usage.cost_currency"),
-            "USD"
-        );
-        assert_eq!(
-            attribute_string(&span.attributes, "centaur.usage.cost_source"),
-            "centaur_estimate:anthropic:fable-mythos-5:5m-cache-write"
-        );
-        assert_eq!(
-            attribute_string(
-                &span.attributes,
-                "lmnr.association.properties.metadata.execution_id"
-            ),
-            "exe_123"
-        );
-        assert_eq!(
-            attribute_string(&span.attributes, "lmnr.association.properties.session_id"),
-            "slack:C123:123.456"
-        );
-        assert_eq!(
-            attribute_string(
-                &span.attributes,
-                "lmnr.association.properties.metadata.raw_request_metadata"
-            ),
-            ""
-        );
-    }
-
-    #[test]
-    fn harness_usage_trace_request_uses_matching_traceparent_for_api_parentage() {
-        let execution_trace_id = "01234567-89ab-cdef-0123-456789abcdef";
-        let trace = TraceContext {
-            thread_key: Some("slack:C123:123.456".to_string()),
-            trace_id: Some(execution_trace_id.to_string()),
-            traceparent: Some(
-                "00-0123456789abcdef0123456789abcdef-1111111111111111-01".to_string(),
-            ),
-            metadata: BTreeMap::new(),
-        };
-        let usage = NormalizedTokenUsage {
-            model: Some("claude-opus-4-8".to_string()),
-            input_tokens: Some(10),
-            output_tokens: Some(2),
-            cache_creation_input_tokens: None,
-            cache_read_input_tokens: None,
-            reasoning_output_tokens: None,
-            total_tokens: None,
-        };
-        let request = harness_usage_trace_request(
-            &trace,
-            HarnessUsageSpan {
-                harness: HarnessKind::ClaudeCode,
-                model: "fallback-model",
-                model_provider: "anthropic",
-                turn_id: "turn-1",
-                input: None,
-                output: None,
-                start_unix_nano: 100,
-                end_unix_nano: 200,
-            },
-            &usage,
-        )
-        .expect("usage trace request");
-        let span = &request.resource_spans[0].scope_spans[0].spans[0];
-
-        assert_eq!(
-            span.trace_id,
-            Uuid::parse_str(execution_trace_id)
-                .expect("execution trace uuid")
-                .as_bytes()
-                .to_vec()
-        );
-        assert_eq!(
-            span.parent_span_id,
-            vec![0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11]
-        );
-    }
-
-    #[test]
-    fn harness_usage_trace_request_prefers_execution_traceparent() {
-        let legacy_trace_id = "01234567-89ab-cdef-0123-456789abcdef";
-        let trace = TraceContext {
-            thread_key: Some("slack:C123:123.456".to_string()),
-            trace_id: Some(legacy_trace_id.to_string()),
-            traceparent: Some(
-                "00-fedcba9876543210fedcba9876543210-1111111111111111-01".to_string(),
-            ),
-            metadata: BTreeMap::new(),
-        };
-        let usage = NormalizedTokenUsage {
-            model: Some("claude-opus-4-8".to_string()),
-            input_tokens: Some(10),
-            output_tokens: Some(2),
-            cache_creation_input_tokens: None,
-            cache_read_input_tokens: None,
-            reasoning_output_tokens: None,
-            total_tokens: None,
-        };
-        let request = harness_usage_trace_request(
-            &trace,
-            HarnessUsageSpan {
-                harness: HarnessKind::ClaudeCode,
-                model: "fallback-model",
-                model_provider: "anthropic",
-                turn_id: "turn-1",
-                input: None,
-                output: None,
-                start_unix_nano: 100,
-                end_unix_nano: 200,
-            },
-            &usage,
-        )
-        .expect("usage trace request");
-        let span = &request.resource_spans[0].scope_spans[0].spans[0];
-
-        assert_eq!(
-            span.trace_id,
-            Uuid::parse_str("fedcba98-7654-3210-fedc-ba9876543210")
-                .expect("execution trace uuid")
-                .as_bytes()
-                .to_vec()
-        );
-        assert_eq!(
-            span.parent_span_id,
-            vec![0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11]
-        );
-    }
-
-    #[test]
-    fn harness_usage_trace_request_falls_back_to_legacy_trace_id() {
-        let legacy_trace_id = "01234567-89ab-cdef-0123-456789abcdef";
-        let trace = TraceContext {
-            thread_key: Some("slack:C123:123.456".to_string()),
-            trace_id: Some(legacy_trace_id.to_string()),
-            traceparent: None,
-            metadata: BTreeMap::new(),
-        };
-        let usage = NormalizedTokenUsage {
-            model: Some("claude-opus-4-8".to_string()),
-            input_tokens: Some(10),
-            output_tokens: Some(2),
-            cache_creation_input_tokens: None,
-            cache_read_input_tokens: None,
-            reasoning_output_tokens: None,
-            total_tokens: None,
-        };
-        let request = harness_usage_trace_request(
-            &trace,
-            HarnessUsageSpan {
-                harness: HarnessKind::ClaudeCode,
-                model: "fallback-model",
-                model_provider: "anthropic",
-                turn_id: "turn-1",
-                input: None,
-                output: None,
-                start_unix_nano: 100,
-                end_unix_nano: 200,
-            },
-            &usage,
-        )
-        .expect("usage trace request");
-        let span = &request.resource_spans[0].scope_spans[0].spans[0];
-
-        assert_eq!(
-            span.trace_id,
-            Uuid::parse_str(legacy_trace_id)
-                .expect("legacy trace uuid")
-                .as_bytes()
-                .to_vec()
-        );
-        assert!(span.parent_span_id.is_empty());
-    }
-
-    #[test]
-    fn harness_usage_trace_request_estimates_amp_deep_cost() {
-        let trace = TraceContext {
-            thread_key: Some("slack:C123:123.456".to_string()),
-            trace_id: None,
-            traceparent: Some(
-                "00-0123456789abcdef0123456789abcdef-1111111111111111-01".to_string(),
-            ),
-            metadata: BTreeMap::new(),
-        };
-        let usage = NormalizedTokenUsage {
-            model: Some("deep".to_string()),
-            input_tokens: Some(150_681),
-            output_tokens: Some(1_456),
-            cache_creation_input_tokens: Some(27_289),
-            cache_read_input_tokens: Some(123_392),
-            reasoning_output_tokens: None,
-            total_tokens: Some(152_137),
-        };
-        let request = harness_usage_trace_request(
-            &trace,
-            HarnessUsageSpan {
-                harness: HarnessKind::Amp,
-                model: "deep",
-                model_provider: "amp",
-                turn_id: "turn-1",
-                input: None,
-                output: None,
-                start_unix_nano: 100,
-                end_unix_nano: 200,
-            },
-            &usage,
-        )
-        .expect("usage trace request");
-        let span = &request.resource_spans[0].scope_spans[0].spans[0];
-
-        assert_eq!(span.name, "amp.session_task.turn");
-        assert_eq!(attribute_string(&span.attributes, "gen_ai.system"), "amp");
-        assert_eq!(
-            attribute_double(&span.attributes, "gen_ai.usage.input_cost"),
-            Some(0.198141)
-        );
-        assert_eq!(
-            attribute_double(&span.attributes, "gen_ai.usage.output_cost"),
-            Some(0.04368)
-        );
-        assert_eq!(
-            attribute_double(&span.attributes, "gen_ai.usage.cost"),
-            Some(0.241821)
-        );
-        assert_eq!(
-            attribute_double(&span.attributes, "centaur.usage.estimated_cost_usd"),
-            Some(0.241821)
-        );
-        assert_eq!(
-            attribute_string(&span.attributes, "centaur.usage.cost_source"),
-            "centaur_estimate:amp:gpt-5.5"
-        );
-    }
-
-    fn kv_string(key: &str, value: &str) -> KeyValue {
-        KeyValue {
-            key: key.to_string(),
-            value: Some(AnyValue {
-                value: Some(any_value::Value::StringValue(value.to_string())),
-            }),
-            ..Default::default()
+    fn trace_context() -> TraceContext {
+        TraceContext {
+            thread_key: Some("slack:T:C:1.0".to_owned()),
+            traceparent: Some("00-0123456789abcdef0123456789abcdef-1111111111111111-01".to_owned()),
+            metadata: BTreeMap::from([(
+                "execution_id".to_owned(),
+                Value::String("exe-1".to_owned()),
+            )]),
         }
     }
 
-    fn kv_int(key: &str, value: i64) -> KeyValue {
-        KeyValue {
-            key: key.to_string(),
-            value: Some(AnyValue {
-                value: Some(any_value::Value::IntValue(value)),
-            }),
-            ..Default::default()
-        }
+    fn test_turn(tracer: SdkTracer) -> TurnTelemetry {
+        let trace = trace_context();
+        TurnTelemetry::with_tracer(
+            trace.clone(),
+            trace.parent_context(),
+            Some(tracer),
+            HarnessKind::Codex,
+            "gpt-5.5".to_owned(),
+            "openai".to_owned(),
+            "turn-1".to_owned(),
+            Some("hello".to_owned()),
+        )
     }
 
-    fn attribute_double(attributes: &[KeyValue], key: &str) -> Option<f64> {
-        attributes
+    #[test]
+    fn canonical_turn_exports_usage_and_tool_spans_under_execution_parent() {
+        let (exporter, provider, tracer) = test_telemetry();
+        let mut turn = test_turn(tracer);
+        turn.observe_wire_value(&json!({
+            "method": "item/started",
+            "params": {"item": {
+                "id": "tool-1",
+                "type": "dynamicToolCall",
+                "tool": "list_issues",
+                "namespace": "github"
+            }}
+        }));
+        turn.observe_wire_value(&json!({
+            "method": "item/completed",
+            "params": {"item": {
+                "id": "tool-1",
+                "type": "dynamicToolCall",
+                "tool": "list_issues",
+                "namespace": "github",
+                "status": "completed"
+            }}
+        }));
+        turn.observe_wire_value(&json!({
+            "method": "thread/tokenUsage/updated",
+            "params": {"tokenUsage": {"last": {
+                "inputTokens": 10,
+                "cachedInputTokens": 4,
+                "outputTokens": 5,
+                "reasoningOutputTokens": 2,
+                "totalTokens": 15
+            }}}
+        }));
+        turn.finish(TurnStatus::Completed);
+        provider.force_flush().expect("flush");
+
+        let spans = exporter.get_finished_spans().expect("spans");
+        assert_eq!(spans.len(), 2);
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.name == "codex.tool.list_issues")
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.name == "codex.session_task.turn")
+        );
+        for span in &spans {
+            assert_eq!(
+                span.span_context.trace_id().to_string(),
+                "0123456789abcdef0123456789abcdef"
+            );
+            assert_eq!(span.parent_span_id.to_string(), "1111111111111111");
+        }
+        let tool = spans
             .iter()
-            .find(|attribute| attribute.key == key)
-            .and_then(|attribute| attribute.value.as_ref())
-            .and_then(|value| match value.value.as_ref()? {
-                any_value::Value::DoubleValue(value) => Some(*value),
-                any_value::Value::IntValue(value) => Some(*value as f64),
-                any_value::Value::StringValue(value) => value.parse().ok(),
-                _ => None,
+            .find(|span| span.name == "codex.tool.list_issues")
+            .expect("tool span");
+        assert_eq!(attribute(tool, "lmnr.span.type").as_deref(), Some("TOOL"));
+        assert_eq!(attribute(tool, "tool.status").as_deref(), Some("completed"));
+        let usage = spans
+            .iter()
+            .find(|span| span.name == "codex.session_task.turn")
+            .expect("usage span");
+        assert_eq!(attribute(usage, "lmnr.span.type").as_deref(), Some("LLM"));
+        assert_eq!(
+            attribute(usage, "gen_ai.usage.input_tokens").as_deref(),
+            Some("10")
+        );
+        assert_eq!(
+            attribute(usage, "lmnr.association.properties.session_id").as_deref(),
+            Some("slack:T:C:1.0")
+        );
+    }
+
+    #[test]
+    fn unfinished_tool_is_failed_when_turn_finishes() {
+        let (exporter, provider, tracer) = test_telemetry();
+        let mut turn = test_turn(tracer);
+        turn.observe_wire_value(&json!({
+            "method": "item/started",
+            "params": {"item": {
+                "id": "tool-1",
+                "type": "commandExecution",
+                "command": "redacted"
+            }}
+        }));
+        turn.finish(TurnStatus::Cancelled);
+        provider.force_flush().expect("flush");
+
+        let spans = exporter.get_finished_spans().expect("spans");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(
+            attribute(&spans[0], "tool.status").as_deref(),
+            Some("cancelled")
+        );
+        assert_eq!(spans[0].status, Status::error("tool cancelled"));
+    }
+
+    #[test]
+    fn codex_usage_updates_are_aggregated_per_turn() {
+        let (_exporter, _provider, tracer) = test_telemetry();
+        let mut turn = test_turn(tracer);
+        for usage in [
+            json!({"inputTokens": 10, "outputTokens": 2, "totalTokens": 12}),
+            json!({"inputTokens": 20, "outputTokens": 3, "totalTokens": 23}),
+        ] {
+            turn.observe_wire_value(&json!({
+                "method": "thread/tokenUsage/updated",
+                "params": {"tokenUsage": {"last": usage}}
+            }));
+        }
+        let usage = turn.usage.as_ref().expect("usage");
+        assert_eq!(usage.input_tokens, Some(30));
+        assert_eq!(usage.output_tokens, Some(5));
+        assert_eq!(usage.total_tokens, Some(35));
+    }
+
+    #[test]
+    fn codex_terminal_error_marks_turn_and_dangling_tools_failed() {
+        let (exporter, provider, tracer) = test_telemetry();
+        let mut turn = test_turn(tracer);
+        turn.observe_wire_value(&json!({
+            "method": "item/started",
+            "params": {"item": {
+                "id": "tool-1",
+                "type": "commandExecution"
+            }}
+        }));
+        turn.observe_wire_value(&json!({
+            "method": "error",
+            "params": {"error": {"message": "redacted"}}
+        }));
+        turn.observe_wire_value(&json!({
+            "method": "thread/tokenUsage/updated",
+            "params": {"tokenUsage": {"last": {
+                "inputTokens": 10,
+                "outputTokens": 2,
+                "totalTokens": 12
+            }}}
+        }));
+        turn.finish(TurnStatus::Completed);
+        provider.force_flush().expect("flush");
+
+        let spans = exporter.get_finished_spans().expect("spans");
+        assert_eq!(spans.len(), 2);
+        let tool = spans
+            .iter()
+            .find(|span| span.name == "codex.tool.command_execution")
+            .expect("tool span");
+        assert_eq!(
+            attribute(tool, "tool.status").as_deref(),
+            Some("failed")
+        );
+        let turn = spans
+            .iter()
+            .find(|span| span.name == "codex.session_task.turn")
+            .expect("turn span");
+        assert_eq!(turn.status, Status::error("turn failed"));
+    }
+
+    #[test]
+    fn traceparent_is_the_only_trace_identity() {
+        let trace = trace_context();
+        assert_eq!(
+            trace.effective_traceparent().as_deref(),
+            Some("00-0123456789abcdef0123456789abcdef-1111111111111111-01")
+        );
+        assert!(
+            TraceContext {
+                traceparent: Some("invalid".to_owned()),
+                ..Default::default()
+            }
+            .effective_traceparent()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn cost_estimate_accounts_for_cached_tokens() {
+        let usage = NormalizedTokenUsage {
+            input_tokens: Some(1_000_000),
+            output_tokens: Some(100_000),
+            cache_read_input_tokens: Some(250_000),
+            ..Default::default()
+        };
+        let cost =
+            estimate_usage_cost(HarnessKind::Codex, "openai", "gpt-5.5", &usage).expect("cost");
+        assert!((cost.input_cost - 3.875).abs() < 1e-9);
+        assert!((cost.output_cost - 3.0).abs() < 1e-9);
+    }
+
+    fn attribute(span: &opentelemetry_sdk::trace::SpanData, key: &str) -> Option<String> {
+        span.attributes
+            .iter()
+            .find(|attribute| attribute.key.as_str() == key)
+            .map(|attribute| match &attribute.value {
+                opentelemetry::Value::String(value) => value.to_string(),
+                opentelemetry::Value::I64(value) => value.to_string(),
+                opentelemetry::Value::F64(value) => value.to_string(),
+                opentelemetry::Value::Bool(value) => value.to_string(),
+                _ => String::new(),
             })
+    }
+
+    #[test]
+    fn bounded_span_value_preserves_utf8_boundary() {
+        let value = format!("{}é", "a".repeat(MAX_SPAN_IO_BYTES - 1));
+        let bounded = bounded_span_value(&value);
+        assert!(bounded.ends_with("…[truncated]"));
+        assert!(bounded.is_char_boundary(bounded.len()));
     }
 }

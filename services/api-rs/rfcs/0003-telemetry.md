@@ -33,30 +33,29 @@ Prometheus/VictoriaMetrics metrics, and domain spans in the session runtime.
 - Metrics scrape readiness is implemented: the Helm chart emits Prometheus
   scrape annotations for `api-rs` by default. Dashboard and Grafana provisioning
   artifacts are intentionally not checked in with this slice.
-- Codex app-server protocol messages are recorded as events on the execution
-  tree. Recognized tool-call envelopes create
-  `centaur.api_rs.codex_app_server.tool_call` spans that stay open from tool
-  start through completion and use Laminar's `TOOL` span type.
 - Process-local trace continuity is implemented for spawned stdout work:
   `centaur.api_rs.session.execution` is created when an execution is claimed,
-  kept active until terminal state, and used as the parent for stdout-pump,
-  codex app-server event, and tool-call spans emitted by the background pump.
+  kept active until terminal state, and used as the parent for control-plane
+  work emitted by the background pump.
 - Harness trace export wiring is implemented: every sandbox stdin line carries
-  `thread_key` and the durable execution span's `traceparent`, so the Rust
-  harness server can configure Codex's OTLP export and the harness's
-  `session_task.turn` spans join the execution trace. Harness LLM spans use
-  Laminar's `LLM` span type and standard GenAI usage attributes. Non-Codex
-  harness usage is handed to a bounded background batch exporter so telemetry
-  delivery cannot delay the terminal protocol message. The api-rs process's
-  own OTLP env
+  `thread_key`, execution metadata, and the durable execution span's
+  `traceparent`. The Rust harness server owns canonical telemetry for every
+  harness. It emits one `LLM` span for turn usage and one `TOOL` span for each
+  normalized tool call, all directly through the standard OpenTelemetry SDK.
+  Codex usage comes from `thread/tokenUsage/updated`; Claude Code and Amp usage
+  comes from their normalized harness events. Native harness tracing is not
+  enabled, and api-rs does not reconstruct spans from sandbox stdout.
+- The harness OpenTelemetry SDK batches and exports directly to the configured
+  OTLP endpoint. There is no collector or loopback OTLP proxy in the sandbox.
+  The api-rs process's own OTLP env
   (`OTEL_EXPORTER_OTLP_{ENDPOINT,TRACES_ENDPOINT,HEADERS}` and
-  `OTEL_RESOURCE_ATTRIBUTES`) is always forwarded into codex sandboxes —
-  the same hardcoded passthrough set the Python control plane used — so the
-  Laminar ingest key flows secret → api-rs env → sandbox without touching
+  `OTEL_RESOURCE_ATTRIBUTES`) is always forwarded into sandbox environments.
+  This is the same hardcoded passthrough set the Python control plane used, so
+  the Laminar ingest key flows secret → api-rs env → sandbox without touching
   values. Operator sandbox env (`SESSION_SANDBOX_EXTRA_ENV`, rendered from the
   chart's `sandbox.extraEnv`) layers on top; the endpoint host is auto-merged
   into the sandbox `NO_PROXY`, and the per-sandbox egress NetworkPolicy gets a
-  namespace-scoped rule for in-cluster collector endpoints. The chart's
+  namespace-scoped rule for in-cluster OTLP endpoints. The chart's
   `networkPolicy.otlpEgress` values open the matching api-rs egress for its
   own OTLP export on installs without a broader CNI policy.
 
@@ -74,13 +73,15 @@ Prometheus/VictoriaMetrics metrics, and domain spans in the session runtime.
 - Preserve the current crate boundaries: HTTP telemetry belongs in
   `centaur-api-server`; session and sandbox spans belong in their owning crates;
   sandbox core traits stay byte-oriented and backend-neutral.
+- Keep harness telemetry at the normalized protocol boundary so all harnesses
+  produce the same LLM and tool span contract.
 
 ## Non-goals
 
 - Replacing the Python API telemetry implementation.
 - Exporting OpenTelemetry logs in the first slice.
-- Adding tool, workflow, final delivery, or Slack-specific telemetry to
-  `api-rs` before those concepts exist there.
+- Reconstructing harness, model, or tool spans in `api-rs` from stdout events.
+- Enabling or rewriting native Claude Code or Codex telemetry.
 - Adding high-cardinality labels such as `thread_key`, `execution_id`,
   `sandbox_id`, or `user_id` to metrics.
 - Making sandbox traits aware of HTTP routes, request IDs, or OpenTelemetry
@@ -215,8 +216,8 @@ Initial span set:
 | `centaur.api_rs.sandbox.write_input` | `centaur-session-runtime` |
 | `centaur.api_rs.session.stdout_pump` | `centaur-session-runtime` |
 | `centaur.api_rs.session.events.stream` | `centaur-session-runtime` |
-| `centaur.api_rs.codex_app_server.event` | `centaur-session-runtime` |
-| `centaur.api_rs.codex_app_server.tool_call` | `centaur-session-runtime` |
+| `<harness>.session_task.turn` | `harness-server` |
+| `<harness>.tool.<name>` | `harness-server` |
 
 Spans may carry:
 
@@ -226,17 +227,20 @@ Spans may carry:
 - `centaur.harness_type`
 - `centaur.sandbox.backend`
 - `centaur.session.event_type`
-- `codex_app_server.source`
-- `codex_app_server.event_type`
-- `codex_app_server.item_type`
+- `lmnr.association.properties.session_id`
+- `lmnr.association.properties.metadata.execution_id`
+- `lmnr.span.type`
+- `gen_ai.system`
+- `gen_ai.request.model`
+- `gen_ai.usage.*`
 - `tool.kind`
 - `tool.name`
 - `tool.method`
 - `tool.status`
 
-They must not carry message text, stdout lines, raw metadata, or secrets.
-Tool-call spans must not carry tool arguments, command output, tool results, or
-prompt content.
+Tool spans must not carry tool arguments, command output, tool results, or
+prompt content. LLM input and output are bounded before export. No span may
+carry raw metadata or secrets.
 
 ## Trace Continuity
 
@@ -253,6 +257,13 @@ execution metadata before sandbox input is delivered. Steering reuses that
 context, and restart adoption creates a continuation span in the same trace.
 The thread is never used as a trace identity, so multiple turns appear as
 separate traces grouped into one Laminar session.
+
+The harness reads the execution `traceparent` and creates its canonical LLM and
+tool spans as direct children of the execution span. These spans are siblings,
+not a reconstructed model-call tree. Every harness span carries the Laminar
+session association and execution metadata. Tool state is scoped to one turn;
+finishing, failing, cancelling, or dropping the turn closes any unfinished tool
+spans.
 
 ## Implementation Plan
 
@@ -291,7 +302,15 @@ separate traces grouped into one Laminar session.
    - Persist the execution `traceparent` before delivering sandbox input.
    - Continue the persisted trace when adopting an execution after restart.
 
-7. Verify locally.
+7. Add canonical harness telemetry.
+   - Pass only W3C `traceparent`, session identity, and bounded execution
+     metadata to the harness.
+   - Emit standard LLM usage and tool spans from `harness-server`.
+   - Export through the standard OpenTelemetry batch processor.
+   - Do not enable native harness tracing or proxy native OTLP payloads.
+   - Do not parse sandbox stdout into telemetry in `api-rs`.
+
+8. Verify locally.
    - Run Rust unit tests.
    - Start `centaur-api-server` locally.
    - Exercise create, messages, execute, and events endpoints.
@@ -309,5 +328,10 @@ separate traces grouped into one Laminar session.
 - Setting `OTEL_EXPORTER_OTLP_ENDPOINT` enables trace export.
 - Dropping the telemetry guard flushes pending spans.
 - Metrics labels stay bounded.
-- No telemetry path records message text, stdout lines, raw metadata, secrets,
-  or auth headers.
+- Logs and tool spans do not record message text or stdout lines. LLM input and
+  output attributes are bounded. No telemetry path records raw metadata,
+  secrets, or auth headers.
+- Harness tool spans close at the end of their turn, including failure and
+  cancellation paths.
+- Every harness LLM and tool span is searchable by Laminar session ID and
+  execution ID.
