@@ -1165,6 +1165,24 @@ fn openai_pricing(model: &str) -> Option<TokenPricing> {
             source: "centaur_estimate:openai:gpt-5.6-sol:standard-short-context",
         });
     }
+    if model.contains("gpt-5-6-terra") {
+        return Some(TokenPricing {
+            input_per_mtok: 2.0,
+            cache_creation_per_mtok: 2.5,
+            cache_read_per_mtok: 0.2,
+            output_per_mtok: 12.0,
+            source: "centaur_estimate:openai:gpt-5.6-terra:standard-short-context",
+        });
+    }
+    if model.contains("gpt-5-6-luna") {
+        return Some(TokenPricing {
+            input_per_mtok: 0.2,
+            cache_creation_per_mtok: 0.25,
+            cache_read_per_mtok: 0.02,
+            output_per_mtok: 1.2,
+            source: "centaur_estimate:openai:gpt-5.6-luna:standard-short-context",
+        });
+    }
     if model.contains("gpt-5-5") {
         return Some(TokenPricing {
             input_per_mtok: 5.0,
@@ -1734,7 +1752,7 @@ mod tests {
     }
 
     #[test]
-    fn gpt_5_6_sol_cost_uses_standard_short_context_pricing() {
+    fn gpt_5_6_family_cost_uses_standard_short_context_pricing() {
         let usage = NormalizedTokenUsage {
             input_tokens: Some(1_000_000),
             cache_creation_input_tokens: Some(100_000),
@@ -1743,16 +1761,37 @@ mod tests {
             ..Default::default()
         };
 
-        let cost =
-            estimate_usage_cost(HarnessKind::Codex, "openai", "gpt-5.6-sol", &usage).expect("cost");
+        for (model, input_cost, output_cost, source) in [
+            (
+                "gpt-5.6-sol",
+                4.225,
+                3.0,
+                "centaur_estimate:openai:gpt-5.6-sol:standard-short-context",
+            ),
+            (
+                "gpt-5.6-terra",
+                1.69,
+                1.2,
+                "centaur_estimate:openai:gpt-5.6-terra:standard-short-context",
+            ),
+            (
+                "gpt-5.6-luna",
+                0.169,
+                0.12,
+                "centaur_estimate:openai:gpt-5.6-luna:standard-short-context",
+            ),
+        ] {
+            let cost =
+                estimate_usage_cost(HarnessKind::Codex, "openai", model, &usage).expect("cost");
 
-        assert!((cost.input_cost - 4.225).abs() < 1e-9);
-        assert!((cost.output_cost - 3.0).abs() < 1e-9);
-        assert!((cost.total_cost() - 7.225).abs() < 1e-9);
-        assert_eq!(
-            cost.source,
-            "centaur_estimate:openai:gpt-5.6-sol:standard-short-context"
-        );
+            assert!((cost.input_cost - input_cost).abs() < 1e-9, "{model}");
+            assert!((cost.output_cost - output_cost).abs() < 1e-9, "{model}");
+            assert!(
+                (cost.total_cost() - input_cost - output_cost).abs() < 1e-9,
+                "{model}"
+            );
+            assert_eq!(cost.source, source);
+        }
     }
 
     fn attribute(span: &opentelemetry_sdk::trace::SpanData, key: &str) -> Option<String> {
