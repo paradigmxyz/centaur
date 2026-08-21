@@ -144,15 +144,36 @@ class Console::ScheduledTasksControllerTest < ActionDispatch::IntegrationTest
     assert_response :not_found
   end
 
-  test "non-admins cannot author tasks" do
+  test "non-admins can create and manage their own tasks" do
     delete logout_url
-    post login_url, params: { email: users(:member_user).email, password: "password123456" }
+    member = users(:member_user)
+    post login_url, params: { email: member.email, password: "password123456" }
 
-    assert_no_difference -> { ScheduledTask.count } do
+    get new_console_scheduled_task_url
+    assert_response :ok
+    assert_select "a[href=?]", console_scheduled_tasks_path, text: "Scheduled"
+
+    assert_difference -> { ScheduledTask.count }, 1 do
       post console_scheduled_tasks_url, params: { scheduled_task: task_params }
     end
+    task = member.scheduled_tasks.find_by!(name: task_params.fetch(:name))
+    assert_redirected_to console_scheduled_tasks_path
 
-    assert_redirected_to console_threads_path
+    patch console_scheduled_task_url(task.oid), params: {
+      scheduled_task: task_params.merge(name: "Updated member task")
+    }
+    assert_redirected_to console_scheduled_tasks_path
+    assert_equal "Updated member task", task.reload.name
+
+    assert_enqueued_jobs 1, only: ScheduledTaskRunJob do
+      post run_console_scheduled_task_url(task.oid)
+    end
+    assert_redirected_to console_scheduled_tasks_path
+
+    assert_difference -> { ScheduledTask.count }, -1 do
+      delete console_scheduled_task_url(task.oid)
+    end
+    assert_redirected_to console_scheduled_tasks_path
   end
 
   private

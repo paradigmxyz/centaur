@@ -1,6 +1,5 @@
 class Console::ScheduledTasksController < ApplicationController
   layout "console"
-  before_action :require_admin
   before_action :set_task, only: %i[edit update destroy run]
 
   def index
