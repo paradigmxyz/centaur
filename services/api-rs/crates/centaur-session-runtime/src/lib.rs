@@ -1998,17 +1998,15 @@ impl SessionRuntime {
             let traceparent = centaur_telemetry::traceparent_for_span(&execution_trace_span);
             if let Some(traceparent) = traceparent.as_deref()
                 && execution_traceparent(&execution) != Some(traceparent)
-            {
-                if let Err(error) = self
+                && let Err(error) = self
                     .store
                     .set_execution_traceparent(&execution.execution_id, traceparent)
                     .await
-                {
-                    let error = SessionRuntimeError::Store(error);
-                    self.record_execution_failure(thread_key, &execution.execution_id, &error)
-                        .await;
-                    return Err(error);
-                }
+            {
+                let error = SessionRuntimeError::Store(error);
+                self.record_execution_failure(thread_key, &execution.execution_id, &error)
+                    .await;
+                return Err(error);
             }
             self.execution_spans
                 .lock()
@@ -4909,8 +4907,13 @@ struct StdoutPumpState {
     turn_execution_by_id: HashMap<String, String>,
     item_execution_by_id: HashMap<String, String>,
     tool_call_by_id: HashMap<String, ToolCallLabels>,
-    tool_span_by_id: HashMap<String, Span>,
+    tool_span_by_id: HashMap<String, ActiveToolSpan>,
     stdout_span_by_execution: HashMap<String, Span>,
+}
+
+struct ActiveToolSpan {
+    execution_id: String,
+    span: Span,
 }
 
 impl StdoutPumpState {
@@ -5004,10 +5007,10 @@ impl StdoutPumpState {
         self.final_answer_text_by_execution.remove(execution_id);
         self.first_token_recorded_by_execution.remove(execution_id);
         let tool_ids_to_forget = self
-            .item_execution_by_id
+            .tool_span_by_id
             .iter()
-            .filter(|&(_item_id, mapped_execution_id)| mapped_execution_id == execution_id)
-            .map(|(item_id, _mapped_execution_id)| item_id.clone())
+            .filter(|&(_tool_id, active_span)| active_span.execution_id == execution_id)
+            .map(|(tool_id, _active_span)| tool_id.clone())
             .collect::<Vec<_>>();
         self.turn_execution_by_id
             .retain(|_, mapped_execution_id| mapped_execution_id != execution_id);
@@ -5016,8 +5019,8 @@ impl StdoutPumpState {
         self.stdout_span_by_execution.remove(execution_id);
         for item_id in tool_ids_to_forget {
             self.tool_call_by_id.remove(&item_id);
-            if let Some(span) = self.tool_span_by_id.remove(&item_id) {
-                finish_codex_app_server_tool_span(&span, "failed", None);
+            if let Some(active_span) = self.tool_span_by_id.remove(&item_id) {
+                finish_codex_app_server_tool_span(&active_span.span, "failed", None);
             }
         }
     }
@@ -5058,7 +5061,13 @@ impl StdoutPumpState {
                         &event,
                     );
                     if let Some(id) = event.id.as_deref() {
-                        self.tool_span_by_id.insert(id.to_owned(), span);
+                        self.tool_span_by_id.insert(
+                            id.to_owned(),
+                            ActiveToolSpan {
+                                execution_id: execution_id.to_owned(),
+                                span,
+                            },
+                        );
                     }
                 }
                 "progress" => {
@@ -5067,7 +5076,7 @@ impl StdoutPumpState {
                         .as_deref()
                         .and_then(|id| self.tool_span_by_id.get(id))
                     {
-                        span.record("tool.status", "progress");
+                        span.span.record("tool.status", "progress");
                     }
                 }
                 status => {
@@ -5076,7 +5085,7 @@ impl StdoutPumpState {
                         .as_deref()
                         .and_then(|id| self.tool_span_by_id.remove(id))
                     {
-                        finish_codex_app_server_tool_span(&span, status, event.duration);
+                        finish_codex_app_server_tool_span(&span.span, status, event.duration);
                     } else {
                         let span = new_codex_app_server_tool_span(
                             parent,
@@ -8246,6 +8255,53 @@ mod tests {
             }]
         );
         assert!(known.is_empty());
+    }
+
+    #[test]
+    fn dangling_anthropic_tool_span_closes_with_its_execution() {
+        let thread_key = ThreadKey::parse("test:anthropic-tool-span").unwrap();
+        let parent = tracing::info_span!("test_execution");
+        let first_tool_use = json!({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "tool_use", "id": "use-1", "name": "todo_write", "input": {}}
+                ]
+            }
+        });
+        let second_tool_use = json!({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "tool_use", "id": "use-2", "name": "web_search", "input": {}}
+                ]
+            }
+        });
+        let mut state = StdoutPumpState::default();
+
+        state.record_codex_app_server_spans(
+            &parent,
+            &thread_key,
+            "sandbox-1",
+            "execution-1",
+            &first_tool_use,
+        );
+        state.record_codex_app_server_spans(
+            &parent,
+            &thread_key,
+            "sandbox-1",
+            "execution-2",
+            &second_tool_use,
+        );
+
+        state.forget("execution-1");
+
+        assert!(!state.tool_span_by_id.contains_key("use-1"));
+        assert!(!state.tool_call_by_id.contains_key("use-1"));
+        assert!(state.tool_span_by_id.contains_key("use-2"));
+        assert!(state.tool_call_by_id.contains_key("use-2"));
+
+        state.forget("execution-2");
     }
 
     #[test]
