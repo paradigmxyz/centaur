@@ -1156,6 +1156,15 @@ fn anthropic_pricing(model: &str) -> Option<TokenPricing> {
 }
 
 fn openai_pricing(model: &str) -> Option<TokenPricing> {
+    if model.contains("gpt-5-6-sol") {
+        return Some(TokenPricing {
+            input_per_mtok: 5.0,
+            cache_creation_per_mtok: 6.25,
+            cache_read_per_mtok: 0.5,
+            output_per_mtok: 30.0,
+            source: "centaur_estimate:openai:gpt-5.6-sol:standard-short-context",
+        });
+    }
     if model.contains("gpt-5-5") {
         return Some(TokenPricing {
             input_per_mtok: 5.0,
@@ -1722,6 +1731,28 @@ mod tests {
             estimate_usage_cost(HarnessKind::Codex, "openai", "gpt-5.5", &usage).expect("cost");
         assert!((cost.input_cost - 3.875).abs() < 1e-9);
         assert!((cost.output_cost - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn gpt_5_6_sol_cost_uses_standard_short_context_pricing() {
+        let usage = NormalizedTokenUsage {
+            input_tokens: Some(1_000_000),
+            cache_creation_input_tokens: Some(100_000),
+            cache_read_input_tokens: Some(200_000),
+            output_tokens: Some(100_000),
+            ..Default::default()
+        };
+
+        let cost =
+            estimate_usage_cost(HarnessKind::Codex, "openai", "gpt-5.6-sol", &usage).expect("cost");
+
+        assert!((cost.input_cost - 4.225).abs() < 1e-9);
+        assert!((cost.output_cost - 3.0).abs() < 1e-9);
+        assert!((cost.total_cost() - 7.225).abs() < 1e-9);
+        assert_eq!(
+            cost.source,
+            "centaur_estimate:openai:gpt-5.6-sol:standard-short-context"
+        );
     }
 
     fn attribute(span: &opentelemetry_sdk::trace::SpanData, key: &str) -> Option<String> {
