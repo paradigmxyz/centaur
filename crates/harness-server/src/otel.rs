@@ -18,6 +18,9 @@ use crate::{HarnessKind, NormalizedContent, NormalizedEvent, NormalizedTokenUsag
 
 const LAMINAR_METADATA_PREFIX: &str = "lmnr.association.properties.metadata.";
 const MAX_SPAN_IO_BYTES: usize = 60 * 1024;
+/// Transcript capture is opt-in: LLM span prompt and response text are only
+/// exported when this env var is set to a truthy value.
+const TRANSCRIPT_CAPTURE_ENV: &str = "CENTAUR_TELEMETRY_CAPTURE_TRANSCRIPTS";
 
 static TELEMETRY: OnceLock<Option<TelemetryRuntime>> = OnceLock::new();
 
@@ -95,6 +98,7 @@ pub(crate) struct TurnTelemetry {
     started_at: SystemTime,
     tools: HashMap<String, ActiveTool>,
     centaur_tool_names: BTreeSet<String>,
+    capture_transcripts: bool,
     observed_status: Option<TurnStatus>,
     finished: bool,
 }
@@ -131,6 +135,7 @@ impl TurnTelemetry {
             model_provider.into(),
             turn_id.into(),
             input,
+            transcript_capture_enabled(),
         )
     }
 
@@ -144,6 +149,7 @@ impl TurnTelemetry {
         model_provider: String,
         turn_id: String,
         input: Option<String>,
+        capture_transcripts: bool,
     ) -> Self {
         Self {
             tracer,
@@ -153,12 +159,17 @@ impl TurnTelemetry {
             model,
             model_provider,
             turn_id,
-            input: input.map(|value| bounded_span_value(&value)),
+            input: if capture_transcripts {
+                input.map(|value| bounded_span_value(&value))
+            } else {
+                None
+            },
             output: SpanOutput::default(),
             usage: None,
             started_at: SystemTime::now(),
             tools: HashMap::new(),
             centaur_tool_names: load_centaur_tool_names(),
+            capture_transcripts,
             observed_status: None,
             finished: false,
         }
@@ -167,6 +178,9 @@ impl TurnTelemetry {
     pub(crate) fn observe_normalized(&mut self, event: &NormalizedEvent) {
         if let Some(usage) = event.token_usage() {
             self.usage = Some(usage.clone());
+        }
+        if !self.capture_transcripts {
+            return;
         }
         match event {
             NormalizedEvent::AssistantMessage { content, .. } => {
@@ -192,15 +206,19 @@ impl TurnTelemetry {
         };
         match method {
             "item/completed" | "item.completed" => {
-                if let Some(item) = protocol_item(value) {
+                if self.capture_transcripts
+                    && let Some(item) = protocol_item(value)
+                {
                     self.observe_completed_output(item);
                 }
             }
             "item/agentMessage/delta" => {
-                if let (Some(item_id), Some(delta)) = (
-                    string_at_path(value, &["params", "itemId"]),
-                    string_at_path(value, &["params", "delta"]),
-                ) {
+                if self.capture_transcripts
+                    && let (Some(item_id), Some(delta)) = (
+                        string_at_path(value, &["params", "itemId"]),
+                        string_at_path(value, &["params", "delta"]),
+                    )
+                {
                     self.output.append_delta(&item_id, &delta);
                 }
             }
@@ -494,6 +512,20 @@ fn traces_export_disabled() -> bool {
             .to_ascii_lowercase()
             .as_str(),
         "none" | "false" | "0" | "off"
+    )
+}
+
+fn transcript_capture_enabled() -> bool {
+    env::var(TRANSCRIPT_CAPTURE_ENV)
+        .ok()
+        .as_deref()
+        .is_some_and(truthy_env_value)
+}
+
+fn truthy_env_value(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
     )
 }
 
@@ -1131,6 +1163,13 @@ mod tests {
     }
 
     fn test_turn(tracer: SdkTracer) -> TurnTelemetry {
+        test_turn_with_transcript_capture(tracer, false)
+    }
+
+    fn test_turn_with_transcript_capture(
+        tracer: SdkTracer,
+        capture_transcripts: bool,
+    ) -> TurnTelemetry {
         let trace = trace_context();
         TurnTelemetry::with_tracer(
             trace.clone(),
@@ -1141,6 +1180,7 @@ mod tests {
             "openai".to_owned(),
             "turn-1".to_owned(),
             Some("hello".to_owned()),
+            capture_transcripts,
         )
     }
 
@@ -1333,6 +1373,101 @@ mod tests {
         assert_eq!(usage.input_tokens, Some(30));
         assert_eq!(usage.output_tokens, Some(5));
         assert_eq!(usage.total_tokens, Some(35));
+    }
+
+    #[test]
+    fn transcript_capture_is_disabled_without_opt_in() {
+        let (exporter, provider, tracer) = test_telemetry();
+        let mut turn = test_turn(tracer);
+        turn.observe_wire_value(&json!({
+            "method": "item/completed",
+            "params": {"item": {
+                "id": "message-1",
+                "type": "agentMessage",
+                "text": "private answer"
+            }}
+        }));
+        turn.observe_wire_value(&json!({
+            "method": "thread/tokenUsage/updated",
+            "params": {"tokenUsage": {"last": {
+                "inputTokens": 10,
+                "outputTokens": 2,
+                "totalTokens": 12
+            }}}
+        }));
+        turn.finish(TurnStatus::Completed);
+        provider.force_flush().expect("flush");
+
+        let spans = exporter.get_finished_spans().expect("spans");
+        let span = spans
+            .iter()
+            .find(|span| span.name == "codex.session_task.turn")
+            .expect("turn span");
+        for key in [
+            "input.value",
+            "output.value",
+            "lmnr.span.input",
+            "lmnr.span.output",
+            "gen_ai.input.messages",
+            "gen_ai.output.messages",
+        ] {
+            assert_eq!(attribute(span, key), None, "unexpected {key}");
+        }
+        assert_eq!(
+            attribute(span, "gen_ai.usage.total_tokens").as_deref(),
+            Some("12")
+        );
+    }
+
+    #[test]
+    fn transcript_capture_exports_prompt_and_response_when_enabled() {
+        let (exporter, provider, tracer) = test_telemetry();
+        let mut turn = test_turn_with_transcript_capture(tracer, true);
+        turn.observe_wire_value(&json!({
+            "method": "item/completed",
+            "params": {"item": {
+                "id": "message-1",
+                "type": "agentMessage",
+                "text": "captured answer"
+            }}
+        }));
+        turn.observe_wire_value(&json!({
+            "method": "thread/tokenUsage/updated",
+            "params": {"tokenUsage": {"last": {
+                "inputTokens": 10,
+                "outputTokens": 2,
+                "totalTokens": 12
+            }}}
+        }));
+        turn.finish(TurnStatus::Completed);
+        provider.force_flush().expect("flush");
+
+        let spans = exporter.get_finished_spans().expect("spans");
+        let span = spans
+            .iter()
+            .find(|span| span.name == "codex.session_task.turn")
+            .expect("turn span");
+        assert_eq!(attribute(span, "input.value").as_deref(), Some("hello"));
+        assert_eq!(
+            attribute(span, "output.value").as_deref(),
+            Some("captured answer")
+        );
+    }
+
+    #[test]
+    fn transcript_capture_accepts_only_explicit_truthy_values() {
+        for value in ["1", "true", "TRUE", "yes", "on"] {
+            assert!(
+                truthy_env_value(value),
+                "expected {value} to enable capture"
+            );
+        }
+        for value in ["", "0", "false", "no", "off", "enabled"] {
+            assert!(
+                !truthy_env_value(value),
+                "expected {value} to leave capture disabled"
+            );
+        }
     }
 
     #[test]
