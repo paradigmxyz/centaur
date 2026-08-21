@@ -207,6 +207,10 @@ impl TurnTelemetry {
         }
     }
 
+    pub(crate) fn set_model(&mut self, model: impl Into<String>) {
+        self.model = model.into();
+    }
+
     pub(crate) fn observe_wire_value(&mut self, value: &Value) {
         self.observe_tool_notification(value);
         self.remember_turn_id(value);
@@ -1510,6 +1514,48 @@ mod tests {
         assert_eq!(usage.input_tokens, Some(30));
         assert_eq!(usage.output_tokens, Some(5));
         assert_eq!(usage.total_tokens, Some(35));
+    }
+
+    #[test]
+    fn resolved_codex_model_is_used_for_usage_and_cost() {
+        let (exporter, provider, tracer) = test_telemetry();
+        let mut turn = TurnTelemetry::with_tracer(
+            trace_context(),
+            trace_context().parent_context(),
+            Some(tracer),
+            HarnessKind::Codex,
+            String::new(),
+            "openai".to_owned(),
+            "turn-1".to_owned(),
+            None,
+            false,
+        );
+        turn.set_model("gpt-5.4");
+        turn.observe_wire_value(&json!({
+            "method": "thread/tokenUsage/updated",
+            "params": {"tokenUsage": {"last": {
+                "inputTokens": 50_000,
+                "outputTokens": 1_000,
+                "totalTokens": 51_000
+            }}}
+        }));
+        turn.finish(TurnStatus::Completed);
+        provider.force_flush().expect("flush");
+
+        let spans = exporter.get_finished_spans().expect("spans");
+        let span = spans
+            .iter()
+            .find(|span| span.name == "codex.session_task.turn")
+            .expect("turn span");
+        assert_eq!(
+            attribute(span, "gen_ai.response.model").as_deref(),
+            Some("gpt-5.4")
+        );
+        let cost = attribute(span, "gen_ai.usage.cost")
+            .expect("cost")
+            .parse::<f64>()
+            .expect("numeric cost");
+        assert!(cost > 0.0);
     }
 
     #[test]
