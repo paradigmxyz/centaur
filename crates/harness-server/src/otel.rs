@@ -1,5 +1,7 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
+use std::fs;
+use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::SystemTime;
 
@@ -92,6 +94,7 @@ pub(crate) struct TurnTelemetry {
     usage: Option<NormalizedTokenUsage>,
     started_at: SystemTime,
     tools: HashMap<String, ActiveTool>,
+    centaur_tool_names: BTreeSet<String>,
     observed_status: Option<TurnStatus>,
     finished: bool,
 }
@@ -155,6 +158,7 @@ impl TurnTelemetry {
             usage: None,
             started_at: SystemTime::now(),
             tools: HashMap::new(),
+            centaur_tool_names: load_centaur_tool_names(),
             observed_status: None,
             finished: false,
         }
@@ -229,7 +233,7 @@ impl TurnTelemetry {
             Some("item/started" | "item.started") => {
                 if let Some(item) = protocol_item(value)
                     && let Some(id) = string_at_path(item, &["id"])
-                    && let Some(labels) = tool_labels_from_item(item)
+                    && let Some(labels) = tool_labels_from_item(item, &self.centaur_tool_names)
                 {
                     self.start_tool(id, labels);
                 }
@@ -327,7 +331,7 @@ impl TurnTelemetry {
             finish_tool_span(&mut tool.span, status);
             return;
         }
-        let Some(labels) = tool_labels_from_item(item) else {
+        let Some(labels) = tool_labels_from_item(item, &self.centaur_tool_names) else {
             return;
         };
         self.start_tool(id.clone(), labels);
@@ -675,7 +679,10 @@ fn protocol_item(value: &Value) -> Option<&Value> {
         .or_else(|| value.get("item"))
 }
 
-fn tool_labels_from_item(item: &Value) -> Option<ToolLabels> {
+fn tool_labels_from_item(
+    item: &Value,
+    centaur_tool_names: &BTreeSet<String>,
+) -> Option<ToolLabels> {
     let item_type = string_at_path(item, &["type"])?;
     match item_type.as_str() {
         "mcpToolCall" | "mcp_tool_call" => Some(ToolLabels {
@@ -693,13 +700,85 @@ fn tool_labels_from_item(item: &Value) -> Option<ToolLabels> {
             name: string_at_path(item, &["tool"]).unwrap_or_else(|| "agent".to_owned()),
             method: "call".to_owned(),
         }),
-        "commandExecution" | "command_execution" => Some(ToolLabels {
-            kind: "command".to_owned(),
-            name: "command_execution".to_owned(),
-            method: "shell".to_owned(),
-        }),
+        "commandExecution" | "command_execution" => {
+            Some(centaur_tool_labels(item, centaur_tool_names).unwrap_or_else(command_tool_labels))
+        }
         _ => None,
     }
+}
+
+fn command_tool_labels() -> ToolLabels {
+    ToolLabels {
+        kind: "command".to_owned(),
+        name: "command_execution".to_owned(),
+        method: "shell".to_owned(),
+    }
+}
+
+fn centaur_tool_labels(item: &Value, centaur_tool_names: &BTreeSet<String>) -> Option<ToolLabels> {
+    let command = string_at_path(item, &["command"])?;
+    let words = unwrap_shell_words(&command)?;
+    let executable = executable_name(words.first()?);
+
+    let (name, method) = if executable == "centaur-tools" {
+        match words.get(1).map(String::as_str) {
+            Some("call") => (words.get(2)?, words.get(3).map_or("call", String::as_str)),
+            Some("run") => (words.get(2)?, "cli"),
+            _ => return None,
+        }
+    } else {
+        (words.first()?, "cli")
+    };
+    let name = executable_name(name);
+    if !centaur_tool_names.contains(name) {
+        return None;
+    }
+
+    Some(ToolLabels {
+        kind: "centaur".to_owned(),
+        name: name.to_owned(),
+        method: method.to_owned(),
+    })
+}
+
+fn unwrap_shell_words(command: &str) -> Option<Vec<String>> {
+    let words = shell_words::split(command).ok()?;
+    let executable = words.first().map(|word| executable_name(word));
+    if matches!(executable, Some("bash" | "sh" | "zsh"))
+        && matches!(words.get(1).map(String::as_str), Some("-c" | "-lc"))
+    {
+        return shell_words::split(words.get(2)?).ok();
+    }
+    Some(words)
+}
+
+fn executable_name(value: &str) -> &str {
+    value.rsplit('/').next().unwrap_or(value)
+}
+
+fn load_centaur_tool_names() -> BTreeSet<String> {
+    let Some(catalog_path) = centaur_tool_catalog_path() else {
+        return BTreeSet::new();
+    };
+    let Ok(contents) = fs::read_to_string(catalog_path) else {
+        return BTreeSet::new();
+    };
+    let Ok(entries) = serde_json::from_str::<Vec<Value>>(&contents) else {
+        return BTreeSet::new();
+    };
+    entries
+        .iter()
+        .filter_map(|entry| string_at_path(entry, &["name"]))
+        .collect()
+}
+
+fn centaur_tool_catalog_path() -> Option<PathBuf> {
+    if let Some(bin_dir) = env::var_os("CENTAUR_TOOL_BIN_DIR") {
+        return Some(PathBuf::from(bin_dir).join(".centaur-tools.json"));
+    }
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".local/bin/.centaur-tools.json"))
 }
 
 fn completed_tool_status(item: &Value) -> &'static str {
@@ -1065,6 +1144,15 @@ mod tests {
         )
     }
 
+    fn test_turn_with_centaur_tools(
+        tracer: SdkTracer,
+        names: impl IntoIterator<Item = &'static str>,
+    ) -> TurnTelemetry {
+        let mut turn = test_turn(tracer);
+        turn.centaur_tool_names = names.into_iter().map(str::to_owned).collect();
+        turn
+    }
+
     #[test]
     fn canonical_turn_exports_usage_and_tool_spans_under_execution_parent() {
         let (exporter, provider, tracer) = test_telemetry();
@@ -1163,6 +1251,69 @@ mod tests {
             Some("cancelled")
         );
         assert_eq!(spans[0].status, Status::error("tool cancelled"));
+    }
+
+    #[test]
+    fn centaur_cli_command_exports_the_catalog_tool_name() {
+        let (exporter, provider, tracer) = test_telemetry();
+        let mut turn = test_turn_with_centaur_tools(tracer, ["websearch"]);
+        for method in ["item/started", "item/completed"] {
+            turn.observe_wire_value(&json!({
+                "method": method,
+                "params": {"item": {
+                    "id": "tool-1",
+                    "type": "commandExecution",
+                    "command": "/bin/bash -lc 'websearch search --query secret-value'",
+                    "exitCode": 0
+                }}
+            }));
+        }
+        provider.force_flush().expect("flush");
+
+        let spans = exporter.get_finished_spans().expect("spans");
+        assert_eq!(spans.len(), 1);
+        let tool = &spans[0];
+        assert_eq!(tool.name, "codex.tool.websearch");
+        assert_eq!(attribute(tool, "tool.kind").as_deref(), Some("centaur"));
+        assert_eq!(attribute(tool, "tool.name").as_deref(), Some("websearch"));
+        assert_eq!(attribute(tool, "tool.method").as_deref(), Some("cli"));
+        assert!(
+            !attribute(tool, "lmnr.span.input")
+                .unwrap_or_default()
+                .contains("secret-value")
+        );
+    }
+
+    #[test]
+    fn centaur_tools_call_exports_tool_and_method() {
+        let labels = tool_labels_from_item(
+            &json!({
+                "type": "commandExecution",
+                "command": "centaur-tools call vlogs errors '{\"query\":\"secret-value\"}'"
+            }),
+            &BTreeSet::from(["vlogs".to_owned()]),
+        )
+        .expect("labels");
+
+        assert_eq!(labels.kind, "centaur");
+        assert_eq!(labels.name, "vlogs");
+        assert_eq!(labels.method, "errors");
+    }
+
+    #[test]
+    fn non_catalog_command_remains_a_shell_command() {
+        let labels = tool_labels_from_item(
+            &json!({
+                "type": "commandExecution",
+                "command": "/bin/bash -lc 'gh api repos/example/project'"
+            }),
+            &BTreeSet::from(["websearch".to_owned()]),
+        )
+        .expect("labels");
+
+        assert_eq!(labels.kind, "command");
+        assert_eq!(labels.name, "command_execution");
+        assert_eq!(labels.method, "shell");
     }
 
     #[test]
