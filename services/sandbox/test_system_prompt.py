@@ -81,6 +81,10 @@ class SystemPromptTest(unittest.TestCase):
         self.assertIn(
             "`task`, `create-task`, `update-task`, `delete-task`, or `run-task`", prompt
         )
+        self.assertIn(
+            "Only create scheduled tasks from MCP or direct-message (DM) sessions",
+            prompt,
+        )
         self.assertIn("five-field cron expressions in Pacific Time", prompt)
         self.assertIn("Use `dm` as the delivery channel", prompt)
         self.assertIn(
