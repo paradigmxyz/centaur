@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     path::PathBuf,
     sync::{Mutex, OnceLock},
@@ -310,13 +310,102 @@ fn mcp_centaur_tool_catalog() -> Result<Vec<DiscoveredTool>, ApiError> {
     }
     .resolve_tool_dirs()
     .map_err(|error| ApiError::Internal(error.to_string()))?;
+    // Sandboxes only install tools admitted by TOOL_ALLOWLIST/TOOL_BLOCKLIST
+    // (services/sandbox/install_tool_shims.py), so apply the same filter here:
+    // an unfiltered catalog advertises tools whose calls can only fail in the
+    // tool host, and MCP clients plan around those phantom entries.
+    let filter = sandbox_tool_filter();
     let tools = discover_tool_catalog(&dirs)
         .map_err(|error| ApiError::Internal(error.to_string()))?
-        .tools;
+        .tools
+        .into_iter()
+        .filter(|tool| filter.admits(tool))
+        .collect::<Vec<_>>();
     if !cfg!(test) {
         *CATALOG_CACHE.lock().unwrap() = Some((Instant::now(), tools.clone()));
     }
     Ok(tools)
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct SandboxToolFilter {
+    allowlist: Option<BTreeSet<String>>,
+    blocklist: BTreeSet<String>,
+}
+
+impl SandboxToolFilter {
+    // Mirrors the sandbox shim gate: a tool matches a list by its package
+    // directory name or its pyproject project name.
+    fn admits(&self, tool: &DiscoveredTool) -> bool {
+        let package_dir = tool
+            .project_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if self.blocklist.contains(package_dir) || self.blocklist.contains(&tool.package) {
+            return false;
+        }
+        match &self.allowlist {
+            None => true,
+            Some(allowlist) => allowlist.contains(package_dir) || allowlist.contains(&tool.package),
+        }
+    }
+}
+
+// The tool lists live in SESSION_SANDBOX_EXTRA_ENV — the exact values sandbox
+// pods boot with — so the advertised catalog cannot drift from what the tool
+// host enforces. Resolved once per process like the other deployment env.
+fn sandbox_tool_filter() -> SandboxToolFilter {
+    static CELL: OnceLock<SandboxToolFilter> = OnceLock::new();
+    if cfg!(test) {
+        return parse_sandbox_tool_filter(env::var("SESSION_SANDBOX_EXTRA_ENV").ok().as_deref());
+    }
+    CELL.get_or_init(|| {
+        parse_sandbox_tool_filter(env::var("SESSION_SANDBOX_EXTRA_ENV").ok().as_deref())
+    })
+    .clone()
+}
+
+fn parse_sandbox_tool_filter(raw: Option<&str>) -> SandboxToolFilter {
+    let mut allowlist = None;
+    let mut blocklist = None;
+    if let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty())
+        && let Ok(Value::Array(items)) = serde_json::from_str::<Value>(raw)
+    {
+        for item in &items {
+            let Some(name) = item.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            let value = item
+                .get("value")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            match name {
+                "TOOL_ALLOWLIST" => allowlist = split_tool_list(value),
+                "TOOL_BLOCKLIST" => blocklist = split_tool_list(value),
+                _ => {}
+            }
+        }
+    }
+    SandboxToolFilter {
+        allowlist,
+        blocklist: blocklist.unwrap_or_default(),
+    }
+}
+
+// Unset or empty means no restriction, matching the sandbox installer.
+fn split_tool_list(raw: &str) -> Option<BTreeSet<String>> {
+    let entries = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    if entries.is_empty() {
+        None
+    } else {
+        Some(entries)
+    }
 }
 
 fn mcp_find_centaur_tool(name: &str) -> Result<Option<DiscoveredTool>, ApiError> {
@@ -1354,5 +1443,79 @@ def search(query, limit=20):
             r#"resource_metadata="http://localhost:3000/.well-known/oauth-protected-resource/mcp""#
         ));
         assert!(!challenge.contains("/mcp/.well-known"));
+    }
+
+    #[test]
+    fn sandbox_tool_filter_defaults_to_admit_all() {
+        for raw in [
+            None,
+            Some(""),
+            Some("not json"),
+            Some(r#"[{"name":"OTHER","value":"x"}]"#),
+        ] {
+            let filter = parse_sandbox_tool_filter(raw);
+            assert_eq!(filter, SandboxToolFilter::default());
+            assert!(filter.admits(&test_tool(PathBuf::from("/tools/demo"))));
+        }
+        let empty_lists = parse_sandbox_tool_filter(Some(
+            r#"[{"name":"TOOL_ALLOWLIST","value":""},{"name":"TOOL_BLOCKLIST","value":" , "}]"#,
+        ));
+        assert_eq!(empty_lists, SandboxToolFilter::default());
+    }
+
+    #[test]
+    fn sandbox_tool_filter_matches_package_dir_or_project_name() {
+        let filter = parse_sandbox_tool_filter(Some(
+            r#"[{"name":"TOOL_ALLOWLIST","value":"demo-dir, project-name"},
+                {"name":"TOOL_BLOCKLIST","value":"blocked"}]"#,
+        ));
+
+        // Admitted via the package directory name.
+        assert!(filter.admits(&test_tool(PathBuf::from("/tools/demo-dir"))));
+        // Admitted via the pyproject project name.
+        let mut by_project = test_tool(PathBuf::from("/tools/other-dir"));
+        by_project.package = "project-name".to_owned();
+        assert!(filter.admits(&by_project));
+        // Not listed -> filtered out.
+        assert!(!filter.admits(&test_tool(PathBuf::from("/tools/unlisted"))));
+        // Blocklist wins even when allowlisted.
+        let mut blocked = test_tool(PathBuf::from("/tools/demo-dir"));
+        blocked.package = "blocked".to_owned();
+        assert!(!filter.admits(&blocked));
+    }
+
+    #[test]
+    fn mcp_tool_catalog_applies_sandbox_allowlist() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp = temp_dir("centaur-api-rs-mcp-allowlist");
+        for (dir, project) in [("alpha", "alpha-tool"), ("beta", "beta-tool")] {
+            let package_dir = temp.join(dir);
+            fs::create_dir_all(&package_dir).unwrap();
+            fs::write(
+                package_dir.join("pyproject.toml"),
+                format!(
+                    "[project]\nname = \"{project}\"\n\n[project.scripts]\n{dir} = \"{project}.cli:main\"\n"
+                ),
+            )
+            .unwrap();
+        }
+        let _env = EnvGuard::set(&[
+            (
+                "TOOL_DIRS",
+                Box::leak(temp.display().to_string().into_boxed_str()),
+            ),
+            (
+                "SESSION_SANDBOX_EXTRA_ENV",
+                r#"[{"name":"TOOL_ALLOWLIST","value":"alpha"}]"#,
+            ),
+        ]);
+
+        let names = mcp_centaur_tool_catalog()
+            .unwrap()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["alpha".to_owned()]);
     }
 }
