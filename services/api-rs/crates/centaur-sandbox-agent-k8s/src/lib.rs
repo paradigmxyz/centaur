@@ -653,13 +653,7 @@ fn pod_terminated_container_reason(pod: &Pod) -> Option<String> {
         .as_ref()?
         .iter()
         .find(|status| status.name == DEFAULT_CONTAINER_NAME)
-        .or_else(|| {
-            pod.status
-                .as_ref()?
-                .container_statuses
-                .as_ref()?
-                .first()
-        })?;
+        .or_else(|| pod.status.as_ref()?.container_statuses.as_ref()?.first())?;
     let terminated = container.state.as_ref()?.terminated.as_ref()?;
     let reason = terminated.reason.as_deref().unwrap_or("terminated");
     let mut detail = format!(
@@ -669,7 +663,11 @@ fn pod_terminated_container_reason(pod: &Pod) -> Option<String> {
     if let Some(signal) = terminated.signal {
         detail.push_str(&format!(", signal {signal}"));
     }
-    if let Some(message) = terminated.message.as_deref().filter(|message| !message.is_empty()) {
+    if let Some(message) = terminated
+        .message
+        .as_deref()
+        .filter(|message| !message.is_empty())
+    {
         detail.push_str(&format!(": {message}"));
     }
     Some(detail)
