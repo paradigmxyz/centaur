@@ -160,7 +160,12 @@ async fn assert_channel_visibility(conn: &mut PgConnection) -> Result<(), Box<dy
             slack_users: vec![],
             slack_messages: vec!["C_ALPHA:1000.000001".to_owned()],
             slack_attachments: vec!["C_ALPHA:1000.000001:F_ALPHA".to_owned()],
-            context_docs: vec!["doc_slack_alpha".to_owned()],
+            context_docs: vec![
+                "doc_gcal".to_owned(),
+                "doc_gdrive".to_owned(),
+                "doc_linear".to_owned(),
+                "doc_slack_alpha".to_owned(),
+            ],
             google_drive_runs: 0,
             google_drive_files: 0,
             google_drive_checkpoints: 0,
@@ -184,7 +189,12 @@ async fn assert_channel_visibility(conn: &mut PgConnection) -> Result<(), Box<dy
             slack_users: vec![],
             slack_messages: vec!["C_BETA:1000.000002".to_owned()],
             slack_attachments: vec!["C_BETA:1000.000002:F_BETA".to_owned()],
-            context_docs: vec!["doc_slack_beta".to_owned()],
+            context_docs: vec![
+                "doc_gcal".to_owned(),
+                "doc_gdrive".to_owned(),
+                "doc_linear".to_owned(),
+                "doc_slack_beta".to_owned(),
+            ],
             google_drive_runs: 0,
             google_drive_files: 0,
             google_drive_checkpoints: 0,
@@ -201,10 +211,10 @@ async fn assert_channel_visibility(conn: &mut PgConnection) -> Result<(), Box<dy
     );
 
     let dm_or_missing_channel = visible_rows(conn, "centaur_slack_reader", Some("")).await?;
-    assert_eq!(dm_or_missing_channel, empty_visible_rows());
+    assert_eq!(dm_or_missing_channel, non_slack_context_docs_only_rows());
 
     let unset_channel = visible_rows(conn, "centaur_slack_reader", None).await?;
-    assert_eq!(unset_channel, empty_visible_rows());
+    assert_eq!(unset_channel, non_slack_context_docs_only_rows());
 
     let formerly_admin_channel =
         visible_rows(conn, "centaur_slack_reader", Some("C_ADMIN")).await?;
@@ -215,7 +225,11 @@ async fn assert_channel_visibility(conn: &mut PgConnection) -> Result<(), Box<dy
             slack_users: vec![],
             slack_messages: vec![],
             slack_attachments: vec![],
-            context_docs: vec![],
+            context_docs: vec![
+                "doc_gcal".to_owned(),
+                "doc_gdrive".to_owned(),
+                "doc_linear".to_owned(),
+            ],
             google_drive_runs: 0,
             google_drive_files: 0,
             google_drive_checkpoints: 0,
@@ -1503,6 +1517,17 @@ fn empty_visible_rows() -> VisibleRows {
         linear_issues: 0,
         linear_comments: 0,
         linear_checkpoints: 0,
+    }
+}
+
+fn non_slack_context_docs_only_rows() -> VisibleRows {
+    VisibleRows {
+        context_docs: vec![
+            "doc_gcal".to_owned(),
+            "doc_gdrive".to_owned(),
+            "doc_linear".to_owned(),
+        ],
+        ..empty_visible_rows()
     }
 }
 
