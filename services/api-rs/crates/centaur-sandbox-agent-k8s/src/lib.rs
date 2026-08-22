@@ -636,11 +636,43 @@ fn sandbox_status_from_pod(replicas: i32, pod: Option<&Pod>) -> SandboxStatus {
         .to_ascii_lowercase();
     match phase.as_str() {
         "running" if pod_ready(pod) => SandboxStatus::Running,
-        "running" | "pending" => SandboxStatus::Created,
+        "running" | "pending" => pod_terminated_container_reason(pod)
+            .map(SandboxStatus::Unknown)
+            .unwrap_or(SandboxStatus::Created),
         "succeeded" | "failed" => SandboxStatus::Stopped,
         "unknown" => SandboxStatus::Unknown("unknown".to_owned()),
         other => SandboxStatus::Unknown(other.to_owned()),
     }
+}
+
+fn pod_terminated_container_reason(pod: &Pod) -> Option<String> {
+    let container = pod
+        .status
+        .as_ref()?
+        .container_statuses
+        .as_ref()?
+        .iter()
+        .find(|status| status.name == DEFAULT_CONTAINER_NAME)
+        .or_else(|| {
+            pod.status
+                .as_ref()?
+                .container_statuses
+                .as_ref()?
+                .first()
+        })?;
+    let terminated = container.state.as_ref()?.terminated.as_ref()?;
+    let reason = terminated.reason.as_deref().unwrap_or("terminated");
+    let mut detail = format!(
+        "container {} terminated: {reason} (exit code {})",
+        container.name, terminated.exit_code
+    );
+    if let Some(signal) = terminated.signal {
+        detail.push_str(&format!(", signal {signal}"));
+    }
+    if let Some(message) = terminated.message.as_deref().filter(|message| !message.is_empty()) {
+        detail.push_str(&format!(": {message}"));
+    }
+    Some(detail)
 }
 
 fn pod_ready(pod: &Pod) -> bool {
@@ -982,7 +1014,9 @@ mod tests {
     use centaur_sandbox_core::{
         RepoCacheAccess, ResourceRequirements, SandboxCapabilities, SandboxSpec,
     };
-    use k8s_openapi::api::core::v1::{PodCondition, PodStatus};
+    use k8s_openapi::api::core::v1::{
+        ContainerState, ContainerStateTerminated, ContainerStatus, PodCondition, PodStatus,
+    };
     use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 
     use super::*;
@@ -1454,6 +1488,18 @@ mod tests {
     }
 
     #[test]
+    fn reports_terminated_container_reason_before_ready_status() {
+        let oom_pod = pod_with_phase_ready_and_terminated_container("Running", false);
+
+        assert_eq!(
+            sandbox_status_from_pod(1, Some(&oom_pod)),
+            SandboxStatus::Unknown(
+                "container agent terminated: OOMKilled (exit code 137)".to_owned()
+            )
+        );
+    }
+
+    #[test]
     fn state_pvc_name_matches_agent_sandbox_template() {
         assert_eq!(
             state_pvc_name(&SandboxId::new("asbx-test")),
@@ -1474,5 +1520,26 @@ mod tests {
             }),
             ..Pod::default()
         }
+    }
+
+    fn pod_with_phase_ready_and_terminated_container(phase: &str, ready: bool) -> Pod {
+        let mut pod = pod_with_phase_and_ready(phase, ready);
+        pod.status.as_mut().unwrap().container_statuses = Some(vec![ContainerStatus {
+            name: DEFAULT_CONTAINER_NAME.to_owned(),
+            image: "centaur-agent:latest".to_owned(),
+            image_id: "centaur-agent:latest".to_owned(),
+            ready,
+            restart_count: 0,
+            state: Some(ContainerState {
+                terminated: Some(ContainerStateTerminated {
+                    exit_code: 137,
+                    reason: Some("OOMKilled".to_owned()),
+                    ..ContainerStateTerminated::default()
+                }),
+                ..ContainerState::default()
+            }),
+            ..ContainerStatus::default()
+        }]);
+        pod
     }
 }
