@@ -1281,6 +1281,21 @@ impl SessionRuntime {
         Ok(principal.id)
     }
 
+    /// Role `foreign_id`s assigned to an MCP principal, or `None` when
+    /// iron-control is not configured. Callers that filter tools by grant
+    /// should treat `None` as "cannot determine — do not filter".
+    pub async fn mcp_principal_role_foreign_ids(
+        &self,
+        principal_id: &str,
+    ) -> Result<Option<std::collections::BTreeSet<String>>, SessionRuntimeError> {
+        let Some(registrar) = &self.iron_control else {
+            return Ok(None);
+        };
+        Ok(Some(
+            registrar.principal_role_foreign_ids(principal_id).await?,
+        ))
+    }
+
     pub fn with_warm_pool(mut self, config: WarmPoolConfig) -> Self {
         if config.target_size == 0 {
             return self;

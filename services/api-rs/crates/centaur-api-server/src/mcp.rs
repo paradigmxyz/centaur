@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     path::PathBuf,
     sync::{Mutex, OnceLock},
@@ -118,8 +118,9 @@ pub(crate) async fn mcp_post(
         "ping" => json!({}),
         "tools/list" => {
             ensure_mcp_scope(&principal.scopes, "mcp:tools")?;
+            let visibility = mcp_tool_visibility(&state, &principal).await;
             let mut tools = vec![mcp_whoami_tool()];
-            tools.extend(mcp_centaur_tool_entries()?);
+            tools.extend(mcp_centaur_tool_entries(&visibility)?);
             json!({
                 "tools": tools,
             })
@@ -134,6 +135,18 @@ pub(crate) async fn mcp_post(
                 let Some(tool) = mcp_find_centaur_tool(&params.name)? else {
                     return Ok(mcp_json_error(id, -32602, "unknown tool"));
                 };
+                // Gate the call on the same visibility rule as tools/list so a
+                // principal cannot invoke a tool whose secrets it lacks (which
+                // would only fail later at the proxy with a confusing upstream
+                // error). Re-checked here to close the list -> call window.
+                let visibility = mcp_tool_visibility(&state, &principal).await;
+                if !visibility.allows(&tool) {
+                    return Ok(mcp_json_error(
+                        id,
+                        -32602,
+                        &format!("tool {} is not available to this principal", tool.name),
+                    ));
+                }
                 mcp_centaur_tool_result(&state, &principal, tool, params.arguments).await?
             }
         }
@@ -160,9 +173,93 @@ fn mcp_whoami_tool() -> Value {
     })
 }
 
-fn mcp_centaur_tool_entries() -> Result<Vec<Value>, ApiError> {
+/// Whether MCP tool visibility is scoped to the principal's granted secrets.
+/// Off by default so this is inert until per-tool roles (`tool-<slug>`) are
+/// assigned to the principals that need them; otherwise every secret-backed
+/// tool would vanish for principals that have not been granted anything yet.
+fn mcp_filter_tools_by_grants() -> bool {
+    fn read() -> bool {
+        env::var("CENTAUR_MCP_FILTER_TOOLS_BY_GRANTS")
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+    }
+    if cfg!(test) {
+        return read();
+    }
+    static CELL: OnceLock<bool> = OnceLock::new();
+    *CELL.get_or_init(read)
+}
+
+/// The set of tool roles a principal may use, used to filter the catalog.
+enum McpToolVisibility {
+    /// Show everything: filtering is disabled, iron-control is not configured,
+    /// or the principal's grants could not be resolved (fail open — the proxy
+    /// still enforces secret access at call time).
+    Unfiltered,
+    /// Show only tools whose `required_tool_role` is in this set (plus tools
+    /// that declare no secrets).
+    Roles(BTreeSet<String>),
+}
+
+impl McpToolVisibility {
+    fn allows(&self, tool: &DiscoveredTool) -> bool {
+        match self {
+            McpToolVisibility::Unfiltered => true,
+            McpToolVisibility::Roles(roles) => match &tool.required_tool_role {
+                None => true,
+                Some(role) => roles.contains(role),
+            },
+        }
+    }
+}
+
+/// Resolve the principal's tool visibility. Returns `Unfiltered` (fail open)
+/// whenever filtering is disabled or the principal's roles cannot be resolved,
+/// since secret access is independently enforced by the per-sandbox proxy at
+/// call time — hiding tools on a transient control-plane error would degrade
+/// UX with no security benefit.
+async fn mcp_tool_visibility(state: &AppState, principal: &McpPrincipal) -> McpToolVisibility {
+    if !mcp_filter_tools_by_grants() {
+        return McpToolVisibility::Unfiltered;
+    }
+    let runtime = match state.runtime() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "mcp tool filtering: runtime unavailable, showing all tools"
+            );
+            return McpToolVisibility::Unfiltered;
+        }
+    };
+    match runtime
+        .mcp_principal_role_foreign_ids(&principal.principal_id)
+        .await
+    {
+        Ok(Some(roles)) => McpToolVisibility::Roles(roles),
+        Ok(None) => McpToolVisibility::Unfiltered,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                principal_id = %principal.principal_id,
+                "mcp tool filtering: could not resolve principal roles, showing all tools"
+            );
+            McpToolVisibility::Unfiltered
+        }
+    }
+}
+
+fn mcp_centaur_tool_entries(visibility: &McpToolVisibility) -> Result<Vec<Value>, ApiError> {
     let mut entries = Vec::new();
     for tool in mcp_centaur_tool_catalog()? {
+        if !visibility.allows(&tool) {
+            continue;
+        }
         let methods = mcp_tool_methods(&tool);
         let signatures = methods
             .iter()
@@ -918,7 +1015,44 @@ mod mcp_tests {
             description: Some("Demo tool".to_owned()),
             client_module: "client.py".to_owned(),
             project_dir,
+            required_tool_role: None,
         }
+    }
+
+    fn tool_requiring(role: &str) -> DiscoveredTool {
+        DiscoveredTool {
+            name: "demo".to_owned(),
+            package: "demo".to_owned(),
+            description: None,
+            client_module: "client.py".to_owned(),
+            project_dir: PathBuf::from("/tmp/none"),
+            required_tool_role: Some(role.to_owned()),
+        }
+    }
+
+    #[test]
+    fn tool_visibility_unfiltered_shows_everything() {
+        let vis = McpToolVisibility::Unfiltered;
+        assert!(vis.allows(&tool_requiring("tool-github")));
+        assert!(vis.allows(&test_tool(PathBuf::from("/tmp/none"))));
+    }
+
+    #[test]
+    fn tool_visibility_roles_gate_secret_backed_tools() {
+        let vis = McpToolVisibility::Roles(BTreeSet::from(["tool-twitter".to_owned()]));
+        // Granted tool is visible.
+        assert!(vis.allows(&tool_requiring("tool-twitter")));
+        // Un-granted secret-backed tool is hidden.
+        assert!(!vis.allows(&tool_requiring("tool-github")));
+        // A tool that declares no secrets is always visible.
+        assert!(vis.allows(&test_tool(PathBuf::from("/tmp/none"))));
+    }
+
+    #[test]
+    fn tool_visibility_empty_roles_hides_all_secret_backed_tools() {
+        let vis = McpToolVisibility::Roles(BTreeSet::new());
+        assert!(!vis.allows(&tool_requiring("tool-twitter")));
+        assert!(vis.allows(&test_tool(PathBuf::from("/tmp/none"))));
     }
 
     fn test_jwt(secret: &str, claims: Value) -> String {

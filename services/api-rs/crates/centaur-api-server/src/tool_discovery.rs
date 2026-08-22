@@ -66,6 +66,12 @@ pub(crate) struct DiscoveredTool {
     pub(crate) description: Option<String>,
     pub(crate) client_module: String,
     pub(crate) project_dir: PathBuf,
+    /// iron-control role `foreign_id` (`tool-<slug>`) that grants this tool's
+    /// declared secrets, or `None` when the tool declares no secrets (so any
+    /// principal may use it). Mirrors `RoleSpec::tool(<tool dir name>)`, the
+    /// same role `centaur-perms` assigns; used to scope MCP tool visibility to
+    /// the principal's assigned roles.
+    pub(crate) required_tool_role: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -173,6 +179,11 @@ pub(crate) fn discover_tool_catalog(
 ) -> Result<DiscoveredToolCatalog, ToolDiscoveryError> {
     let mut tools = Vec::new();
     for tool in collect_plugin_metadata(tool_dirs)?.tools {
+        // A tool's declared secrets are registered under the per-tool role
+        // `tool-<slug of the tool dir name>` (see centaur-perms / RoleSpec::tool).
+        // `tool.name` is the tool directory name, matching that role's slug.
+        let required_tool_role = (!tool.secrets.is_empty())
+            .then(|| centaur_iron_control::RoleSpec::tool(&tool.name).foreign_id);
         for script_name in tool.script_names {
             tools.push(DiscoveredTool {
                 name: script_name,
@@ -180,6 +191,7 @@ pub(crate) fn discover_tool_catalog(
                 description: tool.description.clone(),
                 client_module: tool.client_module.clone(),
                 project_dir: tool.dir.clone(),
+                required_tool_role: required_tool_role.clone(),
             });
         }
     }
@@ -1960,6 +1972,58 @@ secrets = [
     fn write_tool(path: &Path, pyproject: &str) {
         fs::create_dir_all(path).unwrap();
         fs::write(path.join("pyproject.toml"), pyproject).unwrap();
+    }
+
+    #[test]
+    fn catalog_records_per_tool_role_only_for_secret_backed_tools() {
+        let temp = temp_dir("api-rs-tool-role");
+        let base = temp.join("tools");
+        // A secret-backed tool -> requires its `tool-<dir slug>` role.
+        write_tool(
+            &base.join("github"),
+            r#"
+[project]
+name = "centaur-github"
+scripts = { github = "centaur_github.client:main" }
+
+[tool.centaur]
+secrets = [{type = "http", name = "GITHUB_TOKEN", mode = "inject", inject_header = "Authorization", inject_formatter = "Bearer {{ .Value }}", hosts = ["api.github.com"]}]
+"#,
+        );
+        // A tool with no declared secrets -> no required role (public).
+        write_tool(
+            &base.join("calc"),
+            r#"
+[project]
+name = "centaur-calc"
+scripts = { calc = "centaur_calc.client:main" }
+
+[tool.centaur]
+"#,
+        );
+
+        let catalog = discover_tool_catalog(&[base]).unwrap();
+        let github = catalog
+            .tools
+            .iter()
+            .find(|tool| tool.name == "github")
+            .expect("github tool discovered");
+        assert_eq!(
+            github.required_tool_role.as_deref(),
+            Some("tool-github"),
+            "secret-backed tool must require its per-tool role"
+        );
+        let calc = catalog
+            .tools
+            .iter()
+            .find(|tool| tool.name == "calc")
+            .expect("calc tool discovered");
+        assert_eq!(
+            calc.required_tool_role, None,
+            "secretless tool must be public"
+        );
+
+        let _ = fs::remove_dir_all(temp);
     }
 
     fn write_persona(path: &Path, prompt: &str) {
