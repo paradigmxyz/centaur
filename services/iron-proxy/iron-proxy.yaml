@@ -93,6 +93,14 @@ transforms:
         # egress filtering — same per-integration pattern as the headers above.
         - "dd-api-key"
         - "dd-application-key"
+        # MCP Streamable HTTP for remote MCP servers reached from a sandbox
+        # harness. codex sends MCP-Protocol-Version on every request and
+        # mcp-session-id once the server has established a session; dropping
+        # either one breaks session-bound servers at the egress boundary.
+        # Neither matches the x-* catch-all below, so both are listed here --
+        # same per-integration pattern as the headers above.
+        - "mcp-session-id"
+        - "mcp-protocol-version"
         - "/^x-codex-.*$/"
         - "/^x-openai-.*$/"
         # AWS SigV4 request headers (x-amz-target, x-amz-date,
