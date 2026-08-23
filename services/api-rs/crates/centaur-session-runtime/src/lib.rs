@@ -1084,16 +1084,13 @@ impl SessionRuntime {
             tool_host_session_metadata(principal_id, console_user_email, console_user_name);
         let session = self
             .store
-            .create_or_get_session(
+            .create_or_get_session_merging_metadata(
                 thread_key,
                 &harness,
                 None,
-                metadata.clone(),
+                metadata,
                 BTreeMap::new(),
             )
-            .await?;
-        self.store
-            .merge_session_metadata(thread_key, metadata)
             .await?;
         if session.iron_control_principal.as_deref() != Some(principal_id) {
             self.store
