@@ -190,6 +190,31 @@ impl PgSessionStore {
         row.try_into()
     }
 
+    /// Merge durable session metadata, with the supplied keys replacing older
+    /// values. This is used for identity display data that can be learned or
+    /// refreshed after a session was first created.
+    pub async fn merge_session_metadata(
+        &self,
+        thread_key: &ThreadKey,
+        metadata: Value,
+    ) -> Result<Value, SessionStoreError> {
+        sqlx::query_scalar::<_, Value>(
+            r#"
+            update sessions
+            set metadata = metadata || $2, updated_at = now()
+            where thread_key = $1
+            returning metadata
+            "#,
+        )
+        .bind(thread_key.as_str())
+        .bind(metadata)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| SessionStoreError::NotFound {
+            thread_key: thread_key.as_str().to_owned(),
+        })
+    }
+
     pub async fn get_session_title(
         &self,
         thread_key: &ThreadKey,
@@ -2174,6 +2199,50 @@ mod tests {
                 .expect("get session")
                 .proxy_labels,
             labels
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_metadata_merges_new_identity_values() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let thread_key =
+            ThreadKey::parse(format!("test:metadata-merge-{}", Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({
+                    "mcp_tool_host": true,
+                    "mcp_principal_id": "prn_test",
+                    "console_user_name": "Old Name",
+                }),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+
+        let metadata = store
+            .merge_session_metadata(
+                &thread_key,
+                json!({
+                    "console_user_email": "test@example.com",
+                    "console_user_name": "Test User",
+                }),
+            )
+            .await
+            .expect("merge session metadata");
+
+        assert_eq!(
+            metadata,
+            json!({
+                "mcp_tool_host": true,
+                "mcp_principal_id": "prn_test",
+                "console_user_email": "test@example.com",
+                "console_user_name": "Test User",
+            })
         );
     }
 

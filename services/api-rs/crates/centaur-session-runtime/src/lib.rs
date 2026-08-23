@@ -374,6 +374,8 @@ pub struct InterruptExecutionOutcome {
 #[derive(Debug)]
 pub struct ToolHostCallInput {
     pub principal_id: String,
+    pub console_user_email: Option<String>,
+    pub console_user_name: Option<String>,
     pub token_id: Option<String>,
     pub tool_name: String,
     pub method: String,
@@ -1009,14 +1011,21 @@ impl SessionRuntime {
     ) -> Result<ToolHostCallOutput, SessionRuntimeError> {
         let ToolHostCallInput {
             principal_id,
+            console_user_email,
+            console_user_name,
             token_id,
             tool_name,
             method,
             arguments,
             timeout,
         } = input;
-        self.create_or_get_tool_host_session(thread_key, &principal_id)
-            .await?;
+        self.create_or_get_tool_host_session(
+            thread_key,
+            &principal_id,
+            console_user_email.as_deref(),
+            console_user_name.as_deref(),
+        )
+        .await?;
 
         let request_id = format!("mcp-call-{}", Uuid::new_v4().simple());
         let request = ToolHostRequest {
@@ -1063,16 +1072,28 @@ impl SessionRuntime {
         &self,
         thread_key: &ThreadKey,
         principal_id: &str,
+        console_user_email: Option<&str>,
+        console_user_name: Option<&str>,
     ) -> Result<(), SessionRuntimeError> {
         let harness = self
             .sandbox_runtime
             .warm_harness
             .clone()
             .unwrap_or(HarnessType::Codex);
-        let metadata = tool_host_session_metadata(principal_id);
+        let metadata =
+            tool_host_session_metadata(principal_id, console_user_email, console_user_name);
         let session = self
             .store
-            .create_or_get_session(thread_key, &harness, None, metadata, BTreeMap::new())
+            .create_or_get_session(
+                thread_key,
+                &harness,
+                None,
+                metadata.clone(),
+                BTreeMap::new(),
+            )
+            .await?;
+        self.store
+            .merge_session_metadata(thread_key, metadata)
             .await?;
         if session.iron_control_principal.as_deref() != Some(principal_id) {
             self.store
@@ -1273,7 +1294,7 @@ impl SessionRuntime {
         // same principal cannot interleave with session setup.
         let call_lock = self.tool_host_call_lock(&thread_key);
         let _call_guard = call_lock.lock().await;
-        let metadata = tool_host_session_metadata(principal_id);
+        let metadata = tool_host_session_metadata(principal_id, None, None);
         let principal = self
             .iron_control
             .register_session(thread_key.as_str(), Some(&metadata))
@@ -6677,11 +6698,32 @@ fn tool_host_thread_key(principal_id: &str) -> Result<ThreadKey, SessionRuntimeE
 
 /// Session/principal metadata recorded for observability; runtime behavior
 /// derives from the `mcp:` thread-key prefix, not from these fields.
-fn tool_host_session_metadata(principal_id: &str) -> Value {
-    json!({
-        "mcp_tool_host": true,
-        "mcp_principal_id": principal_id,
-    })
+fn tool_host_session_metadata(
+    principal_id: &str,
+    console_user_email: Option<&str>,
+    console_user_name: Option<&str>,
+) -> Value {
+    let mut metadata = serde_json::Map::from_iter([
+        ("mcp_tool_host".to_owned(), Value::Bool(true)),
+        (
+            "mcp_principal_id".to_owned(),
+            Value::String(principal_id.to_owned()),
+        ),
+    ]);
+    insert_non_empty_metadata_string(&mut metadata, "console_user_email", console_user_email);
+    insert_non_empty_metadata_string(&mut metadata, "console_user_name", console_user_name);
+    Value::Object(metadata)
+}
+
+fn insert_non_empty_metadata_string(
+    metadata: &mut serde_json::Map<String, Value>,
+    key: &str,
+    value: Option<&str>,
+) {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    metadata.insert(key.to_owned(), Value::String(value.to_owned()));
 }
 
 fn proxy_labels_from_session_metadata(
@@ -7134,6 +7176,30 @@ mod tests {
         assert_eq!(spec.command, Some(vec!["/entrypoint.sh".to_owned()]));
         assert_eq!(spec.args, vec!["centaur-tool-host"]);
         assert_eq!(env_value(&spec, "TOOL_DIRS"), Some("/app/tools"));
+    }
+
+    #[test]
+    fn tool_host_session_metadata_includes_console_identity() {
+        assert_eq!(
+            tool_host_session_metadata("prn_test", Some(" test@example.com "), Some(" Test User "),),
+            json!({
+                "mcp_tool_host": true,
+                "mcp_principal_id": "prn_test",
+                "console_user_email": "test@example.com",
+                "console_user_name": "Test User",
+            })
+        );
+    }
+
+    #[test]
+    fn tool_host_session_metadata_omits_missing_console_identity() {
+        assert_eq!(
+            tool_host_session_metadata("prn_test", Some("  "), None),
+            json!({
+                "mcp_tool_host": true,
+                "mcp_principal_id": "prn_test",
+            })
+        );
     }
 
     #[test]
