@@ -381,6 +381,25 @@ pub struct ToolHostCallInput {
     pub timeout: Duration,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ToolHostToolFilter {
+    pub allowlist: Option<String>,
+    pub blocklist: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolHostCallPolicy {
+    principal_id: String,
+    tool_filter: ToolHostToolFilter,
+    sandbox_capabilities: centaur_session_core::SandboxCapabilities,
+}
+
+impl ToolHostCallPolicy {
+    pub fn tool_filter(&self) -> &ToolHostToolFilter {
+        &self.tool_filter
+    }
+}
+
 #[derive(Debug)]
 pub struct ToolHostCallOutput {
     pub request_id: String,
@@ -949,6 +968,7 @@ impl SessionRuntime {
     pub async fn run_tool_host_call(
         &self,
         input: ToolHostCallInput,
+        policy: ToolHostCallPolicy,
     ) -> Result<ToolHostCallOutput, SessionRuntimeError> {
         let principal_id = input.principal_id.trim().to_owned();
         let tool_name = input.tool_name.trim().to_owned();
@@ -973,6 +993,11 @@ impl SessionRuntime {
                 "tool host timeout must be non-zero".to_owned(),
             ));
         }
+        if policy.principal_id != principal_id {
+            return Err(SessionRuntimeError::BadRequest(
+                "tool host policy principal does not match the call principal".to_owned(),
+            ));
+        }
 
         let thread_key = tool_host_thread_key(&principal_id)?;
         let input = ToolHostCallInput {
@@ -984,7 +1009,8 @@ impl SessionRuntime {
         let call_lock = self.tool_host_call_lock(&thread_key);
         let result = {
             let _call_guard = call_lock.lock().await;
-            self.locked_tool_host_call(&thread_key, input).await
+            self.locked_tool_host_call(&thread_key, input, policy.sandbox_capabilities)
+                .await
         };
         // Drop our clone so an idle entry is only referenced by the map, then
         // evict it; remove_if holds the shard lock, so no concurrent caller
@@ -993,6 +1019,36 @@ impl SessionRuntime {
         self.tool_host_call_locks
             .remove_if(thread_key.as_str(), |_, lock| Arc::strong_count(lock) == 1);
         result
+    }
+
+    /// Resolve the principal once and return both the tool lists from its
+    /// effective sandbox spec and the capabilities the ensuing call must use.
+    pub async fn resolve_tool_host_call_policy(
+        &self,
+        principal_id: &str,
+    ) -> Result<ToolHostCallPolicy, SessionRuntimeError> {
+        let principal_id = principal_id.trim();
+        if principal_id.is_empty() {
+            return Err(SessionRuntimeError::BadRequest(
+                "tool host principal_id is required".to_owned(),
+            ));
+        }
+        let thread_key = tool_host_thread_key(principal_id)?;
+        let harness = self
+            .sandbox_runtime
+            .warm_harness
+            .clone()
+            .unwrap_or(HarnessType::Codex);
+        let spec =
+            (self.sandbox_runtime.spec_factory)(&thread_key, "mcp-tool-catalog", &harness, None);
+        let capabilities = self
+            .resolve_sandbox_capabilities(Some(principal_id))
+            .await?;
+        Ok(ToolHostCallPolicy {
+            principal_id: principal_id.to_owned(),
+            tool_filter: tool_host_tool_filter_from_spec(spec, &capabilities),
+            sandbox_capabilities: capabilities,
+        })
     }
 
     fn tool_host_call_lock(&self, thread_key: &ThreadKey) -> Arc<Mutex<()>> {
@@ -1006,6 +1062,7 @@ impl SessionRuntime {
         &self,
         thread_key: &ThreadKey,
         input: ToolHostCallInput,
+        sandbox_capabilities: SessionSandboxCapabilities,
     ) -> Result<ToolHostCallOutput, SessionRuntimeError> {
         let ToolHostCallInput {
             principal_id,
@@ -1033,7 +1090,7 @@ impl SessionRuntime {
         })?;
         let response_timeout = timeout.saturating_add(Duration::from_secs(5));
         let execution = self
-            .execute_session(
+            .execute_session_impl(
                 thread_key,
                 ExecuteSessionInput {
                     idempotency_key: Some(request_id.clone()),
@@ -1048,6 +1105,8 @@ impl SessionRuntime {
                     idle_timeout_ms: None,
                     max_duration_ms: Some(duration_millis_u64(response_timeout)),
                 },
+                None,
+                Some(sandbox_capabilities),
             )
             .await?;
         self.wait_for_tool_host_call(
@@ -1860,7 +1919,8 @@ impl SessionRuntime {
         thread_key: &ThreadKey,
         input: ExecuteSessionInput,
     ) -> Result<SessionExecution, SessionRuntimeError> {
-        self.execute_session_impl(thread_key, input, None).await
+        self.execute_session_impl(thread_key, input, None, None)
+            .await
     }
 
     async fn drive_session_execution(
@@ -1869,7 +1929,7 @@ impl SessionRuntime {
         execution_id: &str,
         input: ExecuteSessionInput,
     ) -> Result<SessionExecution, SessionRuntimeError> {
-        self.execute_session_impl(thread_key, input, Some(execution_id))
+        self.execute_session_impl(thread_key, input, Some(execution_id), None)
             .await
     }
 
@@ -1878,6 +1938,9 @@ impl SessionRuntime {
         thread_key: &ThreadKey,
         input: ExecuteSessionInput,
         persisted_execution_id: Option<&str>,
+        // Present only for an immediately dispatched tool-host call. Durable
+        // recovery passes None and resolves the principal's current policy.
+        pre_resolved_sandbox_capabilities: Option<SessionSandboxCapabilities>,
     ) -> Result<SessionExecution, SessionRuntimeError> {
         if self.shutting_down.load(Ordering::SeqCst) {
             return Err(SessionRuntimeError::ShuttingDown);
@@ -2030,9 +2093,13 @@ impl SessionRuntime {
             let requester_principal_id = self
                 .resolve_requester_principal(thread_key, requester_metadata.as_ref())
                 .await;
-            let desired_capabilities = self
-                .resolve_sandbox_capabilities(session.iron_control_principal.as_deref())
-                .await?;
+            let desired_capabilities = match pre_resolved_sandbox_capabilities {
+                Some(capabilities) => capabilities,
+                None => {
+                    self.resolve_sandbox_capabilities(session.iron_control_principal.as_deref())
+                        .await?
+                }
+            };
 
             let sandbox_id = match self
                 .ensure_session_sandbox(EnsureSessionSandboxRequest {
@@ -5907,6 +5974,25 @@ fn apply_sandbox_capabilities(spec: &mut SandboxSpec, capabilities: &SessionSand
     }
 }
 
+fn tool_host_tool_filter_from_spec(
+    mut spec: SandboxSpec,
+    capabilities: &SessionSandboxCapabilities,
+) -> ToolHostToolFilter {
+    apply_sandbox_capabilities(&mut spec, capabilities);
+    ToolHostToolFilter {
+        allowlist: spec
+            .env
+            .iter()
+            .find(|env| env.name == "TOOL_ALLOWLIST")
+            .map(|env| env.value.clone()),
+        blocklist: spec
+            .env
+            .iter()
+            .find(|env| env.name == "TOOL_BLOCKLIST")
+            .map(|env| env.value.clone()),
+    }
+}
+
 fn scope_repo_cache_mounts_to_public(spec: &mut SandboxSpec) {
     for mount in spec
         .mounts
@@ -7359,6 +7445,26 @@ mod tests {
         assert_eq!(spec.mounts[0].target_path, "/workspace");
         assert_eq!(env_value(&spec, CENTAUR_SKILL_DIRS_ENV), None);
         assert_eq!(env_value(&spec, CENTAUR_PUBLIC_SKILL_DIRS_ENV), None);
+    }
+
+    #[test]
+    fn tool_host_tool_filter_uses_effective_capability_scoped_spec() {
+        let spec = SandboxSpec::new("mock")
+            .env("TOOL_ALLOWLIST", "alpha,beta")
+            .env("TOOL_BLOCKLIST", "custom-script");
+        let capabilities = SessionSandboxCapabilities {
+            repo_cache: SessionRepoCacheAccess::None,
+            observability_enabled: false,
+        };
+
+        let filter = tool_host_tool_filter_from_spec(spec, &capabilities);
+
+        assert_eq!(filter.allowlist.as_deref(), Some("alpha,beta"));
+        let blocklist = filter.blocklist.unwrap();
+        assert!(blocklist.split(',').any(|tool| tool == "custom-script"));
+        for tool in OBSERVABILITY_TOOL_BLOCKLIST.split(',') {
+            assert!(blocklist.split(',').any(|blocked| blocked == tool));
+        }
     }
 
     fn test_principal(

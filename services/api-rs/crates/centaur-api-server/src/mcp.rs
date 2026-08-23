@@ -13,7 +13,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use base64::{Engine as _, engine::general_purpose};
-use centaur_session_runtime::{SessionRuntime, ToolHostCallInput, ToolHostCallOutput};
+use centaur_session_runtime::{
+    SessionRuntime, ToolHostCallInput, ToolHostCallOutput, ToolHostCallPolicy, ToolHostToolFilter,
+};
 use hmac::{Hmac, KeyInit, Mac};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -118,8 +120,10 @@ pub(crate) async fn mcp_post(
         "ping" => json!({}),
         "tools/list" => {
             ensure_mcp_scope(&principal.scopes, "mcp:tools")?;
+            let policy = mcp_tool_host_call_policy(&state, &principal).await?;
+            let filter = parse_sandbox_tool_filter(policy.tool_filter());
             let mut tools = vec![mcp_whoami_tool()];
-            tools.extend(mcp_centaur_tool_entries()?);
+            tools.extend(mcp_centaur_tool_entries(&filter)?);
             json!({
                 "tools": tools,
             })
@@ -131,10 +135,12 @@ pub(crate) async fn mcp_post(
             if params.name == "centaur_whoami" {
                 mcp_whoami_result(&principal, params.arguments)?
             } else {
-                let Some(tool) = mcp_find_centaur_tool(&params.name)? else {
+                let policy = mcp_tool_host_call_policy(&state, &principal).await?;
+                let filter = parse_sandbox_tool_filter(policy.tool_filter());
+                let Some(tool) = mcp_find_centaur_tool(&params.name, &filter)? else {
                     return Ok(mcp_json_error(id, -32602, "unknown tool"));
                 };
-                mcp_centaur_tool_result(&state, &principal, tool, params.arguments).await?
+                mcp_centaur_tool_result(&state, &principal, tool, params.arguments, policy).await?
             }
         }
         _ => return Ok(mcp_json_error(id, -32601, "method not found")),
@@ -160,9 +166,9 @@ fn mcp_whoami_tool() -> Value {
     })
 }
 
-fn mcp_centaur_tool_entries() -> Result<Vec<Value>, ApiError> {
+fn mcp_centaur_tool_entries(filter: &SandboxToolFilter) -> Result<Vec<Value>, ApiError> {
     let mut entries = Vec::new();
-    for tool in mcp_centaur_tool_catalog()? {
+    for tool in mcp_centaur_tool_catalog(filter)? {
         let methods = mcp_tool_methods(&tool);
         let signatures = methods
             .iter()
@@ -286,45 +292,41 @@ fn mcp_tool_help_result(
     ))
 }
 
-fn mcp_centaur_tool_catalog() -> Result<Vec<DiscoveredTool>, ApiError> {
+fn mcp_centaur_tool_catalog(filter: &SandboxToolFilter) -> Result<Vec<DiscoveredTool>, ApiError> {
     // Discovery scans the tool dirs and parses package metadata on every
     // call; reuse a recent result so each MCP request does not redo that
     // I/O while still picking up newly synced tools quickly. Tests point
     // the discovery env vars at per-case temp dirs, so they read live.
     const CATALOG_TTL: Duration = Duration::from_secs(10);
     static CATALOG_CACHE: Mutex<Option<(Instant, Vec<DiscoveredTool>)>> = Mutex::new(None);
-    if !cfg!(test)
+    let tools = if !cfg!(test)
         && let Some((discovered_at, tools)) = CATALOG_CACHE.lock().unwrap().as_ref()
         && discovered_at.elapsed() < CATALOG_TTL
     {
-        return Ok(tools.clone());
-    }
-
-    let dirs = ToolDiscoveryConfig {
-        tool_dirs: env::var("TOOL_DIRS").ok(),
-        public_tool_dirs: env::var("KUBERNETES_PUBLIC_TOOL_DIRS").ok(),
-        tools_path: env::var("TOOLS_PATH").ok().map(PathBuf::from),
-        tools_overlay_path: env::var("TOOLS_OVERLAY_PATH").ok().map(PathBuf::from),
-        plugins_dir: env::var("PLUGINS_DIR").ok().map(PathBuf::from),
-        tools_config: env::var("TOOLS_CONFIG").ok().map(PathBuf::from),
-    }
-    .resolve_tool_dirs()
-    .map_err(|error| ApiError::Internal(error.to_string()))?;
-    // Sandboxes only install tools admitted by TOOL_ALLOWLIST/TOOL_BLOCKLIST
-    // (services/sandbox/install_tool_shims.py), so apply the same filter here:
-    // an unfiltered catalog advertises tools whose calls can only fail in the
-    // tool host, and MCP clients plan around those phantom entries.
-    let filter = sandbox_tool_filter();
-    let tools = discover_tool_catalog(&dirs)
-        .map_err(|error| ApiError::Internal(error.to_string()))?
-        .tools
+        tools.clone()
+    } else {
+        let dirs = ToolDiscoveryConfig {
+            tool_dirs: env::var("TOOL_DIRS").ok(),
+            public_tool_dirs: env::var("KUBERNETES_PUBLIC_TOOL_DIRS").ok(),
+            tools_path: env::var("TOOLS_PATH").ok().map(PathBuf::from),
+            tools_overlay_path: env::var("TOOLS_OVERLAY_PATH").ok().map(PathBuf::from),
+            plugins_dir: env::var("PLUGINS_DIR").ok().map(PathBuf::from),
+            tools_config: env::var("TOOLS_CONFIG").ok().map(PathBuf::from),
+        }
+        .resolve_tool_dirs()
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+        let tools = discover_tool_catalog(&dirs)
+            .map_err(|error| ApiError::Internal(error.to_string()))?
+            .tools;
+        if !cfg!(test) {
+            *CATALOG_CACHE.lock().unwrap() = Some((Instant::now(), tools.clone()));
+        }
+        tools
+    };
+    Ok(tools
         .into_iter()
         .filter(|tool| filter.admits(tool))
-        .collect::<Vec<_>>();
-    if !cfg!(test) {
-        *CATALOG_CACHE.lock().unwrap() = Some((Instant::now(), tools.clone()));
-    }
-    Ok(tools)
+        .collect())
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -334,15 +336,18 @@ struct SandboxToolFilter {
 }
 
 impl SandboxToolFilter {
-    // Mirrors the sandbox shim gate: a tool matches a list by its package
-    // directory name or its pyproject project name.
+    // Mirrors the sandbox shim gate: allowlists match package directory or
+    // project names, while blocklists also match individual script names.
     fn admits(&self, tool: &DiscoveredTool) -> bool {
         let package_dir = tool
             .project_dir
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or_default();
-        if self.blocklist.contains(package_dir) || self.blocklist.contains(&tool.package) {
+        if self.blocklist.contains(package_dir)
+            || self.blocklist.contains(&tool.package)
+            || self.blocklist.contains(&tool.name)
+        {
             return false;
         }
         match &self.allowlist {
@@ -352,44 +357,25 @@ impl SandboxToolFilter {
     }
 }
 
-// The tool lists live in SESSION_SANDBOX_EXTRA_ENV — the exact values sandbox
-// pods boot with — so the advertised catalog cannot drift from what the tool
-// host enforces. Resolved once per process like the other deployment env.
-fn sandbox_tool_filter() -> SandboxToolFilter {
-    static CELL: OnceLock<SandboxToolFilter> = OnceLock::new();
-    if cfg!(test) {
-        return parse_sandbox_tool_filter(env::var("SESSION_SANDBOX_EXTRA_ENV").ok().as_deref());
-    }
-    CELL.get_or_init(|| {
-        parse_sandbox_tool_filter(env::var("SESSION_SANDBOX_EXTRA_ENV").ok().as_deref())
-    })
-    .clone()
+async fn mcp_tool_host_call_policy(
+    state: &AppState,
+    principal: &McpPrincipal,
+) -> Result<ToolHostCallPolicy, ApiError> {
+    let policy = state
+        .runtime()?
+        .resolve_tool_host_call_policy(&principal.principal_id)
+        .await?;
+    Ok(policy)
 }
 
-fn parse_sandbox_tool_filter(raw: Option<&str>) -> SandboxToolFilter {
-    let mut allowlist = None;
-    let mut blocklist = None;
-    if let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty())
-        && let Ok(Value::Array(items)) = serde_json::from_str::<Value>(raw)
-    {
-        for item in &items {
-            let Some(name) = item.get("name").and_then(Value::as_str) else {
-                continue;
-            };
-            let value = item
-                .get("value")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            match name {
-                "TOOL_ALLOWLIST" => allowlist = split_tool_list(value),
-                "TOOL_BLOCKLIST" => blocklist = split_tool_list(value),
-                _ => {}
-            }
-        }
-    }
+fn parse_sandbox_tool_filter(filter: &ToolHostToolFilter) -> SandboxToolFilter {
     SandboxToolFilter {
-        allowlist,
-        blocklist: blocklist.unwrap_or_default(),
+        allowlist: filter.allowlist.as_deref().and_then(split_tool_list),
+        blocklist: filter
+            .blocklist
+            .as_deref()
+            .and_then(split_tool_list)
+            .unwrap_or_default(),
     }
 }
 
@@ -408,8 +394,11 @@ fn split_tool_list(raw: &str) -> Option<BTreeSet<String>> {
     }
 }
 
-fn mcp_find_centaur_tool(name: &str) -> Result<Option<DiscoveredTool>, ApiError> {
-    Ok(mcp_centaur_tool_catalog()?
+fn mcp_find_centaur_tool(
+    name: &str,
+    filter: &SandboxToolFilter,
+) -> Result<Option<DiscoveredTool>, ApiError> {
+    Ok(mcp_centaur_tool_catalog(filter)?
         .into_iter()
         .find(|tool| tool.name == name))
 }
@@ -441,19 +430,45 @@ async fn mcp_centaur_tool_result(
     principal: &McpPrincipal,
     tool: DiscoveredTool,
     arguments: Value,
+    policy: ToolHostCallPolicy,
 ) -> Result<Value, ApiError> {
+    match prepare_mcp_centaur_tool_call(&tool, arguments)? {
+        McpCentaurToolAction::Return(result) => Ok(result),
+        McpCentaurToolAction::Run { method, arguments } => {
+            run_tool_host_centaur_tool(
+                state.runtime()?,
+                principal,
+                &tool,
+                &method,
+                arguments,
+                policy,
+            )
+            .await
+        }
+    }
+}
+
+enum McpCentaurToolAction {
+    Return(Value),
+    Run { method: String, arguments: Value },
+}
+
+fn prepare_mcp_centaur_tool_call(
+    tool: &DiscoveredTool,
+    arguments: Value,
+) -> Result<McpCentaurToolAction, ApiError> {
     let params = serde_json::from_value::<CentaurToolMcpArguments>(arguments)
         .map_err(|error| ApiError::BadRequest(error.to_string()))?;
     if params.method.trim().is_empty() {
         return Err(ApiError::BadRequest("method is required".to_owned()));
     }
     let method = params.method.trim().to_owned();
-    let methods = mcp_tool_methods(&tool);
+    let methods = mcp_tool_methods(tool);
     if method == "help" {
-        return mcp_tool_help_result(&tool, &methods);
+        return mcp_tool_help_result(tool, &methods).map(McpCentaurToolAction::Return);
     }
     if !methods.iter().any(|candidate| candidate.name == method) {
-        return Ok(mcp_text_result(
+        return Ok(McpCentaurToolAction::Return(mcp_text_result(
             format!(
                 "centaur tool {} has no method {method}. Available methods: {}",
                 tool.name,
@@ -464,21 +479,21 @@ async fn mcp_centaur_tool_result(
                     .join(", ")
             ),
             true,
-        ));
+        )));
     }
     let arguments = match normalize_centaur_tool_arguments(params.arguments) {
         Ok(arguments) => arguments,
         Err(kind) => {
-            return Ok(mcp_text_result(
+            return Ok(McpCentaurToolAction::Return(mcp_text_result(
                 format!(
                     "centaur tool {}.{method} arguments must be an object; got {kind}",
                     tool.name
                 ),
                 true,
-            ));
+            )));
         }
     };
-    run_tool_host_centaur_tool(state.runtime()?, principal, &tool, &method, arguments).await
+    Ok(McpCentaurToolAction::Run { method, arguments })
 }
 
 fn normalize_centaur_tool_arguments(arguments: Value) -> Result<Value, &'static str> {
@@ -508,16 +523,20 @@ async fn run_tool_host_centaur_tool(
     tool: &DiscoveredTool,
     method: &str,
     arguments: Value,
+    policy: ToolHostCallPolicy,
 ) -> Result<Value, ApiError> {
     let output = runtime
-        .run_tool_host_call(ToolHostCallInput {
-            principal_id: principal.principal_id.clone(),
-            token_id: Some(principal.token_id.clone()),
-            tool_name: tool.name.clone(),
-            method: method.to_owned(),
-            arguments,
-            timeout: Duration::from_secs(120),
-        })
+        .run_tool_host_call(
+            ToolHostCallInput {
+                principal_id: principal.principal_id.clone(),
+                token_id: Some(principal.token_id.clone()),
+                tool_name: tool.name.clone(),
+                method: method.to_owned(),
+                arguments,
+                timeout: Duration::from_secs(120),
+            },
+            policy,
+        )
         .await?;
     if output.timed_out {
         return Ok(mcp_text_result(
@@ -1010,6 +1029,13 @@ mod mcp_tests {
         }
     }
 
+    fn returned_tool_action(action: McpCentaurToolAction) -> Value {
+        match action {
+            McpCentaurToolAction::Return(result) => result,
+            McpCentaurToolAction::Run { .. } => panic!("expected a local tool result"),
+        }
+    }
+
     fn test_jwt(secret: &str, claims: Value) -> String {
         let header = general_purpose::URL_SAFE_NO_PAD
             .encode(serde_json::to_vec(&json!({"alg": "HS256", "typ": "JWT"})).unwrap());
@@ -1147,8 +1173,8 @@ RuntimeError: X API error: 401 - {
         );
     }
 
-    #[tokio::test]
-    async fn mcp_unknown_method_returns_available_methods_without_running_tool() {
+    #[test]
+    fn mcp_unknown_method_returns_available_methods_without_running_tool() {
         let temp = temp_dir("centaur-api-rs-mcp-unknown-method");
         fs::create_dir_all(&temp).unwrap();
         fs::write(
@@ -1160,20 +1186,11 @@ def search(query, limit=20):
         )
         .unwrap();
 
-        let result = mcp_centaur_tool_result(
-            &AppState::unready(crate::ApiAuthConfig::testing("test-secret")),
-            &McpPrincipal {
-                principal_id: "mcp:test".to_owned(),
-                token_id: "mcp_tok_test".to_owned(),
-                name: "test".to_owned(),
-                scopes: vec!["mcp:tools".to_owned()],
-                expires_at: None,
-            },
-            test_tool(temp.clone()),
-            json!({"method": "missing", "arguments": {}}),
-        )
-        .await
-        .unwrap();
+        let tool = test_tool(temp.clone());
+        let result = returned_tool_action(
+            prepare_mcp_centaur_tool_call(&tool, json!({"method": "missing", "arguments": {}}))
+                .unwrap(),
+        );
 
         assert_eq!(result["isError"], true);
         let text = result["content"][0]["text"].as_str().unwrap();
@@ -1183,26 +1200,17 @@ def search(query, limit=20):
         let _ = fs::remove_dir_all(temp);
     }
 
-    #[tokio::test]
-    async fn mcp_unknown_method_is_rejected_when_tool_has_no_public_methods() {
+    #[test]
+    fn mcp_unknown_method_is_rejected_when_tool_has_no_public_methods() {
         let temp = temp_dir("centaur-api-rs-mcp-no-methods");
         fs::create_dir_all(&temp).unwrap();
         fs::write(temp.join("client.py"), "def _hidden():\n    return None\n").unwrap();
 
-        let result = mcp_centaur_tool_result(
-            &AppState::unready(crate::ApiAuthConfig::testing("test-secret")),
-            &McpPrincipal {
-                principal_id: "mcp:test".to_owned(),
-                token_id: "mcp_tok_test".to_owned(),
-                name: "test".to_owned(),
-                scopes: vec!["mcp:tools".to_owned()],
-                expires_at: None,
-            },
-            test_tool(temp.clone()),
-            json!({"method": "missing", "arguments": {}}),
-        )
-        .await
-        .unwrap();
+        let tool = test_tool(temp.clone());
+        let result = returned_tool_action(
+            prepare_mcp_centaur_tool_call(&tool, json!({"method": "missing", "arguments": {}}))
+                .unwrap(),
+        );
 
         assert_eq!(result["isError"], true);
         let text = result["content"][0]["text"].as_str().unwrap();
@@ -1211,8 +1219,8 @@ def search(query, limit=20):
         let _ = fs::remove_dir_all(temp);
     }
 
-    #[tokio::test]
-    async fn mcp_tool_arguments_must_be_an_object_before_running_sandbox() {
+    #[test]
+    fn mcp_tool_arguments_must_be_an_object_before_running_sandbox() {
         let temp = temp_dir("centaur-api-rs-mcp-arguments-object");
         fs::create_dir_all(&temp).unwrap();
         fs::write(
@@ -1224,20 +1232,14 @@ def search(query, limit=20):
         )
         .unwrap();
 
-        let result = mcp_centaur_tool_result(
-            &AppState::unready(crate::ApiAuthConfig::testing("test-secret")),
-            &McpPrincipal {
-                principal_id: "mcp:test".to_owned(),
-                token_id: "mcp_tok_test".to_owned(),
-                name: "test".to_owned(),
-                scopes: vec!["mcp:tools".to_owned()],
-                expires_at: None,
-            },
-            test_tool(temp.clone()),
-            json!({"method": "search", "arguments": ["not", "an", "object"]}),
-        )
-        .await
-        .unwrap();
+        let tool = test_tool(temp.clone());
+        let result = returned_tool_action(
+            prepare_mcp_centaur_tool_call(
+                &tool,
+                json!({"method": "search", "arguments": ["not", "an", "object"]}),
+            )
+            .unwrap(),
+        );
 
         assert_eq!(result["isError"], true);
         let text = result["content"][0]["text"].as_str().unwrap();
@@ -1447,28 +1449,23 @@ def search(query, limit=20):
 
     #[test]
     fn sandbox_tool_filter_defaults_to_admit_all() {
-        for raw in [
-            None,
-            Some(""),
-            Some("not json"),
-            Some(r#"[{"name":"OTHER","value":"x"}]"#),
-        ] {
-            let filter = parse_sandbox_tool_filter(raw);
-            assert_eq!(filter, SandboxToolFilter::default());
-            assert!(filter.admits(&test_tool(PathBuf::from("/tools/demo"))));
-        }
-        let empty_lists = parse_sandbox_tool_filter(Some(
-            r#"[{"name":"TOOL_ALLOWLIST","value":""},{"name":"TOOL_BLOCKLIST","value":" , "}]"#,
-        ));
+        let filter = parse_sandbox_tool_filter(&ToolHostToolFilter::default());
+        assert_eq!(filter, SandboxToolFilter::default());
+        assert!(filter.admits(&test_tool(PathBuf::from("/tools/demo"))));
+
+        let empty_lists = parse_sandbox_tool_filter(&ToolHostToolFilter {
+            allowlist: Some(String::new()),
+            blocklist: Some(" , ".to_owned()),
+        });
         assert_eq!(empty_lists, SandboxToolFilter::default());
     }
 
     #[test]
-    fn sandbox_tool_filter_matches_package_dir_or_project_name() {
-        let filter = parse_sandbox_tool_filter(Some(
-            r#"[{"name":"TOOL_ALLOWLIST","value":"demo-dir, project-name"},
-                {"name":"TOOL_BLOCKLIST","value":"blocked"}]"#,
-        ));
+    fn sandbox_tool_filter_matches_package_dir_project_or_script_name() {
+        let filter = parse_sandbox_tool_filter(&ToolHostToolFilter {
+            allowlist: Some("demo-dir, project-name".to_owned()),
+            blocklist: Some("blocked, blocked-script".to_owned()),
+        });
 
         // Admitted via the package directory name.
         assert!(filter.admits(&test_tool(PathBuf::from("/tools/demo-dir"))));
@@ -1482,6 +1479,9 @@ def search(query, limit=20):
         let mut blocked = test_tool(PathBuf::from("/tools/demo-dir"));
         blocked.package = "blocked".to_owned();
         assert!(!filter.admits(&blocked));
+        let mut blocked_script = test_tool(PathBuf::from("/tools/demo-dir"));
+        blocked_script.name = "blocked-script".to_owned();
+        assert!(!filter.admits(&blocked_script));
     }
 
     #[test]
@@ -1499,18 +1499,16 @@ def search(query, limit=20):
             )
             .unwrap();
         }
-        let _env = EnvGuard::set(&[
-            (
-                "TOOL_DIRS",
-                Box::leak(temp.display().to_string().into_boxed_str()),
-            ),
-            (
-                "SESSION_SANDBOX_EXTRA_ENV",
-                r#"[{"name":"TOOL_ALLOWLIST","value":"alpha"}]"#,
-            ),
-        ]);
+        let _env = EnvGuard::set(&[(
+            "TOOL_DIRS",
+            Box::leak(temp.display().to_string().into_boxed_str()),
+        )]);
+        let filter = SandboxToolFilter {
+            allowlist: Some(BTreeSet::from(["alpha".to_owned()])),
+            blocklist: BTreeSet::new(),
+        };
 
-        let names = mcp_centaur_tool_catalog()
+        let names = mcp_centaur_tool_catalog(&filter)
             .unwrap()
             .into_iter()
             .map(|tool| tool.name)
