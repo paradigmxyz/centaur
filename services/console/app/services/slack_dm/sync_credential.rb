@@ -42,40 +42,64 @@ module SlackDm
       @run_id = "sdms_#{SecureRandom.hex(16)}"
       @messages_fetched = 0
       @replies_fetched = 0
+      @messages_upserted = 0
+      @replies_upserted = 0
     end
 
-    def call
+    def call(starting_conversation_id: nil, deadline: nil)
       auth = slack_api(AUTH_TEST_ENDPOINT)
       home_team_id = auth.fetch("team_id")
       source_user_id = auth["user_id"].presence || @credential.provider_subject.to_s
       checkpoints = load_checkpoints(home_team_id)
-      batch = empty_batch(home_team_id, source_user_id)
+      conversations = list_conversations.sort_by { |conversation| conversation.fetch("id") }
+      conversations = remaining_conversations(conversations, starting_conversation_id)
+      run = empty_batch(home_team_id, source_user_id).fetch(:run)
+      run[:conversations_requested] = conversations.length
+      checkpointed_conversation_id = starting_conversation_id
 
-      conversations = list_conversations
-      batch[:run][:conversations_requested] = conversations.length
+      conversations.each_with_index do |conversation, index|
+        if deadline && Time.current >= deadline
+          finish_run(run, status: "partial")
+          return false
+        end
 
-      conversations.each do |conversation|
-        normalize_conversation(conversation, home_team_id, batch)
-        normalize_members(conversation, home_team_id, batch)
-        sync_history(conversation, home_team_id, checkpoints[conversation.fetch("id")], batch)
-        batch[:run][:conversations_synced] += 1
-      rescue StandardError => e
-        raise if e.is_a?(SlackApi::RetryableError)
-        raise if Rails.env.test?
+        conversation_id = conversation.fetch("id")
+        if conversation_id != checkpointed_conversation_id
+          yield conversation_id if block_given?
+          checkpointed_conversation_id = conversation_id
+        end
 
-        batch[:run][:conversations_failed] += 1
-        Rails.logger.warn do
-          "slack DM sync failed for conversation #{conversation['id']}: #{e.class}: #{e.message}"
+        batch = empty_batch(home_team_id, source_user_id)
+        conversation_failed = false
+        begin
+          normalize_conversation(conversation, home_team_id, batch)
+          normalize_members(conversation, home_team_id, batch)
+          sync_history(conversation, home_team_id, checkpoints[conversation_id], batch)
+        rescue StandardError => e
+          raise if e.is_a?(SlackApi::RetryableError)
+          raise if Rails.env.test?
+
+          conversation_failed = true
+          run[:conversations_failed] += 1
+          Rails.logger.warn do
+            "slack DM sync failed for conversation #{conversation_id}: #{e.class}: #{e.message}"
+          end
+        end
+        unless conversation_failed
+          run[:conversations_synced] += 1
+          ingest_conversation_batch(batch, run)
+        end
+
+        next_conversation_id = conversations[index + 1]&.fetch("id")
+        if next_conversation_id
+          yield next_conversation_id if block_given?
+          checkpointed_conversation_id = next_conversation_id
         end
       end
 
-      batch[:run][:status] = batch[:run][:conversations_failed].positive? ? "partial" : "completed"
-      batch[:run][:messages_fetched] = @messages_fetched
-      batch[:run][:messages_upserted] = batch[:messages].length
-      batch[:run][:replies_fetched] = @replies_fetched
-      batch[:run][:replies_upserted] = batch[:messages].count { |message| message[:parent_message_ts].present? }
-      batch[:run][:finished] = true
-      @api_client.ingest_slack_dm_sync_batch(sanitize_for_postgres(batch))
+      status = run[:conversations_failed].positive? ? "partial" : "completed"
+      finish_run(run, status: status)
+      true
     end
 
     private
@@ -118,6 +142,46 @@ module SlackDm
         attachments: [],
         checkpoints: []
       }
+    end
+
+    def remaining_conversations(conversations, starting_conversation_id)
+      return conversations if starting_conversation_id.blank?
+
+      conversations.drop_while do |conversation|
+        conversation.fetch("id") < starting_conversation_id
+      end
+    end
+
+    def ingest_conversation_batch(batch, run)
+      replies_upserted = batch[:messages].count do |message|
+        message[:parent_message_ts].present?
+      end
+      @messages_upserted += batch[:messages].length
+      @replies_upserted += replies_upserted
+      update_run_counts(run)
+      batch[:run] = run.merge(finished: false)
+      @api_client.ingest_slack_dm_sync_batch(sanitize_for_postgres(batch))
+    end
+
+    def finish_run(run, status:)
+      update_run_counts(run)
+      batch = {
+        run: run.merge(status: status, finished: true),
+        replace_memberships: false,
+        conversations: [],
+        members: [],
+        messages: [],
+        attachments: [],
+        checkpoints: []
+      }
+      @api_client.ingest_slack_dm_sync_batch(sanitize_for_postgres(batch))
+    end
+
+    def update_run_counts(run)
+      run[:messages_fetched] = @messages_fetched
+      run[:messages_upserted] = @messages_upserted
+      run[:replies_fetched] = @replies_fetched
+      run[:replies_upserted] = @replies_upserted
     end
 
     def list_conversations

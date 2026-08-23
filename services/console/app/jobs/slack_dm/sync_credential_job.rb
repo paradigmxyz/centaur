@@ -23,7 +23,7 @@ module SlackDm
 
       credentials = eligible_credentials(oauth_app_slug)
       if credentials.empty?
-        cursor.update!(next_credential_id: nil, not_before: nil)
+        cursor.update!(next_credential_id: nil, next_conversation_id: nil, not_before: nil)
         return
       end
 
@@ -31,10 +31,14 @@ module SlackDm
       credentials = ordered_credentials(credentials, cursor.next_credential_id)
       credentials.each_with_index do |credential, index|
         break if Time.current >= deadline
-        return unless sync_credential(cursor, credential)
+        return unless sync_credential(cursor, credential, deadline)
 
         next_credential = credentials[index + 1] || credentials.first
-        cursor.update!(next_credential_id: next_credential.id, not_before: nil)
+        cursor.update!(
+          next_credential_id: next_credential.id,
+          next_conversation_id: nil,
+          not_before: nil
+        )
       end
     end
 
@@ -66,9 +70,17 @@ module SlackDm
       credentials.rotate(start_index)
     end
 
-    def sync_credential(cursor, credential)
-      SlackDm::SyncCredential.new(credential).call
-      true
+    def sync_credential(cursor, credential, deadline)
+      SlackDm::SyncCredential.new(credential).call(
+        starting_conversation_id: cursor.next_conversation_id,
+        deadline: deadline
+      ) do |conversation_id|
+        cursor.update!(
+          next_credential_id: credential.id,
+          next_conversation_id: conversation_id,
+          not_before: nil
+        )
+      end
     rescue SlackApi::RateLimitedError => e
       retry_at = e.retry_after.seconds.from_now
       cursor.update!(next_credential_id: credential.id, not_before: retry_at)

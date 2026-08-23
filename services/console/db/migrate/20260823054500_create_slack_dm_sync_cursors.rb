@@ -3,6 +3,7 @@ class CreateSlackDmSyncCursors < ActiveRecord::Migration[8.1]
     create_table :slack_dm_sync_cursors do |t|
       t.string :oauth_app_slug, null: false
       t.bigint :next_credential_id
+      t.string :next_conversation_id
       t.datetime :not_before
 
       t.timestamps

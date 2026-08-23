@@ -491,6 +491,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_23_054500) do
 
   create_table "slack_dm_sync_cursors", force: :cascade do |t|
     t.datetime "created_at", null: false
+    t.string "next_conversation_id"
     t.bigint "next_credential_id"
     t.datetime "not_before"
     t.string "oauth_app_slug", null: false

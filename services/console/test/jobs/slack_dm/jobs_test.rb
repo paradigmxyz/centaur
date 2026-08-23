@@ -43,7 +43,10 @@ module SlackDm
       synced_ids = []
       sync_factory = lambda do |credential|
         Object.new.tap do |sync|
-          sync.define_singleton_method(:call) { synced_ids << credential.id }
+          sync.define_singleton_method(:call) do |**|
+            synced_ids << credential.id
+            true
+          end
         end
       end
 
@@ -66,7 +69,10 @@ module SlackDm
       synced_ids = []
       sync_factory = lambda do |credential|
         Object.new.tap do |sync|
-          sync.define_singleton_method(:call) { synced_ids << credential.id }
+          sync.define_singleton_method(:call) do |**|
+            synced_ids << credential.id
+            true
+          end
         end
       end
 
@@ -106,9 +112,11 @@ module SlackDm
       attempted_ids = []
       sync_factory = lambda do |credential|
         Object.new.tap do |sync|
-          sync.define_singleton_method(:call) do
+          sync.define_singleton_method(:call) do |**|
             attempted_ids << credential.id
             raise SlackApi::Error, "invalid_auth" if credential == first
+
+            true
           end
         end
       end
@@ -128,11 +136,14 @@ module SlackDm
       rate_limited = true
       sync_factory = lambda do |credential|
         Object.new.tap do |sync|
-          sync.define_singleton_method(:call) do
+          sync.define_singleton_method(:call) do |**_kwargs, &checkpoint|
             attempted_ids << credential.id
             if credential == first && rate_limited
+              checkpoint.call("D200")
               raise SlackApi::RateLimitedError.new(retry_after: 20.minutes.to_i)
             end
+
+            true
           end
         end
       end
@@ -143,6 +154,7 @@ module SlackDm
 
         cursor = SlackDmSyncCursor.find_by!(oauth_app_slug: "slack-dms")
         assert_equal first.id, cursor.next_credential_id
+        assert_equal "D200", cursor.next_conversation_id
         assert_equal now + 20.minutes, cursor.not_before
         assert_equal [ first.id ], attempted_ids
 
@@ -156,6 +168,7 @@ module SlackDm
       assert_equal [ first.id, first.id, second.id ], attempted_ids
       cursor = SlackDmSyncCursor.find_by!(oauth_app_slug: "slack-dms")
       assert_equal first.id, cursor.next_credential_id
+      assert_nil cursor.next_conversation_id
       assert_nil cursor.not_before
     end
 
@@ -167,9 +180,10 @@ module SlackDm
       advance_clock = -> { travel SlackDm::SyncCredentialJob::RUN_TIME_BUDGET + 1.second }
       sync_factory = lambda do |credential|
         Object.new.tap do |sync|
-          sync.define_singleton_method(:call) do
+          sync.define_singleton_method(:call) do |**|
             attempted_ids << credential.id
             advance_clock.call
+            true
           end
         end
       end
@@ -183,6 +197,32 @@ module SlackDm
       assert_equal [ first.id ], attempted_ids
       assert_equal second.id,
                    SlackDmSyncCursor.find_by!(oauth_app_slug: "slack-dms").next_credential_id
+    end
+
+    test "SyncCredentialJob preserves a conversation cursor when the budget expires" do
+      app = slack_app
+      first = slack_credential(app: app)
+      slack_credential(app: app)
+      attempted_ids = []
+      sync_factory = lambda do |credential|
+        Object.new.tap do |sync|
+          sync.define_singleton_method(:call) do |**_kwargs, &checkpoint|
+            attempted_ids << credential.id
+            checkpoint.call("D200")
+            false
+          end
+        end
+      end
+
+      SlackDm::SyncCredential.stub(:new, sync_factory) do
+        SlackDm::SyncCredentialJob.perform_now("slack-dms")
+      end
+
+      cursor = SlackDmSyncCursor.find_by!(oauth_app_slug: "slack-dms")
+      assert_equal [ first.id ], attempted_ids
+      assert_equal first.id, cursor.next_credential_id
+      assert_equal "D200", cursor.next_conversation_id
+      assert_nil cursor.not_before
     end
   end
 end
