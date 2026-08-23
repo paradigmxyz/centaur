@@ -307,10 +307,10 @@ module SlackDm
       previous.nil? ? ENV.delete(env_key) : ENV[env_key] = previous
     end
 
-    test "429 responses expose Retry-After for deferred job execution" do
+    test "429 responses expose the full Retry-After to the cursor job" do
       [
         [ "120", 120 ],
-        [ "600", 5.minutes.to_i ],
+        [ "600", 600 ],
         [ "invalid", 1 ]
       ].each do |header, expected|
         response = HttpClient::Response.new(

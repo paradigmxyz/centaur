@@ -32,82 +32,157 @@ module SlackDm
       )
     end
 
-    test "PollSyncJob enqueues credentials with any supported private conversation scopes" do
+    test "SyncCredentialJob syncs eligible credentials serially" do
       app = slack_app
       good = slack_credential(app: app)
       dm_only = slack_credential(app: app, scopes: SlackDm::SyncCredential::DM_REQUIRED_SCOPES)
-      missing_scope = slack_credential(app: app, scopes: %w[chat:write])
-      no_token = slack_credential(app: app, access_token: nil)
+      slack_credential(app: app, scopes: %w[chat:write])
+      slack_credential(app: app, access_token: nil)
       other_app = slack_app(slug: "other-slack")
-      other = slack_credential(app: other_app)
-
-      SlackDm::PollSyncJob.perform_now("slack-dms")
-
-      enqueued_ids = enqueued_jobs
-        .select { |job| job[:job] == SlackDm::SyncCredentialJob }
-        .map { |job| job[:args].first }
-      assert_includes enqueued_ids, good.id
-      assert_includes enqueued_ids, dm_only.id
-      refute_includes enqueued_ids, missing_scope.id
-      refute_includes enqueued_ids, no_token.id
-      refute_includes enqueued_ids, other.id
-    end
-
-    test "SyncCredentialJob is a no-op for missing credentials" do
-      assert_nothing_raised { SlackDm::SyncCredentialJob.perform_now(-1) }
-    end
-
-    test "SyncCredentialJob defers rate-limited work using Retry-After" do
-      credential = slack_credential(app: slack_app)
-      sync = rate_limited_sync(retry_after: 120)
-      now = Time.zone.parse("2026-08-12 12:00:00")
-
-      SlackDm::SyncCredential.stub(:new, ->(*) { sync }) do
-        travel_to(now) { SlackDm::SyncCredentialJob.perform_now(credential.id) }
-      end
-
-      retry_job = enqueued_jobs.sole
-      assert_equal SlackDm::SyncCredentialJob, retry_job[:job]
-      assert_equal [ credential.id ], retry_job[:args]
-      assert_in_delta now.to_f + 120, retry_job[:at], 0.001
-    end
-
-    test "SyncCredentialJob allows only one delayed rate-limit retry" do
-      credential = slack_credential(app: slack_app)
-      job = SlackDm::SyncCredentialJob.new(credential.id)
-      job.executions = SlackDm::SyncCredentialJob::MAX_RETRYABLE_EXECUTIONS - 1
-
-      SlackDm::SyncCredential.stub(:new, ->(*) { rate_limited_sync(retry_after: 120) }) do
-        assert_no_enqueued_jobs { job.perform_now }
-      end
-
-      assert_equal SlackDm::SyncCredentialJob::MAX_RETRYABLE_EXECUTIONS, job.executions
-    end
-
-    test "SyncCredentialJob defers transient Slack API failures" do
-      credential = slack_credential(app: slack_app)
-      sync = Object.new
-      sync.define_singleton_method(:call) do
-        raise SlackApi::TransientError.new(retry_after: 30)
-      end
-
-      SlackDm::SyncCredential.stub(:new, ->(*) { sync }) do
-        SlackDm::SyncCredentialJob.perform_now(credential.id)
-      end
-
-      retry_job = enqueued_jobs.sole
-      assert_equal SlackDm::SyncCredentialJob, retry_job[:job]
-      assert_equal [ credential.id ], retry_job[:args]
-    end
-
-    private
-
-    def rate_limited_sync(retry_after:)
-      Object.new.tap do |sync|
-        sync.define_singleton_method(:call) do
-          raise SlackApi::RateLimitedError.new(retry_after: retry_after)
+      slack_credential(app: other_app)
+      synced_ids = []
+      sync_factory = lambda do |credential|
+        Object.new.tap do |sync|
+          sync.define_singleton_method(:call) { synced_ids << credential.id }
         end
       end
+
+      SlackDm::SyncCredential.stub(:new, sync_factory) do
+        assert_no_enqueued_jobs { SlackDm::SyncCredentialJob.perform_now("slack-dms") }
+      end
+
+      assert_equal [ good.id, dm_only.id ], synced_ids
+      cursor = SlackDmSyncCursor.find_by!(oauth_app_slug: "slack-dms")
+      assert_equal good.id, cursor.next_credential_id
+      assert_nil cursor.not_before
+    end
+
+    test "SyncCredentialJob resumes from the persisted credential cursor" do
+      app = slack_app
+      first = slack_credential(app: app)
+      second = slack_credential(app: app)
+      third = slack_credential(app: app)
+      SlackDmSyncCursor.create!(oauth_app_slug: "slack-dms", next_credential_id: second.id)
+      synced_ids = []
+      sync_factory = lambda do |credential|
+        Object.new.tap do |sync|
+          sync.define_singleton_method(:call) { synced_ids << credential.id }
+        end
+      end
+
+      SlackDm::SyncCredential.stub(:new, sync_factory) do
+        SlackDm::SyncCredentialJob.perform_now("slack-dms")
+      end
+
+      assert_equal [ second.id, third.id, first.id ], synced_ids
+      assert_equal second.id,
+                   SlackDmSyncCursor.find_by!(oauth_app_slug: "slack-dms").next_credential_id
+    end
+
+    test "SyncCredentialJob configures duplicate global runs to be discarded" do
+      first = SlackDm::SyncCredentialJob.new("slack-dms")
+      duplicate = SlackDm::SyncCredentialJob.new("slack-dms")
+      other_app = SlackDm::SyncCredentialJob.new("other-slack")
+      legacy_poll = SlackDm::PollSyncJob.new("slack-dms")
+
+      assert_equal :discard, SlackDm::SyncCredentialJob.concurrency_on_conflict
+      assert_equal 6.hours, SlackDm::SyncCredentialJob.concurrency_duration
+      assert_equal 30.minutes, SlackDm::SyncCredentialJob::RUN_TIME_BUDGET
+      assert_equal first.concurrency_key, duplicate.concurrency_key
+      assert_equal first.concurrency_key, other_app.concurrency_key
+      assert_equal first.concurrency_key, legacy_poll.concurrency_key
+    end
+
+    test "SyncCredentialJob ignores credential IDs queued by the previous job shape" do
+      assert_no_difference -> { SlackDmSyncCursor.count } do
+        SlackDm::SyncCredentialJob.perform_now(123)
+      end
+    end
+
+    test "SyncCredentialJob continues after one credential has a Slack API error" do
+      app = slack_app
+      first = slack_credential(app: app)
+      second = slack_credential(app: app)
+      attempted_ids = []
+      sync_factory = lambda do |credential|
+        Object.new.tap do |sync|
+          sync.define_singleton_method(:call) do
+            attempted_ids << credential.id
+            raise SlackApi::Error, "invalid_auth" if credential == first
+          end
+        end
+      end
+
+      SlackDm::SyncCredential.stub(:new, sync_factory) do
+        SlackDm::SyncCredentialJob.perform_now("slack-dms")
+      end
+
+      assert_equal [ first.id, second.id ], attempted_ids
+    end
+
+    test "SyncCredentialJob pauses the cursor until Slack Retry-After elapses" do
+      app = slack_app
+      first = slack_credential(app: app)
+      second = slack_credential(app: app)
+      attempted_ids = []
+      rate_limited = true
+      sync_factory = lambda do |credential|
+        Object.new.tap do |sync|
+          sync.define_singleton_method(:call) do
+            attempted_ids << credential.id
+            if credential == first && rate_limited
+              raise SlackApi::RateLimitedError.new(retry_after: 20.minutes.to_i)
+            end
+          end
+        end
+      end
+      now = Time.zone.parse("2026-08-23 12:00:00")
+
+      SlackDm::SyncCredential.stub(:new, sync_factory) do
+        travel_to(now) { SlackDm::SyncCredentialJob.perform_now("slack-dms") }
+
+        cursor = SlackDmSyncCursor.find_by!(oauth_app_slug: "slack-dms")
+        assert_equal first.id, cursor.next_credential_id
+        assert_equal now + 20.minutes, cursor.not_before
+        assert_equal [ first.id ], attempted_ids
+
+        travel_to(now + 10.minutes) { SlackDm::SyncCredentialJob.perform_now("slack-dms") }
+        assert_equal [ first.id ], attempted_ids
+
+        rate_limited = false
+        travel_to(now + 20.minutes) { SlackDm::SyncCredentialJob.perform_now("slack-dms") }
+      end
+
+      assert_equal [ first.id, first.id, second.id ], attempted_ids
+      cursor = SlackDmSyncCursor.find_by!(oauth_app_slug: "slack-dms")
+      assert_equal first.id, cursor.next_credential_id
+      assert_nil cursor.not_before
+    end
+
+    test "SyncCredentialJob stops between credentials after its runtime budget" do
+      app = slack_app
+      first = slack_credential(app: app)
+      second = slack_credential(app: app)
+      attempted_ids = []
+      advance_clock = -> { travel SlackDm::SyncCredentialJob::RUN_TIME_BUDGET + 1.second }
+      sync_factory = lambda do |credential|
+        Object.new.tap do |sync|
+          sync.define_singleton_method(:call) do
+            attempted_ids << credential.id
+            advance_clock.call
+          end
+        end
+      end
+
+      SlackDm::SyncCredential.stub(:new, sync_factory) do
+        travel_to(Time.zone.parse("2026-08-23 12:00:00")) do
+          SlackDm::SyncCredentialJob.perform_now("slack-dms")
+        end
+      end
+
+      assert_equal [ first.id ], attempted_ids
+      assert_equal second.id,
+                   SlackDmSyncCursor.find_by!(oauth_app_slug: "slack-dms").next_credential_id
     end
   end
 end

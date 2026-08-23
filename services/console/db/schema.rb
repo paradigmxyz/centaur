@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_08_20_191500) do
+ActiveRecord::Schema[8.1].define(version: 2026_08_23_054500) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
   enable_extension "pg_search"
@@ -487,6 +487,15 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_20_191500) do
     t.index ["principal_id"], name: "index_slack_channel_permissions_on_principal_id"
     t.index ["role_id", "channel_id"], name: "idx_slack_permissions_unique_role_channel", unique: true, where: "(role_id IS NOT NULL)"
     t.check_constraint "(principal_id IS NOT NULL) <> (role_id IS NOT NULL)", name: "slack_channel_permissions_exactly_one_grantee"
+  end
+
+  create_table "slack_dm_sync_cursors", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.bigint "next_credential_id"
+    t.datetime "not_before"
+    t.string "oauth_app_slug", null: false
+    t.datetime "updated_at", null: false
+    t.index ["oauth_app_slug"], name: "index_slack_dm_sync_cursors_on_oauth_app_slug", unique: true
   end
 
   create_table "static_secrets", force: :cascade do |t|

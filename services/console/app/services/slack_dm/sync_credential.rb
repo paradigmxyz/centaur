@@ -328,7 +328,7 @@ module SlackDm
         params: params,
         headers: { "Authorization" => "Bearer #{@credential.access_token}" }
       )
-      SlackApi.parse_response!(response, max_rate_limit_wait: rate_limit_max_wait)
+      SlackApi.parse_response!(response, max_rate_limit_wait: nil)
     rescue Socket::ResolutionError => e
       raise SlackApi::TransientError.new(
         "Slack API hostname resolution failed: #{e.message}",
@@ -365,7 +365,6 @@ module SlackDm
     end
 
     def slack_timeout = positive_env("SLACK_DM_SYNC_TIMEOUT_SECONDS", 20)
-    def rate_limit_max_wait = positive_env("SLACK_DM_SYNC_RATE_LIMIT_MAX_WAIT_SECONDS", 5.minutes.to_i)
     def list_page_size = positive_env("SLACK_DM_SYNC_LIST_PAGE_SIZE", 200)
     def list_max_pages = positive_env("SLACK_DM_SYNC_LIST_MAX_PAGES", 10)
     def members_page_size = positive_env("SLACK_DM_SYNC_MEMBERS_PAGE_SIZE", 200)
