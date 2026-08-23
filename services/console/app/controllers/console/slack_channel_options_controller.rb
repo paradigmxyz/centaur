@@ -2,7 +2,7 @@ module Console
   class SlackChannelOptionsController < ApplicationController
     MAX_RESULTS = 20
 
-    before_action :require_admin
+    before_action :require_admin, unless: :scheduled_task_request?
 
     def index
       response.headers["Cache-Control"] = "no-store"
@@ -16,6 +16,10 @@ module Console
     end
 
     private
+
+    def scheduled_task_request?
+      params[:owner_type] == "scheduled_task" && params[:id].blank?
+    end
 
     def channel_scope
       return scheduled_task_delivery_policy.allowed_channels if params[:owner_type] == "scheduled_task"

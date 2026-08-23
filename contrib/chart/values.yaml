@@ -333,6 +333,12 @@ sandbox:
   # mirrored into slackbotv2. This keeps Slack's model/thinking footer aligned
   # with the policy the sandbox actually runs.
   extraEnv: {}
+  telemetry:
+    # Include user prompts, assistant responses, and bounded shell commands on
+    # harness spans.
+    # Token usage, cost, status, session, and tool telemetry remain available
+    # when this is disabled.
+    captureTranscripts: false
   stateVolume:
     enabled: false
     size: 10Gi

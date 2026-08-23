@@ -167,9 +167,22 @@ module Console
       delete logout_url
       post login_url, params: { email: users(:member_user).email, password: "password123456" }
 
-      get console_principal_slack_channel_options_url(principals(:acme_channel).oid)
+      get console_principal_slack_channel_options_url(principals(:acme_channel).oid),
+          params: { owner_type: "scheduled_task" }
 
       assert_redirected_to console_threads_path
+    end
+
+    test "non-admins can search scheduled task delivery channels" do
+      delete logout_url
+      post login_url, params: { email: users(:member_user).email, password: "password123456" }
+
+      with_catalog do
+        get slack_channel_options_console_scheduled_tasks_url, params: { q: "general" }
+      end
+
+      assert_response :ok
+      assert_equal "C0123456789", response.parsed_body.fetch("options").sole.fetch("value")
     end
 
     private

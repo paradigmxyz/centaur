@@ -3,7 +3,6 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-
 SYSTEM_PROMPT = Path(__file__).with_name("SYSTEM_PROMPT.md")
 
 
@@ -73,6 +72,25 @@ class SystemPromptTest(unittest.TestCase):
         self.assertIn("look in `oauth_credentials`", prompt)
         self.assertIn("personal `provider_email`", prompt)
         self.assertIn("Centaur can use their personal connected account", prompt)
+
+    def test_scheduled_task_guidance_is_present(self) -> None:
+        prompt = SYSTEM_PROMPT.read_text()
+
+        self.assertIn("[Scheduled tasks]", prompt)
+        self.assertIn("`centaur-console tasks`", prompt)
+        self.assertIn(
+            "`task`, `create-task`, `update-task`, `delete-task`, or `run-task`", prompt
+        )
+        self.assertIn(
+            "Only create scheduled tasks from MCP or direct-message (DM) sessions",
+            prompt,
+        )
+        self.assertIn("five-field cron expressions in Pacific Time", prompt)
+        self.assertIn("Use `dm` as the delivery channel", prompt)
+        self.assertIn(
+            "Treat the first successful mutation response as authoritative", prompt
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

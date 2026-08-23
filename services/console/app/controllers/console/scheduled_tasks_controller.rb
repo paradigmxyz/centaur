@@ -1,6 +1,5 @@
 class Console::ScheduledTasksController < ApplicationController
   layout "console"
-  before_action :require_admin
   before_action :set_task, only: %i[edit update destroy run]
 
   def index
@@ -58,11 +57,16 @@ class Console::ScheduledTasksController < ApplicationController
   def task_attributes
     attributes = task_params
     delivery_mode = attributes.delete(:delivery_mode)
-    attributes.except(:schedule_preset).merge(
+    schedule_preset = attributes.delete(:schedule_preset)
+    custom_days = attributes.delete(:custom_days)
+    custom_time = attributes.delete(:custom_time)
+    attributes.merge(
       delivery_channel: delivery_channel_for(delivery_mode, attributes[:delivery_channel]),
       cron_expression: ScheduledTask.cron_for(
-        attributes[:schedule_preset],
-        attributes[:cron_expression]
+        schedule_preset,
+        nil,
+        custom_days: custom_days,
+        custom_time: custom_time
       )
     )
   end
@@ -81,13 +85,22 @@ class Console::ScheduledTasksController < ApplicationController
       :delivery_mode,
       :delivery_channel,
       :schedule_preset,
-      :cron_expression,
-      :enabled
+      :custom_time,
+      :enabled,
+      custom_days: []
     )
   end
 
   def prepare_form
     @slack_dm_user_id = SlackDeliveryPolicy.new(current_user).direct_message_user_id
+    submitted_schedule = params[:scheduled_task]
+    @schedule_preset = submitted_schedule&.[](:schedule_preset).presence || @task.schedule_preset
+    @custom_schedule_days = if submitted_schedule&.key?(:custom_days)
+      Array(submitted_schedule[:custom_days])
+    else
+      @task.custom_schedule_days
+    end
+    @custom_schedule_time = submitted_schedule&.[](:custom_time).presence || @task.custom_schedule_time
   end
 
   def slack_destination_names

@@ -80,6 +80,8 @@ struct CentaurToolMcpArguments {
 struct McpPrincipal {
     token_id: String,
     principal_id: String,
+    console_user_email: Option<String>,
+    console_user_name: Option<String>,
     name: String,
     scopes: Vec<String>,
     expires_at: Option<OffsetDateTime>,
@@ -529,6 +531,8 @@ async fn run_tool_host_centaur_tool(
         .run_tool_host_call(
             ToolHostCallInput {
                 principal_id: principal.principal_id.clone(),
+                console_user_email: principal.console_user_email.clone(),
+                console_user_name: principal.console_user_name.clone(),
                 token_id: Some(principal.token_id.clone()),
                 tool_name: tool.name.clone(),
                 method: method.to_owned(),
@@ -746,9 +750,11 @@ fn verify_mcp_jwt(token: &str, headers: &HeaderMap) -> Result<Option<McpPrincipa
         let digest = Sha256::digest(token.as_bytes());
         format!("mcp_jwt_{}", hex::encode(&digest[..12]))
     });
+    let console_user_email = first_non_empty_owned([claims.email]);
+    let console_user_name = first_non_empty_owned([claims.name]);
     let name = first_non_empty_owned([
-        claims.name,
-        claims.email,
+        console_user_name.clone(),
+        console_user_email.clone(),
         claims.sub,
         Some(claims.principal_id.clone()),
     ])
@@ -757,6 +763,8 @@ fn verify_mcp_jwt(token: &str, headers: &HeaderMap) -> Result<Option<McpPrincipa
     Ok(Some(McpPrincipal {
         token_id,
         principal_id: claims.principal_id,
+        console_user_email,
+        console_user_name,
         name,
         scopes,
         expires_at,
@@ -1285,6 +1293,7 @@ def search(query, limit=20):
                 "scope": "mcp:tools",
                 "principal_id": "prn_test",
                 "email": "test@example.com",
+                "name": "Test User",
             }),
         );
 
@@ -1294,7 +1303,12 @@ def search(query, limit=20):
 
         assert_eq!(principal.token_id, "mcpjwt_test");
         assert_eq!(principal.principal_id, "prn_test");
-        assert_eq!(principal.name, "test@example.com");
+        assert_eq!(
+            principal.console_user_email.as_deref(),
+            Some("test@example.com")
+        );
+        assert_eq!(principal.console_user_name.as_deref(), Some("Test User"));
+        assert_eq!(principal.name, "Test User");
         assert_eq!(principal.scopes, vec!["mcp:tools"]);
         assert!(principal.expires_at.is_some());
     }

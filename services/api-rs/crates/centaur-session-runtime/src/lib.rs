@@ -32,9 +32,9 @@ use centaur_session_sqlx::{
     default_metadata,
 };
 use centaur_telemetry::{
-    export_thread_trace_root_span, record_sandbox_warm_pool_claim,
-    record_session_execution_finished, record_session_execution_started, record_session_failure,
-    record_session_first_token_latency, set_span_parent_trace,
+    record_sandbox_warm_pool_claim, record_session_execution_finished,
+    record_session_execution_started, record_session_failure, record_session_first_token_latency,
+    set_span_parent_from_traceparent,
 };
 use dashmap::{DashMap, DashSet};
 use futures_util::{FutureExt, SinkExt, Stream, StreamExt, future::BoxFuture, stream};
@@ -374,6 +374,8 @@ pub struct InterruptExecutionOutcome {
 #[derive(Debug)]
 pub struct ToolHostCallInput {
     pub principal_id: String,
+    pub console_user_email: Option<String>,
+    pub console_user_name: Option<String>,
     pub token_id: Option<String>,
     pub tool_name: String,
     pub method: String,
@@ -1066,14 +1068,21 @@ impl SessionRuntime {
     ) -> Result<ToolHostCallOutput, SessionRuntimeError> {
         let ToolHostCallInput {
             principal_id,
+            console_user_email,
+            console_user_name,
             token_id,
             tool_name,
             method,
             arguments,
             timeout,
         } = input;
-        self.create_or_get_tool_host_session(thread_key, &principal_id)
-            .await?;
+        self.create_or_get_tool_host_session(
+            thread_key,
+            &principal_id,
+            console_user_email.as_deref(),
+            console_user_name.as_deref(),
+        )
+        .await?;
 
         let request_id = format!("mcp-call-{}", Uuid::new_v4().simple());
         let request = ToolHostRequest {
@@ -1122,16 +1131,25 @@ impl SessionRuntime {
         &self,
         thread_key: &ThreadKey,
         principal_id: &str,
+        console_user_email: Option<&str>,
+        console_user_name: Option<&str>,
     ) -> Result<(), SessionRuntimeError> {
         let harness = self
             .sandbox_runtime
             .warm_harness
             .clone()
             .unwrap_or(HarnessType::Codex);
-        let metadata = tool_host_session_metadata(principal_id);
+        let metadata =
+            tool_host_session_metadata(principal_id, console_user_email, console_user_name);
         let session = self
             .store
-            .create_or_get_session(thread_key, &harness, None, metadata, BTreeMap::new())
+            .create_or_get_session_merging_metadata(
+                thread_key,
+                &harness,
+                None,
+                metadata,
+                BTreeMap::new(),
+            )
             .await?;
         if session.iron_control_principal.as_deref() != Some(principal_id) {
             self.store
@@ -1332,7 +1350,7 @@ impl SessionRuntime {
         // same principal cannot interleave with session setup.
         let call_lock = self.tool_host_call_lock(&thread_key);
         let _call_guard = call_lock.lock().await;
-        let metadata = tool_host_session_metadata(principal_id);
+        let metadata = tool_host_session_metadata(principal_id, None, None);
         let principal = self
             .iron_control
             .register_session(thread_key.as_str(), Some(&metadata))
@@ -1471,13 +1489,7 @@ impl SessionRuntime {
             thread_key = %thread_key,
             harness_type = %harness_type,
         );
-        set_span_parent_trace(
-            &span,
-            &thread_trace_id(thread_key),
-            &thread_trace_parent_span_id(thread_key),
-        );
         let result = async {
-            ensure_thread_trace_root_span(thread_key);
             info!(
                 component = COMPONENT_SESSION_RUNTIME,
                 event = "session_create_or_get_started",
@@ -1662,13 +1674,7 @@ impl SessionRuntime {
             thread_key = %thread_key,
             message_count = messages.len(),
         );
-        set_span_parent_trace(
-            &span,
-            &thread_trace_id(thread_key),
-            &thread_trace_parent_span_id(thread_key),
-        );
         let result = async {
-            ensure_thread_trace_root_span(thread_key);
             if messages.is_empty() {
                 return Err(SessionRuntimeError::BadRequest(
                     "messages must not be empty".to_owned(),
@@ -1971,13 +1977,7 @@ impl SessionRuntime {
             input_line_count,
             idempotency_key_present,
         );
-        set_span_parent_trace(
-            &span,
-            &thread_trace_id(thread_key),
-            &thread_trace_parent_span_id(thread_key),
-        );
         let result = async {
-            ensure_thread_trace_root_span(thread_key);
             info!(
                 component = COMPONENT_SESSION_RUNTIME,
                 event = "session_execute_started",
@@ -2056,9 +2056,16 @@ impl SessionRuntime {
                 return Err(error);
             }
             let execution_trace_span = info_span!(
+                parent: None,
                 "centaur.api_rs.session.execution",
                 component = COMPONENT_SESSION_RUNTIME,
                 event = "session_execution",
+                "lmnr.span.type" = "DEFAULT",
+                "lmnr.span.output" = tracing::field::Empty,
+                "otel.status_code" = tracing::field::Empty,
+                "lmnr.association.properties.session_id" = thread_key.as_str(),
+                "lmnr.association.properties.metadata.execution_id" = execution.execution_id.as_str(),
+                "lmnr.association.properties.metadata.thread_key" = thread_key.as_str(),
                 "centaur.thread_key" = thread_key.as_str(),
                 "centaur.execution_id" = execution.execution_id.as_str(),
                 "centaur.sandbox_id" = tracing::field::Empty,
@@ -2066,11 +2073,22 @@ impl SessionRuntime {
                 execution_id = %execution.execution_id,
                 sandbox_id = tracing::field::Empty,
             );
-            set_span_parent_trace(
-                &execution_trace_span,
-                &thread_trace_id(thread_key),
-                &thread_trace_parent_span_id(thread_key),
-            );
+            if let Some(traceparent) = execution_traceparent(&execution) {
+                set_span_parent_from_traceparent(&execution_trace_span, traceparent);
+            }
+            let traceparent = centaur_telemetry::traceparent_for_span(&execution_trace_span);
+            if let Some(traceparent) = traceparent.as_deref()
+                && execution_traceparent(&execution) != Some(traceparent)
+                && let Err(error) = self
+                    .store
+                    .set_execution_traceparent(&execution.execution_id, traceparent)
+                    .await
+            {
+                let error = SessionRuntimeError::Store(error);
+                self.record_execution_failure(thread_key, &execution.execution_id, &error)
+                    .await;
+                return Err(error);
+            }
             self.execution_spans
                 .lock()
                 .await
@@ -2142,7 +2160,11 @@ impl SessionRuntime {
                 }
             };
 
-            let trace = SessionTraceContext::new(thread_key, Some(&execution_trace_span));
+            let trace = SessionTraceContext::for_execution(
+                Some(&execution_trace_span),
+                traceparent.or_else(|| execution_traceparent(&execution).map(ToOwned::to_owned)),
+                Some(&execution.execution_id),
+            );
             let input_lines = input_lines_with_session_context(thread_key, &trace, &input_lines);
             if let Err(error) = write_input_lines(
                 &pipe,
@@ -2292,7 +2314,9 @@ impl SessionRuntime {
         execution_id: &str,
         error: &SessionRuntimeError,
     ) {
-        self.execution_spans.lock().await.remove(execution_id);
+        if let Some(span) = self.execution_spans.lock().await.remove(execution_id) {
+            finish_execution_trace_span(&span, "failed");
+        }
         let error_message = error.to_string();
         let execution = match self
             .store
@@ -2420,7 +2444,11 @@ impl SessionRuntime {
             .await
             .get(&execution.execution_id)
             .cloned();
-        let trace = SessionTraceContext::new(thread_key, execution_span.as_ref());
+        let trace = SessionTraceContext::for_execution(
+            execution_span.as_ref(),
+            execution_traceparent(&execution).map(ToOwned::to_owned),
+            Some(&execution.execution_id),
+        );
         let input_lines = input_lines_with_session_context(thread_key, &trace, &input_lines);
 
         let pipe = match self
@@ -2486,7 +2514,11 @@ impl SessionRuntime {
             .await
             .get(&execution.execution_id)
             .cloned();
-        let trace = SessionTraceContext::new(thread_key, execution_span.as_ref());
+        let trace = SessionTraceContext::for_execution(
+            execution_span.as_ref(),
+            execution_traceparent(&execution).map(ToOwned::to_owned),
+            Some(&execution.execution_id),
+        );
         let input_lines = input_lines_with_session_context(
             thread_key,
             &trace,
@@ -3586,6 +3618,32 @@ impl SessionRuntime {
             return Ok(OrphanAdoption::Deferred);
         }
 
+        let recovery_span = info_span!(
+            parent: None,
+            "centaur.api_rs.session.execution.recovered",
+            component = COMPONENT_SESSION_RUNTIME,
+            event = "session_execution_recovered",
+            "lmnr.span.type" = "DEFAULT",
+            "lmnr.span.output" = tracing::field::Empty,
+            "otel.status_code" = tracing::field::Empty,
+            "lmnr.association.properties.session_id" = thread_key.as_str(),
+            "lmnr.association.properties.metadata.execution_id" = execution_id,
+            "lmnr.association.properties.metadata.thread_key" = thread_key.as_str(),
+            "centaur.thread_key" = thread_key.as_str(),
+            "centaur.execution_id" = execution_id,
+            "centaur.sandbox_id" = sandbox_id,
+            thread_key = %thread_key,
+            execution_id,
+            sandbox_id,
+        );
+        if let Some(traceparent) = execution_traceparent(execution) {
+            set_span_parent_from_traceparent(&recovery_span, traceparent);
+        }
+        self.execution_spans
+            .lock()
+            .await
+            .insert(execution_id.to_owned(), recovery_span);
+
         // The turn may have finished while no control plane was attached. An
         // attach stream cannot replay that output, but the backend's recorded
         // history (pod logs) can.
@@ -3645,6 +3703,9 @@ impl SessionRuntime {
         // flight. Re-attach the stdout pump and re-arm the remaining
         // max-duration budget so an adopted-but-silent turn stays bounded.
         if let Err(error) = self.ensure_session_pipe(thread_key, sandbox_id).await {
+            if let Some(span) = self.execution_spans.lock().await.remove(execution_id) {
+                finish_execution_trace_span(&span, "failed");
+            }
             let _ = self
                 .store
                 .release_stdout_owner(execution_id, &self.stdout_owner_id)
@@ -4638,13 +4699,7 @@ async fn run_stdout_pump(
         thread_key = %thread_key,
         sandbox_id,
     );
-    set_span_parent_trace(
-        &span,
-        &thread_trace_id(&thread_key),
-        &thread_trace_parent_span_id(&thread_key),
-    );
     async {
-        ensure_thread_trace_root_span(&thread_key);
         let mut stdout = FramedRead::new(stdout, LinesCodec::new());
         info!(
             component = COMPONENT_SESSION_RUNTIME,
@@ -4748,15 +4803,6 @@ async fn run_stdout_pump(
                     &mut output_state,
                 )
                 .await;
-            }
-            if let Some(value) = output_value.as_ref() {
-                output_state.record_codex_app_server_spans(
-                    &output_span,
-                    &thread_key,
-                    sandbox_id,
-                    &output_execution_id,
-                    value,
-                );
             }
             if let Some(execution) = active_execution
                 && execution.execution_id == output_execution_id
@@ -4936,7 +4982,6 @@ struct StdoutPumpState {
     first_token_recorded_by_execution: HashSet<String>,
     turn_execution_by_id: HashMap<String, String>,
     item_execution_by_id: HashMap<String, String>,
-    tool_call_by_id: HashMap<String, ToolCallLabels>,
     stdout_span_by_execution: HashMap<String, Span>,
 }
 
@@ -5030,20 +5075,11 @@ impl StdoutPumpState {
     fn forget(&mut self, execution_id: &str) {
         self.final_answer_text_by_execution.remove(execution_id);
         self.first_token_recorded_by_execution.remove(execution_id);
-        let tool_ids_to_forget = self
-            .item_execution_by_id
-            .iter()
-            .filter(|&(_item_id, mapped_execution_id)| mapped_execution_id == execution_id)
-            .map(|(item_id, _mapped_execution_id)| item_id.clone())
-            .collect::<Vec<_>>();
         self.turn_execution_by_id
             .retain(|_, mapped_execution_id| mapped_execution_id != execution_id);
         self.item_execution_by_id
             .retain(|_, mapped_execution_id| mapped_execution_id != execution_id);
         self.stdout_span_by_execution.remove(execution_id);
-        for item_id in tool_ids_to_forget {
-            self.tool_call_by_id.remove(&item_id);
-        }
     }
 
     fn stdout_span_for_execution(
@@ -5060,20 +5096,6 @@ impl StdoutPumpState {
         self.stdout_span_by_execution
             .insert(execution_id.to_owned(), span.clone());
         span
-    }
-
-    fn record_codex_app_server_spans(
-        &mut self,
-        parent: &Span,
-        thread_key: &ThreadKey,
-        sandbox_id: &str,
-        execution_id: &str,
-        value: &Value,
-    ) {
-        record_codex_app_server_event_span(parent, thread_key, sandbox_id, execution_id, value);
-        for event in tool_call_span_events(value, &mut self.tool_call_by_id) {
-            record_codex_app_server_tool_span(parent, thread_key, sandbox_id, execution_id, &event);
-        }
     }
 
     fn known_execution_for_value(&self, value: &Value) -> Option<String> {
@@ -5134,353 +5156,6 @@ fn new_stdout_pump_span(
             sandbox_id,
         )
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ToolCallLabels {
-    kind: String,
-    name: String,
-    method: String,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct ToolCallSpanEvent {
-    labels: ToolCallLabels,
-    status: &'static str,
-    duration: Option<Duration>,
-}
-
-fn record_codex_app_server_event_span(
-    parent: &Span,
-    thread_key: &ThreadKey,
-    sandbox_id: &str,
-    execution_id: &str,
-    value: &Value,
-) {
-    let event_type = sandbox_output_event_type(value);
-    let source = sandbox_output_source(value);
-    let item = protocol_item(value);
-    let item_type = item
-        .and_then(|item| string_at_path(item, &["type"]))
-        .unwrap_or_default();
-    let turn_id = turn_ids(value).into_iter().next().unwrap_or_default();
-    let item_id = item_ids(value).into_iter().next().unwrap_or_default();
-
-    let span = info_span!(
-        parent: parent,
-        "centaur.api_rs.codex_app_server.event",
-        component = COMPONENT_SESSION_RUNTIME,
-        event = "codex_app_server_event",
-        "centaur.thread_key" = thread_key.as_str(),
-        "centaur.execution_id" = execution_id,
-        "centaur.sandbox_id" = sandbox_id,
-        "codex_app_server.source" = source,
-        "codex_app_server.event_type" = event_type,
-        "codex_app_server.item_type" = item_type.as_str(),
-        "codex_app_server.turn_id" = turn_id.as_str(),
-        "codex_app_server.item_id" = item_id.as_str(),
-    );
-    let _entered = span.enter();
-}
-
-fn record_codex_app_server_tool_span(
-    parent: &Span,
-    thread_key: &ThreadKey,
-    sandbox_id: &str,
-    execution_id: &str,
-    event: &ToolCallSpanEvent,
-) {
-    let duration_ms = event
-        .duration
-        .map(|duration| duration.as_secs_f64() * 1000.0);
-    let span = info_span!(
-        parent: parent,
-        "centaur.api_rs.codex_app_server.tool_call",
-        component = COMPONENT_SESSION_RUNTIME,
-        event = "codex_app_server_tool_call",
-        "centaur.thread_key" = thread_key.as_str(),
-        "centaur.execution_id" = execution_id,
-        "centaur.sandbox_id" = sandbox_id,
-        "tool.kind" = event.labels.kind.as_str(),
-        "tool.name" = event.labels.name.as_str(),
-        "tool.method" = event.labels.method.as_str(),
-        "tool.status" = event.status,
-        "tool.duration_ms" = tracing::field::Empty,
-    );
-    if let Some(duration_ms) = duration_ms {
-        span.record("tool.duration_ms", duration_ms);
-    }
-    let _entered = span.enter();
-}
-
-fn sandbox_output_event_type(value: &Value) -> &str {
-    value
-        .get("method")
-        .and_then(Value::as_str)
-        .or_else(|| value.get("type").and_then(Value::as_str))
-        .filter(|event_type| !event_type.trim().is_empty())
-        .unwrap_or("json")
-}
-
-fn sandbox_output_source(value: &Value) -> &str {
-    if value.get("method").and_then(Value::as_str).is_some() {
-        return "codex_app_server";
-    }
-    match value.get("type").and_then(Value::as_str) {
-        Some(event_type)
-            if event_type.starts_with("item.")
-                || event_type.starts_with("turn.")
-                || event_type.starts_with("thread.") =>
-        {
-            "codex_app_server"
-        }
-        Some("system")
-            if value
-                .get("subtype")
-                .and_then(Value::as_str)
-                .is_some_and(|subtype| subtype.starts_with("wrapper_")) =>
-        {
-            "codex_app_server"
-        }
-        Some("assistant" | "user" | "tool") => "harness",
-        Some(_) | None => "sandbox",
-    }
-}
-
-fn tool_call_span_events(
-    value: &Value,
-    known_tool_calls: &mut HashMap<String, ToolCallLabels>,
-) -> Vec<ToolCallSpanEvent> {
-    let mut events = Vec::new();
-    let event_type = sandbox_output_event_type(value);
-
-    if matches!(event_type, "item/started" | "item.started")
-        && let Some(item) = protocol_item(value)
-        && let Some(labels) = tool_labels_from_item(item)
-    {
-        remember_tool_call_labels(item, &labels, known_tool_calls);
-        events.push(ToolCallSpanEvent {
-            labels,
-            status: "started",
-            duration: None,
-        });
-    }
-
-    if matches!(event_type, "item/completed" | "item.completed")
-        && let Some(item) = protocol_item(value)
-    {
-        let item_id = string_at_path(item, &["id"]);
-        let labels = tool_labels_from_item(item).or_else(|| {
-            item_id
-                .as_deref()
-                .and_then(|item_id| known_tool_calls.get(item_id).cloned())
-        });
-        if let Some(labels) = labels {
-            let status = completed_tool_status(item);
-            if let Some(item_id) = item_id {
-                known_tool_calls.remove(&item_id);
-            }
-            events.push(ToolCallSpanEvent {
-                labels,
-                status,
-                duration: duration_from_ms_value(
-                    item.get("durationMs").or_else(|| item.get("duration_ms")),
-                ),
-            });
-        }
-    }
-
-    if matches!(
-        event_type,
-        "item/mcpToolCall/progress" | "item.mcpToolCall.progress"
-    ) {
-        let labels = progress_item_id(value)
-            .and_then(|item_id| known_tool_calls.get(&item_id).cloned())
-            .unwrap_or_else(|| ToolCallLabels {
-                kind: "mcp".to_owned(),
-                name: "unknown".to_owned(),
-                method: "unknown".to_owned(),
-            });
-        events.push(ToolCallSpanEvent {
-            labels,
-            status: "progress",
-            duration: None,
-        });
-    }
-
-    for tool_use in anthropic_tool_uses(value) {
-        let labels = ToolCallLabels {
-            kind: "anthropic".to_owned(),
-            name: string_at_path(tool_use, &["name"]).unwrap_or_else(|| "unknown".to_owned()),
-            method: "call".to_owned(),
-        };
-        if let Some(tool_id) = string_at_path(tool_use, &["id"]) {
-            known_tool_calls.insert(tool_id, labels.clone());
-        }
-        events.push(ToolCallSpanEvent {
-            labels,
-            status: "started",
-            duration: None,
-        });
-    }
-
-    for tool_result in anthropic_tool_results(value) {
-        let labels = string_at_path(tool_result, &["tool_use_id"])
-            .and_then(|tool_use_id| known_tool_calls.remove(&tool_use_id))
-            .unwrap_or_else(|| ToolCallLabels {
-                kind: "anthropic".to_owned(),
-                name: "unknown".to_owned(),
-                method: "call".to_owned(),
-            });
-        events.push(ToolCallSpanEvent {
-            labels,
-            status: if tool_result
-                .get("is_error")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                "failed"
-            } else {
-                "completed"
-            },
-            duration: None,
-        });
-    }
-
-    events
-}
-
-fn protocol_item(value: &Value) -> Option<&Value> {
-    value
-        .get("params")
-        .and_then(|params| params.get("item"))
-        .or_else(|| value.get("item"))
-}
-
-fn tool_labels_from_item(item: &Value) -> Option<ToolCallLabels> {
-    let item_type = string_at_path(item, &["type"])?;
-    match item_type.as_str() {
-        "mcpToolCall" | "mcp_tool_call" => Some(ToolCallLabels {
-            kind: "mcp".to_owned(),
-            name: string_at_path(item, &["tool"]).unwrap_or_else(|| "unknown".to_owned()),
-            method: string_at_path(item, &["server"]).unwrap_or_else(|| "call".to_owned()),
-        }),
-        "dynamicToolCall" | "dynamic_tool_call" => Some(ToolCallLabels {
-            kind: "dynamic".to_owned(),
-            name: string_at_path(item, &["tool"]).unwrap_or_else(|| "unknown".to_owned()),
-            method: string_at_path(item, &["namespace"]).unwrap_or_else(|| "call".to_owned()),
-        }),
-        "collabAgentToolCall" | "collab_agent_tool_call" => Some(ToolCallLabels {
-            kind: "collab_agent".to_owned(),
-            name: string_at_path(item, &["tool"]).unwrap_or_else(|| "agent".to_owned()),
-            method: "call".to_owned(),
-        }),
-        _ => None,
-    }
-}
-
-fn remember_tool_call_labels(
-    item: &Value,
-    labels: &ToolCallLabels,
-    known_tool_calls: &mut HashMap<String, ToolCallLabels>,
-) {
-    if let Some(item_id) = string_at_path(item, &["id"]) {
-        known_tool_calls.insert(item_id, labels.clone());
-    }
-}
-
-fn completed_tool_status(item: &Value) -> &'static str {
-    if item
-        .get("success")
-        .and_then(Value::as_bool)
-        .is_some_and(|success| !success)
-        || item.get("error").is_some()
-    {
-        return "failed";
-    }
-
-    if let Some(exit_code) = item.get("exitCode").and_then(Value::as_i64) {
-        return if exit_code == 0 {
-            "completed"
-        } else {
-            "failed"
-        };
-    }
-
-    match item
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("completed")
-    {
-        "failed" | "error" | "cancelled" | "declined" => "failed",
-        "inProgress" | "in_progress" | "running" => "started",
-        _ => "completed",
-    }
-}
-
-fn duration_from_ms_value(value: Option<&Value>) -> Option<Duration> {
-    let millis = value.and_then(|value| {
-        value
-            .as_f64()
-            .or_else(|| value.as_u64().map(|millis| millis as f64))
-            .or_else(|| value.as_i64().map(|millis| millis as f64))
-    })?;
-    if millis.is_finite() && millis >= 0.0 {
-        Some(Duration::from_secs_f64(millis / 1000.0))
-    } else {
-        None
-    }
-}
-
-fn progress_item_id(value: &Value) -> Option<String> {
-    [
-        &["params", "itemId"][..],
-        &["params", "item_id"][..],
-        &["itemId"][..],
-        &["item_id"][..],
-    ]
-    .into_iter()
-    .filter_map(|path| string_at_path(value, path))
-    .next()
-}
-
-fn anthropic_tool_uses(value: &Value) -> Vec<&Value> {
-    if value.get("type").and_then(Value::as_str) != Some("assistant") {
-        return Vec::new();
-    }
-    content_blocks(value)
-        .into_iter()
-        .filter(|part| part.get("type").and_then(Value::as_str) == Some("tool_use"))
-        .collect()
-}
-
-fn anthropic_tool_results(value: &Value) -> Vec<&Value> {
-    if !matches!(
-        value.get("type").and_then(Value::as_str),
-        Some("user" | "tool")
-    ) {
-        return Vec::new();
-    }
-    content_blocks(value)
-        .into_iter()
-        .filter(|part| {
-            part.get("type").and_then(Value::as_str) == Some("tool_result")
-                || part.get("tool_use_id").and_then(Value::as_str).is_some()
-        })
-        .collect()
-}
-
-fn content_blocks(value: &Value) -> Vec<&Value> {
-    value
-        .get("content")
-        .or_else(|| {
-            value
-                .get("message")
-                .and_then(|message| message.get("content"))
-        })
-        .and_then(Value::as_array)
-        .map(|values| values.iter().collect())
-        .unwrap_or_default()
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -5591,7 +5266,9 @@ async fn record_terminal_output(
             (execution, "failed")
         }
     };
-    ctx.execution_spans.lock().await.remove(execution_id);
+    if let Some(span) = ctx.execution_spans.lock().await.remove(execution_id) {
+        finish_execution_trace_span(&span, terminal_status);
+    }
     if let Err(error) = ctx
         .store
         .touch_sandbox_activity(thread_key, sandbox_id)
@@ -5693,7 +5370,9 @@ async fn record_max_duration_failure(
     else {
         return Ok(());
     };
-    ctx.execution_spans.lock().await.remove(execution_id);
+    if let Some(span) = ctx.execution_spans.lock().await.remove(execution_id) {
+        finish_execution_trace_span(&span, "failed");
+    }
     if let Err(error) = ctx.store.touch_session_sandbox_activity(thread_key).await {
         warn!(
             component = COMPONENT_SESSION_RUNTIME,
@@ -6550,58 +6229,55 @@ async fn write_input_lines(
     .await
 }
 
-/// Trace identity injected into sandbox stdin lines so the Rust harness server
-/// can configure the harness OTLP export. Without a `trace_id` or `traceparent`
-/// on the first turn, Codex exports no `session_task.turn` spans and Laminar
-/// has no token usage to price into cost.
+const EXECUTION_TRACEPARENT_METADATA_KEY: &str = "centaur.traceparent";
+
+/// Execution trace identity injected into sandbox stdin lines so harness spans
+/// join the durable execution trace. The traceparent is persisted before input
+/// delivery and can therefore be reused by steering and restart recovery.
 #[derive(Clone, Debug)]
 struct SessionTraceContext {
-    /// Stable per-thread trace id, derived from the thread key (UUIDv5) so it
-    /// needs no persisted state and survives API restarts.
-    trace_id: String,
-    /// W3C traceparent of the current execution span, when the OpenTelemetry
-    /// layer is active. Lets harness spans join the execution's trace.
     traceparent: Option<String>,
+    execution_id: Option<String>,
 }
 
 impl SessionTraceContext {
-    fn new(thread_key: &ThreadKey, execution_span: Option<&Span>) -> Self {
+    #[cfg(test)]
+    fn new(execution_span: Option<&Span>, persisted_traceparent: Option<String>) -> Self {
+        Self::for_execution(execution_span, persisted_traceparent, None)
+    }
+
+    fn for_execution(
+        execution_span: Option<&Span>,
+        persisted_traceparent: Option<String>,
+        execution_id: Option<&str>,
+    ) -> Self {
         Self {
-            trace_id: thread_trace_id(thread_key),
-            traceparent: execution_span.and_then(centaur_telemetry::traceparent_for_span),
+            traceparent: execution_span
+                .and_then(centaur_telemetry::traceparent_for_span)
+                .or(persisted_traceparent),
+            execution_id: execution_id.map(ToOwned::to_owned),
         }
     }
 }
 
-/// Deterministic per-thread trace id: one trace identity per thread without a
-/// `thread_traces` table (derive, don't store).
-pub fn thread_trace_id(thread_key: &ThreadKey) -> String {
-    uuid::Uuid::new_v5(
-        &uuid::Uuid::NAMESPACE_URL,
-        format!("centaur:thread:{}", thread_key.as_str()).as_bytes(),
-    )
-    .to_string()
+fn execution_traceparent(execution: &SessionExecution) -> Option<&str> {
+    execution
+        .metadata
+        .get(EXECUTION_TRACEPARENT_METADATA_KEY)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
-fn ensure_thread_trace_root_span(thread_key: &ThreadKey) {
-    let trace_id = thread_trace_id(thread_key);
-    let root_span_id = thread_trace_parent_span_id(thread_key);
-    let thread_key = thread_key.as_str().to_owned();
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        handle.spawn(async move {
-            let _ = export_thread_trace_root_span(&trace_id, &root_span_id, &thread_key).await;
-        });
-    }
-}
-
-pub fn thread_trace_parent_span_id(thread_key: &ThreadKey) -> String {
-    let digest = Sha256::digest(format!("centaur:thread-parent:{}", thread_key.as_str()));
-    let mut bytes = [0_u8; 8];
-    bytes.copy_from_slice(&digest[..8]);
-    if bytes.iter().all(|byte| *byte == 0) {
-        bytes[7] = 1;
-    }
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+fn finish_execution_trace_span(span: &Span, status: &str) {
+    span.record(
+        "lmnr.span.output",
+        serde_json::json!({ "status": status }).to_string(),
+    );
+    span.record(
+        "otel.status_code",
+        if status == "failed" { "ERROR" } else { "OK" },
+    );
 }
 
 fn input_lines_with_session_context(
@@ -6628,11 +6304,22 @@ fn input_line_with_session_context(
     };
     map.entry("thread_key")
         .or_insert_with(|| Value::String(thread_key.as_str().to_owned()));
-    map.entry("trace_id")
-        .or_insert_with(|| Value::String(trace.trace_id.clone()));
+    // `traceparent` is the sole execution trace authority. A legacy or
+    // caller-supplied trace_id must not split harness spans into another trace.
+    map.remove("trace_id");
     if let Some(traceparent) = &trace.traceparent {
         map.entry("traceparent")
             .or_insert_with(|| Value::String(traceparent.clone()));
+    }
+    if let Some(execution_id) = trace.execution_id.as_deref() {
+        let trace_metadata = map
+            .entry("trace_metadata")
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if let Value::Object(metadata) = trace_metadata {
+            metadata
+                .entry("execution_id")
+                .or_insert_with(|| Value::String(execution_id.to_owned()));
+        }
     }
     prepend_chat_surface_note(map, thread_key);
     merge_session_context(map, session_context_for_thread(thread_key));
@@ -7094,11 +6781,32 @@ fn tool_host_thread_key(principal_id: &str) -> Result<ThreadKey, SessionRuntimeE
 
 /// Session/principal metadata recorded for observability; runtime behavior
 /// derives from the `mcp:` thread-key prefix, not from these fields.
-fn tool_host_session_metadata(principal_id: &str) -> Value {
-    json!({
-        "mcp_tool_host": true,
-        "mcp_principal_id": principal_id,
-    })
+fn tool_host_session_metadata(
+    principal_id: &str,
+    console_user_email: Option<&str>,
+    console_user_name: Option<&str>,
+) -> Value {
+    let mut metadata = serde_json::Map::from_iter([
+        ("mcp_tool_host".to_owned(), Value::Bool(true)),
+        (
+            "mcp_principal_id".to_owned(),
+            Value::String(principal_id.to_owned()),
+        ),
+    ]);
+    insert_non_empty_metadata_string(&mut metadata, "console_user_email", console_user_email);
+    insert_non_empty_metadata_string(&mut metadata, "console_user_name", console_user_name);
+    Value::Object(metadata)
+}
+
+fn insert_non_empty_metadata_string(
+    metadata: &mut serde_json::Map<String, Value>,
+    key: &str,
+    value: Option<&str>,
+) {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    metadata.insert(key.to_owned(), Value::String(value.to_owned()));
 }
 
 fn proxy_labels_from_session_metadata(
@@ -7574,6 +7282,30 @@ mod tests {
     }
 
     #[test]
+    fn tool_host_session_metadata_includes_console_identity() {
+        assert_eq!(
+            tool_host_session_metadata("prn_test", Some(" test@example.com "), Some(" Test User "),),
+            json!({
+                "mcp_tool_host": true,
+                "mcp_principal_id": "prn_test",
+                "console_user_email": "test@example.com",
+                "console_user_name": "Test User",
+            })
+        );
+    }
+
+    #[test]
+    fn tool_host_session_metadata_omits_missing_console_identity() {
+        assert_eq!(
+            tool_host_session_metadata("prn_test", Some("  "), None),
+            json!({
+                "mcp_tool_host": true,
+                "mcp_principal_id": "prn_test",
+            })
+        );
+    }
+
+    #[test]
     fn turn_completed_without_answer_text_is_terminal() {
         let event = json!({
             "type": "turn.completed",
@@ -7935,6 +7667,23 @@ mod tests {
     }
 
     #[test]
+    fn execution_traceparent_reads_durable_execution_metadata() {
+        let execution = session_execution(
+            "exe-trace",
+            ExecutionStatus::Running,
+            json!({
+                "centaur.traceparent":
+                    "00-0123456789abcdef0123456789abcdef-1111111111111111-01"
+            }),
+        );
+
+        assert_eq!(
+            execution_traceparent(&execution),
+            Some("00-0123456789abcdef0123456789abcdef-1111111111111111-01")
+        );
+    }
+
+    #[test]
     fn idle_timeout_is_read_from_execution_metadata() {
         let execution = session_execution(
             "exe-idle",
@@ -7971,172 +7720,6 @@ mod tests {
         assert!(redacted.contains("risk-adjusted PnL improved"));
         assert!(!redacted.contains("sk-proj-abcdefghijklmnopqrstuvwxyz123456"));
         assert!(redacted.contains("[REDACTED_TOKEN] stayed hidden"));
-    }
-
-    #[test]
-    fn codex_app_server_event_source_and_type_are_classified() {
-        let app_server = json!({
-            "method": "item/agentMessage/delta",
-            "params": {"turnId": "turn-1", "itemId": "item-1"},
-        });
-        let harness = json!({
-            "type": "assistant",
-            "message": {"content": [{"type": "text", "text": "redacted"}]},
-        });
-        let sandbox = json!({
-            "type": "custom.wrapper.event",
-        });
-
-        assert_eq!(
-            sandbox_output_event_type(&app_server),
-            "item/agentMessage/delta"
-        );
-        assert_eq!(sandbox_output_source(&app_server), "codex_app_server");
-        assert_eq!(sandbox_output_source(&harness), "harness");
-        assert_eq!(sandbox_output_source(&sandbox), "sandbox");
-    }
-
-    #[test]
-    fn codex_app_server_mcp_tool_events_emit_tool_spans() {
-        let started = json!({
-            "method": "item/started",
-            "params": {
-                "item": {
-                    "id": "tool-1",
-                    "type": "mcpToolCall",
-                    "server": "github",
-                    "tool": "list_issues"
-                }
-            }
-        });
-        let progress = json!({
-            "method": "item/mcpToolCall/progress",
-            "params": {"itemId": "tool-1"}
-        });
-        let completed = json!({
-            "method": "item/completed",
-            "params": {
-                "item": {
-                    "id": "tool-1",
-                    "durationMs": 125
-                }
-            }
-        });
-        let mut known = HashMap::new();
-
-        assert_eq!(
-            tool_call_span_events(&started, &mut known),
-            vec![ToolCallSpanEvent {
-                labels: ToolCallLabels {
-                    kind: "mcp".to_owned(),
-                    name: "list_issues".to_owned(),
-                    method: "github".to_owned(),
-                },
-                status: "started",
-                duration: None,
-            }]
-        );
-        assert_eq!(
-            tool_call_span_events(&progress, &mut known),
-            vec![ToolCallSpanEvent {
-                labels: ToolCallLabels {
-                    kind: "mcp".to_owned(),
-                    name: "list_issues".to_owned(),
-                    method: "github".to_owned(),
-                },
-                status: "progress",
-                duration: None,
-            }]
-        );
-        assert_eq!(
-            tool_call_span_events(&completed, &mut known),
-            vec![ToolCallSpanEvent {
-                labels: ToolCallLabels {
-                    kind: "mcp".to_owned(),
-                    name: "list_issues".to_owned(),
-                    method: "github".to_owned(),
-                },
-                status: "completed",
-                duration: Some(Duration::from_millis(125)),
-            }]
-        );
-        assert!(known.is_empty());
-    }
-
-    #[test]
-    fn command_execution_items_do_not_emit_tool_spans() {
-        let started = json!({
-            "method": "item/started",
-            "params": {
-                "item": {
-                    "id": "cmd-1",
-                    "type": "commandExecution",
-                    "command": "ls -la"
-                }
-            }
-        });
-        let completed = json!({
-            "method": "item/completed",
-            "params": {
-                "item": {
-                    "id": "cmd-1",
-                    "type": "commandExecution",
-                    "command": "ls -la",
-                    "exitCode": 0,
-                    "durationMs": 42
-                }
-            }
-        });
-        let mut known = HashMap::new();
-
-        assert_eq!(tool_call_span_events(&started, &mut known), Vec::new());
-        assert_eq!(tool_call_span_events(&completed, &mut known), Vec::new());
-        assert!(known.is_empty());
-    }
-
-    #[test]
-    fn anthropic_tool_use_and_result_events_emit_tool_spans() {
-        let assistant = json!({
-            "type": "assistant",
-            "message": {
-                "content": [
-                    {"type": "tool_use", "id": "use-1", "name": "todo_write", "input": {"redacted": true}}
-                ]
-            }
-        });
-        let result = json!({
-            "type": "user",
-            "content": [
-                {"type": "tool_result", "tool_use_id": "use-1", "content": "redacted"}
-            ]
-        });
-        let mut known = HashMap::new();
-
-        assert_eq!(
-            tool_call_span_events(&assistant, &mut known),
-            vec![ToolCallSpanEvent {
-                labels: ToolCallLabels {
-                    kind: "anthropic".to_owned(),
-                    name: "todo_write".to_owned(),
-                    method: "call".to_owned(),
-                },
-                status: "started",
-                duration: None,
-            }]
-        );
-        assert_eq!(
-            tool_call_span_events(&result, &mut known),
-            vec![ToolCallSpanEvent {
-                labels: ToolCallLabels {
-                    kind: "anthropic".to_owned(),
-                    name: "todo_write".to_owned(),
-                    method: "call".to_owned(),
-                },
-                status: "completed",
-                duration: None,
-            }]
-        );
-        assert!(known.is_empty());
     }
 
     #[test]
@@ -8542,23 +8125,43 @@ mod tests {
     #[test]
     fn input_line_with_session_context_enriches_json_objects() {
         let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
-        let trace = SessionTraceContext::new(&thread_key, None);
+        let trace = SessionTraceContext::new(None, None);
 
         let line = input_line_with_session_context(&thread_key, &trace, r#"{"type":"user"}"#);
         let value: Value = serde_json::from_str(&line).unwrap();
 
         assert_eq!(value["type"], "user");
         assert_eq!(value["thread_key"], thread_key.as_str());
-        assert_eq!(value["trace_id"], trace.trace_id);
-        // Without an OpenTelemetry layer there is no traceparent to forward.
+        assert!(value.get("trace_id").is_none());
+        // Without an OpenTelemetry layer there is no execution context to forward.
         assert!(value.get("traceparent").is_none());
         assert!(value.get("session_context").is_none());
     }
 
     #[test]
+    fn input_line_injects_bounded_execution_trace_metadata() {
+        let thread_key = ThreadKey::parse("test:trace-metadata").unwrap();
+        let trace = SessionTraceContext::for_execution(
+            None,
+            Some("00-0123456789abcdef0123456789abcdef-1111111111111111-01".to_owned()),
+            Some("exe-123"),
+        );
+
+        let line = input_line_with_session_context(
+            &thread_key,
+            &trace,
+            r#"{"type":"user","trace_metadata":{"action":"execute"}}"#,
+        );
+        let value: Value = serde_json::from_str(&line).unwrap();
+
+        assert_eq!(value["trace_metadata"]["execution_id"], "exe-123");
+        assert_eq!(value["trace_metadata"]["action"], "execute");
+    }
+
+    #[test]
     fn input_line_with_session_context_adds_slack_thread_context() {
         let thread_key = ThreadKey::parse("slack:T123:C123:1780000000.000000").unwrap();
-        let trace = SessionTraceContext::new(&thread_key, None);
+        let trace = SessionTraceContext::new(None, None);
 
         let line = input_line_with_session_context(&thread_key, &trace, r#"{"type":"user"}"#);
         let value: Value = serde_json::from_str(&line).unwrap();
@@ -8574,7 +8177,7 @@ mod tests {
     #[test]
     fn input_line_with_session_context_adds_discord_thread_context() {
         let thread_key = ThreadKey::parse("discord:111:222:333").unwrap();
-        let trace = SessionTraceContext::new(&thread_key, None);
+        let trace = SessionTraceContext::new(None, None);
 
         let line = input_line_with_session_context(&thread_key, &trace, r#"{"type":"user"}"#);
         let value: Value = serde_json::from_str(&line).unwrap();
@@ -8589,7 +8192,7 @@ mod tests {
     #[test]
     fn input_line_with_session_context_adds_linear_thread_context() {
         let thread_key = ThreadKey::parse("linear:ISSUE:s:SESS").unwrap();
-        let trace = SessionTraceContext::new(&thread_key, None);
+        let trace = SessionTraceContext::new(None, None);
 
         let line = input_line_with_session_context(&thread_key, &trace, r#"{"type":"user"}"#);
         let value: Value = serde_json::from_str(&line).unwrap();
@@ -8611,7 +8214,7 @@ mod tests {
     #[test]
     fn input_line_with_session_context_adds_github_thread_context() {
         let thread_key = ThreadKey::parse("github:0xSplits/centaur:704:rc:99").unwrap();
-        let trace = SessionTraceContext::new(&thread_key, None);
+        let trace = SessionTraceContext::new(None, None);
 
         let line = input_line_with_session_context(&thread_key, &trace, r#"{"type":"user"}"#);
         let value: Value = serde_json::from_str(&line).unwrap();
@@ -8627,7 +8230,7 @@ mod tests {
     #[test]
     fn input_line_with_session_context_preserves_existing_session_context() {
         let thread_key = ThreadKey::parse("slack:T123:C123:1780000000.000000").unwrap();
-        let trace = SessionTraceContext::new(&thread_key, None);
+        let trace = SessionTraceContext::new(None, None);
 
         let line = input_line_with_session_context(
             &thread_key,
@@ -8648,8 +8251,8 @@ mod tests {
     fn input_line_with_session_context_preserves_existing_fields_and_non_json() {
         let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
         let trace = SessionTraceContext {
-            trace_id: thread_trace_id(&thread_key),
             traceparent: Some("00-0123456789abcdef0123456789abcdef-0123456789abcdef-01".to_owned()),
+            execution_id: None,
         };
 
         let line = input_line_with_session_context(
@@ -8660,7 +8263,7 @@ mod tests {
         let value: Value = serde_json::from_str(&line).unwrap();
 
         assert_eq!(value["thread_key"], "chat:existing");
-        assert_eq!(value["trace_id"], "caller-trace");
+        assert!(value.get("trace_id").is_none());
         assert_eq!(
             value["traceparent"],
             "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
@@ -8674,7 +8277,7 @@ mod tests {
     #[test]
     fn input_line_prepends_discord_chat_surface_note_to_user_content() {
         let thread_key = ThreadKey::parse("discord:111:222:333").unwrap();
-        let trace = SessionTraceContext::new(&thread_key, None);
+        let trace = SessionTraceContext::new(None, None);
 
         let line = input_line_with_session_context(
             &thread_key,
@@ -8695,7 +8298,7 @@ mod tests {
     #[test]
     fn input_line_prepends_slack_chat_surface_note_to_user_content() {
         let thread_key = ThreadKey::parse("slack:C123:123.456").unwrap();
-        let trace = SessionTraceContext::new(&thread_key, None);
+        let trace = SessionTraceContext::new(None, None);
 
         let line = input_line_with_session_context(
             &thread_key,
@@ -8713,7 +8316,7 @@ mod tests {
     #[test]
     fn input_line_prepends_linear_chat_surface_note_to_user_content() {
         let thread_key = ThreadKey::parse("linear:ISSUE:s:SESS").unwrap();
-        let trace = SessionTraceContext::new(&thread_key, None);
+        let trace = SessionTraceContext::new(None, None);
 
         let line = input_line_with_session_context(
             &thread_key,
@@ -8733,7 +8336,7 @@ mod tests {
     #[test]
     fn input_line_prepends_github_chat_surface_note_to_user_content() {
         let thread_key = ThreadKey::parse("github:0xSplits/centaur:issue:12").unwrap();
-        let trace = SessionTraceContext::new(&thread_key, None);
+        let trace = SessionTraceContext::new(None, None);
 
         let line = input_line_with_session_context(
             &thread_key,
@@ -8754,7 +8357,7 @@ mod tests {
     fn input_line_leaves_content_untouched_without_a_chat_destination() {
         // A non-platform thread key resolves to no destination, so nothing is added.
         let thread_key = ThreadKey::parse("cli:test").unwrap();
-        let trace = SessionTraceContext::new(&thread_key, None);
+        let trace = SessionTraceContext::new(None, None);
 
         let line = input_line_with_session_context(
             &thread_key,
@@ -8766,27 +8369,6 @@ mod tests {
 
         assert_eq!(content.len(), 1);
         assert_eq!(content[0]["text"], "hi");
-    }
-
-    #[test]
-    fn thread_trace_id_is_deterministic_per_thread() {
-        let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
-        let other = ThreadKey::parse("chat:C456:1780000000.000000").unwrap();
-
-        assert_eq!(thread_trace_id(&thread_key), thread_trace_id(&thread_key));
-        assert_ne!(thread_trace_id(&thread_key), thread_trace_id(&other));
-        // The wrapper parses this with uuid.UUID(...): must stay a canonical UUID.
-        assert!(uuid::Uuid::parse_str(&thread_trace_id(&thread_key)).is_ok());
-        assert_eq!(
-            thread_trace_parent_span_id(&thread_key),
-            thread_trace_parent_span_id(&thread_key)
-        );
-        assert_ne!(
-            thread_trace_parent_span_id(&thread_key),
-            thread_trace_parent_span_id(&other)
-        );
-        assert_eq!(thread_trace_parent_span_id(&thread_key).len(), 16);
-        assert_ne!(thread_trace_parent_span_id(&thread_key), "0000000000000000");
     }
 
     #[test]

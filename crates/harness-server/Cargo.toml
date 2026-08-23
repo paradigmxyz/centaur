@@ -26,12 +26,12 @@ codex-utils-absolute-path = { git = "https://github.com/openai/codex", rev = "e9
 # Scoped to the formats chat clients actually paste to keep the build lean.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 nanocodex = { git = "https://github.com/gakonst/nanocodex", rev = "bf022728c6d36501bdb1c380c7092743db3d5dae" }
-opentelemetry-proto = { version = "0.32.0", default-features = false, features = ["trace", "gen-tonic-messages"] }
-prost = "0.14"
+opentelemetry = "0.32.0"
+opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace"] }
+opentelemetry_sdk = { version = "0.32.1", features = ["testing", "trace"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sha2 = "0.11"
+shell-words = "1.1"
 thiserror = "2.0"
 tokio = { version = "1.49", features = ["rt-multi-thread", "sync"] }
-url = "2.5"
 uuid = { version = "1.19", features = ["v4"] }

@@ -348,5 +348,20 @@ module SlackDm
         assert_equal SlackApi::DEFAULT_TRANSIENT_RETRY_AFTER_SECONDS, error.retry_after
       end
     end
+
+    test "hostname resolution failures request deferred job execution" do
+      http_client = Object.new
+      http_client.define_singleton_method(:get) do |*|
+        raise Socket::ResolutionError, "Temporary failure in name resolution"
+      end
+
+      error = assert_raises(SlackApi::TransientError) do
+        SlackDm::SyncCredential.new(credential, http_client: http_client).call
+      end
+
+      assert_equal "hostname_resolution_failed", error.code
+      assert_equal SlackApi::DEFAULT_TRANSIENT_RETRY_AFTER_SECONDS, error.retry_after
+      assert_instance_of Socket::ResolutionError, error.cause
+    end
   end
 end

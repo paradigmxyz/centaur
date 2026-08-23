@@ -34,7 +34,7 @@
               <% end %>
             </td>
             <td class="console-td text-xs text-zinc-400">
-              <div class="<%= "font-mono" if task.schedule_preset == "cron" %>"><%= task.schedule_label %></div>
+              <div class="<%= "font-mono" if task.schedule_label == task.cron_expression %>"><%= task.schedule_label %></div>
               <% unless task.enabled? %>
                 <div class="mt-1 text-zinc-600">Disabled</div>
               <% end %>
