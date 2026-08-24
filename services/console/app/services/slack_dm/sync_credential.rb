@@ -13,6 +13,7 @@ module SlackDm
     CONVERSATIONS_HISTORY_ENDPOINT = "https://slack.com/api/conversations.history"
     CONVERSATIONS_REPLIES_ENDPOINT = "https://slack.com/api/conversations.replies"
     API_READ_TIMEOUT_SECONDS = 120
+    SKIPPABLE_INGEST_STATUSES = [ 400, 413, 422 ].freeze
     class << self
       attr_accessor :slack_api_http
 
@@ -86,8 +87,17 @@ module SlackDm
           end
         end
         unless conversation_failed
-          run[:conversations_synced] += 1
-          ingest_conversation_batch(batch, run)
+          begin
+            ingest_conversation_batch(batch, run)
+          rescue CentaurApiClient::Error => e
+            raise unless SKIPPABLE_INGEST_STATUSES.include?(e.status)
+
+            run[:conversations_failed] += 1
+            Rails.logger.warn do
+              "Slack DM ingest rejected conversation #{conversation_id}: " \
+                "status=#{e.status} error=#{e.message}"
+            end
+          end
         end
 
         next_conversation_id = conversations[index + 1]&.fetch("id")
@@ -153,14 +163,23 @@ module SlackDm
     end
 
     def ingest_conversation_batch(batch, run)
-      replies_upserted = batch[:messages].count do |message|
+      batch_replies_upserted = batch[:messages].count do |message|
         message[:parent_message_ts].present?
       end
-      @messages_upserted += batch[:messages].length
-      @replies_upserted += replies_upserted
-      update_run_counts(run)
-      batch[:run] = run.merge(finished: false)
+      messages_upserted = @messages_upserted + batch[:messages].length
+      replies_upserted = @replies_upserted + batch_replies_upserted
+      batch[:run] = run.merge(
+        conversations_synced: run[:conversations_synced] + 1,
+        messages_fetched: @messages_fetched,
+        messages_upserted: messages_upserted,
+        replies_fetched: @replies_fetched,
+        replies_upserted: replies_upserted,
+        finished: false
+      )
       @api_client.ingest_slack_dm_sync_batch(sanitize_for_postgres(batch))
+      run[:conversations_synced] += 1
+      @messages_upserted = messages_upserted
+      @replies_upserted = replies_upserted
     end
 
     def finish_run(run, status:)

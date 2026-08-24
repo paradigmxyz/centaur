@@ -5,8 +5,9 @@ module SlackDm
     class FakeApiClient
       attr_reader :batches
 
-      def initialize
+      def initialize(&ingest_handler)
         @batches = []
+        @ingest_handler = ingest_handler
       end
 
       def batch
@@ -32,6 +33,7 @@ module SlackDm
 
       def ingest_slack_dm_sync_batch(payload)
         @batches << payload
+        @ingest_handler&.call(payload)
         { "ok" => true }
       end
     end
@@ -69,6 +71,42 @@ module SlackDm
         scopes: SlackDm::SyncCredential::REQUIRED_SCOPES,
         provider_subject: "U_ME"
       )
+    end
+
+    def two_conversation_slack_http(history_calls)
+      lambda do |endpoint:, params:, access_token:|
+        assert_equal "xoxp-live", access_token
+        case endpoint
+        when SlackDm::SyncCredential::AUTH_TEST_ENDPOINT
+          { "ok" => true, "team_id" => "T123", "user_id" => "U_ME" }
+        when SlackDm::SyncCredential::CONVERSATIONS_LIST_ENDPOINT
+          {
+            "ok" => true,
+            "channels" => [
+              { "id" => "D100", "is_im" => true, "user" => "U_ONE" },
+              { "id" => "D200", "is_im" => true, "user" => "U_TWO" }
+            ],
+            "response_metadata" => { "next_cursor" => "" }
+          }
+        when SlackDm::SyncCredential::CONVERSATIONS_HISTORY_ENDPOINT
+          conversation_id = params.fetch("channel")
+          history_calls << conversation_id
+          {
+            "ok" => true,
+            "messages" => [
+              {
+                "type" => "message",
+                "ts" => conversation_id == "D100" ? "1700000000.000001" : "1700000000.000002",
+                "user" => "U_OTHER",
+                "text" => conversation_id
+              }
+            ],
+            "response_metadata" => { "next_cursor" => "" }
+          }
+        else
+          flunk "unexpected Slack endpoint #{endpoint}"
+        end
+      end
     end
 
     test "uses an extended API read timeout by default" do
@@ -437,6 +475,67 @@ module SlackDm
       end
       assert_equal [ "D100" ], ingested_conversation_ids
       assert_equal "partial", api_client.final_batch[:run][:status]
+    end
+
+    test "sync skips a conversation rejected by the ingest API" do
+      api_client = FakeApiClient.new do |payload|
+        conversation_id = payload.dig(:conversations, 0, :conversation_id)
+        if conversation_id == "D100"
+          raise CentaurApiClient::Error.new("invalid message timestamp", status: 400)
+        end
+      end
+      history_calls = []
+      conversation_cursor = nil
+
+      completed = SlackDm::SyncCredential.new(
+        credential,
+        api_client: api_client,
+        slack_api_http: two_conversation_slack_http(history_calls)
+      ).call do |conversation_id|
+        conversation_cursor = conversation_id
+      end
+
+      attempted_conversation_ids = api_client.batches.filter_map do |batch|
+        batch.dig(:conversations, 0, :conversation_id)
+      end
+      assert completed
+      assert_equal %w[D100 D200], history_calls
+      assert_equal %w[D100 D200], attempted_conversation_ids
+      assert_equal "D200", conversation_cursor
+      assert_equal "partial", api_client.final_batch[:run][:status]
+      assert_equal 1, api_client.final_batch[:run][:conversations_failed]
+      assert_equal 1, api_client.final_batch[:run][:conversations_synced]
+      assert_equal 2, api_client.final_batch[:run][:messages_fetched]
+      assert_equal 1, api_client.final_batch[:run][:messages_upserted]
+    end
+
+    test "sync retries a conversation after a transient ingest API failure" do
+      api_client = FakeApiClient.new do |payload|
+        conversation_id = payload.dig(:conversations, 0, :conversation_id)
+        if conversation_id == "D100"
+          raise CentaurApiClient::Error.new("temporary failure", status: 500)
+        end
+      end
+      history_calls = []
+      conversation_cursor = nil
+
+      error = assert_raises(CentaurApiClient::Error) do
+        SlackDm::SyncCredential.new(
+          credential,
+          api_client: api_client,
+          slack_api_http: two_conversation_slack_http(history_calls)
+        ).call do |conversation_id|
+          conversation_cursor = conversation_id
+        end
+      end
+
+      attempted_conversation_ids = api_client.batches.filter_map do |batch|
+        batch.dig(:conversations, 0, :conversation_id)
+      end
+      assert_equal 500, error.status
+      assert_equal [ "D100" ], history_calls
+      assert_equal [ "D100" ], attempted_conversation_ids
+      assert_equal "D100", conversation_cursor
     end
 
     test "429 responses expose the full Retry-After to the cursor job" do

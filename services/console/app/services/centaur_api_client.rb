@@ -2,7 +2,14 @@ require "cgi"
 require "uri"
 
 class CentaurApiClient
-  Error = Class.new(StandardError)
+  class Error < StandardError
+    attr_reader :status
+
+    def initialize(message = nil, status: nil)
+      @status = status
+      super(message)
+    end
+  end
 
   DEFAULT_TIMEOUT_SECONDS = 20
 
@@ -139,7 +146,10 @@ class CentaurApiClient
     return parsed if response.status.between?(200, 299)
 
     message = parsed.is_a?(Hash) ? parsed["error"] || parsed["message"] || parsed["detail"] : nil
-    raise Error, message.presence || "Centaur API returned HTTP #{response.status}"
+    raise Error.new(
+      message.presence || "Centaur API returned HTTP #{response.status}",
+      status: response.status
+    )
   end
 
   def request_headers

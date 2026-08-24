@@ -56,6 +56,7 @@ class CentaurApiClientTest < ActiveSupport::TestCase
     end
     http.verify
     assert_equal "bad archive", error.message
+    assert_equal 400, error.status
   end
 
   test "fails before the request when the service JWT cannot be minted" do
@@ -71,6 +72,7 @@ class CentaurApiClientTest < ActiveSupport::TestCase
     end
 
     assert_equal "Console API service JWT could not be minted", error.message
+    assert_nil error.status
   end
 
   test "lists Slack DM sync checkpoints for a broker credential" do
