@@ -585,6 +585,25 @@ module SlackDm
       assert_equal [ nil, "page-2", "page-2" ], list_cursors
     end
 
+    test "short rate limits escape after five retries of one Slack call" do
+      attempts = 0
+      slack_http = lambda do |endpoint:, **|
+        assert_equal SlackDm::SyncCredential::AUTH_TEST_ENDPOINT, endpoint
+        attempts += 1
+        raise SlackApi::RateLimitedError.new(retry_after: 1)
+      end
+      client = SlackDm::SyncCredential.new(credential, slack_api_http: slack_http)
+      sleeps = []
+
+      error = assert_raises(SlackApi::RateLimitedError) do
+        client.stub(:sleep, ->(seconds) { sleeps << seconds }) { client.call }
+      end
+
+      assert_equal 1, error.retry_after
+      assert_equal SlackDm::SyncCredential::MAX_INLINE_RATE_LIMIT_RETRIES + 1, attempts
+      assert_equal Array.new(SlackDm::SyncCredential::MAX_INLINE_RATE_LIMIT_RETRIES, 1), sleeps
+    end
+
     test "long 429 responses expose the full Retry-After to the cursor job" do
       [
         [ "300", 300 ],

@@ -14,6 +14,7 @@ module SlackDm
     CONVERSATIONS_REPLIES_ENDPOINT = "https://slack.com/api/conversations.replies"
     API_READ_TIMEOUT_SECONDS = 120
     INLINE_RATE_LIMIT_WAIT_THRESHOLD_SECONDS = 5.minutes.to_i
+    MAX_INLINE_RATE_LIMIT_RETRIES = 5
     SKIPPABLE_INGEST_STATUSES = [ 400, 413, 422 ].freeze
     class << self
       attr_accessor :slack_api_http
@@ -427,16 +428,21 @@ module SlackDm
     end
 
     def with_rate_limit_guard(endpoint)
-      yield
-    rescue SlackApi::RateLimitedError => e
-      raise unless e.retry_after < INLINE_RATE_LIMIT_WAIT_THRESHOLD_SECONDS
+      retries = 0
+      begin
+        yield
+      rescue SlackApi::RateLimitedError => e
+        raise unless e.retry_after < INLINE_RATE_LIMIT_WAIT_THRESHOLD_SECONDS
+        raise if retries >= MAX_INLINE_RATE_LIMIT_RETRIES
 
-      Rails.logger.info do
-        "Slack DM sync sleeping after rate limit: credential_id=#{@credential.id} " \
-          "endpoint=#{endpoint} retry_after=#{e.retry_after}"
+        retries += 1
+        Rails.logger.info do
+          "Slack DM sync sleeping after rate limit: credential_id=#{@credential.id} " \
+            "endpoint=#{endpoint} retry_after=#{e.retry_after} retry=#{retries}"
+        end
+        sleep(e.retry_after)
+        retry
       end
-      sleep(e.retry_after)
-      retry
     end
 
     def max_slack_ts(left, right)
