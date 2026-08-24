@@ -1,0 +1,159 @@
+module GoogleDocs
+  class SyncJob < ApplicationJob
+    CONCURRENCY_DURATION = 1.hour
+    HANDOFF_DELAY = 2.seconds
+
+    queue_as :default
+
+    limits_concurrency(
+      to: 1,
+      key: ->(credential_id) { "google_docs_sync_#{credential_id}" },
+      group: "GoogleDocsCredentialSync",
+      duration: CONCURRENCY_DURATION,
+      on_conflict: :discard
+    )
+
+    retry_on GoogleDocs::SyncCredential::GoogleApiError,
+      CentaurApiClient::Error,
+      wait: :polynomially_longer,
+      attempts: 5
+
+    private
+
+    def eligible_credential(credential_id)
+      credential = BrokerCredential.includes(:oauth_app).find_by(id: credential_id)
+      return unless credential
+      return if credential.dead?
+      return if credential.access_token.blank?
+      return unless credential.oauth_app&.provider == Oauth::Providers::Google::KEY
+      return unless GoogleDocs::SyncCredential.required_scopes_granted?(credential.scopes)
+
+      credential
+    end
+
+    def api_client
+      @api_client ||= CentaurApiClient.new
+    end
+
+    def sync_client(credential)
+      GoogleDocs::SyncCredential.new(credential)
+    end
+
+    def load_checkpoint(credential)
+      api_client
+        .get_google_docs_sync_checkpoint(broker_credential_id: credential.oid)
+        .fetch("checkpoint")
+    end
+
+    def checkpoint_phase(checkpoint)
+      checkpoint&.dig("metadata", "phase").presence || "pending"
+    end
+
+    def initial_page_token(checkpoint)
+      checkpoint&.dig("metadata", "initial_page_token").presence
+    end
+
+    def checkpoint_payload(
+      credential,
+      checkpoint,
+      phase:,
+      initial_page_token: nil,
+      start_page_token: nil,
+      changes_page_token: nil,
+      run_id: nil,
+      full_sync_finished: false,
+      incremental_sync_finished: false
+    )
+      metadata = checkpoint&.fetch("metadata", {})
+      metadata = {} unless metadata.is_a?(Hash)
+      payload = {
+        broker_credential_id: credential.oid,
+        provider_subject: credential.provider_subject.to_s,
+        provider_email: credential.provider_email.to_s,
+        last_run_id: run_id,
+        last_error: "",
+        metadata: metadata.merge(
+          "phase" => phase,
+          "initial_page_token" => initial_page_token.to_s
+        )
+      }
+      payload[:start_page_token] = start_page_token if start_page_token
+      payload[:changes_page_token] = changes_page_token if changes_page_token
+      now = Time.current.iso8601
+      payload[:last_full_sync_at] = now if full_sync_finished
+      payload[:last_incremental_sync_at] = now if incremental_sync_finished
+      payload
+    end
+
+    def ingest_metadata_page(credential, sync, files:, deactivations:, mode:, source:)
+      run_id = "gdocs_#{SecureRandom.hex(16)}"
+      api_client.ingest_google_docs_sync_batch(
+        run: run_payload(
+          credential,
+          run_id,
+          mode: mode,
+          status: "running",
+          files_seen: files.length
+        ),
+        files: files.map { |file| sync.file_payload(file, run_id: run_id) },
+        observations: files.map do |file|
+          sync.observation_payload(file, run_id: run_id, source: source)
+        end,
+        observation_deactivations: deactivations,
+        replace_context_documents: false
+      )
+      enqueue_missing_content(credential, sync, files)
+      run_id
+    end
+
+    def finish_page(credential, run_id, mode:, files_seen:, checkpoint:)
+      api_client.ingest_google_docs_sync_batch(
+        run: run_payload(
+          credential,
+          run_id,
+          mode: mode,
+          status: "completed",
+          files_seen: files_seen
+        ),
+        checkpoint: checkpoint,
+        replace_context_documents: false
+      )
+    end
+
+    def enqueue_missing_content(credential, sync, files)
+      return if files.empty?
+
+      versions = files.map { |file| sync.content_version(file) }
+      missing = api_client.get_google_docs_content_status(files: versions).fetch("missing")
+      missing_versions = Array(missing).to_h do |file|
+        [ [ file.fetch("file_id"), file.fetch("source_version", "") ], true ]
+      end
+      files.each do |file|
+        version = sync.content_version(file)
+        key = [ version.fetch(:file_id), version.fetch(:source_version) ]
+        next unless missing_versions[key]
+
+        GoogleDocs::FetchDocumentJob.perform_later(credential.id, file)
+      end
+    end
+
+    def run_payload(credential, run_id, mode:, status:, files_seen:)
+      {
+        run_id: run_id,
+        mode: mode,
+        status: status,
+        broker_credential_id: credential.oid,
+        provider_subject: credential.provider_subject.to_s,
+        provider_email: credential.provider_email.to_s,
+        files_seen: files_seen,
+        files_upserted: files_seen,
+        finished: status == "completed",
+        metadata: { oauth_app_slug: credential.oauth_app&.slug }
+      }
+    end
+
+    def schedule(job_class, credential_id)
+      job_class.set(wait: HANDOFF_DELAY).perform_later(credential_id)
+    end
+  end
+end

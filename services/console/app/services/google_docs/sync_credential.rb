@@ -1,5 +1,5 @@
-require "digest"
 require "cgi"
+require "digest"
 require "json"
 
 module GoogleDocs
@@ -11,7 +11,15 @@ module GoogleDocs
     EXPORT_MIME_TYPE = "text/plain"
 
     FILES_LIST_ENDPOINT = "https://www.googleapis.com/drive/v3/files"
+    CHANGES_LIST_ENDPOINT = "https://www.googleapis.com/drive/v3/changes"
+    START_PAGE_TOKEN_ENDPOINT = "https://www.googleapis.com/drive/v3/changes/startPageToken"
     DOCS_GET_ENDPOINT = "https://docs.googleapis.com/v1/documents"
+
+    FILE_FIELDS = [
+      "id", "name", "mimeType", "webViewLink", "driveId", "owners", "lastModifyingUser",
+      "capabilities", "labelInfo", "trashed", "explicitlyTrashed", "createdTime", "modifiedTime",
+      "version"
+    ].join(",")
 
     GoogleApiError = Class.new(StandardError)
 
@@ -32,10 +40,6 @@ module GoogleDocs
         positive_int(ConsoleEnv["GOOGLE_DOCS_SYNC_PAGE_SIZE"], 100)
       end
 
-      def max_pages
-        positive_int(ConsoleEnv["GOOGLE_DOCS_SYNC_MAX_PAGES"], 10)
-      end
-
       def chunk_chars
         positive_int(ConsoleEnv["GOOGLE_DOCS_SYNC_CHUNK_CHARS"], 12_000)
       end
@@ -46,125 +50,59 @@ module GoogleDocs
       end
     end
 
-    def initialize(credential, api_client: CentaurApiClient.new, google_api_http: nil)
+    attr_reader :credential
+
+    def initialize(credential, google_api_http: nil)
       @credential = credential
-      @api_client = api_client
       @google_api_http = google_api_http || self.class.google_api_http
-      @run_id = "gdocs_#{SecureRandom.hex(16)}"
-      @files_seen = 0
-      @docs_fetched = 0
-      @docs_failed = 0
-      @chunks_upserted = 0
-      @max_modified_at = nil
-      @truncated = false
     end
 
-    def call
-      checkpoint = load_checkpoint
-      batch = empty_batch
-      modified_after = checkpoint && checkpoint["last_incremental_sync_at"].presence
-
-      files = list_files(modified_after: modified_after)
-      batch[:run][:files_seen] = files.length
-
-      files.each do |file|
-        normalize_file(file, batch)
-        normalize_observation(file, batch)
-        sync_content(file, batch)
-      rescue StandardError => e
-        raise if Rails.env.test?
-
-        @docs_failed += 1
-        Rails.logger.warn do
-          "Google Docs sync failed for file #{file['id']}: #{e.class}: #{e.message}"
-        end
-      end
-
-      finish_batch(batch)
-      @api_client.ingest_google_docs_sync_batch(batch)
+    def start_page_token
+      google_api(
+        START_PAGE_TOKEN_ENDPOINT,
+        "supportsAllDrives" => "true"
+      ).fetch("startPageToken")
+    rescue KeyError
+      raise GoogleApiError, "Google Drive returned no start page token"
     end
 
-    private
-
-    def load_checkpoint
-      @api_client
-        .get_google_docs_sync_checkpoint(broker_credential_id: @credential.oid)
-        .fetch("checkpoint")
+    def list_files_page(page_token: nil)
+      google_api(
+        FILES_LIST_ENDPOINT,
+        {
+          "q" => "mimeType = '#{GOOGLE_DOC_MIME_TYPE}' and trashed = false",
+          "pageSize" => self.class.page_size,
+          "fields" => "nextPageToken,files(#{FILE_FIELDS})",
+          "includeItemsFromAllDrives" => "true",
+          "supportsAllDrives" => "true",
+          "orderBy" => "modifiedTime,name",
+          "pageToken" => page_token
+        }.compact
+      )
     end
 
-    def empty_batch
+    def list_changes_page(page_token:)
+      google_api(
+        CHANGES_LIST_ENDPOINT,
+        {
+          "pageToken" => page_token,
+          "pageSize" => self.class.page_size,
+          "fields" => "nextPageToken,newStartPageToken,changes(fileId,removed,file(#{FILE_FIELDS}))",
+          "includeItemsFromAllDrives" => "true",
+          "includeRemoved" => "true",
+          "supportsAllDrives" => "true",
+          "spaces" => "drive"
+        }
+      )
+    end
+
+    def eligible_file?(file)
+      file.is_a?(Hash) && file["id"].present? &&
+        file["mimeType"] == GOOGLE_DOC_MIME_TYPE && file["trashed"] != true
+    end
+
+    def file_payload(file, run_id: nil)
       {
-        run: {
-          run_id: @run_id,
-          mode: "incremental",
-          status: "running",
-          broker_credential_id: @credential.oid,
-          provider_subject: @credential.provider_subject.to_s,
-          provider_email: @credential.provider_email.to_s,
-          files_seen: 0,
-          files_upserted: 0,
-          docs_fetched: 0,
-          docs_upserted: 0,
-          chunks_upserted: 0,
-          metadata: {
-            oauth_app_slug: @credential.oauth_app&.slug,
-            credential_id: @credential.oid
-          }
-        },
-        replace_context_documents: true,
-        files: [],
-        observations: [],
-        contents: [],
-        context_documents: []
-      }
-    end
-
-    def list_files(modified_after:)
-      files = []
-      page_token = nil
-      self.class.max_pages.times do |index|
-        page = google_api(
-          FILES_LIST_ENDPOINT,
-          files_list_params(modified_after: modified_after, page_token: page_token)
-        )
-        page_files = Array(page["files"]).select do |file|
-          file["id"].present? && file["mimeType"] == GOOGLE_DOC_MIME_TYPE
-        end
-        files.concat(page_files)
-        page_files.each { |file| track_modified_at(file["modifiedTime"]) }
-        page_token = page["nextPageToken"].presence
-        if page_token.present? && index == self.class.max_pages - 1
-          @truncated = true
-        end
-        break if page_token.blank?
-      end
-      @files_seen = files.length
-      files
-    end
-
-    def files_list_params(modified_after:, page_token:)
-      query = [
-        "mimeType = '#{GOOGLE_DOC_MIME_TYPE}'",
-        "trashed = false"
-      ]
-      query << "modifiedTime > '#{drive_literal(modified_after)}'" if modified_after.present?
-      {
-        "q" => query.join(" and "),
-        "pageSize" => self.class.page_size,
-        "fields" => [
-          "nextPageToken,",
-          "files(id,name,mimeType,webViewLink,driveId,owners,lastModifyingUser,",
-          "capabilities,labelInfo,trashed,explicitlyTrashed,createdTime,modifiedTime,version)"
-        ].join,
-        "includeItemsFromAllDrives" => "true",
-        "supportsAllDrives" => "true",
-        "orderBy" => "modifiedTime",
-        "pageToken" => page_token
-      }.compact
-    end
-
-    def normalize_file(file, batch)
-      batch[:files] << {
         file_id: file.fetch("id"),
         drive_id: file["driveId"].to_s,
         name: file["name"].to_s,
@@ -178,66 +116,78 @@ module GoogleDocs
         explicitly_trashed: file["explicitlyTrashed"] == true,
         source_created_at: file["createdTime"],
         source_modified_at: file["modifiedTime"],
-        source_version: file["version"].to_s,
+        source_version: source_version(file),
         raw_payload: file,
-        source_run_id: @run_id
+        source_run_id: run_id
       }
     end
 
-    def normalize_observation(file, batch)
-      batch[:observations] << {
-        broker_credential_id: @credential.oid,
+    def observation_payload(file, run_id: nil, source:)
+      {
+        broker_credential_id: credential.oid,
         observed_file_id: file.fetch("id"),
         file_id: file.fetch("id"),
-        provider_subject: @credential.provider_subject.to_s,
-        provider_email: @credential.provider_email.to_s,
+        provider_subject: credential.provider_subject.to_s,
+        provider_email: credential.provider_email.to_s,
         observed_name: file["name"].to_s,
         observed_mime_type: file["mimeType"].to_s,
         observed_web_view_link: file["webViewLink"].to_s,
         role_hint: role_hint(file),
         permission_ids: [],
         active: true,
-        raw_payload: { "source" => "drive.files.list" },
-        source_run_id: @run_id
+        raw_payload: { "source" => source },
+        source_run_id: run_id
       }
     end
 
-    def sync_content(file, batch)
-      doc = docs_get(file.fetch("id"))
-      text = docs_text_from_document(doc)
-      @docs_fetched += 1
-      title = doc["title"].presence || file["name"].to_s
-      text_hash = content_hash(text)
-      exported_at = Time.current.iso8601
-      batch[:contents] << {
-        file_id: file.fetch("id"),
-        title: title,
-        text_content: text,
-        text_hash: text_hash,
-        export_mime_type: EXPORT_MIME_TYPE,
-        exported_at: exported_at,
-        source_modified_at: file["modifiedTime"],
-        source_version: file["version"].to_s,
-        source_run_id: @run_id
+    def observation_deactivation(file_id)
+      {
+        broker_credential_id: credential.oid,
+        observed_file_id: file_id
       }
+    end
 
-      chunks_for(text).each_with_index do |chunk, index|
-        chunk_id = format("chunk-%04d", index)
-        batch[:context_documents] << context_document(file, title, chunk, chunk_id)
-        @chunks_upserted += 1
-      end
-    rescue StandardError => e
-      @docs_failed += 1
-      batch[:contents] << {
+    def content_version(file)
+      {
         file_id: file.fetch("id"),
-        title: file["name"].to_s,
-        text_hash: "",
-        export_mime_type: EXPORT_MIME_TYPE,
-        source_modified_at: file["modifiedTime"],
-        source_version: file["version"].to_s,
-        source_run_id: @run_id,
-        last_error: "#{e.class}: #{e.message}"
+        source_version: source_version(file)
       }
+    end
+
+    def document_batch(file)
+      doc = google_api(
+        "#{DOCS_GET_ENDPOINT}/#{CGI.escape(file.fetch('id'))}",
+        "includeTabsContent" => "true"
+      )
+      text = docs_text_from_document(doc)
+      title = doc["title"].presence || file["name"].to_s
+      exported_at = Time.current.iso8601
+      contents = [
+        {
+          file_id: file.fetch("id"),
+          title: title,
+          text_content: text,
+          text_hash: content_hash(text),
+          export_mime_type: EXPORT_MIME_TYPE,
+          exported_at: exported_at,
+          source_modified_at: file["modifiedTime"],
+          source_version: source_version(file)
+        }
+      ]
+      context_documents = chunks_for(text).each_with_index.map do |chunk, index|
+        context_document(file, title, chunk, format("chunk-%04d", index))
+      end
+      {
+        contents: contents,
+        context_documents: context_documents,
+        replace_context_documents: true
+      }
+    end
+
+    private
+
+    def source_version(file)
+      file["version"].presence || file["modifiedTime"].to_s
     end
 
     def context_document(file, title, body, chunk_id)
@@ -255,51 +205,10 @@ module GoogleDocs
         drive_id: file["driveId"].to_s,
         source_created_at: file["createdTime"],
         source_modified_at: file["modifiedTime"],
-        source_version: file["version"].to_s,
+        source_version: source_version(file),
         content_hash: content_hash(file.fetch("id"), chunk_id, title, body),
-        metadata: {
-          source: "google_docs",
-          provider_subject: @credential.provider_subject.to_s,
-          provider_email: @credential.provider_email.to_s,
-          broker_credential_id: @credential.oid
-        }
+        metadata: { source: "google_docs" }
       }
-    end
-
-    def finish_batch(batch)
-      batch[:run][:files_upserted] = batch[:files].length
-      batch[:run][:docs_fetched] = @docs_fetched
-      batch[:run][:docs_upserted] = batch[:contents].count { |content| content[:last_error].blank? }
-      batch[:run][:chunks_upserted] = @chunks_upserted
-      batch[:run][:finished] = true
-
-      successful = @docs_failed.zero? && !@truncated
-      batch[:run][:status] = successful ? "completed" : "partial_failed"
-      batch[:run][:error_text] = if @truncated
-        "Google Docs sync hit max page limit"
-      elsif @docs_failed.positive?
-        "#{@docs_failed} Google Doc(s) failed"
-      else
-        ""
-      end
-
-      batch[:checkpoint] = {
-        broker_credential_id: @credential.oid,
-        provider_subject: @credential.provider_subject.to_s,
-        provider_email: @credential.provider_email.to_s,
-        last_run_id: @run_id,
-        last_error: batch[:run][:error_text].to_s,
-        metadata: { "page_size" => self.class.page_size, "max_pages" => self.class.max_pages }
-      }
-      if successful
-        now = Time.current.iso8601
-        batch[:checkpoint][:last_incremental_sync_at] = (@max_modified_at&.iso8601 || now)
-        batch[:checkpoint][:last_full_sync_at] = now
-      end
-    end
-
-    def docs_get(file_id)
-      google_api("#{DOCS_GET_ENDPOINT}/#{CGI.escape(file_id)}", { "includeTabsContent" => "true" })
     end
 
     def docs_text_from_document(doc)
@@ -337,18 +246,8 @@ module GoogleDocs
       return "" unless capabilities.is_a?(Hash)
       return "writer" if capabilities["canEdit"] == true
       return "commenter" if capabilities["canComment"] == true
+
       "reader"
-    end
-
-    def track_modified_at(value)
-      parsed = Time.iso8601(value.to_s)
-      @max_modified_at = parsed if @max_modified_at.nil? || parsed > @max_modified_at
-    rescue ArgumentError
-      nil
-    end
-
-    def drive_literal(value)
-      value.to_s.gsub("\\", "\\\\").gsub("'", "\\\\'")
     end
 
     def content_hash(*parts)
@@ -357,7 +256,7 @@ module GoogleDocs
 
     def google_api(endpoint, params = {})
       response = if @google_api_http
-        @google_api_http.call(endpoint: endpoint, params: params, access_token: @credential.access_token)
+        @google_api_http.call(endpoint: endpoint, params: params, access_token: credential.access_token)
       else
         net_http_get(endpoint, params)
       end
@@ -370,7 +269,7 @@ module GoogleDocs
       response = HttpClient.new.get(
         endpoint,
         params: params,
-        headers: { "Authorization" => "Bearer #{@credential.access_token}" }
+        headers: { "Authorization" => "Bearer #{credential.access_token}" }
       )
       parsed = response.json
       return parsed if response.success?

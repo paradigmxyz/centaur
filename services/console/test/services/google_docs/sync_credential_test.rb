@@ -2,24 +2,6 @@ require "test_helper"
 
 module GoogleDocs
   class SyncCredentialTest < ActiveSupport::TestCase
-    class FakeApiClient
-      attr_reader :batch
-
-      def get_google_docs_sync_checkpoint(broker_credential_id:)
-        {
-          "checkpoint" => {
-            "broker_credential_id" => broker_credential_id,
-            "last_incremental_sync_at" => "2026-06-01T00:00:00Z"
-          }
-        }
-      end
-
-      def ingest_google_docs_sync_batch(payload)
-        @batch = payload
-        { "ok" => true }
-      end
-    end
-
     def google_app
       OauthApp.create!(
         provider: "google",
@@ -92,84 +74,90 @@ module GoogleDocs
       ])
     end
 
-    test "sync normalizes files observations contents context docs and checkpoint" do
-      api_client = FakeApiClient.new
+    test "uses bounded Drive file and change pages" do
+      calls = []
       google_http = lambda do |endpoint:, params:, access_token:|
         assert_equal "ya29.live", access_token
+        calls << [ endpoint, params ]
         case endpoint
+        when GoogleDocs::SyncCredential::START_PAGE_TOKEN_ENDPOINT
+          { "startPageToken" => "change-100" }
         when GoogleDocs::SyncCredential::FILES_LIST_ENDPOINT
-          assert_includes params["q"], "modifiedTime > '2026-06-01T00:00:00Z'"
-          assert_equal(
-            "nextPageToken,files(id,name,mimeType,webViewLink,driveId,owners," \
-              "lastModifyingUser,capabilities,labelInfo,trashed,explicitlyTrashed," \
-              "createdTime,modifiedTime,version)",
-            params["fields"]
-          )
-          {
-            "files" => [
-              {
-                "id" => "doc-123",
-                "name" => "Launch Plan",
-                "mimeType" => GoogleDocs::SyncCredential::GOOGLE_DOC_MIME_TYPE,
-                "webViewLink" => "https://docs.google.com/document/d/doc-123/edit",
-                "driveId" => "drive-1",
-                "owners" => [
-                  {
-                    "permissionId" => "perm-owner",
-                    "displayName" => "Alice",
-                    "emailAddress" => "alice@example.com"
-                  }
-                ],
-                "lastModifyingUser" => { "displayName" => "Bob" },
-                "capabilities" => { "canEdit" => true },
-                "labelInfo" => { "labels" => [] },
-                "trashed" => false,
-                "explicitlyTrashed" => false,
-                "createdTime" => "2026-06-01T12:00:00Z",
-                "modifiedTime" => "2026-06-02T12:00:00Z",
-                "version" => "7"
-              }
-            ],
-            "nextPageToken" => ""
-          }
-        when "#{GoogleDocs::SyncCredential::DOCS_GET_ENDPOINT}/doc-123"
-          {
-            "title" => "Launch Plan",
-            "body" => {
-              "content" => [
-                {
-                  "paragraph" => {
-                    "elements" => [
-                      { "textRun" => { "content" => "Ship the Google Docs ingest flow.\n" } }
-                    ]
-                  }
-                }
-              ]
-            }
-          }
+          { "files" => [], "nextPageToken" => "file-2" }
+        when GoogleDocs::SyncCredential::CHANGES_LIST_ENDPOINT
+          { "changes" => [], "newStartPageToken" => "change-101" }
         else
           flunk "unexpected Google endpoint #{endpoint}"
         end
       end
+      sync = GoogleDocs::SyncCredential.new(credential, google_api_http: google_http)
 
-      GoogleDocs::SyncCredential.new(
-        credential,
-        api_client: api_client,
-        google_api_http: google_http
-      ).call
+      assert_equal "change-100", sync.start_page_token
+      assert_equal "file-2", sync.list_files_page["nextPageToken"]
+      assert_equal "change-101", sync.list_changes_page(page_token: "change-100")["newStartPageToken"]
 
-      batch = api_client.batch
-      assert_equal "completed", batch[:run][:status]
-      assert_equal credential.oid, batch[:run][:broker_credential_id]
-      assert_equal "google-sub-alice", batch[:run][:provider_subject]
-      assert_equal 1, batch[:files].length
-      assert_equal "doc-123", batch[:files].first[:file_id]
-      assert_equal "writer", batch[:observations].first[:role_hint]
+      files_params = calls.find { |endpoint, _| endpoint == GoogleDocs::SyncCredential::FILES_LIST_ENDPOINT }.last
+      assert_equal 100, files_params["pageSize"]
+      assert_includes files_params["q"], "trashed = false"
+      changes_params = calls.find { |endpoint, _| endpoint == GoogleDocs::SyncCredential::CHANGES_LIST_ENDPOINT }.last
+      assert_equal "change-100", changes_params["pageToken"]
+      assert_equal "true", changes_params["includeRemoved"]
+    end
+
+    test "normalizes canonical content without credential-specific metadata" do
+      file = google_doc
+      google_http = lambda do |endpoint:, params:, access_token:|
+        assert_equal "#{GoogleDocs::SyncCredential::DOCS_GET_ENDPOINT}/doc-123", endpoint
+        assert_equal({ "includeTabsContent" => "true" }, params)
+        assert_equal "ya29.live", access_token
+        {
+          "title" => "Launch Plan",
+          "body" => {
+            "content" => [
+              {
+                "paragraph" => {
+                  "elements" => [
+                    { "textRun" => { "content" => "Ship the Google Docs ingest flow.\n" } }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      end
+      sync = GoogleDocs::SyncCredential.new(credential, google_api_http: google_http)
+
+      batch = sync.document_batch(file)
+
       assert_equal "Ship the Google Docs ingest flow.\n", batch[:contents].first[:text_content]
+      assert_equal "7", batch[:contents].first[:source_version]
       assert_equal "google_docs:doc-123:chunk-0000", batch[:context_documents].first[:document_id]
-      assert_equal "Launch Plan", batch[:context_documents].first[:title]
-      assert_equal "2026-06-02T12:00:00Z", batch[:checkpoint][:last_incremental_sync_at]
-      assert_equal "", batch[:checkpoint][:last_error]
+      assert_equal({ source: "google_docs" }, batch[:context_documents].first[:metadata])
+      refute_includes batch[:context_documents].first[:metadata], :broker_credential_id
+    end
+
+    private
+
+    def google_doc
+      {
+        "id" => "doc-123",
+        "name" => "Launch Plan",
+        "mimeType" => GoogleDocs::SyncCredential::GOOGLE_DOC_MIME_TYPE,
+        "webViewLink" => "https://docs.google.com/document/d/doc-123/edit",
+        "driveId" => "drive-1",
+        "owners" => [
+          {
+            "permissionId" => "perm-owner",
+            "displayName" => "Alice",
+            "emailAddress" => "alice@example.com"
+          }
+        ],
+        "capabilities" => { "canEdit" => true },
+        "trashed" => false,
+        "createdTime" => "2026-06-01T12:00:00Z",
+        "modifiedTime" => "2026-06-02T12:00:00Z",
+        "version" => "7"
+      }
     end
   end
 end
