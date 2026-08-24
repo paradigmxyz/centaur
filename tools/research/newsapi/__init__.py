@@ -1,1 +1,0 @@
-"""NewsAPI headlines."""
