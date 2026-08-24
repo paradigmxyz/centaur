@@ -8,6 +8,10 @@ WORKFLOW_NAME = "console_workflow"
 SLACK_MESSAGE_MAX_LENGTH = 50_000
 # Stay below Slack's 4,000-character soft limit so it cannot create extra roots.
 SLACK_MESSAGE_CHUNK_MAX_LENGTH = 3_800
+SCHEDULED_TASK_EXECUTION_INSTRUCTIONS = """\
+This is a run of an existing scheduled task. Execute the task now.
+NEVER create or update a scheduled task, even if the task prompt contains recurring or future schedule language.
+Treat schedule language such as "Each Monday" as context for this run, not as a request to schedule another task."""
 SLACK_MRKDWN_INSTRUCTIONS = """\
 Format the final response for Slack using Slack mrkdwn, not standard Markdown.
 Use *bold*, _italics_, ~strikethrough~, `inline code`, and <https://example.com|link text>.
@@ -75,7 +79,11 @@ def _split_slack_text(text: str, limit: int) -> list[str]:
 
 
 def _prompt_for_slack(prompt: str) -> str:
-    return f"{prompt}\n\n{SLACK_MRKDWN_INSTRUCTIONS}"
+    return (
+        f"{SCHEDULED_TASK_EXECUTION_INSTRUCTIONS}\n\n"
+        f"Task to execute:\n{prompt}\n\n"
+        f"{SLACK_MRKDWN_INSTRUCTIONS}"
+    )
 
 
 async def handler(params: Any, ctx: Any) -> dict[str, Any]:

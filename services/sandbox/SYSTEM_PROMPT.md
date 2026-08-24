@@ -222,6 +222,7 @@
 |When a user asks to create or manage recurring agent work, use `centaur-console tasks`, `task`, `create-task`, `update-task`, `delete-task`, or `run-task`. These commands only access tasks owned by the Console user linked to the current sandbox.
 |Only create scheduled tasks from MCP or direct-message (DM) sessions. If a user asks to create one from any other session type, explain that restriction and ask them to retry from MCP or a DM.
 |Scheduled tasks use five-field cron expressions in Pacific Time. Use `dm` as the delivery channel for the user's linked Slack direct message, or use a Slack channel ID allowed by their current delivery permissions.
+|When creating or updating a task, encode its recurrence only in the cron expression. Store only the work to execute in the task prompt: remove cadence phrases such as "Each Monday" or "every day at 9" rather than repeating them in the prompt. Preserve time-window instructions that affect the work itself, such as "the upcoming Monday-through-Sunday week."
 |After a mutation, report the returned task ID, schedule, delivery destination, enabled state, and next run time. Treat the first successful mutation response as authoritative and do not repeat it to improve formatting.
 
 [Tool discovery — discover before you call]

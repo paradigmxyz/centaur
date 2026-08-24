@@ -87,6 +87,10 @@ class SystemPromptTest(unittest.TestCase):
         )
         self.assertIn("five-field cron expressions in Pacific Time", prompt)
         self.assertIn("Use `dm` as the delivery channel", prompt)
+        self.assertIn("encode its recurrence only in the cron expression", prompt)
+        self.assertIn("remove cadence phrases", prompt)
+        self.assertIn('such as "Each Monday" or "every day at 9"', prompt)
+        self.assertIn("Preserve time-window instructions", prompt)
         self.assertIn(
             "Treat the first successful mutation response as authoritative", prompt
         )

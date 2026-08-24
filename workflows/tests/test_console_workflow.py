@@ -64,7 +64,8 @@ def test_handler_runs_one_scoped_agent_turn_and_delivers_its_text():
     assert len(context.agent_calls) == 1
     prompt, kwargs = context.agent_calls[0]
     assert prompt == (
-        "Summarize open incidents\n\n"
+        f"{console_workflow.SCHEDULED_TASK_EXECUTION_INSTRUCTIONS}\n\n"
+        "Task to execute:\nSummarize open incidents\n\n"
         f"{console_workflow.SLACK_MRKDWN_INSTRUCTIONS}"
     )
     assert kwargs["principal"] == "console-user-author"
@@ -78,6 +79,33 @@ def test_handler_runs_one_scoped_agent_turn_and_delivers_its_text():
         ("C0123456789", "Daily summary", {"mrkdwn": True})
     ]
     assert result["delivery"]["ts"] == "123.1"
+
+
+def test_handler_treats_recurring_language_as_an_instruction_to_execute_now():
+    context = FakeContext()
+    task = (
+        "Each Monday, review my Google Calendar for the upcoming "
+        "Monday-through-Sunday week and my recent Slack conversations."
+    )
+
+    asyncio.run(
+        console_workflow.handler(
+            {
+                "prompt": task,
+                "principal": "console-user-author",
+                "channel": "C0123456789",
+                "scheduled_task_id": "tsk_123",
+            },
+            context,
+        )
+    )
+
+    prompt, _kwargs = context.agent_calls[0]
+    assert prompt.startswith(
+        "This is a run of an existing scheduled task. Execute the task now.\n"
+        "NEVER create or update a scheduled task"
+    )
+    assert f"Task to execute:\n{task}\n\n" in prompt
 
 
 def test_handler_threads_and_truncates_long_channel_results():
