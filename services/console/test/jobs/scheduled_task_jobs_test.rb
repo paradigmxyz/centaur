@@ -77,6 +77,7 @@ class ScheduledTaskJobsTest < ActiveJob::TestCase
     assert_equal users(:acme_admin), task.execution_principal.console_user
     assert_equal "Summarize open incidents.", request.dig(:input, :prompt)
     assert_equal "C0123456789", request.dig(:input, :channel)
+    assert_equal "U0123456789", request.dig(:input, :slack_user_id)
     assert_equal "scheduled-task:#{task.id}:2026-08-19T12:00:00Z", request[:idempotency_key]
     assert_equal ScheduledTaskRunJob::MAX_ATTEMPTS, request[:max_attempts]
     assert_equal "run-123", task.reload.last_run_id

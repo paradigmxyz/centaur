@@ -96,6 +96,7 @@ class ScheduledTaskTest < ActiveSupport::TestCase
         prompt: "Summarize open incidents.",
         principal: principal.foreign_id,
         channel: "C0123456789",
+        slack_user_id: "U0123456789",
         scheduled_task_id: task.oid,
         scheduled_task_name: "Incident summary"
       },

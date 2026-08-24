@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 WORKFLOW_NAME = "console_workflow"
 SLACK_MESSAGE_MAX_LENGTH = 50_000
 # Stay below Slack's 4,000-character soft limit so it cannot create extra roots.
 SLACK_MESSAGE_CHUNK_MAX_LENGTH = 3_800
+# Slack section block text is limited to 3,000 characters.
+SLACK_SECTION_MAX_LENGTH = 3_000
+SLACK_USER_ID_PATTERN = re.compile(r"[UW][A-Z0-9]{8,}")
+SCHEDULED_TASK_FOOTER = "Sent by <@{slack_user_id}>'s scheduled task"
+SCHEDULED_TASK_FOOTER_FALLBACK = "Sent by a scheduled task"
 SCHEDULED_TASK_EXECUTION_INSTRUCTIONS = """\
 This is a run of an existing scheduled task. Execute the task now.
 NEVER create or update a scheduled task, even if the task prompt contains recurring or future schedule language.
@@ -28,12 +34,32 @@ def _required_string(params: Any, key: str) -> str:
     return value.strip()
 
 
-async def _deliver_to_slack(ctx: Any, channel: str, text: str) -> Any:
-    truncated = text[:SLACK_MESSAGE_MAX_LENGTH]
-    chunks = _split_slack_text(truncated, SLACK_MESSAGE_CHUNK_MAX_LENGTH)
+async def _deliver_to_slack(
+    ctx: Any,
+    channel: str,
+    text: str,
+    slack_user_id: str,
+) -> Any:
+    footer = _scheduled_task_footer(slack_user_id)
+    footer_suffix = f"\n\n{footer}"
+    body_limit = SLACK_MESSAGE_MAX_LENGTH - len(footer_suffix)
+    chunks = _split_slack_text(text[:body_limit], SLACK_MESSAGE_CHUNK_MAX_LENGTH)
+    final_body = chunks[-1]
+    if len(final_body) + len(footer_suffix) <= SLACK_MESSAGE_CHUNK_MAX_LENGTH:
+        chunks[-1] = f"{final_body}{footer_suffix}"
+    else:
+        final_body = ""
+        chunks.append(footer)
+
+    def message_args(index: int) -> dict[str, Any]:
+        args: dict[str, Any] = {"mrkdwn": True}
+        if index == len(chunks) - 1:
+            args["blocks"] = _scheduled_task_blocks(final_body, footer)
+        return args
+
     root = await ctx.step(
         "post_result",
-        lambda: ctx.post_to_slack(channel, chunks[0], mrkdwn=True),
+        lambda: ctx.post_to_slack(channel, chunks[0], **message_args(0)),
     )
     if len(chunks) == 1:
         return root
@@ -51,12 +77,37 @@ async def _deliver_to_slack(ctx: Any, channel: str, text: str) -> Any:
             lambda chunk=chunk: ctx.post_to_slack(
                 reply_channel,
                 chunk,
-                mrkdwn=True,
                 thread_ts=thread_ts,
+                **message_args(index),
             ),
         )
         replies.append(reply)
     return {**root, "replies": replies}
+
+
+def _scheduled_task_footer(slack_user_id: str) -> str:
+    return (
+        SCHEDULED_TASK_FOOTER.format(slack_user_id=slack_user_id)
+        if SLACK_USER_ID_PATTERN.fullmatch(slack_user_id)
+        else SCHEDULED_TASK_FOOTER_FALLBACK
+    )
+
+
+def _scheduled_task_blocks(body: str, footer: str) -> list[dict[str, Any]]:
+    blocks = [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": section},
+        }
+        for section in _split_slack_text(body, SLACK_SECTION_MAX_LENGTH)
+    ]
+    blocks.append(
+        {
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": footer}],
+        }
+    )
+    return blocks
 
 
 def _split_slack_text(text: str, limit: int) -> list[str]:
@@ -91,6 +142,7 @@ async def handler(params: Any, ctx: Any) -> dict[str, Any]:
     principal = _required_string(params, "principal")
     channel = _required_string(params, "channel")
     scheduled_task_id = _required_string(params, "scheduled_task_id")
+    slack_user_id = str(params.get("slack_user_id") or "").strip()
 
     result = await ctx.agent_turn(
         _prompt_for_slack(prompt),
@@ -103,7 +155,12 @@ async def handler(params: Any, ctx: Any) -> dict[str, Any]:
     response_text = str(result.get("result_text") or "").strip()
     if not response_text:
         response_text = "The task completed without a text response."
-    delivery = await _deliver_to_slack(ctx, channel, response_text)
+    delivery = await _deliver_to_slack(
+        ctx,
+        channel,
+        response_text,
+        slack_user_id,
+    )
 
     return {
         "agent_result": result,
