@@ -35,9 +35,10 @@ module SlackApi
     if response.status == 429
       retry_after = Float(response["retry-after"], exception: false)
       retry_after = 1 unless retry_after&.positive?
+      retry_after = [ retry_after, max_rate_limit_wait ].min if max_rate_limit_wait
       raise RateLimitedError.new(
         "Slack API rate limited#{context}.",
-        retry_after: [ retry_after, max_rate_limit_wait ].min,
+        retry_after: retry_after,
         code: "ratelimited"
       )
     end

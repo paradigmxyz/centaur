@@ -1,16 +1,15 @@
 import { Controller } from "@hotwired/stimulus"
 
 export default class extends Controller {
-  static targets = ["preset", "cron", "expression"]
+  static targets = ["preset", "custom", "customTime"]
 
   connect() {
     this.update()
   }
 
   update() {
-    const cronSelected = this.presetTarget.value === "cron"
-    this.cronTarget.hidden = !cronSelected
-    this.expressionTarget.disabled = !cronSelected
-    this.expressionTarget.required = cronSelected
+    const customSelected = this.presetTarget.value === "custom"
+    this.customTarget.hidden = !customSelected
+    this.customTimeTarget.required = customSelected
   }
 }

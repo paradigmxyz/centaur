@@ -1876,16 +1876,16 @@
             </a>
           </div>
 
-          <% if acting_admin? %>
-            <div class="console-thread-group">
-              <a href="<%= console_scheduled_tasks_path %>"
-                 class="console-thread-group-title <%= "console-thread-group-title-active" if scheduled_tasks_view %>"
-                 title="Scheduled">
-                <span class="console-nav-icon"><%= console_icon("clock", classes: "size-4") %></span>
-                <span class="console-nav-label">Scheduled</span>
-              </a>
-            </div>
+          <div class="console-thread-group">
+            <a href="<%= console_scheduled_tasks_path %>"
+               class="console-thread-group-title <%= "console-thread-group-title-active" if scheduled_tasks_view %>"
+               title="Scheduled">
+              <span class="console-nav-icon"><%= console_icon("clock", classes: "size-4") %></span>
+              <span class="console-nav-label">Scheduled</span>
+            </a>
+          </div>
 
+          <% if acting_admin? %>
             <div class="console-thread-group">
               <a href="<%= console_workflows_path %>"
                  class="console-thread-group-title <%= "console-thread-group-title-active" if workflows_view %>"

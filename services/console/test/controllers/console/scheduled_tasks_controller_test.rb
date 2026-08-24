@@ -18,10 +18,18 @@ class Console::ScheduledTasksControllerTest < ActionDispatch::IntegrationTest
     assert_select "textarea[name='scheduled_task[prompt]']"
     assert_select "select[name='scheduled_task[principal_oid]']", count: 0
     assert_select "select[name='scheduled_task[schedule_preset]']"
+    assert_select "select[name='scheduled_task[schedule_preset]'] option", 5
+    assert_select "option", text: "Every day"
+    assert_select "option", text: "Every weekday"
+    assert_select "option", text: "Mondays"
+    assert_select "option", text: "Fridays"
+    assert_select "option", text: "Custom"
     assert_select "select[name='scheduled_task[timezone]']", count: 0
-    assert_select "[data-schedule-fields-target=cron][hidden]"
-    assert_select "input[name='scheduled_task[cron_expression]'][disabled]"
-    assert_select "p", text: "All schedules use Pacific Time."
+    assert_select "[data-schedule-fields-target=custom][hidden]"
+    assert_select "input[type=checkbox][name='scheduled_task[custom_days][]']", 7
+    assert_select "input[type=time][name='scheduled_task[custom_time]']"
+    assert_select "input[name='scheduled_task[cron_expression]']", count: 0
+    assert_select "p", text: "Presets run at 9:00 AM Pacific Time."
     assert_select "form[data-controller='slack-channel-autocomplete']"
     assert_select "[data-slack-channel-autocomplete-url-value=?]",
                   slack_channel_options_console_scheduled_tasks_path
@@ -81,16 +89,54 @@ class Console::ScheduledTasksControllerTest < ActionDispatch::IntegrationTest
     assert_select "input[role=combobox][value=?]", task.delivery_channel
   end
 
-  test "edit form shows the cron expression for a cron schedule" do
+  test "edit form maps a weekly cron schedule to custom day and time fields" do
     task = create_task
-    task.update!(cron_expression: "15 6 * * *")
+    task.update!(cron_expression: "15 6 * * 1,3,5")
 
     get edit_console_scheduled_task_url(task.oid)
 
     assert_response :ok
-    assert_select "option[value=cron][selected]"
-    assert_select "[data-schedule-fields-target=cron]:not([hidden])"
-    assert_select "input[name='scheduled_task[cron_expression]'][required]:not([disabled])"
+    assert_select "option[value=custom][selected]"
+    assert_select "[data-schedule-fields-target=custom]:not([hidden])"
+    assert_select "input[name='scheduled_task[custom_days][]'][value=1][checked]"
+    assert_select "input[name='scheduled_task[custom_days][]'][value=3][checked]"
+    assert_select "input[name='scheduled_task[custom_days][]'][value=5][checked]"
+    assert_select "input[name='scheduled_task[custom_days][]'][value=2]:not([checked])"
+    assert_select "input[name='scheduled_task[custom_time]'][value='06:15'][required]"
+  end
+
+  test "creates a task from custom weekdays and time" do
+    assert_difference -> { ScheduledTask.count }, 1 do
+      post console_scheduled_tasks_url, params: {
+        scheduled_task: task_params.merge(
+          schedule_preset: "custom",
+          custom_days: %w[1 3 5],
+          custom_time: "14:30"
+        )
+      }
+    end
+
+    task = ScheduledTask.order(:id).last
+    assert_redirected_to console_scheduled_tasks_path
+    assert_equal "30 14 * * 1,3,5", task.cron_expression
+    assert_equal "Mon, Wed, Fri at 2:30 PM PT", task.schedule_label
+  end
+
+  test "rejects a custom schedule without any days" do
+    assert_no_difference -> { ScheduledTask.count } do
+      post console_scheduled_tasks_url, params: {
+        scheduled_task: task_params.merge(
+          schedule_preset: "custom",
+          custom_days: [],
+          custom_time: "14:30"
+        )
+      }
+    end
+
+    assert_response :unprocessable_entity
+    assert_select "option[value=custom][selected]"
+    assert_select "[data-schedule-fields-target=custom]:not([hidden])"
+    assert_select "p", text: "Choose at least one day and a time."
   end
 
   test "shows scheduled tasks on their dedicated page" do
@@ -101,7 +147,7 @@ class Console::ScheduledTasksControllerTest < ActionDispatch::IntegrationTest
     assert_select ".console-thread-group-title-active", text: /Scheduled/
     assert_select "h1", text: "Scheduled Tasks"
     assert_select "a[href=?]", edit_console_scheduled_task_path(task.oid), text: task.name
-    assert_select "td", text: /Hourly/
+    assert_select "td", text: /0 \* \* \* \*/
     assert_select "td", text: /#general/
     assert_select "td", text: /#{task.delivery_channel}/
     assert_no_match task.timezone, response.body
@@ -144,15 +190,36 @@ class Console::ScheduledTasksControllerTest < ActionDispatch::IntegrationTest
     assert_response :not_found
   end
 
-  test "non-admins cannot author tasks" do
+  test "non-admins can create and manage their own tasks" do
     delete logout_url
-    post login_url, params: { email: users(:member_user).email, password: "password123456" }
+    member = users(:member_user)
+    post login_url, params: { email: member.email, password: "password123456" }
 
-    assert_no_difference -> { ScheduledTask.count } do
+    get new_console_scheduled_task_url
+    assert_response :ok
+    assert_select "a[href=?]", console_scheduled_tasks_path, text: "Scheduled"
+
+    assert_difference -> { ScheduledTask.count }, 1 do
       post console_scheduled_tasks_url, params: { scheduled_task: task_params }
     end
+    task = member.scheduled_tasks.find_by!(name: task_params.fetch(:name))
+    assert_redirected_to console_scheduled_tasks_path
 
-    assert_redirected_to console_threads_path
+    patch console_scheduled_task_url(task.oid), params: {
+      scheduled_task: task_params.merge(name: "Updated member task")
+    }
+    assert_redirected_to console_scheduled_tasks_path
+    assert_equal "Updated member task", task.reload.name
+
+    assert_enqueued_jobs 1, only: ScheduledTaskRunJob do
+      post run_console_scheduled_task_url(task.oid)
+    end
+    assert_redirected_to console_scheduled_tasks_path
+
+    assert_difference -> { ScheduledTask.count }, -1 do
+      delete console_scheduled_task_url(task.oid)
+    end
+    assert_redirected_to console_scheduled_tasks_path
   end
 
   private

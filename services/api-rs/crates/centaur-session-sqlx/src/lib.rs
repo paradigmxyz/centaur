@@ -124,21 +124,79 @@ impl PgSessionStore {
         metadata: Value,
         proxy_labels: BTreeMap<String, String>,
     ) -> Result<Session, SessionStoreError> {
-        sqlx::query(
-            r#"
-            insert into sessions (thread_key, harness_type, persona_id, status, metadata, proxy_labels)
-            values ($1, $2, $3, $4, $5, $6)
-            on conflict (thread_key) do nothing
-            "#,
+        self.create_or_get_session_inner(
+            thread_key,
+            harness_type,
+            persona_id,
+            metadata,
+            proxy_labels,
+            false,
         )
-        .bind(thread_key.as_str())
-        .bind(harness_type.as_ref())
-        .bind(persona_id)
-        .bind(SessionStatus::Idle.as_ref())
-        .bind(metadata)
-        .bind(Json(proxy_labels.clone()))
-        .execute(&self.pool)
-        .await?;
+        .await
+    }
+
+    /// Create or load a session while merging newly learned metadata into an
+    /// existing row. The conflict update is skipped when every supplied value
+    /// is already present, so unchanged calls do not write or touch updated_at.
+    pub async fn create_or_get_session_merging_metadata(
+        &self,
+        thread_key: &ThreadKey,
+        harness_type: &HarnessType,
+        persona_id: Option<&str>,
+        metadata: Value,
+        proxy_labels: BTreeMap<String, String>,
+    ) -> Result<Session, SessionStoreError> {
+        self.create_or_get_session_inner(
+            thread_key,
+            harness_type,
+            persona_id,
+            metadata,
+            proxy_labels,
+            true,
+        )
+        .await
+    }
+
+    async fn create_or_get_session_inner(
+        &self,
+        thread_key: &ThreadKey,
+        harness_type: &HarnessType,
+        persona_id: Option<&str>,
+        metadata: Value,
+        proxy_labels: BTreeMap<String, String>,
+        merge_metadata: bool,
+    ) -> Result<Session, SessionStoreError> {
+        let query = if merge_metadata {
+            sqlx::query(
+                r#"
+                insert into sessions (thread_key, harness_type, persona_id, status, metadata, proxy_labels)
+                values ($1, $2, $3, $4, $5, $6)
+                on conflict (thread_key) do update
+                set metadata = sessions.metadata || excluded.metadata,
+                    updated_at = now()
+                where sessions.harness_type = excluded.harness_type
+                  and sessions.persona_id is not distinct from excluded.persona_id
+                  and not sessions.metadata @> excluded.metadata
+                "#,
+            )
+        } else {
+            sqlx::query(
+                r#"
+                insert into sessions (thread_key, harness_type, persona_id, status, metadata, proxy_labels)
+                values ($1, $2, $3, $4, $5, $6)
+                on conflict (thread_key) do nothing
+                "#,
+            )
+        };
+        query
+            .bind(thread_key.as_str())
+            .bind(harness_type.as_ref())
+            .bind(persona_id)
+            .bind(SessionStatus::Idle.as_ref())
+            .bind(metadata)
+            .bind(Json(proxy_labels.clone()))
+            .execute(&self.pool)
+            .await?;
 
         if !proxy_labels.is_empty() {
             sqlx::query(
@@ -389,6 +447,35 @@ impl PgSessionStore {
         .ok_or_else(|| SessionStoreError::ExecutionNotFound {
             execution_id: execution_id.to_owned(),
         })
+    }
+
+    /// Persist the execution trace context before input is delivered to the
+    /// sandbox. Keeping it on the durable execution row lets recovery and
+    /// steering continue the same trace after a control-plane restart.
+    pub async fn set_execution_traceparent(
+        &self,
+        execution_id: &str,
+        traceparent: &str,
+    ) -> Result<(), SessionStoreError> {
+        let updated = sqlx::query_scalar::<_, String>(
+            r#"
+            update session_executions
+            set metadata = metadata || jsonb_build_object('centaur.traceparent', $2::text),
+                updated_at = now()
+            where execution_id = $1
+            returning execution_id
+            "#,
+        )
+        .bind(execution_id)
+        .bind(traceparent)
+        .fetch_optional(&self.pool)
+        .await?;
+        if updated.is_none() {
+            return Err(SessionStoreError::ExecutionNotFound {
+                execution_id: execution_id.to_owned(),
+            });
+        }
+        Ok(())
     }
 
     pub async fn active_execution_for_thread(
@@ -2149,6 +2236,81 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_or_get_session_merges_only_changed_metadata() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let thread_key =
+            ThreadKey::parse(format!("test:metadata-merge-{}", Uuid::new_v4())).unwrap();
+        let created = store
+            .create_or_get_session_merging_metadata(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({
+                    "mcp_tool_host": true,
+                    "mcp_principal_id": "prn_test",
+                    "console_user_name": "Old Name",
+                }),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+
+        let updated = store
+            .create_or_get_session_merging_metadata(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({
+                    "mcp_tool_host": true,
+                    "mcp_principal_id": "prn_test",
+                    "console_user_email": "test@example.com",
+                    "console_user_name": "Test User",
+                }),
+                Default::default(),
+            )
+            .await
+            .expect("merge session metadata");
+        assert!(updated.updated_at >= created.updated_at);
+
+        let unchanged = store
+            .create_or_get_session_merging_metadata(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({
+                    "mcp_tool_host": true,
+                    "mcp_principal_id": "prn_test",
+                    "console_user_email": "test@example.com",
+                    "console_user_name": "Test User",
+                }),
+                Default::default(),
+            )
+            .await
+            .expect("load session with unchanged metadata");
+        assert_eq!(unchanged.updated_at, updated.updated_at);
+
+        let metadata = sqlx::query_scalar::<_, serde_json::Value>(
+            "select metadata from sessions where thread_key = $1",
+        )
+        .bind(thread_key.as_str())
+        .fetch_one(store.pool())
+        .await
+        .expect("load session metadata");
+
+        assert_eq!(
+            metadata,
+            json!({
+                "mcp_tool_host": true,
+                "mcp_principal_id": "prn_test",
+                "console_user_email": "test@example.com",
+                "console_user_name": "Test User",
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn execution_requests_are_durable_and_idempotent() {
         let Some(store) = test_store().await else {
             return;
@@ -2195,6 +2357,22 @@ mod tests {
         assert!(first.created);
         assert!(!replay.created);
         assert_eq!(replay.execution.execution_id, first.execution.execution_id);
+        store
+            .set_execution_traceparent(
+                &first.execution.execution_id,
+                "00-0123456789abcdef0123456789abcdef-1111111111111111-01",
+            )
+            .await
+            .expect("persist execution traceparent");
+        assert_eq!(
+            store
+                .latest_execution_for_thread(&thread_key)
+                .await
+                .expect("load traced execution")
+                .expect("execution exists")
+                .metadata["centaur.traceparent"],
+            "00-0123456789abcdef0123456789abcdef-1111111111111111-01"
+        );
         assert_eq!(
             store
                 .execution_request(&first.execution.execution_id)

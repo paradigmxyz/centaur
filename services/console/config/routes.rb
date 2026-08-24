@@ -272,6 +272,9 @@ Rails.application.routes.draw do
       namespace :sandbox do
         resource :permissions, only: :show
         resources :oauth_apps, only: :index
+        resources :scheduled_tasks, only: %i[index show create update destroy] do
+          post :run, on: :member
+        end
         resources :skills, only: %i[index show create update destroy] do
           collection { get :search }
           member do

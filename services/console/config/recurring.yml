@@ -20,7 +20,7 @@ production:
     class: "Broker::PollRefreshJob"
     schedule: every minute
   slack_dm_poll_sync:
-    class: "SlackDm::PollSyncJob"
+    class: "SlackDm::SyncCredentialJob"
     schedule: every 10 minutes
   slack_channel_catalog_refresh:
     class: "SlackChannelCatalogRefreshJob"

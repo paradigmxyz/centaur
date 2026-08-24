@@ -86,14 +86,14 @@
     <% end %>
   </fieldset>
 
-  <% cron_schedule = task.schedule_preset == "cron" %>
-  <div class="grid gap-5 lg:grid-cols-2" data-controller="schedule-fields">
+  <% custom_schedule = @schedule_preset == "custom" %>
+  <div data-controller="schedule-fields">
     <div>
       <%= form.label :schedule_preset, "Schedule", class: "mb-2 block text-sm font-medium text-zinc-200" %>
       <%= form.select :schedule_preset,
             options_for_select(
-              ScheduledTask::SCHEDULE_PRESET_LABELS.map { |preset, label| [ label, preset ] } + [ [ "Cron", "cron" ] ],
-              task.schedule_preset
+              ScheduledTask::SCHEDULE_PRESET_LABELS.map { |preset, label| [ label, preset ] } + [ [ "Custom", "custom" ] ],
+              @schedule_preset
             ),
             {},
             class: "form-input",
@@ -101,20 +101,48 @@
               schedule_fields_target: "preset",
               action: "schedule-fields#update"
             } %>
-      <p class="mt-2 text-xs text-zinc-500">All schedules use Pacific Time.</p>
+      <p class="mt-2 text-xs text-zinc-500">Presets run at 9:00 AM Pacific Time.</p>
     </div>
 
-    <div data-schedule-fields-target="cron" <%= "hidden" unless cron_schedule %>>
-      <%= form.label :cron_expression, "Cron expression", class: "mb-2 block text-sm font-medium text-zinc-200" %>
-      <%= form.text_field :cron_expression,
-            required: cron_schedule,
-            disabled: !cron_schedule,
-            placeholder: "0 9 * * 1-5",
-            class: "form-input font-mono",
-            data: { schedule_fields_target: "expression" } %>
-      <p class="mt-2 text-xs text-zinc-500">Cron expressions are evaluated in Pacific Time.</p>
-    </div>
+    <fieldset class="mt-4 rounded-lg border border-ink-600 bg-ink-900/50 p-4"
+              data-schedule-fields-target="custom"
+              <%= "hidden" unless custom_schedule %>>
+      <legend class="px-1 text-sm font-medium text-zinc-200">Custom schedule</legend>
+
+      <div>
+        <span class="mb-2 block text-xs font-medium text-zinc-400">Days</span>
+        <div class="grid grid-cols-4 gap-2 sm:grid-cols-7">
+          <% ScheduledTask::CUSTOM_SCHEDULE_DAYS.each do |label, value| %>
+            <% checkbox_id = "scheduled_task_custom_day_#{value}" %>
+            <label for="<%= checkbox_id %>"
+                   class="flex cursor-pointer items-center justify-center gap-2 rounded border border-ink-600 bg-ink-800 px-2 py-2 text-sm text-zinc-300 hover:border-centaur-500/50 hover:text-zinc-100">
+              <%= check_box_tag "scheduled_task[custom_days][]",
+                                value,
+                                @custom_schedule_days.include?(value),
+                                id: checkbox_id,
+                                class: "rounded border-ink-500 bg-ink-900 text-centaur-500" %>
+              <span><%= label %></span>
+            </label>
+          <% end %>
+        </div>
+      </div>
+
+      <div class="mt-4 max-w-xs">
+        <%= label_tag "scheduled_task_custom_time", "Time", class: "mb-2 block text-xs font-medium text-zinc-400" %>
+        <%= time_field_tag "scheduled_task[custom_time]",
+                           @custom_schedule_time,
+                           id: "scheduled_task_custom_time",
+                           required: custom_schedule,
+                           class: "form-input",
+                           data: { schedule_fields_target: "customTime" } %>
+        <p class="mt-2 text-xs text-zinc-500">Custom schedules use Pacific Time.</p>
+      </div>
+    </fieldset>
   </div>
+
+  <% if task.errors[:cron_expression].any? %>
+    <p class="-mt-3 text-xs text-red-400">Choose at least one day and a time.</p>
+  <% end %>
 
   <label class="flex items-start gap-3 rounded border border-ink-700 bg-ink-900/50 px-4 py-3">
     <%= form.check_box :enabled, class: "mt-0.5 rounded border-ink-500 bg-ink-900 text-centaur-500" %>

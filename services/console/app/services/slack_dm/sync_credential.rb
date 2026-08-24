@@ -13,6 +13,9 @@ module SlackDm
     CONVERSATIONS_HISTORY_ENDPOINT = "https://slack.com/api/conversations.history"
     CONVERSATIONS_REPLIES_ENDPOINT = "https://slack.com/api/conversations.replies"
     API_READ_TIMEOUT_SECONDS = 120
+    INLINE_RATE_LIMIT_WAIT_THRESHOLD_SECONDS = 5.minutes.to_i
+    MAX_INLINE_RATE_LIMIT_RETRIES = 5
+    SKIPPABLE_INGEST_STATUSES = [ 400, 413, 422 ].freeze
     class << self
       attr_accessor :slack_api_http
 
@@ -42,40 +45,73 @@ module SlackDm
       @run_id = "sdms_#{SecureRandom.hex(16)}"
       @messages_fetched = 0
       @replies_fetched = 0
+      @messages_upserted = 0
+      @replies_upserted = 0
     end
 
-    def call
+    def call(starting_conversation_id: nil, deadline: nil)
       auth = slack_api(AUTH_TEST_ENDPOINT)
       home_team_id = auth.fetch("team_id")
       source_user_id = auth["user_id"].presence || @credential.provider_subject.to_s
       checkpoints = load_checkpoints(home_team_id)
-      batch = empty_batch(home_team_id, source_user_id)
+      conversations = list_conversations.sort_by { |conversation| conversation.fetch("id") }
+      conversations = remaining_conversations(conversations, starting_conversation_id)
+      run = empty_batch(home_team_id, source_user_id).fetch(:run)
+      run[:conversations_requested] = conversations.length
+      checkpointed_conversation_id = starting_conversation_id
 
-      conversations = list_conversations
-      batch[:run][:conversations_requested] = conversations.length
+      conversations.each_with_index do |conversation, index|
+        if deadline && Time.current >= deadline
+          finish_run(run, status: "partial")
+          return false
+        end
 
-      conversations.each do |conversation|
-        normalize_conversation(conversation, home_team_id, batch)
-        normalize_members(conversation, home_team_id, batch)
-        sync_history(conversation, home_team_id, checkpoints[conversation.fetch("id")], batch)
-        batch[:run][:conversations_synced] += 1
-      rescue StandardError => e
-        raise if e.is_a?(SlackApi::RetryableError)
-        raise if Rails.env.test?
+        conversation_id = conversation.fetch("id")
+        if conversation_id != checkpointed_conversation_id
+          yield conversation_id if block_given?
+          checkpointed_conversation_id = conversation_id
+        end
 
-        batch[:run][:conversations_failed] += 1
-        Rails.logger.warn do
-          "slack DM sync failed for conversation #{conversation['id']}: #{e.class}: #{e.message}"
+        batch = empty_batch(home_team_id, source_user_id)
+        conversation_failed = false
+        begin
+          normalize_conversation(conversation, home_team_id, batch)
+          normalize_members(conversation, home_team_id, batch)
+          sync_history(conversation, home_team_id, checkpoints[conversation_id], batch)
+        rescue StandardError => e
+          raise if e.is_a?(SlackApi::RetryableError)
+          raise if Rails.env.test?
+
+          conversation_failed = true
+          run[:conversations_failed] += 1
+          Rails.logger.warn do
+            "slack DM sync failed for conversation #{conversation_id}: #{e.class}: #{e.message}"
+          end
+        end
+        unless conversation_failed
+          begin
+            ingest_conversation_batch(batch, run)
+          rescue CentaurApiClient::Error => e
+            raise unless SKIPPABLE_INGEST_STATUSES.include?(e.status)
+
+            run[:conversations_failed] += 1
+            Rails.logger.warn do
+              "Slack DM ingest rejected conversation #{conversation_id}: " \
+                "status=#{e.status} error=#{e.message}"
+            end
+          end
+        end
+
+        next_conversation_id = conversations[index + 1]&.fetch("id")
+        if next_conversation_id
+          yield next_conversation_id if block_given?
+          checkpointed_conversation_id = next_conversation_id
         end
       end
 
-      batch[:run][:status] = batch[:run][:conversations_failed].positive? ? "partial" : "completed"
-      batch[:run][:messages_fetched] = @messages_fetched
-      batch[:run][:messages_upserted] = batch[:messages].length
-      batch[:run][:replies_fetched] = @replies_fetched
-      batch[:run][:replies_upserted] = batch[:messages].count { |message| message[:parent_message_ts].present? }
-      batch[:run][:finished] = true
-      @api_client.ingest_slack_dm_sync_batch(sanitize_for_postgres(batch))
+      status = run[:conversations_failed].positive? ? "partial" : "completed"
+      finish_run(run, status: status)
+      true
     end
 
     private
@@ -118,6 +154,55 @@ module SlackDm
         attachments: [],
         checkpoints: []
       }
+    end
+
+    def remaining_conversations(conversations, starting_conversation_id)
+      return conversations if starting_conversation_id.blank?
+
+      conversations.drop_while do |conversation|
+        conversation.fetch("id") < starting_conversation_id
+      end
+    end
+
+    def ingest_conversation_batch(batch, run)
+      batch_replies_upserted = batch[:messages].count do |message|
+        message[:parent_message_ts].present?
+      end
+      messages_upserted = @messages_upserted + batch[:messages].length
+      replies_upserted = @replies_upserted + batch_replies_upserted
+      batch[:run] = run.merge(
+        conversations_synced: run[:conversations_synced] + 1,
+        messages_fetched: @messages_fetched,
+        messages_upserted: messages_upserted,
+        replies_fetched: @replies_fetched,
+        replies_upserted: replies_upserted,
+        finished: false
+      )
+      @api_client.ingest_slack_dm_sync_batch(sanitize_for_postgres(batch))
+      run[:conversations_synced] += 1
+      @messages_upserted = messages_upserted
+      @replies_upserted = replies_upserted
+    end
+
+    def finish_run(run, status:)
+      update_run_counts(run)
+      batch = {
+        run: run.merge(status: status, finished: true),
+        replace_memberships: false,
+        conversations: [],
+        members: [],
+        messages: [],
+        attachments: [],
+        checkpoints: []
+      }
+      @api_client.ingest_slack_dm_sync_batch(sanitize_for_postgres(batch))
+    end
+
+    def update_run_counts(run)
+      run[:messages_fetched] = @messages_fetched
+      run[:messages_upserted] = @messages_upserted
+      run[:replies_fetched] = @replies_fetched
+      run[:replies_upserted] = @replies_upserted
     end
 
     def list_conversations
@@ -314,21 +399,50 @@ module SlackDm
     end
 
     def slack_api(endpoint, params = {})
-      if @slack_api_http
-        return @slack_api_http.call(
-          endpoint: endpoint,
-          params: params,
-          access_token: @credential.access_token
-        )
+      with_rate_limit_guard(endpoint) do
+        if @slack_api_http
+          @slack_api_http.call(
+            endpoint: endpoint,
+            params: params,
+            access_token: @credential.access_token
+          )
+        else
+          http_client = @http_client || HttpClient.new(
+            open_timeout: slack_timeout,
+            read_timeout: slack_timeout
+          )
+          response = http_client.get(
+            endpoint,
+            params: params,
+            headers: { "Authorization" => "Bearer #{@credential.access_token}" }
+          )
+          SlackApi.parse_response!(response, max_rate_limit_wait: nil)
+        end
       end
-
-      http_client = @http_client || HttpClient.new(open_timeout: slack_timeout, read_timeout: slack_timeout)
-      response = http_client.get(
-        endpoint,
-        params: params,
-        headers: { "Authorization" => "Bearer #{@credential.access_token}" }
+    rescue Socket::ResolutionError => e
+      raise SlackApi::TransientError.new(
+        "Slack API hostname resolution failed: #{e.message}",
+        retry_after: SlackApi::DEFAULT_TRANSIENT_RETRY_AFTER_SECONDS,
+        code: "hostname_resolution_failed"
       )
-      SlackApi.parse_response!(response, max_rate_limit_wait: rate_limit_max_wait)
+    end
+
+    def with_rate_limit_guard(endpoint)
+      retries = 0
+      begin
+        yield
+      rescue SlackApi::RateLimitedError => e
+        raise unless e.retry_after < INLINE_RATE_LIMIT_WAIT_THRESHOLD_SECONDS
+        raise if retries >= MAX_INLINE_RATE_LIMIT_RETRIES
+
+        retries += 1
+        Rails.logger.info do
+          "Slack DM sync sleeping after rate limit: credential_id=#{@credential.id} " \
+            "endpoint=#{endpoint} retry_after=#{e.retry_after} retry=#{retries}"
+        end
+        sleep(e.retry_after)
+        retry
+      end
     end
 
     def max_slack_ts(left, right)
@@ -359,7 +473,6 @@ module SlackDm
     end
 
     def slack_timeout = positive_env("SLACK_DM_SYNC_TIMEOUT_SECONDS", 20)
-    def rate_limit_max_wait = positive_env("SLACK_DM_SYNC_RATE_LIMIT_MAX_WAIT_SECONDS", 5.minutes.to_i)
     def list_page_size = positive_env("SLACK_DM_SYNC_LIST_PAGE_SIZE", 200)
     def list_max_pages = positive_env("SLACK_DM_SYNC_LIST_MAX_PAGES", 10)
     def members_page_size = positive_env("SLACK_DM_SYNC_MEMBERS_PAGE_SIZE", 200)
