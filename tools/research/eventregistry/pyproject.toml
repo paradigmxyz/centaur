@@ -1,6 +1,6 @@
 [project]
-name = "newsapi-ai"
-description = "NewsAPI.ai CLI for recent article search"
+name = "eventregistry"
+description = "Event Registry CLI for recent article search"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
@@ -10,13 +10,13 @@ dependencies = [
 ]
 
 [project.scripts]
-newsapi_ai = "centaur_tool_newsapi_ai.cli:app"
+eventregistry = "centaur_tool_eventregistry.cli:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["."]
 
 [tool.hatch.build.targets.wheel.sources]
-"." = "centaur_tool_newsapi_ai"
+"." = "centaur_tool_eventregistry"
 
 [build-system]
 requires = ["hatchling"]
@@ -24,4 +24,4 @@ build-backend = "hatchling.build"
 
 [tool.centaur]
 module = "client.py"
-secrets = [{type = "http", name = "NEWSAPI_AI_API_KEY", mode = "inject", inject_query_param = "apiKey", hosts = ["eventregistry.org"]}]
+secrets = [{type = "http", name = "EVENTREGISTRY_API_KEY", mode = "inject", inject_query_param = "apiKey", hosts = ["eventregistry.org"]}]

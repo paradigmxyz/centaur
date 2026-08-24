@@ -1,4 +1,4 @@
-"""NewsAPI.ai article client."""
+"""Event Registry article client."""
 
 from typing import Literal, TypedDict
 
@@ -7,7 +7,7 @@ import httpx
 from centaur_sdk import secret
 
 StringOrList = str | list[str]
-GET_ARTICLES_DOCS_URL = "https://newsapi.ai/documentation?tab=searchArticles"
+EVENT_REGISTRY_DOCS_URL = "https://newsapi.ai/documentation?tab=searchArticles"
 
 
 class GetArticlesRequest(TypedDict, total=False):
@@ -113,8 +113,8 @@ DEFAULT_GET_ARTICLES_REQUEST: GetArticlesRequest = {
 }
 
 
-class NewsAPIAIClient:
-    """Client for the NewsAPI.ai getArticles endpoint."""
+class EventRegistryClient:
+    """Client for the Event Registry getArticles endpoint."""
 
     URL = "https://eventregistry.org/api/v1/article/getArticles"
 
@@ -130,9 +130,9 @@ class NewsAPIAIClient:
         return self._client
 
     def _get_api_key(self) -> str:
-        api_key = self._api_key or secret("NEWSAPI_AI_API_KEY", "")
+        api_key = self._api_key or secret("EVENTREGISTRY_API_KEY", "")
         if not api_key:
-            raise RuntimeError("NEWSAPI_AI_API_KEY not set.")
+            raise RuntimeError("EVENTREGISTRY_API_KEY not set.")
         return api_key
 
     def get_articles(self, request: GetArticlesRequest) -> dict:
@@ -159,17 +159,17 @@ class NewsAPIAIClient:
             data = response.json()
         except httpx.HTTPStatusError as exc:
             raise RuntimeError(
-                f"NewsAPI.ai error: {exc.response.status_code} - {exc.response.text}"
+                f"Event Registry error: {exc.response.status_code} - {exc.response.text}"
             ) from exc
         except httpx.RequestError as exc:
-            raise RuntimeError(f"NewsAPI.ai request failed: {exc}") from exc
+            raise RuntimeError(f"Event Registry request failed: {exc}") from exc
         except ValueError as exc:
-            raise RuntimeError("NewsAPI.ai returned a non-JSON response.") from exc
+            raise RuntimeError("Event Registry returned a non-JSON response.") from exc
 
         if not isinstance(data, dict):
-            raise RuntimeError("NewsAPI.ai returned an unexpected response.")
+            raise RuntimeError("Event Registry returned an unexpected response.")
         if data.get("error"):
-            raise RuntimeError(f"NewsAPI.ai error: {data['error']}")
+            raise RuntimeError(f"Event Registry error: {data['error']}")
         return data
 
     def close(self) -> None:
@@ -177,12 +177,12 @@ class NewsAPIAIClient:
             self._client.close()
             self._client = None
 
-    def __enter__(self) -> "NewsAPIAIClient":
+    def __enter__(self) -> "EventRegistryClient":
         return self
 
     def __exit__(self, *args: object) -> None:
         self.close()
 
 
-def _client() -> NewsAPIAIClient:
-    return NewsAPIAIClient()
+def _client() -> EventRegistryClient:
+    return EventRegistryClient()
