@@ -128,6 +128,40 @@ module SlackDm
       assert_equal [ first.id, second.id ], attempted_ids
     end
 
+    test "SyncCredentialJob sleeps in-thread for short Slack Retry-After delays" do
+      app = slack_app
+      first = slack_credential(app: app)
+      second = slack_credential(app: app)
+      attempted_ids = []
+      rate_limited = true
+      sync_factory = lambda do |credential|
+        Object.new.tap do |sync|
+          sync.define_singleton_method(:call) do |**|
+            attempted_ids << credential.id
+            if credential == first && rate_limited
+              rate_limited = false
+              raise SlackApi::RateLimitedError.new(retry_after: 5.minutes.to_i - 1)
+            end
+
+            true
+          end
+        end
+      end
+      sleeps = []
+      job = SlackDm::SyncCredentialJob.new("slack-dms")
+
+      SlackDm::SyncCredential.stub(:new, sync_factory) do
+        assert_no_enqueued_jobs do
+          job.stub(:sleep, ->(seconds) { sleeps << seconds }) { job.perform_now }
+        end
+      end
+
+      assert_equal [ 5.minutes.to_i - 1 ], sleeps
+      assert_equal [ first.id, first.id, second.id ], attempted_ids
+      cursor = SlackDmSyncCursor.find_by!(oauth_app_slug: "slack-dms")
+      assert_nil cursor.not_before
+    end
+
     test "SyncCredentialJob pauses the cursor until Slack Retry-After elapses" do
       app = slack_app
       first = slack_credential(app: app)
@@ -140,7 +174,7 @@ module SlackDm
             attempted_ids << credential.id
             if credential == first && rate_limited
               checkpoint.call("D200")
-              raise SlackApi::RateLimitedError.new(retry_after: 20.minutes.to_i)
+              raise SlackApi::RateLimitedError.new(retry_after: 5.minutes.to_i)
             end
 
             true
@@ -148,7 +182,7 @@ module SlackDm
         end
       end
       now = Time.zone.parse("2026-08-23 12:00:00")
-      retry_at = now + 20.minutes
+      retry_at = now + 5.minutes
 
       SlackDm::SyncCredential.stub(:new, sync_factory) do
         assert_enqueued_with(
@@ -165,7 +199,7 @@ module SlackDm
         assert_equal retry_at, cursor.not_before
         assert_equal [ first.id ], attempted_ids
 
-        travel_to(now + 10.minutes) { SlackDm::SyncCredentialJob.perform_now("slack-dms") }
+        travel_to(now + 4.minutes) { SlackDm::SyncCredentialJob.perform_now("slack-dms") }
         assert_equal [ first.id ], attempted_ids
 
         rate_limited = false
