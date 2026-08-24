@@ -2,7 +2,6 @@ module SlackDm
   class SyncCredentialJob < ApplicationJob
     CONCURRENCY_DURATION = 6.hours
     RUN_TIME_BUDGET = 30.minutes
-    INLINE_RETRY_AFTER_THRESHOLD = 5.minutes.to_i
 
     queue_as :default
 
@@ -84,15 +83,6 @@ module SlackDm
         )
       end
     rescue SlackApi::RateLimitedError => e
-      if e.retry_after < INLINE_RETRY_AFTER_THRESHOLD
-        Rails.logger.info do
-          "Slack DM sync sleeping after rate limit: credential_id=#{credential.id} " \
-            "retry_after=#{e.retry_after}"
-        end
-        sleep(e.retry_after)
-        retry
-      end
-
       retry_at = e.retry_after.seconds.from_now
       cursor.update!(next_credential_id: credential.id, not_before: retry_at)
       persisted_retry_at = cursor.reload.not_before

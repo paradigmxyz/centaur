@@ -538,11 +538,57 @@ module SlackDm
       assert_equal "D100", conversation_cursor
     end
 
-    test "429 responses expose the full Retry-After to the cursor job" do
+    test "short rate limits retry the same paginated Slack call" do
+      api_client = FakeApiClient.new
+      list_cursors = []
+      rate_limited = true
+      slack_http = lambda do |endpoint:, params:, access_token:|
+        assert_equal "xoxp-live", access_token
+        case endpoint
+        when SlackDm::SyncCredential::AUTH_TEST_ENDPOINT
+          { "ok" => true, "team_id" => "T123", "user_id" => "U_ME" }
+        when SlackDm::SyncCredential::CONVERSATIONS_LIST_ENDPOINT
+          cursor = params["cursor"]
+          list_cursors << cursor
+          if cursor.nil?
+            {
+              "ok" => true,
+              "channels" => [],
+              "response_metadata" => { "next_cursor" => "page-2" }
+            }
+          elsif rate_limited
+            rate_limited = false
+            raise SlackApi::RateLimitedError.new(retry_after: 5.minutes.to_i - 1)
+          else
+            {
+              "ok" => true,
+              "channels" => [],
+              "response_metadata" => { "next_cursor" => "" }
+            }
+          end
+        else
+          flunk "unexpected Slack endpoint #{endpoint}"
+        end
+      end
+      client = SlackDm::SyncCredential.new(
+        credential,
+        api_client: api_client,
+        slack_api_http: slack_http
+      )
+      sleeps = []
+
+      client.stub(:sleep, ->(seconds) { sleeps << seconds }) do
+        assert client.call
+      end
+
+      assert_equal [ 5.minutes.to_i - 1 ], sleeps
+      assert_equal [ nil, "page-2", "page-2" ], list_cursors
+    end
+
+    test "long 429 responses expose the full Retry-After to the cursor job" do
       [
-        [ "120", 120 ],
-        [ "600", 600 ],
-        [ "invalid", 1 ]
+        [ "300", 300 ],
+        [ "600", 600 ]
       ].each do |header, expected|
         response = HttpClient::Response.new(
           status: 429,

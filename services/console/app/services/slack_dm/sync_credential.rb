@@ -13,6 +13,7 @@ module SlackDm
     CONVERSATIONS_HISTORY_ENDPOINT = "https://slack.com/api/conversations.history"
     CONVERSATIONS_REPLIES_ENDPOINT = "https://slack.com/api/conversations.replies"
     API_READ_TIMEOUT_SECONDS = 120
+    INLINE_RATE_LIMIT_WAIT_THRESHOLD_SECONDS = 5.minutes.to_i
     SKIPPABLE_INGEST_STATUSES = [ 400, 413, 422 ].freeze
     class << self
       attr_accessor :slack_api_http
@@ -397,27 +398,45 @@ module SlackDm
     end
 
     def slack_api(endpoint, params = {})
-      if @slack_api_http
-        return @slack_api_http.call(
-          endpoint: endpoint,
-          params: params,
-          access_token: @credential.access_token
-        )
+      with_rate_limit_guard(endpoint) do
+        if @slack_api_http
+          @slack_api_http.call(
+            endpoint: endpoint,
+            params: params,
+            access_token: @credential.access_token
+          )
+        else
+          http_client = @http_client || HttpClient.new(
+            open_timeout: slack_timeout,
+            read_timeout: slack_timeout
+          )
+          response = http_client.get(
+            endpoint,
+            params: params,
+            headers: { "Authorization" => "Bearer #{@credential.access_token}" }
+          )
+          SlackApi.parse_response!(response, max_rate_limit_wait: nil)
+        end
       end
-
-      http_client = @http_client || HttpClient.new(open_timeout: slack_timeout, read_timeout: slack_timeout)
-      response = http_client.get(
-        endpoint,
-        params: params,
-        headers: { "Authorization" => "Bearer #{@credential.access_token}" }
-      )
-      SlackApi.parse_response!(response, max_rate_limit_wait: nil)
     rescue Socket::ResolutionError => e
       raise SlackApi::TransientError.new(
         "Slack API hostname resolution failed: #{e.message}",
         retry_after: SlackApi::DEFAULT_TRANSIENT_RETRY_AFTER_SECONDS,
         code: "hostname_resolution_failed"
       )
+    end
+
+    def with_rate_limit_guard(endpoint)
+      yield
+    rescue SlackApi::RateLimitedError => e
+      raise unless e.retry_after < INLINE_RATE_LIMIT_WAIT_THRESHOLD_SECONDS
+
+      Rails.logger.info do
+        "Slack DM sync sleeping after rate limit: credential_id=#{@credential.id} " \
+          "endpoint=#{endpoint} retry_after=#{e.retry_after}"
+      end
+      sleep(e.retry_after)
+      retry
     end
 
     def max_slack_ts(left, right)
