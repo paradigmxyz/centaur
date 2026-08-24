@@ -13,12 +13,13 @@ module SlackDm
       on_conflict: :discard
     )
 
-    def perform(oauth_app_slug = SlackDm::SyncCredential.oauth_app_slug)
+    def perform(oauth_app_slug = SlackDm::SyncCredential.oauth_app_slug, expected_not_before = nil)
       # Credential IDs were the argument before this became a global cursor job.
       # Ignore any of those jobs that were already queued during deployment.
       return unless oauth_app_slug.is_a?(String)
 
       cursor = SlackDmSyncCursor.find_or_create_by!(oauth_app_slug: oauth_app_slug)
+      return if expected_not_before && cursor.not_before != expected_not_before
       return if cursor.not_before&.future?
 
       credentials = eligible_credentials(oauth_app_slug)
@@ -84,9 +85,14 @@ module SlackDm
     rescue SlackApi::RateLimitedError => e
       retry_at = e.retry_after.seconds.from_now
       cursor.update!(next_credential_id: credential.id, not_before: retry_at)
+      persisted_retry_at = cursor.reload.not_before
+      self.class.set(wait_until: persisted_retry_at).perform_later(
+        cursor.oauth_app_slug,
+        persisted_retry_at
+      )
       Rails.logger.info do
         "Slack DM sync paused after rate limit: credential_id=#{credential.id} " \
-          "retry_at=#{retry_at.iso8601}"
+          "retry_at=#{persisted_retry_at.iso8601}"
       end
       false
     rescue SlackApi::Error => e

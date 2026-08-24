@@ -148,21 +148,30 @@ module SlackDm
         end
       end
       now = Time.zone.parse("2026-08-23 12:00:00")
+      retry_at = now + 20.minutes
 
       SlackDm::SyncCredential.stub(:new, sync_factory) do
-        travel_to(now) { SlackDm::SyncCredentialJob.perform_now("slack-dms") }
+        assert_enqueued_with(
+          job: SlackDm::SyncCredentialJob,
+          args: [ "slack-dms", retry_at ],
+          at: retry_at
+        ) do
+          travel_to(now) { SlackDm::SyncCredentialJob.perform_now("slack-dms") }
+        end
 
         cursor = SlackDmSyncCursor.find_by!(oauth_app_slug: "slack-dms")
         assert_equal first.id, cursor.next_credential_id
         assert_equal "D200", cursor.next_conversation_id
-        assert_equal now + 20.minutes, cursor.not_before
+        assert_equal retry_at, cursor.not_before
         assert_equal [ first.id ], attempted_ids
 
         travel_to(now + 10.minutes) { SlackDm::SyncCredentialJob.perform_now("slack-dms") }
         assert_equal [ first.id ], attempted_ids
 
         rate_limited = false
-        travel_to(now + 20.minutes) { SlackDm::SyncCredentialJob.perform_now("slack-dms") }
+        travel_to(retry_at) do
+          perform_enqueued_jobs(only: SlackDm::SyncCredentialJob)
+        end
       end
 
       assert_equal [ first.id, first.id, second.id ], attempted_ids
@@ -170,6 +179,30 @@ module SlackDm
       assert_equal first.id, cursor.next_credential_id
       assert_nil cursor.next_conversation_id
       assert_nil cursor.not_before
+    end
+
+    test "SyncCredentialJob ignores a delayed retry after another run clears the pause" do
+      app = slack_app
+      slack_credential(app: app)
+      attempted_ids = []
+      retry_at = Time.zone.parse("2026-08-23 12:20:00")
+      SlackDmSyncCursor.create!(oauth_app_slug: "slack-dms")
+      sync_factory = lambda do |credential|
+        attempted_ids << credential.id
+        Object.new
+      end
+
+      SlackDm::SyncCredential.stub(:new, sync_factory) do
+        SlackDm::SyncCredentialJob.set(wait_until: retry_at).perform_later(
+          "slack-dms",
+          retry_at
+        )
+        travel_to(retry_at) do
+          perform_enqueued_jobs(only: SlackDm::SyncCredentialJob)
+        end
+      end
+
+      assert_empty attempted_ids
     end
 
     test "SyncCredentialJob stops between credentials after its runtime budget" do
