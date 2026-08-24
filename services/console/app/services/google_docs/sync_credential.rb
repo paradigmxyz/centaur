@@ -24,8 +24,8 @@ module GoogleDocs
 
       def required_scopes_granted?(scopes)
         granted = Array(scopes)
-        granted.include?(DOCS_READONLY_SCOPE) &&
-          (granted.include?(DRIVE_METADATA_SCOPE) || granted.include?(DRIVE_READONLY_SCOPE))
+        granted.include?(DRIVE_READONLY_SCOPE) ||
+          (granted.include?(DRIVE_METADATA_SCOPE) && granted.include?(DOCS_READONLY_SCOPE))
       end
 
       def page_size

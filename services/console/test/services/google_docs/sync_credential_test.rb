@@ -76,17 +76,19 @@ module GoogleDocs
       end
     end
 
-    test "required scopes allow drive readonly or metadata plus docs readonly" do
+    test "required scopes allow drive readonly alone or metadata plus docs readonly" do
       assert GoogleDocs::SyncCredential.required_scopes_granted?([
         GoogleDocs::SyncCredential::DRIVE_METADATA_SCOPE,
         GoogleDocs::SyncCredential::DOCS_READONLY_SCOPE
       ])
       assert GoogleDocs::SyncCredential.required_scopes_granted?([
-        GoogleDocs::SyncCredential::DRIVE_READONLY_SCOPE,
-        GoogleDocs::SyncCredential::DOCS_READONLY_SCOPE
+        GoogleDocs::SyncCredential::DRIVE_READONLY_SCOPE
       ])
       refute GoogleDocs::SyncCredential.required_scopes_granted?([
         GoogleDocs::SyncCredential::DRIVE_METADATA_SCOPE
+      ])
+      refute GoogleDocs::SyncCredential.required_scopes_granted?([
+        GoogleDocs::SyncCredential::DOCS_READONLY_SCOPE
       ])
     end
 
