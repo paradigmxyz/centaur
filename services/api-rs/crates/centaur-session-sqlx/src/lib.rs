@@ -401,6 +401,7 @@ impl PgSessionStore {
             values ($1, $2, $3, $4, $5, $6)
             on conflict (thread_key, idempotency_key)
                 where idempotency_key is not null
+                  and status in ('queued', 'running', 'completed')
             do update set
                 idempotency_key = excluded.idempotency_key,
                 request = case
@@ -2379,6 +2380,91 @@ mod tests {
                 .await
                 .expect("load persisted execution request"),
             first_request
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_execution_does_not_block_rerun_on_same_idempotency_key() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let thread_key = ThreadKey::parse(format!("test:retry-idem-{}", Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+        let key = "review-commit-abc123";
+        let first = store
+            .create_execution_with_request(&thread_key, Some(key), json!({}), json!({}))
+            .await
+            .expect("create execution with request");
+        assert!(first.created);
+        store
+            .fail_execution(
+                &first.execution.execution_id,
+                "sandbox stdout closed before terminal output; stdout reattach attempts exhausted",
+            )
+            .await
+            .expect("fail execution");
+
+        // A failed row must not shadow a fresh run on the same stable key:
+        // a turn killed by a control-plane roll has to be retryable.
+        let retry = store
+            .create_execution_with_request(&thread_key, Some(key), json!({}), json!({}))
+            .await
+            .expect("retry execution with request");
+        assert!(
+            retry.created,
+            "rerun after failure must create a fresh execution"
+        );
+        assert_ne!(
+            retry.execution.execution_id, first.execution.execution_id,
+            "retry must not resurrect the failed row"
+        );
+
+        // In-flight rows still dedupe.
+        let duplicate = store
+            .create_execution_with_request(&thread_key, Some(key), json!({}), json!({}))
+            .await
+            .expect("duplicate queued execution");
+        assert!(!duplicate.created);
+        assert_eq!(
+            duplicate.execution.execution_id,
+            retry.execution.execution_id
+        );
+        store
+            .mark_execution_running(&retry.execution.execution_id)
+            .await
+            .expect("mark retry running");
+        let duplicate_running = store
+            .create_execution_with_request(&thread_key, Some(key), json!({}), json!({}))
+            .await
+            .expect("duplicate running execution");
+        assert!(!duplicate_running.created);
+        assert_eq!(
+            duplicate_running.execution.execution_id,
+            retry.execution.execution_id
+        );
+
+        // Completed rows still dedupe.
+        store
+            .complete_execution(&retry.execution.execution_id)
+            .await
+            .expect("complete retry");
+        let duplicate_completed = store
+            .create_execution_with_request(&thread_key, Some(key), json!({}), json!({}))
+            .await
+            .expect("duplicate completed execution");
+        assert!(!duplicate_completed.created);
+        assert_eq!(
+            duplicate_completed.execution.execution_id,
+            retry.execution.execution_id
         );
     }
 
