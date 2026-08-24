@@ -4104,6 +4104,8 @@ describe('slackbotv2', () => {
         '/api/webhooks/slack',
         signedSlackEvent({
           event_id: 'Ev-slackbotv2-slow-execute',
+          retry_num: '1',
+          retry_reason: 'http_timeout',
           event: {
             type: 'app_mention',
             user: USER_ID,
@@ -4177,6 +4179,8 @@ describe('slackbotv2', () => {
         slack_event_id: 'Ev-slackbotv2-slow-execute',
         slack_event_type: 'app_mention',
         slack_message_ts: mention.ts,
+        slack_retry_num: '1',
+        slack_retry_reason: 'http_timeout',
         slack_thread_ts: parent.ts,
         task_count: expect.any(Number)
       })
@@ -5593,6 +5597,8 @@ async function threadTexts(threadTs: string): Promise<string[]> {
 function signedSlackEvent(input: {
   event_id: string
   event: Record<string, unknown>
+  retry_num?: string
+  retry_reason?: string
 }): RequestInit {
   const timestamp = Math.floor(Date.now() / 1000)
   const body = JSON.stringify({
@@ -5607,13 +5613,16 @@ function signedSlackEvent(input: {
   const signature = createHmac('sha256', SIGNING_SECRET)
     .update(`v0:${timestamp}:${body}`)
     .digest('hex')
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+    'x-slack-request-timestamp': String(timestamp),
+    'x-slack-signature': `v0=${signature}`
+  }
+  if (input.retry_num) headers['x-slack-retry-num'] = input.retry_num
+  if (input.retry_reason) headers['x-slack-retry-reason'] = input.retry_reason
   return {
     method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-slack-request-timestamp': String(timestamp),
-      'x-slack-signature': `v0=${signature}`
-    },
+    headers,
     body
   }
 }
