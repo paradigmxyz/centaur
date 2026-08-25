@@ -27,18 +27,14 @@ class SystemPromptTest(unittest.TestCase):
         self.assertIn("both `/d/<meeting-uuid>` and `/t/<meeting-uuid>-<share-suffix>`", prompt)
         self.assertIn("Do not substitute a similarly titled meeting", prompt)
 
-    def test_mercator_paid_fallback_guidance_is_present(self) -> None:
+    def test_mpp_fallback_discovery_guidance_is_present(self) -> None:
         prompt = SYSTEM_PROMPT.read_text()
 
-        self.assertIn("[Mercator external service fallback]", prompt)
+        self.assertIn("[MPP fallback discovery]", prompt)
         self.assertIn("centaur-tools list", prompt)
-        self.assertIn("use `mercator search`", prompt)
-        self.assertIn("show the exact service, plan, and maximum price", prompt)
-        self.assertIn("configured automatic threshold", prompt)
-        self.assertIn("above it, wait for explicit user approval", prompt)
-        self.assertIn("submit the unchanged handoff", prompt)
-        self.assertIn("returns a receipt by default", prompt)
-        self.assertIn("wallet is managed by Centaur outside the sandbox", prompt)
+        self.assertIn('mpp services search "<sanitized task capability>" --limit 5', prompt)
+        self.assertIn("mpp services show <service-id>", prompt)
+        self.assertIn("Current MPP support discovers candidates only", prompt)
 
     def test_runtime_discovery_and_vlogs_examples_match_available_surfaces(self) -> None:
         prompt = SYSTEM_PROMPT.read_text()

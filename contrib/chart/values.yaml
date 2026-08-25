@@ -436,8 +436,9 @@ apiRs:
     walletSecretKey: MERCATOR_WALLET_JSON
     walletMountPath: /var/run/secrets/centaur/mercator/wallet.json
     jobsUrl: https://mercator.tempoxyz.dev/v1/jobs
-    # Payments at or below this amount can proceed without an explicit user
-    # confirmation. maxSpendPerJob is an unconditional server-side ceiling.
+    # Payments at or below this amount can proceed without a user confirmation.
+    # Above it, callers must acknowledge the confirmation in the request;
+    # maxSpendPerJob remains an unconditional server-side ceiling either way.
     # Both use Mercator's six-decimal billing currency amount format.
     policy:
       autoApproveMax: "0"

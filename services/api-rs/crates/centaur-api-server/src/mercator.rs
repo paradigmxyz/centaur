@@ -7,12 +7,13 @@ use std::{
     time::Duration,
 };
 
-use axum::Json;
+use axum::{Extension, Json};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::{process::Command, time::timeout};
 
-use crate::ApiError;
+use crate::{ApiError, auth::AuthenticatedCaller};
 
 const DEFAULT_JOBS_URL: &str = "https://mercator.tempoxyz.dev/v1/jobs";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 45;
@@ -22,7 +23,11 @@ const AMOUNT_SCALE: u128 = 1_000_000;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SubmitMercatorRequest {
-    /// Set after the user has accepted a quote above the automatic threshold.
+    /// Caller assertion that the user accepted a quote above the automatic threshold.
+    ///
+    /// This is a UX acknowledgement, not an authentication boundary. The
+    /// authenticated principal, hard spend limit, destination, and catalog
+    /// policy are enforced independently by Centaur.
     #[serde(default)]
     approved: bool,
     handoff: MercatorHandoff,
@@ -66,7 +71,7 @@ pub(crate) struct SubmitMercatorResponse {
 #[serde(rename_all = "snake_case")]
 enum ApprovalMode {
     Automatic,
-    Explicit,
+    UserAcknowledged,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -108,6 +113,7 @@ impl MercatorPolicy {
 }
 
 pub(crate) async fn submit_mercator_job(
+    Extension(caller): Extension<AuthenticatedCaller>,
     Json(request): Json<SubmitMercatorRequest>,
 ) -> Result<Json<SubmitMercatorResponse>, ApiError> {
     let policy = MercatorPolicy::from_env()?;
@@ -115,7 +121,16 @@ pub(crate) async fn submit_mercator_job(
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_JOBS_URL.to_owned());
-    let approval = validate_handoff(&request, &policy, &configured_jobs_url)?;
+    let validated = validate_handoff(&request, &policy, &configured_jobs_url)?;
+
+    tracing::info!(
+        caller = %fingerprint(caller.principal_subject().unwrap_or("unknown")),
+        request = %validated.audit.request,
+        max_spend = %request.handoff.max_spend,
+        plan_nodes = validated.audit.plan_nodes,
+        approval = ?validated.approval,
+        "Mercator paid job authorized"
+    );
 
     let wallet_path = required_env("MERCATOR_WALLET_PATH")?;
     let wallet = TemporaryWallet::copy_from(Path::new(&wallet_path))?;
@@ -125,9 +140,15 @@ pub(crate) async fn submit_mercator_job(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "/usr/local/bin/mercator".to_owned());
     let result = execute_handoff(&executable, wallet.path(), &request).await?;
+    tracing::info!(
+        caller = %fingerprint(caller.principal_subject().unwrap_or("unknown")),
+        request = %validated.audit.request,
+        job_id = result_job_id(&result).unwrap_or("unknown"),
+        "Mercator paid job submitted"
+    );
     Ok(Json(SubmitMercatorResponse {
         ok: true,
-        approval,
+        approval: validated.approval,
         result,
     }))
 }
@@ -136,7 +157,7 @@ fn validate_handoff(
     request: &SubmitMercatorRequest,
     policy: &MercatorPolicy,
     configured_jobs_url: &str,
-) -> Result<ApprovalMode, ApiError> {
+) -> Result<ValidatedHandoff, ApiError> {
     let handoff = &request.handoff;
     if handoff.status != "payment_required" || handoff.next_action != "run_rest_request" {
         return Err(ApiError::BadRequest(
@@ -169,10 +190,11 @@ fn validate_handoff(
     let approval = if max_spend <= policy.auto_approve_max {
         ApprovalMode::Automatic
     } else if request.approved {
-        ApprovalMode::Explicit
+        ApprovalMode::UserAcknowledged
     } else {
         return Err(ApiError::BadRequest(
-            "explicit user approval is required above the automatic payment threshold".to_owned(),
+            "user approval acknowledgement is required above the automatic payment threshold"
+                .to_owned(),
         ));
     };
     if max_spend > policy.max_spend_per_job {
@@ -205,7 +227,13 @@ fn validate_handoff(
     for node in nodes {
         validate_node(node, policy)?;
     }
-    Ok(approval)
+    Ok(ValidatedHandoff {
+        approval,
+        audit: MercatorAudit {
+            request: fingerprint(idempotency_key),
+            plan_nodes: nodes.len(),
+        },
+    })
 }
 
 fn validate_node(node: &Value, policy: &MercatorPolicy) -> Result<(), ApiError> {
@@ -267,6 +295,31 @@ fn endpoint_matches(rule: &EndpointRule, endpoint: &EndpointRule) -> bool {
     rule.service_id == endpoint.service_id
         && rule.method.eq_ignore_ascii_case(&endpoint.method)
         && rule.path == endpoint.path
+}
+
+#[derive(Debug)]
+struct MercatorAudit {
+    request: String,
+    plan_nodes: usize,
+}
+
+#[derive(Debug)]
+struct ValidatedHandoff {
+    approval: ApprovalMode,
+    audit: MercatorAudit,
+}
+
+fn fingerprint(value: &str) -> String {
+    let digest = Sha256::digest(value.as_bytes());
+    hex::encode(&digest[..8])
+}
+
+fn result_job_id(result: &Value) -> Option<&str> {
+    result
+        .get("jobId")
+        .or_else(|| result.get("job").and_then(|job| job.get("jobId")))
+        .or_else(|| result.get("job").and_then(|job| job.get("id")))
+        .and_then(Value::as_str)
 }
 
 async fn execute_handoff(
@@ -474,8 +527,9 @@ mod tests {
     fn validates_canonical_approved_handoff() {
         assert_eq!(
             validate_handoff(&request(true), &policy("0", "0.10"), DEFAULT_JOBS_URL)
-                .expect("valid handoff"),
-            ApprovalMode::Explicit
+                .expect("valid handoff")
+                .approval,
+            ApprovalMode::UserAcknowledged
         );
     }
 
@@ -483,7 +537,8 @@ mod tests {
     fn automatically_approves_payment_at_or_below_threshold() {
         assert_eq!(
             validate_handoff(&request(false), &policy("0.001", "0.10"), DEFAULT_JOBS_URL,)
-                .expect("payment should be automatic"),
+                .expect("payment should be automatic")
+                .approval,
             ApprovalMode::Automatic
         );
     }
@@ -492,7 +547,7 @@ mod tests {
     fn rejects_unapproved_payment_above_threshold() {
         let error = validate_handoff(&request(false), &policy("0.0009", "0.10"), DEFAULT_JOBS_URL)
             .expect_err("approval must be required");
-        assert!(error.to_string().contains("explicit user approval"));
+        assert!(error.to_string().contains("approval acknowledgement"));
     }
 
     #[test]
@@ -577,5 +632,16 @@ mod tests {
 
         assert!(!staged_path.exists());
         fs::remove_file(source).expect("remove source wallet");
+    }
+
+    #[test]
+    fn audit_values_are_stable_and_do_not_expose_identifiers() {
+        let request = request(true);
+        let audit = validate_handoff(&request, &policy("0", "0.10"), DEFAULT_JOBS_URL)
+            .expect("valid handoff")
+            .audit;
+        assert_eq!(audit.request, fingerprint("centaur-smoke-1"));
+        assert_eq!(audit.plan_nodes, 1);
+        assert!(!audit.request.contains("centaur-smoke-1"));
     }
 }
