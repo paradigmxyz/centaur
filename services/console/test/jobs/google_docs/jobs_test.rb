@@ -2,6 +2,8 @@ require "test_helper"
 
 module GoogleDocs
   class JobsTest < ActiveJob::TestCase
+    SYNC_ENABLED_ENV = "CENTAUR_CONSOLE_GOOGLE_DOCS_SYNC_ENABLED"
+
     class FakeApiClient
       attr_accessor :checkpoint, :missing
       attr_reader :batches
@@ -31,6 +33,19 @@ module GoogleDocs
 
       def update_checkpoint(payload)
         @checkpoint = (checkpoint || {}).merge(payload.deep_stringify_keys)
+      end
+    end
+
+    setup do
+      @previous_sync_enabled = ENV[SYNC_ENABLED_ENV]
+      ENV[SYNC_ENABLED_ENV] = "true"
+    end
+
+    teardown do
+      if @previous_sync_enabled.nil?
+        ENV.delete(SYNC_ENABLED_ENV)
+      else
+        ENV[SYNC_ENABLED_ENV] = @previous_sync_enabled
       end
     end
 
@@ -322,12 +337,11 @@ module GoogleDocs
     private
 
     def with_sync_enabled(value)
-      env_key = "CENTAUR_CONSOLE_GOOGLE_DOCS_SYNC_ENABLED"
-      previous = ENV[env_key]
-      ENV[env_key] = value
+      previous = ENV[SYNC_ENABLED_ENV]
+      ENV[SYNC_ENABLED_ENV] = value
       yield
     ensure
-      previous.nil? ? ENV.delete(env_key) : ENV[env_key] = previous
+      previous.nil? ? ENV.delete(SYNC_ENABLED_ENV) : ENV[SYNC_ENABLED_ENV] = previous
     end
 
     def with_clients(api_client, google_http)

@@ -133,11 +133,10 @@ Google OAuth consent apps for broker credentials are configured separately in th
 
 ## Google Docs Sync
 
-Google Docs metadata and document-content ETL is enabled by default. Set
-`CENTAUR_CONSOLE_GOOGLE_DOCS_SYNC_ENABLED=false` to stop the recurring poller
-and make queued Google Docs sync jobs exit without doing work. This switch does
-not disable Google OAuth, stop credential refresh, or remove previously indexed
-content.
+Google Docs metadata and document-content ETL is disabled by default. Set
+`CENTAUR_CONSOLE_GOOGLE_DOCS_SYNC_ENABLED=true` to enable the recurring poller
+and queued Google Docs sync jobs. This switch does not affect Google OAuth,
+credential refresh, or previously indexed content.
 
 ## Encryption Keys
 

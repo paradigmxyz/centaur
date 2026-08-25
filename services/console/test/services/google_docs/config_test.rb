@@ -2,7 +2,7 @@ require "test_helper"
 
 module GoogleDocs
   class ConfigTest < ActiveSupport::TestCase
-    test "sync ETL defaults to enabled and honors the kill switch" do
+    test "sync ETL defaults to disabled and honors the feature switch" do
       env_key = "CENTAUR_CONSOLE_GOOGLE_DOCS_SYNC_ENABLED"
       legacy_env_key = "IRON_CONTROL_GOOGLE_DOCS_SYNC_ENABLED"
       previous = {
@@ -12,7 +12,7 @@ module GoogleDocs
       ENV.delete(env_key)
       ENV.delete(legacy_env_key)
 
-      assert GoogleDocs::Config.sync_enabled?
+      refute GoogleDocs::Config.sync_enabled?
 
       ENV[env_key] = "false"
       refute GoogleDocs::Config.sync_enabled?
