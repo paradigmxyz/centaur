@@ -3,46 +3,41 @@ module GoogleDocs
     private
 
     def sync_page(credential, sync, checkpoint)
-      if self.class.job_class_for(checkpoint) == InitialSyncJob
+      page_token = high_water_mark(checkpoint)
+      unless page_token
         schedule(GoogleDocs::InitialSyncJob, credential.id)
         return
       end
-      unless checkpoint&.fetch("changes_page_token", nil).present?
-        restart_initial_sync(credential, checkpoint)
-        return
-      end
 
-      page = sync.list_changes_page(page_token: checkpoint.fetch("changes_page_token"))
-      files, deactivations = partition_changes(sync, page["changes"])
-      next_page_token = page["nextPageToken"].presence
-      new_start_page_token = page["newStartPageToken"].presence
-      if next_page_token.nil? && new_start_page_token.nil?
-        raise GoogleDocs::SyncCredential::GoogleApiError,
-          "Google Drive returned neither a next page token nor a new start page token"
-      end
-
-      catching_up = checkpoint_phase(checkpoint) == "catching_up"
-      finished = next_page_token.nil?
-      run_id = new_run_id
-      ingest_page(
-        credential,
-        sync,
-        run_id: run_id,
-        files: files,
-        deactivations: deactivations,
-        mode: "incremental",
-        source: "drive.changes.list",
-        checkpoint: checkpoint_payload(
+      loop do
+        page = sync.list_changes_page(page_token: page_token)
+        files, deactivations = partition_changes(sync, page["changes"])
+        run_id = ingest_page(
           credential,
-          checkpoint,
-          phase: finished ? "ready" : checkpoint_phase(checkpoint),
-          changes_page_token: next_page_token || new_start_page_token,
-          run_id: run_id,
-          full_sync_finished: finished && catching_up,
-          incremental_sync_finished: finished
+          sync,
+          files: files,
+          deactivations: deactivations,
+          mode: "incremental",
+          source: "drive.changes.list"
         )
-      )
-      schedule(self.class, credential.id) if next_page_token
+        enqueue_content_fetches(credential, files)
+
+        page_token = page["nextPageToken"].presence
+        next if page_token
+
+        new_start_page_token = page["newStartPageToken"].presence
+        unless new_start_page_token
+          raise GoogleDocs::SyncCredential::GoogleApiError,
+            "Google Drive returned no new start page token"
+        end
+        persist_checkpoint(
+          credential,
+          changes_page_token: new_start_page_token,
+          run_id: run_id,
+          incremental_sync_finished: true
+        )
+        break
+      end
     end
 
     def partition_changes(sync, changes)

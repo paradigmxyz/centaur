@@ -61,27 +61,38 @@ module GoogleDocs
       )
     end
 
-    test "poll job enqueues the incremental entry job for a Drive readonly credential" do
+    test "poll job chooses initial or incremental sync from the completed high-water mark" do
       app = create_google_app
       credential = create_credential(app: app)
+      api_client = FakeApiClient.new
 
-      PollSyncJob.perform_now(app.slug)
+      CentaurApiClient.stub(:new, api_client) { PollSyncJob.perform_now(app.slug) }
+      assert_enqueued_with(job: InitialSyncJob, args: [ credential.id ])
 
+      clear_enqueued_jobs
+      api_client.checkpoint = checkpoint_for(credential, changes_page_token: "change-200")
+      CentaurApiClient.stub(:new, api_client) { PollSyncJob.perform_now(app.slug) }
       assert_enqueued_with(job: IncrementalSyncJob, args: [ credential.id ])
     end
 
-    test "initial sync captures a change token and marks observations without resetting visibility" do
+    test "initial sync replaces the complete observation snapshot before publishing its high-water mark" do
       credential = create_credential
       api_client = FakeApiClient.new
-      file = google_doc
+      first_file = google_doc
+      second_file = google_doc("doc-456")
+      file_page_tokens = []
       google_http = lambda do |endpoint:, params:, access_token:|
         assert_equal "token", access_token
         case endpoint
         when SyncCredential::START_PAGE_TOKEN_ENDPOINT
           { "startPageToken" => "change-100" }
         when SyncCredential::FILES_LIST_ENDPOINT
-          assert_nil params["pageToken"]
-          { "files" => [ file ], "nextPageToken" => "files-2" }
+          file_page_tokens << params["pageToken"]
+          if params["pageToken"]
+            { "files" => [ second_file ] }
+          else
+            { "files" => [ first_file ], "nextPageToken" => "files-2" }
+          end
         else
           flunk "unexpected Google endpoint #{endpoint}"
         end
@@ -91,153 +102,111 @@ module GoogleDocs
         InitialSyncJob.perform_now(credential.id)
       end
 
-      initialization = api_client.batches.first
-      assert_equal "change-100", initialization.dig(:checkpoint, :start_page_token)
-      assert_equal "change-100", initialization.dig(:checkpoint, :changes_page_token)
-      crawl_id = initialization.dig(:checkpoint, :metadata, "initial_crawl_id")
-      assert crawl_id.present?
-      metadata_batch = api_client.batches.second
-      assert_equal "completed", metadata_batch.dig(:run, :status)
-      assert metadata_batch[:checkpoint]
-      assert_equal [ "doc-123" ], metadata_batch[:files].pluck(:file_id)
-      assert_equal [ "doc-123" ], metadata_batch[:observations].pluck(:observed_file_id)
-      assert_equal crawl_id, metadata_batch[:observations].first.dig(:raw_payload, "initial_crawl_id")
-      assert_equal "files-2", api_client.checkpoint.dig("metadata", "initial_page_token")
-      assert_equal "listing", api_client.checkpoint.dig("metadata", "phase")
-      assert_empty api_client.batches.last[:observation_sweeps]
-      assert_enqueued_with(job: FetchDocumentJob, args: [ credential.id, file ])
-      assert_enqueued_with(job: InitialSyncJob, args: [ credential.id ])
-    end
+      assert_equal [ nil, "files-2" ], file_page_tokens
+      assert_equal 2, api_client.batches.length
+      snapshot = api_client.batches.first
+      assert_equal "completed", snapshot.dig(:run, :status)
+      assert_equal [ "doc-123", "doc-456" ], snapshot[:files].pluck(:file_id)
+      assert_equal [ "doc-123", "doc-456" ], snapshot[:observations].pluck(:observed_file_id)
+      assert_equal [ credential.oid ], snapshot[:replace_observation_credentials]
+      refute snapshot.key?(:checkpoint)
 
-    test "initial sync hands its baseline token to incremental catch-up after the final page" do
-      credential = create_credential
-      api_client = FakeApiClient.new(
-        checkpoint: checkpoint_for(
-          credential,
-          phase: "listing",
-          changes_page_token: "change-100",
-          initial_page_token: "files-2",
-          initial_crawl_id: "crawl-123"
-        )
-      )
-      google_http = lambda do |endpoint:, params:, **|
-        assert_equal SyncCredential::FILES_LIST_ENDPOINT, endpoint
-        assert_equal "files-2", params["pageToken"]
-        { "files" => [] }
-      end
-
-      with_clients(api_client, google_http) do
-        InitialSyncJob.perform_now(credential.id)
-      end
-
-      assert_equal "catching_up", api_client.checkpoint.dig("metadata", "phase")
-      assert_equal "change-100", api_client.checkpoint["changes_page_token"]
-      assert_equal(
-        [ { broker_credential_id: credential.oid, initial_crawl_id: "crawl-123" } ],
-        api_client.batches.last[:observation_sweeps]
-      )
+      checkpoint = api_client.batches.second.fetch(:checkpoint)
+      assert_equal "change-100", checkpoint[:changes_page_token]
+      assert_equal({}, checkpoint[:metadata])
+      assert checkpoint[:last_full_sync_at].present?
+      assert_enqueued_with(job: FetchDocumentJob, args: [ credential.id, first_file ])
+      assert_enqueued_with(job: FetchDocumentJob, args: [ credential.id, second_file ])
       assert_enqueued_with(job: IncrementalSyncJob, args: [ credential.id ])
     end
 
-    test "a rejected initial page token resets the checkpoint and restarts the initial crawl" do
+    test "an initial job with a completed high-water mark hands off without crawling" do
       credential = create_credential
       api_client = FakeApiClient.new(
-        checkpoint: checkpoint_for(
-          credential,
-          phase: "listing",
-          changes_page_token: "change-100",
-          initial_page_token: "files-expired",
-          initial_crawl_id: "crawl-123"
-        )
+        checkpoint: checkpoint_for(credential, changes_page_token: "change-200")
       )
-      google_http = lambda do |endpoint:, **|
-        assert_equal SyncCredential::FILES_LIST_ENDPOINT, endpoint
-        raise SyncCredential::InvalidPageTokenError, "Page token expired"
+      google_http = ->(**) { flunk "a stale initial job should not call Google" }
+
+      with_clients(api_client, google_http) do
+        InitialSyncJob.perform_now(credential.id)
+      end
+
+      assert_empty api_client.batches
+      assert_enqueued_with(job: IncrementalSyncJob, args: [ credential.id ])
+    end
+
+    test "a rejected initial page token leaves no high-water mark and restarts the crawl" do
+      credential = create_credential
+      api_client = FakeApiClient.new
+      google_http = lambda do |endpoint:, params:, **|
+        case endpoint
+        when SyncCredential::START_PAGE_TOKEN_ENDPOINT
+          { "startPageToken" => "change-100" }
+        when SyncCredential::FILES_LIST_ENDPOINT
+          if params["pageToken"]
+            raise SyncCredential::InvalidPageTokenError, "Page token expired"
+          end
+          { "files" => [ google_doc ], "nextPageToken" => "files-expired" }
+        else
+          flunk "unexpected Google endpoint #{endpoint}"
+        end
       end
 
       with_clients(api_client, google_http) do
         InitialSyncJob.perform_now(credential.id)
       end
 
-      assert_equal "pending", api_client.checkpoint.dig("metadata", "phase")
-      assert_equal "", api_client.checkpoint.dig("metadata", "initial_page_token")
+      assert_equal "", api_client.checkpoint["changes_page_token"]
+      assert_equal 1, api_client.batches.length
       assert_enqueued_with(job: InitialSyncJob, args: [ credential.id ])
     end
 
-    test "incremental sync applies current files and removals before advancing its token" do
+    test "incremental sync drains all pages before advancing its high-water mark" do
       credential = create_credential
       api_client = FakeApiClient.new(
-        checkpoint: checkpoint_for(
-          credential,
-          phase: "catching_up",
-          changes_page_token: "change-100"
-        )
+        checkpoint: checkpoint_for(credential, changes_page_token: "change-100")
       )
       file = google_doc
+      change_page_tokens = []
       google_http = lambda do |endpoint:, params:, **|
         assert_equal SyncCredential::CHANGES_LIST_ENDPOINT, endpoint
-        assert_equal "change-100", params["pageToken"]
-        {
-          "changes" => [
-            { "fileId" => "doc-removed", "removed" => true },
-            { "fileId" => "doc-123", "file" => file }
-          ],
-          "newStartPageToken" => "change-200"
-        }
+        change_page_tokens << params["pageToken"]
+        if params["pageToken"] == "change-100"
+          {
+            "changes" => [ { "fileId" => "doc-123", "file" => file } ],
+            "nextPageToken" => "change-101"
+          }
+        else
+          {
+            "changes" => [ { "fileId" => "doc-removed", "removed" => true } ],
+            "newStartPageToken" => "change-200"
+          }
+        end
       end
 
       with_clients(api_client, google_http) do
         IncrementalSyncJob.perform_now(credential.id)
       end
 
-      metadata_batch = api_client.batches.first
-      assert_equal 1, api_client.batches.length
-      assert_equal "completed", metadata_batch.dig(:run, :status)
-      assert_equal [ "doc-123" ], metadata_batch[:files].pluck(:file_id)
+      assert_equal [ "change-100", "change-101" ], change_page_tokens
+      assert_equal 3, api_client.batches.length
+      assert_equal [ "doc-123" ], api_client.batches.first[:files].pluck(:file_id)
       assert_equal(
         [ { broker_credential_id: credential.oid, observed_file_id: "doc-removed" } ],
-        metadata_batch[:observation_deactivations]
+        api_client.batches.second[:observation_deactivations]
       )
-      assert_equal "ready", api_client.checkpoint.dig("metadata", "phase")
-      assert_equal "change-200", api_client.checkpoint["changes_page_token"]
-      assert api_client.checkpoint["last_full_sync_at"].present?
-      assert api_client.checkpoint["last_incremental_sync_at"].present?
-      assert_no_enqueued_jobs(only: IncrementalSyncJob)
+      refute api_client.batches.first.key?(:checkpoint)
+      refute api_client.batches.second.key?(:checkpoint)
+      checkpoint = api_client.batches.last.fetch(:checkpoint)
+      assert_equal "change-200", checkpoint[:changes_page_token]
+      assert checkpoint[:last_incremental_sync_at].present?
+      assert_enqueued_with(job: FetchDocumentJob, args: [ credential.id, file ])
     end
 
-    test "incremental sync persists each change page before scheduling the next page" do
+    test "a rejected Changes token clears the high-water mark and restarts initial sync" do
       credential = create_credential
       api_client = FakeApiClient.new(
-        checkpoint: checkpoint_for(
-          credential,
-          phase: "ready",
-          changes_page_token: "change-200"
-        )
-      )
-      google_http = lambda do |endpoint:, params:, **|
-        assert_equal SyncCredential::CHANGES_LIST_ENDPOINT, endpoint
-        assert_equal "change-200", params["pageToken"]
-        { "changes" => [], "nextPageToken" => "change-201" }
-      end
-
-      with_clients(api_client, google_http) do
-        IncrementalSyncJob.perform_now(credential.id)
-      end
-
-      assert_equal "ready", api_client.checkpoint.dig("metadata", "phase")
-      assert_equal "change-201", api_client.checkpoint["changes_page_token"]
-      assert_nil api_client.checkpoint["last_incremental_sync_at"]
-      assert_enqueued_with(job: IncrementalSyncJob, args: [ credential.id ])
-    end
-
-    test "a rejected changes token resets the checkpoint and restarts the initial crawl" do
-      credential = create_credential
-      api_client = FakeApiClient.new(
-        checkpoint: checkpoint_for(
-          credential,
-          phase: "ready",
-          changes_page_token: "change-expired"
-        )
+        checkpoint: checkpoint_for(credential, changes_page_token: "change-expired")
       )
       google_http = lambda do |endpoint:, **|
         assert_equal SyncCredential::CHANGES_LIST_ENDPOINT, endpoint
@@ -248,31 +217,11 @@ module GoogleDocs
         IncrementalSyncJob.perform_now(credential.id)
       end
 
-      assert_equal "pending", api_client.checkpoint.dig("metadata", "phase")
+      assert_equal "", api_client.checkpoint["changes_page_token"]
       assert_enqueued_with(job: InitialSyncJob, args: [ credential.id ])
     end
 
-    test "a missing changes token resets the checkpoint instead of bouncing between crawlers" do
-      credential = create_credential
-      api_client = FakeApiClient.new(
-        checkpoint: checkpoint_for(
-          credential,
-          phase: "ready",
-          changes_page_token: ""
-        )
-      )
-      google_http = ->(**) { flunk "a missing token should not call Google" }
-
-      with_clients(api_client, google_http) do
-        IncrementalSyncJob.perform_now(credential.id)
-      end
-
-      assert_equal "pending", api_client.checkpoint.dig("metadata", "phase")
-      assert_enqueued_with(job: InitialSyncJob, args: [ credential.id ])
-      assert_no_enqueued_jobs(only: IncrementalSyncJob)
-    end
-
-    test "crawler entry jobs hand off without moving a checkpoint backward" do
+    test "incremental sync without a high-water mark hands off to initial sync" do
       credential = create_credential
       api_client = FakeApiClient.new
       google_http = ->(**) { flunk "a routing job should not call Google" }
@@ -283,23 +232,6 @@ module GoogleDocs
 
       assert_empty api_client.batches
       assert_enqueued_with(job: InitialSyncJob, args: [ credential.id ])
-
-      clear_enqueued_jobs
-      credential = create_credential
-      api_client = FakeApiClient.new(
-        checkpoint: checkpoint_for(
-          credential,
-          phase: "ready",
-          changes_page_token: "change-200"
-        )
-      )
-      with_clients(api_client, google_http) do
-        InitialSyncJob.perform_now(credential.id)
-      end
-
-      assert_empty api_client.batches
-      assert_equal "change-200", api_client.checkpoint["changes_page_token"]
-      assert_enqueued_with(job: IncrementalSyncJob, args: [ credential.id ])
     end
 
     test "document fetch skips a canonical version that is already present" do
@@ -360,31 +292,20 @@ module GoogleDocs
       SyncCredential.google_api_http = previous_http
     end
 
-    def checkpoint_for(
-      credential,
-      phase:,
-      changes_page_token:,
-      initial_page_token: nil,
-      initial_crawl_id: nil
-    )
+    def checkpoint_for(credential, changes_page_token:)
       {
         "broker_credential_id" => credential.oid,
-        "start_page_token" => "change-100",
         "changes_page_token" => changes_page_token,
-        "metadata" => {
-          "phase" => phase,
-          "initial_page_token" => initial_page_token.to_s,
-          "initial_crawl_id" => initial_crawl_id
-        }
+        "metadata" => {}
       }
     end
 
-    def google_doc
+    def google_doc(id = "doc-123")
       {
-        "id" => "doc-123",
+        "id" => id,
         "name" => "Launch Plan",
         "mimeType" => SyncCredential::GOOGLE_DOC_MIME_TYPE,
-        "webViewLink" => "https://docs.google.com/document/d/doc-123/edit",
+        "webViewLink" => "https://docs.google.com/document/d/#{id}/edit",
         "owners" => [ { "permissionId" => "owner-1", "displayName" => "Alice" } ],
         "capabilities" => { "canEdit" => true },
         "trashed" => false,

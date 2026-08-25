@@ -1580,7 +1580,7 @@ struct GoogleDocsSyncBatchRequest {
     #[serde(default)]
     observation_deactivations: Vec<GoogleDocsObservationDeactivationPayload>,
     #[serde(default)]
-    observation_sweeps: Vec<GoogleDocsObservationSweepPayload>,
+    replace_observation_credentials: Vec<String>,
     #[serde(default)]
     contents: Vec<GoogleDocsSyncContentPayload>,
     #[serde(default)]
@@ -1703,12 +1703,6 @@ struct GoogleDocsSyncObservationPayload {
 struct GoogleDocsObservationDeactivationPayload {
     broker_credential_id: String,
     observed_file_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct GoogleDocsObservationSweepPayload {
-    broker_credential_id: String,
-    initial_crawl_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2506,6 +2500,17 @@ async fn ingest_google_docs_sync_batch(
         .await?;
     }
 
+    for broker_credential_id in &request.replace_observation_credentials {
+        sqlx::query(
+            "UPDATE google_docs_sync_file_observations \
+             SET active = FALSE, updated_at = NOW() \
+             WHERE broker_credential_id = $1 AND active = TRUE",
+        )
+        .bind(broker_credential_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+
     for observation in &request.observations {
         sqlx::query(
             "INSERT INTO google_docs_sync_file_observations (\
@@ -2558,19 +2563,6 @@ async fn ingest_google_docs_sync_batch(
         )
         .bind(&deactivation.broker_credential_id)
         .bind(&deactivation.observed_file_id)
-        .execute(&mut *tx)
-        .await?;
-    }
-
-    for sweep in &request.observation_sweeps {
-        sqlx::query(
-            "UPDATE google_docs_sync_file_observations \
-             SET active = FALSE, updated_at = NOW() \
-             WHERE broker_credential_id = $1 AND active = TRUE \
-             AND COALESCE(raw_payload->>'initial_crawl_id', '') <> $2",
-        )
-        .bind(&sweep.broker_credential_id)
-        .bind(&sweep.initial_crawl_id)
         .execute(&mut *tx)
         .await?;
     }
@@ -2694,7 +2686,7 @@ async fn ingest_google_docs_sync_batch(
              provider_subject = EXCLUDED.provider_subject, \
              provider_email = EXCLUDED.provider_email, \
              start_page_token = COALESCE(NULLIF(EXCLUDED.start_page_token, ''), google_docs_sync_checkpoints.start_page_token), \
-             changes_page_token = COALESCE(NULLIF(EXCLUDED.changes_page_token, ''), google_docs_sync_checkpoints.changes_page_token), \
+             changes_page_token = EXCLUDED.changes_page_token, \
              last_full_sync_at = COALESCE(EXCLUDED.last_full_sync_at, google_docs_sync_checkpoints.last_full_sync_at), \
              last_incremental_sync_at = COALESCE(EXCLUDED.last_incremental_sync_at, google_docs_sync_checkpoints.last_incremental_sync_at), \
              last_run_id = EXCLUDED.last_run_id, \
@@ -2729,7 +2721,7 @@ async fn ingest_google_docs_sync_batch(
         "counts": {
             "files": request.files.len(),
             "observations": request.observations.len(),
-            "observation_sweeps": request.observation_sweeps.len(),
+            "observation_replacements": request.replace_observation_credentials.len(),
             "contents": request.contents.len(),
             "context_documents": request.context_documents.len(),
             "checkpoint": request.checkpoint.is_some(),
@@ -3472,15 +3464,8 @@ fn validate_google_docs_sync_batch(request: &GoogleDocsSyncBatchRequest) -> Resu
             &deactivation.observed_file_id,
         )?;
     }
-    for sweep in &request.observation_sweeps {
-        require_non_empty(
-            "observation_sweep.broker_credential_id",
-            &sweep.broker_credential_id,
-        )?;
-        require_non_empty(
-            "observation_sweep.initial_crawl_id",
-            &sweep.initial_crawl_id,
-        )?;
+    for broker_credential_id in &request.replace_observation_credentials {
+        require_non_empty("replace_observation_credential", broker_credential_id)?;
     }
     for content in &request.contents {
         require_non_empty("content.file_id", &content.file_id)?;

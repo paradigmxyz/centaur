@@ -130,9 +130,7 @@ module GoogleDocs
       }
     end
 
-    def observation_payload(file, run_id: nil, source:, initial_crawl_id: nil)
-      raw_payload = { "source" => source }
-      raw_payload["initial_crawl_id"] = initial_crawl_id if initial_crawl_id
+    def observation_payload(file, run_id: nil, source:)
       {
         broker_credential_id: credential.oid,
         observed_file_id: file.fetch("id"),
@@ -145,7 +143,7 @@ module GoogleDocs
         role_hint: role_hint(file),
         permission_ids: [],
         active: true,
-        raw_payload: raw_payload,
+        raw_payload: { "source" => source },
         source_run_id: run_id
       }
     end
