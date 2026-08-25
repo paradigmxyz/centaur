@@ -1,11 +1,9 @@
 module GoogleDocs
   class IncrementalSyncJob < SyncJob
-    def perform(credential_id)
-      credential = eligible_credential(credential_id)
-      return unless credential
+    private
 
-      checkpoint = load_checkpoint(credential)
-      if %w[pending listing].include?(checkpoint_phase(checkpoint))
+    def sync_page(credential, sync, checkpoint)
+      if self.class.job_class_for(checkpoint) == InitialSyncJob
         schedule(GoogleDocs::InitialSyncJob, credential.id)
         return
       end
@@ -14,9 +12,8 @@ module GoogleDocs
         return
       end
 
-      sync = sync_client(credential)
       page = sync.list_changes_page(page_token: checkpoint.fetch("changes_page_token"))
-      files, deactivations = normalize_changes(sync, page["changes"])
+      files, deactivations = partition_changes(sync, page["changes"])
       run_id = ingest_metadata_page(
         credential,
         sync,
@@ -50,28 +47,18 @@ module GoogleDocs
         )
       )
       schedule(self.class, credential.id) if next_page_token
-    rescue GoogleDocs::SyncCredential::InvalidPageTokenError
-      restart_initial_sync(credential, checkpoint)
     end
 
-    private
-
-    def normalize_changes(sync, changes)
-      latest_changes = Array(changes).each_with_object({}) do |change, latest|
-        file_id = change["fileId"].presence || change.dig("file", "id").presence
-        latest[file_id] = change if file_id
+    def partition_changes(sync, changes)
+      file_changes, deactivation_changes = Array(changes).partition do |change|
+        change["removed"] != true && sync.eligible_file?(change["file"])
       end
-      files = []
-      deactivations = []
-      latest_changes.each do |file_id, change|
-        file = change["file"]
-        if change["removed"] == true || !sync.eligible_file?(file)
-          deactivations << sync.observation_deactivation(file_id)
-        else
-          files << file
+      [
+        file_changes.map { |change| change.fetch("file") },
+        deactivation_changes.map do |change|
+          sync.observation_deactivation(change.fetch("fileId"))
         end
-      end
-      [ files, deactivations ]
+      ]
     end
   end
 end

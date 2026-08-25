@@ -37,6 +37,13 @@ module GoogleDocs
           (granted.include?(DRIVE_METADATA_SCOPE) && granted.include?(DOCS_READONLY_SCOPE))
       end
 
+      def syncable?(credential, oauth_app_slug: nil)
+        credential.present? && !credential.dead? && credential.access_token.present? &&
+          credential.oauth_app&.provider == Oauth::Providers::Google::KEY &&
+          credential.oauth_app.enabled? && required_scopes_granted?(credential.scopes) &&
+          (oauth_app_slug.nil? || credential.oauth_app.slug == oauth_app_slug)
+      end
+
       def page_size
         positive_int(ConsoleEnv["GOOGLE_DOCS_SYNC_PAGE_SIZE"], 100)
       end

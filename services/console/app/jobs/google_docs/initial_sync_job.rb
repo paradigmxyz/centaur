@@ -1,12 +1,9 @@
 module GoogleDocs
   class InitialSyncJob < SyncJob
-    def perform(credential_id)
-      credential = eligible_credential(credential_id)
-      return unless credential
+    private
 
-      sync = sync_client(credential)
-      checkpoint = load_checkpoint(credential)
-      if %w[catching_up ready].include?(checkpoint_phase(checkpoint))
+    def sync_page(credential, sync, checkpoint)
+      if self.class.job_class_for(checkpoint) == IncrementalSyncJob
         if checkpoint&.fetch("changes_page_token", nil).present?
           schedule(GoogleDocs::IncrementalSyncJob, credential.id)
         else
@@ -50,11 +47,7 @@ module GoogleDocs
       )
 
       schedule(next_page_token ? self.class : GoogleDocs::IncrementalSyncJob, credential.id)
-    rescue GoogleDocs::SyncCredential::InvalidPageTokenError
-      restart_initial_sync(credential, checkpoint)
     end
-
-    private
 
     def initialize_crawl(credential, sync, checkpoint)
       start_page_token = sync.start_page_token

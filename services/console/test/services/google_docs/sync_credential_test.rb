@@ -74,6 +74,17 @@ module GoogleDocs
       ])
     end
 
+    test "syncable credentials centralize app, token, and scope eligibility" do
+      current_credential = credential
+      app = current_credential.oauth_app
+
+      assert GoogleDocs::SyncCredential.syncable?(current_credential, oauth_app_slug: app.slug)
+      refute GoogleDocs::SyncCredential.syncable?(current_credential, oauth_app_slug: "another-app")
+
+      app.update!(enabled: false)
+      refute GoogleDocs::SyncCredential.syncable?(current_credential.reload)
+    end
+
     test "uses bounded Drive file and change pages" do
       calls = []
       google_http = lambda do |endpoint:, params:, access_token:|

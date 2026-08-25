@@ -1,9 +1,8 @@
 module GoogleDocs
-  class SyncJob < ApplicationJob
+  class SyncJob < BaseJob
     CONCURRENCY_DURATION = 1.hour
     HANDOFF_DELAY = 2.seconds
-
-    queue_as :default
+    INCREMENTAL_PHASES = %w[catching_up ready].freeze
 
     limits_concurrency(
       to: 1,
@@ -13,30 +12,29 @@ module GoogleDocs
       on_conflict: :discard
     )
 
-    retry_on GoogleDocs::SyncCredential::GoogleApiError,
-      CentaurApiClient::Error,
-      wait: :polynomially_longer,
-      attempts: 5
+    def self.checkpoint_phase(checkpoint)
+      checkpoint&.dig("metadata", "phase").presence || "pending"
+    end
+
+    def self.job_class_for(checkpoint)
+      INCREMENTAL_PHASES.include?(checkpoint_phase(checkpoint)) ? IncrementalSyncJob : InitialSyncJob
+    end
+
+    def perform(credential_id)
+      credential = eligible_credential(credential_id)
+      return unless credential
+
+      sync = sync_client(credential)
+      checkpoint = load_checkpoint(credential)
+      sync_page(credential, sync, checkpoint)
+    rescue GoogleDocs::SyncCredential::InvalidPageTokenError
+      restart_initial_sync(credential, checkpoint)
+    end
 
     private
 
-    def eligible_credential(credential_id)
-      credential = BrokerCredential.includes(:oauth_app).find_by(id: credential_id)
-      return unless credential
-      return if credential.dead?
-      return if credential.access_token.blank?
-      return unless credential.oauth_app&.provider == Oauth::Providers::Google::KEY
-      return unless GoogleDocs::SyncCredential.required_scopes_granted?(credential.scopes)
-
-      credential
-    end
-
-    def api_client
-      @api_client ||= CentaurApiClient.new
-    end
-
-    def sync_client(credential)
-      GoogleDocs::SyncCredential.new(credential)
+    def sync_page(*)
+      raise NotImplementedError
     end
 
     def load_checkpoint(credential)
@@ -46,7 +44,7 @@ module GoogleDocs
     end
 
     def checkpoint_phase(checkpoint)
-      checkpoint&.dig("metadata", "phase").presence || "pending"
+      self.class.checkpoint_phase(checkpoint)
     end
 
     def initial_page_token(checkpoint)
