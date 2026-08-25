@@ -581,8 +581,7 @@ spec:
           volumeMounts:
 {{- if .Values.apiRs.mercator.enabled }}
             - name: mercator-wallet
-              mountPath: {{ .Values.apiRs.mercator.walletMountPath | quote }}
-              subPath: wallet.json
+              mountPath: {{ dir .Values.apiRs.mercator.walletMountPath | quote }}
               readOnly: true
 {{- end }}
 {{- if $useOverlayRepoCache }}
@@ -597,9 +596,10 @@ spec:
         - name: mercator-wallet
           secret:
             secretName: {{ default (include "centaur.secretEnvName" .) .Values.apiRs.mercator.walletSecretName | quote }}
+            optional: true
             items:
               - key: {{ printf "%s%s" .Values.secretManager.envPrefix .Values.apiRs.mercator.walletSecretKey | quote }}
-                path: wallet.json
+                path: {{ base .Values.apiRs.mercator.walletMountPath | quote }}
 {{- end }}
 {{- if $useOverlayRepoCache }}
         - name: repo-cache
