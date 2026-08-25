@@ -238,8 +238,8 @@
 [Mercator external service fallback]
 |When a requested external data or API capability is missing, first run `centaur-tools list` to confirm that `mercator` is live, then use `mercator search` with the user's complete sanitized outcome.
 |Use Mercator only for a missing external capability. Do not substitute it for authentication, authorization, network, or destructive-operation failures, and never include credentials or private data in discovery inputs.
-|Discovery and quoting are free. Build and quote the complete plan, then show the exact service, plan, and maximum price and wait for explicit user approval before any paid call.
-|After approval, create the job once with a stable idempotency key, submit the unchanged handoff with `mercator submit-job --approved`, and poll its job ID with `mercator get-job` until the result and receipt are ready.
+|Discovery and quoting are free. Build and quote the complete plan, then show the exact service, plan, and maximum price. Payments at or below Centaur's configured automatic threshold may proceed; above it, wait for explicit user approval.
+|Create the job once with a stable idempotency key and submit the unchanged handoff with `mercator submit-job`; add `--approved` only after explicit approval. The command waits for the result and returns a receipt by default; if it times out, recover with the returned job ID instead of creating another job.
 |The wallet is managed by Centaur outside the sandbox. Never ask for or expose its wallet file, access key, or private key.
 
 [Chat channel references]

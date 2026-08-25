@@ -2,6 +2,19 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "definitions": {
+    "mercatorEndpoints": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["serviceId", "method", "path"],
+        "properties": {
+          "serviceId": { "type": "string", "minLength": 1 },
+          "method": { "type": "string", "minLength": 1 },
+          "path": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
     "consoleConfig": {
       "type": "object",
       "properties": {
@@ -342,7 +355,18 @@
             "walletSecretName": { "type": "string" },
             "walletSecretKey": { "type": "string", "minLength": 1 },
             "walletMountPath": { "type": "string", "minLength": 1 },
-            "jobsUrl": { "type": "string", "format": "uri" }
+            "jobsUrl": { "type": "string", "format": "uri" },
+            "policy": {
+              "type": "object",
+              "properties": {
+                "autoApproveMax": { "type": "string", "pattern": "^[0-9]+(?:\\.[0-9]{1,6})?$" },
+                "maxSpendPerJob": { "type": "string", "pattern": "^[0-9]+(?:\\.[0-9]{1,6})?$" },
+                "allowedServices": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+                "deniedServices": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+                "allowedEndpoints": { "$ref": "#/definitions/mercatorEndpoints" },
+                "deniedEndpoints": { "$ref": "#/definitions/mercatorEndpoints" }
+              }
+            }
           }
         },
         "sandboxRunningLimit": { "type": "integer", "minimum": 0 },

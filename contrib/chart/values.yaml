@@ -436,6 +436,19 @@ apiRs:
     walletSecretKey: MERCATOR_WALLET_JSON
     walletMountPath: /var/run/secrets/centaur/mercator/wallet.json
     jobsUrl: https://mercator.tempoxyz.dev/v1/jobs
+    # Payments at or below this amount can proceed without an explicit user
+    # confirmation. maxSpendPerJob is an unconditional server-side ceiling.
+    # Both use Mercator's six-decimal billing currency amount format.
+    policy:
+      autoApproveMax: "0"
+      maxSpendPerJob: "0"
+      # Empty allowlists permit every catalog entry. Denylists always win.
+      allowedServices: []
+      deniedServices: []
+      # Endpoint entries are exact {serviceId, method, path} objects. When an
+      # endpoint allowlist is set, every node must match both active allowlists.
+      allowedEndpoints: []
+      deniedEndpoints: []
   # Public/local MCP endpoint advertised through OAuth protected-resource
   # metadata. Empty falls back to slackbotv2.mcpPublicUrl.
   mcpPublicUrl: ""

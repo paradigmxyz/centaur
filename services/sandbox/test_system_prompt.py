@@ -34,8 +34,10 @@ class SystemPromptTest(unittest.TestCase):
         self.assertIn("centaur-tools list", prompt)
         self.assertIn("use `mercator search`", prompt)
         self.assertIn("show the exact service, plan, and maximum price", prompt)
-        self.assertIn("wait for explicit user approval", prompt)
+        self.assertIn("configured automatic threshold", prompt)
+        self.assertIn("above it, wait for explicit user approval", prompt)
         self.assertIn("submit the unchanged handoff", prompt)
+        self.assertIn("returns a receipt by default", prompt)
         self.assertIn("wallet is managed by Centaur outside the sandbox", prompt)
 
     def test_runtime_discovery_and_vlogs_examples_match_available_surfaces(self) -> None:

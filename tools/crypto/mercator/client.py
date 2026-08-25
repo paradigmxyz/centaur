@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Any
 
 import httpx
@@ -100,11 +101,18 @@ class MercatorClient:
         )
 
     def submit_job(
-        self, handoff: dict[str, Any], approved: bool = False
+        self,
+        handoff: dict[str, Any],
+        approved: bool = False,
+        wait: bool = True,
+        poll_interval: float = 2.0,
+        wait_timeout: float = 90.0,
     ) -> dict[str, Any]:
-        """Pay an exact Mercator handoff. Call only after showing the quote and receiving approval."""
-        if not approved:
-            raise ValueError("explicit user approval is required before payment")
+        """Submit through Centaur policy and, by default, return the terminal job."""
+        if poll_interval < 0:
+            raise ValueError("poll_interval must be non-negative")
+        if wait_timeout < 0:
+            raise ValueError("wait_timeout must be non-negative")
         response = self.http.post(
             f"{self.centaur_api_url}{SUBMIT_PATH}",
             headers=self._centaur_headers(),
@@ -114,6 +122,36 @@ class MercatorClient:
         payload = response.json()
         if not isinstance(payload, dict):
             raise RuntimeError("Centaur Mercator payer returned invalid JSON")
+        if not wait:
+            return payload
+
+        job = self._submission_job(payload)
+        job_id = job.get("jobId")
+        if not isinstance(job_id, str) or not job_id:
+            raise RuntimeError("Centaur Mercator payer response is missing a job ID")
+        if job.get("ready") is not True:
+            deadline = time.monotonic() + wait_timeout
+            while time.monotonic() <= deadline:
+                polled = self.get_job(job_id).get("job")
+                if not isinstance(polled, dict):
+                    raise RuntimeError("Mercator get_job response is missing a job")
+                job = polled
+                if job.get("ready") is True:
+                    break
+                if poll_interval:
+                    time.sleep(poll_interval)
+            else:
+                payload["job"] = job
+                payload["polling"] = {
+                    "status": "timed_out",
+                    "nextAction": f"Retry get_job with job_id {job_id}",
+                }
+                return payload
+
+        payload["job"] = job
+        usage = job.get("usage")
+        if isinstance(usage, dict):
+            payload["receipt"] = {"jobId": job_id, "usage": usage}
         return payload
 
     def get_job(self, job_id: str) -> dict[str, Any]:
@@ -182,6 +220,20 @@ class MercatorClient:
         if bearer:
             headers["Authorization"] = f"Bearer {bearer}"
         return headers
+
+    @staticmethod
+    def _submission_job(payload: dict[str, Any]) -> dict[str, Any]:
+        result = payload.get("result")
+        if isinstance(result, dict):
+            if isinstance(result.get("jobId"), str):
+                return result
+            job = result.get("job")
+            if isinstance(job, dict):
+                if isinstance(job.get("jobId"), str):
+                    return job
+                if isinstance(job.get("id"), str):
+                    return {**job, "jobId": job["id"]}
+        raise RuntimeError("Centaur Mercator payer response is missing a job ID")
 
     @staticmethod
     def _decode_mcp_envelope(body: str) -> dict[str, Any]:

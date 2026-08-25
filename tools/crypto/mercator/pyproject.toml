@@ -1,6 +1,6 @@
 [project]
 name = "mercator"
-description = "Discover, quote, and run paid Mercator services with explicit approval"
+description = "Discover, quote, and run paid Mercator services through Centaur policy"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [

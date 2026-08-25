@@ -69,12 +69,26 @@ def create_job(
 @app.command("submit-job")
 def submit_job(
     handoff: str = typer.Option(..., help="Handoff JSON returned by create-job"),
-    approved: bool = typer.Option(False, help="User accepted the displayed quote"),
+    approved: bool = typer.Option(
+        False,
+        help="User accepted a quote above Centaur's automatic threshold",
+    ),
+    wait: bool = typer.Option(True, "--wait/--no-wait", help="Wait for the terminal job"),
+    poll_interval: float = typer.Option(2.0, min=0, help="Polling interval in seconds"),
+    wait_timeout: float = typer.Option(90.0, min=0, help="Maximum polling time"),
 ) -> None:
-    """Submit an approved handoff through Centaur's trusted payer."""
+    """Submit a handoff through Centaur's trusted payer and return its result."""
     from .client import _client
 
-    _print(_client().submit_job(_json_object(handoff, "handoff"), approved=approved))
+    _print(
+        _client().submit_job(
+            _json_object(handoff, "handoff"),
+            approved=approved,
+            wait=wait,
+            poll_interval=poll_interval,
+            wait_timeout=wait_timeout,
+        )
+    )
 
 
 @app.command("get-job")

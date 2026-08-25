@@ -263,6 +263,18 @@ spec:
               value: {{ .Values.apiRs.mercator.walletMountPath | quote }}
             - name: CENTAUR_MERCATOR_JOBS_URL
               value: {{ .Values.apiRs.mercator.jobsUrl | quote }}
+            - name: CENTAUR_MERCATOR_AUTO_APPROVE_MAX
+              value: {{ .Values.apiRs.mercator.policy.autoApproveMax | quote }}
+            - name: CENTAUR_MERCATOR_MAX_SPEND_PER_JOB
+              value: {{ .Values.apiRs.mercator.policy.maxSpendPerJob | quote }}
+            - name: CENTAUR_MERCATOR_ALLOWED_SERVICES
+              value: {{ .Values.apiRs.mercator.policy.allowedServices | toJson | quote }}
+            - name: CENTAUR_MERCATOR_DENIED_SERVICES
+              value: {{ .Values.apiRs.mercator.policy.deniedServices | toJson | quote }}
+            - name: CENTAUR_MERCATOR_ALLOWED_ENDPOINTS
+              value: {{ .Values.apiRs.mercator.policy.allowedEndpoints | toJson | quote }}
+            - name: CENTAUR_MERCATOR_DENIED_ENDPOINTS
+              value: {{ .Values.apiRs.mercator.policy.deniedEndpoints | toJson | quote }}
 {{- end }}
             - name: TOOL_DIRS
               value: {{ join ":" $toolDirs | quote }}
