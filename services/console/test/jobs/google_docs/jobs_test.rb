@@ -61,26 +61,11 @@ module GoogleDocs
       )
     end
 
-    test "poll job routes a Drive readonly credential to its current phase" do
+    test "poll job enqueues the incremental entry job for a Drive readonly credential" do
       app = create_google_app
       credential = create_credential(app: app)
-      api_client = FakeApiClient.new
 
-      CentaurApiClient.stub(:new, api_client) do
-        PollSyncJob.perform_now(app.slug)
-      end
-
-      assert_enqueued_with(job: InitialSyncJob, args: [ credential.id ])
-
-      clear_enqueued_jobs
-      api_client.checkpoint = {
-        "broker_credential_id" => credential.oid,
-        "changes_page_token" => "change-2",
-        "metadata" => { "phase" => "ready" }
-      }
-      CentaurApiClient.stub(:new, api_client) do
-        PollSyncJob.perform_now(app.slug)
-      end
+      PollSyncJob.perform_now(app.slug)
 
       assert_enqueued_with(job: IncrementalSyncJob, args: [ credential.id ])
     end
@@ -107,12 +92,13 @@ module GoogleDocs
       end
 
       initialization = api_client.batches.first
-      refute initialization.key?(:reset_observation_credentials)
       assert_equal "change-100", initialization.dig(:checkpoint, :start_page_token)
       assert_equal "change-100", initialization.dig(:checkpoint, :changes_page_token)
       crawl_id = initialization.dig(:checkpoint, :metadata, "initial_crawl_id")
       assert crawl_id.present?
       metadata_batch = api_client.batches.second
+      assert_equal "completed", metadata_batch.dig(:run, :status)
+      assert metadata_batch[:checkpoint]
       assert_equal [ "doc-123" ], metadata_batch[:files].pluck(:file_id)
       assert_equal [ "doc-123" ], metadata_batch[:observations].pluck(:observed_file_id)
       assert_equal crawl_id, metadata_batch[:observations].first.dig(:raw_payload, "initial_crawl_id")
@@ -185,8 +171,7 @@ module GoogleDocs
           credential,
           phase: "catching_up",
           changes_page_token: "change-100"
-        ),
-        missing: []
+        )
       )
       file = google_doc
       google_http = lambda do |endpoint:, params:, **|
@@ -206,6 +191,8 @@ module GoogleDocs
       end
 
       metadata_batch = api_client.batches.first
+      assert_equal 1, api_client.batches.length
+      assert_equal "completed", metadata_batch.dig(:run, :status)
       assert_equal [ "doc-123" ], metadata_batch[:files].pluck(:file_id)
       assert_equal(
         [ { broker_credential_id: credential.oid, observed_file_id: "doc-removed" } ],
@@ -225,8 +212,7 @@ module GoogleDocs
           credential,
           phase: "ready",
           changes_page_token: "change-200"
-        ),
-        missing: []
+        )
       )
       google_http = lambda do |endpoint:, params:, **|
         assert_equal SyncCredential::CHANGES_LIST_ENDPOINT, endpoint
@@ -286,7 +272,19 @@ module GoogleDocs
       assert_no_enqueued_jobs(only: IncrementalSyncJob)
     end
 
-    test "stale crawler jobs hand off without moving a checkpoint backward" do
+    test "crawler entry jobs hand off without moving a checkpoint backward" do
+      credential = create_credential
+      api_client = FakeApiClient.new
+      google_http = ->(**) { flunk "a routing job should not call Google" }
+
+      with_clients(api_client, google_http) do
+        IncrementalSyncJob.perform_now(credential.id)
+      end
+
+      assert_empty api_client.batches
+      assert_enqueued_with(job: InitialSyncJob, args: [ credential.id ])
+
+      clear_enqueued_jobs
       credential = create_credential
       api_client = FakeApiClient.new(
         checkpoint: checkpoint_for(
@@ -295,8 +293,6 @@ module GoogleDocs
           changes_page_token: "change-200"
         )
       )
-      google_http = ->(**) { flunk "a stale initial job should not call Google" }
-
       with_clients(api_client, google_http) do
         InitialSyncJob.perform_now(credential.id)
       end

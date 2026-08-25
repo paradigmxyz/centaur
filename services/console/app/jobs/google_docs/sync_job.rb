@@ -90,22 +90,24 @@ module GoogleDocs
       payload
     end
 
-    def ingest_metadata_page(
+    def ingest_page(
       credential,
       sync,
+      run_id:,
       files:,
       deactivations:,
       mode:,
       source:,
-      initial_crawl_id: nil
+      checkpoint:,
+      initial_crawl_id: nil,
+      observation_sweeps: []
     )
-      run_id = "gdocs_#{SecureRandom.hex(16)}"
+      enqueue_content_fetches(credential, files)
       api_client.ingest_google_docs_sync_batch(
         run: run_payload(
           credential,
           run_id,
           mode: mode,
-          status: "running",
           files_seen: files.length
         ),
         files: files.map { |file| sync.file_payload(file, run_id: run_id) },
@@ -118,55 +120,33 @@ module GoogleDocs
           )
         end,
         observation_deactivations: deactivations,
-        replace_context_documents: false
-      )
-      enqueue_missing_content(credential, sync, files)
-      run_id
-    end
-
-    def finish_page(credential, run_id, mode:, files_seen:, checkpoint:, observation_sweeps: [])
-      api_client.ingest_google_docs_sync_batch(
-        run: run_payload(
-          credential,
-          run_id,
-          mode: mode,
-          status: "completed",
-          files_seen: files_seen
-        ),
         observation_sweeps: observation_sweeps,
         checkpoint: checkpoint,
         replace_context_documents: false
       )
     end
 
-    def enqueue_missing_content(credential, sync, files)
-      return if files.empty?
+    def new_run_id
+      "gdocs_#{SecureRandom.hex(16)}"
+    end
 
-      versions = files.map { |file| sync.content_version(file) }
-      missing = api_client.get_google_docs_content_status(files: versions).fetch("missing")
-      missing_versions = Array(missing).to_h do |file|
-        [ [ file.fetch("file_id"), file.fetch("source_version", "") ], true ]
-      end
+    def enqueue_content_fetches(credential, files)
       files.each do |file|
-        version = sync.content_version(file)
-        key = [ version.fetch(:file_id), version.fetch(:source_version) ]
-        next unless missing_versions[key]
-
         GoogleDocs::FetchDocumentJob.perform_later(credential.id, file)
       end
     end
 
-    def run_payload(credential, run_id, mode:, status:, files_seen:)
+    def run_payload(credential, run_id, mode:, files_seen:)
       {
         run_id: run_id,
         mode: mode,
-        status: status,
+        status: "completed",
         broker_credential_id: credential.oid,
         provider_subject: credential.provider_subject.to_s,
         provider_email: credential.provider_email.to_s,
         files_seen: files_seen,
         files_upserted: files_seen,
-        finished: status == "completed",
+        finished: true,
         metadata: { oauth_app_slug: credential.oauth_app&.slug }
       }
     end

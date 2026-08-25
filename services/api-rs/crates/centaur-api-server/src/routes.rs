@@ -1580,8 +1580,6 @@ struct GoogleDocsSyncBatchRequest {
     #[serde(default)]
     observation_deactivations: Vec<GoogleDocsObservationDeactivationPayload>,
     #[serde(default)]
-    reset_observation_credentials: Vec<String>,
-    #[serde(default)]
     observation_sweeps: Vec<GoogleDocsObservationSweepPayload>,
     #[serde(default)]
     contents: Vec<GoogleDocsSyncContentPayload>,
@@ -2457,17 +2455,6 @@ async fn ingest_google_docs_sync_batch(
 
     if let Some(run) = &request.run {
         upsert_google_docs_sync_run(&mut tx, run).await?;
-    }
-
-    for broker_credential_id in &request.reset_observation_credentials {
-        sqlx::query(
-            "UPDATE google_docs_sync_file_observations \
-             SET active = FALSE, updated_at = NOW() \
-             WHERE broker_credential_id = $1 AND active = TRUE",
-        )
-        .bind(broker_credential_id)
-        .execute(&mut *tx)
-        .await?;
     }
 
     for file in &request.files {
@@ -3484,9 +3471,6 @@ fn validate_google_docs_sync_batch(request: &GoogleDocsSyncBatchRequest) -> Resu
             "observation_deactivation.observed_file_id",
             &deactivation.observed_file_id,
         )?;
-    }
-    for broker_credential_id in &request.reset_observation_credentials {
-        require_non_empty("reset_observation_credential", broker_credential_id)?;
     }
     for sweep in &request.observation_sweeps {
         require_non_empty(

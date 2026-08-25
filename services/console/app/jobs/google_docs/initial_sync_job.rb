@@ -17,22 +17,18 @@ module GoogleDocs
       crawl_id = initial_crawl_id(checkpoint)
       page = sync.list_files_page(page_token: initial_page_token(checkpoint))
       files = Array(page["files"]).select { |file| sync.eligible_file?(file) }
-      run_id = ingest_metadata_page(
+      run_id = new_run_id
+      next_page_token = page["nextPageToken"].presence
+      next_phase = next_page_token ? "listing" : "catching_up"
+      ingest_page(
         credential,
         sync,
+        run_id: run_id,
         files: files,
         deactivations: [],
         mode: "initial",
         source: "drive.files.list",
-        initial_crawl_id: crawl_id
-      )
-      next_page_token = page["nextPageToken"].presence
-      next_phase = next_page_token ? "listing" : "catching_up"
-      finish_page(
-        credential,
-        run_id,
-        mode: "initial",
-        files_seen: files.length,
+        initial_crawl_id: crawl_id,
         observation_sweeps: next_page_token ? [] : [ {
           broker_credential_id: credential.oid,
           initial_crawl_id: crawl_id

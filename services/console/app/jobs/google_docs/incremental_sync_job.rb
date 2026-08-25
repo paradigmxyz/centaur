@@ -14,14 +14,6 @@ module GoogleDocs
 
       page = sync.list_changes_page(page_token: checkpoint.fetch("changes_page_token"))
       files, deactivations = partition_changes(sync, page["changes"])
-      run_id = ingest_metadata_page(
-        credential,
-        sync,
-        files: files,
-        deactivations: deactivations,
-        mode: "incremental",
-        source: "drive.changes.list"
-      )
       next_page_token = page["nextPageToken"].presence
       new_start_page_token = page["newStartPageToken"].presence
       if next_page_token.nil? && new_start_page_token.nil?
@@ -31,11 +23,15 @@ module GoogleDocs
 
       catching_up = checkpoint_phase(checkpoint) == "catching_up"
       finished = next_page_token.nil?
-      finish_page(
+      run_id = new_run_id
+      ingest_page(
         credential,
-        run_id,
+        sync,
+        run_id: run_id,
+        files: files,
+        deactivations: deactivations,
         mode: "incremental",
-        files_seen: files.length,
+        source: "drive.changes.list",
         checkpoint: checkpoint_payload(
           credential,
           checkpoint,
