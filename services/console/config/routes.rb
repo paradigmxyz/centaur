@@ -160,6 +160,7 @@ Rails.application.routes.draw do
         post :approve
         post :disable
         post :promote
+        post :demote
       end
     end
     resource :system_settings, only: %i[edit update], path: "settings"
