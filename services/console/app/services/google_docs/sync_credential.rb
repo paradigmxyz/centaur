@@ -284,31 +284,22 @@ module GoogleDocs
       return parsed if response.success?
 
       message = parsed.dig("error", "message") if parsed.is_a?(Hash)
-      error_class = if invalid_page_token_response?(response.status, parsed, params)
+      error_class = if invalid_page_token_response?(response.status, params)
         InvalidPageTokenError
       else
         GoogleApiError
       end
       raise error_class, message.presence || "Google API returned HTTP #{response.status}"
     rescue JSON::ParserError
-      if params["pageToken"].present? && response&.status == 410
+      if invalid_page_token_response?(response&.status, params)
         raise InvalidPageTokenError, "Google API rejected the page token"
       end
 
       raise GoogleApiError, "Google API returned invalid JSON"
     end
 
-    def invalid_page_token_response?(status, parsed, params)
-      return false unless params["pageToken"].present?
-      return true if status == 410
-      return false unless [ 400, 404 ].include?(status)
-
-      error = parsed["error"] if parsed.is_a?(Hash)
-      details = error.is_a?(Hash) ? Array(error["errors"]) : []
-      details.any? { |detail| detail.is_a?(Hash) && detail["location"] == "pageToken" } ||
-        ([ error.is_a?(Hash) ? error["message"] : nil ] + details.flat_map do |detail|
-          detail.is_a?(Hash) ? detail.values_at("message", "reason") : []
-        end).compact.any? { |value| value.match?(/page[\s_-]*token/i) }
+    def invalid_page_token_response?(status, params)
+      params["pageToken"].present? && [ 400, 404, 410 ].include?(status)
     end
   end
 end

@@ -3,21 +3,17 @@ require "test_helper"
 module GoogleDocs
   class JobsTest < ActiveJob::TestCase
     class FakeApiClient
-      attr_accessor :checkpoint, :initial_sync_active, :missing
+      attr_accessor :checkpoint, :missing
       attr_reader :batches
 
-      def initialize(checkpoint: nil, initial_sync_active: false, missing: nil)
+      def initialize(checkpoint: nil, missing: nil)
         @checkpoint = checkpoint
-        @initial_sync_active = initial_sync_active
         @missing = missing
         @batches = []
       end
 
       def get_google_docs_sync_checkpoint(broker_credential_id:)
-        {
-          "checkpoint" => checkpoint,
-          "initial_sync_active" => initial_sync_active
-        }
+        { "checkpoint" => checkpoint }
       end
 
       def ingest_google_docs_sync_batch(payload)
@@ -74,16 +70,12 @@ module GoogleDocs
       assert_enqueued_with(job: InitialSyncJob, args: [ credential.id ])
 
       clear_enqueued_jobs
-      api_client.initial_sync_active = true
-      CentaurApiClient.stub(:new, api_client) { PollSyncJob.perform_now(app.slug) }
-      assert_no_enqueued_jobs
-
       api_client.checkpoint = checkpoint_for(credential, changes_page_token: "change-200")
       CentaurApiClient.stub(:new, api_client) { PollSyncJob.perform_now(app.slug) }
       assert_enqueued_with(job: IncrementalSyncJob, args: [ credential.id ])
     end
 
-    test "initial sync durably chains pages before sweeping and publishing its high-water mark" do
+    test "initial sync ingests bounded pages before sweeping and publishing its high-water mark" do
       credential = create_credential
       api_client = FakeApiClient.new
       first_file = google_doc
@@ -111,32 +103,14 @@ module GoogleDocs
       end
 
       run_id = api_client.batches.first.dig(:run, :run_id)
-      continuation = {
-        "run_id" => run_id,
-        "start_page_token" => "change-100",
-        "page_token" => "files-2",
-        "files_seen" => 1
-      }
-      assert_equal [ nil ], file_page_tokens
-      assert_equal 1, api_client.batches.length
+      assert_equal [ nil, "files-2" ], file_page_tokens
+      assert_equal 3, api_client.batches.length
       first_page = api_client.batches.first
       assert_equal "running", first_page.dig(:run, :status)
       assert_equal [ "doc-123" ], first_page[:files].pluck(:file_id)
       assert_equal [ "doc-123" ], first_page[:observations].pluck(:observed_file_id)
       refute first_page.key?(:observation_sweeps)
       refute first_page.key?(:checkpoint)
-      assert_enqueued_with(
-        job: InitialSyncJob,
-        args: [ credential.id, continuation ],
-        priority: SyncJob::CONTINUATION_PRIORITY
-      )
-
-      with_clients(api_client, google_http) do
-        InitialSyncJob.perform_now(credential.id, continuation)
-      end
-
-      assert_equal [ nil, "files-2" ], file_page_tokens
-      assert_equal 3, api_client.batches.length
       second_page = api_client.batches.second
       assert_equal run_id, second_page.dig(:run, :run_id)
       assert_equal 2, second_page.dig(:run, :files_seen)
@@ -160,7 +134,7 @@ module GoogleDocs
       assert_enqueued_with(job: IncrementalSyncJob, args: [ credential.id ])
     end
 
-    test "an initial job with a completed high-water mark hands off without crawling" do
+    test "a stale initial job with a completed high-water mark is a no-op" do
       credential = create_credential
       api_client = FakeApiClient.new(
         checkpoint: checkpoint_for(credential, changes_page_token: "change-200")
@@ -172,7 +146,7 @@ module GoogleDocs
       end
 
       assert_empty api_client.batches
-      assert_enqueued_with(job: IncrementalSyncJob, args: [ credential.id ])
+      assert_no_enqueued_jobs
     end
 
     test "a rejected initial page token leaves no high-water mark and restarts the crawl" do
@@ -193,16 +167,6 @@ module GoogleDocs
       end
 
       with_clients(api_client, google_http) { InitialSyncJob.perform_now(credential.id) }
-      run_id = api_client.batches.first.dig(:run, :run_id)
-      continuation = {
-        "run_id" => run_id,
-        "start_page_token" => "change-100",
-        "page_token" => "files-expired",
-        "files_seen" => 1
-      }
-      with_clients(api_client, google_http) do
-        InitialSyncJob.perform_now(credential.id, continuation)
-      end
 
       assert_equal "", api_client.checkpoint["changes_page_token"]
       assert_equal 2, api_client.batches.length
@@ -328,16 +292,11 @@ module GoogleDocs
       assert_equal "google_docs:doc-123:chunk-0000", batch[:context_documents].first[:document_id]
     end
 
-    test "credential crawler jobs block conflicts and prioritize chain continuations" do
+    test "credential crawler jobs block conflicts for the full crawl" do
       assert_equal "GoogleDocsCredentialSync", InitialSyncJob.concurrency_group
       assert_equal InitialSyncJob.concurrency_group, IncrementalSyncJob.concurrency_group
       assert_equal :block, InitialSyncJob.concurrency_on_conflict
       assert_equal 1.hour, InitialSyncJob.concurrency_duration
-
-      initial = InitialSyncJob.new(123)
-      continuation = InitialSyncJob.new(123, { "page_token" => "files-2" })
-      assert_equal initial.concurrency_key, continuation.concurrency_key
-      assert_equal(-10, SyncJob::CONTINUATION_PRIORITY)
     end
 
     private

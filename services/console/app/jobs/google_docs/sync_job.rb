@@ -1,14 +1,10 @@
 module GoogleDocs
   class SyncJob < BaseJob
     CONCURRENCY_DURATION = 1.hour
-    # Solid Queue orders lower priorities first. Enqueueing the next crawl node
-    # at this priority while the current node holds the semaphore gives the
-    # continuation precedence over poll-created root jobs already waiting.
-    CONTINUATION_PRIORITY = -10
 
     limits_concurrency(
       to: 1,
-      key: ->(credential_id, *) { "google_docs_sync_#{credential_id}" },
+      key: ->(credential_id) { "google_docs_sync_#{credential_id}" },
       group: "GoogleDocsCredentialSync",
       duration: CONCURRENCY_DURATION,
       on_conflict: :block
@@ -18,18 +14,18 @@ module GoogleDocs
       checkpoint&.fetch("changes_page_token", nil).presence
     end
 
-    def perform(credential_id, *arguments)
+    def perform(credential_id)
       credential = eligible_credential(credential_id)
       return unless credential
 
-      sync_page(credential, sync_client(credential), load_checkpoint(credential), *arguments)
+      sync_page(credential, sync_client(credential), load_checkpoint(credential))
     rescue GoogleDocs::SyncCredential::InvalidPageTokenError
       restart_initial_sync(credential)
     end
 
     private
 
-    def sync_page(*)
+    def sync_page(_credential, _sync, _checkpoint)
       raise NotImplementedError
     end
 
@@ -128,13 +124,9 @@ module GoogleDocs
       }
     end
 
-    def schedule(job_class, *arguments)
-      job_class.set(priority: CONTINUATION_PRIORITY).perform_later(*arguments)
-    end
-
     def restart_initial_sync(credential)
       persist_checkpoint(credential, changes_page_token: "", run_id: nil)
-      schedule(GoogleDocs::InitialSyncJob, credential.id)
+      GoogleDocs::InitialSyncJob.perform_later(credential.id)
     end
   end
 end

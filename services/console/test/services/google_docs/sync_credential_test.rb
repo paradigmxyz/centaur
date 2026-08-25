@@ -118,14 +118,8 @@ module GoogleDocs
 
     test "classifies a rejected Drive page token for crawl recovery" do
       response = HttpClient::Response.new(
-        status: 404,
-        body: {
-          error: {
-            code: 404,
-            message: "Page token expired",
-            errors: [ { reason: "notFound", location: "pageToken" } ]
-          }
-        }.to_json,
+        status: 400,
+        body: { error: { message: "Bad request" } }.to_json,
         headers: {}
       )
       api = Object.new
