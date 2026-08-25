@@ -145,6 +145,25 @@ module GoogleDocs
       end
     end
 
+    test "classifies transient network failures for job retries" do
+      [
+        Net::ReadTimeout.new("read timed out"),
+        Net::OpenTimeout.new("open timed out"),
+        SocketError.new("host unavailable"),
+        Errno::ECONNRESET.new
+      ].each do |network_error|
+        google_http = ->(**) { raise network_error }
+        sync = GoogleDocs::SyncCredential.new(credential, google_api_http: google_http)
+
+        error = assert_raises(GoogleDocs::SyncCredential::GoogleApiError) do
+          sync.user_start_page_token
+        end
+
+        assert_equal network_error, error.cause
+        assert_includes error.message, network_error.class.name
+      end
+    end
+
     test "normalizes canonical content without credential-specific metadata" do
       file = google_doc
       google_http = lambda do |endpoint:, params:, access_token:|

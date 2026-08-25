@@ -25,6 +25,17 @@ module GoogleDocs
     class GoogleApiError < StandardError; end
     class InvalidPageTokenError < GoogleApiError; end
 
+    NETWORK_ERRORS = [
+      EOFError,
+      Errno::ECONNREFUSED,
+      Errno::ECONNRESET,
+      Errno::EHOSTUNREACH,
+      Errno::EPIPE,
+      Errno::ETIMEDOUT,
+      SocketError,
+      Timeout::Error
+    ].freeze
+
     class << self
       attr_accessor :google_api_http
 
@@ -274,6 +285,8 @@ module GoogleDocs
       return response if response.is_a?(Hash)
 
       raise GoogleApiError, "Google API returned invalid response"
+    rescue *NETWORK_ERRORS => error
+      raise GoogleApiError, "Google API network request failed: #{error.class}"
     end
 
     def net_http_get(endpoint, params)
