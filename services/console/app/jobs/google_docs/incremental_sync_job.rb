@@ -2,7 +2,7 @@ module GoogleDocs
   class IncrementalSyncJob < SyncJob
     private
 
-    def sync_page(credential, sync, checkpoint)
+    def sync_page(credential, sync, checkpoint, _continuation = nil)
       page_token = high_water_mark(checkpoint)
       unless page_token
         schedule(GoogleDocs::InitialSyncJob, credential.id)

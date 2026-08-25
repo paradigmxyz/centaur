@@ -75,7 +75,7 @@ module GoogleDocs
       assert_enqueued_with(job: IncrementalSyncJob, args: [ credential.id ])
     end
 
-    test "initial sync replaces the complete observation snapshot before publishing its high-water mark" do
+    test "initial sync durably chains pages before sweeping and publishing its high-water mark" do
       credential = create_credential
       api_client = FakeApiClient.new
       first_file = google_doc
@@ -102,16 +102,44 @@ module GoogleDocs
         InitialSyncJob.perform_now(credential.id)
       end
 
-      assert_equal [ nil, "files-2" ], file_page_tokens
-      assert_equal 2, api_client.batches.length
-      snapshot = api_client.batches.first
-      assert_equal "completed", snapshot.dig(:run, :status)
-      assert_equal [ "doc-123", "doc-456" ], snapshot[:files].pluck(:file_id)
-      assert_equal [ "doc-123", "doc-456" ], snapshot[:observations].pluck(:observed_file_id)
-      assert_equal [ credential.oid ], snapshot[:replace_observation_credentials]
-      refute snapshot.key?(:checkpoint)
+      run_id = api_client.batches.first.dig(:run, :run_id)
+      continuation = {
+        "run_id" => run_id,
+        "start_page_token" => "change-100",
+        "page_token" => "files-2",
+        "files_seen" => 1
+      }
+      assert_equal [ nil ], file_page_tokens
+      assert_equal 1, api_client.batches.length
+      first_page = api_client.batches.first
+      assert_equal "running", first_page.dig(:run, :status)
+      assert_equal [ "doc-123" ], first_page[:files].pluck(:file_id)
+      assert_equal [ "doc-123" ], first_page[:observations].pluck(:observed_file_id)
+      refute first_page.key?(:observation_sweeps)
+      refute first_page.key?(:checkpoint)
+      assert_enqueued_with(job: InitialSyncJob, args: [ credential.id, continuation ])
 
-      checkpoint = api_client.batches.second.fetch(:checkpoint)
+      with_clients(api_client, google_http) do
+        InitialSyncJob.perform_now(credential.id, continuation)
+      end
+
+      assert_equal [ nil, "files-2" ], file_page_tokens
+      assert_equal 3, api_client.batches.length
+      second_page = api_client.batches.second
+      assert_equal run_id, second_page.dig(:run, :run_id)
+      assert_equal 2, second_page.dig(:run, :files_seen)
+      assert_equal [ "doc-456" ], second_page[:files].pluck(:file_id)
+      refute second_page.key?(:observation_sweeps)
+      refute second_page.key?(:checkpoint)
+
+      completion = api_client.batches.third
+      assert_equal "completed", completion.dig(:run, :status)
+      assert_equal 2, completion.dig(:run, :files_seen)
+      assert_equal(
+        [ { broker_credential_id: credential.oid, source_run_id: run_id } ],
+        completion[:observation_sweeps]
+      )
+      checkpoint = completion.fetch(:checkpoint)
       assert_equal "change-100", checkpoint[:changes_page_token]
       assert_equal({}, checkpoint[:metadata])
       assert checkpoint[:last_full_sync_at].present?
@@ -152,12 +180,22 @@ module GoogleDocs
         end
       end
 
+      with_clients(api_client, google_http) { InitialSyncJob.perform_now(credential.id) }
+      run_id = api_client.batches.first.dig(:run, :run_id)
+      continuation = {
+        "run_id" => run_id,
+        "start_page_token" => "change-100",
+        "page_token" => "files-expired",
+        "files_seen" => 1
+      }
       with_clients(api_client, google_http) do
-        InitialSyncJob.perform_now(credential.id)
+        InitialSyncJob.perform_now(credential.id, continuation)
       end
 
       assert_equal "", api_client.checkpoint["changes_page_token"]
-      assert_equal 1, api_client.batches.length
+      assert_equal 2, api_client.batches.length
+      refute api_client.batches.first.key?(:observation_sweeps)
+      refute api_client.batches.first.key?(:checkpoint)
       assert_enqueued_with(job: InitialSyncJob, args: [ credential.id ])
     end
 
@@ -280,6 +318,10 @@ module GoogleDocs
       assert_equal InitialSyncJob.concurrency_group, IncrementalSyncJob.concurrency_group
       assert_equal :discard, InitialSyncJob.concurrency_on_conflict
       assert_equal 1.hour, InitialSyncJob.concurrency_duration
+
+      initial = InitialSyncJob.new(123)
+      continuation = InitialSyncJob.new(123, { "page_token" => "files-2" })
+      assert_equal initial.concurrency_key, continuation.concurrency_key
     end
 
     private
