@@ -10,7 +10,7 @@ module GoogleDocs
         return
       end
       unless checkpoint&.fetch("changes_page_token", nil).present?
-        schedule(GoogleDocs::InitialSyncJob, credential.id)
+        restart_initial_sync(credential, checkpoint)
         return
       end
 
@@ -50,6 +50,8 @@ module GoogleDocs
         )
       )
       schedule(self.class, credential.id) if next_page_token
+    rescue GoogleDocs::SyncCredential::InvalidPageTokenError
+      restart_initial_sync(credential, checkpoint)
     end
 
     private

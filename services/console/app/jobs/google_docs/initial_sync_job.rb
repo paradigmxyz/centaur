@@ -7,10 +7,17 @@ module GoogleDocs
       sync = sync_client(credential)
       checkpoint = load_checkpoint(credential)
       if %w[catching_up ready].include?(checkpoint_phase(checkpoint))
-        schedule(GoogleDocs::IncrementalSyncJob, credential.id)
+        if checkpoint&.fetch("changes_page_token", nil).present?
+          schedule(GoogleDocs::IncrementalSyncJob, credential.id)
+        else
+          restart_initial_sync(credential, checkpoint)
+        end
         return
       end
-      checkpoint = initialize_crawl(credential, sync, checkpoint) unless checkpoint_phase(checkpoint) == "listing"
+      unless checkpoint_phase(checkpoint) == "listing" && initial_crawl_id(checkpoint)
+        checkpoint = initialize_crawl(credential, sync, checkpoint)
+      end
+      crawl_id = initial_crawl_id(checkpoint)
       page = sync.list_files_page(page_token: initial_page_token(checkpoint))
       files = Array(page["files"]).select { |file| sync.eligible_file?(file) }
       run_id = ingest_metadata_page(
@@ -19,7 +26,8 @@ module GoogleDocs
         files: files,
         deactivations: [],
         mode: "initial",
-        source: "drive.files.list"
+        source: "drive.files.list",
+        initial_crawl_id: crawl_id
       )
       next_page_token = page["nextPageToken"].presence
       next_phase = next_page_token ? "listing" : "catching_up"
@@ -28,6 +36,10 @@ module GoogleDocs
         run_id,
         mode: "initial",
         files_seen: files.length,
+        observation_sweeps: next_page_token ? [] : [ {
+          broker_credential_id: credential.oid,
+          initial_crawl_id: crawl_id
+        } ],
         checkpoint: checkpoint_payload(
           credential,
           checkpoint,
@@ -38,21 +50,24 @@ module GoogleDocs
       )
 
       schedule(next_page_token ? self.class : GoogleDocs::IncrementalSyncJob, credential.id)
+    rescue GoogleDocs::SyncCredential::InvalidPageTokenError
+      restart_initial_sync(credential, checkpoint)
     end
 
     private
 
     def initialize_crawl(credential, sync, checkpoint)
       start_page_token = sync.start_page_token
+      crawl_id = SecureRandom.uuid
       payload = checkpoint_payload(
         credential,
         checkpoint,
         phase: "listing",
+        initial_crawl_id: crawl_id,
         start_page_token: start_page_token,
         changes_page_token: start_page_token
       )
       api_client.ingest_google_docs_sync_batch(
-        reset_observation_credentials: [ credential.oid ],
         checkpoint: payload,
         replace_context_documents: false
       )

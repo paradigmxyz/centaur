@@ -104,6 +104,29 @@ module GoogleDocs
       assert_equal "true", changes_params["includeRemoved"]
     end
 
+    test "classifies a rejected Drive page token for crawl recovery" do
+      response = HttpClient::Response.new(
+        status: 404,
+        body: {
+          error: {
+            code: 404,
+            message: "Page token expired",
+            errors: [ { reason: "notFound", location: "pageToken" } ]
+          }
+        }.to_json,
+        headers: {}
+      )
+      api = Object.new
+      api.define_singleton_method(:get) { |*, **| response }
+      sync = GoogleDocs::SyncCredential.new(credential)
+
+      HttpClient.stub(:new, api) do
+        assert_raises(GoogleDocs::SyncCredential::InvalidPageTokenError) do
+          sync.list_changes_page(page_token: "rejected-token")
+        end
+      end
+    end
+
     test "normalizes canonical content without credential-specific metadata" do
       file = google_doc
       google_http = lambda do |endpoint:, params:, access_token:|

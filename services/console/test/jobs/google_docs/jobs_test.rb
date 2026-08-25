@@ -85,7 +85,7 @@ module GoogleDocs
       assert_enqueued_with(job: IncrementalSyncJob, args: [ credential.id ])
     end
 
-    test "initial sync captures a change token, resets visibility, and persists one file page" do
+    test "initial sync captures a change token and marks observations without resetting visibility" do
       credential = create_credential
       api_client = FakeApiClient.new
       file = google_doc
@@ -107,14 +107,18 @@ module GoogleDocs
       end
 
       initialization = api_client.batches.first
-      assert_equal [ credential.oid ], initialization[:reset_observation_credentials]
+      refute initialization.key?(:reset_observation_credentials)
       assert_equal "change-100", initialization.dig(:checkpoint, :start_page_token)
       assert_equal "change-100", initialization.dig(:checkpoint, :changes_page_token)
+      crawl_id = initialization.dig(:checkpoint, :metadata, "initial_crawl_id")
+      assert crawl_id.present?
       metadata_batch = api_client.batches.second
       assert_equal [ "doc-123" ], metadata_batch[:files].pluck(:file_id)
       assert_equal [ "doc-123" ], metadata_batch[:observations].pluck(:observed_file_id)
+      assert_equal crawl_id, metadata_batch[:observations].first.dig(:raw_payload, "initial_crawl_id")
       assert_equal "files-2", api_client.checkpoint.dig("metadata", "initial_page_token")
       assert_equal "listing", api_client.checkpoint.dig("metadata", "phase")
+      assert_empty api_client.batches.last[:observation_sweeps]
       assert_enqueued_with(job: FetchDocumentJob, args: [ credential.id, file ])
       assert_enqueued_with(job: InitialSyncJob, args: [ credential.id ])
     end
@@ -126,7 +130,8 @@ module GoogleDocs
           credential,
           phase: "listing",
           changes_page_token: "change-100",
-          initial_page_token: "files-2"
+          initial_page_token: "files-2",
+          initial_crawl_id: "crawl-123"
         )
       )
       google_http = lambda do |endpoint:, params:, **|
@@ -141,7 +146,36 @@ module GoogleDocs
 
       assert_equal "catching_up", api_client.checkpoint.dig("metadata", "phase")
       assert_equal "change-100", api_client.checkpoint["changes_page_token"]
+      assert_equal(
+        [ { broker_credential_id: credential.oid, initial_crawl_id: "crawl-123" } ],
+        api_client.batches.last[:observation_sweeps]
+      )
       assert_enqueued_with(job: IncrementalSyncJob, args: [ credential.id ])
+    end
+
+    test "a rejected initial page token resets the checkpoint and restarts the initial crawl" do
+      credential = create_credential
+      api_client = FakeApiClient.new(
+        checkpoint: checkpoint_for(
+          credential,
+          phase: "listing",
+          changes_page_token: "change-100",
+          initial_page_token: "files-expired",
+          initial_crawl_id: "crawl-123"
+        )
+      )
+      google_http = lambda do |endpoint:, **|
+        assert_equal SyncCredential::FILES_LIST_ENDPOINT, endpoint
+        raise SyncCredential::InvalidPageTokenError, "Page token expired"
+      end
+
+      with_clients(api_client, google_http) do
+        InitialSyncJob.perform_now(credential.id)
+      end
+
+      assert_equal "pending", api_client.checkpoint.dig("metadata", "phase")
+      assert_equal "", api_client.checkpoint.dig("metadata", "initial_page_token")
+      assert_enqueued_with(job: InitialSyncJob, args: [ credential.id ])
     end
 
     test "incremental sync applies current files and removals before advancing its token" do
@@ -208,6 +242,48 @@ module GoogleDocs
       assert_equal "change-201", api_client.checkpoint["changes_page_token"]
       assert_nil api_client.checkpoint["last_incremental_sync_at"]
       assert_enqueued_with(job: IncrementalSyncJob, args: [ credential.id ])
+    end
+
+    test "a rejected changes token resets the checkpoint and restarts the initial crawl" do
+      credential = create_credential
+      api_client = FakeApiClient.new(
+        checkpoint: checkpoint_for(
+          credential,
+          phase: "ready",
+          changes_page_token: "change-expired"
+        )
+      )
+      google_http = lambda do |endpoint:, **|
+        assert_equal SyncCredential::CHANGES_LIST_ENDPOINT, endpoint
+        raise SyncCredential::InvalidPageTokenError, "Page token expired"
+      end
+
+      with_clients(api_client, google_http) do
+        IncrementalSyncJob.perform_now(credential.id)
+      end
+
+      assert_equal "pending", api_client.checkpoint.dig("metadata", "phase")
+      assert_enqueued_with(job: InitialSyncJob, args: [ credential.id ])
+    end
+
+    test "a missing changes token resets the checkpoint instead of bouncing between crawlers" do
+      credential = create_credential
+      api_client = FakeApiClient.new(
+        checkpoint: checkpoint_for(
+          credential,
+          phase: "ready",
+          changes_page_token: ""
+        )
+      )
+      google_http = ->(**) { flunk "a missing token should not call Google" }
+
+      with_clients(api_client, google_http) do
+        IncrementalSyncJob.perform_now(credential.id)
+      end
+
+      assert_equal "pending", api_client.checkpoint.dig("metadata", "phase")
+      assert_enqueued_with(job: InitialSyncJob, args: [ credential.id ])
+      assert_no_enqueued_jobs(only: IncrementalSyncJob)
     end
 
     test "stale crawler jobs hand off without moving a checkpoint backward" do
@@ -288,14 +364,21 @@ module GoogleDocs
       SyncCredential.google_api_http = previous_http
     end
 
-    def checkpoint_for(credential, phase:, changes_page_token:, initial_page_token: nil)
+    def checkpoint_for(
+      credential,
+      phase:,
+      changes_page_token:,
+      initial_page_token: nil,
+      initial_crawl_id: nil
+    )
       {
         "broker_credential_id" => credential.oid,
         "start_page_token" => "change-100",
         "changes_page_token" => changes_page_token,
         "metadata" => {
           "phase" => phase,
-          "initial_page_token" => initial_page_token.to_s
+          "initial_page_token" => initial_page_token.to_s,
+          "initial_crawl_id" => initial_crawl_id
         }
       }
     end

@@ -1582,6 +1582,8 @@ struct GoogleDocsSyncBatchRequest {
     #[serde(default)]
     reset_observation_credentials: Vec<String>,
     #[serde(default)]
+    observation_sweeps: Vec<GoogleDocsObservationSweepPayload>,
+    #[serde(default)]
     contents: Vec<GoogleDocsSyncContentPayload>,
     #[serde(default)]
     context_documents: Vec<GoogleDocsContextDocumentPayload>,
@@ -1703,6 +1705,12 @@ struct GoogleDocsSyncObservationPayload {
 struct GoogleDocsObservationDeactivationPayload {
     broker_credential_id: String,
     observed_file_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoogleDocsObservationSweepPayload {
+    broker_credential_id: String,
+    initial_crawl_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2567,6 +2575,19 @@ async fn ingest_google_docs_sync_batch(
         .await?;
     }
 
+    for sweep in &request.observation_sweeps {
+        sqlx::query(
+            "UPDATE google_docs_sync_file_observations \
+             SET active = FALSE, updated_at = NOW() \
+             WHERE broker_credential_id = $1 AND active = TRUE \
+             AND COALESCE(raw_payload->>'initial_crawl_id', '') <> $2",
+        )
+        .bind(&sweep.broker_credential_id)
+        .bind(&sweep.initial_crawl_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+
     for content in &request.contents {
         sqlx::query(
             "INSERT INTO google_docs_sync_document_contents (\
@@ -2721,6 +2742,7 @@ async fn ingest_google_docs_sync_batch(
         "counts": {
             "files": request.files.len(),
             "observations": request.observations.len(),
+            "observation_sweeps": request.observation_sweeps.len(),
             "contents": request.contents.len(),
             "context_documents": request.context_documents.len(),
             "checkpoint": request.checkpoint.is_some(),
@@ -3465,6 +3487,16 @@ fn validate_google_docs_sync_batch(request: &GoogleDocsSyncBatchRequest) -> Resu
     }
     for broker_credential_id in &request.reset_observation_credentials {
         require_non_empty("reset_observation_credential", broker_credential_id)?;
+    }
+    for sweep in &request.observation_sweeps {
+        require_non_empty(
+            "observation_sweep.broker_credential_id",
+            &sweep.broker_credential_id,
+        )?;
+        require_non_empty(
+            "observation_sweep.initial_crawl_id",
+            &sweep.initial_crawl_id,
+        )?;
     }
     for content in &request.contents {
         require_non_empty("content.file_id", &content.file_id)?;
