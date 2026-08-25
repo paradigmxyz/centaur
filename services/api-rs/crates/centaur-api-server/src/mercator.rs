@@ -1,4 +1,11 @@
-use std::{env, path::Path, time::Duration};
+use std::{
+    env,
+    fs::{self, OpenOptions},
+    io::Write,
+    os::unix::fs::OpenOptionsExt,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -58,17 +65,13 @@ pub(crate) async fn submit_mercator_job(
     validate_handoff(&request)?;
 
     let wallet_path = required_env("MERCATOR_WALLET_PATH")?;
-    if !Path::new(&wallet_path).is_file() {
-        return Err(ApiError::ServiceUnavailable(
-            "Mercator wallet is not configured".to_owned(),
-        ));
-    }
+    let wallet = TemporaryWallet::copy_from(Path::new(&wallet_path))?;
 
     let executable = env::var("CENTAUR_MERCATOR_CLI")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "/usr/local/bin/mercator".to_owned());
-    let result = execute_handoff(&executable, &wallet_path, &request).await?;
+    let result = execute_handoff(&executable, wallet.path(), &request).await?;
     Ok(Json(SubmitMercatorResponse { ok: true, result }))
 }
 
@@ -137,7 +140,7 @@ fn validate_handoff(request: &SubmitMercatorRequest) -> Result<(), ApiError> {
 
 async fn execute_handoff(
     executable: &str,
-    wallet_path: &str,
+    wallet_path: &Path,
     request: &SubmitMercatorRequest,
 ) -> Result<Value, ApiError> {
     let body = serde_json::to_string(&request.handoff.rest.body)?;
@@ -192,6 +195,51 @@ async fn execute_handoff(
     Ok(result)
 }
 
+/// Per-request writable copy of the read-only Kubernetes Secret mount.
+///
+/// The Accounts SDK intentionally enforces mode 0600 whenever it reads its
+/// filesystem store, which cannot succeed directly on a Kubernetes Secret
+/// volume. The canonical copy remains in Centaur's Secret; the CLI receives a
+/// private, short-lived copy that is removed when the submission finishes.
+struct TemporaryWallet {
+    path: PathBuf,
+}
+
+impl TemporaryWallet {
+    fn copy_from(source: &Path) -> Result<Self, ApiError> {
+        if !source.is_file() {
+            return Err(wallet_unavailable());
+        }
+        let contents = fs::read(source).map_err(|_| wallet_unavailable())?;
+        let path = env::temp_dir().join(format!("centaur-mercator-{}.json", uuid::Uuid::new_v4()));
+        let mut destination = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|_| wallet_unavailable())?;
+        if destination.write_all(&contents).is_err() || destination.sync_all().is_err() {
+            let _ = fs::remove_file(&path);
+            return Err(wallet_unavailable());
+        }
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TemporaryWallet {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn wallet_unavailable() -> ApiError {
+    ApiError::ServiceUnavailable("Mercator wallet is not configured".to_owned())
+}
+
 fn required_env(name: &str) -> Result<String, ApiError> {
     env::var(name)
         .ok()
@@ -216,6 +264,7 @@ fn valid_amount(value: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::os::unix::fs::PermissionsExt;
 
     fn request(approved: bool) -> SubmitMercatorRequest {
         SubmitMercatorRequest {
@@ -267,5 +316,32 @@ mod tests {
         for invalid in ["", ".1", "1.", "1.0000001", "-1", "1e3"] {
             assert!(!valid_amount(invalid), "{invalid}");
         }
+    }
+
+    #[test]
+    fn stages_wallet_in_private_writable_file() {
+        let source = env::temp_dir().join(format!("centaur-secret-{}.json", uuid::Uuid::new_v4()));
+        fs::write(&source, br#"{"wallet":"test"}"#).expect("write source wallet");
+
+        let staged_path;
+        {
+            let wallet = TemporaryWallet::copy_from(&source).expect("stage wallet");
+            staged_path = wallet.path().to_path_buf();
+            assert_eq!(
+                fs::read(wallet.path()).expect("read staged wallet"),
+                br#"{"wallet":"test"}"#
+            );
+            assert_eq!(
+                fs::metadata(wallet.path())
+                    .expect("staged wallet metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+
+        assert!(!staged_path.exists());
+        fs::remove_file(source).expect("remove source wallet");
     }
 }
