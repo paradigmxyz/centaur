@@ -1112,7 +1112,17 @@ fn anthropic_pricing(model: &str) -> Option<TokenPricing> {
             source: "centaur_estimate:anthropic:fable-mythos-5:5m-cache-write",
         });
     }
-    if model.contains("opus-4-8")
+    if model.contains("opus-5-fast") {
+        return Some(TokenPricing {
+            input_per_mtok: 10.0,
+            cache_creation_per_mtok: 12.5,
+            cache_read_per_mtok: 1.0,
+            output_per_mtok: 50.0,
+            source: "centaur_estimate:anthropic:opus-5-fast:5m-cache-write",
+        });
+    }
+    if model.contains("opus-5")
+        || model.contains("opus-4-8")
         || model.contains("opus-4-7")
         || model.contains("opus-4-6")
         || model.contains("opus-4-5")
@@ -1132,6 +1142,15 @@ fn anthropic_pricing(model: &str) -> Option<TokenPricing> {
             cache_read_per_mtok: 1.5,
             output_per_mtok: 75.0,
             source: "centaur_estimate:anthropic:opus-4-deprecated:5m-cache-write",
+        });
+    }
+    if model.contains("sonnet-5") {
+        return Some(TokenPricing {
+            input_per_mtok: 2.0,
+            cache_creation_per_mtok: 2.5,
+            cache_read_per_mtok: 0.2,
+            output_per_mtok: 10.0,
+            source: "centaur_estimate:anthropic:sonnet-5:5m-cache-write",
         });
     }
     if model.contains("sonnet-4-6") || model.contains("sonnet-4-5") || model.contains("sonnet-4") {

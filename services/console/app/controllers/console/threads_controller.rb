@@ -127,6 +127,8 @@ class Console::ThreadsController < ApplicationController
                       efforts: [ %w[fast Fast] ]),
     ComposerAgent.new(value: "claude-opus-4-8", label: "Claude Opus 4.8",
                       harness: "claudecode", model: "claude-opus-4-8", efforts: []),
+    ComposerAgent.new(value: "claude-sonnet-5", label: "Claude Sonnet 5",
+                      harness: "claudecode", model: "claude-sonnet-5", efforts: []),
     ComposerAgent.new(value: "claude-sonnet-4-6", label: "Claude Sonnet 4.6",
                       harness: "claudecode", model: "claude-sonnet-4-6", efforts: []),
     ComposerAgent.new(value: "claude-haiku-4-5", label: "Claude Haiku 4.5",
