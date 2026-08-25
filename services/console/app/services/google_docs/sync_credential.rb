@@ -31,11 +31,6 @@ module GoogleDocs
         ConsoleEnv["GOOGLE_DOCS_SYNC_OAUTH_APP_SLUG"].presence || "google"
       end
 
-      def enabled?
-        raw = ConsoleEnv["GOOGLE_DOCS_SYNC_ENABLED"]
-        raw.nil? ? true : ActiveModel::Type::Boolean.new.cast(raw)
-      end
-
       def required_scopes_granted?(scopes)
         granted = Array(scopes)
         granted.include?(DRIVE_READONLY_SCOPE) ||

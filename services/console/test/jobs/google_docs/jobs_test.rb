@@ -83,7 +83,10 @@ module GoogleDocs
 
       with_sync_enabled("false") do
         CentaurApiClient.stub(:new, api_client) { PollSyncJob.perform_now(app.slug) }
-        with_clients(api_client, google_http) { InitialSyncJob.perform_now(credential.id) }
+        with_clients(api_client, google_http) do
+          InitialSyncJob.perform_now(credential.id)
+          FetchDocumentJob.perform_now(credential.id, google_doc)
+        end
       end
 
       assert_no_enqueued_jobs

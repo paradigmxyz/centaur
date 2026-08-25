@@ -3,7 +3,7 @@ module GoogleDocs
     queue_as :default
 
     def perform(oauth_app_slug = GoogleDocs::SyncCredential.oauth_app_slug)
-      return unless GoogleDocs::SyncCredential.enabled?
+      return unless GoogleDocs::Config.sync_enabled?
 
       api_client = CentaurApiClient.new
       credentials = BrokerCredential

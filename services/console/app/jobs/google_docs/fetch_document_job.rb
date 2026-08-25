@@ -1,6 +1,8 @@
 module GoogleDocs
   class FetchDocumentJob < BaseJob
     def perform(credential_id, file)
+      return unless GoogleDocs::Config.sync_enabled?
+
       credential = eligible_credential(credential_id)
       return unless credential
 
