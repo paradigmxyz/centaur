@@ -10,6 +10,8 @@ module GoogleDocs
     private
 
     def eligible_credential(credential_id)
+      return unless GoogleDocs::SyncCredential.enabled?
+
       credential = BrokerCredential.includes(:oauth_app).find_by(id: credential_id)
       return unless GoogleDocs::SyncCredential.syncable?(credential)
 

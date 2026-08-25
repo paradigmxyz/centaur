@@ -43,7 +43,7 @@ module GoogleDocs
       end
 
       def syncable?(credential, oauth_app_slug: nil)
-        enabled? && credential.present? && !credential.dead? && credential.access_token.present? &&
+        credential.present? && !credential.dead? && credential.access_token.present? &&
           credential.oauth_app&.provider == Oauth::Providers::Google::KEY &&
           credential.oauth_app.enabled? && required_scopes_granted?(credential.scopes) &&
           (oauth_app_slug.nil? || credential.oauth_app.slug == oauth_app_slug)
