@@ -10,7 +10,9 @@ module GoogleDocs
       on_conflict: :block
     )
 
-    def self.high_water_mark(checkpoint)
+    def self.user_changes_page_token(checkpoint)
+      # The persisted field predates shared-drive scopes. It contains only the
+      # credential's user change-log token.
       checkpoint&.fetch("changes_page_token", nil).presence
     end
 
@@ -35,13 +37,13 @@ module GoogleDocs
         .fetch("checkpoint")
     end
 
-    def high_water_mark(checkpoint)
-      self.class.high_water_mark(checkpoint)
+    def user_changes_page_token(checkpoint)
+      self.class.user_changes_page_token(checkpoint)
     end
 
     def checkpoint_payload(
       credential,
-      changes_page_token:,
+      user_changes_page_token:,
       run_id: nil,
       full_sync_finished: false,
       incremental_sync_finished: false
@@ -50,7 +52,7 @@ module GoogleDocs
         broker_credential_id: credential.oid,
         provider_subject: credential.provider_subject.to_s,
         provider_email: credential.provider_email.to_s,
-        changes_page_token: changes_page_token,
+        changes_page_token: user_changes_page_token,
         last_run_id: run_id,
         last_error: "",
         metadata: {}
@@ -97,11 +99,11 @@ module GoogleDocs
       end
     end
 
-    def persist_checkpoint(credential, changes_page_token:, run_id:, **timestamps)
+    def persist_user_checkpoint(credential, user_changes_page_token:, run_id:, **timestamps)
       api_client.ingest_google_docs_sync_batch(
         checkpoint: checkpoint_payload(
           credential,
-          changes_page_token: changes_page_token,
+          user_changes_page_token: user_changes_page_token,
           run_id: run_id,
           **timestamps
         ),
@@ -125,7 +127,7 @@ module GoogleDocs
     end
 
     def restart_initial_sync(credential)
-      persist_checkpoint(credential, changes_page_token: "", run_id: nil)
+      persist_user_checkpoint(credential, user_changes_page_token: "", run_id: nil)
       GoogleDocs::InitialSyncJob.perform_later(credential.id)
     end
   end

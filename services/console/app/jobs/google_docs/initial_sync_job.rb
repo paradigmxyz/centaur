@@ -3,14 +3,14 @@ module GoogleDocs
     private
 
     def sync_page(credential, sync, checkpoint)
-      return if high_water_mark(checkpoint)
+      return if user_changes_page_token(checkpoint)
 
-      start_page_token = sync.start_page_token
+      user_start_page_token = sync.user_start_page_token
       run_id = "gdocs_#{SecureRandom.hex(16)}"
       page_token = nil
       files_seen = 0
       loop do
-        page = sync.list_files_page(page_token: page_token)
+        page = sync.list_user_files_page(page_token: page_token)
         files = Array(page["files"]).select { |file| sync.eligible_file?(file) }
         files_seen += files.length
         ingest_page(
@@ -43,7 +43,7 @@ module GoogleDocs
         ],
         checkpoint: checkpoint_payload(
           credential,
-          changes_page_token: start_page_token,
+          user_changes_page_token: user_start_page_token,
           run_id: run_id,
           full_sync_finished: true
         ),

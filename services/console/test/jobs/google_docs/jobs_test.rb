@@ -61,7 +61,7 @@ module GoogleDocs
       )
     end
 
-    test "poll job chooses initial or incremental sync from the completed high-water mark" do
+    test "poll job chooses initial or incremental sync from the completed user checkpoint" do
       app = create_google_app
       credential = create_credential(app: app)
       api_client = FakeApiClient.new
@@ -70,12 +70,12 @@ module GoogleDocs
       assert_enqueued_with(job: InitialSyncJob, args: [ credential.id ])
 
       clear_enqueued_jobs
-      api_client.checkpoint = checkpoint_for(credential, changes_page_token: "change-200")
+      api_client.checkpoint = checkpoint_for(credential, user_changes_page_token: "change-200")
       CentaurApiClient.stub(:new, api_client) { PollSyncJob.perform_now(app.slug) }
       assert_enqueued_with(job: IncrementalSyncJob, args: [ credential.id ])
     end
 
-    test "initial sync ingests bounded pages before sweeping and publishing its high-water mark" do
+    test "initial sync ingests bounded pages before sweeping and publishing its user checkpoint" do
       credential = create_credential
       api_client = FakeApiClient.new
       first_file = google_doc
@@ -134,10 +134,10 @@ module GoogleDocs
       assert_enqueued_with(job: IncrementalSyncJob, args: [ credential.id ])
     end
 
-    test "a stale initial job with a completed high-water mark is a no-op" do
+    test "a stale initial job with a completed user checkpoint is a no-op" do
       credential = create_credential
       api_client = FakeApiClient.new(
-        checkpoint: checkpoint_for(credential, changes_page_token: "change-200")
+        checkpoint: checkpoint_for(credential, user_changes_page_token: "change-200")
       )
       google_http = ->(**) { flunk "a stale initial job should not call Google" }
 
@@ -149,7 +149,7 @@ module GoogleDocs
       assert_no_enqueued_jobs
     end
 
-    test "a rejected initial page token leaves no high-water mark and restarts the crawl" do
+    test "a rejected initial page token leaves no user checkpoint and restarts the crawl" do
       credential = create_credential
       api_client = FakeApiClient.new
       google_http = lambda do |endpoint:, params:, **|
@@ -175,10 +175,10 @@ module GoogleDocs
       assert_enqueued_with(job: InitialSyncJob, args: [ credential.id ])
     end
 
-    test "incremental sync drains all pages before advancing its high-water mark" do
+    test "incremental sync drains all pages before advancing its user checkpoint" do
       credential = create_credential
       api_client = FakeApiClient.new(
-        checkpoint: checkpoint_for(credential, changes_page_token: "change-100")
+        checkpoint: checkpoint_for(credential, user_changes_page_token: "change-100")
       )
       file = google_doc
       change_page_tokens = []
@@ -220,10 +220,10 @@ module GoogleDocs
       assert_enqueued_with(job: FetchDocumentJob, args: [ credential.id, file ])
     end
 
-    test "a rejected Changes token clears the high-water mark and restarts initial sync" do
+    test "a rejected user Changes token clears the checkpoint and restarts initial sync" do
       credential = create_credential
       api_client = FakeApiClient.new(
-        checkpoint: checkpoint_for(credential, changes_page_token: "change-expired")
+        checkpoint: checkpoint_for(credential, user_changes_page_token: "change-expired")
       )
       google_http = lambda do |endpoint:, **|
         assert_equal SyncCredential::CHANGES_LIST_ENDPOINT, endpoint
@@ -238,7 +238,7 @@ module GoogleDocs
       assert_enqueued_with(job: InitialSyncJob, args: [ credential.id ])
     end
 
-    test "incremental sync without a high-water mark hands off to initial sync" do
+    test "incremental sync without a user checkpoint hands off to initial sync" do
       credential = create_credential
       api_client = FakeApiClient.new
       google_http = ->(**) { flunk "a routing job should not call Google" }
@@ -312,10 +312,10 @@ module GoogleDocs
       SyncCredential.google_api_http = previous_http
     end
 
-    def checkpoint_for(credential, changes_page_token:)
+    def checkpoint_for(credential, user_changes_page_token:)
       {
         "broker_credential_id" => credential.oid,
-        "changes_page_token" => changes_page_token,
+        "changes_page_token" => user_changes_page_token,
         "metadata" => {}
       }
     end

@@ -9,6 +9,7 @@ module GoogleDocs
     DOCS_READONLY_SCOPE = "https://www.googleapis.com/auth/documents.readonly"
     GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document"
     EXPORT_MIME_TYPE = "text/plain"
+    USER_CORPUS = "user"
 
     FILES_LIST_ENDPOINT = "https://www.googleapis.com/drive/v3/files"
     CHANGES_LIST_ENDPOINT = "https://www.googleapis.com/drive/v3/changes"
@@ -65,7 +66,7 @@ module GoogleDocs
       @google_api_http = google_api_http || self.class.google_api_http
     end
 
-    def start_page_token
+    def user_start_page_token
       google_api(
         START_PAGE_TOKEN_ENDPOINT,
         "supportsAllDrives" => "true"
@@ -74,13 +75,14 @@ module GoogleDocs
       raise GoogleApiError, "Google Drive returned no start page token"
     end
 
-    def list_files_page(page_token: nil)
+    def list_user_files_page(page_token: nil)
       google_api(
         FILES_LIST_ENDPOINT,
         {
           "q" => "mimeType = '#{GOOGLE_DOC_MIME_TYPE}' and trashed = false",
           "pageSize" => self.class.page_size,
           "fields" => "nextPageToken,files(#{FILE_FIELDS})",
+          "corpora" => USER_CORPUS,
           "includeItemsFromAllDrives" => "true",
           "supportsAllDrives" => "true",
           "orderBy" => "modifiedTime,name",
@@ -89,7 +91,7 @@ module GoogleDocs
       )
     end
 
-    def list_changes_page(page_token:)
+    def list_user_changes_page(page_token:)
       google_api(
         CHANGES_LIST_ENDPOINT,
         {

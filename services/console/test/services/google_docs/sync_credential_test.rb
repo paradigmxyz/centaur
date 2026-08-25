@@ -85,7 +85,7 @@ module GoogleDocs
       refute GoogleDocs::SyncCredential.syncable?(current_credential.reload)
     end
 
-    test "uses bounded Drive file and change pages" do
+    test "uses bounded user-corpus Drive file and change pages" do
       calls = []
       google_http = lambda do |endpoint:, params:, access_token:|
         assert_equal "ya29.live", access_token
@@ -103,16 +103,28 @@ module GoogleDocs
       end
       sync = GoogleDocs::SyncCredential.new(credential, google_api_http: google_http)
 
-      assert_equal "change-100", sync.start_page_token
-      assert_equal "file-2", sync.list_files_page["nextPageToken"]
-      assert_equal "change-101", sync.list_changes_page(page_token: "change-100")["newStartPageToken"]
+      assert_equal "change-100", sync.user_start_page_token
+      assert_equal "file-2", sync.list_user_files_page["nextPageToken"]
+      assert_equal "change-101", sync.list_user_changes_page(page_token: "change-100")["newStartPageToken"]
 
+      start_token_params = calls.find do |endpoint, _|
+        endpoint == GoogleDocs::SyncCredential::START_PAGE_TOKEN_ENDPOINT
+      end.last
+      assert_equal "true", start_token_params["supportsAllDrives"]
+      refute_includes start_token_params, "driveId"
       files_params = calls.find { |endpoint, _| endpoint == GoogleDocs::SyncCredential::FILES_LIST_ENDPOINT }.last
       assert_equal 100, files_params["pageSize"]
+      assert_equal "user", files_params["corpora"]
+      assert_equal "true", files_params["includeItemsFromAllDrives"]
+      assert_equal "true", files_params["supportsAllDrives"]
+      refute_includes files_params, "driveId"
       assert_includes files_params["q"], "trashed = false"
       changes_params = calls.find { |endpoint, _| endpoint == GoogleDocs::SyncCredential::CHANGES_LIST_ENDPOINT }.last
       assert_equal "change-100", changes_params["pageToken"]
       assert_equal "true", changes_params["includeRemoved"]
+      assert_equal "true", changes_params["includeItemsFromAllDrives"]
+      assert_equal "true", changes_params["supportsAllDrives"]
+      refute_includes changes_params, "driveId"
       assert_includes changes_params["fields"], "changes(changeType,driveId,fileId,removed"
     end
 
@@ -128,7 +140,7 @@ module GoogleDocs
 
       HttpClient.stub(:new, api) do
         assert_raises(GoogleDocs::SyncCredential::InvalidPageTokenError) do
-          sync.list_changes_page(page_token: "rejected-token")
+          sync.list_user_changes_page(page_token: "rejected-token")
         end
       end
     end

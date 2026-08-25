@@ -20,7 +20,7 @@ module GoogleDocs
         checkpoint = api_client
           .get_google_docs_sync_checkpoint(broker_credential_id: credential.oid)
           .fetch("checkpoint")
-        job_class = SyncJob.high_water_mark(checkpoint) ? IncrementalSyncJob : InitialSyncJob
+        job_class = SyncJob.user_changes_page_token(checkpoint) ? IncrementalSyncJob : InitialSyncJob
         job_class.perform_later(credential.id)
       rescue CentaurApiClient::Error => e
         Rails.logger.warn do
