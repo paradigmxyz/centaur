@@ -34,6 +34,12 @@
             "oauthAppSlug": { "type": "string" }
           }
         },
+        "googleDocsSync": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" }
+          }
+        },
         "service": {
           "type": "object",
           "properties": {

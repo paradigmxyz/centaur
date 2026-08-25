@@ -162,6 +162,12 @@ console:
   # worker. Keep this aligned with the Console OAuth app users authorize.
   slackDmSync:
     oauthAppSlug: slack
+  # Google Docs metadata and document-content ETL. Enable this to run the
+  # recurring poller and queued Google Docs sync jobs. Disabled jobs exit
+  # without work.
+  # This does not disable Google OAuth or remove previously indexed content.
+  googleDocsSync:
+    enabled: false
   service:
     httpPort: 3000
   # Optional Ingress for the console. Bring your own controller — Tailscale

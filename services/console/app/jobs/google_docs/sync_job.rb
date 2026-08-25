@@ -17,6 +17,8 @@ module GoogleDocs
     end
 
     def perform(credential_id)
+      return unless GoogleDocs::Config.sync_enabled?
+
       credential = eligible_credential(credential_id)
       return unless credential
 

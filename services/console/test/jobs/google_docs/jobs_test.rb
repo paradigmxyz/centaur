@@ -2,6 +2,8 @@ require "test_helper"
 
 module GoogleDocs
   class JobsTest < ActiveJob::TestCase
+    SYNC_ENABLED_ENV = "CENTAUR_CONSOLE_GOOGLE_DOCS_SYNC_ENABLED"
+
     class FakeApiClient
       attr_accessor :checkpoint, :missing
       attr_reader :batches
@@ -31,6 +33,19 @@ module GoogleDocs
 
       def update_checkpoint(payload)
         @checkpoint = (checkpoint || {}).merge(payload.deep_stringify_keys)
+      end
+    end
+
+    setup do
+      @previous_sync_enabled = ENV[SYNC_ENABLED_ENV]
+      ENV[SYNC_ENABLED_ENV] = "true"
+    end
+
+    teardown do
+      if @previous_sync_enabled.nil?
+        ENV.delete(SYNC_ENABLED_ENV)
+      else
+        ENV[SYNC_ENABLED_ENV] = @previous_sync_enabled
       end
     end
 
@@ -73,6 +88,23 @@ module GoogleDocs
       api_client.checkpoint = checkpoint_for(credential, user_changes_page_token: "change-200")
       CentaurApiClient.stub(:new, api_client) { PollSyncJob.perform_now(app.slug) }
       assert_enqueued_with(job: IncrementalSyncJob, args: [ credential.id ])
+    end
+
+    test "sync kill switch prevents polling and queued ETL work" do
+      app = create_google_app
+      credential = create_credential(app: app)
+      api_client = -> { flunk "disabled Google Docs sync should not create an API client" }
+      google_http = ->(**) { flunk "disabled Google Docs sync should not call Google" }
+
+      with_sync_enabled("false") do
+        CentaurApiClient.stub(:new, api_client) { PollSyncJob.perform_now(app.slug) }
+        with_clients(api_client, google_http) do
+          InitialSyncJob.perform_now(credential.id)
+          FetchDocumentJob.perform_now(credential.id, google_doc)
+        end
+      end
+
+      assert_no_enqueued_jobs
     end
 
     test "initial sync ingests bounded pages before sweeping and publishing its user checkpoint" do
@@ -303,6 +335,14 @@ module GoogleDocs
     end
 
     private
+
+    def with_sync_enabled(value)
+      previous = ENV[SYNC_ENABLED_ENV]
+      ENV[SYNC_ENABLED_ENV] = value
+      yield
+    ensure
+      previous.nil? ? ENV.delete(SYNC_ENABLED_ENV) : ENV[SYNC_ENABLED_ENV] = previous
+    end
 
     def with_clients(api_client, google_http)
       previous_http = SyncCredential.google_api_http
