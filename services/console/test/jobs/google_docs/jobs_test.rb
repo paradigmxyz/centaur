@@ -293,6 +293,9 @@ module GoogleDocs
     end
 
     test "credential crawler jobs block conflicts for the full crawl" do
+      assert_equal "google_docs", InitialSyncJob.queue_name
+      assert_equal InitialSyncJob.queue_name, IncrementalSyncJob.queue_name
+      assert_equal InitialSyncJob.queue_name, FetchDocumentJob.queue_name
       assert_equal "GoogleDocsCredentialSync", InitialSyncJob.concurrency_group
       assert_equal InitialSyncJob.concurrency_group, IncrementalSyncJob.concurrency_group
       assert_equal :block, InitialSyncJob.concurrency_on_conflict

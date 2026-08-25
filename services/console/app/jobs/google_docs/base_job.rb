@@ -1,6 +1,6 @@
 module GoogleDocs
   class BaseJob < ApplicationJob
-    queue_as :default
+    queue_as :google_docs
 
     retry_on GoogleDocs::SyncCredential::GoogleApiError,
       CentaurApiClient::Error,
