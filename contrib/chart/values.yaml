@@ -427,6 +427,15 @@ apiRs:
     tag: latest
     pullPolicy: Always
   port: 8080
+  # Optional shared Mercator payment wallet. Discovery and quoting work without
+  # this; enabling it mounts one wallet from the canonical Centaur Secret into
+  # api-rs only, never into agent sandboxes.
+  mercator:
+    enabled: false
+    walletSecretName: ""
+    walletSecretKey: MERCATOR_WALLET_JSON
+    walletMountPath: /var/run/secrets/centaur/mercator/wallet.json
+    jobsUrl: https://mercator.tempoxyz.dev/v1/jobs
   # Public/local MCP endpoint advertised through OAuth protected-resource
   # metadata. Empty falls back to slackbotv2.mcpPublicUrl.
   mcpPublicUrl: ""

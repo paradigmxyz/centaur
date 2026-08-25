@@ -335,6 +335,16 @@
       "properties": {
         "syncInfraSecrets": { "type": "boolean" },
         "mcpPublicUrl": { "type": "string" },
+        "mercator": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "walletSecretName": { "type": "string" },
+            "walletSecretKey": { "type": "string", "minLength": 1 },
+            "walletMountPath": { "type": "string", "minLength": 1 },
+            "jobsUrl": { "type": "string", "format": "uri" }
+          }
+        },
         "sandboxRunningLimit": { "type": "integer", "minimum": 0 },
         "sandboxHotIdleGraceSecs": { "type": "integer", "minimum": 0 },
         "workflowHostSandbox": { "type": "boolean" },

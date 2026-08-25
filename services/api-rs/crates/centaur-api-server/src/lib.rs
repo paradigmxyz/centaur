@@ -3,6 +3,7 @@ mod auth;
 pub mod client;
 mod error;
 mod mcp;
+mod mercator;
 mod routes;
 mod slack_proxy;
 mod tool_discovery;
@@ -241,6 +242,11 @@ mod tests {
                 .body(Body::empty())
                 .unwrap(),
             Request::builder()
+                .method(Method::POST)
+                .uri("/api/mercator/jobs")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
                 .uri("/api/workflows/runs")
                 .body(Body::empty())
                 .unwrap(),
@@ -468,6 +474,38 @@ mod tests {
             .unwrap();
         assert_ne!(slack_response.status(), StatusCode::UNAUTHORIZED);
         assert_ne!(slack_response.status(), StatusCode::FORBIDDEN);
+
+        let mercator_response = build_router_with_app_state(AppState::unready(test_auth()))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/mercator/jobs")
+                    .header(header::AUTHORIZATION, format!("Bearer {principal}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{
+                            "approved": false,
+                            "handoff": {
+                                "client": {"arguments": ["submit"], "executable": "mercator"},
+                                "maxSpend": "0.001",
+                                "nextAction": "run_rest_request",
+                                "rest": {
+                                    "body": {
+                                        "idempotencyKey": "centaur-auth-test",
+                                        "plan": {"nodes": []}
+                                    },
+                                    "method": "POST",
+                                    "url": "https://mercator.tempoxyz.dev/v1/jobs"
+                                },
+                                "status": "payment_required"
+                            }
+                        }"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(mercator_response.status(), StatusCode::BAD_REQUEST);
 
         let pool =
             PgPool::connect_lazy("postgres://postgres:postgres@localhost/centaur_test").unwrap();

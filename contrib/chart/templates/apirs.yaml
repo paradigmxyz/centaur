@@ -258,6 +258,12 @@ spec:
               value: {{ .Values.apiRs.syncInfraSecrets | quote }}
             - name: RUST_LOG
               value: info
+{{- if .Values.apiRs.mercator.enabled }}
+            - name: MERCATOR_WALLET_PATH
+              value: {{ .Values.apiRs.mercator.walletMountPath | quote }}
+            - name: CENTAUR_MERCATOR_JOBS_URL
+              value: {{ .Values.apiRs.mercator.jobsUrl | quote }}
+{{- end }}
             - name: TOOL_DIRS
               value: {{ join ":" $toolDirs | quote }}
 {{- if gt (len $publicToolDirs) 0 }}
@@ -571,14 +577,31 @@ spec:
 {{ toYaml .Values.containerSecurityContext | nindent 12 }}
           resources:
 {{ toYaml .Values.apiRs.resources | nindent 12 }}
-{{- if $useOverlayRepoCache }}
+{{- if or $useOverlayRepoCache .Values.apiRs.mercator.enabled }}
           volumeMounts:
+{{- if .Values.apiRs.mercator.enabled }}
+            - name: mercator-wallet
+              mountPath: {{ .Values.apiRs.mercator.walletMountPath | quote }}
+              subPath: wallet.json
+              readOnly: true
+{{- end }}
+{{- if $useOverlayRepoCache }}
             - name: repo-cache
               mountPath: {{ .Values.repoCache.hostPath | quote }}
               readOnly: true
 {{- end }}
-{{- if $useOverlayRepoCache }}
+{{- end }}
+{{- if or $useOverlayRepoCache .Values.apiRs.mercator.enabled }}
       volumes:
+{{- if .Values.apiRs.mercator.enabled }}
+        - name: mercator-wallet
+          secret:
+            secretName: {{ default (include "centaur.secretEnvName" .) .Values.apiRs.mercator.walletSecretName | quote }}
+            items:
+              - key: {{ printf "%s%s" .Values.secretManager.envPrefix .Values.apiRs.mercator.walletSecretKey | quote }}
+                path: wallet.json
+{{- end }}
+{{- if $useOverlayRepoCache }}
         - name: repo-cache
 {{- if $repoCacheUsePvc }}
           persistentVolumeClaim:
@@ -588,6 +611,7 @@ spec:
           hostPath:
             path: {{ .Values.repoCache.hostPath | quote }}
             type: DirectoryOrCreate
+{{- end }}
 {{- end }}
 {{- end }}
 ---
