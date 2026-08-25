@@ -95,7 +95,8 @@ module GoogleDocs
         {
           "pageToken" => page_token,
           "pageSize" => self.class.page_size,
-          "fields" => "nextPageToken,newStartPageToken,changes(fileId,removed,file(#{FILE_FIELDS}))",
+          "fields" => "nextPageToken,newStartPageToken," \
+            "changes(changeType,driveId,fileId,removed,file(#{FILE_FIELDS}))",
           "includeItemsFromAllDrives" => "true",
           "includeRemoved" => "true",
           "supportsAllDrives" => "true",

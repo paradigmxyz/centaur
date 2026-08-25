@@ -1,14 +1,17 @@
 module GoogleDocs
   class SyncJob < BaseJob
     CONCURRENCY_DURATION = 1.hour
-    HANDOFF_DELAY = 2.seconds
+    # Solid Queue orders lower priorities first. Enqueueing the next crawl node
+    # at this priority while the current node holds the semaphore gives the
+    # continuation precedence over poll-created root jobs already waiting.
+    CONTINUATION_PRIORITY = -10
 
     limits_concurrency(
       to: 1,
       key: ->(credential_id, *) { "google_docs_sync_#{credential_id}" },
       group: "GoogleDocsCredentialSync",
       duration: CONCURRENCY_DURATION,
-      on_conflict: :discard
+      on_conflict: :block
     )
 
     def self.high_water_mark(checkpoint)
@@ -126,7 +129,7 @@ module GoogleDocs
     end
 
     def schedule(job_class, *arguments)
-      job_class.set(wait: HANDOFF_DELAY).perform_later(*arguments)
+      job_class.set(priority: CONTINUATION_PRIORITY).perform_later(*arguments)
     end
 
     def restart_initial_sync(credential)

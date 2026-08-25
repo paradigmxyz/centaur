@@ -2378,7 +2378,33 @@ async fn get_google_docs_sync_checkpoint(
     .fetch_optional(&pool)
     .await?;
 
-    Ok(Json(json!({ "ok": true, "checkpoint": checkpoint })))
+    let initial_sync_active = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (\
+         SELECT 1 FROM google_docs_sync_runs AS runs \
+         WHERE runs.broker_credential_id = $1 \
+         AND runs.mode = 'initial' \
+         AND runs.status = 'running' \
+         AND runs.finished_at IS NULL \
+         AND (\
+           runs.started_at >= NOW() - INTERVAL '1 hour' \
+           OR EXISTS (\
+             SELECT 1 FROM google_docs_sync_file_observations AS observations \
+             WHERE observations.broker_credential_id = $1 \
+             AND observations.source_run_id = runs.run_id \
+             AND observations.last_seen_at >= NOW() - INTERVAL '1 hour'\
+           )\
+         )\
+         )",
+    )
+    .bind(&query.broker_credential_id)
+    .fetch_one(&pool)
+    .await?;
+
+    Ok(Json(json!({
+        "ok": true,
+        "checkpoint": checkpoint,
+        "initial_sync_active": initial_sync_active,
+    })))
 }
 
 async fn get_google_docs_content_status(

@@ -3,17 +3,21 @@ require "test_helper"
 module GoogleDocs
   class JobsTest < ActiveJob::TestCase
     class FakeApiClient
-      attr_accessor :checkpoint, :missing
+      attr_accessor :checkpoint, :initial_sync_active, :missing
       attr_reader :batches
 
-      def initialize(checkpoint: nil, missing: nil)
+      def initialize(checkpoint: nil, initial_sync_active: false, missing: nil)
         @checkpoint = checkpoint
+        @initial_sync_active = initial_sync_active
         @missing = missing
         @batches = []
       end
 
       def get_google_docs_sync_checkpoint(broker_credential_id:)
-        { "checkpoint" => checkpoint }
+        {
+          "checkpoint" => checkpoint,
+          "initial_sync_active" => initial_sync_active
+        }
       end
 
       def ingest_google_docs_sync_batch(payload)
@@ -70,6 +74,10 @@ module GoogleDocs
       assert_enqueued_with(job: InitialSyncJob, args: [ credential.id ])
 
       clear_enqueued_jobs
+      api_client.initial_sync_active = true
+      CentaurApiClient.stub(:new, api_client) { PollSyncJob.perform_now(app.slug) }
+      assert_no_enqueued_jobs
+
       api_client.checkpoint = checkpoint_for(credential, changes_page_token: "change-200")
       CentaurApiClient.stub(:new, api_client) { PollSyncJob.perform_now(app.slug) }
       assert_enqueued_with(job: IncrementalSyncJob, args: [ credential.id ])
@@ -117,7 +125,11 @@ module GoogleDocs
       assert_equal [ "doc-123" ], first_page[:observations].pluck(:observed_file_id)
       refute first_page.key?(:observation_sweeps)
       refute first_page.key?(:checkpoint)
-      assert_enqueued_with(job: InitialSyncJob, args: [ credential.id, continuation ])
+      assert_enqueued_with(
+        job: InitialSyncJob,
+        args: [ credential.id, continuation ],
+        priority: SyncJob::CONTINUATION_PRIORITY
+      )
 
       with_clients(api_client, google_http) do
         InitialSyncJob.perform_now(credential.id, continuation)
@@ -216,7 +228,10 @@ module GoogleDocs
           }
         else
           {
-            "changes" => [ { "fileId" => "doc-removed", "removed" => true } ],
+            "changes" => [
+              { "changeType" => "drive", "driveId" => "shared-drive-1" },
+              { "fileId" => "doc-removed", "removed" => true }
+            ],
             "newStartPageToken" => "change-200"
           }
         end
@@ -313,15 +328,16 @@ module GoogleDocs
       assert_equal "google_docs:doc-123:chunk-0000", batch[:context_documents].first[:document_id]
     end
 
-    test "credential crawler jobs share a long-lived discard concurrency group" do
+    test "credential crawler jobs block conflicts and prioritize chain continuations" do
       assert_equal "GoogleDocsCredentialSync", InitialSyncJob.concurrency_group
       assert_equal InitialSyncJob.concurrency_group, IncrementalSyncJob.concurrency_group
-      assert_equal :discard, InitialSyncJob.concurrency_on_conflict
+      assert_equal :block, InitialSyncJob.concurrency_on_conflict
       assert_equal 1.hour, InitialSyncJob.concurrency_duration
 
       initial = InitialSyncJob.new(123)
       continuation = InitialSyncJob.new(123, { "page_token" => "files-2" })
       assert_equal initial.concurrency_key, continuation.concurrency_key
+      assert_equal(-10, SyncJob::CONTINUATION_PRIORITY)
     end
 
     private

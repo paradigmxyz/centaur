@@ -17,10 +17,13 @@ module GoogleDocs
       credentials.find_each do |credential|
         next unless GoogleDocs::SyncCredential.syncable?(credential, oauth_app_slug: oauth_app_slug)
 
-        checkpoint = api_client
+        sync_state = api_client
           .get_google_docs_sync_checkpoint(broker_credential_id: credential.oid)
-          .fetch("checkpoint")
-        job_class = SyncJob.high_water_mark(checkpoint) ? IncrementalSyncJob : InitialSyncJob
+        checkpoint = sync_state.fetch("checkpoint")
+        high_water_mark = SyncJob.high_water_mark(checkpoint)
+        next if !high_water_mark && sync_state["initial_sync_active"] == true
+
+        job_class = high_water_mark ? IncrementalSyncJob : InitialSyncJob
         job_class.perform_later(credential.id)
       rescue CentaurApiClient::Error => e
         Rails.logger.warn do

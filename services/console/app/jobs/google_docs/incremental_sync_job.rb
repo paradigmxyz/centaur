@@ -41,15 +41,20 @@ module GoogleDocs
     end
 
     def partition_changes(sync, changes)
-      file_changes, deactivation_changes = Array(changes).partition do |change|
-        change["removed"] != true && sync.eligible_file?(change["file"])
-      end
-      [
-        file_changes.map { |change| change.fetch("file") },
-        deactivation_changes.map do |change|
-          sync.observation_deactivation(change.fetch("fileId"))
+      files = []
+      deactivations = []
+      Array(changes).each do |change|
+        file_id = change["fileId"].presence || change.dig("file", "id").presence
+        next unless file_id
+
+        file = change["file"]
+        if change["removed"] == true || !sync.eligible_file?(file)
+          deactivations << sync.observation_deactivation(file_id)
+        else
+          files << file
         end
-      ]
+      end
+      [ files, deactivations ]
     end
   end
 end

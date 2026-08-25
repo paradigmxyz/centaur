@@ -113,6 +113,7 @@ module GoogleDocs
       changes_params = calls.find { |endpoint, _| endpoint == GoogleDocs::SyncCredential::CHANGES_LIST_ENDPOINT }.last
       assert_equal "change-100", changes_params["pageToken"]
       assert_equal "true", changes_params["includeRemoved"]
+      assert_includes changes_params["fields"], "changes(changeType,driveId,fileId,removed"
     end
 
     test "classifies a rejected Drive page token for crawl recovery" do
