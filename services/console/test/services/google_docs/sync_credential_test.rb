@@ -150,6 +150,7 @@ module GoogleDocs
         Net::ReadTimeout.new("read timed out"),
         Net::OpenTimeout.new("open timed out"),
         SocketError.new("host unavailable"),
+        Socket::ResolutionError.new("temporary DNS failure"),
         Errno::ECONNRESET.new
       ].each do |network_error|
         google_http = ->(**) { raise network_error }
