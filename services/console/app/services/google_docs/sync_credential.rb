@@ -31,6 +31,11 @@ module GoogleDocs
         ConsoleEnv["GOOGLE_DOCS_SYNC_OAUTH_APP_SLUG"].presence || "google"
       end
 
+      def enabled?
+        raw = ConsoleEnv["GOOGLE_DOCS_SYNC_ENABLED"]
+        raw.nil? ? true : ActiveModel::Type::Boolean.new.cast(raw)
+      end
+
       def required_scopes_granted?(scopes)
         granted = Array(scopes)
         granted.include?(DRIVE_READONLY_SCOPE) ||
@@ -38,7 +43,7 @@ module GoogleDocs
       end
 
       def syncable?(credential, oauth_app_slug: nil)
-        credential.present? && !credential.dead? && credential.access_token.present? &&
+        enabled? && credential.present? && !credential.dead? && credential.access_token.present? &&
           credential.oauth_app&.provider == Oauth::Providers::Google::KEY &&
           credential.oauth_app.enabled? && required_scopes_granted?(credential.scopes) &&
           (oauth_app_slug.nil? || credential.oauth_app.slug == oauth_app_slug)

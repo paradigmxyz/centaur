@@ -75,6 +75,20 @@ module GoogleDocs
       assert_enqueued_with(job: IncrementalSyncJob, args: [ credential.id ])
     end
 
+    test "sync kill switch prevents polling and queued ETL work" do
+      app = create_google_app
+      credential = create_credential(app: app)
+      api_client = -> { flunk "disabled Google Docs sync should not create an API client" }
+      google_http = ->(**) { flunk "disabled Google Docs sync should not call Google" }
+
+      with_sync_enabled("false") do
+        CentaurApiClient.stub(:new, api_client) { PollSyncJob.perform_now(app.slug) }
+        with_clients(api_client, google_http) { InitialSyncJob.perform_now(credential.id) }
+      end
+
+      assert_no_enqueued_jobs
+    end
+
     test "initial sync ingests bounded pages before sweeping and publishing its high-water mark" do
       credential = create_credential
       api_client = FakeApiClient.new
@@ -303,6 +317,15 @@ module GoogleDocs
     end
 
     private
+
+    def with_sync_enabled(value)
+      env_key = "CENTAUR_CONSOLE_GOOGLE_DOCS_SYNC_ENABLED"
+      previous = ENV[env_key]
+      ENV[env_key] = value
+      yield
+    ensure
+      previous.nil? ? ENV.delete(env_key) : ENV[env_key] = previous
+    end
 
     def with_clients(api_client, google_http)
       previous_http = SyncCredential.google_api_http

@@ -170,6 +170,8 @@ spec:
             - name: CENTAUR_CONSOLE_SLACK_DM_SYNC_OAUTH_APP_SLUG
               value: {{ . | quote }}
 {{- end }}
+            - name: CENTAUR_CONSOLE_GOOGLE_DOCS_SYNC_ENABLED
+              value: {{ $console.googleDocsSync.enabled | quote }}
             - name: RAILS_LOG_TO_STDOUT
               value: "1"
 {{- if .Values.apiRs.enabled }}
