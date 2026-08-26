@@ -74,6 +74,11 @@ pub struct AgentSandboxConfig {
     pub tolerations: Vec<Toleration>,
     /// RuntimeClass for sandbox and iron-proxy pods (e.g. `gvisor`).
     pub runtime_class_name: Option<String>,
+    /// PriorityClass for sandbox and iron-proxy pods. A dedicated (low)
+    /// class lets the cluster scope a ResourceQuota to sandbox workloads and
+    /// makes the kubelet/scheduler sacrifice them before the control plane
+    /// under node pressure. Empty leaves the cluster default untouched.
+    pub priority_class_name: Option<String>,
     pub state_volume: Option<StateVolumeConfig>,
     pub iron_proxy: Option<IronProxyConfig>,
     pub iron_control: IronControlSettings,
@@ -130,6 +135,7 @@ impl AgentSandboxConfig {
             node_selector: BTreeMap::new(),
             tolerations: Vec::new(),
             runtime_class_name: None,
+            priority_class_name: None,
             state_volume: None,
             iron_proxy: None,
             iron_control,
@@ -492,7 +498,15 @@ impl SandboxBackend for AgentSandboxBackend {
 
     async fn pause(&self, id: &SandboxId) -> SandboxResult<()> {
         self.patch_sandbox_merge(id, sandbox_pause_patch(jiff::Timestamp::now()))
-            .await
+            .await?;
+        // A paused sandbox has no agent pod, so its egress proxy is idle;
+        // keeping it running holds a node pod slot per suspended sandbox for
+        // the whole retention window (at ~500 pods per kubelet that starves
+        // the cluster of schedulable slots). Delete the proxy resources here:
+        // `resume()` unconditionally recreates them from the principal
+        // recorded at create, and already handles proxies deleted out from
+        // under a suspended sandbox.
+        self.delete_iron_proxy_resources(id).await
     }
 
     async fn resume(&self, id: &SandboxId) -> SandboxResult<()> {
@@ -827,6 +841,15 @@ fn build_agent_sandbox(
             .map(str::trim)
             .filter(|name| !name.is_empty()),
     );
+    insert_optional(
+        &mut pod_spec,
+        "priorityClassName",
+        config
+            .priority_class_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty()),
+    );
 
     let mut agent_spec = json!({
         "replicas": 1,
@@ -1116,6 +1139,7 @@ mod tests {
             ..Default::default()
         }];
         config.runtime_class_name = Some("gvisor".to_owned());
+        config.priority_class_name = Some("centaur-sandbox".to_owned());
 
         let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
         let pod_spec = &sandbox.spec.pod_template.spec;
@@ -1136,6 +1160,10 @@ mod tests {
         assert_eq!(tolerations[0].key.as_deref(), Some("example.com/sandbox"));
         assert_eq!(tolerations[0].effect.as_deref(), Some("NoSchedule"));
         assert_eq!(pod_spec.runtime_class_name.as_deref(), Some("gvisor"));
+        assert_eq!(
+            pod_spec.priority_class_name.as_deref(),
+            Some("centaur-sandbox")
+        );
     }
 
     #[test]
@@ -1149,6 +1177,7 @@ mod tests {
         assert!(pod_spec.node_selector.is_none());
         assert!(pod_spec.tolerations.is_none());
         assert!(pod_spec.runtime_class_name.is_none());
+        assert!(pod_spec.priority_class_name.is_none());
     }
 
     #[test]

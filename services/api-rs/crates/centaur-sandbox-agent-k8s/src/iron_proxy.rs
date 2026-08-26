@@ -388,6 +388,7 @@ impl AgentSandboxBackend {
                     &self.config.node_selector,
                     &self.config.tolerations,
                     self.config.runtime_class_name.as_deref(),
+                    self.config.priority_class_name.as_deref(),
                 ),
             )
             .await
@@ -1233,6 +1234,7 @@ fn build_iron_proxy_pod(
     node_selector: &BTreeMap<String, String>,
     tolerations: &[k8s_openapi::api::core::v1::Toleration],
     runtime_class_name: Option<&str>,
+    priority_class_name: Option<&str>,
 ) -> Pod {
     let annotations = BTreeMap::from([
         (
@@ -1245,6 +1247,10 @@ fn build_iron_proxy_pod(
         ),
     ]);
     let runtime_class = runtime_class_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned);
+    let priority_class = priority_class_name
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .map(str::to_owned);
@@ -1265,6 +1271,7 @@ fn build_iron_proxy_pod(
             node_selector: (!node_selector.is_empty()).then(|| node_selector.clone()),
             tolerations: (!tolerations.is_empty()).then(|| tolerations.to_vec()),
             runtime_class_name: runtime_class,
+            priority_class_name: priority_class,
             ..Default::default()
         }),
         ..Default::default()
@@ -2347,6 +2354,7 @@ mod tests {
             &BTreeMap::new(),
             &[],
             None,
+            None,
         );
 
         let resources = pod.spec.as_ref().unwrap().containers[0]
@@ -2388,6 +2396,7 @@ mod tests {
             &BTreeMap::new(),
             &[],
             None,
+            None,
         );
 
         assert!(pod.spec.as_ref().unwrap().containers[0].resources.is_none());
@@ -2412,6 +2421,7 @@ mod tests {
             &sync,
             &BTreeMap::new(),
             &[],
+            None,
             None,
         );
         assert_eq!(
@@ -2493,6 +2503,7 @@ mod tests {
             &BTreeMap::new(),
             &[],
             None,
+            None,
         );
         let pod_labels = pod.metadata.labels.as_ref().unwrap();
         assert!(!pod_labels.contains_key(OBSERVABILITY_ENABLED_LABEL));
@@ -2556,6 +2567,7 @@ mod tests {
             &node_selector,
             &tolerations,
             Some("gvisor"),
+            Some("centaur-sandbox"),
         );
         let pod_spec = pod.spec.unwrap();
         assert_eq!(
@@ -2568,6 +2580,10 @@ mod tests {
         );
         assert_eq!(pod_spec.tolerations.as_ref().unwrap().len(), 1);
         assert_eq!(pod_spec.runtime_class_name.as_deref(), Some("gvisor"));
+        assert_eq!(
+            pod_spec.priority_class_name.as_deref(),
+            Some("centaur-sandbox")
+        );
     }
 
     #[test]
@@ -2588,6 +2604,7 @@ mod tests {
             &sync,
             &BTreeMap::new(),
             &[],
+            None,
             None,
         );
         let pod_spec = pod.spec.unwrap();

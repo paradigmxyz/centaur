@@ -200,6 +200,9 @@ spec:
         centaur.ai/observability-enabled: "true"
     spec:
       terminationGracePeriodSeconds: {{ .Values.apiRs.terminationGracePeriodSeconds }}
+{{- with .Values.apiRs.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+{{- end }}
       automountServiceAccountToken: true
       serviceAccountName: {{ $apiRsName }}
       {{- with .Values.global.imagePullSecrets }}
@@ -371,6 +374,10 @@ spec:
 {{- if and .Values.sandbox.runtimeClassName (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_RUNTIME_CLASS_NAME")) }}
             - name: SESSION_SANDBOX_RUNTIME_CLASS_NAME
               value: {{ .Values.sandbox.runtimeClassName | quote }}
+{{- end }}
+{{- if and .Values.sandbox.priorityClassName (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_PRIORITY_CLASS_NAME")) }}
+            - name: SESSION_SANDBOX_PRIORITY_CLASS_NAME
+              value: {{ .Values.sandbox.priorityClassName | quote }}
 {{- end }}
             # Sandboxes call back into this control plane via the in-cluster Service.
             - name: SESSION_SANDBOX_CENTAUR_API_URL
