@@ -160,6 +160,8 @@ console:
   oktaOauth:
     enabled: false
     issuer: ""
+    # Must match token_endpoint_auth_method on the Okta client application.
+    tokenEndpointAuthMethod: client_secret_basic
   # OAuth app slug whose user-level Slack credentials are used by the DM sync
   # worker. Keep this aligned with the Console OAuth app users authorize.
   slackDmSync:

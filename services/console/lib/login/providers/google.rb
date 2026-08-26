@@ -18,6 +18,7 @@ module Login
       def extra_authorization_params = {}
       def pkce? = true
       def token_exchange_client_secret(secret) = secret
+      def token_endpoint_auth_method = "client_secret_post"
 
       def identity_from(result, client_id:, nonce: nil)
         Login::IdToken.identity(result.id_token, client_id: client_id, valid_issuers: VALID_ISSUERS)

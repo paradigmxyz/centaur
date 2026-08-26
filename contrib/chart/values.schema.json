@@ -12,7 +12,11 @@
           "type": "object",
           "properties": {
             "enabled": { "type": "boolean" },
-            "issuer": { "type": "string" }
+            "issuer": { "type": "string" },
+            "tokenEndpointAuthMethod": {
+              "type": "string",
+              "enum": ["client_secret_basic", "client_secret_post"]
+            }
           }
         },
         "image": {

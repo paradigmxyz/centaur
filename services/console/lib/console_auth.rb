@@ -8,6 +8,9 @@
 #   credentials.console_auth.<provider>.client_id/secret  (fallback)
 # Okta additionally requires an OIDC issuer URL:
 #   CENTAUR_CONSOLE_OKTA_ISSUER
+# Its token-endpoint client authentication method defaults to Okta's default,
+# client_secret_basic, and may be changed for an app registered to use POST:
+#   CENTAUR_CONSOLE_OKTA_TOKEN_ENDPOINT_AUTH_METHOD=client_secret_post
 # A provider is offered on the login page only when both are present.
 #
 # SSO email domains are optional. When configured, every SSO login must use an
@@ -43,6 +46,10 @@ module ConsoleAuth
   def client_id(provider) = setting(provider, "client_id")
   def client_secret(provider) = setting(provider, "client_secret")
   def issuer(provider) = setting(provider, "issuer")
+
+  def token_endpoint_auth_method(provider)
+    setting(provider, "token_endpoint_auth_method").presence || "client_secret_basic"
+  end
 
   def password_login_enabled?
     raw = ConsoleEnv["PASSWORD_LOGIN_ENABLED"]

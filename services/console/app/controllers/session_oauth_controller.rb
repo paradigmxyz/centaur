@@ -127,6 +127,7 @@ class SessionOauthController < ApplicationController
       code: code.to_s,
       redirect_uri: callback_redirect_uri,
       code_verifier: code_verifier.to_s,
+      client_auth_method: @provider.token_endpoint_auth_method,
       # Login requests no offline access, so the IdP returns no refresh token.
       require_refresh_token: false
     )

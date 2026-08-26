@@ -21,6 +21,7 @@ module Login
       # Sign in with Slack uses a confidential OIDC exchange for standard HTTPS
       # callbacks, even when the Slack app has opted into optional PKCE support.
       def token_exchange_client_secret(secret) = secret
+      def token_endpoint_auth_method = "client_secret_post"
 
       def identity_from(result, client_id:, nonce: nil)
         identity = Login::IdToken.identity(result.id_token, client_id: client_id, valid_issuers: VALID_ISSUERS)

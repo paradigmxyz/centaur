@@ -10,6 +10,7 @@ module Login
       SCOPES = %w[openid email profile].freeze
       ALGORITHMS = %w[RS256].freeze
       REQUIRED_CLAIMS = %w[iss aud exp iat sub nonce].freeze
+      TOKEN_ENDPOINT_AUTH_METHODS = %w[client_secret_basic client_secret_post].freeze
       MAX_USERINFO_BYTES = 64.kilobytes
 
       def key = KEY
@@ -19,6 +20,13 @@ module Login
       def extra_authorization_params = {}
       def pkce? = true
       def token_exchange_client_secret(secret) = secret
+
+      def token_endpoint_auth_method
+        method = ConsoleAuth.token_endpoint_auth_method(KEY)
+        return method if TOKEN_ENDPOINT_AUTH_METHODS.include?(method)
+
+        raise exchange_error("Okta token endpoint authentication method is invalid", "token_endpoint_auth_method_invalid")
+      end
 
       def identity_from(result, client_id:, nonce:)
         claims = verified_claims(result.id_token, client_id: client_id)

@@ -78,6 +78,7 @@ for the operator workflow.
 | `networkPolicy.metricsIngressSourceNamespaces` | Helm value. | Allows Prometheus-compatible collectors in the listed namespaces to scrape internal metrics Services. Collectors in the Centaur namespace are always allowed. |
 | `console.oktaOauth.enabled` | Helm value, default `false`. | Enables Okta OIDC login for the Console. |
 | `console.oktaOauth.issuer` | Helm value. | Okta organization or custom authorization-server issuer used for OIDC discovery. |
+| `console.oktaOauth.tokenEndpointAuthMethod` | Helm value, default `client_secret_basic`. | Client authentication method configured on the Okta application: `client_secret_basic` or `client_secret_post`. |
 | `CENTAUR_CONSOLE_OKTA_CLIENT_ID`, `CENTAUR_CONSOLE_OKTA_CLIENT_SECRET` | `secretManager.existingSecretName` when Okta login is enabled. | Okta OIDC web application credentials. |
 | `apiRs.syncInfraSecrets`, `IRON_CONTROL_SYNC_INFRA_SECRETS` | Helm value, default `true`. | Upserts the shared `infra` role and its harness/platform secrets. Set false only when another process owns that shared Console state. |
 | `IRON_CONTROL_URL`, `IRON_CONTROL_API_KEY` | Chart-rendered for api-rs; operator shell for `centaur-perms`. | Connects the runtime or CLI to the Console. |

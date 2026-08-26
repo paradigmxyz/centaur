@@ -14,6 +14,7 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
     CENTAUR_CONSOLE_GOOGLE_CLIENT_ID CENTAUR_CONSOLE_GOOGLE_CLIENT_SECRET
     CENTAUR_CONSOLE_SLACK_CLIENT_ID CENTAUR_CONSOLE_SLACK_CLIENT_SECRET
     CENTAUR_CONSOLE_OKTA_CLIENT_ID CENTAUR_CONSOLE_OKTA_CLIENT_SECRET CENTAUR_CONSOLE_OKTA_ISSUER
+    CENTAUR_CONSOLE_OKTA_TOKEN_ENDPOINT_AUTH_METHOD
     CENTAUR_CONSOLE_BOOTSTRAP_ADMINS CENTAUR_CONSOLE_SSO_EMAIL_DOMAINS
   ].freeze
 
@@ -172,6 +173,37 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
 
     assert_redirected_to login_path
     assert_equal "Sign in is temporarily unavailable. Please try again.", flash[:alert]
+  end
+
+  test "Okta client_secret_post configuration controls the token request" do
+    configure_okta
+    ENV["CENTAUR_CONSOLE_OKTA_TOKEN_ENDPOINT_AUTH_METHOD"] = "client_secret_post"
+    metadata = {
+      "issuer" => OKTA_ISSUER,
+      "authorization_endpoint" => "#{OKTA_ISSUER}/v1/authorize",
+      "token_endpoint" => "#{OKTA_ISSUER}/v1/token"
+    }
+    identity = {
+      subject: "okta-post-user",
+      email: "okta-post@example.com",
+      email_verified: true,
+      name: "Okta Post User"
+    }
+
+    Login::OidcDiscovery.stub(:metadata, metadata) do
+      Login::Providers.fetch("okta").stub(:identity_from, identity) do
+        state = start_flow(provider: "okta")
+        stub_exchange(status: 200, body: { access_token: "AT", id_token: "ID" }.to_json) do |request|
+          assert_equal OKTA_CLIENT_ID, request.dig(:form, "client_id")
+          assert_equal "okta-login-secret", request.dig(:form, "client_secret")
+          assert_nil request.dig(:headers, "Authorization")
+        end
+
+        get auth_callback_url(provider: "okta"), params: { code: "the-code", state: state }
+      end
+    end
+
+    assert_redirected_to console_threads_path
   end
 
   # --- callback: provisioning ------------------------------------------------
