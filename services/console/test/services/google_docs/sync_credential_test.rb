@@ -145,6 +145,25 @@ module GoogleDocs
       end
     end
 
+    test "uses an extended read timeout for Google API fetches" do
+      response = HttpClient::Response.new(
+        status: 200,
+        body: { "startPageToken" => "change-100" }.to_json,
+        headers: {}
+      )
+      api = Object.new
+      api.define_singleton_method(:get) { |*, **| response }
+      factory = lambda do |read_timeout:|
+        assert_equal GoogleDocs::SyncCredential::FETCH_READ_TIMEOUT_SECONDS, read_timeout
+        api
+      end
+      sync = GoogleDocs::SyncCredential.new(credential)
+
+      HttpClient.stub(:new, factory) do
+        assert_equal "change-100", sync.user_start_page_token
+      end
+    end
+
     test "classifies transient network failures for job retries" do
       [
         Net::ReadTimeout.new("read timed out"),

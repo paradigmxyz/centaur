@@ -10,6 +10,7 @@ module GoogleDocs
     GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document"
     EXPORT_MIME_TYPE = "text/plain"
     USER_CORPUS = "user"
+    FETCH_READ_TIMEOUT_SECONDS = 60
 
     FILES_LIST_ENDPOINT = "https://www.googleapis.com/drive/v3/files"
     CHANGES_LIST_ENDPOINT = "https://www.googleapis.com/drive/v3/changes"
@@ -290,7 +291,7 @@ module GoogleDocs
     end
 
     def net_http_get(endpoint, params)
-      response = HttpClient.new.get(
+      response = HttpClient.new(read_timeout: FETCH_READ_TIMEOUT_SECONDS).get(
         endpoint,
         params: params,
         headers: { "Authorization" => "Bearer #{credential.access_token}" }
