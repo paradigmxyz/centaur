@@ -2,7 +2,7 @@ require "test_helper"
 
 module Console
   # Covers the admin-only operator management screen: who can reach it, and the
-  # approve/disable/promote state transitions (including the self-disable guard).
+  # approve/disable/promote/demote state transitions (including self-action guards).
   class UsersControllerTest < ActionDispatch::IntegrationTest
     def sign_in(user)
       post login_url, params: { email: user.email, password: "password123456" }
@@ -48,6 +48,19 @@ module Console
       assert_select "span", text: "Google"   # acme_admin is linked via Google
       assert_select "span", text: "Slack"    # pending_user is linked via Slack
       assert_select "span", text: "Password" # member_user has no linked identity
+    end
+
+    test "the index offers role changes without offering self-demotion" do
+      sign_in users(:acme_admin)
+      get console_users_url
+
+      assert_select "form[action=?]", demote_console_user_path(users(:globex_admin).oid) do
+        assert_select "button", text: "Make user"
+      end
+      assert_select "form[action=?]", demote_console_user_path(users(:acme_admin).oid), count: 0
+      assert_select "form[action=?]", promote_console_user_path(users(:member_user).oid) do
+        assert_select "button", text: "Make admin"
+      end
     end
 
     test "approve activates a pending user and records the approver" do
@@ -111,12 +124,35 @@ module Console
       assert target.active?
     end
 
+    test "demote makes an admin a user" do
+      sign_in users(:acme_admin)
+      target = users(:globex_admin)
+      post demote_console_user_url(target.oid)
+      assert_redirected_to console_users_path
+      assert_not target.reload.admin?
+      assert_equal "#{target.email} is now a user.", flash[:notice]
+    end
+
+    test "an admin cannot demote their own account" do
+      admin = users(:acme_admin)
+      sign_in admin
+      post demote_console_user_url(admin.oid)
+      assert_redirected_to console_users_path
+      assert_equal "You can't demote your own account.", flash[:alert]
+      assert admin.reload.admin?
+    end
+
     test "a non-admin cannot perform actions" do
       sign_in users(:member_user)
       target = users(:pending_user)
       post approve_console_user_url(target.oid)
       assert_redirected_to console_threads_path
       assert target.reload.pending?
+
+      admin = users(:globex_admin)
+      post demote_console_user_url(admin.oid)
+      assert_redirected_to console_threads_path
+      assert admin.reload.admin?
     end
   end
 end

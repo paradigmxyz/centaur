@@ -5,7 +5,7 @@
 //! the shared sandbox trait.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     process::Stdio,
     sync::{
         Arc,
@@ -40,6 +40,7 @@ struct LocalSandbox {
     stdout: Option<ChildStdout>,
     stderr: Option<ChildStderr>,
     status: SandboxStatus,
+    labels: BTreeMap<String, String>,
 }
 
 impl LocalSandboxBackend {
@@ -101,6 +102,7 @@ impl SandboxBackend for LocalSandboxBackend {
                 stdout,
                 stderr,
                 status: SandboxStatus::Running,
+                labels: spec.labels,
             })),
         );
 
@@ -146,11 +148,11 @@ impl SandboxBackend for LocalSandboxBackend {
     }
 
     async fn observe(&self, id: &SandboxId) -> SandboxResult<ObservedSandbox> {
-        Ok(ObservedSandbox::new(
-            id.clone(),
-            self.name(),
-            self.status(id).await?,
-        ))
+        let sandbox = self.sandbox(id).await?;
+        let mut sandbox = sandbox.lock().await;
+        let status = refresh_status(&mut sandbox).await?;
+        Ok(ObservedSandbox::new(id.clone(), self.name(), status)
+            .with_labels(sandbox.labels.clone()))
     }
 
     async fn list_observed(&self) -> SandboxResult<Vec<ObservedSandbox>> {
@@ -288,6 +290,25 @@ mod tests {
             .unwrap();
 
         assert_eq!(read, b"ping\n");
+        manager.stop(&handle.id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_backend_preserves_observation_labels() {
+        let backend = Arc::new(LocalSandboxBackend::new());
+        let manager = SandboxManager::new(backend);
+        let spec = cat_spec().label("centaur.ai/component", "workflow-run");
+        let handle = manager.create_running(spec).await.unwrap();
+
+        let observed = manager.observe(&handle.id).await.unwrap();
+        assert_eq!(
+            observed
+                .labels
+                .get("centaur.ai/component")
+                .map(String::as_str),
+            Some("workflow-run")
+        );
+
         manager.stop(&handle.id).await.unwrap();
     }
 

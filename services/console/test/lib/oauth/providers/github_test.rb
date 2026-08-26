@@ -10,13 +10,45 @@ module Oauth
         )
       end
 
-      test "builds a deterministic pending identity without calling GitHub" do
-        identity = Github.new.identity_from(result, client_id: "unused")
+      test "resolves the authenticated GitHub user" do
+        http = expect_http_call(
+          status: 200,
+          body: { id: 99_123, login: "octocat", name: "Octo Cat", email: "octo@example.com" }.to_json
+        ) do |request|
+          assert_equal :get, request[:method]
+          assert_equal Github::USER_ENDPOINT, request[:url]
+          assert_equal "Bearer gho_token", request[:headers]["Authorization"]
+          assert_equal "application/vnd.github+json", request[:headers]["Accept"]
+        end
 
-        assert_match(/\Apending-[a-f0-9]{32}\z/, identity[:subject])
+        identity = Github.new.identity_from(
+          result,
+          client_id: "unused",
+          http_client: HttpClient.new(http: http)
+        )
+
+        assert_equal "99123", identity[:subject]
+        assert_equal "octo@example.com", identity[:email]
+        assert_equal "Octo Cat", identity[:name]
+        assert_equal({ "github_login" => "octocat" }, identity[:labels])
+        http.verify
+      end
+
+      test "falls back to the GitHub login for the display name" do
+        http = expect_http_call(
+          status: 200,
+          body: { id: 99_123, login: "octocat", name: nil, email: nil }.to_json
+        )
+
+        identity = Github.new.identity_from(
+          result,
+          client_id: "unused",
+          http_client: HttpClient.new(http: http)
+        )
+
+        assert_equal "octocat", identity[:name]
         assert_nil identity[:email]
-        assert_equal "Pending GitHub account", identity[:name]
-        assert_equal identity, Github.new.identity_from(result, client_id: "unused")
+        http.verify
       end
 
       test "missing access token raises a parse error" do
@@ -24,6 +56,37 @@ module Oauth
           Github.new.identity_from(result(access_token: nil), client_id: "unused")
         end
         assert_equal "missing_access_token", err.code
+      end
+
+      test "identity endpoint failure raises an exchange error" do
+        http = expect_http_call(status: 503, body: "temporarily unavailable")
+
+        err = assert_raises(Broker::ExchangeError) do
+          Github.new.identity_from(
+            result,
+            client_id: "unused",
+            http_client: HttpClient.new(http: http)
+          )
+        end
+
+        assert_equal "identity_lookup_failed", err.code
+        assert_equal 503, err.status
+        http.verify
+      end
+
+      test "identity endpoint network failure raises a network exchange error" do
+        transport = ->(**) { raise Errno::ECONNREFUSED }
+
+        err = assert_raises(Broker::ExchangeError) do
+          Github.new.identity_from(
+            result,
+            client_id: "unused",
+            http_client: HttpClient.new(http: transport)
+          )
+        end
+
+        assert_equal "identity_lookup_failed", err.code
+        assert_equal "network", err.stage
       end
 
       test "parses comma or space separated granted scopes" do

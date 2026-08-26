@@ -1,4 +1,5 @@
 import type { RustSessionStreamEvent } from "@centaur/harness-events";
+import { isRetryableCodexErrorNotification } from "@centaur/rendering";
 import type { Attachment, Message } from "chat";
 import type {
   ForwardSessionInput,
@@ -189,6 +190,7 @@ export async function forwardToSessionApi(
     input.threadId,
     input.executeMessage,
     input.model,
+    input.provider,
     input.contextPreamble,
   );
   traceLog(options, "githubbot_session_execute_complete", input.trace, {
@@ -219,6 +221,7 @@ export async function executeSessionTurn(
     input.threadId,
     input.executeMessage,
     input.model,
+    input.provider,
     input.contextPreamble,
   );
   traceLog(options, "githubbot_session_execute_complete", input.trace, {
@@ -508,13 +511,14 @@ async function executeSession(
   threadId: string,
   message: GithubbotApiMessage,
   model?: string,
+  provider?: string,
   contextPreamble?: string,
 ): Promise<GithubbotExecuteSessionResponse> {
   const fetchFn = options.fetch ?? fetch;
   const body: GithubbotExecuteSessionRequest = {
     idempotency_key: message.id,
     metadata: sessionMetadata(message, { action: "execute" }),
-    input_lines: toCodexInputLines(message, threadId, model, contextPreamble),
+    input_lines: toCodexInputLines(message, threadId, model, provider, contextPreamble),
     ...(options.idleTimeoutMs === undefined
       ? {}
       : { idle_timeout_ms: options.idleTimeoutMs }),
@@ -674,10 +678,7 @@ function ensureTrailingSlash(value: string): string {
 }
 
 function apiHeaders(options: GithubbotOptions, jsonBody = true): HeadersInit {
-  const apiKey =
-    options.apiKey ??
-    process.env.GITHUBBOT_API_KEY ??
-    process.env.CENTAUR_API_KEY;
+  const apiKey = options.apiKey ?? process.env.GITHUBBOT_API_KEY;
   return {
     ...(jsonBody ? { "content-type": "application/json" } : {}),
     ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
@@ -743,6 +744,7 @@ function toCodexInputLines(
   message: GithubbotApiMessage,
   threadId: string,
   model?: string,
+  provider?: string,
   contextPreamble?: string,
 ): string[] {
   const staged = new Map<GithubbotApiAttachment, string>();
@@ -776,6 +778,7 @@ function toCodexInputLines(
     threadId,
     staged,
     model,
+    provider,
     contextPreamble,
   );
   if (inlineLine.length > MAX_CODEX_INPUT_LINE_CHARS) {
@@ -789,6 +792,7 @@ function toCodexInputLines(
         threadId,
         staged,
         model,
+        provider,
         contextPreamble,
       );
       if (inlineLine.length <= MAX_CODEX_INPUT_LINE_CHARS) break;
@@ -803,6 +807,7 @@ function toCodexInputLineWithStaged(
   threadId: string,
   staged: Map<GithubbotApiAttachment, string>,
   model?: string,
+  provider?: string,
   contextPreamble?: string,
 ): string {
   return JSON.stringify({
@@ -810,6 +815,7 @@ function toCodexInputLineWithStaged(
     thread_key: threadId,
     trace_metadata: sessionMetadata(message, { action: "execute" }),
     ...(model ? { model } : {}),
+    ...(provider ? { provider } : {}),
     message: {
       role: "user",
       content: codexInputContent(message, staged, contextPreamble),
@@ -1081,6 +1087,7 @@ function isTerminalCodexOutputLine(line: string): boolean {
     return false;
   }
   if (!isJsonObject(payload)) return false;
+  if (isRetryableCodexErrorNotification(payload)) return false;
 
   return (
     payload.type === "turn.completed" ||

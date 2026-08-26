@@ -1,0 +1,6 @@
+<% content_for :title, "Edit #{@task.name} · Centaur Console" %>
+<div class="mb-6">
+  <h1 class="page-title">Edit Scheduled Task</h1>
+  <p class="page-subtitle"><%= @task.name %></p>
+</div>
+<%= render "form", task: @task %>

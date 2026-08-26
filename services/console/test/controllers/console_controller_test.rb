@@ -264,22 +264,20 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
       channel_id: "G9876543210",
       history_enabled: true
     )
-    catalog = SlackChannelCatalog::Result.new(
-      channels: [
-        SlackChannelCatalog::Channel.new(id: "C0123456789", name: "general", private: false),
-        SlackChannelCatalog::Channel.new(id: "G9876543210", name: "private", private: true)
-      ],
-      error: nil,
-      configured: true
-    )
-
-    with_slack_channel_catalog(catalog) { get console_principal_url(principal.oid) }
+    get console_principal_url(principal.oid)
     assert_response :ok
 
     assert_select "td", text: /#general/
     assert_select "h3", text: "Inherited From Roles"
     assert_select "td", text: /#private/
     assert_select "input[type=checkbox][disabled]", minimum: 3
+    assert_select "input[role=combobox][aria-controls]"
+    assert_select "[data-slack-channel-autocomplete-url-value=?]",
+                  console_principal_slack_channel_options_path(principal.oid)
+    assert_select "input[type=submit][data-slack-channel-autocomplete-target=submit]:not([disabled])",
+                  value: "Save Slack channel permissions"
+    assert_select "select[name$='[channel_id]']", count: 0
+    assert_select "body", text: /#unused/, count: 0
   end
 
   test "credentials table combines id, shows status, and links to detail" do
@@ -496,16 +494,5 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
       assert_select "input[name=_method][value=delete]", count: 1
       assert_select "button", text: "Sign out"
     end
-  end
-
-  private
-
-  def with_slack_channel_catalog(catalog)
-    singleton = SlackChannelCatalogProvider.singleton_class
-    original = singleton.instance_method(:fetch)
-    singleton.define_method(:fetch) { catalog }
-    yield
-  ensure
-    singleton.define_method(:fetch, original)
   end
 end

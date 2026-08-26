@@ -1,0 +1,63 @@
+<% content_for :title, "Scheduled · Centaur Console" %>
+
+<%= render "console/page_header",
+           title: "Scheduled Tasks",
+           subtitle: "Schedule single-turn prompts and deliver their results to Slack.",
+           icon: "clock",
+           actions: link_to("New Task", new_console_scheduled_task_path, class: "btn-primary") %>
+
+<section>
+  <div class="console-panel">
+    <table class="console-table">
+      <thead class="console-table-head">
+        <tr>
+          <th class="console-th">Name</th>
+          <th class="console-th">Schedule</th>
+          <th class="console-th">Delivery</th>
+          <th class="console-th"><span class="sr-only">Actions</span></th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-ink-700">
+        <% if @tasks.empty? %>
+          <tr>
+            <td colspan="4" class="px-5 py-8 text-center text-zinc-600">No scheduled tasks yet.</td>
+          </tr>
+        <% end %>
+        <% @tasks.each do |task| %>
+          <tr class="console-row-hover">
+            <td class="console-td">
+              <%= link_to task.name, edit_console_scheduled_task_path(task.oid), class: "console-link font-medium" %>
+              <% if task.last_error.present? %>
+                <div class="mt-1 text-xs text-red-400" title="<%= task.last_error %>">Last dispatch failed</div>
+              <% elsif task.last_run_at.present? %>
+                <div class="mt-1 text-xs text-zinc-600">Last run <%= local_time(task.last_run_at, relative: true, format: :compact) %></div>
+              <% end %>
+            </td>
+            <td class="console-td text-xs text-zinc-400">
+              <div class="<%= "font-mono" if task.schedule_label == task.cron_expression %>"><%= task.schedule_label %></div>
+              <% unless task.enabled? %>
+                <div class="mt-1 text-zinc-600">Disabled</div>
+              <% end %>
+            </td>
+            <td class="console-td text-xs text-zinc-400">
+              <% destination_name = @slack_destination_names[task.delivery_channel] %>
+              <div><%= destination_name.presence || task.delivery_channel %></div>
+              <% if destination_name.present? %>
+                <div class="mt-1 text-zinc-600"><%= task.delivery_channel %></div>
+              <% end %>
+            </td>
+            <td class="console-td">
+              <div class="flex justify-end gap-2">
+                <%= button_to "Run now", run_console_scheduled_task_path(task.oid), method: :post, class: "btn-secondary py-1.5" %>
+                <%= link_to "Edit", edit_console_scheduled_task_path(task.oid), class: "btn-secondary py-1.5" %>
+                <%= button_to "Delete", console_scheduled_task_path(task.oid), method: :delete,
+                      class: "btn-secondary py-1.5 text-red-300",
+                      data: { turbo_confirm: "Delete #{task.name}?" } %>
+              </div>
+            </td>
+          </tr>
+        <% end %>
+      </tbody>
+    </table>
+  </div>
+</section>

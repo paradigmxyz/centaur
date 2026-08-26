@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { Buffer } from 'node:buffer'
 import { randomUUID } from 'node:crypto'
 import { Hono, type Context } from 'hono'
 import {
@@ -29,6 +30,7 @@ import {
   type RendererEvent
 } from '@centaur/rendering'
 import { conflateChatSdkStream } from './conflate'
+import { resolveHarnessRollout } from './harness-rollout'
 import { observeSeconds, slackbotMetrics } from './metrics'
 import {
   renderSlackDisplayText,
@@ -398,14 +400,23 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     const route = c.req.path
     const rawBody = await c.req.raw.clone().text()
     const eventType = slackWebhookEventType(rawBody)
+    const webhookFields = {
+      ...slackWebhookLogFields(rawBody),
+      slack_retry_num: c.req.header('x-slack-retry-num') || undefined,
+      slack_retry_reason: c.req.header('x-slack-retry-reason') || undefined
+    }
     let outcome = 'success'
     try {
+      traceLog(options, 'slackbotv2_webhook_received', undefined, {
+        body_bytes: Buffer.byteLength(rawBody, 'utf8'),
+        route,
+        ...webhookFields
+      })
       if (!isAllowedSlackWebhookBody(rawBody, options, logger)) {
         outcome = 'ignored'
         return new globalThis.Response('ok', { status: 200 })
       }
       const awaitHandoff = shouldAwaitSlackHandoff(rawBody)
-      const webhookFields = slackWebhookLogFields(rawBody)
       const handoffTasks: Promise<unknown>[] = []
       const context: SlackbotV2RequestContext = {
         waitUntil: promise => waitUntil(c, promise)
@@ -1108,9 +1119,19 @@ async function syncThreadMessageToSession(
   // Without an explicit override or channel default the harness runs its
   // configured default (CLAUDE_MODEL/CODEX_MODEL, else the baked harness
   // config); show and record that instead of dropping the model entirely.
-  const effectiveModel =
-    resolvedModel ??
-    defaultModelForHarness(effectiveHarnessType, input.options.harnessDefaultModels)
+  const harnessDefaultModel = defaultModelForHarness(
+    effectiveHarnessType,
+    input.options.harnessDefaultModels
+  )
+  const effectiveModel = resolvedModel ?? harnessDefaultModel
+  const modelOverride = resolvedModel !== harnessDefaultModel ? resolvedModel : undefined
+  const harnessRollout = resolveHarnessRollout({
+    modelOverride,
+    requestedHarness: effectiveHarnessType,
+    rolloutPercent: input.options.codexNanocodexRolloutPercent ?? 0,
+    threadId: thread.id
+  })
+  const rolloutSelected = harnessRollout.assignment !== undefined
   const resolvedReasoning = reasoningForModel(
     effectiveHarnessType,
     effectiveModel,
@@ -1204,13 +1225,20 @@ async function syncThreadMessageToSession(
     executeMessage: shouldStartExecution ? serializedMessage : undefined,
     // Sticky harness changes only apply when a message starts an execution;
     // restarting the thread out from under an active execution would kill it.
-    harnessType: shouldStartExecution ? resolvedHarnessType : undefined,
+    harnessType: shouldStartExecution
+      ? rolloutSelected
+        ? harnessRollout.harnessType
+        : resolvedHarnessType
+      : undefined,
+    harnessAssignment: shouldStartExecution ? harnessRollout.assignment : undefined,
     metadataHarnessType: shouldStartExecution ? effectiveHarnessType : undefined,
     messages: messagesToAppend,
     model: shouldStartExecution ? resolvedModel : undefined,
     metadataModel: shouldStartExecution ? effectiveModel : undefined,
     provider: shouldStartExecution ? resolvedProvider : undefined,
     reasoning: resolvedReasoning,
+    restartOnHarnessConflict:
+      shouldStartExecution && rolloutSelected ? Boolean(resolvedHarnessType) : undefined,
     onEventId: eventId => {
       lastEventId = Math.max(lastEventId, eventId)
     },
@@ -3064,6 +3092,7 @@ function slackWebhookLogFields(rawBody: string): JsonObject {
   const payload = parseSlackWebhookPayload(rawBody)
   if (!payload) return { slack_payload_parse_error: true }
   const event = isJsonObject(payload.event) ? payload.event : {}
+  const eventChannel = isJsonObject(event.channel) ? event.channel : {}
   const team = isJsonObject(payload.team) ? payload.team : {}
   const channel = isJsonObject(payload.channel) ? payload.channel : {}
   const message = isJsonObject(payload.message) ? payload.message : {}
@@ -3073,7 +3102,11 @@ function slackWebhookLogFields(rawBody: string): JsonObject {
   setStringField(fields, 'slack_event_id', payload.event_id)
   setStringField(fields, 'slack_event_type', event.type ?? payload.type)
   setStringField(fields, 'slack_action_id', action?.action_id)
-  setStringField(fields, 'slack_channel', event.channel ?? channel.id ?? container.channel_id)
+  setStringField(
+    fields,
+    'slack_channel',
+    stringValue(event.channel) ?? eventChannel.id ?? channel.id ?? container.channel_id
+  )
   setStringField(fields, 'slack_message_ts', event.ts ?? message.ts ?? container.message_ts)
   setStringField(
     fields,

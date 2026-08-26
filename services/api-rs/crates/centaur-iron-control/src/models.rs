@@ -480,8 +480,6 @@ pub struct Principal {
     pub labels: BTreeMap<String, String>,
     #[serde(default = "default_true")]
     pub sandbox_observability_enabled: bool,
-    #[serde(default = "default_true")]
-    pub sandbox_api_server_enabled: bool,
 }
 
 /// Request body for creating/updating one Slack permission row on a principal.

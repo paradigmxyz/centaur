@@ -125,7 +125,7 @@ class PgDsnSecret < ApplicationRecord
     when "slack_team_id" then principal.slack_team_id.to_s
     when "slack_email" then principal.slack_email.to_s
     when "console_user_id" then principal.console_user&.oid.to_s
-    when "console_user_email" then principal.console_user_email.to_s
+    when "console_user_email" then principal.console_user&.email.to_s
     when "slack_history_channel_ids" then JSON.generate(principal.slack_history_channel_ids)
     else "" # Invalid persisted or unsaved settings fail closed.
     end

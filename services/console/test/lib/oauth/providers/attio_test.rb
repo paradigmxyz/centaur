@@ -10,13 +10,30 @@ module Oauth
         )
       end
 
-      test "builds a deterministic pending identity without calling Attio" do
-        identity = Attio.new.identity_from(result, client_id: "unused")
+      test "resolves the authenticated Attio workspace" do
+        http = expect_http_call(
+          status: 200,
+          body: {
+            workspace_id: "WS_ABC123",
+            workspace_name: "Acme Sales",
+            workspace_slug: "acme-sales"
+          }.to_json
+        ) do |request|
+          assert_equal :get, request[:method]
+          assert_equal Attio::SELF_ENDPOINT, request[:url]
+          assert_equal "Bearer attio-token", request[:headers]["Authorization"]
+        end
 
-        assert_match(/\Apending-[a-f0-9]{32}\z/, identity[:subject])
+        identity = Attio.new.identity_from(
+          result,
+          client_id: "unused",
+          http_client: HttpClient.new(http: http)
+        )
+
+        assert_equal "WS_ABC123", identity[:subject]
         assert_nil identity[:email]
-        assert_equal "Pending Attio workspace", identity[:name]
-        assert_equal identity, Attio.new.identity_from(result, client_id: "unused")
+        assert_equal "Acme Sales", identity[:name]
+        http.verify
       end
 
       test "missing access token raises a parse error" do
@@ -24,6 +41,21 @@ module Oauth
           Attio.new.identity_from(result(access_token: nil), client_id: "unused")
         end
         assert_equal "missing_access_token", err.code
+      end
+
+      test "invalid identity JSON raises an exchange error" do
+        http = expect_http_call(status: 200, body: "not-json")
+
+        err = assert_raises(Broker::ExchangeError) do
+          Attio.new.identity_from(
+            result,
+            client_id: "unused",
+            http_client: HttpClient.new(http: http)
+          )
+        end
+
+        assert_equal "invalid_identity_response", err.code
+        http.verify
       end
 
       test "nil scope parses to an empty list" do

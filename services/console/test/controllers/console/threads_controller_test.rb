@@ -1148,6 +1148,34 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_equal "gpt-5.5", create[:metadata][:model]
   end
 
+  test "a configured custom inference model pick uses its codex provider" do
+    client = RecordingApiClient.new
+    config = {
+      private_responses: {
+        name: "Private Responses",
+        baseUrl: "https://inference.example.com/v1",
+        apiKeyEnv: "PRIVATE_RESPONSES_API_KEY",
+        defaultModel: "example-model"
+      }
+    }.to_json
+    with_env("CODEX_CUSTOM_PROVIDERS" => config) do
+      with_composer(client: client) do
+        post console_threads_url,
+             params: { prompt: "Reply with PONG.", model: "provider:private_responses" }
+      end
+    end
+
+    create = client.calls[0].last
+    assert_equal "codex", create[:harness_type]
+    assert_equal "example-model", create[:metadata][:model]
+    assert_equal "private_responses", create[:metadata][:provider]
+
+    execute = client.calls[2].last
+    assert_equal "private_responses", execute[:metadata][:provider]
+    line = JSON.parse(execute[:input_lines].first)
+    assert_equal "private_responses", line["provider"]
+  end
+
   test "a codex chat carries the picked reasoning effort" do
     client = RecordingApiClient.new
     with_composer(client: client) do

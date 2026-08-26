@@ -1809,21 +1809,24 @@ secrets = [
         let registry =
             discover_persona_registry(&[base.clone(), overlay.clone()], Some("eng".to_owned()))
                 .unwrap();
-        let personas = registry.summaries();
+        let registry = serde_json::to_value(registry).unwrap();
+        let personas = registry["personas"].as_object().unwrap();
 
         assert_eq!(personas.len(), 2);
-        let eng = personas
-            .iter()
-            .find(|persona| persona.id == "eng")
-            .expect("eng persona");
-        assert_eq!(eng.source_root, overlay.display().to_string());
-        assert!(eng.source_path.ends_with("personas/eng"));
+        let eng = personas.get("eng").expect("eng persona");
+        assert_eq!(eng["source_root"], overlay.display().to_string());
+        assert!(
+            eng["source_path"]
+                .as_str()
+                .unwrap()
+                .ends_with("personas/eng")
+        );
         assert_ne!(
-            eng.prompt_hash,
+            eng["prompt_hash"],
             "sha256:c41ac32f8b086eecbd1c70d06689eb428de2a2c740d086640851985f26c4e2fc"
         );
         assert_eq!(
-            eng.prompt_hash,
+            eng["prompt_hash"],
             "sha256:af70f573f4496a1cf92865966cb522c2c142a5789e075660a56bea66080bc738"
         );
         assert!(

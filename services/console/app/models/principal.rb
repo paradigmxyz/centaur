@@ -23,6 +23,7 @@ class Principal < ApplicationRecord
   include SlackChannelPermissionOwner
 
   after_commit :auto_grant_matching_oauth_credentials, on: %i[create update]
+  after_create_commit :enqueue_slack_channel_catalog_refresh, if: :slack_channel_catalog_refreshable?
   after_create :assign_default_roles, if: :roles_blank_for_defaulting?
   before_validation :apply_sandbox_repo_cache_label
   before_commit :bump_own_sync_config_cache_version, on: :update, if: :sync_config_fields_changed?
@@ -53,8 +54,6 @@ class Principal < ApplicationRecord
                             allow_nil: true, if: :will_save_change_to_slack_team_id?
   validates :slack_email, format: { with: URI::MailTo::EMAIL_REGEXP, message: "is not a valid email address" },
                           allow_nil: true, if: :will_save_change_to_slack_email?
-  validates :console_user_email, format: { with: URI::MailTo::EMAIL_REGEXP, message: "is not a valid email address" },
-                                 allow_nil: true, if: :will_save_change_to_console_user_email?
 
   # Stand-in for an inline secret value in redacted config: operator inspection
   # reports that a control_plane source carries a value without revealing it.
@@ -138,9 +137,27 @@ class Principal < ApplicationRecord
     unless supplied_key?(supplied, :sandbox_observability_enabled)
       self.sandbox_observability_enabled = defaults[:sandbox_observability_enabled]
     end
-    unless supplied_key?(supplied, :sandbox_api_server_enabled)
-      self.sandbox_api_server_enabled = defaults[:sandbox_api_server_enabled]
+    unless supplied_key?(supplied, :sandbox_sessions_read_enabled)
+      self.sandbox_sessions_read_enabled = defaults[:sandbox_sessions_read_enabled]
     end
+    unless supplied_key?(supplied, :sandbox_workflows_read_enabled)
+      self.sandbox_workflows_read_enabled = defaults[:sandbox_workflows_read_enabled]
+    end
+    unless supplied_key?(supplied, :sandbox_workflows_write_enabled)
+      self.sandbox_workflows_write_enabled = defaults[:sandbox_workflows_write_enabled]
+    end
+  end
+
+  # Slackbot only sends a DM partner's email when that user belongs to the
+  # bot's home workspace. Treat an explicitly supplied email as a trusted
+  # bridge to the corresponding Console account. This is called from the API
+  # upsert boundary rather than a model callback so an omitted email never
+  # activates a stale value already stored on the principal. A supplied email
+  # with no matching account clears any previous link.
+  def link_console_user_by_slack_email
+    return unless kind == "slack_dm" && slack_email.present?
+
+    self.console_user = User.find_by(email: slack_email.to_s.strip.downcase)
   end
 
   def labels_with_sandbox_capabilities
@@ -239,6 +256,14 @@ class Principal < ApplicationRecord
   end
 
   private
+
+  def slack_channel_catalog_refreshable?
+    kind == "slack_channel" && slack_channel_id.present? && SlackChannelCatalogSync.configured?
+  end
+
+  def enqueue_slack_channel_catalog_refresh
+    SlackChannelCatalogMembershipRefreshJob.perform_later(slack_channel_id)
+  end
 
   def roles_blank_for_defaulting?
     association(:roles).target.empty? && !roles.exists?
@@ -354,8 +379,8 @@ class Principal < ApplicationRecord
 
   def sync_config_fields_changed?
     %w[
-      name labels sandbox_api_server_enabled kind slack_user_id slack_channel_id slack_team_id slack_email
-      console_user_id console_user_email
+      name labels sandbox_sessions_read_enabled sandbox_workflows_read_enabled
+      sandbox_workflows_write_enabled kind slack_user_id slack_channel_id slack_team_id slack_email console_user_id
     ].any? do |field|
       previous_changes.key?(field)
     end

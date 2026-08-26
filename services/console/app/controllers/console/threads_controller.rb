@@ -90,7 +90,7 @@ class Console::ThreadsController < ApplicationController
   # Pseudo thread key that opens a new-chat composer pane in the split view.
   NEW_PANE_KEY = "new".freeze
 
-  # The composer's model selector, in display order. Each entry pins the
+  # The composer's built-in model selector, in display order. Each entry pins the
   # harness the choice runs on (wire values match api-rs's HarnessType enum,
   # serde lowercase); the model ids are the ones the bots' --model flags
   # expand to (services/slackbotv2/src/overrides.ts). Amp appears as a plain
@@ -99,7 +99,7 @@ class Console::ThreadsController < ApplicationController
   # Claude Opus 5's `fast` choice, which selects OpenRouter's native fast model
   # variant. Codex's enum lives in crates/harness-server/src/codex.rs, with
   # `max` being 5.6-specific.
-  ComposerAgent = Struct.new(:value, :label, :harness, :model, :efforts, keyword_init: true)
+  ComposerAgent = Struct.new(:value, :label, :harness, :model, :provider, :efforts, keyword_init: true)
   CODEX_EFFORTS = [
     %w[minimal Minimal],
     %w[low Low],
@@ -111,8 +111,9 @@ class Console::ThreadsController < ApplicationController
     [ "claude-opus-5", "fast" ] => "claude-opus-5-fast"
   }.freeze
   # First entry doubles as the default pick (unless the deploy's default-model
-  # resolution for its harness names another listed model).
-  COMPOSER_AGENTS = [
+  # resolution for its harness names another listed model). Operator-configured
+  # Codex providers are appended by .composer_agents at runtime.
+  BASE_COMPOSER_AGENTS = [
     ComposerAgent.new(value: "gpt-5.6-sol", label: "GPT-5.6 Sol",
                       harness: "codex", model: "gpt-5.6-sol",
                       efforts: CODEX_EFFORTS + [ %w[max Max] ]),
@@ -136,6 +137,30 @@ class Console::ThreadsController < ApplicationController
                       harness: "amp", model: nil, efforts: [])
   ].freeze
 
+  def self.custom_provider_agents(raw)
+    providers = JSON.parse(raw.presence || "{}")
+    return [] unless providers.is_a?(Hash)
+
+    providers.sort.filter_map do |provider_id, config|
+      next unless provider_id.match?(/\A[a-z][a-z0-9_-]*\z/) && config.is_a?(Hash)
+
+      label = config["name"].to_s.strip
+      model = config["defaultModel"].to_s.strip
+      next if label.blank? || model.blank?
+
+      ComposerAgent.new(
+        value: "provider:#{provider_id}", label: label,
+        harness: "codex", model: model, provider: provider_id, efforts: []
+      )
+    end
+  rescue JSON::ParserError
+    []
+  end
+
+  def self.composer_agents
+    BASE_COMPOSER_AGENTS + custom_provider_agents(ENV["CODEX_CUSTOM_PROVIDERS"])
+  end
+
   helper_method :thread_title,
                 :thread_source_icon,
                 :thread_source_label,
@@ -145,6 +170,7 @@ class Console::ThreadsController < ApplicationController
                 :thread_message_text,
                 :thread_text_preview,
                 :thread_status_classes,
+                :composer_agents,
                 :composer_agent_choices,
                 :composer_default_agent_value,
                 :composer_agents_json,
@@ -304,21 +330,21 @@ class Console::ThreadsController < ApplicationController
   # claims a default the sandbox would not actually run.
   def composer_agent_choices
     default_value = composer_default_agent_value
-    COMPOSER_AGENTS
+    composer_agents
       .sort_by.with_index { |agent, index| agent.value == default_value ? -1 : index }
       .map { |agent| [ agent.label, agent.value ] }
   end
 
   def composer_default_agent_value
-    default = default_model_for_harness(COMPOSER_AGENTS.first.harness)
-    COMPOSER_AGENTS.find { |agent| agent.value == default }&.value ||
-      COMPOSER_AGENTS.first.value
+    default = default_model_for_harness(composer_agents.first.harness)
+    composer_agents.find { |agent| agent.value == default }&.value ||
+      composer_agents.first.value
   end
 
   # Per-agent metadata the picker script needs to rebuild the effort submenu
   # when the model changes: { value => { label:, efforts: [[value, label]] } }.
   def composer_agents_json
-    COMPOSER_AGENTS.to_h do |agent|
+    composer_agents.to_h do |agent|
       [ agent.value, { label: agent.label, efforts: agent.efforts } ]
     end.to_json
   end
@@ -337,7 +363,11 @@ class Console::ThreadsController < ApplicationController
   def composer_agent_for(raw)
     value = raw.to_s.strip
     value = composer_default_agent_value if value.blank?
-    COMPOSER_AGENTS.find { |agent| agent.value == value }
+    composer_agents.find { |agent| agent.value == value }
+  end
+
+  def composer_agents
+    self.class.composer_agents
   end
 
   def start_thread(prompt)
@@ -357,9 +387,14 @@ class Console::ThreadsController < ApplicationController
     api_client.create_session(
       thread_key: thread_key,
       harness_type: agent.harness,
-      metadata: console_actor_metadata.merge(model.present? ? { model: model } : {})
+      metadata: console_actor_metadata
+        .merge(model.present? ? { model: model } : {})
+        .merge(agent.provider.present? ? { provider: agent.provider } : {})
     )
-    send_prompt(thread_key, prompt, model: model, effort: reasoning)
+    send_prompt(
+      thread_key, prompt,
+      model: model, provider: agent.provider, effort: reasoning
+    )
     # A new-chat pane in a split view swaps the sentinel for the created
     # thread so the other panes stay open.
     open_keys = params[:open_threads].to_s.split(",").map(&:strip).reject(&:blank?)
@@ -380,7 +415,7 @@ class Console::ThreadsController < ApplicationController
       return
     end
 
-    send_prompt(session.thread_key, prompt, model: reply_model_for(session))
+    send_prompt(session.thread_key, prompt, **reply_overrides_for(session))
     redirect_to console_threads_path(thread: reply_redirect_keys(session.thread_key))
   rescue CentaurApiClient::Error => e
     redirect_to console_threads_path(thread: reply_redirect_keys(thread_key)),
@@ -393,7 +428,7 @@ class Console::ThreadsController < ApplicationController
   # Append persists the turn in conversation history; execute runs it. The
   # shared client_message_id lets api-rs dedupe the copy of the message the
   # harness echoes back.
-  def send_prompt(thread_key, prompt, model: nil, effort: nil)
+  def send_prompt(thread_key, prompt, model: nil, provider: nil, effort: nil)
     message_id = SecureRandom.uuid
 
     api_client.append_session_messages(
@@ -410,6 +445,7 @@ class Console::ThreadsController < ApplicationController
 
     execute_metadata = console_actor_metadata.merge(action: "execute")
     execute_metadata[:model] = model if model.present?
+    execute_metadata[:provider] = provider if provider.present?
     execute_metadata[:reasoning] = effort if effort.present?
     api_client.execute_session(
       thread_key: thread_key,
@@ -418,7 +454,7 @@ class Console::ThreadsController < ApplicationController
       input_lines: [
         composer_input_line(
           thread_key, prompt,
-          model: model, effort: effort, client_message_id: message_id
+          model: model, provider: provider, effort: effort, client_message_id: message_id
         )
       ]
     )
@@ -429,7 +465,7 @@ class Console::ThreadsController < ApplicationController
   # for Amp) the harness runs its own default. `reasoning` is the per-turn
   # codex effort; other harnesses discard it, and validation upstream only
   # accepts it for codex models anyway.
-  def composer_input_line(thread_key, prompt, model:, effort:, client_message_id:)
+  def composer_input_line(thread_key, prompt, model:, provider:, effort:, client_message_id:)
     line = {
       type: "user",
       thread_key: thread_key,
@@ -444,6 +480,7 @@ class Console::ThreadsController < ApplicationController
       }
     }
     line[:model] = model if model.present?
+    line[:provider] = provider if provider.present?
     line[:reasoning] = effort if effort.present?
     line.to_json
   end
@@ -478,10 +515,14 @@ class Console::ThreadsController < ApplicationController
   # Follow-ups reuse the model the chat has been running on (mirrors the
   # display resolution in thread_model_label, minus the upcasing): last
   # execution's recorded model, session metadata, then the deploy default.
-  def reply_model_for(session)
-    recorded_model(latest_executions_for([ session.thread_key ])[session.thread_key]&.metadata) ||
-      recorded_model(session.metadata_hash) ||
-      default_model_for_harness(session.harness_type.to_s)
+  def reply_overrides_for(session)
+    execution_metadata = latest_executions_for([ session.thread_key ])[session.thread_key]&.metadata
+    {
+      model: recorded_model(execution_metadata) ||
+        recorded_model(session.metadata_hash) ||
+        default_model_for_harness(session.harness_type.to_s),
+      provider: recorded_provider(execution_metadata) || recorded_provider(session.metadata_hash)
+    }
   end
 
   # Keeps split-view panes open across a composer submit: the form carries the
@@ -1501,6 +1542,12 @@ class Console::ThreadsController < ApplicationController
     return unless metadata.is_a?(Hash)
 
     metadata["model"].presence
+  end
+
+  def recorded_provider(metadata)
+    return unless metadata.is_a?(Hash)
+
+    metadata["provider"].presence
   end
 
   def default_model_for_harness(harness_type)

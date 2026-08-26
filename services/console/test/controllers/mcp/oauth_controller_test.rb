@@ -73,6 +73,22 @@ module Mcp
       assert_equal [ "https://claude.ai/api/mcp/auth_callback" ], body.fetch("redirect_uris")
     end
 
+    test "dynamic client registration creates a private-use scheme native client" do
+      assert_difference -> { McpOauthClient.count }, 1 do
+        post "/mcp/oauth/register",
+             params: {
+               client_name: "Cursor",
+               redirect_uris: [ "cursor://anysphere.cursor-mcp/oauth/callback" ],
+               scope: "mcp:tools"
+             },
+             as: :json
+      end
+
+      assert_response :created
+      body = JSON.parse(response.body)
+      assert_equal [ "cursor://anysphere.cursor-mcp/oauth/callback" ], body.fetch("redirect_uris")
+    end
+
     test "dynamic client registration rejects non-loopback plain HTTP redirect URIs" do
       assert_no_difference -> { McpOauthClient.count } do
         post "/mcp/oauth/register",
@@ -158,7 +174,6 @@ module Mcp
       assert_match(/\Aprn_/, stored_code.principal.oid)
       assert_equal "console_user", stored_code.principal.kind
       assert_equal @operator.id, stored_code.principal.console_user_id
-      assert_equal @operator.email, stored_code.principal.console_user_email
       assert_empty stored_code.principal.labels.slice("console-user-id", "email")
 
       exchange_authorization_code(client, code)

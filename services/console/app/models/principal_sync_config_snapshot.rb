@@ -158,9 +158,6 @@ class PrincipalSyncConfigSnapshot < ApplicationRecord
   end
 
   def api_server_jwt_window_stale?(principal)
-    return false unless principal.sandbox_api_server_enabled?
-
-    return false if principal.slack_jwt_channel_ids.empty?
     return false if ENV["CENTAUR_JWT_SIGNING_SECRET"].to_s.blank?
 
     updated_at.to_i < ApiServer::Jwt.window_start_for(principal, Time.current.to_i)
@@ -377,8 +374,6 @@ class PrincipalSyncConfigSnapshot < ApplicationRecord
   private_class_method :generated_proxy_secrets_for
 
   def self.api_server_jwt_secret_for(principal)
-    return nil unless principal.sandbox_api_server_enabled?
-
     token = ApiServer::Jwt.encode_for_principal(principal)
     return nil if token.blank?
 

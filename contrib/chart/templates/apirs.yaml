@@ -221,6 +221,21 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sCENTAUR_JWT_SIGNING_SECRET" .Values.secretManager.envPrefix }}
+{{- range $ingress := list
+  (dict "enabled" .Values.slackbotv2.enabled "key" "SLACKBOT_API_KEY")
+  (dict "enabled" .Values.discordbot.enabled "key" "DISCORDBOT_API_KEY")
+  (dict "enabled" .Values.githubbot.enabled "key" "GITHUBBOT_API_KEY")
+  (dict "enabled" .Values.linearbot.enabled "key" "LINEARBOT_API_KEY")
+  (dict "enabled" .Values.teamsbot.enabled "key" "TEAMSBOT_API_KEY")
+}}
+{{- if $ingress.enabled }}
+            - name: {{ $ingress.key }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" $ }}
+                  key: {{ printf "%s%s" $.Values.secretManager.envPrefix $ingress.key }}
+{{- end }}
+{{- end }}
             - name: BIND_ADDR
               value: {{ printf "0.0.0.0:%v" .Values.apiRs.port | quote }}
             - name: SLACK_BOT_TOKEN
@@ -239,8 +254,6 @@ spec:
 {{- end }}
             - name: RUN_MIGRATIONS
               value: {{ .Values.apiRs.runMigrations | quote }}
-            - name: SESSION_CODEX_NANOCODEX_ROLLOUT_PERCENT
-              value: {{ .Values.apiRs.codexNanocodexRolloutPercent | quote }}
             - name: IRON_CONTROL_SYNC_INFRA_SECRETS
               value: {{ .Values.apiRs.syncInfraSecrets | quote }}
             - name: RUST_LOG
@@ -414,6 +427,12 @@ spec:
               value: {{ .Values.sandbox.codexAuthMode | quote }}
             - name: CLAUDE_CODE_AUTH_MODE
               value: {{ .Values.sandbox.claudeCodeAuthMode | quote }}
+{{- if .Values.codex.customProviders }}
+            # Shared provider catalog: api-rs derives hostname-scoped proxy
+            # credentials from the same JSON sandboxes use for Codex config.
+            - name: CODEX_CUSTOM_PROVIDERS
+              value: {{ .Values.codex.customProviders | toJson | quote }}
+{{- end }}
             # Which harness's auth fragment iron-proxy registers (and therefore
             # which placeholder credential lands in the sandbox env). Must agree
             # with the harness the sandbox image CMD actually runs.
@@ -431,6 +450,12 @@ spec:
 {{- end }}
 {{- if not (hasKey .Values.sandbox.extraEnv "COMPANY_CONTEXT_EMBEDDINGS_MODEL") }}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_MODEL" "value" $companyContextEmbeddingsModel) }}
+{{- end }}
+{{- if .Values.codex.customProviders }}
+{{- $sandboxEnvList = append $sandboxEnvList (dict "name" "CODEX_CUSTOM_PROVIDERS" "value" (.Values.codex.customProviders | toJson)) }}
+{{- end }}
+{{- if not (hasKey .Values.sandbox.extraEnv "CENTAUR_TELEMETRY_CAPTURE_TRANSCRIPTS") }}
+{{- $sandboxEnvList = append $sandboxEnvList (dict "name" "CENTAUR_TELEMETRY_CAPTURE_TRANSCRIPTS" "value" (.Values.sandbox.telemetry.captureTranscripts | toString)) }}
 {{- end }}
 {{- range $k, $v := .Values.sandbox.extraEnv }}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" $k "value" ($v | toString)) }}

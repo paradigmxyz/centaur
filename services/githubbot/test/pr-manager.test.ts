@@ -871,3 +871,82 @@ describe("workflow event emission", () => {
     expect(attempts).toBe(2);
   });
 });
+
+describe("management turn reaction ack", () => {
+  const submittedReview = (state: string, nodeId?: string) =>
+    JSON.stringify({
+      action: "submitted",
+      repository: { full_name: "base/repo" },
+      pull_request: { number: 7 },
+      review: {
+        id: 55,
+        node_id: nodeId,
+        state,
+        user: { login: "reviewer" },
+      },
+    });
+
+  function reviewCtx(reactions: { subjectId: string; content: string }[]) {
+    return {
+      octokit: {
+        graphql: async (
+          _query: string,
+          vars: { subjectId: string; content: string },
+        ) => {
+          reactions.push({ subjectId: vars.subjectId, content: vars.content });
+          return {};
+        },
+        rest: {
+          pulls: {
+            get: async () => ({
+              data: prPayload({ headRepoFullName: "base/repo" }),
+            }),
+            merge: async () => ({ data: {} }),
+          },
+          git: { deleteRef: async () => ({ data: {} }) },
+        },
+      },
+      options: {
+        apiUrl: "http://localhost",
+        deleteBranchOnMerge: false,
+        logger: quietLogger,
+        // Non-retryable so the backgrounded turn settles off the network.
+        fetch: () => Promise.resolve(new Response("no", { status: 400 })),
+      },
+      state: makeState(),
+      userName: "centaur-bot",
+    } as unknown as PrManagerContext;
+  }
+
+  test("acks a changes-requested review with eyes on the review itself, settling when the turn fails", async () => {
+    const reactions: { subjectId: string; content: string }[] = [];
+    await handleReviewEvent(
+      reviewCtx(reactions),
+      submittedReview("changes_requested", "PRR_test55"),
+    );
+    // The working ack lands before the management turn runs.
+    expect(reactions).toContainEqual({ subjectId: "PRR_test55", content: "EYES" });
+    await drainBackgroundWork(5_000);
+    expect(reactions).toContainEqual({
+      subjectId: "PRR_test55",
+      content: "CONFUSED",
+    });
+  });
+
+  test("does not react on an approved review (deterministic merge, no work turn)", async () => {
+    const reactions: { subjectId: string; content: string }[] = [];
+    await handleReviewEvent(
+      reviewCtx(reactions),
+      submittedReview("approved", "PRR_test55"),
+    );
+    await drainBackgroundWork(5_000);
+    expect(reactions).toEqual([]);
+  });
+
+  test("stays quiet when the payload carries no review node id", async () => {
+    const reactions: { subjectId: string; content: string }[] = [];
+    await handleReviewEvent(reviewCtx(reactions), submittedReview("changes_requested"));
+    await drainBackgroundWork(5_000);
+    expect(reactions).toEqual([]);
+  });
+});

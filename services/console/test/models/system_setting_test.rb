@@ -5,14 +5,16 @@ class SystemSettingTest < ActiveSupport::TestCase
     assert_equal system_settings(:default), SystemSetting.current
   end
 
-  test "defaults enable all sandbox capabilities" do
+  test "defaults API sandbox capabilities to disabled" do
     SystemSetting.destroy_all
 
     settings = SystemSetting.current
 
     assert_equal "all", settings.default_sandbox_repo_cache
     assert_equal true, settings.default_sandbox_observability_enabled
-    assert_equal true, settings.default_sandbox_api_server_enabled
+    assert_equal false, settings.default_sandbox_sessions_read_enabled
+    assert_equal false, settings.default_sandbox_workflows_read_enabled
+    assert_equal false, settings.default_sandbox_workflows_write_enabled
   end
 
   test "repo-cache setting is validated" do

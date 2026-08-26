@@ -10,6 +10,11 @@ module Oauth
       # Do not add Sign in with Slack scopes here. Slack rejects requests that
       # mix SIWS scopes with normal API scopes such as channels:history.
       IDENTITY_SCOPES = [].freeze
+      # search.messages only accepts a user token carrying search:read. Centaur's
+      # Slack MCP tool depends on that method for workspace-wide search, so every
+      # Slack consent must request it even when an older operator-managed OAuth
+      # app allowlist does not include it yet.
+      REQUIRED_SCOPES = %w[search:read].freeze
       API_HOSTS = %w[slack.com].freeze
       VALID_ISSUERS = %w[https://slack.com].freeze
 
@@ -18,6 +23,7 @@ module Oauth
       def authorization_endpoint = AUTHORIZATION_ENDPOINT
       def token_endpoint = TOKEN_ENDPOINT
       def identity_scopes = IDENTITY_SCOPES
+      def required_scopes = REQUIRED_SCOPES
       def api_hosts = API_HOSTS
       def authorization_scope_param = "user_scope"
       def scope_separator = ","
@@ -46,7 +52,7 @@ module Oauth
 
       def refresh_scopes(_scopes) = []
 
-      def identity_from(result, client_id:)
+      def identity_from(result, client_id:, http_client: nil)
         user_id = result.response&.dig("authed_user", "id")
         if user_id.present?
           return {

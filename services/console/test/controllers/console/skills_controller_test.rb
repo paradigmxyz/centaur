@@ -17,14 +17,27 @@ class Console::SkillsControllerTest < ActionDispatch::IntegrationTest
     assert_no_match skills(:other_private).name, response.body
   end
 
-  test "shows only owned skills on the my skills tab" do
+  test "shows editor identities to viewers of a shared skill" do
+    skill = skills(:admin_shared)
+    editor = users(:globex_admin)
+    skill.editors << editor
+
+    get console_skill_url(skill.oid)
+
+    assert_response :ok
+    assert_select "#skill-editors-heading", text: "Editors"
+    assert_match editor.email, response.body
+  end
+
+  test "shows owned and editable skills on the my skills tab" do
+    skills(:other_private).editors << @user
     get mine_console_skills_url
 
     assert_response :ok
     assert_match "My Skills", response.body
     assert_match skills(:member_private).name, response.body
+    assert_match skills(:other_private).name, response.body
     assert_no_match skills(:admin_shared).name, response.body
-    assert_no_match skills(:other_private).name, response.body
   end
 
   test "creates edits and immediately shares a skill" do
@@ -33,13 +46,15 @@ class Console::SkillsControllerTest < ActionDispatch::IntegrationTest
         skill: {
           name: "release-helper",
           description: "Help with release readiness.",
-          content: "# Release\n\nFollow the release checklist."
+          content: "# Release\n\nFollow the release checklist.",
+          editor_oids: [ users(:globex_admin).oid ]
         }
       }
     end
     skill = @user.skills.find_by!(name: "release-helper")
     assert_redirected_to console_skill_path(skill.oid)
     assert_equal "# Release\n\nFollow the release checklist.", skill.content
+    assert_equal [ users(:globex_admin) ], skill.editors.to_a
     assert skill.shared?
     assert_not_nil skill.shared_at
 
@@ -67,6 +82,91 @@ class Console::SkillsControllerTest < ActionDispatch::IntegrationTest
     assert_select "input[name='skill[name]']"
     assert_select "input[name='skill[description]']"
     assert_select "textarea[name='skill[content]']"
+    assert_select "input[role='combobox'][data-user-typeahead-target='input']"
+    assert_select "input[name='skill[editor_oids][]']"
+    assert_match "Their names and emails are visible to anyone who can view the skill.", response.body
+  end
+
+  test "owner adds and removes editors" do
+    skill = skills(:member_private)
+    editor = users(:globex_admin)
+
+    assert_difference("SkillEditor.count", 1) do
+      patch console_skill_url(skill.oid), params: {
+        skill: {
+          name: skill.name,
+          description: skill.description,
+          content: skill.content,
+          lock_version: skill.lock_version,
+          editor_oids: [ editor.oid ]
+        }
+      }
+    end
+    assert_redirected_to console_skill_path(skill.oid)
+    assert_equal [ editor ], skill.reload.editors.to_a
+
+    get edit_console_skill_url(skill.oid)
+    assert_response :ok
+    assert_select "input[name='skill[editor_oids][]'][value='#{editor.oid}']"
+
+    assert_difference("SkillEditor.count", -1) do
+      patch console_skill_url(skill.oid), params: {
+        skill: {
+          name: skill.name,
+          description: skill.description,
+          content: skill.content,
+          lock_version: skill.lock_version,
+          editor_oids: [ "" ]
+        }
+      }
+    end
+    assert_empty skill.reload.editors
+  end
+
+  test "owner cannot add an unavailable editor" do
+    skill = skills(:member_private)
+
+    patch console_skill_url(skill.oid), params: {
+      skill: {
+        name: skill.name,
+        description: skill.description,
+        content: skill.content,
+        lock_version: skill.lock_version,
+        editor_oids: [ users(:disabled_user).oid ]
+      }
+    }
+
+    assert_response :unprocessable_entity
+    assert_match "Editors include an unavailable user", response.body
+    assert_empty skill.reload.editors
+  end
+
+  test "editor updates a private skill but cannot manage it" do
+    skill = skills(:other_private)
+    skill.editors << @user
+
+    get console_skill_url(skill.oid)
+    assert_response :ok
+    assert_select "nav[aria-label='Breadcrumb'] a[href='#{mine_console_skills_path}']", text: /Back to Skills/
+    assert_select "a[href='#{edit_console_skill_path(skill.oid)}']", text: "Edit"
+    assert_select "button[role='switch']", count: 0
+    assert_select "form[action='#{console_skill_path(skill.oid)}'] button", text: "Archive", count: 0
+
+    patch console_skill_url(skill.oid), params: {
+      skill: {
+        name: skill.name,
+        description: "Updated by an editor.",
+        content: skill.content,
+        lock_version: skill.lock_version,
+        editor_oids: [ users(:globex_admin).oid ]
+      }
+    }
+    assert_redirected_to console_skill_path(skill.oid)
+    assert_equal "Updated by an editor.", skill.reload.description
+    assert_equal [ @user ], skill.editors.to_a
+
+    delete console_skill_url(skill.oid)
+    assert_response :not_found
   end
 
   test "preserves separate fields when instructions are invalid" do

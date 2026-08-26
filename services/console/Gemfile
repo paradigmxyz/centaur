@@ -8,8 +8,9 @@ gem "propshaft"
 gem "tailwindcss-rails", "4.6.0"
 # Use pg as the database for Active Record
 gem "pg", "~> 1.5"
-# Preserve ParadeDB indexes in Rails schema dumps and migrations.
-gem "rails-paradedb", "0.7.0", require: "parade_db"
+# Preserve ParadeDB indexes in Rails schema dumps and migrations. Versions 0.10+
+# require ParadeDB 0.25+, while Console currently runs ParadeDB 0.23.
+gem "rails-paradedb", "0.9.0", require: "parade_db"
 # Opaque ID encoding (bigint <-> short string) for externally-exposed IDs
 gem "sqids", "~> 0.2"
 # JSON Schema validation for jsonb config columns
@@ -28,6 +29,9 @@ gem "stimulus-rails"
 gem "jbuilder"
 # Collapse multi-line request logs into a single JSON event [https://github.com/roidrage/lograge]
 gem "lograge"
+# Report unhandled Rails and background-job errors when SENTRY_DSN is configured.
+gem "sentry-ruby", "~> 6.7"
+gem "sentry-rails", "~> 6.7"
 
 # Use Active Model has_secure_password [https://guides.rubyonrails.org/active_model_basics.html#securepassword]
 gem "bcrypt", "~> 3.1.7"
@@ -42,6 +46,9 @@ gem "tzinfo-data", platforms: %i[ windows jruby ]
 gem "solid_cache"
 gem "solid_queue"
 gem "solid_cable"
+# Parse and calculate scheduled task cron schedules. Solid Queue also uses
+# Fugit internally, but Console's task schedules are a direct dependency.
+gem "fugit", "~> 1.13"
 
 # Reduces boot times through caching; required in config/boot.rb
 gem "bootsnap", require: false

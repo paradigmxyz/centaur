@@ -2,16 +2,24 @@ require "cgi"
 require "uri"
 
 class CentaurApiClient
-  Error = Class.new(StandardError)
+  class Error < StandardError
+    attr_reader :status
+
+    def initialize(message = nil, status: nil)
+      @status = status
+      super(message)
+    end
+  end
 
   DEFAULT_TIMEOUT_SECONDS = 20
 
   attr_reader :base_url
 
-  def initialize(base_url: nil, api_key: nil, http: nil, timeout: DEFAULT_TIMEOUT_SECONDS)
+  def initialize(base_url: nil, token_provider: -> { ApiServer::Jwt.encode_for_console_service },
+                 http: nil, timeout: DEFAULT_TIMEOUT_SECONDS, read_timeout: timeout)
     @base_url = (base_url.presence || ConsoleEnv["CENTAUR_API_URL"].presence || "http://localhost:8080").delete_suffix("/")
-    @api_key = api_key.presence || ConsoleEnv["CENTAUR_API_KEY"].presence
-    @api = HttpClient.new(http: http, open_timeout: timeout, read_timeout: timeout)
+    @token_provider = token_provider
+    @api = HttpClient.new(http: http, open_timeout: timeout, read_timeout: read_timeout)
   end
 
   def list_slack_archive_imports(limit: 100)
@@ -65,6 +73,10 @@ class CentaurApiClient
     post("/api/admin/google/docs-sync/batch", payload)
   end
 
+  def get_google_docs_content_status(files:)
+    post("/api/admin/google/docs-sync/content-status", { files: files })
+  end
+
   def get_granola_sync_checkpoint(scope_id:)
     get("/api/admin/granola/sync/checkpoint", scope_id: scope_id)
   end
@@ -107,9 +119,11 @@ class CentaurApiClient
     get("/api/workflows/runs/#{escape_path(run_id)}")
   end
 
-  def create_workflow_run(workflow_name:, input: nil)
+  def create_workflow_run(workflow_name:, input: nil, idempotency_key: nil, max_attempts: nil)
     payload = { workflow_name: workflow_name }
     payload[:input] = input unless input.nil?
+    payload[:idempotency_key] = idempotency_key if idempotency_key.present?
+    payload[:max_attempts] = max_attempts unless max_attempts.nil?
 
     post("/api/workflows/runs", payload)
   end
@@ -136,13 +150,19 @@ class CentaurApiClient
     return parsed if response.status.between?(200, 299)
 
     message = parsed.is_a?(Hash) ? parsed["error"] || parsed["message"] || parsed["detail"] : nil
-    raise Error, message.presence || "Centaur API returned HTTP #{response.status}"
+    raise Error.new(
+      message.presence || "Centaur API returned HTTP #{response.status}",
+      status: response.status
+    )
   end
 
   def request_headers
+    token = @token_provider.call
+    raise Error, "Console API service JWT could not be minted" if token.blank?
+
     headers = { "Accept" => "application/json" }
     headers["Content-Type"] = "application/json"
-    headers["Authorization"] = "Bearer #{@api_key}" if @api_key.present?
+    headers["Authorization"] = "Bearer #{token}"
     headers
   end
 

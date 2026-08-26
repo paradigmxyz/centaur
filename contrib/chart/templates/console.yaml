@@ -127,6 +127,10 @@ spec:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sSLACK_BOT_TOKEN" $prefix }}
                   optional: true
+{{- if .Values.codex.customProviders }}
+            - name: CODEX_CUSTOM_PROVIDERS
+              value: {{ .Values.codex.customProviders | toJson | quote }}
+{{- end }}
 {{- range $name := tuple "CLAUDE_MODEL" "CODEX_MODEL" }}
 {{- if hasKey $.Values.sandbox.extraEnv $name }}
             # Mirror the deployer's harness default-model override
@@ -185,6 +189,14 @@ spec:
 {{- if $console.publicUrl }}
             - name: CENTAUR_CONSOLE_PUBLIC_URL
               value: {{ $console.publicUrl | quote }}
+{{- end }}
+{{- with $console.allowedHosts }}
+            - name: CENTAUR_CONSOLE_ALLOWED_HOSTS
+              value: {{ join "," . | quote }}
+{{- end }}
+{{- with $console.sentryDsn }}
+            - name: SENTRY_DSN
+              value: {{ . | quote }}
 {{- end }}
 {{- if $mcpPublicUrl }}
             - name: CENTAUR_MCP_PUBLIC_URL
@@ -255,6 +267,8 @@ spec:
             - name: CENTAUR_CONSOLE_SLACK_DM_SYNC_OAUTH_APP_SLUG
               value: {{ . | quote }}
 {{- end }}
+            - name: CENTAUR_CONSOLE_GOOGLE_DOCS_SYNC_ENABLED
+              value: {{ $console.googleDocsSync.enabled | quote }}
             - name: PORT
               value: {{ $console.service.httpPort | quote }}
             - name: RAILS_LOG_TO_STDOUT

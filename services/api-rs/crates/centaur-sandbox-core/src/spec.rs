@@ -30,7 +30,6 @@ pub struct SandboxCapabilities {
     #[serde(default)]
     pub repo_cache: RepoCacheAccess,
     pub observability_enabled: bool,
-    pub api_server_enabled: bool,
 }
 
 impl SandboxCapabilities {
@@ -38,12 +37,11 @@ impl SandboxCapabilities {
         Self {
             repo_cache: RepoCacheAccess::All,
             observability_enabled: true,
-            api_server_enabled: true,
         }
     }
 
     pub fn is_default_enabled(&self) -> bool {
-        self.repo_cache.enabled() && self.observability_enabled && self.api_server_enabled
+        self.repo_cache.enabled() && self.observability_enabled
     }
 }
 

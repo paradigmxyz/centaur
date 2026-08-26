@@ -124,21 +124,79 @@ impl PgSessionStore {
         metadata: Value,
         proxy_labels: BTreeMap<String, String>,
     ) -> Result<Session, SessionStoreError> {
-        sqlx::query(
-            r#"
-            insert into sessions (thread_key, harness_type, persona_id, status, metadata, proxy_labels)
-            values ($1, $2, $3, $4, $5, $6)
-            on conflict (thread_key) do nothing
-            "#,
+        self.create_or_get_session_inner(
+            thread_key,
+            harness_type,
+            persona_id,
+            metadata,
+            proxy_labels,
+            false,
         )
-        .bind(thread_key.as_str())
-        .bind(harness_type.as_ref())
-        .bind(persona_id)
-        .bind(SessionStatus::Idle.as_ref())
-        .bind(metadata)
-        .bind(Json(proxy_labels.clone()))
-        .execute(&self.pool)
-        .await?;
+        .await
+    }
+
+    /// Create or load a session while merging newly learned metadata into an
+    /// existing row. The conflict update is skipped when every supplied value
+    /// is already present, so unchanged calls do not write or touch updated_at.
+    pub async fn create_or_get_session_merging_metadata(
+        &self,
+        thread_key: &ThreadKey,
+        harness_type: &HarnessType,
+        persona_id: Option<&str>,
+        metadata: Value,
+        proxy_labels: BTreeMap<String, String>,
+    ) -> Result<Session, SessionStoreError> {
+        self.create_or_get_session_inner(
+            thread_key,
+            harness_type,
+            persona_id,
+            metadata,
+            proxy_labels,
+            true,
+        )
+        .await
+    }
+
+    async fn create_or_get_session_inner(
+        &self,
+        thread_key: &ThreadKey,
+        harness_type: &HarnessType,
+        persona_id: Option<&str>,
+        metadata: Value,
+        proxy_labels: BTreeMap<String, String>,
+        merge_metadata: bool,
+    ) -> Result<Session, SessionStoreError> {
+        let query = if merge_metadata {
+            sqlx::query(
+                r#"
+                insert into sessions (thread_key, harness_type, persona_id, status, metadata, proxy_labels)
+                values ($1, $2, $3, $4, $5, $6)
+                on conflict (thread_key) do update
+                set metadata = sessions.metadata || excluded.metadata,
+                    updated_at = now()
+                where sessions.harness_type = excluded.harness_type
+                  and sessions.persona_id is not distinct from excluded.persona_id
+                  and not sessions.metadata @> excluded.metadata
+                "#,
+            )
+        } else {
+            sqlx::query(
+                r#"
+                insert into sessions (thread_key, harness_type, persona_id, status, metadata, proxy_labels)
+                values ($1, $2, $3, $4, $5, $6)
+                on conflict (thread_key) do nothing
+                "#,
+            )
+        };
+        query
+            .bind(thread_key.as_str())
+            .bind(harness_type.as_ref())
+            .bind(persona_id)
+            .bind(SessionStatus::Idle.as_ref())
+            .bind(metadata)
+            .bind(Json(proxy_labels.clone()))
+            .execute(&self.pool)
+            .await?;
 
         if !proxy_labels.is_empty() {
             sqlx::query(
@@ -175,7 +233,7 @@ impl PgSessionStore {
     pub async fn get_session(&self, thread_key: &ThreadKey) -> Result<Session, SessionStoreError> {
         let row = sqlx::query_as::<_, SessionRow>(
             r#"
-            select thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, proxy_labels, sandbox_last_active_at, created_at, updated_at
+            select thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, proxy_labels, sandbox_last_active_at, created_at, updated_at
             from sessions
             where thread_key = $1
             "#,
@@ -324,15 +382,31 @@ impl PgSessionStore {
         idempotency_key: Option<&str>,
         metadata: Value,
     ) -> Result<CreateExecutionResult, SessionStoreError> {
+        self.create_execution_with_request(thread_key, idempotency_key, metadata, empty_object())
+            .await
+    }
+
+    pub async fn create_execution_with_request(
+        &self,
+        thread_key: &ThreadKey,
+        idempotency_key: Option<&str>,
+        metadata: Value,
+        request: Value,
+    ) -> Result<CreateExecutionResult, SessionStoreError> {
         let execution_id = prefixed_id("exe");
         let row = sqlx::query_as::<_, CreateExecutionRow>(
             r#"
             insert into session_executions
-                (execution_id, thread_key, idempotency_key, status, metadata)
-            values ($1, $2, $3, $4, $5)
+                (execution_id, thread_key, idempotency_key, status, metadata, request)
+            values ($1, $2, $3, $4, $5, $6)
             on conflict (thread_key, idempotency_key)
                 where idempotency_key is not null
-            do update set idempotency_key = excluded.idempotency_key
+            do update set
+                idempotency_key = excluded.idempotency_key,
+                request = case
+                    when session_executions.request = '{}'::jsonb then excluded.request
+                    else session_executions.request
+                end
             returning
                 execution_id = $1 as created,
                 execution_id,
@@ -352,10 +426,56 @@ impl PgSessionStore {
         .bind(idempotency_key)
         .bind(ExecutionStatus::Queued.as_ref())
         .bind(metadata)
+        .bind(request)
         .fetch_one(&self.pool)
         .await?;
 
         row.try_into()
+    }
+
+    pub async fn execution_request(&self, execution_id: &str) -> Result<Value, SessionStoreError> {
+        sqlx::query_scalar::<_, Value>(
+            r#"
+            select request
+            from session_executions
+            where execution_id = $1
+            "#,
+        )
+        .bind(execution_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| SessionStoreError::ExecutionNotFound {
+            execution_id: execution_id.to_owned(),
+        })
+    }
+
+    /// Persist the execution trace context before input is delivered to the
+    /// sandbox. Keeping it on the durable execution row lets recovery and
+    /// steering continue the same trace after a control-plane restart.
+    pub async fn set_execution_traceparent(
+        &self,
+        execution_id: &str,
+        traceparent: &str,
+    ) -> Result<(), SessionStoreError> {
+        let updated = sqlx::query_scalar::<_, String>(
+            r#"
+            update session_executions
+            set metadata = metadata || jsonb_build_object('centaur.traceparent', $2::text),
+                updated_at = now()
+            where execution_id = $1
+            returning execution_id
+            "#,
+        )
+        .bind(execution_id)
+        .bind(traceparent)
+        .fetch_optional(&self.pool)
+        .await?;
+        if updated.is_none() {
+            return Err(SessionStoreError::ExecutionNotFound {
+                execution_id: execution_id.to_owned(),
+            });
+        }
+        Ok(())
     }
 
     pub async fn active_execution_for_thread(
@@ -492,6 +612,34 @@ impl PgSessionStore {
             execution: row.try_into()?,
             claimed: true,
         })
+    }
+
+    pub async fn requeue_execution_if_running_without_stdout_owner(
+        &self,
+        execution_id: &str,
+    ) -> Result<Option<SessionExecution>, SessionStoreError> {
+        let row = sqlx::query_as::<_, SessionExecutionRow>(
+            r#"
+            update session_executions
+            set status = $2, started_at = null, updated_at = now()
+            where execution_id = $1
+              and status = $3
+              and stdout_owner_id is null
+            returning execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
+            "#,
+        )
+        .bind(execution_id)
+        .bind(ExecutionStatus::Queued.as_ref())
+        .bind(ExecutionStatus::Running.as_ref())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        self.set_session_status(&row.thread_key, SessionStatus::Idle)
+            .await?;
+        row.try_into().map(Some)
     }
 
     pub async fn claim_stdout_owner(
@@ -1177,14 +1325,13 @@ impl PgSessionStore {
                 sandbox_repo_cache_enabled = null,
                 sandbox_repo_cache_access = null,
                 sandbox_observability_enabled = null,
-                sandbox_api_server_enabled = null,
                 sandbox_last_active_at = case
                     when $2::text is null then null
                     else now()
                 end,
                 updated_at = now()
             where thread_key = $1
-            returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, proxy_labels, sandbox_last_active_at, created_at, updated_at
+            returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, proxy_labels, sandbox_last_active_at, created_at, updated_at
             "#,
         )
         .bind(thread_key.as_str())
@@ -1209,11 +1356,13 @@ impl PgSessionStore {
                 sandbox_repo_cache_enabled = $3,
                 sandbox_repo_cache_access = $4,
                 sandbox_observability_enabled = $5,
-                sandbox_api_server_enabled = $6,
+                -- Keep the deprecated column populated during rolling upgrades
+                -- so older api-rs pods can read assignments made by this version.
+                sandbox_api_server_enabled = true,
                 sandbox_last_active_at = now(),
                 updated_at = now()
             where thread_key = $1
-            returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, proxy_labels, sandbox_last_active_at, created_at, updated_at
+            returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, proxy_labels, sandbox_last_active_at, created_at, updated_at
             "#,
         )
         .bind(thread_key.as_str())
@@ -1221,7 +1370,6 @@ impl PgSessionStore {
         .bind(capabilities.repo_cache_enabled())
         .bind(capabilities.repo_cache.as_str())
         .bind(capabilities.observability_enabled)
-        .bind(capabilities.api_server_enabled)
         .fetch_one(&self.pool)
         .await?;
 
@@ -1241,7 +1389,6 @@ impl PgSessionStore {
                 sandbox_repo_cache_enabled = null,
                 sandbox_repo_cache_access = null,
                 sandbox_observability_enabled = null,
-                sandbox_api_server_enabled = null,
                 sandbox_last_active_at = null,
                 updated_at = now()
             where thread_key = $1 and sandbox_id = $2
@@ -1272,12 +1419,11 @@ impl PgSessionStore {
                 sandbox_repo_cache_enabled = null,
                 sandbox_repo_cache_access = null,
                 sandbox_observability_enabled = null,
-                sandbox_api_server_enabled = null,
                 sandbox_last_active_at = null,
                 status = $3,
                 updated_at = now()
             where thread_key = $1
-            returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, proxy_labels, sandbox_last_active_at, created_at, updated_at
+            returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, proxy_labels, sandbox_last_active_at, created_at, updated_at
             "#,
         )
         .bind(thread_key.as_str())
@@ -1302,7 +1448,7 @@ impl PgSessionStore {
             update sessions
             set iron_control_principal = $2, updated_at = now()
             where thread_key = $1
-            returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, proxy_labels, sandbox_last_active_at, created_at, updated_at
+            returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, proxy_labels, sandbox_last_active_at, created_at, updated_at
             "#,
         )
         .bind(thread_key.as_str())
@@ -1311,6 +1457,47 @@ impl PgSessionStore {
         .await?;
 
         row.try_into()
+    }
+
+    /// Bind a principal to a session without allowing an existing binding to
+    /// change. The conditional update makes concurrent first bindings atomic:
+    /// one caller wins, and a caller selecting a different principal receives
+    /// a conflict instead of rebinding the session.
+    pub async fn bind_iron_control_principal(
+        &self,
+        thread_key: &ThreadKey,
+        iron_control_principal: &str,
+    ) -> Result<Session, SessionStoreError> {
+        let row = sqlx::query_as::<_, SessionRow>(
+            r#"
+            update sessions
+            set iron_control_principal = $2, updated_at = now()
+            where thread_key = $1
+              and (iron_control_principal is null or iron_control_principal = $2)
+            returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, proxy_labels, sandbox_last_active_at, created_at, updated_at
+            "#,
+        )
+        .bind(thread_key.as_str())
+        .bind(iron_control_principal)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        if let Some(row) = row {
+            return row.try_into();
+        }
+
+        let session = self.get_session(thread_key).await?;
+        match session.iron_control_principal {
+            Some(existing) => Err(SessionStoreError::PrincipalConflict {
+                thread_key: thread_key.as_str().to_owned(),
+                existing,
+                requested: iron_control_principal.to_owned(),
+            }),
+            None => Err(SessionStoreError::InvalidPersistedValue(format!(
+                "session {} remained unbound after principal binding",
+                thread_key.as_str()
+            ))),
+        }
     }
 
     pub async fn insert_ready_warm_sandbox(
@@ -1472,7 +1659,7 @@ impl PgSessionStore {
             update sessions
             set harness_thread_id = $2, updated_at = now()
             where thread_key = $1
-            returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, sandbox_api_server_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, proxy_labels, sandbox_last_active_at, created_at, updated_at
+            returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, proxy_labels, sandbox_last_active_at, created_at, updated_at
             "#,
         )
         .bind(thread_key.as_str())
@@ -1591,8 +1778,16 @@ pub enum SessionStoreError {
         existing: Option<String>,
         requested: Option<String>,
     },
+    #[error("session {thread_key} already exists with principal {existing}, requested {requested}")]
+    PrincipalConflict {
+        thread_key: String,
+        existing: String,
+        requested: String,
+    },
     #[error("invalid persisted value: {0}")]
     InvalidPersistedValue(String),
+    #[error("session execution not found for execution_id {execution_id}")]
+    ExecutionNotFound { execution_id: String },
     #[error("invalid notification payload on {channel}: {payload}: {error}")]
     InvalidNotification {
         channel: String,
@@ -1613,7 +1808,6 @@ struct SessionRow {
     sandbox_repo_cache_enabled: Option<bool>,
     sandbox_repo_cache_access: Option<String>,
     sandbox_observability_enabled: Option<bool>,
-    sandbox_api_server_enabled: Option<bool>,
     harness_type: String,
     harness_thread_id: Option<String>,
     persona_id: Option<String>,
@@ -1637,23 +1831,18 @@ impl TryFrom<SessionRow> for Session {
                 row.sandbox_repo_cache_enabled,
                 row.sandbox_repo_cache_access,
                 row.sandbox_observability_enabled,
-                row.sandbox_api_server_enabled,
             ) {
-                (
-                    Some(repo_cache_enabled),
-                    repo_cache_access,
-                    Some(observability_enabled),
-                    Some(api_server_enabled),
-                ) => Some(SandboxCapabilities {
-                    repo_cache: repo_cache_access
-                        .as_deref()
-                        .and_then(SandboxRepoCacheAccess::parse)
-                        .unwrap_or_else(|| {
-                            SandboxRepoCacheAccess::from_legacy_enabled(repo_cache_enabled)
-                        }),
-                    observability_enabled,
-                    api_server_enabled,
-                }),
+                (Some(repo_cache_enabled), repo_cache_access, Some(observability_enabled)) => {
+                    Some(SandboxCapabilities {
+                        repo_cache: repo_cache_access
+                            .as_deref()
+                            .and_then(SandboxRepoCacheAccess::parse)
+                            .unwrap_or_else(|| {
+                                SandboxRepoCacheAccess::from_legacy_enabled(repo_cache_enabled)
+                            }),
+                        observability_enabled,
+                    })
+                }
                 _ => None,
             },
             harness_type: parse_persisted(row.harness_type)?,
@@ -2043,6 +2232,153 @@ mod tests {
                 .expect("get session")
                 .proxy_labels,
             labels
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_or_get_session_merges_only_changed_metadata() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let thread_key =
+            ThreadKey::parse(format!("test:metadata-merge-{}", Uuid::new_v4())).unwrap();
+        let created = store
+            .create_or_get_session_merging_metadata(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({
+                    "mcp_tool_host": true,
+                    "mcp_principal_id": "prn_test",
+                    "console_user_name": "Old Name",
+                }),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+
+        let updated = store
+            .create_or_get_session_merging_metadata(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({
+                    "mcp_tool_host": true,
+                    "mcp_principal_id": "prn_test",
+                    "console_user_email": "test@example.com",
+                    "console_user_name": "Test User",
+                }),
+                Default::default(),
+            )
+            .await
+            .expect("merge session metadata");
+        assert!(updated.updated_at >= created.updated_at);
+
+        let unchanged = store
+            .create_or_get_session_merging_metadata(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({
+                    "mcp_tool_host": true,
+                    "mcp_principal_id": "prn_test",
+                    "console_user_email": "test@example.com",
+                    "console_user_name": "Test User",
+                }),
+                Default::default(),
+            )
+            .await
+            .expect("load session with unchanged metadata");
+        assert_eq!(unchanged.updated_at, updated.updated_at);
+
+        let metadata = sqlx::query_scalar::<_, serde_json::Value>(
+            "select metadata from sessions where thread_key = $1",
+        )
+        .bind(thread_key.as_str())
+        .fetch_one(store.pool())
+        .await
+        .expect("load session metadata");
+
+        assert_eq!(
+            metadata,
+            json!({
+                "mcp_tool_host": true,
+                "mcp_principal_id": "prn_test",
+                "console_user_email": "test@example.com",
+                "console_user_name": "Test User",
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn execution_requests_are_durable_and_idempotent() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let thread_key =
+            ThreadKey::parse(format!("test:execution-request-{}", Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+        let first_request = json!({
+            "idempotency_key": "slack-message-1",
+            "input_lines": ["{\"type\":\"user\",\"text\":\"first\"}"],
+            "metadata": {"source": "slackbotv2"},
+            "idle_timeout_ms": 1000,
+            "max_duration_ms": null
+        });
+        let first = store
+            .create_execution_with_request(
+                &thread_key,
+                Some("slack-message-1"),
+                json!({"source": "slackbotv2"}),
+                first_request.clone(),
+            )
+            .await
+            .expect("create execution with request");
+
+        let replay = store
+            .create_execution_with_request(
+                &thread_key,
+                Some("slack-message-1"),
+                json!({"source": "different-replay"}),
+                json!({"input_lines": ["different replay"]}),
+            )
+            .await
+            .expect("replay idempotent execution request");
+
+        assert!(first.created);
+        assert!(!replay.created);
+        assert_eq!(replay.execution.execution_id, first.execution.execution_id);
+        store
+            .set_execution_traceparent(
+                &first.execution.execution_id,
+                "00-0123456789abcdef0123456789abcdef-1111111111111111-01",
+            )
+            .await
+            .expect("persist execution traceparent");
+        assert_eq!(
+            store
+                .latest_execution_for_thread(&thread_key)
+                .await
+                .expect("load traced execution")
+                .expect("execution exists")
+                .metadata["centaur.traceparent"],
+            "00-0123456789abcdef0123456789abcdef-1111111111111111-01"
+        );
+        assert_eq!(
+            store
+                .execution_request(&first.execution.execution_id)
+                .await
+                .expect("load persisted execution request"),
+            first_request
         );
     }
 

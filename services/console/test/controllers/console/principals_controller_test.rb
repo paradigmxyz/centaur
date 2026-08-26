@@ -36,7 +36,9 @@ module Console
       system_settings(:default).update!(
         default_sandbox_repo_cache: "public",
         default_sandbox_observability_enabled: false,
-        default_sandbox_api_server_enabled: false
+        default_sandbox_sessions_read_enabled: false,
+        default_sandbox_workflows_read_enabled: false,
+        default_sandbox_workflows_write_enabled: false
       )
       Role.update_all(assign_by_default: false)
       roles(:acme_infra).update!(assign_by_default: true)
@@ -68,7 +70,9 @@ module Console
       )
       assert_equal "public", principal.sandbox_repo_cache
       assert_equal false, principal.sandbox_observability_enabled
-      assert_equal false, principal.sandbox_api_server_enabled
+      assert_equal false, principal.sandbox_sessions_read_enabled
+      assert_equal false, principal.sandbox_workflows_read_enabled
+      assert_equal false, principal.sandbox_workflows_write_enabled
       expected = [ roles(:acme_infra), roles(:globex_infra) ].sort_by(&:id)
       assert_equal expected, principal.roles.order(:id).to_a
       assert_equal @operator, principal.created_by
@@ -99,7 +103,9 @@ module Console
             params: {
               sandbox_repo_cache: "public",
               sandbox_observability_enabled: "0",
-              sandbox_api_server_enabled: "0"
+              sandbox_sessions_read_enabled: "0",
+              sandbox_workflows_read_enabled: "0",
+              sandbox_workflows_write_enabled: "0"
             }
 
       assert_redirected_to console_principal_path(principal.oid)
@@ -108,7 +114,9 @@ module Console
       assert_equal "public", principal.sandbox_repo_cache
       assert_equal "public", principal.labels[Principal::SANDBOX_REPO_CACHE_LABEL]
       assert_equal false, principal.sandbox_observability_enabled
-      assert_equal false, principal.sandbox_api_server_enabled
+      assert_equal false, principal.sandbox_sessions_read_enabled
+      assert_equal false, principal.sandbox_workflows_read_enabled
+      assert_equal false, principal.sandbox_workflows_write_enabled
     end
 
     test "update_slack_channel_permissions stores selected Slack channel permissions" do

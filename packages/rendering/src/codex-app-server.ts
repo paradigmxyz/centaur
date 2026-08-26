@@ -765,11 +765,21 @@ function errorMessage(event: any): string {
     return messageFromError(event?.turn?.error ?? event?.error, event?.message, 'turn failed')
   }
   if (eventType !== 'error' && eventType !== 'turn.failed') return ''
+  if (isRetryableCodexErrorNotification(event)) return ''
   return messageFromError(
     event?.error,
     event?.message,
     eventType === 'turn.failed' ? 'turn failed' : 'Execution failed'
   )
+}
+
+/** Codex reconnects dropped model streams and emits `error` with `willRetry: true`. */
+export function isRetryableCodexErrorNotification(source: unknown): boolean {
+  if (!isRecord(source)) return false
+  const event = normalizeServerNotification(source)
+  if (!event) return false
+  if (String(event.type ?? '') !== 'error') return false
+  return event.willRetry === true
 }
 
 function isFailedTurn(event: any): boolean {
