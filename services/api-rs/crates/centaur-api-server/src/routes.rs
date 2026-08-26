@@ -1676,6 +1676,8 @@ struct GoogleDocsSyncFilePayload {
     source_run_id: Option<String>,
 }
 
+const GOOGLE_DOCS_NAME_MAX_BYTES: usize = 1_024;
+
 #[derive(Debug, Deserialize)]
 struct GoogleDocsSyncObservationPayload {
     broker_credential_id: String,
@@ -2435,7 +2437,7 @@ fn content_version_satisfies(stored: &str, requested: &str) -> bool {
 
 #[cfg(test)]
 mod google_docs_content_status_tests {
-    use super::content_version_satisfies;
+    use super::*;
 
     #[test]
     fn newer_numeric_google_drive_versions_satisfy_older_requests() {
@@ -2448,6 +2450,57 @@ mod google_docs_content_status_tests {
     fn opaque_versions_only_satisfy_exact_requests() {
         assert!(content_version_satisfies("version-a", "version-a"));
         assert!(!content_version_satisfies("version-b", "version-a"));
+    }
+
+    #[test]
+    fn google_docs_names_at_the_byte_limit_are_valid() {
+        let name = "📄".repeat(GOOGLE_DOCS_NAME_MAX_BYTES / 4);
+        let request: GoogleDocsSyncBatchRequest = serde_json::from_value(json!({
+            "files": [{ "file_id": "doc-1", "name": name }],
+            "observations": [{
+                "broker_credential_id": "credential-1",
+                "observed_file_id": "doc-1",
+                "file_id": "doc-1",
+                "observed_name": name
+            }]
+        }))
+        .unwrap();
+
+        validate_google_docs_sync_batch(&request).unwrap();
+    }
+
+    #[test]
+    fn rejects_google_docs_file_names_over_the_byte_limit() {
+        let request: GoogleDocsSyncBatchRequest = serde_json::from_value(json!({
+            "files": [{
+                "file_id": "doc-1",
+                "name": "a".repeat(GOOGLE_DOCS_NAME_MAX_BYTES + 1)
+            }]
+        }))
+        .unwrap();
+
+        let error = validate_google_docs_sync_batch(&request).unwrap_err();
+
+        assert!(matches!(error, ApiError::BadRequest(message) if message ==
+            "file.name must be at most 1024 bytes"));
+    }
+
+    #[test]
+    fn rejects_google_docs_observed_names_over_the_byte_limit() {
+        let request: GoogleDocsSyncBatchRequest = serde_json::from_value(json!({
+            "observations": [{
+                "broker_credential_id": "credential-1",
+                "observed_file_id": "doc-1",
+                "file_id": "doc-1",
+                "observed_name": "📄".repeat((GOOGLE_DOCS_NAME_MAX_BYTES / 4) + 1)
+            }]
+        }))
+        .unwrap();
+
+        let error = validate_google_docs_sync_batch(&request).unwrap_err();
+
+        assert!(matches!(error, ApiError::BadRequest(message) if message ==
+            "observation.observed_name must be at most 1024 bytes"));
     }
 }
 
@@ -3219,6 +3272,15 @@ fn require_non_empty(field: &str, value: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+fn require_max_bytes(field: &str, value: &str, max: usize) -> Result<(), ApiError> {
+    if value.len() > max {
+        return Err(ApiError::BadRequest(format!(
+            "{field} must be at most {max} bytes"
+        )));
+    }
+    Ok(())
+}
+
 fn slack_ts_to_datetime(value: Option<&str>) -> Result<Option<OffsetDateTime>, ApiError> {
     let Some(value) = empty_to_none(value) else {
         return Ok(None);
@@ -3440,6 +3502,7 @@ fn validate_google_docs_sync_batch(request: &GoogleDocsSyncBatchRequest) -> Resu
     }
     for file in &request.files {
         require_non_empty("file.file_id", &file.file_id)?;
+        require_max_bytes("file.name", &file.name, GOOGLE_DOCS_NAME_MAX_BYTES)?;
         validate_json_shape("file.owners", &file.owners, false)?;
         validate_json_shape("file.last_modifying_user", &file.last_modifying_user, true)?;
         validate_json_shape("file.capabilities", &file.capabilities, true)?;
@@ -3461,6 +3524,11 @@ fn validate_google_docs_sync_batch(request: &GoogleDocsSyncBatchRequest) -> Resu
             &observation.observed_file_id,
         )?;
         require_non_empty("observation.file_id", &observation.file_id)?;
+        require_max_bytes(
+            "observation.observed_name",
+            &observation.observed_name,
+            GOOGLE_DOCS_NAME_MAX_BYTES,
+        )?;
         validate_json_shape(
             "observation.permission_ids",
             &observation.permission_ids,
