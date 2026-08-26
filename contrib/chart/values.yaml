@@ -427,6 +427,18 @@ apiRs:
     tag: latest
     pullPolicy: Always
   port: 8080
+  # Optional shared Mercator payment wallet. Discovery and quoting work without
+  # this; enabling it mounts one wallet from the canonical Centaur Secret into
+  # api-rs only, never into agent sandboxes.
+  mercator:
+    enabled: false
+    # Payments at or below this amount can proceed without a user confirmation.
+    # Above it, callers must acknowledge the confirmation in the request.
+    # Uses Mercator's six-decimal billing currency amount format.
+    autoApproveMax: "0"
+    # Empty allowlists permit every catalog entry. Denylists always win.
+    allowedServices: []
+    deniedServices: []
   # Public/local MCP endpoint advertised through OAuth protected-resource
   # metadata. Empty falls back to slackbotv2.mcpPublicUrl.
   mcpPublicUrl: ""

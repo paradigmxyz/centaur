@@ -57,6 +57,7 @@ use crate::{
     api_jwt::{bearer_jwt_from_headers, decode_jwt_payload, verify_console_jwt},
     auth::{ApiAuthConfig, AuthenticatedCaller, CallerClass, Capability},
     mcp::{mcp_get, mcp_post, mcp_protected_resource_metadata},
+    mercator::submit_mercator_job,
     slack_proxy::slack_proxy_router,
     types::{
         AppendMessagesRequest, AppendMessagesResponse, CreateSessionRequest, CreateSessionResponse,
@@ -259,6 +260,10 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         )
         .route("/api/session/{thread_key}/events", get(stream_events))
         .route("/api/sandboxes/drain", post(drain_sandboxes))
+        .route(
+            "/api/mercator/jobs",
+            post(submit_mercator_job).layer(DefaultBodyLimit::max(256 * 1024)),
+        )
         .merge(slack_proxy_router())
         .route("/api/workflows/schedules", get(list_workflow_schedules))
         .route(
@@ -544,6 +549,7 @@ fn route_access(method: &Method, route: &str) -> Option<RouteAccess> {
             capability(Capability::SessionsWrite)
         }
         (&Method::POST, "/api/sandboxes/drain") => capability(Capability::SandboxesDrain),
+        (&Method::POST, "/api/mercator/jobs") => Some(RouteAccess::PrincipalOnly),
         (&Method::GET, "/api/workflows/schedules")
         | (&Method::GET, "/api/workflows/runs")
         | (&Method::GET, "/api/workflows/runs/{run_id}") => capability(Capability::WorkflowsRead),

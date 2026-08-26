@@ -258,6 +258,14 @@ spec:
               value: {{ .Values.apiRs.syncInfraSecrets | quote }}
             - name: RUST_LOG
               value: info
+{{- if .Values.apiRs.mercator.enabled }}
+            - name: CENTAUR_MERCATOR_AUTO_APPROVE_MAX
+              value: {{ .Values.apiRs.mercator.autoApproveMax | quote }}
+            - name: CENTAUR_MERCATOR_ALLOWED_SERVICES
+              value: {{ .Values.apiRs.mercator.allowedServices | toJson | quote }}
+            - name: CENTAUR_MERCATOR_DENIED_SERVICES
+              value: {{ .Values.apiRs.mercator.deniedServices | toJson | quote }}
+{{- end }}
             - name: TOOL_DIRS
               value: {{ join ":" $toolDirs | quote }}
 {{- if gt (len $publicToolDirs) 0 }}
@@ -571,14 +579,31 @@ spec:
 {{ toYaml .Values.containerSecurityContext | nindent 12 }}
           resources:
 {{ toYaml .Values.apiRs.resources | nindent 12 }}
-{{- if $useOverlayRepoCache }}
+{{- if or $useOverlayRepoCache .Values.apiRs.mercator.enabled }}
           volumeMounts:
+{{- if .Values.apiRs.mercator.enabled }}
+            - name: mercator-wallet
+              mountPath: /var/run/secrets/centaur/mercator
+              readOnly: true
+{{- end }}
+{{- if $useOverlayRepoCache }}
             - name: repo-cache
               mountPath: {{ .Values.repoCache.hostPath | quote }}
               readOnly: true
 {{- end }}
-{{- if $useOverlayRepoCache }}
+{{- end }}
+{{- if or $useOverlayRepoCache .Values.apiRs.mercator.enabled }}
       volumes:
+{{- if .Values.apiRs.mercator.enabled }}
+        - name: mercator-wallet
+          secret:
+            secretName: {{ include "centaur.secretEnvName" . }}
+            optional: true
+            items:
+              - key: {{ printf "%sMERCATOR_WALLET_JSON" .Values.secretManager.envPrefix | quote }}
+                path: wallet.json
+{{- end }}
+{{- if $useOverlayRepoCache }}
         - name: repo-cache
 {{- if $repoCacheUsePvc }}
           persistentVolumeClaim:
@@ -588,6 +613,7 @@ spec:
           hostPath:
             path: {{ .Values.repoCache.hostPath | quote }}
             type: DirectoryOrCreate
+{{- end }}
 {{- end }}
 {{- end }}
 ---
