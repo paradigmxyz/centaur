@@ -15,7 +15,9 @@ use tokio::{process::Command, time::timeout};
 
 use crate::{ApiError, auth::AuthenticatedCaller};
 
-const DEFAULT_JOBS_URL: &str = "https://mercator.tempoxyz.dev/v1/jobs";
+const JOBS_URL: &str = "https://mercator.tempoxyz.dev/v1/jobs";
+const CLI_PATH: &str = "/usr/local/bin/mercator";
+const WALLET_PATH: &str = "/var/run/secrets/centaur/mercator/wallet.json";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 45;
 const MAX_CLI_OUTPUT_BYTES: usize = 1024 * 1024;
 const AMOUNT_SCALE: u128 = 1_000_000;
@@ -26,8 +28,8 @@ pub(crate) struct SubmitMercatorRequest {
     /// Caller assertion that the user accepted a quote above the automatic threshold.
     ///
     /// This is a UX acknowledgement, not an authentication boundary. The
-    /// authenticated principal, hard spend limit, destination, and catalog
-    /// policy are enforced independently by Centaur.
+    /// authenticated principal, pinned destination, service policy, and quoted
+    /// maximum passed to the payment client are enforced independently.
     #[serde(default)]
     approved: bool,
     handoff: MercatorHandoff,
@@ -74,40 +76,19 @@ enum ApprovalMode {
     UserAcknowledged,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct EndpointRule {
-    service_id: String,
-    method: String,
-    path: String,
-}
-
 #[derive(Debug)]
 struct MercatorPolicy {
     auto_approve_max: u128,
-    max_spend_per_job: u128,
     allowed_services: Vec<String>,
     denied_services: Vec<String>,
-    allowed_endpoints: Vec<EndpointRule>,
-    denied_endpoints: Vec<EndpointRule>,
 }
 
 impl MercatorPolicy {
     fn from_env() -> Result<Self, ApiError> {
-        let auto_approve_max = policy_amount("CENTAUR_MERCATOR_AUTO_APPROVE_MAX")?;
-        let max_spend_per_job = policy_amount("CENTAUR_MERCATOR_MAX_SPEND_PER_JOB")?;
-        if auto_approve_max > max_spend_per_job {
-            return Err(ApiError::Internal(
-                "Mercator automatic approval threshold exceeds the per-job limit".to_owned(),
-            ));
-        }
         Ok(Self {
-            auto_approve_max,
-            max_spend_per_job,
+            auto_approve_max: policy_amount("CENTAUR_MERCATOR_AUTO_APPROVE_MAX")?,
             allowed_services: policy_json("CENTAUR_MERCATOR_ALLOWED_SERVICES")?,
             denied_services: policy_json("CENTAUR_MERCATOR_DENIED_SERVICES")?,
-            allowed_endpoints: policy_json("CENTAUR_MERCATOR_ALLOWED_ENDPOINTS")?,
-            denied_endpoints: policy_json("CENTAUR_MERCATOR_DENIED_ENDPOINTS")?,
         })
     }
 }
@@ -117,11 +98,7 @@ pub(crate) async fn submit_mercator_job(
     Json(request): Json<SubmitMercatorRequest>,
 ) -> Result<Json<SubmitMercatorResponse>, ApiError> {
     let policy = MercatorPolicy::from_env()?;
-    let configured_jobs_url = env::var("CENTAUR_MERCATOR_JOBS_URL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_JOBS_URL.to_owned());
-    let validated = validate_handoff(&request, &policy, &configured_jobs_url)?;
+    let validated = validate_handoff(&request, &policy)?;
 
     tracing::info!(
         caller = %fingerprint(caller.principal_subject().unwrap_or("unknown")),
@@ -132,14 +109,9 @@ pub(crate) async fn submit_mercator_job(
         "Mercator paid job authorized"
     );
 
-    let wallet_path = required_env("MERCATOR_WALLET_PATH")?;
-    let wallet = TemporaryWallet::copy_from(Path::new(&wallet_path))?;
+    let wallet = TemporaryWallet::copy_from(Path::new(WALLET_PATH))?;
 
-    let executable = env::var("CENTAUR_MERCATOR_CLI")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "/usr/local/bin/mercator".to_owned());
-    let result = execute_handoff(&executable, wallet.path(), &request).await?;
+    let result = execute_handoff(CLI_PATH, wallet.path(), &request).await?;
     tracing::info!(
         caller = %fingerprint(caller.principal_subject().unwrap_or("unknown")),
         request = %validated.audit.request,
@@ -156,7 +128,6 @@ pub(crate) async fn submit_mercator_job(
 fn validate_handoff(
     request: &SubmitMercatorRequest,
     policy: &MercatorPolicy,
-    configured_jobs_url: &str,
 ) -> Result<ValidatedHandoff, ApiError> {
     let handoff = &request.handoff;
     if handoff.status != "payment_required" || handoff.next_action != "run_rest_request" {
@@ -177,7 +148,7 @@ fn validate_handoff(
         ));
     }
 
-    if handoff.rest.url != configured_jobs_url {
+    if handoff.rest.url != JOBS_URL {
         return Err(ApiError::BadRequest(
             "Mercator handoff URL is not allowed".to_owned(),
         ));
@@ -187,12 +158,6 @@ fn validate_handoff(
             "Mercator maxSpend must be a non-negative decimal with at most 6 decimals".to_owned(),
         )
     })?;
-    if max_spend > policy.max_spend_per_job {
-        return Err(ApiError::Forbidden(
-            "Mercator maxSpend exceeds the configured per-job limit".to_owned(),
-        ));
-    }
-
     let body = handoff.rest.body.as_object().ok_or_else(|| {
         ApiError::BadRequest("Mercator handoff body must be an object".to_owned())
     })?;
@@ -215,7 +180,7 @@ fn validate_handoff(
         .filter(|nodes| !nodes.is_empty())
         .ok_or_else(|| ApiError::BadRequest("Mercator plan has no nodes".to_owned()))?;
     for node in nodes {
-        validate_node(node, policy)?;
+        validate_service(node, policy)?;
     }
     let approval = if max_spend <= policy.auto_approve_max {
         ApprovalMode::Automatic
@@ -236,36 +201,25 @@ fn validate_handoff(
     })
 }
 
-fn validate_node(node: &Value, policy: &MercatorPolicy) -> Result<(), ApiError> {
+fn validate_service(node: &Value, policy: &MercatorPolicy) -> Result<(), ApiError> {
     let node = node
         .as_object()
         .ok_or_else(|| ApiError::BadRequest("Mercator plan node must be an object".to_owned()))?;
-    let field = |name: &str| {
-        node.get(name)
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| ApiError::BadRequest(format!("Mercator plan node is missing {name}")))
-    };
-    let service_id = field("serviceId")?;
-    let method = field("method")?.to_ascii_uppercase();
-    let path = field("path")?;
-    let endpoint = EndpointRule {
-        service_id: service_id.to_owned(),
-        method,
-        path: path.to_owned(),
-    };
+    let service_id = node
+        .get("serviceId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ApiError::BadRequest("Mercator plan node is missing serviceId".to_owned())
+        })?;
 
     if policy
         .denied_services
         .iter()
         .any(|value| value == service_id)
-        || policy
-            .denied_endpoints
-            .iter()
-            .any(|rule| endpoint_matches(rule, &endpoint))
     {
         return Err(ApiError::Forbidden(
-            "Mercator plan contains a denied service or endpoint".to_owned(),
+            "Mercator plan contains a denied service".to_owned(),
         ));
     }
     if !policy.allowed_services.is_empty()
@@ -278,23 +232,7 @@ fn validate_node(node: &Value, policy: &MercatorPolicy) -> Result<(), ApiError> 
             "Mercator plan contains a service outside the allowlist".to_owned(),
         ));
     }
-    if !policy.allowed_endpoints.is_empty()
-        && !policy
-            .allowed_endpoints
-            .iter()
-            .any(|rule| endpoint_matches(rule, &endpoint))
-    {
-        return Err(ApiError::Forbidden(
-            "Mercator plan contains an endpoint outside the allowlist".to_owned(),
-        ));
-    }
     Ok(())
-}
-
-fn endpoint_matches(rule: &EndpointRule, endpoint: &EndpointRule) -> bool {
-    rule.service_id == endpoint.service_id
-        && rule.method.eq_ignore_ascii_case(&endpoint.method)
-        && rule.path == endpoint.path
 }
 
 #[derive(Debug)]
@@ -424,14 +362,6 @@ fn wallet_unavailable() -> ApiError {
     ApiError::ServiceUnavailable("Mercator wallet is not configured".to_owned())
 }
 
-fn required_env(name: &str) -> Result<String, ApiError> {
-    env::var(name)
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| ApiError::ServiceUnavailable("Mercator wallet is not configured".to_owned()))
-}
-
 fn amount_units(value: &str) -> Option<u128> {
     let (whole, fractional) = match value.split_once('.') {
         Some(parts) => parts,
@@ -505,28 +435,25 @@ mod tests {
                         }]},
                     }),
                     method: "POST".to_owned(),
-                    url: DEFAULT_JOBS_URL.to_owned(),
+                    url: JOBS_URL.to_owned(),
                 },
                 status: "payment_required".to_owned(),
             },
         }
     }
 
-    fn policy(auto_approve_max: &str, max_spend_per_job: &str) -> MercatorPolicy {
+    fn policy(auto_approve_max: &str) -> MercatorPolicy {
         MercatorPolicy {
             auto_approve_max: amount_units(auto_approve_max).expect("valid threshold"),
-            max_spend_per_job: amount_units(max_spend_per_job).expect("valid limit"),
             allowed_services: Vec::new(),
             denied_services: Vec::new(),
-            allowed_endpoints: Vec::new(),
-            denied_endpoints: Vec::new(),
         }
     }
 
     #[test]
     fn validates_canonical_approved_handoff() {
         assert_eq!(
-            validate_handoff(&request(true), &policy("0", "0.10"), DEFAULT_JOBS_URL)
+            validate_handoff(&request(true), &policy("0"))
                 .expect("valid handoff")
                 .approval,
             ApprovalMode::UserAcknowledged
@@ -536,7 +463,7 @@ mod tests {
     #[test]
     fn automatically_approves_payment_at_or_below_threshold() {
         assert_eq!(
-            validate_handoff(&request(false), &policy("0.001", "0.10"), DEFAULT_JOBS_URL,)
+            validate_handoff(&request(false), &policy("0.001"))
                 .expect("payment should be automatic")
                 .approval,
             ApprovalMode::Automatic
@@ -545,28 +472,17 @@ mod tests {
 
     #[test]
     fn rejects_unapproved_payment_above_threshold() {
-        let error = validate_handoff(&request(false), &policy("0.0009", "0.10"), DEFAULT_JOBS_URL)
+        let error = validate_handoff(&request(false), &policy("0.0009"))
             .expect_err("approval must be required");
         assert!(error.to_string().contains("approval acknowledgement"));
-    }
-
-    #[test]
-    fn rejects_payment_above_hard_limit_before_approval() {
-        let error = validate_handoff(
-            &request(false),
-            &policy("0.0005", "0.0009"),
-            DEFAULT_JOBS_URL,
-        )
-        .expect_err("hard limit must be enforced");
-        assert!(error.to_string().contains("per-job limit"));
     }
 
     #[test]
     fn rejects_non_mercator_destination() {
         let mut request = request(true);
         request.handoff.rest.url = "https://example.com/v1/jobs".to_owned();
-        let error = validate_handoff(&request, &policy("0", "0.10"), DEFAULT_JOBS_URL)
-            .expect_err("destination must be pinned");
+        let error =
+            validate_handoff(&request, &policy("0")).expect_err("destination must be pinned");
         assert!(error.to_string().contains("URL is not allowed"));
     }
 
@@ -581,29 +497,22 @@ mod tests {
     }
 
     #[test]
-    fn applies_service_and_endpoint_rules_with_deny_precedence() {
-        let allowed_endpoint = EndpointRule {
-            service_id: "x402-api".to_owned(),
-            method: "get".to_owned(),
-            path: "/crypto/price/btc/usd/btc-usd".to_owned(),
-        };
-        let mut policy = policy("0.001", "0.10");
+    fn applies_service_rules_with_deny_precedence() {
+        let mut policy = policy("0.001");
         policy.allowed_services = vec!["x402-api".to_owned()];
-        policy.allowed_endpoints = vec![allowed_endpoint.clone()];
-        validate_handoff(&request(false), &policy, DEFAULT_JOBS_URL).expect("allowlisted endpoint");
+        validate_handoff(&request(false), &policy).expect("allowlisted service");
 
-        policy.denied_endpoints = vec![allowed_endpoint];
-        let error = validate_handoff(&request(false), &policy, DEFAULT_JOBS_URL)
-            .expect_err("denylist must win");
+        policy.denied_services = vec!["x402-api".to_owned()];
+        let error = validate_handoff(&request(false), &policy).expect_err("denylist must win");
         assert!(error.to_string().contains("denied"));
     }
 
     #[test]
     fn rejects_service_outside_nonempty_allowlist() {
-        let mut policy = policy("0", "0.10");
+        let mut policy = policy("0");
         policy.allowed_services = vec!["another-service".to_owned()];
-        let error = validate_handoff(&request(false), &policy, DEFAULT_JOBS_URL)
-            .expect_err("service must be allowlisted");
+        let error =
+            validate_handoff(&request(false), &policy).expect_err("service must be allowlisted");
         assert!(error.to_string().contains("outside the allowlist"));
     }
 
@@ -637,7 +546,7 @@ mod tests {
     #[test]
     fn audit_values_are_stable_and_do_not_expose_identifiers() {
         let request = request(true);
-        let audit = validate_handoff(&request, &policy("0", "0.10"), DEFAULT_JOBS_URL)
+        let audit = validate_handoff(&request, &policy("0"))
             .expect("valid handoff")
             .audit;
         assert_eq!(audit.request, fingerprint("centaur-smoke-1"));

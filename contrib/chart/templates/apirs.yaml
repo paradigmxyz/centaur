@@ -259,22 +259,12 @@ spec:
             - name: RUST_LOG
               value: info
 {{- if .Values.apiRs.mercator.enabled }}
-            - name: MERCATOR_WALLET_PATH
-              value: {{ .Values.apiRs.mercator.walletMountPath | quote }}
-            - name: CENTAUR_MERCATOR_JOBS_URL
-              value: {{ .Values.apiRs.mercator.jobsUrl | quote }}
             - name: CENTAUR_MERCATOR_AUTO_APPROVE_MAX
-              value: {{ .Values.apiRs.mercator.policy.autoApproveMax | quote }}
-            - name: CENTAUR_MERCATOR_MAX_SPEND_PER_JOB
-              value: {{ .Values.apiRs.mercator.policy.maxSpendPerJob | quote }}
+              value: {{ .Values.apiRs.mercator.autoApproveMax | quote }}
             - name: CENTAUR_MERCATOR_ALLOWED_SERVICES
-              value: {{ .Values.apiRs.mercator.policy.allowedServices | toJson | quote }}
+              value: {{ .Values.apiRs.mercator.allowedServices | toJson | quote }}
             - name: CENTAUR_MERCATOR_DENIED_SERVICES
-              value: {{ .Values.apiRs.mercator.policy.deniedServices | toJson | quote }}
-            - name: CENTAUR_MERCATOR_ALLOWED_ENDPOINTS
-              value: {{ .Values.apiRs.mercator.policy.allowedEndpoints | toJson | quote }}
-            - name: CENTAUR_MERCATOR_DENIED_ENDPOINTS
-              value: {{ .Values.apiRs.mercator.policy.deniedEndpoints | toJson | quote }}
+              value: {{ .Values.apiRs.mercator.deniedServices | toJson | quote }}
 {{- end }}
             - name: TOOL_DIRS
               value: {{ join ":" $toolDirs | quote }}
@@ -593,7 +583,7 @@ spec:
           volumeMounts:
 {{- if .Values.apiRs.mercator.enabled }}
             - name: mercator-wallet
-              mountPath: {{ dir .Values.apiRs.mercator.walletMountPath | quote }}
+              mountPath: /var/run/secrets/centaur/mercator
               readOnly: true
 {{- end }}
 {{- if $useOverlayRepoCache }}
@@ -607,11 +597,11 @@ spec:
 {{- if .Values.apiRs.mercator.enabled }}
         - name: mercator-wallet
           secret:
-            secretName: {{ default (include "centaur.secretEnvName" .) .Values.apiRs.mercator.walletSecretName | quote }}
+            secretName: {{ include "centaur.secretEnvName" . }}
             optional: true
             items:
-              - key: {{ printf "%s%s" .Values.secretManager.envPrefix .Values.apiRs.mercator.walletSecretKey | quote }}
-                path: {{ base .Values.apiRs.mercator.walletMountPath | quote }}
+              - key: {{ printf "%sMERCATOR_WALLET_JSON" .Values.secretManager.envPrefix | quote }}
+                path: wallet.json
 {{- end }}
 {{- if $useOverlayRepoCache }}
         - name: repo-cache
