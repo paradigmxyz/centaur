@@ -187,16 +187,6 @@ fn validate_handoff(
             "Mercator maxSpend must be a non-negative decimal with at most 6 decimals".to_owned(),
         )
     })?;
-    let approval = if max_spend <= policy.auto_approve_max {
-        ApprovalMode::Automatic
-    } else if request.approved {
-        ApprovalMode::UserAcknowledged
-    } else {
-        return Err(ApiError::BadRequest(
-            "user approval acknowledgement is required above the automatic payment threshold"
-                .to_owned(),
-        ));
-    };
     if max_spend > policy.max_spend_per_job {
         return Err(ApiError::Forbidden(
             "Mercator maxSpend exceeds the configured per-job limit".to_owned(),
@@ -227,6 +217,16 @@ fn validate_handoff(
     for node in nodes {
         validate_node(node, policy)?;
     }
+    let approval = if max_spend <= policy.auto_approve_max {
+        ApprovalMode::Automatic
+    } else if request.approved {
+        ApprovalMode::UserAcknowledged
+    } else {
+        return Err(ApiError::BadRequest(
+            "user approval acknowledgement is required above the automatic payment threshold"
+                .to_owned(),
+        ));
+    };
     Ok(ValidatedHandoff {
         approval,
         audit: MercatorAudit {
@@ -551,9 +551,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_payment_above_hard_limit_even_when_approved() {
+    fn rejects_payment_above_hard_limit_before_approval() {
         let error = validate_handoff(
-            &request(true),
+            &request(false),
             &policy("0.0005", "0.0009"),
             DEFAULT_JOBS_URL,
         )
@@ -600,7 +600,7 @@ mod tests {
 
     #[test]
     fn rejects_service_outside_nonempty_allowlist() {
-        let mut policy = policy("0.001", "0.10");
+        let mut policy = policy("0", "0.10");
         policy.allowed_services = vec!["another-service".to_owned()];
         let error = validate_handoff(&request(false), &policy, DEFAULT_JOBS_URL)
             .expect_err("service must be allowlisted");
