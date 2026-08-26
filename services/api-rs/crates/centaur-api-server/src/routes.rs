@@ -1670,6 +1670,12 @@ struct GoogleDocsSyncFilePayload {
     source_run_id: Option<String>,
 }
 
+const GOOGLE_DOCS_NAME_MAX_CHARS: usize = 255;
+
+fn truncate_google_docs_name(name: &str) -> String {
+    name.chars().take(GOOGLE_DOCS_NAME_MAX_CHARS).collect()
+}
+
 #[derive(Debug, Deserialize)]
 struct GoogleDocsSyncObservationPayload {
     broker_credential_id: String,
@@ -2429,7 +2435,7 @@ fn content_version_satisfies(stored: &str, requested: &str) -> bool {
 
 #[cfg(test)]
 mod google_docs_content_status_tests {
-    use super::content_version_satisfies;
+    use super::{GOOGLE_DOCS_NAME_MAX_CHARS, content_version_satisfies, truncate_google_docs_name};
 
     #[test]
     fn newer_numeric_google_drive_versions_satisfy_older_requests() {
@@ -2442,6 +2448,16 @@ mod google_docs_content_status_tests {
     fn opaque_versions_only_satisfy_exact_requests() {
         assert!(content_version_satisfies("version-a", "version-a"));
         assert!(!content_version_satisfies("version-b", "version-a"));
+    }
+
+    #[test]
+    fn google_docs_names_are_truncated_on_character_boundaries() {
+        let name = "📄".repeat(GOOGLE_DOCS_NAME_MAX_CHARS + 1);
+
+        let truncated = truncate_google_docs_name(&name);
+
+        assert_eq!(truncated.chars().count(), GOOGLE_DOCS_NAME_MAX_CHARS);
+        assert_eq!(truncated, "📄".repeat(GOOGLE_DOCS_NAME_MAX_CHARS));
     }
 }
 
@@ -2458,6 +2474,7 @@ async fn ingest_google_docs_sync_batch(
     }
 
     for file in &request.files {
+        let name = truncate_google_docs_name(&file.name);
         sqlx::query(
             "INSERT INTO google_docs_sync_files (\
              file_id, drive_id, name, mime_type, web_view_link, owners, \
@@ -2488,7 +2505,7 @@ async fn ingest_google_docs_sync_batch(
         )
         .bind(&file.file_id)
         .bind(&file.drive_id)
-        .bind(&file.name)
+        .bind(&name)
         .bind(&file.mime_type)
         .bind(&file.web_view_link)
         .bind(&file.owners)
@@ -2507,6 +2524,7 @@ async fn ingest_google_docs_sync_batch(
     }
 
     for observation in &request.observations {
+        let observed_name = truncate_google_docs_name(&observation.observed_name);
         sqlx::query(
             "INSERT INTO google_docs_sync_file_observations (\
              broker_credential_id, observed_file_id, file_id, provider_subject, \
@@ -2537,7 +2555,7 @@ async fn ingest_google_docs_sync_batch(
         .bind(&observation.file_id)
         .bind(&observation.provider_subject)
         .bind(&observation.provider_email)
-        .bind(&observation.observed_name)
+        .bind(&observed_name)
         .bind(&observation.observed_mime_type)
         .bind(&observation.observed_web_view_link)
         .bind(&observation.shortcut_target_file_id)
