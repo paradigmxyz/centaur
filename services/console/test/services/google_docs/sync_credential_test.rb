@@ -216,6 +216,21 @@ module GoogleDocs
       refute_includes batch[:context_documents].first[:metadata], :broker_credential_id
     end
 
+    test "truncates names sent to the sync API while preserving the raw payload" do
+      file = google_doc.merge("name" => "a#{"📄" * (GoogleDocs::SyncCredential::NAME_MAX_BYTES / 4)}")
+      sync = GoogleDocs::SyncCredential.new(credential)
+
+      file_payload = sync.file_payload(file)
+      observation_payload = sync.observation_payload(file, source: "full")
+
+      expected_name = "a#{"📄" * ((GoogleDocs::SyncCredential::NAME_MAX_BYTES / 4) - 1)}"
+      assert_equal expected_name, file_payload[:name]
+      assert_equal expected_name, observation_payload[:observed_name]
+      assert_operator file_payload[:name].bytesize, :<=, GoogleDocs::SyncCredential::NAME_MAX_BYTES
+      assert_predicate file_payload[:name], :valid_encoding?
+      assert_equal file, file_payload[:raw_payload]
+    end
+
     private
 
     def google_doc

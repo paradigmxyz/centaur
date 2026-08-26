@@ -9,6 +9,7 @@ module GoogleDocs
     DOCS_READONLY_SCOPE = "https://www.googleapis.com/auth/documents.readonly"
     GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document"
     EXPORT_MIME_TYPE = "text/plain"
+    NAME_MAX_BYTES = 1_024
     USER_CORPUS = "user"
     FETCH_READ_TIMEOUT_SECONDS = 60
 
@@ -128,7 +129,7 @@ module GoogleDocs
       {
         file_id: file.fetch("id"),
         drive_id: file["driveId"].to_s,
-        name: file["name"].to_s,
+        name: truncated_name(file),
         mime_type: file["mimeType"].to_s,
         web_view_link: file["webViewLink"].to_s,
         owners: Array(file["owners"]),
@@ -152,7 +153,7 @@ module GoogleDocs
         file_id: file.fetch("id"),
         provider_subject: credential.provider_subject.to_s,
         provider_email: credential.provider_email.to_s,
-        observed_name: file["name"].to_s,
+        observed_name: truncated_name(file),
         observed_mime_type: file["mimeType"].to_s,
         observed_web_view_link: file["webViewLink"].to_s,
         role_hint: role_hint(file),
@@ -208,6 +209,13 @@ module GoogleDocs
     end
 
     private
+
+    def truncated_name(file)
+      name = file["name"].to_s
+      return name if name.bytesize <= NAME_MAX_BYTES
+
+      name.byteslice(0, NAME_MAX_BYTES).scrub("")
+    end
 
     def source_version(file)
       file["version"].presence || file["modifiedTime"].to_s

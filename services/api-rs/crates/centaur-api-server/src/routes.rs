@@ -1670,11 +1670,7 @@ struct GoogleDocsSyncFilePayload {
     source_run_id: Option<String>,
 }
 
-const GOOGLE_DOCS_NAME_MAX_CHARS: usize = 255;
-
-fn truncate_google_docs_name(name: &str) -> String {
-    name.chars().take(GOOGLE_DOCS_NAME_MAX_CHARS).collect()
-}
+const GOOGLE_DOCS_NAME_MAX_BYTES: usize = 1_024;
 
 #[derive(Debug, Deserialize)]
 struct GoogleDocsSyncObservationPayload {
@@ -2435,7 +2431,7 @@ fn content_version_satisfies(stored: &str, requested: &str) -> bool {
 
 #[cfg(test)]
 mod google_docs_content_status_tests {
-    use super::{GOOGLE_DOCS_NAME_MAX_CHARS, content_version_satisfies, truncate_google_docs_name};
+    use super::*;
 
     #[test]
     fn newer_numeric_google_drive_versions_satisfy_older_requests() {
@@ -2451,13 +2447,54 @@ mod google_docs_content_status_tests {
     }
 
     #[test]
-    fn google_docs_names_are_truncated_on_character_boundaries() {
-        let name = "📄".repeat(GOOGLE_DOCS_NAME_MAX_CHARS + 1);
+    fn google_docs_names_at_the_byte_limit_are_valid() {
+        let name = "📄".repeat(GOOGLE_DOCS_NAME_MAX_BYTES / 4);
+        let request: GoogleDocsSyncBatchRequest = serde_json::from_value(json!({
+            "files": [{ "file_id": "doc-1", "name": name }],
+            "observations": [{
+                "broker_credential_id": "credential-1",
+                "observed_file_id": "doc-1",
+                "file_id": "doc-1",
+                "observed_name": name
+            }]
+        }))
+        .unwrap();
 
-        let truncated = truncate_google_docs_name(&name);
+        validate_google_docs_sync_batch(&request).unwrap();
+    }
 
-        assert_eq!(truncated.chars().count(), GOOGLE_DOCS_NAME_MAX_CHARS);
-        assert_eq!(truncated, "📄".repeat(GOOGLE_DOCS_NAME_MAX_CHARS));
+    #[test]
+    fn rejects_google_docs_file_names_over_the_byte_limit() {
+        let request: GoogleDocsSyncBatchRequest = serde_json::from_value(json!({
+            "files": [{
+                "file_id": "doc-1",
+                "name": "a".repeat(GOOGLE_DOCS_NAME_MAX_BYTES + 1)
+            }]
+        }))
+        .unwrap();
+
+        let error = validate_google_docs_sync_batch(&request).unwrap_err();
+
+        assert!(matches!(error, ApiError::BadRequest(message) if message ==
+            "file.name must be at most 1024 bytes"));
+    }
+
+    #[test]
+    fn rejects_google_docs_observed_names_over_the_byte_limit() {
+        let request: GoogleDocsSyncBatchRequest = serde_json::from_value(json!({
+            "observations": [{
+                "broker_credential_id": "credential-1",
+                "observed_file_id": "doc-1",
+                "file_id": "doc-1",
+                "observed_name": "📄".repeat((GOOGLE_DOCS_NAME_MAX_BYTES / 4) + 1)
+            }]
+        }))
+        .unwrap();
+
+        let error = validate_google_docs_sync_batch(&request).unwrap_err();
+
+        assert!(matches!(error, ApiError::BadRequest(message) if message ==
+            "observation.observed_name must be at most 1024 bytes"));
     }
 }
 
@@ -2474,7 +2511,6 @@ async fn ingest_google_docs_sync_batch(
     }
 
     for file in &request.files {
-        let name = truncate_google_docs_name(&file.name);
         sqlx::query(
             "INSERT INTO google_docs_sync_files (\
              file_id, drive_id, name, mime_type, web_view_link, owners, \
@@ -2505,7 +2541,7 @@ async fn ingest_google_docs_sync_batch(
         )
         .bind(&file.file_id)
         .bind(&file.drive_id)
-        .bind(&name)
+        .bind(&file.name)
         .bind(&file.mime_type)
         .bind(&file.web_view_link)
         .bind(&file.owners)
@@ -2524,7 +2560,6 @@ async fn ingest_google_docs_sync_batch(
     }
 
     for observation in &request.observations {
-        let observed_name = truncate_google_docs_name(&observation.observed_name);
         sqlx::query(
             "INSERT INTO google_docs_sync_file_observations (\
              broker_credential_id, observed_file_id, file_id, provider_subject, \
@@ -2555,7 +2590,7 @@ async fn ingest_google_docs_sync_batch(
         .bind(&observation.file_id)
         .bind(&observation.provider_subject)
         .bind(&observation.provider_email)
-        .bind(&observed_name)
+        .bind(&observation.observed_name)
         .bind(&observation.observed_mime_type)
         .bind(&observation.observed_web_view_link)
         .bind(&observation.shortcut_target_file_id)
@@ -3231,6 +3266,15 @@ fn require_non_empty(field: &str, value: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+fn require_max_bytes(field: &str, value: &str, max: usize) -> Result<(), ApiError> {
+    if value.len() > max {
+        return Err(ApiError::BadRequest(format!(
+            "{field} must be at most {max} bytes"
+        )));
+    }
+    Ok(())
+}
+
 fn slack_ts_to_datetime(value: Option<&str>) -> Result<Option<OffsetDateTime>, ApiError> {
     let Some(value) = empty_to_none(value) else {
         return Ok(None);
@@ -3452,6 +3496,7 @@ fn validate_google_docs_sync_batch(request: &GoogleDocsSyncBatchRequest) -> Resu
     }
     for file in &request.files {
         require_non_empty("file.file_id", &file.file_id)?;
+        require_max_bytes("file.name", &file.name, GOOGLE_DOCS_NAME_MAX_BYTES)?;
         validate_json_shape("file.owners", &file.owners, false)?;
         validate_json_shape("file.last_modifying_user", &file.last_modifying_user, true)?;
         validate_json_shape("file.capabilities", &file.capabilities, true)?;
@@ -3473,6 +3518,11 @@ fn validate_google_docs_sync_batch(request: &GoogleDocsSyncBatchRequest) -> Resu
             &observation.observed_file_id,
         )?;
         require_non_empty("observation.file_id", &observation.file_id)?;
+        require_max_bytes(
+            "observation.observed_name",
+            &observation.observed_name,
+            GOOGLE_DOCS_NAME_MAX_BYTES,
+        )?;
         validate_json_shape(
             "observation.permission_ids",
             &observation.permission_ids,
