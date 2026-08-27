@@ -2345,6 +2345,54 @@ def slides_create(title: str) -> dict:
     }
 
 
+def slides_get(presentation_id: str) -> dict:
+    """Get a Google Slides presentation, including its current revision ID.
+
+    Args:
+        presentation_id: The presentation ID (from URL)
+
+    Returns:
+        The Google Slides presentation resource
+    """
+    service = get_slides_service()
+    return service.presentations().get(presentationId=presentation_id).execute()
+
+
+def slides_batch_update(
+    presentation_id: str,
+    requests: list[dict],
+    required_revision_id: str | None = None,
+) -> dict:
+    """Apply native Google Slides API requests to a presentation.
+
+    Args:
+        presentation_id: The presentation ID (from URL)
+        requests: Google Slides API batchUpdate request objects
+        required_revision_id: Optional revision that must still be current
+
+    Returns:
+        Dict with the presentation ID, replies, and resulting revision ID
+    """
+    if not requests or any(not isinstance(request, dict) for request in requests):
+        raise ValueError("requests must be a non-empty list of request objects")
+
+    service = get_slides_service()
+    body: dict = {"requests": requests}
+    if required_revision_id:
+        body["writeControl"] = {"requiredRevisionId": required_revision_id}
+
+    result = (
+        service.presentations()
+        .batchUpdate(presentationId=presentation_id, body=body)
+        .execute()
+    )
+    return {
+        "presentation_id": result.get("presentationId", presentation_id),
+        "replies": result.get("replies", []),
+        "revision_id": result.get("writeControl", {}).get("requiredRevisionId", ""),
+    }
+
+
 # Google Analytics functions
 
 _analytics_property_id: str | None = None
@@ -3513,6 +3561,39 @@ class GSuiteClient:
             Dict with presentation_id, title, and url
         """
         return slides_create(title)
+
+    def slides_get(self, presentation_id: str) -> dict:
+        """Get a Google Slides presentation, including its current revision ID.
+
+        Args:
+            presentation_id: The presentation ID (from URL)
+
+        Returns:
+            The Google Slides presentation resource
+        """
+        return slides_get(presentation_id)
+
+    def slides_batch_update(
+        self,
+        presentation_id: str,
+        requests: list[dict],
+        required_revision_id: str | None = None,
+    ) -> dict:
+        """Apply native Google Slides API requests to a presentation.
+
+        Args:
+            presentation_id: The presentation ID (from URL)
+            requests: Google Slides API batchUpdate request objects
+            required_revision_id: Optional revision that must still be current
+
+        Returns:
+            Dict with the presentation ID, replies, and resulting revision ID
+        """
+        return slides_batch_update(
+            presentation_id,
+            requests,
+            required_revision_id=required_revision_id,
+        )
 
     # --- Analytics ---
 

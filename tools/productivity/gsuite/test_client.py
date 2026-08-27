@@ -230,6 +230,95 @@ class _FakeDocsService:
         return self.documents_api
 
 
+class _FakeSlidesPresentationsApi:
+    def __init__(self):
+        self.get_calls: list[dict] = []
+        self.batch_update_calls: list[dict] = []
+
+    def get(self, **kwargs):
+        self.get_calls.append(kwargs)
+        return _CreateRequest(
+            {
+                "presentationId": kwargs["presentationId"],
+                "title": "Asset One-Pagers",
+                "revisionId": "rev-123",
+                "slides": [],
+            }
+        )
+
+    def batchUpdate(self, **kwargs):
+        self.batch_update_calls.append(kwargs)
+        return _CreateRequest(
+            {
+                "presentationId": kwargs["presentationId"],
+                "replies": [{} for _ in kwargs["body"]["requests"]],
+                "writeControl": {"requiredRevisionId": "rev-124"},
+            }
+        )
+
+
+class _FakeSlidesService:
+    def __init__(self):
+        self.presentations_api = _FakeSlidesPresentationsApi()
+
+    def presentations(self):
+        return self.presentations_api
+
+
+def test_slides_get_returns_presentation_and_revision(monkeypatch):
+    fake_service = _FakeSlidesService()
+    monkeypatch.setattr(client, "get_slides_service", lambda: fake_service)
+
+    result = client.slides_get("slides-123")
+
+    assert result["presentationId"] == "slides-123"
+    assert result["revisionId"] == "rev-123"
+    assert fake_service.presentations_api.get_calls == [
+        {"presentationId": "slides-123"}
+    ]
+
+
+def test_slides_batch_update_uses_revision_guard(monkeypatch):
+    fake_service = _FakeSlidesService()
+    monkeypatch.setattr(client, "get_slides_service", lambda: fake_service)
+    requests = [{"createSlide": {"objectId": "slide-2"}}]
+
+    result = client.slides_batch_update(
+        "slides-123",
+        requests,
+        required_revision_id="rev-123",
+    )
+
+    assert result == {
+        "presentation_id": "slides-123",
+        "replies": [{}],
+        "revision_id": "rev-124",
+    }
+    assert fake_service.presentations_api.batch_update_calls == [
+        {
+            "presentationId": "slides-123",
+            "body": {
+                "requests": requests,
+                "writeControl": {"requiredRevisionId": "rev-123"},
+            },
+        }
+    ]
+
+
+def test_slides_batch_update_rejects_empty_requests(monkeypatch):
+    fake_service = _FakeSlidesService()
+    monkeypatch.setattr(client, "get_slides_service", lambda: fake_service)
+
+    try:
+        client.slides_batch_update("slides-123", [])
+    except ValueError as exc:
+        assert str(exc) == "requests must be a non-empty list of request objects"
+    else:
+        raise AssertionError("Expected ValueError")
+
+    assert fake_service.presentations_api.batch_update_calls == []
+
+
 def _paragraph(start_index: int, text: str, *, bullet: bool = False) -> dict:
     paragraph = {"elements": [{"textRun": {"content": text}}]}
     if bullet:

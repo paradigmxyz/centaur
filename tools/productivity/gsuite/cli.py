@@ -1620,6 +1620,52 @@ def sheets_create_cmd(
 # Slides commands
 
 
+@slides_app.command("get")
+def slides_get_cmd(
+    presentation_id: str = typer.Argument(..., help="Presentation ID or Google Slides URL"),
+):
+    """Get a Google Slides presentation as JSON."""
+    from .client import slides_get
+
+    result = slides_get(extract_drive_file_id(presentation_id))
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+@slides_app.command("batch-update")
+def slides_batch_update_cmd(
+    presentation_id: str = typer.Argument(..., help="Presentation ID or Google Slides URL"),
+    requests_file: Path = typer.Argument(
+        ...,
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help="JSON file containing a request array or an object with a requests array",
+    ),
+    required_revision_id: str | None = typer.Option(
+        None,
+        "--required-revision-id",
+        help="Only update if this presentation revision is still current",
+    ),
+):
+    """Apply native Google Slides API batchUpdate requests from a JSON file."""
+    from .client import slides_batch_update
+
+    try:
+        payload = json.loads(requests_file.read_text())
+        requests = payload.get("requests") if isinstance(payload, dict) else payload
+        if not isinstance(requests, list):
+            raise ValueError("JSON must be a request array or an object with a requests array")
+        result = slides_batch_update(
+            extract_drive_file_id(presentation_id),
+            requests,
+            required_revision_id=required_revision_id,
+        )
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        console.print(f"[red]Error: {exc}[/]")
+        raise typer.Exit(1) from exc
+
+
 @slides_app.command("create")
 def slides_create_cmd(
     title: str = typer.Argument(..., help="Presentation title"),
