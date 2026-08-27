@@ -2412,7 +2412,7 @@ describe('slackbotv2', () => {
     await Promise.all(firstWaits)
   })
 
-  it('does not execute a second mention while a stream is already active', async () => {
+  it('keeps reactions on every follow-up until the active execution posts a response', async () => {
     bot = createTestBot({ steeringReactionEnabled: true })
     codexApi.autoRespond = false
 
@@ -2441,35 +2441,40 @@ describe('slackbotv2', () => {
     await waitFor(() => codexApi.eventRequests.length === 1)
     await waitFor(() => codexApi.streamCount === 1)
 
-    const secondMentionText = `<@${BOT_USER_ID}> add this while still running`
-    const secondMention = await postUserMessage(secondMentionText, parent.ts)
-    const secondWaits: Promise<unknown>[] = []
-    const secondResponse = await bot.app.request(
-      '/api/webhooks/slack',
-      signedSlackEvent({
-        event_id: 'Ev-slackbotv2-second-mention-during-stream',
-        event: {
-          type: 'app_mention',
-          user: USER_ID,
-          channel: CHANNEL_ID,
-          team: TEAM_ID,
-          ts: secondMention.ts,
-          thread_ts: parent.ts,
-          text: secondMentionText
-        }
-      }),
-      {},
-      waitUntilContext(secondWaits)
-    )
+    const followUps: Array<{ mention: { ts: string }; waits: Promise<unknown>[] }> = []
+    for (const [index, text] of ['add this while still running', 'and handle this too'].entries()) {
+      const mentionText = `<@${BOT_USER_ID}> ${text}`
+      const mention = await postUserMessage(mentionText, parent.ts)
+      const waits: Promise<unknown>[] = []
+      const response = await bot.app.request(
+        '/api/webhooks/slack',
+        signedSlackEvent({
+          event_id: `Ev-slackbotv2-follow-up-during-stream-${index}`,
+          event: {
+            type: 'app_mention',
+            user: USER_ID,
+            channel: CHANNEL_ID,
+            team: TEAM_ID,
+            ts: mention.ts,
+            thread_ts: parent.ts,
+            text: mentionText
+          }
+        }),
+        {},
+        waitUntilContext(waits)
+      )
 
-    expect(secondResponse.status).toBe(200)
-    await Promise.all(secondWaits)
-    await waitFor(() => codexApi.appends.length === 2)
+      expect(response.status).toBe(200)
+      await Promise.all(waits)
+      followUps.push({ mention, waits })
+    }
+
+    await waitFor(() => codexApi.appends.length === 3)
     expect(codexApi.executes).toHaveLength(1)
     expect(codexApi.streamCount).toBe(1)
-    const secondAppendTexts = sessionMessageTexts(codexApi.appends[1]!.body.messages)
-    expect(secondAppendTexts[0]).toContain('# Requester Context')
-    expect(secondAppendTexts.at(-1)).toBe(`@${BOT_USER_ID} add this while still running`)
+    const firstFollowUpTexts = sessionMessageTexts(codexApi.appends[1]!.body.messages)
+    expect(firstFollowUpTexts[0]).toContain('# Requester Context')
+    expect(firstFollowUpTexts.at(-1)).toBe(`@${BOT_USER_ID} add this while still running`)
     expect(
       slackApi.calls
         .filter(call => call.method === 'reactions.add' || call.method === 'reactions.remove')
@@ -2484,13 +2489,13 @@ describe('slackbotv2', () => {
         channel: CHANNEL_ID,
         method: 'reactions.add',
         name: 'hourglass_flowing_sand',
-        timestamp: secondMention.ts
+        timestamp: followUps[0]!.mention.ts
       },
       {
         channel: CHANNEL_ID,
-        method: 'reactions.remove',
+        method: 'reactions.add',
         name: 'hourglass_flowing_sand',
-        timestamp: secondMention.ts
+        timestamp: followUps[1]!.mention.ts
       }
     ])
     expect(
@@ -2499,8 +2504,20 @@ describe('slackbotv2', () => {
         .map(call => stringField(call.body.status))
     ).toEqual(['Thinking...'])
 
-    codexApi.closeStreams()
+    codexApi.emitOutputLines(
+      threadKey(parent.ts),
+      sampleCodexOutputLines('Handled both follow-ups.')
+    )
     await Promise.all(firstWaits)
+    await waitFor(
+      () => slackApi.calls.filter(call => call.method === 'reactions.remove').length === 2
+    )
+    expect(
+      slackApi.calls
+        .filter(call => call.method === 'reactions.remove')
+        .map(call => stringField(call.body.timestamp))
+        .sort()
+    ).toEqual(followUps.map(item => item.mention.ts).sort())
   })
 
   it('auto-disables steering reactions when reactions:write is missing', async () => {
@@ -4525,6 +4542,7 @@ describe('slackbotv2', () => {
     const parent = await postUserMessage('Context before restart recovery.')
     const mentionText = `<@${BOT_USER_ID}> recover a completed run`
     const mention = await postUserMessage(mentionText, parent.ts)
+    const followUp = await postUserMessage(`<@${BOT_USER_ID}> persisted follow-up`, parent.ts)
     const key = threadKey(parent.ts)
     const message = apiMessageFromSlackEvent({
       isMention: true,
@@ -4538,6 +4556,7 @@ describe('slackbotv2', () => {
       forwardedMessageIds: [mention.ts],
       historyForwarded: true,
       lastEventId: 0,
+      pendingSteeringReactions: [{ channel: CHANNEL_ID, timestamp: followUp.ts }],
       renderObligation: {
         afterEventId: 0,
         executionId: 'exe-recovery',
@@ -4563,6 +4582,11 @@ describe('slackbotv2', () => {
       parentTs: parent.ts
     })
     expect(await threadText(parent.ts)).toContain('Recovered request.')
+    expect(
+      slackApi.calls
+        .filter(call => call.method === 'reactions.remove')
+        .map(call => stringField(call.body.timestamp))
+    ).toEqual([followUp.ts])
     // Recovery clears the obligation after the Slack stream stops; wait for
     // the state write instead of racing it.
     await waitFor(async () => {
@@ -4576,6 +4600,7 @@ describe('slackbotv2', () => {
       expect.objectContaining({
         activeExecution: false,
         lastEventId: expect.any(Number),
+        pendingSteeringReactions: [],
         renderObligation: null
       })
     )
@@ -4975,7 +5000,7 @@ describe('slackbotv2', () => {
     expect(codexApi.appends).toHaveLength(1)
   })
 
-  it('clears a steering reaction when an append retry starts an execution', async () => {
+  it('keeps a steering reaction when an append retry starts an execution', async () => {
     let failNextAppend = false
     bot = createTestBot({
       fetch: async (input, init) => {
@@ -5048,6 +5073,11 @@ describe('slackbotv2', () => {
     await Promise.all(firstWaits)
 
     await waitFor(() => codexApi.executes.length === 2, 3000)
+    expect(slackApi.calls.some(call => call.method === 'reactions.remove')).toBe(false)
+
+    await waitFor(() => codexApi.eventRequests.length === 2, 3000)
+    codexApi.emitOutputLines(key, sampleCodexOutputLines('Upgraded retry complete.'))
+    await Promise.all(steeringWaits)
     await waitFor(() => slackApi.calls.some(call => call.method === 'reactions.remove'), 3000)
     expect(
       slackApi.calls
@@ -5060,10 +5090,6 @@ describe('slackbotv2', () => {
       { method: 'reactions.add', timestamp: steeringMention.ts },
       { method: 'reactions.remove', timestamp: steeringMention.ts }
     ])
-
-    await waitFor(() => codexApi.eventRequests.length === 2, 3000)
-    codexApi.emitOutputLines(key, sampleCodexOutputLines('Upgraded retry complete.'))
-    await Promise.all(steeringWaits)
     expect(await threadText(parent.ts)).toContain('Upgraded retry complete.')
   })
 

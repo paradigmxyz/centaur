@@ -74,7 +74,8 @@ import { isSlackStopCommand } from './stop-command'
 import {
   createSteeringReactionController,
   type SteeringReactionAck,
-  type SteeringReactionController
+  type SteeringReactionController,
+  type SteeringReactionTarget
 } from './steering-reaction'
 import type {
   ForwardSessionInput,
@@ -499,7 +500,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   app.post('/api/slack/commands', handleSlackWebhook)
 
   if (options.recoverRenderObligationsOnStart !== false) {
-    scheduleRenderObligationRecovery(chat, state, options, stateConnected)
+    scheduleRenderObligationRecovery(chat, state, options, steeringReactions, stateConnected)
   }
 
   return { app, chat }
@@ -1032,6 +1033,37 @@ function finishSteeringReaction(
   backgroundWaitUntil(input.steeringReactions.complete(ack, trace))
 }
 
+function appendSteeringReactionTarget(
+  targets: readonly SteeringReactionTarget[] | undefined,
+  target: SteeringReactionTarget
+): SteeringReactionTarget[] {
+  const existing = targets ?? []
+  if (
+    existing.some(
+      item => item.channel === target.channel && item.timestamp === target.timestamp
+    )
+  ) {
+    return [...existing]
+  }
+  return [...existing, target].slice(-1000)
+}
+
+async function releaseUnownedSteeringReaction(
+  thread: Thread<SlackbotV2ThreadState>,
+  input: SyncThreadMessageInput,
+  ack: SteeringReactionAck,
+  trace?: SlackbotV2Trace
+): Promise<void> {
+  const latest = (await thread.state) ?? {}
+  if (latest.activeExecution === true) return
+  await thread.setState({
+    pendingSteeringReactions: (latest.pendingSteeringReactions ?? []).filter(
+      target => target.channel !== ack.channel || target.timestamp !== ack.timestamp
+    )
+  })
+  backgroundWaitUntil(input.steeringReactions.complete(ack, trace))
+}
+
 /**
  * Persists a Slack thread update into the session API. In execute mode the create/append/execute
  * handoff completes before Slack is acknowledged; SSE rendering continues in background.
@@ -1324,12 +1356,32 @@ async function syncThreadMessageToSession(
     const latest = (await thread.state) ?? {}
     const latestMessageIds = new Set(latest.forwardedMessageIds ?? [])
     for (const item of messagesToAppend) latestMessageIds.add(item.id)
+    const steeringReactionAck = input.steeringReactionAck
+    const holdSteeringReaction =
+      steeringReactionAck !== undefined && latest.activeExecution === true
     await thread.setState({
       ...(stickyOverridesUpdate ?? {}),
       forwardedMessageIds: Array.from(latestMessageIds).slice(-1000),
       historyForwarded: latest.historyForwarded || (shouldIncludeContext && !contextDegraded),
-      lastEventId
+      lastEventId,
+      ...(holdSteeringReaction
+        ? {
+            pendingSteeringReactions: appendSteeringReactionTarget(
+              latest.pendingSteeringReactions,
+              steeringReactionAck
+            )
+          }
+        : {})
     })
+    if (holdSteeringReaction) {
+      input.steeringReactionAck = undefined
+      await releaseUnownedSteeringReaction(
+        thread,
+        input,
+        steeringReactionAck,
+        trace
+      )
+    }
     traceLog(input.options, 'slackbotv2_forward_messages_committed', trace, {
       appended_message_count: messagesToAppend.length,
       forwarded_message_count: Math.min(latestMessageIds.size, 1000)
@@ -1342,6 +1394,7 @@ async function syncThreadMessageToSession(
     const latest = (await thread.state) ?? {}
     const latestExecutedMessageIds = new Set(latest.executedMessageIds ?? [])
     latestExecutedMessageIds.add(serializedMessage.id)
+    const steeringReactionAck = input.steeringReactionAck
     forwardInput.executionId = execution.execution_id
     // Take the render lease before the obligation becomes visible so a
     // concurrent recovery sweep never claims it while this process is about
@@ -1358,12 +1411,21 @@ async function syncThreadMessageToSession(
       activeExecution: true,
       executedMessageIds: Array.from(latestExecutedMessageIds).slice(-1000),
       lastEventId,
+      ...(steeringReactionAck
+        ? {
+            pendingSteeringReactions: appendSteeringReactionTarget(
+              latest.pendingSteeringReactions,
+              steeringReactionAck
+            )
+          }
+        : {}),
       renderObligation: {
         afterEventId: lastEventId,
         executionId: execution.execution_id,
         message: serializedMessage
       }
     })
+    if (steeringReactionAck) input.steeringReactionAck = undefined
     await indexRenderObligation(input.state, {
       options: input.options,
       threadId: thread.id,
@@ -1404,7 +1466,6 @@ async function syncThreadMessageToSession(
     return
   }
 
-  finishSteeringReaction(input, trace)
   try {
     await thread.setState({ activeExecution: true })
     traceLog(input.options, 'slackbotv2_forward_active_execution_marked', trace)
@@ -1451,6 +1512,7 @@ async function syncThreadMessageToSession(
       },
       onSessionRestarted: handleSessionRestarted
     })
+    finishSteeringReaction(input, trace)
     scheduleExecutionRender(
       thread,
       serializedMessage,
@@ -1459,6 +1521,7 @@ async function syncThreadMessageToSession(
       () => lastEventId,
       renderLease,
       assistantStatusVisible,
+      input.steeringReactions,
       trace,
       responseContextBlock
     )
@@ -1512,6 +1575,7 @@ async function syncThreadMessageToSession(
         error: errorMessage(renderError)
       })
     }
+    finishSteeringReaction(input, trace)
     traceLog(input.options, 'slackbotv2_forward_complete', trace, {
       latest_active_execution: latest.activeExecution === true,
       last_event_id: lastEventId
@@ -1528,6 +1592,7 @@ function scheduleExecutionRender(
   getLastEventId: () => number,
   renderLease: { release: (() => Promise<void>) | null },
   assistantStatusVisible: boolean,
+  steeringReactions: SteeringReactionController,
   trace?: SlackbotV2Trace,
   responseContextBlock?: SlackContextBlock
 ): void {
@@ -1543,6 +1608,7 @@ function scheduleExecutionRender(
           input,
           getLastEventId,
           assistantStatusVisible,
+          steeringReactions,
           trace,
           responseContextBlock
         )
@@ -1587,6 +1653,7 @@ async function renderExecutionAttempt(
   input: ForwardSessionInput,
   getLastEventId: () => number,
   assistantStatusVisible: boolean,
+  steeringReactions: SteeringReactionController,
   trace?: SlackbotV2Trace,
   responseContextBlock?: SlackContextBlock
 ): Promise<'complete' | 'retry'> {
@@ -1725,11 +1792,14 @@ async function renderExecutionAttempt(
     throw error
   } finally {
     const latest = (await thread.state) ?? {}
+    const completedSteeringReactions = rendered ? latest.pendingSteeringReactions ?? [] : []
     await thread.setState({
       activeExecution: retry,
       lastEventId: Math.max(latest.lastEventId ?? 0, getLastEventId(), fallbackLastEventId),
+      ...(rendered ? { pendingSteeringReactions: [] } : {}),
       ...(rendered ? { renderObligation: null } : {})
     })
+    await steeringReactions.completeTargets(completedSteeringReactions, trace)
     traceLog(options, 'slackbotv2_render_finalized', trace, {
       obligation_cleared: rendered,
       render_duration_ms: elapsedMs(renderStartedAtMs),
@@ -1916,10 +1986,11 @@ function scheduleRenderObligationRecovery(
   chat: Chat<Record<string, Adapter>, SlackbotV2ThreadState>,
   state: StateAdapter,
   options: SlackbotV2Options,
+  steeringReactions: SteeringReactionController,
   stateConnected: Promise<void>
 ): void {
   backgroundWaitUntil(
-    recoverRenderObligationsWithRetry(chat, state, options, stateConnected)
+    recoverRenderObligationsWithRetry(chat, state, options, steeringReactions, stateConnected)
   )
 }
 
@@ -1927,6 +1998,7 @@ async function recoverRenderObligationsWithRetry(
   chat: Chat<Record<string, Adapter>, SlackbotV2ThreadState>,
   state: StateAdapter,
   options: SlackbotV2Options,
+  steeringReactions: SteeringReactionController,
   stateConnected: Promise<void>
 ): Promise<void> {
   // Wait for the startup Postgres connection before scanning for obligations.
@@ -1935,7 +2007,13 @@ async function recoverRenderObligationsWithRetry(
   let attempt = 0
   while (true) {
     try {
-      const deferredCount = await recoverRenderObligations(chat, state, options, failureCounts)
+      const deferredCount = await recoverRenderObligations(
+        chat,
+        state,
+        options,
+        steeringReactions,
+        failureCounts
+      )
       if (deferredCount === 0) return
       const delayMs = renderRetryDelayMs(attempt)
       attempt += 1
@@ -1965,6 +2043,7 @@ async function recoverRenderObligations(
   chat: Chat<Record<string, Adapter>, SlackbotV2ThreadState>,
   state: StateAdapter,
   options: SlackbotV2Options,
+  steeringReactions: SteeringReactionController,
   failureCounts: Map<string, number>
 ): Promise<number> {
   const startedAtMs = nowMs()
@@ -2009,8 +2088,12 @@ async function recoverRenderObligations(
         await thread.setState({
           activeExecution: false,
           lastEventId: threadState?.lastEventId ?? 0,
+          pendingSteeringReactions: [],
           renderObligation: null
         })
+        await steeringReactions.completeTargets(
+          threadState?.pendingSteeringReactions ?? []
+        )
         continue
       }
 
@@ -2034,8 +2117,12 @@ async function recoverRenderObligations(
         await thread.setState({
           activeExecution: false,
           lastEventId: threadState?.lastEventId ?? 0,
+          pendingSteeringReactions: [],
           renderObligation: null
         })
+        await steeringReactions.completeTargets(
+          threadState?.pendingSteeringReactions ?? []
+        )
         continue
       }
 
@@ -2067,7 +2154,14 @@ async function recoverRenderObligations(
       // Race a deadline; on timeout move on and leave the attempt running
       // detached - it may still finish and clear the obligation, which is why
       // the lease is kept so a later pass does not start a duplicate render.
-      const recovery = recoverRenderObligation(chat, state, options, threadId, obligation)
+      const recovery = recoverRenderObligation(
+        chat,
+        state,
+        options,
+        steeringReactions,
+        threadId,
+        obligation
+      )
       let outcome: { timedOut: true } | { timedOut: false; deferred: boolean }
       try {
         outcome = await Promise.race([
@@ -2157,6 +2251,7 @@ async function recoverRenderObligation(
   chat: Chat<Record<string, Adapter>, SlackbotV2ThreadState>,
   state: StateAdapter,
   options: SlackbotV2Options,
+  steeringReactions: SteeringReactionController,
   threadId: string,
   obligation: SlackbotV2RenderObligation
 ): Promise<boolean> {
@@ -2204,11 +2299,14 @@ async function recoverRenderObligation(
       return true
     }
     await renderRecoveredExecutionStream(thread, streamError(error), obligation.message, options, trace)
+    const latest = (await thread.state) ?? {}
     await thread.setState({
       activeExecution: false,
       lastEventId,
+      pendingSteeringReactions: [],
       renderObligation: null
     })
+    await steeringReactions.completeTargets(latest.pendingSteeringReactions ?? [], trace)
     renderOutcome = 'stream_error_rendered'
     recordRenderAttempt('recovery', renderOutcome, renderStartedAtMs)
     return false
@@ -2314,11 +2412,14 @@ async function recoverRenderObligation(
     }
   } finally {
     const latest = (await thread.state) ?? {}
+    const completedSteeringReactions = rendered ? latest.pendingSteeringReactions ?? [] : []
     await thread.setState({
       activeExecution: false,
       lastEventId: Math.max(latest.lastEventId ?? 0, lastEventId),
+      ...(rendered ? { pendingSteeringReactions: [] } : {}),
       ...(rendered ? { renderObligation: null } : {})
     })
+    await steeringReactions.completeTargets(completedSteeringReactions, trace)
     traceLog(options, 'slackbotv2_render_recovery_finalized', trace, {
       obligation_cleared: rendered,
       last_event_id: lastEventId

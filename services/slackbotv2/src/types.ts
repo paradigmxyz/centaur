@@ -4,6 +4,7 @@ import type { Attachment, Chat, Logger, StateAdapter } from 'chat'
 import type { Hono } from 'hono'
 import type { ChannelDefaults } from './channel-defaults'
 import type { HarnessOverrides } from './overrides'
+import type { SteeringReactionTarget } from './steering-reaction'
 import type { SlackDisplayTextSource } from './slack-display-text'
 
 export type JsonPrimitive = string | number | boolean | null
@@ -249,6 +250,8 @@ export type SlackbotV2ThreadState = {
   model?: string | null
   /** Last thread-level model provider selected by Slack flags. Null clears persisted state. */
   provider?: string | null
+  /** Follow-up reactions cleared after the active execution posts its response. */
+  pendingSteeringReactions?: SteeringReactionTarget[]
   renderObligation?: SlackbotV2RenderObligation | null
 }
 

@@ -571,9 +571,10 @@ slackbotv2:
     pullPolicy: Always
   userName: centaur
   assistantStatus: ""
-  # React to mentioned follow-ups while an execution is active. Requires the
-  # Slack app to grant reactions:write. Slackbot disables the feature for the
-  # running process if Slack reports that the scope is missing.
+  # React to mentioned follow-ups while an execution is active, then remove
+  # their reactions after the assistant response is posted. Requires the Slack
+  # app to grant reactions:write. Slackbot disables the feature for the running
+  # process if Slack reports that the scope is missing.
   steeringReactionEnabled: false
   steeringReaction: hourglass_flowing_sand
   # Join newly-created public channels after subscribed channel_created events.
