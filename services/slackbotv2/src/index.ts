@@ -1791,6 +1791,12 @@ async function renderExecutionAttempt(
     }
     throw error
   } finally {
+    // Best-effort UI cleanup: this state read/write is not a CAS. An unusually
+    // stalled setState can let a concurrent steering commit add a reaction
+    // after this read and then have this write clear its state record without
+    // removing the Slack reaction. Avoiding that cosmetic race would require
+    // stronger atomic state ownership than steering acknowledgements warrant.
+    // The same accepted race applies to recovery finalization below.
     const latest = (await thread.state) ?? {}
     const completedSteeringReactions = rendered ? latest.pendingSteeringReactions ?? [] : []
     await thread.setState({
