@@ -1404,6 +1404,7 @@ async function syncThreadMessageToSession(
     return
   }
 
+  finishSteeringReaction(input, trace)
   try {
     await thread.setState({ activeExecution: true })
     traceLog(input.options, 'slackbotv2_forward_active_execution_marked', trace)

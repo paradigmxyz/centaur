@@ -4975,6 +4975,98 @@ describe('slackbotv2', () => {
     expect(codexApi.appends).toHaveLength(1)
   })
 
+  it('clears a steering reaction when an append retry starts an execution', async () => {
+    let failNextAppend = false
+    bot = createTestBot({
+      fetch: async (input, init) => {
+        if (failNextAppend && String(input).endsWith('/messages')) {
+          failNextAppend = false
+          return new Response('unavailable', {
+            status: 503,
+            statusText: 'Service Unavailable'
+          })
+        }
+        return globalThis.fetch(input, init)
+      },
+      handoffRetryDelaysMs: [300],
+      steeringReactionEnabled: true
+    })
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('History before an upgraded steering retry.')
+    const firstMention = await postUserMessage(`<@${BOT_USER_ID}> start running`, parent.ts)
+    const firstWaits: Promise<unknown>[] = []
+    const firstResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-steering-upgrade-first',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: firstMention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> start running`
+        }
+      }),
+      {},
+      waitUntilContext(firstWaits)
+    )
+    expect(firstResponse.status).toBe(200)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    failNextAppend = true
+    const steeringMention = await postUserMessage(
+      `<@${BOT_USER_ID}> retry me as the next turn`,
+      parent.ts
+    )
+    const steeringWaits: Promise<unknown>[] = []
+    const steeringResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-steering-upgrade-second',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: steeringMention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> retry me as the next turn`
+        }
+      }),
+      {},
+      waitUntilContext(steeringWaits)
+    )
+    expect(steeringResponse.status).toBe(200)
+    await waitFor(() => slackApi.calls.some(call => call.method === 'reactions.add'))
+    expect(slackApi.calls.some(call => call.method === 'reactions.remove')).toBe(false)
+
+    const key = threadKey(parent.ts)
+    codexApi.emitOutputLines(key, sampleCodexOutputLines('First execution complete.'))
+    await Promise.all(firstWaits)
+
+    await waitFor(() => codexApi.executes.length === 2, 3000)
+    await waitFor(() => slackApi.calls.some(call => call.method === 'reactions.remove'), 3000)
+    expect(
+      slackApi.calls
+        .filter(call => call.method === 'reactions.add' || call.method === 'reactions.remove')
+        .map(call => ({
+          method: call.method,
+          timestamp: stringField(call.body.timestamp)
+        }))
+    ).toEqual([
+      { method: 'reactions.add', timestamp: steeringMention.ts },
+      { method: 'reactions.remove', timestamp: steeringMention.ts }
+    ])
+
+    await waitFor(() => codexApi.eventRequests.length === 2, 3000)
+    codexApi.emitOutputLines(key, sampleCodexOutputLines('Upgraded retry complete.'))
+    await Promise.all(steeringWaits)
+    expect(await threadText(parent.ts)).toContain('Upgraded retry complete.')
+  })
+
   it('reuses an accepted execution when the local retry follows a lost execute response', async () => {
     let overrideStrategyCalls = 0
     bot = createTestBot({
