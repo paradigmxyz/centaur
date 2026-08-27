@@ -1,5 +1,7 @@
 <% content_for :title, "Workflows · Centaur Console" %>
 
+<h2 class="mb-3 text-sm font-semibold text-zinc-200">Workflow Runs</h2>
+
 <% if @workflow_db_unavailable %>
   <div class="mb-4 rounded border border-amber-500/30 bg-amber-500/[0.08] px-4 py-3 text-sm text-amber-200">
     Workflow database is unavailable. Console needs the API workflow read-only views to show runs.

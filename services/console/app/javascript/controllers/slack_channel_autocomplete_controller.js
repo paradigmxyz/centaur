@@ -1,14 +1,16 @@
 import { Controller } from "@hotwired/stimulus"
 
 export default class extends Controller {
-  static targets = ["input", "value", "list", "status", "submit"]
-  static values = { url: String }
+  static targets = ["input", "value", "list", "status", "submit", "deliveryMode", "channelFields"]
+  static values = { url: String, dmUserId: String }
 
   connect() {
     this.options = []
     this.activeIndex = -1
     this.opened = false
     this.selectedDisplay = null
+    this.channelValue = /^[CDG][A-Z0-9]{8,}$/.test(this.valueTarget.value) ? this.valueTarget.value : ""
+    this.deliveryModeChanged()
     this.updateSubmitState()
   }
 
@@ -138,6 +140,7 @@ export default class extends Controller {
   select(option) {
     this.inputTarget.value = `${option.label} (${option.value})`
     this.valueTarget.value = option.value
+    this.channelValue = option.value
     this.selectedDisplay = this.inputTarget.value
     this.updateSubmitState()
     this.setStatus(`Selected ${option.label}.`)
@@ -147,18 +150,44 @@ export default class extends Controller {
 
   syncManualChannelId() {
     const value = this.inputTarget.value.trim().toUpperCase()
-    this.valueTarget.value = /^[CDG][A-Z0-9]{8,}$/.test(value) ? value : ""
+    const destinationPattern = this.hasDeliveryModeTarget ? /^[CDG][A-Z0-9]{8,}$/ : /^[CDGUW][A-Z0-9]{8,}$/
+    this.valueTarget.value = destinationPattern.test(value) ? value : ""
+    if (this.hasDeliveryModeTarget) this.channelValue = this.valueTarget.value
+    this.updateSubmitState()
+  }
+
+  deliveryModeChanged() {
+    if (!this.hasDeliveryModeTarget) return
+
+    const deliveryMode = this.deliveryModeTargets.find((input) => input.checked)?.value
+    const deliverToDm = deliveryMode === "dm"
+    if (deliverToDm) {
+      if (/^[CDG][A-Z0-9]{8,}$/.test(this.valueTarget.value)) this.channelValue = this.valueTarget.value
+      this.valueTarget.value = this.dmUserIdValue
+    } else if (/^[UW][A-Z0-9]{8,}$/.test(this.valueTarget.value)) {
+      this.valueTarget.value = this.channelValue
+    }
+
+    this.channelFieldsTarget.hidden = deliverToDm
+    this.inputTarget.disabled = deliverToDm
     this.updateSubmitState()
   }
 
   updateSubmitState() {
+    const deliverToDm = this.hasDeliveryModeTarget &&
+      this.deliveryModeTargets.some((input) => input.checked && input.value === "dm")
+    if (deliverToDm) {
+      this.submitTarget.disabled = this.dmUserIdValue === ""
+      return
+    }
+
     const hasInput = this.inputTarget.value.trim() !== ""
     const hasChannelId = this.valueTarget.value.trim() !== ""
     this.submitTarget.disabled = hasInput && !hasChannelId
   }
 
   resultStatus() {
-    if (this.options.length === 0) return "No matching channels. You can enter a channel ID directly."
+    if (this.options.length === 0) return "No matching Slack destinations."
     if (this.options.length === 20) {
       return this.currentQuery === ""
         ? "Showing the first 20 channels. Type to search all channels."

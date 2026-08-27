@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_08_14_180000) do
+ActiveRecord::Schema[8.1].define(version: 2026_08_23_054500) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
   enable_extension "pg_search"
@@ -380,6 +380,26 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_14_180000) do
     t.index ["labels"], name: "index_roles_on_labels", using: :gin
   end
 
+  create_table "scheduled_tasks", force: :cascade do |t|
+    t.bigint "author_id", null: false
+    t.datetime "created_at", null: false
+    t.string "cron_expression", null: false
+    t.string "delivery_channel", null: false
+    t.boolean "enabled", default: true, null: false
+    t.datetime "last_enqueued_at"
+    t.text "last_error"
+    t.datetime "last_run_at"
+    t.string "last_run_id"
+    t.string "name", null: false
+    t.datetime "next_run_at"
+    t.text "prompt", null: false
+    t.string "timezone", default: "America/Los_Angeles", null: false
+    t.datetime "updated_at", null: false
+    t.index ["author_id", "name"], name: "index_scheduled_tasks_on_author_id_and_name", unique: true
+    t.index ["author_id"], name: "index_scheduled_tasks_on_author_id"
+    t.index ["enabled", "next_run_at"], name: "index_scheduled_tasks_on_enabled_and_next_run_at"
+  end
+
   create_table "secret_sources", force: :cascade do |t|
     t.bigint "aws_auth_secret_id"
     t.jsonb "config", default: {}, null: false
@@ -434,6 +454,26 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_14_180000) do
     t.index ["visibility", "updated_at"], name: "index_active_skills_for_catalog", where: "(archived_at IS NULL)"
   end
 
+  create_table "slack_bot_channels", force: :cascade do |t|
+    t.boolean "active", default: true, null: false
+    t.boolean "archived", default: false, null: false
+    t.string "bot_user_id", null: false
+    t.string "channel_id", null: false
+    t.datetime "created_at", null: false
+    t.datetime "last_seen_at"
+    t.text "member_user_ids", default: [], null: false, array: true
+    t.text "membership_error"
+    t.datetime "membership_last_attempted_at"
+    t.datetime "membership_refreshed_at"
+    t.string "name", null: false
+    t.boolean "private", default: false, null: false
+    t.string "team_id", null: false
+    t.datetime "updated_at", null: false
+    t.index ["member_user_ids"], name: "index_slack_bot_channels_on_member_user_ids", using: :gin
+    t.index ["team_id", "active", "name"], name: "index_slack_bot_channels_for_catalog_search"
+    t.index ["team_id", "channel_id"], name: "index_slack_bot_channels_on_team_id_and_channel_id", unique: true
+  end
+
   create_table "slack_channel_permissions", force: :cascade do |t|
     t.string "channel_id", null: false
     t.datetime "created_at", null: false
@@ -447,6 +487,16 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_14_180000) do
     t.index ["principal_id"], name: "index_slack_channel_permissions_on_principal_id"
     t.index ["role_id", "channel_id"], name: "idx_slack_permissions_unique_role_channel", unique: true, where: "(role_id IS NOT NULL)"
     t.check_constraint "(principal_id IS NOT NULL) <> (role_id IS NOT NULL)", name: "slack_channel_permissions_exactly_one_grantee"
+  end
+
+  create_table "slack_dm_sync_cursors", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.string "next_conversation_id"
+    t.bigint "next_credential_id"
+    t.datetime "not_before"
+    t.string "oauth_app_slug", null: false
+    t.datetime "updated_at", null: false
+    t.index ["oauth_app_slug"], name: "index_slack_dm_sync_cursors_on_oauth_app_slug", unique: true
   end
 
   create_table "static_secrets", force: :cascade do |t|
@@ -556,6 +606,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_14_180000) do
   add_foreign_key "request_rules", "oauth_token_secrets"
   add_foreign_key "request_rules", "static_secrets"
   add_foreign_key "roles", "users", column: "created_by_id"
+  add_foreign_key "scheduled_tasks", "users", column: "author_id"
   add_foreign_key "secret_sources", "aws_auth_secrets"
   add_foreign_key "secret_sources", "gcp_auth_secrets"
   add_foreign_key "secret_sources", "gcp_id_token_secrets"

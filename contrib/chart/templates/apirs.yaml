@@ -200,6 +200,9 @@ spec:
         centaur.ai/observability-enabled: "true"
     spec:
       terminationGracePeriodSeconds: {{ .Values.apiRs.terminationGracePeriodSeconds }}
+{{- with .Values.apiRs.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+{{- end }}
       automountServiceAccountToken: true
       serviceAccountName: {{ $apiRsName }}
       {{- with .Values.global.imagePullSecrets }}
@@ -372,6 +375,14 @@ spec:
             - name: SESSION_SANDBOX_RUNTIME_CLASS_NAME
               value: {{ .Values.sandbox.runtimeClassName | quote }}
 {{- end }}
+{{- if and .Values.sandbox.serviceAccountName (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_SERVICE_ACCOUNT_NAME")) }}
+            - name: SESSION_SANDBOX_SERVICE_ACCOUNT_NAME
+              value: {{ .Values.sandbox.serviceAccountName | quote }}
+{{- end }}
+{{- if and .Values.sandbox.priorityClassName (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_PRIORITY_CLASS_NAME")) }}
+            - name: SESSION_SANDBOX_PRIORITY_CLASS_NAME
+              value: {{ .Values.sandbox.priorityClassName | quote }}
+{{- end }}
             # Sandboxes call back into this control plane via the in-cluster Service.
             - name: SESSION_SANDBOX_CENTAUR_API_URL
               value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
@@ -453,6 +464,9 @@ spec:
 {{- end }}
 {{- if .Values.codex.customProviders }}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" "CODEX_CUSTOM_PROVIDERS" "value" (.Values.codex.customProviders | toJson)) }}
+{{- end }}
+{{- if not (hasKey .Values.sandbox.extraEnv "CENTAUR_TELEMETRY_CAPTURE_TRANSCRIPTS") }}
+{{- $sandboxEnvList = append $sandboxEnvList (dict "name" "CENTAUR_TELEMETRY_CAPTURE_TRANSCRIPTS" "value" (.Values.sandbox.telemetry.captureTranscripts | toString)) }}
 {{- end }}
 {{- range $k, $v := .Values.sandbox.extraEnv }}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" $k "value" ($v | toString)) }}

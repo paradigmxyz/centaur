@@ -1,0 +1,40 @@
+<% field = local_assigns.fetch(:field) %>
+<% attribute = local_assigns.fetch(:attribute) %>
+<% picker_id = local_assigns.fetch(:picker_id) %>
+<% display_value = local_assigns.fetch(:display_value, field.object.public_send(attribute).presence) %>
+<% placeholder = local_assigns.fetch(:placeholder, "Search channels or enter an ID") %>
+
+<div class="relative">
+  <%= field.hidden_field attribute,
+                         data: { slack_channel_autocomplete_target: "value" } %>
+  <%= text_field_tag nil,
+                     display_value,
+                     id: picker_id,
+                     class: "form-input",
+                     placeholder: placeholder,
+                     autocomplete: "off",
+                     role: "combobox",
+                     aria: {
+                       autocomplete: "list",
+                       controls: "#{picker_id}_listbox",
+                       expanded: "false"
+                     },
+                     data: {
+                       slack_channel_autocomplete_target: "input",
+                       action: "focus->slack-channel-autocomplete#open input->slack-channel-autocomplete#input keydown->slack-channel-autocomplete#keydown blur->slack-channel-autocomplete#blur"
+                     } %>
+  <div id="<%= picker_id %>_listbox"
+       class="absolute z-20 mt-1 max-h-72 w-full overflow-y-auto rounded border border-ink-500 bg-ink-900 shadow-lg"
+       role="listbox"
+       hidden
+       data-slack-channel-autocomplete-target="list"></div>
+  <div class="mt-1 min-h-5 text-xs text-zinc-500"
+       role="status"
+       aria-live="polite"
+       data-slack-channel-autocomplete-target="status"></div>
+  <noscript>
+    <%= field.text_field attribute,
+                         class: "form-input mt-2",
+                         placeholder: "C0123456789" %>
+  </noscript>
+</div>

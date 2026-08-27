@@ -4,7 +4,7 @@
 
 <%= render "console/page_header",
            title: "Users",
-           subtitle: "Operator accounts. Approve pending sign-ins, promote admins, or disable access." %>
+           subtitle: "Operator accounts. Approve pending sign-ins, change roles, or disable access." %>
 
 <% if @pending.any? %>
   <h2 class="mb-3 text-xs font-semibold uppercase tracking-wider text-amber-300/80"><%= pluralize(@pending.size, "pending approval") %></h2>
@@ -56,7 +56,11 @@
           <td class="console-td"><%= user_idp_chips(user) %></td>
           <td class="console-td">
             <div class="flex items-center justify-end gap-2">
-              <% unless user.admin? %>
+              <% if user.admin? && user != current_user %>
+                <%= button_to "Make user", demote_console_user_path(user.oid), method: :post,
+                      form: { data: { turbo_confirm: "Make #{user.email} a user?" } },
+                      class: "cursor-pointer rounded border border-ink-600 px-3 py-1.5 text-zinc-400 transition-colors hover:border-centaur-500/40 hover:text-centaur-300" %>
+              <% elsif !user.admin? %>
                 <%= button_to "Make admin", promote_console_user_path(user.oid), method: :post,
                       class: "cursor-pointer rounded border border-ink-600 px-3 py-1.5 text-zinc-400 transition-colors hover:border-centaur-500/40 hover:text-centaur-300" %>
               <% end %>

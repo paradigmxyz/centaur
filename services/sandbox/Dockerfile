@@ -55,7 +55,6 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     httplib2>=0.20.0 \
     httpx>=0.28.0 \
     "openai>=2.53.0" \
-    opentelemetry-proto==1.42.1 \
     "psycopg[binary]>=3.2.0" \
     "githubkit>=0.16.1" \
     pysocks>=1.7.1 \

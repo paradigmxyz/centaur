@@ -46,6 +46,9 @@ gem "tzinfo-data", platforms: %i[ windows jruby ]
 gem "solid_cache"
 gem "solid_queue"
 gem "solid_cable"
+# Parse and calculate scheduled task cron schedules. Solid Queue also uses
+# Fugit internally, but Console's task schedules are a direct dependency.
+gem "fugit", "~> 1.13"
 
 # Reduces boot times through caching; required in config/boot.rb
 gem "bootsnap", require: false

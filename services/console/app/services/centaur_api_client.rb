@@ -2,7 +2,14 @@ require "cgi"
 require "uri"
 
 class CentaurApiClient
-  Error = Class.new(StandardError)
+  class Error < StandardError
+    attr_reader :status
+
+    def initialize(message = nil, status: nil)
+      @status = status
+      super(message)
+    end
+  end
 
   DEFAULT_TIMEOUT_SECONDS = 20
 
@@ -66,6 +73,10 @@ class CentaurApiClient
     post("/api/admin/google/docs-sync/batch", payload)
   end
 
+  def get_google_docs_content_status(files:)
+    post("/api/admin/google/docs-sync/content-status", { files: files })
+  end
+
   def get_granola_sync_checkpoint(scope_id:)
     get("/api/admin/granola/sync/checkpoint", scope_id: scope_id)
   end
@@ -108,9 +119,11 @@ class CentaurApiClient
     get("/api/workflows/runs/#{escape_path(run_id)}")
   end
 
-  def create_workflow_run(workflow_name:, input: nil)
+  def create_workflow_run(workflow_name:, input: nil, idempotency_key: nil, max_attempts: nil)
     payload = { workflow_name: workflow_name }
     payload[:input] = input unless input.nil?
+    payload[:idempotency_key] = idempotency_key if idempotency_key.present?
+    payload[:max_attempts] = max_attempts unless max_attempts.nil?
 
     post("/api/workflows/runs", payload)
   end
@@ -137,7 +150,10 @@ class CentaurApiClient
     return parsed if response.status.between?(200, 299)
 
     message = parsed.is_a?(Hash) ? parsed["error"] || parsed["message"] || parsed["detail"] : nil
-    raise Error, message.presence || "Centaur API returned HTTP #{response.status}"
+    raise Error.new(
+      message.presence || "Centaur API returned HTTP #{response.status}",
+      status: response.status
+    )
   end
 
   def request_headers

@@ -162,6 +162,12 @@ console:
   # worker. Keep this aligned with the Console OAuth app users authorize.
   slackDmSync:
     oauthAppSlug: slack
+  # Google Docs metadata and document-content ETL. Enable this to run the
+  # recurring poller and queued Google Docs sync jobs. Disabled jobs exit
+  # without work.
+  # This does not disable Google OAuth or remove previously indexed content.
+  googleDocsSync:
+    enabled: false
   service:
     httpPort: 3000
   # Optional Ingress for the console. Bring your own controller — Tailscale
@@ -309,6 +315,17 @@ sandbox:
   #   effect: NoSchedule
   # RuntimeClass for sandbox + iron-proxy pods, e.g. gVisor.
   runtimeClassName: ""
+  # ServiceAccount for sandbox pods (session, warm, and workflow-host), e.g.
+  # for cloud workload identity (EKS IRSA). Must already exist in the release
+  # namespace; iron-proxy pods are unaffected, and the Kubernetes API token
+  # stays unmounted (automountServiceAccountToken remains false). Changing
+  # this value drains retained sandbox pods before api-rs enables reuse.
+  serviceAccountName: ""
+  # PriorityClass for sandbox + iron-proxy pods. Point this at a dedicated
+  # (low-priority) PriorityClass to scope a ResourceQuota to sandbox
+  # workloads and let the kubelet/scheduler sacrifice them before the
+  # control plane under node pressure.
+  priorityClassName: ""
   reposPath: ""
   # How the in-sandbox harness authenticates upstream. Single source of truth:
   # the control plane reads it to register the matching iron-proxy credential
@@ -333,6 +350,12 @@ sandbox:
   # mirrored into slackbotv2. This keeps Slack's model/thinking footer aligned
   # with the policy the sandbox actually runs.
   extraEnv: {}
+  telemetry:
+    # Include user prompts, assistant responses, and bounded shell commands on
+    # harness spans.
+    # Token usage, cost, status, session, and tool telemetry remain available
+    # when this is disabled.
+    captureTranscripts: false
   stateVolume:
     enabled: false
     size: 10Gi
@@ -532,6 +555,10 @@ apiRs:
   terminationGracePeriodSeconds: 35
   extraEnv: {}
   resources: {}
+  # PriorityClass for the api-rs control plane pod itself. Pair with
+  # Guaranteed-QoS resources so runaway sandboxes are evicted before the
+  # control plane.
+  priorityClassName: ""
 
 # Chat SDK Slackbot v2. Forwards Slack events to the api-rs control plane
 # (:8080) and streams responses back. Listens on :3001.
@@ -544,6 +571,12 @@ slackbotv2:
     pullPolicy: Always
   userName: centaur
   assistantStatus: ""
+  # React to mentioned follow-ups while an execution is active, then remove
+  # their reactions after the assistant response is posted. Requires the Slack
+  # app to grant reactions:write. Slackbot disables the feature for the running
+  # process if Slack reports that the scope is missing.
+  steeringReactionEnabled: false
+  steeringReaction: hourglass_flowing_sand
   # Join newly-created public channels after subscribed channel_created events.
   # Requires the Slack app to grant channels:read and channels:join.
   autoJoinCreatedChannels: false

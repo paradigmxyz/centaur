@@ -71,6 +71,11 @@ import {
   parseSlackWebhookPayload
 } from './slack-events'
 import { isSlackStopCommand } from './stop-command'
+import {
+  createSteeringReactionController,
+  type SteeringReactionAck,
+  type SteeringReactionController
+} from './steering-reaction'
 import type {
   ForwardSessionInput,
   JsonObject,
@@ -269,7 +274,8 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     onLockConflict: 'force',
     logger
   })
-  const lateSlackFiles = createLateSlackFileRepair(options, state)
+  const steeringReactions = createSteeringReactionController(options)
+  const lateSlackFiles = createLateSlackFileRepair(options, state, steeringReactions)
   const stateConnectionStatus: StateConnectionStatus = { attempts: 0, connected: false }
   const stateConnected = ensureStateConnected(state, options, stateConnectionStatus)
   backgroundWaitUntil(stateConnected)
@@ -344,6 +350,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
       mode: 'execute',
       options,
       state,
+      steeringReactions,
       subscribe: true,
       trigger: 'new_mention'
     })
@@ -361,6 +368,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
       mode: 'execute',
       options,
       state,
+      steeringReactions,
       subscribe: true,
       trigger: 'new_mention'
     })
@@ -384,6 +392,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
       mode: 'execute',
       options,
       state,
+      steeringReactions,
       trigger: 'subscribed_message'
     })
   })
@@ -400,7 +409,11 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     const route = c.req.path
     const rawBody = await c.req.raw.clone().text()
     const eventType = slackWebhookEventType(rawBody)
-    const webhookFields = slackWebhookLogFields(rawBody)
+    const webhookFields = {
+      ...slackWebhookLogFields(rawBody),
+      slack_retry_num: c.req.header('x-slack-retry-num') || undefined,
+      slack_retry_reason: c.req.header('x-slack-retry-reason') || undefined
+    }
     let outcome = 'success'
     try {
       traceLog(options, 'slackbotv2_webhook_received', undefined, {
@@ -500,6 +513,7 @@ async function handleSlackMessageHandoff(
     mode: SlackbotV2MessageMode
     options: SlackbotV2Options
     state: StateAdapter
+    steeringReactions: SteeringReactionController
     subscribe?: boolean
     trigger: string
   }
@@ -511,35 +525,40 @@ async function handleSlackMessageHandoff(
     trigger: input.trigger
   })
   let initialAssistantStatusVisible = false
-  const assistantStatus = input.assistantStatusRequested
-    ? setInitialAssistantStatus(thread, input.options, trace)
-        .then(visible => {
-          initialAssistantStatusVisible = visible
-          return visible
-        })
-    : Promise.resolve(false)
-  if (input.assistantStatusRequested) {
-    backgroundWaitUntil(assistantStatus.then(() => undefined).catch(() => undefined))
-  }
+  let assistantStatus = Promise.resolve(false)
   try {
     if (await handleStopCommand(thread, message, input.options, input.trigger)) {
       return
+    }
+    // Assistant status is thread-wide. A mentioned follow-up that steers an
+    // active execution must not clear or replace the status owned by that run.
+    const assistantStatusRequested =
+      input.assistantStatusRequested && ((await thread.state)?.activeExecution !== true)
+    assistantStatus = assistantStatusRequested
+      ? setInitialAssistantStatus(thread, input.options, trace).then(visible => {
+          initialAssistantStatusVisible = visible
+          return visible
+        })
+      : Promise.resolve(false)
+    if (assistantStatusRequested) {
+      backgroundWaitUntil(assistantStatus.then(() => undefined).catch(() => undefined))
     }
     if (input.subscribe) {
       await subscribeSlackThreadForHandoff(thread, input.options, trace, input.trigger)
     }
     traceLog(input.options, 'slackbotv2_handoff_sync_starting', trace, {
       initial_assistant_status_deferred:
-        input.assistantStatusRequested && !initialAssistantStatusVisible,
+        assistantStatusRequested && !initialAssistantStatusVisible,
       initial_assistant_status_visible: initialAssistantStatusVisible,
       trigger: input.trigger
     })
     await syncThreadMessageToSession(thread, message, {
-      initialAssistantStatusRequested: input.assistantStatusRequested,
+      initialAssistantStatusRequested: assistantStatusRequested,
       initialAssistantStatusVisible,
       mode: input.mode,
       options: input.options,
-      state: input.state
+      state: input.state,
+      steeringReactions: input.steeringReactions
     })
     traceLog(input.options, 'slackbotv2_handoff_complete', trace, {
       trigger: input.trigger
@@ -551,9 +570,10 @@ async function handleSlackMessageHandoff(
     })
     backgroundWaitUntil(
       assistantStatus
-        .then(visible =>
-          visible ? setAssistantStatus(thread, '', input.options, trace) : undefined
-        )
+        .then(async visible => {
+          if (!visible || (await thread.state)?.activeExecution === true) return
+          await setAssistantStatus(thread, '', input.options, trace)
+        })
         .then(() => undefined)
         .catch(() => undefined)
     )
@@ -945,6 +965,8 @@ type SyncThreadMessageInput = {
   /** Resolved once per local handoff chain so retryable failures stay idempotent. */
   resolvedMessageOverrides?: Awaited<ReturnType<typeof messageOverridesForText>>
   state: StateAdapter
+  steeringReactionAck?: SteeringReactionAck
+  steeringReactions: SteeringReactionController
 }
 
 /**
@@ -985,9 +1007,10 @@ function scheduleHandoffRetry(
         attempt: attempt + 1,
         error: errorMessage(retryError)
       })
+      finishSteeringReaction(input, trace)
       // A retry chain that dies outside the normal failure paths (which clear
       // the status themselves) must not leave "Thinking..." stuck on the thread.
-      if (input.mode === 'execute') {
+      if (input.mode === 'execute' && input.initialAssistantStatusRequested) {
         try {
           await setAssistantStatus(thread, '', input.options, trace)
         } catch {
@@ -997,6 +1020,16 @@ function scheduleHandoffRetry(
     })
   )
   return true
+}
+
+function finishSteeringReaction(
+  input: SyncThreadMessageInput,
+  trace?: SlackbotV2Trace
+): void {
+  const ack = input.steeringReactionAck
+  if (!ack) return
+  input.steeringReactionAck = undefined
+  backgroundWaitUntil(input.steeringReactions.complete(ack, trace))
 }
 
 /**
@@ -1030,7 +1063,8 @@ async function syncThreadMessageToSession(
   }
   if (isDuplicateIncrementalMessage) {
     traceLog(input.options, 'slackbotv2_forward_duplicate_skipped', trace)
-    if (input.initialAssistantStatusVisible) {
+    finishSteeringReaction(input, trace)
+    if (input.initialAssistantStatusVisible && state.activeExecution !== true) {
       await setAssistantStatus(thread, '', input.options, trace)
     }
     recordForward(input.mode, 'duplicate_skipped', traceStartedAtMs)
@@ -1051,7 +1085,11 @@ async function syncThreadMessageToSession(
         .catch(() => undefined)
     )
   }
-  if (!shouldStartExecution && input.initialAssistantStatusVisible) {
+  if (
+    !shouldStartExecution
+    && input.initialAssistantStatusVisible
+    && state.activeExecution !== true
+  ) {
     await setAssistantStatus(thread, '', input.options, trace)
   }
 
@@ -1214,6 +1252,15 @@ async function syncThreadMessageToSession(
   const candidateMessages = context ?? [serializedMessage]
   const messagesToAppend = candidateMessages.filter(item => !messageIds.has(item.id))
 
+  if (
+    state.activeExecution === true
+    && message.isMention === true
+    && messagesToAppend.some(item => item.id === message.id)
+    && !input.steeringReactionAck
+  ) {
+    input.steeringReactionAck = input.steeringReactions.begin(thread, message, trace)
+  }
+
   const forwardInput: ForwardSessionInput = {
     afterEventId: lastEventId,
     executeContextMessages:
@@ -1277,12 +1324,19 @@ async function syncThreadMessageToSession(
     const latest = (await thread.state) ?? {}
     const latestMessageIds = new Set(latest.forwardedMessageIds ?? [])
     for (const item of messagesToAppend) latestMessageIds.add(item.id)
+    const steeringReactionAck = input.steeringReactionAck
+    const holdSteeringReaction =
+      steeringReactionAck !== undefined && latest.activeExecution === true
     await thread.setState({
       ...(stickyOverridesUpdate ?? {}),
       forwardedMessageIds: Array.from(latestMessageIds).slice(-1000),
       historyForwarded: latest.historyForwarded || (shouldIncludeContext && !contextDegraded),
       lastEventId
     })
+    if (holdSteeringReaction) {
+      input.steeringReactions.hold(steeringReactionAck)
+      input.steeringReactionAck = undefined
+    }
     traceLog(input.options, 'slackbotv2_forward_messages_committed', trace, {
       appended_message_count: messagesToAppend.length,
       forwarded_message_count: Math.min(latestMessageIds.size, 1000)
@@ -1295,6 +1349,7 @@ async function syncThreadMessageToSession(
     const latest = (await thread.state) ?? {}
     const latestExecutedMessageIds = new Set(latest.executedMessageIds ?? [])
     latestExecutedMessageIds.add(serializedMessage.id)
+    const steeringReactionAck = input.steeringReactionAck
     forwardInput.executionId = execution.execution_id
     // Take the render lease before the obligation becomes visible so a
     // concurrent recovery sweep never claims it while this process is about
@@ -1317,6 +1372,10 @@ async function syncThreadMessageToSession(
         message: serializedMessage
       }
     })
+    if (steeringReactionAck) {
+      input.steeringReactions.hold(steeringReactionAck)
+      input.steeringReactionAck = undefined
+    }
     await indexRenderObligation(input.state, {
       options: input.options,
       threadId: thread.id,
@@ -1346,9 +1405,11 @@ async function syncThreadMessageToSession(
           error: errorMessage(error)
         })
       }
+      finishSteeringReaction(input, trace)
       recordForward(input.mode, 'error', traceStartedAtMs)
       throw error
     }
+    finishSteeringReaction(input, trace)
     traceLog(input.options, 'slackbotv2_forward_complete', trace)
     recordForward(input.mode, 'complete', traceStartedAtMs)
     if (input.retryAttempt) slackbotMetrics.handoffRetries.inc({ outcome: 'succeeded' })
@@ -1401,6 +1462,7 @@ async function syncThreadMessageToSession(
       },
       onSessionRestarted: handleSessionRestarted
     })
+    finishSteeringReaction(input, trace)
     scheduleExecutionRender(
       thread,
       serializedMessage,
@@ -1409,6 +1471,7 @@ async function syncThreadMessageToSession(
       () => lastEventId,
       renderLease,
       assistantStatusVisible,
+      input.steeringReactions,
       trace,
       responseContextBlock
     )
@@ -1462,6 +1525,7 @@ async function syncThreadMessageToSession(
         error: errorMessage(renderError)
       })
     }
+    finishSteeringReaction(input, trace)
     traceLog(input.options, 'slackbotv2_forward_complete', trace, {
       latest_active_execution: latest.activeExecution === true,
       last_event_id: lastEventId
@@ -1478,6 +1542,7 @@ function scheduleExecutionRender(
   getLastEventId: () => number,
   renderLease: { release: (() => Promise<void>) | null },
   assistantStatusVisible: boolean,
+  steeringReactions: SteeringReactionController,
   trace?: SlackbotV2Trace,
   responseContextBlock?: SlackContextBlock
 ): void {
@@ -1493,6 +1558,7 @@ function scheduleExecutionRender(
           input,
           getLastEventId,
           assistantStatusVisible,
+          steeringReactions,
           trace,
           responseContextBlock
         )
@@ -1537,6 +1603,7 @@ async function renderExecutionAttempt(
   input: ForwardSessionInput,
   getLastEventId: () => number,
   assistantStatusVisible: boolean,
+  steeringReactions: SteeringReactionController,
   trace?: SlackbotV2Trace,
   responseContextBlock?: SlackContextBlock
 ): Promise<'complete' | 'retry'> {
@@ -1680,6 +1747,7 @@ async function renderExecutionAttempt(
       lastEventId: Math.max(latest.lastEventId ?? 0, getLastEventId(), fallbackLastEventId),
       ...(rendered ? { renderObligation: null } : {})
     })
+    if (rendered) await steeringReactions.completeThread(thread.id, trace)
     traceLog(options, 'slackbotv2_render_finalized', trace, {
       obligation_cleared: rendered,
       render_duration_ms: elapsedMs(renderStartedAtMs),
@@ -2760,7 +2828,11 @@ function backgroundWaitUntil(promise: Promise<unknown>): void {
   void promise.catch(() => undefined)
 }
 
-function createLateSlackFileRepair(options: SlackbotV2Options, state: StateAdapter) {
+function createLateSlackFileRepair(
+  options: SlackbotV2Options,
+  state: StateAdapter,
+  steeringReactions: SteeringReactionController
+) {
   const pending = new Map<string, PendingLateSlackFileMention[]>()
   const consumed = new Map<string, number>()
 
@@ -2840,7 +2912,13 @@ function createLateSlackFileRepair(options: SlackbotV2Options, state: StateAdapt
       }
 
       consumed.set(dedupeKey, Date.now())
-      return repairLateSlackFileMessage(options, state, match, event).catch(error => {
+      return repairLateSlackFileMessage(
+        options,
+        state,
+        steeringReactions,
+        match,
+        event
+      ).catch(error => {
         traceWarn(options, 'slackbotv2_late_file_repair_failed', undefined, {
           dedupe_key: dedupeKey,
           error: errorMessage(error),
@@ -2856,6 +2934,7 @@ function createLateSlackFileRepair(options: SlackbotV2Options, state: StateAdapt
 async function repairLateSlackFileMessage(
   options: SlackbotV2Options,
   state: StateAdapter,
+  steeringReactions: SteeringReactionController,
   pending: PendingLateSlackFileMention,
   event: Record<string, unknown>
 ): Promise<void> {
@@ -2885,6 +2964,7 @@ async function repairLateSlackFileMessage(
     mode: 'execute',
     options,
     state,
+    steeringReactions,
     trigger: 'late_file_message'
   })
   traceLog(options, 'slackbotv2_late_file_repair_complete', undefined, {

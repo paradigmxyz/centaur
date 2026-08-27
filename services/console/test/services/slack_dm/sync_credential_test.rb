@@ -3,7 +3,20 @@ require "test_helper"
 module SlackDm
   class SyncCredentialTest < ActiveSupport::TestCase
     class FakeApiClient
-      attr_reader :batch
+      attr_reader :batches
+
+      def initialize(&ingest_handler)
+        @batches = []
+        @ingest_handler = ingest_handler
+      end
+
+      def batch
+        @batches.find { |payload| payload[:conversations].any? }
+      end
+
+      def final_batch
+        @batches.last
+      end
 
       def list_slack_dm_sync_checkpoints(broker_credential_id:, home_team_id:)
         {
@@ -19,7 +32,8 @@ module SlackDm
       end
 
       def ingest_slack_dm_sync_batch(payload)
-        @batch = payload
+        @batches << payload
+        @ingest_handler&.call(payload)
         { "ok" => true }
       end
     end
@@ -57,6 +71,42 @@ module SlackDm
         scopes: SlackDm::SyncCredential::REQUIRED_SCOPES,
         provider_subject: "U_ME"
       )
+    end
+
+    def two_conversation_slack_http(history_calls)
+      lambda do |endpoint:, params:, access_token:|
+        assert_equal "xoxp-live", access_token
+        case endpoint
+        when SlackDm::SyncCredential::AUTH_TEST_ENDPOINT
+          { "ok" => true, "team_id" => "T123", "user_id" => "U_ME" }
+        when SlackDm::SyncCredential::CONVERSATIONS_LIST_ENDPOINT
+          {
+            "ok" => true,
+            "channels" => [
+              { "id" => "D100", "is_im" => true, "user" => "U_ONE" },
+              { "id" => "D200", "is_im" => true, "user" => "U_TWO" }
+            ],
+            "response_metadata" => { "next_cursor" => "" }
+          }
+        when SlackDm::SyncCredential::CONVERSATIONS_HISTORY_ENDPOINT
+          conversation_id = params.fetch("channel")
+          history_calls << conversation_id
+          {
+            "ok" => true,
+            "messages" => [
+              {
+                "type" => "message",
+                "ts" => conversation_id == "D100" ? "1700000000.000001" : "1700000000.000002",
+                "user" => "U_OTHER",
+                "text" => conversation_id
+              }
+            ],
+            "response_metadata" => { "next_cursor" => "" }
+          }
+        else
+          flunk "unexpected Slack endpoint #{endpoint}"
+        end
+      end
     end
 
     test "uses an extended API read timeout by default" do
@@ -192,7 +242,7 @@ module SlackDm
       ).call
 
       batch = api_client.batch
-      assert_equal "completed", batch[:run][:status]
+      assert_equal "running", batch[:run][:status]
       assert_equal credential.oid, batch[:run][:broker_credential_id]
       assert_equal 1, batch[:conversations].length
       assert_equal "im", batch[:conversations].first[:conversation_type]
@@ -206,6 +256,8 @@ module SlackDm
       assert_equal "note.txt", batch[:attachments].first[:name]
       assert_equal "note.txt", batch[:attachments].first[:raw_payload]["name"]
       assert_equal "1700000000.000002", batch[:checkpoints].first[:watermark_ts]
+      assert_equal "completed", api_client.final_batch[:run][:status]
+      assert api_client.final_batch[:run][:finished]
     end
 
     test "sync ingests private channels and their complete member list" do
@@ -294,7 +346,7 @@ module SlackDm
         end
       end
 
-      error = assert_raises(SlackDm::SyncCredential::SlackApiError) do
+      error = assert_raises(SlackApi::Error) do
         SlackDm::SyncCredential.new(
           credential,
           api_client: api_client,
@@ -307,11 +359,255 @@ module SlackDm
       previous.nil? ? ENV.delete(env_key) : ENV[env_key] = previous
     end
 
-    test "429 responses expose Retry-After for deferred job execution" do
+    test "sync ingests completed conversations separately and resumes at its cursor" do
+      api_client = FakeApiClient.new
+      rate_limited = true
+      history_calls = []
+      slack_http = lambda do |endpoint:, params:, access_token:|
+        assert_equal "xoxp-live", access_token
+        case endpoint
+        when SlackDm::SyncCredential::AUTH_TEST_ENDPOINT
+          { "ok" => true, "team_id" => "T123", "user_id" => "U_ME" }
+        when SlackDm::SyncCredential::CONVERSATIONS_LIST_ENDPOINT
+          {
+            "ok" => true,
+            "channels" => [
+              { "id" => "D100", "is_im" => true, "user" => "U_ONE" },
+              { "id" => "D200", "is_im" => true, "user" => "U_TWO" }
+            ],
+            "response_metadata" => { "next_cursor" => "" }
+          }
+        when SlackDm::SyncCredential::CONVERSATIONS_HISTORY_ENDPOINT
+          conversation_id = params.fetch("channel")
+          history_calls << conversation_id
+          if conversation_id == "D200" && rate_limited
+            raise SlackApi::RateLimitedError.new(retry_after: 20.minutes.to_i)
+          end
+
+          {
+            "ok" => true,
+            "messages" => [
+              {
+                "type" => "message",
+                "ts" => "1700000000.000001",
+                "user" => "U_OTHER",
+                "text" => conversation_id
+              }
+            ],
+            "response_metadata" => { "next_cursor" => "" }
+          }
+        else
+          flunk "unexpected Slack endpoint #{endpoint}"
+        end
+      end
+      conversation_cursor = nil
+
+      assert_raises(SlackApi::RateLimitedError) do
+        SlackDm::SyncCredential.new(
+          credential,
+          api_client: api_client,
+          slack_api_http: slack_http
+        ).call do |conversation_id|
+          conversation_cursor = conversation_id
+        end
+      end
+
+      assert_equal "D200", conversation_cursor
+      ingested_conversation_ids = api_client.batches.flat_map do |batch|
+        batch[:conversations].map { |conversation| conversation[:conversation_id] }
+      end
+      assert_equal [ "D100" ], ingested_conversation_ids
+
+      rate_limited = false
+      SlackDm::SyncCredential.new(
+        credential,
+        api_client: api_client,
+        slack_api_http: slack_http
+      ).call(starting_conversation_id: conversation_cursor)
+
+      assert_equal %w[D100 D200 D200], history_calls
+      ingested_conversation_ids = api_client.batches.flat_map do |batch|
+        batch[:conversations].map { |conversation| conversation[:conversation_id] }
+      end
+      assert_equal %w[D100 D200], ingested_conversation_ids
+    end
+
+    test "sync checkpoints the next conversation before stopping at its deadline" do
+      api_client = FakeApiClient.new
+      conversation_cursor = nil
+      now = Time.zone.parse("2026-08-23 12:00:00")
+      slack_http = lambda do |endpoint:, params:, access_token:|
+        assert_equal "xoxp-live", access_token
+        case endpoint
+        when SlackDm::SyncCredential::AUTH_TEST_ENDPOINT
+          { "ok" => true, "team_id" => "T123", "user_id" => "U_ME" }
+        when SlackDm::SyncCredential::CONVERSATIONS_LIST_ENDPOINT
+          {
+            "ok" => true,
+            "channels" => [
+              { "id" => "D100", "is_im" => true, "user" => "U_ONE" },
+              { "id" => "D200", "is_im" => true, "user" => "U_TWO" }
+            ],
+            "response_metadata" => { "next_cursor" => "" }
+          }
+        when SlackDm::SyncCredential::CONVERSATIONS_HISTORY_ENDPOINT
+          travel 31.minutes if params.fetch("channel") == "D100"
+          { "ok" => true, "messages" => [], "response_metadata" => { "next_cursor" => "" } }
+        else
+          flunk "unexpected Slack endpoint #{endpoint}"
+        end
+      end
+
+      completed = travel_to(now) do
+        SlackDm::SyncCredential.new(
+          credential,
+          api_client: api_client,
+          slack_api_http: slack_http
+        ).call(deadline: now + 30.minutes) do |conversation_id|
+          conversation_cursor = conversation_id
+        end
+      end
+
+      assert_not completed
+      assert_equal "D200", conversation_cursor
+      ingested_conversation_ids = api_client.batches.flat_map do |batch|
+        batch[:conversations].map { |conversation| conversation[:conversation_id] }
+      end
+      assert_equal [ "D100" ], ingested_conversation_ids
+      assert_equal "partial", api_client.final_batch[:run][:status]
+    end
+
+    test "sync skips a conversation rejected by the ingest API" do
+      api_client = FakeApiClient.new do |payload|
+        conversation_id = payload.dig(:conversations, 0, :conversation_id)
+        if conversation_id == "D100"
+          raise CentaurApiClient::Error.new("invalid message timestamp", status: 400)
+        end
+      end
+      history_calls = []
+      conversation_cursor = nil
+
+      completed = SlackDm::SyncCredential.new(
+        credential,
+        api_client: api_client,
+        slack_api_http: two_conversation_slack_http(history_calls)
+      ).call do |conversation_id|
+        conversation_cursor = conversation_id
+      end
+
+      attempted_conversation_ids = api_client.batches.filter_map do |batch|
+        batch.dig(:conversations, 0, :conversation_id)
+      end
+      assert completed
+      assert_equal %w[D100 D200], history_calls
+      assert_equal %w[D100 D200], attempted_conversation_ids
+      assert_equal "D200", conversation_cursor
+      assert_equal "partial", api_client.final_batch[:run][:status]
+      assert_equal 1, api_client.final_batch[:run][:conversations_failed]
+      assert_equal 1, api_client.final_batch[:run][:conversations_synced]
+      assert_equal 2, api_client.final_batch[:run][:messages_fetched]
+      assert_equal 1, api_client.final_batch[:run][:messages_upserted]
+    end
+
+    test "sync retries a conversation after a transient ingest API failure" do
+      api_client = FakeApiClient.new do |payload|
+        conversation_id = payload.dig(:conversations, 0, :conversation_id)
+        if conversation_id == "D100"
+          raise CentaurApiClient::Error.new("temporary failure", status: 500)
+        end
+      end
+      history_calls = []
+      conversation_cursor = nil
+
+      error = assert_raises(CentaurApiClient::Error) do
+        SlackDm::SyncCredential.new(
+          credential,
+          api_client: api_client,
+          slack_api_http: two_conversation_slack_http(history_calls)
+        ).call do |conversation_id|
+          conversation_cursor = conversation_id
+        end
+      end
+
+      attempted_conversation_ids = api_client.batches.filter_map do |batch|
+        batch.dig(:conversations, 0, :conversation_id)
+      end
+      assert_equal 500, error.status
+      assert_equal [ "D100" ], history_calls
+      assert_equal [ "D100" ], attempted_conversation_ids
+      assert_equal "D100", conversation_cursor
+    end
+
+    test "short rate limits retry the same paginated Slack call" do
+      api_client = FakeApiClient.new
+      list_cursors = []
+      rate_limited = true
+      slack_http = lambda do |endpoint:, params:, access_token:|
+        assert_equal "xoxp-live", access_token
+        case endpoint
+        when SlackDm::SyncCredential::AUTH_TEST_ENDPOINT
+          { "ok" => true, "team_id" => "T123", "user_id" => "U_ME" }
+        when SlackDm::SyncCredential::CONVERSATIONS_LIST_ENDPOINT
+          cursor = params["cursor"]
+          list_cursors << cursor
+          if cursor.nil?
+            {
+              "ok" => true,
+              "channels" => [],
+              "response_metadata" => { "next_cursor" => "page-2" }
+            }
+          elsif rate_limited
+            rate_limited = false
+            raise SlackApi::RateLimitedError.new(retry_after: 5.minutes.to_i - 1)
+          else
+            {
+              "ok" => true,
+              "channels" => [],
+              "response_metadata" => { "next_cursor" => "" }
+            }
+          end
+        else
+          flunk "unexpected Slack endpoint #{endpoint}"
+        end
+      end
+      client = SlackDm::SyncCredential.new(
+        credential,
+        api_client: api_client,
+        slack_api_http: slack_http
+      )
+      sleeps = []
+
+      client.stub(:sleep, ->(seconds) { sleeps << seconds }) do
+        assert client.call
+      end
+
+      assert_equal [ 5.minutes.to_i - 1 ], sleeps
+      assert_equal [ nil, "page-2", "page-2" ], list_cursors
+    end
+
+    test "short rate limits escape after five retries of one Slack call" do
+      attempts = 0
+      slack_http = lambda do |endpoint:, **|
+        assert_equal SlackDm::SyncCredential::AUTH_TEST_ENDPOINT, endpoint
+        attempts += 1
+        raise SlackApi::RateLimitedError.new(retry_after: 1)
+      end
+      client = SlackDm::SyncCredential.new(credential, slack_api_http: slack_http)
+      sleeps = []
+
+      error = assert_raises(SlackApi::RateLimitedError) do
+        client.stub(:sleep, ->(seconds) { sleeps << seconds }) { client.call }
+      end
+
+      assert_equal 1, error.retry_after
+      assert_equal SlackDm::SyncCredential::MAX_INLINE_RATE_LIMIT_RETRIES + 1, attempts
+      assert_equal Array.new(SlackDm::SyncCredential::MAX_INLINE_RATE_LIMIT_RETRIES, 1), sleeps
+    end
+
+    test "long 429 responses expose the full Retry-After to the cursor job" do
       [
-        [ "120", 120 ],
-        [ "600", 5.minutes.to_i ],
-        [ "invalid", 1 ]
+        [ "300", 300 ],
+        [ "600", 600 ]
       ].each do |header, expected|
         response = HttpClient::Response.new(
           status: 429,
@@ -319,7 +615,7 @@ module SlackDm
           headers: { "retry-after" => header }
         )
 
-        error = assert_raises(SlackDm::SyncCredential::RateLimitedError) do
+        error = assert_raises(SlackApi::RateLimitedError) do
           SlackDm::SyncCredential.new(
             credential,
             http_client: FakeHttpClient.new(response)
@@ -328,6 +624,40 @@ module SlackDm
 
         assert_equal expected, error.retry_after
       end
+    end
+
+    test "transient Slack API errors request deferred job execution" do
+      %w[fatal_error internal_error].each do |error_code|
+        response = HttpClient::Response.new(
+          status: 200,
+          body: { ok: false, error: error_code }.to_json,
+          headers: { "content-type" => "application/json" }
+        )
+
+        error = assert_raises(SlackApi::TransientError) do
+          SlackDm::SyncCredential.new(
+            credential,
+            http_client: FakeHttpClient.new(response)
+          ).call
+        end
+
+        assert_equal SlackApi::DEFAULT_TRANSIENT_RETRY_AFTER_SECONDS, error.retry_after
+      end
+    end
+
+    test "hostname resolution failures request deferred job execution" do
+      http_client = Object.new
+      http_client.define_singleton_method(:get) do |*|
+        raise Socket::ResolutionError, "Temporary failure in name resolution"
+      end
+
+      error = assert_raises(SlackApi::TransientError) do
+        SlackDm::SyncCredential.new(credential, http_client: http_client).call
+      end
+
+      assert_equal "hostname_resolution_failed", error.code
+      assert_equal SlackApi::DEFAULT_TRANSIENT_RETRY_AFTER_SECONDS, error.retry_after
+      assert_instance_of Socket::ResolutionError, error.cause
     end
   end
 end

@@ -80,6 +80,10 @@ spec:
               value: {{ .Values.apiRs.activitySummary.enabled | quote }}
             - name: SLACKBOTV2_AUTO_JOIN_CREATED_CHANNELS
               value: {{ .Values.slackbotv2.autoJoinCreatedChannels | quote }}
+            - name: SLACKBOTV2_STEERING_REACTION_ENABLED
+              value: {{ .Values.slackbotv2.steeringReactionEnabled | quote }}
+            - name: SLACKBOTV2_STEERING_REACTION
+              value: {{ .Values.slackbotv2.steeringReaction | quote }}
             - name: SLACKBOTV2_RESPONSE_METADATA_MODE
               value: {{ .Values.slackbotv2.responseMetadataMode | quote }}
             - name: SLACKBOTV2_RESPONSE_SERVICE_TIER_ENABLED

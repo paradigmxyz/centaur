@@ -23,6 +23,7 @@ class Principal < ApplicationRecord
   include SlackChannelPermissionOwner
 
   after_commit :auto_grant_matching_oauth_credentials, on: %i[create update]
+  after_create_commit :enqueue_slack_channel_catalog_refresh, if: :slack_channel_catalog_refreshable?
   after_create :assign_default_roles, if: :roles_blank_for_defaulting?
   before_validation :apply_sandbox_repo_cache_label
   before_commit :bump_own_sync_config_cache_version, on: :update, if: :sync_config_fields_changed?
@@ -255,6 +256,14 @@ class Principal < ApplicationRecord
   end
 
   private
+
+  def slack_channel_catalog_refreshable?
+    kind == "slack_channel" && slack_channel_id.present? && SlackChannelCatalogSync.configured?
+  end
+
+  def enqueue_slack_channel_catalog_refresh
+    SlackChannelCatalogMembershipRefreshJob.perform_later(slack_channel_id)
+  end
 
   def roles_blank_for_defaulting?
     association(:roles).target.empty? && !roles.exists?

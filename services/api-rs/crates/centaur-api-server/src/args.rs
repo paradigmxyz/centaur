@@ -680,6 +680,22 @@ struct SandboxArgs {
         env = "SESSION_SANDBOX_RUNTIME_CLASS_NAME"
     )]
     runtime_class_name: Option<String>,
+    /// `serviceAccountName` for sandbox pods, e.g. for cloud workload
+    /// identity. The chart renders `sandbox.serviceAccountName` into this.
+    #[arg(
+        long = "session-sandbox-service-account-name",
+        env = "SESSION_SANDBOX_SERVICE_ACCOUNT_NAME"
+    )]
+    service_account_name: Option<String>,
+    /// `priorityClassName` for sandbox and iron-proxy pods. Giving sandbox
+    /// workloads a dedicated (low) PriorityClass lets the cluster scope a
+    /// ResourceQuota to them and evict/preempt them before the control plane.
+    /// The chart renders `sandbox.priorityClassName` into this.
+    #[arg(
+        long = "session-sandbox-priority-class-name",
+        env = "SESSION_SANDBOX_PRIORITY_CLASS_NAME"
+    )]
+    priority_class_name: Option<String>,
     #[command(flatten)]
     tools: ToolDiscoveryArgs,
     #[command(flatten)]
@@ -795,6 +811,13 @@ impl SandboxArgs {
                     self.kube_client().await?,
                     AgentSandboxConfig::try_from(self)?,
                 );
+                let stopped = backend.drain_service_account_mismatches().await?;
+                if !stopped.is_empty() {
+                    info!(
+                        stopped_count = stopped.len(),
+                        "drained sandboxes with stale service accounts before enabling reuse"
+                    );
+                }
                 Ok(SandboxRuntime::backend_with_workload(
                     Arc::new(backend),
                     self.container_workload_mode()?,
@@ -1466,6 +1489,18 @@ impl TryFrom<&SandboxArgs> for AgentSandboxConfig {
         config.tolerations = args.tolerations()?;
         config.runtime_class_name = args
             .runtime_class_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned);
+        config.service_account_name = args
+            .service_account_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned);
+        config.priority_class_name = args
+            .priority_class_name
             .as_deref()
             .map(str::trim)
             .filter(|name| !name.is_empty())
@@ -2741,6 +2776,7 @@ mod tests {
                 {"name":"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT","value":"http://laminar-app-server.laminar.svc.cluster.local:8000/v1/traces"},
                 {"name":"OTEL_SERVICE_NAME","value":"codex"},
                 {"name":"CODEX_AUTH_MODE","value":"chatgpt"},
+                {"name":" TOOL_ALLOWLIST ","value":123},
                 {"name":"NULL_VALUE"},
                 {"name":"  ","value":"skipped"},
                 {"name":"BAD=NAME","value":"skipped"}
@@ -2762,6 +2798,8 @@ mod tests {
         assert_eq!(value("OTEL_SERVICE_NAME"), Some("codex"));
         // Operator extra env overrides template defaults.
         assert_eq!(value("CODEX_AUTH_MODE"), Some("chatgpt"));
+        // Names are trimmed and non-string values use their JSON representation.
+        assert_eq!(value("TOOL_ALLOWLIST"), Some("123"));
         // Null values become empty strings; invalid names are dropped.
         assert_eq!(value("NULL_VALUE"), Some(""));
         assert!(!env.iter().any(|(name, _)| name == "BAD=NAME"));
@@ -2835,6 +2873,10 @@ mod tests {
             r#"[{"key":"example.com/sandbox","operator":"Exists","effect":"NoSchedule"}]"#,
             "--session-sandbox-runtime-class-name",
             "gvisor",
+            "--session-sandbox-service-account-name",
+            "centaur-sandbox",
+            "--session-sandbox-priority-class-name",
+            "centaur-sandbox",
         ])
         .unwrap();
 
@@ -2844,6 +2886,14 @@ mod tests {
         );
         assert_eq!(args.sandbox.tolerations().unwrap().len(), 1);
         assert_eq!(args.sandbox.runtime_class_name.as_deref(), Some("gvisor"));
+        assert_eq!(
+            args.sandbox.service_account_name.as_deref(),
+            Some("centaur-sandbox")
+        );
+        assert_eq!(
+            args.sandbox.priority_class_name.as_deref(),
+            Some("centaur-sandbox")
+        );
     }
 
     #[test]
@@ -2857,6 +2907,8 @@ mod tests {
 
         assert!(args.sandbox.node_selector().unwrap().is_empty());
         assert!(args.sandbox.tolerations().unwrap().is_empty());
+        assert!(args.sandbox.service_account_name.is_none());
+        assert!(args.sandbox.priority_class_name.is_none());
     }
 
     /// Unlike `SESSION_SANDBOX_EXTRA_ENV`, bad node steering fails startup:

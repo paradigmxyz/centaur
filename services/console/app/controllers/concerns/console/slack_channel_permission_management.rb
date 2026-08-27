@@ -5,8 +5,13 @@ module Console
     private
 
     def load_slack_channel_permission_form(owner)
-      @slack_channel_catalog = SlackChannelCatalogProvider.fetch
-      @slack_channel_names = @slack_channel_catalog.channels.to_h { |channel| [ channel.id, channel.name ] }
+      SlackChannelCatalogSync.enqueue_if_empty
+      @slack_channel_catalog_error = if !SlackChannelCatalogSync.configured?
+        "SLACK_BOT_TOKEN is not configured."
+      elsif SlackBotChannel.none?
+        "Slack channel catalog is loading. Enter a channel ID or reload shortly."
+      end
+      @slack_channel_names = SlackBotChannel.pluck(:channel_id, :name).to_h
       @slack_channel_permissions = owner.slack_channel_permissions.ordered
       @slack_channel_options_url = slack_channel_options_url(owner)
     end

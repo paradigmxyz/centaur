@@ -1219,6 +1219,21 @@ module Api
         assert_equal principal.foreign_id, data["foreign_id"]
       end
 
+      test "GET lookup preserves dots in a principal foreign_id" do
+        principal = Principal.create!(
+          foreign_id: "console-user-mslipper-paradigm.xyz-8704b344d443",
+          created_by: users(:acme_admin)
+        )
+
+        get "/api/v1/principals/lookup/#{principal.foreign_id}", headers: auth_headers
+        assert_response :ok
+        assert_equal principal.oid, json_body.dig("data", "id")
+
+        get "/api/v1/principals/lookup/#{principal.foreign_id}/effective_config", headers: auth_headers
+        assert_response :ok
+        assert_equal principal.oid, json_body.dig("data", "id")
+      end
+
       test "GET lookup returns 404 when no principal matches" do
         get lookup_api_v1_principals_url(foreign_id: "U-does-not-exist"),
             headers: auth_headers

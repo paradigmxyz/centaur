@@ -264,17 +264,7 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
       channel_id: "G9876543210",
       history_enabled: true
     )
-    catalog = SlackChannelCatalog::Result.new(
-      channels: [
-        SlackChannelCatalog::Channel.new(id: "C0123456789", name: "general", private: false),
-        SlackChannelCatalog::Channel.new(id: "G9876543210", name: "private", private: true),
-        SlackChannelCatalog::Channel.new(id: "C1111111111", name: "unused", private: false)
-      ],
-      error: nil,
-      configured: true
-    )
-
-    with_slack_channel_catalog(catalog) { get console_principal_url(principal.oid) }
+    get console_principal_url(principal.oid)
     assert_response :ok
 
     assert_select "td", text: /#general/
@@ -504,16 +494,5 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
       assert_select "input[name=_method][value=delete]", count: 1
       assert_select "button", text: "Sign out"
     end
-  end
-
-  private
-
-  def with_slack_channel_catalog(catalog)
-    singleton = SlackChannelCatalogProvider.singleton_class
-    original = singleton.instance_method(:fetch)
-    singleton.define_method(:fetch) { catalog }
-    yield
-  ensure
-    singleton.define_method(:fetch, original)
   end
 end

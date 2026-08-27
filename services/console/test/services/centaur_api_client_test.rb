@@ -56,6 +56,7 @@ class CentaurApiClientTest < ActiveSupport::TestCase
     end
     http.verify
     assert_equal "bad archive", error.message
+    assert_equal 400, error.status
   end
 
   test "fails before the request when the service JWT cannot be minted" do
@@ -71,6 +72,7 @@ class CentaurApiClientTest < ActiveSupport::TestCase
     end
 
     assert_equal "Console API service JWT could not be minted", error.message
+    assert_nil error.status
   end
 
   test "lists Slack DM sync checkpoints for a broker credential" do
@@ -152,6 +154,25 @@ class CentaurApiClientTest < ActiveSupport::TestCase
     http.verify
   end
 
+  test "gets Google Docs content status" do
+    http = Minitest::Mock.new
+    expect_request(http, status: 200, body: { missing: [] }.to_json) do |request|
+      assert_equal :post, request[:method]
+      assert_equal "http://api.internal:8080/api/admin/google/docs-sync/content-status", request[:url]
+      assert_equal(
+        { "files" => [ { "file_id" => "doc-123", "source_version" => "7" } ] },
+        JSON.parse(request[:body])
+      )
+    end
+    client = api_client(base_url: "http://api.internal:8080", http: http)
+
+    client.get_google_docs_content_status(
+      files: [ { file_id: "doc-123", source_version: "7" } ]
+    )
+
+    http.verify
+  end
+
   test "creates app sessions with encoded thread keys" do
     http = Minitest::Mock.new
     expect_request(http, status: 200, body: { ok: true }.to_json) do |request|
@@ -222,7 +243,7 @@ class CentaurApiClientTest < ActiveSupport::TestCase
     http.verify
   end
 
-  test "creates workflow runs with optional input" do
+  test "creates workflow runs with optional input and idempotency key" do
     http = Minitest::Mock.new
     expect_request(http, status: 200, body: { ok: true, run_id: "r1" }.to_json) do |request|
       assert_equal :post, request[:method]
@@ -235,10 +256,25 @@ class CentaurApiClientTest < ActiveSupport::TestCase
         JSON.parse(request[:body])
       )
     end
+    expect_request(http, status: 200, body: { ok: true, run_id: "r1" }.to_json) do |request|
+      assert_equal(
+        {
+          "workflow_name" => "console_workflow",
+          "idempotency_key" => "scheduled:1",
+          "max_attempts" => 3
+        },
+        JSON.parse(request[:body])
+      )
+    end
     client = api_client(base_url: "http://api.internal:8080", http: http)
 
     client.create_workflow_run(workflow_name: "slack_sync")
     client.create_workflow_run(workflow_name: "slack_sync", input: { "mode" => "full" })
+    client.create_workflow_run(
+      workflow_name: "console_workflow",
+      idempotency_key: "scheduled:1",
+      max_attempts: 3
+    )
 
     http.verify
   end
