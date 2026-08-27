@@ -4,13 +4,11 @@ import { fetchWithTimeout, slackApiTimeoutMs } from './session-api'
 import type { SlackbotV2Options, SlackbotV2Trace } from './types'
 import { elapsedMs, errorMessage, nowMs, stringValue, traceLog, traceWarn } from './utils'
 
-export type SteeringReactionTarget = {
+export type SteeringReactionAck = {
+  added: Promise<boolean>
   channel: string
   timestamp: string
-}
-
-export type SteeringReactionAck = SteeringReactionTarget & {
-  added: Promise<boolean>
+  threadId: string
 }
 
 export type SteeringReactionController = {
@@ -20,7 +18,8 @@ export type SteeringReactionController = {
     trace?: SlackbotV2Trace
   ): SteeringReactionAck | undefined
   complete(ack: SteeringReactionAck, trace?: SlackbotV2Trace): Promise<void>
-  completeTargets(targets: readonly SteeringReactionTarget[], trace?: SlackbotV2Trace): Promise<void>
+  completeThread(threadId: string, trace?: SlackbotV2Trace): Promise<void>
+  hold(ack: SteeringReactionAck): void
 }
 
 export function createSteeringReactionController(
@@ -30,7 +29,10 @@ export function createSteeringReactionController(
   const name = normalizeSlackReactionName(
     options.steeringReactionName ?? 'hourglass_flowing_sand'
   )
-  const pendingAdds = new Map<string, Promise<boolean>>()
+  // Deliberately process-local: reactions are best-effort UI state. A restart
+  // may leave an old reaction behind instead of coupling render recovery to
+  // Slack reaction bookkeeping.
+  const pending = new Map<string, Map<string, SteeringReactionAck>>()
 
   const updateReaction = async (
     operation: 'add' | 'remove',
@@ -103,21 +105,12 @@ export function createSteeringReactionController(
     }
   }
 
-  const completeTarget = async (
-    target: SteeringReactionTarget,
+  const completeAck = async (
+    ack: SteeringReactionAck,
     trace?: SlackbotV2Trace
   ): Promise<void> => {
-    const key = steeringReactionTargetKey(target)
-    const added = pendingAdds.get(key)
-    try {
-      // In the live process, wait for a concurrent add before removing it. On
-      // recovery after a restart there is no add promise, so remove the
-      // persisted target directly.
-      if (added && !(await added)) return
-      await updateReaction('remove', target.channel, target.timestamp, trace)
-    } finally {
-      pendingAdds.delete(key)
-    }
+    if (!(await ack.added)) return
+    await updateReaction('remove', ack.channel, ack.timestamp, trace)
   }
 
   return {
@@ -126,23 +119,33 @@ export function createSteeringReactionController(
       const target = slackMessageReactionTarget(thread, message)
       if (!target) return undefined
       const added = updateReaction('add', target.channel, target.timestamp, trace)
-      pendingAdds.set(steeringReactionTargetKey(target), added)
       return {
         added,
-        ...target
+        ...target,
+        threadId: thread.id
       }
     },
     async complete(ack, trace) {
-      await completeTarget(ack, trace)
+      const reactions = pending.get(ack.threadId)
+      reactions?.delete(steeringReactionAckKey(ack))
+      if (reactions?.size === 0) pending.delete(ack.threadId)
+      await completeAck(ack, trace)
     },
-    async completeTargets(targets, trace) {
-      await Promise.all(targets.map(target => completeTarget(target, trace)))
+    async completeThread(threadId, trace) {
+      const reactions = Array.from(pending.get(threadId)?.values() ?? [])
+      pending.delete(threadId)
+      await Promise.all(reactions.map(ack => completeAck(ack, trace)))
+    },
+    hold(ack) {
+      const reactions = pending.get(ack.threadId) ?? new Map<string, SteeringReactionAck>()
+      reactions.set(steeringReactionAckKey(ack), ack)
+      pending.set(ack.threadId, reactions)
     }
   }
 }
 
-function steeringReactionTargetKey(target: SteeringReactionTarget): string {
-  return `${target.channel}:${target.timestamp}`
+function steeringReactionAckKey(ack: SteeringReactionAck): string {
+  return `${ack.channel}:${ack.timestamp}`
 }
 
 function normalizeSlackReactionName(value: string): string {

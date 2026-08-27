@@ -74,8 +74,7 @@ import { isSlackStopCommand } from './stop-command'
 import {
   createSteeringReactionController,
   type SteeringReactionAck,
-  type SteeringReactionController,
-  type SteeringReactionTarget
+  type SteeringReactionController
 } from './steering-reaction'
 import type {
   ForwardSessionInput,
@@ -500,7 +499,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   app.post('/api/slack/commands', handleSlackWebhook)
 
   if (options.recoverRenderObligationsOnStart !== false) {
-    scheduleRenderObligationRecovery(chat, state, options, steeringReactions, stateConnected)
+    scheduleRenderObligationRecovery(chat, state, options, stateConnected)
   }
 
   return { app, chat }
@@ -1033,37 +1032,6 @@ function finishSteeringReaction(
   backgroundWaitUntil(input.steeringReactions.complete(ack, trace))
 }
 
-function appendSteeringReactionTarget(
-  targets: readonly SteeringReactionTarget[] | undefined,
-  target: SteeringReactionTarget
-): SteeringReactionTarget[] {
-  const existing = targets ?? []
-  if (
-    existing.some(
-      item => item.channel === target.channel && item.timestamp === target.timestamp
-    )
-  ) {
-    return [...existing]
-  }
-  return [...existing, target].slice(-1000)
-}
-
-async function releaseUnownedSteeringReaction(
-  thread: Thread<SlackbotV2ThreadState>,
-  input: SyncThreadMessageInput,
-  ack: SteeringReactionAck,
-  trace?: SlackbotV2Trace
-): Promise<void> {
-  const latest = (await thread.state) ?? {}
-  if (latest.activeExecution === true) return
-  await thread.setState({
-    pendingSteeringReactions: (latest.pendingSteeringReactions ?? []).filter(
-      target => target.channel !== ack.channel || target.timestamp !== ack.timestamp
-    )
-  })
-  backgroundWaitUntil(input.steeringReactions.complete(ack, trace))
-}
-
 /**
  * Persists a Slack thread update into the session API. In execute mode the create/append/execute
  * handoff completes before Slack is acknowledged; SSE rendering continues in background.
@@ -1363,24 +1331,11 @@ async function syncThreadMessageToSession(
       ...(stickyOverridesUpdate ?? {}),
       forwardedMessageIds: Array.from(latestMessageIds).slice(-1000),
       historyForwarded: latest.historyForwarded || (shouldIncludeContext && !contextDegraded),
-      lastEventId,
-      ...(holdSteeringReaction
-        ? {
-            pendingSteeringReactions: appendSteeringReactionTarget(
-              latest.pendingSteeringReactions,
-              steeringReactionAck
-            )
-          }
-        : {})
+      lastEventId
     })
     if (holdSteeringReaction) {
+      input.steeringReactions.hold(steeringReactionAck)
       input.steeringReactionAck = undefined
-      await releaseUnownedSteeringReaction(
-        thread,
-        input,
-        steeringReactionAck,
-        trace
-      )
     }
     traceLog(input.options, 'slackbotv2_forward_messages_committed', trace, {
       appended_message_count: messagesToAppend.length,
@@ -1411,21 +1366,16 @@ async function syncThreadMessageToSession(
       activeExecution: true,
       executedMessageIds: Array.from(latestExecutedMessageIds).slice(-1000),
       lastEventId,
-      ...(steeringReactionAck
-        ? {
-            pendingSteeringReactions: appendSteeringReactionTarget(
-              latest.pendingSteeringReactions,
-              steeringReactionAck
-            )
-          }
-        : {}),
       renderObligation: {
         afterEventId: lastEventId,
         executionId: execution.execution_id,
         message: serializedMessage
       }
     })
-    if (steeringReactionAck) input.steeringReactionAck = undefined
+    if (steeringReactionAck) {
+      input.steeringReactions.hold(steeringReactionAck)
+      input.steeringReactionAck = undefined
+    }
     await indexRenderObligation(input.state, {
       options: input.options,
       threadId: thread.id,
@@ -1791,21 +1741,13 @@ async function renderExecutionAttempt(
     }
     throw error
   } finally {
-    // Best-effort UI cleanup: this state read/write is not a CAS. An unusually
-    // stalled setState can let a concurrent steering commit add a reaction
-    // after this read and then have this write clear its state record without
-    // removing the Slack reaction. Avoiding that cosmetic race would require
-    // stronger atomic state ownership than steering acknowledgements warrant.
-    // The same accepted race applies to recovery finalization below.
     const latest = (await thread.state) ?? {}
-    const completedSteeringReactions = rendered ? latest.pendingSteeringReactions ?? [] : []
     await thread.setState({
       activeExecution: retry,
       lastEventId: Math.max(latest.lastEventId ?? 0, getLastEventId(), fallbackLastEventId),
-      ...(rendered ? { pendingSteeringReactions: [] } : {}),
       ...(rendered ? { renderObligation: null } : {})
     })
-    await steeringReactions.completeTargets(completedSteeringReactions, trace)
+    if (rendered) await steeringReactions.completeThread(thread.id, trace)
     traceLog(options, 'slackbotv2_render_finalized', trace, {
       obligation_cleared: rendered,
       render_duration_ms: elapsedMs(renderStartedAtMs),
@@ -1992,11 +1934,10 @@ function scheduleRenderObligationRecovery(
   chat: Chat<Record<string, Adapter>, SlackbotV2ThreadState>,
   state: StateAdapter,
   options: SlackbotV2Options,
-  steeringReactions: SteeringReactionController,
   stateConnected: Promise<void>
 ): void {
   backgroundWaitUntil(
-    recoverRenderObligationsWithRetry(chat, state, options, steeringReactions, stateConnected)
+    recoverRenderObligationsWithRetry(chat, state, options, stateConnected)
   )
 }
 
@@ -2004,7 +1945,6 @@ async function recoverRenderObligationsWithRetry(
   chat: Chat<Record<string, Adapter>, SlackbotV2ThreadState>,
   state: StateAdapter,
   options: SlackbotV2Options,
-  steeringReactions: SteeringReactionController,
   stateConnected: Promise<void>
 ): Promise<void> {
   // Wait for the startup Postgres connection before scanning for obligations.
@@ -2013,13 +1953,7 @@ async function recoverRenderObligationsWithRetry(
   let attempt = 0
   while (true) {
     try {
-      const deferredCount = await recoverRenderObligations(
-        chat,
-        state,
-        options,
-        steeringReactions,
-        failureCounts
-      )
+      const deferredCount = await recoverRenderObligations(chat, state, options, failureCounts)
       if (deferredCount === 0) return
       const delayMs = renderRetryDelayMs(attempt)
       attempt += 1
@@ -2049,7 +1983,6 @@ async function recoverRenderObligations(
   chat: Chat<Record<string, Adapter>, SlackbotV2ThreadState>,
   state: StateAdapter,
   options: SlackbotV2Options,
-  steeringReactions: SteeringReactionController,
   failureCounts: Map<string, number>
 ): Promise<number> {
   const startedAtMs = nowMs()
@@ -2094,12 +2027,8 @@ async function recoverRenderObligations(
         await thread.setState({
           activeExecution: false,
           lastEventId: threadState?.lastEventId ?? 0,
-          pendingSteeringReactions: [],
           renderObligation: null
         })
-        await steeringReactions.completeTargets(
-          threadState?.pendingSteeringReactions ?? []
-        )
         continue
       }
 
@@ -2123,12 +2052,8 @@ async function recoverRenderObligations(
         await thread.setState({
           activeExecution: false,
           lastEventId: threadState?.lastEventId ?? 0,
-          pendingSteeringReactions: [],
           renderObligation: null
         })
-        await steeringReactions.completeTargets(
-          threadState?.pendingSteeringReactions ?? []
-        )
         continue
       }
 
@@ -2160,14 +2085,7 @@ async function recoverRenderObligations(
       // Race a deadline; on timeout move on and leave the attempt running
       // detached - it may still finish and clear the obligation, which is why
       // the lease is kept so a later pass does not start a duplicate render.
-      const recovery = recoverRenderObligation(
-        chat,
-        state,
-        options,
-        steeringReactions,
-        threadId,
-        obligation
-      )
+      const recovery = recoverRenderObligation(chat, state, options, threadId, obligation)
       let outcome: { timedOut: true } | { timedOut: false; deferred: boolean }
       try {
         outcome = await Promise.race([
@@ -2257,7 +2175,6 @@ async function recoverRenderObligation(
   chat: Chat<Record<string, Adapter>, SlackbotV2ThreadState>,
   state: StateAdapter,
   options: SlackbotV2Options,
-  steeringReactions: SteeringReactionController,
   threadId: string,
   obligation: SlackbotV2RenderObligation
 ): Promise<boolean> {
@@ -2305,14 +2222,11 @@ async function recoverRenderObligation(
       return true
     }
     await renderRecoveredExecutionStream(thread, streamError(error), obligation.message, options, trace)
-    const latest = (await thread.state) ?? {}
     await thread.setState({
       activeExecution: false,
       lastEventId,
-      pendingSteeringReactions: [],
       renderObligation: null
     })
-    await steeringReactions.completeTargets(latest.pendingSteeringReactions ?? [], trace)
     renderOutcome = 'stream_error_rendered'
     recordRenderAttempt('recovery', renderOutcome, renderStartedAtMs)
     return false
@@ -2418,14 +2332,11 @@ async function recoverRenderObligation(
     }
   } finally {
     const latest = (await thread.state) ?? {}
-    const completedSteeringReactions = rendered ? latest.pendingSteeringReactions ?? [] : []
     await thread.setState({
       activeExecution: false,
       lastEventId: Math.max(latest.lastEventId ?? 0, lastEventId),
-      ...(rendered ? { pendingSteeringReactions: [] } : {}),
       ...(rendered ? { renderObligation: null } : {})
     })
-    await steeringReactions.completeTargets(completedSteeringReactions, trace)
     traceLog(options, 'slackbotv2_render_recovery_finalized', trace, {
       obligation_cleared: rendered,
       last_event_id: lastEventId

@@ -4542,7 +4542,6 @@ describe('slackbotv2', () => {
     const parent = await postUserMessage('Context before restart recovery.')
     const mentionText = `<@${BOT_USER_ID}> recover a completed run`
     const mention = await postUserMessage(mentionText, parent.ts)
-    const followUp = await postUserMessage(`<@${BOT_USER_ID}> persisted follow-up`, parent.ts)
     const key = threadKey(parent.ts)
     const message = apiMessageFromSlackEvent({
       isMention: true,
@@ -4556,7 +4555,6 @@ describe('slackbotv2', () => {
       forwardedMessageIds: [mention.ts],
       historyForwarded: true,
       lastEventId: 0,
-      pendingSteeringReactions: [{ channel: CHANNEL_ID, timestamp: followUp.ts }],
       renderObligation: {
         afterEventId: 0,
         executionId: 'exe-recovery',
@@ -4582,11 +4580,6 @@ describe('slackbotv2', () => {
       parentTs: parent.ts
     })
     expect(await threadText(parent.ts)).toContain('Recovered request.')
-    expect(
-      slackApi.calls
-        .filter(call => call.method === 'reactions.remove')
-        .map(call => stringField(call.body.timestamp))
-    ).toEqual([followUp.ts])
     // Recovery clears the obligation after the Slack stream stops; wait for
     // the state write instead of racing it.
     await waitFor(async () => {
@@ -4600,7 +4593,6 @@ describe('slackbotv2', () => {
       expect.objectContaining({
         activeExecution: false,
         lastEventId: expect.any(Number),
-        pendingSteeringReactions: [],
         renderObligation: null
       })
     )
