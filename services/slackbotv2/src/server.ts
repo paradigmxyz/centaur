@@ -93,6 +93,11 @@ const options: SlackbotV2Options = {
   slackApiUrl,
   slackApiTimeoutMs,
   stateKeyPrefix: optionalEnv('SLACKBOTV2_STATE_KEY_PREFIX'),
+  steeringReactionEnabled: booleanEnv('SLACKBOTV2_STEERING_REACTION_ENABLED', false),
+  steeringReactionName: stringEnv(
+    'SLACKBOTV2_STEERING_REACTION',
+    'hourglass_flowing_sand'
+  ),
   userName: stringEnv('SLACKBOTV2_USER_NAME', 'centaur'),
   logger: consoleLogger
 }
@@ -117,6 +122,8 @@ console.log(
       messageOverridesStrategyMode !== 'llm' || Boolean(messageOverridesStrategyApiKey),
     response_metadata_mode: options.responseMetadataMode,
     response_service_tier_enabled: options.responseServiceTierEnabled,
+    steering_reaction_enabled: options.steeringReactionEnabled,
+    steering_reaction_name: options.steeringReactionName,
     port: server.port,
     api_url: apiUrl
   })
