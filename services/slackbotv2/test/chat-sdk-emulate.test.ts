@@ -834,6 +834,108 @@ describe('slackbotv2', () => {
     )
   })
 
+  it('replays a quota-limited alternate harness on the deployment default', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({
+      defaultHarnessType: 'codex',
+      quotaFallbackHarness: 'claudecode',
+      state: sharedState
+    })
+
+    const parent = await postUserMessage('Thread default context.')
+    const pinClaude = await postUserMessage(
+      `<@${BOT_USER_ID}> --claude start on Claude`,
+      parent.ts
+    )
+    const pinWaits: Promise<unknown>[] = []
+    const pinResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-quota-fallback-pin-claude',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: pinClaude.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> --claude start on Claude`
+        }
+      }),
+      {},
+      waitUntilContext(pinWaits)
+    )
+    expect(pinResponse.status).toBe(200)
+    await Promise.all(pinWaits)
+
+    codexApi.autoRespond = false
+    const followUp = await postUserMessage(
+      `<@${BOT_USER_ID}> continue on anything that works`,
+      parent.ts
+    )
+    const followUpWaits: Promise<unknown>[] = []
+    const followUpResponse = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-quota-fallback-to-default',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: followUp.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> continue on anything that works`
+        }
+      }),
+      {},
+      waitUntilContext(followUpWaits)
+    )
+    expect(followUpResponse.status).toBe(200)
+    await waitFor(() => codexApi.eventRequests.length === 2, 3000)
+
+    const failedExecutionId = codexApi.eventRequests[1]!.executionId
+    codexApi.emitSessionEvent(
+      threadKey(parent.ts),
+      'session.execution_failed',
+      {
+        error: "You've hit your session limit · resets 8:20pm (UTC)",
+        failure_class: 'quota'
+      },
+      failedExecutionId
+    )
+
+    await waitFor(() => codexApi.eventRequests.length === 3, 3000)
+    const replayExecutionId = codexApi.eventRequests[2]!.executionId
+    codexApi.emitOutputLines(
+      threadKey(parent.ts),
+      sampleCodexOutputLines('Recovered on Codex.'),
+      replayExecutionId
+    )
+
+    await waitFor(async () => (await threadText(parent.ts)).includes('Recovered on Codex.'), 3000)
+    await Promise.all(followUpWaits)
+    await waitFor(async () => {
+      const state = await sharedState.get<Record<string, unknown>>(
+        `thread-state:${threadKey(parent.ts)}`
+      )
+      return state?.activeExecution === false && state.renderObligation === null
+    }, 3000)
+    expect(codexApi.creates.map(create => create.body.harness_type)).toEqual([
+      'claudecode',
+      'claudecode',
+      'codex'
+    ])
+    expect(codexApi.executes[1]!.body.idempotency_key).toBe(followUp.ts)
+    expect(codexApi.executes[2]!.body.idempotency_key).toBe(
+      `${followUp.ts}:quota-fallback`
+    )
+    expect(
+      await sharedState.get<Record<string, unknown>>(`thread-state:${threadKey(parent.ts)}`)
+    ).toEqual(expect.objectContaining({ harnessType: 'codex' }))
+  })
+
   it('clears a sticky model rejected by the harness and accepts a later override', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()

@@ -6003,7 +6003,8 @@ fn terminal_failure_class(error: &str) -> &'static str {
         return "evicted";
     }
     // Provider quota/credit exhaustion. Matches the Codex CLI's ChatGPT
-    // usage-limit message ("You've hit your usage limit"), the raw OpenAI
+    // usage-limit message ("You've hit your usage limit"), Claude Code's
+    // subscription limit ("You've hit your session limit"), the raw OpenAI
     // error codes surfaced by codex and nanocodex (insufficient_quota for
     // API-key billing, usage_not_included for subscription plans), and the
     // Anthropic equivalents ("usage limit", "credit balance is too low").
@@ -6011,6 +6012,7 @@ fn terminal_failure_class(error: &str) -> &'static str {
     if error.contains("insufficient_quota")
         || error.contains("usage_not_included")
         || error.contains("usage limit")
+        || error.contains("session limit")
         || error.contains("quota exceeded")
         || error.contains("credit balance")
     {
@@ -8028,6 +8030,11 @@ mod tests {
             terminal_failure_class("You've hit your usage limit. Try again at 5pm."),
             "quota"
         );
+        // Claude Code on a Claude.ai subscription.
+        assert_eq!(
+            terminal_failure_class("You've hit your session limit · resets 8:20pm (UTC)"),
+            "quota"
+        );
         // Raw OpenAI error codes (codex/nanocodex, API-key and subscription).
         assert_eq!(
             terminal_failure_class("stream error: insufficient_quota"),
@@ -8039,9 +8046,7 @@ mod tests {
         );
         // Anthropic API-key billing.
         assert_eq!(
-            terminal_failure_class(
-                "Your credit balance is too low to access the Anthropic API."
-            ),
+            terminal_failure_class("Your credit balance is too low to access the Anthropic API."),
             "quota"
         );
         // Plain rate limits stay transient, not quota.

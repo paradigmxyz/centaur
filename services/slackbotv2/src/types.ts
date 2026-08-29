@@ -167,12 +167,10 @@ export type SlackbotV2Options = {
   defaultHarnessType?: string
   fetch?: SlackbotV2Fetch
   /**
-   * Harness to restart a thread onto after the active harness fails an
-   * execution with the "quota" failure class (provider credits exhausted),
-   * e.g. "claudecode" to fall back from Codex to Claude Code
-   * (SLACKBOTV2_QUOTA_FALLBACK_HARNESS). The switch is sticky for the
-   * thread, mirrors an explicit --claude/--codex flag, and is attempted at
-   * most once per message. Unset disables automatic fallback.
+   * Alternate to the deployment default after a "quota" failure. A thread on
+   * the default moves to this harness; a thread already on this harness moves
+   * back to the default. The switch is sticky and attempted once per message.
+   * Unset disables automatic fallback.
    */
   quotaFallbackHarness?: string
   /**
@@ -298,6 +296,8 @@ export type ForwardSessionInput = {
    */
   contextPreamble?: string
   executionId?: string
+  /** Distinct durable request key for an intentional replay such as quota fallback. */
+  executionIdempotencyKey?: string
   executeMessage?: SlackbotV2ApiMessage
   /** Effective harness selected by Slack policy, including any rollout cohort. */
   harnessType?: string

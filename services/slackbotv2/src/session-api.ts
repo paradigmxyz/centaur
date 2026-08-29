@@ -530,6 +530,7 @@ export async function forwardToSessionApi(
       options,
       input.threadId,
       executeMessage,
+      input.executionIdempotencyKey,
       input.model,
       input.executeContextMessages,
       input.contextPreamble,
@@ -1356,6 +1357,7 @@ async function executeSession(
   options: SlackbotV2Options,
   threadId: string,
   message: SlackbotV2ApiMessage,
+  idempotencyKey?: string,
   model?: string,
   contextMessages?: SlackbotV2ApiMessage[],
   contextPreamble?: string,
@@ -1370,7 +1372,7 @@ async function executeSession(
   const idleTimeoutMs = sessionIdleTimeoutMs(options)
   const recordedModel = metadataModel ?? model
   const body: SlackbotV2ExecuteSessionRequest = {
-    idempotency_key: message.id,
+    idempotency_key: idempotencyKey ?? message.id,
     // Record the model this execution runs on (explicit override, else the
     // configured/baked harness default) so readers like the Console can show
     // it. Metadata only; the harness receives `model` via input_lines and only

@@ -32,6 +32,7 @@ import {
 import { conflateChatSdkStream } from './conflate'
 import { resolveHarnessRollout } from './harness-rollout'
 import { observeSeconds, slackbotMetrics } from './metrics'
+import { quotaFallbackDecision } from './quota-fallback'
 import {
   renderSlackDisplayText,
   slackMessagePromptText,
@@ -198,8 +199,6 @@ type TerminalExecutionFailure = {
   /** api-rs failure taxonomy ("quota", "timeout", ...) when present. */
   failureClass?: string
 }
-
-const QUOTA_FALLBACK_HARNESS_TYPES = new Set(['amp', 'claudecode', 'codex', 'nanocodex'])
 
 /**
  * Passes the renderer source stream through untouched while recording the
@@ -1332,6 +1331,9 @@ async function syncThreadMessageToSession(
   const renderLease: { release: (() => Promise<void>) | null } = { release: null }
   const candidateMessages = context ?? [serializedMessage]
   const messagesToAppend = candidateMessages.filter(item => !messageIds.has(item.id))
+  const replayingQuotaFallback =
+    state.quotaFallbackMessageId === serializedMessage.id &&
+    !executedMessageIds.has(serializedMessage.id)
 
   if (
     state.activeExecution === true
@@ -1346,6 +1348,9 @@ async function syncThreadMessageToSession(
     afterEventId: lastEventId,
     executeContextMessages:
       shouldStartExecution && shouldIncludeContext ? candidateMessages : undefined,
+    executionIdempotencyKey: replayingQuotaFallback
+      ? `${serializedMessage.id}:quota-fallback`
+      : undefined,
     executeMessage: shouldStartExecution ? serializedMessage : undefined,
     // Sticky harness changes only apply when a message starts an execution;
     // restarting the thread out from under an active execution would kill it.
@@ -1469,30 +1474,32 @@ async function syncThreadMessageToSession(
     })
   }
 
-  // Runs after a rendered execution ends with the "quota" failure class
-  // (provider credits exhausted). Pins the thread to the configured fallback
-  // harness exactly as an explicit --claude/--codex flag would and replays
-  // this message once on it; the state guard makes a fallback that itself
-  // fails terminal instead of looping.
+  // Runs after a rendered execution ends with the "quota" failure class.
+  // The configured harness is the alternate for the deployment default; a
+  // thread already using that alternate returns to the default. The replay
+  // gets its own idempotency key and is attempted at most once per message.
   const handleQuotaFailure = async (failure: TerminalExecutionFailure): Promise<void> => {
-    const fallbackHarness = input.options.quotaFallbackHarness
-    if (!fallbackHarness) return
-    if (!QUOTA_FALLBACK_HARNESS_TYPES.has(fallbackHarness)) {
+    const latest = (await thread.state) ?? {}
+    const failedHarness = forwardInput.metadataHarnessType ?? effectiveHarnessType
+    const decision = quotaFallbackDecision({
+      alreadyAttempted: latest.quotaFallbackMessageId === serializedMessage.id,
+      configuredFallbackHarness: input.options.quotaFallbackHarness,
+      defaultHarness: input.options.defaultHarnessType ?? 'codex',
+      explicitHarnessRequested: explicitOverrides.harnessType !== undefined,
+      failedHarness
+    })
+    if (decision.outcome === 'disabled') return
+    if (decision.outcome === 'misconfigured') {
       traceWarn(input.options, 'slackbotv2_quota_fallback_misconfigured', trace, {
-        fallback_harness_type: fallbackHarness
+        fallback_harness_type: decision.harnessType
       })
       return
     }
-    const failedHarness = forwardInput.metadataHarnessType ?? effectiveHarnessType
-    if (failedHarness === fallbackHarness) {
-      slackbotMetrics.quotaHarnessFallbacks.inc({ outcome: 'suppressed_same_harness' })
+    if (decision.outcome !== 'scheduled') {
+      slackbotMetrics.quotaHarnessFallbacks.inc({ outcome: decision.outcome })
       return
     }
-    const latest = (await thread.state) ?? {}
-    if (latest.quotaFallbackMessageId === serializedMessage.id) {
-      slackbotMetrics.quotaHarnessFallbacks.inc({ outcome: 'suppressed_already_attempted' })
-      return
-    }
+    const fallbackHarness = decision.harnessType
     await thread.setState({
       // Forget the failed execution of this message so the replay starts a
       // new one, and tombstone model/provider like any harness switch.
