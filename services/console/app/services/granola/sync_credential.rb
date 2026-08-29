@@ -17,7 +17,7 @@ module Granola
     DEFAULT_MAX_NOTES = 50
     WATERMARK_OVERLAP_SECONDS = 5 * 60
 
-    MEETING_RE = /<meeting\s+id="(?<id>[^"]+)"\s+title="(?<title>[^"]*)"\s+date="(?<date>[^"]*)">(?<body>.*?)<\/meeting>/m
+    MEETING_RE = /<meeting\s+id="(?<id>[^"]+)"\s+title="(?<title>[^"]*)"\s+date="(?<date>[^"]*)"(?:\s+[^>]*)?>(?<body>.*?)<\/meeting>/m
     PARTICIPANTS_RE = /<known_participants>(?<participants>.*?)<\/known_participants>/m
     SUMMARY_RE = /<summary>(?<summary>.*?)<\/summary>/m
     PARTICIPANT_RE = /(?<name>[^,<]+?)\s*<(?<email>[^>]+)>/
@@ -93,6 +93,8 @@ module Granola
           "custom_end" => Time.current.utc.to_date.iso8601
         )
       ).first(self.class.max_notes)
+
+      return [] if meetings.empty?
 
       details = parse_meetings(
         mcp_tool("get_meetings", "meeting_ids" => meetings.map { |meeting| meeting.fetch("id") })

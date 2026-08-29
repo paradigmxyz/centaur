@@ -92,6 +92,23 @@ module Granola
       assert_equal "Ada: Ship the Granola sync.", note["transcript"].first["text"]
     end
 
+    test "completes an empty meeting window without requesting details" do
+      api_client = FakeApiClient.new
+      mcp_http = lambda do |tool:, **|
+        case tool
+        when "get_account_info" then { email: "owner@example.com" }.to_json
+        when "list_meetings" then %(<meetings_data count="0"></meetings_data>)
+        else flunk "unexpected Granola MCP tool #{tool}"
+        end
+      end
+
+      SyncCredential.new(credential, api_client: api_client, mcp_http: mcp_http).call
+
+      batch = api_client.batches.fetch(0)
+      assert_equal "completed", batch[:run][:status]
+      assert_empty batch[:notes]
+    end
+
     test "records an API failure against the same OAuth credential scope" do
       api_client = FakeApiClient.new
       mcp_http = lambda do |tool:, **|
@@ -152,7 +169,7 @@ module Granola
 
     def meeting_xml
       <<~XML
-        <meeting id="meeting-1" title="Planning" date="Jul 8, 2026 5:30 PM GMT+2">
+        <meeting id="meeting-1" title="Planning" date="Jul 8, 2026 5:30 PM GMT+2" captured_by_me="true" listed_as_participant="true">
           <known_participants>Ada (note creator) from Acme &lt;ada@example.com&gt;
           Bob &lt;bob@example.com&gt;</known_participants>
           <summary>Ship the Granola sync.</summary>
