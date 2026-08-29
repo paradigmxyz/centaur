@@ -165,6 +165,7 @@ const RENDER_RECOVERY_MAX_THREAD_FAILURES = 5
 const RENDER_RETRY_INITIAL_DELAY_MS = 250
 const RENDER_RETRY_MAX_DELAY_MS = 5_000
 const ASSISTANT_STATUS_MAX_CHARS = 50
+const PROVIDER_QUOTA_ANSWER_CAPTURE_MAX_CHARS = 256
 const SLACK_TASK_DETAILS_MAX_CHARS = 500
 const SLACK_FALLBACK_TEXT_MAX_CHARS = 35_000
 const POSTGRES_CONNECT_INITIAL_DELAY_MS = 250
@@ -203,6 +204,11 @@ type TerminalExecutionFailure = {
   renderedMessageId?: string
   /** True when the harness returned its quota banner as a successful answer. */
   returnedAsAnswer?: boolean
+}
+
+type RenderedAnswerCapture = {
+  text: string
+  truncated: boolean
 }
 
 /**
@@ -2735,6 +2741,7 @@ async function renderExecutionStream(
     phase_ms: elapsedMs(titleStartedAtMs)
   })
   const capture = { diverged: false }
+  const renderedAnswer: RenderedAnswerCapture = { text: '', truncated: false }
   try {
     const taskDisplayMode = slackStreamTaskDisplayMode(options)
     const visibleStream = await streamAfterFirstChunk(
@@ -2745,7 +2752,8 @@ async function renderExecutionStream(
               stream,
               rendererOptions(thread, options, capture, trace)
             ),
-            taskDisplayMode
+            taskDisplayMode,
+            renderedAnswer
           )
         )
       )
@@ -2765,6 +2773,21 @@ async function renderExecutionStream(
       // message; optional response metadata may be appended on every live response.
       ...(responseContextBlock ? { stopBlocks: [responseContextBlock] } : {})
     })
+    if (
+      failureCapture &&
+      !failureCapture.failure &&
+      !renderedAnswer.truncated &&
+      isProviderQuotaAnswer(renderedAnswer.text)
+    ) {
+      failureCapture.failure = {
+        error: renderedAnswer.text.trim(),
+        failureClass: 'quota',
+        returnedAsAnswer: true
+      }
+      traceLog(options, 'slackbotv2_quota_answer_detected', trace, {
+        detection_boundary: 'rendered_answer'
+      })
+    }
     return { diverged: capture.diverged, messageId: sent?.id }
   } finally {
     await setAssistantStatus(thread, '', options, trace)
@@ -2952,9 +2975,15 @@ function slackStreamTaskDisplayMode(options: SlackbotV2Options): SlackStreamTask
 
 async function* slackVisibleChatSdkStream(
   stream: AsyncIterable<ChatSDKStreamChunk>,
-  taskDisplayMode: SlackStreamTaskDisplayMode
+  taskDisplayMode: SlackStreamTaskDisplayMode,
+  renderedAnswer?: RenderedAnswerCapture
 ): AsyncIterable<ChatSDKStreamChunk> {
   for await (const chunk of stream) {
+    if (chunk.type === 'markdown_text' && renderedAnswer && !renderedAnswer.truncated) {
+      const remaining = PROVIDER_QUOTA_ANSWER_CAPTURE_MAX_CHARS - renderedAnswer.text.length
+      if (chunk.text.length > remaining) renderedAnswer.truncated = true
+      renderedAnswer.text += chunk.text.slice(0, Math.max(0, remaining))
+    }
     if (taskDisplayMode === 'none' && chunk.type !== 'markdown_text') continue
     yield chunk
   }

@@ -896,23 +896,9 @@ describe('slackbotv2', () => {
     await waitFor(() => codexApi.eventRequests.length === 2, 3000)
 
     const failedExecutionId = codexApi.eventRequests[1]!.executionId
-    codexApi.emitOutputLine(
+    codexApi.emitOutputLines(
       threadKey(parent.ts),
-      JSON.stringify({
-        type: 'result',
-        subtype: 'success',
-        result: "You've hit your session limit · resets 8:20pm (UTC)"
-      }),
-      failedExecutionId
-    )
-    codexApi.emitSessionEvent(
-      threadKey(parent.ts),
-      'session.execution_completed',
-      {
-        execution_id: failedExecutionId,
-        status: 'completed',
-        result_text: "You've hit your session limit · resets 8:20pm (UTC)"
-      },
+      sampleCodexOutputLines("You've hit your session limit · resets 8:20pm (UTC)"),
       failedExecutionId
     )
 
