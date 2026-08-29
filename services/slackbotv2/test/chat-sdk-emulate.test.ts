@@ -896,12 +896,22 @@ describe('slackbotv2', () => {
     await waitFor(() => codexApi.eventRequests.length === 2, 3000)
 
     const failedExecutionId = codexApi.eventRequests[1]!.executionId
+    codexApi.emitOutputLine(
+      threadKey(parent.ts),
+      JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        result: "You've hit your session limit · resets 8:20pm (UTC)"
+      }),
+      failedExecutionId
+    )
     codexApi.emitSessionEvent(
       threadKey(parent.ts),
-      'session.execution_failed',
+      'session.execution_completed',
       {
-        error: "You've hit your session limit · resets 8:20pm (UTC)",
-        failure_class: 'quota'
+        execution_id: failedExecutionId,
+        status: 'completed',
+        result_text: "You've hit your session limit · resets 8:20pm (UTC)"
       },
       failedExecutionId
     )
@@ -931,9 +941,20 @@ describe('slackbotv2', () => {
     expect(codexApi.executes[2]!.body.idempotency_key).toBe(
       `${followUp.ts}:quota-fallback`
     )
+    const visibleThreadText = await threadText(parent.ts)
+    expect(visibleThreadText).not.toContain("You've hit your session limit")
     expect(
       await sharedState.get<Record<string, unknown>>(`thread-state:${threadKey(parent.ts)}`)
     ).toEqual(expect.objectContaining({ harnessType: 'codex' }))
+    await drainWaitUntilTasks(followUpWaits)
+    await waitFor(
+      () => /^slackbotv2_active_live_renders 0$/m.test(slackbotMetrics.expose()),
+      3000
+    )
+    await waitFor(
+      () => /^slackbotv2_session_event_streams_open 0$/m.test(slackbotMetrics.expose()),
+      3000
+    )
   })
 
   it('clears a sticky model rejected by the harness and accepts a later override', async () => {
@@ -6070,6 +6091,15 @@ function waitUntilContext(waits: Promise<unknown>[]) {
     },
     passThroughOnException() {},
     props: {}
+  }
+}
+
+async function drainWaitUntilTasks(waits: Promise<unknown>[]): Promise<void> {
+  while (true) {
+    const scheduled = waits.length
+    await Promise.all(waits.slice(0, scheduled))
+    await Promise.resolve()
+    if (waits.length === scheduled) return
   }
 }
 

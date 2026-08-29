@@ -14,6 +14,17 @@ export type QuotaFallbackDecision =
   | { outcome: 'suppressed_same_harness' }
   | { harnessType: string; outcome: 'scheduled' }
 
+const CLAUDE_SESSION_LIMIT_ANSWER =
+  /^you(?:'|’)ve hit your session limit(?:\s*·\s*resets [^\r\n]{1,100})?$/iu
+
+/**
+ * Recognizes provider-generated terminal quota banners, not ordinary prose
+ * that happens to discuss a quota or session limit.
+ */
+export function isProviderQuotaAnswer(answer: string): boolean {
+  return CLAUDE_SESSION_LIMIT_ANSWER.test(answer.trim())
+}
+
 export function quotaFallbackDecision(input: {
   alreadyAttempted: boolean
   configuredFallbackHarness?: string

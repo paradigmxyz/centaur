@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { quotaFallbackDecision } from '../src/quota-fallback'
+import { isProviderQuotaAnswer, quotaFallbackDecision } from '../src/quota-fallback'
 
 const baseInput = {
   alreadyAttempted: false,
@@ -58,5 +58,19 @@ describe('quotaFallbackDecision', () => {
         failedHarness: 'claudecode'
       })
     ).toEqual({ harnessType: 'unknown', outcome: 'misconfigured' })
+  })
+})
+
+describe('isProviderQuotaAnswer', () => {
+  test('matches the exact Claude session-limit banner', () => {
+    expect(isProviderQuotaAnswer("You've hit your session limit · resets 8:20pm (UTC)")).toBe(true)
+    expect(isProviderQuotaAnswer("  You’ve hit your session limit\n")).toBe(true)
+  })
+
+  test('does not mistake explanatory prose for a provider quota banner', () => {
+    expect(isProviderQuotaAnswer('The logs say you have hit your session limit.')).toBe(false)
+    expect(
+      isProviderQuotaAnswer("You've hit your session limit, so here are your options.")
+    ).toBe(false)
   })
 })
