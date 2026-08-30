@@ -506,8 +506,12 @@ apiRs:
     companyContextEmbeddings:
       # Enables the embedding workflow and hybrid search in agent sandboxes.
       enabled: false
+      # Delay between scheduled scans for missing or stale embeddings.
       intervalSeconds: 300
+      # Maximum documents claimed by each workflow run.
       batchSize: 250
+      # Maximum characters sent per document. Inputs are capped at 8192.
+      maxInputChars: 8192
       # Shared by the embedding workflow and company-context searches in agent sandboxes.
       model: text-embedding-3-small
   # Reaper: stop sandboxes older than the max lifetime, regardless of whether

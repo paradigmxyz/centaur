@@ -102,6 +102,7 @@
   (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_ENABLED" "value" $companyContextEmbeddingsEnabled)
   (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_INTERVAL_SECONDS" "value" (dig "companyContextEmbeddings" "intervalSeconds" 300 $apiRsEtl))
   (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_BATCH_SIZE" "value" (dig "companyContextEmbeddings" "batchSize" 250 $apiRsEtl))
+  (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_MAX_INPUT_CHARS" "value" (dig "companyContextEmbeddings" "maxInputChars" 8192 $apiRsEtl))
   (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_MODEL" "value" $companyContextEmbeddingsModel)
 -}}
 {{- $apiRsEtlPassthroughNames := list -}}

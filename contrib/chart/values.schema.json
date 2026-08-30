@@ -415,6 +415,11 @@
                 "enabled": { "type": "boolean" },
                 "intervalSeconds": { "type": "integer", "minimum": 1 },
                 "batchSize": { "type": "integer", "minimum": 1 },
+                "maxInputChars": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 8192
+                },
                 "model": { "type": "string", "minLength": 1 }
               }
             }

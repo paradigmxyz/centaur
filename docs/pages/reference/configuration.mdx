@@ -278,6 +278,16 @@ Slack ETL workflows:
 | `SLACK_RETENTION_ENABLED`, `SLACK_RETENTION_INTERVAL_MINUTES`, `SLACK_ETL_RETENTION_DAYS`, `SLACK_DM_RETENTION_DAYS` | `apiRs.etl.slack.retention.*`. | Slack retention enablement, cadence, and separate public ETL/DM TTLs. |
 | `COMPANY_CONTEXT_DOCUMENTS_ENABLED` | `apiRs.etl.companyContextDocuments.enabled`. | Enables company-context projection when any ETL is on. |
 | `COMPANY_CONTEXT_DOCUMENTS_MAX_WINDOW_SECONDS` | `apiRs.etl.companyContextDocuments.maxWindowSeconds`. | Maximum source `updated_at` window projected by one company-context documents run. |
+| `COMPANY_CONTEXT_EMBEDDINGS_ENABLED` | `apiRs.etl.companyContextEmbeddings.enabled`, default `false`. | Enables scheduled document embedding and hybrid company-context search in agent sandboxes. |
+| `COMPANY_CONTEXT_EMBEDDINGS_INTERVAL_SECONDS` | `apiRs.etl.companyContextEmbeddings.intervalSeconds`, default `300`. | Delay between scans for missing or stale document embeddings. |
+| `COMPANY_CONTEXT_EMBEDDINGS_BATCH_SIZE` | `apiRs.etl.companyContextEmbeddings.batchSize`, default `250`. | Maximum documents claimed by one embedding workflow run. |
+| `COMPANY_CONTEXT_EMBEDDINGS_MAX_INPUT_CHARS` | `apiRs.etl.companyContextEmbeddings.maxInputChars`, default `8192`. | Maximum characters embedded from each document. Values cannot exceed `8192`. |
+| `COMPANY_CONTEXT_EMBEDDINGS_MODEL` | `apiRs.etl.companyContextEmbeddings.model`, default `text-embedding-3-small`. | Embedding model shared by document generation and hybrid queries. The model must support the chart's 1536-dimension vector schema. |
+
+The bundled PostgreSQL image provides pgvector. External PostgreSQL deployments
+must make the `vector` extension available before migrations run. The workflow
+uses the shared Python workflow-host database connection, OpenAI credential,
+and `OPENAI_BASE_URL`. No workflow-specific PostgreSQL role or DSN is required.
 
 Google Workspace ETL workflows:
 
