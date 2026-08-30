@@ -26,6 +26,7 @@ use cron::Schedule;
 use futures_util::{StreamExt, TryStreamExt, pin_mut, stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use sqlx::Row;
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -116,6 +117,14 @@ struct WorkflowRuntimeInner {
     _schedule_worker: Worker,
     webhook_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
     schedule_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
+    event_trigger_registry: Arc<RwLock<Vec<RegisteredWorkflowEventTrigger>>>,
+}
+
+#[derive(Clone)]
+struct WorkflowMetadataRegistries {
+    webhooks: Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
+    schedules: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
+    event_triggers: Arc<RwLock<Vec<RegisteredWorkflowEventTrigger>>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -187,6 +196,9 @@ impl WorkflowEnablement {
         metadata
             .webhooks
             .retain(|webhook| self.is_enabled(&webhook.workflow_name));
+        metadata
+            .event_triggers
+            .retain(|trigger| self.is_enabled(&trigger.workflow_name));
         metadata.schedules.retain(|schedule| {
             schedule
                 .get("workflow_name")
@@ -410,6 +422,19 @@ pub struct WorkflowWebhookSpec {
     pub filter: Option<WebhookFilter>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RegisteredWorkflowEventTrigger {
+    pub workflow_name: String,
+    pub source_path: String,
+    pub spec: WorkflowEventTriggerSpec,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct WorkflowEventTriggerSpec {
+    pub name: String,
+    pub event_name_prefix: String,
+}
+
 /// A declarative webhook pre-filter, evaluated in-process before a run is
 /// created. A node is either a boolean combinator (`any`/`all`) or a leaf that
 /// reads a `header` or a dot-path into the JSON `body` and applies `op`
@@ -625,6 +650,10 @@ impl WorkflowRuntime {
             &discovery,
             &enablement,
         )?));
+        let event_trigger_registry = Arc::new(RwLock::new(build_event_trigger_registry(
+            &discovery,
+            &enablement,
+        )?));
 
         let task_session_runtime = session_runtime.clone();
         let task_workflow_host_sandbox = workflow_host_sandbox.clone();
@@ -804,8 +833,11 @@ impl WorkflowRuntime {
             spawn_workflow_metadata_reconciler(
                 schedule_client.clone(),
                 workflow_clients,
-                webhook_registry.clone(),
-                schedule_registry.clone(),
+                WorkflowMetadataRegistries {
+                    webhooks: webhook_registry.clone(),
+                    schedules: schedule_registry.clone(),
+                    event_triggers: event_trigger_registry.clone(),
+                },
                 workflow_host_sandbox.clone(),
                 workflow_principal_registrar,
                 interval,
@@ -825,6 +857,7 @@ impl WorkflowRuntime {
                 _schedule_worker: schedule_worker,
                 webhook_registry,
                 schedule_registry,
+                event_trigger_registry,
             }),
         })
     }
@@ -999,6 +1032,39 @@ impl WorkflowRuntime {
         event_name: &str,
         payload: Value,
     ) -> Result<(), WorkflowRuntimeError> {
+        self.emit_event_with_idempotency(event_name, payload, None)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn emit_event_with_idempotency(
+        &self,
+        event_name: &str,
+        payload: Value,
+        idempotency_key: Option<&str>,
+    ) -> Result<Vec<CreateWorkflowRunResponse>, WorkflowRuntimeError> {
+        let event_name = event_name.trim();
+        if event_name.is_empty() {
+            return Err(WorkflowRuntimeError::BadRequest(
+                "event_name must not be empty".to_owned(),
+            ));
+        }
+        let matching_triggers = self
+            .inner
+            .event_trigger_registry
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .filter(|trigger| event_name.starts_with(&trigger.spec.event_name_prefix))
+            .cloned()
+            .collect::<Vec<_>>();
+        let idempotency_key = idempotency_key.map(str::trim).filter(|key| !key.is_empty());
+        if !matching_triggers.is_empty() && idempotency_key.is_none() {
+            return Err(WorkflowRuntimeError::BadRequest(
+                "idempotency_key is required when an event starts workflows".to_owned(),
+            ));
+        }
+
         self.inner
             .client
             .emit_event(event_name, payload.clone(), Some(WORKFLOW_QUEUE))
@@ -1013,9 +1079,30 @@ impl WorkflowRuntime {
             .await?;
         self.inner
             .etl_backfill_client
-            .emit_event(event_name, payload, Some(WORKFLOW_ETL_BACKFILL_QUEUE))
+            .emit_event(
+                event_name,
+                payload.clone(),
+                Some(WORKFLOW_ETL_BACKFILL_QUEUE),
+            )
             .await?;
-        Ok(())
+
+        let mut runs = Vec::with_capacity(matching_triggers.len());
+        for trigger in matching_triggers {
+            let digest = Sha256::digest(
+                format!("{}:{}", trigger.spec.name, idempotency_key.unwrap()).as_bytes(),
+            );
+            let response = self
+                .create_run(CreateWorkflowRunRequest {
+                    workflow_name: trigger.workflow_name,
+                    input: json!({"event_name": event_name, "payload": payload.clone()}),
+                    idempotency_key: Some(format!("event-trigger:{}", hex::encode(digest))),
+                    harness_type: None,
+                    max_attempts: Some(3),
+                })
+                .await?;
+            runs.push(response);
+        }
+        Ok(runs)
     }
 
     pub fn get_webhook(&self, slug: &str) -> Option<RegisteredWorkflowWebhook> {
@@ -1168,6 +1255,48 @@ fn build_schedule_registry(
             )));
         }
     }
+    Ok(registry)
+}
+
+fn build_event_trigger_registry(
+    discovery: &PythonWorkflowMetadata,
+    enablement: &WorkflowEnablement,
+) -> Result<Vec<RegisteredWorkflowEventTrigger>, WorkflowRuntimeError> {
+    let mut names = BTreeSet::new();
+    let mut registry = Vec::new();
+    for mut trigger in discovery.event_triggers.clone() {
+        if !enablement.is_enabled(&trigger.workflow_name) {
+            continue;
+        }
+        trigger.workflow_name = trigger.workflow_name.trim().to_owned();
+        trigger.spec.name = trigger.spec.name.trim().to_owned();
+        trigger.spec.event_name_prefix = trigger.spec.event_name_prefix.trim().to_owned();
+        if trigger.workflow_name.is_empty() {
+            return Err(WorkflowRuntimeError::BadRequest(
+                "workflow event trigger workflow_name must not be empty".to_owned(),
+            ));
+        }
+        if trigger.spec.name.is_empty() || trigger.spec.name.len() > 128 {
+            return Err(WorkflowRuntimeError::BadRequest(format!(
+                "workflow event trigger name must contain 1..=128 bytes, got {:?}",
+                trigger.spec.name
+            )));
+        }
+        if trigger.spec.event_name_prefix.is_empty() || trigger.spec.event_name_prefix.len() > 256 {
+            return Err(WorkflowRuntimeError::BadRequest(format!(
+                "workflow event trigger {:?} event_name_prefix must contain 1..=256 bytes",
+                trigger.spec.name
+            )));
+        }
+        if !names.insert(trigger.spec.name.clone()) {
+            return Err(WorkflowRuntimeError::BadRequest(format!(
+                "duplicate workflow event trigger name {:?}",
+                trigger.spec.name
+            )));
+        }
+        registry.push(trigger);
+    }
+    registry.sort_by(|left, right| left.spec.name.cmp(&right.spec.name));
     Ok(registry)
 }
 
@@ -1673,6 +1802,8 @@ struct PythonWorkflowDiscovery {
     #[serde(default)]
     webhooks: Vec<RegisteredWorkflowWebhook>,
     #[serde(default)]
+    event_triggers: Vec<RegisteredWorkflowEventTrigger>,
+    #[serde(default)]
     schedule: Option<Value>,
     #[serde(default)]
     principal: Option<PythonWorkflowPrincipal>,
@@ -1693,6 +1824,7 @@ struct PythonWorkflowDiscoveryPayload {
 #[derive(Debug, Default)]
 struct PythonWorkflowMetadata {
     webhooks: Vec<RegisteredWorkflowWebhook>,
+    event_triggers: Vec<RegisteredWorkflowEventTrigger>,
     schedules: Vec<Value>,
     workflow_names: BTreeSet<String>,
     principals: BTreeMap<String, WorkflowPrincipalDeclaration>,
@@ -1707,6 +1839,7 @@ fn metadata_from_discovery_payload(
             .workflow_names
             .insert(workflow.workflow_name.clone());
         metadata.webhooks.extend(workflow.webhooks);
+        metadata.event_triggers.extend(workflow.event_triggers);
         if let Some(mut schedule) = workflow.schedule {
             if let Some(object) = schedule.as_object_mut() {
                 object
@@ -1916,8 +2049,7 @@ fn parse_worker_concurrency(raw: Option<&str>, default: usize) -> usize {
 fn spawn_workflow_metadata_reconciler(
     schedule_client: Client,
     workflow_clients: WorkflowQueueClients,
-    webhook_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
-    schedule_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
+    registries: WorkflowMetadataRegistries,
     workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
     workflow_principal_registrar: WorkflowPrincipalRegistrar,
     interval: Duration,
@@ -1932,8 +2064,7 @@ fn spawn_workflow_metadata_reconciler(
             ticker.tick().await;
             match reconcile_workflow_metadata_once(
                 &schedule_client,
-                &webhook_registry,
-                &schedule_registry,
+                &registries,
                 workflow_host_sandbox.as_ref(),
                 &workflow_principal_registrar,
             )
@@ -1969,8 +2100,7 @@ fn spawn_workflow_metadata_reconciler(
 
 async fn reconcile_workflow_metadata_once(
     schedule_client: &Client,
-    webhook_registry: &Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
-    schedule_registry: &Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
+    registries: &WorkflowMetadataRegistries,
     workflow_host_sandbox: Option<&WorkflowHostSandboxRuntime>,
     workflow_principal_registrar: &WorkflowPrincipalRegistrar,
 ) -> Result<
@@ -1984,6 +2114,7 @@ async fn reconcile_workflow_metadata_once(
     let discovery = discover_python_workflow_metadata().await?;
     let next_webhooks = build_webhook_registry(&discovery, &enablement)?;
     let next_schedules = build_schedule_registry(&discovery, &enablement)?;
+    let next_event_triggers = build_event_trigger_registry(&discovery, &enablement)?;
     if let Some(sandbox) = workflow_host_sandbox {
         reconcile_workflow_principals(
             sandbox,
@@ -1994,21 +2125,31 @@ async fn reconcile_workflow_metadata_once(
         .await?;
     }
     {
-        let mut webhooks = webhook_registry
+        let mut webhooks = registries
+            .webhooks
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *webhooks = next_webhooks;
     }
     {
-        let mut schedules = schedule_registry
+        let mut schedules = registries
+            .schedules
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *schedules = next_schedules.clone();
+    }
+    {
+        let mut event_triggers = registries
+            .event_triggers
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *event_triggers = next_event_triggers;
     }
     reconcile_schedules(schedule_client, &next_schedules).await?;
     info!(
         webhook_count = discovery.webhooks.len(),
         schedule_count = discovery.schedules.len(),
+        event_trigger_count = discovery.event_triggers.len(),
         "reconciled workflow metadata"
     );
     Ok((discovery, next_schedules))
@@ -5071,6 +5212,14 @@ mod tests {
                     "workflow_name": "manual_workflow",
                     "source_path": "workflows/manual_workflow.py",
                     "principal": "finance-automation",
+                    "event_triggers": [{
+                        "workflow_name": "manual_workflow",
+                        "source_path": "workflows/manual_workflow.py",
+                        "spec": {
+                            "name": "manual-actions",
+                            "event_name_prefix": "slack.block_action.manual."
+                        }
+                    }],
                 },
             ],
         }))
@@ -5084,6 +5233,8 @@ mod tests {
             ])
         );
         assert_eq!(metadata.schedules.len(), 1);
+        assert_eq!(metadata.event_triggers.len(), 1);
+        assert_eq!(metadata.event_triggers[0].spec.name, "manual-actions");
         assert_eq!(
             metadata.schedules[0].get("workflow_name"),
             Some(&json!("scheduled_workflow"))
@@ -5118,6 +5269,50 @@ mod tests {
             Some(&WorkflowPrincipalDeclaration::Existing(
                 "prn_01k2m3n4p5".to_owned()
             ))
+        );
+    }
+
+    #[test]
+    fn event_trigger_registry_validates_names_and_enablement() {
+        let trigger = RegisteredWorkflowEventTrigger {
+            workflow_name: "heartbeat_feedback".to_owned(),
+            source_path: "workflows/heartbeat_feedback.py".to_owned(),
+            spec: WorkflowEventTriggerSpec {
+                name: "heartbeat-actions".to_owned(),
+                event_name_prefix: "slack.block_action.phai.heartbeat.".to_owned(),
+            },
+        };
+        let metadata = PythonWorkflowMetadata {
+            event_triggers: vec![trigger.clone()],
+            workflow_names: BTreeSet::from(["heartbeat_feedback".to_owned()]),
+            ..PythonWorkflowMetadata::default()
+        };
+
+        assert_eq!(
+            build_event_trigger_registry(&metadata, &WorkflowEnablement::all())
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            build_event_trigger_registry(
+                &metadata,
+                &WorkflowEnablement::allowlist("other_workflow")
+            )
+            .unwrap()
+            .is_empty()
+        );
+
+        let duplicate = PythonWorkflowMetadata {
+            event_triggers: vec![trigger.clone(), trigger],
+            ..PythonWorkflowMetadata::default()
+        };
+        let error = build_event_trigger_registry(&duplicate, &WorkflowEnablement::all())
+            .expect_err("duplicate event trigger names must fail discovery");
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate workflow event trigger")
         );
     }
 

@@ -551,7 +551,8 @@ export async function forwardToSessionApi(
 
 export async function dispatchSlackBlockAction(
   options: SlackbotV2Options,
-  payload: SlackbotV2BlockActionPayload
+  payload: SlackbotV2BlockActionPayload,
+  idempotencyKey?: string
 ): Promise<void> {
   const action = `dispatch Slack block action ${payload.action_id}`
   const response = await recordSessionApiOperation(
@@ -563,6 +564,7 @@ export async function dispatchSlackBlockAction(
         {
           body: JSON.stringify({
             event_name: `slack.block_action.${payload.action_id}`,
+            idempotency_key: idempotencyKey,
             payload
           }),
           headers: apiHeaders(options),

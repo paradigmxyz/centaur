@@ -6,6 +6,7 @@ import inspect
 from typing import Any
 
 from api.app import WorkflowToolManager, WorkflowTools, bind_context_rpc, reset_context_rpc
+from api.heartbeat import HeartbeatState
 
 
 @dataclasses.dataclass
@@ -26,6 +27,7 @@ class WorkflowContext:
         workflow_name: str,
         pool: Any = None,
         agent_defaults: dict[str, Any] | None = None,
+        workflow_principal: str | None = None,
     ) -> None:
         self._rpc = rpc
         self.run_id = run_id
@@ -37,6 +39,13 @@ class WorkflowContext:
         # per-call kwargs always win. See agent_turn().
         self._agent_defaults = dict(agent_defaults or {})
         self.tools = WorkflowTools(WorkflowToolManager(self._rpc))
+        self.heartbeat = HeartbeatState(
+            pool,
+            workflow_name=workflow_name,
+            workflow_run_id=run_id,
+            workflow_task_id=task_id,
+            workflow_principal=workflow_principal,
+        )
 
     def log(self, event: str, **fields: Any) -> None:
         self._rpc.notify(

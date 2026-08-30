@@ -206,6 +206,9 @@ async def handler(inp, ctx):
 ```
 
 Use workflows when a task should run longer than one request, wait for something external, run on a schedule, or coordinate multiple agent turns.
+Workflows may also declare idempotent internal-event triggers. Managed-principal
+workflows can use the typed heartbeat state API for recurring source review,
+human dispositions, and evidence-linked semantic-memory proposals.
 
 ## Security Model
 

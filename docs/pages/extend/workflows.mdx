@@ -91,6 +91,49 @@ disabled.
 The handler may re-execute after a restart. Put external side effects behind
 `ctx.step(...)` so completed work is not repeated.
 
+## Start a workflow from an internal event
+
+Use `EVENT_TRIGGERS` when a durable workflow should start from an event that
+already entered Centaur, such as a signed Slack block action:
+
+```python
+EVENT_TRIGGERS = [
+    {
+        "name": "report-review-actions",
+        "event_name_prefix": "slack.block_action.acme.report.",
+    }
+]
+```
+
+Each trigger name must be unique. A matching `POST /api/workflows/events`
+request must include `idempotency_key`; Centaur combines that key with the
+trigger name so ingress retries return the existing workflow run instead of
+starting another. The handler receives:
+
+```json
+{"event_name":"slack.block_action.acme.report.approve","payload":{}}
+```
+
+Event triggers start new runs. They do not replace `ctx.wait_for_event(...)`,
+which resumes an already-running workflow. One emitted event can still wake
+waiters and start declared trigger workflows.
+
+## Durable heartbeat state
+
+Trusted, managed-principal workflows can use `ctx.heartbeat` for recurring
+review loops. The typed API owns profile registration, source checkpoints,
+immutable observations, material-change items, version-checked synthesis,
+content-hashed replay artifacts, delivery/action tokens, review transitions,
+and evidence-linked semantic-memory proposals. Organization overlays own the profile policy and source
+normalization; they should not issue SQL directly.
+
+Heartbeat profiles are organization, team, or personal scoped. Every run and
+profile operation is checked against the workflow's managed principal. Review
+actions additionally require an expiring single-use token, the rendered item
+version, and an explicit profile reviewer grant. Memory facts begin as
+`proposed`; an overlay must define a separate confirmation/retrieval policy
+before treating them as agent context.
+
 These primitives compose into larger automations:
 
 - **Scheduled operations**: run a daily digest, weekly cleanup, periodic sync,

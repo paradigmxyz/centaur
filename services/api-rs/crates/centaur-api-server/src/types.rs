@@ -145,6 +145,8 @@ pub struct EmitWorkflowEventRequest {
     pub event_type: Option<String>,
     pub correlation_id: Option<String>,
     #[serde(default)]
+    pub idempotency_key: Option<String>,
+    #[serde(default)]
     pub payload: Value,
 }
 

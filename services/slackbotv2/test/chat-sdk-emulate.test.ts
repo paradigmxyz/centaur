@@ -347,6 +347,7 @@ describe('slackbotv2', () => {
     expect(codexApi.workflowEvents).toHaveLength(2)
     expect(codexApi.workflowEvents[0]).toEqual({
       event_name: 'slack.block_action.deploy.approve',
+      idempotency_key: `slackbotv2:block-action:${TEAM_ID}:${CHANNEL_ID}:1700000001.000200:${USER_ID}:deploy.approve:1700000002.000300`,
       payload: {
         action_id: 'deploy.approve',
         action_ts: '1700000002.000300',
@@ -5890,6 +5891,7 @@ type MockSessionEvent = {
 
 type MockWorkflowEventRequest = {
   event_name: string
+  idempotency_key?: string
   payload: SlackbotV2BlockActionPayload
 }
 

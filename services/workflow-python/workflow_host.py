@@ -15,6 +15,7 @@ import importlib.util
 import inspect
 import json
 import os
+import re
 import sys
 import traceback
 import typing
@@ -84,6 +85,7 @@ class RegisteredWorkflow:
     input_cls: type | None
     webhooks: Any
     schedule: Any
+    event_triggers: Any = None
     principal: Any = None
     agent_defaults: dict[str, Any] | None = None
 
@@ -154,6 +156,7 @@ def load_workflow_file(path: Path) -> RegisteredWorkflow | None:
         input_cls=getattr(module, "Input", None),
         webhooks=getattr(module, "WEBHOOKS", None),
         schedule=getattr(module, "SCHEDULE", None),
+        event_triggers=getattr(module, "EVENT_TRIGGERS", None),
         principal=getattr(module, "WORKFLOW_PRINCIPAL", None),
         agent_defaults=agent_defaults,
     )
@@ -356,6 +359,42 @@ def normalize_schedule(workflow: RegisteredWorkflow) -> dict[str, Any] | None:
     return schedule
 
 
+def normalize_event_trigger_spec(
+    workflow: RegisteredWorkflow, raw: Any
+) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    name = raw.get("name")
+    event_name_prefix = raw.get("event_name_prefix")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    if not isinstance(event_name_prefix, str) or not event_name_prefix.strip():
+        return None
+    return {
+        "workflow_name": workflow.workflow_name,
+        "source_path": workflow.source_path,
+        "spec": {
+            "name": name.strip(),
+            "event_name_prefix": event_name_prefix.strip(),
+        },
+    }
+
+
+def normalize_event_triggers(workflow: RegisteredWorkflow) -> list[dict[str, Any]]:
+    raw = workflow.event_triggers
+    if raw is None:
+        return []
+    if isinstance(raw, dict):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    return [
+        spec
+        for spec in (normalize_event_trigger_spec(workflow, item) for item in raw)
+        if spec is not None
+    ]
+
+
 def normalize_principal(workflow: RegisteredWorkflow) -> bool | str | None:
     raw = workflow.principal
     if isinstance(raw, bool):
@@ -364,6 +403,16 @@ def normalize_principal(workflow: RegisteredWorkflow) -> bool | str | None:
         reference = raw.strip()
         return reference or None
     return None
+
+
+def workflow_principal_foreign_id(workflow: RegisteredWorkflow) -> str | None:
+    raw = normalize_principal(workflow)
+    if isinstance(raw, str):
+        return raw
+    if raw is not True:
+        return None
+    slug = re.sub(r"[^a-z0-9]+", "-", workflow.workflow_name.lower()).strip("-") or "x"
+    return f"workflow-{slug}"
 
 
 async def run_workflow(message: dict[str, Any], rpc: RpcClient) -> dict[str, Any]:
@@ -381,6 +430,7 @@ async def run_workflow(message: dict[str, Any], rpc: RpcClient) -> dict[str, Any
         workflow_name=workflow_name,
         pool=pool,
         agent_defaults=registered.agent_defaults,
+        workflow_principal=workflow_principal_foreign_id(registered),
     )
     previous_metric_rpc = metrics.get_metric_rpc()
     metrics.set_metric_rpc(rpc)
@@ -398,6 +448,16 @@ async def run_workflow(message: dict[str, Any], rpc: RpcClient) -> dict[str, Any
             "workflow_name": ctx.workflow_name,
             "result": jsonable(result),
         }
+    except Exception as exc:
+        try:
+            await ctx.heartbeat.fail_current_run(exc)
+        except Exception as audit_error:
+            ctx.log(
+                "heartbeat_run_failure_audit_failed",
+                error_type=type(audit_error).__name__,
+                error=str(audit_error)[:1000],
+            )
+        raise
     finally:
         await rpc.drain_notifications()
         metrics.set_metric_rpc(previous_metric_rpc)
@@ -415,6 +475,7 @@ def discovery_payload() -> dict[str, Any]:
                 "source_path": workflow.source_path,
                 "webhooks": normalize_webhooks(workflow),
                 "schedule": normalize_schedule(workflow),
+                "event_triggers": normalize_event_triggers(workflow),
                 "principal": normalize_principal(workflow),
             }
             for workflow in workflows.values()

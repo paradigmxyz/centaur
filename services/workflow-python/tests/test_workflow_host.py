@@ -633,6 +633,10 @@ class WorkflowHostTests(unittest.TestCase):
 
         assert registered is not None
         self.assertEqual(host.normalize_principal(registered), True)
+        self.assertEqual(
+            host.workflow_principal_foreign_id(registered),
+            "workflow-principal-workflow",
+        )
 
     def test_load_workflow_file_reads_workflow_principal_reference(self) -> None:
         host = load_workflow_host()
@@ -648,6 +652,37 @@ class WorkflowHostTests(unittest.TestCase):
 
         assert registered is not None
         self.assertEqual(host.normalize_principal(registered), "finance-automation")
+        self.assertEqual(
+            host.workflow_principal_foreign_id(registered), "finance-automation"
+        )
+
+    def test_load_workflow_file_normalizes_event_triggers(self) -> None:
+        host = load_workflow_host()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "event_workflow.py"
+            path.write_text(
+                "WORKFLOW_NAME = 'event_workflow'\n"
+                "EVENT_TRIGGERS = [{'name': 'heartbeat-actions', "
+                "'event_name_prefix': 'slack.block_action.phai.heartbeat.'}]\n"
+                "def handler(inp, ctx):\n"
+                "    return None\n"
+            )
+            registered = host.load_workflow_file(path)
+
+        assert registered is not None
+        self.assertEqual(
+            host.normalize_event_triggers(registered),
+            [
+                {
+                    "workflow_name": "event_workflow",
+                    "source_path": str(path),
+                    "spec": {
+                        "name": "heartbeat-actions",
+                        "event_name_prefix": "slack.block_action.phai.heartbeat.",
+                    },
+                }
+            ],
+        )
 
         registered.principal = " prn_01k2m3n4p5 "
         self.assertEqual(host.normalize_principal(registered), "prn_01k2m3n4p5")

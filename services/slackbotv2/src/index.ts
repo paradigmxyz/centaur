@@ -298,7 +298,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
       return
     }
     try {
-      await dispatchSlackBlockAction(options, payload)
+      await dispatchSlackBlockAction(options, payload, dedupeKey)
     } catch (error) {
       try {
         if (dedupeKey && (await state.get(dedupeKey)) === leaseToken) {

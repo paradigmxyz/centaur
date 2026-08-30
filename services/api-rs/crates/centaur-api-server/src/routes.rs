@@ -2903,8 +2903,14 @@ async fn emit_workflow_event(
             ));
         }
     };
-    workflows.emit_event(&event_name, request.payload).await?;
-    Ok(Json(json!({ "ok": true })))
+    let runs = workflows
+        .emit_event_with_idempotency(
+            &event_name,
+            request.payload,
+            request.idempotency_key.as_deref(),
+        )
+        .await?;
+    Ok(Json(json!({ "ok": true, "runs": runs })))
 }
 
 async fn invoke_workflow_webhook(
