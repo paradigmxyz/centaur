@@ -104,6 +104,7 @@
   (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_BATCH_SIZE" "value" (dig "companyContextEmbeddings" "batchSize" 250 $apiRsEtl))
   (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_MAX_INPUT_CHARS" "value" (dig "companyContextEmbeddings" "maxInputChars" 8192 $apiRsEtl))
   (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_MODEL" "value" $companyContextEmbeddingsModel)
+  (dict "name" "MEMORY_GENERATION_ENABLED" "value" (dig "memoryGeneration" "enabled" false $apiRsEtl))
 -}}
 {{- $apiRsEtlPassthroughNames := list -}}
 {{- range $env := $apiRsEtlEnv -}}
