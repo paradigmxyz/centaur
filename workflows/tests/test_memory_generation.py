@@ -56,6 +56,7 @@ def test_uses_v1_memory_prompt():
     memory = _load()
     normalized = " ".join(memory.SYSTEM_PROMPT.split())
 
+    assert memory.DEFAULT_GENERATION_MODEL == "gpt-5.6-luna"
     assert "Generate zero or more memories" in normalized
     assert "weeks or months later" in normalized
     assert "ordinary inventories" in normalized
