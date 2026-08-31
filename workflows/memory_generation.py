@@ -20,6 +20,7 @@ DEFAULT_GENERATION_BATCH_SIZE = 50
 DEFAULT_EMBEDDING_BATCH_SIZE = 25
 DEFAULT_INTERVAL_SECONDS = 15 * 60
 DEFAULT_CONTEXT_MESSAGES = 40
+DEFAULT_GENERATION_MAX_INPUT_CHARS = 32_000
 DEFAULT_GENERATION_MODEL = "gpt-5.6-luna"
 DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 EMBEDDING_DIMENSIONS = 1_536
@@ -138,13 +139,18 @@ def _owner_for_thread(thread: Any) -> MemoryOwner | None:
         ":"
     ):
         return None
-    if _clean_string(thread.get("conversation_type", "")) == "mpim":
-        return None
+    conversation_type = _clean_string(thread.get("conversation_type", ""))
 
     if channel_id.startswith("D"):
         user_id = _clean_string(metadata.get("slack_user_id"))
         return MemoryOwner("user", user_id) if user_id else None
-    if channel_id.startswith(("C", "G")):
+    if channel_id.startswith("G"):
+        # A G-prefixed conversation may be either an MPIM or a private channel.
+        # Only synced private channels have unambiguous channel ownership.
+        if conversation_type != "private_channel":
+            return None
+        return MemoryOwner("channel", channel_id)
+    if channel_id.startswith("C"):
         return MemoryOwner("channel", channel_id)
     return None
 
@@ -211,7 +217,7 @@ async def _load_thread_material(
         "  terminal.payload->>'result_text' AS result_text, "
         "  s.metadata AS session_metadata, s.iron_control_principal, "
         "  COALESCE(("
-        "    SELECT conversation_type FROM slack_dm_sync_conversations conversation "
+        "    SELECT conversation_type FROM slack_private_sync_conversations conversation "
         "    WHERE conversation.conversation_id = s.metadata->>'slack_channel_id' "
         "      AND conversation.home_team_id = COALESCE("
         "        NULLIF(s.metadata->>'slack_home_team_id', ''), "
@@ -272,6 +278,34 @@ async def _load_thread_material(
     }
 
 
+def _generation_input(
+    material: dict[str, Any],
+    max_chars: int = DEFAULT_GENERATION_MAX_INPUT_CHARS,
+) -> str:
+    payload = {
+        "executions": [dict(item) for item in material["executions"]],
+        "preceding_user_messages": [
+            dict(item) for item in material["preceding_user_messages"]
+        ],
+    }
+
+    def encode() -> str:
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    encoded = encode()
+    text_fields = [
+        (execution, "assistant_final") for execution in payload["executions"]
+    ] + [(message, "text") for message in payload["preceding_user_messages"]]
+    for item, field in text_fields:
+        while len(encoded) > max_chars and (value := _clean_string(item.get(field))):
+            trim_chars = min(len(value), max(1, len(encoded) - max_chars))
+            item[field] = value[:-trim_chars]
+            encoded = encode()
+    if len(encoded) > max_chars:
+        raise ValueError("memory generation metadata exceeds input limit")
+    return encoded
+
+
 async def _generate_candidates(
     client: OpenAIClient,
     *,
@@ -285,13 +319,7 @@ async def _generate_candidates(
             {"role": "system", "content": OUTPUT_INSTRUCTIONS},
             {
                 "role": "user",
-                "content": json.dumps(
-                    {
-                        "executions": material["executions"],
-                        "preceding_user_messages": material["preceding_user_messages"],
-                    },
-                    separators=(",", ":"),
-                ),
+                "content": _generation_input(material),
             },
         ],
         text={
@@ -424,6 +452,39 @@ async def _process_thread(
     return {**result, "skipped": 0}
 
 
+async def _process_thread_safely(
+    pool: Any,
+    *,
+    executions: list[Any],
+    generation_model: str,
+    client: OpenAIClient,
+    ctx: WorkflowContext,
+    step_name: str,
+) -> dict[str, int]:
+    try:
+        result = await _process_thread(
+            pool,
+            executions=executions,
+            generation_model=generation_model,
+            client=client,
+        )
+    except Exception as error:  # noqa: BLE001
+        failed = len(executions)
+        increment_metric(
+            "memory_generation_threads_failed_total",
+            1,
+            error_type=type(error).__name__,
+        )
+        ctx.log(
+            "memory_generation_thread_failed",
+            step=step_name,
+            executions=failed,
+            error_type=type(error).__name__,
+        )
+        return {"created": 0, "rejected": 0, "skipped": 0, "failed": failed}
+    return {**result, "failed": 0}
+
+
 async def _generate_embeddings(
     client: OpenAIClient, *, model: str, inputs: list[str]
 ) -> list[list[float]]:
@@ -510,15 +571,18 @@ async def handler(_inp: Any, ctx: WorkflowContext) -> dict[str, Any]:
         )
 
     client = _client()
-    totals = {"created": 0, "rejected": 0, "skipped": 0}
+    totals = {"created": 0, "rejected": 0, "skipped": 0, "failed": 0}
     for thread_key, thread_executions in by_thread.items():
+        step_name = _thread_step_name(thread_key)
         result = await ctx.step(
-            _thread_step_name(thread_key),
-            lambda rows=thread_executions: _process_thread(
+            step_name,
+            lambda rows=thread_executions, name=step_name: _process_thread_safely(
                 ctx._pool,
                 executions=rows,
                 generation_model=DEFAULT_GENERATION_MODEL,
                 client=client,
+                ctx=ctx,
+                step_name=name,
             ),
         )
         for key in totals:

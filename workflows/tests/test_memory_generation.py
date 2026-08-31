@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import sys
 import types
 from pathlib import Path
@@ -63,6 +64,33 @@ def test_uses_v1_memory_prompt():
     assert "generate only the latest state" in normalized
 
 
+def test_generation_input_is_bounded_and_preserves_recent_user_context():
+    memory = _load()
+    material = {
+        "executions": [
+            {
+                "source_execution_id": "exe-1",
+                "creator_user_id": "U1",
+                "assistant_final": "a" * 1_000,
+            }
+        ],
+        "preceding_user_messages": [
+            {"message_id": "old", "text": "b" * 1_000},
+            {"message_id": "recent", "text": "keep this recent context"},
+        ],
+    }
+
+    encoded = memory._generation_input(material, max_chars=512)
+    payload = json.loads(encoded)
+
+    assert len(encoded) <= 512
+    assert payload["preceding_user_messages"][-1]["text"] == (
+        "keep this recent context"
+    )
+    assert len(payload["executions"][0]["assistant_final"]) < 1_000
+    assert material["executions"][0]["assistant_final"] == "a" * 1_000
+
+
 def test_owner_uses_user_scope_for_verified_dm():
     memory = _load()
 
@@ -71,7 +99,7 @@ def test_owner_uses_user_scope_for_verified_dm():
     assert owner == memory.MemoryOwner("user", "U1")
 
 
-def test_owner_uses_channel_scope_and_skips_group_dm():
+def test_owner_uses_channel_scope_for_public_and_synced_private_channels():
     memory = _load()
     channel_thread = _thread(
         thread_key="slack:T1:C1:123.456",
@@ -89,23 +117,40 @@ def test_owner_uses_channel_scope_and_skips_group_dm():
     assert memory._owner_for_thread(channel_thread) == memory.MemoryOwner(
         "channel", "C1"
     )
-    assert (
-        memory._owner_for_thread(
-            _thread(
-                thread_key="slack:T1:G1:123.456",
-                session_metadata={
-                    "platform": "slack",
-                    "source": "slackbotv2",
-                    "slack_channel_id": "G1",
-                    "slack_team_id": "T1",
-                    "slack_home_team_id": "T1",
-                    "slack_user_id": "U1",
-                },
-                conversation_type="mpim",
-            )
+    assert memory._owner_for_thread(
+        _thread(
+            thread_key="slack:T1:G1:123.456",
+            session_metadata={
+                "platform": "slack",
+                "source": "slackbotv2",
+                "slack_channel_id": "G1",
+                "slack_team_id": "T1",
+                "slack_home_team_id": "T1",
+                "slack_user_id": "U1",
+            },
+            conversation_type="private_channel",
         )
-        is None
+    ) == memory.MemoryOwner("channel", "G1")
+
+
+def test_owner_skips_group_dm_and_unknown_g_conversation():
+    memory = _load()
+    group_thread = _thread(
+        thread_key="slack:T1:G1:123.456",
+        session_metadata={
+            "platform": "slack",
+            "source": "slackbotv2",
+            "slack_channel_id": "G1",
+            "slack_team_id": "T1",
+            "slack_home_team_id": "T1",
+            "slack_user_id": "U1",
+        },
     )
+
+    assert (
+        memory._owner_for_thread({**group_thread, "conversation_type": "mpim"}) is None
+    )
+    assert memory._owner_for_thread({**group_thread, "conversation_type": ""}) is None
 
 
 def test_owner_rejects_unverified_or_mismatched_session():
@@ -332,5 +377,60 @@ def test_handler_groups_executions_by_thread_and_keeps_embedding_pass_independen
         "embed_null_memories",
     ]
     assert result["created"] == 1
+    assert result["failed"] == 0
     assert result["processed"] == 2
     assert result["embedding_failed"] == 2
+
+
+def test_handler_advances_cursor_and_embeds_after_thread_failure(monkeypatch):
+    memory = _load()
+    executions = [
+        _thread(execution_id="exe-bad", thread_key="slack:T1:D1:1"),
+        _thread(execution_id="exe-good", thread_key="slack:T1:D2:2"),
+    ]
+    advanced = []
+    metrics = []
+
+    async def load_executions(*_args, **_kwargs):
+        return executions
+
+    async def process_thread(*_args, **kwargs):
+        if kwargs["executions"][0]["execution_id"] == "exe-bad":
+            raise RuntimeError("poison thread")
+        return {"created": 1, "rejected": 0, "skipped": 0}
+
+    async def advance_cursor(_pool, execution_id):
+        advanced.append(execution_id)
+
+    async def embed_pending(*_args, **_kwargs):
+        return {"embedded": 1, "embedding_failed": 0}
+
+    async def emit_age(_pool):
+        return None
+
+    monkeypatch.setattr(memory, "_load_executions", load_executions)
+    monkeypatch.setattr(memory, "_process_thread", process_thread)
+    monkeypatch.setattr(memory, "_advance_cursor", advance_cursor)
+    monkeypatch.setattr(memory, "_embed_pending", embed_pending)
+    monkeypatch.setattr(memory, "_emit_pending_embedding_age", emit_age)
+    monkeypatch.setattr(memory, "_client", lambda: types.SimpleNamespace())
+    monkeypatch.setattr(
+        memory,
+        "increment_metric",
+        lambda name, value, **fields: metrics.append((name, value, fields)),
+    )
+    context = ImmediateContext(object())
+
+    result = asyncio.run(memory.handler({}, context))
+
+    assert result["created"] == 1
+    assert result["failed"] == 1
+    assert result["embedded"] == 1
+    assert advanced == ["exe-good"]
+    assert metrics == [
+        (
+            "memory_generation_threads_failed_total",
+            1,
+            {"error_type": "RuntimeError"},
+        )
+    ]
