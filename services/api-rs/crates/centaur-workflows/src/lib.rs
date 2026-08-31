@@ -57,6 +57,7 @@ const WORKFLOW_HOST_CLAIM_EXTENSION: Duration = Duration::from_secs(5 * 60);
 const WORKFLOW_HOST_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 const WORKFLOW_RECONCILE_INTERVAL_SECS_ENV: &str = "WORKFLOW_RECONCILE_INTERVAL_SECS";
 const DEFAULT_WORKFLOW_RECONCILE_INTERVAL_SECS: u64 = 60;
+const SCHEDULE_FIRST_REGISTRATION_CATCH_UP_GRACE_SECS: i64 = 60;
 const WORKFLOW_ENABLE_MODE_ENV: &str = "WORKFLOW_ENABLE_MODE";
 const WORKFLOW_ALLOWED_NAMES_ENV: &str = "WORKFLOW_ALLOWED_NAMES";
 const MAX_LIST_RUNS_LIMIT: i64 = 1_000;
@@ -2551,10 +2552,7 @@ async fn run_schedule_tick(
                 input: schedule.input.clone(),
                 harness_type: HarnessType::Codex,
             },
-            SpawnOptions {
-                idempotency_key: Some(fire_key.clone()),
-                ..SpawnOptions::default()
-            },
+            scheduled_workflow_spawn_options(fire_key.clone()),
         )
         .await?;
     let next_run_at = next_schedule_time_after_tick(&schedule, input.scheduled_at, Utc::now())
@@ -2574,30 +2572,60 @@ async fn run_schedule_tick(
     }))
 }
 
+fn scheduled_workflow_spawn_options(idempotency_key: String) -> SpawnOptions {
+    // Scheduled workflows may call Slack, tools, or source systems. Centaur
+    // has checkpoints but no durable external-effect ledger, so a failed
+    // attempt cannot prove that replay is side-effect free. Fail closed until
+    // that ledger exists; manual/event workflows retain their normal policy.
+    SpawnOptions {
+        idempotency_key: Some(idempotency_key),
+        max_attempts: Some(1),
+        ..SpawnOptions::default()
+    }
+}
+
 async fn ensure_schedule_tick(
     client: &Client,
     schedule: &RegisteredWorkflowSchedule,
     scheduled_at: DateTime<Utc>,
 ) -> Result<bool, WorkflowRuntimeError> {
-    if has_active_schedule_tick(client, &schedule.schedule_id).await? {
+    let now = Utc::now();
+    let latest = latest_schedule_tick(client, &schedule.schedule_id).await?;
+    if schedule_tick_is_active(latest.as_ref()) {
         return Ok(false);
     }
-    spawn_schedule_tick(client, schedule, scheduled_at).await?;
+    let occurrence = schedule_reconcile_occurrence(schedule, scheduled_at, now, latest)?;
+    spawn_schedule_tick(client, schedule, occurrence).await?;
     Ok(true)
 }
 
-async fn has_active_schedule_tick(
+#[derive(Debug, Clone)]
+struct ScheduleTickRecord {
+    state: String,
+    scheduled_at: DateTime<Utc>,
+}
+
+fn is_terminal_task_state(state: &str) -> bool {
+    matches!(state, "completed" | "failed" | "cancelled")
+}
+
+fn schedule_tick_is_active(tick: Option<&ScheduleTickRecord>) -> bool {
+    tick.is_some_and(|tick| !is_terminal_task_state(&tick.state))
+}
+
+async fn latest_schedule_tick(
     client: &Client,
     schedule_id: &str,
-) -> Result<bool, WorkflowRuntimeError> {
+) -> Result<Option<ScheduleTickRecord>, WorkflowRuntimeError> {
     let (task_table, _) = absurd_queue_tables(WORKFLOW_SCHEDULE_QUEUE)?;
     let row = sqlx::query(&format!(
         r#"
-        select 1
+        select state, (params->>'scheduled_at')::timestamptz as scheduled_at
         from {task_table} t
         where t.task_name = $1
           and t.params->>'schedule_id' = $2
-          and t.state not in {ABSURD_TERMINAL_TASK_STATES}
+          and t.params ? 'scheduled_at'
+        order by (t.params->>'scheduled_at')::timestamptz desc
         limit 1
         "#,
     ))
@@ -2605,7 +2633,81 @@ async fn has_active_schedule_tick(
     .bind(schedule_id)
     .fetch_optional(client.pool())
     .await?;
-    Ok(row.is_some())
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let state: String = row.try_get("state").map_err(|error| {
+        WorkflowRuntimeError::Internal(format!("failed to read schedule tick state: {error}"))
+    })?;
+    let scheduled_at: DateTime<Utc> = row.try_get("scheduled_at").map_err(|error| {
+        WorkflowRuntimeError::Internal(format!("failed to read schedule tick time: {error}"))
+    })?;
+    Ok(Some(ScheduleTickRecord {
+        state,
+        scheduled_at,
+    }))
+}
+
+fn schedule_reconcile_occurrence(
+    schedule: &RegisteredWorkflowSchedule,
+    next_future: DateTime<Utc>,
+    now: DateTime<Utc>,
+    latest: Option<ScheduleTickRecord>,
+) -> Result<DateTime<Utc>, WorkflowRuntimeError> {
+    let WorkflowScheduleKind::Cron { .. } = schedule.kind else {
+        return Ok(next_future);
+    };
+    let missed = latest_cron_occurrence_at_or_before(schedule, now)?;
+    if latest
+        .as_ref()
+        .is_some_and(|tick| tick.scheduled_at < missed)
+        || (latest.is_none()
+            && now.signed_duration_since(missed).num_seconds()
+                <= SCHEDULE_FIRST_REGISTRATION_CATCH_UP_GRACE_SECS)
+    {
+        // Coalesce all downtime into the newest missed occurrence. The tick
+        // itself advances to the next future occurrence after it runs. A
+        // schedule with no durable history gets this only during the short
+        // first-registration grace window.
+        return Ok(missed);
+    }
+    Ok(next_future)
+}
+
+fn latest_cron_occurrence_at_or_before(
+    schedule: &RegisteredWorkflowSchedule,
+    now: DateTime<Utc>,
+) -> Result<DateTime<Utc>, WorkflowRuntimeError> {
+    let WorkflowScheduleKind::Cron { cron } = &schedule.kind else {
+        return Err(WorkflowRuntimeError::Internal(
+            "latest cron occurrence requested for an interval schedule".to_owned(),
+        ));
+    };
+    let timezone = schedule.timezone.parse::<Tz>().map_err(|error| {
+        WorkflowRuntimeError::BadRequest(format!(
+            "invalid timezone {:?} for schedule {:?}: {error}",
+            schedule.timezone, schedule.schedule_id
+        ))
+    })?;
+    let parsed = Schedule::from_str(&normalize_cron_expression(cron)).map_err(|error| {
+        WorkflowRuntimeError::BadRequest(format!(
+            "invalid cron {:?} for schedule {:?}: {error}",
+            cron, schedule.schedule_id
+        ))
+    })?;
+    // `next_back` uses cron's DST-aware `prev_from` implementation. Starting
+    // one second after `now` makes an occurrence exactly at `now` eligible,
+    // while preserving the configured timezone and repeated fall-back hour.
+    parsed
+        .after(&(now.with_timezone(&timezone) + chrono::Duration::seconds(1)))
+        .next_back()
+        .map(|previous| previous.with_timezone(&Utc))
+        .ok_or_else(|| {
+            WorkflowRuntimeError::BadRequest(format!(
+                "cron {:?} for schedule {:?} produced no previous run",
+                cron, schedule.schedule_id
+            ))
+        })
 }
 
 async fn spawn_schedule_tick(
@@ -2626,6 +2728,8 @@ async fn spawn_schedule_tick(
                     schedule.schedule_id,
                     scheduled_at.to_rfc3339()
                 )),
+                // The tick only enqueues an idempotent occurrence. Keep the
+                // durable scheduler retry policy for transient queue errors.
                 max_attempts: Some(10),
                 retry_strategy: Some(RetryStrategy {
                     kind: RetryKind::Fixed,
@@ -5042,6 +5146,161 @@ mod tests {
         let next = next_schedule_time_after_tick(&schedule, scheduled_at, now).unwrap();
 
         assert_eq!(next, Utc.with_ymd_and_hms(2026, 6, 16, 12, 30, 0).unwrap());
+    }
+
+    #[test]
+    fn cron_reconcile_coalesces_downtime_to_one_latest_missed_occurrence() {
+        let schedule = normalize_schedule(json!({
+            "workflow_name": "weekday_report",
+            "schedule_id": "weekday_report",
+            "cron": "0 * * * *",
+            "timezone": "UTC",
+            "enabled": true,
+        }))
+        .unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 6, 16, 12, 25, 0).unwrap();
+        let next_future = Utc.with_ymd_and_hms(2026, 6, 16, 13, 0, 0).unwrap();
+        let latest = Some(ScheduleTickRecord {
+            state: "completed".to_owned(),
+            scheduled_at: Utc.with_ymd_and_hms(2026, 6, 16, 10, 0, 0).unwrap(),
+        });
+        assert_eq!(
+            schedule_reconcile_occurrence(&schedule, next_future, now, latest).unwrap(),
+            Utc.with_ymd_and_hms(2026, 6, 16, 12, 0, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn cron_reconcile_does_not_repeat_already_recorded_missed_occurrence() {
+        let schedule = normalize_schedule(json!({
+            "workflow_name": "hourly_report",
+            "schedule_id": "hourly_report",
+            "cron": "0 * * * *",
+            "timezone": "UTC",
+            "enabled": true,
+        }))
+        .unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 6, 16, 12, 25, 0).unwrap();
+        let next_future = Utc.with_ymd_and_hms(2026, 6, 16, 13, 0, 0).unwrap();
+        let latest = Some(ScheduleTickRecord {
+            state: "completed".to_owned(),
+            scheduled_at: Utc.with_ymd_and_hms(2026, 6, 16, 12, 0, 0).unwrap(),
+        });
+
+        assert_eq!(
+            schedule_reconcile_occurrence(&schedule, next_future, now, latest).unwrap(),
+            next_future
+        );
+    }
+
+    #[test]
+    fn active_overdue_tick_blocks_a_second_reconciliation() {
+        let tick = ScheduleTickRecord {
+            state: "running".to_owned(),
+            scheduled_at: Utc.with_ymd_and_hms(2026, 6, 16, 10, 0, 0).unwrap(),
+        };
+        assert!(schedule_tick_is_active(Some(&tick)));
+        assert!(!schedule_tick_is_active(None));
+        assert!(!schedule_tick_is_active(Some(&ScheduleTickRecord {
+            state: "completed".to_owned(),
+            scheduled_at: tick.scheduled_at,
+        })));
+    }
+
+    #[test]
+    fn cron_reconcile_keeps_the_next_future_occurrence_on_time() {
+        let schedule = normalize_schedule(json!({
+            "workflow_name": "hourly_report",
+            "schedule_id": "hourly_report",
+            "cron": "0 * * * *",
+            "timezone": "UTC",
+            "enabled": true,
+        }))
+        .unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 6, 16, 12, 0, 0).unwrap();
+        let next_future = Utc.with_ymd_and_hms(2026, 6, 16, 13, 0, 0).unwrap();
+        let latest = Some(ScheduleTickRecord {
+            state: "completed".to_owned(),
+            scheduled_at: Utc.with_ymd_and_hms(2026, 6, 16, 12, 0, 0).unwrap(),
+        });
+
+        assert_eq!(
+            schedule_reconcile_occurrence(&schedule, next_future, now, latest).unwrap(),
+            next_future
+        );
+    }
+
+    #[test]
+    fn cron_first_registration_catches_up_only_within_grace() {
+        let schedule = normalize_schedule(json!({
+            "workflow_name": "hourly_report",
+            "schedule_id": "hourly_report",
+            "cron": "0 * * * *",
+            "timezone": "UTC",
+            "enabled": true,
+        }))
+        .unwrap();
+        let next_future = Utc.with_ymd_and_hms(2026, 6, 16, 13, 0, 0).unwrap();
+        let within_grace = Utc.with_ymd_and_hms(2026, 6, 16, 12, 0, 30).unwrap();
+        assert_eq!(
+            schedule_reconcile_occurrence(&schedule, next_future, within_grace, None).unwrap(),
+            Utc.with_ymd_and_hms(2026, 6, 16, 12, 0, 0).unwrap()
+        );
+
+        let outside_grace = Utc.with_ymd_and_hms(2026, 6, 16, 12, 2, 0).unwrap();
+        assert_eq!(
+            schedule_reconcile_occurrence(&schedule, next_future, outside_grace, None).unwrap(),
+            next_future
+        );
+    }
+
+    #[test]
+    fn cron_reconcile_preserves_dst_fallback_occurrence_timezone() {
+        let schedule = normalize_schedule(json!({
+            "workflow_name": "daily_report",
+            "schedule_id": "daily_report",
+            "cron": "30 1 * * *",
+            "timezone": "America/Los_Angeles",
+            "enabled": true,
+        }))
+        .unwrap();
+        // 09:35 UTC is 01:35 PST after the 2026 fall-back transition.
+        let now = Utc.with_ymd_and_hms(2026, 11, 1, 9, 35, 0).unwrap();
+        assert_eq!(
+            latest_cron_occurrence_at_or_before(&schedule, now).unwrap(),
+            Utc.with_ymd_and_hms(2026, 11, 1, 9, 30, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn delayed_interval_tick_coalesces_multiple_intervals_once() {
+        let schedule = normalize_schedule(json!({
+            "workflow_name": "hourly_report",
+            "schedule_id": "hourly_report",
+            "interval_seconds": 600,
+            "enabled": true,
+        }))
+        .unwrap();
+        let scheduled_at = Utc.with_ymd_and_hms(2026, 6, 16, 12, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 6, 16, 12, 35, 0).unwrap();
+        let next = next_schedule_time_after_tick(&schedule, scheduled_at, now).unwrap();
+        assert_eq!(next, Utc.with_ymd_and_hms(2026, 6, 16, 12, 40, 0).unwrap());
+        // Re-running the same tick uses the same scheduled occurrence and
+        // therefore computes the same single next future occurrence.
+        assert_eq!(
+            next_schedule_time_after_tick(&schedule, scheduled_at, now).unwrap(),
+            next
+        );
+    }
+
+    #[test]
+    fn scheduled_workflows_fail_closed_without_a_side_effect_ledger() {
+        let options = scheduled_workflow_spawn_options("schedule:test:occurrence".to_owned());
+        assert_eq!(options.max_attempts, Some(1));
+        assert_eq!(
+            options.idempotency_key.as_deref(),
+            Some("schedule:test:occurrence")
+        );
     }
 
     #[test]
