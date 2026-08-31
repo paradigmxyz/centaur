@@ -201,6 +201,18 @@ class WorkflowContext:
             }
         )
 
+    async def update_slack(self, channel: str, ts: str, text: str, **kwargs: Any) -> Any:
+        """Update a message previously posted by this workflow's Slack app."""
+        return await self._rpc.request(
+            {
+                "type": "ctx.update_slack",
+                "channel": channel,
+                "ts": ts,
+                "text": text,
+                "args": kwargs,
+            }
+        )
+
 
 def duration_seconds(value: dt.timedelta | int | float) -> float:
     if isinstance(value, dt.timedelta):

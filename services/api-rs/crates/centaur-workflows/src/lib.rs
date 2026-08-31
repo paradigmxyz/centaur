@@ -3671,6 +3671,10 @@ async fn handle_python_context_request(
                 Err(error) => Err(error.to_string()),
             }
         }
+        Some("ctx.update_slack") => match update_python_slack_message(message).await {
+            Ok(value) => Ok(value),
+            Err(error) => Err(error.to_string()),
+        },
         other => Err(format!("unsupported context request type {other:?}")),
     };
     Ok(match result {
@@ -4365,6 +4369,25 @@ async fn post_python_slack_message(
         .map_err(WorkflowRuntimeError::from)
 }
 
+async fn update_python_slack_message(message: &Value) -> Result<Value, WorkflowRuntimeError> {
+    let channel = required_python_string(message, "channel", "ctx.update_slack")?;
+    let ts = required_python_string(message, "ts", "ctx.update_slack")?;
+    let text = required_python_string(message, "text", "ctx.update_slack")?;
+    let args = message.get("args").cloned().unwrap_or_else(|| json!({}));
+    let payload = python_slack_update_payload(channel, ts, text, &args)?;
+
+    let token = env::var("SLACK_BOT_TOKEN")
+        .or_else(|_| env::var("SLACK_BOT_TOKEN_OVERRIDE"))
+        .map_err(|_| {
+            WorkflowRuntimeError::BadRequest(
+                "SLACK_BOT_TOKEN or SLACK_BOT_TOKEN_OVERRIDE must be set".to_owned(),
+            )
+        })?;
+    let response = send_slack_update(&token, payload).await?;
+    serde_json::to_value(slack_update_result_from_response(channel, ts, response))
+        .map_err(WorkflowRuntimeError::from)
+}
+
 fn python_slack_message_payload(
     channel: &str,
     text: &str,
@@ -4408,6 +4431,44 @@ fn python_slack_message_payload(
     payload
 }
 
+fn python_slack_update_payload(
+    channel: &str,
+    ts: &str,
+    text: &str,
+    args: &Value,
+) -> Result<Value, WorkflowRuntimeError> {
+    for (field, value) in [("channel", channel), ("ts", ts), ("text", text)] {
+        if value.trim().is_empty() {
+            return Err(WorkflowRuntimeError::BadRequest(format!(
+                "ctx.update_slack requires non-empty {field}"
+            )));
+        }
+    }
+    if !args.is_object() {
+        return Err(WorkflowRuntimeError::BadRequest(
+            "ctx.update_slack args must be an object".to_owned(),
+        ));
+    }
+
+    let mut payload = json!({
+        "channel": channel,
+        "ts": ts,
+        "text": text,
+    });
+    // Keep this allowlist deliberately narrower than chat.postMessage. In
+    // particular, never forward caller-selected identity, token, or endpoint
+    // fields. `mrkdwn` is retained for heartbeat's common message contract.
+    if let Some(blocks) = args.get("blocks")
+        && blocks.is_array()
+    {
+        payload["blocks"] = blocks.clone();
+    }
+    if let Some(mrkdwn) = args.get("mrkdwn").and_then(Value::as_bool) {
+        payload["mrkdwn"] = json!(mrkdwn);
+    }
+    Ok(payload)
+}
+
 async fn send_slack_message(token: &str, payload: Value) -> Result<Value, WorkflowRuntimeError> {
     let response: Value = reqwest::Client::new()
         .post("https://slack.com/api/chat.postMessage")
@@ -4429,6 +4490,27 @@ async fn send_slack_message(token: &str, payload: Value) -> Result<Value, Workfl
     Ok(response)
 }
 
+async fn send_slack_update(token: &str, payload: Value) -> Result<Value, WorkflowRuntimeError> {
+    let response: Value = reqwest::Client::new()
+        .post("https://slack.com/api/chat.update")
+        .bearer_auth(token)
+        .json(&payload)
+        .send()
+        .await?
+        .json()
+        .await?;
+    if response.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err(WorkflowRuntimeError::Upstream(format!(
+            "Slack chat.update failed: {}",
+            response
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown_error")
+        )));
+    }
+    Ok(response)
+}
+
 fn slack_post_result_from_response(channel: &str, response: Value) -> SlackPostResult {
     SlackPostResult {
         channel: response
@@ -4440,6 +4522,21 @@ fn slack_post_result_from_response(channel: &str, response: Value) -> SlackPostR
             .get("ts")
             .and_then(Value::as_str)
             .unwrap_or("")
+            .to_owned(),
+    }
+}
+
+fn slack_update_result_from_response(channel: &str, ts: &str, response: Value) -> SlackPostResult {
+    SlackPostResult {
+        channel: response
+            .get("channel")
+            .and_then(Value::as_str)
+            .unwrap_or(channel)
+            .to_owned(),
+        ts: response
+            .get("ts")
+            .and_then(Value::as_str)
+            .unwrap_or(ts)
             .to_owned(),
     }
 }
@@ -5369,6 +5466,61 @@ mod tests {
 
         assert!(payload.get("username").is_none());
         assert!(payload.get("icon_emoji").is_none());
+    }
+
+    #[test]
+    fn python_slack_update_payload_forwards_only_safe_fields() {
+        let payload = python_slack_update_payload(
+            "C123",
+            "1710000000.000100",
+            "Heartbeat is healthy.",
+            &json!({
+                "blocks": [{"type": "section"}],
+                "mrkdwn": true,
+                "reply_broadcast": false,
+                "username": "attacker-controlled",
+                "icon_emoji": ":skull:",
+                "token": "xoxb-not-forwarded",
+                "endpoint": "https://attacker.invalid",
+                "unfurl_links": true,
+                "unfurl_media": true,
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(
+            payload,
+            json!({
+                "channel": "C123",
+                "ts": "1710000000.000100",
+                "text": "Heartbeat is healthy.",
+                "blocks": [{"type": "section"}],
+                "mrkdwn": true,
+            })
+        );
+    }
+
+    #[test]
+    fn python_slack_update_payload_requires_non_empty_fields() {
+        for (channel, ts, text, field) in [
+            ("", "1710000000.000100", "hello", "channel"),
+            ("   ", "1710000000.000100", "hello", "channel"),
+            ("C123", "", "hello", "ts"),
+            ("C123", "   ", "hello", "ts"),
+            ("C123", "1710000000.000100", "", "text"),
+            ("C123", "1710000000.000100", "   ", "text"),
+        ] {
+            let error = python_slack_update_payload(channel, ts, text, &json!({})).unwrap_err();
+            assert!(error.to_string().contains(&format!("non-empty {field}")));
+        }
+    }
+
+    #[test]
+    fn python_slack_update_result_is_stable_when_slack_omits_identifiers() {
+        let result = slack_update_result_from_response("C123", "1710000000.000100", json!({}));
+
+        assert_eq!(result.channel, "C123");
+        assert_eq!(result.ts, "1710000000.000100");
     }
 
     #[test]

@@ -88,6 +88,8 @@ class RequestRpc(FakeRpc):
             }
         if message_type == "ctx.post_to_slack":
             return {"channel": payload["channel"], "ts": "1710000000.000100"}
+        if message_type == "ctx.update_slack":
+            return {"channel": payload["channel"], "ts": payload["ts"]}
         if message_type == "ctx.sleep":
             return {"slept": True}
         if message_type == "ctx.event.wait":
@@ -466,6 +468,40 @@ class WorkflowHostTests(unittest.TestCase):
                         "username": "The Date Goblin",
                         "icon_emoji": ":female_mage:",
                     },
+                }
+            ],
+        )
+
+    def test_update_slack_sends_exact_rpc_payload(self) -> None:
+        host = load_workflow_host()
+        rpc = RequestRpc()
+        ctx = host.WorkflowContext(
+            rpc,
+            run_id="run-123",
+            task_id="task-456",
+            workflow_name="sample",
+        )
+
+        result = asyncio.run(
+            ctx.update_slack(
+                "C12345678",
+                "1710000000.000100",
+                "Heartbeat is healthy.",
+                blocks=[{"type": "section"}],
+                mrkdwn=True,
+            )
+        )
+
+        self.assertEqual(result, {"channel": "C12345678", "ts": "1710000000.000100"})
+        self.assertEqual(
+            rpc.requests,
+            [
+                {
+                    "type": "ctx.update_slack",
+                    "channel": "C12345678",
+                    "ts": "1710000000.000100",
+                    "text": "Heartbeat is healthy.",
+                    "args": {"blocks": [{"type": "section"}], "mrkdwn": True},
                 }
             ],
         )
