@@ -1963,7 +1963,7 @@ class HeartbeatState:
                 )
         except Exception as exc:
             message = str(exc)
-            if "invalid, expired, or already used" in message or "reviewer" in message:
+            if "invalid, expired, or already used" in message or "already used" in message or "reviewer" in message:
                 raise PermissionError(message) from exc
             if "changed after this action" in message:
                 raise RuntimeError(message) from exc

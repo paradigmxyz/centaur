@@ -41,6 +41,7 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
             "0057_heartbeat_rls_principal_scope.sql",
             "0058_heartbeat_memory_and_draft_facades.sql",
             "0059_heartbeat_feedback_semantics.sql",
+            "0060_heartbeat_draft_grant_replay.sql",
         ):
             await self.pool.execute((MIGRATIONS / migration).read_text())
         await self.pool.execute(
@@ -1033,6 +1034,36 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
             actor_ref="U-REVIEWER",
             provider_event_key="draft-prepare-1",
         )
+        replayed_draft = await feedback.apply_action(
+            token=item_delivery["tokens"][0]["token"],
+            actor_ref="U-REVIEWER",
+            provider_event_key="draft-prepare-1",
+        )
+        self.assertEqual(replayed_draft["draft_grant"], draft_result["draft_grant"])
+        with self.assertRaises(PermissionError):
+            await feedback.apply_action(
+                token=item_delivery["tokens"][0]["token"],
+                actor_ref="U-REVIEWER",
+                provider_event_key="draft-prepare-other-event",
+            )
+        admin_connection = await asyncpg.connect(DATABASE_URL)
+        try:
+            persisted_action = await admin_connection.fetchval(
+                "select result::text from heartbeat_action_tokens where token_hash=$1",
+                hashlib.sha256(item_delivery["tokens"][0]["token"].encode()).hexdigest(),
+            )
+            self.assertNotIn("draft_grant", persisted_action)
+            self.assertNotIn(draft_result["draft_grant"], persisted_action)
+            persisted_grant = await admin_connection.fetchval(
+                "select grant_hash from heartbeat_draft_grants where item_id=$1",
+                item_id,
+            )
+            self.assertEqual(
+                persisted_grant,
+                hashlib.sha256(draft_result["draft_grant"].encode()).hexdigest(),
+            )
+        finally:
+            await admin_connection.close()
         admin_connection = await asyncpg.connect(DATABASE_URL)
         try:
             await admin_connection.execute(
