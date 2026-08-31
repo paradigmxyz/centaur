@@ -293,6 +293,33 @@ api-rs should call the tool runtime and return JSON output. If api-rs tool
 runtime is incomplete during the POC, this can temporarily proxy to the existing
 Python API, but the target design is api-rs-owned tool routing.
 
+The compatibility proxy path may be restricted with the optional
+`WORKFLOW_TOOL_ALLOWLIST_JSON` environment variable. Its shape is a JSON object
+mapping workflow names to tool names to exact method arrays, for example:
+
+```json
+{"daily_digest":{"slack":["send_message"],"time":["now"]}}
+```
+
+When a workflow has an entry, every `ctx.call_tool` tool/method pair must be
+listed. Workflows without an entry retain the legacy unrestricted behavior when
+the variable is unset. A present-but-empty value is malformed, as are invalid
+configured JSON and invalid mapping shapes; all fail closed. Authorization uses
+the workflow name carried by the api-rs-owned workflow task input; fields
+supplied in a workflow's RPC request
+cannot select another workflow's policy. Built-in context helpers, including
+the Rust `time.now` helper, are not subject to this tool-method mapping.
+
+Proxy transport failures, non-success responses, and invalid JSON responses are
+reported with bounded generic error codes (and HTTP status for response
+failures). Provider response bodies and request details are not copied into
+workflow errors, checkpoints, or logs.
+
+Phai's production deployment must assert the exact `heartbeat_run` and
+`heartbeat_feedback` workflow entries, including the complete expected
+tool-method sets. It must reject missing, extra, or mismatched entries; parsing
+valid JSON or checking only that the entries are non-empty is insufficient.
+
 ### `ctx.post_to_slack`
 
 `ctx.post_to_slack` should be implemented through the Slack tool or a small

@@ -47,6 +47,8 @@ pub const WORKFLOW_SCHEDULE_TASK: &str = "centaur.workflow.schedule_tick";
 const PYTHON_HOST_ENV: &str = "PYTHON_WORKFLOW_HOST_PATH";
 const PYTHON_HOST_INTERPRETER_ENV: &str = "PYTHON_WORKFLOW_HOST_PYTHON";
 const WORKFLOW_TOOL_API_URL_ENV: &str = "WORKFLOW_TOOL_API_URL";
+const WORKFLOW_TOOL_ALLOWLIST_ENV: &str = "WORKFLOW_TOOL_ALLOWLIST_JSON";
+const MAX_WORKFLOW_TOOL_IDENTIFIER_BYTES: usize = 128;
 const DEFAULT_AGENT_IDLE_TIMEOUT_MS: u64 = 60_000;
 const DEFAULT_AGENT_MAX_DURATION_MS: u64 = 30 * 60 * 1_000;
 const DEFAULT_AGENT_BATCH_CONCURRENCY: usize = 4;
@@ -3687,10 +3689,14 @@ async fn handle_python_context_request(
                 Err(error) => Err(error.to_string()),
             }
         }
-        Some("ctx.call_tool") => match call_python_workflow_tool(message).await {
-            Ok(value) => Ok(value),
-            Err(error) => Err(error.to_string()),
-        },
+        Some("ctx.call_tool") => {
+            // The task input is supplied by api-rs. Do not use a workflow-supplied
+            // identity field from the RPC message when selecting authorization.
+            match call_python_workflow_tool(&input.workflow_name, message).await {
+                Ok(value) => Ok(value),
+                Err(error) => Err(error.to_string()),
+            }
+        }
         Some("ctx.post_to_slack") => {
             match post_python_slack_message(message, ctx, &request_id).await {
                 Ok(value) => Ok(value),
@@ -4290,7 +4296,135 @@ fn run_time_now_tool() -> ToolResult {
     }
 }
 
-async fn call_python_workflow_tool(message: &Value) -> Result<Value, WorkflowRuntimeError> {
+type WorkflowToolAllowlist = BTreeMap<String, BTreeMap<String, BTreeSet<String>>>;
+
+fn validate_workflow_tool_identifier(kind: &str, value: &str) -> Result<(), WorkflowRuntimeError> {
+    let invalid = || {
+        WorkflowRuntimeError::BadRequest(format!(
+            "{WORKFLOW_TOOL_ALLOWLIST_ENV} contains an invalid {kind} identifier"
+        ))
+    };
+    if value.is_empty()
+        || value != value.trim()
+        || value.chars().any(char::is_control)
+        || value.len() > MAX_WORKFLOW_TOOL_IDENTIFIER_BYTES
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+fn parse_workflow_tool_allowlist(raw: &str) -> Result<WorkflowToolAllowlist, WorkflowRuntimeError> {
+    let value: Value = serde_json::from_str(raw.trim()).map_err(|_| {
+        WorkflowRuntimeError::BadRequest(format!(
+            "{WORKFLOW_TOOL_ALLOWLIST_ENV} must be valid JSON"
+        ))
+    })?;
+    let workflows = value.as_object().ok_or_else(|| {
+        WorkflowRuntimeError::BadRequest(format!(
+            "{WORKFLOW_TOOL_ALLOWLIST_ENV} must be a JSON object"
+        ))
+    })?;
+    let mut allowlist = BTreeMap::new();
+    for (workflow_name, raw_tools) in workflows {
+        validate_workflow_tool_identifier("workflow", workflow_name)?;
+        let tools = raw_tools.as_object().ok_or_else(|| {
+            WorkflowRuntimeError::BadRequest(format!(
+                "{WORKFLOW_TOOL_ALLOWLIST_ENV} workflow entries must be JSON objects"
+            ))
+        })?;
+        let mut parsed_tools = BTreeMap::new();
+        for (tool_name, raw_methods) in tools {
+            validate_workflow_tool_identifier("tool", tool_name)?;
+            let methods = raw_methods.as_array().ok_or_else(|| {
+                WorkflowRuntimeError::BadRequest(format!(
+                    "{WORKFLOW_TOOL_ALLOWLIST_ENV} tool entries must be arrays"
+                ))
+            })?;
+            let mut parsed_methods = BTreeSet::new();
+            for raw_method in methods {
+                let method = raw_method.as_str().ok_or_else(|| {
+                    WorkflowRuntimeError::BadRequest(format!(
+                        "{WORKFLOW_TOOL_ALLOWLIST_ENV} methods must be strings"
+                    ))
+                })?;
+                validate_workflow_tool_identifier("method", method)?;
+                parsed_methods.insert(method.to_owned());
+            }
+            parsed_tools.insert(tool_name.to_owned(), parsed_methods);
+        }
+        allowlist.insert(workflow_name.to_owned(), parsed_tools);
+    }
+    Ok(allowlist)
+}
+
+fn workflow_tool_allowlist_from_env() -> Result<Option<WorkflowToolAllowlist>, WorkflowRuntimeError>
+{
+    let raw = match env::var(WORKFLOW_TOOL_ALLOWLIST_ENV) {
+        Ok(raw) => raw,
+        Err(env::VarError::NotPresent) => return Ok(None),
+        Err(env::VarError::NotUnicode(_)) => {
+            return Err(WorkflowRuntimeError::BadRequest(format!(
+                "{WORKFLOW_TOOL_ALLOWLIST_ENV} must be valid UTF-8"
+            )));
+        }
+    };
+    parse_workflow_tool_allowlist(&raw).map(Some)
+}
+
+fn workflow_tool_method_allowed(
+    allowlist: Option<&WorkflowToolAllowlist>,
+    workflow_name: &str,
+    tool: &str,
+    method: &str,
+) -> bool {
+    let Some(allowlist) = allowlist else {
+        return true;
+    };
+    let Some(tools) = allowlist.get(workflow_name) else {
+        return true;
+    };
+    tools
+        .get(tool)
+        .is_some_and(|methods| methods.contains(method))
+}
+
+fn authorize_workflow_tool_method(
+    workflow_name: &str,
+    tool: &str,
+    method: &str,
+) -> Result<(), WorkflowRuntimeError> {
+    let allowlist = workflow_tool_allowlist_from_env()?;
+    if workflow_tool_method_allowed(allowlist.as_ref(), workflow_name, tool, method) {
+        return Ok(());
+    }
+    Err(WorkflowRuntimeError::Disabled(
+        "ctx.call_tool tool/method is not allowed for this workflow".to_owned(),
+    ))
+}
+
+fn tool_proxy_transport_error() -> WorkflowRuntimeError {
+    WorkflowRuntimeError::Upstream("ctx.call_tool proxy_transport_error".to_owned())
+}
+
+fn tool_proxy_http_error(status: reqwest::StatusCode) -> WorkflowRuntimeError {
+    WorkflowRuntimeError::Upstream(format!(
+        "ctx.call_tool proxy_http_error status={}",
+        status.as_u16()
+    ))
+}
+
+fn tool_proxy_json_error(status: reqwest::StatusCode) -> WorkflowRuntimeError {
+    WorkflowRuntimeError::Upstream(format!(
+        "ctx.call_tool proxy_invalid_json status={}",
+        status.as_u16()
+    ))
+}
+
+async fn call_python_workflow_tool(
+    workflow_name: &str,
+    message: &Value,
+) -> Result<Value, WorkflowRuntimeError> {
     let tool = message
         .get("tool")
         .and_then(Value::as_str)
@@ -4311,25 +4445,29 @@ async fn call_python_workflow_tool(message: &Value) -> Result<Value, WorkflowRun
     if tool == "time" && matches!(method, "now" | "time_now") {
         return serde_json::to_value(run_time_now_tool()).map_err(WorkflowRuntimeError::from);
     }
+    authorize_workflow_tool_method(workflow_name, tool, method)?;
 
     let base_url = env::var(WORKFLOW_TOOL_API_URL_ENV).map_err(|_| {
         WorkflowRuntimeError::BadRequest(format!(
-            "{WORKFLOW_TOOL_API_URL_ENV} must be set for ctx.call_tool({tool}.{method})"
+            "{WORKFLOW_TOOL_API_URL_ENV} must be set for ctx.call_tool"
         ))
     })?;
     let base_url = base_url.trim_end_matches('/');
     let url = format!("{base_url}/tools/{tool}/{method}");
     let args = message.get("args").cloned().unwrap_or_else(|| json!({}));
     let request = reqwest::Client::new().post(&url).json(&args);
-    let response = request.send().await?;
+    let response = request
+        .send()
+        .await
+        .map_err(|_| tool_proxy_transport_error())?;
     let status = response.status();
-    let body: Value = response.json().await.unwrap_or_else(|_| json!({}));
     if !status.is_success() {
-        return Err(WorkflowRuntimeError::BadRequest(format!(
-            "ctx.call_tool({tool}.{method}) failed with status {status}: {body}"
-        )));
+        return Err(tool_proxy_http_error(status));
     }
-    Ok(body)
+    response
+        .json()
+        .await
+        .map_err(|_| tool_proxy_json_error(status))
 }
 
 async fn post_tool_result_to_slack(
@@ -6170,17 +6308,141 @@ mod tests {
 
     #[tokio::test]
     async fn ctx_call_tool_supports_builtin_time_now() {
-        let value = call_python_workflow_tool(&json!({
-            "type": "ctx.call_tool",
-            "tool": "time",
-            "method": "now",
-            "args": {},
-        }))
+        let value = call_python_workflow_tool(
+            "any-workflow",
+            &json!({
+                "type": "ctx.call_tool",
+                "tool": "time",
+                "method": "now",
+                "args": {},
+            }),
+        )
         .await
         .unwrap();
         assert_eq!(value["tool"], json!("time"));
         assert_eq!(value["method"], json!("now"));
         assert!(value.pointer("/output/utc").is_some());
+    }
+
+    #[test]
+    fn workflow_tool_allowlist_requires_exact_methods_and_scopes_by_workflow() {
+        let allowlist = parse_workflow_tool_allowlist(
+            r#"{
+                "daily_digest": {"slack": ["send_message"], "time": ["now"]},
+                "other_workflow": {"slack": ["read_message"]}
+            }"#,
+        )
+        .unwrap();
+
+        assert!(workflow_tool_method_allowed(
+            Some(&allowlist),
+            "daily_digest",
+            "slack",
+            "send_message"
+        ));
+        assert!(!workflow_tool_method_allowed(
+            Some(&allowlist),
+            "daily_digest",
+            "slack",
+            "delete_message"
+        ));
+        assert!(!workflow_tool_method_allowed(
+            Some(&allowlist),
+            "other_workflow",
+            "slack",
+            "send_message"
+        ));
+        assert!(!workflow_tool_method_allowed(
+            Some(&allowlist),
+            "daily_digest",
+            "github",
+            "list"
+        ));
+    }
+
+    #[test]
+    fn workflow_tool_allowlist_preserves_unconfigured_workflow_compatibility() {
+        let allowlist = parse_workflow_tool_allowlist(r#"{"configured": {"slack": []}}"#).unwrap();
+
+        assert!(workflow_tool_method_allowed(
+            None,
+            "configured",
+            "slack",
+            "send_message"
+        ));
+        assert!(workflow_tool_method_allowed(
+            Some(&allowlist),
+            "unconfigured",
+            "slack",
+            "send_message"
+        ));
+    }
+
+    #[test]
+    fn workflow_tool_allowlist_rejects_malformed_configuration() {
+        for raw in [
+            "not-json",
+            "",
+            " ",
+            "[]",
+            r#"{"workflow": {"slack": "send_message"}}"#,
+            r#"{"workflow": {"slack": ["send_message", 1]}}"#,
+            r#"{" workflow": {"slack": ["send_message"]}}"#,
+            r#"{"workflow": {"slack ": ["send_message"]}}"#,
+            r#"{"workflow": {"slack": ["send_message "]}}"#,
+            r#"{"workflow\n": {"slack": ["send_message"]}}"#,
+            r#"{"workflow": {"slack": ["send\u0000message"]}}"#,
+        ] {
+            assert!(parse_workflow_tool_allowlist(raw).is_err(), "config: {raw}");
+        }
+        let overlong_workflow = format!(
+            r#"{{"{}": {{"slack": ["send_message"]}}}}"#,
+            "w".repeat(MAX_WORKFLOW_TOOL_IDENTIFIER_BYTES + 1)
+        );
+        let overlong_tool = format!(
+            r#"{{"workflow": {{"{}": ["send_message"]}}}}"#,
+            "t".repeat(MAX_WORKFLOW_TOOL_IDENTIFIER_BYTES + 1)
+        );
+        let overlong_method = format!(
+            r#"{{"workflow": {{"slack": ["{}"]}}}}"#,
+            "m".repeat(MAX_WORKFLOW_TOOL_IDENTIFIER_BYTES + 1)
+        );
+        for raw in [overlong_workflow, overlong_tool, overlong_method] {
+            assert!(
+                parse_workflow_tool_allowlist(&raw).is_err(),
+                "config: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_proxy_errors_are_bounded_and_do_not_include_request_or_response_data() {
+        let sensitive = [
+            "provider response body",
+            "bearer secret token",
+            "query text",
+            "request header",
+            "request payload",
+        ];
+        let errors = [
+            tool_proxy_transport_error(),
+            tool_proxy_http_error(reqwest::StatusCode::UNAUTHORIZED),
+            tool_proxy_json_error(reqwest::StatusCode::OK),
+        ];
+        for error in errors {
+            let rendered = error.to_string();
+            assert!(rendered.len() <= 128);
+            for value in sensitive {
+                assert!(
+                    !rendered.contains(value),
+                    "error leaked {value:?}: {rendered}"
+                );
+            }
+        }
+        assert_eq!(
+            tool_proxy_http_error(reqwest::StatusCode::UNAUTHORIZED).to_string(),
+            "ctx.call_tool proxy_http_error status=401"
+        );
     }
 
     #[test]
