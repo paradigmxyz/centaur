@@ -12,6 +12,15 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "services" / "workflow-python"))
 
 
 def _load():
+    api_module = sys.modules.get("api")
+    if api_module is not None and not hasattr(api_module, "__path__"):
+        for module_name in (
+            "api.metrics",
+            "api.runtime_control",
+            "api.workflow_engine",
+            "api",
+        ):
+            sys.modules.pop(module_name, None)
     return importlib.import_module("workflows.memory_generation")
 
 
