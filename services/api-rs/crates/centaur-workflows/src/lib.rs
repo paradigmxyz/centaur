@@ -2549,7 +2549,7 @@ async fn run_schedule_tick(
             WORKFLOW_TASK,
             WorkflowTaskInput {
                 workflow_name: schedule.workflow_name.clone(),
-                input: schedule.input.clone(),
+                input: schedule_workflow_input(&schedule, input.scheduled_at),
                 harness_type: HarnessType::Codex,
             },
             scheduled_workflow_spawn_options(fire_key.clone()),
@@ -2570,6 +2570,30 @@ async fn run_schedule_tick(
         "workflow_created": workflow_spawn.created,
         "next_run_at": next_run_at.to_rfc3339(),
     }))
+}
+
+fn schedule_workflow_input(
+    schedule: &RegisteredWorkflowSchedule,
+    scheduled_at: DateTime<Utc>,
+) -> Value {
+    let scheduled_for = scheduled_at.to_rfc3339();
+    let mut input = schedule.input.as_object().cloned().unwrap_or_default();
+    input.insert("scheduled_for".to_owned(), json!(&scheduled_for));
+
+    let metadata = input.entry("metadata").or_insert_with(|| json!({}));
+    if !metadata.is_object() {
+        *metadata = json!({});
+    }
+    let metadata = metadata
+        .as_object_mut()
+        .expect("metadata was normalized to an object");
+    metadata.insert("source".to_owned(), json!("workflow_schedule"));
+    metadata.insert("workflow_name".to_owned(), json!(&schedule.workflow_name));
+    metadata.insert("no_delivery".to_owned(), json!(schedule.no_delivery));
+    metadata.insert("schedule_id".to_owned(), json!(&schedule.schedule_id));
+    metadata.insert("scheduled_for".to_owned(), json!(&scheduled_for));
+
+    Value::Object(input)
 }
 
 fn scheduled_workflow_spawn_options(idempotency_key: String) -> SpawnOptions {
@@ -5157,6 +5181,197 @@ mod tests {
             schedule.input.pointer("/metadata/no_delivery"),
             Some(&json!(true))
         );
+    }
+
+    #[test]
+    fn scheduled_cron_input_carries_the_authoritative_occurrence() {
+        let schedule = normalize_schedule(json!({
+            "workflow_name": "hourly_report",
+            "schedule_id": "hourly_report",
+            "cron": "0 * * * *",
+            "timezone": "UTC",
+            "enabled": true,
+            "no_delivery": true,
+            "input": {"report": "daily", "metadata": {"keep": "this"}},
+        }))
+        .unwrap();
+        let scheduled_at = Utc.with_ymd_and_hms(2026, 6, 16, 12, 0, 0).unwrap();
+        let child_input = schedule_workflow_input(&schedule, scheduled_at);
+        let scheduled_for = scheduled_at.to_rfc3339();
+
+        assert_eq!(child_input["report"], json!("daily"));
+        assert_eq!(child_input["scheduled_for"], json!(scheduled_for));
+        assert_eq!(
+            child_input["metadata"],
+            json!({
+                "keep": "this",
+                "source": "workflow_schedule",
+                "workflow_name": "hourly_report",
+                "no_delivery": true,
+                "schedule_id": "hourly_report",
+                "scheduled_for": scheduled_for,
+            })
+        );
+    }
+
+    #[test]
+    fn scheduled_cron_input_overwrites_caller_provenance_spoof() {
+        let schedule = normalize_schedule(json!({
+            "workflow_name": "hourly_report",
+            "schedule_id": "authoritative_schedule",
+            "cron": "0 * * * *",
+            "timezone": "UTC",
+            "enabled": true,
+            "no_delivery": true,
+            "input": {
+                "scheduled_for": "1999-01-01T00:00:00Z",
+                "metadata": {
+                    "schedule_id": "caller_schedule",
+                    "scheduled_for": "1999-01-01T00:00:00Z",
+                    "no_delivery": true,
+                },
+            },
+        }))
+        .unwrap();
+        let scheduled_at = Utc.with_ymd_and_hms(2026, 6, 16, 12, 0, 0).unwrap();
+        let child_input = schedule_workflow_input(&schedule, scheduled_at);
+        let scheduled_for = scheduled_at.to_rfc3339();
+
+        assert_eq!(child_input["scheduled_for"], json!(scheduled_for));
+        assert_eq!(
+            child_input["metadata"]["schedule_id"],
+            json!("authoritative_schedule")
+        );
+        assert_eq!(
+            child_input["metadata"]["scheduled_for"],
+            json!(scheduled_for)
+        );
+        assert_eq!(child_input["metadata"]["no_delivery"], json!(true));
+    }
+
+    #[test]
+    fn scheduled_input_rebuilds_authoritative_metadata_for_non_object_spoof() {
+        let schedule = normalize_schedule(json!({
+            "workflow_name": "hourly_report",
+            "schedule_id": "authoritative_schedule",
+            "cron": "0 * * * *",
+            "timezone": "UTC",
+            "enabled": true,
+            "no_delivery": true,
+            "input": {
+                "metadata": "caller-controlled metadata",
+                "scheduled_for": "1999-01-01T00:00:00Z"
+            },
+        }))
+        .unwrap();
+        let scheduled_at = Utc.with_ymd_and_hms(2026, 6, 16, 12, 0, 0).unwrap();
+        let child_input = schedule_workflow_input(&schedule, scheduled_at);
+        let scheduled_for = scheduled_at.to_rfc3339();
+
+        assert_eq!(
+            child_input["metadata"],
+            json!({
+                "source": "workflow_schedule",
+                "workflow_name": "hourly_report",
+                "no_delivery": true,
+                "schedule_id": "authoritative_schedule",
+                "scheduled_for": scheduled_for,
+            })
+        );
+    }
+
+    #[test]
+    fn coalesced_cron_occurrence_is_the_child_provenance() {
+        let schedule = normalize_schedule(json!({
+            "workflow_name": "hourly_report",
+            "schedule_id": "hourly_report",
+            "cron": "0 * * * *",
+            "timezone": "UTC",
+            "enabled": true,
+            "input": {"metadata": {"no_delivery": false}},
+        }))
+        .unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 6, 16, 12, 25, 0).unwrap();
+        let latest = Some(ScheduleTickRecord {
+            state: "completed".to_owned(),
+            scheduled_at: Utc.with_ymd_and_hms(2026, 6, 16, 10, 0, 0).unwrap(),
+        });
+        let next_future = Utc.with_ymd_and_hms(2026, 6, 16, 13, 0, 0).unwrap();
+        let coalesced = schedule_reconcile_occurrence(&schedule, next_future, now, latest).unwrap();
+        let child_input = schedule_workflow_input(&schedule, coalesced);
+        let scheduled_for = coalesced.to_rfc3339();
+
+        assert_eq!(
+            coalesced,
+            Utc.with_ymd_and_hms(2026, 6, 16, 12, 0, 0).unwrap()
+        );
+        assert_eq!(child_input["scheduled_for"], json!(scheduled_for));
+        assert_eq!(
+            child_input["metadata"]["scheduled_for"],
+            json!(scheduled_for)
+        );
+        assert_eq!(
+            child_input["metadata"]["schedule_id"],
+            json!("hourly_report")
+        );
+    }
+
+    #[test]
+    fn scheduled_cron_input_formats_dst_occurrence_as_rfc3339_utc() {
+        let schedule = normalize_schedule(json!({
+            "workflow_name": "daily_report",
+            "schedule_id": "daily_report",
+            "cron": "30 1 * * *",
+            "timezone": "America/Los_Angeles",
+            "enabled": true,
+        }))
+        .unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 11, 1, 9, 35, 0).unwrap();
+        let scheduled_at = latest_cron_occurrence_at_or_before(&schedule, now).unwrap();
+        let child_input = schedule_workflow_input(&schedule, scheduled_at);
+        let scheduled_for = scheduled_at.to_rfc3339();
+
+        assert_eq!(
+            scheduled_at,
+            Utc.with_ymd_and_hms(2026, 11, 1, 9, 30, 0).unwrap()
+        );
+        assert_eq!(child_input["scheduled_for"], json!(scheduled_for));
+        assert_eq!(
+            child_input["metadata"]["scheduled_for"],
+            json!(scheduled_for)
+        );
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(child_input["scheduled_for"].as_str().unwrap())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn scheduled_interval_input_carries_occurrence_and_delivery_metadata() {
+        let schedule = normalize_schedule(json!({
+            "workflow_name": "slack_backfill",
+            "schedule_id": "slack_backfill",
+            "interval_seconds": 600,
+            "enabled": true,
+            "no_delivery": true,
+            "input": {"batch": 4},
+        }))
+        .unwrap();
+        let scheduled_at = Utc.with_ymd_and_hms(2026, 6, 16, 12, 10, 0).unwrap();
+        let child_input = schedule_workflow_input(&schedule, scheduled_at);
+        let scheduled_for = scheduled_at.to_rfc3339();
+
+        assert_eq!(child_input["batch"], json!(4));
+        assert_eq!(child_input["scheduled_for"], json!(scheduled_for));
+        assert_eq!(
+            child_input["metadata"]["schedule_id"],
+            json!("slack_backfill")
+        );
+        assert_eq!(
+            child_input["metadata"]["scheduled_for"],
+            json!(scheduled_for)
+        );
+        assert_eq!(child_input["metadata"]["no_delivery"], json!(true));
     }
 
     #[test]
