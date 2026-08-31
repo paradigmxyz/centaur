@@ -1259,7 +1259,7 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
                  'workflow-heartbeat-run', 'workflow-heartbeat-run'),
                 ($2, 'projection-test', 'team', 'team-1',
                  'account:private', 'owner', '{\"team\":\"engineering\"}',
-                 'Engineering owns the account.', 'proposed', 'internal', 1,
+                 'Engineering owns the account.', 'confirmed', 'internal', 1,
                  'workflow-heartbeat-run', 'workflow-heartbeat-run')
             """,
             public_fact_id,
@@ -1267,9 +1267,6 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
         )
         await state.confirm_memory_fact(
             fact_id=str(public_fact_id), actor_ref="U-REVIEWER", expected_revision=1
-        )
-        await state.confirm_memory_fact(
-            fact_id=str(team_fact_id), actor_ref="U-REVIEWER", expected_revision=1
         )
         long_fact_id = uuid.uuid4()
         long_metadata_fact_id = uuid.uuid4()
