@@ -1235,7 +1235,6 @@ class HeartbeatState:
                         item_version, actor_kind, actor_ref, payload, idempotency_key
                     ) values ($1, $2, $3, $4, $5, $6, $7, 'human', $8,
                               $9::jsonb, $10)
-                    on conflict (idempotency_key) do nothing
                     """,
                     _uuid("item-event", event_key),
                     item["item_id"],
