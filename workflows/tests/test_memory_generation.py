@@ -7,6 +7,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT))
 sys.path.insert(0, str(REPOSITORY_ROOT / "services" / "workflow-python"))
@@ -396,7 +398,7 @@ def test_handler_advances_cursor_and_embeds_after_thread_failure(monkeypatch):
 
     async def process_thread(*_args, **kwargs):
         if kwargs["executions"][0]["execution_id"] == "exe-bad":
-            raise RuntimeError("poison thread")
+            raise memory.GenerationInputTooLargeError("poison thread")
         return {"created": 1, "rejected": 0, "skipped": 0}
 
     async def advance_cursor(_pool, execution_id):
@@ -431,6 +433,39 @@ def test_handler_advances_cursor_and_embeds_after_thread_failure(monkeypatch):
         (
             "memory_generation_threads_failed_total",
             1,
-            {"error_type": "RuntimeError"},
+            {"error_type": "GenerationInputTooLargeError"},
         )
     ]
+
+
+def test_handler_keeps_cursor_on_transient_thread_failure(monkeypatch):
+    memory = _load()
+    executions = [_thread(execution_id="exe-1")]
+    advanced = []
+    embedded = []
+
+    async def load_executions(*_args, **_kwargs):
+        return executions
+
+    async def process_thread(*_args, **_kwargs):
+        raise RuntimeError("OpenAI unavailable")
+
+    async def advance_cursor(_pool, execution_id):
+        advanced.append(execution_id)
+
+    async def embed_pending(*_args, **_kwargs):
+        embedded.append(True)
+        return {"embedded": 0, "embedding_failed": 0}
+
+    monkeypatch.setattr(memory, "_load_executions", load_executions)
+    monkeypatch.setattr(memory, "_process_thread", process_thread)
+    monkeypatch.setattr(memory, "_advance_cursor", advance_cursor)
+    monkeypatch.setattr(memory, "_embed_pending", embed_pending)
+    monkeypatch.setattr(memory, "_client", lambda: types.SimpleNamespace())
+    context = ImmediateContext(object())
+
+    with pytest.raises(RuntimeError, match="OpenAI unavailable"):
+        asyncio.run(memory.handler({}, context))
+
+    assert advanced == []
+    assert embedded == []

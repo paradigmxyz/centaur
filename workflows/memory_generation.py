@@ -12,7 +12,7 @@ from typing import Any, Protocol
 from api.metrics import increment_metric, set_gauge
 from api.runtime_control import decode_jsonb
 from api.workflow_engine import WorkflowContext
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, BadRequestError
 
 WORKFLOW_NAME = "memory_generation"
 
@@ -86,6 +86,18 @@ CANDIDATE_SCHEMA = {
     "required": ["candidates"],
     "additionalProperties": False,
 }
+
+
+class PermanentThreadError(Exception):
+    """A thread-specific failure that retrying cannot repair."""
+
+
+class MissingExecutionMaterialError(PermanentThreadError):
+    pass
+
+
+class GenerationInputTooLargeError(PermanentThreadError):
+    pass
 
 
 def _env_flag_enabled(name: str, default: bool = False) -> bool:
@@ -237,7 +249,7 @@ async def _load_thread_material(
         execution_ids,
     )
     if not rows:
-        raise RuntimeError("memory generation executions disappeared")
+        raise MissingExecutionMaterialError("memory generation executions disappeared")
 
     thread_key = _clean_string(rows[0]["thread_key"])
     messages = await connection.fetch(
@@ -302,7 +314,9 @@ def _generation_input(
             item[field] = value[:-trim_chars]
             encoded = encode()
     if len(encoded) > max_chars:
-        raise ValueError("memory generation metadata exceeds input limit")
+        raise GenerationInputTooLargeError(
+            "memory generation metadata exceeds input limit"
+        )
     return encoded
 
 
@@ -468,7 +482,7 @@ async def _process_thread_safely(
             generation_model=generation_model,
             client=client,
         )
-    except Exception as error:  # noqa: BLE001
+    except (BadRequestError, PermanentThreadError) as error:
         failed = len(executions)
         increment_metric(
             "memory_generation_threads_failed_total",
