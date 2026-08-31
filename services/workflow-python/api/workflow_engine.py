@@ -213,6 +213,24 @@ class WorkflowContext:
             }
         )
 
+    async def find_slack_message(
+        self, channel: str, client_msg_id: str, thread_ts: str | None = None
+    ) -> dict[str, Any]:
+        """Reconcile one of this workflow's Slack posts without reading content.
+
+        The workflow host performs a bounded exact ``client_msg_id`` lookup in
+        the requested channel, or in the requested thread when ``thread_ts``
+        is supplied.  The response contains only message identity fields.
+        """
+        request: dict[str, Any] = {
+            "type": "ctx.find_slack_message",
+            "channel": channel,
+            "client_msg_id": client_msg_id,
+        }
+        if thread_ts is not None:
+            request["thread_ts"] = thread_ts
+        return await self._rpc.request(request)
+
 
 def duration_seconds(value: dt.timedelta | int | float) -> float:
     if isinstance(value, dt.timedelta):

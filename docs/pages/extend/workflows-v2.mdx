@@ -62,6 +62,7 @@ Supported v2 primitives:
 | `ctx.run_agents(...)` | Supported for bounded concurrent agent turns with ordered outcomes |
 | `ctx.call_tool(...)` | Supported through the generated `centaur-tools call` bridge in the workflow-host sandbox |
 | `ctx.post_to_slack(...)` | Supported |
+| `ctx.find_slack_message(...)` | Supported (bounded metadata-only reconciliation) |
 | `ctx._pool` | Supported when the workflow-host sandbox receives `DATABASE_URL` |
 | `WEBHOOKS` | Supported |
 | `SCHEDULE` | Supported |
@@ -111,6 +112,32 @@ async def handler(inp: dict, ctx: WorkflowContext) -> dict:
 `username` and `icon_emoji` are optional. They customize the Slack app identity
 for that message and require the app installation to grant
 `chat:write.customize`. Omitting them preserves the app's default identity.
+
+### Reconcile an ambiguous Slack post
+
+When a workflow may have posted a message immediately before a crash, use the
+first-class reconciliation helper instead of a generic Slack search:
+
+```python
+message = await ctx.find_slack_message(
+    channel="C0123456789",
+    client_msg_id=f"heartbeat:{ctx.run_id}:summary",
+    thread_ts="1710000000.000100",  # optional; limits lookup to this thread
+)
+```
+
+The workflow host uses `conversations.history` for channel lookups and
+`conversations.replies` when `thread_ts` is supplied. It exact-matches the
+client message ID, follows at most three pages of 100 messages, and fails
+closed when Slack returns malformed or still-paginated data. The result is
+only `{"found": bool, "channel": ..., "ts": ...}` with an optional
+`thread_ts`; message text, blocks, users, and metadata are never returned.
+
+The Slack bot token must have `channels:history` for public channels and
+`groups:history` for private channels (and the bot must be a member of private
+channels). If direct messages or group DMs are in scope, also grant
+`im:history` or `mpim:history` respectively. These scopes are read-only and
+are used only by this bounded reconciliation path.
 
 ### Make agent turns explicit
 

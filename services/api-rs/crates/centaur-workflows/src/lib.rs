@@ -66,6 +66,8 @@ const MAX_LIST_RUNS_LIMIT: i64 = 1_000;
 const WORKFLOW_REAP_REMOVED_AFTER_TICKS_ENV: &str = "WORKFLOW_REAP_REMOVED_AFTER_TICKS";
 const DEFAULT_WORKFLOW_REAP_REMOVED_AFTER_TICKS: u32 = 3;
 const ABSURD_TERMINAL_TASK_STATES: &str = "('completed', 'failed', 'cancelled')";
+const SLACK_RECONCILIATION_PAGE_LIMIT: &str = "100";
+const MAX_SLACK_RECONCILIATION_PAGES: usize = 3;
 
 pub fn python_workflow_event_name(event_type: &str, correlation_id: &str) -> String {
     // JSON string encoding is unambiguous even when either component contains a delimiter.
@@ -3699,6 +3701,10 @@ async fn handle_python_context_request(
             Ok(value) => Ok(value),
             Err(error) => Err(error.to_string()),
         },
+        Some("ctx.find_slack_message") => match find_python_slack_message(message).await {
+            Ok(value) => Ok(value),
+            Err(error) => Err(error.to_string()),
+        },
         other => Err(format!("unsupported context request type {other:?}")),
     };
     Ok(match result {
@@ -4410,6 +4416,234 @@ async fn update_python_slack_message(message: &Value) -> Result<Value, WorkflowR
     let response = send_slack_update(&token, payload).await?;
     serde_json::to_value(slack_update_result_from_response(channel, ts, response))
         .map_err(WorkflowRuntimeError::from)
+}
+
+fn validate_slack_reconciliation_field(
+    message: &Value,
+    field: &str,
+    operation: &str,
+    max_bytes: usize,
+) -> Result<String, WorkflowRuntimeError> {
+    let value = message
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| WorkflowRuntimeError::BadRequest(format!("{operation} requires {field}")))?;
+    if value.trim().is_empty()
+        || value.len() > max_bytes
+        || value.chars().any(|character| character.is_control())
+    {
+        return Err(WorkflowRuntimeError::BadRequest(format!(
+            "{operation} requires a valid {field}"
+        )));
+    }
+    Ok(value.to_owned())
+}
+
+fn validate_slack_reconciliation_thread_ts(value: &str) -> Result<(), WorkflowRuntimeError> {
+    let mut components = value.split('.');
+    let seconds = components.next().unwrap_or_default();
+    let fraction = components.next().unwrap_or_default();
+    if components.next().is_some()
+        || seconds.is_empty()
+        || fraction.is_empty()
+        || !seconds.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(WorkflowRuntimeError::BadRequest(
+            "ctx.find_slack_message requires a valid thread_ts".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn slack_reconciliation_match(
+    channel: &str,
+    client_msg_id: &str,
+    thread_ts: Option<&str>,
+    messages: &Value,
+) -> Result<Option<Value>, WorkflowRuntimeError> {
+    let messages = messages.as_array().ok_or_else(|| {
+        WorkflowRuntimeError::Upstream(
+            "Slack reconciliation returned malformed messages".to_owned(),
+        )
+    })?;
+
+    for message in messages {
+        if message.get("client_msg_id").and_then(Value::as_str) != Some(client_msg_id) {
+            continue;
+        }
+        if message
+            .get("channel")
+            .and_then(Value::as_str)
+            .is_some_and(|message_channel| message_channel != channel)
+        {
+            continue;
+        }
+        if let Some(thread_ts) = thread_ts {
+            let is_requested_thread = message.get("ts").and_then(Value::as_str) == Some(thread_ts)
+                || message.get("thread_ts").and_then(Value::as_str) == Some(thread_ts);
+            if !is_requested_thread {
+                continue;
+            }
+        }
+        let ts = message
+            .get("ts")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                WorkflowRuntimeError::Upstream(
+                    "Slack reconciliation returned a matching message without ts".to_owned(),
+                )
+            })?;
+        let mut result = json!({"found": true, "channel": channel, "ts": ts});
+        if let Some(message_thread_ts) = message
+            .get("thread_ts")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        {
+            result["thread_ts"] = json!(message_thread_ts);
+        }
+        return Ok(Some(result));
+    }
+    Ok(None)
+}
+
+fn slack_reconciliation_next_cursor(body: &Value) -> Result<Option<String>, WorkflowRuntimeError> {
+    let has_more = match body.get("has_more") {
+        None | Some(Value::Null) => false,
+        Some(value) => value.as_bool().ok_or_else(|| {
+            WorkflowRuntimeError::Upstream(
+                "Slack reconciliation returned malformed pagination".to_owned(),
+            )
+        })?,
+    };
+    let next_cursor = match body.get("response_metadata") {
+        None | Some(Value::Null) => None,
+        Some(metadata) => {
+            let metadata = metadata.as_object().ok_or_else(|| {
+                WorkflowRuntimeError::Upstream(
+                    "Slack reconciliation returned malformed pagination".to_owned(),
+                )
+            })?;
+            match metadata.get("next_cursor") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(cursor)) if !cursor.trim().is_empty() => Some(cursor.to_owned()),
+                Some(Value::String(_)) => None,
+                Some(_) => {
+                    return Err(WorkflowRuntimeError::Upstream(
+                        "Slack reconciliation returned malformed pagination".to_owned(),
+                    ));
+                }
+            }
+        }
+    };
+    if has_more && next_cursor.is_none() {
+        return Err(WorkflowRuntimeError::Upstream(
+            "Slack reconciliation returned incomplete pagination".to_owned(),
+        ));
+    }
+    Ok(next_cursor)
+}
+
+fn slack_reconciliation_endpoint(thread_ts: Option<&str>) -> &'static str {
+    if thread_ts.is_some() {
+        "https://slack.com/api/conversations.replies"
+    } else {
+        "https://slack.com/api/conversations.history"
+    }
+}
+
+async fn find_python_slack_message(message: &Value) -> Result<Value, WorkflowRuntimeError> {
+    let operation = "ctx.find_slack_message";
+    let channel = validate_slack_reconciliation_field(message, "channel", operation, 255)?;
+    let client_msg_id =
+        validate_slack_reconciliation_field(message, "client_msg_id", operation, 512)?;
+    let thread_ts = message
+        .get("thread_ts")
+        .map(|value| {
+            value.as_str().ok_or_else(|| {
+                WorkflowRuntimeError::BadRequest(format!("{operation} requires a valid thread_ts"))
+            })
+        })
+        .transpose()?;
+    if let Some(thread_ts) = thread_ts {
+        if thread_ts.trim().is_empty() || thread_ts.len() > 64 {
+            return Err(WorkflowRuntimeError::BadRequest(
+                "ctx.find_slack_message requires a valid thread_ts".to_owned(),
+            ));
+        }
+        validate_slack_reconciliation_thread_ts(thread_ts)?;
+    }
+
+    let token = env::var("SLACK_BOT_TOKEN")
+        .or_else(|_| env::var("SLACK_BOT_TOKEN_OVERRIDE"))
+        .map_err(|_| {
+            WorkflowRuntimeError::BadRequest(
+                "SLACK_BOT_TOKEN or SLACK_BOT_TOKEN_OVERRIDE must be set".to_owned(),
+            )
+        })?;
+    let endpoint = slack_reconciliation_endpoint(thread_ts);
+    let client = reqwest::Client::new();
+    let mut cursor: Option<String> = None;
+
+    for page in 0..MAX_SLACK_RECONCILIATION_PAGES {
+        let mut url = reqwest::Url::parse(endpoint).map_err(|_| {
+            WorkflowRuntimeError::Internal("invalid Slack reconciliation endpoint".to_owned())
+        })?;
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("channel", &channel);
+            query.append_pair("limit", SLACK_RECONCILIATION_PAGE_LIMIT);
+            if let Some(thread_ts) = thread_ts {
+                query.append_pair("ts", thread_ts);
+            }
+            if let Some(cursor) = cursor.as_deref() {
+                query.append_pair("cursor", cursor);
+            }
+        }
+        let request = client.get(url).bearer_auth(&token);
+
+        let response = request.send().await.map_err(|_| {
+            WorkflowRuntimeError::Upstream("Slack reconciliation lookup failed".to_owned())
+        })?;
+        if !response.status().is_success() {
+            return Err(WorkflowRuntimeError::Upstream(
+                "Slack reconciliation lookup failed".to_owned(),
+            ));
+        }
+        let body = response.json::<Value>().await.map_err(|_| {
+            WorkflowRuntimeError::Upstream(
+                "Slack reconciliation returned malformed response".to_owned(),
+            )
+        })?;
+        if body.get("ok") != Some(&Value::Bool(true)) {
+            return Err(WorkflowRuntimeError::Upstream(
+                "Slack reconciliation lookup failed".to_owned(),
+            ));
+        }
+        let messages = body.get("messages").ok_or_else(|| {
+            WorkflowRuntimeError::Upstream(
+                "Slack reconciliation returned malformed messages".to_owned(),
+            )
+        })?;
+        if let Some(result) =
+            slack_reconciliation_match(&channel, &client_msg_id, thread_ts, messages)?
+        {
+            return Ok(result);
+        }
+        cursor = slack_reconciliation_next_cursor(&body)?;
+        if cursor.is_none() {
+            return Ok(json!({"found": false, "channel": channel}));
+        }
+        if page + 1 == MAX_SLACK_RECONCILIATION_PAGES {
+            return Err(WorkflowRuntimeError::Upstream(
+                "Slack reconciliation lookup exceeded bounded pagination".to_owned(),
+            ));
+        }
+    }
+    Err(WorkflowRuntimeError::Upstream(
+        "Slack reconciliation lookup exceeded bounded pagination".to_owned(),
+    ))
 }
 
 fn python_slack_message_payload(
@@ -5736,6 +5970,151 @@ mod tests {
 
         assert_eq!(result.channel, "C123");
         assert_eq!(result.ts, "1710000000.000100");
+    }
+
+    #[test]
+    fn slack_reconciliation_exact_match_returns_only_safe_identity_fields() {
+        let result = slack_reconciliation_match(
+            "C123",
+            "client-1",
+            None,
+            &json!([
+                {
+                    "channel": "C123",
+                    "client_msg_id": "wrong-id",
+                    "ts": "1710000000.000001",
+                    "text": "secret wrong message"
+                },
+                {
+                    "channel": "C123",
+                    "client_msg_id": "client-1",
+                    "ts": "1710000000.000100",
+                    "text": "secret message",
+                    "blocks": [{"type": "section", "text": {"text": "secret"}}],
+                    "metadata": {"event_type": "private"}
+                }
+            ]),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            result,
+            json!({"found": true, "channel": "C123", "ts": "1710000000.000100"})
+        );
+        assert!(result.get("text").is_none());
+        assert!(result.get("blocks").is_none());
+        assert!(result.get("metadata").is_none());
+    }
+
+    #[test]
+    fn slack_reconciliation_rejects_wrong_channel_and_client_id() {
+        let result = slack_reconciliation_match(
+            "C123",
+            "client-1",
+            None,
+            &json!([
+                {
+                    "channel": "C999",
+                    "client_msg_id": "client-1",
+                    "ts": "1710000000.000100"
+                },
+                {
+                    "channel": "C123",
+                    "client_msg_id": "client-2",
+                    "ts": "1710000000.000101"
+                }
+            ]),
+        )
+        .unwrap();
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn slack_reconciliation_thread_lookup_isolated_from_other_threads() {
+        let messages = json!([
+            {
+                "channel": "C123",
+                "client_msg_id": "client-1",
+                "ts": "1710000000.000200",
+                "thread_ts": "1710000000.000999",
+                "text": "other thread secret"
+            },
+            {
+                "channel": "C123",
+                "client_msg_id": "client-1",
+                "ts": "1710000000.000201",
+                "thread_ts": "1710000000.000100",
+                "text": "requested thread secret"
+            }
+        ]);
+        let result =
+            slack_reconciliation_match("C123", "client-1", Some("1710000000.000100"), &messages)
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            result,
+            json!({
+                "found": true,
+                "channel": "C123",
+                "ts": "1710000000.000201",
+                "thread_ts": "1710000000.000100"
+            })
+        );
+
+        assert!(
+            slack_reconciliation_match("C123", "client-1", Some("1710000000.000555"), &messages)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn slack_reconciliation_validates_malformed_inputs_and_pagination() {
+        for (field, value) in [
+            ("channel", json!("")),
+            ("channel", json!("C\n123")),
+            ("client_msg_id", json!("")),
+            ("client_msg_id", json!("client\u{0000}id")),
+        ] {
+            let mut request = json!({});
+            request[field] = value;
+            let error =
+                validate_slack_reconciliation_field(&request, field, "ctx.find_slack_message", 255)
+                    .unwrap_err();
+            assert!(error.to_string().contains(field));
+        }
+
+        assert!(validate_slack_reconciliation_thread_ts("not-a-slack-ts").is_err());
+        assert!(validate_slack_reconciliation_thread_ts("1710000000.000100").is_ok());
+        assert!(
+            slack_reconciliation_next_cursor(&json!({
+                "has_more": true,
+                "response_metadata": {}
+            }))
+            .is_err()
+        );
+        assert_eq!(
+            slack_reconciliation_next_cursor(&json!({
+                "has_more": true,
+                "response_metadata": {"next_cursor": "cursor-2"}
+            }))
+            .unwrap(),
+            Some("cursor-2".to_owned())
+        );
+    }
+
+    #[test]
+    fn slack_reconciliation_selects_only_the_scoped_official_endpoint() {
+        assert_eq!(
+            slack_reconciliation_endpoint(None),
+            "https://slack.com/api/conversations.history"
+        );
+        assert_eq!(
+            slack_reconciliation_endpoint(Some("1710000000.000100")),
+            "https://slack.com/api/conversations.replies"
+        );
     }
 
     #[test]

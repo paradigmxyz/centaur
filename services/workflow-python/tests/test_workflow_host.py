@@ -90,6 +90,13 @@ class RequestRpc(FakeRpc):
             return {"channel": payload["channel"], "ts": "1710000000.000100"}
         if message_type == "ctx.update_slack":
             return {"channel": payload["channel"], "ts": payload["ts"]}
+        if message_type == "ctx.find_slack_message":
+            return {
+                "found": True,
+                "channel": payload["channel"],
+                "ts": "1710000000.000100",
+                **({"thread_ts": payload["thread_ts"]} if "thread_ts" in payload else {}),
+            }
         if message_type == "ctx.sleep":
             return {"slept": True}
         if message_type == "ctx.event.wait":
@@ -504,6 +511,66 @@ class WorkflowHostTests(unittest.TestCase):
                     "args": {"blocks": [{"type": "section"}], "mrkdwn": True},
                 }
             ],
+        )
+
+    def test_find_slack_message_uses_bounded_metadata_only_rpc(self) -> None:
+        host = load_workflow_host()
+        rpc = RequestRpc()
+        ctx = host.WorkflowContext(
+            rpc,
+            run_id="run-123",
+            task_id="task-456",
+            workflow_name="sample",
+        )
+
+        result = asyncio.run(
+            ctx.find_slack_message(
+                "C12345678",
+                "client-message-1",
+                thread_ts="1710000000.000100",
+            )
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "found": True,
+                "channel": "C12345678",
+                "ts": "1710000000.000100",
+                "thread_ts": "1710000000.000100",
+            },
+        )
+        self.assertEqual(
+            rpc.requests,
+            [
+                {
+                    "type": "ctx.find_slack_message",
+                    "channel": "C12345678",
+                    "client_msg_id": "client-message-1",
+                    "thread_ts": "1710000000.000100",
+                }
+            ],
+        )
+
+    def test_find_slack_message_omits_optional_thread_scope(self) -> None:
+        host = load_workflow_host()
+        rpc = RequestRpc()
+        ctx = host.WorkflowContext(
+            rpc,
+            run_id="run-123",
+            task_id="task-456",
+            workflow_name="sample",
+        )
+
+        asyncio.run(ctx.find_slack_message("C12345678", "client-message-1"))
+
+        self.assertEqual(
+            rpc.requests[-1],
+            {
+                "type": "ctx.find_slack_message",
+                "channel": "C12345678",
+                "client_msg_id": "client-message-1",
+            },
         )
 
     def test_create_pool_retries_transient_connection_failure(self) -> None:
