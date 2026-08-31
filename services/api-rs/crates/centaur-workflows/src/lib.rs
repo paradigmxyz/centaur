@@ -4469,6 +4469,11 @@ fn slack_reconciliation_match(
     })?;
 
     for message in messages {
+        if !message.is_object() {
+            return Err(WorkflowRuntimeError::Upstream(
+                "Slack reconciliation returned malformed messages".to_owned(),
+            ));
+        }
         if message.get("client_msg_id").and_then(Value::as_str) != Some(client_msg_id) {
             continue;
         }
@@ -6088,6 +6093,7 @@ mod tests {
 
         assert!(validate_slack_reconciliation_thread_ts("not-a-slack-ts").is_err());
         assert!(validate_slack_reconciliation_thread_ts("1710000000.000100").is_ok());
+        assert!(slack_reconciliation_match("C123", "client-1", None, &json!([null])).is_err());
         assert!(
             slack_reconciliation_next_cursor(&json!({
                 "has_more": true,
