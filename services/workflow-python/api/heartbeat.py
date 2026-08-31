@@ -1155,7 +1155,7 @@ class HeartbeatState:
                     from heartbeat_action_tokens t
                     join heartbeat_deliveries d on d.delivery_id = t.delivery_id
                     join heartbeat_runs r on r.run_id = d.run_id
-                    where t.token_hash = $1 for update
+                    where t.token_hash = $1 for update of t
                     """,
                     token_hash,
                 )

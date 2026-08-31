@@ -265,23 +265,37 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
             surfaced_item_ids=[synthesized["item_id"]],
         )
 
-        feedback = self.state(
-            run_id=uuid.uuid4(),
-            workflow_name="heartbeat_feedback",
-            principal="workflow-heartbeat-feedback",
+        async def assume_feedback_role(connection: asyncpg.Connection) -> None:
+            await connection.execute("set role centaur_heartbeat_feedback")
+
+        feedback_pool = await asyncpg.create_pool(
+            DATABASE_URL,
+            min_size=1,
+            max_size=1,
+            init=assume_feedback_role,
         )
-        action = await feedback.apply_action(
-            token=raw_token,
-            actor_ref="U-REVIEWER",
-            provider_event_key="slack-action-1",
-        )
-        self.assertEqual(action["status"], "resolved")
-        with self.assertRaises(PermissionError):
-            await feedback.apply_action(
+        try:
+            feedback = HeartbeatState(
+                feedback_pool,
+                workflow_name="heartbeat_feedback",
+                workflow_run_id=str(uuid.uuid4()),
+                workflow_task_id=str(uuid.uuid4()),
+                workflow_principal="workflow-heartbeat-feedback",
+            )
+            action = await feedback.apply_action(
                 token=raw_token,
                 actor_ref="U-REVIEWER",
                 provider_event_key="slack-action-1",
             )
+            self.assertEqual(action["status"], "resolved")
+            with self.assertRaises(PermissionError):
+                await feedback.apply_action(
+                    token=raw_token,
+                    actor_ref="U-REVIEWER",
+                    provider_event_key="slack-action-1",
+                )
+        finally:
+            feedback_pool.terminate()
         await first.complete_run(
             run_id=str(run["run_id"]), status="completed", outcome="attention"
         )
