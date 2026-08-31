@@ -88,7 +88,23 @@ describe('reasoningForModel', () => {
     expect(reasoningForModel('codex', 'gpt-5.5-pro-2026-07-01', 'low')).toBeUndefined()
     expect(reasoningForModel('nanocodex', 'gpt-5.5-pro-2026-07-01', 'low')).toBeUndefined()
     expect(reasoningForModel('codex', 'gpt-5.4-2026-03-05', 'xhigh')).toBe('xhigh')
-    expect(reasoningForModel('codex', 'gpt-5.3', 'high')).toBeUndefined()
+  })
+
+  test('forwards canonical efforts for models the table does not know', () => {
+    // Custom `model_providers.*` models (Codex pointed at an OpenAI-compatible
+    // endpoint) cannot appear in the per-model table; dropping the user's
+    // explicit request would silently pin such deployments to the default
+    // effort. The provider rejects unsupported efforts itself.
+    for (const effort of allEfforts) {
+      expect(reasoningForModel('codex', 'my-custom-model', effort)).toBe(effort)
+    }
+    expect(reasoningForModel('codex', 'gpt-5.3', 'high')).toBe('high')
+    expect(reasoningForModel('nanocodex', 'my-custom-model', 'minimal')).toBe('minimal')
+  })
+
+  test('still rejects non-canonical efforts for unknown models', () => {
+    expect(reasoningForModel('codex', 'my-custom-model', 'superduper')).toBeUndefined()
+    expect(reasoningForModel('codex', 'my-custom-model', '')).toBeUndefined()
   })
 
   test('rejects Codex efforts for the currently selected non-Codex model', () => {

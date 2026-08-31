@@ -42,6 +42,14 @@ const GPT_5_6_REASONING_EFFORTS = new Set([
   ...STANDARD_CODEX_REASONING_EFFORTS,
   'max'
 ])
+// Every effort any Codex model accepts. Models absent from the table below
+// (custom `model_providers.*` models pointing Codex at an OpenAI-compatible
+// endpoint) are validated against this canonical set instead of being
+// rejected outright.
+const ALL_CODEX_REASONING_EFFORTS = new Set([
+  ...GPT_5_6_REASONING_EFFORTS,
+  'minimal'
+])
 const CODEX_REASONING_EFFORTS_BY_MODEL: Record<string, ReadonlySet<string>> = {
   'gpt-5.2': STANDARD_CODEX_REASONING_EFFORTS,
   'gpt-5.2-codex': CODEX_MODEL_REASONING_EFFORTS,
@@ -189,7 +197,16 @@ export function reasoningForModel(
   const supported = Object.entries(CODEX_REASONING_EFFORTS_BY_MODEL).find(
     ([modelId]) => selectedModel === modelId || selectedModel.startsWith(`${modelId}-20`)
   )?.[1]
-  return supported?.has(effectiveEffort) ? effort : undefined
+  // A model the table doesn't know is a custom-provider model (a
+  // `model_providers.*` entry pointing Codex at an OpenAI-compatible
+  // endpoint), whose supported efforts this table cannot know. Forward any
+  // canonical effort rather than silently dropping the user's explicit
+  // request - the provider is the authority on its own models and rejects
+  // unsupported efforts itself.
+  if (!supported) {
+    return ALL_CODEX_REASONING_EFFORTS.has(effectiveEffort) ? effort : undefined
+  }
+  return supported.has(effectiveEffort) ? effort : undefined
 }
 
 function reasoningDisplayName(reasoning: string | null | undefined): string | undefined {
