@@ -152,6 +152,8 @@ def _owner_for_thread(thread: Any) -> MemoryOwner | None:
     ):
         return None
     conversation_type = _clean_string(thread.get("conversation_type", ""))
+    if conversation_type == "mpim":
+        return None
 
     if channel_id.startswith("D"):
         user_id = _clean_string(metadata.get("slack_user_id"))

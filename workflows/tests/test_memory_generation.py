@@ -154,6 +154,24 @@ def test_owner_skips_group_dm_and_unknown_g_conversation():
     )
     assert memory._owner_for_thread({**group_thread, "conversation_type": ""}) is None
 
+    assert (
+        memory._owner_for_thread(
+            _thread(
+                thread_key="slack:T1:C1:123.456",
+                session_metadata={
+                    "platform": "slack",
+                    "source": "slackbotv2",
+                    "slack_channel_id": "C1",
+                    "slack_team_id": "T1",
+                    "slack_home_team_id": "T1",
+                    "slack_user_id": "U1",
+                },
+                conversation_type="mpim",
+            )
+        )
+        is None
+    )
+
 
 def test_owner_rejects_unverified_or_mismatched_session():
     memory = _load()
