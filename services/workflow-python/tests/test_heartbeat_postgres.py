@@ -6,13 +6,14 @@ import sys
 import unittest
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
 
 WORKFLOW_PYTHON = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(WORKFLOW_PYTHON))
 
-from api.heartbeat import HeartbeatState
+from api.heartbeat import HeartbeatState, _uuid
 
 DATABASE_URL = os.getenv("HEARTBEAT_TEST_DATABASE_URL")
 MIGRATIONS = (
@@ -36,8 +37,64 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
             "0054_memory_facts.sql",
             "0055_heartbeat_workflow_roles.sql",
             "0056_heartbeat_memory_lifecycle.sql",
+            "0057_heartbeat_rls_principal_scope.sql",
         ):
             await self.pool.execute((MIGRATIONS / migration).read_text())
+        await self.pool.execute(
+            "select heartbeat_bind_workflow_principal($1::name, $2)",
+            "centaur_heartbeat_run",
+            "workflow-heartbeat-run",
+        )
+        await self.pool.execute(
+            """
+            do $$ begin
+                if not exists (select 1 from pg_roles where rolname = 'heartbeat_test_client') then
+                    create role heartbeat_test_client login password 'heartbeat-test';
+                end if;
+                if not exists (select 1 from pg_roles where rolname = 'heartbeat_feedback_client') then
+                    create role heartbeat_feedback_client login password 'heartbeat-test';
+                end if;
+                if not exists (select 1 from pg_roles where rolname = 'heartbeat_other_client') then
+                    create role heartbeat_other_client login password 'heartbeat-test';
+                end if;
+                if not exists (select 1 from pg_roles where rolname = 'centaur_heartbeat_run_other') then
+                    create role centaur_heartbeat_run_other nologin;
+                end if;
+            end $$
+            """
+        )
+        await self.pool.execute(
+            "grant centaur_heartbeat_run to heartbeat_test_client"
+        )
+        await self.pool.execute(
+            "grant centaur_heartbeat_feedback to heartbeat_feedback_client"
+        )
+        await self.pool.execute(
+            "grant centaur_heartbeat_run_other to heartbeat_other_client"
+        )
+        self.pool.terminate()
+
+        async def assume_run_role(connection: asyncpg.Connection) -> None:
+            await connection.execute("set role centaur_heartbeat_run")
+            await connection.execute(
+                "set centaur.workflow_principal = 'workflow-heartbeat-run'"
+            )
+
+        database_url = urlsplit(DATABASE_URL)
+        client_database_url = urlunsplit(
+            (
+                database_url.scheme,
+                f"heartbeat_test_client:heartbeat-test@{database_url.hostname}"
+                + (f":{database_url.port}" if database_url.port else ""),
+                database_url.path,
+                database_url.query,
+                database_url.fragment,
+            )
+        )
+        self.client_database_url = client_database_url
+        self.pool = await asyncpg.create_pool(
+            client_database_url, min_size=1, max_size=1, setup=assume_run_role
+        )
 
     async def asyncTearDown(self) -> None:
         self.pool.terminate()
@@ -59,16 +116,26 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_feedback_role_cannot_read_memory(self) -> None:
-        async with self.pool.acquire() as connection:
-            async with connection.transaction():
-                await connection.execute("set local role centaur_heartbeat_feedback")
-                self.assertEqual(await connection.fetchval("select count(*) from heartbeat_items"), 0)
+        async def assume_feedback_role(connection: asyncpg.Connection) -> None:
+            await connection.execute("set role centaur_heartbeat_feedback")
 
-        async with self.pool.acquire() as connection:
-            async with connection.transaction():
-                await connection.execute("set local role centaur_heartbeat_feedback")
-                with self.assertRaises(asyncpg.InsufficientPrivilegeError):
-                    await connection.fetchval("select count(*) from memory_facts")
+        feedback_pool = await asyncpg.create_pool(
+            self.client_database_url.replace(
+                "heartbeat_test_client", "heartbeat_feedback_client"
+            ),
+            min_size=1,
+            max_size=1,
+            setup=assume_feedback_role,
+        )
+        try:
+            self.assertEqual(
+                await feedback_pool.fetchval("select count(*) from heartbeat_items"),
+                0,
+            )
+            with self.assertRaises(asyncpg.InsufficientPrivilegeError):
+                await feedback_pool.fetchval("select count(*) from memory_facts")
+        finally:
+            feedback_pool.terminate()
 
         async with self.pool.acquire() as connection:
             async with connection.transaction():
@@ -97,6 +164,40 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
             "enabled": True,
         }
         profile = await first.register_profile(definition)
+        second_principal = "workflow-heartbeat-other"
+        second_role = "centaur_heartbeat_run_other"
+        second_profile_id = uuid.uuid4()
+        admin_pool = await asyncpg.create_pool(
+            DATABASE_URL, min_size=1, max_size=1
+        )
+        try:
+            await admin_pool.execute(
+                f"do $$ begin if not exists (select 1 from pg_roles where rolname = '{second_role}') then create role {second_role} nologin; end if; end $$"
+            )
+            await admin_pool.execute(
+                f"grant centaur_heartbeat_run to {second_role}"
+            )
+            await admin_pool.execute(
+                "select heartbeat_bind_workflow_principal($1::name, $2)",
+                second_role,
+                second_principal,
+            )
+            await admin_pool.execute(
+                """
+                insert into heartbeat_profiles (
+                    profile_id, namespace, name, scope_kind, scope_ref,
+                    workflow_name, executor_principal_foreign_id, definition_hash,
+                    definition_version, destination, required_sources,
+                    optional_sources, delivery_policy, enabled
+                ) values ($1, 'default', 'other-principal-profile', 'team', 'gtm',
+                    'heartbeat_run', $2, 'definition-v1', 1, '{}'::jsonb,
+                    '{}', '{}', '{}'::jsonb, true)
+                """,
+                second_profile_id,
+                second_principal,
+            )
+        finally:
+            admin_pool.terminate()
         run = await first.begin_run(
             profile_id=str(profile["profile_id"]),
             trigger="replay",
@@ -357,6 +458,13 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(forgotten["status"], "forgotten")
         self.assertEqual(forgotten["canonical_text"], "[forgotten]")
         self.assertEqual(forgotten["evidence"], [])
+        forgotten_ancestor = await first.retrieve_memory_fact(
+            fact_id=fact_id, actor_ref="U-REVIEWER"
+        )
+        self.assertEqual(forgotten_ancestor["status"], "forgotten")
+        self.assertEqual(forgotten_ancestor["canonical_text"], "[forgotten]")
+        self.assertEqual(forgotten_ancestor["value"], {})
+        self.assertEqual(forgotten_ancestor["evidence"], [])
         self.assertEqual(
             await first.list_memory_facts(actor_ref="U-REVIEWER"), []
         )
@@ -364,6 +472,127 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
             await first.retrieve_memory_fact(
                 fact_id=str(corrected["fact_id"]), actor_ref="U-NOT-A-REVIEWER"
             )
+        async def assume_other_role(connection: asyncpg.Connection) -> None:
+            await connection.execute("set role centaur_heartbeat_run_other")
+            await connection.execute(
+                "set centaur.workflow_principal = 'workflow-heartbeat-other'"
+            )
+
+        other_pool = await asyncpg.create_pool(
+            self.client_database_url.replace(
+                "heartbeat_test_client", "heartbeat_other_client"
+            ),
+            min_size=1,
+            max_size=1,
+            setup=assume_other_role,
+        )
+        try:
+            other = HeartbeatState(
+                other_pool,
+                workflow_name="heartbeat_run",
+                workflow_run_id=str(uuid.uuid4()),
+                workflow_task_id=str(uuid.uuid4()),
+                workflow_principal="workflow-heartbeat-other",
+            )
+            self.assertEqual(
+                await other.list_memory_facts(actor_ref="U-REVIEWER"), []
+            )
+            with self.assertRaises(PermissionError):
+                await other.retrieve_memory_fact(
+                    fact_id=str(corrected["fact_id"]), actor_ref="U-REVIEWER"
+                )
+            await other_pool.execute(
+                "update memory_facts set canonical_text = 'forged' where fact_id = $1",
+                corrected["fact_id"],
+            )
+            self.assertEqual(
+                await other_pool.fetchval(
+                    "select count(*) from memory_facts where fact_id = $1",
+                    corrected["fact_id"],
+                ),
+                0,
+            )
+            self.assertEqual(
+                (await first.retrieve_memory_fact(
+                    fact_id=str(corrected["fact_id"]), actor_ref="U-REVIEWER"
+                ))["canonical_text"],
+                "[forgotten]",
+            )
+            with self.assertRaises(asyncpg.PostgresError):
+                await self.pool.execute(
+                    "update memory_facts set owner_principal = 'workflow-heartbeat-other' where fact_id = $1",
+                    corrected["fact_id"],
+                )
+            value_hash = hashlib.sha256(
+                b'{"team":"gtm"}'
+            ).hexdigest()
+            self.assertNotEqual(
+                fact_id,
+                str(
+                    _uuid(
+                        "memory-fact",
+                        "workflow-heartbeat-other",
+                        "default",
+                        "team",
+                        "gtm",
+                        "account:acme",
+                        "review_owner",
+                        value_hash,
+                    )
+                ),
+            )
+        finally:
+            other_pool.terminate()
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                await connection.execute("set local role centaur_heartbeat_run")
+                with self.assertRaises(asyncpg.InsufficientPrivilegeError):
+                    await connection.execute(
+                        f"set local role {second_role}"
+                    )
+
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                await connection.execute("reset centaur.workflow_principal")
+                self.assertEqual(
+                    await connection.fetchval("select count(*) from heartbeat_profiles"),
+                    0,
+                )
+                await connection.execute(
+                    "set local centaur.workflow_principal = 'forged-principal'"
+                )
+                self.assertEqual(
+                    await connection.fetchval("select count(*) from heartbeat_profiles"),
+                    0,
+                )
+                await connection.execute(
+                    "set local centaur.workflow_principal = 'workflow-heartbeat-run'"
+                )
+                self.assertEqual(
+                    await connection.fetchval(
+                        "select count(*) from heartbeat_profiles where profile_id = $1",
+                        profile["profile_id"],
+                    ),
+                    1,
+                )
+                self.assertEqual(
+                    await connection.fetchval("select count(*) from heartbeat_profiles"),
+                    2,
+                )
+                self.assertEqual(
+                    await connection.fetchval(
+                        "select count(*) from heartbeat_profiles where profile_id = $1",
+                        second_profile_id,
+                    ),
+                    0,
+                )
+                await connection.execute(
+                    "set local centaur.workflow_principal = 'workflow-heartbeat-other'"
+                )
+                self.assertEqual(
+                    await connection.fetchval("select count(*) from heartbeat_profiles"),
+                    0,
+                )
 
         delivery = await first.prepare_delivery(
             run_id=str(run["run_id"]),
@@ -420,12 +649,18 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
             await connection.execute("set role centaur_heartbeat_feedback")
 
         feedback_pool = await asyncpg.create_pool(
-            DATABASE_URL,
+            self.client_database_url.replace(
+                "heartbeat_test_client", "heartbeat_feedback_client"
+            ),
             min_size=1,
             max_size=1,
-            init=assume_feedback_role,
+            setup=assume_feedback_role,
         )
         try:
+            self.assertEqual(
+                await feedback_pool.fetchval("select count(*) from heartbeat_items"),
+                0,
+            )
             feedback = HeartbeatState(
                 feedback_pool,
                 workflow_name="heartbeat_feedback",

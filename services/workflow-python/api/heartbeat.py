@@ -209,34 +209,12 @@ class HeartbeatState:
                 if str(value).strip()
             }
         )
-        async with self._pool.acquire() as connection:
-            async with connection.transaction():
-                await connection.execute(
-                    "delete from heartbeat_profile_grants where profile_id = $1 and permission = 'review'",
-                    profile_id,
-                )
-                for reviewer in reviewer_refs:
-                    await connection.execute(
-                        """
-                        insert into heartbeat_profile_grants (
-                            profile_id, subject_kind, subject_ref, permission, granted_by_principal
-                        ) values ($1, 'principal', $2, 'review', $3)
-                        on conflict do nothing
-                        """,
-                        profile_id,
-                        reviewer,
-                        self.workflow_principal,
-                    )
-                await connection.execute(
-                    """
-                    insert into heartbeat_profile_grants (
-                        profile_id, subject_kind, subject_ref, permission, granted_by_principal
-                    ) values ($1, 'principal', $2, 'operate', $2)
-                    on conflict do nothing
-                    """,
-                    profile_id,
-                    self.workflow_principal,
-                )
+        await self._pool.execute(
+            "select heartbeat_replace_profile_grants($1, $2, $3::text[])",
+            profile_id,
+            self.workflow_principal,
+            reviewer_refs,
+        )
         return _row(row) or {}
 
     async def begin_run(
@@ -900,6 +878,7 @@ class HeartbeatState:
                     value_hash = hashlib.sha256(_json(value).encode()).hexdigest()
                     fact_id = _uuid(
                         "memory-fact",
+                        self.workflow_principal,
                         profile["namespace"],
                         profile["scope_kind"],
                         profile["scope_ref"],
@@ -910,14 +889,15 @@ class HeartbeatState:
                     await connection.execute(
                         """
                         insert into memory_facts (
-                            fact_id, namespace, scope_kind, scope_ref, subject_key,
+                            fact_id, owner_principal, namespace, scope_kind, scope_ref, subject_key,
                             predicate, value, canonical_text, status, sensitivity,
                             valid_until, observed_at, proposed_by_principal
-                        ) values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8,
-                                  'proposed', $9, $10, now(), $11)
+                        ) values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9,
+                                  'proposed', $10, $11, now(), $12)
                         on conflict (fact_id) do nothing
                         """,
                         fact_id,
+                        self.workflow_principal,
                         profile["namespace"],
                         profile["scope_kind"],
                         profile["scope_ref"],
@@ -1131,6 +1111,7 @@ class HeartbeatState:
                   where p.namespace = f.namespace
                     and p.scope_kind = f.scope_kind
                     and p.scope_ref = f.scope_ref
+                    and p.executor_principal_foreign_id = f.owner_principal
                     and g.subject_kind = 'principal'
                     and g.subject_ref = $2
                     and g.permission in ('review', 'admin')
@@ -1231,6 +1212,7 @@ class HeartbeatState:
              and p.scope_ref = f.scope_ref
             join heartbeat_profile_grants g on g.profile_id = p.profile_id
             where {' and '.join(predicates)}
+              and p.executor_principal_foreign_id = f.owner_principal
             order by f.updated_at desc, f.fact_id
             limit ${limit_arg}
             """,
@@ -1333,15 +1315,17 @@ class HeartbeatState:
         rows = await self._pool.fetch(
             """
             select f.* from memory_facts f
-            where f.namespace = $1 and f.scope_kind = $2 and f.scope_ref = $3
+            where f.owner_principal = $1
+              and f.namespace = $2 and f.scope_kind = $3 and f.scope_ref = $4
               and f.status = 'confirmed'
-              and f.sensitivity = any($4::text[])
-              and (cardinality($5::text[]) = 0 or f.subject_key = any($5::text[]))
+              and f.sensitivity = any($5::text[])
+              and (cardinality($6::text[]) = 0 or f.subject_key = any($6::text[]))
               and (f.valid_from is null or f.valid_from <= now())
               and (f.valid_until is null or f.valid_until > now())
             order by f.updated_at desc, f.fact_id
-            limit $6
+            limit $7
             """,
+            self.workflow_principal,
             profile["namespace"],
             profile["scope_kind"],
             profile["scope_ref"],
@@ -1501,21 +1485,66 @@ class HeartbeatState:
                 new_revision = actual_revision + 1
                 if target_status == "forgotten":
                     # Keep a non-content tombstone for audit while immediately
-                    # excluding and purging the sensitive value/evidence.
+                    # excluding and purging the sensitive value/evidence. Walk
+                    # both directions because a correction points backwards via
+                    # supersedes_fact_id while a user may forget either side of
+                    # the correction chain.
+                    lineage_ids = await connection.fetch(
+                        """
+                        with recursive lineage(fact_id, supersedes_fact_id) as (
+                            select fact_id, supersedes_fact_id
+                              from memory_facts
+                             where fact_id = $1
+                            union
+                            select f.fact_id, f.supersedes_fact_id
+                              from memory_facts f
+                              join lineage l
+                                on f.supersedes_fact_id = l.fact_id
+                                or l.supersedes_fact_id = f.fact_id
+                        )
+                        select fact_id from lineage
+                        """,
+                        fact_uuid,
+                    )
+                    lineage_ids = [row["fact_id"] for row in lineage_ids]
                     await connection.execute(
-                        "delete from memory_fact_evidence where fact_id = $1", fact_uuid
+                        "delete from memory_fact_evidence where fact_id = any($1::uuid[])",
+                        lineage_ids,
                     )
                     await connection.execute(
                         """
                         update memory_facts set status = 'forgotten', value = '{}'::jsonb,
-                               canonical_text = '[forgotten]', revision = $2,
-                               confirmed_by_principal = $3, updated_at = now()
-                        where fact_id = $1
+                               canonical_text = '[forgotten]', revision = revision + 1,
+                               confirmed_by_principal = $2, updated_at = now()
+                        where fact_id = any($1::uuid[])
                         """,
-                        fact_uuid,
-                        new_revision,
+                        lineage_ids,
                         actor_ref,
                     )
+                    for lineage_id in lineage_ids:
+                        lineage_event_key = (
+                            event_key
+                            if lineage_id == fact_uuid
+                            else f"{event_key}:lineage:{lineage_id}"
+                        )
+                        await connection.execute(
+                            """
+                            insert into memory_fact_events (
+                                event_id, fact_id, event_type, actor_ref, reason,
+                                payload, idempotency_key
+                            ) values ($1, $2, 'forgotten', $3, $4, $5::jsonb, $6)
+                            on conflict (idempotency_key) do nothing
+                            """,
+                            _uuid("memory-event", lineage_event_key),
+                            lineage_id,
+                            actor_ref,
+                            reason,
+                            _json({"forgotten_from_fact_id": str(fact_uuid)}),
+                            lineage_event_key,
+                        )
+                    # The selected fact's event was inserted above; skip the
+                    # generic event insertion below for this transition.
+                    return await self._memory_result(connection, fact_uuid)
                 else:
                     await connection.execute(
                         """
@@ -1606,14 +1635,15 @@ class HeartbeatState:
                 await connection.execute(
                     """
                     insert into memory_facts (
-                        fact_id, namespace, scope_kind, scope_ref, subject_key,
+                        fact_id, owner_principal, namespace, scope_kind, scope_ref, subject_key,
                         predicate, value, canonical_text, status, sensitivity,
                         confidence, valid_from, valid_until, observed_at, revision,
                         supersedes_fact_id, proposed_by_principal, confirmed_by_principal
-                    ) values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10,
-                              $11, $12, $13, now(), $14, $15, $16, $17)
+                    ) values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11,
+                              $12, $13, $14, now(), $15, $16, $17, $18)
                     """,
                     replacement_id,
+                    fact["owner_principal"],
                     fact["namespace"],
                     fact["scope_kind"],
                     fact["scope_ref"],
@@ -1746,112 +1776,22 @@ class HeartbeatState:
         if not token or not actor_ref or not provider_event_key:
             raise ValueError("token, actor_ref, and provider_event_key are required")
         token_hash = hashlib.sha256(token.encode()).hexdigest()
-        async with self._pool.acquire() as connection:
-            async with connection.transaction():
-                action = await connection.fetchrow(
-                    """
-                    select t.*, d.run_id, r.profile_id
-                    from heartbeat_action_tokens t
-                    join heartbeat_deliveries d on d.delivery_id = t.delivery_id
-                    join heartbeat_runs r on r.run_id = d.run_id
-                    where t.token_hash = $1 for update of t
-                    """,
-                    token_hash,
-                )
-                if (
-                    action is None
-                    or action["consumed_at"] is not None
-                    or action["expires_at"] <= dt.datetime.now(dt.UTC)
-                ):
-                    raise PermissionError(
-                        "heartbeat action token is invalid, expired, or already used"
-                    )
-                allowed = await connection.fetchval(
-                    """
-                    select exists(
-                        select 1 from heartbeat_profile_grants
-                        where profile_id = $1 and permission in ('review', 'admin')
-                          and subject_kind = 'principal' and subject_ref = $2
-                    )
-                    """,
-                    action["profile_id"],
-                    actor_ref,
-                )
-                if not allowed:
-                    raise PermissionError("actor is not a heartbeat reviewer")
-                item = await connection.fetchrow(
-                    "select * from heartbeat_items where item_id = $1 for update",
-                    action["item_id"],
-                )
-                if item is None or int(item["version"]) != int(action["item_version"]):
-                    raise RuntimeError(
-                        "heartbeat item changed after this action was rendered"
-                    )
-                action_name = str(action["action"])
-                to_status = str(item["status"])
-                disposition = item["disposition"]
-                snooze_until = item["snooze_until"]
-                if action_name in {"approve", "assign", "park"}:
-                    to_status, disposition = "resolved", action_name
-                elif action_name == "snooze":
-                    payload = _json_value(action["payload"]) or {}
-                    snooze_until = _parse_time(payload.get("until")) or (
-                        dt.datetime.now(dt.UTC) + dt.timedelta(days=1)
-                    )
-                    to_status, disposition = "snoozed", "snooze"
-                elif action_name == "not_useful":
-                    to_status, disposition = "dismissed", "not_useful"
-                elif action_name != "prepare_draft":
-                    raise ValueError(f"unsupported heartbeat action {action_name!r}")
-                new_version = int(item["version"]) + 1
-                await connection.execute(
-                    """
-                    update heartbeat_items set status = $2, disposition = $3,
-                        snooze_until = $4,
-                        resolved_at = case when $2 in ('resolved', 'dismissed') then now() else null end,
-                        version = $5
-                    where item_id = $1
-                    """,
-                    item["item_id"],
-                    to_status,
-                    disposition,
-                    snooze_until,
-                    new_version,
-                )
-                await connection.execute(
-                    """
-                    update heartbeat_action_tokens set consumed_at = now(), consumed_by_principal = $2
-                    where token_hash = $1
-                    """,
+        try:
+            async with self._pool.acquire() as connection:
+                result = await connection.fetchval(
+                    "select heartbeat_consume_action($1, $2, $3)",
                     token_hash,
                     actor_ref,
+                    provider_event_key,
                 )
-                event_key = f"slack:{provider_event_key}"
-                await connection.execute(
-                    """
-                    insert into heartbeat_item_events (
-                        event_id, item_id, run_id, event_type, from_status, to_status,
-                        item_version, actor_kind, actor_ref, payload, idempotency_key
-                    ) values ($1, $2, $3, $4, $5, $6, $7, 'human', $8,
-                              $9::jsonb, $10)
-                    """,
-                    _uuid("item-event", event_key),
-                    item["item_id"],
-                    action["run_id"],
-                    action_name,
-                    item["status"],
-                    to_status,
-                    new_version,
-                    actor_ref,
-                    _json({"delivery_id": str(action["delivery_id"])}),
-                    event_key,
-                )
-        return {
-            "item_id": str(item["item_id"]),
-            "action": action_name,
-            "status": to_status,
-            "version": new_version,
-        }
+        except Exception as exc:
+            message = str(exc)
+            if "invalid, expired, or already used" in message or "reviewer" in message:
+                raise PermissionError(message) from exc
+            if "changed after this action" in message:
+                raise RuntimeError(message) from exc
+            raise
+        return _json_value(result) or {}
 
     async def complete_run(
         self,

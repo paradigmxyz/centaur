@@ -1415,11 +1415,45 @@ fn postgres_listeners(secrets: &[ToolSecret]) -> Result<Vec<PostgresListener>, T
     by_name
         .into_values()
         .map(|secret| {
+            const WORKFLOW_PRINCIPAL_SETTING: &str = "centaur.workflow_principal";
             let mut extra = BTreeMap::new();
             if let Some(role) = &secret.role {
                 extra.insert("role".to_owned(), yaml_string(role));
             }
             extra.insert("labels".to_owned(), yaml_value(&secret.labels)?);
+            let mut settings = secret.settings.clone();
+            let heartbeat_scoped = matches!(
+                secret.role.as_deref(),
+                Some("centaur_heartbeat_run" | "centaur_heartbeat_feedback")
+            );
+            if heartbeat_scoped {
+                if let Some(existing) = settings
+                    .iter()
+                    .find(|setting| setting.name == WORKFLOW_PRINCIPAL_SETTING)
+                {
+                    let is_immutable_principal = existing.value.is_none()
+                        && existing
+                            .value_from
+                            .as_ref()
+                            .and_then(|source| source.principal_field.as_deref())
+                            == Some("foreign_id");
+                    if !is_immutable_principal {
+                        return Err(ToolDiscoveryError::Invalid(format!(
+                            "pg_dsn setting {WORKFLOW_PRINCIPAL_SETTING:?} is reserved and must source principal_field foreign_id"
+                        )));
+                    }
+                } else {
+                    settings.push(PgDsnSetting {
+                        name: WORKFLOW_PRINCIPAL_SETTING.to_owned(),
+                        value: None,
+                        value_from: Some(PgDsnSettingValueFrom {
+                            principal_label: None,
+                            principal_field: Some("foreign_id".to_owned()),
+                            proxy_label: None,
+                        }),
+                    });
+                }
+            }
             Ok(PostgresListener {
                 name: Some(secret.name.to_lowercase()),
                 upstream: Some(PostgresUpstream {
@@ -1439,7 +1473,7 @@ fn postgres_listeners(secrets: &[ToolSecret]) -> Result<Vec<PostgresListener>, T
                     database: Some(secret.database.clone()),
                     ..Default::default()
                 }),
-                settings: secret.settings.clone(),
+                settings,
                 extra,
                 ..Default::default()
             })
@@ -1629,7 +1663,7 @@ mod tests {
             secret_ref: "RESHIFT_DSN".to_owned(),
             labels: tool_labels("company_context", "centaur"),
             database: "warehouse".to_owned(),
-            role: Some("centaur_company_context_reader".to_owned()),
+            role: Some("centaur_heartbeat_run".to_owned()),
             settings: vec![
                 PgDsnSetting {
                     name: "centaur.slack_channel_id".to_owned(),
@@ -1672,9 +1706,9 @@ mod tests {
         assert_eq!(sandbox_env.database.as_deref(), Some("warehouse"));
         assert_eq!(
             listeners[0].extra.get("role").and_then(YamlValue::as_str),
-            Some("centaur_company_context_reader")
+            Some("centaur_heartbeat_run")
         );
-        assert_eq!(listeners[0].settings.len(), 4);
+        assert_eq!(listeners[0].settings.len(), 5);
         assert_eq!(listeners[0].settings[0].name, "centaur.slack_channel_id");
         assert_eq!(listeners[0].settings[1].name, "centaur.slack_user_id");
         assert_eq!(
@@ -1696,6 +1730,51 @@ mod tests {
             Some("slack_history_channel_ids")
         );
         assert_eq!(listeners[0].settings[3].value.as_deref(), Some("true"));
+        assert_eq!(listeners[0].settings[4].name, "centaur.workflow_principal");
+        assert_eq!(
+            listeners[0].settings[4]
+                .value_from
+                .as_ref()
+                .and_then(|value_from| value_from.principal_field.as_deref()),
+            Some("foreign_id")
+        );
+    }
+
+    #[test]
+    fn rejects_forged_workflow_principal_setting() {
+        let err = postgres_listeners(&[ToolSecret::PgDsn(PgDsnSecret {
+            name: "STATE_DSN".to_owned(),
+            secret_ref: "STATE_DSN".to_owned(),
+            labels: tool_labels("test", "centaur"),
+            database: "ai_v2".to_owned(),
+            role: Some("centaur_heartbeat_run".to_owned()),
+            settings: vec![PgDsnSetting {
+                name: "centaur.workflow_principal".to_owned(),
+                value: Some("workflow-heartbeat-run".to_owned()),
+                value_from: None,
+            }],
+        })])
+        .expect_err("workflow principal must be sourced from foreign_id");
+        assert!(err.to_string().contains("reserved"));
+    }
+
+    #[test]
+    fn does_not_add_workflow_principal_to_unrelated_pg_dsn() {
+        let listeners = postgres_listeners(&[ToolSecret::PgDsn(PgDsnSecret {
+            name: "COMPANY_DSN".to_owned(),
+            secret_ref: "COMPANY_DSN".to_owned(),
+            labels: tool_labels("company_context", "centaur"),
+            database: "warehouse".to_owned(),
+            role: Some("centaur_company_context_reader".to_owned()),
+            settings: vec![],
+        })])
+        .unwrap();
+        assert!(
+            listeners[0]
+                .settings
+                .iter()
+                .all(|setting| setting.name != "centaur.workflow_principal")
+        );
     }
 
     #[test]
