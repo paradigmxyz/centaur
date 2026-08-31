@@ -1378,38 +1378,39 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
             try:
-                self.assertEqual(
-                    await reader_pool.fetchval(
-                        "select count(*) from company_context_documents where source = 'heartbeat_memory'"
-                    ),
-                    0,
-                )
-                await reader_pool.execute(
-                    "set centaur.heartbeat_memory_namespace = 'wrong-namespace'"
-                )
-                self.assertEqual(
-                    await reader_pool.fetchval(
-                        "select count(*) from company_context_documents where source_document_id = $1",
-                        str(fact_id),
-                    ),
-                    0,
-                )
-                await reader_pool.execute(
-                    "set centaur.heartbeat_memory_namespace = 'projection-test'"
-                )
-                self.assertEqual(
-                    await reader_pool.fetchval(
-                        "select count(*) from company_context_documents where source = 'heartbeat_memory'"
-                    ),
-                    2,
-                )
-                self.assertEqual(
-                    await reader_pool.fetchval(
-                        "select count(*) from company_context_documents where source_document_id = $1",
-                        str(team_fact_id),
-                    ),
-                    0,
-                )
+                async with reader_pool.acquire() as reader:
+                    self.assertEqual(
+                        await reader.fetchval(
+                            "select count(*) from company_context_documents where source = 'heartbeat_memory'"
+                        ),
+                        0,
+                    )
+                    await reader.execute(
+                        "set centaur.heartbeat_memory_namespace = 'wrong-namespace'"
+                    )
+                    self.assertEqual(
+                        await reader.fetchval(
+                            "select count(*) from company_context_documents where source_document_id = $1",
+                            str(fact_id),
+                        ),
+                        0,
+                    )
+                    await reader.execute(
+                        "set centaur.heartbeat_memory_namespace = 'projection-test'"
+                    )
+                    self.assertEqual(
+                        await reader.fetchval(
+                            "select count(*) from company_context_documents where source = 'heartbeat_memory'"
+                        ),
+                        2,
+                    )
+                    self.assertEqual(
+                        await reader.fetchval(
+                            "select count(*) from company_context_documents where source_document_id = $1",
+                            str(team_fact_id),
+                        ),
+                        0,
+                    )
             finally:
                 reader_pool.terminate()
 
