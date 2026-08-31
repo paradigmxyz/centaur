@@ -35,6 +35,7 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
             "0053_heartbeat_state.sql",
             "0054_memory_facts.sql",
             "0055_heartbeat_workflow_roles.sql",
+            "0056_heartbeat_memory_lifecycle.sql",
         ):
             await self.pool.execute((MIGRATIONS / migration).read_text())
 
@@ -73,6 +74,8 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
             async with connection.transaction():
                 await connection.execute("set local role centaur_heartbeat_run")
                 self.assertEqual(await connection.fetchval("select count(*) from memory_facts"), 0)
+                with self.assertRaises(asyncpg.InsufficientPrivilegeError):
+                    await connection.execute("delete from memory_facts")
 
     async def test_replay_action_and_memory_proposal_are_idempotent_and_authorized(
         self,
@@ -146,6 +149,18 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(committed["inserted_observations"], 1)
         self.assertEqual(committed["changed_items"], 1)
+        item_uuid = await self.pool.fetchval(
+            "select item_id from heartbeat_items where profile_id = $1 and story_key = $2",
+            profile["profile_id"],
+            item["story_key"],
+        )
+        await self.pool.execute(
+            """
+            update heartbeat_items set status = 'snoozed', snooze_until = now() + interval '1 day',
+                   version = version + 1 where item_id = $1
+            """,
+            item_uuid,
+        )
         with self.assertRaisesRegex(RuntimeError, "changed immutable content"):
             await first.commit_source_batch(
                 profile_id=str(profile["profile_id"]),
@@ -160,6 +175,38 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
                 items=[],
                 expected_checkpoint_version=1,
             )
+        revised_observation = {
+            **observation,
+            "source_revision": "2026-08-30T01:00:00Z",
+            "source_updated_at": "2026-08-30T01:00:00Z",
+            "content_hash": hashlib.sha256(b"issue-v2").hexdigest(),
+            "payload": {"status": "Done"},
+        }
+        revised_item = {
+            **item,
+            "material_hash": revised_observation["content_hash"],
+            "observation_refs": [
+                {
+                    "source_object_id": revised_observation["source_object_id"],
+                    "source_revision": revised_observation["source_revision"],
+                    "relation": "primary",
+                }
+            ],
+        }
+        await first.commit_source_batch(
+            profile_id=str(profile["profile_id"]),
+            run_id=str(run["run_id"]),
+            source_key="linear",
+            observations=[revised_observation],
+            items=[revised_item],
+            expected_checkpoint_version=1,
+        )
+        self.assertEqual(
+            await self.pool.fetchval(
+                "select status from heartbeat_items where item_id = $1", item_uuid
+            ),
+            "open",
+        )
         artifact = await first.put_artifact(
             run_id=str(run["run_id"]),
             artifact_kind="source_input",
@@ -241,6 +288,82 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             await self.pool.fetchval("select count(*) from memory_fact_events"), 1
         )
+        proposed_fact = await first.list_memory_facts(
+            actor_ref="U-REVIEWER", include_nonconfirmed=True
+        )
+        self.assertEqual(len(proposed_fact), 1)
+        fact_id = str(proposed_fact[0]["fact_id"])
+        self.assertEqual(len(proposed_fact[0]["evidence"]), 1)
+        confirmed = await first.confirm_memory_fact(
+            fact_id=fact_id,
+            actor_ref="U-REVIEWER",
+            expected_revision=1,
+            reason="reviewed against the source observation",
+        )
+        self.assertEqual(confirmed["status"], "confirmed")
+        self.assertEqual(confirmed["revision"], 2)
+        workflow_memory = await first.retrieve_confirmed_memory(
+            profile_id=str(profile["profile_id"]),
+            entity_keys=["account:acme"],
+            max_sensitivity="internal",
+        )
+        self.assertEqual(len(workflow_memory), 1)
+        self.assertEqual(workflow_memory[0]["fact_id"], uuid.UUID(fact_id))
+        self.assertEqual(
+            len((await first.retrieve_memory_facts(actor_ref="U-REVIEWER"))), 1
+        )
+        corrected = await first.correct_memory_fact(
+            fact_id=fact_id,
+            actor_ref="U-REVIEWER",
+            expected_revision=2,
+            canonical_text="The GTM team owns the Acme review.",
+            value={"team": "gtm", "confirmed": True},
+            evidence=[
+                {
+                    "evidence_kind": "user_statement",
+                    "evidence_ref": "reviewer:U-REVIEWER:1",
+                    "excerpt": "GTM owns the Acme review.",
+                }
+            ],
+            reason="corrected wording and retained the review provenance",
+        )
+        self.assertEqual(corrected["status"], "confirmed")
+        self.assertEqual(corrected["revision"], 3)
+        history = await first.retrieve_memory_fact(
+            fact_id=str(corrected["fact_id"]),
+            actor_ref="U-REVIEWER",
+            include_history=True,
+        )
+        self.assertEqual(len(history["history"]), 2)
+        disputed = await first.dispute_memory_fact(
+            fact_id=str(corrected["fact_id"]),
+            actor_ref="U-REVIEWER",
+            expected_revision=3,
+            reason="the review owner is not canonical yet",
+            evidence=[
+                {
+                    "evidence_kind": "decision_record",
+                    "evidence_ref": "decision:acme-owner:1",
+                }
+            ],
+        )
+        self.assertEqual(disputed["status"], "disputed")
+        forgotten = await first.forget_memory_fact(
+            fact_id=str(corrected["fact_id"]),
+            actor_ref="U-REVIEWER",
+            expected_revision=4,
+            reason="reviewer requested erasure",
+        )
+        self.assertEqual(forgotten["status"], "forgotten")
+        self.assertEqual(forgotten["canonical_text"], "[forgotten]")
+        self.assertEqual(forgotten["evidence"], [])
+        self.assertEqual(
+            await first.list_memory_facts(actor_ref="U-REVIEWER"), []
+        )
+        with self.assertRaises(PermissionError):
+            await first.retrieve_memory_fact(
+                fact_id=str(corrected["fact_id"]), actor_ref="U-NOT-A-REVIEWER"
+            )
 
         delivery = await first.prepare_delivery(
             run_id=str(run["run_id"]),
@@ -262,6 +385,30 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
             await self.pool.fetchval(
                 "select token_hash from heartbeat_action_tokens limit 1"
             ),
+        )
+        replayed_delivery = await first.prepare_delivery(
+            run_id=str(run["run_id"]),
+            destination_kind="slack",
+            destination_ref="C123",
+            rendered_payload={"text": "Review Acme now"},
+            item_actions=[
+                {
+                    "item_id": synthesized["item_id"],
+                    "item_version": synthesized["expected_version"],
+                    "action": "approve",
+                    "payload": {},
+                }
+            ],
+        )
+        self.assertEqual(replayed_delivery["delivery_id"], delivery["delivery_id"])
+        self.assertEqual(replayed_delivery["tokens"], [])
+        self.assertTrue(replayed_delivery["replayed"])
+        self.assertEqual(
+            await self.pool.fetchval(
+                "select count(*) from heartbeat_action_tokens where delivery_id = $1",
+                uuid.UUID(delivery["delivery_id"]),
+            ),
+            1,
         )
         await first.mark_delivery_sent(
             delivery_id=delivery["delivery_id"],
@@ -317,9 +464,9 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
             profile_id=str(second_profile["profile_id"]),
             run_id=str(second_run["run_id"]),
             source_key="linear",
-            observations=[observation],
-            items=[item],
-            expected_checkpoint_version=1,
+            observations=[revised_observation],
+            items=[revised_item],
+            expected_checkpoint_version=2,
         )
         self.assertEqual(replay["inserted_observations"], 0)
         self.assertEqual(replay["changed_items"], 0)

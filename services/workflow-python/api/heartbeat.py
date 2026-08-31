@@ -11,6 +11,7 @@ _ID_NAMESPACE = uuid.UUID("ba55d079-050d-496d-a2a0-9c4f96e64c4f")
 _SCOPES = {"organization", "team", "personal"}
 _SENSITIVITIES = {"public", "internal", "confidential", "restricted"}
 _ACTIONS = {"approve", "assign", "park", "snooze", "not_useful", "prepare_draft"}
+_MEMORY_STATUSES = {"proposed", "confirmed", "disputed", "superseded", "forgotten", "expired"}
 _ARTIFACT_KINDS = {
     "source_input",
     "source_error",
@@ -91,6 +92,14 @@ class HeartbeatState:
             raise RuntimeError("Heartbeat requires a workflow-host Postgres grant")
         if not self.workflow_principal:
             raise RuntimeError("Heartbeat requires WORKFLOW_PRINCIPAL")
+
+    def _require_memory_workflow(self) -> None:
+        # Until the Rust workflow identity is propagated through the typed
+        # service boundary, constrain memory APIs to the two reviewed workflow
+        # entry points. A caller cannot turn an arbitrary workflow-host module
+        # into a memory reader merely by constructing this facade.
+        if self.workflow_name not in {"heartbeat_run", "heartbeat_feedback"}:
+            raise PermissionError("workflow is not authorized for memory APIs")
 
     async def _require_profile_executor(self, profile_id: uuid.UUID) -> dict[str, Any]:
         profile = await self._pool.fetchrow(
@@ -462,7 +471,11 @@ class HeartbeatState:
                                 material_hash,
                             )
                         elif changed:
-                            reopen = old_status in {"resolved", "dismissed", "stale"}
+                            # A material source revision invalidates a prior snooze as
+                            # well as a terminal disposition. Snooze suppresses a
+                            # delivery window; it must not suppress newly changed
+                            # source evidence.
+                            reopen = old_status in {"resolved", "dismissed", "stale", "snoozed"}
                             row = await connection.fetchrow(
                                 """
                                 update heartbeat_items set
@@ -995,6 +1008,32 @@ class HeartbeatState:
         tokens: list[dict[str, Any]] = []
         async with self._pool.acquire() as connection:
             async with connection.transaction():
+                existing_delivery = await connection.fetchrow(
+                    """
+                    select * from heartbeat_deliveries
+                    where client_message_id = $1
+                    for update
+                    """,
+                    client_message_id,
+                )
+                if existing_delivery is not None:
+                    # The delivery key is the workflow/run/destination idempotency
+                    # boundary. A retry must reuse the durable delivery and never
+                    # mint a second active token set. The original workflow step
+                    # owns the raw token values; a replay that did not checkpoint
+                    # them cannot safely recover them because only token hashes are
+                    # persisted.
+                    if _json_value(existing_delivery["rendered_payload"]) != rendered_payload:
+                        raise RuntimeError(
+                            "heartbeat delivery replay differs from the original payload"
+                        )
+                    return {
+                        "delivery_id": str(existing_delivery["delivery_id"]),
+                        "client_message_id": client_message_id,
+                        "tokens": [],
+                        "replayed": True,
+                        "status": existing_delivery["status"],
+                    }
                 await connection.execute(
                     """
                     insert into heartbeat_deliveries (
@@ -1063,7 +1102,567 @@ class HeartbeatState:
             "delivery_id": str(delivery_id),
             "client_message_id": client_message_id,
             "tokens": tokens,
+            "replayed": False,
         }
+
+    async def _memory_authorized(
+        self,
+        connection: Any,
+        *,
+        fact_id: uuid.UUID,
+        actor_ref: str,
+        lock: bool = False,
+    ) -> dict[str, Any]:
+        """Load a fact only through a reviewer/admin grant for its scope.
+
+        Memory facts have no profile foreign key by design. The grant join below
+        binds their namespace/scope to a registered profile, preventing a caller
+        from selecting a different scope merely by supplying a fact UUID.
+        """
+        suffix = " for update" if lock else ""
+        fact = await connection.fetchrow(
+            f"""
+            select f.* from memory_facts f
+            where f.fact_id = $1
+              and exists (
+                  select 1
+                  from heartbeat_profiles p
+                  join heartbeat_profile_grants g on g.profile_id = p.profile_id
+                  where p.namespace = f.namespace
+                    and p.scope_kind = f.scope_kind
+                    and p.scope_ref = f.scope_ref
+                    and g.subject_kind = 'principal'
+                    and g.subject_ref = $2
+                    and g.permission in ('review', 'admin')
+              ){suffix}
+            """,
+            fact_id,
+            actor_ref,
+        )
+        if fact is None:
+            raise PermissionError("actor is not authorized for this memory scope")
+        return _row(fact) or {}
+
+    async def _memory_result(
+        self, connection: Any, fact_id: uuid.UUID
+    ) -> dict[str, Any]:
+        fact = await connection.fetchrow(
+            "select * from memory_facts where fact_id = $1", fact_id
+        )
+        if fact is None:
+            raise RuntimeError("memory fact not found")
+        result = _row(fact) or {}
+        result["evidence"] = [
+            _row(row) or {}
+            for row in await connection.fetch(
+                """
+                select evidence_id, evidence_kind, evidence_ref, source_url,
+                       excerpt, content_hash, created_at
+                from memory_fact_evidence where fact_id = $1
+                order by created_at, evidence_id
+                """,
+                fact_id,
+            )
+        ]
+        result["events"] = [
+            _row(row) or {}
+            for row in await connection.fetch(
+                """
+                select event_id, event_type, actor_ref, reason, payload,
+                       idempotency_key, created_at
+                from memory_fact_events where fact_id = $1
+                order by created_at, event_id
+                """,
+                fact_id,
+            )
+        ]
+        return result
+
+    async def list_memory_facts(
+        self,
+        *,
+        actor_ref: str,
+        namespace: str = "default",
+        scope_kind: str | None = None,
+        scope_ref: str | None = None,
+        subject_key: str | None = None,
+        predicate: str | None = None,
+        include_nonconfirmed: bool = False,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """List reviewer-visible facts with evidence and provenance."""
+        self._require_ready()
+        self._require_memory_workflow()
+        actor_ref = actor_ref.strip()
+        if not actor_ref:
+            raise ValueError("actor_ref is required")
+        if scope_kind is not None and scope_kind not in _SCOPES:
+            raise ValueError(f"unsupported memory scope_kind {scope_kind!r}")
+        limit = max(1, min(int(limit), 100))
+        args: list[Any] = [namespace, actor_ref]
+        predicates = [
+            "f.namespace = $1",
+            "g.subject_kind = 'principal'",
+            "g.subject_ref = $2",
+            "g.permission in ('review', 'admin')",
+        ]
+        if not include_nonconfirmed:
+            predicates.append("f.status = 'confirmed'")
+        if scope_kind is not None:
+            args.append(scope_kind)
+            predicates.append(f"f.scope_kind = ${len(args)}")
+        if scope_ref is not None:
+            args.append(scope_ref)
+            predicates.append(f"f.scope_ref = ${len(args)}")
+        if subject_key is not None:
+            args.append(subject_key)
+            predicates.append(f"f.subject_key = ${len(args)}")
+        if predicate is not None:
+            args.append(predicate)
+            predicates.append(f"f.predicate = ${len(args)}")
+        args.append(limit)
+        limit_arg = len(args)
+        rows = await self._pool.fetch(
+            f"""
+            select distinct f.*
+            from memory_facts f
+            join heartbeat_profiles p
+              on p.namespace = f.namespace and p.scope_kind = f.scope_kind
+             and p.scope_ref = f.scope_ref
+            join heartbeat_profile_grants g on g.profile_id = p.profile_id
+            where {' and '.join(predicates)}
+            order by f.updated_at desc, f.fact_id
+            limit ${limit_arg}
+            """,
+            *args,
+        )
+        results: list[dict[str, Any]] = []
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                for row in rows:
+                    results.append(await self._memory_result(connection, row["fact_id"]))
+        return results
+
+    async def get_memory_fact(
+        self, *, fact_id: str, actor_ref: str, include_history: bool = False
+    ) -> dict[str, Any]:
+        self._require_ready()
+        self._require_memory_workflow()
+        fact_uuid = _parse_uuid(fact_id, "fact_id")
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                await self._memory_authorized(
+                    connection, fact_id=fact_uuid, actor_ref=actor_ref
+                )
+                result = await self._memory_result(connection, fact_uuid)
+                if include_history:
+                    result["history"] = [
+                        _row(row) or {}
+                        for row in await connection.fetch(
+                            """
+                            with recursive lineage as (
+                                select fact_id, supersedes_fact_id, revision
+                                from memory_facts where fact_id = $1
+                                union all
+                                select f.fact_id, f.supersedes_fact_id, f.revision
+                                from memory_facts f join lineage l
+                                  on f.fact_id = l.supersedes_fact_id
+                            )
+                            select f.* from memory_facts f
+                            join lineage l on l.fact_id = f.fact_id
+                            order by f.revision
+                            """,
+                            fact_uuid,
+                        )
+                    ]
+                return result
+
+    async def retrieve_memory_fact(
+        self, *, fact_id: str, actor_ref: str, include_history: bool = False
+    ) -> dict[str, Any]:
+        """Named retrieval alias for workflow callers and future API adapters."""
+        return await self.get_memory_fact(
+            fact_id=fact_id, actor_ref=actor_ref, include_history=include_history
+        )
+
+    async def retrieve_memory_facts(self, **kwargs: Any) -> list[dict[str, Any]]:
+        """Plural retrieval alias retaining the list filter contract."""
+        return await self.list_memory_facts(**kwargs)
+
+    async def retrieve_confirmed_memory(
+        self,
+        *,
+        profile_id: str,
+        entity_keys: list[str] | tuple[str, ...] | None = None,
+        max_sensitivity: str = "internal",
+        allowed_sensitivities: list[str] | tuple[str, ...] | None = None,
+        limit: int = 25,
+    ) -> list[dict[str, Any]]:
+        """Retrieve confirmed memory for the workflow's registered profile.
+
+        This is the model-facing read path: authorization comes from the pinned
+        workflow executor and profile scope, never from a human actor supplied by
+        workflow input. Reviewer-facing list/get APIs remain separate.
+        """
+        self._require_ready()
+        profile_uuid = _parse_uuid(profile_id, "profile_id")
+        profile = await self._require_profile_executor(profile_uuid)
+        if max_sensitivity not in _SENSITIVITIES:
+            raise ValueError(f"unsupported max_sensitivity {max_sensitivity!r}")
+        sensitivity_rank = {
+            "public": 0,
+            "internal": 1,
+            "confidential": 2,
+            "restricted": 3,
+        }
+        max_rank = sensitivity_rank[max_sensitivity]
+        if allowed_sensitivities is None:
+            allowed = [
+                sensitivity
+                for sensitivity, rank in sensitivity_rank.items()
+                if rank <= max_rank
+            ]
+        else:
+            allowed = list(dict.fromkeys(allowed_sensitivities))
+            if not allowed or any(value not in _SENSITIVITIES for value in allowed):
+                raise ValueError("allowed_sensitivities contains an unsupported value")
+            if any(sensitivity_rank[value] > max_rank for value in allowed):
+                raise ValueError("allowed_sensitivities exceeds max_sensitivity")
+        keys = [str(key).strip() for key in (entity_keys or []) if str(key).strip()]
+        limit = max(1, min(int(limit), 100))
+        rows = await self._pool.fetch(
+            """
+            select f.* from memory_facts f
+            where f.namespace = $1 and f.scope_kind = $2 and f.scope_ref = $3
+              and f.status = 'confirmed'
+              and f.sensitivity = any($4::text[])
+              and (cardinality($5::text[]) = 0 or f.subject_key = any($5::text[]))
+              and (f.valid_from is null or f.valid_from <= now())
+              and (f.valid_until is null or f.valid_until > now())
+            order by f.updated_at desc, f.fact_id
+            limit $6
+            """,
+            profile["namespace"],
+            profile["scope_kind"],
+            profile["scope_ref"],
+            allowed,
+            keys,
+            limit,
+        )
+        results: list[dict[str, Any]] = []
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                for row in rows:
+                    results.append(await self._memory_result(connection, row["fact_id"]))
+        return results
+
+    async def _memory_event_exists(
+        self, connection: Any, idempotency_key: str
+    ) -> uuid.UUID | None:
+        return await connection.fetchval(
+            "select fact_id from memory_fact_events where idempotency_key = $1",
+            idempotency_key,
+        )
+
+    async def _insert_memory_evidence(
+        self,
+        connection: Any,
+        *,
+        fact_id: uuid.UUID,
+        evidence: list[dict[str, Any]],
+    ) -> None:
+        for entry in evidence:
+            kind = str(entry.get("evidence_kind") or "source_ref")
+            reference = str(entry.get("evidence_ref") or "").strip()
+            if kind not in {"heartbeat_observation", "source_ref", "user_statement", "decision_record"}:
+                raise ValueError(f"unsupported memory evidence_kind {kind!r}")
+            if not reference:
+                raise ValueError("memory evidence_ref is required")
+            evidence_id = _uuid("memory-evidence", fact_id, kind, reference)
+            await connection.execute(
+                """
+                insert into memory_fact_evidence (
+                    evidence_id, fact_id, evidence_kind, evidence_ref,
+                    source_url, excerpt, content_hash
+                ) values ($1, $2, $3, $4, $5, $6, $7)
+                on conflict (fact_id, evidence_kind, evidence_ref) do nothing
+                """,
+                evidence_id,
+                fact_id,
+                kind,
+                reference,
+                entry.get("source_url"),
+                entry.get("excerpt"),
+                entry.get("content_hash"),
+            )
+
+    async def confirm_memory_fact(
+        self,
+        *,
+        fact_id: str,
+        actor_ref: str,
+        expected_revision: int,
+        reason: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        return await self._transition_memory_fact(
+            fact_id=fact_id,
+            actor_ref=actor_ref,
+            expected_revision=expected_revision,
+            target_status="confirmed",
+            event_type="confirmed",
+            reason=reason,
+            idempotency_key=idempotency_key,
+        )
+
+    async def dispute_memory_fact(
+        self,
+        *,
+        fact_id: str,
+        actor_ref: str,
+        expected_revision: int,
+        reason: str,
+        evidence: list[dict[str, Any]] | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        if not reason.strip():
+            raise ValueError("dispute reason is required")
+        return await self._transition_memory_fact(
+            fact_id=fact_id,
+            actor_ref=actor_ref,
+            expected_revision=expected_revision,
+            target_status="disputed",
+            event_type="disputed",
+            reason=reason,
+            evidence=evidence,
+            idempotency_key=idempotency_key,
+        )
+
+    async def forget_memory_fact(
+        self,
+        *,
+        fact_id: str,
+        actor_ref: str,
+        expected_revision: int,
+        reason: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        return await self._transition_memory_fact(
+            fact_id=fact_id,
+            actor_ref=actor_ref,
+            expected_revision=expected_revision,
+            target_status="forgotten",
+            event_type="forgotten",
+            reason=reason,
+            idempotency_key=idempotency_key,
+        )
+
+    async def _transition_memory_fact(
+        self,
+        *,
+        fact_id: str,
+        actor_ref: str,
+        expected_revision: int,
+        target_status: str,
+        event_type: str,
+        reason: str | None = None,
+        evidence: list[dict[str, Any]] | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        self._require_ready()
+        self._require_memory_workflow()
+        if target_status not in {"confirmed", "disputed", "forgotten"}:
+            raise ValueError("unsupported memory transition")
+        fact_uuid = _parse_uuid(fact_id, "fact_id")
+        actor_ref = actor_ref.strip()
+        if not actor_ref:
+            raise ValueError("actor_ref is required")
+        event_key = idempotency_key or f"memory:{fact_uuid}:{event_type}:v{expected_revision}"
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                existing_event = await self._memory_event_exists(connection, event_key)
+                if existing_event == fact_uuid:
+                    await self._memory_authorized(
+                        connection, fact_id=fact_uuid, actor_ref=actor_ref
+                    )
+                    return await self._memory_result(connection, fact_uuid)
+                fact = await self._memory_authorized(
+                    connection, fact_id=fact_uuid, actor_ref=actor_ref, lock=True
+                )
+                actual_revision = int(fact["revision"])
+                if actual_revision != int(expected_revision):
+                    raise RuntimeError(
+                        f"memory fact revision conflict: expected {expected_revision}, got {actual_revision}"
+                    )
+                if target_status == "confirmed" and fact["status"] not in {"proposed", "disputed"}:
+                    raise RuntimeError("only proposed or disputed memory facts can be confirmed")
+                if target_status == "disputed" and fact["status"] in {"forgotten", "superseded"}:
+                    raise RuntimeError("forgotten or superseded memory facts cannot be disputed")
+                new_revision = actual_revision + 1
+                if target_status == "forgotten":
+                    # Keep a non-content tombstone for audit while immediately
+                    # excluding and purging the sensitive value/evidence.
+                    await connection.execute(
+                        "delete from memory_fact_evidence where fact_id = $1", fact_uuid
+                    )
+                    await connection.execute(
+                        """
+                        update memory_facts set status = 'forgotten', value = '{}'::jsonb,
+                               canonical_text = '[forgotten]', revision = $2,
+                               confirmed_by_principal = $3, updated_at = now()
+                        where fact_id = $1
+                        """,
+                        fact_uuid,
+                        new_revision,
+                        actor_ref,
+                    )
+                else:
+                    await connection.execute(
+                        """
+                        update memory_facts set status = $2, revision = $3,
+                               confirmed_by_principal = case when $2 = 'confirmed' then $4 else confirmed_by_principal end,
+                               updated_at = now()
+                        where fact_id = $1
+                        """,
+                        fact_uuid,
+                        target_status,
+                        new_revision,
+                        actor_ref,
+                    )
+                    if evidence:
+                        await self._insert_memory_evidence(
+                            connection, fact_id=fact_uuid, evidence=evidence
+                        )
+                await connection.execute(
+                    """
+                    insert into memory_fact_events (
+                        event_id, fact_id, event_type, actor_ref, reason,
+                        payload, idempotency_key
+                    ) values ($1, $2, $3, $4, $5, $6::jsonb, $7)
+                    """,
+                    _uuid("memory-event", event_key),
+                    fact_uuid,
+                    event_type,
+                    actor_ref,
+                    reason,
+                    _json({"expected_revision": expected_revision, "new_revision": new_revision}),
+                    event_key,
+                )
+                return await self._memory_result(connection, fact_uuid)
+
+    async def correct_memory_fact(
+        self,
+        *,
+        fact_id: str,
+        actor_ref: str,
+        expected_revision: int,
+        canonical_text: str,
+        value: Any,
+        subject_key: str | None = None,
+        predicate: str | None = None,
+        sensitivity: str | None = None,
+        evidence: list[dict[str, Any]] | None = None,
+        reason: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Supersede a fact with a new auditable revision."""
+        self._require_ready()
+        self._require_memory_workflow()
+        fact_uuid = _parse_uuid(fact_id, "fact_id")
+        actor_ref = actor_ref.strip()
+        canonical_text = canonical_text.strip()
+        if not actor_ref or not canonical_text:
+            raise ValueError("actor_ref and canonical_text are required")
+        if sensitivity is not None and sensitivity not in _SENSITIVITIES:
+            raise ValueError(f"unsupported memory sensitivity {sensitivity!r}")
+        value_hash = hashlib.sha256(_json(value).encode()).hexdigest()
+        event_key = idempotency_key or f"memory:{fact_uuid}:correct:{value_hash}"
+        replacement_id = _uuid("memory-correction", fact_uuid, event_key)
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                prior_event = await self._memory_event_exists(connection, event_key)
+                if prior_event is not None:
+                    replacement = await connection.fetchval(
+                        "select fact_id from memory_fact_events where idempotency_key = $1",
+                        f"{event_key}:replacement",
+                    )
+                    return await self._memory_result(
+                        connection, replacement or prior_event
+                    )
+                fact = await self._memory_authorized(
+                    connection, fact_id=fact_uuid, actor_ref=actor_ref, lock=True
+                )
+                if int(fact["revision"]) != int(expected_revision):
+                    raise RuntimeError(
+                        f"memory fact revision conflict: expected {expected_revision}, got {fact['revision']}"
+                    )
+                await connection.execute(
+                    """
+                    update memory_facts set status = 'superseded', revision = revision + 1,
+                           updated_at = now() where fact_id = $1
+                    """,
+                    fact_uuid,
+                )
+                await connection.execute(
+                    """
+                    insert into memory_facts (
+                        fact_id, namespace, scope_kind, scope_ref, subject_key,
+                        predicate, value, canonical_text, status, sensitivity,
+                        confidence, valid_from, valid_until, observed_at, revision,
+                        supersedes_fact_id, proposed_by_principal, confirmed_by_principal
+                    ) values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10,
+                              $11, $12, $13, now(), $14, $15, $16, $17)
+                    """,
+                    replacement_id,
+                    fact["namespace"],
+                    fact["scope_kind"],
+                    fact["scope_ref"],
+                    subject_key or fact["subject_key"],
+                    predicate or fact["predicate"],
+                    _json(value),
+                    canonical_text,
+                    "confirmed" if fact["status"] == "confirmed" else "proposed",
+                    sensitivity or fact["sensitivity"],
+                    fact["confidence"],
+                    fact["valid_from"],
+                    fact["valid_until"],
+                    int(expected_revision) + 1,
+                    fact_uuid,
+                    actor_ref,
+                    actor_ref if fact["status"] == "confirmed" else None,
+                )
+                if evidence:
+                    await self._insert_memory_evidence(
+                        connection, fact_id=replacement_id, evidence=evidence
+                    )
+                else:
+                    raise ValueError("memory corrections require evidence")
+                payload = {
+                    "supersedes_fact_id": str(fact_uuid),
+                    "expected_revision": expected_revision,
+                    "new_revision": int(expected_revision) + 1,
+                }
+                for target in (fact_uuid, replacement_id):
+                    await connection.execute(
+                        """
+                        insert into memory_fact_events (
+                            event_id, fact_id, event_type, actor_ref, reason,
+                            payload, idempotency_key
+                        ) values ($1, $2, $3, $4, $5, $6::jsonb, $7)
+                        """,
+                        _uuid("memory-event", event_key, target),
+                        target,
+                        "superseded" if target == fact_uuid else "confirmed" if fact["status"] == "confirmed" else "proposed",
+                        actor_ref,
+                        reason,
+                        _json(payload),
+                        event_key if target == fact_uuid else f"{event_key}:replacement",
+                    )
+                return await self._memory_result(connection, replacement_id)
+
+    async def supersede_memory_fact(self, **kwargs: Any) -> dict[str, Any]:
+        """Explicit lifecycle name for a correction that supersedes a fact."""
+        return await self.correct_memory_fact(**kwargs)
 
     async def mark_delivery_sent(
         self,
