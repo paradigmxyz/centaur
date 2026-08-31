@@ -3196,11 +3196,6 @@ async fn run_python_workflow_host_in_sandbox(
     if env::var_os("WORKFLOW_DIRS").is_none() && !sandbox_spec_has_env(&spec, "WORKFLOW_DIRS") {
         spec = spec.env("WORKFLOW_DIRS", default_workflow_dirs());
     }
-    if let Ok(database_url) = env::var("DATABASE_URL")
-        && !sandbox_spec_has_env(&spec, "DATABASE_URL")
-    {
-        spec = spec.env("DATABASE_URL", database_url);
-    }
     let (sandbox_id, io) = sandbox.runtime.create_running_io(spec).await?;
     let mut stdin = io.stdin;
     let stderr_task = tokio::spawn(async move {

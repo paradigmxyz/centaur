@@ -217,6 +217,7 @@ Centaur is designed around practical isolation and auditability:
 - each conversation runs in a Kubernetes sandbox with a default-deny NetworkPolicy
 - sandboxes call approved local tool CLI shims and reach the outside world only through a per-sandbox [iron-proxy](https://docs.iron.sh)
 - sandboxes only ever see placeholder strings for upstream credentials; real values are swapped in by iron-proxy only on outbound requests to the specific hosts and headers a secret is bound to
+- sandboxed workflow hosts receive principal-scoped Postgres proxy DSNs and a non-secret database name, never the control plane's raw `DATABASE_URL`
 - messages, executions, events, and delivery state are persisted
 - outbound activity can be audited
 

@@ -76,6 +76,15 @@ requires `apiRs.workflowHostSandbox=true`, which renders
 `WORKFLOW_HOST_SANDBOX=true`; startup fails if workflow-host sandboxing is
 disabled.
 
+When a managed workflow needs Postgres, grant its principal a typed `pg_dsn`
+secret through iron-control. An agent-k8s workflow-host sandbox receives the
+selected database as `WORKFLOW_HOST_DATABASE_NAME`; iron-proxy separately
+injects the principal-scoped `CENTAUR_POSTGRES_DSN`. The control plane's raw
+`DATABASE_URL` is never forwarded to that sandbox. Local workflow hosts retain
+the direct `DATABASE_URL` development path. The Python host prefers the proxy
+DSN, adds the explicit database, and uses an asyncpg pool reset that preserves
+the proxy-enforced role and settings.
+
 ## Durable primitives
 
 | Primitive | Use it for |
@@ -133,6 +142,11 @@ actions additionally require an expiring single-use token, the rendered item
 version, and an explicit profile reviewer grant. Memory facts begin as
 `proposed`; an overlay must define a separate confirmation/retrieval policy
 before treating them as agent context.
+
+The built-in heartbeat migrations create separate no-login database roles for
+the collection/run path and the narrower human-feedback path. Deployments
+should grant the matching typed DSN to each managed workflow principal rather
+than sharing the control-plane database credential.
 
 These primitives compose into larger automations:
 

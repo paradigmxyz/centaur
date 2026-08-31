@@ -27,7 +27,11 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         assert DATABASE_URL is not None
         self.pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=1)
-        for migration in ("0053_heartbeat_state.sql", "0054_memory_facts.sql"):
+        for migration in (
+            "0053_heartbeat_state.sql",
+            "0054_memory_facts.sql",
+            "0055_heartbeat_workflow_roles.sql",
+        ):
             await self.pool.execute((MIGRATIONS / migration).read_text())
 
     async def asyncTearDown(self) -> None:
@@ -48,6 +52,23 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
             workflow_task_id=str(task_id or uuid.uuid4()),
             workflow_principal=principal,
         )
+
+    async def test_feedback_role_cannot_read_memory(self) -> None:
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                await connection.execute("set local role centaur_heartbeat_feedback")
+                self.assertEqual(await connection.fetchval("select count(*) from heartbeat_items"), 0)
+
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                await connection.execute("set local role centaur_heartbeat_feedback")
+                with self.assertRaises(asyncpg.InsufficientPrivilegeError):
+                    await connection.fetchval("select count(*) from memory_facts")
+
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                await connection.execute("set local role centaur_heartbeat_run")
+                self.assertEqual(await connection.fetchval("select count(*) from memory_facts"), 0)
 
     async def test_replay_action_and_memory_proposal_are_idempotent_and_authorized(
         self,

@@ -498,6 +498,87 @@ class WorkflowHostTests(unittest.TestCase):
         self.assertEqual(calls, ["postgresql://example/db"] * 3)
         self.assertEqual(sleeps, [0.25, 0.5])
 
+    def test_proxy_database_url_uses_explicit_database_without_raw_credentials(self) -> None:
+        host = load_workflow_host()
+
+        with patch.dict(
+            os.environ,
+            {
+                "DATABASE_URL": "",
+                "CENTAUR_POSTGRES_DSN": "postgresql://proxy-user:proxy-pass@127.0.0.1:5432",
+                "WORKFLOW_HOST_DATABASE_NAME": "ai_v2",
+            },
+            clear=False,
+        ):
+            resolved = host.workflow_database_url()
+
+        self.assertEqual(
+            resolved,
+            ("postgresql://proxy-user:proxy-pass@127.0.0.1:5432/ai_v2", True),
+        )
+
+    def test_proxy_database_url_can_derive_database_from_legacy_direct_url(self) -> None:
+        host = load_workflow_host()
+
+        with patch.dict(
+            os.environ,
+            {
+                "DATABASE_URL": "postgresql://raw-user:raw-pass@postgres/ai%5Fv2",
+                "CENTAUR_POSTGRES_DSN": "postgresql://proxy-user:proxy-pass@proxy:5432?sslmode=disable",
+                "WORKFLOW_HOST_DATABASE_NAME": "",
+            },
+            clear=False,
+        ):
+            resolved = host.workflow_database_url()
+
+        self.assertEqual(
+            resolved,
+            ("postgresql://proxy-user:proxy-pass@proxy:5432/ai_v2?sslmode=disable", True),
+        )
+
+    def test_proxy_database_url_fails_closed_without_database(self) -> None:
+        host = load_workflow_host()
+
+        with patch.dict(
+            os.environ,
+            {
+                "DATABASE_URL": "",
+                "CENTAUR_POSTGRES_DSN": "postgresql://proxy-user:proxy-pass@proxy:5432",
+                "WORKFLOW_HOST_DATABASE_NAME": "",
+            },
+            clear=False,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "requires WORKFLOW_HOST_DATABASE_NAME"):
+                host.workflow_database_url()
+
+    def test_create_pool_uses_proxy_safe_reset_callback(self) -> None:
+        host = load_workflow_host()
+        calls = []
+        pool = FakePool()
+
+        async def create_pool(database_url, **kwargs):
+            calls.append((database_url, kwargs))
+            return pool
+
+        fake_asyncpg = types.SimpleNamespace(create_pool=create_pool)
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "DATABASE_URL": "",
+                    "CENTAUR_POSTGRES_DSN": "postgresql://proxy-user:proxy-pass@proxy:5432",
+                    "WORKFLOW_HOST_DATABASE_NAME": "ai_v2",
+                },
+                clear=False,
+            ),
+            patch.dict(sys.modules, {"asyncpg": fake_asyncpg}),
+        ):
+            result = asyncio.run(host.create_pool())
+
+        self.assertIs(result, pool)
+        self.assertEqual(calls[0][0], "postgresql://proxy-user:proxy-pass@proxy:5432/ai_v2")
+        self.assertIs(calls[0][1]["reset"], host._proxy_pool_reset)
+
     def test_workflow_result_includes_grouping_identifiers(self) -> None:
         host = load_workflow_host()
         pool = FakePool()

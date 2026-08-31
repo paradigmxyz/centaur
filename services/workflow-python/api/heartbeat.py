@@ -88,7 +88,7 @@ class HeartbeatState:
 
     def _require_ready(self) -> None:
         if self._pool is None:
-            raise RuntimeError("Heartbeat requires DATABASE_URL in the workflow host")
+            raise RuntimeError("Heartbeat requires a workflow-host Postgres grant")
         if not self.workflow_principal:
             raise RuntimeError("Heartbeat requires WORKFLOW_PRINCIPAL")
 

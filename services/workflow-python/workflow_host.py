@@ -21,6 +21,7 @@ import traceback
 import typing
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 from api import metrics
 from api.workflow_engine import WorkflowContext
@@ -265,10 +266,46 @@ def coerce_input(raw: Any, input_cls: type | None) -> Any:
         return raw
 
 
+def workflow_database_url() -> tuple[str, bool] | None:
+    direct_url = os.getenv("DATABASE_URL", "").strip()
+    proxy_url = os.getenv("CENTAUR_POSTGRES_DSN", "").strip()
+    if not proxy_url:
+        return (direct_url, False) if direct_url else None
+
+    database_name = os.getenv("WORKFLOW_HOST_DATABASE_NAME", "").strip()
+    if not database_name and direct_url:
+        database_name = unquote(urlsplit(direct_url).path.lstrip("/"))
+    if not database_name or "/" in database_name:
+        raise RuntimeError(
+            "CENTAUR_POSTGRES_DSN requires WORKFLOW_HOST_DATABASE_NAME or a database in "
+            "DATABASE_URL"
+        )
+
+    parsed = urlsplit(proxy_url)
+    if parsed.scheme not in {"postgres", "postgresql"} or not parsed.netloc:
+        raise RuntimeError("CENTAUR_POSTGRES_DSN must be a PostgreSQL URL")
+    return (
+        urlunsplit(
+            (parsed.scheme, parsed.netloc, f"/{quote(database_name, safe='')}", parsed.query, "")
+        ),
+        True,
+    )
+
+
+async def _proxy_pool_reset(_connection: Any) -> None:
+    # asyncpg performs its internal reset before this callback, including an
+    # open-transaction rollback and listener cleanup. Its default SQL reset
+    # additionally sends RESET ALL, which would erase iron-proxy's enforced
+    # role and settings. A workflow-host sandbox serves one run, so there is no
+    # cross-run session state to clear here.
+    return None
+
+
 async def create_pool() -> Any:
-    database_url = os.getenv("DATABASE_URL", "").strip()
-    if not database_url:
+    resolved = workflow_database_url()
+    if resolved is None:
         return None
+    database_url, uses_proxy = resolved
     try:
         import asyncpg  # type: ignore
     except ImportError:
@@ -277,7 +314,8 @@ async def create_pool() -> Any:
     last_error: Exception | None = None
     for attempt in range(1, DATABASE_CONNECT_ATTEMPTS + 1):
         try:
-            return await asyncpg.create_pool(database_url)
+            kwargs = {"reset": _proxy_pool_reset} if uses_proxy else {}
+            return await asyncpg.create_pool(database_url, **kwargs)
         except Exception as exc:
             last_error = exc
             if attempt == DATABASE_CONNECT_ATTEMPTS:
