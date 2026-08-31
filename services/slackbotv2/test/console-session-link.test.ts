@@ -16,6 +16,7 @@ describe('harnessDisplayName', () => {
   test('maps known harness wire values to display names', () => {
     expect(harnessDisplayName('codex')).toBe('Codex')
     expect(harnessDisplayName('nanocodex')).toBe('Nanocodex')
+    expect(harnessDisplayName('pi')).toBe('Pi')
     expect(harnessDisplayName('claudecode')).toBe('Claude Code')
     expect(harnessDisplayName('amp')).toBe('Amp')
   })

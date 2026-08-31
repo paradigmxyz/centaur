@@ -1,0 +1,17 @@
+# Using the Pi Harness
+
+Centaur can run the official [Pi coding agent](https://github.com/earendil-works/pi-coding-agent) as a first-class harness. Start a Slack thread with `--pi`, set a channel default to `pi`, or create an API session with `"harness_type": "pi"`.
+
+Pi runs in long-lived JSONL RPC mode. Centaur forwards streamed text, thinking, tool calls/results, usage, errors, steering messages, and interrupts through the normal blocks protocol. The Centaur thread key produces a stable Pi session UUID, so mounting the sandbox home directory preserves conversation state across sandbox restarts.
+
+## Configuration
+
+| Variable | Purpose |
+| --- | --- |
+| `PI_PROVIDER` | Default Pi provider. Defaults to `openai-codex` for ChatGPT access-token deployments, otherwise `openai`. |
+| `PI_MODEL` | Default model. Falls back to `CODEX_MODEL`. |
+| `PI_THINKING` | Default Pi thinking level (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`). Falls back to `CODEX_MODEL_REASONING_EFFORT`; Centaur maps `none` to Pi's `off`. |
+| `PI_BIN` | Pi executable, default `pi`. |
+| `PI_CONTINUE_SESSION_ID` | Explicit session UUID override. Normally unnecessary because Centaur derives one from the thread key. |
+
+For ChatGPT subscription auth, use `sandbox.codexAuthMode: access_token`. The sandbox entrypoint converts Centaur's broker placeholder into Pi's `~/.pi/agent/auth.json`; no real token is baked into the image.

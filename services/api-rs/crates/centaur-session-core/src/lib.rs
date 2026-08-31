@@ -362,6 +362,7 @@ pub enum HarnessType {
     ClaudeCode,
     Nanocodex,
     Hermes,
+    Pi,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, AsRefStr, Display, EnumString)]
@@ -865,6 +866,7 @@ mod tests {
             HarnessType::from_str("claudecode").unwrap(),
             HarnessType::ClaudeCode
         );
+        assert_eq!(HarnessType::from_str("pi").unwrap(), HarnessType::Pi);
     }
 
     #[test]

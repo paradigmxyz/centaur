@@ -1,6 +1,6 @@
 /**
  * Inline message directives, restored from the v1 slackbot:
- *   --claude | --claude-code | --amp | --codex | --nanocodex
+ *   --claude | --claude-code | --amp | --codex | --nanocodex | --pi
  *                                                  pick the harness for the thread
  *   --bedrock                                    codex via the AWS Bedrock provider
  *   --meta                                       codex via Meta AI direct
@@ -46,7 +46,8 @@ const HARNESS_FLAGS: Record<string, string> = {
   claudecode: 'claudecode',
   codex: 'codex',
   hermes: 'hermes',
-  nanocodex: 'nanocodex'
+  nanocodex: 'nanocodex',
+  pi: 'pi'
 }
 
 // Provider flags select a model provider within the codex harness (and imply
@@ -76,7 +77,7 @@ const MODEL_SHORTCUTS: Record<string, { harnessType: string; model: string }> =
     ])
   )
 
-const STRATEGY_HARNESSES = new Set(['amp', 'claudecode', 'codex', 'hermes', 'nanocodex'])
+const STRATEGY_HARNESSES = new Set(['amp', 'claudecode', 'codex', 'hermes', 'nanocodex', 'pi'])
 const STRATEGY_PROVIDERS = new Set(['amazon-bedrock', 'openrouter', 'responses'])
 const STRATEGY_REASONING_EFFORTS = new Set([
   'none',
@@ -247,9 +248,14 @@ export function validateStrategyOverrides(
   if (modelRaw) {
     const modelHarness = STRATEGY_MODEL_HARNESSES[modelRaw.toLowerCase()]
     if (!modelHarness) return {}
-    if (harnessType && harnessType !== modelHarness) return {}
+    if (
+      harnessType &&
+      harnessType !== modelHarness &&
+      !(harnessType === 'pi' && modelHarness === 'codex')
+    )
+      return {}
     model = modelRaw.toLowerCase()
-    harnessType = modelHarness
+    harnessType ??= modelHarness
   }
 
   const reasoningRaw = cleanString(raw.reasoning)
@@ -257,7 +263,10 @@ export function validateStrategyOverrides(
     const normalized = reasoningRaw.toLowerCase()
     if (!STRATEGY_REASONING_EFFORTS.has(normalized)) return {}
     reasoning =
-      harnessType === undefined || harnessType === 'codex' || harnessType === 'nanocodex'
+      harnessType === undefined ||
+      harnessType === 'codex' ||
+      harnessType === 'nanocodex' ||
+      harnessType === 'pi'
         ? normalized
         : undefined
   }

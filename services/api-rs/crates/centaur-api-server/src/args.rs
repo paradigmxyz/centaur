@@ -2056,7 +2056,7 @@ fn harness_fragment_engine_name(engine: &HarnessType) -> &'static str {
         HarnessType::Codex => "codex",
         HarnessType::Amp => "amp",
         HarnessType::ClaudeCode => "claude-code",
-        HarnessType::Nanocodex => "codex",
+        HarnessType::Nanocodex | HarnessType::Pi => "codex",
         HarnessType::Hermes => "hermes",
     }
 }
@@ -2072,7 +2072,9 @@ fn merge_fragment(target: &mut ProxyFragment, source: ProxyFragment) {
 
 fn harness_auth_mode_env(engine: &HarnessType) -> Option<String> {
     match engine {
-        HarnessType::Codex | HarnessType::Nanocodex => env::var("CODEX_AUTH_MODE").ok(),
+        HarnessType::Codex | HarnessType::Nanocodex | HarnessType::Pi => {
+            env::var("CODEX_AUTH_MODE").ok()
+        }
         HarnessType::ClaudeCode => env::var("CLAUDE_CODE_AUTH_MODE").ok(),
         HarnessType::Amp => None,
         // Hermes resolves providers through its own credential store /
@@ -3286,7 +3288,7 @@ mod tests {
     }
 
     #[test]
-    fn nanocodex_reuses_the_codex_proxy_fragment() {
+    fn codex_compatible_harnesses_reuse_the_codex_proxy_fragment() {
         let _guard = ENV_LOCK.lock().unwrap();
         let _env = EnvGuard::set(&[("CODEX_AUTH_MODE", "access_token")]);
 
@@ -3296,6 +3298,14 @@ mod tests {
         );
         assert_eq!(
             harness_auth_mode_env(&HarnessType::Nanocodex).as_deref(),
+            Some("access_token")
+        );
+        assert_eq!(
+            harness_fragment_engine_name(&HarnessType::Pi),
+            harness_fragment_engine_name(&HarnessType::Codex)
+        );
+        assert_eq!(
+            harness_auth_mode_env(&HarnessType::Pi).as_deref(),
             Some("access_token")
         );
     }

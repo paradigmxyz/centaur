@@ -70,14 +70,22 @@ const options: SlackbotV2Options = {
     ...(optionalEnv('CLAUDE_MODEL') ? { claudecode: optionalEnv('CLAUDE_MODEL')! } : {}),
     ...(optionalEnv('CODEX_MODEL')
       ? { codex: optionalEnv('CODEX_MODEL')!, nanocodex: optionalEnv('CODEX_MODEL')! }
+      : {}),
+    ...(optionalEnv('PI_MODEL') || optionalEnv('CODEX_MODEL')
+      ? { pi: (optionalEnv('PI_MODEL') || optionalEnv('CODEX_MODEL'))! }
       : {})
   },
-  harnessDefaultReasoning: optionalEnv('CODEX_MODEL_REASONING_EFFORT')
-    ? {
-        codex: optionalEnv('CODEX_MODEL_REASONING_EFFORT')!,
-        nanocodex: optionalEnv('CODEX_MODEL_REASONING_EFFORT')!
-      }
-    : {},
+  harnessDefaultReasoning: {
+    ...(optionalEnv('CODEX_MODEL_REASONING_EFFORT')
+      ? {
+          codex: optionalEnv('CODEX_MODEL_REASONING_EFFORT')!,
+          nanocodex: optionalEnv('CODEX_MODEL_REASONING_EFFORT')!
+        }
+      : {}),
+    ...(optionalEnv('PI_THINKING') || optionalEnv('CODEX_MODEL_REASONING_EFFORT')
+      ? { pi: (optionalEnv('PI_THINKING') || optionalEnv('CODEX_MODEL_REASONING_EFFORT'))! }
+      : {})
+  },
   idleTimeoutMs: optionalNumberEnv('SESSION_IDLE_TIMEOUT_MS'),
   maxDurationMs: optionalNumberEnv('SESSION_MAX_DURATION_MS'),
   messageOverridesStrategy: createMessageOverridesStrategy(),

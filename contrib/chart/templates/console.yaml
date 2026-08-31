@@ -131,7 +131,7 @@ spec:
             - name: CODEX_CUSTOM_PROVIDERS
               value: {{ .Values.codex.customProviders | toJson | quote }}
 {{- end }}
-{{- range $name := tuple "CLAUDE_MODEL" "CODEX_MODEL" }}
+{{- range $name := tuple "CLAUDE_MODEL" "CODEX_MODEL" "PI_MODEL" }}
 {{- if hasKey $.Values.sandbox.extraEnv $name }}
             # Mirror the deployer's harness default-model override
             # (sandbox.extraEnv) so the Threads view names the model threads

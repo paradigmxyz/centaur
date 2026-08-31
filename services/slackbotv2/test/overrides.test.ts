@@ -32,6 +32,7 @@ describe('extractMessageOverrides', () => {
     expect(extractMessageOverrides('--codex review this').harnessType).toBe('codex')
     expect(extractMessageOverrides('--nanocodex review this').harnessType).toBe('nanocodex')
     expect(extractMessageOverrides('--hermes review this').harnessType).toBe('hermes')
+    expect(extractMessageOverrides('--pi review this').harnessType).toBe('pi')
   })
 
   test('parses harness flag anywhere in the message', () => {
@@ -433,6 +434,17 @@ describe('validateStrategyOverrides', () => {
     expect(validateStrategyOverrides({ model: 'terra' })).toEqual({})
     expect(validateStrategyOverrides({ model: 'anthropic/claude-fable-5' })).toEqual({})
     expect(validateStrategyOverrides({ model: 'not real model id' })).toEqual({})
+  })
+
+  test('keeps Pi when selecting an OpenAI model and reasoning', () => {
+    expect(
+      validateStrategyOverrides({ harness: 'pi', model: 'gpt-5.6-luna', reasoning: 'high' })
+    ).toEqual({
+      harnessType: 'pi',
+      model: 'gpt-5.6-luna',
+      provider: undefined,
+      reasoning: 'high'
+    })
   })
 
   test('rejects incompatible canonical strategy fields', () => {
