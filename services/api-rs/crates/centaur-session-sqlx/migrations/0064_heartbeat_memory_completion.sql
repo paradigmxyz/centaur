@@ -36,8 +36,8 @@ alter table public.memory_fact_events
                     'expired','evidence_added','correction_requested','promoted'));
 
 -- A projection is derived from canonical memory_facts.  It has no evidence
--- excerpt, value, or source payload.  The existing company-context reader
--- policies are intentionally unchanged; only the definer writes this row.
+-- excerpt, value, or source payload.  Only the definer writes this row; the
+-- company-context reader policy is extended below with a narrow read branch.
 create or replace function heartbeat_refresh_memory_projection()
 returns trigger
 language plpgsql
@@ -122,6 +122,60 @@ begin
         new.predicate;
     return new;
 end;
+$$;
+
+-- Company-context consumers may read only deliverable organization memory.
+-- Preserve the existing Slack branch exactly and do not expose team, private,
+-- personal, unconfirmed, or non-derived rows through this reader role.
+do $$
+begin
+    if to_regclass('public.company_context_documents') is not null
+       and exists (select 1 from pg_roles where rolname = 'centaur_company_context_reader') then
+        execute 'drop policy if exists centaur_cc_reader_documents_select on public.company_context_documents';
+        if to_regclass('public.slack_sync_channels') is not null then
+            execute $policy$
+                create policy centaur_cc_reader_documents_select
+                    on public.company_context_documents
+                    for select
+                    to centaur_company_context_reader
+                    using (
+                        (
+                            source = 'slack'
+                            and metadata ->> 'channel_id' in (
+                                select channels.channel_id
+                                from public.slack_sync_channels channels
+                            )
+                        )
+                        or (
+                            source = 'heartbeat_memory'
+                            and source_type = 'memory_fact'
+                            and access_scope like 'organization:%'
+                            and metadata ->> 'scope_kind' = 'organization'
+                            and metadata ->> 'sensitivity' in ('public', 'internal')
+                            and metadata ->> 'derived' = 'true'
+                            and nullif(current_setting('centaur.heartbeat_memory_namespace', true), '') = metadata ->> 'namespace'
+                        )
+                    )
+            $policy$;
+        else
+            execute $policy$
+                create policy centaur_cc_reader_documents_select
+                    on public.company_context_documents
+                    for select
+                    to centaur_company_context_reader
+                    using (
+                        source = 'heartbeat_memory'
+                        and source_type = 'memory_fact'
+                        and access_scope like 'organization:%'
+                        and metadata ->> 'scope_kind' = 'organization'
+                        and metadata ->> 'sensitivity' in ('public', 'internal')
+                        and metadata ->> 'derived' = 'true'
+                        and nullif(current_setting('centaur.heartbeat_memory_namespace', true), '') = metadata ->> 'namespace'
+                    )
+            $policy$;
+        end if;
+    end if;
+end
 $$;
 
 alter function heartbeat_refresh_memory_projection() owner to centaur_heartbeat_definer;

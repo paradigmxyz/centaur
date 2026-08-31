@@ -34,18 +34,18 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
         assert DATABASE_URL is not None
         self.pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=1)
         for migration in (
-            "0053_heartbeat_state.sql",
-            "0054_memory_facts.sql",
-            "0055_heartbeat_workflow_roles.sql",
-            "0056_heartbeat_memory_lifecycle.sql",
-            "0057_heartbeat_rls_principal_scope.sql",
-            "0058_heartbeat_memory_and_draft_facades.sql",
-            "0059_heartbeat_feedback_semantics.sql",
-            "0060_heartbeat_draft_grant_replay.sql",
-            "0061_heartbeat_synthesis_attempt_artifact.sql",
-            "0062_heartbeat_memory_completion.sql",
+            "0055_heartbeat_state.sql",
+            "0056_memory_facts.sql",
+            "0057_heartbeat_workflow_roles.sql",
+            "0058_heartbeat_memory_lifecycle.sql",
+            "0059_heartbeat_rls_principal_scope.sql",
+            "0060_heartbeat_memory_and_draft_facades.sql",
+            "0061_heartbeat_feedback_semantics.sql",
+            "0062_heartbeat_draft_grant_replay.sql",
+            "0063_heartbeat_synthesis_attempt_artifact.sql",
+            "0064_heartbeat_memory_completion.sql",
         ):
-            if migration == "0062_heartbeat_memory_completion.sql":
+            if migration == "0064_heartbeat_memory_completion.sql":
                 await self.pool.execute(
                     """
                     do $$ begin
@@ -54,6 +54,12 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
                         end if;
                         if not exists (select 1 from pg_roles where rolname = 'heartbeat_readonly_client') then
                             create role heartbeat_readonly_client login password 'heartbeat-test';
+                        end if;
+                        if not exists (select 1 from pg_roles where rolname = 'centaur_company_context_reader') then
+                            create role centaur_company_context_reader nologin;
+                        end if;
+                        if not exists (select 1 from pg_roles where rolname = 'heartbeat_company_context_reader_client') then
+                            create role heartbeat_company_context_reader_client login password 'heartbeat-test';
                         end if;
                     end $$
                     """
@@ -95,6 +101,12 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
         )
         await self.pool.execute(
             "grant select on company_context_documents to centaur_readonly"
+        )
+        await self.pool.execute(
+            "grant centaur_company_context_reader to heartbeat_company_context_reader_client"
+        )
+        await self.pool.execute(
+            "grant select on company_context_documents to centaur_company_context_reader"
         )
         await self.pool.execute(
             "select heartbeat_bind_workflow_principal($1::name, $2)",
@@ -1232,6 +1244,33 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
             fact_id=str(fact_id), actor_ref="U-REVIEWER", expected_revision=1
         )
         self.assertEqual(confirmed["status"], "confirmed")
+        public_fact_id = uuid.uuid4()
+        team_fact_id = uuid.uuid4()
+        await self.pool.execute(
+            """
+            insert into memory_facts(
+                fact_id, namespace, scope_kind, scope_ref, subject_key,
+                predicate, value, canonical_text, status, sensitivity,
+                revision, proposed_by_principal, owner_principal
+            ) values
+                ($1, 'projection-test', 'organization', 'org-1',
+                 'account:public', 'owner', '{\"team\":\"sales\"}',
+                 'Sales owns the account.', 'proposed', 'public', 1,
+                 'workflow-heartbeat-run', 'workflow-heartbeat-run'),
+                ($2, 'projection-test', 'team', 'team-1',
+                 'account:private', 'owner', '{\"team\":\"engineering\"}',
+                 'Engineering owns the account.', 'proposed', 'internal', 1,
+                 'workflow-heartbeat-run', 'workflow-heartbeat-run')
+            """,
+            public_fact_id,
+            team_fact_id,
+        )
+        await state.confirm_memory_fact(
+            fact_id=str(public_fact_id), actor_ref="U-REVIEWER", expected_revision=1
+        )
+        await state.confirm_memory_fact(
+            fact_id=str(team_fact_id), actor_ref="U-REVIEWER", expected_revision=1
+        )
         long_fact_id = uuid.uuid4()
         long_metadata_fact_id = uuid.uuid4()
         await self.pool.execute(
@@ -1286,6 +1325,18 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(metadata["scope_ref"], "org-1")
             self.assertEqual(metadata["subject_key"], "account:acme")
             self.assertEqual(len(document["content_hash"]), 64)
+            self.assertIsNotNone(
+                await admin.fetchrow(
+                    "select 1 from company_context_documents where source_document_id = $1",
+                    str(public_fact_id),
+                )
+            )
+            self.assertIsNone(
+                await admin.fetchrow(
+                    "select 1 from company_context_documents where source_document_id = $1",
+                    str(team_fact_id),
+                )
+            )
             self.assertIsNone(
                 await admin.fetchrow(
                     "select 1 from company_context_documents where source_document_id = $1",
@@ -1318,6 +1369,52 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
                 )
             finally:
                 readonly_pool.terminate()
+
+            reader_pool = await asyncpg.create_pool(
+                self.client_database_url.replace(
+                    "heartbeat_test_client", "heartbeat_company_context_reader_client"
+                ),
+                min_size=1,
+                max_size=1,
+                setup=lambda connection: connection.execute(
+                    "set role centaur_company_context_reader"
+                ),
+            )
+            try:
+                self.assertEqual(
+                    await reader_pool.fetchval(
+                        "select count(*) from company_context_documents where source = 'heartbeat_memory'"
+                    ),
+                    0,
+                )
+                await reader_pool.execute(
+                    "set centaur.heartbeat_memory_namespace = 'wrong-namespace'"
+                )
+                self.assertEqual(
+                    await reader_pool.fetchval(
+                        "select count(*) from company_context_documents where source_document_id = $1",
+                        str(fact_id),
+                    ),
+                    0,
+                )
+                await reader_pool.execute(
+                    "set centaur.heartbeat_memory_namespace = 'projection-test'"
+                )
+                self.assertEqual(
+                    await reader_pool.fetchval(
+                        "select count(*) from company_context_documents where source = 'heartbeat_memory'"
+                    ),
+                    2,
+                )
+                self.assertEqual(
+                    await reader_pool.fetchval(
+                        "select count(*) from company_context_documents where source_document_id = $1",
+                        str(team_fact_id),
+                    ),
+                    0,
+                )
+            finally:
+                reader_pool.terminate()
 
             await self.pool.execute(
                 "update memory_facts set status = 'disputed', revision = revision + 1 where fact_id = $1",
