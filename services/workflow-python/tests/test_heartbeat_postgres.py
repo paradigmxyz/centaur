@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sys
 import unittest
@@ -38,12 +39,24 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
             "0055_heartbeat_workflow_roles.sql",
             "0056_heartbeat_memory_lifecycle.sql",
             "0057_heartbeat_rls_principal_scope.sql",
+            "0058_heartbeat_memory_and_draft_facades.sql",
+            "0059_heartbeat_feedback_semantics.sql",
         ):
             await self.pool.execute((MIGRATIONS / migration).read_text())
         await self.pool.execute(
             "select heartbeat_bind_workflow_principal($1::name, $2)",
             "centaur_heartbeat_run",
             "workflow-heartbeat-run",
+        )
+        await self.pool.execute(
+            "select heartbeat_bind_workflow_principal($1::name, $2)",
+            "centaur_heartbeat_feedback",
+            "workflow-heartbeat-feedback",
+        )
+        await self.pool.execute(
+            "select heartbeat_bind_workflow_principal($1::name, $2)",
+            "centaur_heartbeat_prepare_action",
+            "workflow-heartbeat-prepare-action",
         )
         await self.pool.execute(
             """
@@ -558,6 +571,7 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
                     await connection.fetchval("select count(*) from heartbeat_profiles"),
                     0,
                 )
+
                 await connection.execute(
                     "set local centaur.workflow_principal = 'forged-principal'"
                 )
@@ -630,7 +644,7 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertEqual(replayed_delivery["delivery_id"], delivery["delivery_id"])
-        self.assertEqual(replayed_delivery["tokens"], [])
+        self.assertEqual(replayed_delivery["tokens"], delivery["tokens"])
         self.assertTrue(replayed_delivery["replayed"])
         self.assertEqual(
             await self.pool.fetchval(
@@ -674,12 +688,12 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
                 provider_event_key="slack-action-1",
             )
             self.assertEqual(action["status"], "resolved")
-            with self.assertRaises(PermissionError):
-                await feedback.apply_action(
-                    token=raw_token,
-                    actor_ref="U-REVIEWER",
-                    provider_event_key="slack-action-1",
-                )
+            replayed_action = await feedback.apply_action(
+                token=raw_token,
+                actor_ref="U-REVIEWER",
+                provider_event_key="slack-action-1",
+            )
+            self.assertEqual(replayed_action, action)
         finally:
             feedback_pool.terminate()
         await first.complete_run(
@@ -720,3 +734,359 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaises(PermissionError):
             await unauthorized.list_candidates(profile_id=str(profile["profile_id"]))
+
+    async def test_z_memory_delivery_facade_is_run_bound_and_correct_is_request_only(self) -> None:
+        state = self.state(run_id=uuid.uuid4())
+        profile = await state.register_profile(
+            {
+                "namespace": "default",
+                "name": "memory-facade-profile",
+                "scope_kind": "team",
+                "scope_ref": "memory-facade",
+                "definition_hash": "memory-v1",
+                "definition_version": 1,
+                "destination": {"kind": "slack", "ref": "C-memory"},
+                "required_sources": [],
+                "optional_sources": [],
+                "delivery_policy": {"posture": "read_and_draft_only"},
+                "reviewer_refs": ["U-REVIEWER"],
+                "enabled": True,
+            }
+        )
+        other_profile = await state.register_profile(
+            {
+                "namespace": "default",
+                "name": "memory-facade-other-profile",
+                "scope_kind": "team",
+                "scope_ref": "memory-facade",
+                "definition_hash": "memory-v1",
+                "definition_version": 1,
+                "destination": {"kind": "slack", "ref": "C-memory-other"},
+                "required_sources": [],
+                "optional_sources": [],
+                "delivery_policy": {"posture": "read_and_draft_only"},
+                "reviewer_refs": ["U-OTHER"],
+                "enabled": True,
+            }
+        )
+        run = await state.begin_run(
+            profile_id=str(profile["profile_id"]),
+            trigger="replay",
+            definition_hash="memory-v1",
+            prompt_version="test-v1",
+        )
+        fact_id = uuid.uuid4()
+        async with self.pool.acquire() as connection:
+            await connection.execute(
+                """
+                insert into memory_facts(
+                    fact_id, owner_principal, namespace, scope_kind, scope_ref,
+                    subject_key, predicate, value, canonical_text, status, sensitivity,
+                    proposed_by_principal
+                ) values ($1, 'workflow-heartbeat-run', 'default', 'team', 'memory-facade',
+                    'account:memory', 'owner', '{"team":"gtm"}', 'GTM owns the review',
+                    'proposed', 'internal', 'workflow-heartbeat-run')
+                """,
+                fact_id,
+            )
+            await connection.execute(
+                "insert into heartbeat_run_memory_facts(run_id, fact_id) values($1,$2)",
+                run["run_id"], fact_id,
+            )
+        delivery = await state.prepare_delivery(
+            run_id=str(run["run_id"]),
+            destination_kind="slack",
+            destination_ref="C-memory",
+            rendered_payload={"text": "Review memory"},
+            memory_actions=[
+                {
+                    "memory_fact_id": str(fact_id),
+                    "expected_revision": 1,
+                    "action": "correct",
+                    "payload": {},
+                }
+            ],
+        )
+        replay = await state.prepare_delivery(
+            run_id=str(run["run_id"]),
+            destination_kind="slack",
+            destination_ref="C-memory",
+            rendered_payload={"text": "Review memory"},
+            memory_actions=[
+                {
+                    "memory_fact_id": str(fact_id),
+                    "expected_revision": 1,
+                    "action": "correct",
+                    "payload": {},
+                }
+            ],
+        )
+        self.assertEqual(replay["tokens"], delivery["tokens"])
+        await state.mark_delivery_sent(
+            delivery_id=delivery["delivery_id"],
+            provider_message_id="memory-only",
+            surfaced_item_ids=[],
+        )
+        feedback_pool = await asyncpg.create_pool(
+            self.client_database_url.replace(
+                "heartbeat_test_client", "heartbeat_feedback_client"
+            ),
+            min_size=1,
+            max_size=1,
+            setup=lambda connection: connection.execute(
+                "set role centaur_heartbeat_feedback"
+            ),
+        )
+        try:
+            feedback = HeartbeatState(
+                feedback_pool,
+                workflow_name="heartbeat_feedback",
+                workflow_run_id=str(uuid.uuid4()),
+                workflow_task_id=str(uuid.uuid4()),
+                workflow_principal="workflow-heartbeat-feedback",
+            )
+            with self.assertRaises(PermissionError):
+                await feedback.request_memory_correction(
+                    token=delivery["tokens"][0]["token"],
+                    fact_id=str(fact_id),
+                    actor_ref="U-OTHER",
+                    provider_event_key="memory-correction-other-profile",
+                )
+            result = await feedback.request_memory_correction(
+                token=delivery["tokens"][0]["token"],
+                fact_id=str(fact_id),
+                actor_ref="U-REVIEWER",
+                provider_event_key="memory-correction-1",
+            )
+            self.assertEqual(result["status"], "correction_requested")
+            self.assertEqual(result["fact_status"], "proposed")
+            fact = await self.pool.fetchrow(
+                "select status, revision, canonical_text from memory_facts where fact_id=$1",
+                fact_id,
+            )
+            self.assertEqual(tuple(fact), ("proposed", 1, "GTM owns the review"))
+            admin_connection = await asyncpg.connect(DATABASE_URL)
+            try:
+                self.assertEqual(
+                    await admin_connection.fetchval(
+                        "select count(*) from memory_correction_requests where fact_id=$1",
+                        fact_id,
+                    ),
+                    1,
+                )
+            finally:
+                await admin_connection.close()
+            victim_id = uuid.uuid4()
+            foreign_id = uuid.uuid4()
+            foreign_evidence_id = uuid.uuid4()
+            await self.pool.execute(
+                """
+                insert into memory_facts(
+                    fact_id, owner_principal, namespace, scope_kind, scope_ref,
+                    subject_key, predicate, value, canonical_text, status, sensitivity,
+                    proposed_by_principal
+                ) values ($1, 'workflow-heartbeat-run', 'default', 'team', 'memory-facade',
+                    'account:victim', 'owner', '{"team":"gtm"}', 'Victim fact',
+                    'proposed', 'internal', 'workflow-heartbeat-run')
+                """,
+                victim_id,
+            )
+            await self.pool.execute(
+                "insert into heartbeat_run_memory_facts(run_id, fact_id) values($1,$2)",
+                run["run_id"],
+                victim_id,
+            )
+            admin_connection = await asyncpg.connect(DATABASE_URL)
+            try:
+                await admin_connection.execute(
+                    """
+                    insert into memory_facts(
+                        fact_id, owner_principal, namespace, scope_kind, scope_ref,
+                        subject_key, predicate, value, canonical_text, status, sensitivity,
+                        proposed_by_principal
+                    ) values ($1, 'workflow-heartbeat-other', 'default', 'team', 'other-scope',
+                        'account:foreign', 'owner', '{"team":"foreign"}', 'Foreign fact',
+                        'proposed', 'internal', 'workflow-heartbeat-other')
+                    """,
+                    foreign_id,
+                )
+                await admin_connection.execute(
+                    "insert into memory_fact_evidence(evidence_id,fact_id,evidence_kind,evidence_ref) values($1,$2,'user_statement','foreign-proof')",
+                    foreign_evidence_id,
+                    foreign_id,
+                )
+                await admin_connection.execute(
+                    "update memory_facts set supersedes_fact_id=$2 where fact_id=$1",
+                    victim_id,
+                    foreign_id,
+                )
+            finally:
+                await admin_connection.close()
+            forget_delivery = await state.prepare_delivery(
+                run_id=str(run["run_id"]),
+                destination_kind="slack",
+                destination_ref="C-memory-forget",
+                rendered_payload={"text": "Forget memory"},
+                memory_actions=[
+                    {
+                        "memory_fact_id": str(victim_id),
+                        "expected_revision": 1,
+                        "action": "forget",
+                        "payload": {},
+                    }
+                ],
+            )
+            forgotten = await feedback.apply_memory_action(
+                token=forget_delivery["tokens"][0]["token"],
+                actor_ref="U-REVIEWER",
+                provider_event_key="memory-forget-lineage",
+            )
+            self.assertEqual(forgotten["status"], "forgotten")
+            admin_connection = await asyncpg.connect(DATABASE_URL)
+            try:
+                foreign = await admin_connection.fetchrow(
+                    "select status, canonical_text, value, (select count(*) from memory_fact_evidence where fact_id=$1) from memory_facts where fact_id=$1",
+                    foreign_id,
+                )
+                self.assertEqual(foreign["status"], "proposed")
+                self.assertEqual(foreign["canonical_text"], "Foreign fact")
+                self.assertEqual(json.loads(foreign["value"]), {"team": "foreign"})
+                self.assertEqual(foreign["count"], 1)
+            finally:
+                await admin_connection.close()
+        finally:
+            feedback_pool.terminate()
+        feedback_pool = await asyncpg.create_pool(
+            self.client_database_url.replace(
+                "heartbeat_test_client", "heartbeat_feedback_client"
+            ),
+            min_size=1,
+            max_size=1,
+            setup=lambda connection: connection.execute(
+                "set role centaur_heartbeat_feedback"
+            ),
+        )
+        feedback = HeartbeatState(
+            feedback_pool,
+            workflow_name="heartbeat_feedback",
+            workflow_run_id=str(uuid.uuid4()),
+            workflow_task_id=str(uuid.uuid4()),
+            workflow_principal="workflow-heartbeat-feedback",
+        )
+        item_id = uuid.uuid4()
+        async with self.pool.acquire() as connection:
+            await connection.execute(
+                """
+                insert into heartbeat_items(item_id, profile_id, story_key, item_type, title, material_hash)
+                values($1, $2, 'memory-draft-item', 'work', 'Draft item', 'draft-hash')
+                """,
+                item_id,
+                profile["profile_id"],
+            )
+        item_delivery = await state.prepare_delivery(
+            run_id=str(run["run_id"]),
+            destination_kind="slack",
+            destination_ref="C-draft",
+            rendered_payload={"text": "Prepare draft"},
+            item_actions=[
+                {
+                    "item_id": str(item_id),
+                    "item_version": 1,
+                    "action": "prepare_draft",
+                    "payload": {},
+                }
+            ],
+        )
+        assignment_item_id = uuid.uuid4()
+        async with self.pool.acquire() as connection:
+            await connection.execute(
+                """
+                insert into heartbeat_items(item_id, profile_id, story_key, item_type, title, material_hash)
+                values($1, $2, 'assignment-item', 'work', 'Assignment item', 'assignment-hash')
+                """,
+                assignment_item_id,
+                profile["profile_id"],
+            )
+        assignment_delivery = await state.prepare_delivery(
+            run_id=str(run["run_id"]),
+            destination_kind="slack",
+            destination_ref="C-assignment",
+            rendered_payload={"text": "Assign"},
+            item_actions=[
+                {
+                    "item_id": str(assignment_item_id),
+                    "item_version": 1,
+                    "action": "assign",
+                    "payload": {},
+                }
+            ],
+        )
+        assignment_result = await feedback.apply_action(
+            token=assignment_delivery["tokens"][0]["token"],
+            actor_ref="U-REVIEWER",
+            provider_event_key="assignment-1",
+        )
+        self.assertEqual(assignment_result["status"], "open")
+        self.assertNotIn("draft_grant", assignment_result)
+        draft_result = await feedback.apply_action(
+            token=item_delivery["tokens"][0]["token"],
+            actor_ref="U-REVIEWER",
+            provider_event_key="draft-prepare-1",
+        )
+        admin_connection = await asyncpg.connect(DATABASE_URL)
+        try:
+            await admin_connection.execute(
+                "do $$ begin if not exists (select 1 from pg_roles where rolname = 'heartbeat_prepare_client') then create role heartbeat_prepare_client login password 'heartbeat-test'; end if; end $$"
+            )
+            await admin_connection.execute(
+                "grant centaur_heartbeat_prepare_action to heartbeat_prepare_client"
+            )
+        finally:
+            await admin_connection.close()
+        prepare_pool = await asyncpg.create_pool(
+            self.client_database_url.replace(
+                "heartbeat_test_client", "heartbeat_prepare_client"
+            ),
+            min_size=1,
+            max_size=1,
+            setup=lambda connection: connection.execute(
+                "set role centaur_heartbeat_prepare_action"
+            ),
+        )
+        try:
+            with self.assertRaises(asyncpg.InsufficientPrivilegeError):
+                await prepare_pool.fetchval("select count(*) from heartbeat_items")
+            with self.assertRaises(asyncpg.InsufficientPrivilegeError):
+                await prepare_pool.fetchval("select count(*) from memory_facts")
+            with self.assertRaises(asyncpg.InsufficientPrivilegeError):
+                await prepare_pool.fetchval("select count(*) from heartbeat_draft_grants")
+            prepare = HeartbeatState(
+                prepare_pool,
+                workflow_name="heartbeat_prepare_action",
+                workflow_run_id=str(uuid.uuid4()),
+                workflow_task_id=str(uuid.uuid4()),
+                workflow_principal="workflow-heartbeat-prepare-action",
+            )
+            grant = draft_result["draft_grant"]
+            draft_item = await prepare.get_item(
+                draft_grant=grant, item_id=str(item_id), expected_version=2
+            )
+            self.assertEqual(str(draft_item["item_id"]), str(item_id))
+            self.assertEqual(draft_item["version"], 2)
+            artifact = await prepare.put_draft_artifact(
+                draft_grant=grant,
+                item_id=str(item_id),
+                item_version=2,
+                draft={"writes": [], "notes": ["review required"]},
+            )
+            self.assertEqual(str(artifact["item_id"]), str(item_id))
+            with self.assertRaises(PermissionError):
+                await prepare.put_draft_artifact(
+                    draft_grant=grant,
+                    item_id=str(item_id),
+                    item_version=2,
+                    draft={"writes": []},
+                )
+        finally:
+            prepare_pool.terminate()
+            feedback_pool.terminate()

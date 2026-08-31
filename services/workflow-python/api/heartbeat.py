@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import hmac
 import json
 import secrets
 import uuid
@@ -33,6 +34,12 @@ def _json_value(value: Any) -> Any:
         except json.JSONDecodeError:
             return value
     return value
+
+
+def _delivery_token(seed: str, kind: str, spec: dict[str, Any]) -> str:
+    """Derive the one-time bearer token without persisting its plaintext."""
+    material = f"{kind}:{_json(spec)}".encode()
+    return hmac.new(seed.encode(), material, hashlib.sha256).hexdigest()
 
 
 def _row(row: Any) -> dict[str, Any] | None:
@@ -751,6 +758,7 @@ class HeartbeatState:
         await self._require_profile_executor(profile_uuid)
         await self._require_run_executor(run_uuid, profile_uuid)
         proposals = memory_proposals or []
+        committed_memory_proposals: list[dict[str, Any]] = []
         if len(items) > 100 or len(proposals) > 100:
             raise ValueError(
                 "heartbeat synthesis is limited to 100 items and proposals"
@@ -924,6 +932,14 @@ class HeartbeatState:
                         _json({"heartbeat_run_id": str(run_uuid)}),
                         memory_event_key,
                     )
+                    await connection.execute(
+                        """
+                        insert into heartbeat_run_memory_facts (run_id, fact_id)
+                        values ($1, $2) on conflict do nothing
+                        """,
+                        run_uuid,
+                        fact_id,
+                    )
                     for observation_id in proposal_evidence:
                         evidence_uuid = _parse_uuid(
                             str(observation_id), "evidence_observation_id"
@@ -946,6 +962,11 @@ class HeartbeatState:
                             fact_id,
                             str(evidence_uuid),
                         )
+                    committed = await connection.fetchrow(
+                        "select fact_id, revision, status, sensitivity from memory_facts where fact_id = $1",
+                        fact_id,
+                    )
+                    committed_memory_proposals.append(_row(committed) or {})
                 await connection.execute(
                     """
                     update heartbeat_runs set status = 'committing',
@@ -960,7 +981,8 @@ class HeartbeatState:
         return {
             "candidate_count": committed_candidate_count,
             "committed_items": len(items),
-            "memory_proposals": len(proposals),
+            "memory_proposals": committed_memory_proposals,
+            "memory_proposal_count": len(proposals),
         }
 
     async def prepare_delivery(
@@ -970,7 +992,8 @@ class HeartbeatState:
         destination_kind: str,
         destination_ref: str,
         rendered_payload: dict[str, Any],
-        item_actions: list[dict[str, Any]],
+        item_actions: list[dict[str, Any]] | None = None,
+        memory_actions: list[dict[str, Any]] | None = None,
         token_ttl_seconds: int = 604800,
     ) -> dict[str, Any]:
         self._require_ready()
@@ -981,8 +1004,12 @@ class HeartbeatState:
         profile_uuid = _parse_uuid(str(run["profile_id"]), "profile_id")
         if not destination_kind.strip() or not destination_ref.strip():
             raise ValueError("heartbeat delivery destination is required")
+        item_actions = item_actions or []
         if len(item_actions) > 100:
             raise ValueError("heartbeat delivery is limited to 100 actions")
+        memory_actions = memory_actions or []
+        if len(memory_actions) > 100:
+            raise ValueError("heartbeat memory delivery is limited to 100 actions")
         delivery_id = _uuid("delivery", run_uuid, destination_kind, destination_ref)
         client_message_id = f"heartbeat:{run_uuid}:{destination_kind}:{destination_ref}"
         tokens: list[dict[str, Any]] = []
@@ -998,28 +1025,114 @@ class HeartbeatState:
                 )
                 if existing_delivery is not None:
                     # The delivery key is the workflow/run/destination idempotency
-                    # boundary. A retry must reuse the durable delivery and never
-                    # mint a second active token set. The original workflow step
-                    # owns the raw token values; a replay that did not checkpoint
-                    # them cannot safely recover them because only token hashes are
-                    # persisted.
                     if _json_value(existing_delivery["rendered_payload"]) != rendered_payload:
                         raise RuntimeError(
                             "heartbeat delivery replay differs from the original payload"
                         )
+                    if not existing_delivery["token_seed"]:
+                        raise RuntimeError("heartbeat delivery cannot recover its token set")
+                    stored_items = await connection.fetch(
+                        """
+                        select token_hash, item_id, item_version, action, payload
+                          from heartbeat_action_tokens
+                         where delivery_id = $1
+                        """,
+                        existing_delivery["delivery_id"],
+                    )
+                    requested_items = [
+                        {
+                            "item_id": str(_parse_uuid(str(a.get("item_id") or ""), "item_id")),
+                            "item_version": int(a.get("item_version") or 0),
+                            "action": str(a.get("action") or ""),
+                            "payload": a.get("payload") or {},
+                        }
+                        for a in item_actions
+                    ]
+                    persisted_items = [
+                        {
+                            "item_id": str(row["item_id"]),
+                            "item_version": row["item_version"],
+                            "action": row["action"],
+                            "payload": _json_value(row["payload"]) or {},
+                        }
+                        for row in stored_items
+                    ]
+                    if sorted(requested_items, key=_json) != sorted(persisted_items, key=_json):
+                        raise RuntimeError("heartbeat delivery replay differs in item actions")
+                    stored_memory = await connection.fetch(
+                        """
+                        select token_hash, fact_id, expected_revision, action, payload
+                          from heartbeat_memory_action_tokens
+                         where delivery_id = $1
+                        """,
+                        existing_delivery["delivery_id"],
+                    )
+                    requested_memory = [
+                        {
+                            "memory_fact_id": str(_parse_uuid(str(a.get("memory_fact_id") or a.get("fact_id") or ""), "memory_fact_id")),
+                            "expected_revision": int(a.get("expected_revision") or 0),
+                            "action": str(a.get("action") or ""),
+                            "payload": a.get("payload") or {},
+                        }
+                        for a in memory_actions
+                    ]
+                    persisted_memory = [
+                        {
+                            "memory_fact_id": str(row["fact_id"]),
+                            "expected_revision": row["expected_revision"],
+                            "action": row["action"],
+                            "payload": _json_value(row["payload"]) or {},
+                        }
+                        for row in stored_memory
+                    ]
+                    if sorted(requested_memory, key=_json) != sorted(persisted_memory, key=_json):
+                        raise RuntimeError("heartbeat delivery replay differs in memory actions")
+                    for spec in requested_items:
+                        token = _delivery_token(existing_delivery["token_seed"], "item", spec)
+                        matching = next(
+                            row for row in stored_items
+                            if str(row["item_id"]) == spec["item_id"]
+                            and row["item_version"] == spec["item_version"]
+                            and row["action"] == spec["action"]
+                            and (_json_value(row["payload"]) or {}) == spec["payload"]
+                        )
+                        if matching["token_hash"] != hashlib.sha256(token.encode()).hexdigest():
+                            raise RuntimeError("heartbeat delivery token set is corrupt")
+                        tokens.append({
+                            "item_id": spec["item_id"],
+                            "action": spec["action"],
+                            "token": token,
+                        })
+                    for spec in requested_memory:
+                        token = _delivery_token(existing_delivery["token_seed"], "memory", spec)
+                        matching = next(
+                            row for row in stored_memory
+                            if str(row["fact_id"]) == spec["memory_fact_id"]
+                            and row["expected_revision"] == spec["expected_revision"]
+                            and row["action"] == spec["action"]
+                            and (_json_value(row["payload"]) or {}) == spec["payload"]
+                        )
+                        if matching["token_hash"] != hashlib.sha256(token.encode()).hexdigest():
+                            raise RuntimeError("heartbeat delivery token set is corrupt")
+                        tokens.append({
+                            "memory_fact_id": spec["memory_fact_id"],
+                            "action": spec["action"],
+                            "token": token,
+                        })
                     return {
                         "delivery_id": str(existing_delivery["delivery_id"]),
                         "client_message_id": client_message_id,
-                        "tokens": [],
+                        "tokens": tokens,
                         "replayed": True,
                         "status": existing_delivery["status"],
                     }
+                token_seed = secrets.token_urlsafe(32)
                 await connection.execute(
                     """
                     insert into heartbeat_deliveries (
                         delivery_id, run_id, destination_kind, destination_ref,
-                        status, client_message_id, rendered_payload
-                    ) values ($1, $2, $3, $4, 'pending', $5, $6::jsonb)
+                        status, client_message_id, rendered_payload, token_seed
+                    ) values ($1, $2, $3, $4, 'pending', $5, $6::jsonb, $7)
                     on conflict (client_message_id) do nothing
                     """,
                     delivery_id,
@@ -1028,13 +1141,12 @@ class HeartbeatState:
                     destination_ref,
                     client_message_id,
                     _json(rendered_payload),
+                    token_seed,
                 )
                 for item_action in item_actions:
                     action = str(item_action.get("action") or "")
                     if action not in _ACTIONS:
                         raise ValueError(f"unsupported heartbeat action {action!r}")
-                    token = secrets.token_urlsafe(24)
-                    token_hash = hashlib.sha256(token.encode()).hexdigest()
                     item_id = _parse_uuid(
                         str(item_action.get("item_id") or ""), "item_id"
                     )
@@ -1055,6 +1167,14 @@ class HeartbeatState:
                         raise RuntimeError(
                             "heartbeat delivery item is stale or outside the run profile"
                         )
+                    item_spec = {
+                        "item_id": str(item_id),
+                        "item_version": item_version,
+                        "action": action,
+                        "payload": item_action.get("payload") or {},
+                    }
+                    token = _delivery_token(token_seed, "item", item_spec)
+                    token_hash = hashlib.sha256(token.encode()).hexdigest()
                     await connection.execute(
                         """
                         insert into heartbeat_action_tokens (
@@ -1073,6 +1193,59 @@ class HeartbeatState:
                     )
                     tokens.append(
                         {"item_id": str(item_id), "action": action, "token": token}
+                    )
+                for memory_action in memory_actions:
+                    action = str(memory_action.get("action") or "")
+                    if action not in {"confirm", "dispute", "forget", "correct"}:
+                        raise ValueError(f"unsupported memory action {action!r}")
+                    fact_id = _parse_uuid(
+                        str(memory_action.get("memory_fact_id") or memory_action.get("fact_id") or ""),
+                        "memory_fact_id",
+                    )
+                    expected_revision = int(memory_action.get("expected_revision") or 0)
+                    fact = await connection.fetchrow(
+                        """
+                        select fact_id, revision, status, sensitivity from memory_facts
+                        where fact_id = $1 and owner_principal = $2 and status = 'proposed'
+                          and namespace = (select namespace from heartbeat_profiles where profile_id = $4)
+                          and scope_kind = (select scope_kind from heartbeat_profiles where profile_id = $4)
+                          and scope_ref = (select scope_ref from heartbeat_profiles where profile_id = $4)
+                          and exists (
+                              select 1 from heartbeat_run_memory_facts rmf
+                              where rmf.run_id = $3 and rmf.fact_id = memory_facts.fact_id
+                          )
+                        """,
+                        fact_id,
+                        self.workflow_principal,
+                        run_uuid,
+                        profile_uuid,
+                    )
+                    if fact is None or fact["revision"] != expected_revision:
+                        raise RuntimeError("heartbeat memory action fact is stale or outside the run profile")
+                    if fact["sensitivity"] in {"confidential", "restricted"}:
+                        raise PermissionError("confidential and restricted memory cannot be delivered")
+                    memory_spec = {
+                        "memory_fact_id": str(fact_id),
+                        "expected_revision": expected_revision,
+                        "action": action,
+                        "payload": memory_action.get("payload") or {},
+                    }
+                    token = _delivery_token(token_seed, "memory", memory_spec)
+                    token_hash = hashlib.sha256(token.encode()).hexdigest()
+                    await connection.execute(
+                        """
+                        insert into heartbeat_memory_action_tokens (
+                            token_hash, delivery_id, fact_id, expected_revision,
+                            action, payload, expires_at
+                        ) values ($1, $2, $3, $4, $5, $6::jsonb,
+                                  now() + make_interval(secs => $7))
+                        """,
+                        token_hash, delivery_id, fact_id, expected_revision, action,
+                        _json(memory_action.get("payload") or {}),
+                        max(60, min(int(token_ttl_seconds), 2592000)),
+                    )
+                    tokens.append(
+                        {"memory_fact_id": str(fact_id), "action": action, "token": token}
                     )
                 await connection.execute(
                     "update heartbeat_runs set status = 'delivering' where run_id = $1",
@@ -1501,6 +1674,10 @@ class HeartbeatState:
                               join lineage l
                                 on f.supersedes_fact_id = l.fact_id
                                 or l.supersedes_fact_id = f.fact_id
+                             where f.owner_principal = (select owner_principal from memory_facts where fact_id = $1)
+                               and f.namespace = (select namespace from memory_facts where fact_id = $1)
+                               and f.scope_kind = (select scope_kind from memory_facts where fact_id = $1)
+                               and f.scope_ref = (select scope_ref from memory_facts where fact_id = $1)
                         )
                         select fact_id from lineage
                         """,
@@ -1791,6 +1968,137 @@ class HeartbeatState:
             if "changed after this action" in message:
                 raise RuntimeError(message) from exc
             raise
+        return _json_value(result) or {}
+
+    async def apply_memory_action(
+        self,
+        *,
+        token: str,
+        actor_ref: str,
+        provider_event_key: str,
+        corrected_canonical_text: str | None = None,
+        corrected_value: Any = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        self._require_ready()
+        self._require_memory_workflow()
+        if not token or not actor_ref or not provider_event_key:
+            raise ValueError("token, actor_ref, and provider_event_key are required")
+        try:
+            async with self._pool.acquire() as connection:
+                result = await connection.fetchval(
+                    "select heartbeat_consume_memory_action($1,$2,$3,$4,$5::jsonb,$6)",
+                    hashlib.sha256(token.encode()).hexdigest(),
+                    actor_ref,
+                    provider_event_key,
+                    corrected_canonical_text,
+                    _json(corrected_value) if corrected_value is not None else None,
+                    reason,
+                )
+        except Exception as exc:
+            message = str(exc)
+            if "invalid" in message or "expired" in message or "reviewer" in message or "already used" in message:
+                raise PermissionError(message) from exc
+            raise RuntimeError(message) from exc
+        return _json_value(result) or {}
+
+    async def request_memory_correction(
+        self,
+        *,
+        token: str,
+        actor_ref: str,
+        provider_event_key: str,
+        fact_id: str | None = None,
+        corrected_canonical_text: str | None = None,
+        corrected_value: Any = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        # fact_id is accepted for Phai compatibility, but the opaque token is
+        # the sole authority for the target fact.
+        del fact_id
+        return await self.apply_memory_action(
+            token=token,
+            actor_ref=actor_ref,
+            provider_event_key=provider_event_key,
+            corrected_canonical_text=corrected_canonical_text,
+            corrected_value=corrected_value,
+            reason=reason,
+        )
+
+    async def request_assignment(
+        self, *, token: str, actor_ref: str, provider_event_key: str
+    ) -> dict[str, Any]:
+        return await self.apply_action(
+            token=token, actor_ref=actor_ref, provider_event_key=provider_event_key
+        )
+
+    async def get_item(
+        self,
+        *,
+        draft_grant: str | None = None,
+        grant: str | None = None,
+        item_id: str | None = None,
+        item_version: int | None = None,
+        expected_version: int | None = None,
+    ) -> dict[str, Any]:
+        self._require_ready()
+        if self.workflow_name != "heartbeat_prepare_action":
+            raise PermissionError("workflow is not authorized for draft reads")
+        raw_grant = draft_grant or grant
+        if not raw_grant:
+            raise ValueError("draft_grant is required")
+        try:
+            async with self._pool.acquire() as connection:
+                result = await connection.fetchval(
+                    "select heartbeat_get_item($1)",
+                hashlib.sha256(raw_grant.encode()).hexdigest(),
+                )
+        except Exception as exc:
+            message = str(exc)
+            if "invalid" in message or "authorized" in message:
+                raise PermissionError(message) from exc
+            raise RuntimeError(message) from exc
+        item = _json_value(result) or {}
+        if item_id is not None and str(item.get("item_id")) != str(item_id):
+            raise PermissionError("draft grant item mismatch")
+        requested_version = item_version if item_version is not None else expected_version
+        if requested_version is not None and int(item.get("version")) != int(requested_version):
+            raise RuntimeError("draft grant item version mismatch")
+        return item
+
+    async def put_draft_artifact(
+        self,
+        *,
+        draft_grant: str | None = None,
+        grant: str | None = None,
+        item_id: str | None = None,
+        item_version: int | None = None,
+        draft: dict[str, Any] | None = None,
+        content: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self._require_ready()
+        if self.workflow_name != "heartbeat_prepare_action":
+            raise PermissionError("workflow is not authorized for draft writes")
+        raw_grant = draft_grant or grant
+        if not raw_grant or not item_id or item_version is None:
+            raise ValueError("draft_grant, item_id, and item_version are required")
+        payload = draft if draft is not None else content
+        if not isinstance(payload, dict):
+            raise ValueError("draft must be a JSON object")
+        try:
+            async with self._pool.acquire() as connection:
+                result = await connection.fetchval(
+                    "select heartbeat_put_draft_artifact($1,$2::uuid,$3,$4::jsonb)",
+                hashlib.sha256(raw_grant.encode()).hexdigest(),
+                    _parse_uuid(item_id, "item_id"),
+                    int(item_version),
+                    _json(payload),
+                )
+        except Exception as exc:
+            message = str(exc)
+            if "invalid" in message or "authorized" in message or "already used" in message:
+                raise PermissionError(message) from exc
+            raise RuntimeError(message) from exc
         return _json_value(result) or {}
 
     async def complete_run(

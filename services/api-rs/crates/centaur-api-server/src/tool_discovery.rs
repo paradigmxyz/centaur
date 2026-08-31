@@ -1424,7 +1424,11 @@ fn postgres_listeners(secrets: &[ToolSecret]) -> Result<Vec<PostgresListener>, T
             let mut settings = secret.settings.clone();
             let heartbeat_scoped = matches!(
                 secret.role.as_deref(),
-                Some("centaur_heartbeat_run" | "centaur_heartbeat_feedback")
+                Some(
+                    "centaur_heartbeat_run"
+                        | "centaur_heartbeat_feedback"
+                        | "centaur_heartbeat_prepare_action",
+                )
             );
             if heartbeat_scoped {
                 if let Some(existing) = settings
