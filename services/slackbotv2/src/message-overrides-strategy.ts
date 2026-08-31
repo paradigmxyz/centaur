@@ -3,6 +3,7 @@ import {
   extractMessageOverrides,
   validateStrategyOverrides
 } from './overrides'
+import { extractNaturalLanguageOverrides } from './natural-language-overrides'
 import type { JsonObject, MessageOverridesStrategy } from './types'
 import { errorMessage, isJsonObject } from './utils'
 
@@ -117,6 +118,17 @@ export function createOpenAiMessageOverridesStrategy(
     const { cleanedText, ...explicitOverrides } = extractMessageOverrides(text)
     if (Object.values(explicitOverrides).some(value => value !== undefined)) {
       return { cleanedText, overrides: explicitOverrides }
+    }
+
+    const naturalLanguageOverrides = extractNaturalLanguageOverrides(text)
+    if (naturalLanguageOverrides) {
+      options.logger?.info('slackbotv2_message_overrides_strategy_deterministic_match', {
+        harness: naturalLanguageOverrides.harnessType,
+        model: naturalLanguageOverrides.model,
+        provider: naturalLanguageOverrides.provider,
+        reasoning: naturalLanguageOverrides.reasoning
+      })
+      return { overrides: naturalLanguageOverrides }
     }
 
     const controller = new AbortController()
