@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import uuid
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -16,15 +15,13 @@ from openai import AsyncOpenAI, BadRequestError
 
 WORKFLOW_NAME = "memory_generation"
 
-DEFAULT_GENERATION_BATCH_SIZE = 50
+DEFAULT_GENERATION_BATCH_SIZE = 250
 DEFAULT_EMBEDDING_BATCH_SIZE = 25
-DEFAULT_INTERVAL_SECONDS = 15 * 60
 DEFAULT_CONTEXT_MESSAGES = 40
 DEFAULT_GENERATION_MAX_INPUT_CHARS = 32_000
 DEFAULT_GENERATION_MODEL = "gpt-5.6-luna"
 DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 EMBEDDING_DIMENSIONS = 1_536
-FALSE_ENV_VALUES = {"0", "false", "no", "off"}
 # Copied from paradigm/evals/evals/memory_save/prompts/v1.md.
 SYSTEM_PROMPT = """Review one or more chronological conversation turns and generate memories that are likely to improve
 future conversations.
@@ -100,21 +97,6 @@ class GenerationInputTooLargeError(PermanentThreadError):
     pass
 
 
-def _env_flag_enabled(name: str, default: bool = False) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() not in FALSE_ENV_VALUES
-
-
-SCHEDULE = {
-    "schedule_id": WORKFLOW_NAME,
-    "interval_seconds": DEFAULT_INTERVAL_SECONDS,
-    "enabled": _env_flag_enabled("MEMORY_GENERATION_ENABLED"),
-    "no_delivery": True,
-}
-
-
 @dataclass(frozen=True)
 class MemoryOwner:
     scope: str
@@ -176,23 +158,36 @@ def _thread_step_name(thread_key: str) -> str:
 
 async def _load_executions(pool: Any, batch_size: int) -> list[dict[str, Any]]:
     rows = await pool.fetch(
-        "SELECT e.execution_id, e.thread_key "
-        "FROM session_executions e "
-        "JOIN sessions s ON s.thread_key = e.thread_key "
-        "CROSS JOIN memory_generation_cursor cursor "
-        "WHERE e.status = 'completed' "
-        "  AND e.completed_at <= NOW() - INTERVAL '2 minutes' "
-        "  AND (e.completed_at, e.execution_id) > (cursor.completed_at, cursor.execution_id) "
-        "  AND e.thread_key LIKE 'slack:%' "
-        "  AND s.metadata->>'platform' = 'slack' "
-        "  AND s.metadata->>'source' = 'slackbotv2' "
-        "  AND EXISTS ("
-        "    SELECT 1 FROM session_events terminal "
-        "    WHERE terminal.execution_id = e.execution_id "
-        "      AND terminal.event_type = 'session.execution_completed' "
-        "      AND NULLIF(BTRIM(terminal.payload->>'result_text'), '') IS NOT NULL"
-        "  ) "
-        "ORDER BY e.completed_at, e.execution_id LIMIT $1",
+        "WITH eligible AS MATERIALIZED ("
+        "  SELECT e.execution_id, e.thread_key, e.completed_at "
+        "  FROM session_executions e "
+        "  JOIN sessions s ON s.thread_key = e.thread_key "
+        "  CROSS JOIN memory_generation_cursor cursor "
+        "  WHERE e.status = 'completed' "
+        "    AND e.completed_at <= NOW() - INTERVAL '2 minutes' "
+        "    AND (e.completed_at, e.execution_id) > "
+        "        (cursor.completed_at, cursor.execution_id) "
+        "    AND e.thread_key LIKE 'slack:%' "
+        "    AND s.metadata->>'platform' = 'slack' "
+        "    AND s.metadata->>'source' = 'slackbotv2' "
+        "    AND EXISTS ("
+        "      SELECT 1 FROM session_events terminal "
+        "      WHERE terminal.execution_id = e.execution_id "
+        "        AND terminal.event_type = 'session.execution_completed' "
+        "        AND NULLIF(BTRIM(terminal.payload->>'result_text'), '') IS NOT NULL"
+        "    )"
+        "), thread_starts AS ("
+        "  SELECT DISTINCT ON (thread_key) thread_key, completed_at, execution_id "
+        "  FROM eligible "
+        "  ORDER BY thread_key, completed_at, execution_id"
+        "), cutoff AS ("
+        "  SELECT completed_at, execution_id FROM thread_starts "
+        "  ORDER BY completed_at, execution_id OFFSET $1 LIMIT 1"
+        ") SELECT execution_id, thread_key FROM eligible "
+        "WHERE NOT EXISTS (SELECT 1 FROM cutoff) "
+        "   OR (completed_at, execution_id) < "
+        "      (SELECT completed_at, execution_id FROM cutoff) "
+        "ORDER BY completed_at, execution_id",
         batch_size,
     )
     return [dict(row) for row in rows]
@@ -622,13 +617,27 @@ async def handler(_inp: Any, ctx: WorkflowContext) -> dict[str, Any]:
         ),
     )
     await _emit_pending_embedding_age(ctx._pool)
+    next_run = None
+    if (
+        len(by_thread) == DEFAULT_GENERATION_BATCH_SIZE
+        or embedding_result["embedded"] == DEFAULT_EMBEDDING_BATCH_SIZE
+    ):
+        next_run = await ctx.start_workflow(
+            WORKFLOW_NAME,
+            {"source": "memory_generation_continuation"},
+            idempotency_key=f"{WORKFLOW_NAME}:{ctx.run_id}:next",
+        )
     result = {
         "status": "completed",
         "processed": len(executions),
+        "threads": len(by_thread),
         **totals,
         **embedding_result,
+        "requeued": next_run is not None,
         "generation_model": DEFAULT_GENERATION_MODEL,
         "embedding_model": DEFAULT_EMBEDDING_MODEL,
     }
+    if next_run is not None:
+        result["next_run"] = next_run
     ctx.log("memory_generation_completed", **result)
     return result

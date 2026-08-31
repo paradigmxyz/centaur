@@ -46,13 +46,11 @@ def _thread(**overrides):
     return value
 
 
-def test_schedule_is_opt_in(monkeypatch):
-    monkeypatch.delenv("MEMORY_GENERATION_ENABLED", raising=False)
+def test_workflow_is_manual_and_batches_250_threads():
     memory = _load()
 
-    assert memory.SCHEDULE["enabled"] is False
-    assert memory.SCHEDULE["interval_seconds"] == 900
-    assert memory.SCHEDULE["no_delivery"] is True
+    assert not hasattr(memory, "SCHEDULE")
+    assert memory.DEFAULT_GENERATION_BATCH_SIZE == 250
 
 
 def test_uses_v1_memory_prompt():
@@ -342,10 +340,17 @@ class ImmediateContext:
         self._pool = pool
         self.run_id = "run-1"
         self.steps = []
+        self.started = []
 
     async def step(self, name, fn):
         self.steps.append(name)
         return await fn()
+
+    async def start_workflow(
+        self, workflow_name, workflow_input, *, idempotency_key=None
+    ):
+        self.started.append((workflow_name, workflow_input, idempotency_key))
+        return {"run_id": "run-next", "task_id": "task-next"}
 
     def log(self, *_args, **_kwargs):
         return None
@@ -399,7 +404,9 @@ def test_handler_groups_executions_by_thread_and_keeps_embedding_pass_independen
     assert result["created"] == 1
     assert result["failed"] == 0
     assert result["processed"] == 2
+    assert result["threads"] == 1
     assert result["embedding_failed"] == 2
+    assert result["requeued"] is False
 
 
 def test_handler_advances_cursor_and_embeds_after_thread_failure(monkeypatch):
@@ -487,3 +494,45 @@ def test_handler_keeps_cursor_on_transient_thread_failure(monkeypatch):
 
     assert advanced == []
     assert embedded == []
+
+
+def test_handler_requeues_when_thread_batch_is_full(monkeypatch):
+    memory = _load()
+    monkeypatch.setattr(memory, "DEFAULT_GENERATION_BATCH_SIZE", 2)
+    executions = [
+        _thread(execution_id="exe-1", thread_key="slack:T1:D1:1"),
+        _thread(execution_id="exe-2", thread_key="slack:T1:D2:2"),
+    ]
+
+    async def load_executions(*_args, **_kwargs):
+        return executions
+
+    async def process_thread(*_args, **_kwargs):
+        return {"created": 0, "rejected": 0, "skipped": 0}
+
+    async def no_op(*_args, **_kwargs):
+        return None
+
+    async def embed_pending(*_args, **_kwargs):
+        return {"embedded": 0, "embedding_failed": 0}
+
+    monkeypatch.setattr(memory, "_load_executions", load_executions)
+    monkeypatch.setattr(memory, "_process_thread", process_thread)
+    monkeypatch.setattr(memory, "_advance_cursor", no_op)
+    monkeypatch.setattr(memory, "_embed_pending", embed_pending)
+    monkeypatch.setattr(memory, "_emit_pending_embedding_age", no_op)
+    monkeypatch.setattr(memory, "_client", lambda: types.SimpleNamespace())
+    context = ImmediateContext(object())
+
+    result = asyncio.run(memory.handler({}, context))
+
+    assert result["threads"] == 2
+    assert result["requeued"] is True
+    assert result["next_run"] == {"run_id": "run-next", "task_id": "task-next"}
+    assert context.started == [
+        (
+            "memory_generation",
+            {"source": "memory_generation_continuation"},
+            "memory_generation:run-1:next",
+        )
+    ]
