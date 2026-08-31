@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import os
+import sys
 import unittest
 import uuid
 from pathlib import Path
 
 import asyncpg
+
+WORKFLOW_PYTHON = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(WORKFLOW_PYTHON))
 
 from api.heartbeat import HeartbeatState
 
