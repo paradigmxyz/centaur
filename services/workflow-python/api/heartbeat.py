@@ -19,6 +19,7 @@ _ARTIFACT_KINDS = {
     "ranked_candidates",
     "synthesis_output",
     "delivery_preview",
+    "synthesis_attempt",
 }
 _MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
 

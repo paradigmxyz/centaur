@@ -42,6 +42,7 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
             "0058_heartbeat_memory_and_draft_facades.sql",
             "0059_heartbeat_feedback_semantics.sql",
             "0060_heartbeat_draft_grant_replay.sql",
+            "0061_heartbeat_synthesis_attempt_artifact.sql",
         ):
             await self.pool.execute((MIGRATIONS / migration).read_text())
         await self.pool.execute(
@@ -335,13 +336,33 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
             content={"observations": [observation], "items": [item]},
         )
         self.assertEqual(artifact["artifact_id"], replayed_artifact["artifact_id"])
-        self.assertEqual(len(await first.list_artifacts(run_id=str(run["run_id"]))), 1)
+        attempt = await first.put_artifact(
+            run_id=str(run["run_id"]),
+            artifact_kind="synthesis_attempt",
+            artifact_key="attempt-1",
+            content={"attempt": 1, "outcome": "retry"},
+        )
+        replayed_attempt = await first.put_artifact(
+            run_id=str(run["run_id"]),
+            artifact_kind="synthesis_attempt",
+            artifact_key="attempt-1",
+            content={"attempt": 1, "outcome": "retry"},
+        )
+        self.assertEqual(attempt["artifact_id"], replayed_attempt["artifact_id"])
+        self.assertEqual(len(await first.list_artifacts(run_id=str(run["run_id"]))), 2)
         with self.assertRaisesRegex(RuntimeError, "differs from the original"):
             await first.put_artifact(
                 run_id=str(run["run_id"]),
                 artifact_kind="source_input",
                 artifact_key="linear",
                 content={"observations": [], "items": []},
+            )
+        with self.assertRaisesRegex(RuntimeError, "differs from the original"):
+            await first.put_artifact(
+                run_id=str(run["run_id"]),
+                artifact_kind="synthesis_attempt",
+                artifact_key="attempt-1",
+                content={"attempt": 2, "outcome": "retry"},
             )
 
         candidates = await first.list_candidates(profile_id=str(profile["profile_id"]))
