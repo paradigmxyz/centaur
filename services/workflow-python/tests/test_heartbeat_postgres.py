@@ -43,8 +43,59 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
             "0059_heartbeat_feedback_semantics.sql",
             "0060_heartbeat_draft_grant_replay.sql",
             "0061_heartbeat_synthesis_attempt_artifact.sql",
+            "0062_heartbeat_memory_completion.sql",
         ):
+            if migration == "0062_heartbeat_memory_completion.sql":
+                await self.pool.execute(
+                    """
+                    do $$ begin
+                        if not exists (select 1 from pg_roles where rolname = 'centaur_readonly') then
+                            create role centaur_readonly nologin;
+                        end if;
+                        if not exists (select 1 from pg_roles where rolname = 'heartbeat_readonly_client') then
+                            create role heartbeat_readonly_client login password 'heartbeat-test';
+                        end if;
+                    end $$
+                    """
+                )
+                await self.pool.execute(
+                    """
+                    create table if not exists company_context_documents (
+                        document_id text primary key,
+                        source text not null,
+                        source_type text not null,
+                        source_document_id text not null,
+                        source_chunk_id text not null default '',
+                        parent_document_id text,
+                        title text not null default '',
+                        body text not null default '',
+                        url text not null default '',
+                        author_id text not null default '',
+                        author_name text not null default '',
+                        access_scope text not null default 'company',
+                        occurred_at timestamptz,
+                        source_updated_at timestamptz,
+                        content_hash text not null default '',
+                        metadata jsonb not null default '{}'::jsonb,
+                        created_at timestamptz not null default now(),
+                        updated_at timestamptz not null default now(),
+                        unique (source, source_type, source_document_id, source_chunk_id)
+                    )
+                    """
+                )
+                await self.pool.execute(
+                    "alter table company_context_documents enable row level security"
+                )
+                await self.pool.execute(
+                    "alter table company_context_documents force row level security"
+                )
             await self.pool.execute((MIGRATIONS / migration).read_text())
+        await self.pool.execute(
+            "grant centaur_readonly to heartbeat_readonly_client"
+        )
+        await self.pool.execute(
+            "grant select on company_context_documents to centaur_readonly"
+        )
         await self.pool.execute(
             "select heartbeat_bind_workflow_principal($1::name, $2)",
             "centaur_heartbeat_run",
@@ -849,15 +900,20 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
             provider_message_id="memory-only",
             surfaced_item_ids=[],
         )
+
+        async def assume_feedback(connection: asyncpg.Connection) -> None:
+            await connection.execute("set role centaur_heartbeat_feedback")
+            await connection.execute(
+                "set centaur.workflow_principal = 'workflow-heartbeat-feedback'"
+            )
+
         feedback_pool = await asyncpg.create_pool(
             self.client_database_url.replace(
                 "heartbeat_test_client", "heartbeat_feedback_client"
             ),
             min_size=1,
             max_size=1,
-            setup=lambda connection: connection.execute(
-                "set role centaur_heartbeat_feedback"
-            ),
+            setup=assume_feedback,
         )
         try:
             feedback = HeartbeatState(
@@ -1142,3 +1198,734 @@ class HeartbeatPostgresTests(unittest.IsolatedAsyncioTestCase):
         finally:
             prepare_pool.terminate()
             feedback_pool.terminate()
+
+    async def test_zz_memory_projection_is_bounded_and_lifecycle_reconciled(self) -> None:
+        run_id = uuid.uuid4()
+        state = self.state(run_id=run_id)
+        await state.register_profile(
+            {
+                "namespace": "projection-test",
+                "name": "organization",
+                "scope_kind": "organization",
+                "scope_ref": "org-1",
+                "definition_hash": "projection-v1",
+                "definition_version": 1,
+                "reviewer_refs": ["U-REVIEWER"],
+                "enabled": True,
+            }
+        )
+        fact_id = uuid.uuid4()
+        await self.pool.execute(
+            """
+            insert into memory_facts(
+                fact_id, namespace, scope_kind, scope_ref, subject_key,
+                predicate, value, canonical_text, status, sensitivity,
+                revision, proposed_by_principal, owner_principal
+            ) values($1, 'projection-test', 'organization', 'org-1',
+                     'account:acme', 'owner', '{\"team\":\"gtm\"}',
+                     'GTM owns the account.', 'proposed', 'internal', 1,
+                     'workflow-heartbeat-run', 'workflow-heartbeat-run')
+            """,
+            fact_id,
+        )
+        confirmed = await state.confirm_memory_fact(
+            fact_id=str(fact_id), actor_ref="U-REVIEWER", expected_revision=1
+        )
+        self.assertEqual(confirmed["status"], "confirmed")
+        long_fact_id = uuid.uuid4()
+        long_metadata_fact_id = uuid.uuid4()
+        await self.pool.execute(
+            """
+            insert into memory_facts(
+                fact_id, namespace, scope_kind, scope_ref, subject_key,
+                predicate, value, canonical_text, status, sensitivity,
+                revision, proposed_by_principal, owner_principal
+            ) values
+                ($1, 'projection-test', 'organization', 'org-1',
+                 'account:long', 'owner', '{\"team\":\"gtm\"}', $2,
+                 'proposed', 'internal', 1,
+                 'workflow-heartbeat-run', 'workflow-heartbeat-run'),
+                ($3, 'projection-test', 'organization', 'org-1', $4,
+                 'owner', '{\"team\":\"gtm\"}', 'bounded metadata',
+                 'proposed', 'internal', 1,
+                 'workflow-heartbeat-run', 'workflow-heartbeat-run')
+            """,
+            long_fact_id,
+            "x" * 1001,
+            long_metadata_fact_id,
+            "s" * 257,
+        )
+        await state.confirm_memory_fact(
+            fact_id=str(long_fact_id), actor_ref="U-REVIEWER", expected_revision=1
+        )
+        await state.confirm_memory_fact(
+            fact_id=str(long_metadata_fact_id),
+            actor_ref="U-REVIEWER",
+            expected_revision=1,
+        )
+        admin = await asyncpg.connect(DATABASE_URL)
+        try:
+            document = await admin.fetchrow(
+                """
+                select document_id, body, access_scope, metadata, content_hash
+                  from company_context_documents
+                 where source_document_id = $1
+                """,
+                str(fact_id),
+            )
+            self.assertIsNotNone(document)
+            assert document is not None
+            metadata = (
+                json.loads(document["metadata"])
+                if isinstance(document["metadata"], str)
+                else document["metadata"]
+            )
+            self.assertEqual(document["document_id"], f"memory_fact:{fact_id}:2")
+            self.assertEqual(document["body"], "GTM owns the account.")
+            self.assertEqual(document["access_scope"], "organization:projection-test:org-1")
+            self.assertEqual(metadata["scope_ref"], "org-1")
+            self.assertEqual(metadata["subject_key"], "account:acme")
+            self.assertEqual(len(document["content_hash"]), 64)
+            self.assertIsNone(
+                await admin.fetchrow(
+                    "select 1 from company_context_documents where source_document_id = $1",
+                    str(long_fact_id),
+                )
+            )
+            self.assertIsNone(
+                await admin.fetchrow(
+                    "select 1 from company_context_documents where source_document_id = $1",
+                    str(long_metadata_fact_id),
+                )
+            )
+
+            readonly_pool = await asyncpg.create_pool(
+                self.client_database_url.replace(
+                    "heartbeat_test_client", "heartbeat_readonly_client"
+                ),
+                min_size=1,
+                max_size=1,
+                setup=lambda connection: connection.execute(
+                    "set role centaur_readonly"
+                ),
+            )
+            try:
+                self.assertEqual(
+                    await readonly_pool.fetchval(
+                        "select count(*) from company_context_documents where source = 'heartbeat_memory'"
+                    ),
+                    0,
+                )
+            finally:
+                readonly_pool.terminate()
+
+            await self.pool.execute(
+                "update memory_facts set status = 'disputed', revision = revision + 1 where fact_id = $1",
+                fact_id,
+            )
+            self.assertIsNone(
+                await admin.fetchrow(
+                    "select 1 from company_context_documents where source_document_id = $1",
+                    str(fact_id),
+                )
+            )
+            with self.assertRaises(ValueError):
+                await state._insert_memory_evidence(
+                    self.pool,
+                    fact_id=fact_id,
+                    evidence=[{"evidence_ref": f"memory_fact:{fact_id}"}],
+                )
+        finally:
+            await admin.close()
+
+    async def test_zz_memory_event_idempotency_is_namespaced_by_fact(self) -> None:
+        state = self.state(run_id=uuid.uuid4())
+        profile = await state.register_profile(
+            {
+                "namespace": "event-key-test",
+                "name": "team",
+                "scope_kind": "team",
+                "scope_ref": "team-1",
+                "definition_hash": "event-key-v1",
+                "definition_version": 1,
+                "reviewer_refs": ["U-REVIEWER"],
+                "enabled": True,
+            }
+        )
+        fact_one = uuid.uuid4()
+        fact_two = uuid.uuid4()
+        await self.pool.execute(
+            """
+            insert into memory_facts(
+                fact_id, namespace, scope_kind, scope_ref, subject_key,
+                predicate, value, canonical_text, status, sensitivity,
+                revision, proposed_by_principal, owner_principal
+            ) values
+                ($1, 'event-key-test', 'team', 'team-1', 'account:one',
+                 'owner', '{\"team\":\"gtm\"}', 'First owner',
+                 'proposed', 'internal', 1, 'workflow-heartbeat-run',
+                 'workflow-heartbeat-run'),
+                ($2, 'event-key-test', 'team', 'team-1', 'account:two',
+                 'owner', '{\"team\":\"sales\"}', 'Second owner',
+                 'proposed', 'internal', 1, 'workflow-heartbeat-run',
+                 'workflow-heartbeat-run')
+            """,
+            fact_one,
+            fact_two,
+        )
+        await state.confirm_memory_fact(
+            fact_id=str(fact_one),
+            actor_ref="U-REVIEWER",
+            expected_revision=1,
+            idempotency_key="same-transition-key",
+        )
+        await state.confirm_memory_fact(
+            fact_id=str(fact_two),
+            actor_ref="U-REVIEWER",
+            expected_revision=1,
+            idempotency_key="same-transition-key",
+        )
+        self.assertEqual(
+            await self.pool.fetchval(
+                "select count(*) from memory_fact_events where event_type = 'confirmed' and fact_id = any($1::uuid[])",
+                [fact_one, fact_two],
+            ),
+            2,
+        )
+        evidence_one = uuid.uuid4()
+        evidence_two = uuid.uuid4()
+        await self.pool.execute(
+            """
+            insert into memory_fact_evidence(
+                evidence_id, fact_id, evidence_kind, evidence_ref
+            ) values
+                ($1, $2, 'user_statement', 'event-key:one'),
+                ($3, $4, 'user_statement', 'event-key:two')
+            """,
+            evidence_one,
+            fact_one,
+            evidence_two,
+            fact_two,
+        )
+        corrected_one = await state.correct_memory_fact(
+            fact_id=str(fact_one),
+            actor_ref="U-REVIEWER",
+            expected_revision=2,
+            canonical_text="First owner corrected",
+            value={"team": "gtm", "corrected": True},
+            evidence=[
+                {
+                    "evidence_kind": "user_statement",
+                    "evidence_ref": "event-key:one-correction",
+                }
+            ],
+            idempotency_key="same-correction-key",
+        )
+        corrected_two = await state.correct_memory_fact(
+            fact_id=str(fact_two),
+            actor_ref="U-REVIEWER",
+            expected_revision=2,
+            canonical_text="Second owner corrected",
+            value={"team": "sales", "corrected": True},
+            evidence=[
+                {
+                    "evidence_kind": "user_statement",
+                    "evidence_ref": "event-key:two-correction",
+                }
+            ],
+            idempotency_key="same-correction-key",
+        )
+        self.assertNotEqual(corrected_one["fact_id"], corrected_two["fact_id"])
+        with self.assertRaises(PermissionError):
+            await state.correct_memory_fact(
+                fact_id=str(fact_one),
+                actor_ref="U-NOT-A-REVIEWER",
+                expected_revision=2,
+                canonical_text="unauthorized replay",
+                value={"team": "gtm"},
+                evidence=[
+                    {
+                        "evidence_kind": "user_statement",
+                        "evidence_ref": "event-key:unauthorized",
+                    }
+                ],
+                idempotency_key="same-correction-key",
+            )
+        with self.assertRaisesRegex(ValueError, "canonical_text exceeds"):
+            await state.correct_memory_fact(
+                fact_id=str(fact_two),
+                actor_ref="U-REVIEWER",
+                expected_revision=2,
+                canonical_text="x" * 1001,
+                value={"team": "sales"},
+                evidence=[
+                    {
+                        "evidence_kind": "user_statement",
+                        "evidence_ref": "event-key:oversized",
+                    }
+                ],
+                idempotency_key="oversized-correction-key",
+            )
+
+        admin = await asyncpg.connect(DATABASE_URL)
+        try:
+            await admin.execute(
+                "delete from memory_facts where fact_id = any($1::uuid[])",
+                [
+                    fact_one,
+                    fact_two,
+                    corrected_one["fact_id"],
+                    corrected_two["fact_id"],
+                ],
+            )
+            await admin.execute(
+                "delete from heartbeat_profiles where profile_id = $1",
+                profile["profile_id"],
+            )
+            self.assertEqual(
+                await admin.fetchval(
+                    "select count(*) from memory_facts where fact_id = any($1::uuid[])",
+                    [fact_one, fact_two, corrected_one["fact_id"], corrected_two["fact_id"]],
+                ),
+                0,
+            )
+        finally:
+            await admin.close()
+
+    async def test_zz_retention_policy_is_strict_and_returns_fixed_counts(self) -> None:
+        state = self.state(run_id=uuid.uuid4())
+        base = {
+            "namespace": "retention-test",
+            "scope_kind": "team",
+            "scope_ref": "team-1",
+            "definition_hash": "retention-v1",
+            "definition_version": 1,
+            "enabled": True,
+        }
+        for invalid in (
+            {"observation_days": 1, "run_snapshot_days": 1, "delivery_days": 1, "extra": 1},
+            {"observation_days": "1", "run_snapshot_days": 1, "delivery_days": 1},
+            {"observation_days": 0, "run_snapshot_days": 1, "delivery_days": 1},
+        ):
+            with self.assertRaises(ValueError):
+                await state.register_profile({**base, "name": str(uuid.uuid4()), "retention_policy": invalid})
+        profile = await state.register_profile(
+            {
+                **base,
+                "name": "valid",
+                "retention_policy": {
+                    "observation_days": 1,
+                    "run_snapshot_days": 1,
+                    "delivery_days": 1,
+                },
+            }
+        )
+        expired_proposed_id = uuid.uuid4()
+        expired_confirmed_id = uuid.uuid4()
+        await self.pool.execute(
+            """
+            insert into memory_facts(
+                fact_id, namespace, scope_kind, scope_ref, subject_key,
+                predicate, value, canonical_text, status, sensitivity,
+                valid_until, revision, proposed_by_principal, owner_principal
+            ) values
+                ($1, 'retention-test', 'team', 'team-1', 'account:old-proposed',
+                 'owner', '{\"team\":\"gtm\"}', 'Old proposed fact',
+                 'proposed', 'internal', now() - interval '1 day', 1,
+                 'workflow-heartbeat-run', 'workflow-heartbeat-run'),
+                ($2, 'retention-test', 'team', 'team-1', 'account:old-confirmed',
+                 'owner', '{\"team\":\"gtm\"}', 'Old confirmed fact',
+                 'confirmed', 'internal', now() - interval '1 day', 1,
+                 'workflow-heartbeat-run', 'workflow-heartbeat-run')
+            """,
+            expired_proposed_id,
+            expired_confirmed_id,
+        )
+        result = await state.apply_retention(str(profile["profile_id"]))
+        self.assertEqual(
+            set(result),
+            {
+                "observations_scrubbed",
+                "artifacts_scrubbed",
+                "run_snapshots_scrubbed",
+                "deliveries_scrubbed",
+                "action_tokens_deleted",
+                "memory_tokens_deleted",
+                "draft_artifacts_deleted",
+                "draft_grants_deleted",
+                "facts_expired",
+            },
+        )
+        self.assertEqual(result["facts_expired"], 2)
+        self.assertEqual(
+            await self.pool.fetchval(
+                """
+                select count(*) from memory_facts
+                 where fact_id = any($1::uuid[]) and status = 'expired'
+                """,
+                [expired_proposed_id, expired_confirmed_id],
+            ),
+            2,
+        )
+        replay = await state.apply_retention(str(profile["profile_id"]))
+        self.assertEqual(replay["facts_expired"], 0)
+
+    async def test_zz_memory_proposal_cannot_downgrade_observation_sensitivity(self) -> None:
+        run_id = uuid.uuid4()
+        state = self.state(run_id=run_id)
+        profile = await state.register_profile(
+            {
+                "namespace": "sensitivity-test",
+                "name": "team",
+                "scope_kind": "team",
+                "scope_ref": "team-1",
+                "definition_hash": "sensitivity-v1",
+                "definition_version": 1,
+                "enabled": True,
+            }
+        )
+        await state.begin_run(
+            profile_id=str(profile["profile_id"]),
+            trigger="replay",
+            definition_hash="sensitivity-v1",
+            prompt_version="test",
+        )
+        observation = {
+            "source_object_id": "item-1",
+            "source_revision": "1",
+            "content_hash": hashlib.sha256(b"internal").hexdigest(),
+            "title": "Internal item",
+            "sensitivity": "internal",
+            "payload": {"status": "open"},
+        }
+        item = {
+            "story_key": "linear:item-1",
+            "material_hash": observation["content_hash"],
+            "title": "Internal item",
+            "item_type": "work",
+            "observation_refs": [
+                {"source_object_id": "item-1", "source_revision": "1"}
+            ],
+        }
+        await state.commit_source_batch(
+            profile_id=str(profile["profile_id"]),
+            run_id=str(run_id),
+            source_key="linear",
+            observations=[observation],
+            items=[item],
+        )
+        candidate = (await state.list_candidates(profile_id=str(profile["profile_id"])))[0]
+        with self.assertRaisesRegex(ValueError, "below its evidence"):
+            await state.commit_synthesis(
+                profile_id=str(profile["profile_id"]),
+                run_id=str(run_id),
+                items=[],
+                memory_proposals=[
+                    {
+                        "subject_key": "account:acme",
+                        "predicate": "owner",
+                        "value": {"team": "gtm"},
+                        "canonical_text": "The account owner is GTM.",
+                        "sensitivity": "public",
+                        "evidence_observation_ids":[
+                            str(candidate["observations"][0]["observation_id"])
+                        ],
+                    }
+                ],
+            )
+        evidence_id = str(candidate["observations"][0]["observation_id"])
+        proposal = {
+            "subject_key": "account:acme",
+            "predicate": "owner",
+            "value": {"team": "gtm"},
+            "canonical_text": "The account owner is GTM.",
+            "sensitivity": "internal",
+            "evidence_observation_ids": [evidence_id],
+        }
+        for invalid_proposal, expected_error in (
+            (
+                {**proposal, "subject_key": "s" * 257},
+                "subject_key exceeds",
+            ),
+            ({**proposal, "predicate": "p" * 257}, "predicate exceeds"),
+            ({**proposal, "canonical_text": "c" * 1001}, "canonical_text exceeds"),
+            ({**proposal, "value": {"payload": "v" * 2100}}, "value exceeds"),
+            (
+                {**proposal, "evidence_observation_ids": [evidence_id] * 11},
+                "at most 10 evidence",
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, expected_error):
+                await state.commit_synthesis(
+                    profile_id=str(profile["profile_id"]),
+                    run_id=str(run_id),
+                    items=[],
+                    memory_proposals=[invalid_proposal],
+                )
+
+    async def test_zz_memory_promotion_is_authorized_widening_and_idempotent(self) -> None:
+        run_state = self.state(run_id=uuid.uuid4())
+        source = await run_state.register_profile(
+            {
+                "namespace": "promotion-test",
+                "name": "personal",
+                "scope_kind": "personal",
+                "scope_ref": "U-OWNER",
+                "definition_hash": "promotion-v1",
+                "definition_version": 1,
+                "reviewer_refs": ["U-ADMIN"],
+                "enabled": True,
+            }
+        )
+        target = await run_state.register_profile(
+            {
+                "namespace": "promotion-test",
+                "name": "organization",
+                "scope_kind": "organization",
+                "scope_ref": "org-1",
+                "definition_hash": "promotion-v1",
+                "definition_version": 1,
+                "enabled": True,
+            }
+        )
+        target_two = await run_state.register_profile(
+            {
+                "namespace": "promotion-test",
+                "name": "organization-two",
+                "scope_kind": "organization",
+                "scope_ref": "org-2",
+                "definition_hash": "promotion-v1",
+                "definition_version": 1,
+                "enabled": True,
+            }
+        )
+        same_scope = await run_state.register_profile(
+            {
+                "namespace": "promotion-test",
+                "name": "same-scope",
+                "scope_kind": "personal",
+                "scope_ref": "U-OTHER",
+                "definition_hash": "promotion-v1",
+                "definition_version": 1,
+                "enabled": True,
+            }
+        )
+        cross_namespace = await run_state.register_profile(
+            {
+                "namespace": "other-namespace",
+                "name": "organization",
+                "scope_kind": "organization",
+                "scope_ref": "org-2",
+                "definition_hash": "promotion-v1",
+                "definition_version": 1,
+                "enabled": True,
+            }
+        )
+        fact_id = uuid.uuid4()
+        await self.pool.execute(
+            """
+            insert into memory_facts(
+                fact_id, namespace, scope_kind, scope_ref, subject_key,
+                predicate, value, canonical_text, status, sensitivity,
+                revision, proposed_by_principal, confirmed_by_principal,
+                owner_principal
+            ) values($1, 'promotion-test', 'personal', 'U-OWNER',
+                     'account:acme', 'owner', '{\"team\":\"gtm\"}',
+                     'GTM owns the account.', 'confirmed', 'internal', 2,
+                     'workflow-heartbeat-run', 'U-ADMIN', 'workflow-heartbeat-run')
+            """,
+            fact_id,
+        )
+        await self.pool.execute(
+            """
+            insert into memory_fact_evidence(
+                evidence_id, fact_id, evidence_kind, evidence_ref,
+                source_url, excerpt, content_hash
+            ) values($1, $2, 'user_statement', 'statement:acme',
+                     'https://example.test/acme', 'bounded', 'hash')
+            """,
+            uuid.uuid4(),
+            fact_id,
+        )
+        admin = await asyncpg.connect(DATABASE_URL)
+        await admin.execute(
+            """
+            insert into heartbeat_profile_grants(
+                profile_id, subject_kind, subject_ref, permission,
+                granted_by_principal
+            ) values
+                ($1, 'principal', 'U-ADMIN', 'admin', 'operator'),
+                ($2, 'principal', 'U-ADMIN', 'admin', 'operator'),
+                ($3, 'principal', 'U-ADMIN', 'admin', 'operator'),
+                ($4, 'principal', 'U-ADMIN', 'admin', 'operator'),
+                ($5, 'principal', 'U-SOURCE-ONLY', 'review', 'operator')
+            on conflict do nothing
+            """,
+            target["profile_id"],
+            same_scope["profile_id"],
+            cross_namespace["profile_id"],
+            target_two["profile_id"],
+            source["profile_id"],
+        )
+        await admin.close()
+
+        with self.assertRaises(PermissionError):
+            await run_state.promote_memory_fact(
+                fact_id=str(fact_id),
+                target_profile_id=str(target["profile_id"]),
+                actor_ref="U-ADMIN",
+                expected_revision=2,
+            )
+
+        async def assume_feedback(connection: asyncpg.Connection) -> None:
+            await connection.execute("set role centaur_heartbeat_feedback")
+            await connection.execute(
+                "set centaur.workflow_principal = 'workflow-heartbeat-feedback'"
+            )
+
+        feedback_pool = await asyncpg.create_pool(
+            self.client_database_url.replace(
+                "heartbeat_test_client", "heartbeat_feedback_client"
+            ),
+            min_size=1,
+            max_size=1,
+            setup=assume_feedback,
+        )
+        try:
+            feedback = HeartbeatState(
+                feedback_pool,
+                workflow_name="heartbeat_feedback",
+                workflow_run_id=str(uuid.uuid4()),
+                workflow_task_id=str(uuid.uuid4()),
+                workflow_principal="workflow-heartbeat-feedback",
+            )
+            with self.assertRaisesRegex(RuntimeError, "precondition"):
+                await feedback.promote_memory_fact(
+                    fact_id=str(fact_id),
+                    target_profile_id=str(target["profile_id"]),
+                    actor_ref="U-ADMIN",
+                    expected_revision=1,
+                )
+            with self.assertRaisesRegex(PermissionError, "not authorized"):
+                await feedback.promote_memory_fact(
+                    fact_id=str(fact_id),
+                    target_profile_id=str(target["profile_id"]),
+                    actor_ref="U-NO-SOURCE-REVIEW",
+                    expected_revision=2,
+                )
+            with self.assertRaisesRegex(PermissionError, "not authorized"):
+                await feedback.promote_memory_fact(
+                    fact_id=str(fact_id),
+                    target_profile_id=str(target["profile_id"]),
+                    actor_ref="U-SOURCE-ONLY",
+                    expected_revision=2,
+                )
+            with self.assertRaisesRegex(PermissionError, "not authorized"):
+                await feedback.promote_memory_fact(
+                    fact_id=str(fact_id),
+                    target_profile_id=str(same_scope["profile_id"]),
+                    actor_ref="U-ADMIN",
+                    expected_revision=2,
+                )
+            with self.assertRaisesRegex(PermissionError, "not authorized"):
+                await feedback.promote_memory_fact(
+                    fact_id=str(fact_id),
+                    target_profile_id=str(cross_namespace["profile_id"]),
+                    actor_ref="U-ADMIN",
+                    expected_revision=2,
+                )
+            promoted = await feedback.promote_memory_fact(
+                fact_id=str(fact_id),
+                target_profile_id=str(target["profile_id"]),
+                actor_ref="U-ADMIN",
+                expected_revision=2,
+                idempotency_key="shared-promotion-key",
+            )
+            replayed = await feedback.promote_memory_fact(
+                fact_id=str(fact_id),
+                target_profile_id=str(target["profile_id"]),
+                actor_ref="U-ADMIN",
+                expected_revision=2,
+                idempotency_key="shared-promotion-key",
+            )
+            self.assertEqual(promoted["fact_id"], replayed["fact_id"])
+            second_target = await feedback.promote_memory_fact(
+                fact_id=str(fact_id),
+                target_profile_id=str(target_two["profile_id"]),
+                actor_ref="U-ADMIN",
+                expected_revision=2,
+                idempotency_key="shared-promotion-key",
+            )
+            self.assertNotEqual(promoted["fact_id"], second_target["fact_id"])
+        finally:
+            feedback_pool.terminate()
+
+        admin = await asyncpg.connect(DATABASE_URL)
+        try:
+            promoted_row = await admin.fetchrow(
+                "select * from memory_facts where fact_id = $1", uuid.UUID(promoted["fact_id"])
+            )
+            self.assertIsNotNone(promoted_row)
+            assert promoted_row is not None
+            self.assertEqual(promoted_row["owner_principal"], "workflow-heartbeat-run")
+            self.assertEqual(promoted_row["promoted_from_fact_id"], fact_id)
+            self.assertEqual(
+                await admin.fetchval(
+                    "select count(*) from memory_fact_evidence where fact_id = $1",
+                    promoted_row["fact_id"],
+                ),
+                1,
+            )
+            self.assertEqual(
+                await admin.fetchval(
+                    "select count(*) from memory_fact_events where idempotency_key like 'memory-promotion:%'"
+                ),
+                4,
+            )
+            projection = await admin.fetchrow(
+                """
+                select body, access_scope, metadata
+                  from company_context_documents
+                 where source_document_id = $1
+                """,
+                str(promoted_row["fact_id"]),
+            )
+            self.assertIsNotNone(projection)
+            assert projection is not None
+            self.assertEqual(projection["body"], "GTM owns the account.")
+            self.assertEqual(
+                projection["access_scope"], "organization:promotion-test:org-1"
+            )
+            second_promoted_row = await admin.fetchrow(
+                "select fact_id from memory_facts where fact_id = $1",
+                uuid.UUID(second_target["fact_id"]),
+            )
+            self.assertIsNotNone(second_promoted_row)
+            await admin.execute(
+                "delete from memory_fact_events where fact_id in ($1, $2, $3)",
+                fact_id,
+                promoted_row["fact_id"],
+                second_target["fact_id"],
+            )
+            await admin.execute(
+                "delete from memory_fact_evidence where fact_id in ($1, $2, $3)",
+                fact_id,
+                promoted_row["fact_id"],
+                second_target["fact_id"],
+            )
+            await admin.execute(
+                "delete from memory_facts where fact_id in ($1, $2, $3)",
+                fact_id,
+                promoted_row["fact_id"],
+                second_target["fact_id"],
+            )
+            await admin.execute(
+                "delete from heartbeat_profiles where profile_id in ($1, $2, $3, $4, $5)",
+                source["profile_id"],
+                target["profile_id"],
+                same_scope["profile_id"],
+                cross_namespace["profile_id"],
+                target_two["profile_id"],
+            )
+        finally:
+            await admin.close()

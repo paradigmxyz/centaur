@@ -11,6 +11,12 @@ from typing import Any
 _ID_NAMESPACE = uuid.UUID("ba55d079-050d-496d-a2a0-9c4f96e64c4f")
 _SCOPES = {"organization", "team", "personal"}
 _SENSITIVITIES = {"public", "internal", "confidential", "restricted"}
+_SENSITIVITY_RANK = {
+    "public": 0,
+    "internal": 1,
+    "confidential": 2,
+    "restricted": 3,
+}
 _ACTIONS = {"approve", "assign", "park", "snooze", "not_useful", "prepare_draft"}
 _MEMORY_STATUSES = {"proposed", "confirmed", "disputed", "superseded", "forgotten", "expired"}
 _ARTIFACT_KINDS = {
@@ -22,6 +28,16 @@ _ARTIFACT_KINDS = {
     "synthesis_attempt",
 }
 _MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
+_DEFAULT_RETENTION_POLICY = {
+    "observation_days": 90,
+    "run_snapshot_days": 90,
+    "delivery_days": 180,
+}
+_RETENTION_KEYS = frozenset(_DEFAULT_RETENTION_POLICY)
+_MAX_MEMORY_SUBJECT_OR_PREDICATE_CHARS = 256
+_MAX_MEMORY_CANONICAL_CHARS = 1000
+_MAX_MEMORY_VALUE_BYTES = 2048
+_MAX_MEMORY_EVIDENCE_IDS = 10
 
 
 def _json(value: Any) -> str:
@@ -57,6 +73,16 @@ def _uuid(kind: str, *parts: Any) -> uuid.UUID:
     return uuid.uuid5(_ID_NAMESPACE, f"{kind}:{joined}")
 
 
+def _memory_event_key(
+    action: str, fact_id: uuid.UUID, caller_key: str | None, default: str
+) -> str:
+    """Namespace caller idempotency without persisting caller-controlled text."""
+    supplied = (caller_key or "").strip() or default
+    material = f"{action}:{fact_id}:{supplied}".encode()
+    digest = hashlib.sha256(material).hexdigest()
+    return f"memory:{action}:{fact_id}:{digest}"
+
+
 def _parse_uuid(value: str, field: str) -> uuid.UUID:
     try:
         return uuid.UUID(str(value))
@@ -71,6 +97,22 @@ def _parse_time(value: Any) -> dt.datetime | None:
         raise TypeError("timestamp must be RFC3339 text")
     parsed = dt.datetime.fromisoformat(value)
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.UTC)
+
+
+def _retention_policy(value: Any) -> dict[str, int]:
+    if value is None:
+        return dict(_DEFAULT_RETENTION_POLICY)
+    if not isinstance(value, dict) or set(value) != _RETENTION_KEYS:
+        raise ValueError(
+            "retention_policy must contain only observation_days, run_snapshot_days, and delivery_days"
+        )
+    result: dict[str, int] = {}
+    for key in _RETENTION_KEYS:
+        days = value[key]
+        if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= 3650:
+            raise ValueError(f"retention_policy.{key} must be an integer between 1 and 3650")
+        result[key] = days
+    return result
 
 
 class HeartbeatState:
@@ -164,6 +206,7 @@ class HeartbeatState:
             raise ValueError(f"unsupported profile scope_kind {scope_kind!r}")
         if definition_version <= 0:
             raise ValueError("profile definition_version must be positive")
+        retention_policy = _retention_policy(definition.get("retention_policy"))
 
         profile_id = _uuid("profile", namespace, name)
         row = await self._pool.fetchrow(
@@ -171,9 +214,10 @@ class HeartbeatState:
             insert into heartbeat_profiles (
                 profile_id, namespace, name, scope_kind, scope_ref, workflow_name,
                 executor_principal_foreign_id, definition_hash, definition_version,
-                destination, required_sources, optional_sources, delivery_policy, enabled
+                destination, required_sources, optional_sources, delivery_policy,
+                retention_policy, enabled
             ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12,
-                      $13::jsonb, $14)
+                      $13::jsonb, $14::jsonb, $15)
             on conflict (namespace, name) do update set
                 scope_kind = excluded.scope_kind,
                 scope_ref = excluded.scope_ref,
@@ -185,6 +229,7 @@ class HeartbeatState:
                 required_sources = excluded.required_sources,
                 optional_sources = excluded.optional_sources,
                 delivery_policy = excluded.delivery_policy,
+                retention_policy = excluded.retention_policy,
                 enabled = excluded.enabled,
                 updated_at = now()
             where heartbeat_profiles.executor_principal_foreign_id = excluded.executor_principal_foreign_id
@@ -203,6 +248,7 @@ class HeartbeatState:
             list(definition.get("required_sources") or []),
             list(definition.get("optional_sources") or []),
             _json(definition.get("delivery_policy") or {}),
+            _json(retention_policy),
             bool(definition.get("enabled", False)),
         )
         if row is None:
@@ -771,6 +817,22 @@ class HeartbeatState:
             raise ValueError(
                 "heartbeat candidate_count must contain selected items and be at most 100"
             )
+        for proposal in proposals:
+            subject_key = str(proposal.get("subject_key") or "").strip()
+            predicate = str(proposal.get("predicate") or "").strip()
+            canonical_text = str(proposal.get("canonical_text") or "").strip()
+            proposal_evidence = proposal.get("evidence_observation_ids") or []
+            value = proposal.get("value") or {}
+            if len(subject_key) > _MAX_MEMORY_SUBJECT_OR_PREDICATE_CHARS:
+                raise ValueError("memory proposal subject_key exceeds 256 characters")
+            if len(predicate) > _MAX_MEMORY_SUBJECT_OR_PREDICATE_CHARS:
+                raise ValueError("memory proposal predicate exceeds 256 characters")
+            if len(canonical_text) > _MAX_MEMORY_CANONICAL_CHARS:
+                raise ValueError("memory proposal canonical_text exceeds 1000 characters")
+            if len(_json(value).encode()) > _MAX_MEMORY_VALUE_BYTES:
+                raise ValueError("memory proposal value exceeds 2048 bytes")
+            if len(proposal_evidence) > _MAX_MEMORY_EVIDENCE_IDS:
+                raise ValueError("memory proposals support at most 10 evidence observations")
         async with self._pool.acquire() as connection:
             async with connection.transaction():
                 for item in items:
@@ -884,6 +946,24 @@ class HeartbeatState:
                     proposal_evidence = proposal.get("evidence_observation_ids") or []
                     if not proposal_evidence:
                         raise ValueError("memory proposals require heartbeat evidence")
+                    for observation_id in proposal_evidence:
+                        observation_uuid = _parse_uuid(
+                            str(observation_id), "evidence_observation_id"
+                        )
+                        observed_sensitivity = await connection.fetchval(
+                            """
+                            select sensitivity from heartbeat_observations
+                             where observation_id = $1 and profile_id = $2
+                            """,
+                            observation_uuid,
+                            profile_uuid,
+                        )
+                        if observed_sensitivity is None:
+                            raise ValueError("memory evidence is outside the profile")
+                        if _SENSITIVITY_RANK[str(observed_sensitivity)] > _SENSITIVITY_RANK[sensitivity]:
+                            raise ValueError(
+                                "memory proposal sensitivity is below its evidence sensitivity"
+                            )
                     value_hash = hashlib.sha256(_json(value).encode()).hexdigest()
                     fact_id = _uuid(
                         "memory-fact",
@@ -1536,6 +1616,13 @@ class HeartbeatState:
                 raise ValueError(f"unsupported memory evidence_kind {kind!r}")
             if not reference:
                 raise ValueError("memory evidence_ref is required")
+            if reference.lower().startswith(("memory_fact:", "derived_memory:", "memory-derived:")):
+                raise ValueError("derived memory cannot be used as evidence")
+            source_url = entry.get("source_url")
+            if isinstance(source_url, str) and source_url.lower().startswith(
+                ("memory_fact:", "derived_memory:", "memory-derived:")
+            ):
+                raise ValueError("derived memory cannot be used as evidence")
             evidence_id = _uuid("memory-evidence", fact_id, kind, reference)
             await connection.execute(
                 """
@@ -1549,7 +1636,7 @@ class HeartbeatState:
                 fact_id,
                 kind,
                 reference,
-                entry.get("source_url"),
+                source_url,
                 entry.get("excerpt"),
                 entry.get("content_hash"),
             )
@@ -1635,7 +1722,12 @@ class HeartbeatState:
         actor_ref = actor_ref.strip()
         if not actor_ref:
             raise ValueError("actor_ref is required")
-        event_key = idempotency_key or f"memory:{fact_uuid}:{event_type}:v{expected_revision}"
+        event_key = _memory_event_key(
+            event_type,
+            fact_uuid,
+            idempotency_key,
+            f"v{expected_revision}",
+        )
         async with self._pool.acquire() as connection:
             async with connection.transaction():
                 existing_event = await self._memory_event_exists(connection, event_key)
@@ -1780,13 +1872,26 @@ class HeartbeatState:
         canonical_text = canonical_text.strip()
         if not actor_ref or not canonical_text:
             raise ValueError("actor_ref and canonical_text are required")
+        if subject_key is not None and len(subject_key.strip()) > _MAX_MEMORY_SUBJECT_OR_PREDICATE_CHARS:
+            raise ValueError("memory correction subject_key exceeds 256 characters")
+        if predicate is not None and len(predicate.strip()) > _MAX_MEMORY_SUBJECT_OR_PREDICATE_CHARS:
+            raise ValueError("memory correction predicate exceeds 256 characters")
+        if len(canonical_text) > _MAX_MEMORY_CANONICAL_CHARS:
+            raise ValueError("memory correction canonical_text exceeds 1000 characters")
+        if len(_json(value).encode()) > _MAX_MEMORY_VALUE_BYTES:
+            raise ValueError("memory correction value exceeds 2048 bytes")
+        if len(evidence or []) > _MAX_MEMORY_EVIDENCE_IDS:
+            raise ValueError("memory corrections support at most 10 evidence observations")
         if sensitivity is not None and sensitivity not in _SENSITIVITIES:
             raise ValueError(f"unsupported memory sensitivity {sensitivity!r}")
         value_hash = hashlib.sha256(_json(value).encode()).hexdigest()
-        event_key = idempotency_key or f"memory:{fact_uuid}:correct:{value_hash}"
+        event_key = _memory_event_key("correct", fact_uuid, idempotency_key, value_hash)
         replacement_id = _uuid("memory-correction", fact_uuid, event_key)
         async with self._pool.acquire() as connection:
             async with connection.transaction():
+                fact = await self._memory_authorized(
+                    connection, fact_id=fact_uuid, actor_ref=actor_ref, lock=True
+                )
                 prior_event = await self._memory_event_exists(connection, event_key)
                 if prior_event is not None:
                     replacement = await connection.fetchval(
@@ -1796,9 +1901,6 @@ class HeartbeatState:
                     return await self._memory_result(
                         connection, replacement or prior_event
                     )
-                fact = await self._memory_authorized(
-                    connection, fact_id=fact_uuid, actor_ref=actor_ref, lock=True
-                )
                 if int(fact["revision"]) != int(expected_revision):
                     raise RuntimeError(
                         f"memory fact revision conflict: expected {expected_revision}, got {fact['revision']}"
@@ -1871,6 +1973,79 @@ class HeartbeatState:
     async def supersede_memory_fact(self, **kwargs: Any) -> dict[str, Any]:
         """Explicit lifecycle name for a correction that supersedes a fact."""
         return await self.correct_memory_fact(**kwargs)
+
+    async def promote_memory_fact(
+        self,
+        *,
+        fact_id: str,
+        target_profile_id: str,
+        actor_ref: str,
+        expected_revision: int,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Promote one confirmed fact into an explicitly selected broader scope.
+
+        Target selection is an operator/reviewer concern and is deliberately
+        not exposed through model-selected delivery actions.
+        """
+        self._require_ready()
+        if self.workflow_name != "heartbeat_feedback":
+            raise PermissionError("memory promotion requires the feedback workflow")
+        fact_uuid = _parse_uuid(fact_id, "fact_id")
+        target_uuid = _parse_uuid(target_profile_id, "target_profile_id")
+        actor_ref = actor_ref.strip()
+        if not actor_ref or int(expected_revision) <= 0:
+            raise ValueError("actor_ref and a positive expected_revision are required")
+        try:
+            async with self._pool.acquire() as connection:
+                result = await connection.fetchval(
+                    "select heartbeat_promote_memory_fact($1,$2,$3,$4,$5)",
+                    fact_uuid,
+                    target_uuid,
+                    actor_ref,
+                    int(expected_revision),
+                    idempotency_key,
+                )
+        except Exception as exc:
+            message = str(exc)
+            if (
+                "authorized" in message
+                or "administrator" in message
+                or "reviewer" in message
+                or "requires the feedback" in message
+                or "outside the source namespace" in message
+                or "strictly broader" in message
+            ):
+                raise PermissionError("memory promotion is not authorized") from exc
+            if "stale" in message or "confirmed" in message:
+                raise RuntimeError("memory promotion precondition failed") from exc
+            raise RuntimeError("memory promotion failed") from exc
+        return _json_value(result) or {}
+
+    async def apply_retention(self, profile_id: str) -> dict[str, Any]:
+        """Scrub expired heartbeat content for the current run profile.
+
+        The result always contains integer counts for observations_scrubbed,
+        artifacts_scrubbed, run_snapshots_scrubbed, deliveries_scrubbed,
+        action_tokens_deleted, memory_tokens_deleted, draft_artifacts_deleted,
+        draft_grants_deleted, and facts_expired.
+        """
+        self._require_ready()
+        if self.workflow_name != "heartbeat_run":
+            raise PermissionError("retention requires the heartbeat run workflow")
+        profile_uuid = _parse_uuid(profile_id, "profile_id")
+        await self._require_profile_executor(profile_uuid)
+        try:
+            async with self._pool.acquire() as connection:
+                result = await connection.fetchval(
+                    "select heartbeat_apply_retention($1)", profile_uuid
+                )
+        except Exception as exc:
+            message = str(exc)
+            if "requires the heartbeat run workflow" in message or "does not operate" in message:
+                raise PermissionError("heartbeat retention is not authorized") from exc
+            raise RuntimeError("heartbeat retention failed") from exc
+        return _json_value(result) or {}
 
     async def mark_delivery_sent(
         self,
