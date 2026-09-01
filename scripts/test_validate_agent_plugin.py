@@ -72,6 +72,18 @@ class ValidateAgentPluginTest(unittest.TestCase):
                 lambda value: value["plugins"][0].update(source="./centaur"),
                 "source must be ./plugins/centaur",
             ),
+            (
+                "wrong Codex marketplace name",
+                ".agents/plugins/marketplace.json",
+                lambda value: value.update(name="main"),
+                "marketplace name must be centaur",
+            ),
+            (
+                "wrong Claude marketplace name",
+                ".claude-plugin/marketplace.json",
+                lambda value: value.update(name="main"),
+                "marketplace name must be centaur",
+            ),
         )
         for label, relative, mutate, expected in cases:
             with self.subTest(label=label):

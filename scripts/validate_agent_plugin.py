@@ -97,6 +97,18 @@ def validate(root: Path = ROOT) -> list[str]:
     _require(codex.get("name") == NAME, codex_path, "name must be centaur", errors)
     _require(claude.get("name") == NAME, claude_path, "name must be centaur", errors)
     _require(
+        codex_market.get("name") == NAME,
+        codex_market_path,
+        "marketplace name must be centaur",
+        errors,
+    )
+    _require(
+        claude_market.get("name") == NAME,
+        claude_market_path,
+        "marketplace name must be centaur",
+        errors,
+    )
+    _require(
         "mcpServers" not in codex,
         codex_path,
         "Codex MCP URL must remain deployment-specific",
