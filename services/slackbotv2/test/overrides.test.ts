@@ -537,24 +537,113 @@ describe('messageOverridesForText strategy invocation', () => {
     })
   })
 
-  test('falls back when the OpenAI strategy request fails', async () => {
+  test('resolves a natural-language alias before a failing OpenAI request', async () => {
+    let requestCount = 0
     await expect(
       messageOverridesForText(
         slackOptions({
           messageOverridesStrategy: createOpenAiMessageOverridesStrategy({
             apiKey: 'test-key',
-            fetch: (async () =>
-              new Response('secret-token=do-not-log', {
+            fetch: (async () => {
+              requestCount += 1
+              return new Response('secret-token=do-not-log', {
                 status: 503,
                 statusText: 'Service Unavailable'
-              })) as unknown as typeof fetch,
+              })
+            }) as unknown as typeof fetch,
             model: 'gpt-5.4-nano'
           })
         }),
         'use sol',
         trace
       )
-    ).resolves.toEqual({ overrides: {} })
+    ).resolves.toEqual({
+      overrides: {
+        harnessType: 'codex',
+        model: 'gpt-5.6-sol',
+        provider: undefined,
+        reasoning: undefined
+      }
+    })
+    expect(requestCount).toBe(0)
+  })
+
+  test('fuzzy-matches a typo inside an explicit selection clause', async () => {
+    let requestCount = 0
+    const strategy = createOpenAiMessageOverridesStrategy({
+      apiKey: 'test-key',
+      fetch: (async () => {
+        requestCount += 1
+        throw new Error('a deterministic selection must not call the strategy model')
+      }) as unknown as typeof fetch,
+      model: 'gpt-5.4-nano'
+    })
+
+    await expect(strategy({ text: 'switch to sonet for this review' })).resolves.toEqual({
+      overrides: {
+        harnessType: 'claudecode',
+        model: 'claude-sonnet-4-6',
+        provider: undefined,
+        reasoning: undefined
+      }
+    })
+    expect(requestCount).toBe(0)
+  })
+
+  test('does not fuzzy-match model-like words without selection intent', async () => {
+    let requestCount = 0
+    const strategy = createOpenAiMessageOverridesStrategy({
+      apiKey: 'test-key',
+      fetch: (async () => {
+        requestCount += 1
+        return Response.json({
+          output: [
+            {
+              content: [
+                {
+                  text: JSON.stringify({
+                    harness: null,
+                    model: null,
+                    provider: null,
+                    reasoning: null
+                  })
+                }
+              ]
+            }
+          ]
+        })
+      }) as unknown as typeof fetch,
+      model: 'gpt-5.4-nano'
+    })
+
+    await expect(
+      strategy({ text: 'compare the Sonet protocol with Claude docs' })
+    ).resolves.toEqual({
+      overrides: {
+        harnessType: undefined,
+        model: undefined,
+        provider: undefined,
+        reasoning: undefined
+      }
+    })
+    expect(requestCount).toBe(1)
+  })
+
+  test('does not select a model mentioned later in a task clause', async () => {
+    let requestCount = 0
+    const strategy = createOpenAiMessageOverridesStrategy({
+      apiKey: 'test-key',
+      fetch: (async () => {
+        requestCount += 1
+        return new Response('unavailable', { status: 503 })
+      }) as unknown as typeof fetch,
+      model: 'gpt-5.4-nano'
+    })
+
+    await expect(strategy({ text: 'use this tool to compare Claude documentation' })).resolves.toEqual(
+      { overrides: {} }
+    )
+    expect(requestCount).toBe(1)
   })
 
   test('handles --nanocodex deterministically before the OpenAI strategy', async () => {
@@ -580,7 +669,7 @@ describe('messageOverridesForText strategy invocation', () => {
     expect(requestCount).toBe(0)
   })
 
-  test('allows the OpenAI strategy to select nanocodex from natural language', async () => {
+  test('selects nanocodex from natural language without an OpenAI request', async () => {
     let requestBody: Record<string, unknown> | undefined
     const strategy = createOpenAiMessageOverridesStrategy({
       apiKey: 'test-key',
@@ -614,7 +703,7 @@ describe('messageOverridesForText strategy invocation', () => {
         reasoning: undefined
       }
     })
-    expect(JSON.stringify(requestBody)).toContain('nanocodex')
+    expect(requestBody).toBeUndefined()
   })
 })
 
