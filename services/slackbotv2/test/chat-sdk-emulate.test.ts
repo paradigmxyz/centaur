@@ -1076,7 +1076,7 @@ describe('slackbotv2', () => {
     await Promise.all(firstWaits)
     expect(metadataBlockTexts(slackApi.calls)).toHaveLength(1)
     expect(metadataBlockTexts(slackApi.calls)[0]).toContain('Codex')
-    expect(metadataBlockTexts(slackApi.calls)[0]).toContain('Low')
+    expect(metadataBlockTexts(slackApi.calls)[0]).toContain('Medium')
     expect(metadataBlockTexts(slackApi.calls)[0]).not.toContain('Fast')
     expect(metadataBlockTexts(slackApi.calls)[0]).not.toContain('Open chat in Console')
 
@@ -1219,7 +1219,7 @@ describe('slackbotv2', () => {
       .map(block => JSON.stringify(block))
       .find(text => text.includes('Open chat in Console'))
     expect(footer).toContain('Nanocodex')
-    expect(footer).toContain('Low')
+    expect(footer).toContain('Medium')
     expect(footer).not.toContain('Codex*')
     expect(codexApi.creates[0]?.body.harness_type).toBe('nanocodex')
     expect(codexApi.creates[0]?.body.metadata.harness_assignment).toEqual(harnessAssignment)
