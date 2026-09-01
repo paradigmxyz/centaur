@@ -363,6 +363,11 @@ for key rotation, and rejects timestamps outside a five-minute window. Using
 identity. Auth schemes are selected by `auth.type`; Centaur does not infer one
 from the headers.
 
+Lu.ma webhooks use a timestamped HMAC signature. Configure them with
+`{"type": "luma", "secret_ref": "LUMA_WEBHOOK_SECRET"}`; Centaur verifies
+`Webhook-Signature` against `Webhook-Timestamp` and rejects deliveries outside
+the five-minute replay window.
+
 The workflow receives input in this shape:
 
 ```json
