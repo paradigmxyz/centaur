@@ -2,6 +2,7 @@ import { createSlackbotV2, type SlackbotV2Options } from './index'
 import { parseChannelDefaults } from './channel-defaults'
 import { resolveSlackHomeTeamId } from './session-api'
 import { resolveSlackBotUserId } from './slack-user'
+import { parseOverrideAliases } from './overrides'
 import {
   createFlagMessageOverridesStrategy,
   createOpenAiMessageOverridesStrategy
@@ -44,6 +45,12 @@ const consoleLogger = {
   child: () => consoleLogger
 }
 
+const overrideAliases = parseOverrideAliases(
+  optionalEnv('SLACKBOTV2_MODEL_ALIASES'),
+  optionalEnv('SLACKBOTV2_REASONING_ALIASES'),
+  reason => consoleLogger.warn('slackbotv2 alias configuration', { reason })
+)
+
 const options: SlackbotV2Options = {
   apiUrl,
   apiKey: optionalEnv('SLACKBOT_API_KEY'),
@@ -52,8 +59,10 @@ const options: SlackbotV2Options = {
   autoJoinCreatedChannels: booleanEnv('SLACKBOTV2_AUTO_JOIN_CREATED_CHANNELS', false),
   botToken,
   botUserId,
-  channelDefaults: parseChannelDefaults(optionalEnv('SLACKBOTV2_CHANNEL_DEFAULTS'), reason =>
-    consoleLogger.warn('slackbotv2 SLACKBOTV2_CHANNEL_DEFAULTS', { reason })
+  channelDefaults: parseChannelDefaults(
+    optionalEnv('SLACKBOTV2_CHANNEL_DEFAULTS'),
+    reason => consoleLogger.warn('slackbotv2 SLACKBOTV2_CHANNEL_DEFAULTS', { reason }),
+    overrideAliases
   ),
   codexNanocodexRolloutPercent: percentEnv(
     'SLACKBOTV2_CODEX_NANOCODEX_ROLLOUT_PERCENT',
@@ -176,11 +185,14 @@ function percentEnv(name: string, fallback: number): number {
 }
 
 function createMessageOverridesStrategy(): SlackbotV2Options['messageOverridesStrategy'] {
-  if (messageOverridesStrategyMode !== 'llm') return createFlagMessageOverridesStrategy()
+  if (messageOverridesStrategyMode !== 'llm') {
+    return createFlagMessageOverridesStrategy(overrideAliases)
+  }
   if (!messageOverridesStrategyApiKey) {
     return async () => ({ overrides: {} })
   }
   return createOpenAiMessageOverridesStrategy({
+    aliases: overrideAliases,
     apiKey: messageOverridesStrategyApiKey,
     baseUrl: optionalEnv('SLACKBOTV2_MESSAGE_OVERRIDES_OPENAI_BASE_URL'),
     logger: consoleLogger,

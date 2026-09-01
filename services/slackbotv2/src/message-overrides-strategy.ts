@@ -1,7 +1,9 @@
 import type { Logger } from 'chat'
 import {
+  DEFAULT_OVERRIDE_ALIASES,
   extractMessageOverrides,
-  validateStrategyOverrides
+  validateStrategyOverrides,
+  type OverrideAliases
 } from './overrides'
 import type { JsonObject, MessageOverridesStrategy } from './types'
 import { errorMessage, isJsonObject } from './utils'
@@ -9,7 +11,7 @@ import { errorMessage, isJsonObject } from './utils'
 const DEFAULT_TIMEOUT_MS = 2_000
 const DEFAULT_MAX_OUTPUT_TOKENS = 300
 
-const SYSTEM_PROMPT = [
+const BASE_SYSTEM_PROMPT = [
   'Decide whether the Slack message asks to use a specific AI harness, model, provider, or reasoning effort.',
   'Return only canonical override values from the schema.',
   'Use null for every field when the message does not ask to change model selection.',
@@ -21,13 +23,13 @@ const SYSTEM_PROMPT = [
   'Only return reasoning when the user explicitly asks to change model reasoning or effort. A reasoning word appearing incidentally, in quoted text, pasted model output, code, or task requirements is not a selection request.',
   'When the user explicitly requests a reasoning or effort change, map fuzzy magnitude words to the nearest reasoning value. Examples: tiny/cheap/fast -> low or minimal; normal/default -> medium; deep/strong/intense -> high or xhigh; maximum/superduper/biggest -> max.',
   'Return reasoning even when the requested model is not Codex; validation will ignore reasoning that cannot apply.',
-  'Map OpenAI model aliases to canonical IDs: sol -> gpt-5.6-sol, terra -> gpt-5.6-terra, luna -> gpt-5.6-luna, 5.5 -> gpt-5.5, 5.5 pro -> gpt-5.5-pro, 5.4 -> gpt-5.4, 5.4 pro -> gpt-5.4-pro, 5.4 mini -> gpt-5.4-mini, 5.4 nano -> gpt-5.4-nano.',
-  'Map Claude model aliases to canonical IDs: fable -> claude-fable-5, opus -> claude-opus-4-8, opus 4.7 -> claude-opus-4-7, opus 5 -> claude-opus-5, opus 5 fast -> claude-opus-5-fast, sonnet -> claude-sonnet-4-6, sonnet 5 -> claude-sonnet-5, haiku -> claude-haiku-4-5.',
+  'Map versioned OpenAI model names to canonical IDs: 5.5 pro -> gpt-5.5-pro, 5.4 pro -> gpt-5.4-pro, 5.4 mini -> gpt-5.4-mini, 5.4 nano -> gpt-5.4-nano.',
+  'Map Claude model names to canonical IDs: opus 4.7 -> claude-opus-4-7, opus 5 -> claude-opus-5, opus 5 fast -> claude-opus-5-fast, sonnet 5 -> claude-sonnet-5.',
   'Map Amp model aliases to canonical IDs: deep -> deep, fast -> fast. Select an Amp model only when the user explicitly names Amp or clearly asks for the deep or fast model/mode. Requests such as "use the deep model" and "switch to fast mode" select the corresponding Amp model. Do not infer Amp from superlatives, coined terms, or casual requests to be more intelligent, thorough, or fast.',
   'Words containing or merely evoking model aliases are not model requests. For example, "think deeply", "do a deep analysis", "use your strongest thinking", and "give me a fast answer" do not select Amp. Unless another explicit selector is present, return null for every field.',
   'For example, "use max effort and the sol model" should return model "gpt-5.6-sol" and reasoning "max".',
   'Do not treat ordinary discussion of model names as a selection request.'
-].join('\n')
+]
 
 const MODEL_VALUES = [
   'claude-fable-5',
@@ -77,6 +79,7 @@ const MESSAGE_OVERRIDES_SCHEMA = {
 }
 
 export type OpenAiMessageOverridesStrategyOptions = {
+  aliases?: OverrideAliases
   apiKey: string
   baseUrl?: string
   fetch?: typeof fetch
@@ -93,9 +96,11 @@ type OpenAiMessageOverridesStrategyOutput = {
   reasoning?: unknown
 }
 
-export function createFlagMessageOverridesStrategy(): MessageOverridesStrategy {
+export function createFlagMessageOverridesStrategy(
+  aliases: OverrideAliases = DEFAULT_OVERRIDE_ALIASES
+): MessageOverridesStrategy {
   return async ({ text }) => {
-    const parsed = extractMessageOverrides(text)
+    const parsed = extractMessageOverrides(text, aliases)
     const { cleanedText, ...overrides } = parsed
     return { cleanedText, overrides }
   }
@@ -108,13 +113,16 @@ export function createOpenAiMessageOverridesStrategy(
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
   const maxOutputTokens = options.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
   const fetchFn = options.fetch ?? fetch
+  const aliases = options.aliases ?? DEFAULT_OVERRIDE_ALIASES
+  const systemPrompt = systemPromptForAliases(aliases)
+  const schema = messageOverridesSchema(aliases)
 
   return async ({ text }) => {
     // Explicit flags are a deterministic user command, even when the deployment
     // enables the LLM strategy for natural-language model requests. Handle them
     // first so a strict strategy schema or model failure cannot discard the
     // selection, and so flags never leak into the harness prompt.
-    const { cleanedText, ...explicitOverrides } = extractMessageOverrides(text)
+    const { cleanedText, ...explicitOverrides } = extractMessageOverrides(text, aliases)
     if (Object.values(explicitOverrides).some(value => value !== undefined)) {
       return { cleanedText, overrides: explicitOverrides }
     }
@@ -125,7 +133,7 @@ export function createOpenAiMessageOverridesStrategy(
       const response = await fetchFn(responsesUrl, {
         body: JSON.stringify({
           input: text,
-          instructions: SYSTEM_PROMPT,
+          instructions: systemPrompt,
           max_output_tokens: maxOutputTokens,
           model: options.model,
           reasoning: { effort: 'none' },
@@ -133,7 +141,7 @@ export function createOpenAiMessageOverridesStrategy(
           text: {
             format: {
               name: 'slack_message_overrides',
-              schema: MESSAGE_OVERRIDES_SCHEMA,
+              schema,
               strict: true,
               type: 'json_schema'
             }
@@ -163,7 +171,8 @@ export function createOpenAiMessageOverridesStrategy(
       const parsed = JSON.parse(outputText)
       return {
         overrides: validateStrategyOverrides(
-          isJsonObject(parsed) ? (parsed as OpenAiMessageOverridesStrategyOutput) : null
+          isJsonObject(parsed) ? (parsed as OpenAiMessageOverridesStrategyOutput) : null,
+          aliases
         )
       }
     } catch (error) {
@@ -175,6 +184,48 @@ export function createOpenAiMessageOverridesStrategy(
       return { overrides: {} }
     } finally {
       clearTimeout(timeout)
+    }
+  }
+}
+
+function systemPromptForAliases(aliases: OverrideAliases): string {
+  const modelAliases = Object.entries(aliases.model)
+    .map(([alias, value]) => `${alias} -> ${value.model} (${value.harnessType})`)
+    .join(', ')
+  const reasoningAliases = Object.entries(aliases.reasoning)
+    .filter(([alias, effort]) => alias !== effort)
+    .map(([alias, effort]) => `${alias} -> ${effort}`)
+    .join(', ')
+  return [
+    ...BASE_SYSTEM_PROMPT,
+    `Configured model aliases: ${modelAliases || 'none'}.`,
+    `Configured reasoning aliases: ${reasoningAliases || 'none'}.`
+  ].join('\n')
+}
+
+function messageOverridesSchema(aliases: OverrideAliases) {
+  const models = new Set<unknown>(MODEL_VALUES)
+  for (const [alias, value] of Object.entries(aliases.model)) {
+    models.add(alias)
+    models.add(value.model)
+  }
+  const reasoning = new Set<unknown>([
+    'none',
+    'minimal',
+    'low',
+    'medium',
+    'high',
+    'xhigh',
+    'max',
+    null,
+    ...Object.keys(aliases.reasoning)
+  ])
+  return {
+    ...MESSAGE_OVERRIDES_SCHEMA,
+    properties: {
+      ...MESSAGE_OVERRIDES_SCHEMA.properties,
+      model: { enum: [...models], type: ['string', 'null'] },
+      reasoning: { enum: [...reasoning], type: ['string', 'null'] }
     }
   }
 }

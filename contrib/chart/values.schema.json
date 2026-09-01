@@ -451,6 +451,30 @@
           "enum": ["first", "always", "never"]
         },
         "responseServiceTierEnabled": { "type": "boolean" },
+        "modelAliases": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[A-Za-z0-9._-]+$" },
+          "additionalProperties": {
+            "type": "object",
+            "required": ["model", "harness"],
+            "properties": {
+              "model": { "type": "string", "minLength": 1 },
+              "harness": {
+                "type": "string",
+                "enum": ["amp", "claude", "claude-code", "claudecode", "codex", "hermes", "nanocodex"]
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "reasoningAliases": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[A-Za-z0-9._-]+$" },
+          "additionalProperties": {
+            "type": "string",
+            "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+          }
+        },
         "metrics": {
           "type": "object",
           "properties": {

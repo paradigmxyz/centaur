@@ -603,6 +603,18 @@ slackbotv2:
   #     C0ENG: { harness: claude, model: opus, reasoning: high }
   #     C0TRIAGE: { reasoning: low }
   channelDefaults: {}
+  # Additional or replacement aliases used by --model/alias shortcut flags,
+  # channel defaults, and the natural-language message override strategy.
+  # Each model alias names both the canonical model and compatible harness.
+  # Reasoning aliases must resolve to a supported canonical effort:
+  # none|minimal|low|medium|high|xhigh|max.
+  # Example:
+  #   modelAliases:
+  #     frontier: { model: gpt-5.6-sol, harness: codex }
+  #   reasoningAliases:
+  #     strongest: max
+  modelAliases: {}
+  reasoningAliases: {}
   # Message overrides strategy for Slack message text. "flags" keeps the legacy
   # deterministic --model/--claude/-rsn strategy. "llm" asks a small model for
   # normalized overrides, allowing natural language requests such as
