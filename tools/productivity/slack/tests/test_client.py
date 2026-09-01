@@ -35,6 +35,7 @@ class _FakeWebClient:
         self.user_info_response: dict | None = None
         self.user_profile_response: dict | None = None
         self.user_profile_calls: list[dict] = []
+        self.permalink_calls: list[dict] = []
         self.upload_exception: Exception | None = None
         self.upload_count = 0
         # Per-upload-attempt share outcomes consumed by files_upload_v2.
@@ -51,6 +52,15 @@ class _FakeWebClient:
         self.last_kwargs = kwargs
         channel = "D123" if kwargs["channel"].startswith("U") else kwargs["channel"]
         return {"channel": channel, "ts": "123.456"}
+
+    def chat_getPermalink(self, **kwargs):
+        self.permalink_calls.append(kwargs)
+        channel = kwargs["channel"]
+        ts = kwargs["message_ts"]
+        return {
+            "ok": True,
+            "permalink": f"https://acme.slack.com/archives/{channel}/p{ts.replace('.', '')}",
+        }
 
     def conversations_history(self, **kwargs):
         self.history_calls.append(kwargs)
@@ -191,7 +201,22 @@ def test_send_message_posts_directly_to_user_id_without_im_write_scope() -> None
     assert fake_web_client.last_kwargs["channel"] == "U123ABC"
     assert fake_web_client.last_kwargs["text"] == "hello"
     assert result["channel"] == "D123"
-    assert result["permalink"] == "https://slack.com/archives/D123/p123456"
+    assert result["permalink"] == "https://acme.slack.com/archives/D123/p123456"
+    assert fake_web_client.permalink_calls == [{"channel": "D123", "message_ts": "123.456"}]
+
+
+def test_canonical_message_permalink_falls_back_when_slack_rejects_lookup() -> None:
+    client, fake_web_client = _make_client()
+
+    def fail_permalink(**kwargs):
+        raise _make_slack_error(error="message_not_found", status_code=200)
+
+    fake_web_client.chat_getPermalink = fail_permalink  # type: ignore[method-assign]
+
+    assert (
+        client._canonical_message_permalink("C123", "123.456")
+        == "https://slack.com/archives/C123/p123456"
+    )
 
 
 def test_send_dm_posts_directly_to_user_id() -> None:
@@ -1042,6 +1067,11 @@ def test_search_messages_with_channel_ids_scans_proxy_history_without_listing() 
     )
     assert sorted(call["limit"] for call in proxy_calls) == [25, 25, 25]
     assert sorted(item["channel_id"] for item in results) == ["C042WDDP89Y", "C05HUE4KLF2"]
+    assert sorted(fake_web_client.permalink_calls, key=lambda call: call["channel"]) == [
+        {"channel": "C042WDDP89Y", "message_ts": "200.000000"},
+        {"channel": "C05HUE4KLF2", "message_ts": "300.000000"},
+    ]
+    assert all(result["permalink"].startswith("https://acme.slack.com/") for result in results)
 
 
 def test_search_messages_parses_channel_and_user_modifiers_locally() -> None:
