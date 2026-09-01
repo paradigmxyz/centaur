@@ -44,5 +44,19 @@ module Granola
         .map { |job| job[:args].first }
       assert_equal [ expected.id ], enqueued_ids
     end
+
+    test "sync job retries when the Centaur API refuses the connection" do
+      app = create_granola_app
+      credential = create_credential(app: app)
+      sync = -> { raise Errno::ECONNREFUSED }
+
+      Granola::SyncCredential.stub(:syncable?, true) do
+        Granola::SyncCredential.stub(:new, sync) do
+          assert_enqueued_with(job: SyncCredentialJob, args: [ credential.id ]) do
+            SyncCredentialJob.perform_now(credential.id)
+          end
+        end
+      end
+    end
   end
 end
