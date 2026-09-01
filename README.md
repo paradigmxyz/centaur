@@ -228,6 +228,7 @@ See [Security](docs/pages/security.mdx) for the full threat model and the mechan
 - [Developer Guide](AGENTS.md) — full local setup, architecture, API contracts, migrations, testing, and conventions
 - [Tools](tools/) — built-in tool plugins
 - [Workflows](workflows/) — external workflow plugins
+- [Agent plugin](plugins/centaur/) — connect Codex, Claude Code, and other MCP clients to Centaur
 - [API service](services/api-rs/) — Rust control plane
 - [Slackbot](services/slackbotv2/) — Slack integration
 - [Sandbox](services/sandbox/) — agent runtime image
