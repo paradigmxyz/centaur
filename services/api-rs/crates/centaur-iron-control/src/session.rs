@@ -13,8 +13,8 @@ use crate::IronControlClient;
 use crate::error::{IronControlError, Result};
 use crate::models::{Principal, PrincipalInput, SlackChannelPermissionInput};
 use crate::principal::{
-    derive_principal_with_slack_team, derive_slack_requester_principal, is_direct_message,
-    slack_conversation_id,
+    PrincipalRef, derive_github_requester_principal, derive_principal_with_slack_team,
+    derive_slack_requester_principal, is_direct_message, slack_conversation_id,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -102,13 +102,14 @@ impl SessionRegistrar {
         Ok(record)
     }
 
-    /// Upsert the principal of the human requesting a Slack channel turn,
-    /// derived from the execute metadata (``slack_user_id`` and friends).
-    /// Returns ``Ok(None)`` for DM threads (the conversation principal already
-    /// is the user's), for non-Slack threads, when the metadata carries no
-    /// ``slack_user_id``, and when the requester is not proven to belong to the
-    /// Slack app's home team. This prevents Slack Connect users from supplying
-    /// requester credentials to a shared channel turn.
+    /// Bind the principal of the human requesting this turn, resolved from the
+    /// execute metadata (see [`requester_plan`]): fetched for authenticated
+    /// Console executions and upserted for Slack channel and GitHub turns.
+    /// Returns ``Ok(None)`` when the metadata carries no eligible requester.
+    /// For Slack that includes DM threads (the conversation principal already
+    /// is the user's) and requesters not proven to belong to the Slack app's
+    /// home team, which prevents Slack Connect users from supplying requester
+    /// credentials to a shared channel turn.
     ///
     /// Unlike [`Self::register_session`], this never writes Slack channel
     /// permissions: the requester principal only scopes proxy credentials, and
@@ -122,27 +123,22 @@ impl SessionRegistrar {
         let Some(metadata) = metadata else {
             return Ok(None);
         };
-        let Some(slack_team_id) = eligible_slack_requester_team(metadata) else {
-            return Ok(None);
-        };
-        let Some(slack_user_id) = metadata.get("slack_user_id").and_then(Value::as_str) else {
-            return Ok(None);
-        };
-        let Some(principal) = derive_slack_requester_principal(
-            thread_key,
-            slack_user_id,
-            slack_team_id,
-            metadata.get("slack_display_name").and_then(Value::as_str),
-        ) else {
-            return Ok(None);
-        };
-        let mut input = principal.to_principal_input();
-        set_slack_email(
-            &mut input,
-            metadata.get("slack_user_email").and_then(Value::as_str),
-        );
-        self.merge_existing_labels(&mut input).await?;
-        Ok(Some(self.client.upsert_principal(&input).await?))
+        match requester_plan(thread_key, metadata) {
+            None => Ok(None),
+            // The console owns console-user principals: fetch, never upsert.
+            Some(RequesterPlan::FetchExisting(foreign_id)) => {
+                self.client.get_principal(&foreign_id).await.map(Some)
+            }
+            Some(RequesterPlan::UpsertDerived(principal)) => {
+                let mut input = principal.to_principal_input();
+                set_slack_email(
+                    &mut input,
+                    metadata.get("slack_user_email").and_then(Value::as_str),
+                );
+                self.merge_existing_labels(&mut input).await?;
+                Ok(Some(self.client.upsert_principal(&input).await?))
+            }
+        }
     }
 
     pub async fn get_principal(&self, principal: &str) -> Result<Principal> {
@@ -166,6 +162,56 @@ impl SessionRegistrar {
         input.labels = labels;
         Ok(true)
     }
+}
+
+/// How a turn's requester principal is resolved from the execute metadata.
+/// Adding a source is one arm here, not another branch in the registrar.
+#[derive(Debug)]
+enum RequesterPlan {
+    /// Fetch a principal the console service provisioned for its
+    /// authenticated user. The API server strips this metadata field from
+    /// every caller except the authenticated Console service, so checking the
+    /// field also covers Console replies to non-Console threads.
+    FetchExisting(String),
+    /// Upsert the api-rs-owned per-user principal derived from the ingress's
+    /// verified actor identity (Slack channel turns, GitHub turns).
+    UpsertDerived(PrincipalRef),
+}
+
+fn requester_plan(thread_key: &str, metadata: &Value) -> Option<RequesterPlan> {
+    if metadata.get("requester_principal_foreign_id").is_some() {
+        let foreign_id = metadata
+            .get("requester_principal_foreign_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|foreign_id| !foreign_id.is_empty())?;
+        return Some(RequesterPlan::FetchExisting(foreign_id.to_owned()));
+    }
+    // githubbot forwards the comment author (`user_id`, `user_name`) from the
+    // signature-verified webhook payload. Let the derivation helper recognize
+    // every GitHub-owned session family, including work sessions.
+    if let Some(principal) = metadata
+        .get("user_id")
+        .and_then(Value::as_str)
+        .and_then(|user_id| {
+            derive_github_requester_principal(
+                thread_key,
+                user_id,
+                metadata.get("user_name").and_then(Value::as_str),
+            )
+        })
+    {
+        return Some(RequesterPlan::UpsertDerived(principal));
+    }
+    let slack_team_id = eligible_slack_requester_team(metadata)?;
+    let slack_user_id = metadata.get("slack_user_id").and_then(Value::as_str)?;
+    derive_slack_requester_principal(
+        thread_key,
+        slack_user_id,
+        slack_team_id,
+        metadata.get("slack_display_name").and_then(Value::as_str),
+    )
+    .map(RequesterPlan::UpsertDerived)
 }
 
 fn eligible_slack_requester_team(metadata: &Value) -> Option<&str> {
@@ -369,7 +415,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_session_leaves_default_roles_to_iron_control() {
-        let (base_url, requests, server) = spawn_iron_control_stub(false).await;
+        let (base_url, requests, _bodies, server) = spawn_iron_control_stub(false).await;
         let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
         let metadata = json!({
             "slack_user_id": "U123",
@@ -403,7 +449,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_session_does_not_restore_roles_for_existing_principal() {
-        let (base_url, requests, server) = spawn_iron_control_stub(true).await;
+        let (base_url, requests, _bodies, server) = spawn_iron_control_stub(true).await;
         let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
         let metadata = json!({
             "slack_user_id": "U123",
@@ -438,7 +484,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_session_upserts_slack_dm_permission_for_new_user_principal() {
-        let (base_url, requests, server) = spawn_iron_control_stub(false).await;
+        let (base_url, requests, _bodies, server) = spawn_iron_control_stub(false).await;
         let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
         let metadata = json!({
             "slack_user_id": "U123",
@@ -462,7 +508,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_session_upserts_slack_dm_permission_for_existing_user_principal() {
-        let (base_url, requests, server) = spawn_iron_control_stub(true).await;
+        let (base_url, requests, _bodies, server) = spawn_iron_control_stub(true).await;
         let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
         let metadata = json!({
             "slack_user_id": "U123",
@@ -513,7 +559,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_requester_upserts_user_principal_without_roles_or_permissions() {
-        let (base_url, requests, server) = spawn_iron_control_stub(false).await;
+        let (base_url, requests, _bodies, server) = spawn_iron_control_stub(false).await;
         let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
         let metadata = json!({
             "slack_user_id": "U123",
@@ -552,7 +598,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_requester_merges_labels_for_existing_principal() {
-        let (base_url, requests, server) = spawn_iron_control_stub(true).await;
+        let (base_url, requests, _bodies, server) = spawn_iron_control_stub(true).await;
         let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
         let metadata = json!({
             "slack_user_id": "U123",
@@ -586,7 +632,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_requester_returns_none_for_dm_thread() {
-        let (base_url, requests, server) = spawn_iron_control_stub(false).await;
+        let (base_url, requests, _bodies, server) = spawn_iron_control_stub(false).await;
         let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
         let metadata = json!({
             "slack_user_id": "U123",
@@ -606,7 +652,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_requester_returns_none_without_slack_user_id() {
-        let (base_url, requests, server) = spawn_iron_control_stub(false).await;
+        let (base_url, requests, _bodies, server) = spawn_iron_control_stub(false).await;
         let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
         let metadata = json!({
             "aad_object_id": "aad-user-1",
@@ -627,7 +673,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_requester_returns_none_for_non_slack_thread() {
-        let (base_url, requests, server) = spawn_iron_control_stub(false).await;
+        let (base_url, requests, _bodies, server) = spawn_iron_control_stub(false).await;
         let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
         let metadata = json!({
             "slack_user_id": "U123",
@@ -647,7 +693,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_requester_returns_none_for_external_slack_team() {
-        let (base_url, requests, server) = spawn_iron_control_stub(false).await;
+        let (base_url, requests, _bodies, server) = spawn_iron_control_stub(false).await;
         let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
         let metadata = json!({
             "slack_user_id": "U123",
@@ -667,7 +713,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_requester_returns_none_without_home_team() {
-        let (base_url, requests, server) = spawn_iron_control_stub(false).await;
+        let (base_url, requests, _bodies, server) = spawn_iron_control_stub(false).await;
         let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
         let metadata = json!({
             "slack_user_id": "U123",
@@ -682,6 +728,198 @@ mod tests {
         assert_eq!(principal, None);
         assert!(requests.lock().unwrap().is_empty());
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn register_requester_resolves_console_requester_principal() {
+        let (base_url, requests, _bodies, server) = spawn_iron_control_stub(false).await;
+        let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
+        let metadata = json!({
+            "requester_principal_foreign_id": "console-user-ada-example-com-abc123"
+        });
+
+        let principal = registrar
+            .register_requester(
+                "console:9f1b7a3c-2d4e-4f6a-8b0c-1d2e3f4a5b6c",
+                Some(&metadata),
+            )
+            .await
+            .unwrap()
+            .expect("console requester resolves to the provisioned principal");
+        assert_eq!(principal.id, "prn_console_user");
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests.as_slice(),
+            ["GET /api/v1/principals/lookup/console-user-ada-example-com-abc123".to_owned()],
+            "console requesters are fetched, never upserted"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn register_requester_resolves_console_requester_for_slack_thread() {
+        let (base_url, requests, _bodies, server) = spawn_iron_control_stub(false).await;
+        let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
+        let metadata = json!({
+            "requester_principal_foreign_id": "console-user-ada-example-com-abc123"
+        });
+
+        let principal = registrar
+            .register_requester("slack:T123:C123:1773364194.179929", Some(&metadata))
+            .await
+            .unwrap()
+            .expect("console requester resolves independently of the thread namespace");
+
+        assert_eq!(principal.id, "prn_console_user");
+        assert_eq!(
+            requests.lock().unwrap().as_slice(),
+            ["GET /api/v1/principals/lookup/console-user-ada-example-com-abc123".to_owned()]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn register_requester_returns_none_for_console_thread_without_foreign_id() {
+        let (base_url, requests, _bodies, server) = spawn_iron_control_stub(false).await;
+        let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
+        let metadata = json!({ "user_email": "ada@example.com" });
+
+        let principal = registrar
+            .register_requester(
+                "console:9f1b7a3c-2d4e-4f6a-8b0c-1d2e3f4a5b6c",
+                Some(&metadata),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(principal, None);
+        assert!(requests.lock().unwrap().is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn register_requester_errors_for_unknown_console_principal() {
+        let (base_url, requests, _bodies, server) = spawn_iron_control_stub(false).await;
+        let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
+        let metadata = json!({
+            "requester_principal_foreign_id": "console-user-ghost"
+        });
+
+        let result = registrar
+            .register_requester(
+                "console:9f1b7a3c-2d4e-4f6a-8b0c-1d2e3f4a5b6c",
+                Some(&metadata),
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            requests.lock().unwrap().as_slice(),
+            ["GET /api/v1/principals/lookup/console-user-ghost".to_owned()]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn register_requester_upserts_github_user_principal_without_roles_or_permissions() {
+        let (base_url, requests, bodies, server) = spawn_iron_control_stub(false).await;
+        let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
+        let metadata = json!({
+            "user_id": "90210001",
+            "user_name": "ada"
+        });
+
+        let principal = registrar
+            .register_requester("github:acme/widgets:12", Some(&metadata))
+            .await
+            .unwrap()
+            .expect("github requester resolves to a principal");
+        assert_eq!(principal.id, "prn_github_user");
+
+        let bodies = bodies.lock().unwrap();
+        let upsert = bodies
+            .iter()
+            .find(|request| request.starts_with("PUT /api/v1/principals/github-user-90210001"))
+            .expect("github requester principal is upserted");
+        assert!(upsert.contains(r#""kind":"github_user""#));
+        assert!(upsert.contains(r#""name":"GitHub User @ada""#));
+        assert!(upsert.contains(r#""github_subject":"90210001""#));
+
+        let requests = requests.lock().unwrap();
+        assert!(
+            requests.contains(&"GET /api/v1/principals/lookup/github-user-90210001".to_owned())
+        );
+        assert!(requests.contains(&"PUT /api/v1/principals/github-user-90210001".to_owned()));
+        assert!(
+            !requests
+                .iter()
+                .any(|request| request.ends_with("/slack_channel_permissions")),
+            "github requester upserts must not write Slack channel permissions"
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|request| request == "POST /api/v1/principals/prn_github_user/roles"),
+            "iron-control owns default role assignment"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn register_requester_returns_none_for_github_thread_without_user_id() {
+        let (base_url, requests, _bodies, server) = spawn_iron_control_stub(false).await;
+        let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
+        let metadata = json!({ "user_name": "ada" });
+
+        let principal = registrar
+            .register_requester("github:acme/widgets:12", Some(&metadata))
+            .await
+            .unwrap();
+
+        assert_eq!(principal, None);
+        assert!(requests.lock().unwrap().is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn register_requester_ignores_user_id_outside_github_threads() {
+        let (base_url, requests, _bodies, server) = spawn_iron_control_stub(false).await;
+        let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
+        let metadata = json!({
+            "user_id": "90210001",
+            "user_name": "ada"
+        });
+
+        let principal = registrar
+            .register_requester("linear:issue-1", Some(&metadata))
+            .await
+            .unwrap();
+
+        assert_eq!(principal, None);
+        assert!(requests.lock().unwrap().is_empty());
+        server.abort();
+    }
+
+    #[test]
+    fn requester_plan_resolves_github_work_session_keys() {
+        let metadata = json!({
+            "user_id": "90210001",
+            "user_name": "ada"
+        });
+
+        for thread_key in [
+            "github:acme/widgets:12",
+            "github-issue:acme/widgets:12",
+            "github-manage:acme/widgets:12",
+        ] {
+            let Some(RequesterPlan::UpsertDerived(principal)) =
+                requester_plan(thread_key, &metadata)
+            else {
+                panic!("expected a GitHub requester for {thread_key}");
+            };
+            assert_eq!(principal.foreign_id, "github-user-90210001");
+        }
     }
 
     #[test]
@@ -713,13 +951,32 @@ mod tests {
         );
     }
 
+    /// A stub iron-control API. `requests` records `METHOD path` per call;
+    /// `bodies` additionally records the JSON body for calls that carry one,
+    /// so upserting tests can assert what was written, not just where.
     async fn spawn_iron_control_stub(
         principal_exists: bool,
-    ) -> (String, Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
+    ) -> (
+        String,
+        Arc<Mutex<Vec<String>>>,
+        Arc<Mutex<Vec<String>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        fn content_length(headers: &str) -> usize {
+            headers
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
+                .and_then(|(_, value)| value.trim().parse().ok())
+                .unwrap_or(0)
+        }
+
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let bodies = Arc::new(Mutex::new(Vec::new()));
         let seen = requests.clone();
+        let bodies_seen = bodies.clone();
         let handle = tokio::spawn(async move {
             loop {
                 let Ok((mut stream, _)) = listener.accept().await else {
@@ -727,18 +984,37 @@ mod tests {
                 };
                 let mut request = Vec::new();
                 let mut buf = [0u8; 1024];
-                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                loop {
+                    let complete = request
+                        .windows(4)
+                        .position(|window| window == b"\r\n\r\n")
+                        .is_some_and(|headers_end| {
+                            let headers = String::from_utf8_lossy(&request[..headers_end]);
+                            request.len() >= headers_end + 4 + content_length(&headers)
+                        });
+                    if complete {
+                        break;
+                    }
                     match stream.read(&mut buf).await {
                         Ok(0) | Err(_) => break,
                         Ok(read) => request.extend_from_slice(&buf[..read]),
                     }
                 }
                 let request = String::from_utf8_lossy(&request);
-                let first_line = request.lines().next().unwrap_or_default();
+                let mut segments = request.splitn(2, "\r\n\r\n");
+                let head = segments.next().unwrap_or_default();
+                let request_body = segments.next().unwrap_or_default().trim_end();
+                let first_line = head.lines().next().unwrap_or_default();
                 let mut parts = first_line.split_whitespace();
                 let method = parts.next().unwrap_or_default();
                 let path = parts.next().unwrap_or_default();
                 seen.lock().unwrap().push(format!("{method} {path}"));
+                if !request_body.is_empty() {
+                    bodies_seen
+                        .lock()
+                        .unwrap()
+                        .push(format!("{method} {path} {request_body}"));
+                }
 
                 let (status_line, body) = match (method, path) {
                     ("GET", "/api/v1/principals/lookup/slack-channel-t123-c123")
@@ -761,6 +1037,23 @@ mod tests {
                     ("PUT", "/api/v1/principals/slack-user-t123-u123") => {
                         ("200 OK", user_principal_body())
                     }
+                    ("GET", "/api/v1/principals/lookup/console-user-ada-example-com-abc123") => {
+                        ("200 OK", console_user_principal_body())
+                    }
+                    ("GET", "/api/v1/principals/lookup/console-user-ghost") => {
+                        ("404 Not Found", r#"{"error":"not found"}"#.to_owned())
+                    }
+                    ("GET", "/api/v1/principals/lookup/github-user-90210001")
+                        if principal_exists =>
+                    {
+                        ("200 OK", github_user_principal_body())
+                    }
+                    ("GET", "/api/v1/principals/lookup/github-user-90210001") => {
+                        ("404 Not Found", r#"{"error":"not found"}"#.to_owned())
+                    }
+                    ("PUT", "/api/v1/principals/github-user-90210001") => {
+                        ("200 OK", github_user_principal_body())
+                    }
                     (
                         "POST",
                         "/api/v1/principals/prn_channel/slack_channel_permissions"
@@ -782,7 +1075,7 @@ mod tests {
                 let _ = stream.shutdown().await;
             }
         });
-        (base_url, requests, handle)
+        (base_url, requests, bodies, handle)
     }
 
     fn channel_principal_body() -> String {
@@ -791,5 +1084,13 @@ mod tests {
 
     fn user_principal_body() -> String {
         r#"{"data":{"id":"prn_user","foreign_id":"slack-user-t123-u123","name":"Slack DM @Ada Lovelace","labels":{}}}"#.to_owned()
+    }
+
+    fn console_user_principal_body() -> String {
+        r#"{"data":{"id":"prn_console_user","foreign_id":"console-user-ada-example-com-abc123","name":"Ada Lovelace","labels":{}}}"#.to_owned()
+    }
+
+    fn github_user_principal_body() -> String {
+        r#"{"data":{"id":"prn_github_user","foreign_id":"github-user-90210001","name":"GitHub User @ada","labels":{"github_subject":"90210001"}}}"#.to_owned()
     }
 }

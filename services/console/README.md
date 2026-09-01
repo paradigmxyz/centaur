@@ -131,6 +131,13 @@ Both providers request the `openid`, `email`, and `profile` scopes. Client crede
 
 Google OAuth consent apps for broker credentials are configured separately in the console under **OAuth Apps**. Those app callbacks use `/oauth/<slug>/callback` and currently support Google only; Slack support here applies to operator console sign-in.
 
+## Google Docs Sync
+
+Google Docs metadata and document-content ETL is disabled by default. Set
+`CENTAUR_CONSOLE_GOOGLE_DOCS_SYNC_ENABLED=true` to enable the recurring poller
+and queued Google Docs sync jobs. This switch does not affect Google OAuth,
+credential refresh, or previously indexed content.
+
 ## Encryption Keys
 
 `iron-control` uses ActiveRecord encryption to protect secrets stored in the control plane (for example, the `control_plane` secret source type). The following environment variables configure the encryption keys:

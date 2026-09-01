@@ -177,6 +177,8 @@ pub(crate) enum ServerError {
     #[error(transparent)]
     Kube(#[from] kube::Error),
     #[error(transparent)]
+    Sandbox(#[from] centaur_sandbox_core::SandboxError),
+    #[error(transparent)]
     IronProxy(#[from] centaur_iron_proxy::IronProxyConfigError),
     #[error(transparent)]
     IronControl(#[from] centaur_iron_control::IronControlError),

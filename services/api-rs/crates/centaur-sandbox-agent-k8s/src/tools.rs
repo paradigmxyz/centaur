@@ -434,6 +434,15 @@ CENTAUR_TOOLS_METADATA"
         "command": ["/bin/sh", "-ec", script],
         "volumeMounts": volume_mounts,
         "securityContext": security_context_json(),
+        // Explicit requests/limits so a ResourceQuota over cpu/memory
+        // requests admits the pod: quota admission requires every container,
+        // init containers included, to carry requests. Kept small so the
+        // effective pod request stays driven by the agent container
+        // (Kubernetes takes the max of init and main-container requests).
+        "resources": {
+            "requests": { "cpu": "50m", "memory": "64Mi" },
+            "limits": { "cpu": "1", "memory": "512Mi" },
+        },
     });
     if let Some(policy) = &tools.image_pull_policy {
         container["imagePullPolicy"] = json!(policy);

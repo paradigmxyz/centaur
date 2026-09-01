@@ -385,9 +385,12 @@ impl AgentSandboxBackend {
                     iron_proxy,
                     resolved,
                     &sync,
-                    &self.config.node_selector,
-                    &self.config.tolerations,
-                    self.config.runtime_class_name.as_deref(),
+                    ProxyPodScheduling {
+                        node_selector: &self.config.node_selector,
+                        tolerations: &self.config.tolerations,
+                        runtime_class_name: self.config.runtime_class_name.as_deref(),
+                        priority_class_name: self.config.priority_class_name.as_deref(),
+                    },
                 ),
             )
             .await
@@ -1225,14 +1228,21 @@ pub(crate) fn sandbox_ca_volume_json(iron_proxy: &IronProxyConfig) -> Value {
     })
 }
 
+/// Pod-scheduling knobs copied from [`AgentSandboxConfig`] onto each proxy
+/// pod so it lands under the same constraints as its sandbox.
+struct ProxyPodScheduling<'a> {
+    node_selector: &'a BTreeMap<String, String>,
+    tolerations: &'a [k8s_openapi::api::core::v1::Toleration],
+    runtime_class_name: Option<&'a str>,
+    priority_class_name: Option<&'a str>,
+}
+
 fn build_iron_proxy_pod(
     id: &SandboxId,
     iron_proxy: &IronProxyConfig,
     resolved: &ResolvedIronProxy,
     sync: &ProxySyncEnv,
-    node_selector: &BTreeMap<String, String>,
-    tolerations: &[k8s_openapi::api::core::v1::Toleration],
-    runtime_class_name: Option<&str>,
+    scheduling: ProxyPodScheduling<'_>,
 ) -> Pod {
     let annotations = BTreeMap::from([
         (
@@ -1244,7 +1254,13 @@ fn build_iron_proxy_pod(
             resolved.principal_id.clone(),
         ),
     ]);
-    let runtime_class = runtime_class_name
+    let runtime_class = scheduling
+        .runtime_class_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned);
+    let priority_class = scheduling
+        .priority_class_name
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .map(str::to_owned);
@@ -1256,15 +1272,25 @@ fn build_iron_proxy_pod(
         ),
         spec: Some(PodSpec {
             automount_service_account_token: Some(false),
-            restart_policy: Some("Never".to_owned()),
+            // OnFailure so a crashed/OOM-killed proxy container is restarted
+            // in place (same pod IP, Service keeps routing) instead of leaving
+            // the pod Failed and the sandbox with no egress for the rest of
+            // the session: nothing repairs a dead proxy until the next
+            // execute. A 512Mi limit + Never turned proxy OOM kills into 40+
+            // mid-turn "stream disconnected" failures (2026-08-27/28,
+            // prd-centaur-na).
+            restart_policy: Some("OnFailure".to_owned()),
             containers: vec![iron_proxy_container(iron_proxy, resolved, sync)],
             volumes: Some(iron_proxy_volumes(iron_proxy)),
             // Co-locate the per-sandbox proxy with its sandbox: it scales 1:1
             // with sandboxes and processes untrusted traffic, so it must share
             // the same node pool / RuntimeClass (e.g. gVisor) constraints.
-            node_selector: (!node_selector.is_empty()).then(|| node_selector.clone()),
-            tolerations: (!tolerations.is_empty()).then(|| tolerations.to_vec()),
+            node_selector: (!scheduling.node_selector.is_empty())
+                .then(|| scheduling.node_selector.clone()),
+            tolerations: (!scheduling.tolerations.is_empty())
+                .then(|| scheduling.tolerations.to_vec()),
             runtime_class_name: runtime_class,
+            priority_class_name: priority_class,
             ..Default::default()
         }),
         ..Default::default()
@@ -2104,6 +2130,16 @@ fn unique_suffix() -> String {
 mod tests {
     use super::*;
 
+    fn no_scheduling() -> ProxyPodScheduling<'static> {
+        static EMPTY_SELECTOR: BTreeMap<String, String> = BTreeMap::new();
+        ProxyPodScheduling {
+            node_selector: &EMPTY_SELECTOR,
+            tolerations: &[],
+            runtime_class_name: None,
+            priority_class_name: None,
+        }
+    }
+
     fn resolved() -> ResolvedIronProxy {
         ResolvedIronProxy {
             proxy_host: "asbx-test-iron-proxy".to_owned(),
@@ -2339,15 +2375,7 @@ mod tests {
             config_hash: None,
         };
 
-        let pod = build_iron_proxy_pod(
-            &id,
-            &iron_proxy,
-            &resolved(),
-            &sync,
-            &BTreeMap::new(),
-            &[],
-            None,
-        );
+        let pod = build_iron_proxy_pod(&id, &iron_proxy, &resolved(), &sync, no_scheduling());
 
         let resources = pod.spec.as_ref().unwrap().containers[0]
             .resources
@@ -2380,15 +2408,7 @@ mod tests {
             config_hash: None,
         };
 
-        let pod = build_iron_proxy_pod(
-            &id,
-            &iron_proxy,
-            &resolved(),
-            &sync,
-            &BTreeMap::new(),
-            &[],
-            None,
-        );
+        let pod = build_iron_proxy_pod(&id, &iron_proxy, &resolved(), &sync, no_scheduling());
 
         assert!(pod.spec.as_ref().unwrap().containers[0].resources.is_none());
     }
@@ -2405,15 +2425,7 @@ mod tests {
             config_hash: None,
         };
 
-        let pod = build_iron_proxy_pod(
-            &id,
-            &iron_proxy,
-            &resolved,
-            &sync,
-            &BTreeMap::new(),
-            &[],
-            None,
-        );
+        let pod = build_iron_proxy_pod(&id, &iron_proxy, &resolved, &sync, no_scheduling());
         assert_eq!(
             pod.metadata
                 .labels
@@ -2485,15 +2497,7 @@ mod tests {
             config_hash: None,
         };
 
-        let pod = build_iron_proxy_pod(
-            &id,
-            &iron_proxy,
-            &resolved,
-            &sync,
-            &BTreeMap::new(),
-            &[],
-            None,
-        );
+        let pod = build_iron_proxy_pod(&id, &iron_proxy, &resolved, &sync, no_scheduling());
         let pod_labels = pod.metadata.labels.as_ref().unwrap();
         assert!(!pod_labels.contains_key(OBSERVABILITY_ENABLED_LABEL));
 
@@ -2553,9 +2557,12 @@ mod tests {
             &iron_proxy,
             &resolved,
             &sync,
-            &node_selector,
-            &tolerations,
-            Some("gvisor"),
+            ProxyPodScheduling {
+                node_selector: &node_selector,
+                tolerations: &tolerations,
+                runtime_class_name: Some("gvisor"),
+                priority_class_name: Some("centaur-sandbox"),
+            },
         );
         let pod_spec = pod.spec.unwrap();
         assert_eq!(
@@ -2568,6 +2575,10 @@ mod tests {
         );
         assert_eq!(pod_spec.tolerations.as_ref().unwrap().len(), 1);
         assert_eq!(pod_spec.runtime_class_name.as_deref(), Some("gvisor"));
+        assert_eq!(
+            pod_spec.priority_class_name.as_deref(),
+            Some("centaur-sandbox")
+        );
     }
 
     #[test]
@@ -2581,15 +2592,7 @@ mod tests {
             token: "proxy-token".to_owned(),
             config_hash: None,
         };
-        let pod = build_iron_proxy_pod(
-            &id,
-            &iron_proxy,
-            &resolved,
-            &sync,
-            &BTreeMap::new(),
-            &[],
-            None,
-        );
+        let pod = build_iron_proxy_pod(&id, &iron_proxy, &resolved, &sync, no_scheduling());
         let pod_spec = pod.spec.unwrap();
         assert!(pod_spec.node_selector.is_none());
         assert!(pod_spec.tolerations.is_none());

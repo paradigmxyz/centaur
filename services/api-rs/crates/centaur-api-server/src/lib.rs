@@ -309,6 +309,13 @@ mod tests {
                 .body(Body::empty())
                 .unwrap(),
             Request::builder()
+                .method(Method::POST)
+                .uri("/api/admin/google/docs-sync/content-status")
+                .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"files":[]}"#))
+                .unwrap(),
+            Request::builder()
                 .uri("/api/admin/granola/sync/checkpoint")
                 .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
                 .body(Body::empty())

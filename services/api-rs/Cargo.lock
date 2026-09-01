@@ -1017,6 +1017,7 @@ dependencies = [
  "bytes",
  "centaur-sandbox-core",
  "centaur-sandbox-manager",
+ "tempfile",
  "tokio",
 ]
 
@@ -4974,7 +4975,7 @@ dependencies = [
  "base64 0.21.7",
  "hmac-sha256",
  "http 1.4.2",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
  "time",
 ]
 
@@ -5079,6 +5080,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "tempfile"
+version = "3.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
+dependencies = [
+ "fastrand",
+ "getrandom 0.4.2",
+ "once_cell",
+ "rustix",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

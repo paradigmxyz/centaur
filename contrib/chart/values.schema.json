@@ -34,6 +34,12 @@
             "oauthAppSlug": { "type": "string" }
           }
         },
+        "googleDocsSync": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" }
+          }
+        },
         "service": {
           "type": "object",
           "properties": {
@@ -224,6 +230,7 @@
         "nodeSelector": { "type": "object" },
         "tolerations": { "type": "array" },
         "runtimeClassName": { "type": "string" },
+        "serviceAccountName": { "type": "string" },
         "reposPath": { "type": "string" },
         "resources": { "type": "object" },
         "telemetry": {
@@ -408,6 +415,11 @@
                 "enabled": { "type": "boolean" },
                 "intervalSeconds": { "type": "integer", "minimum": 1 },
                 "batchSize": { "type": "integer", "minimum": 1 },
+                "maxInputChars": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 8192
+                },
                 "model": { "type": "string", "minLength": 1 }
               }
             }
