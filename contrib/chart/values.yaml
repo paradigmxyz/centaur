@@ -349,6 +349,8 @@ sandbox:
   # mirrored into slackbotv2 and the Console; CODEX_MODEL_REASONING_EFFORT is
   # mirrored into slackbotv2. This keeps Slack's model/thinking footer aligned
   # with the policy the sandbox actually runs.
+  # Set CODEX_CYBER_POLICY_FALLBACK_MODEL to retry an output-free Codex
+  # cybersecurity-policy rejection once with that model.
   extraEnv: {}
   telemetry:
     # Include user prompts, assistant responses, and bounded shell commands on
