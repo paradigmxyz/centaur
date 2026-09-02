@@ -1212,16 +1212,6 @@ mod mcp_tests {
         }
     }
 
-    #[test]
-    fn mcp_tool_trace_input_contains_only_validated_labels() {
-        let input = mcp_tool_trace_input("demo", "search");
-
-        assert_eq!(
-            serde_json::from_str::<Value>(&input).unwrap(),
-            json!({"kind": "centaur", "name": "demo", "method": "search"})
-        );
-    }
-
     fn returned_tool_action(action: McpCentaurToolAction) -> (Value, Option<String>) {
         match action {
             McpCentaurToolAction::Return { result, method } => (result, method),

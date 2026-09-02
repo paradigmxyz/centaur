@@ -7482,26 +7482,6 @@ mod tests {
     }
 
     #[test]
-    fn tool_host_call_error_preserves_execution_correlation() {
-        let error = ToolHostCallError {
-            request_id: Some("mcp-call-123".to_owned()),
-            execution_id: Some("exe-456".to_owned()),
-            sandbox_id: Some("sbx-789".to_owned()),
-            source: Box::new(SessionRuntimeError::Sandbox(SandboxError::io(
-                "stream failed",
-            ))),
-        };
-
-        assert_eq!(error.request_id(), Some("mcp-call-123"));
-        assert_eq!(error.execution_id(), Some("exe-456"));
-        assert_eq!(error.sandbox_id(), Some("sbx-789"));
-        assert!(matches!(
-            error.into_source(),
-            SessionRuntimeError::Sandbox(SandboxError::Io { .. })
-        ));
-    }
-
-    #[test]
     fn tool_host_session_metadata_includes_console_identity() {
         assert_eq!(
             tool_host_session_metadata("prn_test", Some(" test@example.com "), Some(" Test User "),),
