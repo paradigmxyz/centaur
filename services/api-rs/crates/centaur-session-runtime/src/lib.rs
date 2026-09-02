@@ -416,6 +416,58 @@ pub struct ToolHostCallOutput {
     pub timed_out: bool,
 }
 
+#[derive(Debug, Error)]
+#[error("{source}")]
+pub struct ToolHostCallError {
+    request_id: Option<String>,
+    execution_id: Option<String>,
+    sandbox_id: Option<String>,
+    #[source]
+    source: SessionRuntimeError,
+}
+
+impl ToolHostCallError {
+    fn new(source: SessionRuntimeError) -> Self {
+        Self {
+            request_id: None,
+            execution_id: None,
+            sandbox_id: None,
+            source,
+        }
+    }
+
+    fn with_request(source: SessionRuntimeError, request_id: &str) -> Self {
+        Self {
+            request_id: Some(request_id.to_owned()),
+            execution_id: None,
+            sandbox_id: None,
+            source,
+        }
+    }
+
+    pub fn request_id(&self) -> Option<&str> {
+        self.request_id.as_deref()
+    }
+
+    pub fn execution_id(&self) -> Option<&str> {
+        self.execution_id.as_deref()
+    }
+
+    pub fn sandbox_id(&self) -> Option<&str> {
+        self.sandbox_id.as_deref()
+    }
+
+    pub fn into_source(self) -> SessionRuntimeError {
+        self.source
+    }
+}
+
+impl From<SessionRuntimeError> for ToolHostCallError {
+    fn from(source: SessionRuntimeError) -> Self {
+        Self::new(source)
+    }
+}
+
 #[derive(Clone)]
 struct SessionPipe {
     stdin: Arc<Mutex<SessionInputSink>>,
@@ -974,34 +1026,38 @@ impl SessionRuntime {
         &self,
         input: ToolHostCallInput,
         policy: ToolHostCallPolicy,
-    ) -> Result<ToolHostCallOutput, SessionRuntimeError> {
+    ) -> Result<ToolHostCallOutput, ToolHostCallError> {
         let principal_id = input.principal_id.trim().to_owned();
         let tool_name = input.tool_name.trim().to_owned();
         let method = input.method.trim().to_owned();
         if principal_id.is_empty() {
             return Err(SessionRuntimeError::BadRequest(
                 "tool host principal_id is required".to_owned(),
-            ));
+            )
+            .into());
         }
         if tool_name.is_empty() {
             return Err(SessionRuntimeError::BadRequest(
                 "tool host tool_name is required".to_owned(),
-            ));
+            )
+            .into());
         }
         if method.is_empty() {
-            return Err(SessionRuntimeError::BadRequest(
-                "tool host method is required".to_owned(),
-            ));
+            return Err(
+                SessionRuntimeError::BadRequest("tool host method is required".to_owned()).into(),
+            );
         }
         if input.timeout.is_zero() {
             return Err(SessionRuntimeError::BadRequest(
                 "tool host timeout must be non-zero".to_owned(),
-            ));
+            )
+            .into());
         }
         if policy.principal_id != principal_id {
             return Err(SessionRuntimeError::BadRequest(
                 "tool host policy principal does not match the call principal".to_owned(),
-            ));
+            )
+            .into());
         }
 
         let thread_key = tool_host_thread_key(&principal_id)?;
@@ -1068,7 +1124,7 @@ impl SessionRuntime {
         thread_key: &ThreadKey,
         input: ToolHostCallInput,
         sandbox_capabilities: SessionSandboxCapabilities,
-    ) -> Result<ToolHostCallOutput, SessionRuntimeError> {
+    ) -> Result<ToolHostCallOutput, ToolHostCallError> {
         let ToolHostCallInput {
             principal_id,
             console_user_email,
@@ -1097,9 +1153,14 @@ impl SessionRuntime {
             token_id,
             timeout_seconds: timeout.as_secs().max(1),
         };
-        let input_line = serde_json::to_string(&request).map_err(|error| {
-            SessionRuntimeError::Sandbox(SandboxError::io_source("encode tool host request", error))
-        })?;
+        let input_line = serde_json::to_string(&request)
+            .map_err(|error| {
+                SessionRuntimeError::Sandbox(SandboxError::io_source(
+                    "encode tool host request",
+                    error,
+                ))
+            })
+            .map_err(|error| ToolHostCallError::with_request(error, &request_id))?;
         let response_timeout = timeout.saturating_add(Duration::from_secs(5));
         let execution_metadata = tool_host_execution_metadata(
             &request_id,
@@ -1108,7 +1169,7 @@ impl SessionRuntime {
             timeout,
             centaur_telemetry::traceparent_for_span(&Span::current()),
         );
-        let execution = self
+        let execution = match self
             .execute_session_impl(
                 thread_key,
                 ExecuteSessionInput {
@@ -1121,14 +1182,68 @@ impl SessionRuntime {
                 None,
                 Some(sandbox_capabilities),
             )
-            .await?;
-        self.wait_for_tool_host_call(
-            thread_key,
-            &execution.execution_id,
-            &request_id,
-            response_timeout,
-        )
-        .await
+            .await
+        {
+            Ok(execution) => execution,
+            Err(error) => {
+                return Err(self
+                    .correlate_tool_host_call_error(thread_key, &request_id, None, error)
+                    .await);
+            }
+        };
+        let result = self
+            .wait_for_tool_host_call(
+                thread_key,
+                &execution.execution_id,
+                &request_id,
+                response_timeout,
+            )
+            .await;
+        match result {
+            Ok(output) => Ok(output),
+            Err(error) => Err(self
+                .correlate_tool_host_call_error(
+                    thread_key,
+                    &request_id,
+                    Some(&execution.execution_id),
+                    error,
+                )
+                .await),
+        }
+    }
+
+    async fn correlate_tool_host_call_error(
+        &self,
+        thread_key: &ThreadKey,
+        request_id: &str,
+        execution_id: Option<&str>,
+        source: SessionRuntimeError,
+    ) -> ToolHostCallError {
+        let execution_id = match execution_id {
+            Some(execution_id) => Some(execution_id.to_owned()),
+            None => self
+                .store
+                .latest_execution_for_thread(thread_key)
+                .await
+                .ok()
+                .flatten()
+                .filter(|execution| execution.idempotency_key.as_deref() == Some(request_id))
+                .map(|execution| execution.execution_id),
+        };
+        let sandbox_id = if execution_id.is_some() {
+            self.current_sandbox_id(thread_key)
+                .await
+                .ok()
+                .filter(|sandbox_id| !sandbox_id.is_empty())
+        } else {
+            None
+        };
+        ToolHostCallError {
+            request_id: Some(request_id.to_owned()),
+            execution_id,
+            sandbox_id,
+            source,
+        }
     }
 
     async fn create_or_get_tool_host_session(
@@ -6785,8 +6900,8 @@ fn nonzero_duration_millis(value: u64) -> Result<Duration, SessionRuntimeError> 
     Ok(Duration::from_millis(value))
 }
 
-fn tool_host_thread_key(principal_id: &str) -> Result<ThreadKey, SessionRuntimeError> {
-    ThreadKey::parse(format!("mcp:{principal_id}"))
+pub fn tool_host_thread_key(principal_id: &str) -> Result<ThreadKey, SessionRuntimeError> {
+    ThreadKey::parse(format!("mcp:{}", principal_id.trim()))
         .map_err(|error| SessionRuntimeError::BadRequest(error.to_string()))
 }
 
@@ -6797,22 +6912,25 @@ fn tool_host_execution_metadata(
     timeout: Duration,
     traceparent: Option<String>,
 ) -> Value {
-    let mut metadata = json!({
-        "mcp_tool_host_call": true,
-        "request_id": request_id,
-        "tool": tool_name,
-        "method": method,
-        "timeout_ms": duration_millis_u64(timeout),
-    });
-    if let Some(traceparent) = traceparent
-        && let Some(metadata) = metadata.as_object_mut()
-    {
-        metadata.insert(
-            EXECUTION_TRACEPARENT_METADATA_KEY.to_owned(),
-            Value::String(traceparent),
-        );
-    }
-    metadata
+    let mut metadata = serde_json::Map::from_iter([
+        ("mcp_tool_host_call".to_owned(), Value::Bool(true)),
+        (
+            "request_id".to_owned(),
+            Value::String(request_id.to_owned()),
+        ),
+        ("tool".to_owned(), Value::String(tool_name.to_owned())),
+        ("method".to_owned(), Value::String(method.to_owned())),
+        (
+            "timeout_ms".to_owned(),
+            Value::Number(duration_millis_u64(timeout).into()),
+        ),
+    ]);
+    insert_non_empty_metadata_string(
+        &mut metadata,
+        EXECUTION_TRACEPARENT_METADATA_KEY,
+        traceparent.as_deref(),
+    );
+    Value::Object(metadata)
 }
 
 /// Session/principal metadata recorded for observability; runtime behavior
@@ -7344,6 +7462,32 @@ mod tests {
         assert_eq!(metadata["tool"], "search");
         assert_eq!(metadata["method"], "query");
         assert_eq!(metadata["timeout_ms"], 120_000);
+    }
+
+    #[test]
+    fn tool_host_thread_key_trims_principal_id() {
+        assert_eq!(
+            tool_host_thread_key(" prn_test ").unwrap().as_str(),
+            "mcp:prn_test"
+        );
+    }
+
+    #[test]
+    fn tool_host_call_error_preserves_execution_correlation() {
+        let error = ToolHostCallError {
+            request_id: Some("mcp-call-123".to_owned()),
+            execution_id: Some("exe-456".to_owned()),
+            sandbox_id: Some("sbx-789".to_owned()),
+            source: SessionRuntimeError::Sandbox(SandboxError::io("stream failed")),
+        };
+
+        assert_eq!(error.request_id(), Some("mcp-call-123"));
+        assert_eq!(error.execution_id(), Some("exe-456"));
+        assert_eq!(error.sandbox_id(), Some("sbx-789"));
+        assert!(matches!(
+            error.into_source(),
+            SessionRuntimeError::Sandbox(SandboxError::Io { .. })
+        ));
     }
 
     #[test]

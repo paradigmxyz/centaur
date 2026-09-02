@@ -46,10 +46,11 @@ Prometheus/VictoriaMetrics metrics, and domain spans in the session runtime.
   comes from their normalized harness events. Native harness tracing is not
   enabled, and api-rs does not reconstruct spans from sandbox stdout.
 - Remote MCP `tools/call` telemetry is implemented at the authenticated API
-  boundary. Each accepted call emits a Laminar `TOOL` span with the tool name,
-  method, status, and correlation identifiers. The tool span's trace context is
-  persisted as the parent of the durable tool-host execution. Arguments,
-  results, stdout, and stderr are not exported.
+  boundary. Each accepted call emits a Laminar `TOOL` span with Centaur tool
+  kind, MCP entry point, validated method, status, and correlation identifiers.
+  Correlation identifiers are retained when the durable execution fails. The
+  tool span's trace context is persisted as the parent of the durable tool-host
+  execution. Arguments, results, stdout, and stderr are not exported.
 - The harness OpenTelemetry SDK batches and exports directly to the configured
   OTLP endpoint. There is no collector or loopback OTLP proxy in the sandbox.
   The api-rs process's own OTLP env
@@ -246,6 +247,7 @@ Spans may carry:
 - `tool.command`
 - `tool.cwd`
 - `tool.status`
+- `centaur.tool.entry_point`
 
 Tool spans must not carry command output, tool results, or prompt content.
 Bounded shell commands, including their arguments, workspace-relative working
