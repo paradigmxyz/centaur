@@ -423,7 +423,7 @@ pub struct ToolHostCallError {
     execution_id: Option<String>,
     sandbox_id: Option<String>,
     #[source]
-    source: SessionRuntimeError,
+    source: Box<SessionRuntimeError>,
 }
 
 impl ToolHostCallError {
@@ -432,7 +432,7 @@ impl ToolHostCallError {
             request_id: None,
             execution_id: None,
             sandbox_id: None,
-            source,
+            source: Box::new(source),
         }
     }
 
@@ -441,7 +441,7 @@ impl ToolHostCallError {
             request_id: Some(request_id.to_owned()),
             execution_id: None,
             sandbox_id: None,
-            source,
+            source: Box::new(source),
         }
     }
 
@@ -458,7 +458,7 @@ impl ToolHostCallError {
     }
 
     pub fn into_source(self) -> SessionRuntimeError {
-        self.source
+        *self.source
     }
 }
 
@@ -1242,7 +1242,7 @@ impl SessionRuntime {
             request_id: Some(request_id.to_owned()),
             execution_id,
             sandbox_id,
-            source,
+            source: Box::new(source),
         }
     }
 
@@ -7478,7 +7478,9 @@ mod tests {
             request_id: Some("mcp-call-123".to_owned()),
             execution_id: Some("exe-456".to_owned()),
             sandbox_id: Some("sbx-789".to_owned()),
-            source: SessionRuntimeError::Sandbox(SandboxError::io("stream failed")),
+            source: Box::new(SessionRuntimeError::Sandbox(SandboxError::io(
+                "stream failed",
+            ))),
         };
 
         assert_eq!(error.request_id(), Some("mcp-call-123"));
