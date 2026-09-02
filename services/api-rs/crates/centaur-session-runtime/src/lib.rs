@@ -1101,18 +1101,19 @@ impl SessionRuntime {
             SessionRuntimeError::Sandbox(SandboxError::io_source("encode tool host request", error))
         })?;
         let response_timeout = timeout.saturating_add(Duration::from_secs(5));
+        let execution_metadata = tool_host_execution_metadata(
+            &request_id,
+            &tool_name,
+            &method,
+            timeout,
+            centaur_telemetry::traceparent_for_span(&Span::current()),
+        );
         let execution = self
             .execute_session_impl(
                 thread_key,
                 ExecuteSessionInput {
                     idempotency_key: Some(request_id.clone()),
-                    metadata: Some(json!({
-                        "mcp_tool_host_call": true,
-                        "request_id": request_id.clone(),
-                        "tool": tool_name,
-                        "method": method,
-                        "timeout_ms": duration_millis_u64(timeout),
-                    })),
+                    metadata: Some(execution_metadata),
                     input_lines: vec![input_line],
                     idle_timeout_ms: None,
                     max_duration_ms: Some(duration_millis_u64(response_timeout)),
@@ -6789,6 +6790,31 @@ fn tool_host_thread_key(principal_id: &str) -> Result<ThreadKey, SessionRuntimeE
         .map_err(|error| SessionRuntimeError::BadRequest(error.to_string()))
 }
 
+fn tool_host_execution_metadata(
+    request_id: &str,
+    tool_name: &str,
+    method: &str,
+    timeout: Duration,
+    traceparent: Option<String>,
+) -> Value {
+    let mut metadata = json!({
+        "mcp_tool_host_call": true,
+        "request_id": request_id,
+        "tool": tool_name,
+        "method": method,
+        "timeout_ms": duration_millis_u64(timeout),
+    });
+    if let Some(traceparent) = traceparent
+        && let Some(metadata) = metadata.as_object_mut()
+    {
+        metadata.insert(
+            EXECUTION_TRACEPARENT_METADATA_KEY.to_owned(),
+            Value::String(traceparent),
+        );
+    }
+    metadata
+}
+
 /// Session/principal metadata recorded for observability; runtime behavior
 /// derives from the `mcp:` thread-key prefix, not from these fields.
 fn tool_host_session_metadata(
@@ -7299,6 +7325,25 @@ mod tests {
         assert_eq!(spec.command, Some(vec!["/entrypoint.sh".to_owned()]));
         assert_eq!(spec.args, vec!["centaur-tool-host"]);
         assert_eq!(env_value(&spec, "TOOL_DIRS"), Some("/app/tools"));
+    }
+
+    #[test]
+    fn tool_host_execution_metadata_propagates_tool_traceparent() {
+        let traceparent = "00-0123456789abcdef0123456789abcdef-1111111111111111-01";
+
+        let metadata = tool_host_execution_metadata(
+            "mcp-call-123",
+            "search",
+            "query",
+            Duration::from_secs(120),
+            Some(traceparent.to_owned()),
+        );
+
+        assert_eq!(metadata[EXECUTION_TRACEPARENT_METADATA_KEY], traceparent);
+        assert_eq!(metadata["request_id"], "mcp-call-123");
+        assert_eq!(metadata["tool"], "search");
+        assert_eq!(metadata["method"], "query");
+        assert_eq!(metadata["timeout_ms"], 120_000);
     }
 
     #[test]
