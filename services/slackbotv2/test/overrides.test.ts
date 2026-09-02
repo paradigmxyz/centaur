@@ -2,7 +2,9 @@ import { describe, expect, test } from 'bun:test'
 import { SlackFormatConverter } from '@chat-adapter/slack'
 import {
   extractMessageOverrides,
+  mergeOverrideAliases,
   normalizeHarnessOverrides,
+  parseOverrideAliases,
   validateStrategyOverrides
 } from '../src/overrides'
 import { messageOverridesForText } from '../src/index'
@@ -10,6 +12,24 @@ import { createOpenAiMessageOverridesStrategy } from '../src/message-overrides-s
 import type { SlackbotV2Options, SlackbotV2Trace } from '../src/types'
 
 describe('extractMessageOverrides', () => {
+  test('uses configured model and reasoning aliases', () => {
+    const aliases = mergeOverrideAliases({
+      model: {
+        frontier: { harnessType: 'codex', model: 'gpt-frontier' }
+      },
+      reasoning: { strongest: 'max' }
+    })
+    expect(extractMessageOverrides('--frontier -rsn strongest fix it', aliases)).toEqual({
+      cleanedText: 'fix it',
+      harnessType: 'codex',
+      model: 'gpt-frontier',
+      reasoning: 'max'
+    })
+    expect(extractMessageOverrides('--model frontier fix it', aliases).model).toBe(
+      'gpt-frontier'
+    )
+  })
+
   test('returns text untouched without flags', () => {
     const result = extractMessageOverrides('review this PR --not-a-known-flag stays')
     expect(result).toEqual({
@@ -287,6 +307,31 @@ describe('extractMessageOverrides', () => {
   })
 })
 
+describe('parseOverrideAliases', () => {
+  test('loads deployment alias JSON and preserves built-in aliases', () => {
+    const aliases = parseOverrideAliases(
+      JSON.stringify({ frontier: { harness: 'codex', model: 'gpt-frontier' } }),
+      JSON.stringify({ strongest: 'max' })
+    )
+    expect(aliases.model.frontier).toEqual({ harnessType: 'codex', model: 'gpt-frontier' })
+    expect(aliases.model.opus?.model).toBe('claude-opus-4-8')
+    expect(aliases.reasoning.strongest).toBe('max')
+    expect(aliases.reasoning.hi).toBe('high')
+  })
+
+  test('skips invalid alias entries and reports them', () => {
+    const errors: string[] = []
+    const aliases = parseOverrideAliases(
+      JSON.stringify({ bad: { harness: 'unknown', model: 'gpt-frontier' } }),
+      JSON.stringify({ turbo: 'turbo' }),
+      error => errors.push(error)
+    )
+    expect(aliases.model.bad).toBeUndefined()
+    expect(aliases.reasoning.turbo).toBeUndefined()
+    expect(errors).toHaveLength(2)
+  })
+})
+
 // normalizeHarnessOverrides is the object-shaped sibling of
 // extractMessageOverrides: config fields resolve through the SAME vocabulary
 // tables as the inline flags, so a channel default and a Slack flag validate
@@ -429,8 +474,13 @@ describe('validateStrategyOverrides', () => {
     })
   })
 
-  test('rejects aliases and arbitrary model ids from the strategy path', () => {
-    expect(validateStrategyOverrides({ model: 'terra' })).toEqual({})
+  test('accepts configured aliases and rejects arbitrary model ids from the strategy path', () => {
+    expect(validateStrategyOverrides({ model: 'terra' })).toEqual({
+      harnessType: 'codex',
+      model: 'gpt-5.6-terra',
+      provider: undefined,
+      reasoning: undefined
+    })
     expect(validateStrategyOverrides({ model: 'anthropic/claude-fable-5' })).toEqual({})
     expect(validateStrategyOverrides({ model: 'not real model id' })).toEqual({})
   })
@@ -615,6 +665,50 @@ describe('messageOverridesForText strategy invocation', () => {
       }
     })
     expect(JSON.stringify(requestBody)).toContain('nanocodex')
+  })
+
+  test('includes configured aliases in natural-language selection', async () => {
+    let requestBody: Record<string, unknown> | undefined
+    const aliases = mergeOverrideAliases({
+      model: { frontier: { harnessType: 'codex', model: 'gpt-frontier' } },
+      reasoning: { strongest: 'max' }
+    })
+    const strategy = createOpenAiMessageOverridesStrategy({
+      aliases,
+      apiKey: 'test-key',
+      fetch: (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>
+        return Response.json({
+          output: [
+            {
+              content: [
+                {
+                  text: JSON.stringify({
+                    harness: null,
+                    model: 'frontier',
+                    provider: null,
+                    reasoning: 'strongest'
+                  })
+                }
+              ]
+            }
+          ]
+        })
+      }) as unknown as typeof fetch,
+      model: 'gpt-5.4-nano'
+    })
+
+    await expect(strategy({ text: 'use frontier with strongest reasoning' })).resolves.toEqual({
+      overrides: {
+        harnessType: 'codex',
+        model: 'gpt-frontier',
+        provider: undefined,
+        reasoning: 'max'
+      }
+    })
+    expect(JSON.stringify(requestBody)).toContain('frontier')
+    expect(JSON.stringify(requestBody)).toContain('strongest')
+    expect(JSON.stringify(requestBody)).toContain('gpt-frontier')
   })
 })
 

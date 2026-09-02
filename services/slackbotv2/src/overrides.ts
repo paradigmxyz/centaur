@@ -38,6 +38,16 @@ export type MessageOverrides = HarnessOverrides & {
   cleanedText: string
 }
 
+export type ModelAlias = {
+  harnessType: string
+  model: string
+}
+
+export type OverrideAliases = {
+  model: Record<string, ModelAlias>
+  reasoning: Record<string, string>
+}
+
 // Flag name -> HarnessType wire value (serde lowercase of the Rust enum).
 const HARNESS_FLAGS: Record<string, string> = {
   amp: 'amp',
@@ -59,22 +69,20 @@ const PROVIDER_FLAGS: Record<string, ProviderMapping> = {
   meta: { provider: 'responses', harnessType: 'codex' }
 }
 
-// Claude model aliases, usable both as bare flags (--opus) and as --model
-// values (--model opus). Bare-flag form also implies the claude-code harness.
-const CLAUDE_MODEL_ALIASES: Record<string, string> = {
-  fable: 'claude-fable-5',
-  haiku: 'claude-haiku-4-5',
-  opus: 'claude-opus-4-8',
-  sonnet: 'claude-sonnet-4-6'
+// Built-in model aliases, usable both as bare flags (--opus/--sol) and as
+// --model values (--model opus). Bare-flag form also implies the configured
+// compatible harness.
+const DEFAULT_MODEL_ALIASES: Record<string, ModelAlias> = {
+  '5.4': { harnessType: 'codex', model: 'gpt-5.4' },
+  '5.5': { harnessType: 'codex', model: 'gpt-5.5' },
+  fable: { harnessType: 'claudecode', model: 'claude-fable-5' },
+  haiku: { harnessType: 'claudecode', model: 'claude-haiku-4-5' },
+  luna: { harnessType: 'codex', model: 'gpt-5.6-luna' },
+  opus: { harnessType: 'claudecode', model: 'claude-opus-4-8' },
+  sol: { harnessType: 'codex', model: 'gpt-5.6-sol' },
+  sonnet: { harnessType: 'claudecode', model: 'claude-sonnet-4-6' },
+  terra: { harnessType: 'codex', model: 'gpt-5.6-terra' }
 }
-
-const MODEL_SHORTCUTS: Record<string, { harnessType: string; model: string }> =
-  Object.fromEntries(
-    Object.entries(CLAUDE_MODEL_ALIASES).map(([alias, model]) => [
-      alias,
-      { harnessType: 'claudecode', model }
-    ])
-  )
 
 const STRATEGY_HARNESSES = new Set(['amp', 'claudecode', 'codex', 'hermes', 'nanocodex'])
 const STRATEGY_PROVIDERS = new Set(['amazon-bedrock', 'openrouter', 'responses'])
@@ -128,12 +136,12 @@ const PROVIDER_FLAG_PATTERN = new RegExp(
 // Single dash by design: a short per-turn knob (`-rsn high`), so it can't reuse
 // the `--`-prefixed flagPattern() helper. Value-capturing like --model.
 const REASONING_FLAG_PATTERN = new RegExp(
-  String.raw`(?:^|\s)-rsn${MODEL_VALUE_SEPARATOR}([A-Za-z-]+)${FLAG_VALUE_BOUNDARY}`,
+  String.raw`(?:^|\s)-rsn${MODEL_VALUE_SEPARATOR}([A-Za-z0-9._-]+)${FLAG_VALUE_BOUNDARY}`,
   'i'
 )
 
 // Codex reasoning efforts (turn/start `effort`), plus convenience aliases.
-const REASONING_EFFORTS: Record<string, string> = {
+const DEFAULT_REASONING_ALIASES: Record<string, string> = {
   none: 'none',
   minimal: 'minimal',
   min: 'minimal',
@@ -148,7 +156,44 @@ const REASONING_EFFORTS: Record<string, string> = {
   max: 'max'
 }
 
-export function extractMessageOverrides(text: string): MessageOverrides {
+export const DEFAULT_OVERRIDE_ALIASES: OverrideAliases = {
+  model: DEFAULT_MODEL_ALIASES,
+  reasoning: DEFAULT_REASONING_ALIASES
+}
+
+export function mergeOverrideAliases(
+  custom: Partial<OverrideAliases> | undefined
+): OverrideAliases {
+  return {
+    model: { ...DEFAULT_MODEL_ALIASES, ...custom?.model },
+    reasoning: { ...DEFAULT_REASONING_ALIASES, ...custom?.reasoning }
+  }
+}
+
+export function parseOverrideAliases(
+  modelAliasesRaw: string | undefined,
+  reasoningAliasesRaw: string | undefined,
+  onError?: (message: string) => void
+): OverrideAliases {
+  const model = parseAliasObject(modelAliasesRaw, 'model', onError, value => {
+    if (!isPlainObject(value)) return undefined
+    const model = cleanString(value.model)
+    const harnessRaw = cleanString(value.harness)
+    const harnessType = harnessRaw ? HARNESS_FLAGS[harnessRaw.toLowerCase()] : undefined
+    if (!model || !harnessType) return undefined
+    return { harnessType, model }
+  })
+  const reasoning = parseAliasObject(reasoningAliasesRaw, 'reasoning', onError, value => {
+    const effort = cleanString(value)?.toLowerCase()
+    return effort && STRATEGY_REASONING_EFFORTS.has(effort) ? effort : undefined
+  })
+  return mergeOverrideAliases({ model, reasoning })
+}
+
+export function extractMessageOverrides(
+  text: string,
+  aliases: OverrideAliases = DEFAULT_OVERRIDE_ALIASES
+): MessageOverrides {
   let cleaned = text
   let harnessType: string | undefined
   let model: string | undefined
@@ -158,13 +203,13 @@ export function extractMessageOverrides(text: string): MessageOverrides {
   const modelMatch = MODEL_FLAG_PATTERN.exec(cleaned)
   if (modelMatch) {
     const value = modelMatch[1]!
-    model = CLAUDE_MODEL_ALIASES[value.toLowerCase()] ?? value
+    model = aliases.model[value.toLowerCase()]?.model ?? value
     cleaned = stripMatch(cleaned, modelMatch)
   }
 
   const reasoningMatch = REASONING_FLAG_PATTERN.exec(cleaned)
   if (reasoningMatch) {
-    const normalized = REASONING_EFFORTS[reasoningMatch[1]!.toLowerCase()]
+    const normalized = aliases.reasoning[reasoningMatch[1]!.toLowerCase()]
     if (normalized) {
       reasoning = normalized
       cleaned = stripMatch(cleaned, reasoningMatch)
@@ -187,7 +232,7 @@ export function extractMessageOverrides(text: string): MessageOverrides {
     cleaned = stripMatch(cleaned, match)
   }
 
-  for (const [flag, shortcut] of Object.entries(MODEL_SHORTCUTS)) {
+  for (const [flag, shortcut] of Object.entries(aliases.model)) {
     const match = flagPattern(flag).exec(cleaned)
     if (!match) continue
     model ??= shortcut.model
@@ -219,7 +264,8 @@ export function validateStrategyOverrides(
     model?: unknown
     provider?: unknown
     reasoning?: unknown
-  } | null | undefined
+  } | null | undefined,
+  aliases: OverrideAliases = DEFAULT_OVERRIDE_ALIASES
 ): HarnessOverrides {
   if (!raw || typeof raw !== 'object') return {}
   let harnessType: string | undefined
@@ -245,17 +291,17 @@ export function validateStrategyOverrides(
 
   const modelRaw = cleanString(raw.model)
   if (modelRaw) {
-    const modelHarness = STRATEGY_MODEL_HARNESSES[modelRaw.toLowerCase()]
-    if (!modelHarness) return {}
-    if (harnessType && harnessType !== modelHarness) return {}
-    model = modelRaw.toLowerCase()
-    harnessType = modelHarness
+    const resolved = resolveStrategyModel(modelRaw, aliases)
+    if (!resolved) return {}
+    if (harnessType && harnessType !== resolved.harnessType) return {}
+    model = resolved.model
+    harnessType = resolved.harnessType
   }
 
   const reasoningRaw = cleanString(raw.reasoning)
   if (reasoningRaw) {
-    const normalized = reasoningRaw.toLowerCase()
-    if (!STRATEGY_REASONING_EFFORTS.has(normalized)) return {}
+    const normalized = aliases.reasoning[reasoningRaw.toLowerCase()]
+    if (!normalized) return {}
     reasoning =
       harnessType === undefined || harnessType === 'codex' || harnessType === 'nanocodex'
         ? normalized
@@ -275,7 +321,8 @@ export function validateStrategyOverrides(
  */
 export function normalizeHarnessOverrides(
   raw: { harness?: unknown; model?: unknown; provider?: unknown; reasoning?: unknown },
-  onError?: (message: string) => void
+  onError?: (message: string) => void,
+  aliases: OverrideAliases = DEFAULT_OVERRIDE_ALIASES
 ): HarnessOverrides {
   let harnessType: string | undefined
   let model: string | undefined
@@ -301,11 +348,11 @@ export function normalizeHarnessOverrides(
   }
 
   const modelRaw = cleanString(raw.model)
-  if (modelRaw) model = CLAUDE_MODEL_ALIASES[modelRaw.toLowerCase()] ?? modelRaw
+  if (modelRaw) model = aliases.model[modelRaw.toLowerCase()]?.model ?? modelRaw
 
   const reasoningRaw = cleanString(raw.reasoning)
   if (reasoningRaw) {
-    reasoning = REASONING_EFFORTS[reasoningRaw.toLowerCase()]
+    reasoning = aliases.reasoning[reasoningRaw.toLowerCase()]
     if (!reasoning) onError?.(`unknown reasoning effort "${reasoningRaw}"`)
   }
 
@@ -316,6 +363,53 @@ function cleanString(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined
   const trimmed = value.trim()
   return trimmed === '' ? undefined : trimmed
+}
+
+function resolveStrategyModel(value: string, aliases: OverrideAliases): ModelAlias | undefined {
+  const normalized = value.toLowerCase()
+  const alias = aliases.model[normalized]
+  if (alias) return alias
+  const configuredModel = Object.values(aliases.model).find(
+    candidate => candidate.model.toLowerCase() === normalized
+  )
+  if (configuredModel) return configuredModel
+  const harnessType = STRATEGY_MODEL_HARNESSES[normalized]
+  return harnessType ? { harnessType, model: normalized } : undefined
+}
+
+function parseAliasObject<T>(
+  raw: string | undefined,
+  kind: string,
+  onError: ((message: string) => void) | undefined,
+  parseValue: (value: unknown) => T | undefined
+): Record<string, T> {
+  if (!raw?.trim()) return {}
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch (error) {
+    onError?.(`${kind} aliases: invalid JSON: ${error instanceof Error ? error.message : String(error)}`)
+    return {}
+  }
+  if (!isPlainObject(parsed)) {
+    onError?.(`${kind} aliases: expected an object keyed by alias`)
+    return {}
+  }
+  const result: Record<string, T> = {}
+  for (const [rawAlias, rawValue] of Object.entries(parsed)) {
+    const alias = rawAlias.trim().toLowerCase()
+    const value = parseValue(rawValue)
+    if (!alias || !/^[a-z0-9._-]+$/.test(alias) || !value) {
+      onError?.(`${kind} aliases: invalid alias entry "${rawAlias}"`)
+      continue
+    }
+    result[alias] = value
+  }
+  return result
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function providerMapping(value: string): ProviderMapping | undefined {

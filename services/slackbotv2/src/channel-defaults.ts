@@ -15,7 +15,12 @@
  * onto it like `--claude`/`--codex`; `reasoning` affects Codex and Nanocodex.
  */
 
-import { normalizeHarnessOverrides, type HarnessOverrides } from './overrides'
+import {
+  DEFAULT_OVERRIDE_ALIASES,
+  normalizeHarnessOverrides,
+  type HarnessOverrides,
+  type OverrideAliases
+} from './overrides'
 
 export type ChannelDefaults = Record<string, HarnessOverrides>
 
@@ -26,7 +31,8 @@ export type ChannelDefaults = Record<string, HarnessOverrides>
  */
 export function parseChannelDefaults(
   raw: string | undefined,
-  onError?: (message: string) => void
+  onError?: (message: string) => void,
+  aliases: OverrideAliases = DEFAULT_OVERRIDE_ALIASES
 ): ChannelDefaults {
   const trimmed = raw?.trim()
   if (!trimmed) return {}
@@ -49,7 +55,11 @@ export function parseChannelDefaults(
       onError?.(`channel ${key}: expected an object of harness/model/provider/reasoning fields`)
       continue
     }
-    const overrides = normalizeHarnessOverrides(rawEntry, message => onError?.(`channel ${key}: ${message}`))
+    const overrides = normalizeHarnessOverrides(
+      rawEntry,
+      message => onError?.(`channel ${key}: ${message}`),
+      aliases
+    )
     if (!overrides.harnessType && !overrides.model && !overrides.provider && !overrides.reasoning) {
       onError?.(`channel ${key}: no usable harness/model/provider/reasoning fields`)
       continue

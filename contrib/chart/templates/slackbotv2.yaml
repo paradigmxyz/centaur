@@ -98,6 +98,14 @@ spec:
               value: {{ .Values.slackbotv2.messageOverridesStrategy.timeoutMs | quote }}
             - name: SLACKBOTV2_MESSAGE_OVERRIDES_MAX_OUTPUT_TOKENS
               value: {{ .Values.slackbotv2.messageOverridesStrategy.maxOutputTokens | quote }}
+{{- if .Values.slackbotv2.modelAliases }}
+            - name: SLACKBOTV2_MODEL_ALIASES
+              value: {{ .Values.slackbotv2.modelAliases | toJson | quote }}
+{{- end }}
+{{- if .Values.slackbotv2.reasoningAliases }}
+            - name: SLACKBOTV2_REASONING_ALIASES
+              value: {{ .Values.slackbotv2.reasoningAliases | toJson | quote }}
+{{- end }}
 {{- if $console.publicUrl }}
             # Public origin of the Console UI (matches the Console's own
             # CENTAUR_CONSOLE_PUBLIC_URL). When set, the first assistant message
