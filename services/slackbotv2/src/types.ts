@@ -125,6 +125,23 @@ export type SlackbotV2BlockActionPayload = {
   value?: string
 }
 
+export type SlackbotV2MessageShortcutPayload = {
+  action_ts?: string
+  callback_id: string
+  channel_id: string
+  message_text: string
+  message_ts: string
+  team_id?: string
+  thread_ts: string
+  type: 'message_action'
+  user_id: string
+  user_name: string
+}
+
+export type SlackbotV2WorkflowTriggerPayload =
+  | SlackbotV2BlockActionPayload
+  | SlackbotV2MessageShortcutPayload
+
 export type SlackbotV2Options = {
   allowedExternalTeamIds?: readonly string[]
   apiKey?: string

@@ -51,6 +51,7 @@ import {
   serializeMessageLinks,
   serializeMessage,
   sessionStreamError,
+  startSlackInteractionWorkflow,
   slackApiTimeoutMs,
   withSlackApiTimeout
 } from './session-api'
@@ -82,6 +83,7 @@ import type {
   SlackbotV2,
   SlackbotV2ApiAttachment,
   SlackbotV2BlockActionPayload,
+  SlackbotV2MessageShortcutPayload,
   SlackbotV2ApiMessage,
   SlackbotV2ExecuteSessionResponse,
   SlackbotV2MessageMode,
@@ -108,6 +110,7 @@ export type {
   SlackbotV2ApiAttachment,
   SlackbotV2ApiAuthor,
   SlackbotV2BlockActionPayload,
+  SlackbotV2MessageShortcutPayload,
   SlackbotV2ApiMessage,
   SlackbotV2AppendMessagesRequest,
   SlackbotV2CreateSessionRequest,
@@ -299,6 +302,15 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     }
     try {
       await dispatchSlackBlockAction(options, payload)
+      const workflowName = slackWorkflowName(payload.action_id)
+      if (workflowName) {
+        await startSlackInteractionWorkflow(
+          options,
+          workflowName,
+          payload,
+          slackWorkflowTriggerKey(payload, payload.action_id)
+        )
+      }
     } catch (error) {
       try {
         if (dedupeKey && (await state.get(dedupeKey)) === leaseToken) {
@@ -441,6 +453,40 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
           }
         })
       })
+      const messageShortcut = response.ok ? slackMessageShortcutPayload(rawBody) : null
+      if (messageShortcut) {
+        const workflowName = slackWorkflowName(messageShortcut.callback_id)
+        if (workflowName) {
+          waitUntil(
+            c,
+            startSlackInteractionWorkflow(
+              options,
+              workflowName,
+              messageShortcut,
+              slackWorkflowTriggerKey(messageShortcut, messageShortcut.callback_id)
+            )
+              .then(() => {
+                traceLog(options, 'slackbotv2_message_shortcut_dispatched', undefined, {
+                  callback_id: messageShortcut.callback_id,
+                  channel_id: messageShortcut.channel_id,
+                  message_ts: messageShortcut.message_ts,
+                  team_id: messageShortcut.team_id,
+                  workflow_name: workflowName
+                })
+              })
+              .catch(error => {
+                traceWarn(options, 'slackbotv2_message_shortcut_dispatch_failed', undefined, {
+                  callback_id: messageShortcut.callback_id,
+                  channel_id: messageShortcut.channel_id,
+                  error: errorMessage(error),
+                  message_ts: messageShortcut.message_ts,
+                  team_id: messageShortcut.team_id,
+                  workflow_name: workflowName
+                })
+              })
+          )
+        }
+      }
       const channelCreatedJoinTask = response.ok && options.autoJoinCreatedChannels === true
         ? joinSlackChannelCreatedEvent(rawBody, options)
         : null
@@ -800,6 +846,52 @@ function slackBlockActionDedupeKey(payload: SlackbotV2BlockActionPayload): strin
     payload.action_id,
     payload.action_ts
   ].join(':')
+}
+
+function slackWorkflowName(interactionId: string): string | undefined {
+  return /^workflow\.([a-z][a-z0-9_]*)$/.exec(interactionId)?.[1]
+}
+
+function slackWorkflowTriggerKey(
+  payload: SlackbotV2BlockActionPayload | SlackbotV2MessageShortcutPayload,
+  interactionId: string
+): string {
+  return [
+    'slack-workflow-trigger',
+    payload.type,
+    payload.team_id,
+    payload.channel_id,
+    payload.message_ts,
+    payload.user_id,
+    interactionId,
+    payload.action_ts
+  ].join(':')
+}
+
+function slackMessageShortcutPayload(rawBody: string): SlackbotV2MessageShortcutPayload | null {
+  const raw = parseSlackWebhookPayload(rawBody)
+  if (!raw || raw.type !== 'message_action') return null
+  const team = isJsonObject(raw.team) ? raw.team : {}
+  const user = isJsonObject(raw.user) ? raw.user : {}
+  const channel = isJsonObject(raw.channel) ? raw.channel : {}
+  const message = isJsonObject(raw.message) ? raw.message : {}
+  const callbackId = stringValue(raw.callback_id)
+  const channelId = stringValue(channel.id)
+  const messageTs = stringValue(message.ts)
+  const userId = stringValue(user.id)
+  if (!callbackId || !channelId || !messageTs || !userId) return null
+  return removeUndefinedValues({
+    action_ts: stringValue(raw.action_ts),
+    callback_id: callbackId,
+    channel_id: channelId,
+    message_text: (stringValue(message.text) ?? '').slice(0, 20_000),
+    message_ts: messageTs,
+    team_id: stringValue(team.id) ?? stringValue(user.team_id),
+    thread_ts: stringValue(message.thread_ts) ?? messageTs,
+    type: 'message_action',
+    user_id: userId,
+    user_name: stringValue(user.username) ?? stringValue(user.name) ?? userId
+  }) as SlackbotV2MessageShortcutPayload
 }
 
 function removeUndefinedValues<T extends Record<string, unknown>>(value: T): Partial<T> {

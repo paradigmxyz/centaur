@@ -377,6 +377,98 @@ describe('slackbotv2', () => {
     expect(JSON.stringify(codexApi.workflowEvents)).not.toContain('sensitive-response-token')
   })
 
+  it('starts prefixed workflows from signed Slack message shortcuts', async () => {
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/slack/actions',
+      signedSlackInteraction({
+        type: 'message_action',
+        callback_id: 'workflow.treasury_needs_tracker',
+        action_ts: '1700000010.000300',
+        team: { id: TEAM_ID },
+        user: { id: USER_ID, username: 'tester', team_id: TEAM_ID },
+        channel: { id: CHANNEL_ID },
+        message: {
+          ts: '1700000009.000200',
+          thread_ts: '1700000009.000100',
+          text: 'Fund the partner with 250,000 USDC next Friday.'
+        },
+        response_url: 'https://hooks.slack.com/actions/sensitive-response-token',
+        trigger_id: 'sensitive-trigger-id'
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+    expect(codexApi.workflowRuns).toEqual([
+      {
+        workflow_name: 'treasury_needs_tracker',
+        input: {
+          slack_interaction: {
+            action_ts: '1700000010.000300',
+            callback_id: 'workflow.treasury_needs_tracker',
+            channel_id: CHANNEL_ID,
+            message_text: 'Fund the partner with 250,000 USDC next Friday.',
+            message_ts: '1700000009.000200',
+            team_id: TEAM_ID,
+            thread_ts: '1700000009.000100',
+            type: 'message_action',
+            user_id: USER_ID,
+            user_name: 'tester'
+          }
+        },
+        idempotency_key: [
+          'slack-workflow-trigger',
+          'message_action',
+          TEAM_ID,
+          CHANNEL_ID,
+          '1700000009.000200',
+          USER_ID,
+          'workflow.treasury_needs_tracker',
+          '1700000010.000300'
+        ].join(':')
+      }
+    ])
+    expect(JSON.stringify(codexApi.workflowRuns)).not.toContain('response_url')
+    expect(JSON.stringify(codexApi.workflowRuns)).not.toContain('sensitive-trigger-id')
+  })
+
+  it('starts prefixed workflows from signed Slack block actions', async () => {
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/slack/actions',
+      signedSlackInteraction({
+        type: 'block_actions',
+        team: { id: TEAM_ID },
+        user: { id: USER_ID, username: 'tester', team_id: TEAM_ID },
+        channel: { id: CHANNEL_ID },
+        message: { ts: '1700000011.000200' },
+        actions: [{
+          action_id: 'workflow.treasury_needs_tracker',
+          action_ts: '1700000012.000300',
+          type: 'button',
+          value: '{"mode":"commit"}'
+        }]
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+    expect(codexApi.workflowRuns).toHaveLength(1)
+    expect(codexApi.workflowRuns[0]).toEqual(expect.objectContaining({
+      workflow_name: 'treasury_needs_tracker',
+      input: { slack_interaction: expect.objectContaining({
+        action_id: 'workflow.treasury_needs_tracker',
+        type: 'block_actions',
+        value: '{"mode":"commit"}'
+      }) }
+    }))
+  })
+
   it('applies the external-org allowlist to Slack block actions', async () => {
     const interaction = signedSlackInteraction({
       type: 'block_actions',
@@ -5893,6 +5985,12 @@ type MockWorkflowEventRequest = {
   payload: SlackbotV2BlockActionPayload
 }
 
+type MockWorkflowRunRequest = {
+  idempotency_key: string
+  input: { slack_interaction: Record<string, unknown> }
+  workflow_name: string
+}
+
 type MockSessionApi = {
   appends: MockSessionRequest<SlackbotV2AppendMessagesRequest>[]
   autoRespond: boolean
@@ -5912,6 +6010,7 @@ type MockSessionApi = {
   streamCount: number
   url: string
   workflowEvents: MockWorkflowEventRequest[]
+  workflowRuns: MockWorkflowRunRequest[]
 }
 
 async function startMockCodexApi(): Promise<MockSessionApi> {
@@ -5923,6 +6022,7 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
   const idempotentExecutions = new Map<string, string>()
   const streams = new Set<ServerResponse>()
   const workflowEvents: MockWorkflowEventRequest[] = []
+  const workflowRuns: MockWorkflowRunRequest[] = []
   let autoRespond = true
   let executeHold: Promise<void> | null = null
   let executeHoldRelease: (() => void) | null = null
@@ -5973,7 +6073,8 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
         failNextExecuteAfterAccept = value
       },
       streams,
-      workflowEvents
+      workflowEvents,
+      workflowRuns
     }).catch(error => {
       res.writeHead(500, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ error: String(error) }))
@@ -6003,9 +6104,11 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
       failNextExecute = false
       failNextExecuteAfterAccept = false
       workflowEvents.length = 0
+      workflowRuns.length = 0
     },
     url: `http://127.0.0.1:${port}`,
     workflowEvents,
+    workflowRuns,
     closeStreams,
     get autoRespond() {
       return autoRespond
@@ -6101,6 +6204,7 @@ async function handleMockCodexRequest(
     setFailNextExecuteAfterAccept(value: boolean): void
     streams: Set<ServerResponse>
     workflowEvents: MockWorkflowEventRequest[]
+    workflowRuns: MockWorkflowRunRequest[]
   }
 ): Promise<void> {
   const url = new URL(req.url ?? '/', `http://127.0.0.1:${input.port}`)
@@ -6108,6 +6212,18 @@ async function handleMockCodexRequest(
     const request = await nodeRequestToWebRequest(req, url)
     input.workflowEvents.push((await request.json()) as MockWorkflowEventRequest)
     await sendWebResponse(res, Response.json({ ok: true }))
+    return
+  }
+  if (url.pathname === '/api/workflows/runs') {
+    const request = await nodeRequestToWebRequest(req, url)
+    input.workflowRuns.push((await request.json()) as MockWorkflowRunRequest)
+    await sendWebResponse(
+      res,
+      Response.json(
+        { ok: true, run_id: 'run-1', task_id: 'task-1', status: 'queued' },
+        { status: 202 }
+      )
+    )
     return
   }
   const match = /^\/api\/session\/([^/]+)(?:\/(messages|execute|events))?$/.exec(url.pathname)

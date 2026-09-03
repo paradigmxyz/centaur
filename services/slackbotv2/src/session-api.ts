@@ -6,6 +6,7 @@ import type {
   ForwardSessionInput,
   JsonObject,
   SlackbotV2BlockActionPayload,
+  SlackbotV2WorkflowTriggerPayload,
   JsonValue,
   SlackbotV2ApiAttachment,
   SlackbotV2ApiMessageLink,
@@ -564,6 +565,37 @@ export async function dispatchSlackBlockAction(
           body: JSON.stringify({
             event_name: `slack.block_action.${payload.action_id}`,
             payload
+          }),
+          headers: apiHeaders(options),
+          method: 'POST'
+        },
+        sessionApiTimeoutMs(options),
+        action
+      ),
+    sessionApiTimeoutMs(options),
+    action
+  )
+  await ensureApiOk(response, action)
+}
+
+export async function startSlackInteractionWorkflow(
+  options: SlackbotV2Options,
+  workflowName: string,
+  payload: SlackbotV2WorkflowTriggerPayload,
+  idempotencyKey: string
+): Promise<void> {
+  const action = `start Slack interaction workflow ${workflowName}`
+  const response = await recordSessionApiOperation(
+    'create_workflow_run',
+    () =>
+      fetchWithTimeout(
+        options.fetch ?? globalThis.fetch,
+        new URL('/api/workflows/runs', ensureTrailingSlash(options.apiUrl)),
+        {
+          body: JSON.stringify({
+            workflow_name: workflowName,
+            input: { slack_interaction: payload },
+            idempotency_key: idempotencyKey
           }),
           headers: apiHeaders(options),
           method: 'POST'
