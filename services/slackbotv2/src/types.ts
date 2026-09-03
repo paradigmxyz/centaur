@@ -122,6 +122,7 @@ export type SlackbotV2BlockActionPayload = {
   type: 'block_actions'
   user_id: string
   user_name: string
+  user_team_id?: string
   value?: string
 }
 
@@ -136,6 +137,7 @@ export type SlackbotV2MessageShortcutPayload = {
   type: 'message_action'
   user_id: string
   user_name: string
+  user_team_id?: string
 }
 
 export type SlackbotV2WorkflowTriggerPayload =

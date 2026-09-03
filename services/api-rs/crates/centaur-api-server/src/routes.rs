@@ -2079,6 +2079,7 @@ async fn start_slack_archive_import(
             idempotency_key: Some(format!("slack_archive_import:{}", import.import_id)),
             harness_type: None,
             max_attempts: Some(1),
+            requester: None,
         })
         .await?;
     let row =
@@ -2127,6 +2128,7 @@ async fn retry_slack_archive_import(
             )),
             harness_type: None,
             max_attempts: Some(1),
+            requester: None,
         })
         .await?;
     let row =
@@ -2980,6 +2982,7 @@ async fn invoke_workflow_webhook(
         idempotency_key: Some(trigger_key),
         harness_type: None,
         max_attempts: None,
+        requester: None,
     };
     let run = workflows.create_run(request).await?;
     let status = if run.created {

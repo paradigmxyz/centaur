@@ -831,6 +831,7 @@ function slackBlockActionPayload(event: ActionEvent): SlackbotV2BlockActionPaylo
     type: 'block_actions',
     user_id: event.user.userId,
     user_name: event.user.userName,
+    user_team_id: stringValue(user.team_id),
     value: event.value
   }) as SlackbotV2BlockActionPayload
 }
@@ -890,7 +891,8 @@ function slackMessageShortcutPayload(rawBody: string): SlackbotV2MessageShortcut
     thread_ts: stringValue(message.thread_ts) ?? messageTs,
     type: 'message_action',
     user_id: userId,
-    user_name: stringValue(user.username) ?? stringValue(user.name) ?? userId
+    user_name: stringValue(user.username) ?? stringValue(user.name) ?? userId,
+    user_team_id: stringValue(user.team_id)
   }) as SlackbotV2MessageShortcutPayload
 }
 

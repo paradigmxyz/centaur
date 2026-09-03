@@ -564,7 +564,7 @@ export async function dispatchSlackBlockAction(
         {
           body: JSON.stringify({
             event_name: `slack.block_action.${payload.action_id}`,
-            payload
+            payload: workflowSafeInteractionPayload(payload)
           }),
           headers: apiHeaders(options),
           method: 'POST'
@@ -594,8 +594,9 @@ export async function startSlackInteractionWorkflow(
         {
           body: JSON.stringify({
             workflow_name: workflowName,
-            input: { slack_interaction: payload },
-            idempotency_key: idempotencyKey
+            input: { slack_interaction: workflowSafeInteractionPayload(payload) },
+            idempotency_key: idempotencyKey,
+            requester: workflowRequester(options, payload)
           }),
           headers: apiHeaders(options),
           method: 'POST'
@@ -607,6 +608,29 @@ export async function startSlackInteractionWorkflow(
     action
   )
   await ensureApiOk(response, action)
+}
+
+function workflowSafeInteractionPayload(
+  payload: SlackbotV2WorkflowTriggerPayload
+): Omit<SlackbotV2WorkflowTriggerPayload, 'user_team_id'> {
+  const { user_team_id: _, ...safePayload } = payload
+  return safePayload
+}
+
+function workflowRequester(
+  options: SlackbotV2Options,
+  payload: SlackbotV2WorkflowTriggerPayload
+): JsonObject | undefined {
+  const homeTeamId = options.slackHomeTeamId ?? payload.team_id
+  const requesterTeamId = payload.user_team_id ?? payload.team_id
+  if (!homeTeamId || !requesterTeamId) return undefined
+  return {
+    source: 'slack',
+    user_id: payload.user_id,
+    team_id: requesterTeamId,
+    home_team_id: homeTeamId,
+    display_name: payload.user_name
+  }
 }
 
 export async function openSessionEventStream(

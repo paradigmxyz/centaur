@@ -428,11 +428,42 @@ describe('slackbotv2', () => {
           USER_ID,
           'workflow.treasury_needs_tracker',
           '1700000010.000300'
-        ].join(':')
+        ].join(':'),
+        requester: {
+          source: 'slack',
+          user_id: USER_ID,
+          team_id: TEAM_ID,
+          home_team_id: TEAM_ID,
+          display_name: 'tester'
+        }
       }
     ])
     expect(JSON.stringify(codexApi.workflowRuns)).not.toContain('response_url')
     expect(JSON.stringify(codexApi.workflowRuns)).not.toContain('sensitive-trigger-id')
+    expect(JSON.stringify(codexApi.workflowRuns)).not.toContain('access_token')
+    expect(JSON.stringify(codexApi.workflowRuns)).not.toContain('refresh_token')
+  })
+
+  it('starts shortcut workflows without requester credentials when Slack identity is incomplete', async () => {
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/slack/actions',
+      signedSlackInteraction({
+        type: 'message_action',
+        callback_id: 'workflow.treasury_needs_tracker',
+        action_ts: '1700000010.000301',
+        user: { id: USER_ID, username: 'tester' },
+        channel: { id: CHANNEL_ID },
+        message: { ts: '1700000009.000201', text: 'Fund Acme.' }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+    expect(codexApi.workflowRuns).toHaveLength(1)
+    expect(codexApi.workflowRuns[0]).not.toHaveProperty('requester')
   })
 
   it('starts prefixed workflows from signed Slack block actions', async () => {
@@ -5988,6 +6019,7 @@ type MockWorkflowEventRequest = {
 type MockWorkflowRunRequest = {
   idempotency_key: string
   input: { slack_interaction: Record<string, unknown> }
+  requester?: Record<string, unknown>
   workflow_name: string
 }
 

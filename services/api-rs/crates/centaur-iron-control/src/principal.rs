@@ -341,7 +341,11 @@ pub fn derive_github_requester_principal(
 /// foreign ids or labels for the same user. ``team`` must be a workspace the
 /// user is proven to belong to, never one inferred from where the message
 /// happened to land.
-fn slack_user_principal(user: &str, team: &str, display_name: Option<&str>) -> PrincipalRef {
+pub(crate) fn slack_user_principal(
+    user: &str,
+    team: &str,
+    display_name: Option<&str>,
+) -> PrincipalRef {
     PrincipalRef {
         foreign_id: format!("slack-user-{}-{}", slugify(team), slugify(user)),
         name: display_name
