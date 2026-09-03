@@ -101,6 +101,15 @@ toolServer:
 # existing values files keep working. Prefer `console` for new configuration.
 console:
   replicaCount: 1
+  # Node steering for the Console web pods. Use tolerations with a matching
+  # nodeSelector to schedule onto a dedicated tainted node pool. Empty values
+  # leave placement to the default scheduler.
+  nodeSelector: {}
+  #   workload: centaur-control-plane
+  tolerations: []
+  # - key: centaur.ai/control-plane
+  #   operator: Exists
+  #   effect: NoSchedule
   # Public URL users reach in a browser (e.g. https://console.example.com), used
   # as CENTAUR_CONSOLE_PUBLIC_URL. Set this when console is exposed behind
   # Tailscale/Ingress so MCP OAuth issuer metadata and JWT validation agree.
@@ -201,6 +210,10 @@ console:
   # without this those jobs never execute.
   worker:
     replicaCount: 1
+    # Node steering for Console background worker pods. Configure separately
+    # from the web pods when workers run on a different node pool.
+    nodeSelector: {}
+    tolerations: []
     resources: {}
   # Prometheus SQL Exporter for Console database metrics, initially Solid Queue.
   # This runs as one internal-only replica because every instance would report
@@ -433,6 +446,15 @@ agentSandbox:
 apiRs:
   enabled: true
   replicaCount: 1
+  # Node steering for api-rs pods. Use tolerations with a matching nodeSelector
+  # to schedule onto a dedicated tainted node pool. Empty values leave
+  # placement to the default scheduler.
+  nodeSelector: {}
+  #   workload: centaur-control-plane
+  tolerations: []
+  # - key: centaur.ai/control-plane
+  #   operator: Exists
+  #   effect: NoSchedule
   image:
     repository: centaur-api-rs
     tag: latest
@@ -739,6 +761,10 @@ teamsbot:
 
 postgres:
   enabled: true
+  # Node selector for the PostgreSQL pod. When persistence is enabled, ensure
+  # the selected node pool can mount the configured storage class.
+  nodeSelector: {}
+  #   workload: centaur-database
   image:
     repository: paradedb/paradedb
     tag: 0.23.0-pg16

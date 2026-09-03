@@ -39,6 +39,14 @@ spec:
       imagePullSecrets:
 {{ toYaml . | nindent 8 }}
       {{- end }}
+{{- with $console.worker.nodeSelector }}
+      nodeSelector:
+{{ toYaml . | nindent 8 }}
+{{- end }}
+{{- with $console.worker.tolerations }}
+      tolerations:
+{{ toYaml . | nindent 8 }}
+{{- end }}
       initContainers:
         # Wait for the Solid Queue database (created by the web pod's Rails
         # db:prepare) so a cold start does not crash-loop before it exists.

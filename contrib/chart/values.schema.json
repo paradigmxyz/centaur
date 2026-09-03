@@ -6,6 +6,8 @@
       "type": "object",
       "properties": {
         "replicaCount": { "type": "integer" },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
         "publicUrl": { "type": "string" },
         "allowedHosts": {
           "type": "array",
@@ -61,6 +63,8 @@
           "type": "object",
           "properties": {
             "replicaCount": { "type": "integer" },
+            "nodeSelector": { "type": "object" },
+            "tolerations": { "type": "array" },
             "resources": { "type": "object" }
           }
         },
@@ -334,6 +338,8 @@
     "apiRs": {
       "type": "object",
       "properties": {
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
         "syncInfraSecrets": { "type": "boolean" },
         "mcpPublicUrl": { "type": "string" },
         "sandboxRunningLimit": { "type": "integer", "minimum": 0 },
@@ -476,6 +482,7 @@
     "postgres": {
       "type": "object",
       "properties": {
+        "nodeSelector": { "type": "object" },
         "persistence": {
           "type": "object",
           "properties": {
