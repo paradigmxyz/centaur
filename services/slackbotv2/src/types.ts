@@ -76,6 +76,8 @@ export type SlackbotV2CreateSessionRequest = {
   metadata: JsonObject
   /** 'restart': switch the thread to harness_type if it's pinned to another harness. */
   on_harness_conflict?: 'reject' | 'restart'
+  /** Persona requested when the thread is created; the API pins the first persisted value. */
+  persona_id?: string
 }
 
 export type SlackbotV2HarnessAssignment = {
@@ -180,6 +182,8 @@ export type SlackbotV2Options = {
   harnessDefaultReasoning?: Record<string, string>
   /** Strategy for resolving message-level harness/model/provider/reasoning overrides. */
   messageOverridesStrategy?: MessageOverridesStrategy
+  /** Resolve the persona ids currently deployed for deterministic --<persona-id> flags. */
+  personaIds?: () => Promise<readonly string[]>
   /**
    * Backoff delays between in-process retries of a Slack handoff after a
    * retryable session API failure. Slack's own webhook redelivery cannot
@@ -220,6 +224,7 @@ export type SlackbotV2Options = {
 }
 
 export type MessageOverridesStrategyInput = {
+  personaIds?: readonly string[]
   text: string
 }
 
@@ -247,6 +252,8 @@ export type SlackbotV2ThreadState = {
   lastEventId?: number
   /** Last thread-level model selected by Slack flags. Null clears persisted state. */
   model?: string | null
+  /** Persona pinned by the session API. Null means the thread is pinned without a persona. */
+  personaId?: string | null
   /** Last thread-level model provider selected by Slack flags. Null clears persisted state. */
   provider?: string | null
   renderObligation?: SlackbotV2RenderObligation | null
@@ -298,6 +305,8 @@ export type ForwardSessionInput = {
    * default. Metadata only — never forwarded to the harness (that is `model`).
    */
   metadataModel?: string
+  /** Effective persona selected by sticky thread flags (--persona/--<persona-id>). */
+  personaId?: string
   /** Effective model provider selected by sticky thread flags (--bedrock); codex only. */
   provider?: string
   /** Per-turn reasoning effort parsed from the `-rsn` flag (Codex/Nanocodex). */

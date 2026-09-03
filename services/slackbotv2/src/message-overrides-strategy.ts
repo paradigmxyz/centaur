@@ -94,8 +94,8 @@ type OpenAiMessageOverridesStrategyOutput = {
 }
 
 export function createFlagMessageOverridesStrategy(): MessageOverridesStrategy {
-  return async ({ text }) => {
-    const parsed = extractMessageOverrides(text)
+  return async ({ text, personaIds = [] }) => {
+    const parsed = extractMessageOverrides(text, personaIds)
     const { cleanedText, ...overrides } = parsed
     return { cleanedText, overrides }
   }
@@ -109,14 +109,24 @@ export function createOpenAiMessageOverridesStrategy(
   const maxOutputTokens = options.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
   const fetchFn = options.fetch ?? fetch
 
-  return async ({ text }) => {
-    // Explicit flags are a deterministic user command, even when the deployment
-    // enables the LLM strategy for natural-language model requests. Handle them
-    // first so a strict strategy schema or model failure cannot discard the
-    // selection, and so flags never leak into the harness prompt.
-    const { cleanedText, ...explicitOverrides } = extractMessageOverrides(text)
-    if (Object.values(explicitOverrides).some(value => value !== undefined)) {
+  return async ({ text, personaIds = [] }) => {
+    // Explicit flags are deterministic user commands, even when the deployment
+    // enables the LLM strategy for natural-language model requests. Model flags
+    // bypass the strategy entirely. Persona flags are stripped and retained
+    // locally before the remaining text is classified below.
+    const { cleanedText, ...explicitOverrides } = extractMessageOverrides(text, personaIds)
+    const { personaId, ...explicitModelOverrides } = explicitOverrides
+    if (Object.values(explicitModelOverrides).some(value => value !== undefined)) {
       return { cleanedText, overrides: explicitOverrides }
+    }
+
+    // Persona flags are always resolved locally. When the rest of the message
+    // contains a natural-language model request, let the strategy classify the
+    // already-cleaned text and merge its result without giving it authority to
+    // choose or replace the persona.
+    const strategyText = personaId ? cleanedText : text
+    if (!strategyText) {
+      return { cleanedText, overrides: { personaId } }
     }
 
     const controller = new AbortController()
@@ -124,7 +134,7 @@ export function createOpenAiMessageOverridesStrategy(
     try {
       const response = await fetchFn(responsesUrl, {
         body: JSON.stringify({
-          input: text,
+          input: strategyText,
           instructions: SYSTEM_PROMPT,
           max_output_tokens: maxOutputTokens,
           model: options.model,
@@ -161,10 +171,12 @@ export function createOpenAiMessageOverridesStrategy(
         throw new Error('message overrides strategy response did not include output text')
       }
       const parsed = JSON.parse(outputText)
+      const strategyOverrides = validateStrategyOverrides(
+        isJsonObject(parsed) ? (parsed as OpenAiMessageOverridesStrategyOutput) : null
+      )
       return {
-        overrides: validateStrategyOverrides(
-          isJsonObject(parsed) ? (parsed as OpenAiMessageOverridesStrategyOutput) : null
-        )
+        ...(personaId ? { cleanedText } : {}),
+        overrides: { ...strategyOverrides, ...(personaId ? { personaId } : {}) }
       }
     } catch (error) {
       options.logger?.warn('slackbotv2_message_overrides_strategy_request_failed', {
@@ -172,7 +184,10 @@ export function createOpenAiMessageOverridesStrategy(
         model: options.model,
         timeout_ms: timeoutMs
       })
-      return { overrides: {} }
+      return {
+        ...(personaId ? { cleanedText } : {}),
+        overrides: personaId ? { personaId } : {}
+      }
     } finally {
       clearTimeout(timeout)
     }

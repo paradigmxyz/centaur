@@ -43,6 +43,38 @@ describe('extractMessageOverrides', () => {
     })
   })
 
+  test('parses persona flags independently from harness and model', () => {
+    expect(
+      extractMessageOverrides('--invest --claude --model=fable review this', ['invest'])
+    ).toEqual({
+      cleanedText: 'review this',
+      harnessType: 'claudecode',
+      model: 'claude-fable-5',
+      personaId: 'invest',
+      reasoning: undefined
+    })
+    expect(extractMessageOverrides('--persona eng --codex debug this')).toEqual({
+      cleanedText: 'debug this',
+      harnessType: 'codex',
+      model: undefined,
+      personaId: 'eng',
+      reasoning: undefined
+    })
+    expect(extractMessageOverrides('--persona=legal --sonnet review this').personaId).toBe(
+      'legal'
+    )
+  })
+
+  test('does not hard-code bare persona aliases', () => {
+    expect(extractMessageOverrides('--invest review this')).toEqual({
+      cleanedText: '--invest review this',
+      harnessType: undefined,
+      model: undefined,
+      personaId: undefined,
+      reasoning: undefined
+    })
+  })
+
   test('is case-insensitive', () => {
     expect(extractMessageOverrides('--Claude review').harnessType).toBe('claudecode')
   })
@@ -499,6 +531,36 @@ describe('messageOverridesForText strategy invocation', () => {
     })
   })
 
+  test('loads deployed personas only for unresolved bare selectors', async () => {
+    let requestCount = 0
+    const options = slackOptions({
+      personaIds: async () => {
+        requestCount += 1
+        return ['invest']
+      }
+    })
+
+    await expect(messageOverridesForText(options, 'review this', trace)).resolves.toEqual({
+      cleanedText: 'review this',
+      overrides: expect.any(Object)
+    })
+    await expect(
+      messageOverridesForText(options, '--persona eng review this', trace)
+    ).resolves.toEqual({
+      cleanedText: 'review this',
+      overrides: expect.objectContaining({ personaId: 'eng' })
+    })
+    expect(requestCount).toBe(0)
+
+    await expect(
+      messageOverridesForText(options, '--invest review this', trace)
+    ).resolves.toEqual({
+      cleanedText: 'review this',
+      overrides: expect.objectContaining({ personaId: 'invest' })
+    })
+    expect(requestCount).toBe(1)
+  })
+
   test('uses the configured strategy instead of the legacy flag parser', async () => {
     await expect(
       messageOverridesForText(
@@ -509,6 +571,38 @@ describe('messageOverridesForText strategy invocation', () => {
         trace
       )
     ).resolves.toEqual({ overrides: {} })
+  })
+
+  test('does not let a configured strategy select a persona', async () => {
+    await expect(
+      messageOverridesForText(
+        slackOptions({
+          messageOverridesStrategy: async () => ({
+            overrides: { personaId: 'strategy-selected' }
+          })
+        }),
+        'review this',
+        trace
+      )
+    ).resolves.toEqual({ overrides: {} })
+  })
+
+  test('retains a deterministic persona when a configured strategy throws', async () => {
+    await expect(
+      messageOverridesForText(
+        slackOptions({
+          messageOverridesStrategy: async () => {
+            throw new Error('selector failed')
+          },
+          personaIds: async () => ['invest']
+        }),
+        '--invest review this',
+        trace
+      )
+    ).resolves.toEqual({
+      cleanedText: 'review this',
+      overrides: expect.objectContaining({ personaId: 'invest' })
+    })
   })
 
   test('returns configured strategy overrides without cleaning prompt text', async () => {
@@ -578,6 +672,64 @@ describe('messageOverridesForText strategy invocation', () => {
       }
     })
     expect(requestCount).toBe(0)
+  })
+
+  test('keeps persona selection deterministic when the OpenAI strategy fails', async () => {
+    const strategy = createOpenAiMessageOverridesStrategy({
+      apiKey: 'test-key',
+      fetch: (async () => {
+        throw new Error('selector unavailable')
+      }) as unknown as typeof fetch,
+      model: 'gpt-5.4-nano'
+    })
+
+    await expect(
+      strategy({ personaIds: ['invest'], text: '--invest investigate this company' })
+    ).resolves.toEqual({
+      cleanedText: 'investigate this company',
+      overrides: { personaId: 'invest' }
+    })
+  })
+
+  test('composes a deterministic persona with natural-language model selection', async () => {
+    let requestBody: Record<string, unknown> | undefined
+    const strategy = createOpenAiMessageOverridesStrategy({
+      apiKey: 'test-key',
+      fetch: (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>
+        return Response.json({
+          output: [
+            {
+              content: [
+                {
+                  text: JSON.stringify({
+                    harness: 'codex',
+                    model: 'gpt-5.6-sol',
+                    provider: null,
+                    reasoning: null
+                  })
+                }
+              ]
+            }
+          ]
+        })
+      }) as unknown as typeof fetch,
+      model: 'gpt-5.4-nano'
+    })
+
+    await expect(
+      strategy({ personaIds: ['invest'], text: '--invest use sol for this' })
+    ).resolves.toEqual({
+      cleanedText: 'use sol for this',
+      overrides: {
+        harnessType: 'codex',
+        model: 'gpt-5.6-sol',
+        personaId: 'invest',
+        provider: undefined,
+        reasoning: undefined
+      }
+    })
+    expect(requestBody?.input).toBe('use sol for this')
   })
 
   test('allows the OpenAI strategy to select nanocodex from natural language', async () => {

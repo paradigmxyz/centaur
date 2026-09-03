@@ -227,6 +227,10 @@ mod tests {
     async fn protected_routes_reject_anonymous_requests_before_handlers() {
         for request in [
             Request::builder()
+                .uri("/api/personas")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
                 .method(Method::POST)
                 .uri("/api/session/not-a-valid-thread-key")
                 .body(Body::from("not-json"))
@@ -264,6 +268,11 @@ mod tests {
     #[tokio::test]
     async fn console_service_jwt_passes_every_capability_route_family() {
         for request in [
+            Request::builder()
+                .uri("/api/personas")
+                .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
+                .body(Body::empty())
+                .unwrap(),
             Request::builder()
                 .uri("/api/session/slack%3AC123%3A123.456")
                 .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))

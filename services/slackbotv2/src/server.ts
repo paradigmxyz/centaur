@@ -2,6 +2,7 @@ import { createSlackbotV2, type SlackbotV2Options } from './index'
 import { parseChannelDefaults } from './channel-defaults'
 import { resolveSlackHomeTeamId } from './session-api'
 import { resolveSlackBotUserId } from './slack-user'
+import { createPersonaIdsResolver } from './persona-registry'
 import {
   createFlagMessageOverridesStrategy,
   createOpenAiMessageOverridesStrategy
@@ -81,6 +82,12 @@ const options: SlackbotV2Options = {
   idleTimeoutMs: optionalNumberEnv('SESSION_IDLE_TIMEOUT_MS'),
   maxDurationMs: optionalNumberEnv('SESSION_MAX_DURATION_MS'),
   messageOverridesStrategy: createMessageOverridesStrategy(),
+  personaIds: createPersonaIdsResolver({
+    apiKey: optionalEnv('SLACKBOT_API_KEY'),
+    apiUrl,
+    logger: consoleLogger,
+    timeoutMs: optionalNumberEnv('SLACKBOTV2_SESSION_API_TIMEOUT_MS')
+  }),
   postgresUrl:
     optionalEnv('SLACKBOTV2_DATABASE_URL') ??
     optionalEnv('DATABASE_URL') ??

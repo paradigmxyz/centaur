@@ -645,14 +645,14 @@ describe('slackbotv2', () => {
   // The paragraph break (`\n\n`) after the model value is deliberate: the
   // unpatched chat SDK dropped it, gluing the value to the next word
   // (`fablefirst`); this exercises the patched extractPlainText end to end.
-  it('keeps harness and model flags sticky within a Slack thread', async () => {
+  it('keeps persona, harness, and model flags sticky within a Slack thread', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
     bot = createTestBot({ state: sharedState })
 
     const parent = await postUserMessage('Thread default context.')
     const firstMention = await postUserMessage(
-      `<@${BOT_USER_ID}> --claude --model=fable\n\nfirst pass`,
+      `<@${BOT_USER_ID}> --invest --claude --model=fable\n\nfirst pass`,
       parent.ts
     )
     const firstWaits: Promise<unknown>[] = []
@@ -667,7 +667,7 @@ describe('slackbotv2', () => {
           team: TEAM_ID,
           ts: firstMention.ts,
           thread_ts: parent.ts,
-          text: `<@${BOT_USER_ID}> --claude --model=fable\n\nfirst pass`
+          text: `<@${BOT_USER_ID}> --invest --claude --model=fable\n\nfirst pass`
         }
       }),
       {},
@@ -705,6 +705,10 @@ describe('slackbotv2', () => {
       'claudecode',
       'claudecode'
     ])
+    expect(codexApi.creates.map(create => create.body.persona_id)).toEqual([
+      'invest',
+      'invest'
+    ])
     expect(codexApi.executes).toHaveLength(2)
     const firstInput = JSON.parse(codexApi.executes[0]!.body.input_lines.at(-1)!) as Record<
       string,
@@ -718,6 +722,7 @@ describe('slackbotv2', () => {
     expect(secondInput.model).toBe('claude-fable-5')
     expect(JSON.stringify(firstInput)).not.toContain('--claude')
     expect(JSON.stringify(firstInput)).not.toContain('--model')
+    expect(JSON.stringify(firstInput)).not.toContain('--invest')
     expect(JSON.stringify(firstInput)).toContain('first pass')
     expect(JSON.stringify(secondInput)).toContain('continue without flags')
 
@@ -727,9 +732,61 @@ describe('slackbotv2', () => {
     expect(state).toEqual(
       expect.objectContaining({
         harnessType: 'claudecode',
-        model: 'claude-fable-5'
+        model: 'claude-fable-5',
+        personaId: 'invest'
       })
     )
+  })
+
+  it('pins sticky persona state to the persona persisted by the API', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({ state: sharedState })
+    codexApi.queueCreateResponse({
+      harness_switched: false,
+      harness_type: 'claudecode',
+      persona_id: 'old'
+    })
+
+    const parent = await postUserMessage('Thread default context.')
+    const runMention = async (eventId: string, text: string) => {
+      const mention = await postUserMessage(`<@${BOT_USER_ID}> ${text}`, parent.ts)
+      const waits: Promise<unknown>[] = []
+      const response = await bot.app.request(
+        '/api/webhooks/slack',
+        signedSlackEvent({
+          event_id: eventId,
+          event: {
+            type: 'app_mention',
+            user: USER_ID,
+            channel: CHANNEL_ID,
+            team: TEAM_ID,
+            ts: mention.ts,
+            thread_ts: parent.ts,
+            text: `<@${BOT_USER_ID}> ${text}`
+          }
+        }),
+        {},
+        waitUntilContext(waits)
+      )
+      expect(response.status).toBe(200)
+      await Promise.all(waits)
+    }
+
+    await runMention(
+      'Ev-slackbotv2-persona-reconcile-first',
+      '--claude --persona eng first pass'
+    )
+    await runMention(
+      'Ev-slackbotv2-persona-reconcile-second',
+      '--persona eng continue with a later selector'
+    )
+
+    expect(codexApi.creates.map(create => create.body.persona_id)).toEqual(['eng', 'old'])
+    const state = await sharedState.get<Record<string, unknown>>(
+      `thread-state:${threadKey(parent.ts)}`
+    )
+    expect(state).toEqual(expect.objectContaining({ personaId: 'old' }))
   })
 
   it('clears a sticky model rejected by the harness and accepts a later override', async () => {
@@ -5511,6 +5568,7 @@ function createProductionDefaultTestBot(
     apiUrl: codexApi.url,
     botToken: BOT_TOKEN,
     botUserId: BOT_USER_ID,
+    personaIds: async () => ['eng', 'invest'],
     signingSecret: SIGNING_SECRET,
     slackApiUrl,
     state: createMemoryState(),
@@ -5908,6 +5966,7 @@ type MockSessionApi = {
   failNextExecute: boolean
   failNextExecuteAfterAccept: boolean
   holdNextExecute(): () => void
+  queueCreateResponse(body: Record<string, unknown>, status?: number): void
   reset(): void
   streamCount: number
   url: string
@@ -5916,6 +5975,7 @@ type MockSessionApi = {
 
 async function startMockCodexApi(): Promise<MockSessionApi> {
   const appends: MockSessionRequest<SlackbotV2AppendMessagesRequest>[] = []
+  const createResponses: Array<{ body: Record<string, unknown>; status: number }> = []
   const creates: MockSessionRequest<SlackbotV2CreateSessionRequest>[] = []
   const eventRequests: MockSessionEventRequest[] = []
   const events: MockSessionEvent[] = []
@@ -5938,6 +5998,7 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
   const server = createServer((req, res) => {
     void handleMockCodexRequest(req, res, {
       appends,
+      createResponses,
       creates,
       events,
       eventRequests,
@@ -5988,6 +6049,7 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
     executes,
     reset() {
       appends.length = 0
+      createResponses.length = 0
       creates.length = 0
       eventRequests.length = 0
       events.length = 0
@@ -6003,6 +6065,9 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
       failNextExecute = false
       failNextExecuteAfterAccept = false
       workflowEvents.length = 0
+    },
+    queueCreateResponse(body: Record<string, unknown>, status = 200) {
+      createResponses.push({ body, status })
     },
     url: `http://127.0.0.1:${port}`,
     workflowEvents,
@@ -6085,6 +6150,7 @@ async function handleMockCodexRequest(
   input: {
     appends: MockSessionRequest<SlackbotV2AppendMessagesRequest>[]
     autoRespond: boolean
+    createResponses: Array<{ body: Record<string, unknown>; status: number }>
     creates: MockSessionRequest<SlackbotV2CreateSessionRequest>[]
     events: MockSessionEvent[]
     eventRequests: MockSessionEventRequest[]
@@ -6122,6 +6188,11 @@ async function handleMockCodexRequest(
     const request = await nodeRequestToWebRequest(req, url)
     const body = (await request.json()) as SlackbotV2CreateSessionRequest
     input.creates.push({ threadKey, body })
+    const queued = input.createResponses.shift()
+    if (queued) {
+      await sendWebResponse(res, Response.json(queued.body, { status: queued.status }))
+      return
+    }
     await sendWebResponse(
       res,
       Response.json({
@@ -6129,6 +6200,8 @@ async function handleMockCodexRequest(
         sandbox_id: null,
         harness_type: body.harness_type,
         harness_thread_id: null,
+        harness_switched: false,
+        persona_id: body.persona_id ?? null,
         status: 'active'
       })
     )

@@ -63,7 +63,11 @@ import {
   type SlackContextBlock
 } from './console-session-link'
 import { resolveChannelDefault } from './channel-defaults'
-import { extractMessageOverrides, type HarnessOverrides } from './overrides'
+import {
+  extractMessageOverrides,
+  hasBarePersonaSelectorCandidate,
+  type HarnessOverrides
+} from './overrides'
 import { createFlagMessageOverridesStrategy } from './message-overrides-strategy'
 import {
   isAllowedSlackMessage,
@@ -180,7 +184,10 @@ type PendingLateSlackFileMention = {
   user: string
 }
 
-type StickyThreadOverrides = Pick<SlackbotV2ThreadState, 'harnessType' | 'model' | 'provider'>
+type StickyThreadOverrides = Pick<
+  SlackbotV2ThreadState,
+  'harnessType' | 'model' | 'personaId' | 'provider'
+>
 const DEFAULT_MESSAGE_OVERRIDES_STRATEGY = createFlagMessageOverridesStrategy()
 
 export async function messageOverridesForText(
@@ -189,13 +196,32 @@ export async function messageOverridesForText(
   trace: SlackbotV2Trace
 ): Promise<{ cleanedText?: string; overrides: HarnessOverrides }> {
   const strategy = options.messageOverridesStrategy ?? DEFAULT_MESSAGE_OVERRIDES_STRATEGY
+  let personaIds: readonly string[] = []
+  if (options.personaIds && hasBarePersonaSelectorCandidate(text)) {
+    try {
+      personaIds = await options.personaIds()
+    } catch (error) {
+      traceWarn(options, 'slackbotv2_persona_registry_failed', trace, {
+        error: errorMessage(error)
+      })
+    }
+  }
+  const explicitPersonaId = extractMessageOverrides(text, personaIds).personaId
   try {
-    return await strategy({ text })
+    const result = await strategy({ personaIds, text })
+    const { personaId: _strategyPersonaId, ...strategyOverrides } = result.overrides
+    return {
+      ...result,
+      overrides: {
+        ...strategyOverrides,
+        ...(explicitPersonaId ? { personaId: explicitPersonaId } : {})
+      }
+    }
   } catch (error) {
     traceWarn(options, 'slackbotv2_message_overrides_strategy_failed', trace, {
       error: errorMessage(error)
     })
-    return { overrides: {} }
+    return DEFAULT_MESSAGE_OVERRIDES_STRATEGY({ personaIds, text })
   }
 }
 
@@ -209,6 +235,7 @@ function stickyThreadOverrideUpdate(
     if (!overrides.provider) update.provider = null
   }
   if (overrides.model) update.model = overrides.model
+  if (overrides.personaId) update.personaId = overrides.personaId
   if (overrides.provider) {
     update.provider = overrides.provider
     if (!overrides.model) update.model = null
@@ -216,7 +243,7 @@ function stickyThreadOverrideUpdate(
   return Object.keys(update).length > 0 ? update : undefined
 }
 
-function hasStickyThreadOverride(overrides: StickyThreadOverrides): boolean {
+function hasStickyModelOverride(overrides: StickyThreadOverrides): boolean {
   return Boolean(overrides.harnessType || overrides.model || overrides.provider)
 }
 
@@ -226,13 +253,34 @@ function resolveStickyThreadOverrides(
 ): {
   harnessType?: string
   model?: string
+  personaId?: string
   provider?: string
 } {
   return {
     harnessType: stickyOverrideValue(state, update, 'harnessType'),
     model: stickyOverrideValue(state, update, 'model'),
+    personaId: stickyOverrideValue(state, update, 'personaId'),
     provider: stickyOverrideValue(state, update, 'provider')
   }
+}
+
+function personaOnlyStickyOverride(
+  update: StickyThreadOverrides | undefined
+): StickyThreadOverrides | undefined {
+  return update?.personaId ? { personaId: update.personaId } : undefined
+}
+
+function preservePinnedPersona(
+  state: SlackbotV2ThreadState,
+  update: StickyThreadOverrides | undefined
+): StickyThreadOverrides | undefined {
+  if (
+    !update?.personaId ||
+    !Object.prototype.hasOwnProperty.call(state, 'personaId')
+  ) {
+    return update
+  }
+  return { ...update, personaId: state.personaId ?? null }
 }
 
 function stickyOverrideValue(
@@ -1109,18 +1157,23 @@ async function syncThreadMessageToSession(
     setMessageText(serializedMessage, messageOverrides.cleanedText)
   }
   const overrides = messageOverrides.overrides
-  const requestedStickyOverrides = stickyThreadOverrideUpdate(overrides)
-  // Once a thread is pinned, only another explicit flag may move it. The LLM
-  // strategy can still infer per-turn reasoning, but a false-positive harness,
-  // model, or provider selection must not replace --claude/--amp/--codex/
-  // --nanocodex state.
-  const preserveStickyOverrides = Boolean(
-    requestedStickyOverrides &&
-      hasStickyThreadOverride(state) &&
-      !hasStickyThreadOverride(explicitOverrides)
+  const requestedStickyOverrides = preservePinnedPersona(
+    state,
+    stickyThreadOverrideUpdate(overrides)
   )
-  const stickyOverridesUpdate = preserveStickyOverrides ? undefined : requestedStickyOverrides
-  if (preserveStickyOverrides) {
+  // Once the thread's model configuration is sticky, only another explicit
+  // model or harness flag may move it. The persona is handled separately by
+  // preservePinnedPersona and never moves after the API persists it.
+  const preserveStickyModelOverrides = Boolean(
+    requestedStickyOverrides &&
+      hasStickyModelOverride(requestedStickyOverrides) &&
+      hasStickyModelOverride(state) &&
+      !hasStickyModelOverride(explicitOverrides)
+  )
+  let stickyOverridesUpdate = preserveStickyModelOverrides
+    ? personaOnlyStickyOverride(requestedStickyOverrides)
+    : requestedStickyOverrides
+  if (preserveStickyModelOverrides) {
     traceLog(input.options, 'slackbotv2_forward_sticky_overrides_preserved', trace, {
       pinned_harness_type: state.harnessType,
       requested_harness_type: requestedStickyOverrides?.harnessType
@@ -1194,10 +1247,17 @@ async function syncThreadMessageToSession(
             : undefined
       })
     : undefined
-  if (overrides.harnessType || overrides.model || overrides.provider || overrides.reasoning) {
+  if (
+    overrides.harnessType ||
+    overrides.model ||
+    overrides.personaId ||
+    overrides.provider ||
+    overrides.reasoning
+  ) {
     traceLog(input.options, 'slackbotv2_forward_overrides_parsed', trace, {
       harness_type: overrides.harnessType,
       model: overrides.model,
+      persona_id: overrides.personaId,
       provider: overrides.provider,
       reasoning: overrides.reasoning
     })
@@ -1278,6 +1338,7 @@ async function syncThreadMessageToSession(
     messages: messagesToAppend,
     model: shouldStartExecution ? resolvedModel : undefined,
     metadataModel: shouldStartExecution ? effectiveModel : undefined,
+    personaId: shouldStartExecution ? effectiveOverrides.personaId : undefined,
     provider: shouldStartExecution ? resolvedProvider : undefined,
     reasoning: resolvedReasoning,
     restartOnHarnessConflict:
@@ -1423,6 +1484,20 @@ async function syncThreadMessageToSession(
       onExecutionStarted: commitExecutionStarted,
       onMessagesAppended: commitMessagesAppended,
       onSessionCreated: async outcome => {
+        if (outcome.personaId !== undefined) {
+          const requestedPersonaId = stickyOverridesUpdate?.personaId
+          stickyOverridesUpdate = {
+            ...(stickyOverridesUpdate ?? {}),
+            personaId: outcome.personaId
+          }
+          forwardInput.personaId = outcome.personaId ?? undefined
+          if (requestedPersonaId !== undefined && outcome.personaId !== requestedPersonaId) {
+            traceLog(input.options, 'slackbotv2_session_persona_reconciled', trace, {
+              requested_persona_id: requestedPersonaId,
+              resolved_persona_id: outcome.personaId
+            })
+          }
+        }
         const harnessType = outcome.harnessType ?? effectiveHarnessType
         const abTested = outcome.harnessAssignment?.experiment === 'codex_nanocodex_ab'
         forwardInput.metadataHarnessType = harnessType

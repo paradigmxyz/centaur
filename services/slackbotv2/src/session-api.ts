@@ -480,6 +480,7 @@ export async function forwardToSessionApi(
       options,
       input.threadId,
       input.harnessType,
+      input.personaId,
       sessionRequesterMessage(input),
       input.restartOnHarnessConflict,
       input.harnessAssignment
@@ -494,6 +495,7 @@ export async function forwardToSessionApi(
     ab_test_cohort: created.harnessAssignment?.cohort,
     harness_type: created.harnessType,
     harness_switched: created.harnessSwitched,
+    persona_id: created.personaId,
     phase_ms: elapsedMs(createStartedAtMs)
   })
   await callbacks.onSessionCreated?.(created)
@@ -765,6 +767,8 @@ type CreateSessionOutcome = {
   harnessType?: string
   /** The Slack-owned experiment/cohort used to select the persisted harness. */
   harnessAssignment?: SlackbotV2HarnessAssignment
+  /** The persona persisted by the API. Null means the session has no persona. */
+  personaId?: string | null
   /** The API restarted the thread onto the requested harness. */
   harnessSwitched: boolean
 }
@@ -773,6 +777,7 @@ async function createSession(
   options: SlackbotV2Options,
   threadId: string,
   harnessType?: string,
+  personaId?: string,
   message?: SlackbotV2ApiMessage,
   restartOnHarnessConflict?: boolean,
   harnessAssignment?: SlackbotV2HarnessAssignment
@@ -784,6 +789,7 @@ async function createSession(
     options,
     threadId,
     requested,
+    personaId,
     message,
     (restartOnHarnessConflict ?? Boolean(harnessType)) ? 'restart' : undefined,
     harnessAssignment
@@ -808,6 +814,7 @@ async function createSession(
       options,
       threadId,
       existing,
+      personaId,
       message,
       undefined,
       harnessAssignment
@@ -828,6 +835,7 @@ async function postCreateSession(
   options: SlackbotV2Options,
   threadId: string,
   harnessType: string,
+  personaId?: string,
   message?: SlackbotV2ApiMessage,
   onHarnessConflict?: 'reject' | 'restart',
   harnessAssignment?: SlackbotV2HarnessAssignment
@@ -854,6 +862,7 @@ async function postCreateSession(
         : {}),
       ...(conversationName ? { slack_conversation_name: conversationName } : {})
     },
+    ...(personaId ? { persona_id: personaId } : {}),
     ...(onHarnessConflict ? { on_harness_conflict: onHarnessConflict } : {})
   }
   return fetchWithTimeout(
@@ -881,9 +890,17 @@ async function sessionOutcomeFromResponse(
       (!harnessType || harnessType === 'codex' || harnessType === 'nanocodex')
         ? { ...harnessAssignment, cohort: harnessType ?? harnessAssignment.cohort }
         : undefined
+    const personaId = isJsonObject(payload)
+      ? typeof payload.persona_id === 'string'
+        ? payload.persona_id
+        : 'persona_id' in payload
+          ? null
+          : undefined
+      : undefined
     return {
       harnessSwitched: isJsonObject(payload) && payload.harness_switched === true,
       ...(harnessType ? { harnessType } : {}),
+      ...(personaId !== undefined ? { personaId } : {}),
       ...(resolvedAssignment ? { harnessAssignment: resolvedAssignment } : {})
     }
   } catch {

@@ -617,6 +617,25 @@ describe('forwardToSessionApi overrides', () => {
     expect((create?.body as { harness_type?: string }).harness_type).toBe('claudecode')
   })
 
+  test('creates session with persona independent from harness override', async () => {
+    const { fetchFn, requests } = fakeApi()
+    await forwardToSessionApi(
+      options(fetchFn),
+      forwardInput(apiMessage('review this'), {
+        harnessType: 'claudecode',
+        personaId: 'invest'
+      })
+    )
+    const create = requests.find(request => request.url.endsWith('.000100'))
+    expect(create?.body).toEqual(
+      expect.objectContaining({
+        harness_type: 'claudecode',
+        on_harness_conflict: 'restart',
+        persona_id: 'invest'
+      })
+    )
+  })
+
   test('includes model override on the execute input line', async () => {
     const { fetchFn, requests } = fakeApi()
     await forwardToSessionApi(

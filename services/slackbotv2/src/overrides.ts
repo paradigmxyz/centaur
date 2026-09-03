@@ -5,16 +5,20 @@
  *   --bedrock                                    codex via the AWS Bedrock provider
  *   --meta                                       codex via Meta AI direct
  *   --provider <name>                            codex via a configured provider
+ *   --persona <id> (or --persona=<id>)           pick the persona independently
+ *   --<persona-id>                               pick a deployed persona directly
  *   --model <name> (or --model=<name>)           pick the model within that harness
  *   -rsn <effort> (or -rsn=<effort>)             per-turn reasoning effort (codex/nanocodex)
  *   --fable | --opus | --sonnet | --haiku        model shortcuts (imply claude-code)
  *
  * Flags are stripped from the text before it reaches the agent. The harness
  * applies at session creation — an explicit harness flag on a thread pinned to
- * another harness restarts the thread on the requested one. Harness/model/provider
- * choices are sticky at the Slack thread level: the last flag wins for later
- * turns in the same thread. `--model` accepts either a full model id
- * (claude-sonnet-4-6, gpt-5.2, ...), an amp mode (deep/fast), or a Claude alias
+ * another harness restarts the thread on the requested one. The persona chosen
+ * when the session is created is pinned for the lifetime of the thread; later
+ * persona flags are stripped but do not change it. Harness, model, and provider
+ * choices are sticky at the Slack thread level. `--model`
+ * accepts either a full model id (claude-sonnet-4-6, gpt-5.2, ...), an amp mode
+ * (deep/fast), or a Claude alias
  * (fable/opus/sonnet/haiku) which expands to the full id. Reasoning effort only
  * affects the codex-compatible harnesses and stays per-turn; other harnesses
  * ignore it. The provider rides the blocks-protocol
@@ -23,13 +27,14 @@
  */
 
 /**
- * A resolved bundle of harness knobs (harness + model/provider/reasoning), all
- * optional. Shared by the inline flag parser and per-channel defaults so both
- * speak the same vocabulary.
+ * A resolved bundle of persona and harness knobs, all optional. Shared by the
+ * inline flag parser and per-channel defaults so both speak the same model and
+ * provider vocabulary.
  */
 export type HarnessOverrides = {
   harnessType?: string
   model?: string
+  personaId?: string
   provider?: string
   reasoning?: string
 }
@@ -125,6 +130,16 @@ const PROVIDER_FLAG_PATTERN = new RegExp(
   'i'
 )
 
+const PERSONA_FLAG_PATTERN = new RegExp(
+  String.raw`(?:^|\s)--persona${MODEL_VALUE_SEPARATOR}([A-Za-z0-9._-]+)${FLAG_VALUE_BOUNDARY}`,
+  'i'
+)
+
+const BARE_PERSONA_SELECTOR_CANDIDATE_PATTERN = new RegExp(
+  String.raw`(?:^|\s)--[A-Za-z0-9._-]+${FLAG_VALUE_BOUNDARY}`,
+  'i'
+)
+
 // Single dash by design: a short per-turn knob (`-rsn high`), so it can't reuse
 // the `--`-prefixed flagPattern() helper. Value-capturing like --model.
 const REASONING_FLAG_PATTERN = new RegExp(
@@ -148,12 +163,22 @@ const REASONING_EFFORTS: Record<string, string> = {
   max: 'max'
 }
 
-export function extractMessageOverrides(text: string): MessageOverrides {
+export function extractMessageOverrides(
+  text: string,
+  personaIds: readonly string[] = []
+): MessageOverrides {
   let cleaned = text
   let harnessType: string | undefined
   let model: string | undefined
+  let personaId: string | undefined
   let provider: string | undefined
   let reasoning: string | undefined
+
+  const personaMatch = PERSONA_FLAG_PATTERN.exec(cleaned)
+  if (personaMatch) {
+    personaId = personaMatch[1]!
+    cleaned = stripMatch(cleaned, personaMatch)
+  }
 
   const modelMatch = MODEL_FLAG_PATTERN.exec(cleaned)
   if (modelMatch) {
@@ -204,13 +229,30 @@ export function extractMessageOverrides(text: string): MessageOverrides {
     cleaned = stripMatch(cleaned, match)
   }
 
+  for (const persona of personaIds) {
+    const match = flagPattern(persona).exec(cleaned)
+    if (!match) continue
+    personaId ??= persona
+    cleaned = stripMatch(cleaned, match)
+  }
+
   return {
     cleanedText: cleaned === text ? text : cleaned.trim(),
     harnessType,
     model,
+    personaId,
     provider,
     reasoning
   }
+}
+
+/**
+ * Return true when known flags have been removed and a bare --<id> remains
+ * that may name a deployed persona. This keeps persona discovery off the hot
+ * path for ordinary messages and explicit --persona selections.
+ */
+export function hasBarePersonaSelectorCandidate(text: string): boolean {
+  return BARE_PERSONA_SELECTOR_CANDIDATE_PATTERN.test(extractMessageOverrides(text).cleanedText)
 }
 
 export function validateStrategyOverrides(

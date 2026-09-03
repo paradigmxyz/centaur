@@ -234,6 +234,10 @@ impl PersonaRegistry {
         self
     }
 
+    fn ids(&self) -> Vec<String> {
+        self.personas.keys().cloned().collect()
+    }
+
     fn default_persona_id(&self) -> Option<&str> {
         self.default_persona_id.as_deref()
     }
@@ -916,7 +920,6 @@ impl SandboxBootMode {
 struct PersonaResolution {
     persona_id: Option<String>,
     context: Option<PersonaContext>,
-    defaulted: bool,
 }
 
 impl SessionRuntime {
@@ -969,6 +972,13 @@ impl SessionRuntime {
         self
     }
 
+    pub fn persona_ids(&self) -> Vec<String> {
+        self.personas
+            .as_ref()
+            .map(|personas| personas.ids())
+            .unwrap_or_default()
+    }
+
     pub async fn session_title(
         &self,
         thread_key: &ThreadKey,
@@ -993,7 +1003,6 @@ impl SessionRuntime {
         Ok(PersonaResolution {
             persona_id: selected.map(str::to_owned),
             context,
-            defaulted,
         })
     }
 
@@ -1610,8 +1619,25 @@ impl SessionRuntime {
                 }
             };
             let desired_capabilities = sandbox_capabilities_from_principal(&registered_principal);
-            let persona_resolution =
-                self.resolve_persona_for_create(persona_id, &desired_capabilities)?;
+            // A session's persona is fixed by the first successful create.
+            // Resolve the stored persona before the requested one so later
+            // persona flags cannot change or invalidate an existing thread.
+            let existing_persona_id = match self.store.get_session(thread_key).await {
+                Ok(session) => Some(session.persona_id),
+                Err(SessionStoreError::NotFound { .. }) => None,
+                Err(error) => return Err(error.into()),
+            };
+            let persona_resolution = match existing_persona_id {
+                Some(persona_id) => PersonaResolution {
+                    context: self.resolve_stored_persona(
+                        persona_id.as_deref(),
+                        harness_type,
+                        &desired_capabilities,
+                    )?,
+                    persona_id,
+                },
+                None => self.resolve_persona_for_create(persona_id, &desired_capabilities)?,
+            };
             if let Some(context) = persona_resolution.context.as_ref() {
                 add_persona_metadata(&mut session_metadata, context);
             }
@@ -1627,19 +1653,6 @@ impl SessionRuntime {
                 .await
             {
                 Ok(session) => session,
-                Err(SessionStoreError::PersonaConflict { existing, .. })
-                    if persona_id.is_none() && persona_resolution.defaulted =>
-                {
-                    self.store
-                        .create_or_get_session(
-                            thread_key,
-                            harness_type,
-                            existing.as_deref(),
-                            default_metadata(None),
-                            BTreeMap::new(),
-                        )
-                        .await?
-                }
                 Err(SessionStoreError::HarnessConflict { existing, .. })
                     if on_harness_conflict == HarnessConflictPolicy::Restart =>
                 {
@@ -1710,10 +1723,9 @@ impl SessionRuntime {
 
     /// Restart an existing session on a different harness: stop its sandbox
     /// (killing any in-flight execution), clear the harness thread state, and
-    /// flip the session row to the requested harness. Stored messages and
-    /// events are preserved for the record, but the new harness boots with no
-    /// conversational memory — callers that want continuity must re-send
-    /// context with the next turn.
+    /// flip the session row to the requested harness while preserving its
+    /// persona. Stored messages and events are preserved for the record, but
+    /// the new harness boots with no conversational memory.
     async fn restart_session_on_harness(
         &self,
         thread_key: &ThreadKey,
@@ -7367,6 +7379,8 @@ mod tests {
         )
         .unwrap();
 
+        assert_eq!(registry.ids(), vec!["eng"]);
+
         assert!(
             serde_json::to_value(registry.get("eng").unwrap())
                 .unwrap()
@@ -9114,12 +9128,124 @@ mod adoption_tests {
             .expect("list events")
     }
 
+    async fn session_metadata(store: &PgSessionStore, thread_key: &ThreadKey) -> Value {
+        sqlx::query_scalar("select metadata from sessions where thread_key = $1")
+            .bind(thread_key.as_str())
+            .fetch_one(store.pool())
+            .await
+            .expect("load session metadata")
+    }
+
     fn runtime_with(store: &PgSessionStore, backend: Arc<MockBackend>) -> SessionRuntime {
         SessionRuntime::new(
             store.clone(),
             SandboxRuntime::backend(backend, SandboxSpec::new("mock")),
             TestSessionPrincipalRegistrar,
         )
+    }
+
+    fn runtime_with_personas(store: &PgSessionStore, backend: Arc<MockBackend>) -> SessionRuntime {
+        let definitions = ["old", "eng"].map(|persona_id| PersonaDefinition {
+            id: persona_id.to_owned(),
+            source_root: "/repo/tools".to_owned(),
+            source_path: format!("/repo/tools/personas/{persona_id}"),
+            source_ref: Some("abc123".to_owned()),
+            prompt_hash: format!("sha256:{persona_id}"),
+            prompt: format!("{persona_id} persona prompt"),
+        });
+        runtime_with(store, backend).with_personas(
+            PersonaRegistry::new(definitions, None, vec!["/repo/tools".to_owned()]).unwrap(),
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn harness_restart_preserves_pinned_persona() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:persona-harness-{}", uuid::Uuid::new_v4())).unwrap();
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime = runtime_with_personas(&store, backend);
+
+        runtime
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                Some("old"),
+                Some(json!({})),
+                HarnessConflictPolicy::Reject,
+            )
+            .await
+            .expect("create original session");
+
+        let outcome = runtime
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::ClaudeCode,
+                Some("not-deployed"),
+                Some(json!({})),
+                HarnessConflictPolicy::Restart,
+            )
+            .await
+            .expect("restart session on requested harness");
+
+        assert!(outcome.harness_switched);
+        assert_eq!(outcome.session.harness_type, HarnessType::ClaudeCode);
+        assert_eq!(outcome.session.persona_id.as_deref(), Some("old"));
+        assert_eq!(
+            session_metadata(&store, &thread_key).await["persona"]["persona_id"],
+            "old"
+        );
+        let events = events(&store, &thread_key).await;
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "session.harness_switched")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn existing_session_ignores_later_persona_selection() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:persona-only-{}", uuid::Uuid::new_v4())).unwrap();
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime = runtime_with_personas(&store, backend);
+
+        runtime
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                Some("old"),
+                Some(json!({})),
+                HarnessConflictPolicy::Reject,
+            )
+            .await
+            .expect("create original session");
+
+        let outcome = runtime
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                Some("eng"),
+                Some(json!({})),
+                HarnessConflictPolicy::Reject,
+            )
+            .await
+            .expect("load session with pinned persona");
+
+        assert!(!outcome.harness_switched);
+        assert_eq!(outcome.session.harness_type, HarnessType::Codex);
+        assert_eq!(outcome.session.persona_id.as_deref(), Some("old"));
+        assert_eq!(
+            session_metadata(&store, &thread_key).await["persona"]["persona_id"],
+            "old"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
