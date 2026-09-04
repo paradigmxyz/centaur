@@ -14,6 +14,17 @@
         },
         "sentryDsn": { "type": "string" },
         "railsEnv": { "type": "string" },
+        "oktaOauth": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "issuer": { "type": "string" },
+            "tokenEndpointAuthMethod": {
+              "type": "string",
+              "enum": ["client_secret_basic", "client_secret_post"]
+            }
+          }
+        },
         "chat": {
           "type": "object",
           "properties": {

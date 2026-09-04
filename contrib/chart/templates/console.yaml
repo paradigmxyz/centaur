@@ -245,6 +245,24 @@ spec:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sCENTAUR_CONSOLE_SLACK_CLIENT_SECRET" $prefix }}
 {{- end }}
+{{- if $console.oktaOauth.enabled }}
+            # Okta OIDC console sign-in. Client credentials come from the shared
+            # infra Secret; endpoints and signing keys are discovered from issuer.
+            - name: CENTAUR_CONSOLE_OKTA_ISSUER
+              value: {{ required "console.oktaOauth.issuer is required when Okta OAuth is enabled" $console.oktaOauth.issuer | quote }}
+            - name: CENTAUR_CONSOLE_OKTA_TOKEN_ENDPOINT_AUTH_METHOD
+              value: {{ $console.oktaOauth.tokenEndpointAuthMethod | quote }}
+            - name: CENTAUR_CONSOLE_OKTA_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sCENTAUR_CONSOLE_OKTA_CLIENT_ID" $prefix }}
+            - name: CENTAUR_CONSOLE_OKTA_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sCENTAUR_CONSOLE_OKTA_CLIENT_SECRET" $prefix }}
+{{- end }}
             - name: RAILS_ENV
               value: {{ $console.railsEnv | quote }}
 {{- with $console.slackDmSync.oauthAppSlug }}
