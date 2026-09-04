@@ -112,6 +112,14 @@ console:
   # service DNS names that differ from the chart's short in-cluster URL;
   # publicUrl and the short service host are already included.
   allowedHosts: []
+  # Additional hosts whose requests get the sandbox entitlements credential
+  # injected by the proxy. The in-cluster console URL is always included.
+  #
+  # Needed when sandboxes cannot reach the console's in-cluster address: they
+  # must then use another host, and without a matching injection rule that
+  # request arrives with no credential and is refused. Set this to whatever
+  # address the sandboxes actually use.
+  entitlementsHosts: []
   # Optional Sentry DSN for Console web requests and background jobs. Empty by
   # default, so the Sentry SDK remains disabled unless explicitly configured.
   sentryDsn: ""

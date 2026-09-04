@@ -55,8 +55,35 @@ class Proxy < ApplicationRecord
     sync_config_snapshot.fetch(:config_hash)
   end
 
+  # Hosts whose requests get the sandbox entitlements credential injected by
+  # the proxy.
+  #
+  # `CENTAUR_CONSOLE_URL` is the Console's own in-cluster address, and it is the
+  # only host here by default. That is a problem for any deployment whose
+  # sandboxes cannot reach that address: reaching the Console then needs a host
+  # outside the blocked range, but getting a credential needs the host to equal
+  # the in-cluster one, and the two are mutually exclusive. A sandbox that
+  # fronts the Console on another address gets past the network block and then
+  # 403s, because no injection rule matches the host it actually used.
+  #
+  # `CENTAUR_CONSOLE_ENTITLEMENTS_HOSTS` (comma-separated) names additional
+  # hosts for the same credential. It adds to the default rather than replacing
+  # it, so the in-cluster address keeps working.
   def self.sandbox_entitlements_hosts
-    [ Principal.host_from_url(ENV["CENTAUR_CONSOLE_URL"]) ]
+    Principal.normalize_hosts(
+      [ Principal.host_from_url(ENV["CENTAUR_CONSOLE_URL"]) ] + extra_entitlements_hosts
+    )
+  end
+
+  def self.extra_entitlements_hosts
+    ENV["CENTAUR_CONSOLE_ENTITLEMENTS_HOSTS"].to_s.split(",").filter_map do |entry|
+      entry = entry.strip
+      next if entry.empty?
+
+      # Accept either a bare host or a URL, so the value can be copied from
+      # whatever the deployment already sets CENTAUR_CONSOLE_URL to.
+      entry.include?("//") ? Principal.host_from_url(entry) : entry
+    end
   end
 
   private
