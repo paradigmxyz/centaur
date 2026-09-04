@@ -263,6 +263,16 @@ mod tests {
     /// Serialize the database-backed tests in this module.
     static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+    #[test]
+    fn vacant_sandboxes_do_not_consume_running_slots() {
+        // Warm-pool replenishment is gated on the same count as admission, so
+        // a pod-less CR counted here too and blocked the pool from refilling.
+        assert!(!status_consumes_running_slot(&SandboxStatus::Vacant));
+        assert!(status_consumes_running_slot(&SandboxStatus::Created));
+        assert!(status_consumes_running_slot(&SandboxStatus::Running));
+        assert!(!status_consumes_running_slot(&SandboxStatus::Suspended));
+    }
+
     #[tokio::test]
     async fn replenisher_prunes_missing_ready_rows_before_counting() {
         let _serial = TEST_LOCK.lock().await;

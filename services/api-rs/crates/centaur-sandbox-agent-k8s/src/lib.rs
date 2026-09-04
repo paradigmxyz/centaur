@@ -760,7 +760,11 @@ fn sandbox_status_from_pod(replicas: i32, pod: Option<&Pod>) -> SandboxStatus {
     // The backing Pod Ready condition is the attach boundary; phase alone can be Running while
     // the sandbox is still not ready for I/O.
     let Some(pod) = pod else {
-        return SandboxStatus::Created;
+        // The CR asks for a replica and there is no Pod behind it. Reporting
+        // this as Created made it indistinguishable from a sandbox still
+        // coming up, so it consumed a running slot that nothing could ever
+        // return.
+        return SandboxStatus::Vacant;
     };
     if pod.metadata.deletion_timestamp.is_some() {
         return SandboxStatus::Created;
@@ -1837,7 +1841,10 @@ mod tests {
             sandbox_status_from_pod(1, Some(&unready_pod)),
             SandboxStatus::Created
         );
-        assert_eq!(sandbox_status_from_pod(1, None), SandboxStatus::Created);
+        // A CR asking for a replica with no Pod behind it is vacant, not
+        // starting. Reporting Created here is what let a pod-less CR hold a
+        // running slot nothing could return.
+        assert_eq!(sandbox_status_from_pod(1, None), SandboxStatus::Vacant);
 
         let failed_pod = pod_with_phase_and_ready("Failed", false);
         assert_eq!(

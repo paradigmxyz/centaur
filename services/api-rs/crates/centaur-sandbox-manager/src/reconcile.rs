@@ -28,7 +28,9 @@ impl ReconcilePlan {
             DesiredSandboxState::Running(_) => match &observed.status {
                 SandboxStatus::Running | SandboxStatus::Created => ReconcileAction::None,
                 SandboxStatus::Suspended => ReconcileAction::Resume,
-                SandboxStatus::Stopped | SandboxStatus::Gone => {
+                // Vacant is drift, not a state to wait out: the record asks
+                // for a process and the backend has none.
+                SandboxStatus::Stopped | SandboxStatus::Gone | SandboxStatus::Vacant => {
                     ReconcileAction::ReportDrift(DriftReason::MissingWhileRunning)
                 }
                 SandboxStatus::Unknown(value) => {
@@ -37,7 +39,11 @@ impl ReconcilePlan {
             },
             DesiredSandboxState::Suspended(_) => match &observed.status {
                 SandboxStatus::Suspended => ReconcileAction::None,
-                SandboxStatus::Running | SandboxStatus::Created => ReconcileAction::Pause,
+                // Pausing a vacant sandbox is the repair, not a no-op: the
+                // pod is already gone but the record still requests one.
+                SandboxStatus::Running | SandboxStatus::Created | SandboxStatus::Vacant => {
+                    ReconcileAction::Pause
+                }
                 SandboxStatus::Stopped | SandboxStatus::Gone => {
                     ReconcileAction::ReportDrift(DriftReason::MissingWhileSuspended)
                 }
@@ -47,9 +53,10 @@ impl ReconcilePlan {
             },
             DesiredSandboxState::Stopped => match &observed.status {
                 SandboxStatus::Stopped | SandboxStatus::Gone => ReconcileAction::None,
-                SandboxStatus::Created | SandboxStatus::Running | SandboxStatus::Suspended => {
-                    ReconcileAction::Stop
-                }
+                SandboxStatus::Created
+                | SandboxStatus::Running
+                | SandboxStatus::Suspended
+                | SandboxStatus::Vacant => ReconcileAction::Stop,
                 SandboxStatus::Unknown(value) => {
                     ReconcileAction::ReportDrift(DriftReason::UnknownObservedState(value.clone()))
                 }

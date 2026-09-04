@@ -741,7 +741,15 @@ impl SandboxCapacityController {
     ) -> Result<CapacityCandidateAction, SessionRuntimeError> {
         let id = SandboxId::new(candidate.sandbox_id.as_str());
         match self.manager.status(&id).await {
-            Ok(SandboxStatus::Running | SandboxStatus::Created | SandboxStatus::Unknown(_)) => {}
+            // Vacant falls through to the pause below: the pod is already
+            // gone, but the record still requests one, so pausing is what
+            // makes the CR agree with reality.
+            Ok(
+                SandboxStatus::Running
+                | SandboxStatus::Created
+                | SandboxStatus::Vacant
+                | SandboxStatus::Unknown(_),
+            ) => {}
             Ok(SandboxStatus::Suspended) => {
                 return Ok(CapacityCandidateAction::Skipped);
             }
@@ -5559,7 +5567,7 @@ async fn record_idle_pause(
         Ok(SandboxStatus::Suspended | SandboxStatus::Stopped | SandboxStatus::Gone) => {
             return Ok(());
         }
-        Ok(SandboxStatus::Running | SandboxStatus::Created) => {}
+        Ok(SandboxStatus::Running | SandboxStatus::Created | SandboxStatus::Vacant) => {}
         Ok(SandboxStatus::Unknown(_)) => return Ok(()),
         Err(SandboxError::NotFound(_)) => return Ok(()),
         Err(error) => {
@@ -6001,7 +6009,9 @@ enum ExistingSandboxAction {
 fn existing_sandbox_action(status: &SandboxStatus) -> ExistingSandboxAction {
     match status {
         SandboxStatus::Running => ExistingSandboxAction::Reuse,
-        SandboxStatus::Created | SandboxStatus::Suspended => ExistingSandboxAction::ResumeOrReplace,
+        SandboxStatus::Created | SandboxStatus::Suspended | SandboxStatus::Vacant => {
+            ExistingSandboxAction::ResumeOrReplace
+        }
         SandboxStatus::Stopped | SandboxStatus::Gone | SandboxStatus::Unknown(_) => {
             ExistingSandboxAction::Replace
         }
@@ -7196,6 +7206,30 @@ mod tests {
     use centaur_session_core::SessionStatus;
     use serde_json::json;
     use time::OffsetDateTime;
+
+    #[test]
+    fn vacant_sandboxes_do_not_consume_running_slots() {
+        // The capacity bug in one assertion: a CR asking for a replica with
+        // no pod behind it reported Created, so it held a running slot that
+        // no reclamation path could ever return, and admission refused every
+        // later sandbox until someone deleted the CR by hand.
+        assert!(!status_consumes_running_slot(&SandboxStatus::Vacant));
+
+        assert!(status_consumes_running_slot(&SandboxStatus::Created));
+        assert!(status_consumes_running_slot(&SandboxStatus::Running));
+        assert!(!status_consumes_running_slot(&SandboxStatus::Suspended));
+        assert!(!status_consumes_running_slot(&SandboxStatus::Stopped));
+        assert!(!status_consumes_running_slot(&SandboxStatus::Gone));
+    }
+
+    #[test]
+    fn vacant_sandbox_resumes_rather_than_replaces() {
+        // The state volume outlives the pod, so the workspace is still there.
+        assert!(matches!(
+            existing_sandbox_action(&SandboxStatus::Vacant),
+            ExistingSandboxAction::ResumeOrReplace
+        ));
+    }
 
     #[test]
     fn sandbox_repo_cache_label_controls_access() {
