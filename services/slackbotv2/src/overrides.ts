@@ -1,3 +1,5 @@
+import { escapeRegExp } from './utils'
+
 /**
  * Inline message directives, restored from the v1 slackbot:
  *   --claude | --claude-code | --amp | --codex | --nanocodex
@@ -365,10 +367,6 @@ function valueFlagPattern(flag: string, valuePattern: string): RegExp {
     String.raw`(?:^|\s)${escapeRegExp(flag)}${FLAG_VALUE_SEPARATOR}(${valuePattern})${FLAG_VALUE_BOUNDARY}`,
     'i'
   )
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 function stripMatch(text: string, match: RegExpExecArray): string {
