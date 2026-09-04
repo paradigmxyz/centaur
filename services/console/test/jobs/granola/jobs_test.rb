@@ -60,5 +60,23 @@ module Granola
         end
       end
     end
+
+    test "sync job retries transient Granola API errors" do
+      app = create_granola_app
+      credential = create_credential(app: app)
+      sync = Object.new
+      sync.define_singleton_method(:call) do
+        raise SyncCredential::TransientGranolaApiError, "Granola MCP returned HTTP 503"
+      end
+      sync_factory = ->(_credential) { sync }
+
+      Granola::SyncCredential.stub(:syncable?, true) do
+        Granola::SyncCredential.stub(:new, sync_factory) do
+          assert_enqueued_with(job: SyncCredentialJob, args: [ credential.id ]) do
+            SyncCredentialJob.perform_now(credential.id)
+          end
+        end
+      end
+    end
   end
 end
