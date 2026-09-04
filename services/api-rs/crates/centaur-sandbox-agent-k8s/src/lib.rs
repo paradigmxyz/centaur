@@ -418,6 +418,33 @@ impl AgentSandboxBackend {
         }
     }
 
+    async fn wait_until_pod_gone(&self, id: &SandboxId) -> SandboxResult<()> {
+        let deadline = Instant::now() + self.config.ready_timeout;
+        loop {
+            match self.get_pod(id).await? {
+                None => return Ok(()),
+                Some(_) if Instant::now() >= deadline => {
+                    return Err(SandboxError::NotReady(format!(
+                        "sandbox {} pod did not terminate before timeout",
+                        id.as_str()
+                    )));
+                }
+                Some(_) => sleep(Duration::from_millis(500)).await,
+            }
+        }
+    }
+
+    async fn quiesce_sandbox(&self, id: &SandboxId) -> SandboxResult<()> {
+        match self
+            .patch_sandbox_merge(id, json!({ "spec": { "replicas": 0 } }))
+            .await
+        {
+            Ok(()) => self.wait_until_pod_gone(id).await,
+            Err(SandboxError::NotFound(_)) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     async fn attach_io(&self, id: &SandboxId) -> SandboxResult<SandboxIo> {
         if self.status(id).await? != SandboxStatus::Running {
             return Err(SandboxError::NotReady(format!(
@@ -591,25 +618,26 @@ impl SandboxBackend for AgentSandboxBackend {
     }
 
     async fn stop(&self, id: &SandboxId) -> SandboxResult<()> {
-        let proxy_result = self.delete_iron_proxy_resources(id).await;
+        // TERM/preStop cleanup may still need the per-sandbox egress path.
+        let quiesce_result = self.quiesce_sandbox(id).await;
         let files_result = self.delete_sandbox_files_config_map(id).await;
-        match self
+        let sandbox_result = match self
             .sandboxes()
             .delete(id.as_str(), &DeleteParams::default())
             .await
         {
-            Ok(_) => {
-                proxy_result?;
-                files_result?;
-                self.delete_state_pvc(id).await
-            }
-            Err(err) if is_not_found(&err) => {
-                proxy_result?;
-                files_result?;
-                self.delete_state_pvc(id).await
-            }
+            Ok(_) => Ok(()),
+            Err(err) if is_not_found(&err) => Ok(()),
             Err(err) => Err(map_kube_error("delete sandbox", err)),
-        }
+        };
+        let proxy_result = self.delete_iron_proxy_resources(id).await;
+        let state_result = self.delete_state_pvc(id).await;
+
+        quiesce_result?;
+        files_result?;
+        sandbox_result?;
+        proxy_result?;
+        state_result
     }
 
     async fn assign_iron_control_proxy_principal(
@@ -1305,11 +1333,17 @@ fn map_kube_error(operation: &str, err: Error) -> SandboxError {
 
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
+    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::AtomicUsize;
+
     use centaur_sandbox_core::{
         RepoCacheAccess, ResourceRequirements, SandboxCapabilities, SandboxSpec,
     };
+    use http::{Request, Response};
     use k8s_openapi::api::core::v1::{PodCondition, PodStatus};
     use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
+    use kube::client::Body;
 
     use super::*;
 
@@ -1914,6 +1948,137 @@ mod tests {
             state_pvc_name(&SandboxId::new("asbx-test")),
             "state-asbx-test"
         );
+    }
+
+    #[tokio::test]
+    async fn stop_keeps_proxy_egress_until_the_sandbox_pod_is_gone() {
+        let id = SandboxId::new("asbx-test");
+        let namespace = "centaur";
+        let sandbox_path = format!(
+            "/apis/agents.x-k8s.io/v1alpha1/namespaces/{namespace}/sandboxes/{}",
+            id.as_str()
+        );
+        let pod_path = format!("/api/v1/namespaces/{namespace}/pods/{}", id.as_str());
+        let sandbox = build_agent_sandbox(
+            &id,
+            &SandboxSpec::new("centaur-agent:test"),
+            &AgentSandboxConfig::new(namespace, test_iron_control_settings()),
+        )
+        .unwrap();
+        let sandbox = serde_json::to_value(sandbox).unwrap();
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let pod_reads = Arc::new(AtomicUsize::new(0));
+        let service = tower::service_fn({
+            let requests = Arc::clone(&requests);
+            let pod_reads = Arc::clone(&pod_reads);
+            let sandbox_path = sandbox_path.clone();
+            let pod_path = pod_path.clone();
+            move |request: Request<Body>| {
+                let requests = Arc::clone(&requests);
+                let pod_reads = Arc::clone(&pod_reads);
+                let sandbox = sandbox.clone();
+                let sandbox_path = sandbox_path.clone();
+                let pod_path = pod_path.clone();
+                async move {
+                    let method = request.method().as_str().to_owned();
+                    let path = request.uri().path().to_owned();
+                    requests.lock().unwrap().push(format!("{method} {path}"));
+                    let response = match (method.as_str(), path.as_str()) {
+                        ("PATCH", path) if path == sandbox_path => kube_response(200, sandbox),
+                        ("GET", path) if path == pod_path => {
+                            if pod_reads.fetch_add(1, Ordering::SeqCst) == 0 {
+                                kube_response(
+                                    200,
+                                    json!({
+                                        "apiVersion": "v1",
+                                        "kind": "Pod",
+                                        "metadata": { "name": "asbx-test", "namespace": namespace },
+                                        "status": { "phase": "Running" },
+                                    }),
+                                )
+                            } else {
+                                kube_not_found("pods", "asbx-test")
+                            }
+                        }
+                        ("GET", path) if path == format!("/api/v1/namespaces/{namespace}/pods") => {
+                            kube_response(
+                                200,
+                                json!({
+                                    "apiVersion": "v1",
+                                    "kind": "PodList",
+                                    "metadata": { "resourceVersion": "1" },
+                                    "items": [],
+                                }),
+                            )
+                        }
+                        _ => kube_response(
+                            200,
+                            json!({
+                                "apiVersion": "v1",
+                                "kind": "Status",
+                                "status": "Success",
+                                "code": 200,
+                            }),
+                        ),
+                    };
+                    Ok::<_, Infallible>(response)
+                }
+            }
+        });
+        let backend = AgentSandboxBackend::new(
+            Client::new(service, namespace),
+            AgentSandboxConfig::new(namespace, test_iron_control_settings()),
+        );
+
+        backend.stop(&id).await.unwrap();
+
+        let requests = requests.lock().unwrap();
+        let pause = requests
+            .iter()
+            .position(|request| request == &format!("PATCH {sandbox_path}"))
+            .expect("stop must scale the sandbox down before cleanup");
+        let last_pod_read = requests
+            .iter()
+            .rposition(|request| request == &format!("GET {pod_path}"))
+            .expect("stop must wait for the sandbox pod to disappear");
+        let sandbox_delete = requests
+            .iter()
+            .position(|request| request == &format!("DELETE {sandbox_path}"))
+            .expect("stop must delete the sandbox CR");
+        let proxy_delete = requests
+            .iter()
+            .position(|request| {
+                request
+                    == &format!("DELETE /api/v1/namespaces/{namespace}/services/asbx-test-proxy")
+            })
+            .expect("stop must delete the proxy resources");
+
+        assert!(pause < last_pod_read);
+        assert!(last_pod_read < sandbox_delete);
+        assert!(sandbox_delete < proxy_delete);
+    }
+
+    fn kube_response(status: u16, value: Value) -> Response<Body> {
+        Response::builder()
+            .status(status)
+            .header("content-type", "application/json")
+            .body(Body::from(value.to_string().into_bytes()))
+            .unwrap()
+    }
+
+    fn kube_not_found(kind: &str, name: &str) -> Response<Body> {
+        kube_response(
+            404,
+            json!({
+                "apiVersion": "v1",
+                "kind": "Status",
+                "status": "Failure",
+                "message": format!("{kind} {name} not found"),
+                "reason": "NotFound",
+                "details": { "name": name, "kind": kind },
+                "code": 404,
+            }),
+        )
     }
 
     fn pod_with_phase_and_ready(phase: &str, ready: bool) -> Pod {
