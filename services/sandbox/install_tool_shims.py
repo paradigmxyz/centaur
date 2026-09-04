@@ -156,11 +156,13 @@ def _copy_published_tools(tool_dir: Path, published: Path) -> None:
         if tool_name in blocklist:
             continue
         if tool_name in existing:
+            previous = existing[tool_name]
             print(
-                f"skipping duplicate tool {tool_name}: {package_dir} conflicts with {existing[tool_name]}",
+                f"shadowing tool {tool_name}: {package_dir} replaces {previous}",
                 file=sys.stderr,
             )
-            continue
+            if previous.exists() or previous.is_symlink():
+                _remove_path(previous)
         relative_package_dir = package_dir.relative_to(published)
         target = tool_dir / relative_package_dir
         if target.exists() or target.is_symlink():
