@@ -234,10 +234,6 @@ impl PersonaRegistry {
         self
     }
 
-    fn ids(&self) -> Vec<String> {
-        self.personas.keys().cloned().collect()
-    }
-
     fn default_persona_id(&self) -> Option<&str> {
         self.default_persona_id.as_deref()
     }
@@ -970,13 +966,6 @@ impl SessionRuntime {
     pub fn with_personas(mut self, personas: PersonaRegistry) -> Self {
         self.personas = Some(Arc::new(personas));
         self
-    }
-
-    pub fn persona_ids(&self) -> Vec<String> {
-        self.personas
-            .as_ref()
-            .map(|personas| personas.ids())
-            .unwrap_or_default()
     }
 
     pub async fn session_title(
@@ -7378,8 +7367,6 @@ mod tests {
             vec!["/repo/tools".to_owned()],
         )
         .unwrap();
-
-        assert_eq!(registry.ids(), vec!["eng"]);
 
         assert!(
             serde_json::to_value(registry.get("eng").unwrap())

@@ -94,8 +94,8 @@ type OpenAiMessageOverridesStrategyOutput = {
 }
 
 export function createFlagMessageOverridesStrategy(): MessageOverridesStrategy {
-  return async ({ text, personaIds = [] }) => {
-    const parsed = extractMessageOverrides(text, personaIds)
+  return async ({ text }) => {
+    const parsed = extractMessageOverrides(text)
     const { cleanedText, ...overrides } = parsed
     return { cleanedText, overrides }
   }
@@ -109,12 +109,12 @@ export function createOpenAiMessageOverridesStrategy(
   const maxOutputTokens = options.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
   const fetchFn = options.fetch ?? fetch
 
-  return async ({ text, personaIds = [] }) => {
+  return async ({ text }) => {
     // Explicit flags are deterministic user commands, even when the deployment
     // enables the LLM strategy for natural-language model requests. Model flags
     // bypass the strategy entirely. Persona flags are stripped and retained
     // locally before the remaining text is classified below.
-    const { cleanedText, ...explicitOverrides } = extractMessageOverrides(text, personaIds)
+    const { cleanedText, ...explicitOverrides } = extractMessageOverrides(text)
     const { personaId, ...explicitModelOverrides } = explicitOverrides
     if (Object.values(explicitModelOverrides).some(value => value !== undefined)) {
       return { cleanedText, overrides: explicitOverrides }

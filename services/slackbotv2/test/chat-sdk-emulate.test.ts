@@ -652,7 +652,7 @@ describe('slackbotv2', () => {
 
     const parent = await postUserMessage('Thread default context.')
     const firstMention = await postUserMessage(
-      `<@${BOT_USER_ID}> --invest --claude --model=fable\n\nfirst pass`,
+      `<@${BOT_USER_ID}> --persona=invest --claude --model=fable\n\nfirst pass`,
       parent.ts
     )
     const firstWaits: Promise<unknown>[] = []
@@ -667,7 +667,7 @@ describe('slackbotv2', () => {
           team: TEAM_ID,
           ts: firstMention.ts,
           thread_ts: parent.ts,
-          text: `<@${BOT_USER_ID}> --invest --claude --model=fable\n\nfirst pass`
+          text: `<@${BOT_USER_ID}> --persona=invest --claude --model=fable\n\nfirst pass`
         }
       }),
       {},
@@ -722,7 +722,7 @@ describe('slackbotv2', () => {
     expect(secondInput.model).toBe('claude-fable-5')
     expect(JSON.stringify(firstInput)).not.toContain('--claude')
     expect(JSON.stringify(firstInput)).not.toContain('--model')
-    expect(JSON.stringify(firstInput)).not.toContain('--invest')
+    expect(JSON.stringify(firstInput)).not.toContain('--persona=invest')
     expect(JSON.stringify(firstInput)).toContain('first pass')
     expect(JSON.stringify(secondInput)).toContain('continue without flags')
 
@@ -775,11 +775,11 @@ describe('slackbotv2', () => {
 
     await runMention(
       'Ev-slackbotv2-persona-reconcile-first',
-      '--claude --persona eng first pass'
+      '--claude --persona=eng first pass'
     )
     await runMention(
       'Ev-slackbotv2-persona-reconcile-second',
-      '--persona eng continue with a later selector'
+      '--persona=eng continue with a later selector'
     )
 
     expect(codexApi.creates.map(create => create.body.persona_id)).toEqual(['eng', 'old'])
@@ -5568,7 +5568,6 @@ function createProductionDefaultTestBot(
     apiUrl: codexApi.url,
     botToken: BOT_TOKEN,
     botUserId: BOT_USER_ID,
-    personaIds: async () => ['eng', 'invest'],
     signingSecret: SIGNING_SECRET,
     slackApiUrl,
     state: createMemoryState(),

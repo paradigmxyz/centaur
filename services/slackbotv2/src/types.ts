@@ -182,8 +182,6 @@ export type SlackbotV2Options = {
   harnessDefaultReasoning?: Record<string, string>
   /** Strategy for resolving message-level harness/model/provider/reasoning overrides. */
   messageOverridesStrategy?: MessageOverridesStrategy
-  /** Resolve the persona ids currently deployed for deterministic --<persona-id> flags. */
-  personaIds?: () => Promise<readonly string[]>
   /**
    * Backoff delays between in-process retries of a Slack handoff after a
    * retryable session API failure. Slack's own webhook redelivery cannot
@@ -223,10 +221,7 @@ export type SlackbotV2Options = {
   mapper?: CodexAppServerToChatStreamOptions
 }
 
-export type MessageOverridesStrategyInput = {
-  personaIds?: readonly string[]
-  text: string
-}
+export type MessageOverridesStrategyInput = { text: string }
 
 export type MessageOverridesStrategyResult = {
   cleanedText?: string
@@ -305,7 +300,7 @@ export type ForwardSessionInput = {
    * default. Metadata only — never forwarded to the harness (that is `model`).
    */
   metadataModel?: string
-  /** Effective persona selected by sticky thread flags (--persona/--<persona-id>). */
+  /** Effective persona selected by a sticky --persona=<id> flag. */
   personaId?: string
   /** Effective model provider selected by sticky thread flags (--bedrock); codex only. */
   provider?: string

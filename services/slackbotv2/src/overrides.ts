@@ -6,7 +6,6 @@
  *   --meta                                       codex via Meta AI direct
  *   --provider <name>                            codex via a configured provider
  *   --persona <id> (or --persona=<id>)           pick the persona independently
- *   --<persona-id>                               pick a deployed persona directly
  *   --model <name> (or --model=<name>)           pick the model within that harness
  *   -rsn <effort> (or -rsn=<effort>)             per-turn reasoning effort (codex/nanocodex)
  *   --fable | --opus | --sonnet | --haiku        model shortcuts (imply claude-code)
@@ -117,35 +116,18 @@ const STRATEGY_MODEL_HARNESSES: Record<string, string> = {
 
 // Values are one horizontal-whitespace-delimited token; a newline after the
 // value starts the user's prompt, not part of the model/reasoning value.
-const MODEL_VALUE_SEPARATOR = String.raw`(?:[^\S\r\n]*=[^\S\r\n]*|[^\S\r\n]+)`
+const FLAG_VALUE_SEPARATOR = String.raw`(?:[^\S\r\n]*=[^\S\r\n]*|[^\S\r\n]+)`
 const FLAG_VALUE_BOUNDARY = String.raw`(?=[^\S\r\n]|\r?\n|\r|<br\s*/?>|$)`
 
-const MODEL_FLAG_PATTERN = new RegExp(
-  String.raw`(?:^|\s)--model${MODEL_VALUE_SEPARATOR}([A-Za-z0-9._/-]+)${FLAG_VALUE_BOUNDARY}`,
-  'i'
+const MODEL_FLAG_PATTERN = valueFlagPattern('--model', String.raw`[A-Za-z0-9._/-]+`)
+const PROVIDER_FLAG_PATTERN = valueFlagPattern(
+  '--provider',
+  String.raw`[A-Za-z][A-Za-z0-9_-]*`
 )
+const PERSONA_FLAG_PATTERN = valueFlagPattern('--persona', String.raw`[A-Za-z0-9._-]+`)
 
-const PROVIDER_FLAG_PATTERN = new RegExp(
-  String.raw`(?:^|\s)--provider${MODEL_VALUE_SEPARATOR}([A-Za-z][A-Za-z0-9_-]*)${FLAG_VALUE_BOUNDARY}`,
-  'i'
-)
-
-const PERSONA_FLAG_PATTERN = new RegExp(
-  String.raw`(?:^|\s)--persona${MODEL_VALUE_SEPARATOR}([A-Za-z0-9._-]+)${FLAG_VALUE_BOUNDARY}`,
-  'i'
-)
-
-const BARE_PERSONA_SELECTOR_CANDIDATE_PATTERN = new RegExp(
-  String.raw`(?:^|\s)--[A-Za-z0-9._-]+${FLAG_VALUE_BOUNDARY}`,
-  'i'
-)
-
-// Single dash by design: a short per-turn knob (`-rsn high`), so it can't reuse
-// the `--`-prefixed flagPattern() helper. Value-capturing like --model.
-const REASONING_FLAG_PATTERN = new RegExp(
-  String.raw`(?:^|\s)-rsn${MODEL_VALUE_SEPARATOR}([A-Za-z-]+)${FLAG_VALUE_BOUNDARY}`,
-  'i'
-)
+// Single dash by design: a short per-turn knob (`-rsn high`).
+const REASONING_FLAG_PATTERN = valueFlagPattern('-rsn', String.raw`[A-Za-z-]+`)
 
 // Codex reasoning efforts (turn/start `effort`), plus convenience aliases.
 const REASONING_EFFORTS: Record<string, string> = {
@@ -163,10 +145,7 @@ const REASONING_EFFORTS: Record<string, string> = {
   max: 'max'
 }
 
-export function extractMessageOverrides(
-  text: string,
-  personaIds: readonly string[] = []
-): MessageOverrides {
+export function extractMessageOverrides(text: string): MessageOverrides {
   let cleaned = text
   let harnessType: string | undefined
   let model: string | undefined
@@ -229,13 +208,6 @@ export function extractMessageOverrides(
     cleaned = stripMatch(cleaned, match)
   }
 
-  for (const persona of personaIds) {
-    const match = flagPattern(persona).exec(cleaned)
-    if (!match) continue
-    personaId ??= persona
-    cleaned = stripMatch(cleaned, match)
-  }
-
   return {
     cleanedText: cleaned === text ? text : cleaned.trim(),
     harnessType,
@@ -244,15 +216,6 @@ export function extractMessageOverrides(
     provider,
     reasoning
   }
-}
-
-/**
- * Return true when known flags have been removed and a bare --<id> remains
- * that may name a deployed persona. This keeps persona discovery off the hot
- * path for ordinary messages and explicit --persona selections.
- */
-export function hasBarePersonaSelectorCandidate(text: string): boolean {
-  return BARE_PERSONA_SELECTOR_CANDIDATE_PATTERN.test(extractMessageOverrides(text).cleanedText)
 }
 
 export function validateStrategyOverrides(
@@ -385,7 +348,18 @@ function customProviderDefaultModel(provider: string): string | undefined {
 }
 
 function flagPattern(flag: string): RegExp {
-  return new RegExp(`(?:^|\\s)--${flag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=\\s|$)`, 'i')
+  return new RegExp(`(?:^|\\s)--${escapeRegExp(flag)}(?=\\s|$)`, 'i')
+}
+
+function valueFlagPattern(flag: string, valuePattern: string): RegExp {
+  return new RegExp(
+    String.raw`(?:^|\s)${escapeRegExp(flag)}${FLAG_VALUE_SEPARATOR}(${valuePattern})${FLAG_VALUE_BOUNDARY}`,
+    'i'
+  )
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 function stripMatch(text: string, match: RegExpExecArray): string {

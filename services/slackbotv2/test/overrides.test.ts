@@ -44,15 +44,16 @@ describe('extractMessageOverrides', () => {
   })
 
   test('parses persona flags independently from harness and model', () => {
-    expect(
-      extractMessageOverrides('--invest --claude --model=fable review this', ['invest'])
-    ).toEqual({
+    expect(extractMessageOverrides('--persona=invest --claude --model=fable review this')).toEqual({
       cleanedText: 'review this',
       harnessType: 'claudecode',
       model: 'claude-fable-5',
       personaId: 'invest',
       reasoning: undefined
     })
+    expect(extractMessageOverrides('--persona=legal --sonnet review this').personaId).toBe(
+      'legal'
+    )
     expect(extractMessageOverrides('--persona eng --codex debug this')).toEqual({
       cleanedText: 'debug this',
       harnessType: 'codex',
@@ -60,12 +61,9 @@ describe('extractMessageOverrides', () => {
       personaId: 'eng',
       reasoning: undefined
     })
-    expect(extractMessageOverrides('--persona=legal --sonnet review this').personaId).toBe(
-      'legal'
-    )
   })
 
-  test('does not hard-code bare persona aliases', () => {
+  test('does not recognize bare persona aliases', () => {
     expect(extractMessageOverrides('--invest review this')).toEqual({
       cleanedText: '--invest review this',
       harnessType: undefined,
@@ -531,36 +529,6 @@ describe('messageOverridesForText strategy invocation', () => {
     })
   })
 
-  test('loads deployed personas only for unresolved bare selectors', async () => {
-    let requestCount = 0
-    const options = slackOptions({
-      personaIds: async () => {
-        requestCount += 1
-        return ['invest']
-      }
-    })
-
-    await expect(messageOverridesForText(options, 'review this', trace)).resolves.toEqual({
-      cleanedText: 'review this',
-      overrides: expect.any(Object)
-    })
-    await expect(
-      messageOverridesForText(options, '--persona eng review this', trace)
-    ).resolves.toEqual({
-      cleanedText: 'review this',
-      overrides: expect.objectContaining({ personaId: 'eng' })
-    })
-    expect(requestCount).toBe(0)
-
-    await expect(
-      messageOverridesForText(options, '--invest review this', trace)
-    ).resolves.toEqual({
-      cleanedText: 'review this',
-      overrides: expect.objectContaining({ personaId: 'invest' })
-    })
-    expect(requestCount).toBe(1)
-  })
-
   test('uses the configured strategy instead of the legacy flag parser', async () => {
     await expect(
       messageOverridesForText(
@@ -593,10 +561,9 @@ describe('messageOverridesForText strategy invocation', () => {
         slackOptions({
           messageOverridesStrategy: async () => {
             throw new Error('selector failed')
-          },
-          personaIds: async () => ['invest']
+          }
         }),
-        '--invest review this',
+        '--persona=invest review this',
         trace
       )
     ).resolves.toEqual({
@@ -684,7 +651,7 @@ describe('messageOverridesForText strategy invocation', () => {
     })
 
     await expect(
-      strategy({ personaIds: ['invest'], text: '--invest investigate this company' })
+      strategy({ text: '--persona=invest investigate this company' })
     ).resolves.toEqual({
       cleanedText: 'investigate this company',
       overrides: { personaId: 'invest' }
@@ -718,7 +685,7 @@ describe('messageOverridesForText strategy invocation', () => {
     })
 
     await expect(
-      strategy({ personaIds: ['invest'], text: '--invest use sol for this' })
+      strategy({ text: '--persona=invest use sol for this' })
     ).resolves.toEqual({
       cleanedText: 'use sol for this',
       overrides: {

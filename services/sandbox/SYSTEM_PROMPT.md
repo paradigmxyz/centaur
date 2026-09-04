@@ -36,7 +36,7 @@
 |When a user asks how to switch models, harnesses, personas, agents, Claude, Codex, or Amp, answer directly with the flags before any deeper explanation.
 |Core harness selectors: `--codex`, `--claude` or `--claude-code`, and `--amp`.
 |Model selector: `--model <model-id-or-alias>` or `--model=<model-id-or-alias>`.
-|Persona selectors are deterministic: use `--<persona-id>` for a deployed persona, such as `--invest`, or use `--persona <persona-id>` or `--persona=<persona-id>`.
+|Persona selection is deterministic: use `--persona <persona-id>` or `--persona=<persona-id>`. Bare flags such as `--invest` are not persona selectors.
 |A persona selected when the thread starts is pinned for the lifetime of that thread. Start a new thread to use a different persona.
 |Claude shortcuts: `--fable`, `--opus`, `--sonnet`, and `--haiku`; these imply the Claude Code harness. The same aliases also work as `--model fable`, `--model opus`, `--model sonnet`, or `--model haiku`.
 |Good examples to show: `--claude --model=fable fix this`, `--codex --model=gpt-5.2 investigate this`, `--amp --model fast review this`, or `--opus implement the change`.

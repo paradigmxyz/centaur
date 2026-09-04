@@ -241,7 +241,6 @@ pub fn build_router_with_session_and_workflow_runtime(
 
 pub fn build_router_with_app_state(state: AppState) -> Router {
     let protected = Router::new()
-        .route("/api/personas", get(list_persona_ids))
         .route(
             "/api/session/{thread_key}",
             post(create_or_get_session).get(get_session_context),
@@ -534,8 +533,7 @@ async fn authorize_api_request(
 fn route_access(method: &Method, route: &str) -> Option<RouteAccess> {
     let capability = |capability| Some(RouteAccess::Capability(capability));
     match (method, route) {
-        (&Method::GET, "/api/personas")
-        | (&Method::GET, "/api/session/{thread_key}")
+        (&Method::GET, "/api/session/{thread_key}")
         | (&Method::GET, "/api/session/{thread_key}/events") => {
             capability(Capability::SessionsRead)
         }
@@ -619,10 +617,6 @@ fn session_thread_key_from_path(path: &str) -> Option<ThreadKey> {
     }
     let decoded = urlencoding::decode(raw_thread_key).ok()?;
     ThreadKey::try_from(decoded.into_owned()).ok()
-}
-
-async fn list_persona_ids(State(state): State<AppState>) -> Result<Json<Vec<String>>, ApiError> {
-    Ok(Json(state.runtime()?.persona_ids()))
 }
 
 async fn create_or_get_session(
