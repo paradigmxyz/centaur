@@ -1,4 +1,5 @@
 mod cleanup;
+mod retention;
 mod title_generator;
 
 use std::{
@@ -52,6 +53,7 @@ use tracing::{Instrument, Span, debug, error, info, info_span, warn};
 use uuid::Uuid;
 
 pub use cleanup::SessionSandboxCleanupConfig;
+pub use retention::SessionEventRetentionConfig;
 pub use title_generator::SessionTitleGenerationError;
 use title_generator::{
     OpenAiSessionTitleGenerator, sanitize_session_title, session_title_source_from_parts,
@@ -1500,6 +1502,13 @@ impl SessionRuntime {
             return self;
         }
         cleanup::SessionSandboxCleanupWorker::new(self.context(), config).spawn();
+        self
+    }
+
+    /// Spawn the worker that expires durable session events outside the
+    /// configured retention window.
+    pub fn with_session_event_retention(self, config: SessionEventRetentionConfig) -> Self {
+        retention::SessionEventRetentionWorker::new(self.store.clone(), config).spawn();
         self
     }
 

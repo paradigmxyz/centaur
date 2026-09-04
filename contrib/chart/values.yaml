@@ -523,6 +523,15 @@ apiRs:
   # they are running or suspended. 0 disables the sweep. Interval must be >= 1.
   sandboxMaxLifetimeSecs: 259200 # 3 days
   sandboxReapIntervalSecs: 300
+  # Delete session_events older than this many days. 0 disables retention.
+  # session_events carries one row per harness stdout line and nothing removed
+  # them, so the table grows for the life of the deployment -- order 450MB/day
+  # on a modest single node, against the 20Gi default Postgres volume below.
+  # Events of a queued or running execution are never deleted, whatever their
+  # age. Sweeps are bounded per pass, so a large first backlog drains over
+  # several sweeps.
+  sessionEventsRetentionDays: 0
+  sessionEventsRetentionSweepIntervalSecs: 300
   # Minimum age before proxy resources without a live Sandbox are reaped.
   sandboxOrphanSweepGraceSecs: 600
   # Cleanup worker: stop unreferenced session/warm-pool sandboxes after two

@@ -327,6 +327,10 @@ spec:
               value: {{ .Values.apiRs.sandboxMaxLifetimeSecs | quote }}
             - name: SESSION_SANDBOX_REAP_INTERVAL_SECS
               value: {{ .Values.apiRs.sandboxReapIntervalSecs | quote }}
+            - name: SESSION_EVENTS_RETENTION_DAYS
+              value: {{ .Values.apiRs.sessionEventsRetentionDays | default 0 | quote }}
+            - name: SESSION_EVENTS_RETENTION_SWEEP_INTERVAL_SECS
+              value: {{ .Values.apiRs.sessionEventsRetentionSweepIntervalSecs | quote }}
             - name: SESSION_SANDBOX_ORPHAN_SWEEP_GRACE_SECS
               value: {{ .Values.apiRs.sandboxOrphanSweepGraceSecs | quote }}
             - name: SESSION_SANDBOX_CLEANUP_INTERVAL_SECS
