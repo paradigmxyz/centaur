@@ -119,12 +119,15 @@ const STRATEGY_MODEL_HARNESSES: Record<string, string> = {
 const FLAG_VALUE_SEPARATOR = String.raw`(?:[^\S\r\n]*=[^\S\r\n]*|[^\S\r\n]+)`
 const FLAG_VALUE_BOUNDARY = String.raw`(?=[^\S\r\n]|\r?\n|\r|<br\s*/?>|$)`
 
-const MODEL_FLAG_PATTERN = valueFlagPattern('--model', String.raw`[A-Za-z0-9._/-]+`)
+const MODEL_FLAG_PATTERN = valueFlagPattern('--model', String.raw`[A-Za-z0-9][A-Za-z0-9._/-]*`)
 const PROVIDER_FLAG_PATTERN = valueFlagPattern(
   '--provider',
   String.raw`[A-Za-z][A-Za-z0-9_-]*`
 )
-const PERSONA_FLAG_PATTERN = valueFlagPattern('--persona', String.raw`[A-Za-z0-9._-]+`)
+const PERSONA_FLAG_PATTERN = valueFlagPattern(
+  '--persona',
+  String.raw`[A-Za-z0-9][A-Za-z0-9._-]*`
+)
 
 // Single dash by design: a short per-turn knob (`-rsn high`).
 const REASONING_FLAG_PATTERN = valueFlagPattern('-rsn', String.raw`[A-Za-z-]+`)

@@ -73,6 +73,16 @@ describe('extractMessageOverrides', () => {
     })
   })
 
+  test('does not consume a following flag as a persona value', () => {
+    expect(extractMessageOverrides('--persona --claude fix this')).toEqual({
+      cleanedText: '--persona fix this',
+      harnessType: 'claudecode',
+      model: undefined,
+      personaId: undefined,
+      reasoning: undefined
+    })
+  })
+
   test('is case-insensitive', () => {
     expect(extractMessageOverrides('--Claude review').harnessType).toBe('claudecode')
   })
@@ -222,6 +232,16 @@ describe('extractMessageOverrides', () => {
       cleanedText: '--model\nwhat model are you',
       harnessType: undefined,
       model: undefined,
+      reasoning: undefined
+    })
+  })
+
+  test('does not consume a following flag as a model value', () => {
+    expect(extractMessageOverrides('--model --claude fix this')).toEqual({
+      cleanedText: '--model fix this',
+      harnessType: 'claudecode',
+      model: undefined,
+      personaId: undefined,
       reasoning: undefined
     })
   })
