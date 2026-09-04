@@ -231,6 +231,10 @@ describe('extractMessageOverrides', () => {
     expect(extractMessageOverrides('-rsn max fix it').reasoning).toBe('max')
   })
 
+  test('-rsn accepts the GPT-6 Astra ultra effort', () => {
+    expect(extractMessageOverrides('-rsn ultra fix it').reasoning).toBe('ultra')
+  })
+
   test('-rsn combines with a harness flag', () => {
     expect(extractMessageOverrides('-rsn high --codex audit this')).toEqual({
       cleanedText: 'audit this',
@@ -375,6 +379,12 @@ describe('validateStrategyOverrides', () => {
   })
 
   test('accepts canonical OpenAI model ids from the model catalog', () => {
+    expect(validateStrategyOverrides({ model: 'gpt-6-astra' })).toEqual({
+      harnessType: 'codex',
+      model: 'gpt-6-astra',
+      provider: undefined,
+      reasoning: undefined
+    })
     expect(validateStrategyOverrides({ model: 'gpt-5.6-terra' })).toEqual({
       harnessType: 'codex',
       model: 'gpt-5.6-terra',

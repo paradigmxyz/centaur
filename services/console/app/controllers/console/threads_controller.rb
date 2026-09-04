@@ -100,7 +100,7 @@ class Console::ThreadsController < ApplicationController
   # per-turn reasoning efforts the harness accepts for the model, except
   # Claude Opus 5's `fast` choice, which selects OpenRouter's native fast model
   # variant. Codex's enum lives in crates/harness-server/src/codex.rs, with
-  # `max` being 5.6-specific.
+  # `max` and `ultra` availability depending on the selected model.
   ComposerAgent = Struct.new(:value, :label, :harness, :model, :provider, :efforts, keyword_init: true)
   CODEX_EFFORTS = [
     %w[minimal Minimal],
@@ -108,6 +108,14 @@ class Console::ThreadsController < ApplicationController
     %w[medium Medium],
     %w[high High],
     [ "xhigh", "Extra High" ]
+  ].freeze
+  ASTRA_EFFORTS = [
+    %w[low Low],
+    %w[medium Medium],
+    %w[high High],
+    [ "xhigh", "Extra High" ],
+    %w[max Max],
+    %w[ultra Ultra]
   ].freeze
   MODEL_EFFORT_OVERRIDES = {
     [ "claude-opus-5", "fast" ] => "claude-opus-5-fast"
@@ -119,6 +127,9 @@ class Console::ThreadsController < ApplicationController
     ComposerAgent.new(value: "gpt-5.6-sol", label: "GPT-5.6 Sol",
                       harness: "codex", model: "gpt-5.6-sol",
                       efforts: CODEX_EFFORTS + [ %w[max Max] ]),
+    ComposerAgent.new(value: "gpt-6-astra", label: "GPT-6-Astra",
+                      harness: "codex", model: "gpt-6-astra",
+                      efforts: ASTRA_EFFORTS),
     ComposerAgent.new(value: "nanocodex", label: "Nanocodex (GPT-5.6 Sol)",
                       harness: "nanocodex", model: nil, efforts: []),
     ComposerAgent.new(value: "gpt-5.5", label: "GPT-5.5",

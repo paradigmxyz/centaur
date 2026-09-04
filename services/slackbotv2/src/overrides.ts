@@ -96,7 +96,8 @@ const STRATEGY_REASONING_EFFORTS = new Set([
   'medium',
   'high',
   'xhigh',
-  'max'
+  'max',
+  'ultra'
 ])
 
 const STRATEGY_MODEL_HARNESSES: Record<string, string> = {
@@ -118,7 +119,8 @@ const STRATEGY_MODEL_HARNESSES: Record<string, string> = {
   'gpt-5.5-pro': 'codex',
   'gpt-5.6-luna': 'codex',
   'gpt-5.6-sol': 'codex',
-  'gpt-5.6-terra': 'codex'
+  'gpt-5.6-terra': 'codex',
+  'gpt-6-astra': 'codex'
 }
 
 // Values are one horizontal-whitespace-delimited token; a newline after the
@@ -152,7 +154,8 @@ const REASONING_EFFORTS: Record<string, string> = {
   xhigh: 'xhigh',
   xhi: 'xhigh',
   'x-high': 'xhigh',
-  max: 'max'
+  max: 'max',
+  ultra: 'ultra'
 }
 
 export function extractMessageOverrides(text: string): MessageOverrides {
