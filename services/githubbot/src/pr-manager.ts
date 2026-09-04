@@ -2,6 +2,8 @@ import type { GitHubAdapter } from "@chat-adapter/github";
 import type { StateAdapter } from "chat";
 import { backgroundWaitUntil } from "./context";
 import { reactWorkingOnReview, settleReviewReaction } from "./reactions";
+import { reviewThreadKey } from "./review";
+import { forwardToSessionApi } from "./session-api";
 import { runTurnStream } from "./turn";
 import {
   fetchCiEvaluation,
@@ -295,7 +297,27 @@ export async function handlePullRequestEvent(
   if (!repo || !isRecord(prNode)) return;
   const number = numberValue(prNode.number);
   if (number === undefined) return;
-  if (action === "closed") return; // nothing to drive once closed/merged.
+  if (action === "closed") {
+    // A close used to return here, so a turn already working the PR never
+    // learned: it kept running, kept holding a sandbox slot, and kept pushing
+    // to a branch whose PR no longer existed. Worse, a bare close reads to the
+    // agent as "start over" rather than "this was superseded", which has
+    // produced duplicate PRs re-implementing work that was already collapsed
+    // elsewhere.
+    //
+    // Nothing is driven here -- the turn is not cancelled, because cancelling
+    // discards unpushed work. The close is delivered as durable context so the
+    // turn can finish its current step knowing the outcome.
+    //
+    // Only the bot's own PRs have a management or review session to tell. The
+    // notice is appended via the session API, which mints the session on the
+    // first append, so an unrelated close -- a PR nobody handed to the bot --
+    // would otherwise create two empty sessions per closed PR in the workspace.
+    const pr = await fetchPr(ctx, repo.owner, repo.repo, number);
+    if (!pr || !owns(ctx, pr)) return;
+    await notifyPullRequestClosed(ctx, repo.owner, repo.repo, number, prNode);
+    return;
+  }
 
   const pr = await fetchPr(ctx, repo.owner, repo.repo, number);
   if (!pr || !owns(ctx, pr)) return;
@@ -311,6 +333,68 @@ export async function handlePullRequestEvent(
   // Any other state change that could flip mergeability re-evaluates the merge
   // gate; it's deterministic and idempotent, so over-calling is harmless.
   await tryMerge(ctx, repo.owner, repo.repo, number);
+}
+
+
+/**
+ * Tell the PR's sessions that it closed.
+ *
+ * Delivered as an appended message rather than a turn: this is context for
+ * whatever is already running, not new work. `forwardToSessionApi` with no
+ * `executeMessage` appends and returns without starting an execution, so this
+ * consumes no sandbox slot.
+ *
+ * Both PR-scoped threads are notified. A close matters to the management turn
+ * driving CI and merges, and to a review-response turn addressing feedback on
+ * the same PR; they are separate sessions and either may be mid-flight.
+ */
+async function notifyPullRequestClosed(
+  ctx: PrManagerContext,
+  owner: string,
+  repo: string,
+  number: number,
+  prNode: Record<string, unknown>,
+): Promise<void> {
+  const merged = prNode.merged === true;
+  const title = stringValue(prNode.title) ?? "";
+  const slug = `${owner}/${repo}#${number}`;
+  // Naming the outcome matters more than the fact of the close. "Closed
+  // without merging" is what distinguishes superseded work from finished work,
+  // and getting that wrong is what produced the duplicate PR.
+  const text = merged
+    ? `${slug} (${title}) has been merged. The work on this pull request is complete — do not continue pushing to its branch. If you were mid-task, stop and summarise what you completed.`
+    : `${slug} (${title}) was closed without merging. Do not continue pushing to its branch and do not re-open or re-implement the work as a new pull request: a close usually means the work was superseded or abandoned deliberately. If you were mid-task, stop and summarise what you had done.`;
+  const id = `pr-closed-${owner}-${repo}-${number}-${merged ? "merged" : "closed"}`;
+  const threadKeys = [
+    managementThreadKey(owner, repo, number),
+    reviewThreadKey(owner, repo, number),
+  ];
+  for (const threadKey of threadKeys) {
+    try {
+      await forwardToSessionApi(ctx.options, {
+        afterEventId: 0,
+        conversationName: `${slug}: ${title}`,
+        messages: [managementMessage(id, threadKey, text)],
+        // Append-only: no execution is started, so no event stream to follow.
+        onEventId: () => {},
+        openStream: false,
+        threadId: threadKey,
+        trace: makeTrace(threadKey, id),
+      });
+      traceLog(
+        ctx.options,
+        "githubbot_pr_closed_notified",
+        makeTrace(threadKey, id),
+        { merged, pr: slug },
+      );
+    } catch (error) {
+      // Best effort per thread: one session failing must not stop the other
+      // being told, and a missed notice is not worth failing the webhook over.
+      logger(ctx)?.warn?.(
+        `failed to notify ${threadKey} that ${slug} closed: ${String(error)}`,
+      );
+    }
+  }
 }
 
 /** `pull_request_review` submitted -> address review, or merge on approval. */

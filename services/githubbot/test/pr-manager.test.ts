@@ -3,6 +3,7 @@ import { drainBackgroundWork } from "../src/context";
 import {
   decideMerge,
   handleCiEvent,
+  handlePullRequestEvent,
   handleReviewEvent,
   isOwnedPr,
   type PrManagerContext,
@@ -948,5 +949,102 @@ describe("management turn reaction ack", () => {
     await handleReviewEvent(reviewCtx(reactions), submittedReview("changes_requested"));
     await drainBackgroundWork(5_000);
     expect(reactions).toEqual([]);
+  });
+});
+
+describe("pull request closed", () => {
+  function closeCtx(
+    calls: { url: string; body: unknown }[],
+    owned = true,
+  ) {
+    // fetchPr round-trips through summarizePr, which reads head/labels, so the
+    // mock must be a shaped PR. The bot owns it only when it is an assignee.
+    const data = {
+      number: 41,
+      state: "closed",
+      title: "Add the thing",
+      merged: false,
+      head: { ref: "feature", sha: "abc123" },
+      labels: [],
+      assignees: owned ? [{ login: "centaur-bot" }] : [],
+    };
+    return {
+      octokit: { rest: { pulls: { get: async () => ({ data }) } } },
+      options: {
+        apiUrl: "http://localhost",
+        logger: { debug() {}, warn() {}, error() {}, info() {} },
+        fetch: async (url: string, init?: { body?: string }) => {
+          calls.push({
+            url: String(url),
+            body: init?.body ? JSON.parse(init.body) : undefined,
+          });
+          return new Response(JSON.stringify({ thread_key: "t", created: true }), {
+            headers: { "content-type": "application/json" },
+            status: 200,
+          });
+        },
+      },
+      state: makeState(),
+      userName: "centaur-bot",
+    } as unknown as PrManagerContext;
+  }
+
+  async function runClose(merged: boolean, owned = true) {
+    const calls: { url: string; body: unknown }[] = [];
+    await handlePullRequestEvent(
+      closeCtx(calls, owned),
+      JSON.stringify({
+        action: "closed",
+        pull_request: { merged, number: 41, title: "Add the thing" },
+        repository: { full_name: "base/repo" },
+      }),
+    );
+    return calls;
+  }
+
+  function appendedTexts(calls: { url: string; body: unknown }[]): string[] {
+    return calls
+      .filter((call) => call.url.endsWith("/messages"))
+      .flatMap((call) => {
+        const body = call.body as
+          | { messages?: { parts?: { text?: string }[] }[] }
+          | undefined;
+        return (body?.messages ?? []).flatMap((message) =>
+          (message.parts ?? []).map((part) => part.text ?? ""),
+        );
+      });
+  }
+
+  test("tells both PR-scoped threads the pull request closed", async () => {
+    const calls = await runClose(false);
+    const urls = calls.map((call) => call.url).join(" ");
+    // A close matters to the management turn and to a review-response turn;
+    // they are separate sessions and either may be mid-flight.
+    expect(urls).toContain(encodeURIComponent("github-manage:base/repo:41"));
+    expect(urls).toContain(encodeURIComponent("github-review:base/repo:41"));
+  });
+
+  test("notifies nothing when the pull request is not the bot's", async () => {
+    // The session API mints a session on the first append, so an unrelated
+    // close must not reach notifyPullRequestClosed at all -- otherwise every
+    // closed PR in the workspace becomes a pair of empty Centaur sessions.
+    const calls = await runClose(false, false);
+    expect(calls).toEqual([]);
+  });
+
+  test("starts no execution, so a close consumes no sandbox slot", async () => {
+    const calls = await runClose(false);
+    expect(calls.some((call) => call.url.includes("/execute"))).toBe(false);
+  });
+
+  test("names the outcome, because superseded and finished differ", async () => {
+    const closed = appendedTexts(await runClose(false)).join("\n");
+    expect(closed).toContain("closed without merging");
+    // The duplicate-PR failure came from a bare close reading as "start over".
+    expect(closed).toContain("do not re-open or re-implement");
+
+    const merged = appendedTexts(await runClose(true)).join("\n");
+    expect(merged).toContain("has been merged");
+    expect(merged).not.toContain("closed without merging");
   });
 });
