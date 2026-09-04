@@ -652,6 +652,15 @@ linearbot:
     tag: latest
     pullPolicy: Always
   userName: centaur
+  # Replaces the ownership contract linearbot injects on owned-issue turns.
+  # Supply the whole contract; it is used verbatim. Deployments that reserve
+  # terminal states for humans state their policy here, rather than
+  # counter-instructing it from the system-prompt overlay and leaving the model
+  # to reconcile two opposed instructions on every turn. Unset uses the default.
+  ownershipContext: ""
+  # Replaces the kickoff prompt used when an owned issue arrives with no
+  # instructions. Unset uses the default.
+  emptyPromptInstruction: ""
   extraEnv: {}
   resources: {}
 

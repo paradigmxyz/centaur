@@ -29,11 +29,11 @@ import {
   CommentReplyCollector,
 } from "./comment-bot";
 import {
-  EMPTY_PROMPT_INSTRUCTION,
+  emptyPromptInstruction,
   fetchLinearIssueContext,
   formatIssueContext,
   formatIssueContextHeader,
-  OWNERSHIP_CONTEXT,
+  ownershipContext,
 } from "./linear-context";
 import { ackWorking } from "./linear-narrator";
 import {
@@ -694,7 +694,7 @@ function handleIssueAssignment(
         applyStatus: true,
         botUserId: input.botUserId,
         client,
-        executeMessage: assignmentInstructionMessage(event, threadKey),
+        executeMessage: assignmentInstructionMessage(event, threadKey, options),
         issueId: event.issueId,
         options,
         overrides: {},
@@ -819,7 +819,8 @@ async function runThreadTurn(input: {
   // Inject the ownership contract on owned turns so the agent knows to continue
   // the work (and how to signal status) — including comment turns on delegated
   // issues, where the assignment instruction never runs.
-  if (owns) contextParts.push(OWNERSHIP_CONTEXT);
+  if (owns)
+    contextParts.push(ownershipContext(options.ownershipContext));
   const contextPreamble = contextParts.length
     ? contextParts.join("\n\n")
     : undefined;
@@ -1026,6 +1027,7 @@ async function runThreadTurn(input: {
 function assignmentInstructionMessage(
   event: IssueAssignmentEvent,
   threadKey: string,
+  options: LinearbotOptions,
 ): LinearbotApiMessage {
   return {
     attachments: [],
@@ -1039,7 +1041,7 @@ function assignmentInstructionMessage(
     id: `assign-${event.issueId}-${event.updatedAt}`,
     isMention: true,
     raw: { linearbotAssignment: true },
-    text: EMPTY_PROMPT_INSTRUCTION,
+    text: emptyPromptInstruction(options.emptyPromptInstruction),
     threadId: threadKey,
     timestamp: new Date().toISOString(),
   };

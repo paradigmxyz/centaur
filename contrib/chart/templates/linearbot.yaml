@@ -63,6 +63,14 @@ spec:
                   key: {{ printf "%sDATABASE_URL" .Values.secretManager.envPrefix }}
             - name: LINEARBOT_USER_NAME
               value: {{ .Values.linearbot.userName | quote }}
+{{- if .Values.linearbot.ownershipContext }}
+            - name: LINEARBOT_OWNERSHIP_CONTEXT
+              value: {{ .Values.linearbot.ownershipContext | quote }}
+{{- end }}
+{{- if .Values.linearbot.emptyPromptInstruction }}
+            - name: LINEARBOT_EMPTY_PROMPT_INSTRUCTION
+              value: {{ .Values.linearbot.emptyPromptInstruction | quote }}
+{{- end }}
 {{- if .Values.codex.customProviders }}
             - name: CODEX_CUSTOM_PROVIDERS
               value: {{ .Values.codex.customProviders | toJson | quote }}

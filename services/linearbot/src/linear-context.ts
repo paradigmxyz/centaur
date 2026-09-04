@@ -23,17 +23,27 @@ const CONTEXT_MAX_CHARS = 100_000;
 // ownership contract itself rides in OWNERSHIP_CONTEXT (injected into the
 // context whenever the issue is owned), so it applies to comment turns on owned
 // issues too — not just this empty-prompt case.
-export const EMPTY_PROMPT_INSTRUCTION = [
+export const DEFAULT_EMPTY_PROMPT_INSTRUCTION = [
   "You have been handed this Linear issue with no additional instructions.",
   "Review the issue context above and work the task to the best of your ability.",
 ].join("\n");
+
+export function emptyPromptInstruction(override?: string): string {
+  const configured = override?.trim();
+  return configured && configured.length > 0
+    ? configured
+    : DEFAULT_EMPTY_PROMPT_INSTRUCTION;
+}
+
+/** The default kickoff prompt, for callers with no deployment override. */
+export const EMPTY_PROMPT_INSTRUCTION = DEFAULT_EMPTY_PROMPT_INSTRUCTION;
 
 // Injected into the context whenever the issue is assigned or delegated to the
 // bot — on assignment turns AND on comment turns where the delegate is the bot —
 // so the agent knows it owns the work and may need to carry it forward, not just
 // answer. The bot applies the terminal `Linear-Status:` marker as a backstop
 // (see linear-status.ts); kickoff moves it to In Progress when work starts.
-export const OWNERSHIP_CONTEXT = [
+export const DEFAULT_OWNERSHIP_CONTEXT = [
   "You own this Linear issue — it is assigned or delegated to you. Beyond answering this thread, carry the work forward and complete it if you can.",
   '- The issue is moved to "In Progress" automatically when you start work.',
   '- When you finish, use the `linear` CLI tool (if available) to move it to "Done" if the work is complete, or back to "Todo" if you could not make progress.',
@@ -41,6 +51,38 @@ export const OWNERSHIP_CONTEXT = [
   "- If this looks like a recurring task, previous instances likely exist as other Linear issues; look them up with the `linear` tool for context and continuity.",
   "- Never delegate issues to yourself or mention yourself in comments.",
 ].join("\n");
+
+/**
+ * The ownership contract injected on every owned turn, with the deployment's
+ * own text substituted when it supplies one.
+ *
+ * The whole contract is replaceable rather than one clause of it, because the
+ * terminal-state policy is not confined to one line. A deployment that reserves
+ * Done for human verification also has to narrow the `Linear-Status:` backstop
+ * (so the agent cannot set `done` through the marker either) and usually has to
+ * say which transitions its own automation already performs. A clause-level
+ * override leaves those contradicting each other.
+ *
+ * Replacing rather than extending is the point: appending would leave both the
+ * default and the deployment's policy in context, which is exactly the
+ * contradiction this exists to remove. Deployments that reserve terminal states
+ * for humans previously had no lever but counter-instruction from the
+ * system-prompt overlay, which left the model reconciling two authoritative and
+ * opposed instructions every turn — and sometimes losing.
+ *
+ * The bot's own behaviour is unaffected either way: the automatic In Progress
+ * kickoff and `applyAssignmentStatusMarker` run regardless of this text. A
+ * contract that omits the marker instruction simply never produces a marker.
+ */
+export function ownershipContext(override?: string): string {
+  const configured = override?.trim();
+  return configured && configured.length > 0
+    ? configured
+    : DEFAULT_OWNERSHIP_CONTEXT;
+}
+
+/** The default contract, for callers with no deployment override. */
+export const OWNERSHIP_CONTEXT = DEFAULT_OWNERSHIP_CONTEXT;
 
 const ISSUE_CONTEXT_QUERY = `
   query LinearbotIssueContext($issueId: String!) {
