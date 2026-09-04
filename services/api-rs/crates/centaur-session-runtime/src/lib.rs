@@ -3682,23 +3682,6 @@ impl SessionRuntime {
             return Ok(OrphanAdoption::Failed);
         };
         let id = SandboxId::new(sandbox_id);
-        let status = match self.sandbox_runtime.manager.status(&id).await {
-            Ok(status) => status,
-            Err(SandboxError::NotFound(_)) => SandboxStatus::Gone,
-            // Transient status failures must not fail a possibly live
-            // execution; surface the error and retry on the next startup.
-            Err(error) => return Err(SessionRuntimeError::Sandbox(error)),
-        };
-        if !status.can_open_io() {
-            self.fail_orphaned_execution(
-                thread_key,
-                execution_id,
-                sandbox_id,
-                &format!("sandbox no longer accepts io (status {status:?})"),
-            )
-            .await;
-            return Ok(OrphanAdoption::Failed);
-        }
         if !self.claim_expired_stdout_owner(execution_id).await? {
             // Deferrals repeat on every periodic scan while another control
             // plane pumps the execution; only the first observation is worth
@@ -3757,6 +3740,10 @@ impl SessionRuntime {
             Ok(lines) => lines,
             Err(SandboxError::Unsupported { .. }) => Vec::new(),
             Err(error) => {
+                // Transient read failure. The recorded output is the only
+                // source of truth once the container terminalized, so
+                // swallowing it here would fail live turns; release the
+                // claim and let the next scan retry the read.
                 warn!(
                     component = COMPONENT_SESSION_RUNTIME,
                     event = "execution_adoption_log_read_failed",
@@ -3764,9 +3751,32 @@ impl SessionRuntime {
                     execution_id,
                     sandbox_id,
                     %error,
-                    "failed to read recorded sandbox output; adopting live"
+                    "failed to read recorded sandbox output; releasing claim, retrying on the next scan"
                 );
-                Vec::new()
+                let _ = self
+                    .store
+                    .release_stdout_owner(execution_id, &self.stdout_owner_id)
+                    .await;
+                if let Some(span) = self.execution_spans.lock().await.remove(execution_id) {
+                    finish_execution_trace_span(&span, "retrying");
+                }
+                return Err(SessionRuntimeError::Sandbox(error));
+            }
+        };
+        let status = match self.sandbox_runtime.manager.status(&id).await {
+            Ok(status) => status,
+            Err(SandboxError::NotFound(_)) => SandboxStatus::Gone,
+            Err(error) => {
+                // Transient status failures must not fail a possibly live
+                // execution; release the claim and retry on the next scan.
+                let _ = self
+                    .store
+                    .release_stdout_owner(execution_id, &self.stdout_owner_id)
+                    .await;
+                if let Some(span) = self.execution_spans.lock().await.remove(execution_id) {
+                    finish_execution_trace_span(&span, "retrying");
+                }
+                return Err(SessionRuntimeError::Sandbox(error));
             }
         };
         if let Some(terminal) = terminal_output_from_lines(&lines) {
@@ -3797,6 +3807,47 @@ impl SessionRuntime {
             )
             .await?;
             return Ok(OrphanAdoption::Adopted);
+        }
+
+        if !status.can_open_io() {
+            // No terminal in the recorded output and no live sandbox to
+            // reattach to. A young non-terminal sandbox may still be
+            // coming up (or the status read is transient): retry on the
+            // next scan instead of failing the turn.
+            let running_since = execution.started_at.unwrap_or(execution.created_at);
+            let age = SystemTime::now()
+                .duration_since(SystemTime::from(running_since))
+                .unwrap_or_default();
+            if !status.is_terminal() && age < PRE_SANDBOX_ORPHAN_GRACE {
+                let _ = self
+                    .store
+                    .release_stdout_owner(execution_id, &self.stdout_owner_id)
+                    .await;
+                if let Some(span) = self.execution_spans.lock().await.remove(execution_id) {
+                    finish_execution_trace_span(&span, "skipped");
+                }
+                debug!(
+                    component = COMPONENT_SESSION_RUNTIME,
+                    event = "execution_adoption_skipped",
+                    thread_key = %thread_key,
+                    execution_id,
+                    sandbox_id,
+                    ?status,
+                    age_ms = duration_millis_u64(age),
+                    "skipping young execution with a sandbox not yet open for io"
+                );
+                return Ok(OrphanAdoption::Skipped);
+            }
+            self.fail_orphaned_execution(
+                thread_key,
+                execution_id,
+                sandbox_id,
+                &format!(
+                    "sandbox not openable (status {status:?}) with no recorded terminal output"
+                ),
+            )
+            .await;
+            return Ok(OrphanAdoption::Failed);
         }
 
         // No terminal in the recorded output: treat the turn as still in
@@ -4544,22 +4595,33 @@ fn spawn_stdout_pump_loop(state: StdoutPumpLoop) {
                 }
             };
 
-            if recover_detached_terminal_output(&ctx, &thread_key, &sandbox_id, &execution)
-                .await
-                .unwrap_or_else(|error| {
-                    warn!(
-                        component = COMPONENT_SESSION_RUNTIME,
-                        event = "session_stdout_recovery_failed",
-                        thread_key = %thread_key,
-                        sandbox_id = %sandbox_id,
-                        execution_id = %execution.execution_id,
-                        %error,
-                        "failed to recover detached stdout from recorded output"
-                    );
-                    false
-                })
-            {
-                break;
+            // The container may have terminalized while the attach stream
+            // was gone: the recorded output then holds the turn's outcome,
+            // and a live reattach against a terminal sandbox can only fail
+            // the turn. Retry the read on transient failure (bounded, so a
+            // dead backend cannot stall the loop) before falling back to
+            // the live reattach.
+            for _ in 0..SESSION_PIPE_MAX_REATTACH_ATTEMPTS {
+                match recover_detached_terminal_output(&ctx, &thread_key, &sandbox_id, &execution)
+                    .await
+                {
+                    Ok(true) => break 'pump,
+                    Ok(false) => break,
+                    Err(error) => {
+                        warn!(
+                            component = COMPONENT_SESSION_RUNTIME,
+                            event = "session_stdout_recovery_failed",
+                            thread_key = %thread_key,
+                            sandbox_id = %sandbox_id,
+                            execution_id = %execution.execution_id,
+                            %error,
+                            "failed to recover detached stdout from recorded output; retrying before live reattach"
+                        );
+                        last_reattach_detail =
+                            format!("recorded sandbox output unreadable: {error}");
+                        sleep(SESSION_PIPE_REATTACH_DELAY).await;
+                    }
+                }
             }
 
             if lines_pumped > 0 {
@@ -4708,6 +4770,11 @@ async fn recover_detached_terminal_output(
         Ok(lines) => lines,
         Err(SandboxError::Unsupported { .. }) => return Ok(false),
         Err(error) => {
+            // Transient read failures surface to the pump loop, which
+            // retries before falling back to a live reattach; returning
+            // Ok(false) here would reattach against a container that may
+            // already have terminalized and fail the turn even though the
+            // recorded output can still hold its outcome.
             warn!(
                 component = COMPONENT_SESSION_RUNTIME,
                 event = "session_stdout_recorded_output_read_failed",
@@ -4715,9 +4782,9 @@ async fn recover_detached_terminal_output(
                 execution_id = %execution.execution_id,
                 sandbox_id,
                 %error,
-                "failed to read recorded sandbox output; reattaching live"
+                "failed to read recorded sandbox output; surfacing for retry"
             );
-            return Ok(false);
+            return Err(SessionRuntimeError::Sandbox(error));
         }
     };
 
@@ -8823,6 +8890,7 @@ mod adoption_tests {
         stopped: std::sync::Mutex<Vec<String>>,
         proxy_ensures: std::sync::Mutex<Vec<ProxyEnsure>>,
         missing_on_stop: std::sync::Mutex<BTreeSet<String>>,
+        read_output_failures: std::sync::Mutex<Option<usize>>,
     }
 
     impl MockBackend {
@@ -8841,6 +8909,7 @@ mod adoption_tests {
                 stopped: std::sync::Mutex::new(Vec::new()),
                 proxy_ensures: std::sync::Mutex::new(Vec::new()),
                 missing_on_stop: std::sync::Mutex::new(BTreeSet::new()),
+                read_output_failures: std::sync::Mutex::new(None),
             }
         }
 
@@ -8892,6 +8961,11 @@ mod adoption_tests {
                 .insert(sandbox_id.to_owned());
         }
 
+        /// Makes the next `count` `read_output_since` calls fail transiently.
+        fn fail_next_read_output(&self, count: usize) {
+            *self.read_output_failures.lock().unwrap() = Some(count);
+        }
+
         fn stopped(&self) -> Vec<String> {
             self.stopped.lock().unwrap().clone()
         }
@@ -8939,6 +9013,16 @@ mod adoption_tests {
             _id: &SandboxId,
             _since: Option<SystemTime>,
         ) -> SandboxResult<Vec<String>> {
+            let mut failures = self.read_output_failures.lock().unwrap();
+            if let Some(remaining) = *failures {
+                if remaining > 0 {
+                    *failures = Some(remaining - 1);
+                    return Err(SandboxError::io(format!(
+                        "mock transient recorded-output read failure ({remaining})"
+                    )));
+                }
+                *failures = None;
+            }
             Ok(self.recorded_output.lock().unwrap().clone())
         }
 
@@ -11092,6 +11176,224 @@ mod adoption_tests {
             }),
             "expected a live adoption event"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn adopts_completed_execution_when_sandbox_stopped_with_recorded_terminal() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:adopt-stopped-{}", uuid::Uuid::new_v4())).unwrap();
+        orphaned_execution(&store, &thread_key, Some("sbx-stopped"), true).await;
+
+        // The container terminalized while the old control plane was rolling:
+        // the recorded output still holds the turn's outcome even though the
+        // sandbox no longer accepts io.
+        let backend = Arc::new(MockBackend::new(
+            SandboxStatus::Stopped,
+            completed_output_lines("Finished while unattached."),
+        ));
+        let runtime = runtime_with(&store, backend.clone());
+        runtime.adopt_orphaned_executions().await;
+
+        wait_for_event(&store, &thread_key, "session.execution_completed").await;
+        let all = events(&store, &thread_key).await;
+        assert!(
+            !all.iter()
+                .any(|event| event.event_type == "session.execution_failed"),
+            "stopped sandbox with recorded terminal output must not fail the turn"
+        );
+        let completed = all
+            .iter()
+            .find(|event| event.event_type == "session.execution_completed")
+            .expect("completed event");
+        assert_eq!(
+            completed.payload["result_text"].as_str(),
+            Some("Finished while unattached.")
+        );
+        assert_eq!(backend.opens(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn adoption_retries_after_transient_recorded_output_read_failure() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:adopt-retry-read-{}", uuid::Uuid::new_v4())).unwrap();
+        orphaned_execution(&store, &thread_key, Some("sbx-retry-read"), true).await;
+
+        let backend = Arc::new(MockBackend::new(
+            SandboxStatus::Stopped,
+            completed_output_lines("Recovered on the second read."),
+        ));
+        backend.fail_next_read_output(1);
+        let runtime = runtime_with(&store, backend.clone());
+
+        // The first scan hits the transient read failure: it must surface
+        // the error so the next scan retries, not fail the execution.
+        let execution = store
+            .latest_execution_for_thread(&thread_key)
+            .await
+            .expect("load execution")
+            .expect("execution exists");
+        let error = runtime
+            .adopt_orphaned_execution(&execution, false, None)
+            .await
+            .expect_err("transient read failure must propagate");
+        assert!(
+            matches!(error, SessionRuntimeError::Sandbox(_)),
+            "unexpected error: {error:?}"
+        );
+        let still_running = store
+            .latest_execution_for_thread(&thread_key)
+            .await
+            .expect("reload execution")
+            .expect("execution exists");
+        assert_eq!(still_running.status, ExecutionStatus::Running);
+        assert!(
+            !events(&store, &thread_key)
+                .await
+                .iter()
+                .any(|event| event.event_type == "session.execution_failed"),
+            "transient read failure must not fail the execution"
+        );
+
+        // The lease was released: the next scan re-claims and recovers the
+        // terminal output that was already on disk.
+        runtime.adopt_orphaned_executions().await;
+        wait_for_event(&store, &thread_key, "session.execution_completed").await;
+        let all = events(&store, &thread_key).await;
+        let completed = all
+            .iter()
+            .find(|event| event.event_type == "session.execution_completed")
+            .expect("completed event");
+        assert_eq!(
+            completed.payload["result_text"].as_str(),
+            Some("Recovered on the second read.")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn adoption_skips_young_sandbox_not_open_for_io() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:adopt-young-{}", uuid::Uuid::new_v4())).unwrap();
+        orphaned_execution(&store, &thread_key, Some("sbx-young"), true).await;
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Created, Vec::new()));
+        let runtime = runtime_with(&store, backend.clone());
+        runtime.adopt_orphaned_executions().await;
+
+        // A young execution whose sandbox is not openable yet is skipped
+        // (the periodic scan retries it), not failed.
+        let execution = store
+            .latest_execution_for_thread(&thread_key)
+            .await
+            .expect("load execution")
+            .expect("execution exists");
+        assert_eq!(execution.status, ExecutionStatus::Running);
+        assert_eq!(backend.opens(), 0);
+        assert!(
+            !events(&store, &thread_key)
+                .await
+                .iter()
+                .any(|event| event.event_type == "session.execution_failed"),
+            "young non-openable sandbox must not fail the execution"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn adoption_fails_old_non_openable_sandbox_without_recorded_terminal() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:adopt-old-gone-{}", uuid::Uuid::new_v4())).unwrap();
+        let execution_id =
+            orphaned_execution(&store, &thread_key, Some("sbx-old-gone"), true).await;
+        backdate_execution(&store, &execution_id, 300.0).await;
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Stopped, Vec::new()));
+        let runtime = runtime_with(&store, backend.clone());
+        runtime.adopt_orphaned_executions().await;
+
+        wait_for_event(&store, &thread_key, "session.execution_failed").await;
+        let all = events(&store, &thread_key).await;
+        let failed = all
+            .iter()
+            .find(|event| event.event_type == "session.execution_failed")
+            .expect("failed event");
+        let error = failed.payload["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("sandbox not openable (status Stopped)"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.contains("no recorded terminal output"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(backend.opens(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stdout_eof_retries_recorded_output_before_live_reattach() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:eof-retry-read-{}", uuid::Uuid::new_v4())).unwrap();
+        orphaned_execution(&store, &thread_key, Some("sbx-eof-retry"), true).await;
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let (io, stdout, _stdin) = mock_io();
+        backend.push_io(io).await;
+
+        let runtime = runtime_with(&store, backend.clone());
+        runtime
+            .ensure_session_pipe(&thread_key, "sbx-eof-retry")
+            .await
+            .expect("open initial pipe");
+        backend.set_recorded_output(completed_output_lines(
+            "Recovered after a transient read failure.",
+        ));
+        backend.fail_next_read_output(1);
+        drop(stdout);
+
+        wait_for_event(&store, &thread_key, "session.execution_completed").await;
+        let all = events(&store, &thread_key).await;
+        assert!(
+            !all.iter()
+                .any(|event| event.event_type == "session.execution_failed"),
+            "transient recorded-output read failure must not fail the turn"
+        );
+        assert!(
+            all.iter()
+                .any(|event| event.event_type == "session.stdout_pump_recovered"),
+            "expected recorded-output recovery event"
+        );
+        assert!(
+            !all.iter()
+                .any(|event| event.event_type == "session.stdout_pump_reattached"),
+            "recovery should avoid a live reattach"
+        );
+        let completed = all
+            .iter()
+            .find(|event| event.event_type == "session.execution_completed")
+            .expect("completed event");
+        assert_eq!(
+            completed.payload["result_text"].as_str(),
+            Some("Recovered after a transient read failure.")
+        );
+        assert_eq!(backend.opens(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
