@@ -362,6 +362,7 @@ pub struct CreateWorkflowRunRequest {
 pub struct CreateWorkflowRunResponse {
     pub ok: bool,
     pub run_id: String,
+    pub initial_run_id: String,
     pub task_id: String,
     pub status: String,
     pub created: bool,
@@ -370,6 +371,7 @@ pub struct CreateWorkflowRunResponse {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct WorkflowRun {
     pub run_id: String,
+    pub initial_run_id: String,
     pub task_id: String,
     pub workflow_name: String,
     pub status: String,
@@ -856,13 +858,39 @@ impl WorkflowRuntime {
                 },
             )
             .await?;
+        let initial_run_id = self.initial_run_id(workflow_name, &spawn.task_id).await?;
         Ok(CreateWorkflowRunResponse {
             ok: true,
             run_id: spawn.run_id,
+            initial_run_id,
             task_id: spawn.task_id,
             status: "queued".to_owned(),
             created: spawn.created,
         })
+    }
+
+    pub async fn initial_run_id(
+        &self,
+        workflow_name: &str,
+        task_id: &str,
+    ) -> Result<String, WorkflowRuntimeError> {
+        let queue_name = queue_name_for_class(workflow_queue_class(workflow_name));
+        let (_, run_table) = absurd_queue_tables(queue_name)?;
+        let row = sqlx::query(&format!(
+            r#"
+            select run_id::text as run_id
+            from {run_table}
+            where task_id = $1::uuid
+            order by attempt, run_id
+            limit 1
+            "#,
+        ))
+        .bind(task_id)
+        .fetch_optional(self.inner.client.pool())
+        .await?;
+        row.map(|row| row.try_get("run_id"))
+            .transpose()?
+            .ok_or_else(|| WorkflowRuntimeError::NotFound(task_id.to_owned()))
     }
 
     pub async fn list_runs(
@@ -908,6 +936,13 @@ impl WorkflowRuntime {
             r#"
             select
                 r.run_id::text as run_id,
+                (
+                    select initial.run_id::text
+                    from {run_table} initial
+                    where initial.task_id = t.task_id
+                    order by initial.attempt, initial.run_id
+                    limit 1
+                ) as initial_run_id,
                 t.task_id::text as task_id,
                 t.task_name,
                 t.params,
@@ -959,6 +994,13 @@ impl WorkflowRuntime {
             r#"
             select
                 r.run_id::text as run_id,
+                (
+                    select initial.run_id::text
+                    from {run_table} initial
+                    where initial.task_id = t.task_id
+                    order by initial.attempt, initial.run_id
+                    limit 1
+                ) as initial_run_id,
                 t.task_id::text as task_id,
                 t.task_name,
                 t.params,
@@ -4450,6 +4492,7 @@ fn workflow_run_from_row(row: sqlx::postgres::PgRow) -> Result<WorkflowRun, Work
         .to_owned();
     Ok(WorkflowRun {
         run_id: row.try_get("run_id")?,
+        initial_run_id: row.try_get("initial_run_id")?,
         task_id: row.try_get("task_id")?,
         workflow_name,
         status: row.try_get("state")?,
@@ -5057,6 +5100,7 @@ mod tests {
             + time::Duration::nanoseconds(44_019_000);
         let run = WorkflowRun {
             run_id: "run".to_owned(),
+            initial_run_id: "initial-run".to_owned(),
             task_id: "task".to_owned(),
             workflow_name: "workflow".to_owned(),
             status: "completed".to_owned(),
@@ -5068,6 +5112,7 @@ mod tests {
             updated_at: at,
         };
         let value = serde_json::to_value(run).unwrap();
+        assert_eq!(value["initial_run_id"], json!("initial-run"));
         assert_eq!(value["created_at"], json!("2026-06-09T13:35:05.044019Z"));
         assert_eq!(value["updated_at"], json!("2026-06-09T13:35:05.044019Z"));
     }
