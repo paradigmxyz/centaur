@@ -104,8 +104,9 @@ console:
   # Public URL users reach in a browser (e.g. https://console.example.com), used
   # as CENTAUR_CONSOLE_PUBLIC_URL. Set this when console is exposed behind
   # Tailscale/Ingress so MCP OAuth issuer metadata and JWT validation agree.
-  # When set, the slackbotv2 deployment also links the first assistant message
-  # in a Slack thread to the Console session view; leave empty to omit the link.
+  # When set and console.chat.enabled is true, the slackbotv2 deployment also
+  # links the first assistant message in a Slack thread to the Console session
+  # view. Leave empty to omit the link.
   publicUrl: ""
   # Additional exact Host headers accepted by Rails Host Authorization. Use for
   # service DNS names that differ from the chart's short in-cluster URL;
