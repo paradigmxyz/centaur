@@ -20,6 +20,25 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     post login_url, params: { email: @operator.email, password: "password123456" }
   end
 
+  test "threads page shows the October removal banner" do
+    with_recent_first_error do
+      get console_threads_url
+    end
+
+    assert_response :ok
+    assert_select ".console-amber-note[role=status]", text: /Console chat app will be removed in October/
+  end
+
+  test "threads endpoints are unavailable when console chat is disabled" do
+    with_env("CENTAUR_CONSOLE_CHAT_ENABLED" => "false") do
+      get console_threads_url
+      assert_response :not_found
+
+      post console_threads_url, params: { prompt: "Do not send this" }
+      assert_response :not_found
+    end
+  end
+
   test "an admin sees the Control and Data Sync nav items" do
     with_recent_first_error do
       get console_threads_url

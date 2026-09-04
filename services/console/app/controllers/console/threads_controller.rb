@@ -1,6 +1,8 @@
 class Console::ThreadsController < ApplicationController
   layout "console"
 
+  before_action :require_console_chat_enabled
+
   # Injectable for tests, mirroring Console::WorkflowsController.
   class_attribute :client_factory, default: -> { CentaurApiClient.new }
 

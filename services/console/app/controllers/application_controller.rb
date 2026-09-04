@@ -10,6 +10,7 @@ class ApplicationController < ActionController::Base
   rescue_from ActiveRecord::RecordNotFound, with: :render_not_found
 
   helper_method :current_user, :acting_admin?, :descoped?, :password_login_enabled?
+  helper_method :console_chat_enabled?
   helper_method :public_base_url, :oauth_callback_redirect_uri
 
   # The public origin the console is reached at. Derived from the request by
@@ -80,6 +81,10 @@ class ApplicationController < ActionController::Base
     ConsoleAuth.password_login_enabled?
   end
 
+  def console_chat_enabled?
+    ConsoleFeatures.chat_enabled?
+  end
+
   # The permission check console gates use instead of current_user.admin?: a
   # real admin who is not currently descoped. Keeping current_user untouched
   # means audit trails and data displays still see the true account.
@@ -113,13 +118,20 @@ class ApplicationController < ActionController::Base
   # Keep this redirect silent: direct/admin-default URLs are not
   # actionable errors for non-admin operators, especially on a fresh visit.
   def require_admin
-    redirect_to console_threads_path unless acting_admin?
+    redirect_to default_console_landing_path unless acting_admin?
   end
 
   # Where a signed-in user lands when no explicit destination applies: admins get
-  # the Control section, everyone else gets the threads view.
+  # the Control section. Everyone else gets chat, or Integrations when chat is
+  # disabled.
   def default_console_landing_path
-    acting_admin? ? console_principals_path : console_threads_path
+    return console_principals_path if acting_admin?
+
+    console_chat_enabled? ? console_threads_path : console_integrations_path
+  end
+
+  def require_console_chat_enabled
+    head :not_found unless console_chat_enabled?
   end
 
   # Cheap default so every page renders the empty sidebar list without touching

@@ -117,6 +117,10 @@ console:
   # Break-glass email/password login. Disable when console is reachable from
   # the public internet and SSO is configured.
   passwordLoginEnabled: true
+  # Console's browser-based chat UI is deprecated and will be removed in
+  # October. Disable it to hide chat navigation and reject its HTTP routes.
+  chat:
+    enabled: true
   # When enabled, every authenticated Console user can browse conversations
   # originating in public Slack channels. Private channels and DMs remain
   # owner-only. Requires apiRs.etl.slack.enabled so channel privacy is synced;

@@ -1,5 +1,9 @@
 <% content_for :title, "Chats · Centaur Console" %>
 
+<div class="console-amber-note mb-4 shrink-0 rounded border border-amber-500/30 bg-amber-500/[0.08] px-4 py-3 text-sm text-amber-200" role="status">
+  The Console chat app will be removed in October.
+</div>
+
 <% if @thread_db_unavailable %>
   <div class="console-amber-note mb-4 shrink-0 rounded border border-amber-500/30 bg-amber-500/[0.08] px-4 py-3 text-sm text-amber-200">
     Chat database is unavailable. Set <span class="font-semibold">CENTAUR_CONSOLE_CENTAUR_DATABASE_URL</span>
