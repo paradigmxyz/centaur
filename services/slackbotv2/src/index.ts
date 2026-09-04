@@ -1482,23 +1482,24 @@ async function syncThreadMessageToSession(
       onSessionCreated: async outcome => {
         let personaFallbackNotice: string | undefined
         if (outcome.personaId !== undefined) {
-          const requestedPersonaId = stickyOverridesUpdate?.personaId
+          const requestedPersonaId =
+            outcome.unavailableRequestedPersonaId ?? stickyOverridesUpdate?.personaId
           stickyOverridesUpdate = {
             ...(stickyOverridesUpdate ?? {}),
             personaId: outcome.personaId
           }
           forwardInput.personaId = outcome.personaId ?? undefined
-          if (outcome.personaFallback === true && requestedPersonaId !== undefined) {
+          if (outcome.unavailableRequestedPersonaId) {
             personaFallbackNotice =
               outcome.personaId === null
-                ? `Persona "${requestedPersonaId}" isn't available. Continuing without a persona.`
-                : `Persona "${requestedPersonaId}" isn't available. Using "${outcome.personaId}" instead.`
+                ? `Persona "${outcome.unavailableRequestedPersonaId}" isn't available. Continuing without a persona.`
+                : `Persona "${outcome.unavailableRequestedPersonaId}" isn't available. Using "${outcome.personaId}" instead.`
           }
           if (requestedPersonaId !== undefined && outcome.personaId !== requestedPersonaId) {
             traceLog(input.options, 'slackbotv2_session_persona_reconciled', trace, {
               requested_persona_id: requestedPersonaId,
               resolved_persona_id: outcome.personaId,
-              persona_fallback: outcome.personaFallback
+              unavailable_requested_persona_id: outcome.unavailableRequestedPersonaId
             })
           }
         }

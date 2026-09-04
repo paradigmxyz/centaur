@@ -336,9 +336,9 @@ pub struct CreateOrGetSessionOutcome {
     /// True when the session was restarted onto a different harness because
     /// the request asked for [`HarnessConflictPolicy::Restart`].
     pub harness_switched: bool,
-    /// Set only when this request selected a persona for a new session. True
-    /// means the requested persona was unavailable and a fallback was used.
-    pub persona_fallback: Option<bool>,
+    /// Set only when a new-session request named an unavailable persona and
+    /// the returned session uses this request's resolved fallback.
+    pub unavailable_requested_persona_id: Option<String>,
 }
 
 /// Outcome of [`SessionRuntime::drain`]: the sandboxes that were stopped and
@@ -1619,21 +1619,13 @@ impl SessionRuntime {
                 Err(SessionStoreError::NotFound { .. }) => None,
                 Err(error) => return Err(error.into()),
             };
-            let (persona_resolution, persona_fallback) = match existing_persona_id {
-                Some(persona_id) => (
-                    PersonaResolution {
-                        context: None,
-                        persona_id,
-                        unavailable_requested_persona_id: None,
-                    },
-                    None,
-                ),
-                None => {
-                    let resolution =
-                        self.resolve_persona_for_create(persona_id, &desired_capabilities)?;
-                    let fallback = Some(resolution.unavailable_requested_persona_id.is_some());
-                    (resolution, fallback)
-                }
+            let persona_resolution = match existing_persona_id {
+                Some(persona_id) => PersonaResolution {
+                    context: None,
+                    persona_id,
+                    unavailable_requested_persona_id: None,
+                },
+                None => self.resolve_persona_for_create(persona_id, &desired_capabilities)?,
             };
             if let Some(context) = persona_resolution.context.as_ref() {
                 add_persona_metadata(&mut session_metadata, context);
@@ -1669,6 +1661,10 @@ impl SessionRuntime {
                 .store
                 .bind_iron_control_principal(thread_key, &registered_principal.id)
                 .await?;
+            let unavailable_requested_persona_id = confirmed_unavailable_requested_persona_id(
+                &persona_resolution,
+                session.persona_id.as_deref(),
+            );
             if let Some(context) = self.resolve_stored_persona(
                 session.persona_id.as_deref(),
                 harness_type,
@@ -1700,7 +1696,7 @@ impl SessionRuntime {
             Ok(CreateOrGetSessionOutcome {
                 session,
                 harness_switched,
-                persona_fallback,
+                unavailable_requested_persona_id,
             })
         }
         .instrument(span)
@@ -5735,6 +5731,16 @@ fn resolve_persona_selection(
     })
 }
 
+fn confirmed_unavailable_requested_persona_id(
+    resolution: &PersonaResolution,
+    stored_persona_id: Option<&str>,
+) -> Option<String> {
+    if resolution.persona_id.as_deref() != stored_persona_id {
+        return None;
+    }
+    resolution.unavailable_requested_persona_id.clone()
+}
+
 fn upsert_spec_env(spec: &mut SandboxSpec, name: &str, value: String) {
     if let Some(existing) = spec.env.iter_mut().find(|env| env.name == name) {
         existing.value = value;
@@ -7548,6 +7554,25 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_persona_signal_requires_returned_persona_to_match_resolution() {
+        let resolution = resolve_persona_selection(
+            None,
+            Some("honk"),
+            &SessionSandboxCapabilities::default_enabled(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            confirmed_unavailable_requested_persona_id(&resolution, Some("eng")),
+            None
+        );
+        assert_eq!(
+            confirmed_unavailable_requested_persona_id(&resolution, None).as_deref(),
+            Some("honk")
+        );
+    }
+
+    #[test]
     fn inaccessible_requested_persona_still_fails_closed() {
         let registry = PersonaRegistry::new(
             [PersonaDefinition {
@@ -9302,7 +9327,10 @@ mod adoption_tests {
             .await
             .expect("create session with persona fallback");
 
-        assert_eq!(outcome.persona_fallback, Some(true));
+        assert_eq!(
+            outcome.unavailable_requested_persona_id.as_deref(),
+            Some("not-deployed")
+        );
         assert_eq!(outcome.session.persona_id, None);
     }
 
@@ -9327,7 +9355,7 @@ mod adoption_tests {
             )
             .await
             .expect("create original session");
-        assert_eq!(created.persona_fallback, Some(false));
+        assert_eq!(created.unavailable_requested_persona_id, None);
 
         let outcome = runtime
             .create_or_get_session(
@@ -9341,7 +9369,7 @@ mod adoption_tests {
             .expect("restart session on requested harness");
 
         assert!(outcome.harness_switched);
-        assert_eq!(outcome.persona_fallback, None);
+        assert_eq!(outcome.unavailable_requested_persona_id, None);
         assert_eq!(outcome.session.harness_type, HarnessType::ClaudeCode);
         assert_eq!(outcome.session.persona_id.as_deref(), Some("old"));
         assert_eq!(
@@ -9390,7 +9418,7 @@ mod adoption_tests {
             .expect("load session with pinned persona");
 
         assert!(!outcome.harness_switched);
-        assert_eq!(outcome.persona_fallback, None);
+        assert_eq!(outcome.unavailable_requested_persona_id, None);
         assert_eq!(outcome.session.harness_type, HarnessType::Codex);
         assert_eq!(outcome.session.persona_id.as_deref(), Some("old"));
         assert_eq!(

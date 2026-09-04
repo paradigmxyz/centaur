@@ -643,7 +643,7 @@ async fn create_or_get_session(
     Ok(Json(CreateSessionResponse {
         session: outcome.session,
         harness_switched: outcome.harness_switched,
-        persona_fallback: outcome.persona_fallback,
+        unavailable_requested_persona_id: outcome.unavailable_requested_persona_id,
     }))
 }
 

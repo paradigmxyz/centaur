@@ -795,7 +795,7 @@ describe('slackbotv2', () => {
     expect(state).toEqual(expect.objectContaining({ personaId: 'old' }))
   })
 
-  it('reports when an unavailable persona falls back to the deployment default', async () => {
+  it('reports a fallback for a stale sticky persona on a plain message', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
     bot = createTestBot({ state: sharedState })
@@ -803,12 +803,13 @@ describe('slackbotv2', () => {
       harness_switched: false,
       harness_type: 'codex',
       persona_id: 'eng',
-      persona_fallback: true
+      unavailable_requested_persona_id: 'honk'
     })
 
     const parent = await postUserMessage('Thread default context.')
+    await sharedState.set(`thread-state:${threadKey(parent.ts)}`, { personaId: 'honk' })
     const mention = await postUserMessage(
-      `<@${BOT_USER_ID}> --persona=honk start with the fallback`,
+      `<@${BOT_USER_ID}> start with the fallback`,
       parent.ts
     )
     const waits: Promise<unknown>[] = []
@@ -823,7 +824,7 @@ describe('slackbotv2', () => {
           team: TEAM_ID,
           ts: mention.ts,
           thread_ts: parent.ts,
-          text: `<@${BOT_USER_ID}> --persona=honk start with the fallback`
+          text: `<@${BOT_USER_ID}> start with the fallback`
         }
       }),
       {},
@@ -832,6 +833,7 @@ describe('slackbotv2', () => {
     expect(response.status).toBe(200)
     await Promise.all(waits)
 
+    expect(codexApi.creates[0]?.body.persona_id).toBe('honk')
     const personaNotice = slackApi.calls
       .filter(call => call.method === 'chat.stopStream')
       .flatMap(call => (Array.isArray(call.body.blocks) ? call.body.blocks : []))
@@ -848,7 +850,7 @@ describe('slackbotv2', () => {
       harness_switched: false,
       harness_type: 'codex',
       persona_id: null,
-      persona_fallback: true
+      unavailable_requested_persona_id: 'honk'
     })
 
     const parent = await postUserMessage('Thread default context.')

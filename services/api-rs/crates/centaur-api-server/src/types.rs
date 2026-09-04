@@ -34,10 +34,10 @@ pub struct CreateSessionResponse {
     pub session: Session,
     /// True when this request restarted the thread onto a different harness.
     pub harness_switched: bool,
-    /// Present only for new-session persona selection. True means the requested
-    /// persona was unavailable and the deployment fallback was used.
+    /// Present only when a new-session request named an unavailable persona
+    /// and the returned session uses the resolved fallback.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub persona_fallback: Option<bool>,
+    pub unavailable_requested_persona_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
