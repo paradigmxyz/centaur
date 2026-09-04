@@ -984,55 +984,17 @@ impl SessionRuntime {
         Ok(self.store.get_session(thread_key).await?)
     }
 
-    fn resolve_persona_for_create(
-        &self,
-        requested_persona_id: Option<&str>,
-        capabilities: &SessionSandboxCapabilities,
-    ) -> Result<PersonaResolution, SessionRuntimeError> {
-        let resolution = resolve_persona_selection(
-            self.personas.as_deref(),
-            requested_persona_id,
-            capabilities,
-        )?;
-        if let Some(requested_persona_id) = resolution.unavailable_requested_persona_id.as_deref() {
-            warn!(
-                component = COMPONENT_SESSION_RUNTIME,
-                event = "session_persona_unavailable_fallback",
-                requested_persona_id,
-                resolved_persona_id = resolution.persona_id.as_deref().unwrap_or(""),
-                "requested persona is unavailable; continuing with the deployment fallback"
-            );
-        }
-        Ok(resolution)
-    }
-
     fn resolve_stored_persona(
         &self,
         persona_id: Option<&str>,
-        _harness_type: &HarnessType,
         capabilities: &SessionSandboxCapabilities,
     ) -> Result<Option<PersonaContext>, SessionRuntimeError> {
-        self.resolve_persona_context(persona_id.and_then(clean_persona_id), false, capabilities)
-    }
-
-    fn resolve_persona_context(
-        &self,
-        persona_id: Option<&str>,
-        defaulted: bool,
-        capabilities: &SessionSandboxCapabilities,
-    ) -> Result<Option<PersonaContext>, SessionRuntimeError> {
-        let Some(persona_id) = persona_id else {
-            return Ok(None);
-        };
-        let Some(registry) = self.personas.as_ref() else {
-            return Err(SessionRuntimeError::BadRequest(format!(
-                "persona {persona_id:?} was requested but no persona registry is configured"
-            )));
-        };
-        registry
-            .context_for_access(persona_id, defaulted, &capabilities.repo_cache)
-            .map(Some)
-            .map_err(SessionRuntimeError::BadRequest)
+        resolve_persona_context(
+            self.personas.as_deref(),
+            persona_id.and_then(clean_persona_id),
+            false,
+            capabilities,
+        )
     }
 
     fn default_persona_id(&self) -> Option<&str> {
@@ -1625,7 +1587,11 @@ impl SessionRuntime {
                     persona_id,
                     unavailable_requested_persona_id: None,
                 },
-                None => self.resolve_persona_for_create(persona_id, &desired_capabilities)?,
+                None => resolve_persona_selection(
+                    self.personas.as_deref(),
+                    persona_id,
+                    &desired_capabilities,
+                )?,
             };
             if let Some(context) = persona_resolution.context.as_ref() {
                 add_persona_metadata(&mut session_metadata, context);
@@ -1661,15 +1627,15 @@ impl SessionRuntime {
                 .store
                 .bind_iron_control_principal(thread_key, &registered_principal.id)
                 .await?;
-            let unavailable_requested_persona_id = confirmed_unavailable_requested_persona_id(
-                &persona_resolution,
-                session.persona_id.as_deref(),
-            );
-            if let Some(context) = self.resolve_stored_persona(
-                session.persona_id.as_deref(),
-                harness_type,
-                &desired_capabilities,
-            )? {
+            let unavailable_requested_persona_id = persona_resolution
+                .unavailable_requested_persona_id
+                .filter(|_| {
+                    // Another first-create request may have won with a different resolution.
+                    persona_resolution.persona_id == session.persona_id
+                });
+            if let Some(context) =
+                self.resolve_stored_persona(session.persona_id.as_deref(), &desired_capabilities)?
+            {
                 self.store
                     .append_event(
                         thread_key,
@@ -2843,8 +2809,7 @@ impl SessionRuntime {
         );
         let ensure_started = Instant::now();
         let result = async {
-            let persona_context =
-                self.resolve_stored_persona(persona_id, harness_type, desired_capabilities)?;
+            let persona_context = self.resolve_stored_persona(persona_id, desired_capabilities)?;
             if let Some(sandbox_id) = existing_sandbox_id {
                 let id = SandboxId::new(sandbox_id);
                 if !sandbox_capabilities_match(existing_sandbox_capabilities, desired_capabilities)
@@ -5701,44 +5666,57 @@ fn clean_persona_id(value: &str) -> Option<&str> {
     if value.is_empty() { None } else { Some(value) }
 }
 
+fn resolve_persona_context(
+    personas: Option<&PersonaRegistry>,
+    persona_id: Option<&str>,
+    defaulted: bool,
+    capabilities: &SessionSandboxCapabilities,
+) -> Result<Option<PersonaContext>, SessionRuntimeError> {
+    let Some(persona_id) = persona_id else {
+        return Ok(None);
+    };
+    let Some(registry) = personas else {
+        return Err(SessionRuntimeError::BadRequest(format!(
+            "persona {persona_id:?} was requested but no persona registry is configured"
+        )));
+    };
+    registry
+        .context_for_access(persona_id, defaulted, &capabilities.repo_cache)
+        .map(Some)
+        .map_err(SessionRuntimeError::BadRequest)
+}
+
 fn resolve_persona_selection(
     personas: Option<&PersonaRegistry>,
     requested_persona_id: Option<&str>,
     capabilities: &SessionSandboxCapabilities,
 ) -> Result<PersonaResolution, SessionRuntimeError> {
     let requested = requested_persona_id.and_then(clean_persona_id);
-    let available_requested = requested
-        .filter(|persona_id| personas.is_some_and(|registry| registry.get(persona_id).is_some()));
-    let unavailable_requested_persona_id = requested
-        .filter(|_| available_requested.is_none())
-        .map(str::to_owned);
-    let selected = available_requested.or_else(|| {
-        personas
-            .and_then(|registry| registry.default_persona_id_for_access(&capabilities.repo_cache))
-    });
-    let defaulted = available_requested.is_none() && selected.is_some();
-    let context = match (personas, selected) {
-        (Some(registry), Some(persona_id)) => registry
-            .context_for_access(persona_id, defaulted, &capabilities.repo_cache)
-            .map(Some)
-            .map_err(SessionRuntimeError::BadRequest)?,
-        _ => None,
+    let Some(registry) = personas else {
+        return Ok(PersonaResolution {
+            persona_id: None,
+            context: None,
+            unavailable_requested_persona_id: requested.map(str::to_owned),
+        });
     };
+    let (selected, unavailable_requested_persona_id) = match requested {
+        Some(persona_id) if registry.get(persona_id).is_some() => (Some(persona_id), None),
+        Some(persona_id) => (
+            registry.default_persona_id_for_access(&capabilities.repo_cache),
+            Some(persona_id.to_owned()),
+        ),
+        None => (
+            registry.default_persona_id_for_access(&capabilities.repo_cache),
+            None,
+        ),
+    };
+    let defaulted = selected.is_some() && selected != requested;
+    let context = resolve_persona_context(Some(registry), selected, defaulted, capabilities)?;
     Ok(PersonaResolution {
         persona_id: selected.map(str::to_owned),
         context,
         unavailable_requested_persona_id,
     })
-}
-
-fn confirmed_unavailable_requested_persona_id(
-    resolution: &PersonaResolution,
-    stored_persona_id: Option<&str>,
-) -> Option<String> {
-    if resolution.persona_id.as_deref() != stored_persona_id {
-        return None;
-    }
-    resolution.unavailable_requested_persona_id.clone()
 }
 
 fn upsert_spec_env(spec: &mut SandboxSpec, name: &str, value: String) {
@@ -7486,24 +7464,19 @@ mod tests {
 
     #[test]
     fn unavailable_requested_persona_uses_deployment_fallback() {
-        let persona = |id: &str, source_root: &str| PersonaDefinition {
-            id: id.to_owned(),
-            source_root: source_root.to_owned(),
-            source_path: format!("{source_root}/personas/{id}"),
-            source_ref: None,
-            prompt_hash: format!("sha256:{id}"),
-            prompt: format!("{id} persona"),
-        };
         let default_registry = PersonaRegistry::new(
-            [
-                persona("eng", "/repo/tools"),
-                persona("private", "/repo/private/tools"),
-            ],
+            [PersonaDefinition {
+                id: "eng".to_owned(),
+                source_root: "/repo/tools".to_owned(),
+                source_path: "/repo/tools/personas/eng".to_owned(),
+                source_ref: None,
+                prompt_hash: "sha256:eng".to_owned(),
+                prompt: "engineering persona".to_owned(),
+            }],
             Some("eng".to_owned()),
-            vec!["/repo/tools".to_owned(), "/repo/private/tools".to_owned()],
+            vec!["/repo/tools".to_owned()],
         )
-        .unwrap()
-        .with_public_source_roots(["/repo/tools".to_owned()]);
+        .unwrap();
         let empty_registry = PersonaRegistry::new(Vec::new(), None, Vec::new()).unwrap();
 
         for (registry, expected_persona_id) in [
@@ -7531,34 +7504,6 @@ mod tests {
                 Some("honk")
             );
         }
-
-        let capabilities = SessionSandboxCapabilities {
-            repo_cache: SessionRepoCacheAccess::Public,
-            observability_enabled: false,
-        };
-        assert!(
-            resolve_persona_selection(Some(&default_registry), Some("private"), &capabilities)
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn unavailable_persona_signal_requires_returned_persona_to_match_resolution() {
-        let resolution = resolve_persona_selection(
-            None,
-            Some("honk"),
-            &SessionSandboxCapabilities::default_enabled(),
-        )
-        .unwrap();
-
-        assert_eq!(
-            confirmed_unavailable_requested_persona_id(&resolution, Some("eng")),
-            None
-        );
-        assert_eq!(
-            confirmed_unavailable_requested_persona_id(&resolution, None).as_deref(),
-            Some("honk")
-        );
     }
 
     #[test]

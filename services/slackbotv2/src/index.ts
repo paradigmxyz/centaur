@@ -1229,7 +1229,6 @@ async function syncThreadMessageToSession(
   const includeResponseMetadata =
     responseMetadataMode === 'always' ||
     (responseMetadataMode === 'first' && isFirstAssistantMessage)
-  let responseContextBlock: SlackContextBlock | undefined
   if (
     overrides.harnessType ||
     overrides.model ||
@@ -1460,6 +1459,7 @@ async function syncThreadMessageToSession(
     return
   }
 
+  let responseContextBlock: SlackContextBlock | undefined
   try {
     await thread.setState({ activeExecution: true })
     traceLog(input.options, 'slackbotv2_forward_active_execution_marked', trace)

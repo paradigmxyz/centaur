@@ -887,24 +887,26 @@ async function sessionOutcomeFromResponse(
 ): Promise<CreateSessionOutcome> {
   try {
     const payload = await response.json()
-    const harnessType = isJsonObject(payload) ? stringValue(payload.harness_type) : undefined
+    const payloadIsObject = isJsonObject(payload)
+    const harnessType = rawSlackString(payload, 'harness_type')
     const resolvedAssignment =
       harnessAssignment &&
       (!harnessType || harnessType === 'codex' || harnessType === 'nanocodex')
         ? { ...harnessAssignment, cohort: harnessType ?? harnessAssignment.cohort }
         : undefined
-    const personaId = isJsonObject(payload)
+    const personaId = payloadIsObject
       ? typeof payload.persona_id === 'string'
         ? payload.persona_id
         : 'persona_id' in payload
           ? null
           : undefined
       : undefined
-    const unavailableRequestedPersonaId = isJsonObject(payload)
-      ? stringValue(payload.unavailable_requested_persona_id)
-      : undefined
+    const unavailableRequestedPersonaId = rawSlackString(
+      payload,
+      'unavailable_requested_persona_id'
+    )
     return {
-      harnessSwitched: isJsonObject(payload) && payload.harness_switched === true,
+      harnessSwitched: payloadIsObject && payload.harness_switched === true,
       ...(harnessType ? { harnessType } : {}),
       ...(personaId !== undefined ? { personaId } : {}),
       ...(unavailableRequestedPersonaId ? { unavailableRequestedPersonaId } : {}),

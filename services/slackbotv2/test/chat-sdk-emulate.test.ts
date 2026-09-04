@@ -783,12 +783,7 @@ describe('slackbotv2', () => {
     )
 
     expect(codexApi.creates.map(create => create.body.persona_id)).toEqual(['eng', 'old'])
-    const unavailablePersonaNotices = slackApi.calls
-      .filter(call => call.method === 'chat.stopStream')
-      .flatMap(call => (Array.isArray(call.body.blocks) ? call.body.blocks : []))
-      .map(block => JSON.stringify(block))
-      .filter(block => block.includes("isn't available"))
-    expect(unavailablePersonaNotices).toHaveLength(0)
+    expect(stopStreamBlocksText(slackApi.calls)).not.toContain("isn't available")
     const state = await sharedState.get<Record<string, unknown>>(
       `thread-state:${threadKey(parent.ts)}`
     )
@@ -834,12 +829,9 @@ describe('slackbotv2', () => {
     await Promise.all(waits)
 
     expect(codexApi.creates[0]?.body.persona_id).toBe('honk')
-    const personaNotice = slackApi.calls
-      .filter(call => call.method === 'chat.stopStream')
-      .flatMap(call => (Array.isArray(call.body.blocks) ? call.body.blocks : []))
-      .map(block => JSON.stringify(block))
-      .find(block => block.includes('Persona \\"honk\\" isn\'t available'))
-    expect(personaNotice).toContain('Using \\"eng\\" instead.')
+    expect(stopStreamBlocksText(slackApi.calls)).toContain(
+      `Persona "honk" isn't available. Using "eng" instead.`
+    )
   })
 
   it('clears a sticky model rejected by the harness and accepts a later override', async () => {
@@ -7144,6 +7136,18 @@ function blocksText(value: unknown): string {
     })
     .filter(Boolean)
     .join('\n')
+}
+
+function stopStreamBlocksText(calls: StreamCall[]): string {
+  const blocks = calls
+    .filter(call => call.method === 'chat.stopStream')
+    .flatMap(call => (Array.isArray(call.body.blocks) ? call.body.blocks : []))
+  const elements = blocks.flatMap(block => {
+    if (!block || typeof block !== 'object' || Array.isArray(block)) return []
+    const value = (block as Record<string, unknown>).elements
+    return Array.isArray(value) ? value : []
+  })
+  return blocksText([...blocks, ...elements])
 }
 
 function normalizeApiPath(path: string): string {
