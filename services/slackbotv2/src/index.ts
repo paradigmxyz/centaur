@@ -55,6 +55,7 @@ import {
   withSlackApiTimeout
 } from './session-api'
 import {
+  appendSlackResponseContextNotice,
   buildSlackResponseContextBlock,
   defaultModelForHarness,
   defaultServiceTierForHarness,
@@ -1479,6 +1480,7 @@ async function syncThreadMessageToSession(
       onExecutionStarted: commitExecutionStarted,
       onMessagesAppended: commitMessagesAppended,
       onSessionCreated: async outcome => {
+        let personaFallbackNotice: string | undefined
         if (outcome.personaId !== undefined) {
           const requestedPersonaId = stickyOverridesUpdate?.personaId
           stickyOverridesUpdate = {
@@ -1486,10 +1488,17 @@ async function syncThreadMessageToSession(
             personaId: outcome.personaId
           }
           forwardInput.personaId = outcome.personaId ?? undefined
+          if (outcome.personaFallback === true && requestedPersonaId !== undefined) {
+            personaFallbackNotice =
+              outcome.personaId === null
+                ? `Persona "${requestedPersonaId}" isn't available. Continuing without a persona.`
+                : `Persona "${requestedPersonaId}" isn't available. Using "${outcome.personaId}" instead.`
+          }
           if (requestedPersonaId !== undefined && outcome.personaId !== requestedPersonaId) {
             traceLog(input.options, 'slackbotv2_session_persona_reconciled', trace, {
               requested_persona_id: requestedPersonaId,
-              resolved_persona_id: outcome.personaId
+              resolved_persona_id: outcome.personaId,
+              persona_fallback: outcome.personaFallback
             })
           }
         }
@@ -1497,7 +1506,15 @@ async function syncThreadMessageToSession(
         const abTested = outcome.harnessAssignment?.experiment === 'codex_nanocodex_ab'
         forwardInput.metadataHarnessType = harnessType
         forwardInput.harnessAssignment = outcome.harnessAssignment
-        if (harnessType === effectiveHarnessType && !abTested) return
+        if (harnessType === effectiveHarnessType && !abTested) {
+          if (personaFallbackNotice) {
+            responseContextBlock = appendSlackResponseContextNotice(
+              responseContextBlock,
+              personaFallbackNotice
+            )
+          }
+          return
+        }
         const model =
           resolvedModel ?? defaultModelForHarness(harnessType, input.options.harnessDefaultModels)
         const requestedReasoning = reasoningForModel(harnessType, model, resolvedReasoning)
@@ -1529,6 +1546,12 @@ async function syncThreadMessageToSession(
           requested_harness_type: effectiveHarnessType,
           resolved_harness_type: harnessType
         })
+        if (personaFallbackNotice) {
+          responseContextBlock = appendSlackResponseContextNotice(
+            responseContextBlock,
+            personaFallbackNotice
+          )
+        }
       },
       onSessionRestarted: handleSessionRestarted
     })

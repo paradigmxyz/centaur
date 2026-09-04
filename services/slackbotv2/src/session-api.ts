@@ -496,6 +496,7 @@ export async function forwardToSessionApi(
     harness_type: created.harnessType,
     harness_switched: created.harnessSwitched,
     persona_id: created.personaId,
+    persona_fallback: created.personaFallback,
     phase_ms: elapsedMs(createStartedAtMs)
   })
   await callbacks.onSessionCreated?.(created)
@@ -769,6 +770,8 @@ type CreateSessionOutcome = {
   harnessAssignment?: SlackbotV2HarnessAssignment
   /** The persona persisted by the API. Null means the session has no persona. */
   personaId?: string | null
+  /** The API replaced an unavailable requested persona while creating the session. */
+  personaFallback?: boolean
   /** The API restarted the thread onto the requested harness. */
   harnessSwitched: boolean
 }
@@ -897,10 +900,15 @@ async function sessionOutcomeFromResponse(
           ? null
           : undefined
       : undefined
+    const personaFallback =
+      isJsonObject(payload) && typeof payload.persona_fallback === 'boolean'
+        ? payload.persona_fallback
+        : undefined
     return {
       harnessSwitched: isJsonObject(payload) && payload.harness_switched === true,
       ...(harnessType ? { harnessType } : {}),
       ...(personaId !== undefined ? { personaId } : {}),
+      ...(personaFallback !== undefined ? { personaFallback } : {}),
       ...(resolvedAssignment ? { harnessAssignment: resolvedAssignment } : {})
     }
   } catch {

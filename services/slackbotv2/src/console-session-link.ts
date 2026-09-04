@@ -219,6 +219,25 @@ export type SlackContextBlock = {
   elements: Array<{ type: 'mrkdwn'; text: string }>
 }
 
+export function appendSlackResponseContextNotice(
+  block: SlackContextBlock | undefined,
+  notice: string
+): SlackContextBlock | undefined {
+  const text = notice.trim()
+  if (!text) return block
+  const noticeElement = {
+    type: 'mrkdwn' as const,
+    text: `:warning: ${escapeSlackMrkdwn(text)}`
+  }
+  if (!block) {
+    return { type: 'context', elements: [noticeElement] }
+  }
+  return {
+    ...block,
+    elements: [noticeElement, ...block.elements]
+  }
+}
+
 /**
  * Builds a Slack context block containing the optional Console link and
  * response metadata. Metadata inclusion is independent of the Console URL.

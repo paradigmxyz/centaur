@@ -636,6 +636,35 @@ describe('forwardToSessionApi overrides', () => {
     )
   })
 
+  test('maps persona fallback from the create response onto the session outcome', async () => {
+    const { fetchFn } = fakeApi({
+      createSession: [
+        {
+          body: {
+            harness_switched: false,
+            harness_type: 'codex',
+            persona_fallback: true,
+            persona_id: 'eng'
+          },
+          status: 200
+        }
+      ]
+    })
+    let personaFallback: boolean | undefined
+
+    await forwardToSessionApi(
+      options(fetchFn),
+      forwardInput(apiMessage('review this'), { personaId: 'honk' }),
+      {
+        onSessionCreated: async outcome => {
+          personaFallback = outcome.personaFallback
+        }
+      }
+    )
+
+    expect(personaFallback).toBe(true)
+  })
+
   test('includes model override on the execute input line', async () => {
     const { fetchFn, requests } = fakeApi()
     await forwardToSessionApi(

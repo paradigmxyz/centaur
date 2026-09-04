@@ -9,7 +9,8 @@ use thiserror::Error;
 pub struct CreateSessionRequest {
     pub harness_type: HarnessType,
     /// Used only when creating the session. The first persisted persona stays
-    /// pinned for the lifetime of the thread.
+    /// pinned for the lifetime of the thread. An ID absent from the deployment
+    /// falls back to the eligible deployment default or no persona.
     pub persona_id: Option<String>,
     pub metadata: Option<Value>,
     /// What to do when the session already exists on a different harness.
@@ -33,6 +34,10 @@ pub struct CreateSessionResponse {
     pub session: Session,
     /// True when this request restarted the thread onto a different harness.
     pub harness_switched: bool,
+    /// Present only for new-session persona selection. True means the requested
+    /// persona was unavailable and the deployment fallback was used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persona_fallback: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize)]
