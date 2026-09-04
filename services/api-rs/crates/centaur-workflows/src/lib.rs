@@ -13,7 +13,7 @@ use absurd::{
     SpawnOptions, StepHandle, TaskContext, TaskRegistrationOptions, Worker, WorkerOptions,
 };
 use centaur_iron_control::{IronControlClient, IronControlError, PrincipalInput, slugify};
-use centaur_sandbox_core::SandboxSpec;
+use centaur_sandbox_core::{SandboxId, SandboxSpec};
 use centaur_session_core::{HarnessType, MessageRole, SessionMessageInput, ThreadKey};
 use centaur_session_runtime::{
     ExecuteSessionInput, HarnessConflictPolicy, SESSION_OUTPUT_LINE_EVENT, SandboxRuntime,
@@ -2873,6 +2873,53 @@ impl Drop for WorkflowSandboxCleanupGuard {
     }
 }
 
+struct WorkflowHostSandboxCleanupGuard {
+    runtime: Option<SandboxRuntime>,
+    sandbox_id: SandboxId,
+}
+
+impl WorkflowHostSandboxCleanupGuard {
+    fn new(runtime: SandboxRuntime, sandbox_id: SandboxId) -> Self {
+        Self {
+            runtime: Some(runtime),
+            sandbox_id,
+        }
+    }
+
+    async fn cleanup(&mut self) {
+        let Some(runtime) = self.runtime.as_ref().cloned() else {
+            return;
+        };
+        if let Err(error) = runtime.stop_sandbox(&self.sandbox_id).await {
+            warn!(
+                sandbox_id = %self.sandbox_id.as_str(),
+                %error,
+                "failed to stop workflow host sandbox"
+            );
+            return;
+        }
+        self.runtime = None;
+    }
+}
+
+impl Drop for WorkflowHostSandboxCleanupGuard {
+    fn drop(&mut self) {
+        let Some(runtime) = self.runtime.take() else {
+            return;
+        };
+        let sandbox_id = self.sandbox_id.clone();
+        tokio::spawn(async move {
+            if let Err(error) = runtime.stop_sandbox(&sandbox_id).await {
+                warn!(
+                    sandbox_id = %sandbox_id.as_str(),
+                    %error,
+                    "failed to stop dropped workflow host sandbox"
+                );
+            }
+        });
+    }
+}
+
 async fn run_python_workflow_host(
     input: WorkflowTaskInput,
     ctx: TaskContext,
@@ -3061,7 +3108,10 @@ async fn run_python_workflow_host_in_sandbox(
     {
         spec = spec.env("DATABASE_URL", database_url);
     }
-    let (sandbox_id, io) = sandbox.runtime.create_running_io(spec).await?;
+    let sandbox_id = sandbox.runtime.create_running(spec).await?;
+    let mut cleanup_guard =
+        WorkflowHostSandboxCleanupGuard::new(sandbox.runtime.clone(), sandbox_id.clone());
+    let io = sandbox.runtime.open_io(&sandbox_id).await?;
     let mut stdin = io.stdin;
     let stderr_task = tokio::spawn(async move {
         let _guard = io.guard;
@@ -3083,9 +3133,7 @@ async fn run_python_workflow_host_in_sandbox(
     )
     .await;
     drop(stdin);
-    if let Err(error) = sandbox.runtime.stop_sandbox(&sandbox_id).await {
-        warn!(sandbox_id = %sandbox_id.as_str(), %error, "failed to stop workflow host sandbox");
-    }
+    cleanup_guard.cleanup().await;
     result
 }
 
@@ -4514,7 +4562,99 @@ pub enum WorkflowRuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use centaur_sandbox_core::{
+        ObservedSandbox, SandboxBackend, SandboxError, SandboxHandle, SandboxIo, SandboxResult,
+        SandboxStatus,
+    };
     use chrono::TimeZone;
+    use tokio::sync::Notify;
+
+    struct CleanupTestBackend {
+        stopped: std::sync::Mutex<Vec<String>>,
+        stopped_notify: Notify,
+    }
+
+    impl CleanupTestBackend {
+        fn new() -> Self {
+            Self {
+                stopped: std::sync::Mutex::new(Vec::new()),
+                stopped_notify: Notify::new(),
+            }
+        }
+
+        fn unsupported<T>(&self, operation: &'static str) -> SandboxResult<T> {
+            Err(SandboxError::Unsupported {
+                backend: self.name(),
+                operation,
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SandboxBackend for CleanupTestBackend {
+        fn name(&self) -> &'static str {
+            "cleanup-test"
+        }
+
+        async fn create(&self, _spec: SandboxSpec) -> SandboxResult<SandboxHandle> {
+            self.unsupported("create")
+        }
+
+        async fn open_io(&self, _id: &SandboxId) -> SandboxResult<SandboxIo> {
+            self.unsupported("open_io")
+        }
+
+        async fn status(&self, _id: &SandboxId) -> SandboxResult<SandboxStatus> {
+            self.unsupported("status")
+        }
+
+        async fn observe(&self, _id: &SandboxId) -> SandboxResult<ObservedSandbox> {
+            self.unsupported("observe")
+        }
+
+        async fn list_observed(&self) -> SandboxResult<Vec<ObservedSandbox>> {
+            self.unsupported("list_observed")
+        }
+
+        async fn stop(&self, id: &SandboxId) -> SandboxResult<()> {
+            self.stopped
+                .lock()
+                .expect("stopped sandbox lock")
+                .push(id.as_str().to_owned());
+            self.stopped_notify.notify_one();
+            Ok(())
+        }
+
+        async fn pause(&self, _id: &SandboxId) -> SandboxResult<()> {
+            self.unsupported("pause")
+        }
+
+        async fn resume(&self, _id: &SandboxId) -> SandboxResult<()> {
+            self.unsupported("resume")
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_workflow_host_cleanup_guard_stops_sandbox() {
+        let backend = Arc::new(CleanupTestBackend::new());
+        let runtime = SandboxRuntime::backend(backend.clone(), SandboxSpec::new("test"));
+        let guard = WorkflowHostSandboxCleanupGuard::new(runtime, SandboxId::new("workflow-host"));
+
+        let workflow = tokio::spawn(async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+        });
+        workflow.abort();
+        let _ = workflow.await;
+
+        tokio::time::timeout(Duration::from_secs(1), backend.stopped_notify.notified())
+            .await
+            .expect("workflow host sandbox was not stopped after cancellation");
+        assert_eq!(
+            *backend.stopped.lock().expect("stopped sandbox lock"),
+            vec!["workflow-host"]
+        );
+    }
 
     #[test]
     fn python_event_names_are_collision_free() {

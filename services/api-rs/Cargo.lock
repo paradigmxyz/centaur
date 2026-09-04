@@ -1125,6 +1125,7 @@ name = "centaur-workflows"
 version = "0.1.0"
 dependencies = [
  "absurd-sdk",
+ "async-trait",
  "centaur-iron-control",
  "centaur-sandbox-core",
  "centaur-session-core",

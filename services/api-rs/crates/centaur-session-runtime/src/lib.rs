@@ -4114,13 +4114,18 @@ async fn maybe_generate_session_title(
 }
 
 impl SandboxRuntime {
-    pub async fn create_running_io(
+    pub async fn create_running(
         &self,
         spec: SandboxSpec,
-    ) -> Result<(SandboxId, centaur_sandbox_core::SandboxIoParts), SessionRuntimeError> {
-        let handle = self.manager.create_running(spec).await?;
-        let io = self.manager.open_io(&handle.id).await?.into_parts();
-        Ok((handle.id, io))
+    ) -> Result<SandboxId, SessionRuntimeError> {
+        Ok(self.manager.create_running(spec).await?.id)
+    }
+
+    pub async fn open_io(
+        &self,
+        sandbox_id: &SandboxId,
+    ) -> Result<centaur_sandbox_core::SandboxIoParts, SessionRuntimeError> {
+        Ok(self.manager.open_io(sandbox_id).await?.into_parts())
     }
 
     pub async fn stop_sandbox(&self, sandbox_id: &SandboxId) -> Result<(), SessionRuntimeError> {
