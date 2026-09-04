@@ -1609,8 +1609,9 @@ impl SessionRuntime {
             };
             let desired_capabilities = sandbox_capabilities_from_principal(&registered_principal);
             // A session's persona is fixed by the first successful create.
-            // Resolve the stored persona before the requested one so later
-            // persona flags cannot change or invalidate an existing thread.
+            // Use the stored persona before the requested one so later persona
+            // flags cannot change or invalidate an existing thread. Its
+            // context is resolved once from the post-create session below.
             let existing_persona_id = match self.store.get_session(thread_key).await {
                 Ok(session) => Some(session.persona_id),
                 Err(SessionStoreError::NotFound { .. }) => None,
@@ -1618,11 +1619,7 @@ impl SessionRuntime {
             };
             let persona_resolution = match existing_persona_id {
                 Some(persona_id) => PersonaResolution {
-                    context: self.resolve_stored_persona(
-                        persona_id.as_deref(),
-                        harness_type,
-                        &desired_capabilities,
-                    )?,
+                    context: None,
                     persona_id,
                 },
                 None => self.resolve_persona_for_create(persona_id, &desired_capabilities)?,

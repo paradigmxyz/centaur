@@ -110,23 +110,16 @@ export function createOpenAiMessageOverridesStrategy(
   const fetchFn = options.fetch ?? fetch
 
   return async ({ text }) => {
-    // Explicit flags are deterministic user commands, even when the deployment
-    // enables the LLM strategy for natural-language model requests. Model flags
-    // bypass the strategy entirely. Persona flags are stripped and retained
-    // locally before the remaining text is classified below.
+    // Explicit model flags are deterministic user commands and bypass the
+    // strategy entirely. The wrapper has already removed any persona flag.
     const { cleanedText, ...explicitOverrides } = extractMessageOverrides(text)
-    const { personaId, ...explicitModelOverrides } = explicitOverrides
-    if (Object.values(explicitModelOverrides).some(value => value !== undefined)) {
+    if (Object.values(explicitOverrides).some(value => value !== undefined)) {
       return { cleanedText, overrides: explicitOverrides }
     }
 
-    // Persona flags are always resolved locally. When the rest of the message
-    // contains a natural-language model request, let the strategy classify the
-    // already-cleaned text and merge its result without giving it authority to
-    // choose or replace the persona.
-    const strategyText = personaId ? cleanedText : text
+    const strategyText = cleanedText
     if (!strategyText) {
-      return { cleanedText, overrides: { personaId } }
+      return { cleanedText, overrides: {} }
     }
 
     const controller = new AbortController()
@@ -174,20 +167,14 @@ export function createOpenAiMessageOverridesStrategy(
       const strategyOverrides = validateStrategyOverrides(
         isJsonObject(parsed) ? (parsed as OpenAiMessageOverridesStrategyOutput) : null
       )
-      return {
-        ...(personaId ? { cleanedText } : {}),
-        overrides: { ...strategyOverrides, ...(personaId ? { personaId } : {}) }
-      }
+      return { overrides: strategyOverrides }
     } catch (error) {
       options.logger?.warn('slackbotv2_message_overrides_strategy_request_failed', {
         error: errorMessage(error),
         model: options.model,
         timeout_ms: timeoutMs
       })
-      return {
-        ...(personaId ? { cleanedText } : {}),
-        overrides: personaId ? { personaId } : {}
-      }
+      return { overrides: {} }
     } finally {
       clearTimeout(timeout)
     }

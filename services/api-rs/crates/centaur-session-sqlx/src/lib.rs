@@ -172,10 +172,10 @@ impl PgSessionStore {
                 insert into sessions (thread_key, harness_type, persona_id, status, metadata, proxy_labels)
                 values ($1, $2, $3, $4, $5, $6)
                 on conflict (thread_key) do update
-                set metadata = sessions.metadata || (excluded.metadata - 'persona'),
+                set metadata = sessions.metadata || excluded.metadata,
                     updated_at = now()
                 where sessions.harness_type = excluded.harness_type
-                  and not sessions.metadata @> (excluded.metadata - 'persona')
+                  and not sessions.metadata @> excluded.metadata
                 "#,
             )
         } else {

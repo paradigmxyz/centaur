@@ -43,46 +43,6 @@ describe('extractMessageOverrides', () => {
     })
   })
 
-  test('parses persona flags independently from harness and model', () => {
-    expect(extractMessageOverrides('--persona=invest --claude --model=fable review this')).toEqual({
-      cleanedText: 'review this',
-      harnessType: 'claudecode',
-      model: 'claude-fable-5',
-      personaId: 'invest',
-      reasoning: undefined
-    })
-    expect(extractMessageOverrides('--persona=legal --sonnet review this').personaId).toBe(
-      'legal'
-    )
-    expect(extractMessageOverrides('--persona eng --codex debug this')).toEqual({
-      cleanedText: 'debug this',
-      harnessType: 'codex',
-      model: undefined,
-      personaId: 'eng',
-      reasoning: undefined
-    })
-  })
-
-  test('does not recognize bare persona aliases', () => {
-    expect(extractMessageOverrides('--invest review this')).toEqual({
-      cleanedText: '--invest review this',
-      harnessType: undefined,
-      model: undefined,
-      personaId: undefined,
-      reasoning: undefined
-    })
-  })
-
-  test('does not consume a following flag as a persona value', () => {
-    expect(extractMessageOverrides('--persona --claude fix this')).toEqual({
-      cleanedText: '--persona fix this',
-      harnessType: 'claudecode',
-      model: undefined,
-      personaId: undefined,
-      reasoning: undefined
-    })
-  })
-
   test('is case-insensitive', () => {
     expect(extractMessageOverrides('--Claude review').harnessType).toBe('claudecode')
   })
@@ -241,7 +201,6 @@ describe('extractMessageOverrides', () => {
       cleanedText: '--model fix this',
       harnessType: 'claudecode',
       model: undefined,
-      personaId: undefined,
       reasoning: undefined
     })
   })
@@ -549,6 +508,51 @@ describe('messageOverridesForText strategy invocation', () => {
     })
   })
 
+  test('combines explicit persona and model overrides', async () => {
+    await expect(
+      messageOverridesForText(
+        slackOptions({}),
+        '--persona=invest --claude --model=fable review this',
+        trace
+      )
+    ).resolves.toEqual({
+      cleanedText: 'review this',
+      overrides: {
+        harnessType: 'claudecode',
+        model: 'claude-fable-5',
+        personaId: 'invest',
+        provider: undefined,
+        reasoning: undefined
+      }
+    })
+    await expect(
+      messageOverridesForText(slackOptions({}), '--persona eng --codex debug this', trace)
+    ).resolves.toEqual({
+      cleanedText: 'debug this',
+      overrides: {
+        harnessType: 'codex',
+        model: undefined,
+        personaId: 'eng',
+        provider: undefined,
+        reasoning: undefined
+      }
+    })
+  })
+
+  test('does not consume a following flag as a persona value', async () => {
+    await expect(
+      messageOverridesForText(slackOptions({}), '--persona --claude fix this', trace)
+    ).resolves.toEqual({
+      cleanedText: '--persona fix this',
+      overrides: {
+        harnessType: 'claudecode',
+        model: undefined,
+        provider: undefined,
+        reasoning: undefined
+      }
+    })
+  })
+
   test('uses the configured strategy instead of the legacy flag parser', async () => {
     await expect(
       messageOverridesForText(
@@ -671,7 +675,11 @@ describe('messageOverridesForText strategy invocation', () => {
     })
 
     await expect(
-      strategy({ text: '--persona=invest investigate this company' })
+      messageOverridesForText(
+        slackOptions({ messageOverridesStrategy: strategy }),
+        '--persona=invest investigate this company',
+        trace
+      )
     ).resolves.toEqual({
       cleanedText: 'investigate this company',
       overrides: { personaId: 'invest' }
@@ -705,7 +713,11 @@ describe('messageOverridesForText strategy invocation', () => {
     })
 
     await expect(
-      strategy({ text: '--persona=invest use sol for this' })
+      messageOverridesForText(
+        slackOptions({ messageOverridesStrategy: strategy }),
+        '--persona=invest use sol for this',
+        trace
+      )
     ).resolves.toEqual({
       cleanedText: 'use sol for this',
       overrides: {

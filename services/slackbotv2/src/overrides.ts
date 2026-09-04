@@ -42,6 +42,11 @@ export type MessageOverrides = HarnessOverrides & {
   cleanedText: string
 }
 
+export type PersonaOverride = {
+  cleanedText: string
+  personaId?: string
+}
+
 // Flag name -> HarnessType wire value (serde lowercase of the Rust enum).
 const HARNESS_FLAGS: Record<string, string> = {
   amp: 'amp',
@@ -152,15 +157,8 @@ export function extractMessageOverrides(text: string): MessageOverrides {
   let cleaned = text
   let harnessType: string | undefined
   let model: string | undefined
-  let personaId: string | undefined
   let provider: string | undefined
   let reasoning: string | undefined
-
-  const personaMatch = PERSONA_FLAG_PATTERN.exec(cleaned)
-  if (personaMatch) {
-    personaId = personaMatch[1]!
-    cleaned = stripMatch(cleaned, personaMatch)
-  }
 
   const modelMatch = MODEL_FLAG_PATTERN.exec(cleaned)
   if (modelMatch) {
@@ -215,9 +213,17 @@ export function extractMessageOverrides(text: string): MessageOverrides {
     cleanedText: cleaned === text ? text : cleaned.trim(),
     harnessType,
     model,
-    personaId,
     provider,
     reasoning
+  }
+}
+
+export function extractPersonaOverride(text: string): PersonaOverride {
+  const match = PERSONA_FLAG_PATTERN.exec(text)
+  if (!match) return { cleanedText: text }
+  return {
+    cleanedText: stripMatch(text, match).trim(),
+    personaId: match[1]!
   }
 }
 

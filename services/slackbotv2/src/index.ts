@@ -63,7 +63,11 @@ import {
   type SlackContextBlock
 } from './console-session-link'
 import { resolveChannelDefault } from './channel-defaults'
-import { extractMessageOverrides, type HarnessOverrides } from './overrides'
+import {
+  extractMessageOverrides,
+  extractPersonaOverride,
+  type HarnessOverrides
+} from './overrides'
 import { createFlagMessageOverridesStrategy } from './message-overrides-strategy'
 import {
   isAllowedSlackMessage,
@@ -192,22 +196,26 @@ export async function messageOverridesForText(
   trace: SlackbotV2Trace
 ): Promise<{ cleanedText?: string; overrides: HarnessOverrides }> {
   const strategy = options.messageOverridesStrategy ?? DEFAULT_MESSAGE_OVERRIDES_STRATEGY
-  const explicitPersonaId = extractMessageOverrides(text).personaId
+  const persona = extractPersonaOverride(text)
+  let result: { cleanedText?: string; overrides: HarnessOverrides }
   try {
-    const result = await strategy({ text })
-    const { personaId: _strategyPersonaId, ...strategyOverrides } = result.overrides
-    return {
-      ...result,
-      overrides: {
-        ...strategyOverrides,
-        ...(explicitPersonaId ? { personaId: explicitPersonaId } : {})
-      }
-    }
+    result = await strategy({ text: persona.cleanedText })
   } catch (error) {
     traceWarn(options, 'slackbotv2_message_overrides_strategy_failed', trace, {
       error: errorMessage(error)
     })
-    return DEFAULT_MESSAGE_OVERRIDES_STRATEGY({ text })
+    result = await DEFAULT_MESSAGE_OVERRIDES_STRATEGY({ text: persona.cleanedText })
+  }
+  const { personaId: _strategyPersonaId, ...strategyOverrides } = result.overrides
+  return {
+    ...result,
+    ...(persona.personaId && result.cleanedText === undefined
+      ? { cleanedText: persona.cleanedText }
+      : {}),
+    overrides: {
+      ...strategyOverrides,
+      ...(persona.personaId ? { personaId: persona.personaId } : {})
+    }
   }
 }
 
