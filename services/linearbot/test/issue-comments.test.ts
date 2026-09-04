@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
   parseIssueAssignmentWebhook,
   parseIssueCommentWebhook,
+  parseIssueReleaseWebhook,
 } from "../src/issue-comments";
 
 const BOT_USER_ID = "bot-1";
@@ -226,6 +227,118 @@ describe("parseIssueAssignmentWebhook", () => {
           actor: { id: "user-9", name: "Ada Lovelace", type: "user" },
           updatedFrom: { assigneeId: null },
         }),
+        BOT_USER_ID,
+      ),
+    ).not.toBeNull();
+  });
+});
+
+/** An issue that is no longer the bot's, with `updatedFrom` saying it was. */
+function releasePayload(
+  topLevel: Record<string, unknown> = {},
+  dataOverrides: Record<string, unknown> = {},
+): string {
+  return JSON.stringify({
+    action: "update",
+    type: "Issue",
+    organizationId: "org-1",
+    updatedFrom: { delegateId: BOT_USER_ID },
+    data: {
+      id: "issue-1",
+      assigneeId: null,
+      delegateId: null,
+      updatedAt: "2026-06-17T00:00:00.000Z",
+      ...dataOverrides,
+    },
+    ...topLevel,
+  });
+}
+
+describe("parseIssueReleaseWebhook", () => {
+  it("fires when the bot is dropped as delegate", () => {
+    const event = parseIssueReleaseWebhook(releasePayload(), BOT_USER_ID);
+    expect(event?.issueId).toBe("issue-1");
+    expect(event?.updatedAt).toBe("2026-06-17T00:00:00.000Z");
+  });
+
+  it("fires when the bot is dropped as assignee", () => {
+    expect(
+      parseIssueReleaseWebhook(
+        releasePayload({ updatedFrom: { assigneeId: BOT_USER_ID } }),
+        BOT_USER_ID,
+      ),
+    ).not.toBeNull();
+  });
+
+  it("fires when the issue is handed to someone else outright", () => {
+    expect(
+      parseIssueReleaseWebhook(
+        releasePayload(
+          { updatedFrom: { assigneeId: BOT_USER_ID } },
+          { assigneeId: "user-9" },
+        ),
+        BOT_USER_ID,
+      ),
+    ).not.toBeNull();
+  });
+
+  it("does not fire while the bot still holds the issue by the other field", () => {
+    // Delegate removed, still the assignee: it is still meant to be working.
+    expect(
+      parseIssueReleaseWebhook(
+        releasePayload({}, { assigneeId: BOT_USER_ID }),
+        BOT_USER_ID,
+      ),
+    ).toBeNull();
+  });
+
+  it("does not fire on an unrelated edit to someone else's issue", () => {
+    // The trap this parser exists around: "not assigned to the bot" describes
+    // almost every issue, so only updatedFrom naming the bot can qualify one.
+    expect(
+      parseIssueReleaseWebhook(
+        releasePayload({ updatedFrom: { title: "old title" } }),
+        BOT_USER_ID,
+      ),
+    ).toBeNull();
+  });
+
+  it("does not fire without updatedFrom at all", () => {
+    expect(
+      parseIssueReleaseWebhook(
+        releasePayload({ updatedFrom: undefined }),
+        BOT_USER_ID,
+      ),
+    ).toBeNull();
+  });
+
+  it("does not fire when the bot released the issue itself", () => {
+    // Handing the issue back at the end of a turn is the normal exit; acting
+    // on it would interrupt the turn that just did the work.
+    expect(
+      parseIssueReleaseWebhook(
+        releasePayload({ actor: { id: BOT_USER_ID } }),
+        BOT_USER_ID,
+      ),
+    ).toBeNull();
+  });
+
+  it("does not fire on a create", () => {
+    expect(
+      parseIssueReleaseWebhook(
+        releasePayload({ action: "create" }),
+        BOT_USER_ID,
+      ),
+    ).toBeNull();
+  });
+
+  it("reads updatedFrom nested under data", () => {
+    expect(
+      parseIssueReleaseWebhook(
+        releasePayload(
+          { updatedFrom: undefined },
+          { updatedFrom: { delegateId: BOT_USER_ID } },
+        ),
         BOT_USER_ID,
       ),
     ).not.toBeNull();

@@ -230,6 +230,32 @@ export async function executeSessionTurn(
   return execution;
 }
 
+/**
+ * Asks api-rs to stop the thread's active execution.
+ *
+ * Reports whether there was one to stop, which is the difference between
+ * "cancelled before it started" and "stopped mid-turn" — worth logging, since
+ * only the second leaves a half-finished thread behind.
+ */
+export async function interruptSession(
+  options: LinearbotOptions,
+  threadId: string,
+  reason: string,
+): Promise<boolean> {
+  const fetchFn = options.fetch ?? fetch;
+  const response = await fetchFn(
+    apiSessionUrl(options.apiUrl, threadId, "interrupt"),
+    {
+      method: "POST",
+      headers: apiHeaders(options),
+      body: JSON.stringify({ reason }),
+    },
+  );
+  await ensureApiOk(response, "interrupt session", options);
+  const body = (await response.json()) as { interrupted?: boolean };
+  return body.interrupted === true;
+}
+
 export async function openSessionEventStream(
   options: LinearbotOptions,
   input: Pick<
@@ -604,7 +630,7 @@ async function streamSessionNotifications(
 function apiSessionUrl(
   apiUrl: string,
   threadId: string,
-  suffix?: "messages" | "execute" | "events",
+  suffix?: "messages" | "execute" | "events" | "interrupt",
 ): string {
   const path = `/api/session/${encodeURIComponent(threadId)}${suffix ? `/${suffix}` : ""}`;
   return new URL(path, ensureTrailingSlash(apiUrl)).toString();

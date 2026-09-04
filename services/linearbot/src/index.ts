@@ -19,6 +19,7 @@ import pg from "pg";
 import {
   parseIssueAssignmentWebhook,
   parseIssueCommentWebhook,
+  parseIssueReleaseWebhook,
   type IssueAssignmentEvent,
   type IssueCommentEvent,
 } from "./issue-comments";
@@ -57,6 +58,7 @@ import { extractMessageOverrides, resolveStickyProvider } from "./overrides";
 import {
   executeSessionTurn,
   forwardToSessionApi,
+  interruptSession,
   isRetryableSessionApiError,
   openSessionEventStream,
   serializeMessage,
@@ -241,6 +243,9 @@ export function createLinearbot(options: LinearbotOptions): Linearbot {
         ) ??
         requestContext.run(context, () =>
           handleIssueAssignment(rawBody, handlerInput),
+        ) ??
+        requestContext.run(context, () =>
+          handleIssueRelease(rawBody, handlerInput),
         );
       if (handled) handoffTasks.push(handled);
       try {
@@ -656,6 +661,37 @@ async function appendThreadFollowup(input: {
  * on the issue's sandbox and post the result as a comment. Uses the Issue
  * webhook (not an AgentSessionEvent) so it survives agent sessions being off.
  */
+const RELEASE_INTERRUPT_REASON =
+  "The issue was taken back from the bot while this turn was running.";
+
+/**
+ * Assignment turns still owed a start, by thread key.
+ *
+ * A turn is not instantaneous: it waits its place among concurrent handoffs,
+ * then spends seconds fetching issue context and spawning a sandbox. Somebody
+ * can take the issue back inside that window, and the release path needs to
+ * tell "not started yet, so drop it" from "already running, so interrupt it" —
+ * a dropped turn leaves nothing behind, while an interrupt has a sandbox and a
+ * half-written comment to account for.
+ *
+ * Per process, like the work it tracks. A restart loses the entries, which
+ * costs nothing: it also loses the turns.
+ */
+const pendingAssignments = new Map<string, PendingAssignment>();
+
+type PendingAssignment = {
+  /** Set when the issue is taken back before the turn starts. */
+  released: boolean;
+  /** Set once the turn is actually running. */
+  started: boolean;
+  /**
+   * The issue `updatedAt` (Linear clock) when this assignment was processed.
+   * A release older than this is stale -- it preceded this assignment, so it
+   * belongs to a turn the re-delegation has already superseded.
+   */
+  assignmentUpdatedAtMs: number;
+};
+
 function handleIssueAssignment(
   rawBody: string,
   input: ThreadHandlerInput,
@@ -688,22 +724,148 @@ function handleIssueAssignment(
     await thread.setState({ lastAssignmentTrigger: event.updatedAt });
     const client = (thread.adapter as unknown as LinearSessionCapableAdapter)
       .linearClient;
+    const pending: PendingAssignment = {
+      released: false,
+      started: false,
+      assignmentUpdatedAtMs: event.updatedAt ? Date.parse(event.updatedAt) : NaN,
+    };
+    pendingAssignments.set(threadKey, pending);
     backgroundWaitUntil(
-      runThreadTurn({
-        announceStart: true,
-        applyStatus: true,
-        botUserId: input.botUserId,
-        client,
-        executeMessage: assignmentInstructionMessage(event, threadKey),
-        issueId: event.issueId,
-        options,
-        overrides: {},
-        thread,
-        threadKey,
-        trace,
-      }),
+      (async () => {
+        try {
+          if (pending.released) {
+            // Taken back before this got a start. Nothing has been posted and
+            // no sandbox exists, so dropping it is the whole of the cleanup.
+            traceLog(options, "linearbot_assignment_dropped_on_release", trace, {
+              issue_id: event.issueId,
+            });
+            return;
+          }
+          pending.started = true;
+          await runThreadTurn({
+            announceStart: true,
+            applyStatus: true,
+            botUserId: input.botUserId,
+            client,
+            executeMessage: assignmentInstructionMessage(event, threadKey),
+            issueId: event.issueId,
+            options,
+            overrides: {},
+            thread,
+            threadKey,
+            trace,
+          });
+        } finally {
+          if (pendingAssignments.get(threadKey) === pending) {
+            pendingAssignments.delete(threadKey);
+          }
+        }
+      })(),
     );
   })();
+}
+
+/**
+ * Stops work on an issue the bot no longer holds.
+ *
+ * Two shapes, and they need different handling. A turn still waiting to start
+ * is dropped where it stands: nothing has been posted, no sandbox exists, and
+ * the cheapest correct thing is to never start. A turn already running is
+ * interrupted through api-rs, which ends the execution and lets the sandbox
+ * fall to the usual idle reclaim instead of holding a fleet slot to the end of
+ * work nobody asked for any more.
+ *
+ * Interrupting is also right when this process knows nothing about the thread:
+ * a turn started before a restart is exactly the case where the issue looks
+ * busy and no local state explains it.
+ *
+ * The issue's status is left alone deliberately. Whoever took the issue back
+ * decides where it belongs; moving it here would fight them.
+ */
+/**
+ * The release action, split out so its one non-obvious property is testable:
+ * it interrupts the thread's turn unless the release is stale.
+ *
+ * The local pending entry is keyed by thread and overwritten by a newer
+ * assignment, so at release time it can describe a turn *newer* than the
+ * webhook -- a take-back redelivered out of order after the issue was
+ * re-delegated. Interrupting that would kill a legitimate turn, and marking it
+ * `released` would drop it before it starts. Both are skipped when the release
+ * is stale: Linear advances the issue `updatedAt` on every change, so a release
+ * older than the assignment that owns the current entry precedes the
+ * re-delegation and belongs to a turn that has already been superseded.
+ *
+ * The `started` flag is not a liveness signal, so the interrupt is never gated
+ * on it (gating on it is the race that lets work start after a take-back). With
+ * no local entry there is nothing to compare against, so the interrupt runs
+ * unconditionally there: a turn started before a restart is exactly the case it
+ * must reach. `pending.released` separately keeps a still-queued turn from ever
+ * starting.
+ */
+export async function applyRelease(
+  options: LinearbotOptions,
+  threadKey: string,
+  pending: PendingAssignment | undefined,
+  trace: LinearbotTrace,
+  issueId: string,
+  releaseUpdatedAt: string,
+): Promise<void> {
+  const releaseUpdatedAtMs = releaseUpdatedAt ? Date.parse(releaseUpdatedAt) : NaN;
+  if (
+    pending &&
+    Number.isFinite(releaseUpdatedAtMs) &&
+    Number.isFinite(pending.assignmentUpdatedAtMs) &&
+    releaseUpdatedAtMs < pending.assignmentUpdatedAtMs
+  ) {
+    traceLog(options, "linearbot_release_stale_skipped", trace, {
+      issue_id: issueId,
+    });
+    return;
+  }
+  if (pending) pending.released = true;
+  try {
+    const interrupted = await interruptSession(
+      options,
+      threadKey,
+      RELEASE_INTERRUPT_REASON,
+    );
+    traceLog(options, "linearbot_assignment_release_interrupted", trace, {
+      interrupted,
+      issue_id: issueId,
+    });
+  } catch (error) {
+    (options.logger ?? noopLogger).warn("linearbot_assignment_release_failed", {
+      error: errorMessage(error),
+      issue_id: issueId,
+    });
+  }
+}
+
+function handleIssueRelease(
+  rawBody: string,
+  input: ThreadHandlerInput,
+): Promise<void> | null {
+  if (!input.botUserId) return null;
+  const event = parseIssueReleaseWebhook(rawBody, input.botUserId);
+  if (!event) return null;
+  const { options } = input;
+  const threadKey = `linear:${event.issueId}`;
+  const trace: LinearbotTrace = {
+    includeContext: false,
+    messageId: `release-${event.issueId}-${event.updatedAt}`,
+    mode: "execute",
+    openStream: false,
+    startedAtMs: nowMs(),
+    threadId: threadKey,
+  };
+  return applyRelease(
+    options,
+    threadKey,
+    pendingAssignments.get(threadKey),
+    trace,
+    event.issueId,
+    event.updatedAt,
+  );
 }
 
 /**
