@@ -95,6 +95,10 @@ impl Args {
         self.sandbox.sandbox_reaper_config()
     }
 
+    pub(crate) fn execution_max_duration_ms(&self) -> Option<u64> {
+        Some(self.sandbox.execution_max_duration_ms).filter(|value| *value > 0)
+    }
+
     pub(crate) fn sandbox_cleanup_config(&self) -> SessionSandboxCleanupConfig {
         self.sandbox.sandbox_cleanup_config()
     }
@@ -597,6 +601,16 @@ struct SandboxArgs {
     /// Stop any sandbox older than this regardless of status; sessions replace
     /// reaped sandboxes on their next message. 0 disables the max-lifetime
     /// sweep.
+    /// Wall-clock ceiling for an execution whose request sets no
+    /// `max_duration_ms`. 0 leaves executions unbounded, which is the
+    /// behaviour before this existed: a turn that keeps streaming never
+    /// trips an idle path, so nothing stops it.
+    #[arg(
+        long = "session-execution-max-duration-ms",
+        env = "SESSION_EXECUTION_MAX_DURATION_MS",
+        default_value_t = 0
+    )]
+    execution_max_duration_ms: u64,
     #[arg(
         long = "session-sandbox-max-lifetime-secs",
         env = "SESSION_SANDBOX_MAX_LIFETIME_SECS",

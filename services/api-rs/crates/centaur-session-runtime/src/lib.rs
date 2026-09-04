@@ -155,6 +155,9 @@ pub struct SessionRuntime {
     /// so an execution cannot start on a control plane that is about to
     /// exit and release its leases.
     shutting_down: Arc<AtomicBool>,
+    /// Deployment-wide wall-clock ceiling applied when a request carries no
+    /// `max_duration_ms` of its own. `None` preserves unbounded behaviour.
+    default_max_duration_ms: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -944,6 +947,7 @@ impl SessionRuntime {
             capacity: None,
             stdout_owner_id: format!("api-rs-{}", uuid::Uuid::new_v4().simple()),
             shutting_down: Arc::new(AtomicBool::new(false)),
+            default_max_duration_ms: None,
         }
     }
 
@@ -1484,6 +1488,25 @@ impl SessionRuntime {
 
     /// Spawn the background reaper that stops sandboxes whose total lifetime
     /// expired. No-op when max-lifetime reaping is disabled.
+    /// Wall-clock ceiling for executions whose request does not set one.
+    ///
+    /// The watchdog, its distinct `max_duration_ms` failure, and its re-arming
+    /// after adoption all already exist; they were simply never armed for a
+    /// surface turn, because every caller treats `max_duration_ms` as optional
+    /// and nothing supplied a fallback. A streaming turn therefore had no
+    /// ceiling at all: output keeps arriving, so no idle path ever fires.
+    pub fn with_default_max_duration_ms(mut self, max_duration_ms: Option<u64>) -> Self {
+        self.default_max_duration_ms = max_duration_ms.filter(|value| *value > 0);
+        self
+    }
+
+    /// Applies the deployment default to a request that set no ceiling of its
+    /// own. A per-request `max_duration_ms` always wins, including one shorter
+    /// than the default.
+    fn with_default_max_duration(&self, input: ExecuteSessionInput) -> ExecuteSessionInput {
+        apply_default_max_duration(input, self.default_max_duration_ms)
+    }
+
     pub fn with_sandbox_reaper(self, config: SandboxReaperConfig) -> Self {
         if !config.is_enabled() {
             return self;
@@ -2051,7 +2074,7 @@ impl SessionRuntime {
             input_lines,
             idle_timeout_ms,
             max_duration_ms,
-        } = input;
+        } = self.with_default_max_duration(input);
         let input_line_count = input_lines.len();
         let idempotency_key_present = idempotency_key.is_some();
         let span = info_span!(
@@ -2333,6 +2356,7 @@ impl SessionRuntime {
             return Err(SessionRuntimeError::ShuttingDown);
         }
         self.store.get_session(thread_key).await?;
+        let input = self.with_default_max_duration(input);
         validate_input_lines(&input.input_lines)?;
         let _ = duration_options(input.idle_timeout_ms, input.max_duration_ms)?;
 
@@ -6905,6 +6929,21 @@ fn codec_error_to_runtime(error: LinesCodecError) -> SessionRuntimeError {
         context,
         source: Some(Box::new(error)),
     })
+}
+
+/// Applies the deployment default to a request that set no ceiling of its own.
+///
+/// A per-request `max_duration_ms` always wins, including one longer than the
+/// default: the default exists to arm the watchdog at all, not to cap what a
+/// caller may ask for.
+fn apply_default_max_duration(
+    mut input: ExecuteSessionInput,
+    default_max_duration_ms: Option<u64>,
+) -> ExecuteSessionInput {
+    if input.max_duration_ms.is_none() {
+        input.max_duration_ms = default_max_duration_ms.filter(|value| *value > 0);
+    }
+    input
 }
 
 fn duration_options(
@@ -11566,5 +11605,51 @@ mod adoption_tests {
             .fail_execution_if_active(&execution_id, "test cleanup")
             .await
             .expect("terminalize execution");
+    }
+
+    fn execute_input(max_duration_ms: Option<u64>) -> ExecuteSessionInput {
+        ExecuteSessionInput {
+            idempotency_key: None,
+            metadata: None,
+            input_lines: vec!["{}".to_owned()],
+            idle_timeout_ms: None,
+            max_duration_ms,
+        }
+    }
+
+    #[test]
+    fn default_max_duration_is_zero_disabled() {
+        // 0 has to mean unbounded, not "expire immediately": it is the value a
+        // deployment that never set the knob renders.
+        assert_eq!(
+            apply_default_max_duration(execute_input(None), Some(0)).max_duration_ms,
+            None
+        );
+        assert_eq!(
+            apply_default_max_duration(execute_input(None), None).max_duration_ms,
+            None
+        );
+    }
+
+    #[test]
+    fn default_max_duration_fills_an_unset_request() {
+        assert_eq!(
+            apply_default_max_duration(execute_input(None), Some(1_800_000)).max_duration_ms,
+            Some(1_800_000)
+        );
+    }
+
+    /// A request that names its own ceiling keeps it, including one longer
+    /// than the deployment default -- the default arms the watchdog, it does
+    /// not cap what a caller may ask for.
+    #[test]
+    fn request_max_duration_overrides_the_default() {
+        for requested in [60_000, 7_200_000] {
+            assert_eq!(
+                apply_default_max_duration(execute_input(Some(requested)), Some(1_800_000))
+                    .max_duration_ms,
+                Some(requested)
+            );
+        }
     }
 }

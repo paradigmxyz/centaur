@@ -323,6 +323,13 @@ spec:
               value: {{ .Values.apiRs.sandboxRunningLimit | quote }}
             - name: SESSION_SANDBOX_HOT_IDLE_GRACE_SECS
               value: {{ .Values.apiRs.sandboxHotIdleGraceSecs | quote }}
+            - name: SESSION_EXECUTION_MAX_DURATION_MS
+              # int64 before quote: Helm parses a values number as float64, and
+              # `quote` on a float renders scientific notation. Any ceiling at
+              # or above a million milliseconds -- about 17 minutes, so every
+              # useful value -- would reach the container as "7.2e+06" and fail
+              # to parse as a u64, taking api-rs down with it.
+              value: {{ .Values.apiRs.executionMaxDurationMs | default 0 | int64 | quote }}
             - name: SESSION_SANDBOX_MAX_LIFETIME_SECS
               value: {{ .Values.apiRs.sandboxMaxLifetimeSecs | quote }}
             - name: SESSION_SANDBOX_REAP_INTERVAL_SECS

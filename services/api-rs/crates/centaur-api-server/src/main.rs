@@ -87,6 +87,7 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
     if let Some(config) = args.warm_pool_config(&iron_control.warm_pool_bootstrap_principal) {
         runtime = runtime.with_warm_pool(config);
     }
+    runtime = runtime.with_default_max_duration_ms(args.execution_max_duration_ms());
     runtime = runtime.with_sandbox_reaper(args.sandbox_reaper_config());
     runtime = runtime.with_sandbox_cleanup(args.sandbox_cleanup_config());
     let workflow_host_sandbox = args

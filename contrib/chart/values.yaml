@@ -521,6 +521,12 @@ apiRs:
       model: text-embedding-3-small
   # Reaper: stop sandboxes older than the max lifetime, regardless of whether
   # they are running or suspended. 0 disables the sweep. Interval must be >= 1.
+  # Wall-clock ceiling for an execution whose caller sets no max_duration_ms.
+  # 0 leaves executions unbounded: a turn that keeps streaming model output
+  # never trips an idle path, so nothing stops it short of an operator. A
+  # per-request max_duration_ms always wins over this.
+  executionMaxDurationMs: 0
+  # Reaper: stop sandboxes older than the max lifetime, regardless of whether
   sandboxMaxLifetimeSecs: 259200 # 3 days
   sandboxReapIntervalSecs: 300
   # Cleanup worker: stop unreferenced session/warm-pool sandboxes after two
