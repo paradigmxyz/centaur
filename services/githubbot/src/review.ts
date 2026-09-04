@@ -158,6 +158,7 @@ export function handleReviewRequest(
       contextPreamble: options.reviewPrompt ?? DEFAULT_REVIEW_PROMPT,
       conversationName: `${owner}/${repo}#${number}: ${title}`,
       executeMessage: reviewTriggerMessage({
+        deliveryId: input.deliveryId,
         headSha,
         number,
         owner,
@@ -257,10 +258,12 @@ async function isBotOnTeam(
 
 /**
  * The specific ask for a review-request turn (the methodology rides separately
- * as the context preamble). Keyed by head sha so re-requesting review on a new
- * commit re-executes (the session idempotency key dedupes the same commit).
+ * as the context preamble). Keyed by delivery id so a fresh review request
+ * re-executes, while the state claim and session idempotency key both dedupe a
+ * redelivery of the same request.
  */
 function reviewTriggerMessage(input: {
+  deliveryId: string;
   headSha: string;
   number: number;
   owner: string;
@@ -285,7 +288,7 @@ function reviewTriggerMessage(input: {
       userId: "github-review",
       userName: "github-review",
     },
-    id: `review-${input.threadKey}-${input.headSha}`,
+    id: `review-${input.threadKey}-${input.deliveryId}`,
     isMention: true,
     raw: { githubbotReviewRequest: true, url: input.url },
     text,
