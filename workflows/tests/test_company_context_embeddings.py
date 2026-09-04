@@ -22,7 +22,6 @@ class FakeConnection:
         self.fetch_args = None
         self.executemany_values = []
         self.execute_values = []
-        self.closed = False
 
     async def fetch(self, _query, *args):
         self.fetch_args = args
@@ -33,9 +32,6 @@ class FakeConnection:
 
     async def execute(self, _query, *values):
         self.execute_values.append(values)
-
-    async def close(self):
-        self.closed = True
 
 
 class FakeEmbeddings:
@@ -49,37 +45,6 @@ class FakeEmbeddings:
     async def create(self, **kwargs):
         self.call = kwargs
         return types.SimpleNamespace(data=self.data)
-
-
-def _use_database_connection(monkeypatch, embeddings, connection):
-    monkeypatch.setenv(
-        "CENTAUR_POSTGRES_DSN",
-        "postgresql://workflow:secret@postgres-proxy:5432?sslmode=require",
-    )
-    database_urls = []
-
-    async def connect(database_url, **options):
-        database_urls.append((database_url, options))
-        return connection
-
-    monkeypatch.setattr(embeddings.asyncpg, "connect", connect)
-    return database_urls
-
-
-def test_workflow_uses_a_scoped_principal_and_ai_v2_database(monkeypatch):
-    embeddings = _load()
-    connection = FakeConnection([])
-    database_urls = _use_database_connection(monkeypatch, embeddings, connection)
-
-    asyncio.run(embeddings._connect_database())
-
-    assert embeddings.WORKFLOW_PRINCIPAL is True
-    assert len(database_urls) == 1
-    database_url, options = database_urls[0]
-    assert database_url == (
-        "postgresql://workflow:secret@postgres-proxy:5432/ai_v2?sslmode=require"
-    )
-    assert options == {"command_timeout": 30}
 
 
 def test_handler_embeds_and_stores_one_batch(monkeypatch):
@@ -102,7 +67,6 @@ def test_handler_embeds_and_stores_one_batch(monkeypatch):
         },
     ]
     connection = FakeConnection(rows)
-    _use_database_connection(monkeypatch, embeddings, connection)
     fake_embeddings = FakeEmbeddings()
     monkeypatch.setattr(
         embeddings,
@@ -116,6 +80,7 @@ def test_handler_embeds_and_stores_one_batch(monkeypatch):
         return {"run_id": "run-2", "task_id": "task-2"}
 
     context = types.SimpleNamespace(
+        _pool=connection,
         run_id="run-1",
         log=lambda *_args, **_kwargs: None,
         start_workflow=start_workflow,
@@ -137,7 +102,6 @@ def test_handler_embeds_and_stores_one_batch(monkeypatch):
         "next_run": {"run_id": "run-2", "task_id": "task-2"},
     }
     assert connection.fetch_args == ("text-embedding-3-small", 2)
-    assert connection.closed is True
     assert fake_embeddings.call == {
         "model": "text-embedding-3-small",
         "input": ["First\n\nFirst body", "Second\n\nSecond body"],
@@ -186,7 +150,6 @@ def test_handler_records_whitespace_only_documents_without_calling_openai(monkey
             }
         ]
     )
-    _use_database_connection(monkeypatch, embeddings, connection)
 
     class UnexpectedEmbeddings:
         async def create(self, **_kwargs):
@@ -197,7 +160,10 @@ def test_handler_records_whitespace_only_documents_without_calling_openai(monkey
         "_client",
         lambda: types.SimpleNamespace(embeddings=UnexpectedEmbeddings()),
     )
-    context = types.SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    context = types.SimpleNamespace(
+        _pool=connection,
+        log=lambda *_args, **_kwargs: None,
+    )
 
     result = asyncio.run(embeddings.handler(embeddings.Input(), context))
 
@@ -237,7 +203,6 @@ def test_handler_isolates_and_records_a_rejected_document(monkeypatch):
         },
     ]
     connection = FakeConnection(rows)
-    _use_database_connection(monkeypatch, embeddings, connection)
 
     class RejectedInput(Exception):
         pass
@@ -257,7 +222,10 @@ def test_handler_isolates_and_records_a_rejected_document(monkeypatch):
         "_client",
         lambda: types.SimpleNamespace(embeddings=SelectiveEmbeddings()),
     )
-    context = types.SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    context = types.SimpleNamespace(
+        _pool=connection,
+        log=lambda *_args, **_kwargs: None,
+    )
 
     result = asyncio.run(embeddings.handler(embeddings.Input(batch_size=3), context))
 
@@ -284,13 +252,15 @@ def test_handler_isolates_and_records_a_rejected_document(monkeypatch):
 def test_handler_does_not_call_openai_when_batch_is_empty(monkeypatch):
     embeddings = _load()
     connection = FakeConnection([])
-    _use_database_connection(monkeypatch, embeddings, connection)
     monkeypatch.setattr(
         embeddings,
         "_client",
         lambda: (_ for _ in ()).throw(AssertionError("client should not be created")),
     )
-    context = types.SimpleNamespace(log=lambda *_args, **_kwargs: None)
+    context = types.SimpleNamespace(
+        _pool=connection,
+        log=lambda *_args, **_kwargs: None,
+    )
 
     result = asyncio.run(embeddings.handler(embeddings.Input(), context))
 
@@ -301,7 +271,6 @@ def test_handler_does_not_call_openai_when_batch_is_empty(monkeypatch):
         "model": "text-embedding-3-small",
         "requeued": False,
     }
-    assert connection.closed is True
 
 
 def test_handler_does_not_requeue_a_partial_batch(monkeypatch):
@@ -317,7 +286,6 @@ def test_handler_does_not_requeue_a_partial_batch(monkeypatch):
             }
         ]
     )
-    _use_database_connection(monkeypatch, embeddings, connection)
     fake_embeddings = FakeEmbeddings(
         [types.SimpleNamespace(index=0, embedding=[0.1, 0.2])]
     )
@@ -331,6 +299,7 @@ def test_handler_does_not_requeue_a_partial_batch(monkeypatch):
         raise AssertionError("partial batches should not requeue")
 
     context = types.SimpleNamespace(
+        _pool=connection,
         run_id="run-1",
         log=lambda *_args, **_kwargs: None,
         start_workflow=unexpected_start,

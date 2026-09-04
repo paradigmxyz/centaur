@@ -1,0 +1,33 @@
+name: Validate agent plugin
+
+on:
+  push:
+    paths:
+      - ".agents/plugins/**"
+      - ".claude-plugin/**"
+      - "plugins/centaur/**"
+      - "scripts/validate_agent_plugin.py"
+      - "scripts/test_validate_agent_plugin.py"
+      - ".github/workflows/validate-agent-plugin.yml"
+  pull_request:
+    paths:
+      - ".agents/plugins/**"
+      - ".claude-plugin/**"
+      - "plugins/centaur/**"
+      - "scripts/validate_agent_plugin.py"
+      - "scripts/test_validate_agent_plugin.py"
+      - ".github/workflows/validate-agent-plugin.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python scripts/test_validate_agent_plugin.py
+      - run: python scripts/validate_agent_plugin.py

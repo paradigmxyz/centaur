@@ -39,7 +39,7 @@ describe('harnessDisplayName', () => {
 })
 
 describe('reasoningForModel', () => {
-  const allEfforts = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+  const allEfforts = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']
   const standardEfforts = ['none', 'low', 'medium', 'high', 'xhigh']
   const proEfforts = ['medium', 'high', 'xhigh']
   const codexModelEfforts = ['low', 'medium', 'high', 'xhigh']
@@ -54,7 +54,8 @@ describe('reasoningForModel', () => {
     'gpt-5.5-pro': proEfforts,
     'gpt-5.6-luna': [...standardEfforts, 'max'],
     'gpt-5.6-sol': [...standardEfforts, 'max'],
-    'gpt-5.6-terra': [...standardEfforts, 'max']
+    'gpt-5.6-terra': [...standardEfforts, 'max'],
+    'gpt-6-astra': ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']
   }
 
   test('matches the reasoning efforts advertised by supported Codex models', () => {
@@ -134,7 +135,7 @@ describe('defaultReasoningForHarness', () => {
     .model_reasoning_effort
 
   test('shares the baked Codex reasoning default with Nanocodex', () => {
-    expect(bakedCodexReasoning).toBe('low')
+    expect(bakedCodexReasoning).toBe('medium')
     expect(defaultReasoningForHarness('codex')).toBe(bakedCodexReasoning)
     expect(defaultReasoningForHarness('nanocodex')).toBe(bakedCodexReasoning)
     expect(defaultReasoningForHarness('claudecode')).toBeUndefined()

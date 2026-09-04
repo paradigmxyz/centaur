@@ -175,7 +175,6 @@ impl PgSessionStore {
                 set metadata = sessions.metadata || excluded.metadata,
                     updated_at = now()
                 where sessions.harness_type = excluded.harness_type
-                  and sessions.persona_id is not distinct from excluded.persona_id
                   and not sessions.metadata @> excluded.metadata
                 "#,
             )
@@ -218,13 +217,6 @@ impl PgSessionStore {
                 thread_key: thread_key.as_str().to_owned(),
                 existing: session.harness_type.to_string(),
                 requested: harness_type.as_ref().to_owned(),
-            });
-        }
-        if session.persona_id.as_deref() != persona_id {
-            return Err(SessionStoreError::PersonaConflict {
-                thread_key: thread_key.as_str().to_owned(),
-                existing: session.persona_id,
-                requested: persona_id.map(str::to_owned),
             });
         }
         Ok(session)
@@ -1404,7 +1396,8 @@ impl PgSessionStore {
 
     /// Move an existing session onto a different harness. Clears the sandbox
     /// and harness thread state (they belong to the old harness) and resets
-    /// the session to idle; messages and events are preserved.
+    /// the session to idle; messages and events are preserved. The persona is
+    /// deliberately preserved for the lifetime of the session.
     pub async fn switch_session_harness(
         &self,
         thread_key: &ThreadKey,
@@ -1769,14 +1762,6 @@ pub enum SessionStoreError {
         thread_key: String,
         existing: String,
         requested: String,
-    },
-    #[error(
-        "session {thread_key} already exists with persona_id {existing:?}, requested {requested:?}"
-    )]
-    PersonaConflict {
-        thread_key: String,
-        existing: Option<String>,
-        requested: Option<String>,
     },
     #[error("session {thread_key} already exists with principal {existing}, requested {requested}")]
     PrincipalConflict {

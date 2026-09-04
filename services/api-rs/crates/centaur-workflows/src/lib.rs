@@ -1073,6 +1073,8 @@ fn workflow_queue_class(workflow_name: &str) -> WorkflowQueueClass {
         | "google_drive_sync"
         | "linear_sync"
         | "company_context_documents"
+        | "company_context_embeddings"
+        | "memory_generation"
         | "slack_retention"
         | "chief_of_staff_daily" => WorkflowQueueClass::Etl,
         _ => WorkflowQueueClass::Standard,
@@ -3633,9 +3635,6 @@ async fn run_python_agent_turn(
     if let Some(delivery) = args.get("delivery") {
         object_insert(&mut execution_metadata, "delivery", delivery.clone());
     }
-    if let Some(persona) = args.get("persona").and_then(Value::as_str) {
-        object_insert(&mut execution_metadata, "persona", json!(persona));
-    }
     if let Some(engine) = args.get("engine").and_then(Value::as_str) {
         object_insert(&mut execution_metadata, "engine", json!(engine));
     }
@@ -3970,6 +3969,20 @@ fn object_insert(value: &mut Value, key: &str, item: Value) {
     }
 }
 
+fn set_execution_persona_metadata(metadata: &mut Value, persona_id: Option<&str>) {
+    let Value::Object(object) = metadata else {
+        return;
+    };
+    match persona_id {
+        Some(persona_id) => {
+            object.insert("persona".to_owned(), json!(persona_id));
+        }
+        None => {
+            object.remove("persona");
+        }
+    }
+}
+
 async fn write_host_message<W>(stdin: &mut W, message: &Value) -> Result<(), WorkflowRuntimeError>
 where
     W: AsyncWrite + Unpin,
@@ -4268,7 +4281,7 @@ async fn run_agent_session_turn(
         client_message_id,
         session_metadata,
         message_metadata,
-        execution_metadata,
+        mut execution_metadata,
         execution_idempotency_key,
         workflow_owned_thread,
         idle_timeout_ms,
@@ -4282,7 +4295,7 @@ async fn run_agent_session_turn(
     if workflow_owned_thread {
         object_insert(&mut session_metadata, "workflow_owned_thread", json!(true));
     }
-    session_runtime
+    let session = session_runtime
         .create_or_get_session_with_principal(
             &thread_key,
             &harness_type,
@@ -4291,7 +4304,9 @@ async fn run_agent_session_turn(
             HarnessConflictPolicy::Reject,
             principal_foreign_id.as_deref(),
         )
-        .await?;
+        .await?
+        .session;
+    set_execution_persona_metadata(&mut execution_metadata, session.persona_id.as_deref());
     session_runtime
         .append_messages(
             &thread_key,
@@ -4918,6 +4933,8 @@ mod tests {
             "google_drive_sync",
             "linear_sync",
             "company_context_documents",
+            "company_context_embeddings",
+            "memory_generation",
             "slack_retention",
             "chief_of_staff_daily",
         ] {
@@ -5546,5 +5563,16 @@ mod tests {
             select_stale_cancellations(&active, &BTreeSet::new(), &mut counts, 1),
             vec!["task-1".to_owned()]
         );
+    }
+
+    #[test]
+    fn execution_persona_metadata_tracks_effective_session_persona() {
+        let mut metadata = json!({"persona": "requested"});
+
+        set_execution_persona_metadata(&mut metadata, Some("stored"));
+        assert_eq!(metadata["persona"], json!("stored"));
+
+        set_execution_persona_metadata(&mut metadata, None);
+        assert!(metadata.get("persona").is_none());
     }
 }

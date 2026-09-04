@@ -37,14 +37,18 @@ class PrincipalCredentialReconciliation
   CONSOLE_USER_KIND = "console_user"
   SLACK_PROVIDER = Oauth::Providers::Slack::KEY
   GOOGLE_PROVIDER = Oauth::Providers::Google::KEY
+  GITHUB_PROVIDER = Oauth::Providers::Github::KEY
   EMAIL_LABELS = %w[email google_email].freeze
   # Ordinary principal labels carrying a provider-native identity. Slack uses
   # first-class columns instead. When a principal has a native identity, it
   # takes precedence over email matching for that provider's credentials.
-  # Providers without an entry (for example github) match through the
-  # credential owner's Slack SSO identity or by email.
+  # Providers without an entry match through the credential owner's Slack SSO
+  # identity or by email. GitHub's label is written by api-rs from the
+  # signature-verified webhook sender id (githubbot execute metadata), never
+  # operator- or user-editable input.
   PROVIDER_SUBJECT_LABELS = {
-    GOOGLE_PROVIDER => %w[google_subject]
+    GOOGLE_PROVIDER => %w[google_subject],
+    GITHUB_PROVIDER => %w[github_subject]
   }.freeze
   SLACK_TEAM_LABEL = "slack_team_id"
 

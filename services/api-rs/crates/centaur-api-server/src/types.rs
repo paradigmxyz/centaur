@@ -8,6 +8,8 @@ use thiserror::Error;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CreateSessionRequest {
     pub harness_type: HarnessType,
+    /// Used only when creating the session. The first persisted persona stays
+    /// pinned for the lifetime of the thread.
     pub persona_id: Option<String>,
     pub metadata: Option<Value>,
     /// What to do when the session already exists on a different harness.

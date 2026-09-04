@@ -80,6 +80,10 @@ spec:
               value: {{ .Values.apiRs.activitySummary.enabled | quote }}
             - name: SLACKBOTV2_AUTO_JOIN_CREATED_CHANNELS
               value: {{ .Values.slackbotv2.autoJoinCreatedChannels | quote }}
+            - name: SLACKBOTV2_STEERING_REACTION_ENABLED
+              value: {{ .Values.slackbotv2.steeringReactionEnabled | quote }}
+            - name: SLACKBOTV2_STEERING_REACTION
+              value: {{ .Values.slackbotv2.steeringReaction | quote }}
             - name: SLACKBOTV2_RESPONSE_METADATA_MODE
               value: {{ .Values.slackbotv2.responseMetadataMode | quote }}
             - name: SLACKBOTV2_RESPONSE_SERVICE_TIER_ENABLED
@@ -94,10 +98,11 @@ spec:
               value: {{ .Values.slackbotv2.messageOverridesStrategy.timeoutMs | quote }}
             - name: SLACKBOTV2_MESSAGE_OVERRIDES_MAX_OUTPUT_TOKENS
               value: {{ .Values.slackbotv2.messageOverridesStrategy.maxOutputTokens | quote }}
-{{- if $console.publicUrl }}
+{{- if and $console.chat.enabled $console.publicUrl }}
             # Public origin of the Console UI (matches the Console's own
-            # CENTAUR_CONSOLE_PUBLIC_URL). When set, the first assistant message
-            # in a Slack thread gets an "Open session in Console" link.
+            # CENTAUR_CONSOLE_PUBLIC_URL). When chat is enabled, the first
+            # assistant message in a Slack thread gets an "Open chat in Console"
+            # link.
             - name: CENTAUR_CONSOLE_PUBLIC_URL
               value: {{ $console.publicUrl | quote }}
 {{- end }}

@@ -761,17 +761,19 @@ async fn append_messages(
 
 async fn execute_session(
     State(state): State<AppState>,
+    Extension(caller): Extension<AuthenticatedCaller>,
     Path(raw_thread_key): Path<String>,
     Json(request): Json<ExecuteSessionRequest>,
 ) -> Result<Json<ExecuteSessionResponse>, ApiError> {
     let thread_key = ThreadKey::try_from(raw_thread_key)?;
+    let metadata = sanitize_execute_metadata(caller.class(), request.metadata);
     let execution = state
         .runtime()?
         .enqueue_session_execution(
             &thread_key,
             ExecuteSessionInput {
                 idempotency_key: request.idempotency_key,
-                metadata: request.metadata,
+                metadata,
                 input_lines: request.input_lines,
                 idle_timeout_ms: request.idle_timeout_ms,
                 max_duration_ms: request.max_duration_ms,
@@ -784,6 +786,22 @@ async fn execute_session(
         thread_key: execution.thread_key,
         status: execution.status.to_string(),
     }))
+}
+
+/// `requester_principal_foreign_id` is an identity assertion made by the
+/// authenticated Console service, not ordinary caller-controlled metadata.
+/// Strip it from every other caller class before the execution is persisted so
+/// the runtime can safely honor Console requesters on any thread namespace.
+fn sanitize_execute_metadata(
+    caller_class: CallerClass,
+    mut metadata: Option<Value>,
+) -> Option<Value> {
+    if caller_class != CallerClass::Console
+        && let Some(Value::Object(fields)) = metadata.as_mut()
+    {
+        fields.remove("requester_principal_foreign_id");
+    }
+    metadata
 }
 
 async fn interrupt_session_execution(
@@ -886,7 +904,11 @@ fn principal_subject_owns_session(subject: Option<&str>, session_principal: Opti
 
 #[cfg(test)]
 mod session_authorization_tests {
-    use super::{principal_subject_owns_session, thread_key_matches_platform};
+    use super::{
+        CallerClass, principal_subject_owns_session, sanitize_execute_metadata,
+        thread_key_matches_platform,
+    };
+    use serde_json::json;
 
     #[test]
     fn ingress_scope_covers_every_family_the_bot_mints() {
@@ -929,6 +951,29 @@ mod session_authorization_tests {
             Some("prn_owner")
         ));
         assert!(!principal_subject_owns_session(Some("prn_owner"), None));
+    }
+
+    #[test]
+    fn only_console_callers_may_assert_a_requester_principal_foreign_id() {
+        let metadata = json!({
+            "source": "console",
+            "requester_principal_foreign_id": "console-user-ada"
+        });
+
+        assert_eq!(
+            sanitize_execute_metadata(CallerClass::Console, Some(metadata.clone())),
+            Some(metadata.clone())
+        );
+        for caller_class in [
+            CallerClass::Admin,
+            CallerClass::Ingress,
+            CallerClass::Principal,
+        ] {
+            assert_eq!(
+                sanitize_execute_metadata(caller_class, Some(metadata.clone())),
+                Some(json!({ "source": "console" }))
+            );
+        }
     }
 }
 

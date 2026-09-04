@@ -13,9 +13,9 @@ use std::{
 
 use centaur_iron_control::{IronControlError, Principal, SessionRegistrar};
 use centaur_sandbox_core::{
-    Mount, RepoCacheAccess, ResourceRequirements, SandboxBackend,
-    SandboxCapabilities as BackendSandboxCapabilities, SandboxError, SandboxId, SandboxIoGuard,
-    SandboxRead, SandboxSpec, SandboxStatus, SandboxWrite,
+    Mount, RepoCacheAccess, ResourceRequirements, SANDBOX_AGENT_HOME, SandboxBackend,
+    SandboxCapabilities as BackendSandboxCapabilities, SandboxError, SandboxFile, SandboxId,
+    SandboxIoGuard, SandboxRead, SandboxSpec, SandboxStatus, SandboxWrite,
 };
 use centaur_sandbox_manager::{
     SandboxManager, SandboxReaper, SandboxReaperConfig, WarmPoolConfig, WarmPoolError,
@@ -195,6 +195,8 @@ pub struct PersonaContext {
     pub source_path: String,
     pub source_ref: Option<String>,
     pub prompt_hash: String,
+    #[serde(skip_serializing)]
+    pub prompt: String,
     pub defaulted: bool,
     pub overlay_chain: Vec<String>,
 }
@@ -281,6 +283,7 @@ impl PersonaRegistry {
             source_path: persona.source_path.clone(),
             source_ref: persona.source_ref.clone(),
             prompt_hash: persona.prompt_hash.clone(),
+            prompt: persona.prompt.clone(),
             defaulted,
             overlay_chain: self.overlay_chain.clone(),
         })
@@ -411,6 +414,87 @@ pub struct ToolHostCallOutput {
     pub stderr: String,
     pub exit_status: Option<i32>,
     pub timed_out: bool,
+}
+
+#[derive(Debug, Error)]
+#[error("{source}")]
+pub struct ToolHostCallError {
+    request_id: Option<String>,
+    execution_id: Option<String>,
+    sandbox_id: Option<String>,
+    #[source]
+    source: Box<SessionRuntimeError>,
+}
+
+impl ToolHostCallError {
+    fn new(source: SessionRuntimeError) -> Self {
+        Self {
+            request_id: None,
+            execution_id: None,
+            sandbox_id: None,
+            source: Box::new(source),
+        }
+    }
+
+    fn with_request(source: SessionRuntimeError, request_id: &str) -> Self {
+        Self {
+            request_id: Some(request_id.to_owned()),
+            execution_id: None,
+            sandbox_id: None,
+            source: Box::new(source),
+        }
+    }
+
+    pub fn request_id(&self) -> Option<&str> {
+        self.request_id.as_deref()
+    }
+
+    pub fn execution_id(&self) -> Option<&str> {
+        self.execution_id.as_deref()
+    }
+
+    pub fn sandbox_id(&self) -> Option<&str> {
+        self.sandbox_id.as_deref()
+    }
+
+    pub fn into_source(self) -> SessionRuntimeError {
+        *self.source
+    }
+}
+
+impl From<SessionRuntimeError> for ToolHostCallError {
+    fn from(source: SessionRuntimeError) -> Self {
+        Self::new(source)
+    }
+}
+
+struct SessionExecutionAttempt {
+    execution: SessionExecution,
+    sandbox_id: Option<String>,
+}
+
+struct SessionExecutionAttemptError {
+    execution_id: Option<String>,
+    sandbox_id: Option<String>,
+    source: Box<SessionRuntimeError>,
+}
+
+impl SessionExecutionAttemptError {
+    fn new(
+        execution_id: Option<String>,
+        sandbox_id: Option<String>,
+        source: SessionRuntimeError,
+    ) -> Self {
+        Self {
+            execution_id,
+            sandbox_id,
+            source: Box::new(source),
+        }
+    }
+
+    fn into_source(self) -> SessionRuntimeError {
+        *self.source
+    }
 }
 
 #[derive(Clone)]
@@ -832,7 +916,6 @@ impl SandboxBootMode {
 struct PersonaResolution {
     persona_id: Option<String>,
     context: Option<PersonaContext>,
-    defaulted: bool,
 }
 
 impl SessionRuntime {
@@ -909,7 +992,6 @@ impl SessionRuntime {
         Ok(PersonaResolution {
             persona_id: selected.map(str::to_owned),
             context,
-            defaulted,
         })
     }
 
@@ -971,34 +1053,38 @@ impl SessionRuntime {
         &self,
         input: ToolHostCallInput,
         policy: ToolHostCallPolicy,
-    ) -> Result<ToolHostCallOutput, SessionRuntimeError> {
+    ) -> Result<ToolHostCallOutput, ToolHostCallError> {
         let principal_id = input.principal_id.trim().to_owned();
         let tool_name = input.tool_name.trim().to_owned();
         let method = input.method.trim().to_owned();
         if principal_id.is_empty() {
             return Err(SessionRuntimeError::BadRequest(
                 "tool host principal_id is required".to_owned(),
-            ));
+            )
+            .into());
         }
         if tool_name.is_empty() {
             return Err(SessionRuntimeError::BadRequest(
                 "tool host tool_name is required".to_owned(),
-            ));
+            )
+            .into());
         }
         if method.is_empty() {
-            return Err(SessionRuntimeError::BadRequest(
-                "tool host method is required".to_owned(),
-            ));
+            return Err(
+                SessionRuntimeError::BadRequest("tool host method is required".to_owned()).into(),
+            );
         }
         if input.timeout.is_zero() {
             return Err(SessionRuntimeError::BadRequest(
                 "tool host timeout must be non-zero".to_owned(),
-            ));
+            )
+            .into());
         }
         if policy.principal_id != principal_id {
             return Err(SessionRuntimeError::BadRequest(
                 "tool host policy principal does not match the call principal".to_owned(),
-            ));
+            )
+            .into());
         }
 
         let thread_key = tool_host_thread_key(&principal_id)?;
@@ -1065,7 +1151,7 @@ impl SessionRuntime {
         thread_key: &ThreadKey,
         input: ToolHostCallInput,
         sandbox_capabilities: SessionSandboxCapabilities,
-    ) -> Result<ToolHostCallOutput, SessionRuntimeError> {
+    ) -> Result<ToolHostCallOutput, ToolHostCallError> {
         let ToolHostCallInput {
             principal_id,
             console_user_email,
@@ -1094,22 +1180,28 @@ impl SessionRuntime {
             token_id,
             timeout_seconds: timeout.as_secs().max(1),
         };
-        let input_line = serde_json::to_string(&request).map_err(|error| {
-            SessionRuntimeError::Sandbox(SandboxError::io_source("encode tool host request", error))
-        })?;
+        let input_line = serde_json::to_string(&request)
+            .map_err(|error| {
+                SessionRuntimeError::Sandbox(SandboxError::io_source(
+                    "encode tool host request",
+                    error,
+                ))
+            })
+            .map_err(|error| ToolHostCallError::with_request(error, &request_id))?;
         let response_timeout = timeout.saturating_add(Duration::from_secs(5));
-        let execution = self
+        let execution_metadata = tool_host_execution_metadata(
+            &request_id,
+            &tool_name,
+            &method,
+            timeout,
+            centaur_telemetry::traceparent_for_span(&Span::current()),
+        );
+        let attempt = match self
             .execute_session_impl(
                 thread_key,
                 ExecuteSessionInput {
                     idempotency_key: Some(request_id.clone()),
-                    metadata: Some(json!({
-                        "mcp_tool_host_call": true,
-                        "request_id": request_id.clone(),
-                        "tool": tool_name,
-                        "method": method,
-                        "timeout_ms": duration_millis_u64(timeout),
-                    })),
+                    metadata: Some(execution_metadata),
                     input_lines: vec![input_line],
                     idle_timeout_ms: None,
                     max_duration_ms: Some(duration_millis_u64(response_timeout)),
@@ -1117,14 +1209,37 @@ impl SessionRuntime {
                 None,
                 Some(sandbox_capabilities),
             )
-            .await?;
-        self.wait_for_tool_host_call(
-            thread_key,
-            &execution.execution_id,
-            &request_id,
-            response_timeout,
-        )
-        .await
+            .await
+        {
+            Ok(attempt) => attempt,
+            Err(error) => {
+                return Err(ToolHostCallError {
+                    request_id: Some(request_id),
+                    execution_id: error.execution_id,
+                    sandbox_id: error.sandbox_id,
+                    source: error.source,
+                });
+            }
+        };
+        let execution_id = attempt.execution.execution_id;
+        let result = self
+            .wait_for_tool_host_call(
+                thread_key,
+                &execution_id,
+                &request_id,
+                attempt.sandbox_id.as_deref(),
+                response_timeout,
+            )
+            .await;
+        match result {
+            Ok(output) => Ok(output),
+            Err(source) => Err(ToolHostCallError {
+                request_id: Some(request_id),
+                execution_id: Some(execution_id),
+                sandbox_id: attempt.sandbox_id,
+                source: Box::new(source),
+            }),
+        }
     }
 
     async fn create_or_get_tool_host_session(
@@ -1164,6 +1279,7 @@ impl SessionRuntime {
         thread_key: &ThreadKey,
         execution_id: &str,
         request_id: &str,
+        sandbox_id: Option<&str>,
         response_timeout: Duration,
     ) -> Result<ToolHostCallOutput, SessionRuntimeError> {
         let events = self
@@ -1177,16 +1293,16 @@ impl SessionRuntime {
                     "session.execution_completed" => {
                         return self
                             .tool_host_completed_output(
-                                thread_key,
                                 &event,
                                 execution_id,
                                 request_id,
+                                sandbox_id,
                             )
                             .await;
                     }
                     "session.execution_failed" => {
                         return self
-                            .tool_host_failed_output(thread_key, &event, execution_id, request_id)
+                            .tool_host_failed_output(&event, execution_id, request_id, sandbox_id)
                             .await;
                     }
                     _ => {}
@@ -1199,15 +1315,10 @@ impl SessionRuntime {
         .await
         {
             Ok(output) => output,
-            // Best-effort sandbox id: a store error must not replace the
-            // timeout result with an internal error.
             Err(_) => Ok(ToolHostCallOutput {
                 request_id: request_id.to_owned(),
                 execution_id: execution_id.to_owned(),
-                sandbox_id: self
-                    .current_sandbox_id(thread_key)
-                    .await
-                    .unwrap_or_default(),
+                sandbox_id: sandbox_id.unwrap_or_default().to_owned(),
                 stdout: String::new(),
                 stderr: format!(
                     "tool host call timed out after {} ms",
@@ -1221,12 +1332,12 @@ impl SessionRuntime {
 
     async fn tool_host_completed_output(
         &self,
-        thread_key: &ThreadKey,
         event: &SessionEvent,
         execution_id: &str,
         request_id: &str,
+        sandbox_id: Option<&str>,
     ) -> Result<ToolHostCallOutput, SessionRuntimeError> {
-        let sandbox_id = self.current_sandbox_id(thread_key).await?;
+        let sandbox_id = sandbox_id.unwrap_or_default().to_owned();
         let Some(result_text) = event.payload.get("result_text").and_then(Value::as_str) else {
             return Ok(ToolHostCallOutput {
                 request_id: request_id.to_owned(),
@@ -1257,10 +1368,10 @@ impl SessionRuntime {
 
     async fn tool_host_failed_output(
         &self,
-        thread_key: &ThreadKey,
         event: &SessionEvent,
         execution_id: &str,
         request_id: &str,
+        sandbox_id: Option<&str>,
     ) -> Result<ToolHostCallOutput, SessionRuntimeError> {
         let error = event
             .payload
@@ -1276,24 +1387,12 @@ impl SessionRuntime {
         Ok(ToolHostCallOutput {
             request_id: request_id.to_owned(),
             execution_id: execution_id.to_owned(),
-            sandbox_id: self.current_sandbox_id(thread_key).await?,
+            sandbox_id: sandbox_id.unwrap_or_default().to_owned(),
             stdout: String::new(),
             stderr: error,
             exit_status: None,
             timed_out,
         })
-    }
-
-    async fn current_sandbox_id(
-        &self,
-        thread_key: &ThreadKey,
-    ) -> Result<String, SessionRuntimeError> {
-        Ok(self
-            .store
-            .get_session(thread_key)
-            .await?
-            .sandbox_id
-            .unwrap_or_default())
     }
 
     async fn claim_stdout_owner(&self, execution_id: &str) -> Result<(), SessionRuntimeError> {
@@ -1509,8 +1608,22 @@ impl SessionRuntime {
                 }
             };
             let desired_capabilities = sandbox_capabilities_from_principal(&registered_principal);
-            let persona_resolution =
-                self.resolve_persona_for_create(persona_id, &desired_capabilities)?;
+            // A session's persona is fixed by the first successful create.
+            // Use the stored persona before the requested one so later persona
+            // flags cannot change or invalidate an existing thread. Its
+            // context is resolved once from the post-create session below.
+            let existing_persona_id = match self.store.get_session(thread_key).await {
+                Ok(session) => Some(session.persona_id),
+                Err(SessionStoreError::NotFound { .. }) => None,
+                Err(error) => return Err(error.into()),
+            };
+            let persona_resolution = match existing_persona_id {
+                Some(persona_id) => PersonaResolution {
+                    context: None,
+                    persona_id,
+                },
+                None => self.resolve_persona_for_create(persona_id, &desired_capabilities)?,
+            };
             if let Some(context) = persona_resolution.context.as_ref() {
                 add_persona_metadata(&mut session_metadata, context);
             }
@@ -1526,19 +1639,6 @@ impl SessionRuntime {
                 .await
             {
                 Ok(session) => session,
-                Err(SessionStoreError::PersonaConflict { existing, .. })
-                    if persona_id.is_none() && persona_resolution.defaulted =>
-                {
-                    self.store
-                        .create_or_get_session(
-                            thread_key,
-                            harness_type,
-                            existing.as_deref(),
-                            default_metadata(None),
-                            BTreeMap::new(),
-                        )
-                        .await?
-                }
                 Err(SessionStoreError::HarnessConflict { existing, .. })
                     if on_harness_conflict == HarnessConflictPolicy::Restart =>
                 {
@@ -1609,10 +1709,9 @@ impl SessionRuntime {
 
     /// Restart an existing session on a different harness: stop its sandbox
     /// (killing any in-flight execution), clear the harness thread state, and
-    /// flip the session row to the requested harness. Stored messages and
-    /// events are preserved for the record, but the new harness boots with no
-    /// conversational memory — callers that want continuity must re-send
-    /// context with the next turn.
+    /// flip the session row to the requested harness while preserving its
+    /// persona. Stored messages and events are preserved for the record, but
+    /// the new harness boots with no conversational memory.
     async fn restart_session_on_harness(
         &self,
         thread_key: &ThreadKey,
@@ -1927,6 +2026,8 @@ impl SessionRuntime {
     ) -> Result<SessionExecution, SessionRuntimeError> {
         self.execute_session_impl(thread_key, input, None, None)
             .await
+            .map(|attempt| attempt.execution)
+            .map_err(SessionExecutionAttemptError::into_source)
     }
 
     async fn drive_session_execution(
@@ -1937,6 +2038,8 @@ impl SessionRuntime {
     ) -> Result<SessionExecution, SessionRuntimeError> {
         self.execute_session_impl(thread_key, input, Some(execution_id), None)
             .await
+            .map(|attempt| attempt.execution)
+            .map_err(SessionExecutionAttemptError::into_source)
     }
 
     async fn execute_session_impl(
@@ -1947,14 +2050,27 @@ impl SessionRuntime {
         // Present only for an immediately dispatched tool-host call. Durable
         // recovery passes None and resolves the principal's current policy.
         pre_resolved_sandbox_capabilities: Option<SessionSandboxCapabilities>,
-    ) -> Result<SessionExecution, SessionRuntimeError> {
+    ) -> Result<SessionExecutionAttempt, SessionExecutionAttemptError> {
+        let mut execution_id = persisted_execution_id.map(str::to_owned);
+        let mut correlation_sandbox_id = None;
         if self.shutting_down.load(Ordering::SeqCst) {
-            return Err(SessionRuntimeError::ShuttingDown);
+            return Err(SessionExecutionAttemptError::new(
+                execution_id,
+                correlation_sandbox_id,
+                SessionRuntimeError::ShuttingDown,
+            ));
         }
         let persisted_request = persisted_execution_id
             .is_none()
             .then(|| persisted_execute_request(&input))
-            .transpose()?;
+            .transpose()
+            .map_err(|source| {
+                SessionExecutionAttemptError::new(
+                    execution_id.clone(),
+                    correlation_sandbox_id.clone(),
+                    source,
+                )
+            })?;
         let ExecuteSessionInput {
             idempotency_key,
             metadata,
@@ -1987,6 +2103,7 @@ impl SessionRuntime {
                 "starting session execution"
             );
             let session = self.store.get_session(thread_key).await?;
+            correlation_sandbox_id = session.sandbox_id.clone();
             let harness_label = session.harness_type.to_string();
             validate_input_lines(&input_lines)?;
             let (idle_timeout, max_duration) = duration_options(idle_timeout_ms, max_duration_ms)?;
@@ -2006,6 +2123,7 @@ impl SessionRuntime {
                         persisted_request.expect("new executions have a persisted request"),
                     )
                     .await?;
+                execution_id = Some(execution.execution.execution_id.clone());
                 span.record(
                     "centaur.execution_id",
                     execution.execution.execution_id.as_str(),
@@ -2027,6 +2145,7 @@ impl SessionRuntime {
                     .await?
             };
             let execution = claim.execution;
+            execution_id = Some(execution.execution_id.clone());
             if execution.thread_key != *thread_key {
                 return Err(SessionRuntimeError::BadRequest(format!(
                     "execution {} belongs to thread {}, not {}",
@@ -2142,6 +2261,7 @@ impl SessionRuntime {
                     return Err(error);
                 }
             };
+            correlation_sandbox_id = Some(sandbox_id.clone());
             span.record("centaur.sandbox_id", sandbox_id.as_str());
             span.record("sandbox_id", sandbox_id.as_str());
             execution_trace_span.record("centaur.sandbox_id", sandbox_id.as_str());
@@ -2217,6 +2337,13 @@ impl SessionRuntime {
             );
         }
         result
+            .map(|execution| SessionExecutionAttempt {
+                execution,
+                sandbox_id: correlation_sandbox_id.clone(),
+            })
+            .map_err(|source| {
+                SessionExecutionAttemptError::new(execution_id, correlation_sandbox_id, source)
+            })
     }
 
     /// Persist an execution request and return before sandbox provisioning or
@@ -4136,7 +4263,7 @@ impl SandboxWorkloadMode {
         persona: Option<&PersonaContext>,
     ) -> SandboxSpec {
         match self {
-            Self::MockAppServer { image } => apply_persona_spec_env(
+            Self::MockAppServer { image } => apply_persona_spec(
                 SandboxSpec::new(image)
                     .command(["/bin/sh", "-lc"])
                     .args([mock_app_server_script()])
@@ -4169,7 +4296,7 @@ impl SandboxWorkloadMode {
                 for (name, value) in env {
                     spec = spec.env(name.clone(), value.clone());
                 }
-                apply_persona_spec_env(spec, persona)
+                apply_persona_spec(spec, persona)
             }
         }
     }
@@ -5729,7 +5856,8 @@ fn append_spec_env_csv(spec: &mut SandboxSpec, name: &str, values: &str) {
     upsert_spec_env(spec, name, merged.join(","));
 }
 
-fn apply_persona_spec_env(mut spec: SandboxSpec, persona: Option<&PersonaContext>) -> SandboxSpec {
+fn apply_persona_spec(mut spec: SandboxSpec, persona: Option<&PersonaContext>) -> SandboxSpec {
+    let persona_prompt_path = format!("{SANDBOX_AGENT_HOME}/AGENTS_PERSONA.md");
     for name in [
         "AGENT_PERSONA",
         "CENTAUR_PERSONA_ID",
@@ -5739,11 +5867,17 @@ fn apply_persona_spec_env(mut spec: SandboxSpec, persona: Option<&PersonaContext
     ] {
         remove_spec_env(&mut spec, name);
     }
+    spec.files
+        .retain(|file| file.target_path != persona_prompt_path);
     let Some(persona) = persona else {
         return spec;
     };
     upsert_spec_env(&mut spec, "AGENT_PERSONA", persona.persona_id.clone());
     upsert_spec_env(&mut spec, "CENTAUR_PERSONA_ID", persona.persona_id.clone());
+    spec.files.push(SandboxFile::new(
+        persona_prompt_path,
+        persona.prompt.clone(),
+    ));
     upsert_spec_env(
         &mut spec,
         "CENTAUR_PERSONA_PROMPT_HASH",
@@ -6774,9 +6908,37 @@ fn nonzero_duration_millis(value: u64) -> Result<Duration, SessionRuntimeError> 
     Ok(Duration::from_millis(value))
 }
 
-fn tool_host_thread_key(principal_id: &str) -> Result<ThreadKey, SessionRuntimeError> {
-    ThreadKey::parse(format!("mcp:{principal_id}"))
+pub fn tool_host_thread_key(principal_id: &str) -> Result<ThreadKey, SessionRuntimeError> {
+    ThreadKey::parse(format!("mcp:{}", principal_id.trim()))
         .map_err(|error| SessionRuntimeError::BadRequest(error.to_string()))
+}
+
+fn tool_host_execution_metadata(
+    request_id: &str,
+    tool_name: &str,
+    method: &str,
+    timeout: Duration,
+    traceparent: Option<String>,
+) -> Value {
+    let mut metadata = serde_json::Map::from_iter([
+        ("mcp_tool_host_call".to_owned(), Value::Bool(true)),
+        (
+            "request_id".to_owned(),
+            Value::String(request_id.to_owned()),
+        ),
+        ("tool".to_owned(), Value::String(tool_name.to_owned())),
+        ("method".to_owned(), Value::String(method.to_owned())),
+        (
+            "timeout_ms".to_owned(),
+            Value::Number(duration_millis_u64(timeout).into()),
+        ),
+    ]);
+    insert_non_empty_metadata_string(
+        &mut metadata,
+        EXECUTION_TRACEPARENT_METADATA_KEY,
+        traceparent.as_deref(),
+    );
+    Value::Object(metadata)
 }
 
 /// Session/principal metadata recorded for observability; runtime behavior
@@ -7209,6 +7371,16 @@ mod tests {
                 .get("prompt")
                 .is_none()
         );
+        let context = registry
+            .context_for_access("eng", false, &SessionRepoCacheAccess::All)
+            .unwrap();
+        assert_eq!(context.prompt, "secret prompt");
+        assert!(
+            serde_json::to_value(context)
+                .unwrap()
+                .get("prompt")
+                .is_none()
+        );
         assert!(PersonaRegistry::new(Vec::new(), Some("missing".to_owned()), Vec::new()).is_err());
     }
 
@@ -7279,6 +7451,33 @@ mod tests {
         assert_eq!(spec.command, Some(vec!["/entrypoint.sh".to_owned()]));
         assert_eq!(spec.args, vec!["centaur-tool-host"]);
         assert_eq!(env_value(&spec, "TOOL_DIRS"), Some("/app/tools"));
+    }
+
+    #[test]
+    fn tool_host_execution_metadata_propagates_tool_traceparent() {
+        let traceparent = "00-0123456789abcdef0123456789abcdef-1111111111111111-01";
+
+        let metadata = tool_host_execution_metadata(
+            "mcp-call-123",
+            "search",
+            "query",
+            Duration::from_secs(120),
+            Some(traceparent.to_owned()),
+        );
+
+        assert_eq!(metadata[EXECUTION_TRACEPARENT_METADATA_KEY], traceparent);
+        assert_eq!(metadata["request_id"], "mcp-call-123");
+        assert_eq!(metadata["tool"], "search");
+        assert_eq!(metadata["method"], "query");
+        assert_eq!(metadata["timeout_ms"], 120_000);
+    }
+
+    #[test]
+    fn tool_host_thread_key_trims_principal_id() {
+        assert_eq!(
+            tool_host_thread_key(" prn_test ").unwrap().as_str(),
+            "mcp:prn_test"
+        );
     }
 
     #[test]
@@ -7975,20 +8174,25 @@ mod tests {
         );
         let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
         let persona = test_persona_context("eng");
+        let expected_prompt_hash = persona.prompt_hash.clone();
 
         let spec = workload.spec(&thread_key, &HarnessType::Codex, Some(&persona));
 
         assert_eq!(env_value(&spec, "AGENT_PERSONA"), Some("eng"));
         assert_eq!(env_value(&spec, "CENTAUR_PERSONA_ID"), Some("eng"));
+        assert_eq!(spec.files.len(), 1);
+        assert_eq!(spec.files[0].target_path, "/home/agent/AGENTS_PERSONA.md");
+        assert_eq!(spec.files[0].contents, "eng persona prompt");
         assert_eq!(
             env_value(&spec, "CENTAUR_PERSONA_PROMPT_HASH"),
-            Some("sha256:prompt")
+            Some(expected_prompt_hash.as_str())
         );
         assert_eq!(
             env_value(&spec, "CENTAUR_PERSONA_SOURCE_REF"),
             Some("abc123")
         );
         assert_eq!(env_value(&workload.warm_spec(), "AGENT_PERSONA"), None);
+        assert!(workload.warm_spec().files.is_empty());
     }
 
     #[test]
@@ -8463,12 +8667,14 @@ mod tests {
     }
 
     fn test_persona_context(persona_id: &str) -> PersonaContext {
+        let prompt = format!("{persona_id} persona prompt");
         PersonaContext {
             persona_id: persona_id.to_owned(),
             source_root: "/repo/tools".to_owned(),
             source_path: format!("/repo/tools/personas/{persona_id}"),
             source_ref: Some("abc123".to_owned()),
-            prompt_hash: "sha256:prompt".to_owned(),
+            prompt_hash: format!("sha256:{}", hex::encode(Sha256::digest(prompt.as_bytes()))),
+            prompt,
             defaulted: false,
             overlay_chain: vec!["/repo/tools".to_owned()],
         }
@@ -8906,12 +9112,124 @@ mod adoption_tests {
             .expect("list events")
     }
 
+    async fn session_metadata(store: &PgSessionStore, thread_key: &ThreadKey) -> Value {
+        sqlx::query_scalar("select metadata from sessions where thread_key = $1")
+            .bind(thread_key.as_str())
+            .fetch_one(store.pool())
+            .await
+            .expect("load session metadata")
+    }
+
     fn runtime_with(store: &PgSessionStore, backend: Arc<MockBackend>) -> SessionRuntime {
         SessionRuntime::new(
             store.clone(),
             SandboxRuntime::backend(backend, SandboxSpec::new("mock")),
             TestSessionPrincipalRegistrar,
         )
+    }
+
+    fn runtime_with_personas(store: &PgSessionStore, backend: Arc<MockBackend>) -> SessionRuntime {
+        let definitions = ["old", "eng"].map(|persona_id| PersonaDefinition {
+            id: persona_id.to_owned(),
+            source_root: "/repo/tools".to_owned(),
+            source_path: format!("/repo/tools/personas/{persona_id}"),
+            source_ref: Some("abc123".to_owned()),
+            prompt_hash: format!("sha256:{persona_id}"),
+            prompt: format!("{persona_id} persona prompt"),
+        });
+        runtime_with(store, backend).with_personas(
+            PersonaRegistry::new(definitions, None, vec!["/repo/tools".to_owned()]).unwrap(),
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn harness_restart_preserves_pinned_persona() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:persona-harness-{}", uuid::Uuid::new_v4())).unwrap();
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime = runtime_with_personas(&store, backend);
+
+        runtime
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                Some("old"),
+                Some(json!({})),
+                HarnessConflictPolicy::Reject,
+            )
+            .await
+            .expect("create original session");
+
+        let outcome = runtime
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::ClaudeCode,
+                Some("not-deployed"),
+                Some(json!({})),
+                HarnessConflictPolicy::Restart,
+            )
+            .await
+            .expect("restart session on requested harness");
+
+        assert!(outcome.harness_switched);
+        assert_eq!(outcome.session.harness_type, HarnessType::ClaudeCode);
+        assert_eq!(outcome.session.persona_id.as_deref(), Some("old"));
+        assert_eq!(
+            session_metadata(&store, &thread_key).await["persona"]["persona_id"],
+            "old"
+        );
+        let events = events(&store, &thread_key).await;
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "session.harness_switched")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn existing_session_ignores_later_persona_selection() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:persona-only-{}", uuid::Uuid::new_v4())).unwrap();
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime = runtime_with_personas(&store, backend);
+
+        runtime
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                Some("old"),
+                Some(json!({})),
+                HarnessConflictPolicy::Reject,
+            )
+            .await
+            .expect("create original session");
+
+        let outcome = runtime
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                Some("eng"),
+                Some(json!({})),
+                HarnessConflictPolicy::Reject,
+            )
+            .await
+            .expect("load session with pinned persona");
+
+        assert!(!outcome.harness_switched);
+        assert_eq!(outcome.session.harness_type, HarnessType::Codex);
+        assert_eq!(outcome.session.persona_id.as_deref(), Some("old"));
+        assert_eq!(
+            session_metadata(&store, &thread_key).await["persona"]["persona_id"],
+            "old"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

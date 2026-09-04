@@ -89,7 +89,7 @@ RUN useradd -m -s /bin/bash -u 1001 agent \
     && echo "agent ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/agent
 
 ARG CLAUDE_CODE_VERSION=2.1.154
-ARG CODEX_VERSION=0.144.0
+ARG CODEX_VERSION=0.153.2
 # Hermes Agent (NousResearch) — pinned by commit SHA per the dependency policy.
 ARG HERMES_AGENT_REF=e5e2fb8b2dbe1cae85aa5ad6ce45aef376016e43
 ARG PI_CODING_AGENT_VERSION=0.67.2

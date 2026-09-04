@@ -421,8 +421,23 @@ class SlackClient:
         return body, headers
 
     def _message_permalink(self, channel_id: str, ts: str) -> str:
-        """Build a Slack permalink from channel and timestamp."""
+        """Build a generic fallback permalink from channel and timestamp."""
         return f"https://slack.com/archives/{channel_id}/p{ts.replace('.', '')}"
+
+    def _canonical_message_permalink(self, channel_id: str, ts: str) -> str:
+        """Ask Slack for the workspace-aware permalink for a message."""
+        try:
+            response = self._retry_on_ratelimit(
+                self._client.chat_getPermalink,
+                method_key="chat.getPermalink",
+                channel=channel_id,
+                message_ts=ts,
+            )
+        except (SlackApiError, SlackRateLimitError):
+            return self._message_permalink(channel_id, ts)
+
+        permalink = str(response.get("permalink") or "").strip()
+        return permalink or self._message_permalink(channel_id, ts)
 
     def _resolve_channel_name(self, channel: str, channel_id: str) -> str:
         """Resolve a human-readable channel name when callers passed an ID."""
@@ -1125,7 +1140,12 @@ class SlackClient:
         for msg in scored_results:
             del msg["_score"]
 
-        return scored_results[:max_results]
+        results = scored_results[:max_results]
+        for msg in results:
+            msg["permalink"] = self._canonical_message_permalink(
+                msg["channel_id"], msg["timestamp"]
+            )
+        return results
 
     def get_channel_history_page(
         self,
@@ -1852,10 +1872,11 @@ class SlackClient:
                 kwargs["unfurl_media"] = unfurl_media
             response = self._client.chat_postMessage(**kwargs)
             response_channel = str(response.get("channel") or channel_id)
+            response_ts = str(response.get("ts") or "")
             return {
                 "channel": response_channel,
-                "ts": response.get("ts", ""),
-                "permalink": f"https://slack.com/archives/{response_channel}/p{response.get('ts', '').replace('.', '')}",
+                "ts": response_ts,
+                "permalink": self._canonical_message_permalink(response_channel, response_ts),
             }
         except SlackApiError as e:
             raise RuntimeError(f"Slack API error: {e.response['error']}") from e

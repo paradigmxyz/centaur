@@ -340,7 +340,7 @@ def test_search_queries_bm25_and_returns_compact_results(monkeypatch):
     assert fake.closed is True
 
 
-def test_search_skips_embeddings_when_experiment_is_disabled(monkeypatch):
+def test_search_skips_embeddings_when_disabled(monkeypatch):
     fake = _FakeConnection(
         rows=[
             {

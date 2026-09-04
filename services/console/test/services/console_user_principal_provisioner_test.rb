@@ -15,4 +15,13 @@ class ConsoleUserPrincipalProvisionerTest < ActiveSupport::TestCase
     assert_equal "centaur", @principal.labels["managed-by"]
     assert_includes @principal.roles, Role.find_by!(foreign_id: "user-mcp")
   end
+
+  test "repeated calls leave an unchanged principal untouched" do
+    user = users(:member_user)
+    principal = ConsoleUserPrincipalProvisioner.call(user)
+
+    assert_no_changes -> { principal.reload.updated_at } do
+      ConsoleUserPrincipalProvisioner.call(user)
+    end
+  end
 end

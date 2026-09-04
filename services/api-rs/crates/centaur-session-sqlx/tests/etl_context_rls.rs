@@ -84,6 +84,18 @@ async fn company_context_reader_role_has_narrow_security_surface() -> Result<(),
 }
 
 #[tokio::test]
+async fn company_context_embeddings_support_shared_etl_writes_and_scoped_reads()
+-> Result<(), Box<dyn Error>> {
+    let Some(mut fixture) = RlsTestFixture::create().await? else {
+        return Ok(());
+    };
+    let result = assert_company_context_embedding_access(&mut fixture.conn)
+        .await
+        .map_err(Into::into);
+    fixture.finish(result).await
+}
+
+#[tokio::test]
 async fn company_context_reader_preserves_scoped_search_behavior() -> Result<(), Box<dyn Error>> {
     let Some(mut fixture) = RlsTestFixture::create().await? else {
         return Ok(());
@@ -524,6 +536,10 @@ fn expected_policies() -> Vec<(String, String)> {
             "centaur_cc_reader_gdocs_documents_select",
         ),
         (
+            "company_context_document_embeddings",
+            "centaur_cc_embeddings_select",
+        ),
+        (
             "google_drive_sync_runs",
             "centaur_google_drive_runs_reader_select",
         ),
@@ -731,6 +747,7 @@ async fn assert_company_context_reader_role_security(
     assert_eq!(
         readable_relations,
         vec![
+            "company_context_document_embeddings".to_owned(),
             "company_context_documents".to_owned(),
             "google_docs_context_documents".to_owned(),
             "google_docs_sync_file_observations".to_owned(),
@@ -808,6 +825,72 @@ async fn assert_company_context_reader_role_security(
         writable_relations.is_empty(),
         "company context reader gained an effective write privilege: {writable_relations:?}"
     );
+    Ok(())
+}
+
+async fn assert_company_context_embedding_access(
+    conn: &mut PgConnection,
+) -> Result<(), sqlx::Error> {
+    let hnsw_index_state: (bool, bool) = sqlx::query_as(
+        r#"
+        select indexes.indisvalid, indexes.indisready
+        from pg_index indexes
+        join pg_class relations on relations.oid = indexes.indexrelid
+        where relations.relname = 'company_context_document_embeddings_embedding_hnsw_idx'
+        "#,
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    assert_eq!(
+        hnsw_index_state,
+        (true, true),
+        "embedding HNSW index must be ready and valid"
+    );
+
+    conn.execute(
+        r#"
+        insert into company_context_document_embeddings (
+            google_docs_context_document_id,
+            model,
+            content_hash,
+            embedding
+        ) values
+            (
+                'gdocs_doc',
+                'text-embedding-3-small',
+                'hash_viewer',
+                array_fill(0.1::real, array[1536])::vector
+            ),
+            (
+                'gdocs_doc_other',
+                'text-embedding-3-small',
+                'hash_other',
+                array_fill(0.2::real, array[1536])::vector
+            )
+        "#,
+    )
+    .await?;
+
+    let mut reader_tx = conn.begin().await?;
+    reader_tx.execute("set local search_path to public").await?;
+    sqlx::query("select set_config('centaur.google_subject', 'google_subject', true)")
+        .execute(&mut *reader_tx)
+        .await?;
+    reader_tx
+        .execute("set role centaur_company_context_reader")
+        .await?;
+    let visible_embeddings: Vec<String> = sqlx::query_scalar(
+        r#"
+        select google_docs_context_document_id
+        from company_context_document_embeddings
+        order by google_docs_context_document_id
+        "#,
+    )
+    .fetch_all(&mut *reader_tx)
+    .await?;
+    assert_eq!(visible_embeddings, vec!["gdocs_doc".to_owned()]);
+    reader_tx.execute("reset role").await?;
+    reader_tx.rollback().await?;
     Ok(())
 }
 
