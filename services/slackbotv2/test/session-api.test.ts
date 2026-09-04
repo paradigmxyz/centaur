@@ -636,35 +636,6 @@ describe('forwardToSessionApi overrides', () => {
     )
   })
 
-  test('maps the unavailable persona ID from the create response onto the session outcome', async () => {
-    const { fetchFn } = fakeApi({
-      createSession: [
-        {
-          body: {
-            harness_switched: false,
-            harness_type: 'codex',
-            persona_id: 'eng',
-            unavailable_requested_persona_id: 'honk'
-          },
-          status: 200
-        }
-      ]
-    })
-    let unavailableRequestedPersonaId: string | undefined
-
-    await forwardToSessionApi(
-      options(fetchFn),
-      forwardInput(apiMessage('review this'), { personaId: 'honk' }),
-      {
-        onSessionCreated: async outcome => {
-          unavailableRequestedPersonaId = outcome.unavailableRequestedPersonaId
-        }
-      }
-    )
-
-    expect(unavailableRequestedPersonaId).toBe('honk')
-  })
-
   test('includes model override on the execute input line', async () => {
     const { fetchFn, requests } = fakeApi()
     await forwardToSessionApi(

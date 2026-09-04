@@ -55,11 +55,11 @@ import {
   withSlackApiTimeout
 } from './session-api'
 import {
-  appendSlackResponseContextNotice,
   buildSlackResponseContextBlock,
   defaultModelForHarness,
   defaultServiceTierForHarness,
   effectiveReasoningForHarness,
+  personaFallbackNotice,
   reasoningForModel,
   type SlackContextBlock
 } from './console-session-link'
@@ -1229,20 +1229,7 @@ async function syncThreadMessageToSession(
   const includeResponseMetadata =
     responseMetadataMode === 'always' ||
     (responseMetadataMode === 'first' && isFirstAssistantMessage)
-  let responseContextBlock = isFirstAssistantMessage || includeResponseMetadata
-    ? buildSlackResponseContextBlock({
-        consoleBaseUrl: isFirstAssistantMessage ? input.options.consolePublicUrl : undefined,
-        threadKey: thread.id,
-        harnessType: effectiveHarnessType,
-        metadataEnabled: includeResponseMetadata,
-        model: effectiveModel,
-        reasoning: effectiveReasoning,
-        serviceTier:
-          input.options.responseServiceTierEnabled === true && !resolvedProvider
-            ? defaultServiceTierForHarness(effectiveHarnessType)
-            : undefined
-      })
-    : undefined
+  let responseContextBlock: SlackContextBlock | undefined
   if (
     overrides.harnessType ||
     overrides.model ||
@@ -1480,21 +1467,17 @@ async function syncThreadMessageToSession(
       onExecutionStarted: commitExecutionStarted,
       onMessagesAppended: commitMessagesAppended,
       onSessionCreated: async outcome => {
-        let personaFallbackNotice: string | undefined
+        const fallbackNotice = personaFallbackNotice(
+          outcome.unavailableRequestedPersonaId,
+          outcome.personaId
+        )
         if (outcome.personaId !== undefined) {
-          const requestedPersonaId =
-            outcome.unavailableRequestedPersonaId ?? stickyOverridesUpdate?.personaId
+          const requestedPersonaId = forwardInput.personaId
           stickyOverridesUpdate = {
             ...(stickyOverridesUpdate ?? {}),
             personaId: outcome.personaId
           }
           forwardInput.personaId = outcome.personaId ?? undefined
-          if (outcome.unavailableRequestedPersonaId) {
-            personaFallbackNotice =
-              outcome.personaId === null
-                ? `Persona "${outcome.unavailableRequestedPersonaId}" isn't available. Continuing without a persona.`
-                : `Persona "${outcome.unavailableRequestedPersonaId}" isn't available. Using "${outcome.personaId}" instead.`
-          }
           if (requestedPersonaId !== undefined && outcome.personaId !== requestedPersonaId) {
             traceLog(input.options, 'slackbotv2_session_persona_reconciled', trace, {
               requested_persona_id: requestedPersonaId,
@@ -1507,52 +1490,40 @@ async function syncThreadMessageToSession(
         const abTested = outcome.harnessAssignment?.experiment === 'codex_nanocodex_ab'
         forwardInput.metadataHarnessType = harnessType
         forwardInput.harnessAssignment = outcome.harnessAssignment
-        if (harnessType === effectiveHarnessType && !abTested) {
-          if (personaFallbackNotice) {
-            responseContextBlock = appendSlackResponseContextNotice(
-              responseContextBlock,
-              personaFallbackNotice
-            )
-          }
-          return
-        }
-        const model =
-          resolvedModel ?? defaultModelForHarness(harnessType, input.options.harnessDefaultModels)
-        const requestedReasoning = reasoningForModel(harnessType, model, resolvedReasoning)
-        const reasoning = effectiveReasoningForHarness(
-          harnessType,
-          requestedReasoning,
-          input.options.harnessDefaultReasoning
-        )
-        forwardInput.metadataModel = model
-        forwardInput.reasoning = requestedReasoning
-        if (isFirstAssistantMessage || includeResponseMetadata) {
-          responseContextBlock = buildSlackResponseContextBlock({
-            consoleBaseUrl: isFirstAssistantMessage ? input.options.consolePublicUrl : undefined,
-            threadKey: thread.id,
+        let model = effectiveModel
+        let reasoning = effectiveReasoning
+        if (harnessType !== effectiveHarnessType || abTested) {
+          model =
+            resolvedModel ?? defaultModelForHarness(harnessType, input.options.harnessDefaultModels)
+          const requestedReasoning = reasoningForModel(harnessType, model, resolvedReasoning)
+          reasoning = effectiveReasoningForHarness(
             harnessType,
-            metadataEnabled: includeResponseMetadata,
-            model,
-            reasoning,
-            serviceTier:
-              input.options.responseServiceTierEnabled === true && !resolvedProvider
-                ? defaultServiceTierForHarness(harnessType)
-                : undefined
+            requestedReasoning,
+            input.options.harnessDefaultReasoning
+          )
+          forwardInput.metadataModel = model
+          forwardInput.reasoning = requestedReasoning
+          traceLog(input.options, 'slackbotv2_session_harness_resolved', trace, {
+            ab_tested: abTested,
+            ab_test_experiment: outcome.harnessAssignment?.experiment,
+            ab_test_cohort: outcome.harnessAssignment?.cohort,
+            requested_harness_type: effectiveHarnessType,
+            resolved_harness_type: harnessType
           })
         }
-        traceLog(input.options, 'slackbotv2_session_harness_resolved', trace, {
-          ab_tested: abTested,
-          ab_test_experiment: outcome.harnessAssignment?.experiment,
-          ab_test_cohort: outcome.harnessAssignment?.cohort,
-          requested_harness_type: effectiveHarnessType,
-          resolved_harness_type: harnessType
+        responseContextBlock = buildSlackResponseContextBlock({
+          consoleBaseUrl: isFirstAssistantMessage ? input.options.consolePublicUrl : undefined,
+          threadKey: thread.id,
+          harnessType,
+          metadataEnabled: includeResponseMetadata,
+          model,
+          notice: fallbackNotice,
+          reasoning,
+          serviceTier:
+            input.options.responseServiceTierEnabled === true && !resolvedProvider
+              ? defaultServiceTierForHarness(harnessType)
+              : undefined
         })
-        if (personaFallbackNotice) {
-          responseContextBlock = appendSlackResponseContextNotice(
-            responseContextBlock,
-            personaFallbackNotice
-          )
-        }
       },
       onSessionRestarted: handleSessionRestarted
     })

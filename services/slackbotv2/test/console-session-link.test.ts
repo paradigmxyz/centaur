@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test'
 import {
-  appendSlackResponseContextNotice,
   buildSlackResponseContextBlock,
   consoleSessionUrl,
   defaultModelForHarness,
@@ -8,6 +7,7 @@ import {
   defaultServiceTierForHarness,
   effectiveReasoningForHarness,
   harnessDisplayName,
+  personaFallbackNotice,
   reasoningForModel
 } from '../src/console-session-link'
 import claudeSettings from '../../../harness/claude/settings.json'
@@ -274,15 +274,14 @@ describe('buildSlackResponseContextBlock', () => {
 
     expect(block?.elements[0]?.text).toBe('GPT-5.6-SOL · Codex · Low · Fast')
   })
-})
 
-describe('appendSlackResponseContextNotice', () => {
-  test('creates a warning context block when response metadata is absent', () => {
+  test('renders and escapes a notice when response metadata is absent', () => {
     expect(
-      appendSlackResponseContextNotice(
-        undefined,
-        'Persona "<unsafe&persona>" cannot be used.'
-      )
+      buildSlackResponseContextBlock({
+        consoleBaseUrl: undefined,
+        threadKey: 'slack:C1:1',
+        notice: 'Persona "<unsafe&persona>" cannot be used.'
+      })
     ).toEqual({
       type: 'context',
       elements: [
@@ -293,19 +292,14 @@ describe('appendSlackResponseContextNotice', () => {
       ]
     })
   })
+})
 
-  test('prepends a notice to an existing response context block', () => {
-    const block = buildSlackResponseContextBlock({
-      consoleBaseUrl: 'https://console.centaur.dev',
-      threadKey: 'slack:C1:1'
-    })
-
-    expect(appendSlackResponseContextNotice(block, 'Using the default persona.')?.elements).toEqual([
-      { type: 'mrkdwn', text: ':warning: Using the default persona.' },
-      {
-        type: 'mrkdwn',
-        text: '<https://console.centaur.dev/console/threads?thread=slack%3AC1%3A1|Open chat in Console>'
-      }
-    ])
-  })
+test('personaFallbackNotice describes the resolved fallback', () => {
+  expect(personaFallbackNotice('honk', 'eng')).toBe(
+    `Persona "honk" isn't available. Using "eng" instead.`
+  )
+  expect(personaFallbackNotice('honk', null)).toBe(
+    `Persona "honk" isn't available. Continuing without a persona.`
+  )
+  expect(personaFallbackNotice(undefined, 'eng')).toBeUndefined()
 })

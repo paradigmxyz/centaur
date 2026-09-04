@@ -842,56 +842,6 @@ describe('slackbotv2', () => {
     expect(personaNotice).toContain('Using \\"eng\\" instead.')
   })
 
-  it('reports when an unavailable persona falls back to no persona', async () => {
-    const sharedState = createMemoryState()
-    await sharedState.connect()
-    bot = createTestBot({ state: sharedState })
-    codexApi.queueCreateResponse({
-      harness_switched: false,
-      harness_type: 'codex',
-      persona_id: null,
-      unavailable_requested_persona_id: 'honk'
-    })
-
-    const parent = await postUserMessage('Thread default context.')
-    const mention = await postUserMessage(
-      `<@${BOT_USER_ID}> --persona=honk start without it if needed`,
-      parent.ts
-    )
-    const waits: Promise<unknown>[] = []
-    const response = await bot.app.request(
-      '/api/webhooks/slack',
-      signedSlackEvent({
-        event_id: 'Ev-slackbotv2-persona-reconcile-none',
-        event: {
-          type: 'app_mention',
-          user: USER_ID,
-          channel: CHANNEL_ID,
-          team: TEAM_ID,
-          ts: mention.ts,
-          thread_ts: parent.ts,
-          text: `<@${BOT_USER_ID}> --persona=honk start without it if needed`
-        }
-      }),
-      {},
-      waitUntilContext(waits)
-    )
-    expect(response.status).toBe(200)
-    await Promise.all(waits)
-
-    expect(codexApi.creates[0]?.body.persona_id).toBe('honk')
-    const personaNotice = slackApi.calls
-      .filter(call => call.method === 'chat.stopStream')
-      .flatMap(call => (Array.isArray(call.body.blocks) ? call.body.blocks : []))
-      .map(block => JSON.stringify(block))
-      .find(block => block.includes('Persona \\"honk\\" isn\'t available'))
-    expect(personaNotice).toContain('Continuing without a persona.')
-    const state = await sharedState.get<Record<string, unknown>>(
-      `thread-state:${threadKey(parent.ts)}`
-    )
-    expect(state).toEqual(expect.objectContaining({ personaId: null }))
-  })
-
   it('clears a sticky model rejected by the harness and accepts a later override', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()

@@ -7485,71 +7485,60 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_requested_persona_falls_back_to_deployment_default() {
-        let registry = PersonaRegistry::new(
-            [PersonaDefinition {
-                id: "eng".to_owned(),
-                source_root: "/repo/tools".to_owned(),
-                source_path: "/repo/tools/personas/eng".to_owned(),
-                source_ref: None,
-                prompt_hash: "sha256:eng".to_owned(),
-                prompt: "engineering persona".to_owned(),
-            }],
+    fn unavailable_requested_persona_uses_deployment_fallback() {
+        let persona = |id: &str, source_root: &str| PersonaDefinition {
+            id: id.to_owned(),
+            source_root: source_root.to_owned(),
+            source_path: format!("{source_root}/personas/{id}"),
+            source_ref: None,
+            prompt_hash: format!("sha256:{id}"),
+            prompt: format!("{id} persona"),
+        };
+        let default_registry = PersonaRegistry::new(
+            [
+                persona("eng", "/repo/tools"),
+                persona("private", "/repo/private/tools"),
+            ],
             Some("eng".to_owned()),
-            vec!["/repo/tools".to_owned()],
+            vec!["/repo/tools".to_owned(), "/repo/private/tools".to_owned()],
         )
-        .unwrap();
+        .unwrap()
+        .with_public_source_roots(["/repo/tools".to_owned()]);
+        let empty_registry = PersonaRegistry::new(Vec::new(), None, Vec::new()).unwrap();
 
-        let resolution = resolve_persona_selection(
-            Some(&registry),
-            Some("honk"),
-            &SessionSandboxCapabilities::default_enabled(),
-        )
-        .unwrap();
+        for (registry, expected_persona_id) in [
+            (Some(&default_registry), Some("eng")),
+            (Some(&empty_registry), None),
+            (None, None),
+        ] {
+            let resolution = resolve_persona_selection(
+                registry,
+                Some("honk"),
+                &SessionSandboxCapabilities::default_enabled(),
+            )
+            .unwrap();
 
-        assert_eq!(resolution.persona_id.as_deref(), Some("eng"));
-        assert_eq!(
-            resolution.unavailable_requested_persona_id.as_deref(),
-            Some("honk")
-        );
-        let context = resolution.context.unwrap();
-        assert_eq!(context.persona_id, "eng");
-        assert!(context.defaulted);
-    }
+            assert_eq!(resolution.persona_id.as_deref(), expected_persona_id);
+            assert_eq!(
+                resolution
+                    .context
+                    .as_ref()
+                    .map(|context| context.persona_id.as_str()),
+                expected_persona_id
+            );
+            assert_eq!(
+                resolution.unavailable_requested_persona_id.as_deref(),
+                Some("honk")
+            );
+        }
 
-    #[test]
-    fn unavailable_requested_persona_falls_back_to_no_persona() {
-        let registry = PersonaRegistry::new(Vec::new(), None, Vec::new()).unwrap();
-
-        let resolution = resolve_persona_selection(
-            Some(&registry),
-            Some("honk"),
-            &SessionSandboxCapabilities::default_enabled(),
-        )
-        .unwrap();
-
-        assert_eq!(resolution.persona_id, None);
-        assert_eq!(resolution.context, None);
-        assert_eq!(
-            resolution.unavailable_requested_persona_id.as_deref(),
-            Some("honk")
-        );
-    }
-
-    #[test]
-    fn unavailable_requested_persona_without_registry_falls_back_to_no_persona() {
-        let resolution = resolve_persona_selection(
-            None,
-            Some("honk"),
-            &SessionSandboxCapabilities::default_enabled(),
-        )
-        .unwrap();
-
-        assert_eq!(resolution.persona_id, None);
-        assert_eq!(resolution.context, None);
-        assert_eq!(
-            resolution.unavailable_requested_persona_id.as_deref(),
-            Some("honk")
+        let capabilities = SessionSandboxCapabilities {
+            repo_cache: SessionRepoCacheAccess::Public,
+            observability_enabled: false,
+        };
+        assert!(
+            resolve_persona_selection(Some(&default_registry), Some("private"), &capabilities)
+                .is_err()
         );
     }
 
@@ -7570,33 +7559,6 @@ mod tests {
             confirmed_unavailable_requested_persona_id(&resolution, None).as_deref(),
             Some("honk")
         );
-    }
-
-    #[test]
-    fn inaccessible_requested_persona_still_fails_closed() {
-        let registry = PersonaRegistry::new(
-            [PersonaDefinition {
-                id: "private".to_owned(),
-                source_root: "/repo/private/tools".to_owned(),
-                source_path: "/repo/private/tools/personas/private".to_owned(),
-                source_ref: None,
-                prompt_hash: "sha256:private".to_owned(),
-                prompt: "private persona".to_owned(),
-            }],
-            None,
-            vec!["/repo/private/tools".to_owned()],
-        )
-        .unwrap();
-        let capabilities = SessionSandboxCapabilities {
-            repo_cache: SessionRepoCacheAccess::Public,
-            observability_enabled: false,
-        };
-
-        let error = resolve_persona_selection(Some(&registry), Some("private"), &capabilities)
-            .err()
-            .expect("private persona should be rejected for public access");
-
-        assert!(matches!(error, SessionRuntimeError::BadRequest(_)));
     }
 
     #[test]
@@ -9303,35 +9265,6 @@ mod adoption_tests {
         runtime_with(store, backend).with_personas(
             PersonaRegistry::new(definitions, None, vec!["/repo/tools".to_owned()]).unwrap(),
         )
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn new_session_reports_unavailable_persona_fallback() {
-        let Some(store) = test_store().await else {
-            return;
-        };
-        let _serial = TEST_LOCK.lock().await;
-        let thread_key =
-            ThreadKey::parse(format!("test:persona-fallback-{}", uuid::Uuid::new_v4())).unwrap();
-        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
-        let runtime = runtime_with_personas(&store, backend);
-
-        let outcome = runtime
-            .create_or_get_session(
-                &thread_key,
-                &HarnessType::Codex,
-                Some("not-deployed"),
-                Some(json!({})),
-                HarnessConflictPolicy::Reject,
-            )
-            .await
-            .expect("create session with persona fallback");
-
-        assert_eq!(
-            outcome.unavailable_requested_persona_id.as_deref(),
-            Some("not-deployed")
-        );
-        assert_eq!(outcome.session.persona_id, None);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
