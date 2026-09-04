@@ -14,7 +14,7 @@ import {
   type StateAdapter,
   type Thread
 } from 'chat'
-import { createSlackAdapter } from '@chat-adapter/slack'
+import { createSlackAdapter, SlackFormatConverter } from '@chat-adapter/slack'
 import {
   assertSlackOk,
   callSlackApi,
@@ -138,6 +138,7 @@ type SlackAssistantAdapter = {
   setAssistantTitle?(channelId: string, threadTs: string, title: string): Promise<void>
 }
 
+const slackFormatConverter = new SlackFormatConverter()
 const MAX_SLACK_MESSAGE_ATTACHMENTS = 20
 
 type SlackbotV2RequestContext = {
@@ -1907,7 +1908,7 @@ function slackStreamErrorCode(error: unknown): string {
 const FALLBACK_OPEN_MAX_ATTEMPTS = 4
 
 /**
- * Delivers the durable final answer as a plain thread post after the live
+ * Delivers the durable final answer as a Slack-native thread post after the live
  * Slack streaming render failed. Replays the session event stream from the
  * execution's starting position (the control plane keeps the events durably,
  * so the terminal result is replayable even when the failed render already
@@ -1969,10 +1970,13 @@ async function renderFallbackFinalAnswer(
     }
     const text = fallback.textOrDefault()
     const fallbackText = truncateSlackText(text, SLACK_FALLBACK_TEXT_MAX_CHARS, 'Slack final answer')
+    const fallbackMrkdwn = slackFormatConverter.toResponseUrlText({ markdown: fallbackText })
     if (replacement) {
-      await thread.adapter.editMessage(thread.id, replacement.replaceMessageId, fallbackText)
+      await thread.adapter.editMessage(thread.id, replacement.replaceMessageId, {
+        raw: fallbackMrkdwn
+      })
     } else {
-      await thread.post(fallbackText)
+      await thread.post({ raw: fallbackMrkdwn })
     }
     traceLog(options, 'slackbotv2_render_fallback_complete', trace, {
       chars: text.length,

@@ -2352,6 +2352,61 @@ describe('slackbotv2', () => {
     })
   })
 
+  it('renders root-DM fallback answers as Slack-native rich text', async () => {
+    codexApi.autoRespond = false
+    const opened = await slack.conversations.open({ users: BOT_USER_ID })
+    const dmChannel = String(opened.channel?.id)
+    expect(dmChannel).toStartWith('D')
+    const messageTs = '1788266877.394249'
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-root-dm-rich-fallback',
+        event: {
+          type: 'message',
+          user: USER_ID,
+          channel: dmChannel,
+          channel_type: 'im',
+          team: TEAM_ID,
+          ts: messageTs,
+          text: 'book the meeting'
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+    expect(response.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+    await waitFor(() => codexApi.eventRequests.length === 1)
+
+    const commonMarkAnswer = [
+      '**Booked and verified:**',
+      '',
+      '- **Title:** Example meeting',
+      '',
+      '[Join meeting](https://meet.example.test/room)'
+    ].join('\n')
+    codexApi.emitOutputLines(
+      codexApi.executes[0]!.threadKey,
+      sampleCodexOutputLines(commonMarkAnswer)
+    )
+
+    await Promise.all(waits)
+    const fallbackPost = slackApi.calls.find(call =>
+      call.method === 'chat.postMessage'
+      && stringField(call.body.channel) === dmChannel
+      && stringField(call.body.text).includes('Booked and verified')
+    )
+    expect(fallbackPost).toBeDefined()
+    const delivered = stringField(fallbackPost?.body.text)
+    expect(delivered).toContain('*Booked and verified:*')
+    expect(delivered).toContain('• *Title:* Example meeting')
+    expect(delivered).toContain('<https://meet.example.test/room|Join meeting>')
+    expect(delivered).not.toContain('**Title:**')
+    expect(delivered).not.toContain('[Join meeting](')
+  })
+
   it('ignores non-JSON sandbox bootstrap output lines instead of ending the stream', async () => {
     codexApi.autoRespond = false
 
@@ -2386,6 +2441,66 @@ describe('slackbotv2', () => {
     expect(await threadText(mention.ts)).not.toContain(
       'Execution completed, but no final text was captured.'
     )
+  })
+
+  it('renders streamed CommonMark links as Slack-native rich links', async () => {
+    codexApi.autoRespond = false
+
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> report the completed issue`)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-native-rich-link',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          text: `<@${BOT_USER_ID}> report the completed issue`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+    expect(response.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+
+    const commonMarkAnswer =
+      'Completed: [Issue #276](https://github.com/example/widgets/issues/276) was updated.'
+    const fragmentedOutput = sampleCodexOutputLines(commonMarkAnswer).flatMap(line => {
+      const event = JSON.parse(line) as Record<string, unknown>
+      if (
+        event.method !== 'item/agentMessage/delta'
+        || !isRecord(event.params)
+        || event.params.itemId !== 'answer-1'
+      ) {
+        return [line]
+      }
+      const params = event.params
+      return [
+        'Completed: [Issue',
+        ' #276](https://github.com/example/',
+        'widgets/issues/276) was updated.'
+      ].map(delta => JSON.stringify({
+        ...event,
+        params: { ...params, delta }
+      }))
+    })
+    codexApi.emitOutputLines(threadKey(mention.ts), fragmentedOutput)
+
+    await Promise.all(waits)
+    const transcripts = slackStreamTranscripts(slackApi.calls)
+    expect(transcripts).toHaveLength(1)
+    const delivered = transcripts[0]!.chunks
+      .filter(chunk => chunk.type === 'markdown_text')
+      .map(chunk => stringField(chunk.text))
+      .join('')
+    expect(delivered).toBe(
+      'Completed: <https://github.com/example/widgets/issues/276|Issue #276> was updated.'
+    )
+    expect(delivered).not.toContain('[Issue #276](')
   })
 
   it('ignores unmentioned subscribed messages during a stream, including stop', async () => {
@@ -6354,6 +6469,7 @@ type StreamCall = {
     | 'assistant.threads.setTitle'
     | 'chat.startStream'
     | 'chat.appendStream'
+    | 'chat.postMessage'
     | 'chat.stopStream'
     | 'conversations.join'
     | 'reactions.add'
@@ -6660,6 +6776,9 @@ async function handlePatchedSlackRequest(
       )
     )
     return
+  }
+  if (path === '/api/chat.postMessage') {
+    input.calls.push({ method: 'chat.postMessage', body: await requestBody(request.clone()) })
   }
   if (path === '/api/conversations.replies') {
     const body = await requestBody(request.clone())
