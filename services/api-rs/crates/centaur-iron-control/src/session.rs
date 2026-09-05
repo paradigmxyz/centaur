@@ -15,6 +15,7 @@ use crate::models::{Principal, PrincipalInput, SlackChannelPermissionInput};
 use crate::principal::{
     PrincipalRef, derive_github_requester_principal, derive_principal_with_slack_team,
     derive_slack_requester_principal, is_direct_message, slack_conversation_id,
+    slack_user_principal,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -139,6 +140,33 @@ impl SessionRegistrar {
                 Ok(Some(self.client.upsert_principal(&input).await?))
             }
         }
+    }
+
+    /// Upsert a Slack user's requester principal for a trusted non-session
+    /// ingress such as a signature-verified message shortcut. The explicit
+    /// home-team comparison prevents Slack Connect identities from borrowing
+    /// credentials belonging to a user in the app's workspace.
+    pub async fn register_slack_user(
+        &self,
+        slack_user_id: &str,
+        slack_team_id: &str,
+        slack_home_team_id: &str,
+        display_name: Option<&str>,
+    ) -> Result<Option<Principal>> {
+        let user = slack_user_id.trim();
+        let team = slack_team_id.trim();
+        let home_team = slack_home_team_id.trim();
+        if user.is_empty() || team.is_empty() || home_team.is_empty() || team != home_team {
+            return Ok(None);
+        }
+        let principal = slack_user_principal(
+            user,
+            team,
+            display_name.map(str::trim).filter(|name| !name.is_empty()),
+        );
+        let mut input = principal.to_principal_input();
+        self.merge_existing_labels(&mut input).await?;
+        Ok(Some(self.client.upsert_principal(&input).await?))
     }
 
     pub async fn get_principal(&self, principal: &str) -> Result<Principal> {
@@ -703,6 +731,43 @@ mod tests {
 
         let principal = registrar
             .register_requester("slack:T_HOME:C123:1773364194.179929", Some(&metadata))
+            .await
+            .unwrap();
+
+        assert_eq!(principal, None);
+        assert!(requests.lock().unwrap().is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn register_slack_user_supports_trusted_workflow_ingress() {
+        let (base_url, requests, _bodies, server) = spawn_iron_control_stub(false).await;
+        let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
+
+        let principal = registrar
+            .register_slack_user("U123", "T123", "T123", Some("Ada Lovelace"))
+            .await
+            .unwrap()
+            .expect("home-team workflow requester resolves to a principal");
+
+        assert_eq!(principal.id, "prn_user");
+        let requests = requests.lock().unwrap();
+        assert!(requests.contains(&"PUT /api/v1/principals/slack-user-t123-u123".to_owned()));
+        assert!(
+            !requests
+                .iter()
+                .any(|request| request.ends_with("/slack_channel_permissions"))
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn register_slack_user_rejects_external_workflow_requester() {
+        let (base_url, requests, _bodies, server) = spawn_iron_control_stub(false).await;
+        let registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
+
+        let principal = registrar
+            .register_slack_user("U123", "T_EXTERNAL", "T_HOME", None)
             .await
             .unwrap();
 

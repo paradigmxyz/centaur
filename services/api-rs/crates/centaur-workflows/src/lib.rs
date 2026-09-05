@@ -12,7 +12,9 @@ use absurd::{
     AwaitEventOptions, Client, ClientOptions, CreateQueueOptions, RetryKind, RetryStrategy,
     SpawnOptions, StepHandle, TaskContext, TaskRegistrationOptions, Worker, WorkerOptions,
 };
-use centaur_iron_control::{IronControlClient, IronControlError, PrincipalInput, slugify};
+use centaur_iron_control::{
+    IronControlClient, IronControlError, PrincipalInput, SessionRegistrar, slugify,
+};
 use centaur_sandbox_core::SandboxSpec;
 use centaur_session_core::{HarnessType, MessageRole, SessionMessageInput, ThreadKey};
 use centaur_session_runtime::{
@@ -117,6 +119,7 @@ struct WorkflowRuntimeInner {
     _schedule_worker: Worker,
     webhook_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
     schedule_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
+    workflow_principal_registrar: WorkflowPrincipalRegistrar,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -277,7 +280,11 @@ impl WorkflowHostSandboxRuntime {
         };
     }
 
-    fn spec_for_workflow(&self, workflow_name: &str) -> Result<SandboxSpec, WorkflowRuntimeError> {
+    fn spec_for_workflow(
+        &self,
+        workflow_name: &str,
+        requester_principal_id: Option<&str>,
+    ) -> Result<SandboxSpec, WorkflowRuntimeError> {
         let mut spec = self.spec.clone();
         let principal = {
             let assignments = self
@@ -289,6 +296,7 @@ impl WorkflowHostSandboxRuntime {
         if let Some(principal) = principal {
             spec.iron_control_principal = Some(principal);
         }
+        spec.iron_control_requester_principal = requester_principal_id.map(ToOwned::to_owned);
         Ok(spec)
     }
 }
@@ -301,6 +309,22 @@ pub struct WorkflowPrincipalRegistrar {
 impl WorkflowPrincipalRegistrar {
     pub fn new(client: IronControlClient) -> Self {
         Self { client }
+    }
+
+    async fn register_requester(
+        &self,
+        requester: &WorkflowRequester,
+    ) -> Result<Option<String>, WorkflowRuntimeError> {
+        let WorkflowRequester::Slack {
+            user_id,
+            team_id,
+            home_team_id,
+            display_name,
+        } = requester;
+        let principal = SessionRegistrar::new(self.client.clone())
+            .register_slack_user(user_id, team_id, home_team_id, Some(display_name))
+            .await?;
+        Ok(principal.map(|principal| principal.id))
     }
 
     async fn register_workflow_principals(
@@ -357,6 +381,23 @@ pub struct CreateWorkflowRunRequest {
     pub harness_type: Option<HarnessType>,
     #[serde(default)]
     pub max_attempts: Option<i32>,
+    /// Verified human identity associated with an interactive trigger. This
+    /// contains identifiers only; OAuth credentials are resolved server-side.
+    #[serde(default)]
+    pub requester: Option<WorkflowRequester>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
+pub enum WorkflowRequester {
+    Slack {
+        user_id: String,
+        team_id: String,
+        home_team_id: String,
+        #[serde(default)]
+        display_name: String,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -473,6 +514,10 @@ struct WorkflowTaskInput {
     workflow_name: String,
     input: Value,
     harness_type: HarnessType,
+    /// Iron-control principal OID only. Credential material is resolved by the
+    /// egress proxy and never serialized into the durable workflow task.
+    #[serde(default)]
+    requester_principal_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -808,7 +853,7 @@ impl WorkflowRuntime {
                 webhook_registry.clone(),
                 schedule_registry.clone(),
                 workflow_host_sandbox.clone(),
-                workflow_principal_registrar,
+                workflow_principal_registrar.clone(),
                 interval,
             );
         }
@@ -826,6 +871,7 @@ impl WorkflowRuntime {
                 _schedule_worker: schedule_worker,
                 webhook_registry,
                 schedule_registry,
+                workflow_principal_registrar,
             }),
         })
     }
@@ -841,6 +887,15 @@ impl WorkflowRuntime {
             ));
         }
         WorkflowEnablement::from_env()?.ensure_enabled(workflow_name)?;
+        let requester_principal_id = match request.requester.as_ref() {
+            Some(requester) => {
+                self.inner
+                    .workflow_principal_registrar
+                    .register_requester(requester)
+                    .await?
+            }
+            None => None,
+        };
         let client = self.client_for_workflow(workflow_name);
         let spawn = client
             .spawn(
@@ -849,6 +904,7 @@ impl WorkflowRuntime {
                     workflow_name: workflow_name.to_owned(),
                     input: request.input,
                     harness_type: request.harness_type.unwrap_or(HarnessType::Codex),
+                    requester_principal_id,
                 },
                 SpawnOptions {
                     max_attempts: request.max_attempts,
@@ -2407,6 +2463,7 @@ async fn run_schedule_tick(
                 workflow_name: schedule.workflow_name.clone(),
                 input: schedule.input.clone(),
                 harness_type: HarnessType::Codex,
+                requester_principal_id: None,
             },
             SpawnOptions {
                 idempotency_key: Some(fire_key.clone()),
@@ -3041,7 +3098,10 @@ async fn run_python_workflow_host_in_sandbox(
     sandbox: WorkflowHostSandboxRuntime,
     workflow_clients: WorkflowQueueClients,
 ) -> Result<Value, WorkflowRuntimeError> {
-    let mut spec = sandbox.spec_for_workflow(&input.workflow_name)?;
+    let mut spec = sandbox.spec_for_workflow(
+        &input.workflow_name,
+        input.requester_principal_id.as_deref(),
+    )?;
     spec = spec
         .env("WORKFLOW_RUN_ID", ctx.run_id())
         .env("WORKFLOW_TASK_ID", ctx.task_id())
@@ -3522,6 +3582,7 @@ async fn start_python_child_workflow(
                 workflow_name: workflow_name.to_owned(),
                 input: child_input,
                 harness_type: parent.harness_type.clone(),
+                requester_principal_id: parent.requester_principal_id.clone(),
             },
             SpawnOptions {
                 idempotency_key,
@@ -4584,6 +4645,48 @@ mod tests {
     #[tokio::test]
     async fn host_error_does_not_wait_for_never_closing_stderr() {
         assert_structured_host_error_is_bounded("host.error").await;
+    }
+
+    #[test]
+    fn workflow_task_without_requester_remains_deserializable() {
+        let task: WorkflowTaskInput = serde_json::from_value(json!({
+            "workflow_name": "treasury_needs_tracker",
+            "input": {},
+            "harness_type": "codex",
+        }))
+        .expect("legacy workflow task should deserialize");
+
+        assert_eq!(task.requester_principal_id, None);
+    }
+
+    #[test]
+    fn workflow_task_persists_only_requester_principal_reference() {
+        let task = WorkflowTaskInput {
+            workflow_name: "treasury_needs_tracker".to_owned(),
+            input: json!({"slack_interaction": {"type": "message_action"}}),
+            harness_type: HarnessType::Codex,
+            requester_principal_id: Some("prn_requester".to_owned()),
+        };
+
+        let serialized = serde_json::to_string(&task).expect("workflow task should serialize");
+        assert!(serialized.contains("prn_requester"));
+        assert!(!serialized.contains("access_token"));
+        assert!(!serialized.contains("refresh_token"));
+        assert!(!serialized.contains("credential"));
+    }
+
+    #[test]
+    fn workflow_requester_rejects_credential_fields() {
+        let error = serde_json::from_value::<WorkflowRequester>(json!({
+            "source": "slack",
+            "user_id": "U123",
+            "team_id": "T123",
+            "home_team_id": "T123",
+            "access_token": "must-not-cross-boundary",
+        }))
+        .expect_err("credential fields must not be accepted");
+
+        assert!(error.to_string().contains("access_token"));
     }
 
     #[test]

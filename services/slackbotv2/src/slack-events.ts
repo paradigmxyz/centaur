@@ -30,6 +30,7 @@ type RawSlackEnvelope = {
 
 type RawSlackInteraction = {
   actions?: JsonValue
+  callback_id?: JsonValue
   team?: JsonValue
   type?: JsonValue
   user?: JsonValue
@@ -56,7 +57,10 @@ export function isAllowedSlackWebhookBody(
 ): boolean {
   const payload = parseSlackWebhookPayload(rawBody)
   if (!payload) return true
-  if (isRawSlackInteraction(payload) && payload.type === 'block_actions') {
+  if (
+    isRawSlackInteraction(payload)
+    && (payload.type === 'block_actions' || payload.type === 'message_action')
+  ) {
     return isAllowedSlackInteraction(payload, options, logger)
   }
   if (!isRawSlackEnvelope(payload) || payload.type !== 'event_callback') return true
@@ -111,7 +115,9 @@ function isAllowedSlackInteraction(
   const actions = Array.isArray(payload.actions) ? payload.actions : []
   const firstAction = actions.find(isJsonObject)
   logger.warn('slackbotv2_event_ignored_external_org_not_allowlisted', {
-    action_id: firstAction ? stringValue(firstAction.action_id) : undefined,
+    action_id: firstAction
+      ? stringValue(firstAction.action_id)
+      : stringValue(payload.callback_id),
     external_team_id: externalTeamId,
     team_id: homeTeamId
   })
