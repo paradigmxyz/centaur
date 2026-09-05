@@ -446,6 +446,36 @@ describe('Slack display text fallback', () => {
     expect(context?.text).toContain('thread_key: slack:T1:C1:1700000000.000100')
   })
 
+  test('includes API-owned Slack upload destination for legacy DM thread keys', async () => {
+    const { fetchFn, requests } = fakeApi()
+    await forwardToSessionApi(
+      options(fetchFn),
+      forwardInput(apiMessage('upload this', { threadId: 'D000000001:1700000000.000100' }))
+    )
+
+    const context = lineContent(executeLine(requests)).find(part =>
+      typeof part.text === 'string' && part.text.includes('# Slack Session Context')
+    )
+    expect(context?.text).toContain('session_context.slack.channel_id: D000000001')
+    expect(context?.text).toContain('session_context.slack.thread_ts: 1700000000.000100')
+    expect(context?.text).toContain('thread_key: D000000001:1700000000.000100')
+  })
+
+  test('uses the root message timestamp for Slack DM session keys without a thread timestamp', async () => {
+    const { fetchFn, requests } = fakeApi()
+    await forwardToSessionApi(
+      options(fetchFn),
+      forwardInput(apiMessage('upload this', { threadId: 'slack:D000000001:' }))
+    )
+
+    const context = lineContent(executeLine(requests)).find(part =>
+      typeof part.text === 'string' && part.text.includes('# Slack Session Context')
+    )
+    expect(context?.text).toContain('session_context.slack.channel_id: D000000001')
+    expect(context?.text).toContain('session_context.slack.thread_ts: 1700000000.000100')
+    expect(context?.text).toContain('thread_key: slack:D000000001:')
+  })
+
   test('uses raw Slack block text in prior thread context instead of no text', async () => {
     const { fetchFn, requests } = fakeApi()
     const root = apiMessage('', {

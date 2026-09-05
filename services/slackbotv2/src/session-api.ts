@@ -1793,7 +1793,7 @@ function codexInputContent(
   contextPreamble?: string
 ): JsonValue[] {
   const content: JsonValue[] = []
-  const slackSessionContext = slackUploadSessionContext(message.threadId)
+  const slackSessionContext = slackUploadSessionContext(message.threadId, message.id)
   if (slackSessionContext) {
     content.push({ type: 'text', text: slackSessionContext })
   }
@@ -1836,8 +1836,8 @@ type SlackThreadDestination = {
   threadTs: string
 }
 
-function slackUploadSessionContext(threadId: string): string | undefined {
-  const destination = slackThreadDestination(threadId)
+function slackUploadSessionContext(threadId: string, rootMessageTs: string): string | undefined {
+  const destination = slackThreadDestination(threadId, rootMessageTs)
   if (!destination) return undefined
 
   const lines = [
@@ -1857,9 +1857,18 @@ function slackUploadSessionContext(threadId: string): string | undefined {
   return lines.join('\n')
 }
 
-function slackThreadDestination(threadId: string): SlackThreadDestination | undefined {
+function slackThreadDestination(
+  threadId: string,
+  rootMessageTs: string
+): SlackThreadDestination | undefined {
   const parts = threadId.split(':')
+  if (parts.length === 2 && isSlackConversationId(parts[0]) && parts[1]) {
+    return { channelId: parts[0], threadTs: parts[1] }
+  }
   if (parts[0] !== 'slack') return undefined
+  if (parts.length === 3 && isSlackDmId(parts[1]) && !parts[2] && rootMessageTs) {
+    return { channelId: parts[1], threadTs: rootMessageTs }
+  }
   if (parts.length === 3 && parts[1] && parts[2]) {
     return { channelId: parts[1], threadTs: parts[2] }
   }
@@ -1867,6 +1876,14 @@ function slackThreadDestination(threadId: string): SlackThreadDestination | unde
     return { teamId: parts[1], channelId: parts[2], threadTs: parts[3] }
   }
   return undefined
+}
+
+function isSlackConversationId(value: string | undefined): value is string {
+  return Boolean(value && /^[CDG][A-Z0-9]+$/.test(value))
+}
+
+function isSlackDmId(value: string | undefined): value is string {
+  return Boolean(value && /^D[A-Z0-9]+$/.test(value))
 }
 
 function slackThreadContext(
