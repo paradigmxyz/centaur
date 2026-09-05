@@ -3924,6 +3924,9 @@ fn verify_webhook_auth(
         WorkflowWebhookAuth::StandardWebhooks { secret_ref } => {
             verify_standard_webhook_signature(secret_ref, headers, raw_body)
         }
+        WorkflowWebhookAuth::Luma { secret_ref } => {
+            verify_luma_webhook_signature(secret_ref, headers, raw_body)
+        }
         WorkflowWebhookAuth::Hmac {
             secret_ref,
             signature_header,
@@ -3965,6 +3968,60 @@ fn verify_standard_webhook_signature(
     })?;
     webhook
         .verify(raw_body, headers)
+        .map_err(|_| ApiError::Unauthorized("invalid webhook signature".to_owned()))
+}
+
+fn verify_luma_webhook_signature(
+    secret_ref: &str,
+    headers: &HeaderMap,
+    raw_body: &[u8],
+) -> Result<(), ApiError> {
+    let signature = header_value(headers, "webhook-signature")
+        .ok_or_else(|| ApiError::Unauthorized("missing webhook signature".to_owned()))?;
+    let timestamp = header_value(headers, "webhook-timestamp")
+        .ok_or_else(|| ApiError::Unauthorized("missing webhook timestamp".to_owned()))?;
+    let timestamp_value = timestamp
+        .parse::<i64>()
+        .map_err(|_| ApiError::Unauthorized("invalid webhook timestamp".to_owned()))?;
+    if (OffsetDateTime::now_utc().unix_timestamp() - timestamp_value).abs() > 300 {
+        return Err(ApiError::Unauthorized("stale webhook timestamp".to_owned()));
+    }
+
+    let mut signed_timestamp = None;
+    let mut presented_signature = None;
+    for part in signature.split(',') {
+        if let Some((key, value)) = part.trim().split_once('=') {
+            match key {
+                "t" => signed_timestamp = Some(value),
+                "v1" => presented_signature = Some(value),
+                _ => {}
+            }
+        }
+    }
+    if signed_timestamp != Some(timestamp.as_str()) {
+        return Err(ApiError::Unauthorized(
+            "webhook timestamp mismatch".to_owned(),
+        ));
+    }
+    let presented = hex::decode(
+        presented_signature
+            .ok_or_else(|| ApiError::Unauthorized("missing webhook v1 signature".to_owned()))?,
+    )
+    .map_err(|_| ApiError::Unauthorized("invalid webhook signature".to_owned()))?;
+    let secret = env::var(secret_ref).map_err(|_| {
+        ApiError::Internal(format!(
+            "webhook auth secret {secret_ref} is not configured"
+        ))
+    })?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.trim().as_bytes()).map_err(|_| {
+        ApiError::Internal(format!(
+            "webhook auth secret {secret_ref} is not valid HMAC key material"
+        ))
+    })?;
+    mac.update(timestamp.as_bytes());
+    mac.update(b".");
+    mac.update(raw_body);
+    mac.verify_slice(&presented)
         .map_err(|_| ApiError::Unauthorized("invalid webhook signature".to_owned()))
 }
 
@@ -4019,6 +4076,7 @@ fn signature_header_name(auth: &WorkflowWebhookAuth) -> Option<&str> {
     match auth {
         WorkflowWebhookAuth::None | WorkflowWebhookAuth::Bearer { .. } => None,
         WorkflowWebhookAuth::Github { .. } => Some("X-Hub-Signature-256"),
+        WorkflowWebhookAuth::Luma { .. } => Some("Webhook-Signature"),
         WorkflowWebhookAuth::StandardWebhooks { .. } => Some("webhook-signature"),
         WorkflowWebhookAuth::Hmac {
             signature_header, ..
@@ -4500,6 +4558,32 @@ mod webhook_tests {
         let headers = standard_webhook_headers(secret, "msg_test", timestamp, raw_body);
 
         verify_standard_webhook_signature(secret_ref, &headers, raw_body).unwrap();
+    }
+
+    #[test]
+    fn verifies_luma_webhook_signature() {
+        let raw_body = br#"{"type":"guest.registered"}"#;
+        let secret_ref = "CENTAUR_TEST_LUMA_WEBHOOK_SECRET";
+        let secret = "whsec_luma-test-secret";
+        let timestamp = OffsetDateTime::now_utc().unix_timestamp();
+        unsafe {
+            env::set_var(secret_ref, secret);
+        }
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(timestamp.to_string().as_bytes());
+        mac.update(b".");
+        mac.update(raw_body);
+        let signature = hex::encode(mac.finalize().into_bytes());
+        let mut headers = HeaderMap::new();
+        headers.insert("webhook-timestamp", timestamp.to_string().parse().unwrap());
+        headers.insert(
+            "webhook-signature",
+            format!("t={timestamp},v1={signature}").parse().unwrap(),
+        );
+
+        verify_luma_webhook_signature(secret_ref, &headers, raw_body).unwrap();
+        let error = verify_luma_webhook_signature(secret_ref, &headers, b"{}").unwrap_err();
+        assert!(matches!(error, ApiError::Unauthorized(_)));
     }
 
     #[test]
