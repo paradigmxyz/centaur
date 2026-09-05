@@ -26,7 +26,8 @@ const REASONING_DISPLAY_NAMES: Record<string, string> = {
   medium: 'Medium',
   high: 'High',
   xhigh: 'XHigh',
-  max: 'Max'
+  max: 'Max',
+  ultra: 'Ultra'
 }
 
 const STANDARD_CODEX_REASONING_EFFORTS = new Set([
@@ -42,6 +43,14 @@ const GPT_5_6_REASONING_EFFORTS = new Set([
   ...STANDARD_CODEX_REASONING_EFFORTS,
   'max'
 ])
+const GPT_6_ASTRA_REASONING_EFFORTS = new Set([
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+  'ultra'
+])
 const CODEX_REASONING_EFFORTS_BY_MODEL: Record<string, ReadonlySet<string>> = {
   'gpt-5.2': STANDARD_CODEX_REASONING_EFFORTS,
   'gpt-5.2-codex': CODEX_MODEL_REASONING_EFFORTS,
@@ -53,7 +62,8 @@ const CODEX_REASONING_EFFORTS_BY_MODEL: Record<string, ReadonlySet<string>> = {
   'gpt-5.5-pro': PRO_CODEX_REASONING_EFFORTS,
   'gpt-5.6-luna': GPT_5_6_REASONING_EFFORTS,
   'gpt-5.6-sol': GPT_5_6_REASONING_EFFORTS,
-  'gpt-5.6-terra': GPT_5_6_REASONING_EFFORTS
+  'gpt-5.6-terra': GPT_5_6_REASONING_EFFORTS,
+  'gpt-6-astra': GPT_6_ASTRA_REASONING_EFFORTS
 }
 
 const CODEX_CONFIG = codexConfig as {
@@ -219,6 +229,16 @@ export type SlackContextBlock = {
   elements: Array<{ type: 'mrkdwn'; text: string }>
 }
 
+export function personaFallbackNotice(
+  unavailablePersonaId: string | undefined,
+  personaId: string | null | undefined
+): string | undefined {
+  if (!unavailablePersonaId) return undefined
+  return personaId
+    ? `Persona "${unavailablePersonaId}" isn't available. Using "${personaId}" instead.`
+    : `Persona "${unavailablePersonaId}" isn't available. Continuing without a persona.`
+}
+
 /**
  * Builds a Slack context block containing the optional Console link and
  * response metadata. Metadata inclusion is independent of the Console URL.
@@ -229,13 +249,16 @@ export function buildSlackResponseContextBlock(params: {
   harnessType?: string | null
   metadataEnabled?: boolean
   model?: string | null
+  notice?: string | null
   reasoning?: string | null
   serviceTier?: string | null
 }): SlackContextBlock | undefined {
   const url = consoleSessionUrl(params.consoleBaseUrl, params.threadKey)
   const includeMetadata = params.metadataEnabled === true
-  if (!url && !includeMetadata) return undefined
+  const notice = params.notice?.trim()
+  if (!url && !includeMetadata && !notice) return undefined
   const segments: string[] = []
+  if (notice) segments.push(`:warning: ${escapeSlackMrkdwn(notice)}`)
   if (url) segments.push(`<${url}|Open chat in Console>`)
   if (includeMetadata) {
     const model = params.model?.trim()

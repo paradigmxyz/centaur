@@ -7,6 +7,7 @@ import {
   defaultServiceTierForHarness,
   effectiveReasoningForHarness,
   harnessDisplayName,
+  personaFallbackNotice,
   reasoningForModel
 } from '../src/console-session-link'
 import claudeSettings from '../../../harness/claude/settings.json'
@@ -39,7 +40,7 @@ describe('harnessDisplayName', () => {
 })
 
 describe('reasoningForModel', () => {
-  const allEfforts = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+  const allEfforts = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']
   const standardEfforts = ['none', 'low', 'medium', 'high', 'xhigh']
   const proEfforts = ['medium', 'high', 'xhigh']
   const codexModelEfforts = ['low', 'medium', 'high', 'xhigh']
@@ -54,7 +55,8 @@ describe('reasoningForModel', () => {
     'gpt-5.5-pro': proEfforts,
     'gpt-5.6-luna': [...standardEfforts, 'max'],
     'gpt-5.6-sol': [...standardEfforts, 'max'],
-    'gpt-5.6-terra': [...standardEfforts, 'max']
+    'gpt-5.6-terra': [...standardEfforts, 'max'],
+    'gpt-6-astra': ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']
   }
 
   test('matches the reasoning efforts advertised by supported Codex models', () => {
@@ -273,4 +275,32 @@ describe('buildSlackResponseContextBlock', () => {
 
     expect(block?.elements[0]?.text).toBe('GPT-5.6-SOL · Codex · Low · Fast')
   })
+
+  test('renders and escapes a notice when response metadata is absent', () => {
+    expect(
+      buildSlackResponseContextBlock({
+        consoleBaseUrl: undefined,
+        threadKey: 'slack:C1:1',
+        notice: 'Persona "<unsafe&persona>" cannot be used.'
+      })
+    ).toEqual({
+      type: 'context',
+      elements: [
+        {
+          type: 'mrkdwn',
+          text: ':warning: Persona "&lt;unsafe&amp;persona&gt;" cannot be used.'
+        }
+      ]
+    })
+  })
+})
+
+test('personaFallbackNotice describes the resolved fallback', () => {
+  expect(personaFallbackNotice('honk', 'eng')).toBe(
+    `Persona "honk" isn't available. Using "eng" instead.`
+  )
+  expect(personaFallbackNotice('honk', null)).toBe(
+    `Persona "honk" isn't available. Continuing without a persona.`
+  )
+  expect(personaFallbackNotice(undefined, 'eng')).toBeUndefined()
 })

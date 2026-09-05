@@ -1715,3 +1715,39 @@ def test_read_document_reports_missing_document(monkeypatch):
     result = CompanyContextClient("postgresql://example").read_document("missing-doc")
 
     assert result == {"status": "error", "error": "document not found: missing-doc"}
+
+
+def test_embeddings_dimensions_defaults_when_unset(monkeypatch):
+    monkeypatch.delenv("COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS", raising=False)
+    assert (
+        CompanyContextClient._embeddings_dimensions()
+        == company_context_client.DEFAULT_EMBEDDINGS_DIMENSIONS
+    )
+
+
+def test_embeddings_dimensions_reads_the_configured_width(monkeypatch):
+    monkeypatch.setenv("COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS", "1024")
+    assert CompanyContextClient._embeddings_dimensions() == 1024
+
+
+def test_embeddings_dimensions_ignores_a_blank_value(monkeypatch):
+    monkeypatch.setenv("COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS", "   ")
+    assert (
+        CompanyContextClient._embeddings_dimensions()
+        == company_context_client.DEFAULT_EMBEDDINGS_DIMENSIONS
+    )
+
+
+def test_embeddings_dimensions_rejects_a_non_integer(monkeypatch):
+    monkeypatch.setenv("COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS", "wide")
+    with pytest.raises(RuntimeError, match="must be an integer"):
+        CompanyContextClient._embeddings_dimensions()
+
+
+# Above 2000 pgvector stores the vector but cannot index it, so the search this
+# tool exists to serve would silently fall back to a sequential scan.
+@pytest.mark.parametrize("value", ["0", "-1", "2001"])
+def test_embeddings_dimensions_rejects_unindexable_widths(monkeypatch, value):
+    monkeypatch.setenv("COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS", value)
+    with pytest.raises(RuntimeError, match="must be between 1 and 2000"):
+        CompanyContextClient._embeddings_dimensions()

@@ -45,6 +45,12 @@ Prometheus/VictoriaMetrics metrics, and domain spans in the session runtime.
   Codex usage comes from `thread/tokenUsage/updated`; Claude Code and Amp usage
   comes from their normalized harness events. Native harness tracing is not
   enabled, and api-rs does not reconstruct spans from sandbox stdout.
+- Remote MCP `tools/call` telemetry is implemented at the authenticated API
+  boundary. Each accepted call emits a Laminar `TOOL` span with Centaur tool
+  kind, MCP entry point, validated method, status, and correlation identifiers.
+  Correlation identifiers are retained when the durable execution fails. The
+  tool span's trace context is persisted as the parent of the durable tool-host
+  execution. Arguments, results, stdout, and stderr are not exported.
 - The harness OpenTelemetry SDK batches and exports directly to the configured
   OTLP endpoint. There is no collector or loopback OTLP proxy in the sandbox.
   The api-rs process's own OTLP env
@@ -216,6 +222,7 @@ Initial span set:
 | `centaur.api_rs.sandbox.write_input` | `centaur-session-runtime` |
 | `centaur.api_rs.session.stdout_pump` | `centaur-session-runtime` |
 | `centaur.api_rs.session.events.stream` | `centaur-session-runtime` |
+| `centaur.api_rs.mcp.tool` | `centaur-api-server` |
 | `<harness>.session_task.turn` | `harness-server` |
 | `<harness>.tool.<name>` | `harness-server` |
 
@@ -240,6 +247,7 @@ Spans may carry:
 - `tool.command`
 - `tool.cwd`
 - `tool.status`
+- `centaur.tool.entry_point`
 
 Tool spans must not carry command output, tool results, or prompt content.
 Bounded shell commands, including their arguments, workspace-relative working
@@ -269,6 +277,11 @@ not a reconstructed model-call tree. Every harness span carries the Laminar
 session association and execution metadata. Tool state is scoped to one turn;
 finishing, failing, cancelling, or dropping the turn closes any unfinished tool
 spans.
+
+Remote MCP calls have no harness turn. The API creates a root `TOOL` span for
+the accepted `tools/call` and uses its `traceparent` when creating the durable
+tool-host execution. This keeps sandbox lifecycle work in the same trace while
+grouping calls by the stable `mcp:<principal_id>` Laminar session association.
 
 ## Implementation Plan
 

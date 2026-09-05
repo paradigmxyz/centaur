@@ -1896,53 +1896,55 @@
             </div>
           <% end %>
 
-          <%# New chat rides the thread-link machinery with the "new" sentinel
-              key: plain click opens the full-page composer, Cmd/Ctrl-click
-              adds a composer pane to the split view. %>
-          <div class="console-thread-group">
-            <a href="<%= console_threads_path(thread: Console::ThreadsController::NEW_PANE_KEY) %>"
-               class="console-thread-group-title"
-               aria-label="New chat"
-               title="New chat"
-               data-console-thread-link
-               data-console-new-chat>
-              <span class="console-nav-icon"><%= console_icon("plus", classes: "size-4") %></span>
-              <span class="console-nav-label">New chat</span>
-            </a>
-          </div>
-
-          <div class="console-thread-group">
-            <a href="<%= console_threads_path %>"
-               class="console-thread-group-title <%= "console-thread-group-title-active" if threads_view %>"
-               title="Chats">
-              <span class="console-nav-icon"><%= console_icon("message-square", classes: "size-4") %></span>
-              <span class="console-nav-label">Chats</span>
-            </a>
-            <%# The thread list is loaded lazily via a Turbo Frame so the
-                unindexed cross-database sessions query never blocks the primary
-                page render. See ApplicationController#init_console_sidebar_threads
-                and Console::ThreadsController#sidebar.
-
-                The current thread selection rides along on the frame src so the
-                initial out-of-band render can surface and highlight the open
-                thread(s). The wrapper div (not the frame itself — a permanent
-                turbo-frame trips Turbo's frame lifecycle and can wedge the
-                visit progress bar) is turbo-permanent: Turbo Drive carries the
-                loaded list across page visits instead of refetching it, so
-                thread navigation does not repaint the sidebar; the active
-                highlight is re-synced client-side from the page URL. %>
-            <div id="console_sidebar_thread_list"
-                 class="console-thread-list"
-                 data-turbo-permanent>
-              <%= turbo_frame_tag "console_sidebar_threads",
-                                  src: console_sidebar_threads_path(
-                                    thread: (params[:thread].to_s.presence if threads_view)
-                                  ),
-                                  loading: :lazy do %>
-                <div class="console-thread-empty">Loading chats…</div>
-              <% end %>
+          <% if console_chat_enabled? %>
+            <%# New chat rides the thread-link machinery with the "new" sentinel
+                key: plain click opens the full-page composer, Cmd/Ctrl-click
+                adds a composer pane to the split view. %>
+            <div class="console-thread-group">
+              <a href="<%= console_threads_path(thread: Console::ThreadsController::NEW_PANE_KEY) %>"
+                 class="console-thread-group-title"
+                 aria-label="New chat"
+                 title="New chat"
+                 data-console-thread-link
+                 data-console-new-chat>
+                <span class="console-nav-icon"><%= console_icon("plus", classes: "size-4") %></span>
+                <span class="console-nav-label">New chat</span>
+              </a>
             </div>
-          </div>
+
+            <div class="console-thread-group">
+              <a href="<%= console_threads_path %>"
+                 class="console-thread-group-title <%= "console-thread-group-title-active" if threads_view %>"
+                 title="Chats">
+                <span class="console-nav-icon"><%= console_icon("message-square", classes: "size-4") %></span>
+                <span class="console-nav-label">Chats</span>
+              </a>
+              <%# The thread list is loaded lazily via a Turbo Frame so the
+                  unindexed cross-database sessions query never blocks the primary
+                  page render. See ApplicationController#init_console_sidebar_threads
+                  and Console::ThreadsController#sidebar.
+
+                  The current thread selection rides along on the frame src so the
+                  initial out-of-band render can surface and highlight the open
+                  thread(s). The wrapper div (not the frame itself — a permanent
+                  turbo-frame trips Turbo's frame lifecycle and can wedge the
+                  visit progress bar) is turbo-permanent: Turbo Drive carries the
+                  loaded list across page visits instead of refetching it, so
+                  thread navigation does not repaint the sidebar; the active
+                  highlight is re-synced client-side from the page URL. %>
+              <div id="console_sidebar_thread_list"
+                   class="console-thread-list"
+                   data-turbo-permanent>
+                <%= turbo_frame_tag "console_sidebar_threads",
+                                    src: console_sidebar_threads_path(
+                                      thread: (params[:thread].to_s.presence if threads_view)
+                                    ),
+                                    loading: :lazy do %>
+                  <div class="console-thread-empty">Loading chats…</div>
+                <% end %>
+              </div>
+            </div>
+          <% end %>
         </div>
 
         <% if current_user %>

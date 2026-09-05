@@ -7,12 +7,20 @@ const SESSION_TITLE_MODEL: &str = "gpt-5.4-nano";
 const SESSION_TITLE_MAX_SOURCE_CHARS: usize = 4_000;
 const SESSION_TITLE_MAX_CHARS: usize = 80;
 const SESSION_TITLE_REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
+const SESSION_TITLE_REASONING_EFFORT_ENV: &str = "SESSION_TITLE_REASONING_EFFORT";
+/// A five-word commit-style title needs no deliberation, and the request only
+/// budgets 24 output tokens. Servers that resolve an absent effort to their
+/// highest level spend the whole budget reasoning and return no message, so an
+/// explicit low is the safe default rather than leaving it to the server.
+const DEFAULT_SESSION_TITLE_REASONING_EFFORT: &str = "low";
 
 #[derive(Clone)]
 pub(crate) struct OpenAiSessionTitleGenerator {
     api_key: Arc<str>,
     responses_url: Arc<str>,
     client: reqwest::Client,
+    /// `None` omits the parameter, for servers that reject an unknown field.
+    reasoning_effort: Option<Arc<str>>,
 }
 
 impl OpenAiSessionTitleGenerator {
@@ -31,6 +39,7 @@ impl OpenAiSessionTitleGenerator {
             api_key: Arc::from(api_key.to_owned()),
             responses_url: Arc::from(responses_url),
             client,
+            reasoning_effort: session_title_reasoning_effort(),
         })
     }
 
@@ -38,12 +47,17 @@ impl OpenAiSessionTitleGenerator {
         &self,
         source: String,
     ) -> Result<String, SessionTitleGenerationError> {
-        let body = json!({
+        let mut body = json!({
             "model": SESSION_TITLE_MODEL,
             "instructions": "Generate a short session title for the user's request. Return only the title. Use commit-message style with an imperative verb first, such as Fix, Investigate, Add, Update, Debug, Review, Explain, or Analyze. Keep it to 5 words max; 6-7 words are okay only when needed for a product name. Do not include punctuation, quotes, emoji, markdown, or a trailing period.",
             "input": format!("User request:\n{}", source),
             "max_output_tokens": 24,
         });
+        if let Some(effort) = &self.reasoning_effort
+            && let Some(object) = body.as_object_mut()
+        {
+            object.insert("reasoning".to_owned(), json!({ "effort": effort.as_ref() }));
+        }
         let response = self
             .client
             .post(self.responses_url.as_ref())
@@ -57,6 +71,22 @@ impl OpenAiSessionTitleGenerator {
             return Err(SessionTitleGenerationError::HttpStatus { status, body: text });
         }
         openai_response_output_text(&text).ok_or(SessionTitleGenerationError::MissingOutput)
+    }
+}
+
+/// Reasoning effort for the title call. An empty value omits the parameter,
+/// which is the escape hatch for a server that rejects it outright.
+fn session_title_reasoning_effort() -> Option<Arc<str>> {
+    resolve_reasoning_effort(env::var(SESSION_TITLE_REASONING_EFFORT_ENV).ok().as_deref())
+}
+
+/// Split from the env read so the resolution is testable without mutating
+/// process-global state.
+fn resolve_reasoning_effort(configured: Option<&str>) -> Option<Arc<str>> {
+    match configured.map(str::trim) {
+        Some("") => None,
+        Some(value) => Some(Arc::from(value.to_owned())),
+        None => Some(Arc::from(DEFAULT_SESSION_TITLE_REASONING_EFFORT)),
     }
 }
 
@@ -445,5 +475,31 @@ mod tests {
             ),
             Some("Add Tempo Explorer filter".to_owned())
         );
+    }
+
+    /// The generator reads the effort from the environment, so these assert the
+    /// resolution rather than spinning a server: an unset variable must still
+    /// send an explicit effort, because leaving it to the server's default is
+    /// exactly the failure.
+    #[test]
+    fn title_reasoning_effort_defaults_to_low() {
+        assert_eq!(
+            resolve_reasoning_effort(None).as_deref(),
+            Some(DEFAULT_SESSION_TITLE_REASONING_EFFORT)
+        );
+    }
+
+    #[test]
+    fn title_reasoning_effort_reads_the_configured_level() {
+        assert_eq!(
+            resolve_reasoning_effort(Some("minimal")).as_deref(),
+            Some("minimal")
+        );
+    }
+
+    /// Empty is the escape hatch for a server that rejects the field outright.
+    #[test]
+    fn title_reasoning_effort_empty_omits_the_parameter() {
+        assert!(resolve_reasoning_effort(Some("  ")).is_none());
     }
 }

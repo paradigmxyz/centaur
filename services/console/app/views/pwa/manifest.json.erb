@@ -35,11 +35,13 @@
     "client_mode": "navigate-existing"
   },
   "shortcuts": [
+    <% if ConsoleFeatures.chat_enabled? %>
     {
       "name": "Chats",
       "url": "/console/threads",
       "icons": [{ "src": "/pwa-icon-192.png", "sizes": "192x192", "type": "image/png" }]
     },
+    <% end %>
     {
       "name": "Workflows",
       "url": "/console/workflows",

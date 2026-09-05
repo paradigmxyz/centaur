@@ -76,6 +76,8 @@ export type SlackbotV2CreateSessionRequest = {
   metadata: JsonObject
   /** 'restart': switch the thread to harness_type if it's pinned to another harness. */
   on_harness_conflict?: 'reject' | 'restart'
+  /** Persona requested when the thread is created; the API pins the first persisted value. */
+  persona_id?: string
 }
 
 export type SlackbotV2HarnessAssignment = {
@@ -219,9 +221,7 @@ export type SlackbotV2Options = {
   mapper?: CodexAppServerToChatStreamOptions
 }
 
-export type MessageOverridesStrategyInput = {
-  text: string
-}
+export type MessageOverridesStrategyInput = { text: string }
 
 export type MessageOverridesStrategyResult = {
   cleanedText?: string
@@ -247,6 +247,8 @@ export type SlackbotV2ThreadState = {
   lastEventId?: number
   /** Last thread-level model selected by Slack flags. Null clears persisted state. */
   model?: string | null
+  /** Persona pinned by the session API. Null means the thread is pinned without a persona. */
+  personaId?: string | null
   /** Last thread-level model provider selected by Slack flags. Null clears persisted state. */
   provider?: string | null
   renderObligation?: SlackbotV2RenderObligation | null
@@ -298,6 +300,8 @@ export type ForwardSessionInput = {
    * default. Metadata only — never forwarded to the harness (that is `model`).
    */
   metadataModel?: string
+  /** Effective persona selected by a sticky --persona=<id> flag. */
+  personaId?: string
   /** Effective model provider selected by sticky thread flags (--bedrock); codex only. */
   provider?: string
   /** Per-turn reasoning effort parsed from the `-rsn` flag (Codex/Nanocodex). */

@@ -2,7 +2,7 @@ import { backgroundWaitUntil } from "./context";
 import { DEFAULT_ISSUE_PROMPT } from "./issue-prompt";
 import type { PrManagerContext } from "./pr-manager";
 import { reactWorkingOnSubject, settleSubjectReaction } from "./reactions";
-import { runTurnStream } from "./turn";
+import { runTurnStream, turnOutputChars } from "./turn";
 import type {
   ForwardSessionInput,
   GithubbotApiMessage,
@@ -145,6 +145,7 @@ export function handleIssueEvent(
       runTurnStream(options, forwardInput)
         .then(async (result) => {
           traceLog(options, "githubbot_issue_turn_complete", trace, {
+            chars: turnOutputChars(result),
             failed: result.failed,
           });
           await settleSubjectReaction(

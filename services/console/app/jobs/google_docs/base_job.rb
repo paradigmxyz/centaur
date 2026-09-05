@@ -4,6 +4,7 @@ module GoogleDocs
 
     retry_on GoogleDocs::SyncCredential::GoogleApiError,
       CentaurApiClient::Error,
+      Errno::ECONNREFUSED,
       wait: :polynomially_longer,
       attempts: 5
 

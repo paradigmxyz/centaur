@@ -204,6 +204,8 @@ spec:
 {{- end }}
             - name: CENTAUR_CONSOLE_PASSWORD_LOGIN_ENABLED
               value: {{ $console.passwordLoginEnabled | quote }}
+            - name: CENTAUR_CONSOLE_CHAT_ENABLED
+              value: {{ $console.chat.enabled | quote }}
             - name: CENTAUR_CONSOLE_PUBLIC_SLACK_THREADS_ENABLED
               value: {{ $console.publicSlackThreadsEnabled | quote }}
 {{- with $console.ssoEmailDomains }}

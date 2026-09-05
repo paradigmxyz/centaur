@@ -72,6 +72,7 @@
 {{- $apiRsEtl := .Values.apiRs.etl | default dict -}}
 {{- $companyContextEmbeddingsEnabled := dig "companyContextEmbeddings" "enabled" false $apiRsEtl -}}
 {{- $companyContextEmbeddingsModel := dig "companyContextEmbeddings" "model" "text-embedding-3-small" $apiRsEtl -}}
+{{- $companyContextEmbeddingsDimensions := dig "companyContextEmbeddings" "dimensions" 1536 $apiRsEtl -}}
 {{- $apiRsEtlEnv := list
   (dict "name" "SLACK_ETL_ENABLED" "value" (dig "slack" "enabled" false $apiRsEtl))
   (dict "name" "SLACK_SYNC_INTERVAL_SECONDS" "value" (dig "slack" "syncIntervalSeconds" 3600 $apiRsEtl))
@@ -104,6 +105,7 @@
   (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_BATCH_SIZE" "value" (dig "companyContextEmbeddings" "batchSize" 250 $apiRsEtl))
   (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_MAX_INPUT_CHARS" "value" (dig "companyContextEmbeddings" "maxInputChars" 8192 $apiRsEtl))
   (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_MODEL" "value" $companyContextEmbeddingsModel)
+  (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS" "value" $companyContextEmbeddingsDimensions)
 -}}
 {{- $apiRsEtlPassthroughNames := list -}}
 {{- range $env := $apiRsEtlEnv -}}
@@ -327,6 +329,8 @@ spec:
               value: {{ .Values.apiRs.sandboxMaxLifetimeSecs | quote }}
             - name: SESSION_SANDBOX_REAP_INTERVAL_SECS
               value: {{ .Values.apiRs.sandboxReapIntervalSecs | quote }}
+            - name: SESSION_SANDBOX_ORPHAN_SWEEP_GRACE_SECS
+              value: {{ .Values.apiRs.sandboxOrphanSweepGraceSecs | quote }}
             - name: SESSION_SANDBOX_CLEANUP_INTERVAL_SECS
               value: {{ .Values.apiRs.sandboxCleanupIntervalSecs | quote }}
             - name: SESSION_SANDBOX_IDLE_CLEANUP_BACKSTOP_SECS
@@ -346,6 +350,8 @@ spec:
               value: {{ .Values.apiRs.activitySummary.maxFacts | quote }}
             - name: SESSION_ACTIVITY_SUMMARY_MAX_OUTPUT_TOKENS
               value: {{ .Values.apiRs.activitySummary.maxOutputTokens | quote }}
+            - name: SESSION_ACTIVITY_SUMMARY_REASONING_EFFORT
+              value: {{ .Values.apiRs.activitySummary.reasoningEffort | default "" | quote }}
 {{- end }}
             - name: SESSION_SANDBOX_K8S_NAMESPACE
               value: {{ .Release.Namespace | quote }}
@@ -462,6 +468,9 @@ spec:
 {{- end }}
 {{- if not (hasKey .Values.sandbox.extraEnv "COMPANY_CONTEXT_EMBEDDINGS_MODEL") }}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_MODEL" "value" $companyContextEmbeddingsModel) }}
+{{- end }}
+{{- if not (hasKey .Values.sandbox.extraEnv "COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS") }}
+{{- $sandboxEnvList = append $sandboxEnvList (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS" "value" ($companyContextEmbeddingsDimensions | toString)) }}
 {{- end }}
 {{- if .Values.codex.customProviders }}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" "CODEX_CUSTOM_PROVIDERS" "value" (.Values.codex.customProviders | toJson)) }}

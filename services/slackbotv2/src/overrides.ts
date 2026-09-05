@@ -1,3 +1,5 @@
+import { escapeRegExp } from './utils'
+
 /**
  * Inline message directives, restored from the v1 slackbot:
  *   --claude | --claude-code | --amp | --codex | --nanocodex
@@ -5,16 +7,19 @@
  *   --bedrock                                    codex via the AWS Bedrock provider
  *   --meta                                       codex via Meta AI direct
  *   --provider <name>                            codex via a configured provider
+ *   --persona <id> (or --persona=<id>)           pick the persona independently
  *   --model <name> (or --model=<name>)           pick the model within that harness
  *   -rsn <effort> (or -rsn=<effort>)             per-turn reasoning effort (codex/nanocodex)
  *   --fable | --opus | --sonnet | --haiku        model shortcuts (imply claude-code)
  *
  * Flags are stripped from the text before it reaches the agent. The harness
  * applies at session creation — an explicit harness flag on a thread pinned to
- * another harness restarts the thread on the requested one. Harness/model/provider
- * choices are sticky at the Slack thread level: the last flag wins for later
- * turns in the same thread. `--model` accepts either a full model id
- * (claude-sonnet-4-6, gpt-5.2, ...), an amp mode (deep/fast), or a Claude alias
+ * another harness restarts the thread on the requested one. The persona chosen
+ * when the session is created is pinned for the lifetime of the thread; later
+ * persona flags are stripped but do not change it. Harness, model, and provider
+ * choices are sticky at the Slack thread level. `--model`
+ * accepts either a full model id (claude-sonnet-4-6, gpt-5.2, ...), an amp mode
+ * (deep/fast), or a Claude alias
  * (fable/opus/sonnet/haiku) which expands to the full id. Reasoning effort only
  * affects the codex-compatible harnesses and stays per-turn; other harnesses
  * ignore it. The provider rides the blocks-protocol
@@ -23,19 +28,25 @@
  */
 
 /**
- * A resolved bundle of harness knobs (harness + model/provider/reasoning), all
- * optional. Shared by the inline flag parser and per-channel defaults so both
- * speak the same vocabulary.
+ * A resolved bundle of persona and harness knobs, all optional. Shared by the
+ * inline flag parser and per-channel defaults so both speak the same model and
+ * provider vocabulary.
  */
 export type HarnessOverrides = {
   harnessType?: string
   model?: string
+  personaId?: string
   provider?: string
   reasoning?: string
 }
 
 export type MessageOverrides = HarnessOverrides & {
   cleanedText: string
+}
+
+export type PersonaOverride = {
+  cleanedText: string
+  personaId?: string
 }
 
 // Flag name -> HarnessType wire value (serde lowercase of the Rust enum).
@@ -85,7 +96,8 @@ const STRATEGY_REASONING_EFFORTS = new Set([
   'medium',
   'high',
   'xhigh',
-  'max'
+  'max',
+  'ultra'
 ])
 
 const STRATEGY_MODEL_HARNESSES: Record<string, string> = {
@@ -107,30 +119,27 @@ const STRATEGY_MODEL_HARNESSES: Record<string, string> = {
   'gpt-5.5-pro': 'codex',
   'gpt-5.6-luna': 'codex',
   'gpt-5.6-sol': 'codex',
-  'gpt-5.6-terra': 'codex'
+  'gpt-5.6-terra': 'codex',
+  'gpt-6-astra': 'codex'
 }
 
 // Values are one horizontal-whitespace-delimited token; a newline after the
 // value starts the user's prompt, not part of the model/reasoning value.
-const MODEL_VALUE_SEPARATOR = String.raw`(?:[^\S\r\n]*=[^\S\r\n]*|[^\S\r\n]+)`
+const FLAG_VALUE_SEPARATOR = String.raw`(?:[^\S\r\n]*=[^\S\r\n]*|[^\S\r\n]+)`
 const FLAG_VALUE_BOUNDARY = String.raw`(?=[^\S\r\n]|\r?\n|\r|<br\s*/?>|$)`
 
-const MODEL_FLAG_PATTERN = new RegExp(
-  String.raw`(?:^|\s)--model${MODEL_VALUE_SEPARATOR}([A-Za-z0-9._/-]+)${FLAG_VALUE_BOUNDARY}`,
-  'i'
+const MODEL_FLAG_PATTERN = valueFlagPattern('--model', String.raw`[A-Za-z0-9][A-Za-z0-9._/-]*`)
+const PROVIDER_FLAG_PATTERN = valueFlagPattern(
+  '--provider',
+  String.raw`[A-Za-z][A-Za-z0-9_-]*`
+)
+const PERSONA_FLAG_PATTERN = valueFlagPattern(
+  '--persona',
+  String.raw`[A-Za-z0-9][A-Za-z0-9._-]*`
 )
 
-const PROVIDER_FLAG_PATTERN = new RegExp(
-  String.raw`(?:^|\s)--provider${MODEL_VALUE_SEPARATOR}([A-Za-z][A-Za-z0-9_-]*)${FLAG_VALUE_BOUNDARY}`,
-  'i'
-)
-
-// Single dash by design: a short per-turn knob (`-rsn high`), so it can't reuse
-// the `--`-prefixed flagPattern() helper. Value-capturing like --model.
-const REASONING_FLAG_PATTERN = new RegExp(
-  String.raw`(?:^|\s)-rsn${MODEL_VALUE_SEPARATOR}([A-Za-z-]+)${FLAG_VALUE_BOUNDARY}`,
-  'i'
-)
+// Single dash by design: a short per-turn knob (`-rsn high`).
+const REASONING_FLAG_PATTERN = valueFlagPattern('-rsn', String.raw`[A-Za-z-]+`)
 
 // Codex reasoning efforts (turn/start `effort`), plus convenience aliases.
 const REASONING_EFFORTS: Record<string, string> = {
@@ -145,7 +154,8 @@ const REASONING_EFFORTS: Record<string, string> = {
   xhigh: 'xhigh',
   xhi: 'xhigh',
   'x-high': 'xhigh',
-  max: 'max'
+  max: 'max',
+  ultra: 'ultra'
 }
 
 export function extractMessageOverrides(text: string): MessageOverrides {
@@ -210,6 +220,15 @@ export function extractMessageOverrides(text: string): MessageOverrides {
     model,
     provider,
     reasoning
+  }
+}
+
+export function extractPersonaOverride(text: string): PersonaOverride {
+  const match = PERSONA_FLAG_PATTERN.exec(text)
+  if (!match) return { cleanedText: text }
+  return {
+    cleanedText: stripMatch(text, match).trim(),
+    personaId: match[1]!
   }
 }
 
@@ -343,7 +362,14 @@ function customProviderDefaultModel(provider: string): string | undefined {
 }
 
 function flagPattern(flag: string): RegExp {
-  return new RegExp(`(?:^|\\s)--${flag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=\\s|$)`, 'i')
+  return new RegExp(`(?:^|\\s)--${escapeRegExp(flag)}(?=\\s|$)`, 'i')
+}
+
+function valueFlagPattern(flag: string, valuePattern: string): RegExp {
+  return new RegExp(
+    String.raw`(?:^|\s)${escapeRegExp(flag)}${FLAG_VALUE_SEPARATOR}(${valuePattern})${FLAG_VALUE_BOUNDARY}`,
+    'i'
+  )
 }
 
 function stripMatch(text: string, match: RegExpExecArray): string {

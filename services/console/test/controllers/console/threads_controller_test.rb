@@ -20,6 +20,25 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     post login_url, params: { email: @operator.email, password: "password123456" }
   end
 
+  test "threads page shows the October removal banner" do
+    with_recent_first_error do
+      get console_threads_url
+    end
+
+    assert_response :ok
+    assert_select ".console-amber-note[role=status]", text: /Console chat app will be removed in October/
+  end
+
+  test "threads endpoints are unavailable when console chat is disabled" do
+    with_env("CENTAUR_CONSOLE_CHAT_ENABLED" => "false") do
+      get console_threads_url
+      assert_response :not_found
+
+      post console_threads_url, params: { prompt: "Do not send this" }
+      assert_response :not_found
+    end
+  end
+
   test "an admin sees the Control and Data Sync nav items" do
     with_recent_first_error do
       get console_threads_url
@@ -855,6 +874,7 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
       # through a hidden field, not a native select.
       assert_select "input[type=hidden][name=model]", count: 1
       assert_select "[data-console-model-option][data-value=?]", "amp"
+      assert_select "[data-console-model-option][data-value=?]", "gpt-6-astra"
       assert_select "[data-console-model-option][data-value=?]", "claude-opus-5"
       assert_select "select", count: 0
     end
@@ -863,6 +883,13 @@ class Console::ThreadsControllerTest < ActionDispatch::IntegrationTest
     assert_equal(
       { "label" => "Claude Opus 5", "efforts" => [ %w[fast Fast] ] },
       agents["claude-opus-5"]
+    )
+    assert_equal(
+      { "label" => "GPT-6-Astra", "efforts" => [
+        %w[low Low], %w[medium Medium], %w[high High],
+        [ "xhigh", "Extra High" ], %w[max Max], %w[ultra Ultra]
+      ] },
+      agents["gpt-6-astra"]
     )
     # Submitting replaces the centered empty state with a full-height,
     # bottom-aligned optimistic transcript while the request is in flight.

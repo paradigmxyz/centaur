@@ -14,6 +14,12 @@
         },
         "sentryDsn": { "type": "string" },
         "railsEnv": { "type": "string" },
+        "chat": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" }
+          }
+        },
         "image": {
           "type": "object",
           "properties": {
@@ -338,6 +344,7 @@
         "mcpPublicUrl": { "type": "string" },
         "sandboxRunningLimit": { "type": "integer", "minimum": 0 },
         "sandboxHotIdleGraceSecs": { "type": "integer", "minimum": 0 },
+        "sandboxOrphanSweepGraceSecs": { "type": "integer", "minimum": 1 },
         "workflowHostSandbox": { "type": "boolean" },
         "workflowHostResources": { "type": "object" },
         "etl": {
@@ -420,7 +427,8 @@
                   "minimum": 1,
                   "maximum": 8192
                 },
-                "model": { "type": "string", "minLength": 1 }
+                "model": { "type": "string", "minLength": 1 },
+                "dimensions": { "type": "integer", "minimum": 1, "maximum": 2000 }
               }
             }
           }

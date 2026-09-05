@@ -64,9 +64,6 @@ impl IntoResponse for ApiError {
             Self::Runtime(SessionRuntimeError::Store(SessionStoreError::HarnessConflict {
                 ..
             })) => StatusCode::CONFLICT,
-            Self::Runtime(SessionRuntimeError::Store(SessionStoreError::PersonaConflict {
-                ..
-            })) => StatusCode::CONFLICT,
             Self::Runtime(SessionRuntimeError::Store(SessionStoreError::PrincipalConflict {
                 ..
             })) => StatusCode::CONFLICT,

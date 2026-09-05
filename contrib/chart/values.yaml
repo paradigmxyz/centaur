@@ -104,8 +104,9 @@ console:
   # Public URL users reach in a browser (e.g. https://console.example.com), used
   # as CENTAUR_CONSOLE_PUBLIC_URL. Set this when console is exposed behind
   # Tailscale/Ingress so MCP OAuth issuer metadata and JWT validation agree.
-  # When set, the slackbotv2 deployment also links the first assistant message
-  # in a Slack thread to the Console session view; leave empty to omit the link.
+  # When set and console.chat.enabled is true, the slackbotv2 deployment also
+  # links the first assistant message in a Slack thread to the Console session
+  # view. Leave empty to omit the link.
   publicUrl: ""
   # Additional exact Host headers accepted by Rails Host Authorization. Use for
   # service DNS names that differ from the chart's short in-cluster URL;
@@ -117,6 +118,10 @@ console:
   # Break-glass email/password login. Disable when console is reachable from
   # the public internet and SSO is configured.
   passwordLoginEnabled: true
+  # Console's browser-based chat UI is deprecated and will be removed in
+  # October. Disable it to hide chat navigation and reject its HTTP routes.
+  chat:
+    enabled: true
   # When enabled, every authenticated Console user can browse conversations
   # originating in public Slack channels. Private channels and DMs remain
   # owner-only. Requires apiRs.etl.slack.enabled so channel privacy is synced;
@@ -514,10 +519,17 @@ apiRs:
       maxInputChars: 8192
       # Shared by the embedding workflow and company-context searches in agent sandboxes.
       model: text-embedding-3-small
+      # Vector width requested from the model by both the write and query sides.
+      # This must match the database column width. Changing it requires a schema
+      # migration, index rebuild, and re-embedding existing rows. pgvector will
+      # not build an HNSW or IVFFlat index above 2000.
+      dimensions: 1536
   # Reaper: stop sandboxes older than the max lifetime, regardless of whether
   # they are running or suspended. 0 disables the sweep. Interval must be >= 1.
   sandboxMaxLifetimeSecs: 259200 # 3 days
   sandboxReapIntervalSecs: 300
+  # Minimum age before proxy resources without a live Sandbox are reaped.
+  sandboxOrphanSweepGraceSecs: 600
   # Cleanup worker: stop unreferenced session/warm-pool sandboxes after two
   # consecutive sweeps and restore idle-pauses lost across api-rs restarts.
   # The idle backstop is only used when older execution rows have no persisted
@@ -533,6 +545,11 @@ apiRs:
     timeoutSecs: 5
     maxFacts: 12
     maxOutputTokens: 128
+    # Reasoning effort for the summary call. The output budget above is small,
+    # so a server that resolves an absent effort to its highest level spends
+    # the whole budget reasoning and returns no message. Empty omits the
+    # parameter, for a server that rejects it outright.
+    reasoningEffort: low
   metrics:
     # The Rust API always serves Prometheus text metrics at /metrics. This flag
     # only controls scrape annotations for Prometheus/VictoriaMetrics-style
@@ -647,6 +664,14 @@ linearbot:
     tag: latest
     pullPolicy: Always
   userName: centaur
+  # Reasoning effort per turn type (codex turn/start.effort). Both unset run at
+  # the harness default. These turns are autonomous, so there is no message for
+  # a -rsn flag to ride on, and one global setting suits neither an assignment
+  # turn implementing a whole ticket nor a one-line comment reply.
+  # Accepts none | minimal | low | medium | high | xhigh | max.
+  reasoningEffort:
+    assignment: ""
+    comment: ""
   extraEnv: {}
   resources: {}
 

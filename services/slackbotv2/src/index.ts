@@ -59,11 +59,16 @@ import {
   defaultModelForHarness,
   defaultServiceTierForHarness,
   effectiveReasoningForHarness,
+  personaFallbackNotice,
   reasoningForModel,
   type SlackContextBlock
 } from './console-session-link'
 import { resolveChannelDefault } from './channel-defaults'
-import { extractMessageOverrides, type HarnessOverrides } from './overrides'
+import {
+  extractMessageOverrides,
+  extractPersonaOverride,
+  type HarnessOverrides
+} from './overrides'
 import { createFlagMessageOverridesStrategy } from './message-overrides-strategy'
 import {
   isAllowedSlackMessage,
@@ -94,6 +99,7 @@ import type {
 import {
   elapsedMs,
   errorMessage,
+  escapeRegExp,
   isJsonObject,
   noopLogger,
   nowMs,
@@ -180,7 +186,10 @@ type PendingLateSlackFileMention = {
   user: string
 }
 
-type StickyThreadOverrides = Pick<SlackbotV2ThreadState, 'harnessType' | 'model' | 'provider'>
+type StickyThreadOverrides = Pick<
+  SlackbotV2ThreadState,
+  'harnessType' | 'model' | 'personaId' | 'provider'
+>
 const DEFAULT_MESSAGE_OVERRIDES_STRATEGY = createFlagMessageOverridesStrategy()
 
 export async function messageOverridesForText(
@@ -189,13 +198,26 @@ export async function messageOverridesForText(
   trace: SlackbotV2Trace
 ): Promise<{ cleanedText?: string; overrides: HarnessOverrides }> {
   const strategy = options.messageOverridesStrategy ?? DEFAULT_MESSAGE_OVERRIDES_STRATEGY
+  const persona = extractPersonaOverride(text)
+  let result: { cleanedText?: string; overrides: HarnessOverrides }
   try {
-    return await strategy({ text })
+    result = await strategy({ text: persona.cleanedText })
   } catch (error) {
     traceWarn(options, 'slackbotv2_message_overrides_strategy_failed', trace, {
       error: errorMessage(error)
     })
-    return { overrides: {} }
+    result = await DEFAULT_MESSAGE_OVERRIDES_STRATEGY({ text: persona.cleanedText })
+  }
+  const { personaId: _strategyPersonaId, ...strategyOverrides } = result.overrides
+  return {
+    ...result,
+    ...(persona.personaId && result.cleanedText === undefined
+      ? { cleanedText: persona.cleanedText }
+      : {}),
+    overrides: {
+      ...strategyOverrides,
+      ...(persona.personaId ? { personaId: persona.personaId } : {})
+    }
   }
 }
 
@@ -209,6 +231,7 @@ function stickyThreadOverrideUpdate(
     if (!overrides.provider) update.provider = null
   }
   if (overrides.model) update.model = overrides.model
+  if (overrides.personaId) update.personaId = overrides.personaId
   if (overrides.provider) {
     update.provider = overrides.provider
     if (!overrides.model) update.model = null
@@ -216,7 +239,7 @@ function stickyThreadOverrideUpdate(
   return Object.keys(update).length > 0 ? update : undefined
 }
 
-function hasStickyThreadOverride(overrides: StickyThreadOverrides): boolean {
+function hasStickyModelOverride(overrides: StickyThreadOverrides): boolean {
   return Boolean(overrides.harnessType || overrides.model || overrides.provider)
 }
 
@@ -226,13 +249,34 @@ function resolveStickyThreadOverrides(
 ): {
   harnessType?: string
   model?: string
+  personaId?: string
   provider?: string
 } {
   return {
     harnessType: stickyOverrideValue(state, update, 'harnessType'),
     model: stickyOverrideValue(state, update, 'model'),
+    personaId: stickyOverrideValue(state, update, 'personaId'),
     provider: stickyOverrideValue(state, update, 'provider')
   }
+}
+
+function personaOnlyStickyOverride(
+  update: StickyThreadOverrides | undefined
+): StickyThreadOverrides | undefined {
+  return update?.personaId ? { personaId: update.personaId } : undefined
+}
+
+function preservePinnedPersona(
+  state: SlackbotV2ThreadState,
+  update: StickyThreadOverrides | undefined
+): StickyThreadOverrides | undefined {
+  if (
+    !update?.personaId ||
+    !Object.prototype.hasOwnProperty.call(state, 'personaId')
+  ) {
+    return update
+  }
+  return { ...update, personaId: state.personaId ?? null }
 }
 
 function stickyOverrideValue(
@@ -1109,18 +1153,23 @@ async function syncThreadMessageToSession(
     setMessageText(serializedMessage, messageOverrides.cleanedText)
   }
   const overrides = messageOverrides.overrides
-  const requestedStickyOverrides = stickyThreadOverrideUpdate(overrides)
-  // Once a thread is pinned, only another explicit flag may move it. The LLM
-  // strategy can still infer per-turn reasoning, but a false-positive harness,
-  // model, or provider selection must not replace --claude/--amp/--codex/
-  // --nanocodex state.
-  const preserveStickyOverrides = Boolean(
-    requestedStickyOverrides &&
-      hasStickyThreadOverride(state) &&
-      !hasStickyThreadOverride(explicitOverrides)
+  const requestedStickyOverrides = preservePinnedPersona(
+    state,
+    stickyThreadOverrideUpdate(overrides)
   )
-  const stickyOverridesUpdate = preserveStickyOverrides ? undefined : requestedStickyOverrides
-  if (preserveStickyOverrides) {
+  // Once the thread's model configuration is sticky, only another explicit
+  // model or harness flag may move it. The persona is handled separately by
+  // preservePinnedPersona and never moves after the API persists it.
+  const preserveStickyModelOverrides = Boolean(
+    requestedStickyOverrides &&
+      hasStickyModelOverride(requestedStickyOverrides) &&
+      hasStickyModelOverride(state) &&
+      !hasStickyModelOverride(explicitOverrides)
+  )
+  let stickyOverridesUpdate = preserveStickyModelOverrides
+    ? personaOnlyStickyOverride(requestedStickyOverrides)
+    : requestedStickyOverrides
+  if (preserveStickyModelOverrides) {
     traceLog(input.options, 'slackbotv2_forward_sticky_overrides_preserved', trace, {
       pinned_harness_type: state.harnessType,
       requested_harness_type: requestedStickyOverrides?.harnessType
@@ -1180,24 +1229,17 @@ async function syncThreadMessageToSession(
   const includeResponseMetadata =
     responseMetadataMode === 'always' ||
     (responseMetadataMode === 'first' && isFirstAssistantMessage)
-  let responseContextBlock = isFirstAssistantMessage || includeResponseMetadata
-    ? buildSlackResponseContextBlock({
-        consoleBaseUrl: isFirstAssistantMessage ? input.options.consolePublicUrl : undefined,
-        threadKey: thread.id,
-        harnessType: effectiveHarnessType,
-        metadataEnabled: includeResponseMetadata,
-        model: effectiveModel,
-        reasoning: effectiveReasoning,
-        serviceTier:
-          input.options.responseServiceTierEnabled === true && !resolvedProvider
-            ? defaultServiceTierForHarness(effectiveHarnessType)
-            : undefined
-      })
-    : undefined
-  if (overrides.harnessType || overrides.model || overrides.provider || overrides.reasoning) {
+  if (
+    overrides.harnessType ||
+    overrides.model ||
+    overrides.personaId ||
+    overrides.provider ||
+    overrides.reasoning
+  ) {
     traceLog(input.options, 'slackbotv2_forward_overrides_parsed', trace, {
       harness_type: overrides.harnessType,
       model: overrides.model,
+      persona_id: overrides.personaId,
       provider: overrides.provider,
       reasoning: overrides.reasoning
     })
@@ -1278,6 +1320,7 @@ async function syncThreadMessageToSession(
     messages: messagesToAppend,
     model: shouldStartExecution ? resolvedModel : undefined,
     metadataModel: shouldStartExecution ? effectiveModel : undefined,
+    personaId: shouldStartExecution ? effectiveOverrides.personaId : undefined,
     provider: shouldStartExecution ? resolvedProvider : undefined,
     reasoning: resolvedReasoning,
     restartOnHarnessConflict:
@@ -1416,6 +1459,7 @@ async function syncThreadMessageToSession(
     return
   }
 
+  let responseContextBlock: SlackContextBlock | undefined
   try {
     await thread.setState({ activeExecution: true })
     traceLog(input.options, 'slackbotv2_forward_active_execution_marked', trace)
@@ -1423,41 +1467,62 @@ async function syncThreadMessageToSession(
       onExecutionStarted: commitExecutionStarted,
       onMessagesAppended: commitMessagesAppended,
       onSessionCreated: async outcome => {
+        const fallbackNotice = personaFallbackNotice(
+          outcome.unavailableRequestedPersonaId,
+          outcome.personaId
+        )
+        if (outcome.personaId !== undefined) {
+          const requestedPersonaId = forwardInput.personaId
+          stickyOverridesUpdate = {
+            ...(stickyOverridesUpdate ?? {}),
+            personaId: outcome.personaId
+          }
+          forwardInput.personaId = outcome.personaId ?? undefined
+          if (requestedPersonaId !== undefined && outcome.personaId !== requestedPersonaId) {
+            traceLog(input.options, 'slackbotv2_session_persona_reconciled', trace, {
+              requested_persona_id: requestedPersonaId,
+              resolved_persona_id: outcome.personaId,
+              unavailable_requested_persona_id: outcome.unavailableRequestedPersonaId
+            })
+          }
+        }
         const harnessType = outcome.harnessType ?? effectiveHarnessType
         const abTested = outcome.harnessAssignment?.experiment === 'codex_nanocodex_ab'
         forwardInput.metadataHarnessType = harnessType
         forwardInput.harnessAssignment = outcome.harnessAssignment
-        if (harnessType === effectiveHarnessType && !abTested) return
-        const model =
-          resolvedModel ?? defaultModelForHarness(harnessType, input.options.harnessDefaultModels)
-        const requestedReasoning = reasoningForModel(harnessType, model, resolvedReasoning)
-        const reasoning = effectiveReasoningForHarness(
-          harnessType,
-          requestedReasoning,
-          input.options.harnessDefaultReasoning
-        )
-        forwardInput.metadataModel = model
-        forwardInput.reasoning = requestedReasoning
-        if (isFirstAssistantMessage || includeResponseMetadata) {
-          responseContextBlock = buildSlackResponseContextBlock({
-            consoleBaseUrl: isFirstAssistantMessage ? input.options.consolePublicUrl : undefined,
-            threadKey: thread.id,
+        let model = effectiveModel
+        let reasoning = effectiveReasoning
+        if (harnessType !== effectiveHarnessType || abTested) {
+          model =
+            resolvedModel ?? defaultModelForHarness(harnessType, input.options.harnessDefaultModels)
+          const requestedReasoning = reasoningForModel(harnessType, model, resolvedReasoning)
+          reasoning = effectiveReasoningForHarness(
             harnessType,
-            metadataEnabled: includeResponseMetadata,
-            model,
-            reasoning,
-            serviceTier:
-              input.options.responseServiceTierEnabled === true && !resolvedProvider
-                ? defaultServiceTierForHarness(harnessType)
-                : undefined
+            requestedReasoning,
+            input.options.harnessDefaultReasoning
+          )
+          forwardInput.metadataModel = model
+          forwardInput.reasoning = requestedReasoning
+          traceLog(input.options, 'slackbotv2_session_harness_resolved', trace, {
+            ab_tested: abTested,
+            ab_test_experiment: outcome.harnessAssignment?.experiment,
+            ab_test_cohort: outcome.harnessAssignment?.cohort,
+            requested_harness_type: effectiveHarnessType,
+            resolved_harness_type: harnessType
           })
         }
-        traceLog(input.options, 'slackbotv2_session_harness_resolved', trace, {
-          ab_tested: abTested,
-          ab_test_experiment: outcome.harnessAssignment?.experiment,
-          ab_test_cohort: outcome.harnessAssignment?.cohort,
-          requested_harness_type: effectiveHarnessType,
-          resolved_harness_type: harnessType
+        responseContextBlock = buildSlackResponseContextBlock({
+          consoleBaseUrl: isFirstAssistantMessage ? input.options.consolePublicUrl : undefined,
+          threadKey: thread.id,
+          harnessType,
+          metadataEnabled: includeResponseMetadata,
+          model,
+          notice: fallbackNotice,
+          reasoning,
+          serviceTier:
+            input.options.responseServiceTierEnabled === true && !resolvedProvider
+              ? defaultServiceTierForHarness(harnessType)
+              : undefined
         })
       },
       onSessionRestarted: handleSessionRestarted
@@ -3664,10 +3729,6 @@ function clipOneLine(value: string, max: number): string {
   const oneLine = value.replace(/\s+/g, ' ').trim()
   if (oneLine.length <= max) return oneLine
   return `${oneLine.slice(0, Math.max(0, max - 1)).trimEnd()}...`
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 function waitUntil(c: { executionCtx: WaitUntilContext }, promise: Promise<unknown>): void {
