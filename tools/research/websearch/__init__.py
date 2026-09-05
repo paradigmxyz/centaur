@@ -1,1 +1,1 @@
-"""Web search and deep research via Parallel Web Systems."""
+"""Web search and deep research via Tako (default) or Parallel."""

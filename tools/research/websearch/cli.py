@@ -13,7 +13,18 @@ from .client import _client
 
 load_dotenv()
 
-app = typer.Typer(name="websearch", help="Web search and deep research via Parallel")
+app = typer.Typer(name="websearch", help="Web search and deep research via Tako or Parallel")
+
+console = Console(stderr=True)
+
+
+def _configured_client():
+    """Build the client, reporting a bad `WEBSEARCH_BACKEND` without a traceback."""
+    try:
+        return _client()
+    except RuntimeError as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(1) from exc
 
 
 @app.command("health")
@@ -21,9 +32,7 @@ def health(
     timeout_seconds: float = typer.Option(30.0, "--timeout-seconds", help="Request timeout"),
 ):
     """Assert websearch connectivity and auth with a safe read-only check."""
-    from .client import _client
-
-    client = _client()
+    client = _configured_client()
     try:
         details = asyncio.run(
             client.search(
@@ -42,9 +51,6 @@ def health(
     print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
 
 
-console = Console(stderr=True)
-
-
 def _print_json(payload: dict) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True, default=str))
 
@@ -57,49 +63,63 @@ def search(
     synthesize: bool = typer.Option(
         True, "--synthesize/--no-synthesize", help="Compose a cited answer from excerpts"
     ),
-    mode: str = typer.Option(None, "--mode", help="Search mode: basic | advanced (REST only)"),
+    effort: str = typer.Option(
+        None,
+        "--effort",
+        help=(
+            "Retrieval effort: instant | fast (default) | deep. deep widens retrieval and "
+            "reranks for better results; it's slower and priced higher. Anonymous paths "
+            "note it in meta.partial_failures."
+        ),
+    ),
+    mode: str = typer.Option(
+        None,
+        "--mode",
+        help="[deprecated] use --effort (basic -> instant, advanced -> fast)",
+        hidden=True,
+    ),
     client_model: str = typer.Option(
         None,
         "--client-model",
-        help="Identifier of the consuming LLM (e.g. claude-opus-4-7)",
+        help="Identifier of the consuming LLM (e.g. claude-opus-4-7). Parallel keyed path only.",
     ),
     max_chars_total: int = typer.Option(
-        None, "--max-chars-total", help="Upper bound on total excerpt characters (REST only)"
+        None, "--max-chars-total", help="Upper bound on total excerpt characters (keyed paths only)"
     ),
     include_domains: list[str] = typer.Option(
-        None, "--include-domain", help="Restrict to these domains (REST only). Repeatable."
+        None, "--include-domain", help="Restrict to these domains (keyed paths only). Repeatable."
     ),
     exclude_domains: list[str] = typer.Option(
-        None, "--exclude-domain", help="Exclude these domains (REST only). Repeatable."
+        None, "--exclude-domain", help="Exclude these domains (keyed paths only). Repeatable."
     ),
     max_age_hours: int = typer.Option(
         None,
         "--max-age-hours",
-        help=(
-            "Recency filter (REST only). Rounded DOWN to a UTC calendar-date "
-            "cutoff — Parallel's source policy is date-granular, not hour-precise."
-        ),
+        help="Recency filter (keyed paths only). Rounded DOWN to a UTC calendar-date cutoff.",
     ),
     session_id: str = typer.Option(
         None,
         "--session-id",
-        help="Stable session ID (UUID); reuse across related Search/Extract calls",
+        help="Stable session ID (UUID) reused across related Search/Extract calls. "
+        "Parallel keyed path only.",
     ),
     max_report_chars: int = typer.Option(
         12000, "--max-report-chars", help="Maximum composed answer length in characters"
     ),
     pretty: bool = typer.Option(False, "--pretty", help="Print concise human-readable output"),
     # Backward-compat shim for the original Exa-backed tool's --search-type flag.
-    # Hidden from --help; if passed, we warn and ignore (no Parallel equivalent).
+    # Hidden from --help; if passed, we warn and ignore (no backend equivalent).
     search_type: str = typer.Option(None, "--search-type", help="[deprecated] no-op", hidden=True),
 ):
-    """Search the web via Parallel (free MCP or paid REST)."""
-    client = _client()
+    """Search Tako's data graph and the web (or Parallel, per WEBSEARCH_BACKEND)."""
+    client = _configured_client()
     if search_type:
         console.print(
             f"[yellow]--search-type={search_type!r} is deprecated and ignored (no "
-            "Parallel equivalent for Exa's neural/keyword/auto modes).[/]"
+            "current backend exposes Exa's neural/keyword/auto modes).[/]"
         )
+    if mode:
+        console.print(f"[yellow]--mode={mode!r} is deprecated; use --effort.[/]")
     try:
         payload = asyncio.run(
             client.search(
@@ -107,6 +127,7 @@ def search(
                 num_results=num_results,
                 timeout_seconds=timeout_seconds,
                 synthesize=synthesize,
+                effort=effort,
                 mode=mode,
                 client_model=client_model,
                 max_chars_total=max_chars_total,
@@ -143,16 +164,22 @@ def search(
 @app.command("deep-research")
 def deep_research_command(
     question: str = typer.Argument(..., help="Research question"),
+    effort: str = typer.Option(
+        None,
+        "--effort",
+        help="Research effort: medium (default) | high. high reasons longer on the same data.",
+    ),
     processor: str = typer.Option(
         None,
         "--processor",
         "-p",
-        help="Task processor (pro/pro-fast/ultra/ultra-fast/ultra2x/ultra4x/ultra8x)",
+        help="[deprecated] Parallel-only processor override (pro/ultra family)",
+        hidden=True,
     ),
     timeout_seconds: float = typer.Option(
         None,
         "--timeout-seconds",
-        help="Request timeout. Defaults to a processor-appropriate value.",
+        help="Overall budget. Defaults to 600s on Tako and a processor-appropriate value on Parallel.",
     ),
     max_report_chars: int = typer.Option(
         50000, "--max-report-chars", help="Maximum report length in characters"
@@ -171,8 +198,8 @@ def deep_research_command(
         None, "--num-results-per-query", help="[deprecated] no-op", hidden=True
     ),
 ):
-    """Run Parallel deep research (requires PARALLEL_API_KEY)."""
-    client = _client()
+    """Run deep research through the configured backend (requires its API key)."""
+    client = _configured_client()
 
     def _progress(stage: str) -> None:
         console.print(f"[dim]{stage}[/]")
@@ -190,12 +217,17 @@ def deep_research_command(
     if deprecated_passed:
         console.print(
             f"[yellow]Ignored deprecated flags: {', '.join(deprecated_passed)} "
-            "(Parallel Task API is single-call; iteration knobs no longer apply).[/]"
+            "(both backends run a single multi-source job; iteration knobs no longer apply).[/]"
+        )
+    if processor:
+        console.print(
+            f"[yellow]--processor={processor!r} is deprecated and Parallel-only; use --effort.[/]"
         )
     try:
         payload = asyncio.run(
             client.deep_research(
                 question=question,
+                effort=effort,
                 processor=processor,
                 timeout_seconds=timeout_seconds,
                 max_report_chars=max_report_chars,
