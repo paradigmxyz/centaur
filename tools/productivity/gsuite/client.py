@@ -1759,6 +1759,101 @@ def docs_get_text(document_id: str) -> str:
         return extract_text_from_content(content)
 
 
+DRIVE_COMMENT_FIELDS = (
+    "id,content,htmlContent,anchor,quotedFileContent,resolved,deleted,"
+    "createdTime,modifiedTime,assigneeEmailAddress,mentionedEmailAddresses,"
+    "author(displayName,photoLink,me),"
+    "replies(id,content,htmlContent,action,deleted,createdTime,modifiedTime,"
+    "assigneeEmailAddress,mentionedEmailAddresses,author(displayName,photoLink,me))"
+)
+
+
+def _normalize_drive_comment_user(user: dict) -> dict:
+    return {
+        "display_name": user.get("displayName", ""),
+        "photo_link": user.get("photoLink", ""),
+        "is_me": user.get("me", False),
+    }
+
+
+def _normalize_drive_reply(reply: dict) -> dict:
+    return {
+        "id": reply.get("id", ""),
+        "content": reply.get("content", ""),
+        "html_content": reply.get("htmlContent", ""),
+        "action": reply.get("action", ""),
+        "deleted": reply.get("deleted", False),
+        "created_time": reply.get("createdTime", ""),
+        "modified_time": reply.get("modifiedTime", ""),
+        "author": _normalize_drive_comment_user(reply.get("author") or {}),
+        "assignee_email": reply.get("assigneeEmailAddress", ""),
+        "mentioned_emails": reply.get("mentionedEmailAddresses") or [],
+    }
+
+
+def _normalize_drive_comment(comment: dict) -> dict:
+    quoted_content = comment.get("quotedFileContent") or {}
+    return {
+        "id": comment.get("id", ""),
+        "content": comment.get("content", ""),
+        "html_content": comment.get("htmlContent", ""),
+        "anchor": comment.get("anchor", ""),
+        "quoted_file_content": {
+            "mime_type": quoted_content.get("mimeType", ""),
+            "value": quoted_content.get("value", ""),
+        },
+        "resolved": comment.get("resolved", False),
+        "deleted": comment.get("deleted", False),
+        "created_time": comment.get("createdTime", ""),
+        "modified_time": comment.get("modifiedTime", ""),
+        "author": _normalize_drive_comment_user(comment.get("author") or {}),
+        "assignee_email": comment.get("assigneeEmailAddress", ""),
+        "mentioned_emails": comment.get("mentionedEmailAddresses") or [],
+        "replies": [_normalize_drive_reply(reply) for reply in comment.get("replies", [])],
+    }
+
+
+def docs_list_comments(
+    document_id: str,
+    max_results: int = 100,
+    include_deleted: bool = False,
+) -> list[dict]:
+    """List comments and replies on a Google Doc.
+
+    Args:
+        document_id: The document ID
+        max_results: Maximum number of comments to return
+        include_deleted: Whether to include deleted comments and replies
+
+    Returns:
+        Comments with their quoted document content and replies
+    """
+    if max_results < 1:
+        raise ValueError("max_results must be at least 1")
+
+    service = get_drive_service()
+    comments: list[dict] = []
+    page_token: str | None = None
+
+    while len(comments) < max_results:
+        request_args = {
+            "fileId": document_id,
+            "pageSize": min(100, max_results - len(comments)),
+            "includeDeleted": include_deleted,
+            "fields": f"nextPageToken,comments({DRIVE_COMMENT_FIELDS})",
+        }
+        if page_token:
+            request_args["pageToken"] = page_token
+
+        result = service.comments().list(**request_args).execute()
+        comments.extend(_normalize_drive_comment(comment) for comment in result.get("comments", []))
+        page_token = result.get("nextPageToken")
+        if not page_token:
+            break
+
+    return comments[:max_results]
+
+
 def docs_append(
     document_id: str,
     text: str,
@@ -3225,6 +3320,28 @@ class GSuiteClient:
             Plain text content of the document
         """
         return docs_get_text(document_id)
+
+    def docs_list_comments(
+        self,
+        document_id: str,
+        max_results: int = 100,
+        include_deleted: bool = False,
+    ) -> list[dict]:
+        """List comments and replies on a Google Doc.
+
+        Args:
+            document_id: The document ID
+            max_results: Maximum number of comments to return
+            include_deleted: Whether to include deleted comments and replies
+
+        Returns:
+            Comments with their quoted document content and replies
+        """
+        return docs_list_comments(
+            document_id,
+            max_results=max_results,
+            include_deleted=include_deleted,
+        )
 
     def docs_append(
         self,

@@ -1278,6 +1278,63 @@ def docs_read(
         raise typer.Exit(1)
 
 
+@docs_app.command("comments")
+def docs_comments(
+    doc_id: str = typer.Argument(..., help="Document ID or Google Docs URL"),
+    limit: int = typer.Option(100, "--limit", "-n", help="Max comments"),
+    include_deleted: bool = typer.Option(
+        False,
+        "--include-deleted",
+        help="Include deleted comments and replies",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
+    """Read comments and replies on a Google Doc.
+
+    Examples:
+        gsuite docs comments "1abc123"
+        gsuite docs comments "https://docs.google.com/document/d/1abc123/edit" --json
+    """
+    from .client import docs_list_comments
+
+    try:
+        document_id = extract_doc_id(doc_id)
+        comments = docs_list_comments(
+            document_id,
+            max_results=limit,
+            include_deleted=include_deleted,
+        )
+        if json_output:
+            print(json.dumps(comments, indent=2, ensure_ascii=False))
+            return
+        if not comments:
+            console.print("[yellow]No comments found.[/]")
+            return
+
+        for comment in comments:
+            author = comment["author"]["display_name"] or "Unknown author"
+            status = (
+                "deleted" if comment["deleted"] else "resolved" if comment["resolved"] else "open"
+            )
+            console.print(f"Comment {comment['id']} by {author} [{status}]", markup=False)
+            quoted_text = comment["quoted_file_content"]["value"]
+            if quoted_text:
+                console.print(f"  Quoted: {quoted_text}", markup=False)
+            if comment["content"]:
+                console.print(f"  {comment['content']}", markup=False)
+            for reply in comment["replies"]:
+                reply_author = reply["author"]["display_name"] or "Unknown author"
+                reply_action = f" [{reply['action']}]" if reply["action"] else ""
+                console.print(
+                    f"  Reply {reply['id']} by {reply_author}{reply_action}: {reply['content']}",
+                    markup=False,
+                )
+            console.print()
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1) from e
+
+
 @docs_app.command("replace")
 def docs_replace_cmd(
     doc_id: str = typer.Argument(..., help="Document ID or Google Docs URL"),
