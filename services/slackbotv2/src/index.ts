@@ -32,6 +32,7 @@ import {
 import { conflateChatSdkStream } from './conflate'
 import { resolveHarnessRollout } from './harness-rollout'
 import { observeSeconds, slackbotMetrics } from './metrics'
+import { isProviderQuotaAnswer, quotaFallbackDecision } from './quota-fallback'
 import {
   renderSlackDisplayText,
   slackMessagePromptText,
@@ -59,6 +60,7 @@ import {
   defaultModelForHarness,
   defaultServiceTierForHarness,
   effectiveReasoningForHarness,
+  harnessDisplayName,
   personaFallbackNotice,
   reasoningForModel,
   type SlackContextBlock
@@ -163,6 +165,7 @@ const RENDER_RECOVERY_MAX_THREAD_FAILURES = 5
 const RENDER_RETRY_INITIAL_DELAY_MS = 250
 const RENDER_RETRY_MAX_DELAY_MS = 5_000
 const ASSISTANT_STATUS_MAX_CHARS = 50
+const PROVIDER_QUOTA_ANSWER_CAPTURE_MAX_CHARS = 256
 const SLACK_TASK_DETAILS_MAX_CHARS = 500
 const SLACK_FALLBACK_TEXT_MAX_CHARS = 35_000
 const POSTGRES_CONNECT_INITIAL_DELAY_MS = 250
@@ -191,6 +194,67 @@ type StickyThreadOverrides = Pick<
   'harnessType' | 'model' | 'personaId' | 'provider'
 >
 const DEFAULT_MESSAGE_OVERRIDES_STRATEGY = createFlagMessageOverridesStrategy()
+
+/** Terminal failure details captured off the rendered execution stream. */
+type TerminalExecutionFailure = {
+  error?: string
+  /** api-rs failure taxonomy ("quota", "timeout", ...) when present. */
+  failureClass?: string
+  /** Slack message containing the provider error, when one was rendered. */
+  renderedMessageId?: string
+  /** True when the harness returned its quota banner as a successful answer. */
+  returnedAsAnswer?: boolean
+}
+
+type RenderedAnswerCapture = {
+  text: string
+  truncated: boolean
+}
+
+/**
+ * Passes the renderer source stream through untouched while recording the
+ * terminal `session.execution_failed` payload, so the caller can react to the
+ * failure taxonomy (e.g. quota-driven harness fallback) after the render.
+ */
+async function* captureTerminalFailure(
+  stream: AsyncIterable<SlackbotV2RendererSource>,
+  capture: { failure?: TerminalExecutionFailure; suppressQuotaAnswer: boolean }
+): AsyncIterable<SlackbotV2RendererSource> {
+  for await (const item of stream) {
+    let quotaDetected = false
+    if (
+      item &&
+      typeof item === 'object' &&
+      (item as { eventKind?: unknown }).eventKind === 'session.execution_failed'
+    ) {
+      const data = (item as { data?: unknown }).data
+      const record =
+        data && typeof data === 'object' && !Array.isArray(data)
+          ? (data as Record<string, unknown>)
+          : undefined
+      capture.failure = {
+        error: typeof record?.error === 'string' ? record.error : undefined,
+        failureClass:
+          typeof record?.failureClass === 'string' ? record.failureClass : undefined
+      }
+      quotaDetected = capture.failure.failureClass === 'quota'
+    } else {
+      const terminalAnswer = terminalAnswerText(item)
+      if (isProviderQuotaAnswer(terminalAnswer)) {
+        if (!capture.failure) {
+          capture.failure = {
+            error: terminalAnswer,
+            failureClass: 'quota',
+            returnedAsAnswer: true
+          }
+        }
+        quotaDetected = true
+      }
+    }
+    if (quotaDetected && capture.suppressQuotaAnswer) continue
+    yield item
+  }
+}
 
 export async function messageOverridesForText(
   options: SlackbotV2Options,
@@ -1293,6 +1357,9 @@ async function syncThreadMessageToSession(
   const renderLease: { release: (() => Promise<void>) | null } = { release: null }
   const candidateMessages = context ?? [serializedMessage]
   const messagesToAppend = candidateMessages.filter(item => !messageIds.has(item.id))
+  const replayingQuotaFallback =
+    state.quotaFallbackMessageId === serializedMessage.id &&
+    !executedMessageIds.has(serializedMessage.id)
 
   if (
     state.activeExecution === true
@@ -1307,6 +1374,9 @@ async function syncThreadMessageToSession(
     afterEventId: lastEventId,
     executeContextMessages:
       shouldStartExecution && shouldIncludeContext ? candidateMessages : undefined,
+    executionIdempotencyKey: replayingQuotaFallback
+      ? `${serializedMessage.id}:quota-fallback`
+      : undefined,
     executeMessage: shouldStartExecution ? serializedMessage : undefined,
     // Sticky harness changes only apply when a message starts an execution;
     // restarting the thread out from under an active execution would kill it.
@@ -1430,6 +1500,73 @@ async function syncThreadMessageToSession(
     })
   }
 
+  // Runs after a rendered execution ends with the "quota" failure class.
+  // The configured harness is the alternate for the deployment default; a
+  // thread already using that alternate returns to the default. The replay
+  // gets its own idempotency key and is attempted at most once per message.
+  const handleQuotaFailure = async (failure: TerminalExecutionFailure): Promise<void> => {
+    const latest = (await thread.state) ?? {}
+    const failedHarness = forwardInput.metadataHarnessType ?? effectiveHarnessType
+    const decision = quotaFallbackDecision({
+      alreadyAttempted: latest.quotaFallbackMessageId === serializedMessage.id,
+      configuredFallbackHarness: input.options.quotaFallbackHarness,
+      defaultHarness: input.options.defaultHarnessType ?? 'codex',
+      explicitHarnessRequested: explicitOverrides.harnessType !== undefined,
+      failedHarness
+    })
+    if (decision.outcome === 'disabled') return
+    if (decision.outcome === 'misconfigured') {
+      traceWarn(input.options, 'slackbotv2_quota_fallback_misconfigured', trace, {
+        fallback_harness_type: decision.harnessType
+      })
+      return
+    }
+    if (decision.outcome !== 'scheduled') {
+      slackbotMetrics.quotaHarnessFallbacks.inc({ outcome: decision.outcome })
+      return
+    }
+    const fallbackHarness = decision.harnessType
+    await thread.setState({
+      // Forget the failed execution of this message so the replay starts a
+      // new one, and tombstone model/provider like any harness switch.
+      executedMessageIds: (latest.executedMessageIds ?? []).filter(
+        id => id !== serializedMessage.id
+      ),
+      harnessType: fallbackHarness,
+      model: null,
+      provider: null,
+      quotaFallbackMessageId: serializedMessage.id
+    })
+    if (failure.renderedMessageId) {
+      try {
+        await thread.adapter.editMessage(
+          thread.id,
+          failure.renderedMessageId,
+          `${harnessDisplayName(failedHarness) ?? failedHarness} hit its session limit, so I switched this request to ${harnessDisplayName(fallbackHarness) ?? fallbackHarness} and retried it.`
+        )
+      } catch (error) {
+        traceWarn(input.options, 'slackbotv2_quota_notice_edit_failed', trace, {
+          error: errorMessage(error),
+          message_id: failure.renderedMessageId
+        })
+      }
+    }
+    slackbotMetrics.quotaHarnessFallbacks.inc({ outcome: 'scheduled' })
+    traceLog(
+      input.options,
+      'slackbotv2_quota_fallback_scheduled',
+      trace,
+      {
+        error: failure.error,
+        failed_harness_type: failedHarness,
+        fallback_harness_type: fallbackHarness,
+        returned_as_answer: failure.returnedAsAnswer === true
+      },
+      'warn'
+    )
+    await syncThreadMessageToSession(thread, message, input)
+  }
+
   if (!shouldStartExecution) {
     try {
       if (messagesToAppend.length > 0) {
@@ -1528,6 +1665,13 @@ async function syncThreadMessageToSession(
       onSessionRestarted: handleSessionRestarted
     })
     finishSteeringReaction(input, trace)
+    const quotaFallbackPreview = quotaFallbackDecision({
+      alreadyAttempted: state.quotaFallbackMessageId === serializedMessage.id,
+      configuredFallbackHarness: input.options.quotaFallbackHarness,
+      defaultHarness: input.options.defaultHarnessType ?? 'codex',
+      explicitHarnessRequested: explicitOverrides.harnessType !== undefined,
+      failedHarness: forwardInput.metadataHarnessType ?? effectiveHarnessType
+    })
     scheduleExecutionRender(
       thread,
       serializedMessage,
@@ -1538,7 +1682,9 @@ async function syncThreadMessageToSession(
       assistantStatusVisible,
       input.steeringReactions,
       trace,
-      responseContextBlock
+      responseContextBlock,
+      handleQuotaFailure,
+      quotaFallbackPreview.outcome === 'scheduled'
     )
     traceLog(input.options, 'slackbotv2_forward_complete', trace, {
       last_event_id: lastEventId
@@ -1609,7 +1755,9 @@ function scheduleExecutionRender(
   assistantStatusVisible: boolean,
   steeringReactions: SteeringReactionController,
   trace?: SlackbotV2Trace,
-  responseContextBlock?: SlackContextBlock
+  responseContextBlock?: SlackContextBlock,
+  onQuotaFailure?: (failure: TerminalExecutionFailure) => Promise<void>,
+  suppressQuotaAnswer = false
 ): void {
   const promise = (async () => {
     slackbotMetrics.activeLiveRenders.inc()
@@ -1625,9 +1773,23 @@ function scheduleExecutionRender(
           assistantStatusVisible,
           steeringReactions,
           trace,
-          responseContextBlock
+          responseContextBlock,
+          suppressQuotaAnswer
         )
-        if (result === 'complete') return
+        if (result.status === 'complete') {
+          // The render state is already finalized (activeExecution cleared,
+          // obligation released), so a quota fallback can safely re-forward.
+          if (result.failure?.failureClass === 'quota' && onQuotaFailure) {
+            try {
+              await onQuotaFailure(result.failure)
+            } catch (error) {
+              traceWarn(options, 'slackbotv2_quota_fallback_failed', trace, {
+                error: errorMessage(error)
+              })
+            }
+          }
+          return
+        }
         const delayMs = renderRetryDelayMs(attempt)
         attempt += 1
         traceLog(options, 'slackbotv2_render_retry_scheduled', trace, {
@@ -1670,13 +1832,18 @@ async function renderExecutionAttempt(
   assistantStatusVisible: boolean,
   steeringReactions: SteeringReactionController,
   trace?: SlackbotV2Trace,
-  responseContextBlock?: SlackContextBlock
-): Promise<'complete' | 'retry'> {
+  responseContextBlock?: SlackContextBlock,
+  suppressQuotaAnswer = false
+): Promise<{ status: 'complete' | 'retry'; failure?: TerminalExecutionFailure }> {
   const renderStartedAtMs = nowMs()
   let outcome = 'failure'
   let rendered = false
   let retry = false
   let fallbackLastEventId = 0
+  const failureCapture: {
+    failure?: TerminalExecutionFailure
+    suppressQuotaAnswer: boolean
+  } = { suppressQuotaAnswer }
   try {
     const streamResult = await renderExecutionStream(
       thread,
@@ -1685,8 +1852,12 @@ async function renderExecutionAttempt(
       options,
       trace,
       assistantStatusVisible,
-      responseContextBlock
+      responseContextBlock,
+      failureCapture
     )
+    if (failureCapture.failure && streamResult.messageId) {
+      failureCapture.failure.renderedMessageId = streamResult.messageId
+    }
     rendered = true
     outcome = 'complete'
     let divergenceReconciled = false
@@ -1717,7 +1888,7 @@ async function renderExecutionAttempt(
       answer_diverged: streamResult.diverged,
       divergence_reconciled: divergenceReconciled
     })
-    return 'complete'
+    return { status: 'complete', failure: failureCapture.failure }
   } catch (error) {
     // Check the Slack adapter's delivery annotation before retryability:
     // Slack network failures can surface as TypeError/AbortError, which would
@@ -1737,7 +1908,7 @@ async function renderExecutionAttempt(
         },
         'warn'
       )
-      return 'retry'
+      return { status: 'retry' }
     }
     if (answerLost === false) {
       // The Slack stream broke only after the final answer became visible
@@ -1754,7 +1925,7 @@ async function renderExecutionAttempt(
         },
         'warn'
       )
-      return 'complete'
+      return { status: 'complete', failure: failureCapture.failure }
     }
     traceLog(
       options,
@@ -1785,7 +1956,7 @@ async function renderExecutionAttempt(
         },
         'warn'
       )
-      return 'complete'
+      return { status: 'complete', failure: failureCapture.failure }
     }
     const fallback = await renderFallbackFinalAnswer(
       thread,
@@ -1802,7 +1973,7 @@ async function renderExecutionAttempt(
       rendered = true
       outcome = 'fallback'
       fallbackLastEventId = fallback.lastEventId
-      return 'complete'
+      return { status: 'complete', failure: failureCapture.failure }
     }
     throw error
   } finally {
@@ -2541,8 +2712,13 @@ async function renderExecutionStream(
   options: SlackbotV2Options,
   trace?: SlackbotV2Trace,
   assistantStatusVisible = false,
-  responseContextBlock?: SlackContextBlock
+  responseContextBlock?: SlackContextBlock,
+  failureCapture?: {
+    failure?: TerminalExecutionFailure
+    suppressQuotaAnswer: boolean
+  }
 ): Promise<{ diverged: boolean; messageId?: string }> {
+  if (failureCapture) stream = captureTerminalFailure(stream, failureCapture)
   const promptText = slackMessagePromptText(message)
   if (isPlainTextOnlyRequest(promptText)) {
     await renderPlainTextExecutionStream(
@@ -2565,6 +2741,7 @@ async function renderExecutionStream(
     phase_ms: elapsedMs(titleStartedAtMs)
   })
   const capture = { diverged: false }
+  const renderedAnswer: RenderedAnswerCapture = { text: '', truncated: false }
   try {
     const taskDisplayMode = slackStreamTaskDisplayMode(options)
     const visibleStream = await streamAfterFirstChunk(
@@ -2575,7 +2752,8 @@ async function renderExecutionStream(
               stream,
               rendererOptions(thread, options, capture, trace)
             ),
-            taskDisplayMode
+            taskDisplayMode,
+            renderedAnswer
           )
         )
       )
@@ -2595,6 +2773,21 @@ async function renderExecutionStream(
       // message; optional response metadata may be appended on every live response.
       ...(responseContextBlock ? { stopBlocks: [responseContextBlock] } : {})
     })
+    if (
+      failureCapture &&
+      !failureCapture.failure &&
+      !renderedAnswer.truncated &&
+      isProviderQuotaAnswer(renderedAnswer.text)
+    ) {
+      failureCapture.failure = {
+        error: renderedAnswer.text.trim(),
+        failureClass: 'quota',
+        returnedAsAnswer: true
+      }
+      traceLog(options, 'slackbotv2_quota_answer_detected', trace, {
+        detection_boundary: 'rendered_answer'
+      })
+    }
     return { diverged: capture.diverged, messageId: sent?.id }
   } finally {
     await setAssistantStatus(thread, '', options, trace)
@@ -2782,9 +2975,15 @@ function slackStreamTaskDisplayMode(options: SlackbotV2Options): SlackStreamTask
 
 async function* slackVisibleChatSdkStream(
   stream: AsyncIterable<ChatSDKStreamChunk>,
-  taskDisplayMode: SlackStreamTaskDisplayMode
+  taskDisplayMode: SlackStreamTaskDisplayMode,
+  renderedAnswer?: RenderedAnswerCapture
 ): AsyncIterable<ChatSDKStreamChunk> {
   for await (const chunk of stream) {
+    if (chunk.type === 'markdown_text' && renderedAnswer && !renderedAnswer.truncated) {
+      const remaining = PROVIDER_QUOTA_ANSWER_CAPTURE_MAX_CHARS - renderedAnswer.text.length
+      if (chunk.text.length > remaining) renderedAnswer.truncated = true
+      renderedAnswer.text += chunk.text.slice(0, Math.max(0, remaining))
+    }
     if (taskDisplayMode === 'none' && chunk.type !== 'markdown_text') continue
     yield chunk
   }
@@ -2859,6 +3058,28 @@ function terminalResultText(event: unknown): string {
     if (resultText) return resultText
   }
   return ''
+}
+
+function terminalAnswerText(event: SlackbotV2RendererSource): string {
+  if (!event || typeof event !== 'object') return ''
+  const eventKind = String(
+    'eventKind' in event ? event.eventKind : 'event' in event ? event.event : ''
+  )
+  if (eventKind === 'session.execution_completed') {
+    return terminalResultText('data' in event ? event.data : event)
+  }
+  if (eventKind !== 'session.output.line' || !('data' in event)) return ''
+  const data = event.data
+  if (typeof data !== 'string') return ''
+  // Most output lines are large task/progress payloads. Only parse shapes that
+  // can carry a terminal answer; this also keeps the rendering hot path cheap.
+  if (!/"type"\s*:\s*"(?:result|turn\.done|turn\.completed)"/u.test(data)) return ''
+  try {
+    const payload: unknown = JSON.parse(data)
+    return isTerminalCodexAppServerEvent(payload) ? terminalResultText(payload) : ''
+  } catch {
+    return ''
+  }
 }
 
 async function* streamSessionAfterHandoff(

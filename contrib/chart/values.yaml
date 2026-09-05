@@ -611,6 +611,13 @@ slackbotv2:
   # Include the Codex service tier when a response metadata footer is rendered.
   # This does not cause the footer to appear on additional responses.
   responseServiceTierEnabled: false
+  # Alternate to sandbox.harnessEngine after a provider quota failure. A
+  # thread on the deployment default moves to this harness; a thread already
+  # on this alternate moves back to the default. The sticky switch replays the
+  # failed message once and never loops if both harnesses are exhausted. Uses
+  # the harness wire values (codex | amp | claudecode | nanocodex | hermes)
+  # and requires working credentials for both harnesses. Empty disables it.
+  quotaFallbackHarness: ""
   # Public/local MCP endpoint shown in MCP SSO setup messages. The default
   # assumes users connect through `kubectl port-forward ... 3000:8080`.
   mcpPublicUrl: "http://localhost:3000"

@@ -320,6 +320,84 @@ describe('session event streaming', () => {
     ])
     expect(seenEventIds).toEqual([1])
   })
+
+  test('surfaces the api-rs failure class on failed executions', async () => {
+    const encoded = new TextEncoder().encode(
+      [
+        'id: 1',
+        'event: session.execution_failed',
+        'data: {"error":"You\'ve hit your usage limit.","failure_class":"quota"}',
+        '',
+      ].join('\n')
+    )
+    const fetchFn: SlackbotV2Options['fetch'] = async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoded)
+            controller.close()
+          }
+        }),
+        { headers: { 'content-type': 'text/event-stream' } }
+      )
+
+    const stream = await openSessionEventStream(options(fetchFn), {
+      afterEventId: 0,
+      executionId: 'exec-1',
+      onEventId: () => {},
+      threadId: 'slack:C1:1700000000.000100'
+    })
+    const events = []
+    for await (const event of stream) events.push(event)
+
+    expect(events).toEqual([
+      {
+        data: { error: "You've hit your usage limit.", failureClass: 'quota' },
+        event: 'session.execution_failed',
+        eventId: 1,
+        eventKind: 'session.execution_failed'
+      }
+    ])
+  })
+
+  test('omits the failure class when api-rs does not send one', async () => {
+    const encoded = new TextEncoder().encode(
+      [
+        'id: 1',
+        'event: session.execution_failed',
+        'data: {"error":"turn failed"}',
+        '',
+      ].join('\n')
+    )
+    const fetchFn: SlackbotV2Options['fetch'] = async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoded)
+            controller.close()
+          }
+        }),
+        { headers: { 'content-type': 'text/event-stream' } }
+      )
+
+    const stream = await openSessionEventStream(options(fetchFn), {
+      afterEventId: 0,
+      executionId: 'exec-1',
+      onEventId: () => {},
+      threadId: 'slack:C1:1700000000.000100'
+    })
+    const events = []
+    for await (const event of stream) events.push(event)
+
+    expect(events).toEqual([
+      {
+        data: { error: 'turn failed' },
+        event: 'session.execution_failed',
+        eventId: 1,
+        eventKind: 'session.execution_failed'
+      }
+    ])
+  })
 })
 
 describe('session interruption', () => {

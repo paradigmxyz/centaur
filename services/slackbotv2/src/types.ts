@@ -167,6 +167,13 @@ export type SlackbotV2Options = {
   defaultHarnessType?: string
   fetch?: SlackbotV2Fetch
   /**
+   * Alternate to the deployment default after a "quota" failure. A thread on
+   * the default moves to this harness; a thread already on this harness moves
+   * back to the default. The switch is sticky and attempted once per message.
+   * Unset disables automatic fallback.
+   */
+  quotaFallbackHarness?: string
+  /**
    * Deployment-configured default model per harness wire value (claudecode |
    * codex), from the CLAUDE_MODEL / CODEX_MODEL env vars the chart mirrors
    * out of sandbox.extraEnv. Display/metadata only — never forwarded to the
@@ -249,6 +256,11 @@ export type SlackbotV2ThreadState = {
   model?: string | null
   /** Persona pinned by the session API. Null means the thread is pinned without a persona. */
   personaId?: string | null
+  /**
+   * Message id whose quota-exhaustion failure already triggered an automatic
+   * harness fallback, so a fallback that itself fails never loops.
+   */
+  quotaFallbackMessageId?: string | null
   /** Last thread-level model provider selected by Slack flags. Null clears persisted state. */
   provider?: string | null
   renderObligation?: SlackbotV2RenderObligation | null
@@ -284,6 +296,8 @@ export type ForwardSessionInput = {
    */
   contextPreamble?: string
   executionId?: string
+  /** Distinct durable request key for an intentional replay such as quota fallback. */
+  executionIdempotencyKey?: string
   executeMessage?: SlackbotV2ApiMessage
   /** Effective harness selected by Slack policy, including any rollout cohort. */
   harnessType?: string

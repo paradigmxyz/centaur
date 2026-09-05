@@ -5372,6 +5372,11 @@ async fn record_terminal_output(
                         "execution_id": execution_id,
                         "thread_key": thread_key.as_str(),
                         "error": error.as_str(),
+                        // Machine-readable failure taxonomy (same values as the
+                        // execution metrics label) so consumers can react to
+                        // e.g. provider quota exhaustion without matching
+                        // human-readable error prose.
+                        "failure_class": failure_class,
                     }),
                 )
                 .await?;
@@ -5996,6 +6001,22 @@ fn terminal_failure_class(error: &str) -> &'static str {
     }
     if error.contains("evicted") {
         return "evicted";
+    }
+    // Provider quota/credit exhaustion. Matches the Codex CLI's ChatGPT
+    // usage-limit message ("You've hit your usage limit"), Claude Code's
+    // subscription limit ("You've hit your session limit"), the raw OpenAI
+    // error codes surfaced by codex and nanocodex (insufficient_quota for
+    // API-key billing, usage_not_included for subscription plans), and the
+    // Anthropic equivalents ("usage limit", "credit balance is too low").
+    // Deliberately excludes plain rate limits, which are transient.
+    if error.contains("insufficient_quota")
+        || error.contains("usage_not_included")
+        || error.contains("usage limit")
+        || error.contains("session limit")
+        || error.contains("quota exceeded")
+        || error.contains("credit balance")
+    {
+        return "quota";
     }
     if error.contains("max_duration") || error.contains("timeout") || error.contains("timed out") {
         return "timeout";
@@ -7999,6 +8020,39 @@ mod tests {
         assert_eq!(
             sandbox_dead_detail(&SandboxStatus::Created, None),
             "sandbox no longer accepts io (status Created)"
+        );
+    }
+
+    #[test]
+    fn terminal_failure_class_detects_provider_quota_exhaustion() {
+        // Codex CLI on a ChatGPT plan.
+        assert_eq!(
+            terminal_failure_class("You've hit your usage limit. Try again at 5pm."),
+            "quota"
+        );
+        // Claude Code on a Claude.ai subscription.
+        assert_eq!(
+            terminal_failure_class("You've hit your session limit · resets 8:20pm (UTC)"),
+            "quota"
+        );
+        // Raw OpenAI error codes (codex/nanocodex, API-key and subscription).
+        assert_eq!(
+            terminal_failure_class("stream error: insufficient_quota"),
+            "quota"
+        );
+        assert_eq!(
+            terminal_failure_class("api error: usage_not_included"),
+            "quota"
+        );
+        // Anthropic API-key billing.
+        assert_eq!(
+            terminal_failure_class("Your credit balance is too low to access the Anthropic API."),
+            "quota"
+        );
+        // Plain rate limits stay transient, not quota.
+        assert_eq!(
+            terminal_failure_class("429 rate limit exceeded, retry after 20s"),
+            "harness"
         );
     }
 

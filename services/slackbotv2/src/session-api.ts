@@ -530,6 +530,7 @@ export async function forwardToSessionApi(
       options,
       input.threadId,
       executeMessage,
+      input.executionIdempotencyKey,
       input.model,
       input.executeContextMessages,
       input.contextPreamble,
@@ -1356,6 +1357,7 @@ async function executeSession(
   options: SlackbotV2Options,
   threadId: string,
   message: SlackbotV2ApiMessage,
+  idempotencyKey?: string,
   model?: string,
   contextMessages?: SlackbotV2ApiMessage[],
   contextPreamble?: string,
@@ -1370,7 +1372,7 @@ async function executeSession(
   const idleTimeoutMs = sessionIdleTimeoutMs(options)
   const recordedModel = metadataModel ?? model
   const body: SlackbotV2ExecuteSessionRequest = {
-    idempotency_key: message.id,
+    idempotency_key: idempotencyKey ?? message.id,
     // Record the model this execution runs on (explicit override, else the
     // configured/baked harness default) so readers like the Console can show
     // it. Metadata only; the harness receives `model` via input_lines and only
@@ -2005,8 +2007,12 @@ async function* parseSessionEventStream(
       continue
     }
     if (event.event === 'session.execution_failed' || event.event === 'session.stream_error') {
+      const failureClass = sessionFailureClass(event)
       yield {
-        data: { error: sessionErrorMessage(event) },
+        data: {
+          error: sessionErrorMessage(event),
+          ...(failureClass ? { failureClass } : {})
+        },
         event: event.event,
         eventId: event.id,
         eventKind: event.event
@@ -2165,6 +2171,19 @@ function sessionEventData(event: ParsedSessionEvent): unknown {
   } catch {
     return event.data
   }
+}
+
+// api-rs stamps a machine-readable failure taxonomy ("quota", "timeout", ...)
+// on session.execution_failed events; surface it so consumers can react (e.g.
+// quota-driven harness fallback) without matching human-readable error prose.
+function sessionFailureClass(event: ParsedSessionEvent): string | undefined {
+  try {
+    const payload = JSON.parse(event.data)
+    if (isJsonObject(payload)) return stringValue(payload.failure_class)
+  } catch {
+    // Non-JSON payloads carry no taxonomy.
+  }
+  return undefined
 }
 
 function sessionErrorMessage(event: ParsedSessionEvent, fallback?: string): string {
