@@ -1,9 +1,11 @@
 import asyncio
 import base64
 import importlib.util
+from io import BytesIO
 from pathlib import Path
 
 import pytest
+from openpyxl import load_workbook
 
 _CLIENT_SPEC = importlib.util.spec_from_file_location(
     "docsend_client_under_test", Path(__file__).with_name("client.py")
@@ -52,6 +54,65 @@ def test_normalize_verification_url_rejects_unsupported_urls(url: str) -> None:
 )
 def test_rendered_pdf_filename_replaces_the_source_extension(name: str, expected: str) -> None:
     assert _rendered_pdf_filename(name) == expected
+
+
+def test_build_spreadsheet_workbook_preserves_tabs_cells_and_merges() -> None:
+    data = _CLIENT._build_spreadsheet_workbook(
+        [
+            {
+                "name": "Overview",
+                "column_widths": [50, 180, 90],
+                "rows": [
+                    {
+                        "height": 20,
+                        "cells": [
+                            {"text": "Heading", "colspan": 2, "rowspan": 1},
+                            {"text": "Period A", "colspan": 1, "rowspan": 1},
+                        ],
+                    },
+                    {
+                        "height": None,
+                        "cells": [
+                            {"text": "Widget count", "colspan": 1, "rowspan": 1},
+                            {"text": "$42", "colspan": 1, "rowspan": 1},
+                            {"text": "(17)", "colspan": 1, "rowspan": 1},
+                        ],
+                    },
+                ],
+            },
+            {"name": "Notes", "column_widths": [], "rows": []},
+        ]
+    )
+
+    workbook = load_workbook(BytesIO(data))
+    assert workbook.sheetnames == ["Overview", "Notes"]
+    sheet = workbook["Overview"]
+    assert sheet["A1"].value == "Heading"
+    assert "A1:B1" in {str(cell_range) for cell_range in sheet.merged_cells.ranges}
+    assert sheet["C1"].value == "Period A"
+    assert sheet["B2"].value == 42
+    assert sheet["C2"].value == -17
+    assert sheet.column_dimensions["B"].width > sheet.column_dimensions["A"].width
+
+
+def test_recover_rendered_document_returns_xlsx_for_spreadsheets(monkeypatch) -> None:
+    async def extract(page):
+        return b"xlsx-data", 3
+
+    async def fail_capture(page):
+        raise AssertionError("spreadsheet extraction must run before image capture")
+
+    monkeypatch.setattr(_CLIENT, "_extract_spreadsheet_workbook", extract)
+    monkeypatch.setattr(_CLIENT, "_capture_spreadsheet_sheets", fail_capture)
+
+    result = asyncio.run(_CLIENT._recover_rendered_document(object(), filename="Model.pdf"))
+
+    assert result["status"] == "ok"
+    assert result["filename"] == "Model.xlsx"
+    assert result["mime_type"].endswith("spreadsheetml.sheet")
+    assert result["download_method"] == "spreadsheet_xlsx"
+    assert result["sheet_count"] == 3
+    assert base64.b64decode(result["data"]) == b"xlsx-data"
 
 
 def test_recover_rendered_document_builds_a_pdf_from_visible_pages(monkeypatch) -> None:
