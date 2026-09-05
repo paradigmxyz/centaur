@@ -88,6 +88,57 @@ describe('CodexAppServerRendererEventMapper', () => {
     })
   })
 
+  it('suppresses unphased progress messages and promotes only the terminal message', () => {
+    const mapper = new CodexAppServerRendererEventMapper()
+    const output: Array<ReturnType<typeof mapper.process>[number]> = []
+    const process = (event: unknown) => output.push(...mapper.process(event))
+
+    process({ type: 'item.started', item: { id: 'progress-1', type: 'agentMessage' } })
+    process({
+      type: 'item.agentMessage.delta',
+      itemId: 'progress-1',
+      delta: 'Let me inspect the linked thread.'
+    })
+    process({
+      type: 'item.completed',
+      item: { id: 'progress-1', type: 'agentMessage', text: 'Let me inspect the linked thread.' }
+    })
+    process({
+      type: 'item.started',
+      item: { id: 'cmd-1', type: 'commandExecution', command: 'slack thread C123:123.456' }
+    })
+    process({
+      type: 'item.completed',
+      item: {
+        id: 'cmd-1',
+        type: 'commandExecution',
+        command: 'slack thread C123:123.456',
+        status: 'completed'
+      }
+    })
+    process({ type: 'item.started', item: { id: 'final-1', type: 'agentMessage' } })
+    process({ type: 'item.agentMessage.delta', itemId: 'final-1', delta: 'Investigation complete.' })
+    process({
+      type: 'item.completed',
+      item: { id: 'final-1', type: 'agentMessage', text: 'Investigation complete.' }
+    })
+    process({ type: 'turn.completed', turn: { status: 'completed' } })
+
+    const messages = output.filter(event => event.type === 'renderer.message.delta')
+    expect(messages).toEqual([
+      {
+        type: 'renderer.message.delta',
+        delta: 'Investigation complete.',
+        force: false,
+        planPrefix: true
+      }
+    ])
+    expect(output.at(-1)).toMatchObject({
+      type: 'renderer.done',
+      answerMarkdown: 'Investigation complete.'
+    })
+  })
+
   it('suppresses reasoning thinking blocks', () => {
     const mapper = new CodexAppServerRendererEventMapper()
 
