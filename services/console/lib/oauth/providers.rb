@@ -15,6 +15,7 @@ module Oauth
         Google::KEY => Google.new,
         Granola::KEY => Granola.new,
         Linear::KEY => Linear.new,
+        Paybox::KEY => Paybox.new,
         Slack::KEY => Slack.new
       }.freeze
     end

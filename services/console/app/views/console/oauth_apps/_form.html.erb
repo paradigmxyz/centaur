@@ -26,7 +26,7 @@
         <div>
           <label class="form-label" for="oauth_app_provider">Provider *</label>
           <%= select_tag "oauth_app[provider]",
-                options_for_select(Oauth::Providers.keys.map { |k| [ k.capitalize, k ] }, app.provider),
+                options_for_select(Oauth::Providers.keys.map { |k| [ Oauth::Providers.fetch(k).display_name, k ] }, app.provider),
                 id: "oauth_app_provider", class: "form-input #{field_error_class(app, :provider)}" %>
           <%= field_error(app, :provider) %>
         </div>
@@ -37,10 +37,10 @@
           <p class="form-hint">Not secret. Sent on every authorization and refresh.</p>
         </div>
         <div>
-          <label class="form-label" for="oauth_app_client_secret">Client secret<%= " *".html_safe if app.new_record? %></label>
+          <label class="form-label" for="oauth_app_client_secret">Client secret</label>
           <%= password_field_tag "oauth_app[client_secret]", nil, id: "oauth_app_client_secret", class: "form-input #{field_error_class(app, :client_secret)}", autocomplete: "off", placeholder: app.new_record? ? nil : "•••••••• (unchanged)" %>
           <%= field_error(app, :client_secret) %>
-          <p class="form-hint">Stored encrypted.<%= " Leave blank to keep the current secret." unless app.new_record? %></p>
+          <p class="form-hint">Stored encrypted. Required unless the provider uses public clients (PayBox).<%= " Leave blank to keep the current secret." unless app.new_record? %></p>
         </div>
       </div>
     </section>

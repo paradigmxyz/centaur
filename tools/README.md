@@ -71,6 +71,7 @@ The open-source tool inventory lives in this `tools/` tree and changes over time
   read-only with `DD_API_KEY` and `DD_APP_KEY`.
 - `preqin`: query Preqin Operational API fund and fund-manager data, with
   redacted auth diagnostics for `PREQIN_*` credentials.
+- `paybox`: call the PayBox MCP server with user-scoped OAuth access.
 
 ## Sandbox Tool Paths
 

@@ -37,9 +37,9 @@ module Oauth
       @identity_http_mocks.each(&:verify)
     end
 
-    def stub_exchange(status:, body:, expected: true)
+    def stub_exchange(status:, body:, expected: true, &assert_request)
       http = Minitest::Mock.new
-      expect_http_call(http, status: status, body: body) if expected
+      expect_http_call(http, status: status, body: body, &assert_request) if expected
       @exchange_http_mocks << http
       FlowsController.exchange_client_factory = -> { Broker::AuthorizationCodeClient.new(http: http) }
     end
@@ -134,6 +134,20 @@ module Oauth
         token_type: "Bearer",
         expires_in: 86_399,
         scope: scope
+      }.merge(overrides).to_json
+    end
+
+    def paybox_token_body(client_id:, **overrides)
+      claims = {
+        "iss" => Oauth::Providers::Paybox::ISSUER,
+        "aud" => Oauth::Providers::Paybox::MCP_RESOURCE,
+        "sub" => "paybox-user-1",
+        "cid" => client_id,
+        "email" => "paybox@example.com"
+      }
+      {
+        access_token: id_token(claims), refresh_token: "paybox-refresh",
+        expires_in: 3600, scope: "mcp offline_access"
       }.merge(overrides).to_json
     end
 
@@ -250,6 +264,25 @@ module Oauth
       scopes = q["scope"].split(",")
       assert_includes scopes, "read"
       assert_includes scopes, "write"
+    end
+
+    test "start redirects to PayBox with the MCP resource and public client" do
+      app = OauthApp.create!(
+        provider: "paybox", slug: "paybox", client_id: "pbx-oauth-client",
+        client_secret: nil, allowed_scopes: %w[mcp offline_access],
+        enabled: true, created_by: users(:acme_admin)
+      )
+
+      get oauth_start_url(slug: app.slug)
+      assert_response :redirect
+      uri = URI.parse(response.location)
+      assert_equal "api.paybox.sh", uri.host
+      assert_equal "/oauth/authorize", uri.path
+      query = URI.decode_www_form(uri.query).to_h
+      assert_equal "pbx-oauth-client", query["client_id"]
+      assert_equal "https://api.paybox.sh/mcp", query["resource"]
+      assert_equal "mcp offline_access", query["scope"]
+      assert_equal "S256", query["code_challenge_method"]
     end
 
     test "start redirects signed-out users to login" do
@@ -512,6 +545,31 @@ module Oauth
       assert cred.next_attempt_at.present?
       assert_equal [ "api.linear.app" ], cred.static_secret.rules.map(&:host)
       assert_equal "Linear – Ada Lovelace token", cred.static_secret.name
+    end
+
+    test "callback supports PayBox public-client tokens without a client secret" do
+      app = OauthApp.create!(
+        provider: "paybox", slug: "paybox", client_id: "pbx-oauth-client",
+        client_secret: nil, allowed_scopes: %w[mcp offline_access],
+        enabled: true, created_by: users(:acme_admin)
+      )
+      state = start_flow(slug: app.slug)
+      stub_exchange(status: 200, body: paybox_token_body(client_id: app.client_id)) do |request|
+        assert_nil request[:form]["client_secret"]
+        assert_equal app.client_id, request[:form]["client_id"]
+      end
+
+      assert_difference -> { BrokerCredential.count } => 1 do
+        get oauth_callback_url(slug: app.slug), params: { state: state, code: "auth-code" }
+      end
+      assert_redirected_to console_integrations_path
+
+      credential = BrokerCredential.find_by!(oauth_app: app, provider_subject: "paybox-user-1")
+      assert_equal "PayBox – paybox@example.com", credential.name
+      assert_equal "https://api.paybox.sh/oauth/token", credential.token_endpoint
+      assert_equal %w[mcp offline_access], credential.scopes
+      assert_equal "paybox-refresh", credential.refresh_token
+      assert_equal [ "api.paybox.sh" ], credential.static_secret.rules.map(&:host)
     end
 
     test "GitHub re-consent updates the existing credential synchronously" do

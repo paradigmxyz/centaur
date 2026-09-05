@@ -20,12 +20,18 @@ class OauthAppTest < ActiveSupport::TestCase
     refute build_app(provider: "nope").valid?
     assert build_app(provider: "github").valid?
     assert build_app(provider: "google").valid?
+    assert build_app(provider: "paybox", client_secret: nil).valid?
     assert build_app(provider: "slack").valid?
   end
 
   test "client_id and client_secret are required" do
     refute build_app(client_id: nil).valid?
     refute build_app(client_secret: nil).valid?
+  end
+
+  test "public OAuth clients do not require a client secret" do
+    assert build_app(provider: "paybox", client_secret: nil).valid?
+    refute build_app(provider: "google", client_secret: nil).valid?
   end
 
   test "slug is required, url-safe, and globally unique" do
