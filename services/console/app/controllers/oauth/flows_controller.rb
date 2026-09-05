@@ -160,8 +160,15 @@ module Oauth
         code: code.to_s,
         redirect_uri: oauth_callback_redirect_uri(@app.slug),
         code_verifier: code_verifier.to_s,
-        require_refresh_token: provider_requires_refresh_token?
+        require_refresh_token: provider_requires_refresh_token?,
+        token_endpoint_auth_method: provider_token_endpoint_auth_method
       )
+    end
+
+    def provider_token_endpoint_auth_method
+      return @provider.token_endpoint_auth_method if @provider.respond_to?(:token_endpoint_auth_method)
+
+      :client_secret_post
     end
 
     # Upserts one credential per (app, provider account). A new record gets its
@@ -178,7 +185,7 @@ module Oauth
         # overwritten: the first linked user keeps the credential.
         credential.created_by ||= current_user
         if credential.new_record?
-          credential.foreign_id = "#{@app.provider}-#{@app.slug}-#{identity[:subject].downcase}"
+          credential.foreign_id = credential_foreign_id(identity)
           credential.name = "#{@provider.display_name} – #{identity_display_name(identity)}"
           credential.token_endpoint = @provider.token_endpoint
           credential.external_user_key = SecureRandom.urlsafe_base64(16)
@@ -202,6 +209,14 @@ module Oauth
         ensure_wrapping_secret(credential)
         credential
       end
+    end
+
+    def credential_foreign_id(identity)
+      if @provider.respond_to?(:credential_foreign_id)
+        return @provider.credential_foreign_id(app_slug: @app.slug, identity: identity)
+      end
+
+      "#{@app.provider}-#{@app.slug}-#{identity[:subject].downcase}"
     end
 
     def validate_provider_result!(result)

@@ -1,0 +1,44 @@
+[project]
+name = "meeting-scheduler"
+description = "Google Calendar and Zoom scheduling for Centaur"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "asyncpg>=0.30.0",
+    "google-api-python-client>=2.100.0",
+    "httplib2>=0.20.0",
+    "httpx>=0.27.0",
+    "pysocks>=1.7.1",
+    "typer>=0.12.0",
+]
+
+[project.scripts]
+meeting-scheduler = "centaur_tool_meeting_scheduler.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "centaur_tool_meeting_scheduler"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.centaur]
+module = "client.py"
+hosts = [
+    "calendar.googleapis.com",
+    "www.googleapis.com",
+    "api.zoom.us",
+]
+secrets = [
+    { type = "oauth_token", grant = "refresh_token", name = "GOOGLE_TOKEN_JSON", token_endpoint = "https://oauth2.googleapis.com/token", hosts = [
+        "calendar.googleapis.com",
+        "www.googleapis.com",
+    ], fields = { refresh_token = { secret_ref = "GOOGLE_TOKEN_JSON", json_key = "refresh_token" }, client_id = { secret_ref = "GOOGLE_TOKEN_JSON", json_key = "client_id" }, client_secret = { secret_ref = "GOOGLE_TOKEN_JSON", json_key = "client_secret" } } },
+    # Console owns the General OAuth refresh-token family and delivers only the
+    # current access token. Zoom transcript downloads use regional *.zoom.us URLs.
+    { type = "brokered_token", name = "ZOOM_ACCESS_TOKEN", credential = "zoom-meeting-scheduler", hosts = ["api.zoom.us", "*.zoom.us"] },
+    { type = "pg_dsn", name = "CENTAUR_POSTGRES_DSN", database = "ai_v2", secret_ref = "CENTAUR_POSTGRES_DSN", role = "centaur_meeting_scheduler" },
+]

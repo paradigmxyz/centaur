@@ -1,3 +1,5 @@
+require "base64"
+
 module Broker
   # Registry for broker credential token-exchange strategies. BrokerCredential
   # owns persistence and scheduling; these strategies own provider-specific
@@ -138,11 +140,21 @@ module Broker
       end
 
       def post_token_form(credential, url:, form:, form_encoding: :urlencoded, strict_4xx: false)
+        headers = (credential.token_endpoint_headers || {}).dup
+        if credential.oauth_app&.provider_strategy&.respond_to?(:token_endpoint_auth_method) &&
+            credential.oauth_app.provider_strategy.token_endpoint_auth_method.to_sym == :client_secret_basic
+          client_id = credential.effective_client_id
+          client_secret = credential.effective_client_secret
+          require_value!("client_id", client_id)
+          require_value!("client_secret", client_secret)
+          headers["Authorization"] = "Basic #{Base64.strict_encode64("#{client_id}:#{client_secret}")}"
+          form = form.except("client_id", "client_secret")
+        end
         credential.refresh_client.refresh(
           url: url,
           form: form,
           form_encoding: form_encoding,
-          headers: credential.token_endpoint_headers || {},
+          headers: headers,
           timeout: credential.refresh_timeout_seconds,
           strict_4xx: strict_4xx
         )
