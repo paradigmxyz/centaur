@@ -75,7 +75,25 @@ management thread (`github-manage:{owner}/{repo}:{n}`); the agent does its GitHu
   exhaustion the bot comments tagging a human and stops. On the steady-state CI path it backs off if
   the failing head commit was authored by a human (it won't step on someone mid-edit) — except right
   after assignment, where being assigned is an explicit hand-off, so it fixes the PR regardless of who
-  pushed last.
+  pushed last. **`centaur-skip` checks** are excluded from that evaluation — see below.
+- **Skip a check.** Put `centaur-skip` anywhere in a job id and the bot ignores that check: it never
+  counts as red, never triggers a fix turn, and never appears in the escalation comment's "still
+  failing" list.
+
+  ```yaml
+  jobs:
+    agent-pr-rules-centaur-skip:
+  ```
+
+  The match is case-insensitive. GitHub uses the job id as the check-run name, and recomputes it
+  every run.
+- **Reading checks without the Checks API.** A fine-grained PAT has no Checks permission, so
+  `statusCheckRollup` hands it null check nodes and CI collapses to a bare pass/fail with no names —
+  and no way to spot a `centaur-skip` check. When the nodes are unreadable, githubbot rebuilds the
+  checks from the Actions API (a job *is* a check run) and trusts it only if it accounts for every
+  context GitHub counted; otherwise it keeps the old aggregate behavior rather than risk calling a
+  PR green on a check it never saw. Commit statuses and check runs from other GitHub Apps aren't
+  Actions jobs, which is exactly what that count check catches.
 - **Address review.** A submitted review (`changes_requested` / `commented`) triggers one holistic
   turn that reads all the feedback, makes a single coherent commit, replies on each thread, resolves
   what it addressed, and re-requests review.
@@ -165,6 +183,6 @@ requests**, **Pull request reviews**, **Check runs**, **Check suites**, and **Wo
 
 `bun test test` — unit tests for the override flag parser, the GitHub thread-key parsing / context
 preamble, the review-request trigger gating (incl. team requests), the issue-assignment gating, the
-v2 PR-manager decision logic (CI evaluation, assignment-based ownership, merge gating, the CI-fix
-counter / escalation, and the merge-claim release-on-failure), the author-association gate, body
-mentions, and the per-session serialization queue.
+v2 PR-manager decision logic (CI evaluation, centaur-skip checks, the Actions fallback for unreadable check detail, assignment-based ownership, merge
+gating, the CI-fix counter / escalation, and the merge-claim release-on-failure), the
+author-association gate, body mentions, and the per-session serialization queue.
