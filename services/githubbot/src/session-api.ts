@@ -26,6 +26,8 @@ import {
   traceLog,
 } from "./utils";
 
+const DEFAULT_GITHUBBOT_MAX_DURATION_MS = 45 * 60 * 1000;
+
 export class SessionApiError extends Error {
   readonly action: string;
   readonly body: string;
@@ -522,9 +524,8 @@ async function executeSession(
     ...(options.idleTimeoutMs === undefined
       ? {}
       : { idle_timeout_ms: options.idleTimeoutMs }),
-    ...(options.maxDurationMs === undefined
-      ? {}
-      : { max_duration_ms: options.maxDurationMs }),
+    max_duration_ms:
+      options.maxDurationMs ?? DEFAULT_GITHUBBOT_MAX_DURATION_MS,
   };
   const response = await fetchFn(
     apiSessionUrl(options.apiUrl, threadId, "execute"),
