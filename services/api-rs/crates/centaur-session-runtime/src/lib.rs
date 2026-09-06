@@ -42,6 +42,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use time::OffsetDateTime;
 use tokio::{
     io,
     sync::Mutex,
@@ -94,6 +95,52 @@ type SessionTitleThreadSet = Arc<DashSet<ThreadKey>>;
 type SessionTitleGenerator = Arc<
     dyn Fn(String) -> BoxFuture<'static, Result<String, SessionTitleGenerationError>> + Send + Sync,
 >;
+
+/// Durable cross-replica sandbox reference lease backed by `PgSessionStore`.
+///
+/// The renewer task periodically re-ups the lease expiry. Drop aborts the
+/// renewer; a crash or cancellation leaves a TTL-bounded DB row that the
+/// cleanup worker purges once expired. Explicit completion via `release`
+/// owner-checked-deletes the row (best-effort, logs on failure).
+#[must_use = "the sandbox reference lease must be held for the owning task's lifetime"]
+pub struct SandboxReferenceLease {
+    store: PgSessionStore,
+    sandbox_id: Arc<str>,
+    owner_id: Arc<str>,
+    renewer: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl SandboxReferenceLease {
+    /// Aborts the renewer and owner-checked-deletes the lease row.
+    /// Deletion failures are warn-only and not returned.
+    pub async fn release(mut self) {
+        if let Some(renewer) = self.renewer.take() {
+            renewer.abort();
+            let _ = renewer.await;
+        }
+        if let Err(error) = self
+            .store
+            .delete_sandbox_lease(&self.sandbox_id, &self.owner_id)
+            .await
+        {
+            warn!(
+                sandbox_id = %self.sandbox_id,
+                owner_id = %self.owner_id,
+                %error,
+                "failed to delete sandbox reference lease on release; \
+                 cleanup worker will purge it once expired",
+            );
+        }
+    }
+}
+
+impl Drop for SandboxReferenceLease {
+    fn drop(&mut self) {
+        if let Some(renewer) = self.renewer.take() {
+            renewer.abort();
+        }
+    }
+}
 
 #[async_trait::async_trait]
 pub trait SessionPrincipalRegistrar: Send + Sync {
@@ -186,6 +233,15 @@ pub struct PersonaDefinition {
     pub prompt_hash: String,
     #[serde(skip_serializing)]
     pub prompt: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PersonaSummary {
+    pub id: String,
+    pub source_root: String,
+    pub source_path: String,
+    pub source_ref: Option<String>,
+    pub prompt_hash: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -947,6 +1003,69 @@ impl SessionRuntime {
         }
     }
 
+    /// Acquire a durable sandbox reference shared by every api-rs replica.
+    pub async fn acquire_sandbox_reference_lease(
+        &self,
+        sandbox_id: &str,
+        owner_id: &str,
+    ) -> Result<SandboxReferenceLease, SessionRuntimeError> {
+        let sandbox_id: Arc<str> = Arc::from(sandbox_id);
+        let owner_id: Arc<str> = Arc::from(owner_id);
+        let lease_ttl = time::Duration::minutes(10);
+        let acquired = self
+            .store
+            .acquire_sandbox_lease(
+                &sandbox_id,
+                &owner_id,
+                OffsetDateTime::now_utc() + lease_ttl,
+            )
+            .await?;
+        if !acquired {
+            return Err(SessionRuntimeError::SandboxLeaseOwned {
+                sandbox_id: sandbox_id.to_string(),
+            });
+        }
+
+        let store = self.store.clone();
+        let renewer_sandbox_id = Arc::clone(&sandbox_id);
+        let renewer_owner_id = Arc::clone(&owner_id);
+        let renewer = tokio::spawn(async move {
+            loop {
+                sleep(Duration::from_secs(60)).await;
+                let expires_at = OffsetDateTime::now_utc() + lease_ttl;
+                match store
+                    .renew_sandbox_lease(&renewer_sandbox_id, &renewer_owner_id, expires_at)
+                    .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        warn!(
+                            sandbox_id = %renewer_sandbox_id,
+                            owner_id = %renewer_owner_id,
+                            "sandbox reference lease was lost; stopping renewer",
+                        );
+                        break;
+                    }
+                    Err(error) => {
+                        warn!(
+                            sandbox_id = %renewer_sandbox_id,
+                            owner_id = %renewer_owner_id,
+                            %error,
+                            "failed to renew sandbox reference lease; retrying next interval",
+                        );
+                    }
+                }
+            }
+        });
+
+        Ok(SandboxReferenceLease {
+            store: self.store.clone(),
+            sandbox_id,
+            owner_id,
+            renewer: Some(renewer),
+        })
+    }
+
     pub fn with_session_title_generator<F, Fut>(mut self, generator: F) -> Self
     where
         F: Fn(String) -> Fut + Send + Sync + 'static,
@@ -1649,6 +1768,7 @@ impl SessionRuntime {
                     )
                     .await?;
             }
+
             info!(
                 component = COMPONENT_SESSION_RUNTIME,
                 event = "session_create_or_get_completed",
@@ -2254,11 +2374,74 @@ impl SessionRuntime {
                 }
             };
 
+            // Allocation-only placeholder. An orchestrator claims a sandbox by
+            // executing with the `allocate_sandbox` marker and no input: the
+            // pod claim above is the entire purpose of the call. Left open,
+            // nothing ever completes it — the harness has no child until a
+            // User command spawns one, so not even an interrupt can end it —
+            // and max_duration fails it a minute later, leaving an
+            // `execution exceeded` row on the thread and a one-minute wait
+            // on every cold claim. Complete it here instead: the sandbox is
+            // assigned and no model turn is billed. Fenced to exactly this shape —
+            // the marker action AND no input — so no real execution can take the
+            // path.
+            if is_allocation_only_placeholder(requester_metadata.as_ref(), &input_lines) {
+                // Through the normal terminal machinery, not a bare store
+                // update: the completion event, transcript archive, lease
+                // release, activity touch, finished metric, and the idle
+                // pause the caller's own idle_timeout asked for all hang
+                // off `record_terminal_output`, and skipping them is how an
+                // abandoned allocation outlives its timeout until a sweep.
+                let terminal = record_terminal_output(
+                    &self.context(),
+                    thread_key,
+                    &sandbox_id,
+                    &execution.execution_id,
+                    TerminalOutput::Completed {
+                        reason: "allocation_only",
+                        result_text: None,
+                    },
+                )
+                .await?;
+                // `None` means another writer terminalized the row first;
+                // the in-memory `execution` still says running, and
+                // returning it would report a status the store has already
+                // replaced. Read the thread's terminal truth instead.
+                let terminal = match terminal {
+                    Some(terminal) => terminal,
+                    None => self
+                        .store
+                        .latest_execution_for_thread(thread_key)
+                        .await?
+                        .ok_or_else(|| {
+                            SessionRuntimeError::BadRequest(format!(
+                                "allocation-only execution {} disappeared from {}",
+                                execution.execution_id,
+                                thread_key.as_str(),
+                            ))
+                        })?,
+                };
+                info!(
+                    component = COMPONENT_SESSION_RUNTIME,
+                    event = "session_execute_allocation_only",
+                    thread_key = %thread_key,
+                    execution_id = %terminal.execution_id,
+                    sandbox_id = %sandbox_id,
+                    status = %terminal.status,
+                    completion_reason = "allocation_only",
+                    "allocation-only placeholder completed; sandbox claimed without a turn"
+                );
+                span.record("centaur.execution_id", terminal.execution_id.as_str());
+                span.record("execution_id", terminal.execution_id.as_str());
+                return Ok(terminal);
+            }
+
             let trace = SessionTraceContext::for_execution(
                 Some(&execution_trace_span),
                 traceparent.or_else(|| execution_traceparent(&execution).map(ToOwned::to_owned)),
                 Some(&execution.execution_id),
-            );
+            )
+            .with_max_duration_ms(max_duration_ms);
             let input_lines = input_lines_with_session_context(thread_key, &trace, &input_lines);
             if let Err(error) = write_input_lines(
                 &pipe,
@@ -3710,6 +3893,7 @@ impl SessionRuntime {
             .await;
             return Ok(OrphanAdoption::Failed);
         }
+
         if !self.claim_expired_stdout_owner(execution_id).await? {
             // Deferrals repeat on every periodic scan while another control
             // plane pumps the execution; only the first observation is worth
@@ -4294,6 +4478,7 @@ fn harness_server_subcommand(harness: &HarnessType) -> &'static str {
         HarnessType::ClaudeCode => "claude-code",
         HarnessType::Amp => "amp",
         HarnessType::Nanocodex => "nanocodex",
+        HarnessType::Omp => "omp",
         HarnessType::Hermes => "hermes",
     }
 }
@@ -5290,7 +5475,7 @@ async fn record_terminal_output(
     sandbox_id: &str,
     execution_id: &str,
     terminal: TerminalOutput,
-) -> Result<(), SessionRuntimeError> {
+) -> Result<Option<SessionExecution>, SessionRuntimeError> {
     let mut failure_class = None;
     let (terminal_execution, terminal_status) = match terminal {
         TerminalOutput::Completed {
@@ -5302,7 +5487,7 @@ async fn record_terminal_output(
                 .complete_execution_if_active_and_stdout_owner(execution_id, &ctx.stdout_owner_id)
                 .await?
             else {
-                return Ok(());
+                return Ok(None);
             };
             let mut payload = json!({
                 "execution_id": execution_id,
@@ -5334,7 +5519,7 @@ async fn record_terminal_output(
                 )
                 .await?
             else {
-                return Ok(());
+                return Ok(None);
             };
             ctx.store
                 .append_event(
@@ -5361,7 +5546,7 @@ async fn record_terminal_output(
                 )
                 .await?
             else {
-                return Ok(());
+                return Ok(None);
             };
             ctx.store
                 .append_event(
@@ -5408,12 +5593,12 @@ async fn record_terminal_output(
         spawn_idle_pause(
             ctx.clone(),
             thread_key.clone(),
-            terminal_execution.execution_id,
+            terminal_execution.execution_id.clone(),
             sandbox_id.to_owned(),
             idle_timeout,
         );
     }
-    Ok(())
+    Ok(Some(terminal_execution))
 }
 
 fn spawn_max_duration_failure(
@@ -5457,9 +5642,8 @@ fn spawn_stdout_owner_renewer(ctx: RuntimeContext, execution_id: String) {
                         execution_id,
                         stdout_owner_id = %ctx.stdout_owner_id,
                         %error,
-                        "failed to renew stdout owner lease"
+                        "failed to renew stdout owner lease; retrying"
                     );
-                    break;
                 }
             }
         }
@@ -5668,7 +5852,6 @@ fn should_pause_idle_sandbox(
         ExecutionStatus::Completed | ExecutionStatus::Failed | ExecutionStatus::Cancelled
     )
 }
-
 fn duration_millis_u64(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
@@ -5979,6 +6162,7 @@ fn runtime_error_failure_class(error: &SessionRuntimeError) -> &'static str {
         SessionRuntimeError::Sandbox(SandboxError::Io { .. }) => "sandbox_io",
         SessionRuntimeError::Sandbox(SandboxError::Backend { .. }) => "sandbox_backend",
         SessionRuntimeError::Sandbox(SandboxError::InvalidSpec(_)) => "sandbox_invalid_spec",
+        SessionRuntimeError::SandboxLeaseOwned { .. } => "sandbox_lease_owned",
         SessionRuntimeError::IronControl(_) => "iron_control",
         SessionRuntimeError::WarmPool(_) => "warm_pool",
         SessionRuntimeError::CapacityExceeded { .. } => "capacity",
@@ -6434,6 +6618,10 @@ const EXECUTION_TRACEPARENT_METADATA_KEY: &str = "centaur.traceparent";
 #[derive(Clone, Debug)]
 struct SessionTraceContext {
     traceparent: Option<String>,
+    /// Trusted execution duration forwarded to the harness as a local safety
+    /// deadline. api-rs remains authoritative and records the timeout first.
+    max_duration_ms: Option<u64>,
+    /// Durable execution identity propagated to harness trace metadata.
     execution_id: Option<String>,
 }
 
@@ -6452,8 +6640,14 @@ impl SessionTraceContext {
             traceparent: execution_span
                 .and_then(centaur_telemetry::traceparent_for_span)
                 .or(persisted_traceparent),
+            max_duration_ms: None,
             execution_id: execution_id.map(ToOwned::to_owned),
         }
+    }
+
+    fn with_max_duration_ms(mut self, max_duration_ms: Option<u64>) -> Self {
+        self.max_duration_ms = max_duration_ms;
+        self
     }
 }
 
@@ -6519,6 +6713,22 @@ fn input_line_with_session_context(
         }
     }
     prepend_chat_surface_note(map, thread_key);
+    // max_duration_ms is a reserved control-plane field. Remove any caller
+    // value even when this execution has no configured maximum; otherwise the
+    // OMP harness would trust a deadline that api-rs is not enforcing.
+    if let Some(Value::Object(metadata)) = map.get_mut("trace_metadata") {
+        metadata.remove("max_duration_ms");
+    }
+    // Inject trusted execution controls into trace_metadata after the line
+    // leaves the client boundary. Client-supplied values are overwritten.
+    if let Some(max_duration_ms) = trace.max_duration_ms {
+        let mut metadata = match map.get("trace_metadata") {
+            Some(Value::Object(existing)) => existing.clone(),
+            _ => serde_json::Map::new(),
+        };
+        metadata.insert("max_duration_ms".to_owned(), json!(max_duration_ms));
+        map.insert("trace_metadata".to_owned(), Value::Object(metadata));
+    }
     merge_session_context(map, session_context_for_thread(thread_key));
     serde_json::to_string(&value).unwrap_or_else(|_| line.to_owned())
 }
@@ -6927,6 +7137,18 @@ fn validate_input_lines(lines: &[String]) -> Result<(), SessionRuntimeError> {
     Ok(())
 }
 
+/// True for the sandbox-allocation placeholder: the marker action and
+/// no input lines. A host that wants only the pod an execution claims — not
+/// a turn in it — executes exactly this shape, and [`SessionRuntime::
+/// execute_session`] completes it as soon as the sandbox is assigned.
+fn is_allocation_only_placeholder(metadata: Option<&Value>, input_lines: &[String]) -> bool {
+    input_lines.is_empty()
+        && metadata
+            .and_then(|value| value.get("action"))
+            .and_then(Value::as_str)
+            == Some("allocate_sandbox")
+}
+
 fn stdout_pump_error_message(error: &LinesCodecError) -> String {
     match error {
         LinesCodecError::MaxLineLengthExceeded => {
@@ -7212,6 +7434,8 @@ pub enum SessionRuntimeError {
     Store(#[from] SessionStoreError),
     #[error(transparent)]
     Sandbox(#[from] SandboxError),
+    #[error("sandbox {sandbox_id} reference lease is held by another owner")]
+    SandboxLeaseOwned { sandbox_id: String },
     #[error(transparent)]
     IronControl(#[from] centaur_iron_control::IronControlError),
     #[error(transparent)]
@@ -8003,6 +8227,34 @@ mod tests {
     }
 
     #[test]
+    fn execution_max_duration_is_injected_into_trusted_harness_metadata() {
+        let thread_key = ThreadKey::parse("workflow:test:repair").unwrap();
+        let trace = SessionTraceContext::new(None, None).with_max_duration_ms(Some(2_700_000));
+        let input = r#"{"type":"user","text":"repair","trace_metadata":{"max_duration_ms":1}}"#;
+
+        let value: Value =
+            serde_json::from_str(&input_line_with_session_context(&thread_key, &trace, input))
+                .unwrap();
+
+        assert_eq!(value["trace_metadata"]["max_duration_ms"], 2_700_000);
+    }
+
+    #[test]
+    fn absent_execution_max_duration_removes_client_harness_override() {
+        let thread_key = ThreadKey::parse("workflow:test:repair").unwrap();
+        let trace = SessionTraceContext::new(None, None);
+        let input = r#"{"type":"user","text":"repair","trace_metadata":{"max_duration_ms":2700000,"client_tag":"kept"}}"#;
+
+        let value: Value =
+            serde_json::from_str(&input_line_with_session_context(&thread_key, &trace, input))
+                .unwrap();
+        let metadata = value["trace_metadata"].as_object().unwrap();
+
+        assert!(!metadata.contains_key("max_duration_ms"));
+        assert_eq!(metadata["client_tag"], "kept");
+    }
+
+    #[test]
     fn execution_metadata_preserves_idle_and_max_duration() {
         let metadata =
             execution_metadata(Some(json!({"source": "test"})), Some(2_000), Some(5_000));
@@ -8079,25 +8331,25 @@ mod tests {
             &session,
             Some(&completed),
             "exe-1",
-            "asbx-1"
+            "asbx-1",
         ));
         assert!(!should_pause_idle_sandbox(
             &session,
             Some(&running),
             "exe-1",
-            "asbx-1"
+            "asbx-1",
         ));
         assert!(!should_pause_idle_sandbox(
             &session,
             Some(&newer),
             "exe-1",
-            "asbx-1"
+            "asbx-1",
         ));
         assert!(!should_pause_idle_sandbox(
             &session,
             Some(&completed),
             "exe-1",
-            "asbx-other"
+            "asbx-other",
         ));
     }
 
@@ -8420,10 +8672,12 @@ mod tests {
         let codex_spec = workload.spec(&thread_key, &HarnessType::Codex, None);
         let claude_spec = workload.spec(&thread_key, &HarnessType::ClaudeCode, None);
         let amp_spec = workload.spec(&thread_key, &HarnessType::Amp, None);
+        let omp_spec = workload.spec(&thread_key, &HarnessType::Omp, None);
 
         assert_eq!(codex_spec.args, vec!["harness-server", "codex"]);
         assert_eq!(claude_spec.args, vec!["harness-server", "claude-code"]);
         assert_eq!(amp_spec.args, vec!["harness-server", "amp"]);
+        assert_eq!(omp_spec.args, vec!["harness-server", "omp"]);
         // The image entrypoint must be preserved: only CMD is overridden.
         assert_eq!(codex_spec.command, None);
     }
@@ -8603,6 +8857,7 @@ mod tests {
         let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
         let trace = SessionTraceContext {
             traceparent: Some("00-0123456789abcdef0123456789abcdef-0123456789abcdef-01".to_owned()),
+            max_duration_ms: None,
             execution_id: None,
         };
 
@@ -8720,6 +8975,23 @@ mod tests {
 
         assert_eq!(content.len(), 1);
         assert_eq!(content[0]["text"], "hi");
+    }
+
+    #[test]
+    fn input_line_replaces_non_object_trace_metadata_with_trusted_values() {
+        // Regression: a malicious client sends a non-object trace_metadata
+        // (e.g. null). api-rs must replace it with a fresh object carrying
+        // the trusted max_duration_ms.
+        let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
+        let trace = SessionTraceContext::new(None, None).with_max_duration_ms(Some(99));
+
+        let line = input_line_with_session_context(
+            &thread_key,
+            &trace,
+            r#"{"type":"user","trace_metadata":null}"#,
+        );
+        let value: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["trace_metadata"]["max_duration_ms"], 99);
     }
 
     #[test]
@@ -10142,6 +10414,106 @@ mod adoption_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn allocation_only_placeholder_claims_a_sandbox_and_completes() {
+        // An orchestrator's sandbox claim: execute with the marker and no
+        // input. Before the allocation-only path this execution stayed open
+        // — nothing completes a harness with no child — until max_duration
+        // failed it, leaving an `execution exceeded` row on the thread for the
+        // full minute. It must now return completed with the sandbox assigned
+        // and admit the next execution on the same thread immediately.
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let (base_url, _requests, _server) = spawn_execute_iron_control_stub().await;
+        let thread_key =
+            ThreadKey::parse(format!("omp:test:alloc-{}", uuid::Uuid::new_v4())).unwrap();
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let (io, _stdout, _stdin) = mock_io();
+        backend.push_io(io).await;
+        let runtime =
+            runtime_with_registrar(&store, backend.clone(), requester_test_registrar(base_url));
+
+        runtime
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Omp,
+                None,
+                None,
+                HarnessConflictPolicy::Reject,
+            )
+            .await
+            .expect("create session");
+
+        let claimed = runtime
+            .execute_session(
+                &thread_key,
+                ExecuteSessionInput {
+                    idempotency_key: Some(format!("alloc-{}", uuid::Uuid::new_v4())),
+                    metadata: Some(json!({"source": "orchestrator", "action": "allocate_sandbox"})),
+                    input_lines: vec![],
+                    idle_timeout_ms: Some(30_000),
+                    max_duration_ms: Some(60_000),
+                },
+            )
+            .await
+            .expect("allocation-only execute");
+
+        assert_eq!(
+            claimed.status,
+            ExecutionStatus::Completed,
+            "the placeholder completes as soon as the sandbox is assigned"
+        );
+        assert!(
+            store
+                .get_session(&thread_key)
+                .await
+                .expect("read session")
+                .sandbox_id
+                .is_some(),
+            "the pod claim is the point of the call"
+        );
+
+        // The completion went through the normal terminal machinery, so the
+        // thread carries a real `session.execution_completed` event — what
+        // the console and any event-stream consumer read — not just a row
+        // whose status quietly changed.
+        let events = store
+            .list_events_after(&thread_key, 0, Some(&claimed.execution_id), 100)
+            .await
+            .expect("list execution events");
+        let completed = events
+            .iter()
+            .find(|event| event.event_type == "session.execution_completed")
+            .expect("allocation-only completion event");
+        assert_eq!(
+            completed.payload["completion_reason"].as_str(),
+            Some("allocation_only")
+        );
+
+        // The placeholder is terminal, so a real turn on the same thread is
+        // admitted immediately — not blocked for a minute.
+        let turn = runtime
+            .execute_session(
+                &thread_key,
+                ExecuteSessionInput {
+                    idempotency_key: Some(format!("turn-{}", uuid::Uuid::new_v4())),
+                    metadata: None,
+                    input_lines: vec![r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#.to_owned()],
+                    idle_timeout_ms: None,
+                    max_duration_ms: None,
+                },
+            )
+            .await
+            .expect("next execution admitted after allocation-only claim");
+        store
+            .complete_execution(&turn.execution_id)
+            .await
+            .expect("complete the follow-up turn");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn channel_execute_binds_requester_and_second_user_swaps_it() {
         let Some(store) = test_store().await else {
             return;
@@ -11537,7 +11909,7 @@ mod adoption_tests {
                 .expect("claim as this control plane")
         );
 
-        runtime.handoff_owned_executions(Duration::ZERO).await;
+        let _ = runtime.handoff_owned_executions(Duration::ZERO).await;
 
         wait_for_event(&store, &thread_key, "session.stdout_owner_released").await;
         // The lease is immediately claimable by a peer control plane; without
@@ -11587,7 +11959,7 @@ mod adoption_tests {
                 .await
                 .expect("complete execution")
         });
-        runtime
+        let _ = runtime
             .handoff_owned_executions(Duration::from_secs(5))
             .await;
         let completed = completer.await.expect("completer task");
@@ -11615,7 +11987,7 @@ mod adoption_tests {
 
         // Nothing owned: the handoff returns immediately but still flips
         // the shutdown fence.
-        runtime.handoff_owned_executions(Duration::ZERO).await;
+        let _ = runtime.handoff_owned_executions(Duration::ZERO).await;
 
         let thread_key =
             ThreadKey::parse(format!("test:handoff-fence-{}", uuid::Uuid::new_v4())).unwrap();
