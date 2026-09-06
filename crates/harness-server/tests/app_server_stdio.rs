@@ -2436,13 +2436,27 @@ while IFS= read -r line; do
       ;;
     prompt)
       TURN_COUNT=$((TURN_COUNT+1))
-      printf '{{"id":"%s","type":"response","command":"prompt","success":true,"data":{{"agentInvoked":true}}}}\n' "$ID"
-      printf '%s\n' '{{"type":"agent_start"}}'
-      printf '%s\n' '{{"type":"turn_start"}}'
-      printf '%s\n' '{{"type":"message_update","assistantMessageEvent":{{"type":"text_delta","contentIndex":0,"delta":"hello from turn '"$TURN_COUNT"'"}},"message":{{"role":"assistant","content":[],"responseId":"msg-'"$TURN_COUNT"'"}}}}'
-      printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"hello from turn '"$TURN_COUNT"'"}}],"stopReason":"stop","responseId":"msg-'"$TURN_COUNT"'"}}}}'
-      printf '%s\n' '{{"type":"turn_end"}}'
-      printf '%s\n' '{{"type":"agent_end","messages":[]}}'
+      # Like omp, a prompt whose first token is a bare `/word` is a builtin
+      # slash command: local output, no agent turn. Paths are not commands.
+      MSG=$(printf '%s' "$line" | sed -n 's/.*"message":"\([^"]*\)".*/\1/p')
+      FIRST=${{MSG%% *}}
+      case "$FIRST" in
+        /*/*) SLASH=0 ;;
+        /*) SLASH=1 ;;
+        *) SLASH=0 ;;
+      esac
+      if [ "$SLASH" = 1 ]; then
+        printf '%s\n' '{{"type":"command_output","text":"Context: 12k of 200k tokens"}}'
+        printf '{{"id":"%s","type":"response","command":"prompt","success":true,"data":{{"agentInvoked":false}}}}\n' "$ID"
+      else
+        printf '{{"id":"%s","type":"response","command":"prompt","success":true,"data":{{"agentInvoked":true}}}}\n' "$ID"
+        printf '%s\n' '{{"type":"agent_start"}}'
+        printf '%s\n' '{{"type":"turn_start"}}'
+        printf '%s\n' '{{"type":"message_update","assistantMessageEvent":{{"type":"text_delta","contentIndex":0,"delta":"hello from turn '"$TURN_COUNT"'"}},"message":{{"role":"assistant","content":[],"responseId":"msg-'"$TURN_COUNT"'"}}}}'
+        printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"hello from turn '"$TURN_COUNT"'"}}],"stopReason":"stop","responseId":"msg-'"$TURN_COUNT"'"}}}}'
+        printf '%s\n' '{{"type":"turn_end"}}'
+        printf '%s\n' '{{"type":"agent_end","messages":[]}}'
+      fi
       ;;
     steer)
       printf '{{"id":"%s","type":"response","command":"steer","success":true}}\n' "$ID"
@@ -2855,6 +2869,143 @@ done
     assert!(
         interrupted,
         "valid interrupt must finish turn as interrupted"
+    );
+
+    let _ = bridge.finish_successfully();
+}
+
+#[test]
+fn resident_omp_allowlisted_slash_command_output_becomes_the_reply() {
+    let pidfile = temp_path("omp-rpc-pid-slash-ok");
+    let commands_path = format!("{}.commands", pidfile.display());
+    let _ = std::fs::remove_file(&pidfile);
+    let _ = std::fs::remove_file(&commands_path);
+    let script = fake_omp_rpc_script(&pidfile);
+    let mut bridge = spawn_omp_resident(script, &[]);
+
+    // api-rs prepends a chat-surface note as the first text block for console
+    // and Slack threads; the user's command is the last block.
+    let turn = bridge.run_blocks_user_line(
+        json!({
+            "type": "user",
+            "thread_key": "slack:C123:123.456",
+            "trace_metadata": {"source": "console", "action": "execute"},
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "[chat surface: Slack · channel C123 · thread 123.456.]"},
+                    {"type": "text", "text": "/context"},
+                ],
+            },
+        }),
+        Duration::from_secs(30),
+    );
+    assert_eq!(turn.terminal_status.as_deref(), Some("completed"));
+    assert!(
+        turn.text_from_deltas
+            .contains("Context: 12k of 200k tokens"),
+        "command output must stream as agent text, got {:?}",
+        turn.text_from_deltas
+    );
+    assert!(
+        turn.completed_agent_items
+            .values()
+            .any(|text| text.contains("Context: 12k of 200k tokens")),
+        "command output must complete as an agent item, got {:?}",
+        turn.completed_agent_items
+    );
+    let commands = std::fs::read_to_string(&commands_path).unwrap_or_default();
+    assert!(
+        commands.contains(r#""message":"/context""#),
+        "allowlisted command must reach omp as a prompt without the surface note: {commands}"
+    );
+    assert!(
+        !commands.contains("chat surface"),
+        "the chat-surface note must not be forwarded with a slash command: {commands}"
+    );
+
+    // The resident process is still usable for a normal turn afterwards.
+    let turn = bridge.run_blocks_user_turn("hello", Duration::from_secs(30));
+    assert_eq!(turn.terminal_status.as_deref(), Some("completed"));
+    assert!(turn.text_from_deltas.contains("hello from turn 2"));
+
+    let _ = bridge.finish_successfully();
+}
+
+#[test]
+fn resident_omp_refuses_slash_commands_with_effects_beyond_the_session() {
+    let pidfile = temp_path("omp-rpc-pid-slash-deny");
+    let commands_path = format!("{}.commands", pidfile.display());
+    let _ = std::fs::remove_file(&pidfile);
+    let _ = std::fs::remove_file(&commands_path);
+    let script = fake_omp_rpc_script(&pidfile);
+    let mut bridge = spawn_omp_resident(script, &[]);
+
+    let turn = bridge.run_blocks_user_turn("/share", Duration::from_secs(30));
+    assert_eq!(turn.terminal_status.as_deref(), Some("completed"));
+    let reply = turn
+        .completed_agent_items
+        .values()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        reply.contains("`/share` is not available through Centaur"),
+        "refusal must be the reply: {reply}"
+    );
+    assert!(
+        reply.contains("`/context`"),
+        "refusal must list alternatives: {reply}"
+    );
+    assert!(!pidfile.exists(), "a refused command must not spawn omp");
+
+    // A disallowed subcommand of an allowed command is refused the same way.
+    let turn = bridge.run_blocks_user_turn("/mcp add foo", Duration::from_secs(30));
+    let reply = turn
+        .completed_agent_items
+        .values()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        reply.contains("`/mcp add` is not available through Centaur"),
+        "subcommand refusal must be the reply: {reply}"
+    );
+    assert!(!pidfile.exists(), "a refused subcommand must not spawn omp");
+
+    // The allowed subcommand reaches omp and its output is surfaced.
+    let turn = bridge.run_blocks_user_turn("/mcp list", Duration::from_secs(30));
+    assert_eq!(turn.terminal_status.as_deref(), Some("completed"));
+    assert!(
+        turn.text_from_deltas
+            .contains("Context: 12k of 200k tokens")
+    );
+    let commands = std::fs::read_to_string(&commands_path).unwrap_or_default();
+    assert!(
+        commands.contains(r#""message":"/mcp list""#),
+        "commands: {commands}"
+    );
+    assert!(
+        !commands.contains("/share") && !commands.contains("/mcp add"),
+        "refused commands must never reach omp: {commands}"
+    );
+
+    let _ = bridge.finish_successfully();
+}
+
+#[test]
+fn resident_omp_forwards_slash_like_paths_as_prompts() {
+    let pidfile = temp_path("omp-rpc-pid-slash-path");
+    let _ = std::fs::remove_file(&pidfile);
+    let script = fake_omp_rpc_script(&pidfile);
+    let mut bridge = spawn_omp_resident(script, &[]);
+
+    let turn = bridge.run_blocks_user_turn("/etc/hosts is empty, why?", Duration::from_secs(30));
+    assert_eq!(turn.terminal_status.as_deref(), Some("completed"));
+    assert!(
+        turn.text_from_deltas.contains("hello from turn 1"),
+        "a path is a prompt, not a command: {:?}",
+        turn.text_from_deltas
     );
 
     let _ = bridge.finish_successfully();

@@ -13,6 +13,17 @@
 //! Across resident lifetimes (child death / re-acquire), set
 //! `CENTAUR_OMP_SESSION_NAME` so respawn passes `--resume <name>` and the
 //! prior JSONL session is continued instead of starting an anonymous one.
+//!
+//! # Slash commands
+//! In RPC mode omp executes its builtin slash commands locally and streams
+//! their output as `command_output` frames instead of starting a model turn.
+//! The host forwards only [`OMP_SLASH_COMMAND_ALLOWLIST`] (commands with no
+//! effect beyond the current omp session) and surfaces that output as the
+//! turn's agent message; every other `/command` is answered by the host
+//! without reaching omp. The command is read from the user's own text block
+//! (the last one): api-rs prepends a chat-surface note for console and Slack
+//! threads, and forwarding that note along would hide the leading `/` from
+//! omp's parser, so an allowed command is sent to omp alone.
 
 use std::env;
 use std::io::{self, BufRead, Write};
@@ -26,7 +37,7 @@ use serde_json::{Value, json};
 
 use crate::omp::OmpStreamEvent;
 use crate::server::BlocksCommand;
-use crate::turn::CodexTurnNormalizer;
+use crate::turn::{BridgeConfig, CodexTurnNormalizer};
 use crate::util::write_value;
 use crate::{HarnessServerError, Result};
 const DEFAULT_OMP_TURN_TIMEOUT: Duration = Duration::from_secs(300);
@@ -124,6 +135,8 @@ pub enum OmpRpcFrame {
         id: Option<String>,
         agent_invoked: bool,
     },
+    /// Output of a builtin slash command omp ran locally (no model turn).
+    CommandOutput { text: String },
     /// Any other unsolicited frame the adapter does not demultiplex into a
     /// normalized event (extension_error, available_commands_update,
     /// host_tool_*, subagent_*). Forwarded verbatim to the host log.
@@ -177,6 +190,13 @@ impl OmpRpcFrame {
                     .unwrap_or(false);
                 Ok(Self::PromptResult { id, agent_invoked })
             }
+            "command_output" => Ok(Self::CommandOutput {
+                text: value
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            }),
             // AgentSessionEvent frames reuse the one-shot stream parser so the
             // normalized event surface is identical across paths.
             "session"
@@ -574,6 +594,195 @@ pub fn abort_command(id: &str) -> Value {
     json!({ "id": id, "type": "abort" })
 }
 
+/// Slash commands the resident host forwards to omp. omp runs its builtin
+/// slash commands locally in RPC mode, so every entry must leave no trace
+/// beyond the current omp session: no settings, plugin, MCP, SSH, or memory
+/// writes, no session rename, move, or delete, no upload. `None` admits every
+/// first argument; `Some(list)` admits only those (`""` is the bare command).
+const OMP_SLASH_COMMAND_ALLOWLIST: &[(&str, Option<&[&str]>)] = &[
+    ("changelog", None),
+    ("compact", None),
+    ("context", None),
+    ("dump", None),
+    ("export", None),
+    ("fast", None),
+    ("force", None),
+    ("fresh", None),
+    ("jobs", None),
+    ("model", None),
+    ("prewalk", None),
+    ("reload-plugins", None),
+    ("shake", None),
+    ("todo", None),
+    ("tools", None),
+    (
+        "advisor",
+        Some(&["", "toggle", "on", "off", "status", "dump"]),
+    ),
+    ("browser", Some(&["status"])),
+    (
+        "marketplace",
+        Some(&["list", "installed", "discover", "help"]),
+    ),
+    ("mcp", Some(&["list", "test", "reconnect"])),
+    ("memory", Some(&["", "view", "stats", "diagnose"])),
+    ("plugins", Some(&["", "list"])),
+    ("session", Some(&["", "info"])),
+    ("ssh", Some(&["list"])),
+    ("usage", Some(&["", "show"])),
+];
+
+/// A prompt omp would execute as a slash command rather than send to the model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SlashCommand<'a> {
+    name: &'a str,
+    /// First argument token, empty when the command is bare.
+    first_arg: &'a str,
+}
+
+/// Recognizes a prompt that starts with `/name`, where `name` is a bare word
+/// (letters, digits, `-`) terminated by whitespace, `:` (omp's name/argument
+/// separator), or the end of the text. Paths such as `/etc/hosts` are not
+/// commands and flow to the model unchanged.
+fn parse_slash_command(text: &str) -> Option<SlashCommand<'_>> {
+    let rest = text.trim_start().strip_prefix('/')?;
+    let name_end = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+        .unwrap_or(rest.len());
+    let name = &rest[..name_end];
+    if !name.starts_with(|c: char| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    let tail = &rest[name_end..];
+    if !(tail.is_empty() || tail.starts_with(char::is_whitespace) || tail.starts_with(':')) {
+        return None;
+    }
+    let first_arg = tail
+        .trim_start_matches(':')
+        .split_whitespace()
+        .next()
+        .unwrap_or("");
+    Some(SlashCommand { name, first_arg })
+}
+
+fn slash_command_allowed(command: &SlashCommand<'_>) -> bool {
+    let name = command.name.to_ascii_lowercase();
+    let first_arg = command.first_arg.to_ascii_lowercase();
+    OMP_SLASH_COMMAND_ALLOWLIST.iter().any(|(allowed, args)| {
+        *allowed == name && args.is_none_or(|args| args.contains(&first_arg.as_str()))
+    })
+}
+
+/// The host's reply for a slash command it refuses to forward.
+fn slash_command_rejection(command: &SlashCommand<'_>) -> String {
+    let name = command.name.to_ascii_lowercase();
+    if let Some((_, Some(args))) = OMP_SLASH_COMMAND_ALLOWLIST
+        .iter()
+        .find(|(allowed, args)| *allowed == name && args.is_some())
+    {
+        let accepted = args
+            .iter()
+            .map(|arg| {
+                if arg.is_empty() {
+                    format!("`/{name}`")
+                } else {
+                    format!("`/{name} {arg}`")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return format!(
+            "`/{name} {}` is not available through Centaur because it changes state beyond this omp session. Available: {accepted}.",
+            command.first_arg
+        );
+    }
+    let mut names: Vec<&str> = OMP_SLASH_COMMAND_ALLOWLIST
+        .iter()
+        .map(|(name, _)| *name)
+        .collect();
+    names.sort_unstable();
+    let available = names
+        .iter()
+        .map(|name| format!("`/{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "`/{}` is not available through Centaur. Slash commands run inside this thread's omp session, so only commands with no effect beyond it are forwarded: {available}.",
+        command.name
+    )
+}
+
+/// Drop ANSI CSI and OSC escape sequences from terminal-oriented command output.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                let mut previous = '\0';
+                for c in chars.by_ref() {
+                    if c == '\u{07}' || (previous == '\u{1b}' && c == '\\') {
+                        break;
+                    }
+                    previous = c;
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn omp_bridge_config(thread_id: &str, turn_id: &str) -> BridgeConfig {
+    let mut config = BridgeConfig::new(thread_id.to_owned(), turn_id.to_owned());
+    config.cli_version = "omp".to_string();
+    config.model_provider = "omp".to_string();
+    config
+}
+
+/// Emit a complete turn whose only agent output is `text`, without touching
+/// the resident process. Used for slash commands the host refuses to forward.
+fn write_local_turn(
+    stdout: &mut impl Write,
+    thread_id: &str,
+    client_user_message_id: Option<String>,
+    input: Vec<codex_app_server_protocol::UserInput>,
+    text: &str,
+) -> Result<()> {
+    use crate::traits::{NormalizedContent, NormalizedEvent};
+
+    let turn_id = format!("turn-{}", uuid::Uuid::new_v4().simple());
+    let mut normalizer = CodexTurnNormalizer::new(omp_bridge_config(thread_id, &turn_id));
+    let mut notifications = normalizer.start_notifications(true)?;
+    notifications.extend(normalizer.emit_user_message(client_user_message_id, input)?);
+    notifications.extend(
+        normalizer.process_event(&NormalizedEvent::AssistantMessage {
+            partial: false,
+            stop_reason: Some("end_turn".to_string()),
+            content: vec![NormalizedContent::AgentText {
+                item_id: format!("{turn_id}-host"),
+                text: text.to_string(),
+            }],
+        })?,
+    );
+    notifications.extend(normalizer.finish_turn(None)?);
+    for notification in notifications {
+        write_value(stdout, &notification_to_wire_value(&notification)?)?;
+    }
+    Ok(())
+}
+
 /// The resident OMP blocks server. One `omp --mode rpc` process per sandbox,
 /// reused across sequential turns. Continuously drains unsolicited
 /// session/agent lifecycle frames while ordinary commands are
@@ -582,7 +791,6 @@ pub fn abort_command(id: &str) -> Value {
 pub fn run_omp_blocks_server() -> Result<()> {
     use crate::omp::OmpEventNormalizer;
     use crate::server::{BlocksState, parse_blocks_line_with_state};
-    use crate::turn::BridgeConfig;
     use crate::wire::notification_to_wire_value;
     use std::io::{self, BufRead};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -664,6 +872,41 @@ pub fn run_omp_blocks_server() -> Result<()> {
                 // after a prior turn cleared the flag.
                 turn_active.store(true, Ordering::SeqCst);
 
+                let parts = prompt_text_parts(&input);
+                let message = parts.join("\n\n");
+
+                // Detect steering: api-rs sends a user line with
+                // trace_metadata.action == "steer_active_execution" to queue
+                // additional context during an active turn. Route it as a
+                // steer command rather than a new prompt.
+                let is_steer = trace_context.metadata.get("action").and_then(Value::as_str)
+                    == Some("steer_active_execution");
+
+                // Slash commands execute inside omp itself, so refuse the ones
+                // that would outlive this session before the process is even
+                // spawned. The refusal is the turn's (or steer's) only output.
+                // The user's own text is the last block; api-rs prepends a
+                // chat-surface note for console and Slack threads.
+                let slash_command = parts.last().and_then(|text| parse_slash_command(text));
+                if let Some(command) = &slash_command
+                    && !slash_command_allowed(command)
+                {
+                    let rejection = slash_command_rejection(command);
+                    if is_steer {
+                        write_blocks_error(&mut stdout, &thread_id, "steer", &rejection)?;
+                    } else {
+                        write_local_turn(
+                            &mut stdout,
+                            &thread_id,
+                            client_user_message_id,
+                            input,
+                            &rejection,
+                        )?;
+                    }
+                    turn_active.store(false, Ordering::SeqCst);
+                    continue;
+                }
+
                 // Spawn or reuse the resident process.
                 if child.is_none() {
                     child = Some(OmpRpcChild::spawn()?);
@@ -674,15 +917,6 @@ pub fn run_omp_blocks_server() -> Result<()> {
                     )?;
                 }
                 let child = child.as_mut().unwrap();
-
-                let message = prompt_text(&input);
-
-                // Detect steering: api-rs sends a user line with
-                // trace_metadata.action == "steer_active_execution" to queue
-                // additional context during an active turn. Route it as a
-                // steer command rather than a new prompt.
-                let is_steer = trace_context.metadata.get("action").and_then(Value::as_str)
-                    == Some("steer_active_execution");
 
                 if is_steer {
                     // Steer: send the steer command and wait for its response.
@@ -706,15 +940,19 @@ pub fn run_omp_blocks_server() -> Result<()> {
                     continue;
                 }
 
-                // Prompt: send and drive the turn to completion.
+                // Prompt: send and drive the turn to completion. An allowed
+                // slash command goes to omp alone: with the chat-surface note
+                // in front of it omp's parser would never see the leading `/`.
+                let prompt = match (&slash_command, parts.last()) {
+                    (Some(_), Some(text)) => text.clone(),
+                    _ => message.clone(),
+                };
                 let id = child.next_request_id();
-                child.send_command(&prompt_command(&id, &message, None))?;
+                child.send_command(&prompt_command(&id, &prompt, None))?;
 
                 let turn_id = format!("turn-{}", uuid::Uuid::new_v4().simple());
-                let mut config = BridgeConfig::new(thread_id.clone(), turn_id.clone());
-                config.cli_version = "omp".to_string();
-                config.model_provider = "omp".to_string();
-                let mut normalizer = CodexTurnNormalizer::new(config);
+                let mut normalizer =
+                    CodexTurnNormalizer::new(omp_bridge_config(&thread_id, &turn_id));
 
                 for notification in normalizer.start_notifications(true)? {
                     write_value(&mut stdout, &notification_to_wire_value(&notification)?)?;
@@ -818,6 +1056,7 @@ fn drive_omp_steer_response(
             OmpRpcFrame::Response { .. } => {}
             OmpRpcFrame::Event(_)
             | OmpRpcFrame::PromptResult { .. }
+            | OmpRpcFrame::CommandOutput { .. }
             | OmpRpcFrame::Ready
             | OmpRpcFrame::Other(_) => {}
         }
@@ -830,7 +1069,10 @@ fn drain_ready(child: &mut OmpRpcChild) -> Result<()> {
         let frame = OmpRpcFrame::parse_json_line(&line)?;
         match frame {
             OmpRpcFrame::Ready => return Ok(()),
-            OmpRpcFrame::Event(_) | OmpRpcFrame::PromptResult { .. } | OmpRpcFrame::Other(_) => {}
+            OmpRpcFrame::Event(_)
+            | OmpRpcFrame::PromptResult { .. }
+            | OmpRpcFrame::CommandOutput { .. }
+            | OmpRpcFrame::Other(_) => {}
             OmpRpcFrame::Response { .. } => {}
         }
     }
@@ -862,7 +1104,7 @@ fn drive_omp_turn(
     turn_timeout: Duration,
 ) -> Result<TurnDriveResult> {
     use crate::omp::OmpHarness;
-    use crate::traits::{HarnessServer, NormalizedEvent};
+    use crate::traits::{HarnessServer, NormalizedContent, NormalizedEvent};
 
     let mut pending = std::collections::VecDeque::new();
     let mut terminal = false;
@@ -870,6 +1112,8 @@ fn drive_omp_turn(
     let mut aborted = false;
     let mut child_reusable = true;
     let mut prompt_error: Option<String> = None;
+    // Output of a builtin slash command omp ran locally: (item id, text so far).
+    let mut command_item: Option<(String, String)> = None;
     // Settle window: arm only after a terminal assistant stop.
     let mut settle_deadline: Option<std::time::Instant> = None;
     let absolute_deadline = std::time::Instant::now().checked_add(turn_timeout);
@@ -1023,6 +1267,24 @@ fn drive_omp_turn(
                     }
                 }
             }
+            OmpRpcFrame::CommandOutput { text } => {
+                let text = strip_ansi(&text);
+                let (item_id, buffer) = command_item
+                    .get_or_insert_with(|| (format!("{turn_id}-command"), String::new()));
+                let delta = if buffer.is_empty() || buffer.ends_with('\n') {
+                    text
+                } else {
+                    format!("\n{text}")
+                };
+                buffer.push_str(&delta);
+                let event = NormalizedEvent::AgentTextDelta {
+                    item_id: item_id.clone(),
+                    delta,
+                };
+                for notification in normalizer.process_event(&event)? {
+                    write_value(stdout, &notification_to_wire_value(&notification)?)?;
+                }
+            }
             OmpRpcFrame::PromptResult { agent_invoked, .. } if !agent_invoked => {
                 terminal = true;
             }
@@ -1033,6 +1295,18 @@ fn drive_omp_turn(
                     eprintln!("omp rpc: unsolicited {kind} frame");
                 }
             }
+        }
+    }
+
+    // Close the slash-command output item before the turn ends.
+    if let Some((item_id, text)) = command_item.take() {
+        let event = NormalizedEvent::AssistantMessage {
+            partial: false,
+            stop_reason: Some("end_turn".to_string()),
+            content: vec![NormalizedContent::AgentText { item_id, text }],
+        };
+        for notification in normalizer.process_event(&event)? {
+            write_value(stdout, &notification_to_wire_value(&notification)?)?;
         }
     }
 
@@ -1056,13 +1330,16 @@ fn drive_omp_turn(
     })
 }
 
-fn prompt_text(input: &[codex_app_server_protocol::UserInput]) -> String {
-    let parts = crate::util::user_input_to_anthropic_content(input);
-    parts
+/// The text blocks of a user line, one per content block, in order.
+fn prompt_text_parts(input: &[codex_app_server_protocol::UserInput]) -> Vec<String> {
+    crate::util::user_input_to_anthropic_content(input)
         .into_iter()
         .filter_map(|p| p.get("text").and_then(Value::as_str).map(str::to_owned))
-        .collect::<Vec<_>>()
-        .join("\n\n")
+        .collect()
+}
+
+fn prompt_text(input: &[codex_app_server_protocol::UserInput]) -> String {
+    prompt_text_parts(input).join("\n\n")
 }
 
 fn write_blocks_error(
@@ -1414,6 +1691,90 @@ done
                 Some(v) => std::env::set_var("CENTAUR_OMP_RPC_BRIDGE_COMMAND", v),
                 None => std::env::remove_var("CENTAUR_OMP_RPC_BRIDGE_COMMAND"),
             }
+        }
+    }
+
+    // --- Slash commands -----------------------------------------------------
+
+    #[test]
+    fn slash_command_parses_bare_word_names_only() {
+        assert_eq!(
+            parse_slash_command("/context"),
+            Some(SlashCommand {
+                name: "context",
+                first_arg: ""
+            })
+        );
+        assert_eq!(
+            parse_slash_command("  /usage reset now"),
+            Some(SlashCommand {
+                name: "usage",
+                first_arg: "reset"
+            })
+        );
+        assert_eq!(
+            parse_slash_command("/model:litellm/glm"),
+            Some(SlashCommand {
+                name: "model",
+                first_arg: "litellm/glm"
+            })
+        );
+        assert_eq!(parse_slash_command("/etc/hosts is empty"), None);
+        assert_eq!(parse_slash_command("/ context"), None);
+        assert_eq!(parse_slash_command("/2fast"), None);
+        assert_eq!(parse_slash_command("look at /context"), None);
+    }
+
+    #[test]
+    fn slash_command_allowlist_admits_session_scoped_commands_only() {
+        let allowed = |text: &str| slash_command_allowed(&parse_slash_command(text).unwrap());
+        assert!(allowed("/context"));
+        assert!(allowed("/compact safe"));
+        assert!(allowed("/model litellm/glm-5.2-fp8"));
+        assert!(allowed("/mcp list"));
+        assert!(allowed("/session"));
+        assert!(allowed("/Usage show"));
+        assert!(!allowed("/share"));
+        assert!(!allowed("/mcp add foo"));
+        assert!(!allowed("/session delete"));
+        assert!(!allowed("/usage reset"));
+        assert!(!allowed("/browser"));
+        assert!(!allowed("/rename x"));
+        assert!(!allowed("/move /tmp"));
+        assert!(!allowed("/new"));
+    }
+
+    #[test]
+    fn slash_command_rejection_names_the_alternatives() {
+        let unknown = slash_command_rejection(&parse_slash_command("/share").unwrap());
+        assert!(unknown.starts_with("`/share` is not available through Centaur"));
+        assert!(unknown.contains("`/context`") && unknown.contains("`/compact`"));
+        assert!(!unknown.contains("`/share`,"));
+
+        let subcommand = slash_command_rejection(&parse_slash_command("/mcp add foo").unwrap());
+        assert!(subcommand.starts_with("`/mcp add` is not available through Centaur"));
+        assert!(subcommand.contains("`/mcp list`") && subcommand.contains("`/mcp test`"));
+    }
+
+    #[test]
+    fn strip_ansi_removes_csi_and_osc_sequences() {
+        assert_eq!(
+            strip_ansi(
+                "\u{1b}[1mContext\u{1b}[0m: 12k \u{1b}]8;;https://x\u{7}link\u{1b}]8;;\u{7}"
+            ),
+            "Context: 12k link"
+        );
+        assert_eq!(strip_ansi("plain"), "plain");
+    }
+
+    #[test]
+    fn command_output_frames_are_demultiplexed() {
+        let frame =
+            OmpRpcFrame::parse_json_line(r#"{"type":"command_output","text":"Context: 12k"}"#)
+                .unwrap();
+        match frame {
+            OmpRpcFrame::CommandOutput { text } => assert_eq!(text, "Context: 12k"),
+            other => panic!("expected CommandOutput, got {other:?}"),
         }
     }
 }
