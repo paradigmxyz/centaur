@@ -56,6 +56,11 @@ if [ -d "$STATE_DIR" ] && [ -w "$STATE_DIR" ]; then
     ln -s "$STATE_DIR/claude" "$HOME_DIR/.claude"
     ln -s "$STATE_DIR/uploads" "$HOME_DIR/uploads"
     ln -s "$STATE_DIR/branches" "$HOME_DIR/branches"
+    # omp session JSONLs + thread-map.json ride the state PVC so transcript
+    # continuity (and the bridge-id → omp-session-id map) survives sandbox
+    # replacement. harness-server honors OMP_SESSION_DIR directly.
+    mkdir -p "$STATE_DIR/omp-sessions"
+    export OMP_SESSION_DIR="$STATE_DIR/omp-sessions"
     export CENTAUR_PERSISTENT_STATE=1
 fi
 
@@ -382,6 +387,20 @@ cat > "$HOME_DIR/.pi/agent/settings.json" <<EOF
   "autoCompaction": true
 }
 EOF
+
+# ── omp (oh-my-pi) settings ──────────────────────────────────────────────────
+# Baked harness/omp/{config.yml,models.yml} land in $PI_CODING_AGENT_DIR with
+# the LiteLLM gateway base URL substituted (OMP_LITELLM_BASE_URL) so each
+# deployment points omp at its own gateway Service.
+export PI_CODING_AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME_DIR/.omp/agent}"
+mkdir -p "$PI_CODING_AGENT_DIR"
+OMP_LITELLM_BASE_URL="${OMP_LITELLM_BASE_URL:-http://litellm:4000/v1}"
+for omp_cfg in config.yml models.yml; do
+    if [ -f "$HARNESS_CONFIG_DIR/omp/$omp_cfg" ]; then
+        sed "s|__OMP_LITELLM_BASE_URL__|$OMP_LITELLM_BASE_URL|g" \
+            "$HARNESS_CONFIG_DIR/omp/$omp_cfg" > "$PI_CODING_AGENT_DIR/$omp_cfg"
+    fi
+done
 
 # ── Per-session workspace clone (no shared worktree metadata) ────────────────
 if [ "${CENTAUR_PERSISTENT_STATE:-0}" = "1" ]; then

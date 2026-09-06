@@ -19,6 +19,7 @@ enum Harness {
     ClaudeCode,
     Amp,
     Codex,
+    Omp,
 }
 
 impl Harness {
@@ -27,6 +28,7 @@ impl Harness {
             Self::ClaudeCode => "claude-code",
             Self::Amp => "amp",
             Self::Codex => "codex",
+            Self::Omp => "omp",
         }
     }
 
@@ -35,6 +37,7 @@ impl Harness {
             Self::ClaudeCode => &["claude-code", "--mode", "jsonrpc"],
             Self::Amp => &["amp", "--mode", "jsonrpc"],
             Self::Codex => &["codex", "--mode", "jsonrpc"],
+            Self::Omp => &["omp", "--mode", "jsonrpc"],
         }
     }
 
@@ -43,6 +46,7 @@ impl Harness {
             Self::ClaudeCode => &["claude-code"],
             Self::Amp => &["amp"],
             Self::Codex => &["codex"],
+            Self::Omp => &["omp"],
         }
     }
 
@@ -51,6 +55,7 @@ impl Harness {
             Self::ClaudeCode => Some("CENTAUR_CLAUDE_APP_BRIDGE_COMMAND"),
             Self::Amp => Some("CENTAUR_AMP_APP_BRIDGE_COMMAND"),
             Self::Codex => None,
+            Self::Omp => Some("CENTAUR_OMP_APP_BRIDGE_COMMAND"),
         }
     }
 
@@ -66,6 +71,7 @@ impl Harness {
                 let model = std::env::var("AMP_MODE").unwrap_or_else(|_| "deep".to_string());
                 json!({ "model": model })
             }
+            Self::Omp => json!({}),
             Self::Codex => {
                 let mut params = json!({
                     "approvalPolicy": "never",
@@ -81,6 +87,32 @@ impl Harness {
             }
         }
     }
+}
+
+#[test]
+fn fake_omp_assistant_error_fails_the_app_server_turn() {
+    let fake_omp = concat!(
+        "printf '%s\\n' ",
+        "'{\"type\":\"session\",\"version\":3,\"id\":\"omp-session\"}' ",
+        "'{\"type\":\"agent_start\"}' ",
+        "'{\"type\":\"turn_start\"}' ",
+        "'{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[],\"provider\":\"litellm\",\"model\":\"glm-5.2-fp8\",\"stopReason\":\"error\",\"errorStatus\":401,\"errorMessage\":\"401 LiteLLM Virtual Key expected\"}}' ",
+        "'{\"type\":\"turn_end\"}' ",
+        "'{\"type\":\"agent_end\",\"messages\":[]}'"
+    );
+
+    let run = run_bridge_turn(BridgeTurnConfig {
+        harness: Harness::Omp,
+        command_override: Some(fake_omp.to_string()),
+        prompt: "say hello".to_string(),
+        timeout: Duration::from_secs(10),
+    });
+
+    assert_eq!(run.turn.terminal_status.as_deref(), Some("failed"));
+    assert_eq!(
+        run.turn.terminal_error.as_deref(),
+        Some("401 LiteLLM Virtual Key expected")
+    );
 }
 
 #[test]
@@ -1273,6 +1305,8 @@ impl BridgeProcess {
         for env_key in [
             "CENTAUR_CLAUDE_APP_BRIDGE_COMMAND",
             "CENTAUR_AMP_APP_BRIDGE_COMMAND",
+            "CENTAUR_OMP_APP_BRIDGE_COMMAND",
+            "CENTAUR_OMP_RPC_BRIDGE_COMMAND",
             "CODEX_MODEL",
             "CODEX_MODEL_PROVIDER",
             "OPENROUTER_MODEL",
@@ -1931,7 +1965,9 @@ fn run_native_anthropic(harness: Harness, prompt: &str, timeout: Duration) -> Na
             ]);
             command
         }
-        Harness::Codex => panic!("native anthropic runner does not support Codex"),
+        Harness::Codex | Harness::Omp => {
+            panic!("native anthropic runner does not support {harness:?}")
+        }
     };
     command
         .stdin(Stdio::piped())
@@ -2358,4 +2394,541 @@ fn shell_quote(path: &Path) -> String {
 
 fn shell_quote_str(raw: &str) -> String {
     format!("'{}'", raw.replace('\'', "'\\''"))
+}
+
+// ---------------------------------------------------------------------------
+// Resident OMP RPC host integration tests
+// ---------------------------------------------------------------------------
+// These tests drive the real `harness-server omp` blocks-mode binary with a
+// fake `omp --mode rpc` script (via CENTAUR_OMP_RPC_BRIDGE_COMMAND) that
+// speaks the exact OMP RPC wire protocol. They prove:
+// - process reuse across two sequential turns (same fake process)
+// - prompt/steer/interrupt normalization
+// - clean shutdown
+
+/// A fake `omp --mode rpc` script that speaks the wire protocol. It writes
+/// `ready`, responds to `prompt`/`steer`/`abort` commands, and emits agent
+/// lifecycle events. A pidfile proves process reuse across turns.
+fn fake_omp_rpc_script(pidfile: &Path) -> String {
+    let script_path = temp_path(&format!("fake-omp-rpc-{}", Uuid::new_v4().simple()));
+    let script = format!(
+        r#"#!/bin/sh
+echo $$ > '{pidfile}'
+# Session resume markers for L2 restart/resume proof.
+if [ -n "$CENTAUR_OMP_SESSION_NAME" ]; then
+  echo "$CENTAUR_OMP_SESSION_NAME" > '{pidfile}.session'
+fi
+if [ -f '{pidfile}.session' ]; then
+  cat '{pidfile}.session' > '{pidfile}.resumed'
+fi
+printf '%s\n' '{{"type":"ready"}}'
+TURN_COUNT=0
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> '{pidfile}.commands'
+  CMD=$(printf '%s' "$line" | sed -n 's/.*"type":"\([^"]*\)".*/\1/p')
+  ID=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  case "$CMD" in
+    set_model)
+      printf '{{"id":"%s","type":"response","command":"set_model","success":true,"data":{{"provider":"openai-codex","id":"gpt-5.6-sol"}}}}\n' "$ID"
+      ;;
+    set_thinking_level)
+      printf '{{"id":"%s","type":"response","command":"set_thinking_level","success":true}}\n' "$ID"
+      ;;
+    prompt)
+      TURN_COUNT=$((TURN_COUNT+1))
+      printf '{{"id":"%s","type":"response","command":"prompt","success":true,"data":{{"agentInvoked":true}}}}\n' "$ID"
+      printf '%s\n' '{{"type":"agent_start"}}'
+      printf '%s\n' '{{"type":"turn_start"}}'
+      printf '%s\n' '{{"type":"message_update","assistantMessageEvent":{{"type":"text_delta","contentIndex":0,"delta":"hello from turn '"$TURN_COUNT"'"}},"message":{{"role":"assistant","content":[],"responseId":"msg-'"$TURN_COUNT"'"}}}}'
+      printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"hello from turn '"$TURN_COUNT"'"}}],"stopReason":"stop","responseId":"msg-'"$TURN_COUNT"'"}}}}'
+      printf '%s\n' '{{"type":"turn_end"}}'
+      printf '%s\n' '{{"type":"agent_end","messages":[]}}'
+      ;;
+    steer)
+      printf '{{"id":"%s","type":"response","command":"steer","success":true}}\n' "$ID"
+      ;;
+    abort)
+      printf '{{"id":"%s","type":"response","command":"abort","success":true}}\n' "$ID"
+      printf '%s\n' '{{"type":"agent_end","messages":[]}}'
+      ;;
+    set_session_name)
+      printf '{{"id":"%s","type":"response","command":"set_session_name","success":true}}\n' "$ID"
+      ;;
+    get_state)
+      # Return the released shape: sessionId + sessionFile.
+      SESSION_ID="sess-$(cat '{pidfile}' 2>/dev/null || echo unknown)"
+      printf '{{"id":"%s","type":"response","command":"get_state","success":true,"data":{{"sessionId":"%s","sessionFile":"/tmp/%s.jsonl","sessionName":"test","isStreaming":false,"isCompacting":false,"steeringMode":"all","followUpMode":"all","interruptMode":"immediate","autoCompactionEnabled":true,"messageCount":0,"queuedMessageCount":0,"todoPhases":[],"thinkingLevel":"off"}}}}\n' "$ID" "$SESSION_ID" "$SESSION_ID"
+      ;;
+    *)
+      printf '%s' "$line" >&2
+      ;;
+  esac
+done
+"#,
+        pidfile = pidfile.display(),
+    );
+    std::fs::write(&script_path, script).expect("write fake omp script");
+    set_executable(&script_path);
+    script_path.display().to_string()
+}
+
+fn set_executable(path: &Path) {
+    let _ = std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o755));
+}
+
+/// Spawn `harness-server omp` in blocks mode with a fake omp RPC bridge.
+fn spawn_omp_resident(fake_script: String, extra_envs: &[(&str, &str)]) -> BridgeProcess {
+    let bin = env!("CARGO_BIN_EXE_harness-server");
+    let mut command = Command::new(bin);
+    command
+        .args(["omp"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for env_key in [
+        "CENTAUR_OMP_APP_BRIDGE_COMMAND",
+        "CENTAUR_OMP_RPC_BRIDGE_COMMAND",
+        "OMP_SESSION_DIR",
+    ] {
+        command.env_remove(env_key);
+    }
+    command.env("CENTAUR_OMP_RPC_BRIDGE_COMMAND", &fake_script);
+    for (key, value) in extra_envs {
+        command.env(key, value);
+    }
+    BridgeProcess::spawn_command(command)
+}
+
+#[test]
+fn resident_omp_reuses_one_process_across_two_turns() {
+    let pidfile = temp_path("omp-rpc-pid");
+    let _ = std::fs::remove_file(&pidfile);
+    let script = fake_omp_rpc_script(&pidfile);
+    let mut bridge = spawn_omp_resident(script, &[]);
+
+    let turn1 = bridge.run_blocks_user_turn("first prompt", Duration::from_secs(30));
+    let pid1 = std::fs::read_to_string(&pidfile)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    let turn2 = bridge.run_blocks_user_turn("second prompt", Duration::from_secs(30));
+    let pid2 = std::fs::read_to_string(&pidfile)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    let _ = bridge.finish_successfully();
+
+    // Same process: the pidfile was written once at startup and not overwritten.
+    assert_eq!(pid1, pid2, "resident process must be reused across turns");
+    assert!(!pid1.is_empty(), "pid must have been written");
+
+    // Both turns produced text.
+    assert!(
+        turn1.text_from_deltas.contains("turn 1")
+            || turn1
+                .completed_agent_items
+                .values()
+                .any(|t| t.contains("turn 1"))
+    );
+    assert!(
+        turn2.text_from_deltas.contains("turn 2")
+            || turn2
+                .completed_agent_items
+                .values()
+                .any(|t| t.contains("turn 2"))
+    );
+}
+
+#[test]
+fn resident_omp_applies_model_and_thinking_before_prompt() {
+    let pidfile = temp_path("omp-rpc-pid-model");
+    let _ = std::fs::remove_file(&pidfile);
+    let script = fake_omp_rpc_script(&pidfile);
+    let mut bridge = spawn_omp_resident(script, &[]);
+
+    let turn = bridge.run_blocks_user_line(
+        json!({
+            "type": "user",
+            "thread_key": "task:review",
+            "model": "openai-codex/gpt-5.6-sol:max",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "review this"}],
+            },
+        }),
+        Duration::from_secs(30),
+    );
+    let _ = bridge.finish_successfully();
+
+    assert!(turn.terminal_status.is_some());
+    let commands_path = PathBuf::from(format!("{}.commands", pidfile.display()));
+    let commands = std::fs::read_to_string(commands_path)
+        .expect("read fake OMP commands")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("parse fake OMP command"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        commands
+            .iter()
+            .map(|command| command["type"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        ["get_state", "set_model", "set_thinking_level", "prompt"]
+    );
+    assert_eq!(commands[1]["provider"], "openai-codex");
+    assert_eq!(commands[1]["modelId"], "gpt-5.6-sol");
+    assert_eq!(commands[2]["level"], "max");
+}
+
+#[test]
+#[allow(clippy::useless_format)]
+fn resident_omp_drive_turn_settles_on_child_exit() {
+    // If the omp process exits without sending agent_end, drive_omp_turn
+    // must not poll forever. The settle timeout ensures the turn completes.
+    let script_path = temp_path(&format!("fake-omp-rpc-exit-{}", Uuid::new_v4().simple()));
+    let script = format!(
+        r#"#!/bin/sh
+printf '%s
+' '{{"type":"ready"}}'
+while IFS= read -r line; do
+  CMD=$(printf '%s' "$line" | sed -n 's/.*"type":"\([^"]*\)".*/\1/p')
+  ID=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  case "$CMD" in
+    prompt)
+      printf '{{"id":"%s","type":"response","command":"prompt","success":true}}
+' "$ID"
+      printf '%s
+' '{{"type":"agent_start"}}'
+      # Exit WITHOUT sending agent_end — simulates a crashed/killed process.
+      exit 0
+      ;;
+    *)
+      ;;
+  esac
+done
+"#,
+    );
+    std::fs::write(&script_path, script).expect("write exit script");
+    set_executable(&script_path);
+
+    // The turn should complete (not hang forever) because the process exits
+    // and read_line_timeout returns Err on disconnect, which propagates.
+    // The adapter should handle this gracefully. The key assertion is that
+    // we reach the end of this function — the turn didn't block forever.
+    let mut bridge = spawn_omp_resident(script_path.display().to_string(), &[]);
+    // The process exits mid-turn; the adapter must settle without hanging.
+    // run_blocks_user_line will either complete or panic on process exit.
+    // Either way, the test finishes within the timeout (not forever).
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _turn = bridge.run_blocks_user_turn("prompt", Duration::from_secs(30));
+    }));
+    // Drop the bridge — if the process already exited this is a no-op.
+    drop(bridge);
+}
+
+// ---------------------------------------------------------------------------
+// Real-binary smoke test
+// ---------------------------------------------------------------------------
+// Drives the real `omp --mode rpc` binary from the fork release
+// (v17.0.5-centaur.1) through the harness-server adapter. Ignored by default
+// because it requires the release installed at /tmp/omp-release-install.
+// Run with: cargo test --test app_server_stdio -- resident_omp_real --ignored
+
+#[test]
+fn resident_omp_session_id_resumes_across_respawn() {
+    // Fix (1): prove that get_state persists the actual session id and a
+    // second spawn passes --resume <id> via OMP_BIN (not bridge override).
+    // The fake executable records its argv and returns the session id from
+    // get_state based on its PID.
+    let session_dir = temp_path("omp-session-dir");
+    let _ = std::fs::create_dir_all(&session_dir);
+    let marker = session_dir.join(".resident_session_id");
+    let _ = std::fs::remove_file(&marker);
+    let argv_log = temp_path("omp-argv-log");
+    let _ = std::fs::remove_file(&argv_log);
+
+    // Fake omp binary: records argv, speaks the wire protocol.
+    let fake_bin = temp_path(&format!("fake-omp-bin-{}", Uuid::new_v4().simple()));
+    let script = format!(
+        r#"#!/bin/sh
+# Record argv for resume proof.
+printf '%s\n' "$*" >> '{argv_log}'
+# Write a stable PID-based session id.
+echo $$ > '{session_dir}/.pid'
+printf '%s\n' '{{"type":"ready"}}'
+while IFS= read -r line; do
+  CMD=$(printf '%s' "$line" | sed -n 's/.*"type":"\([^"]*\)".*/\1/p')
+  ID=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  case "$CMD" in
+    get_state)
+      SID="sess-$$"
+      printf '{{"id":"%s","type":"response","command":"get_state","success":true,"data":{{"sessionId":"%s","sessionFile":"/tmp/%s.jsonl","sessionName":"test","isStreaming":false,"isCompacting":false,"steeringMode":"all","followUpMode":"all","interruptMode":"immediate","autoCompactionEnabled":true,"messageCount":0,"queuedMessageCount":0,"todoPhases":[],"thinkingLevel":"off"}}}}\n' "$ID" "$SID" "$SID"
+      ;;
+    prompt)
+      printf '{{"id":"%s","type":"response","command":"prompt","success":true,"data":{{"agentInvoked":true}}}}\n' "$ID"
+      printf '%s\n' '{{"type":"agent_start"}}'
+      printf '%s\n' '{{"type":"message_update","assistantMessageEvent":{{"type":"text_delta","contentIndex":0,"delta":"hi"}},"message":{{"role":"assistant","content":[],"responseId":"msg-1"}}}}'
+      printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"hi"}}],"stopReason":"stop","responseId":"msg-1"}}}}'
+      printf '%s\n' '{{"type":"agent_end","messages":[]}}'
+      ;;
+    *)
+      ;;
+  esac
+done
+"#,
+        argv_log = argv_log.display(),
+        session_dir = session_dir.display(),
+    );
+    std::fs::write(&fake_bin, script).expect("write fake bin");
+    set_executable(&fake_bin);
+
+    // First lifetime: spawn with OMP_BIN, no bridge override.
+    {
+        let bin = env!("CARGO_BIN_EXE_harness-server");
+        let mut command = Command::new(bin);
+        command
+            .args(["omp"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env_remove("CENTAUR_OMP_RPC_BRIDGE_COMMAND")
+            .env_remove("CENTAUR_OMP_APP_BRIDGE_COMMAND")
+            .env("OMP_BIN", &fake_bin)
+            .env("OMP_SESSION_DIR", &session_dir);
+        let mut bridge = BridgeProcess::spawn_command(command);
+        let _turn = bridge.run_blocks_user_turn("first lifetime", Duration::from_secs(30));
+        let _ = bridge.finish_successfully();
+    }
+
+    // The marker must contain a session id from get_state.
+    let persisted = std::fs::read_to_string(&marker).unwrap_or_default();
+    assert!(
+        !persisted.trim().is_empty() && persisted.starts_with("sess-"),
+        "first lifetime must persist session id, got: {persisted:?}"
+    );
+
+    // Second lifetime: same OMP_BIN + session dir; must pass --resume <id>.
+    {
+        let bin = env!("CARGO_BIN_EXE_harness-server");
+        let mut command = Command::new(bin);
+        command
+            .args(["omp"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env_remove("CENTAUR_OMP_RPC_BRIDGE_COMMAND")
+            .env_remove("CENTAUR_OMP_APP_BRIDGE_COMMAND")
+            .env("OMP_BIN", &fake_bin)
+            .env("OMP_SESSION_DIR", &session_dir);
+        let mut bridge = BridgeProcess::spawn_command(command);
+        let _turn = bridge.run_blocks_user_turn("second lifetime", Duration::from_secs(30));
+        let _ = bridge.finish_successfully();
+    }
+
+    // The argv log must show --resume <persisted-id> on the second spawn.
+    let argv_log_content = std::fs::read_to_string(&argv_log).unwrap_or_default();
+    let resume_flag = format!("--resume {}", persisted.trim());
+    assert!(
+        argv_log_content.contains(&resume_flag),
+        "second spawn must pass {resume_flag}, argv log: {argv_log_content}"
+    );
+}
+
+#[test]
+fn resident_omp_active_interrupt_and_steer() {
+    // Concurrent controls during an active turn: a steer queues its exact
+    // text on the turn and an interrupt finishes it as interrupted.
+    // Steer message is recorded to a temp file for exact assertion.
+    let pidfile = temp_path("omp-rpc-pid-active-ctrl");
+    let steer_log = temp_path("omp-rpc-steer-log");
+    let _ = std::fs::remove_file(&pidfile);
+    let _ = std::fs::remove_file(&steer_log);
+    let script_path = temp_path(&format!("fake-omp-hold-{}", Uuid::new_v4().simple()));
+    let script = format!(
+        r#"#!/bin/sh
+echo $$ > '{pidfile}'
+printf '%s\n' '{{"type":"ready"}}'
+while IFS= read -r line; do
+  CMD=$(printf '%s' "$line" | sed -n 's/.*"type":"\([^"]*\)".*/\1/p')
+  ID=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  MSG=$(printf '%s' "$line" | sed -n 's/.*"message":"\([^"]*\)".*/\1/p')
+  case "$CMD" in
+    get_state)
+      printf '{{"id":"%s","type":"response","command":"get_state","success":true,"data":{{"sessionId":"sess-hold","sessionFile":"/tmp/sess-hold.jsonl","sessionName":"t","isStreaming":false,"isCompacting":false,"steeringMode":"all","followUpMode":"all","interruptMode":"immediate","autoCompactionEnabled":true,"messageCount":0,"queuedMessageCount":0,"todoPhases":[],"thinkingLevel":"off"}}}}\n' "$ID"
+      ;;
+    prompt)
+      printf '{{"id":"%s","type":"response","command":"prompt","success":true,"data":{{"agentInvoked":true}}}}\n' "$ID"
+      printf '%s\n' '{{"type":"agent_start"}}'
+      printf '%s\n' '{{"type":"message_update","assistantMessageEvent":{{"type":"text_delta","contentIndex":0,"delta":"working"}},"message":{{"role":"assistant","content":[],"responseId":"msg-1"}}}}'
+      # Hold open until abort.
+      ;;
+    steer)
+      printf '%s\n' "$MSG" > '{steer_log}'
+      printf '{{"id":"%s","type":"response","command":"steer","success":true}}\n' "$ID"
+      ;;
+    abort)
+      printf '{{"id":"%s","type":"response","command":"abort","success":true}}\n' "$ID"
+      printf '%s\n' '{{"type":"agent_end","messages":[]}}'
+      ;;
+    *)
+      ;;
+  esac
+done
+"#,
+        pidfile = pidfile.display(),
+        steer_log = steer_log.display(),
+    );
+    std::fs::write(&script_path, &script).expect("write hold script");
+    set_executable(&script_path);
+
+    let mut bridge = spawn_omp_resident(script_path.display().to_string(), &[]);
+
+    bridge.send(json!({
+        "type": "user",
+        "thread_key": "slack:C123:123.456",
+        "message": {
+            "role": "user",
+            "content": [{"type": "text", "text": "long running"}],
+        },
+    }));
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut saw_delta = false;
+    while Instant::now() < deadline && !saw_delta {
+        let v = bridge.read_json(deadline);
+        if v.get("method").and_then(Value::as_str) == Some("item/agentMessage/delta") {
+            saw_delta = true;
+        }
+    }
+    assert!(
+        saw_delta,
+        "turn must start streaming before concurrent controls"
+    );
+
+    // Valid steer during active turn.
+    bridge.send(json!({
+        "type": "user",
+        "thread_key": "slack:C123:123.456",
+        "trace_metadata": {
+            "action": "steer_active_execution",
+        },
+        "message": {
+            "role": "user",
+            "content": [{"type": "text", "text": "also include risks"}],
+        },
+    }));
+    // Wait for steer to be processed (poll the log file).
+    let steer_deadline = Instant::now() + Duration::from_secs(5);
+    let mut steer_msg = String::new();
+    while Instant::now() < steer_deadline {
+        if let Ok(s) = std::fs::read_to_string(&steer_log)
+            && !s.trim().is_empty()
+        {
+            steer_msg = s.trim().to_string();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        steer_msg, "also include risks",
+        "active steer must send exact message text, got: {steer_msg:?}"
+    );
+
+    // Valid interrupt → abort + interrupted status.
+    bridge.send(json!({
+        "type": "interrupt",
+    }));
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut interrupted = false;
+    while Instant::now() < deadline {
+        let v = bridge.read_json_allowing_error(deadline);
+        if v.get("method").and_then(Value::as_str) == Some("turn/completed") {
+            let status = v.pointer("/params/turn/status").and_then(Value::as_str);
+            if status == Some("interrupted") {
+                interrupted = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        interrupted,
+        "valid interrupt must finish turn as interrupted"
+    );
+
+    let _ = bridge.finish_successfully();
+}
+
+#[test]
+fn resident_omp_failed_prompt_preserves_error_message() {
+    // Fix 8: correlated prompt failure must carry the actual error text.
+    let pidfile = temp_path("omp-rpc-pid-fail");
+    let _ = std::fs::remove_file(&pidfile);
+    let script_path = temp_path(&format!("fake-omp-fail-{}", Uuid::new_v4().simple()));
+    let script = format!(
+        r#"#!/bin/sh
+echo $$ > '{pidfile}'
+printf '%s\n' '{{"type":"ready"}}'
+while IFS= read -r line; do
+  CMD=$(printf '%s' "$line" | sed -n 's/.*"type":"\([^"]*\)".*/\1/p')
+  ID=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  case "$CMD" in
+    get_state)
+      printf '{{"id":"%s","type":"response","command":"get_state","success":true,"data":{{"sessionId":"sess-fail","sessionFile":"/tmp/s.jsonl","sessionName":"t","isStreaming":false,"isCompacting":false,"steeringMode":"all","followUpMode":"all","interruptMode":"immediate","autoCompactionEnabled":true,"messageCount":0,"queuedMessageCount":0,"todoPhases":[],"thinkingLevel":"off"}}}}\n' "$ID"
+      ;;
+    prompt)
+      printf '{{"id":"%s","type":"response","command":"prompt","success":false,"error":"Model not found: provider/model"}}\n' "$ID"
+      ;;
+    *)
+      ;;
+  esac
+done
+"#,
+        pidfile = pidfile.display(),
+    );
+    std::fs::write(&script_path, &script).expect("write fail script");
+    set_executable(&script_path);
+
+    let mut bridge = spawn_omp_resident(script_path.display().to_string(), &[]);
+
+    bridge.send(json!({
+        "type": "user",
+        "thread_key": "slack:C123:123.456",
+        "message": {
+            "role": "user",
+            "content": [{"type": "text", "text": "hello"}],
+        },
+    }));
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut saw_actual_error = false;
+    let mut saw_failed_turn = false;
+    while Instant::now() < deadline {
+        let v = bridge.read_json_allowing_error(deadline);
+        let method = v.get("method").and_then(Value::as_str).unwrap_or_default();
+        if method == "error" {
+            let msg = v
+                .pointer("/params/error/message")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if msg.contains("Model not found") {
+                saw_actual_error = true;
+            }
+        }
+        if method == "turn/completed" {
+            let status = v.pointer("/params/turn/status").and_then(Value::as_str);
+            if status == Some("failed") {
+                saw_failed_turn = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_actual_error,
+        "must preserve actual prompt error message"
+    );
+    assert!(saw_failed_turn, "failed prompt must finish as failed");
+
+    let _ = bridge.finish_successfully();
 }

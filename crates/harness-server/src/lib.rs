@@ -6,6 +6,8 @@ mod error;
 pub mod hermes;
 mod nanocodex;
 mod nanocodex_subagents;
+pub mod omp;
+mod omp_rpc;
 mod otel;
 mod server;
 mod traits;
