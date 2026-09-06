@@ -1094,6 +1094,21 @@ impl PgSessionStore {
         row.try_into().map(Some)
     }
 
+    /// Returns the true latest event id for a session without applying a page
+    /// limit. Lifecycle request anchors must use this rather than taking the
+    /// maximum of a bounded ascending page, which can point at an old event
+    /// once a session has more than one page of history.
+    pub async fn latest_event_id(&self, thread_key: &ThreadKey) -> Result<i64, SessionStoreError> {
+        sqlx::query_scalar::<_, Option<i64>>(
+            "select max(event_id) from session_events where thread_key = $1",
+        )
+        .bind(thread_key.as_str())
+        .fetch_one(&self.pool)
+        .await
+        .map(|latest| latest.unwrap_or(0))
+        .map_err(Into::into)
+    }
+
     pub async fn list_events_after(
         &self,
         thread_key: &ThreadKey,
@@ -1146,6 +1161,100 @@ impl PgSessionStore {
         Ok(exists)
     }
 
+    /// Acquires an absent or expired sandbox reference lease.
+    ///
+    /// A live lease is fenced: another owner cannot overwrite it. Returns
+    /// whether this caller acquired the row.
+    pub async fn acquire_sandbox_lease(
+        &self,
+        sandbox_id: &str,
+        owner_id: &str,
+        expires_at: OffsetDateTime,
+    ) -> Result<bool, SessionStoreError> {
+        let result = sqlx::query(
+            r#"
+            insert into session_sandbox_leases (sandbox_id, owner_id, expires_at)
+            values ($1, $2, $3)
+            on conflict (sandbox_id) do update
+            set owner_id = excluded.owner_id,
+                expires_at = excluded.expires_at,
+                updated_at = now()
+            where session_sandbox_leases.expires_at <= now()
+            "#,
+        )
+        .bind(sandbox_id)
+        .bind(owner_id)
+        .bind(expires_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Extends a live lease held by `owner_id` without inserting or stealing.
+    ///
+    /// Returns false when the lease is missing, expired, or owned elsewhere.
+    pub async fn renew_sandbox_lease(
+        &self,
+        sandbox_id: &str,
+        owner_id: &str,
+        expires_at: OffsetDateTime,
+    ) -> Result<bool, SessionStoreError> {
+        let result = sqlx::query(
+            r#"
+            update session_sandbox_leases
+            set expires_at = $3, updated_at = now()
+            where sandbox_id = $1
+              and owner_id = $2
+              and expires_at > now()
+            "#,
+        )
+        .bind(sandbox_id)
+        .bind(owner_id)
+        .bind(expires_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Deletes a sandbox reference lease owned by `owner_id`. The owner check
+    /// prevents one replica from releasing a lease another owner renewed
+    /// (and thus now owns) out from under it. A no-op (no matching row) is
+    /// not an error: a crashed renewer may have left the lease to expire, and
+    /// a best-effort release must not panic on the clean path.
+    pub async fn delete_sandbox_lease(
+        &self,
+        sandbox_id: &str,
+        owner_id: &str,
+    ) -> Result<(), SessionStoreError> {
+        sqlx::query(
+            r#"
+            delete from session_sandbox_leases
+            where sandbox_id = $1 and owner_id = $2
+            "#,
+        )
+        .bind(sandbox_id)
+        .bind(owner_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Purges every expired sandbox reference lease. Run by the cleanup scan
+    /// before it lists referenced sandboxes so a stale lease left by a
+    /// crashed renewer cannot pin a sandbox forever. Returns the number of
+    /// rows removed so the caller can log drift.
+    pub async fn delete_expired_sandbox_leases(&self) -> Result<u64, SessionStoreError> {
+        let result = sqlx::query(
+            r#"
+            delete from session_sandbox_leases
+            where expires_at <= now()
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     pub async fn list_referenced_sandbox_ids(&self) -> Result<Vec<String>, SessionStoreError> {
         let rows = sqlx::query_scalar::<_, String>(
             r#"
@@ -1158,6 +1267,12 @@ impl PgSessionStore {
             select sandbox_id
             from session_warm_sandboxes
             where status in ('ready', 'claimed', 'evicting')
+
+            union
+
+            select sandbox_id
+            from session_sandbox_leases
+            where expires_at > now()
             "#,
         )
         .fetch_all(&self.pool)
@@ -2717,5 +2832,259 @@ mod tests {
                 .expect("list referenced sandboxes")
                 .contains(&sandbox_id)
         );
+    }
+
+    // ---- session sandbox leases (cross-replica durable refs) ----
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unexpired_sandbox_lease_appears_referenced() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let sandbox_id = format!("sbx-lease-ref-{}", Uuid::new_v4());
+        let owner_id = format!("owner-lease-ref-{}", Uuid::new_v4());
+        let expires_at = OffsetDateTime::now_utc() + TimeDuration::minutes(10);
+
+        store
+            .acquire_sandbox_lease(&sandbox_id, &owner_id, expires_at)
+            .await
+            .expect("acquire lease");
+
+        assert!(
+            store
+                .list_referenced_sandbox_ids()
+                .await
+                .expect("list referenced sandboxes")
+                .contains(&sandbox_id),
+            "an unexpired lease must keep the sandbox referenced"
+        );
+
+        store
+            .delete_sandbox_lease(&sandbox_id, &owner_id)
+            .await
+            .expect("delete lease");
+        assert!(
+            !store
+                .list_referenced_sandbox_ids()
+                .await
+                .expect("list referenced sandboxes")
+                .contains(&sandbox_id),
+            "deleting the lease must drop the reference"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delete_sandbox_lease_rejects_wrong_owner() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let sandbox_id = format!("sbx-lease-owner-{}", Uuid::new_v4());
+        let owner_id = format!("owner-lease-owner-{}", Uuid::new_v4());
+        let expires_at = OffsetDateTime::now_utc() + TimeDuration::minutes(10);
+
+        store
+            .acquire_sandbox_lease(&sandbox_id, &owner_id, expires_at)
+            .await
+            .expect("acquire lease");
+
+        // A different owner must not be able to release the lease.
+        store
+            .delete_sandbox_lease(&sandbox_id, "some-other-owner")
+            .await
+            .expect("delete is not an error even with a wrong owner");
+        assert!(
+            store
+                .list_referenced_sandbox_ids()
+                .await
+                .expect("list referenced sandboxes")
+                .contains(&sandbox_id),
+            "a wrong-owner delete must not release the lease"
+        );
+
+        // The holding owner can release it.
+        store
+            .delete_sandbox_lease(&sandbox_id, &owner_id)
+            .await
+            .expect("delete lease");
+        assert!(
+            !store
+                .list_referenced_sandbox_ids()
+                .await
+                .expect("list referenced sandboxes")
+                .contains(&sandbox_id),
+            "the holding owner can release the lease"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn expired_sandbox_lease_is_not_referenced_before_purge() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let sandbox_id = format!("sbx-lease-expired-ref-{}", Uuid::new_v4());
+        let owner_id = format!("owner-lease-expired-ref-{}", Uuid::new_v4());
+        let expired_at = OffsetDateTime::now_utc() - TimeDuration::minutes(1);
+
+        store
+            .acquire_sandbox_lease(&sandbox_id, &owner_id, expired_at)
+            .await
+            .expect("acquire expired lease");
+
+        assert!(
+            !store
+                .list_referenced_sandbox_ids()
+                .await
+                .expect("list referenced sandboxes")
+                .contains(&sandbox_id),
+            "an expired lease must not keep the sandbox referenced before purge"
+        );
+
+        store
+            .delete_sandbox_lease(&sandbox_id, &owner_id)
+            .await
+            .expect("delete expired lease");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delete_expired_sandbox_leases_purges_stale_rows() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let sandbox_id = format!("sbx-lease-expired-{}", Uuid::new_v4());
+        let owner_id = format!("owner-lease-expired-{}", Uuid::new_v4());
+        // Insert a lease that is already expired.
+        let expired_at = OffsetDateTime::now_utc() - TimeDuration::minutes(1);
+        store
+            .acquire_sandbox_lease(&sandbox_id, &owner_id, expired_at)
+            .await
+            .expect("acquire expired lease");
+
+        let purged = store
+            .delete_expired_sandbox_leases()
+            .await
+            .expect("purge expired leases");
+        assert!(purged >= 1, "at least one expired lease must be purged");
+
+        assert!(
+            !store
+                .list_referenced_sandbox_ids()
+                .await
+                .expect("list referenced sandboxes")
+                .contains(&sandbox_id),
+            "an expired lease must not keep the sandbox referenced after purge"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn acquire_sandbox_lease_rejects_live_owner() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let sandbox_id = format!("sbx-lease-fence-{}", Uuid::new_v4());
+        let first_owner = format!("owner-lease-first-{}", Uuid::new_v4());
+        let second_owner = format!("owner-lease-second-{}", Uuid::new_v4());
+        let expires_at = OffsetDateTime::now_utc() + TimeDuration::minutes(10);
+
+        assert!(
+            store
+                .acquire_sandbox_lease(&sandbox_id, &first_owner, expires_at)
+                .await
+                .expect("acquire first lease")
+        );
+        assert!(
+            !store
+                .acquire_sandbox_lease(&sandbox_id, &second_owner, expires_at)
+                .await
+                .expect("reject second lease"),
+            "a live lease must not be stolen by another owner"
+        );
+
+        let persisted_owner: String =
+            sqlx::query_scalar("select owner_id from session_sandbox_leases where sandbox_id = $1")
+                .bind(&sandbox_id)
+                .fetch_one(store.pool())
+                .await
+                .expect("fetch lease owner");
+        assert_eq!(persisted_owner, first_owner);
+
+        store
+            .delete_sandbox_lease(&sandbox_id, &first_owner)
+            .await
+            .expect("delete lease");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn renew_sandbox_lease_does_not_recreate_released_lease() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let sandbox_id = format!("sbx-lease-release-race-{}", Uuid::new_v4());
+        let owner_id = format!("owner-lease-release-race-{}", Uuid::new_v4());
+        let expires_at = OffsetDateTime::now_utc() + TimeDuration::minutes(10);
+
+        assert!(
+            store
+                .acquire_sandbox_lease(&sandbox_id, &owner_id, expires_at)
+                .await
+                .expect("acquire lease")
+        );
+        store
+            .delete_sandbox_lease(&sandbox_id, &owner_id)
+            .await
+            .expect("delete lease");
+
+        assert!(
+            !store
+                .renew_sandbox_lease(&sandbox_id, &owner_id, expires_at)
+                .await
+                .expect("renew deleted lease"),
+            "renewal must not recreate a released lease"
+        );
+        let exists: bool = sqlx::query_scalar(
+            "select exists(select 1 from session_sandbox_leases where sandbox_id = $1)",
+        )
+        .bind(&sandbox_id)
+        .fetch_one(store.pool())
+        .await
+        .expect("check released lease");
+        assert!(!exists);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn renew_sandbox_lease_extends_expiry() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let sandbox_id = format!("sbx-lease-renew-{}", Uuid::new_v4());
+        let owner_id = format!("owner-lease-renew-{}", Uuid::new_v4());
+        let soon = OffsetDateTime::now_utc() + TimeDuration::minutes(1);
+        let later = OffsetDateTime::now_utc() + TimeDuration::minutes(10);
+
+        store
+            .acquire_sandbox_lease(&sandbox_id, &owner_id, soon)
+            .await
+            .expect("acquire initial lease");
+        store
+            .renew_sandbox_lease(&sandbox_id, &owner_id, later)
+            .await
+            .expect("renew lease");
+
+        let persisted: OffsetDateTime = sqlx::query_scalar(
+            "select expires_at from session_sandbox_leases where sandbox_id = $1",
+        )
+        .bind(&sandbox_id)
+        .fetch_one(store.pool())
+        .await
+        .expect("fetch expiry");
+        // Postgres stores timestamptz at microsecond precision.
+        assert!(
+            (persisted - later).abs() < TimeDuration::milliseconds(1),
+            "renewal must update expires_at to the new value"
+        );
+
+        store
+            .delete_sandbox_lease(&sandbox_id, &owner_id)
+            .await
+            .expect("delete lease");
     }
 }

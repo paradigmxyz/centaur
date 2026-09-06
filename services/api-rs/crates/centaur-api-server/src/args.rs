@@ -2003,11 +2003,19 @@ impl IronProxyHarnessArgs {
     /// so sessions restarted onto another harness still get working
     /// credentials through the proxy.
     fn fragments(&self) -> Result<Vec<ProxyFragment>, ServerError> {
-        let mut fragments = vec![self.fragment()?];
+        let mut fragments = Vec::new();
+        // Engines with no auth-mode source (amp, omp — credentials reach the
+        // sandbox as plain env, not proxy-injected) have no infra fragment to
+        // require. An explicit KUBERNETES_IRON_PROXY_HARNESS_AUTH_MODE still
+        // forces resolution (and fails loudly on an unknown pair).
+        if self.auth_mode.is_some() || harness_auth_mode_env(&self.engine).is_some() {
+            fragments.push(self.fragment()?);
+        }
         for engine in [
             HarnessType::Codex,
             HarnessType::ClaudeCode,
             HarnessType::Amp,
+            HarnessType::Omp,
         ] {
             if harness_fragment_engine_name(&engine) == harness_fragment_engine_name(&self.engine) {
                 continue;
@@ -2078,6 +2086,7 @@ fn harness_fragment_engine_name(engine: &HarnessType) -> &'static str {
         HarnessType::Amp => "amp",
         HarnessType::ClaudeCode => "claude-code",
         HarnessType::Nanocodex => "codex",
+        HarnessType::Omp => "omp",
         HarnessType::Hermes => "hermes",
     }
 }
@@ -2096,6 +2105,9 @@ fn harness_auth_mode_env(engine: &HarnessType) -> Option<String> {
         HarnessType::Codex | HarnessType::Nanocodex => env::var("CODEX_AUTH_MODE").ok(),
         HarnessType::ClaudeCode => env::var("CLAUDE_CODE_AUTH_MODE").ok(),
         HarnessType::Amp => None,
+        // omp gets its upstream key through the plain sandbox env (LiteLLM
+        // gateway), not an iron-proxy auth fragment — the amp pattern.
+        HarnessType::Omp => None,
         // Hermes resolves providers through its own credential store /
         // iron-proxy placeholder injection; no dedicated auth-mode env.
         HarnessType::Hermes => None,
