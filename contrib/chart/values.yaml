@@ -355,6 +355,13 @@ sandbox:
   # mirrored into slackbotv2. This keeps Slack's model/thinking footer aligned
   # with the policy the sandbox actually runs.
   extraEnv: {}
+  # Sign every Git commit created in a sandbox with an OpenPGP key from an
+  # existing Kubernetes Secret. Disabled by default. Use a dedicated,
+  # passphrase-free signing subkey; never put private key material in values.
+  gitCommitSigning:
+    enabled: false
+    existingSecretName: ""
+    secretKey: private-key.asc
   telemetry:
     # Include user prompts, assistant responses, and bounded shell commands on
     # harness spans.

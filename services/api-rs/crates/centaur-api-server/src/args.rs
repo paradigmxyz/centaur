@@ -24,8 +24,9 @@ use centaur_iron_proxy::{
     harness_auth_fragment, infra_fragment,
 };
 use centaur_sandbox_agent_k8s::{
-    AgentSandboxBackend, AgentSandboxConfig, GitHubTokenRef, IronControlSettings, IronProxyConfig,
-    OtlpEgressTarget, Toleration, ToolSource, ToolsConfig,
+    AgentSandboxBackend, AgentSandboxConfig, GIT_COMMIT_SIGNING_KEY_PATH, GitCommitSigningConfig,
+    GitHubTokenRef, IronControlSettings, IronProxyConfig, OtlpEgressTarget, Toleration, ToolSource,
+    ToolsConfig,
 };
 use centaur_sandbox_core::{Mount, MountKind, ResourceRequirements, SandboxSpec};
 use centaur_sandbox_local::LocalSandboxBackend;
@@ -716,6 +717,26 @@ struct SandboxArgs {
         env = "SESSION_SANDBOX_PRIORITY_CLASS_NAME"
     )]
     priority_class_name: Option<String>,
+    /// Enable mandatory OpenPGP commit signing in every sandbox. The private
+    /// key is mounted from an existing Secret by the Kubernetes backend.
+    #[arg(
+        long = "session-sandbox-git-commit-signing-enabled",
+        env = "SESSION_SANDBOX_GIT_COMMIT_SIGNING_ENABLED",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    git_commit_signing_enabled: bool,
+    #[arg(
+        long = "session-sandbox-git-commit-signing-secret-name",
+        env = "SESSION_SANDBOX_GIT_COMMIT_SIGNING_SECRET_NAME"
+    )]
+    git_commit_signing_secret_name: Option<String>,
+    #[arg(
+        long = "session-sandbox-git-commit-signing-secret-key",
+        env = "SESSION_SANDBOX_GIT_COMMIT_SIGNING_SECRET_KEY",
+        default_value = "private-key.asc"
+    )]
+    git_commit_signing_secret_key: String,
     #[command(flatten)]
     tools: ToolDiscoveryArgs,
     #[command(flatten)]
@@ -831,11 +852,11 @@ impl SandboxArgs {
                     self.kube_client().await?,
                     AgentSandboxConfig::try_from(self)?,
                 );
-                let stopped = backend.drain_service_account_mismatches().await?;
+                let stopped = backend.drain_configuration_mismatches().await?;
                 if !stopped.is_empty() {
                     info!(
                         stopped_count = stopped.len(),
-                        "drained sandboxes with stale service accounts before enabling reuse"
+                        "drained sandboxes with stale immutable configuration before enabling reuse"
                     );
                 }
                 Ok(SandboxRuntime::backend_with_workload(
@@ -1144,7 +1165,45 @@ impl SandboxArgs {
             }
         }
 
+        self.apply_git_commit_signing_env(&mut envs);
+
         Ok(envs)
+    }
+
+    fn apply_git_commit_signing_env(&self, envs: &mut Vec<(String, String)>) {
+        if !self.git_commit_signing_enabled {
+            return;
+        }
+        for (name, value) in [
+            ("CENTAUR_GIT_COMMIT_SIGNING_ENABLED", "true"),
+            (
+                "CENTAUR_GIT_COMMIT_SIGNING_KEY_PATH",
+                GIT_COMMIT_SIGNING_KEY_PATH,
+            ),
+        ] {
+            envs.retain(|(existing, _)| existing != name);
+            envs.push((name.to_owned(), value.to_owned()));
+        }
+    }
+
+    fn git_commit_signing_config(&self) -> Result<Option<GitCommitSigningConfig>, ServerError> {
+        if !self.git_commit_signing_enabled {
+            return Ok(None);
+        }
+        let secret_name = clean_optional_value(self.git_commit_signing_secret_name.as_deref())
+            .ok_or_else(|| {
+                ServerError::UnsupportedConfig(
+                    "SESSION_SANDBOX_GIT_COMMIT_SIGNING_SECRET_NAME is required when commit signing is enabled"
+                        .to_owned(),
+                )
+            })?;
+        let secret_key = clean_optional_value(Some(&self.git_commit_signing_secret_key))
+            .ok_or_else(|| {
+                ServerError::UnsupportedConfig(
+                    "SESSION_SANDBOX_GIT_COMMIT_SIGNING_SECRET_KEY must not be empty".to_owned(),
+                )
+            })?;
+        Ok(Some(GitCommitSigningConfig::new(secret_name, secret_key)))
     }
 
     /// `SESSION_SANDBOX_NODE_SELECTOR` parsed as a JSON object of label
@@ -1318,6 +1377,8 @@ impl SandboxArgs {
                 }
             }
         }
+
+        self.apply_git_commit_signing_env(&mut envs);
 
         Ok(envs)
     }
@@ -1530,6 +1591,7 @@ impl TryFrom<&SandboxArgs> for AgentSandboxConfig {
             .map(str::trim)
             .filter(|name| !name.is_empty())
             .map(str::to_owned);
+        config.git_commit_signing = args.git_commit_signing_config()?;
         config.ready_timeout = Duration::from_secs(args.ready_timeout_secs);
         let mut proxy = args.iron_proxy.to_config()?;
         let mut fragments = vec![args.iron_proxy.infra_fragment()?];
@@ -2492,6 +2554,89 @@ mod tests {
         );
         assert_eq!(config.ready_timeout, Duration::from_secs(42));
         assert!(config.iron_proxy.is_some());
+        assert!(config.git_commit_signing.is_none());
+    }
+
+    #[test]
+    fn git_commit_signing_requires_a_secret_when_enabled() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-backend",
+            "agent-k8s",
+            "--session-sandbox-git-commit-signing-enabled",
+            "true",
+            "--iron-control-url",
+            "http://console.local",
+            "--iron-control-api-key",
+            "iak_test",
+        ])
+        .unwrap();
+
+        let error = AgentSandboxConfig::try_from(&args.sandbox).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("SESSION_SANDBOX_GIT_COMMIT_SIGNING_SECRET_NAME is required")
+        );
+    }
+
+    #[test]
+    fn git_commit_signing_configures_the_key_mount_and_workload_env() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-backend",
+            "agent-k8s",
+            "--session-sandbox-workload",
+            "codex-app-server",
+            "--session-sandbox-git-commit-signing-enabled",
+            "true",
+            "--session-sandbox-git-commit-signing-secret-name",
+            "centaur-git-signing",
+            "--session-sandbox-git-commit-signing-secret-key",
+            "signing-subkey.asc",
+            "--session-sandbox-extra-env",
+            r#"[
+                {"name":"CENTAUR_GIT_COMMIT_SIGNING_ENABLED","value":"false"},
+                {"name":"CENTAUR_GIT_COMMIT_SIGNING_KEY_PATH","value":"/tmp/other-key"}
+            ]"#,
+            "--iron-control-url",
+            "http://console.local",
+            "--iron-control-api-key",
+            "iak_test",
+        ])
+        .unwrap();
+
+        let config = AgentSandboxConfig::try_from(&args.sandbox).unwrap();
+        assert_eq!(
+            config.git_commit_signing,
+            Some(GitCommitSigningConfig::new(
+                "centaur-git-signing",
+                "signing-subkey.asc"
+            ))
+        );
+        let env = args.sandbox.codex_app_server_env_template().unwrap();
+        assert!(env.iter().any(|(name, value)| {
+            name == "CENTAUR_GIT_COMMIT_SIGNING_ENABLED" && value == "true"
+        }));
+        assert!(env.iter().any(|(name, value)| {
+            name == "CENTAUR_GIT_COMMIT_SIGNING_KEY_PATH" && value == GIT_COMMIT_SIGNING_KEY_PATH
+        }));
+        assert_eq!(
+            env.iter()
+                .filter(|(name, _)| name == "CENTAUR_GIT_COMMIT_SIGNING_ENABLED")
+                .count(),
+            1
+        );
+        assert_eq!(
+            env.iter()
+                .filter(|(name, _)| name == "CENTAUR_GIT_COMMIT_SIGNING_KEY_PATH")
+                .count(),
+            1
+        );
     }
 
     #[test]

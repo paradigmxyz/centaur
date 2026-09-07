@@ -42,6 +42,10 @@ const SANDBOX_ID_LABEL: &str = "centaur.ai/sandbox-id";
 const OBSERVABILITY_ENABLED_LABEL: &str = "centaur.ai/observability-enabled";
 const MANAGED_BY_VALUE: &str = "api-rs";
 const SANDBOX_FILES_VOLUME: &str = "sandbox-files";
+const GIT_COMMIT_SIGNING_VOLUME: &str = "git-commit-signing-key";
+const GIT_COMMIT_SIGNING_MOUNT_PATH: &str = "/var/run/secrets/centaur/git-signing";
+pub const GIT_COMMIT_SIGNING_KEY_PATH: &str =
+    "/var/run/secrets/centaur/git-signing/private-key.asc";
 // iron-control principal OID the sandbox's proxy binds to, stamped at create
 // so resume (which has only the sandbox id) can rebind without the spec or any
 // in-memory state. Survives pause and api-rs restarts.
@@ -85,6 +89,9 @@ pub struct AgentSandboxConfig {
     /// makes the kubelet/scheduler sacrifice them before the control plane
     /// under node pressure. Empty leaves the cluster default untouched.
     pub priority_class_name: Option<String>,
+    /// Optional OpenPGP key mounted from an existing Kubernetes Secret. The
+    /// sandbox entrypoint imports it and enables mandatory commit signing.
+    pub git_commit_signing: Option<GitCommitSigningConfig>,
     pub state_volume: Option<StateVolumeConfig>,
     pub iron_proxy: Option<IronProxyConfig>,
     pub iron_control: IronControlSettings,
@@ -143,6 +150,7 @@ impl AgentSandboxConfig {
             runtime_class_name: None,
             service_account_name: None,
             priority_class_name: None,
+            git_commit_signing: None,
             state_volume: None,
             iron_proxy: None,
             iron_control,
@@ -165,6 +173,26 @@ impl AgentSandboxConfig {
     pub fn tools(mut self, tools: ToolsConfig) -> Self {
         self.tools = Some(tools);
         self
+    }
+
+    pub fn git_commit_signing(mut self, config: GitCommitSigningConfig) -> Self {
+        self.git_commit_signing = Some(config);
+        self
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitCommitSigningConfig {
+    pub secret_name: String,
+    pub secret_key: String,
+}
+
+impl GitCommitSigningConfig {
+    pub fn new(secret_name: impl Into<String>, secret_key: impl Into<String>) -> Self {
+        Self {
+            secret_name: secret_name.into(),
+            secret_key: secret_key.into(),
+        }
     }
 }
 
@@ -266,23 +294,28 @@ impl AgentSandboxBackend {
         }
     }
 
-    /// Stop every retained sandbox whose immutable pod service account does
-    /// not match the current backend configuration. This runs before api-rs
-    /// enables session reuse or warm-pool claims, so a rollout cannot keep an
-    /// old workload identity alive or assign it to a new session.
-    pub async fn drain_service_account_mismatches(&self) -> SandboxResult<Vec<SandboxId>> {
+    /// Stop retained sandboxes whose immutable pod identity or commit-signing
+    /// key reference does not match the current backend configuration. This
+    /// runs before api-rs enables session reuse or warm-pool claims.
+    pub async fn drain_configuration_mismatches(&self) -> SandboxResult<Vec<SandboxId>> {
         let params =
             ListParams::default().labels(&format!("{MANAGED_BY_LABEL}={MANAGED_BY_VALUE}"));
         let sandboxes = self.sandboxes().list(&params).await.map_err(|err| {
-            map_kube_error("list sandboxes for service account reconciliation", err)
+            map_kube_error("list sandboxes for configuration reconciliation", err)
         })?;
         let mut stopped = Vec::new();
 
         for sandbox in sandboxes.items {
-            if sandbox_service_account_matches(
+            let service_account_matches = sandbox_service_account_matches(
                 &sandbox,
                 self.config.service_account_name.as_deref(),
-            ) {
+            );
+            let git_commit_signing_matches = sandbox_git_commit_signing_matches(
+                &sandbox,
+                &self.config.container_name,
+                self.config.git_commit_signing.as_ref(),
+            );
+            if service_account_matches && git_commit_signing_matches {
                 continue;
             }
             let Some(name) = sandbox.metadata.name.as_deref() else {
@@ -295,7 +328,9 @@ impl AgentSandboxBackend {
                 existing_service_account = ?normalized_name(
                     sandbox.spec.pod_template.spec.service_account_name.as_deref()
                 ),
-                "stopping sandbox whose service account does not match configuration"
+                service_account_matches,
+                git_commit_signing_matches,
+                "stopping sandbox whose immutable configuration is stale"
             );
             SandboxBackend::stop(self, &id).await?;
             stopped.push(id);
@@ -916,6 +951,18 @@ fn build_agent_sandbox(
             upsert_env(&mut agent_env, &name, value);
         }
     }
+    if config.git_commit_signing.is_some() {
+        upsert_env(
+            &mut agent_env,
+            "CENTAUR_GIT_COMMIT_SIGNING_ENABLED",
+            "true".to_owned(),
+        );
+        upsert_env(
+            &mut agent_env,
+            "CENTAUR_GIT_COMMIT_SIGNING_KEY_PATH",
+            GIT_COMMIT_SIGNING_KEY_PATH.to_owned(),
+        );
+    }
     insert_optional(
         &mut container,
         "env",
@@ -959,6 +1006,24 @@ fn build_agent_sandbox(
         volume_mounts.push(iron_proxy::sandbox_ca_volume_mount_json());
         volumes.push(iron_proxy::sandbox_ca_volume_json(iron_proxy));
     }
+    if let Some(signing) = &config.git_commit_signing {
+        volume_mounts.push(json!({
+            "name": GIT_COMMIT_SIGNING_VOLUME,
+            "mountPath": GIT_COMMIT_SIGNING_MOUNT_PATH,
+            "readOnly": true,
+        }));
+        volumes.push(json!({
+            "name": GIT_COMMIT_SIGNING_VOLUME,
+            "secret": {
+                "secretName": signing.secret_name,
+                "defaultMode": 0o440,
+                "items": [{
+                    "key": signing.secret_key,
+                    "path": "private-key.asc",
+                }],
+            },
+        }));
+    }
     // Tool sources are bootstrapped into an emptyDir by an init container and
     // mounted into the agent at the same path `TOOL_DIRS` points at. The mount is
     // writable so `centaur-tools refresh` can fetch and republish the tree.
@@ -1000,7 +1065,7 @@ fn build_agent_sandbox(
         "automountServiceAccountToken": false,
         "enableServiceLinks": false,
     });
-    if repo_cache_tools.is_some() {
+    if repo_cache_tools.is_some() || config.git_commit_signing.is_some() {
         pod_spec["securityContext"] = tools::pod_security_context_json();
     }
     insert_optional(
@@ -1272,6 +1337,50 @@ fn sandbox_service_account_matches(
     ) == normalized_name(configured_service_account)
 }
 
+fn sandbox_git_commit_signing_matches(
+    sandbox: &crd::Sandbox,
+    container_name: &str,
+    configured: Option<&GitCommitSigningConfig>,
+) -> bool {
+    let Ok(pod) = serde_json::to_value(&sandbox.spec.pod_template.spec) else {
+        return false;
+    };
+    let enabled = pod["containers"]
+        .as_array()
+        .and_then(|containers| {
+            containers
+                .iter()
+                .find(|container| container["name"] == container_name)
+        })
+        .and_then(|container| container["env"].as_array())
+        .is_some_and(|env| {
+            env.iter().any(|entry| {
+                entry["name"] == "CENTAUR_GIT_COMMIT_SIGNING_ENABLED" && entry["value"] == "true"
+            })
+        });
+    let signing_volume = pod["volumes"].as_array().and_then(|volumes| {
+        volumes
+            .iter()
+            .find(|volume| volume["name"] == GIT_COMMIT_SIGNING_VOLUME)
+    });
+
+    match configured {
+        None => !enabled && signing_volume.is_none(),
+        Some(config) => {
+            enabled
+                && signing_volume.is_some_and(|volume| {
+                    volume["secret"]["secretName"] == config.secret_name
+                        && volume["secret"]["items"].as_array().is_some_and(|items| {
+                            items.iter().any(|item| {
+                                item["key"] == config.secret_key
+                                    && item["path"] == "private-key.asc"
+                            })
+                        })
+                })
+        }
+    }
+}
+
 /// Override-or-append an env entry, so the agent container never emits a
 /// duplicate env name when we layer tools/overlay wiring over `spec.env`.
 fn upsert_env(env: &mut Vec<(String, String)>, name: &str, value: String) {
@@ -1447,6 +1556,65 @@ mod tests {
     }
 
     #[test]
+    fn mounts_git_commit_signing_key_only_when_configured() {
+        let spec = SandboxSpec::new("centaur-agent:latest");
+        let disabled = AgentSandboxConfig::new("centaur", test_iron_control_settings());
+        let disabled = serde_json::to_value(
+            build_agent_sandbox(&SandboxId::new("asbx-disabled"), &spec, &disabled).unwrap(),
+        )
+        .unwrap();
+        let disabled_pod = &disabled["spec"]["podTemplate"]["spec"];
+        assert!(disabled_pod["volumes"].is_null());
+        assert!(disabled_pod["securityContext"].is_null());
+        assert!(
+            disabled_pod["containers"][0]["env"]
+                .as_array()
+                .is_none_or(|env| env
+                    .iter()
+                    .all(|entry| { entry["name"] != "CENTAUR_GIT_COMMIT_SIGNING_ENABLED" }))
+        );
+
+        let enabled =
+            AgentSandboxConfig::new("centaur", test_iron_control_settings()).git_commit_signing(
+                GitCommitSigningConfig::new("centaur-git-signing", "private.asc"),
+            );
+        let enabled = serde_json::to_value(
+            build_agent_sandbox(&SandboxId::new("asbx-enabled"), &spec, &enabled).unwrap(),
+        )
+        .unwrap();
+        let pod = &enabled["spec"]["podTemplate"]["spec"];
+        assert_eq!(pod["securityContext"]["fsGroup"], 1001);
+        assert!(
+            pod["containers"][0]["env"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| {
+                    entry["name"] == "CENTAUR_GIT_COMMIT_SIGNING_ENABLED"
+                        && entry["value"] == "true"
+                })
+        );
+        assert!(
+            pod["containers"][0]["volumeMounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|mount| {
+                    mount["name"] == GIT_COMMIT_SIGNING_VOLUME
+                        && mount["mountPath"] == GIT_COMMIT_SIGNING_MOUNT_PATH
+                        && mount["readOnly"] == true
+                })
+        );
+        assert!(pod["volumes"].as_array().unwrap().iter().any(|volume| {
+            volume["name"] == GIT_COMMIT_SIGNING_VOLUME
+                && volume["secret"]["secretName"] == "centaur-git-signing"
+                && volume["secret"]["defaultMode"] == 0o440
+                && volume["secret"]["items"][0]["key"] == "private.asc"
+                && volume["secret"]["items"][0]["path"] == "private-key.asc"
+        }));
+    }
+
+    #[test]
     fn renders_partial_sandbox_resources() {
         let spec = SandboxSpec::new("centaur-agent:latest").resources(
             ResourceRequirements::new()
@@ -1604,6 +1772,48 @@ mod tests {
 
         assert!(sandbox_service_account_matches(&sandbox, None));
         assert!(sandbox_service_account_matches(&sandbox, Some("  ")));
+    }
+
+    #[test]
+    fn git_commit_signing_reconciliation_detects_enable_disable_and_key_changes() {
+        let spec = SandboxSpec::new("centaur-agent:latest");
+        let disabled = AgentSandboxConfig::new("centaur", test_iron_control_settings());
+        let disabled_sandbox =
+            build_agent_sandbox(&SandboxId::new("asbx-disabled"), &spec, &disabled).unwrap();
+        let first_key = GitCommitSigningConfig::new("git-signing-v1", "private.asc");
+        let enabled = AgentSandboxConfig::new("centaur", test_iron_control_settings())
+            .git_commit_signing(first_key.clone());
+        let enabled_sandbox =
+            build_agent_sandbox(&SandboxId::new("asbx-enabled"), &spec, &enabled).unwrap();
+
+        assert!(sandbox_git_commit_signing_matches(
+            &disabled_sandbox,
+            DEFAULT_CONTAINER_NAME,
+            None
+        ));
+        assert!(!sandbox_git_commit_signing_matches(
+            &disabled_sandbox,
+            DEFAULT_CONTAINER_NAME,
+            Some(&first_key)
+        ));
+        assert!(sandbox_git_commit_signing_matches(
+            &enabled_sandbox,
+            DEFAULT_CONTAINER_NAME,
+            Some(&first_key)
+        ));
+        assert!(!sandbox_git_commit_signing_matches(
+            &enabled_sandbox,
+            DEFAULT_CONTAINER_NAME,
+            None
+        ));
+        assert!(!sandbox_git_commit_signing_matches(
+            &enabled_sandbox,
+            DEFAULT_CONTAINER_NAME,
+            Some(&GitCommitSigningConfig::new(
+                "git-signing-v2",
+                "private.asc"
+            ))
+        ));
     }
 
     #[test]

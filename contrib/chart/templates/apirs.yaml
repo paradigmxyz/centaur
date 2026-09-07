@@ -73,6 +73,9 @@
 {{- $companyContextEmbeddingsEnabled := dig "companyContextEmbeddings" "enabled" false $apiRsEtl -}}
 {{- $companyContextEmbeddingsModel := dig "companyContextEmbeddings" "model" "text-embedding-3-small" $apiRsEtl -}}
 {{- $companyContextEmbeddingsDimensions := dig "companyContextEmbeddings" "dimensions" 1536 $apiRsEtl -}}
+{{- if and .Values.sandbox.gitCommitSigning.enabled (not .Values.sandbox.gitCommitSigning.existingSecretName) -}}
+{{- fail "sandbox.gitCommitSigning.existingSecretName is required when commit signing is enabled" -}}
+{{- end -}}
 {{- $apiRsEtlEnv := list
   (dict "name" "SLACK_ETL_ENABLED" "value" (dig "slack" "enabled" false $apiRsEtl))
   (dict "name" "SLACK_SYNC_INTERVAL_SECONDS" "value" (dig "slack" "syncIntervalSeconds" 3600 $apiRsEtl))
@@ -389,6 +392,20 @@ spec:
 {{- if and .Values.sandbox.priorityClassName (not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_PRIORITY_CLASS_NAME")) }}
             - name: SESSION_SANDBOX_PRIORITY_CLASS_NAME
               value: {{ .Values.sandbox.priorityClassName | quote }}
+{{- end }}
+{{- if not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_GIT_COMMIT_SIGNING_ENABLED") }}
+            - name: SESSION_SANDBOX_GIT_COMMIT_SIGNING_ENABLED
+              value: {{ .Values.sandbox.gitCommitSigning.enabled | quote }}
+{{- end }}
+{{- if .Values.sandbox.gitCommitSigning.enabled }}
+{{- if not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_GIT_COMMIT_SIGNING_SECRET_NAME") }}
+            - name: SESSION_SANDBOX_GIT_COMMIT_SIGNING_SECRET_NAME
+              value: {{ .Values.sandbox.gitCommitSigning.existingSecretName | quote }}
+{{- end }}
+{{- if not (hasKey .Values.apiRs.extraEnv "SESSION_SANDBOX_GIT_COMMIT_SIGNING_SECRET_KEY") }}
+            - name: SESSION_SANDBOX_GIT_COMMIT_SIGNING_SECRET_KEY
+              value: {{ .Values.sandbox.gitCommitSigning.secretKey | quote }}
+{{- end }}
 {{- end }}
             # Sandboxes call back into this control plane via the in-cluster Service.
             - name: SESSION_SANDBOX_CENTAUR_API_URL

@@ -145,6 +145,47 @@ with the root prompt, then appends every mounted
 Do not rely on `overlay.image.*`; repo-cache-backed overlays are the default
 delivery path.
 
+## Signed Git commits
+
+Commit signing is an explicit deployment opt-in. Keep the signing policy in the
+overlay's `services/sandbox/SYSTEM_PROMPT.md`, but keep the private key out of
+the overlay repository and Helm values. Materialize a dedicated, passphrase-free
+OpenPGP signing subkey as a Kubernetes Secret instead:
+
+```bash
+kubectl create secret generic centaur-git-signing \
+  --from-file=private-key.asc=/secure/path/centaur-signing-subkey.asc
+```
+
+An infrastructure overlay may manage the equivalent Secret through SOPS,
+External Secrets, or another secret manager. Enable the sandbox integration:
+
+```yaml
+sandbox:
+  gitCommitSigning:
+    enabled: true
+    existingSecretName: centaur-git-signing
+    secretKey: private-key.asc
+```
+
+Add the enforcement policy to the overlay prompt:
+
+```text
+All commits must be cryptographically signed. Never disable or bypass commit
+signing. If signing fails, stop and report the failure instead of committing.
+```
+
+The sandbox imports exactly one secret key at startup, verifies that it can
+sign non-interactively, and enables Git's `commit.gpgSign`. Startup fails rather
+than allowing unsigned commits when the key is missing or unusable. Register
+the corresponding public key as a signing key on the GitHub account that
+publishes Centaur's commits.
+
+Enabling this mounts the key into every sandbox created by the deployment. Use
+a dedicated, revocable signing subkey and enable it only where every sandbox
+principal is trusted with that identity. Rotate the Secret and recycle existing
+sandboxes when replacing the key.
+
 ## Verify the overlay
 
 Verify the API pod sees the ordered API-side paths:

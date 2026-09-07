@@ -239,6 +239,19 @@
         "serviceAccountName": { "type": "string" },
         "reposPath": { "type": "string" },
         "resources": { "type": "object" },
+        "gitCommitSigning": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "existingSecretName": { "type": "string" },
+            "secretKey": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]+$"
+            }
+          },
+          "required": ["enabled", "existingSecretName", "secretKey"],
+          "additionalProperties": false
+        },
         "telemetry": {
           "type": "object",
           "properties": {

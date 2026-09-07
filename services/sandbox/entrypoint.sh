@@ -59,6 +59,10 @@ if [ -d "$STATE_DIR" ] && [ -w "$STATE_DIR" ]; then
     export CENTAUR_PERSISTENT_STATE=1
 fi
 
+# Optional deployment-level commit signing. The helper is a no-op unless the
+# Kubernetes backend mounted a key and explicitly enabled it.
+configure-git-signing
+
 mkdir -p "$HOME_DIR/.config/amp"
 
 # ── Write harness configs (no MCP — adds ~10s startup overhead) ───────────────
