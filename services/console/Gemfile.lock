@@ -82,7 +82,7 @@ GEM
     bcrypt (3.1.22)
     bigdecimal (4.1.2)
     bindex (0.8.1)
-    bootsnap (1.25.0)
+    bootsnap (1.26.0)
       msgpack (~> 1.5)
     brakeman (8.0.6)
       racc
@@ -126,7 +126,7 @@ GEM
     hana (1.3.7)
     i18n (1.15.2)
       concurrent-ruby (~> 1.0)
-    image_processing (2.0.3)
+    image_processing (2.1.0)
     importmap-rails (2.2.3)
       actionpack (>= 6.0.0)
       activesupport (>= 6.0.0)
@@ -320,10 +320,10 @@ GEM
       rexml (~> 3.2, >= 3.2.5)
       rubyzip (>= 1.2.2, < 4.0)
       websocket (~> 1.0)
-    sentry-rails (6.7.0)
+    sentry-rails (7.0.0)
       railties (>= 5.2.0)
-      sentry-ruby (~> 6.7.0)
-    sentry-ruby (6.7.0)
+      sentry-ruby (~> 7.0.0)
+    sentry-ruby (7.0.0)
       bigdecimal
       concurrent-ruby (~> 1.0, >= 1.0.2)
       logger
@@ -408,7 +408,7 @@ DEPENDENCIES
   capybara
   debug
   fugit (~> 1.13)
-  image_processing (~> 2.0)
+  image_processing (~> 2.1)
   importmap-rails
   jbuilder
   json_schemer (~> 2.3)
@@ -424,8 +424,8 @@ DEPENDENCIES
   rubocop-rails-omakase
   ruby-vips (~> 2.2)
   selenium-webdriver
-  sentry-rails (~> 6.7)
-  sentry-ruby (~> 6.7)
+  sentry-rails (~> 7.0)
+  sentry-ruby (~> 7.0)
   solid_cable
   solid_cache
   solid_queue
