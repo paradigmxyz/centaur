@@ -3063,6 +3063,77 @@ describe('slackbotv2', () => {
     )
   })
 
+  it('finishes the render obligation without a duplicate reply when a failed stop succeeds on cleanup', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({ state: sharedState })
+    codexApi.autoRespond = false
+    slackApi.failNextStreamStop()
+
+    const parent = await postUserMessage('Context before an transient stop failure.')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> finish the answer`, parent.ts)
+    const key = threadKey(parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request(
+      '/api/webhooks/slack',
+      signedSlackEvent({
+        event_id: 'Ev-slackbotv2-transient-stop',
+        event: {
+          type: 'app_mention',
+          user: USER_ID,
+          channel: CHANNEL_ID,
+          team: TEAM_ID,
+          ts: mention.ts,
+          thread_ts: parent.ts,
+          text: `<@${BOT_USER_ID}> finish the answer`
+        }
+      }),
+      {},
+      waitUntilContext(waits)
+    )
+
+    expect(response.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+    await waitFor(() => codexApi.eventRequests.length === 1)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    codexApi.emitOutputLine(
+      key,
+      JSON.stringify({
+        type: 'item.completed',
+        item: {
+          id: 'cmd-stop',
+          type: 'commandExecution',
+          command: 'printf noisy',
+          status: 'completed',
+          aggregatedOutput: 'done'
+        }
+      })
+    )
+    codexApi.emitSessionEvent(key, 'session.execution_completed', {
+      execution_id: 'exe-transient-stop',
+      status: 'completed',
+      result_text: 'TRANSIENT_STOP_ANSWER_VISIBLE'
+    })
+
+    await Promise.all(waits)
+    expect(slackApi.calls.filter(call => call.method === 'chat.stopStream')).toHaveLength(2)
+    // Recovery was confined to stop(): durable fallback would open a second SSE request.
+    expect(codexApi.eventRequests).toHaveLength(1)
+    const texts = await threadTexts(parent.ts)
+    expect(texts.some(text => text.includes(BROKEN_STREAM_TEXT))).toBe(false)
+    expect(texts.filter(text =>
+      text.includes('TRANSIENT_STOP_ANSWER_VISIBLE')
+    )).toHaveLength(1)
+    const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
+    expect(threadState).toEqual(
+      expect.objectContaining({
+        activeExecution: false,
+        renderObligation: null
+      })
+    )
+  })
+
   it('swaps the streamed message for the durable final answer when the live answer diverges', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
@@ -6413,6 +6484,7 @@ type PatchedSlackApi = {
   failRepliesWithThreadNotFound(channel: string, ts: string): void
   failStreamAppendsAfter(count: number, error: string): void
   failStreamStopsLongerThan(maxChars: number): void
+  failNextStreamStop(): void
   fileInfoRequestCount(fileId: string): number
   holdAssistantStatus(): () => void
   reset(): void
@@ -6474,6 +6546,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
   let assistantStatusGate: Promise<void> | null = null
   let releaseAssistantStatusGate: (() => void) | null = null
   let maxStreamStopChars: number | null = null
+  const stopFailure = { remaining: 0 }
   const appendFailure: { error: string; remaining: number } = { error: '', remaining: -1 }
   const streams = new Map<string, StreamRecord>()
   const releaseCurrentAssistantStatusGate = () => {
@@ -6492,6 +6565,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
       fileInfo,
       fileInfoRequests,
       maxStreamStopChars,
+      stopFailure,
       port,
       reactionResponses,
       streams,
@@ -6520,6 +6594,9 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
       appendFailure.remaining = count
       appendFailure.error = error
     },
+    failNextStreamStop() {
+      stopFailure.remaining = 1
+    },
     failStreamStopsLongerThan(maxChars: number) {
       maxStreamStopChars = maxChars
     },
@@ -6537,6 +6614,7 @@ async function startPatchedSlackApi(emulatorUrl: string): Promise<PatchedSlackAp
       releaseCurrentAssistantStatusGate()
       calls.length = 0
       maxStreamStopChars = null
+      stopFailure.remaining = 0
       appendFailure.remaining = -1
       appendFailure.error = ''
       conversationsJoinResponses.length = 0
@@ -6582,6 +6660,7 @@ async function handlePatchedSlackRequest(
     fileInfo: Map<string, Record<string, unknown>>
     fileInfoRequests: Map<string, number>
     maxStreamStopChars: number | null
+    stopFailure: { remaining: number }
     port: number
     reactionResponses: QueuedSlackApiResponse[]
     streams: Map<string, StreamRecord>
@@ -6736,7 +6815,8 @@ async function handlePatchedSlackRequest(
         request,
         input.streams,
         input.calls,
-        input.maxStreamStopChars
+        input.maxStreamStopChars,
+        input.stopFailure
       )
     )
     return
@@ -6910,12 +6990,17 @@ async function stopStream(
   request: Request,
   streams: Map<string, StreamRecord>,
   calls: StreamCall[],
-  maxStreamStopChars: number | null
+  maxStreamStopChars: number | null,
+  stopFailure: { remaining: number }
 ): Promise<Response> {
   const body = await requestBody(request)
   const channel = stringField(body.channel)
   const ts = stringField(body.ts)
   calls.push({ method: 'chat.stopStream', body, streamTs: ts })
+  if (stopFailure.remaining > 0) {
+    stopFailure.remaining -= 1
+    return Response.json({ ok: false, error: 'internal_error' })
+  }
   const key = streamKey(channel, ts)
   const record = streams.get(key) ?? { channel, payloadChars: 0, ts, text: '' }
   const text = [record.text, streamBodyText(body)].filter(part => part.trim()).join('\n')
