@@ -278,7 +278,7 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
          isMe
        },
        metadata: {
-@@ -3452,26 +3685,251 @@ var SlackAdapter = class _SlackAdapter {
+@@ -3452,26 +3685,255 @@ var SlackAdapter = class _SlackAdapter {
      }
      this.logger.debug("Slack: starting stream", { channel, threadTs });
      const token = await this.getToken();
@@ -448,7 +448,11 @@ index a7048fd884020cfd96a51c48b7071fa7293f3dc4..e5bd30bb8f2d41f8f836e7dee742a67f
          return;
        }
 -      await streamer.append({ markdown_text: delta, token });
-+      let remaining = delta;
++      // chat.appendStream's `markdown_text` accepts Slack mrkdwn, not every
++      // CommonMark construct emitted by models (notably labeled links).
++      // Convert each syntactically committable delta at the transport boundary
++      // so every Slack agent gets native rich formatting without prompt rules.
++      let remaining = this.formatConverter.toResponseUrlText({ markdown: delta });
 +      while (remaining.length > 0) {
 +        if (isExpired(current)) {
 +          await rotateCurrentForAge();
