@@ -131,6 +131,7 @@ export type SlackbotV2Options = {
   allowedExternalTeamIds?: readonly string[]
   apiKey?: string
   apiUrl: string
+  appToken?: string
   assistantStatus?: string
   /**
    * When enabled, session.activity_summary events update Slack's assistant
@@ -203,12 +204,15 @@ export type SlackbotV2Options = {
   renderRecoveryThreadTimeoutMs?: number
   /** Deadline for Centaur session API HTTP calls made during Slack handoff. */
   sessionApiTimeoutMs?: number
-  signingSecret: string
+  /** Slack webhook signature verification; webhook mode only. */
+  signingSecret?: string
   slackApiUrl?: string
   /** Bot workspace team ID resolved once from Slack's auth.test response. */
   slackHomeTeamId?: string
   /** Deadline for optional Slack Web API metadata lookups. */
   slackApiTimeoutMs?: number
+  /** Socket Mode instead of webhooks; requires appToken. Keep one replica. */
+  socketMode?: boolean
   state?: StateAdapter
   stateKeyPrefix?: string
   /** React to mentioned messages that are forwarded into an active execution. */

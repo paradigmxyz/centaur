@@ -10,7 +10,12 @@ import {
 const port = numberEnv('PORT', 3002)
 const apiUrl = stringEnv('CENTAUR_API_URL', 'http://127.0.0.1:8080')
 const botToken = requiredEnv('SLACK_BOT_TOKEN')
-const signingSecret = requiredEnv('SLACK_SIGNING_SECRET')
+const socketMode = booleanEnv('SLACKBOTV2_SOCKET_MODE', false)
+const appToken = optionalEnv('SLACK_APP_TOKEN')
+// Signing secret only guards inbound webhooks; socket mode has none.
+const signingSecret = socketMode
+  ? optionalEnv('SLACK_SIGNING_SECRET')
+  : requiredEnv('SLACK_SIGNING_SECRET')
 const slackApiUrl = optionalEnv('SLACK_API_URL')
 const slackApiTimeoutMs = optionalNumberEnv('SLACKBOTV2_SLACK_API_TIMEOUT_MS')
 const botUserId = await resolveSlackBotUserId({
@@ -47,6 +52,7 @@ const consoleLogger = {
 const options: SlackbotV2Options = {
   apiUrl,
   apiKey: optionalEnv('SLACKBOT_API_KEY'),
+  appToken,
   assistantStatus: optionalEnv('SLACKBOTV2_ASSISTANT_STATUS'),
   activitySummaryStatusEnabled: booleanEnv('SLACKBOTV2_ACTIVITY_SUMMARY_STATUS_ENABLED', false),
   autoJoinCreatedChannels: booleanEnv('SLACKBOTV2_AUTO_JOIN_CREATED_CHANNELS', false),
@@ -92,6 +98,7 @@ const options: SlackbotV2Options = {
   signingSecret,
   slackApiUrl,
   slackApiTimeoutMs,
+  socketMode,
   stateKeyPrefix: optionalEnv('SLACKBOTV2_STATE_KEY_PREFIX'),
   steeringReactionEnabled: booleanEnv('SLACKBOTV2_STEERING_REACTION_ENABLED', false),
   steeringReactionName: stringEnv(
@@ -124,6 +131,7 @@ console.log(
     response_service_tier_enabled: options.responseServiceTierEnabled,
     steering_reaction_enabled: options.steeringReactionEnabled,
     steering_reaction_name: options.steeringReactionName,
+    socket_mode: socketMode,
     port: server.port,
     api_url: apiUrl
   })

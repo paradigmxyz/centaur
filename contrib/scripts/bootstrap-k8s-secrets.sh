@@ -297,6 +297,11 @@ if secret_exists centaur-infra-env; then
       patch_data+=("\"GITHUBBOT_API_KEY\":\"$(rand_hex | base64 | tr -d '\n')\"")
     fi
   fi
+  # Slack Socket Mode app-level token (xapp-); set whenever present so it
+  # can be rotated.
+  if [[ -n "${SLACK_APP_TOKEN:-}" ]]; then
+    patch_data+=("\"SLACK_APP_TOKEN\":\"$(printf '%s' "$SLACK_APP_TOKEN" | base64 | tr -d '\n')\"")
+  fi
   if [[ "${#patch_data[@]}" -gt 0 ]]; then
     patch_json="{\"data\":{$(IFS=,; echo "${patch_data[*]}")}}"
     kubectl -n "$NAMESPACE" patch secret centaur-infra-env --type merge -p "$patch_json" >/dev/null

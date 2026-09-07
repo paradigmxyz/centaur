@@ -34,7 +34,7 @@ These must exist for the normal Helm deployment. For local development,
 | Env var | Set from | Controls |
 | --- | --- | --- |
 | `DATABASE_URL` | `secretManager.existingSecretName`; local bootstrap generates it. | API and Slackbot Postgres connection. |
-| `SLACK_SIGNING_SECRET` | `secretManager.existingSecretName`; local bootstrap reads shell env. | Slack request signature verification. |
+| `SLACK_SIGNING_SECRET` | `secretManager.existingSecretName`; local bootstrap reads shell env. | Slack request signature verification. Optional when `slackbotv2.socketMode=true`. |
 | `SLACKBOT_API_KEY` | `secretManager.existingSecretName`; local bootstrap reads shell env. | Dedicated Slackbot key accepted by api-rs for the Slack session namespace and workflow events. |
 | `SLACK_BOT_TOKEN` | `secretManager.existingSecretName`; local bootstrap reads shell env. | Slack Web API access for Slackbot and api-rs Slack helpers. |
 | `IRON_MANAGEMENT_API_KEY` | `secretManager.existingSecretName`; local bootstrap generates it. | Management key for API-created iron-proxy pods. |
@@ -48,6 +48,7 @@ Optional required-by-mode variables:
 | `OP_CONNECT_CREDENTIALS_FILE` | Local shell before `just deploy`. | Enables the 1Password Connect subchart and creates its credentials Secret. |
 | `OP_CONNECT_TOKEN` | Secret or local bootstrap shell env. | Token used by iron-proxy when `ironProxy.secretSource=onepassword-connect`. |
 | `TEAMS_BOT_APP_ID`, `TEAMS_BOT_APP_PASSWORD`, `TEAMS_BOT_APP_TENANT_ID` | Local shell before `just bootstrap-secrets`; production Secret. | Required by Teamsbot when `teamsbot.enabled=true`. |
+| `SLACK_APP_TOKEN` | `secretManager.existingSecretName`; local bootstrap patches from the shell when present. | App-level token (`xapp-...`, `connections:write` scope) for the Slackbot's Socket Mode connection. Required when `slackbotv2.socketMode=true`. |
 | `TEAMSBOT_API_KEY` | `secretManager.existingSecretName`; local bootstrap generates it when Teams credentials are present and it is omitted. | Static API key used by Teamsbot. |
 | `CENTAUR_APIRS_ADMIN_API_KEY` | `secretManager.existingSecretName` or the api-rs environment. | Optional static bearer token with every api-rs capability. Generate a distinct value with `openssl rand -hex 32`. |
 | `CONSOLE_SQLEXPORTER_DATABASE_URL` | `secretManager.existingSecretName`; local bootstrap copies it from the shell when provided. | Database URL for a separately provisioned read-only PostgreSQL role. Required when `console.sqlExporter.enabled=true`. |
