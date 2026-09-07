@@ -9,11 +9,11 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "axios": "^1.13.6"
+    "axios": "^1.20.0"
   },
   "devDependencies": {
-    "typescript": "5.9.3",
-    "vite": "^8.0.16",
-    "vitest": "^4.1.9"
+    "typescript": "7.0.2",
+    "vite": "^8.2.2",
+    "vitest": "^4.1.11"
   }
 }
