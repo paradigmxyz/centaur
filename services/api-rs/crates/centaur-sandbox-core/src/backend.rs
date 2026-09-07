@@ -88,4 +88,18 @@ pub trait SandboxBackend: Send + Sync {
 
     /// Resume a previously suspended sandbox and wait until it can serve I/O.
     async fn resume(&self, id: &SandboxId) -> SandboxResult<()>;
+
+    /// Delete iron-proxy resources that outlived their sandbox.
+    ///
+    /// A failed create, resume, or unwind can leave the proxy's pod, service,
+    /// and network policies behind, and once the Sandbox CR is gone nothing
+    /// keyed on an observed sandbox can reach them. Backends that manage no
+    /// proxy resources report none. Returns the number of resources deleted
+    /// per class.
+    async fn reap_orphan_iron_proxy_resources(
+        &self,
+        _grace: std::time::Duration,
+    ) -> SandboxResult<BTreeMap<String, u32>> {
+        Ok(BTreeMap::new())
+    }
 }

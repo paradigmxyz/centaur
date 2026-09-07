@@ -22,7 +22,7 @@ describe('parseChannelDefaults', () => {
     )
     expect(parsed).toEqual({
       // `claude` -> wire harness, `opus` -> full model id.
-      C0ENG: { harnessType: 'claudecode', model: 'claude-opus-4-8', reasoning: 'high' },
+      C0ENG: { harnessType: 'claudecode', model: 'claude-opus-5', reasoning: 'high' },
       C0TRIAGE: { harnessType: 'codex', reasoning: 'low' },
       // A provider shortcut implies its harness, mirroring `--bedrock`.
       C0BEDROCK: { harnessType: 'codex', model: 'gpt-5.2', provider: 'amazon-bedrock' }
@@ -47,7 +47,7 @@ describe('parseChannelDefaults', () => {
         })
       )
     ).toEqual({
-      C0A: { model: 'claude-opus-4-8' },
+      C0A: { model: 'claude-opus-5' },
       C0B: { model: 'gpt-5.2' }
     })
   })

@@ -7,6 +7,7 @@ import {
   defaultServiceTierForHarness,
   effectiveReasoningForHarness,
   harnessDisplayName,
+  personaFallbackNotice,
   reasoningForModel
 } from '../src/console-session-link'
 import claudeSettings from '../../../harness/claude/settings.json'
@@ -274,4 +275,32 @@ describe('buildSlackResponseContextBlock', () => {
 
     expect(block?.elements[0]?.text).toBe('GPT-5.6-SOL · Codex · Low · Fast')
   })
+
+  test('renders and escapes a notice when response metadata is absent', () => {
+    expect(
+      buildSlackResponseContextBlock({
+        consoleBaseUrl: undefined,
+        threadKey: 'slack:C1:1',
+        notice: 'Persona "<unsafe&persona>" cannot be used.'
+      })
+    ).toEqual({
+      type: 'context',
+      elements: [
+        {
+          type: 'mrkdwn',
+          text: ':warning: Persona "&lt;unsafe&amp;persona&gt;" cannot be used.'
+        }
+      ]
+    })
+  })
+})
+
+test('personaFallbackNotice describes the resolved fallback', () => {
+  expect(personaFallbackNotice('honk', 'eng')).toBe(
+    `Persona "honk" isn't available. Using "eng" instead.`
+  )
+  expect(personaFallbackNotice('honk', null)).toBe(
+    `Persona "honk" isn't available. Continuing without a persona.`
+  )
+  expect(personaFallbackNotice(undefined, 'eng')).toBeUndefined()
 })

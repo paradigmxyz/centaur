@@ -243,6 +243,48 @@ module Granola
       mcp_request.verify
     end
 
+    test "classifies MCP server errors as transient" do
+      response = HttpClient::Response.new(status: 503, body: "", headers: {})
+      http_client = Object.new
+      http_client.define_singleton_method(:post) { |*, **| response }
+
+      HttpClient.stub(:new, http_client) do
+        error = assert_raises(SyncCredential::TransientGranolaApiError) do
+          SyncCredential.new(credential, api_client: FakeApiClient.new)
+            .send(:mcp_request, "initialize", {})
+        end
+
+        assert_equal "Granola MCP returned HTTP 503", error.message
+      end
+    end
+
+    test "keeps MCP client errors non-retryable" do
+      response = HttpClient::Response.new(status: 401, body: "", headers: {})
+      http_client = Object.new
+      http_client.define_singleton_method(:post) { |*, **| response }
+
+      HttpClient.stub(:new, http_client) do
+        error = assert_raises(SyncCredential::GranolaApiError) do
+          SyncCredential.new(credential, api_client: FakeApiClient.new)
+            .send(:mcp_request, "initialize", {})
+        end
+
+        refute_kind_of SyncCredential::TransientGranolaApiError, error
+        assert_equal "Granola MCP returned HTTP 401", error.message
+      end
+    end
+
+    test "does not swallow transient transcript errors" do
+      mcp_http = lambda do |**|
+        raise SyncCredential::TransientGranolaApiError, "Granola MCP returned HTTP 503"
+      end
+      sync = SyncCredential.new(credential, api_client: FakeApiClient.new, mcp_http: mcp_http)
+
+      assert_raises(SyncCredential::TransientGranolaApiError) do
+        sync.send(:meeting_transcript, "meeting-1")
+      end
+    end
+
     private
 
     def meeting_xml(id: "meeting-1", date: "Jul 8, 2026 5:30 PM GMT+2")

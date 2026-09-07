@@ -40,8 +40,8 @@ const HARNESS_FLAGS: Record<string, string> = {
 const CLAUDE_MODEL_ALIASES: Record<string, string> = {
   fable: "claude-fable-5",
   haiku: "claude-haiku-4-5",
-  opus: "claude-opus-4-8",
-  sonnet: "claude-sonnet-4-6",
+  opus: "claude-opus-5",
+  sonnet: "claude-sonnet-5",
 };
 
 const MODEL_SHORTCUTS: Record<string, { harnessType: string; model: string }> =

@@ -91,23 +91,40 @@ class _FakeRevisionsApi:
         return _CreateRequest(self.get_result)
 
 
+class _FakeCommentsApi:
+    def __init__(self, list_results: list[dict] | None = None):
+        self.list_results = list(list_results or [])
+        self.list_calls: list[dict] = []
+
+    def list(self, **kwargs):
+        self.list_calls.append(kwargs)
+        if not self.list_results:
+            raise AssertionError("Unexpected extra comments.list call")
+        return _CreateRequest(self.list_results.pop(0))
+
+
 class _FakeDriveService:
     def __init__(
         self,
         revision_list_results: list[dict] | None = None,
         revision_get_result: dict | None = None,
+        comment_list_results: list[dict] | None = None,
     ):
         self.files_api = _FakeFilesApi()
         self.revisions_api = _FakeRevisionsApi(
             revision_list_results,
             revision_get_result,
         )
+        self.comments_api = _FakeCommentsApi(comment_list_results)
 
     def files(self):
         return self.files_api
 
     def revisions(self):
         return self.revisions_api
+
+    def comments(self):
+        return self.comments_api
 
 
 class _FakeGmailMessagesApi:
@@ -550,6 +567,149 @@ def test_drive_list_revisions_rejects_non_positive_limit(monkeypatch):
         client.drive_list_revisions("file-123", max_results=0)
 
 
+def test_docs_list_comments_paginates_and_normalizes_threads(monkeypatch):
+    fake_service = _FakeDriveService(
+        comment_list_results=[
+            {
+                "comments": [
+                    {
+                        "id": "comment-1",
+                        "content": "Can we make this more specific?",
+                        "htmlContent": "Can we make this <b>more specific</b>?",
+                        "anchor": '{"r":"head","a":[{"txt":{"o":12,"l":8}}]}',
+                        "quotedFileContent": {
+                            "mimeType": "text/html",
+                            "value": "the proposal",
+                        },
+                        "resolved": True,
+                        "createdTime": "2026-08-10T10:00:00Z",
+                        "modifiedTime": "2026-08-10T11:00:00Z",
+                        "author": {
+                            "displayName": "Ada Lovelace",
+                            "photoLink": "https://example.com/ada.jpg",
+                            "me": False,
+                        },
+                        "assigneeEmailAddress": "grace@example.com",
+                        "mentionedEmailAddresses": ["grace@example.com"],
+                        "replies": [
+                            {
+                                "id": "reply-1",
+                                "content": "Updated.",
+                                "htmlContent": "Updated.",
+                                "action": "resolve",
+                                "createdTime": "2026-08-10T11:00:00Z",
+                                "modifiedTime": "2026-08-10T11:00:00Z",
+                                "author": {"displayName": "Grace Hopper", "me": True},
+                            }
+                        ],
+                    }
+                ],
+                "nextPageToken": "page-2",
+            },
+            {
+                "comments": [
+                    {
+                        "id": "comment-2",
+                        "deleted": True,
+                        "createdTime": "2026-08-11T10:00:00Z",
+                    }
+                ]
+            },
+        ]
+    )
+    monkeypatch.setattr(client, "get_drive_service", lambda: fake_service)
+
+    result = client.docs_list_comments(
+        "doc-123",
+        max_results=2,
+        include_deleted=True,
+    )
+
+    fields = f"nextPageToken,comments({client.DRIVE_COMMENT_FIELDS})"
+    assert fake_service.comments_api.list_calls == [
+        {
+            "fileId": "doc-123",
+            "pageSize": 2,
+            "includeDeleted": True,
+            "fields": fields,
+        },
+        {
+            "fileId": "doc-123",
+            "pageSize": 1,
+            "includeDeleted": True,
+            "fields": fields,
+            "pageToken": "page-2",
+        },
+    ]
+    assert result == [
+        {
+            "id": "comment-1",
+            "content": "Can we make this more specific?",
+            "html_content": "Can we make this <b>more specific</b>?",
+            "anchor": '{"r":"head","a":[{"txt":{"o":12,"l":8}}]}',
+            "quoted_file_content": {
+                "mime_type": "text/html",
+                "value": "the proposal",
+            },
+            "resolved": True,
+            "deleted": False,
+            "created_time": "2026-08-10T10:00:00Z",
+            "modified_time": "2026-08-10T11:00:00Z",
+            "author": {
+                "display_name": "Ada Lovelace",
+                "photo_link": "https://example.com/ada.jpg",
+                "is_me": False,
+            },
+            "assignee_email": "grace@example.com",
+            "mentioned_emails": ["grace@example.com"],
+            "replies": [
+                {
+                    "id": "reply-1",
+                    "content": "Updated.",
+                    "html_content": "Updated.",
+                    "action": "resolve",
+                    "deleted": False,
+                    "created_time": "2026-08-10T11:00:00Z",
+                    "modified_time": "2026-08-10T11:00:00Z",
+                    "author": {
+                        "display_name": "Grace Hopper",
+                        "photo_link": "",
+                        "is_me": True,
+                    },
+                    "assignee_email": "",
+                    "mentioned_emails": [],
+                }
+            ],
+        },
+        {
+            "id": "comment-2",
+            "content": "",
+            "html_content": "",
+            "anchor": "",
+            "quoted_file_content": {"mime_type": "", "value": ""},
+            "resolved": False,
+            "deleted": True,
+            "created_time": "2026-08-11T10:00:00Z",
+            "modified_time": "",
+            "author": {"display_name": "", "photo_link": "", "is_me": False},
+            "assignee_email": "",
+            "mentioned_emails": [],
+            "replies": [],
+        },
+    ]
+
+
+def test_docs_list_comments_rejects_non_positive_limit(monkeypatch):
+    monkeypatch.setattr(
+        client,
+        "get_drive_service",
+        lambda: (_ for _ in ()).throw(AssertionError("Drive API should not be called")),
+    )
+
+    with pytest.raises(ValueError, match="max_results must be at least 1"):
+        client.docs_list_comments("doc-123", max_results=0)
+
+
 def test_drive_get_revision_returns_metadata_and_export_links(monkeypatch):
     fake_service = _FakeDriveService(
         revision_get_result={
@@ -810,6 +970,39 @@ def test_gsuite_client_exposes_drive_revisions(monkeypatch):
         {"file_id": "file-123", "revision_id": "rev-1", "export_format": "pdf"}
     ]
     assert download_calls == [{"file_id": "file-123", "revision_id": "rev-1"}]
+
+
+def test_gsuite_client_exposes_doc_comments(monkeypatch):
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        client,
+        "docs_list_comments",
+        lambda document_id, max_results, include_deleted: (
+            calls.append(
+                {
+                    "document_id": document_id,
+                    "max_results": max_results,
+                    "include_deleted": include_deleted,
+                }
+            )
+            or [{"id": "comment-1"}]
+        ),
+    )
+
+    result = client.GSuiteClient().docs_list_comments(
+        "doc-123",
+        max_results=25,
+        include_deleted=True,
+    )
+
+    assert result == [{"id": "comment-1"}]
+    assert calls == [
+        {
+            "document_id": "doc-123",
+            "max_results": 25,
+            "include_deleted": True,
+        }
+    ]
 
 
 def test_sheets_add_tab_uses_batch_update(monkeypatch):

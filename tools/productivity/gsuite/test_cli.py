@@ -100,6 +100,91 @@ def test_docs_bullets_command_prints_verification_summary(monkeypatch):
     assert "tab tab-2 paragraph 4:" in result.output
 
 
+def test_docs_comments_command_accepts_url_and_outputs_json(monkeypatch):
+    calls: list[dict] = []
+    comments = [
+        {
+            "id": "comment-1",
+            "content": "Please clarify this section.",
+            "author": {"display_name": "Ada Lovelace"},
+            "quoted_file_content": {"value": "Draft language"},
+            "resolved": False,
+            "deleted": False,
+            "replies": [],
+        }
+    ]
+    monkeypatch.setattr(
+        client,
+        "docs_list_comments",
+        lambda document_id, max_results, include_deleted: (
+            calls.append(
+                {
+                    "document_id": document_id,
+                    "max_results": max_results,
+                    "include_deleted": include_deleted,
+                }
+            )
+            or comments
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "docs",
+            "comments",
+            "https://docs.google.com/document/d/doc-123/edit",
+            "--limit",
+            "25",
+            "--include-deleted",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.output) == comments
+    assert calls == [
+        {
+            "document_id": "doc-123",
+            "max_results": 25,
+            "include_deleted": True,
+        }
+    ]
+
+
+def test_docs_comments_command_prints_threads_without_rich_markup(monkeypatch):
+    monkeypatch.setattr(
+        client,
+        "docs_list_comments",
+        lambda document_id, max_results, include_deleted: [
+            {
+                "id": "comment-1",
+                "content": "Use [draft] here.",
+                "author": {"display_name": "Ada Lovelace"},
+                "quoted_file_content": {"value": "Original [text]"},
+                "resolved": True,
+                "deleted": False,
+                "replies": [
+                    {
+                        "id": "reply-1",
+                        "content": "Done [now].",
+                        "action": "resolve",
+                        "author": {"display_name": "Grace Hopper"},
+                    }
+                ],
+            }
+        ],
+    )
+
+    result = runner.invoke(app, ["docs", "comments", "doc-123"])
+
+    assert result.exit_code == 0
+    assert "Comment comment-1 by Ada Lovelace [resolved]" in result.output
+    assert "Quoted: Original [text]" in result.output
+    assert "Use [draft] here." in result.output
+    assert "Reply reply-1 by Grace Hopper [resolve]: Done [now]." in result.output
+
+
 def test_drive_revisions_command_accepts_sheets_url_and_outputs_json(monkeypatch):
     calls: list[dict] = []
     monkeypatch.setattr(
