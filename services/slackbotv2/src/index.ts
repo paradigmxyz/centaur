@@ -307,6 +307,8 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     botToken: options.botToken,
     botUserId: options.botUserId,
     signingSecret: options.signingSecret,
+    mode: options.socketMode ? 'socket' : undefined,
+    appToken: options.appToken,
     userName,
     logger
   })
@@ -323,6 +325,15 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   const stateConnectionStatus: StateConnectionStatus = { attempts: 0, connected: false }
   const stateConnected = ensureStateConnected(state, options, stateConnectionStatus)
   backgroundWaitUntil(stateConnected)
+  if (options.socketMode) {
+    // Socket mode has no inbound webhooks to trigger the Chat SDK's lazy
+    // adapter init, which is what opens the socket; do it eagerly.
+    backgroundWaitUntil(
+      chat.initialize().catch(error => {
+        logger.error('slackbotv2 socket mode connect failed', { error })
+      })
+    )
+  }
 
   chat.onAction(async event => {
     const payload = slackBlockActionPayload(event)

@@ -58,6 +58,20 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sSLACK_SIGNING_SECRET" .Values.secretManager.envPrefix }}
+{{- if .Values.slackbotv2.socketMode }}
+                  # Optional in Socket Mode.
+                  optional: true
+{{- end }}
+{{- if .Values.slackbotv2.socketMode }}
+            # Socket Mode: no public URL needed (set ingress.enabled: false).
+            - name: SLACKBOTV2_SOCKET_MODE
+              value: "true"
+            - name: SLACK_APP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sSLACK_APP_TOKEN" .Values.secretManager.envPrefix }}
+{{- end }}
             - name: SLACKBOT_API_KEY
               valueFrom:
                 secretKeyRef:
