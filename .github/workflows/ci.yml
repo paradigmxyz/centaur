@@ -96,6 +96,7 @@ jobs:
             '^package\.json$' \
             '^pnpm-lock\.yaml$' \
             '^pnpm-workspace\.yaml$' \
+            '^patches/' \
             '^\.github/workflows/ci\.yml$'
           set_output discordbot_checks \
             '^services/discordbot/' \

@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto'
 import {
   createServer,
+  request as httpRequest,
   type IncomingMessage,
   type Server as HttpServer,
   type ServerResponse
@@ -442,7 +443,7 @@ describe('slackbotv2', () => {
       `<@${BOT_USER_ID}> run with this screenshot`,
       parent.ts
     )
-    const fileUrl = `${slackApi.url}/files/captured.png`
+    const fileUrl = 'https://files.slack.com/files/captured.png'
     const waits: Promise<unknown>[] = []
     const response = await bot.app.request(
       '/api/webhooks/slack',
@@ -1583,7 +1584,7 @@ describe('slackbotv2', () => {
       'Root context for the thread.',
       'First preceding reply.',
       'Second preceding reply.',
-      `@${BOT_USER_ID} summarize the thread so far`
+      '@centaur summarize the thread so far'
     ])
     expect(codexApi.executes).toHaveLength(1)
     expect(codexApi.executes[0]!.body.idempotency_key).toBe(mention.ts)
@@ -1596,7 +1597,7 @@ describe('slackbotv2', () => {
 
   it('materializes Slack event files on root mentions without fetching thread replies', async () => {
     const mention = await postUserMessage(`<@${BOT_USER_ID}> inspect this root screenshot`)
-    const fileUrl = `${slackApi.url}/files/captured.png`
+    const fileUrl = 'https://files.slack.com/files/captured.png'
     const waits: Promise<unknown>[] = []
     const response = await bot.app.request(
       '/api/webhooks/slack',
@@ -1988,7 +1989,7 @@ describe('slackbotv2', () => {
     expect(requesterContext).toContain('Slack username: akshaan')
     expect(requesterContext).toContain('GitHub handle from Slack profile: @decofe')
     expect(requesterContext).toContain('Prompted by: @decofe')
-    expect(input.message.content.at(-1)?.text).toBe(`@${BOT_USER_ID} what is my name?`)
+    expect(input.message.content.at(-1)?.text).toBe('@centaur what is my name?')
   })
 
   it('caches Slack requester identity across mentions from the same user', async () => {
@@ -2270,11 +2271,11 @@ describe('slackbotv2', () => {
 
     expect(codexApi.appends).toHaveLength(2)
     expect(sessionMessageTexts(codexApi.appends[0]!.body.messages)).toEqual([
-      `@${BOT_USER_ID} start from this root mention`
+      '@centaur start from this root mention'
     ])
     expect(sessionMessageTexts(codexApi.appends[1]!.body.messages)).toEqual([
       'Important reply between mentions.',
-      `@${BOT_USER_ID} now use the full thread`
+      '@centaur now use the full thread'
     ])
     expect(codexApi.appends[1]!.body.messages.map(message => message.role)).toEqual([
       'user',
@@ -2295,7 +2296,7 @@ describe('slackbotv2', () => {
   it('stages large Slack file attachments without exceeding session input line limits', async () => {
     const parent = await postUserMessage('Context before the video upload.')
     const mention = await postUserMessage(`<@${BOT_USER_ID}> inspect this mp4`, parent.ts)
-    const fileUrl = `${slackApi.url}/files/large-upload.mp4`
+    const fileUrl = 'https://files.slack.com/files/large-upload.mp4'
     const waits: Promise<unknown>[] = []
     const response = await bot.app.request(
       '/api/webhooks/slack',
@@ -2385,7 +2386,7 @@ describe('slackbotv2', () => {
     expect(codexApi.creates.map(create => create.threadKey)).toEqual([threadKey(mention.ts)])
     expect(codexApi.appends).toHaveLength(1)
     expect(sessionMessageTexts(codexApi.appends[0]!.body.messages)).toEqual([
-      `@${BOT_USER_ID} answer from a new root message`
+      '@centaur answer from a new root message'
     ])
     expect(codexApi.executes).toHaveLength(1)
     expect(JSON.stringify(JSON.parse(codexApi.executes[0]!.body.input_lines[0]!))).toContain(
@@ -2576,7 +2577,7 @@ describe('slackbotv2', () => {
     expect(codexApi.streamCount).toBe(1)
     const firstFollowUpTexts = sessionMessageTexts(codexApi.appends[1]!.body.messages)
     expect(firstFollowUpTexts[0]).toContain('# Requester Context')
-    expect(firstFollowUpTexts.at(-1)).toBe(`@${BOT_USER_ID} add this while still running`)
+    expect(firstFollowUpTexts.at(-1)).toBe('@centaur add this while still running')
     expect(
       slackApi.calls
         .filter(call => call.method === 'reactions.add' || call.method === 'reactions.remove')
@@ -3214,6 +3215,7 @@ describe('slackbotv2', () => {
 
   it('rotates Slack stream segments before they reach the streaming age limit', async () => {
     process.env.SLACK_STREAM_SEGMENT_MAX_AGE_MS = '120'
+    bot = createTestBot()
     try {
       codexApi.autoRespond = false
 
@@ -3309,6 +3311,7 @@ describe('slackbotv2', () => {
 
   it('marks open tasks complete before rotating an aged progress segment', async () => {
     process.env.SLACK_STREAM_SEGMENT_MAX_AGE_MS = '120'
+    bot = createTestBot()
     try {
       codexApi.autoRespond = false
 
@@ -4167,7 +4170,7 @@ describe('slackbotv2', () => {
     ).toHaveLength(1)
   })
 
-  it('omits large structured task output so final markdown still delivers', async () => {
+  it('keeps each task on one bounded card as details grow and output expands', async () => {
     codexApi.autoRespond = false
 
     const parent = await postUserMessage('Context before large task output.')
@@ -4224,6 +4227,20 @@ describe('slackbotv2', () => {
         })
       )
     }
+    codexApi.emitOutputLine(threadKey(parent.ts), JSON.stringify({
+      type: 'item.started',
+      item: { id: 'edited-files', type: 'fileChange', status: 'inProgress', changes: [{ path: 'first.ts' }] }
+    }))
+    await waitFor(() => slackApi.calls.some(call =>
+      streamChunks(call.body.chunks).some(chunk => chunk.id === 'edited-files' && chunk.status === 'in_progress')
+    ))
+    codexApi.emitOutputLine(threadKey(parent.ts), JSON.stringify({
+      type: 'item.completed',
+      item: {
+        id: 'edited-files', type: 'fileChange', status: 'completed',
+        changes: Array.from({ length: 30 }, (_, index) => ({ path: `src/🙂-component-${index}.ts`, diff: largeOutput }))
+      }
+    }))
     codexApi.emitOutputLine(
       threadKey(parent.ts),
       JSON.stringify({
@@ -4254,17 +4271,22 @@ describe('slackbotv2', () => {
     expect(transcripts).toHaveLength(1)
     const taskChunks = transcripts[0]!.chunks.filter(chunk => chunk.type === 'task_update')
     expect(taskChunks).not.toHaveLength(0)
+    const taskIds = [...Array.from({ length: 6 }, (_, index) => `cmd-large-${index}`), 'edited-files']
+    expect([...new Set(taskChunks.map(chunk => stringField(chunk.id)))].sort()).toEqual(taskIds)
+    for (const id of taskIds) {
+      expect(taskChunks.filter(chunk => chunk.id === id).at(-1)?.status).toBe('complete')
+    }
     expect(taskChunks.every(chunk => stringField(chunk.output) === '')).toBe(true)
     expect(taskChunks.every(chunk => !chunkText(chunk).includes('large-context-line'))).toBe(true)
     expect(taskChunks.some(chunk => chunkText(chunk).includes('slack thread --json --page 0'))).toBe(
       true
     )
-    expect(
-      taskChunks
-        .map(chunk => stringField(chunk.details))
-        .filter(Boolean)
-        .every(details => details.length <= 500)
-    ).toBe(true)
+    for (const chunk of taskChunks) {
+      const details = stringField(chunk.details)
+      expect(details.length).toBeLessThanOrEqual(256)
+      expect(Buffer.from(details).toString('utf8')).toBe(details)
+    }
+    expect(taskChunks.some(chunk => stringField(chunk.details).includes('[truncated'))).toBe(true)
     const markdownChunks = transcripts[0]!.chunks.filter(chunk => chunk.type === 'markdown_text')
     expect(markdownChunks).toEqual([
       {
@@ -5608,7 +5630,7 @@ function createTestBot(
 function createProductionDefaultTestBot(
   overrides: Partial<Parameters<typeof createSlackbotV2>[0]> = {}
 ): SlackbotV2 {
-  return createSlackbotV2({
+  const instance = createSlackbotV2({
     apiKey: 'slackbotv2-api-key',
     apiUrl: codexApi.url,
     botToken: BOT_TOKEN,
@@ -5618,6 +5640,17 @@ function createProductionDefaultTestBot(
     state: createMemoryState(),
     ...overrides
   })
+  Object.assign(instance.chat.getAdapter('slack'), {
+    createFileTransport: () => (url: URL, signal: AbortSignal, headers: Record<string, string>) => {
+      if (url.hostname !== 'files.slack.com') throw new Error('Unexpected fixture download host')
+      return new Promise<IncomingMessage>((resolve, reject) => {
+        const request = httpRequest(new URL(url.pathname, slackApi.url), { signal, headers }, resolve)
+        request.on('error', reject)
+        request.end()
+      })
+    }
+  })
+  return instance
 }
 
 type CapturedLog = {
@@ -6605,11 +6638,13 @@ async function handlePatchedSlackRequest(
     input.userProfileRequests.set(userId, (input.userProfileRequests.get(userId) ?? 0) + 1)
     input.userProfileRequests.set(path, (input.userProfileRequests.get(path) ?? 0) + 1)
     input.userProfileRequests.set(`${path}:${userId}`, (input.userProfileRequests.get(`${path}:${userId}`) ?? 0) + 1)
-    const profile = input.userProfiles.get(userId) ?? {
+    const profile = input.userProfiles.get(userId) ?? (userId === BOT_USER_ID ? {
+      name: 'centaur', real_name: 'centaur', fields: {}
+    } : {
       name: 'tester',
       real_name: 'Test User',
       fields: {}
-    }
+    })
     if (path === '/api/users.info') {
       await sendWebResponse(
         res,
