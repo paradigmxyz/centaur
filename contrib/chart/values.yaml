@@ -519,6 +519,11 @@ apiRs:
       maxInputChars: 8192
       # Shared by the embedding workflow and company-context searches in agent sandboxes.
       model: text-embedding-3-small
+      # Vector width requested from the model by both the write and query sides.
+      # This must match the database column width. Changing it requires a schema
+      # migration, index rebuild, and re-embedding existing rows. pgvector will
+      # not build an HNSW or IVFFlat index above 2000.
+      dimensions: 1536
   # Reaper: stop sandboxes older than the max lifetime, regardless of whether
   # they are running or suspended. 0 disables the sweep. Interval must be >= 1.
   sandboxMaxLifetimeSecs: 259200 # 3 days
@@ -671,6 +676,14 @@ linearbot:
     tag: latest
     pullPolicy: Always
   userName: centaur
+  # Reasoning effort per turn type (codex turn/start.effort). Both unset run at
+  # the harness default. These turns are autonomous, so there is no message for
+  # a -rsn flag to ride on, and one global setting suits neither an assignment
+  # turn implementing a whole ticket nor a one-line comment reply.
+  # Accepts none | minimal | low | medium | high | xhigh | max.
+  reasoningEffort:
+    assignment: ""
+    comment: ""
   extraEnv: {}
   resources: {}
 
