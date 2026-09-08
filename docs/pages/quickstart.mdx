@@ -227,8 +227,11 @@ mention. Existing DM thread replies retain their thread identity. Older
 conversation-wide DM subscriptions do not override Agent mode's thread roots.
 
 Native Stop interrupts the backend execution and suppresses further rendering
-of its answer. Stop handoff failures return a retryable response, and pending
-stop intents survive service restarts. Streaming progress and titles continue
+of its answer. A Stop received during an active handoff returns a retryable
+response until the execution is known. Pending stop intents survive service
+restarts. If the backend interrupt fails, Centaur logs the failure and releases
+the thread so another request can run. Stopping an idle thread is acknowledged
+without retrying. Streaming progress and titles continue
 through the existing renderer. Suggested prompts can be configured statically
 in the manifest; context-aware prompts and synchronization of user-edited Slack
 session titles are separate integrations.

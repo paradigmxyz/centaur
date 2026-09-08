@@ -3,7 +3,8 @@ import type { StateAdapter, Thread } from 'chat'
 import { assertSlackOk, callSlackApi } from '@chat-adapter/slack/api'
 import { fetchWithTimeout, interruptSessionExecution, slackApiTimeoutMs } from './session-api'
 import type { SlackbotV2Options, SlackbotV2ThreadState } from './types'
-import { isJsonObject, stringValue, traceLog } from './utils'
+import { isJsonObject, stringValue, traceLog, traceWarn, errorMessage } from './utils'
+import { splitEnvList } from './slack-events'
 
 export type AgentStopEvent = {
   channel: string
@@ -25,8 +26,12 @@ export async function isAllowedAgentStopUser(
   if (!teamId || !homeTeamId) throw new Error('Could not resolve agent stop user workspace')
   if (user?.is_bot === true || user?.deleted === true) return false
   const allowlist = options.allowedExternalTeamIds ??
-    (process.env.SLACKBOT_EXTERNAL_ORG_ALLOWLIST ?? '').split(',').map(value => value.trim())
-  return teamId === homeTeamId || allowlist.includes(teamId)
+    splitEnvList(process.env.SLACKBOT_EXTERNAL_ORG_ALLOWLIST)
+  const allowed = teamId === homeTeamId || allowlist.includes(teamId)
+  if (!allowed) traceLog(options, 'slackbotv2_agent_stop_external_user_ignored', undefined, {
+    user_id: userId, team_id: teamId
+  })
+  return allowed
 }
 
 async function agentSlackApi(
@@ -46,99 +51,188 @@ async function agentSlackApi(
   return result
 }
 
-/**
- * Stop is a durable handoff, not a Chat SDK turn cancellation: rendering runs
- * after the SDK handler returns. Persist intent before interrupting so a crash
- * or a failed Slack stream cannot restart delivery of the stopped answer.
- */
+export type AgentStopIntent = {
+  executionId?: string
+  eventTs: string
+  userId: string
+  completed: boolean
+}
+
+export const agentStopIntentKey = (threadId: string) => `slackbotv2:agent-stop:intent:${threadId}`
+const handoffKey = (threadId: string) => `slackbotv2:agent-stop:handoff:${threadId}`
+const stoppedKey = (threadId: string, executionId: string) =>
+  `slackbotv2:agent-stop:execution:${threadId}:${executionId}`
+// Stop records cover the normal recovery window without growing thread state.
+const STOP_TTL_MS = 30 * 24 * 60 * 60 * 1000
+const STOP_POLL_MS = 250
+const listeners = new WeakMap<StateAdapter, Map<string, Set<() => void>>>()
+
+/** Track only a running handoff, not the delay before a scheduled retry. */
+export async function beginAgentHandoff(
+  state: StateAdapter, threadId: string, messageId: string
+): Promise<() => Promise<void>> {
+  const key = handoffKey(threadId)
+  const token = randomUUID()
+  await state.set(key, { token, messageId }, 300_000)
+  return async () => {
+    if ((await state.get<{ token: string }>(key))?.token === token) await state.delete(key)
+  }
+}
+
+/** Stop intent has its own key: SDK thread state uses an unlocked read/merge/write. */
 export async function stopAgentSession(
   thread: Thread<SlackbotV2ThreadState>,
   event: AgentStopEvent,
   state: StateAdapter,
   options: SlackbotV2Options
-): Promise<void> {
+): Promise<boolean> {
   const leaseKey = `slackbotv2:agent-stop:${thread.id}`
   const token = randomUUID()
-  if (!(await state.setIfNotExists(leaseKey, token, 300_000))) {
-    throw new Error('Agent stop is already being delivered')
+  // An early Stop and its execution commit can arrive together. Let the short
+  // intent write finish before the commit delivers it.
+  const deadline = Date.now() + 5_000
+  while (!(await state.setIfNotExists(leaseKey, token, 300_000))) {
+    if (Date.now() >= deadline) throw new Error('Agent stop is already being delivered')
+    await new Promise(resolve => setTimeout(resolve, 25))
   }
   try {
+    const key = agentStopIntentKey(thread.id)
+    const previous = await state.get<AgentStopIntent>(key)
+    if (previous?.completed && Number(previous.eventTs) >= Number(event.event_ts)) return true
+    const handoff = await state.get<{ messageId: string }>(handoffKey(thread.id))
     const latest = (await thread.state) ?? {}
-    const previous = latest.agentStop
-    if (previous && Number(previous.eventTs) >= Number(event.event_ts) && previous.completed) return
-    const obligation = latest.renderObligation
-    // An old/redelivered stop must not cancel a follow-up execution. Slack
-    // timestamps identify the initiating message even after a service restart.
-    if (obligation && Number(obligation.message.id) > Number(event.event_ts)) return
-    const stop = previous && !previous.completed &&
-      (!obligation || Number(previous.eventTs) >= Number(obligation.message.id))
-      ? { ...previous, executionId: previous.executionId ?? obligation?.executionId }
-      : {
-          executionId: obligation?.executionId,
-          eventTs: event.event_ts,
-          userId: event.user,
-          completed: false
-        }
-    if (stop.executionId !== obligation?.executionId) return
-    await thread.setState({
-      agentStop: stop,
-      ...(stop.executionId
-        ? {
-            stoppedExecutionIds: Array.from(new Set([
-              ...(latest.stoppedExecutionIds ?? []), stop.executionId
-            ])).slice(-1000)
-          }
-        : {})
-    })
-    // The loading indicator can appear before the execution handoff finishes.
-    // Its commit callback will deliver this intent as soon as the ID is known.
-    if (!stop.executionId) throw new Error('Agent execution handoff is still pending')
-    await interruptSessionExecution(
-      options,
-      thread.id,
-      `Interrupted from Slack by ${stop.userId}`
-    )
-    // Use the bounded API path. Slack's native stop also stops active streams,
-    // but does not transition the session out of processing for the app.
-    await agentSlackApi(
-      'agents.sessions.setStatus',
-      {
-        channel_id: event.channel,
-        thread_ts: event.thread_ts,
-        status: 'active'
-      },
-      options
-    )
+    let obligation = latest.renderObligation
+    if (previous?.executionId && !previous.completed && previous.executionId !== obligation?.executionId) {
+      await state.delete(key)
+      // This record belongs to an obsolete obligation. Recovery must proceed
+      // with the current one, never deliver the obsolete interrupt against it.
+      if (obligation && Number(event.event_ts) <= Number(previous.eventTs)) return false
+    }
+    if (obligation && Number(obligation.message.id) > Number(event.event_ts)) {
+      if (previous && !previous.completed) await state.delete(key)
+      return false
+    }
+    if (!obligation && (!handoff || Number(handoff.messageId) > Number(event.event_ts))) {
+      await state.delete(key)
+      if (!handoff) await resetIdleAgentStatus(thread.id, event, options)
+      return true
+    }
+    const stop: AgentStopIntent = {
+      executionId: obligation?.executionId,
+      eventTs: event.event_ts,
+      userId: event.user,
+      completed: false
+    }
+    await state.set(key, stop, STOP_TTL_MS)
+    // Close the intent/commit race: either the commit observes our intent or
+    // this read observes its obligation. Neither writes over the other's key.
+    obligation = (await thread.state)?.renderObligation
+    if (!obligation) {
+      if (!stop.executionId && await state.get(handoffKey(thread.id))) {
+        throw new Error('Agent execution handoff is still pending')
+      }
+      await state.delete(key)
+      await resetIdleAgentStatus(thread.id, event, options)
+      return true
+    }
+    if (Number(obligation.message.id) > Number(stop.eventTs)) {
+      await state.delete(key)
+      return false
+    }
+    stop.executionId = obligation.executionId
+    await state.set(key, stop, STOP_TTL_MS)
+    const executionKey = stoppedKey(thread.id, stop.executionId)
+    await state.set(executionKey, true, STOP_TTL_MS)
+    for (const notify of listeners.get(state)?.get(executionKey) ?? []) notify()
+    try {
+      await interruptSessionExecution(options, thread.id, `Interrupted from Slack by ${stop.userId}`)
+    } catch (error) {
+      // A missing sandbox cannot be interrupted. Retire delivery and release
+      // the thread anyway so the next mention can start a fresh execution.
+      traceWarn(options, 'slackbotv2_agent_stop_interrupt_failed', undefined, {
+        execution_id: stop.executionId, thread_id: thread.id, error: errorMessage(error)
+      })
+    }
     const current = (await thread.state) ?? {}
-    await thread.setState({
-      agentStop: { ...stop, completed: true },
-      ...(current.renderObligation?.executionId === stop.executionId
-        ? { activeExecution: false, renderObligation: null }
-        : {})
-    })
+    if (current.renderObligation?.executionId === stop.executionId) {
+      await thread.setState({
+        activeExecution: false,
+        lastEventId: current.lastEventId ?? obligation.afterEventId,
+        renderObligation: null
+      })
+    }
+    // Cleanup precedes Slack delivery: a Slack failure must not wedge execution.
+    await resetAgentStatus(event, options)
+    await state.set(key, { ...stop, completed: true }, STOP_TTL_MS)
     traceLog(options, 'slackbotv2_agent_session_stopped', undefined, {
-      execution_id: stop.executionId,
-      thread_id: thread.id
+      execution_id: stop.executionId, thread_id: thread.id
     })
+    return true
   } finally {
     if (await state.get<string>(leaseKey) === token) await state.delete(leaseKey)
   }
 }
 
-export async function isAgentExecutionStopped(
-  thread: Thread<SlackbotV2ThreadState>,
-  executionId: string | undefined
-): Promise<boolean> {
-  return Boolean(executionId && (await thread.state)?.stoppedExecutionIds?.includes(executionId))
+async function resetIdleAgentStatus(
+  threadId: string, event: AgentStopEvent, options: SlackbotV2Options
+): Promise<void> {
+  try {
+    await resetAgentStatus(event, options)
+  } catch (error) {
+    traceWarn(options, 'slackbotv2_idle_agent_stop_status_failed', undefined, {
+      thread_id: threadId, error: errorMessage(error)
+    })
+  }
 }
 
+async function resetAgentStatus(event: AgentStopEvent, options: SlackbotV2Options): Promise<void> {
+  await agentSlackApi('agents.sessions.setStatus', {
+    channel_id: event.channel, thread_ts: event.thread_ts, status: 'active'
+  }, options)
+}
+
+export async function isAgentExecutionStopped(
+  options: SlackbotV2Options, threadId: string, executionId: string | undefined
+): Promise<boolean> {
+  return Boolean(options.agentViewEnabled && executionId &&
+    await options.state!.get(stoppedKey(threadId, executionId)))
+}
+
+/** Poll a small execution key at most four times a second, after conflation.
+ * Local stops notify the stream immediately. No database read occurs per chunk.
+ */
 export async function* suppressStoppedExecution<T>(
-  thread: Thread<SlackbotV2ThreadState>,
+  options: SlackbotV2Options,
+  threadId: string,
   executionId: string | undefined,
   source: AsyncIterable<T>
 ): AsyncIterable<T> {
-  for await (const event of source) {
-    if (await isAgentExecutionStopped(thread, executionId)) throw new Error('Agent execution stopped')
-    yield event
+  if (!options.agentViewEnabled || !executionId) {
+    yield* source
+    return
+  }
+  const state = options.state!
+  const key = stoppedKey(threadId, executionId)
+  let stopped = false
+  let nextPoll = 0
+  const notify = () => { stopped = true }
+  let byExecution = listeners.get(state)
+  if (!byExecution) listeners.set(state, byExecution = new Map())
+  let callbacks = byExecution.get(key)
+  if (!callbacks) byExecution.set(key, callbacks = new Set())
+  callbacks.add(notify)
+  try {
+    for await (const event of source) {
+      if (!stopped && Date.now() >= nextPoll) {
+        const persisted = Boolean(await state.get(key))
+        stopped = stopped || persisted
+        nextPoll = Date.now() + STOP_POLL_MS
+      }
+      if (stopped) throw new Error('Agent execution stopped')
+      yield event
+    }
+  } finally {
+    callbacks.delete(notify)
+    if (callbacks.size === 0) byExecution.delete(key)
   }
 }

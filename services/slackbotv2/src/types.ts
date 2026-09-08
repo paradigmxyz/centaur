@@ -241,14 +241,6 @@ export type SlackbotV2 = {
 
 export type SlackbotV2ThreadState = {
   activeExecution?: boolean
-  stoppedExecutionIds?: string[]
-  /** Durable native Stop intent. Retained to suppress replay of the stopped execution. */
-  agentStop?: {
-    executionId?: string
-    eventTs: string
-    userId: string
-    completed: boolean
-  }
   executedMessageIds?: string[]
   forwardedMessageIds?: string[]
   /** Last thread-level harness selected by Slack flags. Null clears persisted state. */

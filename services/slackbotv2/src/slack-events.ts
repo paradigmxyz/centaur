@@ -333,7 +333,7 @@ function normalizedIdentifierSet(...values: Array<string | undefined>): Set<stri
   return new Set(values.map(value => value?.trim()).filter((value): value is string => Boolean(value)))
 }
 
-function splitEnvList(value: string | undefined): string[] {
+export function splitEnvList(value: string | undefined): string[] {
   return (value ?? '')
     .split(/[\s,]+/)
     .map(part => part.trim())
