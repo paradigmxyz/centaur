@@ -145,8 +145,8 @@ creation. Migrations for different schemas serialize while they run. Waiting
 for this lock times out after 60 seconds by default; pass `lock_timeout` in
 seconds to change it. This timeout does not limit the migration SQL itself.
 Cancellation terminates the runner, and the runner exits if its host pipe
-closes. On PostgreSQL 14 or newer, the runner enables one-second connection
-checks so the server can detect a disconnected runner during a long query.
+closes. The runner requires PostgreSQL 14 or newer and enables one-second
+connection checks to detect a disconnected runner during a long query.
 Closing its dedicated database connection releases migration locks.
 
 Call `migrate()` on every handler invocation, outside `ctx.step()`. SQLx's
