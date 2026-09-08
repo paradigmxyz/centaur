@@ -1505,7 +1505,7 @@ impl SessionRuntime {
         self
     }
 
-    /// Spawn the worker that expires durable session events outside the
+    /// Spawn the worker that expires stdout output-line events outside the
     /// configured retention window.
     pub fn with_session_event_retention(self, config: SessionEventRetentionConfig) -> Self {
         retention::SessionEventRetentionWorker::new(self.store.clone(), config).spawn();

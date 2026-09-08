@@ -202,7 +202,8 @@ struct ActivitySummaryArgs {
 
 #[derive(Debug, ClapArgs)]
 struct SessionEventRetentionArgs {
-    /// Delete session_events older than this many days. 0 disables retention,
+    /// Delete session.output.line events older than this many days. Other event
+    /// types are preserved. 0 disables retention,
     /// which is the default because session_events is durable history.
     /// Events of a queued or running execution are never deleted.
     #[arg(

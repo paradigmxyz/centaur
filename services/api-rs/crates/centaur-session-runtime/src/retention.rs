@@ -44,9 +44,9 @@ impl SessionEventRetentionWorker {
         });
     }
 
-    /// Delete session events past the retention window.
+    /// Delete stdout output-line events past the retention window.
     ///
-    /// `session_events` carries one row per harness stdout line. Bounded sweeps
+    /// `session.output.line` carries one row per harness stdout line. Bounded sweeps
     /// keep the initial backlog from monopolizing a database connection or
     /// creating one large delete transaction.
     async fn sweep_once(&self) -> Result<SessionEventRetentionReport, SessionStoreError> {
@@ -57,7 +57,7 @@ impl SessionEventRetentionWorker {
         for _ in 0..EVENT_RETENTION_MAX_BATCHES {
             let deleted = self
                 .store
-                .delete_events_older_than(cutoff, EVENT_RETENTION_BATCH_ROWS)
+                .delete_stdout_events_older_than(cutoff, EVENT_RETENTION_BATCH_ROWS)
                 .await?;
             report.deleted_events += deleted;
             if deleted < EVENT_RETENTION_BATCH_ROWS as u64 {
@@ -70,22 +70,9 @@ impl SessionEventRetentionWorker {
                 event = "session_events_expired",
                 deleted = report.deleted_events,
                 retention_secs = self.config.retention.as_secs(),
-                "deleted session events past the retention window"
+                "deleted stdout output-line events past the retention window"
             );
         }
         Ok(report)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_sweep_is_bounded_so_a_large_backlog_drains_over_several() {
-        assert_eq!(
-            EVENT_RETENTION_BATCH_ROWS * EVENT_RETENTION_MAX_BATCHES as i64,
-            100_000
-        );
     }
 }

@@ -1211,9 +1211,9 @@ impl PgSessionStore {
             .collect()
     }
 
-    /// Deletes one batch of `session_events` older than `cutoff`, returning how
-    /// many rows went. Returns fewer than `batch_limit` when the backlog is
-    /// drained.
+    /// Deletes one batch of `session.output.line` events older than `cutoff`,
+    /// returning how many rows went. Other event types are preserved. Returns
+    /// fewer than `batch_limit` when no more eligible, unlocked rows remain.
     ///
     /// Batched rather than a single statement because this table is the largest
     /// in the schema — a deployment can accumulate millions of rows before
@@ -1223,7 +1223,7 @@ impl PgSessionStore {
     /// Events belonging to a `queued` or `running` execution are never deleted,
     /// whatever their age. A long-running turn's early output is still needed to
     /// replay it, and age alone does not distinguish "old" from "still in use".
-    pub async fn delete_events_older_than(
+    pub async fn delete_stdout_events_older_than(
         &self,
         cutoff: std::time::SystemTime,
         batch_limit: i64,
@@ -1236,6 +1236,7 @@ impl PgSessionStore {
                 from session_events e
                 left join session_executions x on x.execution_id = e.execution_id
                 where e.created_at < $1
+                  and e.event_type = 'session.output.line'
                   and (
                       e.execution_id is null
                       or x.status is null
@@ -2473,121 +2474,131 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn event_retention_is_bounded_and_preserves_active_executions() {
+    async fn stdout_retention_is_bounded_and_preserves_other_events_and_active_executions() {
         let Some(store) = test_store().await else {
             return;
         };
-        let thread_key =
-            ThreadKey::parse(format!("test:event-retention-{}", Uuid::new_v4())).unwrap();
-        store
-            .create_or_get_session(
-                &thread_key,
-                &HarnessType::Codex,
-                None,
-                json!({}),
-                Default::default(),
-            )
-            .await
-            .expect("create session");
+        for active_status in ["queued", "running"] {
+            let thread_key =
+                ThreadKey::parse(format!("test:event-retention-{}", Uuid::new_v4())).unwrap();
+            store
+                .create_or_get_session(
+                    &thread_key,
+                    &HarnessType::Codex,
+                    None,
+                    json!({}),
+                    Default::default(),
+                )
+                .await
+                .expect("create session");
 
-        let completed_execution_id = store
-            .create_execution(&thread_key, None, json!({}))
-            .await
-            .expect("create completed execution")
-            .execution
-            .execution_id;
-        store
-            .complete_execution(&completed_execution_id)
-            .await
-            .expect("complete execution");
-        let running_execution_id = store
-            .create_execution(&thread_key, None, json!({}))
-            .await
-            .expect("create running execution")
-            .execution
-            .execution_id;
-        store
-            .mark_execution_running(&running_execution_id)
-            .await
-            .expect("mark execution running");
+            let completed_execution_id = store
+                .create_execution(&thread_key, None, json!({}))
+                .await
+                .expect("create completed execution")
+                .execution
+                .execution_id;
+            store
+                .complete_execution(&completed_execution_id)
+                .await
+                .expect("complete execution");
+            let active_execution_id = store
+                .create_execution(&thread_key, None, json!({}))
+                .await
+                .expect("create queued execution")
+                .execution
+                .execution_id;
+            if active_status == "running" {
+                store
+                    .mark_execution_running(&active_execution_id)
+                    .await
+                    .expect("mark execution running");
+            }
 
-        let old = OffsetDateTime::from_unix_timestamp(946_684_800).expect("valid timestamp");
-        let retained = OffsetDateTime::from_unix_timestamp(1_009_843_200).expect("valid timestamp");
-        for (execution_id, event_type, created_at) in [
-            (
-                Some(completed_execution_id.as_str()),
-                "retention.completed.old.1",
-                old,
-            ),
-            (
-                Some(completed_execution_id.as_str()),
-                "retention.completed.old.2",
-                old,
-            ),
-            (
-                Some(running_execution_id.as_str()),
-                "retention.running.old",
-                old,
-            ),
-            (None, "retention.unscoped.old", old),
-            (
-                Some(completed_execution_id.as_str()),
-                "retention.completed.new",
-                retained,
-            ),
-        ] {
-            sqlx::query(
-                r#"
-                insert into session_events
-                    (thread_key, execution_id, event_type, payload, created_at)
-                values ($1, $2, $3, '{}'::jsonb, $4)
-                "#,
+            let old = OffsetDateTime::from_unix_timestamp(946_684_800).expect("valid timestamp");
+            let retained =
+                OffsetDateTime::from_unix_timestamp(1_009_843_200).expect("valid timestamp");
+            let completed = Some(completed_execution_id.as_str());
+            let active = Some(active_execution_id.as_str());
+            let mut expected_retained_ids = Vec::new();
+            for (execution_id, event_type, created_at, preserve) in [
+                (completed, "session.output.line", old, false),
+                (completed, "session.output.line", old, false),
+                (None, "session.output.line", old, false),
+                (active, "session.output.line", old, true),
+                (completed, "session.output.line", retained, true),
+                (completed, "session.execution_completed", old, true),
+                (completed, "session.execution_failed", old, true),
+                (completed, "session.execution_cancelled", old, true),
+                (completed, "session.activity_summary", old, true),
+                (None, "session.sandbox_paused", old, true),
+                (None, "session.sandbox_ready", old, true),
+                (None, "session.sandbox_resumed", old, true),
+            ] {
+                let payload = if event_type == "session.output.line" {
+                    json!(r#"{"method":"turn/started","params":{}}"#)
+                } else {
+                    json!({})
+                };
+                let event_id = sqlx::query_scalar::<_, i64>(
+                    r#"
+                    insert into session_events
+                        (thread_key, execution_id, event_type, payload, created_at)
+                    values ($1, $2, $3, $4, $5)
+                    returning event_id
+                    "#,
+                )
+                .bind(thread_key.as_str())
+                .bind(execution_id)
+                .bind(event_type)
+                .bind(payload)
+                .bind(created_at)
+                .fetch_one(store.pool())
+                .await
+                .expect("insert retention event");
+                if preserve {
+                    expected_retained_ids.push(event_id);
+                }
+            }
+
+            let cutoff = UNIX_EPOCH + Duration::from_secs(978_307_200);
+            assert_eq!(
+                store
+                    .delete_stdout_events_older_than(cutoff, 2)
+                    .await
+                    .expect("delete first retention batch"),
+                2
+            );
+            assert_eq!(
+                store
+                    .delete_stdout_events_older_than(cutoff, 10)
+                    .await
+                    .expect("delete remaining retention batch"),
+                1
+            );
+            assert_eq!(
+                store
+                    .delete_stdout_events_older_than(cutoff, 10)
+                    .await
+                    .expect("sweep drained backlog"),
+                0
+            );
+
+            let retained_ids = sqlx::query_scalar::<_, i64>(
+                "select event_id from session_events where thread_key = $1 order by event_id",
             )
             .bind(thread_key.as_str())
-            .bind(execution_id)
-            .bind(event_type)
-            .bind(created_at)
-            .execute(store.pool())
+            .fetch_all(store.pool())
             .await
-            .expect("insert retention event");
+            .expect("load retained events");
+            assert_eq!(retained_ids, expected_retained_ids, "{active_status}");
+
+            sqlx::query("delete from sessions where thread_key = $1")
+                .bind(thread_key.as_str())
+                .execute(store.pool())
+                .await
+                .expect("delete test session");
         }
-
-        let cutoff = UNIX_EPOCH + Duration::from_secs(978_307_200);
-        assert_eq!(
-            store
-                .delete_events_older_than(cutoff, 2)
-                .await
-                .expect("delete first retention batch"),
-            2
-        );
-        assert_eq!(
-            store
-                .delete_events_older_than(cutoff, 10)
-                .await
-                .expect("delete remaining retention batch"),
-            1
-        );
-
-        let retained_event_types = sqlx::query_scalar::<_, String>(
-            "select event_type from session_events where thread_key = $1 order by event_type",
-        )
-        .bind(thread_key.as_str())
-        .fetch_all(store.pool())
-        .await
-        .expect("load retained events");
-        assert_eq!(
-            retained_event_types,
-            vec![
-                "retention.completed.new".to_owned(),
-                "retention.running.old".to_owned(),
-            ]
-        );
-
-        sqlx::query("delete from sessions where thread_key = $1")
-            .bind(thread_key.as_str())
-            .execute(store.pool())
-            .await
-            .expect("delete test session");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
