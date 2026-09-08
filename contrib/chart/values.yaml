@@ -528,11 +528,11 @@ apiRs:
   # they are running or suspended. 0 disables the sweep. Interval must be >= 1.
   sandboxMaxLifetimeSecs: 259200 # 3 days
   sandboxReapIntervalSecs: 300
-  # Delete session.output.line events older than this many days. 0 disables
-  # retention. Other session event types are preserved.
-  # Events of a queued or running execution are never deleted, whatever their
-  # age. Sweeps are bounded per pass, so a large first backlog drains over
-  # several sweeps.
+  # Delete session.output.line events older than this many days, once their
+  # execution also completed before the cutoff. Accepts 0 through 3650;
+  # 0 disables retention. Other session event types are preserved.
+  # Events without an execution expire by event age alone. Sweeps are bounded
+  # per pass, so a large first backlog drains over several sweeps.
   sessionEventsRetentionDays: 0
   sessionEventsRetentionSweepIntervalSecs: 300
   # Minimum age before proxy resources without a live Sandbox are reaped.

@@ -1220,9 +1220,9 @@ impl PgSessionStore {
     /// retention is first switched on, and one unbounded delete would hold locks
     /// and bloat the table for the duration.
     ///
-    /// Events belonging to a `queued` or `running` execution are never deleted,
-    /// whatever their age. A long-running turn's early output is still needed to
-    /// replay it, and age alone does not distinguish "old" from "still in use".
+    /// An execution's output is eligible only after its completion time passes
+    /// the cutoff, preserving early output for the full retention window after
+    /// completion. Events without an execution are eligible by event age alone.
     pub async fn delete_stdout_events_older_than(
         &self,
         cutoff: std::time::SystemTime,
@@ -1239,8 +1239,7 @@ impl PgSessionStore {
                   and e.event_type = 'session.output.line'
                   and (
                       e.execution_id is null
-                      or x.status is null
-                      or x.status not in ('queued', 'running')
+                      or x.completed_at < $1
                 )
                 order by e.created_at
                 limit $2
@@ -2474,7 +2473,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn stdout_retention_is_bounded_and_preserves_other_events_and_active_executions() {
+    async fn stdout_retention_is_bounded_and_waits_for_execution_completion_cutoff() {
         let Some(store) = test_store().await else {
             return;
         };
@@ -2492,16 +2491,32 @@ mod tests {
                 .await
                 .expect("create session");
 
-            let completed_execution_id = store
-                .create_execution(&thread_key, None, json!({}))
+            let old = OffsetDateTime::from_unix_timestamp(946_684_800).expect("valid timestamp");
+            let cutoff = UNIX_EPOCH + Duration::from_secs(978_307_200);
+            let retained =
+                OffsetDateTime::from_unix_timestamp(1_009_843_200).expect("valid timestamp");
+            let mut completed_execution_ids = Vec::new();
+            for completed_at in [old, OffsetDateTime::from(cutoff), retained] {
+                let execution_id = store
+                    .create_execution(&thread_key, None, json!({}))
+                    .await
+                    .expect("create execution")
+                    .execution
+                    .execution_id;
+                store
+                    .complete_execution(&execution_id)
+                    .await
+                    .expect("complete execution");
+                sqlx::query(
+                    "update session_executions set completed_at = $2 where execution_id = $1",
+                )
+                .bind(&execution_id)
+                .bind(completed_at)
+                .execute(store.pool())
                 .await
-                .expect("create completed execution")
-                .execution
-                .execution_id;
-            store
-                .complete_execution(&completed_execution_id)
-                .await
-                .expect("complete execution");
+                .expect("set execution completion time");
+                completed_execution_ids.push(execution_id);
+            }
             let active_execution_id = store
                 .create_execution(&thread_key, None, json!({}))
                 .await
@@ -2515,10 +2530,9 @@ mod tests {
                     .expect("mark execution running");
             }
 
-            let old = OffsetDateTime::from_unix_timestamp(946_684_800).expect("valid timestamp");
-            let retained =
-                OffsetDateTime::from_unix_timestamp(1_009_843_200).expect("valid timestamp");
-            let completed = Some(completed_execution_id.as_str());
+            let completed = Some(completed_execution_ids[0].as_str());
+            let completed_at_cutoff = Some(completed_execution_ids[1].as_str());
+            let recently_completed = Some(completed_execution_ids[2].as_str());
             let active = Some(active_execution_id.as_str());
             let mut expected_retained_ids = Vec::new();
             for (execution_id, event_type, created_at, preserve) in [
@@ -2526,6 +2540,9 @@ mod tests {
                 (completed, "session.output.line", old, false),
                 (None, "session.output.line", old, false),
                 (active, "session.output.line", old, true),
+                (completed_at_cutoff, "session.output.line", old, true),
+                (recently_completed, "session.output.line", old, true),
+                (recently_completed, "session.output.line", retained, true),
                 (completed, "session.output.line", retained, true),
                 (completed, "session.execution_completed", old, true),
                 (completed, "session.execution_failed", old, true),
@@ -2561,7 +2578,6 @@ mod tests {
                 }
             }
 
-            let cutoff = UNIX_EPOCH + Duration::from_secs(978_307_200);
             assert_eq!(
                 store
                     .delete_stdout_events_older_than(cutoff, 2)

@@ -202,14 +202,15 @@ struct ActivitySummaryArgs {
 
 #[derive(Debug, ClapArgs)]
 struct SessionEventRetentionArgs {
-    /// Delete session.output.line events older than this many days. Other event
-    /// types are preserved. 0 disables retention,
-    /// which is the default because session_events is durable history.
-    /// Events of a queued or running execution are never deleted.
+    /// Delete session.output.line events older than this many days, once their
+    /// execution also completed before the cutoff. Other event types are
+    /// preserved. Accepts 0 through 3650; 0 disables retention (the default).
+    /// Events without an execution expire by event age alone.
     #[arg(
         long = "session-events-retention-days",
         env = "SESSION_EVENTS_RETENTION_DAYS",
-        default_value_t = 0
+        default_value_t = 0,
+        value_parser = clap::value_parser!(u32).range(0..=3650)
     )]
     retention_days: u32,
     #[arg(
@@ -2278,6 +2279,40 @@ mod tests {
         .unwrap();
 
         assert!(args.session_event_retention_config().is_none());
+    }
+
+    #[test]
+    fn session_event_retention_days_are_bounded() {
+        for days in ["0", "3650"] {
+            let args = Args::try_parse_from([
+                "centaur-api-server",
+                "--database-url",
+                "postgres://postgres:postgres@localhost/centaur",
+                "--session-events-retention-days",
+                days,
+            ])
+            .expect("accept retention boundary");
+            let config = args.session_event_retention_config();
+            if days == "0" {
+                assert!(config.is_none());
+            } else {
+                assert_eq!(
+                    config.expect("retention enabled").retention,
+                    Duration::from_secs(3650 * 24 * 60 * 60)
+                );
+            }
+        }
+        for days in ["3651", "4294967295"] {
+            let error = Args::try_parse_from([
+                "centaur-api-server",
+                "--database-url",
+                "postgres://postgres:postgres@localhost/centaur",
+                "--session-events-retention-days",
+                days,
+            ])
+            .expect_err("reject excessive retention");
+            assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+        }
     }
 
     #[test]
