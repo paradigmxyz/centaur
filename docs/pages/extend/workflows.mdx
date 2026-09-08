@@ -204,15 +204,24 @@ Use `ctx.slack_buttons` to post a message whose buttons start a named workflow.
 The posting workflow receives the Slack message response and continues immediately.
 
 ```python
+from api.workflow_engine import Button
+
 await ctx.slack_buttons(
     "release-review",
     channel="C123",
     text="Approve this release?",
     workflow="review_release",
     input={"release_id": "release-42"},
-    buttons={"approve": "Approve", "reject": "Reject"},
+    buttons={
+        "approve": Button("Approve", style="primary"),
+        "reject": Button("Reject", style="danger"),
+    },
 )
 ```
+
+`primary` uses Slack's green style, and `danger` uses its red style. Omit `style`
+for the default appearance. Plain string labels are still supported and can be
+mixed with `Button` values. Slack does not support arbitrary button colors.
 
 Each click starts `review_release` with the supplied input and a `click` field.
 Slackbot fills `click` from the verified Slack interaction, overriding any

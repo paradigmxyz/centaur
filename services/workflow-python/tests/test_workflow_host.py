@@ -747,12 +747,15 @@ class WorkflowHostTests(unittest.TestCase):
 
     def test_slack_buttons_post_workflow_target_and_replay_message(self) -> None:
         source = '''
+from api.workflow_engine import Button
 WORKFLOW_NAME = "buttons"
 async def handler(inp, ctx):
     return await ctx.slack_buttons(
         "review", channel="C1", text="Proceed?", workflow="review_release",
         input={"release_id": "release-1"},
-        buttons={"approve": "Approve", "reject": "Reject"},
+        buttons={"approve": Button("Approve", style="primary"),
+                 "reject": Button("Reject", style="danger"),
+                 "later": "Decide later", "details": Button("Details")},
     )
 '''
         message = {"ok": True, "channel": "C1", "ts": "1.0"}
@@ -781,8 +784,11 @@ async def handler(inp, ctx):
                         self.assertEqual([b["action_id"] for b in elements], [
                             f"centaur.workflow.action:{group_id}:approve",
                             f"centaur.workflow.action:{group_id}:reject",
+                            f"centaur.workflow.action:{group_id}:later",
+                            f"centaur.workflow.action:{group_id}:details",
                         ])
-                        self.assertEqual([b["text"]["text"] for b in elements], ["Approve", "Reject"])
+                        self.assertEqual([b["text"]["text"] for b in elements], ["Approve", "Reject", "Decide later", "Details"])
+                        self.assertEqual([b.get("style") for b in elements], ["primary", "danger", None, None])
                         for button in elements:
                             self.assertEqual(json.loads(button["value"]), {
                                 "workflow_name": "review_release", "input": {"release_id": "release-1"},
@@ -801,16 +807,18 @@ async def handler(inp, ctx):
 
     def test_button_configuration_is_validated_before_posting(self) -> None:
         source = """
+from api.workflow_engine import Button
 WORKFLOW_NAME = "buttons"
 async def handler(inp, ctx):
     return await ctx.slack_buttons(
         "review", channel="C1", workflow="review_release",
         text=inp.get("text", "Proceed?"), input=inp.get("data", {}),
-        buttons=inp.get("buttons", {"approve": "Approve"}),
+        buttons={"approve": Button("Approve", style=inp["style"])} if "style" in inp else inp.get("buttons", {"approve": "Approve"}),
     )
 """
         for inp in [{"buttons": {}}, {"text": "x" * 3001}, {"data": {"large": "x" * 2000}},
-                    {"buttons": {"bad:action": "Bad"}}, {"buttons": {"approve": "x" * 76}}]:
+                    {"buttons": {"bad:action": "Bad"}}, {"buttons": {"approve": "x" * 76}},
+                    {"style": "blue"}, {"style": "default"}, {"style": ""}]:
             with self.subTest(input=inp), self.workflow_host(source) as proc:
                 self.send_host_message(proc, {
                     "type": "workflow.start", "workflow_name": "buttons",

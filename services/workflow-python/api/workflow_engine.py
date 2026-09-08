@@ -6,7 +6,7 @@ import inspect
 import json
 import re
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 from api.app import WorkflowToolManager, WorkflowTools, bind_context_rpc, reset_context_rpc
 
@@ -17,6 +17,12 @@ class Delivery:
     thread_ts: str = ""
     mode: str = ""
     metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+@dataclasses.dataclass(frozen=True)
+class Button:
+    label: str
+    style: Literal["primary", "danger"] | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -198,16 +204,21 @@ class WorkflowContext:
 
     async def slack_buttons(
         self, name: str, *, channel: str, text: str, workflow: str,
-        buttons: dict[str, str], input: dict[str, Any] | None = None,
+        buttons: dict[str, str | Button], input: dict[str, Any] | None = None,
         thread_ts: str | None = None,
     ) -> dict[str, Any]:
         """Post buttons that start a workflow per click; return the Slack message."""
+        normalized = {action: Button(button) if isinstance(button, str) else button
+                      for action, button in buttons.items()}
         if (
             not name.strip() or len(name) > 200 or name in self._action_names
             or not channel.strip() or not workflow.strip() or not text.strip() or len(text) > 3000
             or not 1 <= len(buttons) <= 5
             or any(not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", action)
-                   or not label.strip() or len(label) > 75 for action, label in buttons.items())
+                   or not isinstance(button, Button)
+                   or not button.label.strip() or len(button.label) > 75
+                   or button.style not in (None, "primary", "danger")
+                   for action, button in normalized.items())
             or (input is not None and not isinstance(input, dict))
         ):
             raise ValueError("invalid Slack button configuration or duplicate step name")
@@ -219,9 +230,10 @@ class WorkflowContext:
         blocks = [
             {"type": "section", "text": {"type": "mrkdwn", "text": text}},
             {"type": "actions", "elements": [
-                {"type": "button", "text": {"type": "plain_text", "text": label},
-                 "action_id": f"centaur.workflow.action:{group_id}:{action}", "value": value}
-                for action, label in buttons.items()
+                {"type": "button", "text": {"type": "plain_text", "text": button.label},
+                 "action_id": f"centaur.workflow.action:{group_id}:{action}", "value": value,
+                 **({"style": button.style} if button.style else {})}
+                for action, button in normalized.items()
             ]},
         ]
         return await self.step(
