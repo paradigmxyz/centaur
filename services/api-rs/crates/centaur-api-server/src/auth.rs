@@ -188,6 +188,14 @@ impl ApiAuthConfig {
         }
     }
 
+    pub(crate) fn verify_workflow_button(
+        &self,
+        request: centaur_workflows::slack_buttons::Invocation,
+    ) -> Result<centaur_workflows::CreateWorkflowRunRequest, ApiError> {
+        centaur_workflows::slack_buttons::verify(request, self.jwt_secret.as_bytes())
+            .map_err(|error| ApiError::Forbidden(error.into()))
+    }
+
     pub(crate) fn authenticate(
         &self,
         headers: &HeaderMap,

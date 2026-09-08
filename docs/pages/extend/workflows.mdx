@@ -224,8 +224,15 @@ for the default appearance. Plain string labels are still supported and can be
 mixed with `Button` values. Slack does not support arbitrary button colors.
 
 Each click starts `review_release` with the supplied input and a `click` field.
-Slackbot fills `click` from the verified Slack interaction, overriding any
-`click` field in the button's input. It contains `id` (the button group ID),
+The Rust workflow context signs the target workflow, input, action, group, and
+destination channel before posting. The invoke endpoint verifies that signature
+before creating a run. Posting a lookalike button through the agent Slack tool
+does not grant permission to start workflows. Use a Slack conversation ID for
+`channel`, such as a channel ID starting with `C` or a DM conversation ID starting
+with `D`.
+
+Slackbot supplies `click` from the verified Slack interaction, and the API uses it
+instead of any `click` field in the signed input. It contains `id` (the button group ID),
 `action`, `user_id`, `team_id`, `channel_id`, `message_ts`, and `action_ts`.
 A workflow using a dataclass `Input` can type this field as `ButtonClick` from
 `api.workflow_engine`.
@@ -274,12 +281,18 @@ and a stable Slack `client_msg_id`; an ambiguous Slack failure can still produce
 duplicate messages. All copies carry the same workflow target and group ID.
 Groups support one to five buttons. Action keys use letters, digits, underscores,
 or hyphens and contain at most 64 characters. Labels contain at most 75 characters.
-The serialized workflow name and input must fit within 2000 bytes. Pass record
+The signed button value, including its authentication envelope, must fit within
+2000 bytes. The API rejects oversized values before posting. Pass record
 IDs rather than large or sensitive data because this input is stored in Slack.
 
 This uses the existing Slackbot interactivity endpoint and API Slack bot token.
 Slackbot needs its dedicated `SLACKBOT_API_KEY` to start workflows through the
-button endpoint. Workflow-start permissions still govern ordinary API callers.
+button endpoint. The signing key stays in Rust and is derived specifically for
+workflow buttons from `CENTAUR_JWT_SIGNING_SECRET`. Unsigned buttons are rejected;
+rotating that secret invalidates previously signed buttons. Signatures authenticate
+the button configuration, while user authorization and duplicate-action policy
+remain the receiving workflow's responsibility.
+Workflow-start permissions still govern ordinary API callers.
 Existing custom Slack action IDs continue to emit raw workflow events.
 The `centaur.workflow.action:` namespace is reserved for workflow buttons.
 `SLACK_API_URL` can target a local Slack emulator in the API and Slackbot.

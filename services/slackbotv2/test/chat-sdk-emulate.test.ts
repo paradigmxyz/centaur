@@ -460,7 +460,7 @@ describe('slackbotv2', () => {
       actions: [{
         action_id: 'centaur.workflow.action:00000000-0000-0000-0000-000000000001:approve',
         action_ts: '1700000004.000200', type: 'button',
-        value: JSON.stringify({ workflow_name: 'review_release', input: { release_id: 'release-1', click: { user_id: 'FORGED' } } })
+        value: 'v1.opaque-signed-payload.signature'
       }]
     }
     const waits: Promise<unknown>[] = []
@@ -477,19 +477,42 @@ describe('slackbotv2', () => {
     await Promise.all(waits)
     expect(requests).toHaveLength(2)
     expect(requests[0]).toEqual({
-      workflow_name: 'review_release',
+      button: payload.actions[0]?.value,
       idempotency_key: expect.stringMatching(/^slack\.button:[0-9a-f]{64}$/),
-      input: {
-        release_id: 'release-1',
-        click: {
+      click: {
           id: '00000000-0000-0000-0000-000000000001', action: 'approve',
           action_ts: payload.actions[0]?.action_ts, channel_id: CHANNEL_ID,
           message_ts: payload.message.ts, team_id: TEAM_ID, user_id: USER_ID
-        }
       }
     })
     expect(requests[1]).toEqual(requests[0])
     expect(codexApi.workflowEvents).toHaveLength(0)
+  })
+
+  it('acknowledges a permanently rejected workflow button without retrying it', async () => {
+    let starts = 0
+    bot = createTestBot({
+      fetch: async (input, init) => {
+        if (String(input).endsWith('/api/workflows/actions/invoke')) {
+          starts += 1
+          expect(JSON.parse(String(init?.body)).button).toBe('unsigned')
+          return Response.json({ error: 'invalid or untrusted workflow button' }, { status: 403 })
+        }
+        return globalThis.fetch(input, init)
+      }
+    })
+    const payload = {
+      type: 'block_actions', team: { id: TEAM_ID },
+      user: { id: USER_ID, username: 'tester', team_id: TEAM_ID },
+      channel: { id: CHANNEL_ID }, message: { ts: '1700000003.000200' },
+      actions: [{ type: 'button', action_id: 'centaur.workflow.action:00000000-0000-0000-0000-000000000001:approve',
+        action_ts: '1700000004.000200', value: 'unsigned' }]
+    }
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request('/api/slack/actions', signedSlackInteraction(payload), {}, waitUntilContext(waits))
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+    expect(starts).toBe(1)
   })
 
   it('applies the external-org allowlist to Slack block actions', async () => {

@@ -1125,6 +1125,7 @@ name = "centaur-workflows"
 version = "0.1.0"
 dependencies = [
  "absurd-sdk",
+ "base64 0.23.1",
  "centaur-iron-control",
  "centaur-sandbox-core",
  "centaur-session-core",
@@ -1135,9 +1136,11 @@ dependencies = [
  "chrono-tz",
  "cron",
  "futures-util",
+ "hmac 0.13.0",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "sqlx",
  "thiserror 2.0.20",
  "time",

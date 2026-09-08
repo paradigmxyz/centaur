@@ -565,26 +565,21 @@ export async function dispatchSlackBlockAction(
   if (workflowAction) {
     const match = payload.action_id.slice(WORKFLOW_ACTION_PREFIX.length)
       .match(/^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}):([a-zA-Z0-9_-]{1,64})$/)
-    const target: unknown = JSON.parse(payload.value ?? '')
-    if (!match || !isJsonObject(target) || typeof target.workflow_name !== 'string'
-      || !target.workflow_name.trim() || !isJsonObject(target.input)
+    if (!match || !payload.value
       || !payload.user_id || !payload.team_id || !payload.channel_id
       || !payload.message_ts || !payload.action_ts) {
       throw new Error('Invalid workflow button or click identity')
     }
     body = {
-      workflow_name: target.workflow_name,
+      button: payload.value,
       idempotency_key: 'slack.button:' + createHash('sha256').update(JSON.stringify([
         payload.team_id, payload.channel_id, payload.user_id,
         payload.message_ts, payload.action_ts, payload.action_id
       ])).digest('hex'),
-      input: {
-        ...target.input,
-        click: {
-          id: match[1]!, action: match[2]!, action_ts: payload.action_ts,
-          channel_id: payload.channel_id, message_ts: payload.message_ts,
-          team_id: payload.team_id, user_id: payload.user_id
-        }
+      click: {
+        id: match[1]!, action: match[2]!, action_ts: payload.action_ts,
+        channel_id: payload.channel_id, message_ts: payload.message_ts,
+        team_id: payload.team_id, user_id: payload.user_id
       }
     }
   }
@@ -608,6 +603,10 @@ export async function dispatchSlackBlockAction(
     sessionApiTimeoutMs(options),
     action
   )
+  if (workflowAction && response.status === 403) {
+    await response.body?.cancel()
+    return { outcome: 'unavailable' }
+  }
   await ensureApiOk(response, action)
   if (workflowAction) {
     const result: unknown = await response.json()

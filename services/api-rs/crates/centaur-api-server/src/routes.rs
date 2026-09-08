@@ -271,7 +271,10 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
             post(cancel_workflow_run),
         )
         .route("/api/workflows/events", post(emit_workflow_event))
-        .route("/api/workflows/actions/invoke", post(create_workflow_run))
+        .route(
+            "/api/workflows/actions/invoke",
+            post(invoke_workflow_button),
+        )
         .route(
             "/api/admin/slack/archive-imports",
             get(list_slack_archive_imports).post(presign_slack_archive_import),
@@ -2838,6 +2841,15 @@ async fn ingest_google_docs_sync_batch(
             "checkpoint": request.checkpoint.is_some(),
         }
     })))
+}
+
+async fn invoke_workflow_button(
+    State(state): State<AppState>,
+    Json(request): Json<centaur_workflows::slack_buttons::Invocation>,
+) -> Result<Json<Value>, ApiError> {
+    let request = state.auth.verify_workflow_button(request)?;
+    let run = workflow_runtime(&state)?.create_run(request).await?;
+    Ok(Json(serde_json::to_value(run)?))
 }
 
 async fn create_workflow_run(

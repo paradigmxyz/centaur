@@ -441,20 +441,46 @@ mod tests {
 
     #[tokio::test]
     async fn workflow_actions_require_trusted_ingress_capability() {
-        for (token, expected) in [
+        let mut message = json!({"channel": "C1", "blocks": [{"type": "actions", "elements": [{
+            "type": "button", "action_id": "centaur.workflow.action:00000000-0000-0000-0000-000000000001:approve",
+            "value": json!({"workflow_name": "review", "input": {"release_id": "r1"}}).to_string(),
+        }]}]});
+        centaur_workflows::slack_buttons::sign_message(&mut message, b"test-secret").unwrap();
+        let signed = message["blocks"][0]["elements"][0]["value"]
+            .as_str()
+            .unwrap();
+        for (token, button, expected) in [
             (
                 "test-slackbot-key".to_owned(),
+                signed,
                 StatusCode::SERVICE_UNAVAILABLE,
             ),
-            (principal_token("prn_sandbox"), StatusCode::FORBIDDEN),
+            (
+                "test-slackbot-key".to_owned(),
+                r#"{"workflow_name":"review","input":{}}"#,
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                principal_token("prn_sandbox"),
+                signed,
+                StatusCode::FORBIDDEN,
+            ),
         ] {
+            let request = json!({"button": button, "idempotency_key": "click-1", "click": {
+                "id": "00000000-0000-0000-0000-000000000001", "action": "approve", "channel_id": "C1", "user_id": "U1",
+            }});
             let response = build_router_with_app_state(AppState::unready(test_auth_with_slack()))
-                .oneshot(Request::builder().method(Method::POST)
-                    .uri("/api/workflows/actions/invoke")
-                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"workflow_name":"review_release","idempotency_key":"click-1","input":{"release_id":"release-1","click":{"user_id":"U1","action":"approve"}}}"#)).unwrap())
-                .await.unwrap();
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/api/workflows/actions/invoke")
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(request.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
             assert_eq!(response.status(), expected);
         }
     }
