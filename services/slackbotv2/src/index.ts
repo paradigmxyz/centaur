@@ -52,6 +52,7 @@ import {
   serializeMessage,
   sessionStreamError,
   slackApiTimeoutMs,
+  WORKFLOW_ACTION_PREFIX,
   withSlackApiTimeout
 } from './session-api'
 import {
@@ -143,6 +144,7 @@ const MAX_SLACK_MESSAGE_ATTACHMENTS = 20
 
 type SlackbotV2RequestContext = {
   waitUntil(promise: Promise<unknown>): void
+  actionError?: unknown
 }
 
 type StateConnectionStatus = {
@@ -330,7 +332,10 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
 
   chat.onAction(async event => {
     const payload = slackBlockActionPayload(event)
-    const dedupeKey = slackBlockActionDedupeKey(payload)
+    const workflowAction = payload.action_id.startsWith(WORKFLOW_ACTION_PREFIX)
+    // Workflow-owned actions deduplicate in the same database transaction as
+    // their outcome. A temporary ingress lease must never acknowledge a lost click.
+    const dedupeKey = workflowAction ? undefined : slackBlockActionDedupeKey(payload)
     const leaseToken = randomUUID()
     if (
       dedupeKey
@@ -346,8 +351,35 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
       return
     }
     try {
-      await dispatchSlackBlockAction(options, payload)
+      const result = await dispatchSlackBlockAction(options, payload)
+      if (result && payload.channel_id) {
+        const messages: Record<string, string> = {
+          accepted: 'Your selection was recorded.',
+          already_resolved: 'This request has already been resolved.',
+          forbidden: 'You are not permitted to act on this request.',
+          unavailable: 'This request is no longer available.'
+        }
+        backgroundWaitUntil(
+          withSlackApiTimeout(options, 'post workflow action feedback', () =>
+            callSlackApi('chat.postEphemeral', {
+              channel: payload.channel_id,
+              user: payload.user_id,
+              text: messages[String(result.outcome)] ?? 'This request is closed.'
+            }, {
+              apiUrl: options.slackApiUrl,
+              fetch: options.fetch as typeof globalThis.fetch | undefined,
+              token: options.botToken
+            })
+          ).catch(error => {
+            traceWarn(options, 'slackbotv2_action_feedback_failed', undefined, {
+              error: errorMessage(error)
+            })
+          })
+        )
+      }
     } catch (error) {
+      const context = requestContext.getStore()
+      if (workflowAction && context) context.actionError = error
       try {
         if (dedupeKey && (await state.get(dedupeKey)) === leaseToken) {
           await state.delete(dedupeKey)
@@ -386,7 +418,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
       message_ts: payload.message_ts,
       team_id: payload.team_id,
       thread_ts: payload.thread_ts,
-      workflow_event_name: `slack.block_action.${payload.action_id}`
+      workflow_event_name: workflowAction ? undefined : `slack.block_action.${payload.action_id}`
     })
   })
 
@@ -510,7 +542,13 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
         outcome = 'ignored'
         return new globalThis.Response('ok', { status: 200 })
       }
-      const awaitHandoff = shouldAwaitSlackHandoff(rawBody)
+      const interaction = parseSlackWebhookPayload(rawBody)
+      const workflowAction = interaction?.type === 'block_actions'
+        && Array.isArray(interaction.actions)
+        && interaction.actions.some(action => isJsonObject(action)
+          && typeof action.action_id === 'string'
+          && action.action_id.startsWith(WORKFLOW_ACTION_PREFIX))
+      const awaitHandoff = workflowAction || shouldAwaitSlackHandoff(rawBody)
       const handoffTasks: Promise<unknown>[] = []
       const context: SlackbotV2RequestContext = {
         waitUntil: promise => waitUntil(c, promise)
@@ -557,6 +595,10 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
             error: waitError ? errorMessage(waitError) : undefined,
             phase_ms: elapsedMs(waitStartedAtMs)
           })
+        }
+        if (workflowAction && (waitError || context.actionError)) {
+          outcome = 'error'
+          return new globalThis.Response('Workflow action could not be recorded. Please retry.', { status: 503 })
         }
       }
       const lateFileTask = lateSlackFiles.repairFromWebhook(rawBody)

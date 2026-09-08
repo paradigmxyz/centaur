@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import inspect
+from collections.abc import Callable
 from typing import Any
 
 from api.app import WorkflowToolManager, WorkflowTools, bind_context_rpc, reset_context_rpc
@@ -14,6 +15,33 @@ class Delivery:
     thread_ts: str = ""
     mode: str = ""
     metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+@dataclasses.dataclass(frozen=True)
+class ButtonClick:
+    """Verified click context. ``id`` is stable across workflow retries."""
+
+    id: str
+    action: str
+    user_id: str
+    team_id: str
+    channel_id: str
+    message_ts: str
+    action_ts: str
+
+
+@dataclasses.dataclass(frozen=True)
+class Button:
+    label: str
+    on_click: Callable[[ButtonClick], Any]
+    style: str | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class ButtonResult:
+    outcome: str
+    click: ButtonClick | None = None
+    value: Any = None
 
 
 class WorkflowContext:
@@ -32,6 +60,7 @@ class WorkflowContext:
         self.task_id = task_id
         self.workflow_name = workflow_name
         self._pool = pool
+        self._action_names: set[str] = set()
         # Module-level `AGENT_DEFAULTS` (e.g. {"model": ..., "reasoning": ...})
         # applied to every ctx.agent_turn as a per-workflow default; explicit
         # per-call kwargs always win. See agent_turn().
@@ -168,8 +197,9 @@ class WorkflowContext:
         input: dict[str, Any] | None = None,
         *,
         idempotency_key: str | None = None,
+        name: str | None = None,
     ) -> dict[str, Any]:
-        """Queue another workflow and return its durable task identifiers."""
+        """Queue a child; supplying ``name`` makes its start replay-safe."""
         request: dict[str, Any] = {
             "type": "ctx.workflow.start",
             "workflow_name": workflow_name,
@@ -177,7 +207,71 @@ class WorkflowContext:
         }
         if idempotency_key:
             request["idempotency_key"] = idempotency_key
+        if name is not None:
+            request["step"] = name
         return await self._rpc.request(request)
+
+    async def slack_actions(
+        self,
+        name: str,
+        *,
+        channel: str,
+        text: str,
+        team_id: str,
+        allowed_users: list[str],
+        buttons: dict[str, Button],
+        timeout: dt.timedelta | int | float = 86400,
+        thread_ts: str | None = None,
+    ) -> ButtonResult:
+        """Post buttons, suspend durably, then execute the winning callback.
+
+        The group is single-use: the first permitted click wins. Callbacks run
+        in this workflow and can use its ordinary durable context operations.
+        Use named child starts and idempotent external writes inside callbacks,
+        just as in any checkpointed step. Expiry returns without a callback.
+        """
+        if not buttons or any(
+            not isinstance(button, Button) or not callable(button.on_click)
+            for button in buttons.values()
+        ):
+            raise ValueError("buttons must contain Button instances with callable on_click handlers")
+        if not name or name in self._action_names:
+            raise ValueError("each button group needs a unique non-empty step name")
+        self._action_names.add(name)
+        seconds = duration_seconds(timeout)
+        if not 1 <= seconds <= 2592000 or seconds != int(seconds):
+            raise ValueError("button timeout must be a whole number of seconds between 1 and 2592000")
+        prompt = await self._rpc.request(
+            {
+                "type": "ctx.actions.create",
+                "step": name,
+                "config": {
+                    "channel": channel,
+                    "text": text,
+                    "team_id": team_id,
+                    "allowed_users": sorted(set(allowed_users)),
+                    "buttons": [
+                        {"id": action, "label": button.label, "style": button.style}
+                        for action, button in buttons.items()
+                    ],
+                    "timeout_seconds": int(seconds),
+                    "thread_ts": thread_ts,
+                },
+            }
+        )
+        result = await self._rpc.request({"type": "ctx.actions.wait", "id": prompt["id"]})
+        if result["outcome"] != "clicked":
+            return ButtonResult(outcome=result["outcome"])
+        click = ButtonClick(
+            **{field.name: result[field.name] for field in dataclasses.fields(ButtonClick)}
+        )
+        if click.action not in buttons:
+            raise RuntimeError("recorded button action is no longer defined in this workflow")
+        value = await self.step(
+            f"{name}.callback.{click.action}",
+            lambda: buttons[click.action].on_click(click),
+        )
+        return ButtonResult(outcome="clicked", click=click, value=value)
 
     async def call_tool(self, tool: str, method: str, args: dict[str, Any] | None = None) -> Any:
         return await WorkflowToolManager(self._rpc).call_tool_raw(tool, method, args or {})

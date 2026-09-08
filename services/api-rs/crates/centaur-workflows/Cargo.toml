@@ -20,7 +20,7 @@ futures-util.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sqlx.workspace = true
+sqlx = { workspace = true, features = ["uuid"] }
 thiserror.workspace = true
 time.workspace = true
 tokio = { workspace = true, features = ["io-util", "process"] }

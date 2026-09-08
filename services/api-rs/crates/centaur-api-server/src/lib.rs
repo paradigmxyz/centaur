@@ -440,6 +440,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workflow_actions_require_trusted_ingress_capability() {
+        for (token, expected) in [
+            (
+                "test-slackbot-key".to_owned(),
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (principal_token("prn_sandbox"), StatusCode::FORBIDDEN),
+        ] {
+            let response = build_router_with_app_state(AppState::unready(test_auth_with_slack()))
+                .oneshot(Request::builder().method(Method::POST)
+                    .uri("/api/workflows/actions/invoke")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"action_id":"centaur.workflow.action:00000000-0000-0000-0000-000000000001:approve","team_id":"T1","channel_id":"C1","user_id":"U1","message_ts":"1.0","action_ts":"2.0"}"#)).unwrap())
+                .await.unwrap();
+            assert_eq!(response.status(), expected);
+        }
+    }
+
+    #[tokio::test]
     async fn principal_jwt_is_capability_scoped_and_archive_exception_is_subject_scoped() {
         let principal = principal_token("prn_sandbox");
         let write_response = build_router_with_app_state(AppState::unready(test_auth()))

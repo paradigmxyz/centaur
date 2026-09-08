@@ -272,6 +272,10 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         )
         .route("/api/workflows/events", post(emit_workflow_event))
         .route(
+            "/api/workflows/actions/invoke",
+            post(invoke_workflow_action),
+        )
+        .route(
             "/api/admin/slack/archive-imports",
             get(list_slack_archive_imports).post(presign_slack_archive_import),
         )
@@ -552,6 +556,9 @@ fn route_access(method: &Method, route: &str) -> Option<RouteAccess> {
             capability(Capability::WorkflowsWrite)
         }
         (&Method::POST, "/api/workflows/events") => capability(Capability::WorkflowsEvents),
+        (&Method::POST, "/api/workflows/actions/invoke") => {
+            capability(Capability::WorkflowsActions)
+        }
         (&Method::POST, "/api/admin/slack/archive-imports/{import_id}/download-url") => {
             Some(RouteAccess::ArchiveDownload)
         }
@@ -2880,6 +2887,15 @@ async fn cancel_workflow_run(
     let workflows = workflow_runtime(&state)?;
     workflows.cancel_run(&run_id).await?;
     Ok(Json(json!({ "ok": true })))
+}
+
+async fn invoke_workflow_action(
+    State(state): State<AppState>,
+    Json(request): Json<centaur_workflows::actions::ActionInvocation>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        workflow_runtime(&state)?.invoke_action(request).await?,
+    ))
 }
 
 async fn emit_workflow_event(

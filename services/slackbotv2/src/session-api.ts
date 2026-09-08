@@ -552,19 +552,32 @@ export async function forwardToSessionApi(
   return openSessionEventStream(options, input)
 }
 
+export const WORKFLOW_ACTION_PREFIX = 'centaur.workflow.action:'
+
 export async function dispatchSlackBlockAction(
   options: SlackbotV2Options,
   payload: SlackbotV2BlockActionPayload
-): Promise<void> {
+): Promise<JsonObject | undefined> {
   const action = `dispatch Slack block action ${payload.action_id}`
+  const workflowAction = payload.action_id.startsWith(WORKFLOW_ACTION_PREFIX)
   const response = await recordSessionApiOperation(
-    'emit_workflow_event',
+    workflowAction ? 'invoke_workflow_action' : 'emit_workflow_event',
     () =>
       fetchWithTimeout(
         options.fetch ?? globalThis.fetch,
-        new URL('/api/workflows/events', ensureTrailingSlash(options.apiUrl)),
+        new URL(
+          workflowAction ? '/api/workflows/actions/invoke' : '/api/workflows/events',
+          ensureTrailingSlash(options.apiUrl)
+        ),
         {
-          body: JSON.stringify({
+          body: JSON.stringify(workflowAction ? {
+            action_id: payload.action_id,
+            action_ts: payload.action_ts,
+            channel_id: payload.channel_id,
+            message_ts: payload.message_ts,
+            team_id: payload.team_id,
+            user_id: payload.user_id
+          } : {
             event_name: `slack.block_action.${payload.action_id}`,
             payload
           }),
@@ -578,6 +591,13 @@ export async function dispatchSlackBlockAction(
     action
   )
   await ensureApiOk(response, action)
+  if (workflowAction) {
+    const result: unknown = await response.json()
+    if (!isJsonObject(result) || typeof result.outcome !== 'string') {
+      throw new Error('Workflow action API returned an invalid result')
+    }
+    return result
+  }
 }
 
 export async function openSessionEventStream(

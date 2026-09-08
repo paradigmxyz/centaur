@@ -198,6 +198,85 @@ curl -s "$CENTAUR_API_URL/api/workflows/runs?workflow_name=nightly_report&limit=
   -H "Authorization: Bearer $CENTAUR_API_TOKEN" | jq
 ```
 
+## Run Actions From Slack Buttons
+
+Use `ctx.slack_actions` to post buttons and run a Python callback when an
+authorized user clicks one. The workflow suspends durably while waiting.
+Callbacks execute inside the same workflow and can call tools, run agents,
+start child workflows, or return a value.
+
+```python
+from api.workflow_engine import Button
+
+async def handler(inp, ctx):
+    async def approve(click):
+        return await ctx.start_workflow(
+            "echo",
+            {"approved_by": click.user_id},
+            name="approved-child",
+        )
+
+    async def reject(click):
+        return {"rejected_by": click.user_id}
+
+    result = await ctx.slack_actions(
+        "review-request",
+        channel=inp["channel"],
+        team_id=inp["team_id"],
+        text="Proceed with this request?",
+        allowed_users=inp["approver_ids"],
+        buttons={
+            "approve": Button("Approve", approve, style="primary"),
+            "reject": Button("Reject", reject, style="danger"),
+        },
+        timeout=86400,
+        thread_ts=inp.get("thread_ts"),
+    )
+    return {"outcome": result.outcome, "value": result.value}
+```
+
+Each group is single-use. The first permitted click selects one callback.
+Subsequent clicks cannot select another callback. For repeated interactions,
+create another group with a different step name. Groups support one to five
+buttons, explicit Slack user IDs, and timeouts from one second to 30 days.
+The timeout starts when the group is first created and does not reset on replay.
+The team and channel must match the posted message. Button IDs use letters,
+digits, underscores, or hyphens. Labels contain at most 75 characters.
+
+The result contains `outcome`, `click`, and `value`. A selected button returns
+`outcome="clicked"`, verified click context, and the callback's return value.
+An expired request returns `outcome="expired"` without calling a callback.
+Cancelling the workflow closes its pending buttons. Click context includes
+`id`, `action`, `user_id`, `team_id`, `channel_id`, `message_ts`, and `action_ts`.
+
+Keep group names stable and unique within the workflow. The API persists each
+group's configuration, audience, deadline, and winning click. Replaying with
+different configuration fails explicitly. Callbacks follow ordinary workflow
+replay rules: keep their meaning compatible for outstanding requests, use
+durable steps, and make external side effects idempotent. A callback can retry
+after failure; a recorded click does not make an external API call exactly once.
+The callback result is checkpointed. `ctx.start_workflow(..., name="...")`
+also checkpoints the child start and derives a stable idempotency key, so a
+retry cannot enqueue another child for that named step.
+Callback return values must be JSON-compatible.
+
+Slack delivery retries separately from the recorded click. The API updates the
+message with the selected choice and user, or with expiry/cancellation status.
+An ambiguous Slack posting timeout can produce duplicate messages; all copies
+reference the same single-use group. Feedback says the selection was recorded,
+not that the callback's work has finished.
+
+This uses the existing Slackbot interactivity endpoint and API Slack bot token.
+Slackbot needs its dedicated `SLACKBOT_API_KEY`; a sandbox principal cannot
+submit another user's click. Existing custom Slack action IDs continue to emit
+raw workflow events. The `centaur.workflow.action:` namespace is reserved for
+these buttons. Internal action wakeups cannot be emitted through the public
+workflow event API. `SLACK_API_URL` can target a local Slack emulator in both
+the API and Slackbot during development.
+
+See `workflows/button_actions.py` for an example with Approve starting an echo
+workflow and Reject returning the clicking user.
+
 ## Schedule a workflow
 
 Workflows can run from schedule metadata declared beside the handler. Use this

@@ -36,6 +36,8 @@ use tokio::{
 };
 use tracing::{info, warn};
 
+pub mod actions;
+
 pub const WORKFLOW_QUEUE: &str = "centaur_workflows";
 pub const WORKFLOW_SLACK_LIVE_QUEUE: &str = "centaur_workflows_slack_live";
 pub const WORKFLOW_ETL_QUEUE: &str = "centaur_workflows_etl";
@@ -115,6 +117,7 @@ struct WorkflowRuntimeInner {
     _etl_worker: Worker,
     _etl_backfill_worker: Worker,
     _schedule_worker: Worker,
+    _action_worker: WorkflowTaskHeartbeatGuard,
     webhook_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
     schedule_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
 }
@@ -824,6 +827,7 @@ impl WorkflowRuntime {
                 _etl_worker: etl_worker,
                 _etl_backfill_worker: etl_backfill_worker,
                 _schedule_worker: schedule_worker,
+                _action_worker: actions::start_worker(store.pool().clone()),
                 webhook_registry,
                 schedule_registry,
             }),
@@ -988,7 +992,7 @@ impl WorkflowRuntime {
             (WORKFLOW_ETL_BACKFILL_QUEUE, &self.inner.etl_backfill_client),
         ] {
             if let Some(run) = self.get_run_for_queue(queue_name, run_id).await? {
-                client.cancel_task(&run.task_id, Some(queue_name)).await?;
+                actions::cancel_task(client.pool(), queue_name, &run.task_id).await?;
                 return Ok(());
             }
         }
@@ -1000,6 +1004,11 @@ impl WorkflowRuntime {
         event_name: &str,
         payload: Value,
     ) -> Result<(), WorkflowRuntimeError> {
+        if actions::is_internal_event(event_name) {
+            return Err(WorkflowRuntimeError::BadRequest(
+                "internal workflow action events cannot be emitted through the public API".into(),
+            ));
+        }
         self.inner
             .client
             .emit_event(event_name, payload.clone(), Some(WORKFLOW_QUEUE))
@@ -1017,6 +1026,13 @@ impl WorkflowRuntime {
             .emit_event(event_name, payload, Some(WORKFLOW_ETL_BACKFILL_QUEUE))
             .await?;
         Ok(())
+    }
+
+    pub async fn invoke_action(
+        &self,
+        invocation: actions::ActionInvocation,
+    ) -> Result<Value, WorkflowRuntimeError> {
+        actions::invoke(self.inner.client.pool(), invocation).await
     }
 
     pub fn get_webhook(&self, slug: &str) -> Option<RegisteredWorkflowWebhook> {
@@ -3447,8 +3463,33 @@ async fn handle_python_context_request(
                 Err(error) => Err(error.to_string()),
             }
         }
+        Some("ctx.actions.create") => {
+            let step = required_python_string(message, "step", "ctx.actions.create")?;
+            let config =
+                serde_json::from_value(message.get("config").cloned().unwrap_or(Value::Null))?;
+            actions::create(
+                workflow_clients.standard.pool(),
+                ctx.queue_name(),
+                ctx.task_id(),
+                &input.workflow_name,
+                step,
+                config,
+            )
+            .await
+            .map_err(|error| error.to_string())
+        }
+        Some("ctx.actions.wait") => {
+            let id = required_python_string(message, "id", "ctx.actions.wait")?;
+            let id = uuid::Uuid::parse_str(id).map_err(|_| {
+                WorkflowRuntimeError::BadRequest("invalid workflow action ID".into())
+            })?;
+            match actions::wait(workflow_clients.standard.pool(), ctx, id).await {
+                Err(WorkflowRuntimeError::Suspend) => return Err(WorkflowRuntimeError::Suspend),
+                result => result.map_err(|error| error.to_string()),
+            }
+        }
         Some("ctx.workflow.start") => {
-            match start_python_child_workflow(message, input, workflow_clients).await {
+            match start_named_python_child_workflow(message, ctx, input, workflow_clients).await {
                 Ok(value) => Ok(value),
                 Err(error) => Err(error.to_string()),
             }
@@ -3479,6 +3520,38 @@ async fn handle_python_context_request(
             "error": error,
         }),
     })
+}
+
+async fn start_named_python_child_workflow(
+    message: &Value,
+    ctx: &TaskContext,
+    parent: &WorkflowTaskInput,
+    clients: &WorkflowQueueClients,
+) -> Result<Value, WorkflowRuntimeError> {
+    let Some(name) = message.get("step").and_then(Value::as_str) else {
+        return start_python_child_workflow(message, parent, clients).await;
+    };
+    if name.trim().is_empty() {
+        return Err(WorkflowRuntimeError::BadRequest(
+            "child workflow step name must not be empty".into(),
+        ));
+    }
+    let step = ctx.begin_step::<Value>(&format!("$child:{name}")).await?;
+    if step.done {
+        return step.state.ok_or_else(|| {
+            WorkflowRuntimeError::Internal("child workflow checkpoint missing result".into())
+        });
+    }
+    let mut message = message.clone();
+    if message.get("idempotency_key").is_none() {
+        message["idempotency_key"] = json!(format!(
+            "workflow-child:{}:{}",
+            ctx.task_id(),
+            step.checkpoint_name
+        ));
+    }
+    let result = start_python_child_workflow(&message, parent, clients).await?;
+    Ok(ctx.complete_step(step, result).await?)
 }
 
 async fn start_python_child_workflow(
