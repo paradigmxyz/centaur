@@ -26,6 +26,8 @@ centaur-overlay/
 │   └── warehouse/
 │       ├── client.py
 │       └── pyproject.toml
+├── migrations/
+│   └── 202609080001_create_checkpoints.sql
 ├── workflows/
 │   └── nightly_report.py
 ├── .agents/
@@ -68,7 +70,8 @@ contents are safe to expose to principals configured with
 `sandbox_repo_cache=public`; invalid or missing values are treated as `private`.
 
 Each source defaults to the conventional layout: `toolsSubdir: tools`,
-`workflowsSubdir: workflows`, `skillsSubdir: .agents/skills`. Directories a
+`workflowsSubdir: workflows`, `migrationsSubdir: migrations`, and
+`skillsSubdir: .agents/skills`. Directories a
 repo does not contain are skipped at runtime, so a skills-only overlay needs no
 extra configuration. Set a subdir to a non-default path to relocate it, or to
 `""` to explicitly disable that surface for a source:
@@ -85,6 +88,23 @@ For compatibility, when `overlays.sources` is empty the chart maps
 `toolServer.repo`, `toolServer.ref`, `toolServer.subdir`, and
 `toolServer.extraSources[]` into the same ordered overlay list.
 
+## User Migrations
+
+Overlays can include SQLx migration files in `migrations/`. The API applies
+these in a background task at startup before starting workflow workers.
+Session routes remain available while migrations run or if they fail;
+workflow routes return HTTP 503 until initialization succeeds.
+
+Migrations from every overlay share one version sequence and a history table
+in `user_migrations`. Versions must be unique across overlays. Unlike tools
+and workflows, migration files never shadow each other. SQL files explicitly
+create and reference application schemas. See [Workflow Databases](./workflows#workflow-databases)
+for an example and retry behavior.
+
+Set `migrationsSubdir` to customize the directory or to `""` to disable it.
+Pin overlay revisions for deployments that change the database, and restart
+the API to apply new migrations. A repo-cache refresh does not rerun them.
+
 ## Mount paths
 
 Repo-cache-backed overlays appear under different prefixes depending on where
@@ -92,7 +112,7 @@ you are debugging:
 
 | Runtime | Mount | Used for |
 |---------|-------|----------|
-| API | `/var/lib/centaur/repos/<owner>/<repo>` | Tool-secret discovery and workflow discovery. |
+| API | `/var/lib/centaur/repos/<owner>/<repo>` | Tool-secret discovery, workflow discovery, and user migrations. |
 | Sandbox | `/home/agent/github/<owner>/<repo>` | Workflow-host execution, skills, persona files, prompt fragments, and runtime files available to agents. |
 
 Do not use the sandbox path when debugging API discovery. If a tool or workflow

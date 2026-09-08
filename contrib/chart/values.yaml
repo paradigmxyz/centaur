@@ -261,11 +261,14 @@ overlay:
 # earlier ones when names collide. When sources is empty, toolServer.repo and
 # toolServer.extraSources are mapped into this shape for compatibility.
 #
-# Subdirs default to the conventional layout — toolsSubdir: tools,
-# workflowsSubdir: workflows, skillsSubdir: .agents/skills — so most sources
-# only need `repo`; set `ref` to a branch, tag, or commit when you do not want
+# Subdirs default to the conventional layout: toolsSubdir: tools,
+# workflowsSubdir: workflows, migrationsSubdir: migrations, and
+# skillsSubdir: .agents/skills. Most sources only need `repo`; set `ref` to
+# a branch, tag, or commit when you do not want
 # the repo's default branch. Directories missing from a repo are skipped at
-# runtime. Set a subdir to "" to explicitly disable that surface for a source.
+# runtime. User migration versions must be unique across all sources; they do
+# not shadow each other. Migrations run once at API startup before workflows.
+# Set a subdir to "" to explicitly disable that surface for a source.
 # Repo visibility defaults to private; set visibility: public only for repos
 # safe to expose to principals with sandbox_repo_cache=public.
 overlays:

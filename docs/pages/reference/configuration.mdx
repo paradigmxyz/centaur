@@ -105,6 +105,7 @@ created. Changing a default does not rewrite existing principals.
 
 | Env var or value | Set from | Controls |
 | --- | --- | --- |
+| `USER_MIGRATION_DIRS` | Chart-rendered from `overlays.sources[*].migrationsSubdir` (default `migrations`), or `apiRs.extraEnv`. | Colon-separated SQLx user migration directories. Applied once in an API background task before workflow initialization. Session readiness is independent of migration success. |
 | `RUST_LOG` | Chart sets `info`; override with `apiRs.extraEnv`. | Rust tracing filter for the API-RS binary and crates. |
 | `OTEL_SERVICE_NAME` | `apiRs.extraEnv`; defaults to `centaur-api-rs`. | OpenTelemetry service name used by trace backends. |
 | `CENTAUR_ENVIRONMENT`, `DEPLOY_ENV`, `ENVIRONMENT` | `apiRs.extraEnv` or deployment env. | Deployment environment resource attribute for telemetry. |

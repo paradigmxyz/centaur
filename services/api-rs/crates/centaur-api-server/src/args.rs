@@ -482,6 +482,9 @@ pub(crate) struct ServerArgs {
     pub(crate) bind_addr: SocketAddr,
     #[arg(long, env = "RUN_MIGRATIONS", default_value_t = false)]
     pub(crate) run_migrations: bool,
+    /// Colon-separated overlay migration directories, loaded once before workflows start.
+    #[arg(long, env = "USER_MIGRATION_DIRS", value_delimiter = ':')]
+    pub(crate) user_migration_dirs: Vec<PathBuf>,
     /// How long shutdown waits for in-flight executions to finish before
     /// releasing their stdout-owner leases for adoption by a peer. Keep
     /// below the pod's terminationGracePeriodSeconds (35s in the chart) so

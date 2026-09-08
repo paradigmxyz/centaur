@@ -13,6 +13,7 @@
 {{- $toolSources := list -}}
 {{- $publicToolSources := list -}}
 {{- $apiWorkflowDirList := list -}}
+{{- $userMigrationDirList := list -}}
 {{- $sandboxWorkflowDirList := list -}}
 {{- $skillDirs := list -}}
 {{- $publicSkillDirs := list -}}
@@ -27,6 +28,9 @@
 {{- if eq $visibility "public" -}}
 {{- $publicToolSources = append $publicToolSources $toolSource -}}
 {{- end -}}
+{{- end -}}
+{{- with (get $source "migrationsSubdir") -}}
+{{- $userMigrationDirList = append $userMigrationDirList (printf "%s/%s/%s" $.Values.repoCache.hostPath $repo .) -}}
 {{- end -}}
 {{- with (get $source "workflowsSubdir") -}}
 {{- $apiWorkflowDirList = append $apiWorkflowDirList (printf "%s/%s/%s" $.Values.repoCache.hostPath $repo .) -}}
@@ -269,6 +273,10 @@ spec:
 {{- if gt (len $publicToolDirs) 0 }}
             - name: KUBERNETES_PUBLIC_TOOL_DIRS
               value: {{ join ":" $publicToolDirs | quote }}
+{{- end }}
+{{- if and $useOverlayRepoCache $userMigrationDirList (not (hasKey .Values.apiRs.extraEnv "USER_MIGRATION_DIRS")) }}
+            - name: USER_MIGRATION_DIRS
+              value: {{ join ":" $userMigrationDirList | quote }}
 {{- end }}
             - name: WORKFLOW_DIRS
               value: {{ $workflowDirs | quote }}

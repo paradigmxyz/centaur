@@ -2,11 +2,6 @@
 # Build context is the repo root (see Justfile `_build-api-rs`) so the runtime
 # stage can bake the shared `tools/` tree used for iron-proxy fragment discovery.
 
-FROM rust:1-bookworm AS sqlx-cli-builder
-RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    cargo install sqlx-cli --version 0.8.6 --locked --no-default-features --features rustls,postgres
-
 FROM rust:1-bookworm AS builder
 # aws-lc-rs (the rustls crypto provider) builds native code, so the builder
 # needs cmake + a C toolchain. No DATABASE_URL is required at build time:
@@ -22,8 +17,8 @@ ARG RUST_BUILD_PROFILE=release
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     case "$RUST_BUILD_PROFILE" in \
-      release) cargo build --release -p centaur-api-server && cp target/release/centaur-api-server /usr/local/bin/ ;; \
-      debug|dev) cargo build -p centaur-api-server && cp target/debug/centaur-api-server /usr/local/bin/ ;; \
+      release) cargo build --release -p centaur-api-server && cp target/release/centaur-api-server /usr/local/bin/centaur-api-server ;; \
+      debug|dev) cargo build -p centaur-api-server && cp target/debug/centaur-api-server /usr/local/bin/centaur-api-server ;; \
       *) echo "unsupported RUST_BUILD_PROFILE=$RUST_BUILD_PROFILE" >&2; exit 2 ;; \
     esac
 
@@ -32,7 +27,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git python3 python3-pip
 COPY --from=builder /usr/local/bin/centaur-api-server /usr/local/bin/centaur-api-server
-COPY --from=sqlx-cli-builder /usr/local/cargo/bin/sqlx /usr/local/bin/sqlx
 WORKDIR /app
 COPY centaur_sdk/ /app/centaur_sdk/
 COPY services/workflow-python/ /app/workflow-python/

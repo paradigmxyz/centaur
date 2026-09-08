@@ -380,7 +380,6 @@ async def run_workflow(message: dict[str, Any], rpc: RpcClient) -> dict[str, Any
         task_id=str(message.get("task_id") or ""),
         workflow_name=workflow_name,
         pool=pool,
-        source_path=registered.source_path,
         agent_defaults=registered.agent_defaults,
     )
     previous_metric_rpc = metrics.get_metric_rpc()

@@ -79,6 +79,7 @@ pub struct AppState {
 struct AppRuntimeState {
     runtime: SessionRuntime,
     workflows: Option<WorkflowRuntime>,
+    workflow_startup_error: Option<&'static str>,
     pool: Option<PgPool>,
     workflow_host_principal: Option<String>,
 }
@@ -124,6 +125,7 @@ impl AppState {
         *initialized = Some(AppRuntimeState {
             runtime,
             workflows,
+            workflow_startup_error: None,
             pool,
             workflow_host_principal: None,
         });
@@ -142,10 +144,30 @@ impl AppState {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *initialized = Some(AppRuntimeState {
             runtime,
+            workflow_startup_error: workflows
+                .is_none()
+                .then_some("workflows are waiting for user migrations and initialization"),
             workflows,
             pool,
             workflow_host_principal: Some(workflow_host_principal),
         });
+    }
+
+    pub fn mark_workflows_ready(&self, workflows: WorkflowRuntime) {
+        let mut initialized = self.initialized.write().unwrap_or_else(|p| p.into_inner());
+        if let Some(state) = initialized.as_mut() {
+            state.workflows = Some(workflows);
+            state.workflow_startup_error = None;
+        }
+    }
+
+    pub fn mark_workflows_failed(&self) {
+        let mut initialized = self.initialized.write().unwrap_or_else(|p| p.into_inner());
+        if let Some(state) = initialized.as_mut() {
+            state.workflow_startup_error = Some(
+                "workflow initialization failed; check API logs and restart after fixing user migrations or workflow configuration",
+            );
+        }
     }
 
     fn initialized(&self) -> Option<AppRuntimeState> {
@@ -183,6 +205,9 @@ impl AppState {
         let initialized = self
             .initialized()
             .ok_or_else(|| ApiError::ServiceUnavailable("api-rs is still starting".to_owned()))?;
+        if let Some(error) = initialized.workflow_startup_error {
+            return Err(ApiError::ServiceUnavailable(error.to_owned()));
+        }
         initialized
             .workflows
             .ok_or_else(|| ApiError::BadRequest("workflow runtime is not enabled".to_owned()))

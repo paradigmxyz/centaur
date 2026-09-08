@@ -7,6 +7,7 @@ mod routes;
 mod slack_proxy;
 mod tool_discovery;
 pub mod types;
+pub mod user_migrations;
 
 pub use auth::{ApiAuthConfig, ApiAuthConfigError};
 pub use centaur_session_runtime::{SandboxRuntime, SessionRuntime};
@@ -608,6 +609,51 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn workflow_startup_failure_leaves_session_api_ready() {
+        let pool = PgPool::connect_lazy("postgres://localhost/unused").unwrap();
+        let state = AppState::unready(test_auth());
+        state.mark_ready_with_workflow_host(
+            centaur_session_runtime::SessionRuntime::new(
+                PgSessionStore::new(pool),
+                SandboxRuntime::backend(Arc::new(TestBackend::default()), SandboxSpec::new("test")),
+                TestSessionPrincipalRegistrar,
+            ),
+            None,
+            None,
+            "prn_workflow_host".to_owned(),
+        );
+        for failed in [false, true] {
+            if failed {
+                state.mark_workflows_failed();
+            }
+            assert!(state.session_runtime().is_some());
+            let app = build_router_with_app_state(state.clone());
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/readyz")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/workflows/schedules")
+                        .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        }
     }
 
     #[tokio::test]

@@ -1,7 +1,7 @@
 mod activity_summary;
 mod args;
 
-use centaur_api_server::{ApiAuthConfig, AppState, build_router_with_app_state};
+use centaur_api_server::{ApiAuthConfig, AppState, build_router_with_app_state, user_migrations};
 use centaur_session_runtime::SessionRuntime;
 use centaur_session_sqlx::PgSessionStore;
 use centaur_telemetry::{TelemetryConfig, init_telemetry};
@@ -92,16 +92,6 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
     let workflow_host_sandbox = args
         .workflow_host_sandbox_runtime(&iron_control.workflow_host_principal)
         .await?;
-    let workflows = Some(
-        WorkflowRuntime::new(
-            store,
-            runtime.clone(),
-            workflow_host_sandbox,
-            iron_control.workflow_principal_registrar,
-        )
-        .await?,
-    );
-
     // Adopt executions orphaned by another control plane process
     // (deploy/crash): recover finished turns from recorded sandbox output,
     // re-attach still running sandboxes, and fail the rest so their threads
@@ -119,11 +109,36 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
     }
 
     app_state.mark_ready_with_workflow_host(
-        runtime,
-        workflows,
-        Some(pool),
+        runtime.clone(),
+        None,
+        Some(pool.clone()),
         iron_control.workflow_host_principal,
     );
+    tokio::spawn(async move {
+        let result = async {
+            user_migrations::run(&pool, &args.server.user_migration_dirs).await?;
+            Ok::<_, ServerError>(
+                WorkflowRuntime::new(
+                    store,
+                    runtime,
+                    workflow_host_sandbox,
+                    iron_control.workflow_principal_registrar,
+                )
+                .await?,
+            )
+        }
+        .await;
+        match result {
+            Ok(workflows) => {
+                app_state.mark_workflows_ready(workflows);
+                info!("centaur workflow runtime initialized");
+            }
+            Err(error) => {
+                tracing::error!(%error, "workflow initialization failed; session API remains available");
+                app_state.mark_workflows_failed();
+            }
+        }
+    });
     info!("centaur api-rs runtime initialized");
     Ok(())
 }
@@ -168,6 +183,8 @@ pub(crate) enum ServerError {
     Join(#[from] tokio::task::JoinError),
     #[error(transparent)]
     Store(#[from] centaur_session_sqlx::SessionStoreError),
+    #[error(transparent)]
+    UserMigrations(#[from] user_migrations::UserMigrationError),
     #[error(transparent)]
     Workflows(#[from] centaur_workflows::WorkflowRuntimeError),
     #[error(transparent)]

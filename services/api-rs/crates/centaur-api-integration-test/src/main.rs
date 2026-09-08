@@ -928,7 +928,17 @@ async fn wait_for_workflow_schedule(
     let mut last_body = Value::Null;
 
     while Instant::now() < deadline {
-        let body = get_json_ok(http, format!("{base_url}/api/workflows/schedules")).await?;
+        let response = http
+            .get(format!("{base_url}/api/workflows/schedules"))
+            .send()
+            .await?;
+        // Session readiness can precede user migrations and workflow startup.
+        if response.status() == StatusCode::SERVICE_UNAVAILABLE {
+            last_body = response.json::<Value>().await?;
+            sleep(Duration::from_millis(250)).await;
+            continue;
+        }
+        let body = response.error_for_status()?.json::<Value>().await?;
         let present = body
             .get("schedules")
             .and_then(Value::as_array)
