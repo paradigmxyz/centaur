@@ -529,12 +529,10 @@ apiRs:
   sandboxMaxLifetimeSecs: 259200 # 3 days
   sandboxReapIntervalSecs: 300
   # Delete session.output.line events older than this many days. 0 disables
-  # retention. Harness stdout lines are 98% of session_events rows and nothing
-  # removed them, so the table grows for the life of the deployment: one
-  # production deployment had reached 4.1GB at about 40k rows a day, against
-  # the 20Gi default Postgres volume below. Only output lines are deleted:
-  # lifecycle events, execution outcomes
-  # and assistant replies are kept, so console transcripts stay intact. Output
+  # retention. Harness stdout lines are almost all of session_events and
+  # nothing removed them, so the table grows for the life of the deployment.
+  # Only output lines are deleted: lifecycle events, execution outcomes and
+  # assistant replies are kept, so console transcripts stay intact. Output
   # lines of a queued or running execution are kept until it finishes. The
   # sweep reads through a partial index over output lines that migration
   # 0055 builds concurrently at startup.

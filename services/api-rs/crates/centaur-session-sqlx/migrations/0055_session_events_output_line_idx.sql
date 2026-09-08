@@ -3,9 +3,7 @@
 -- Output-line retention deletes the oldest session.output.line rows first.
 -- This partial index makes "the oldest expired output lines" an index range
 -- read on created_at that never touches rows of other types, so the sweep
--- needs no cursor and no frontier detection. Output lines are most rows but a
--- small share of bytes: 22MB against a 493MB table at 1M rows, and the build
--- took under half a second there and 4s at 4M rows.
+-- needs no cursor and no frontier detection.
 --
 -- Built concurrently so writes continue. If the build is interrupted the
 -- index is left invalid and `if not exists` will not rebuild it: the sweep
