@@ -15,16 +15,6 @@ import {
   type Thread
 } from 'chat'
 import { createSlackAdapter } from '@chat-adapter/slack'
-import { verifySlackSignature } from '@chat-adapter/slack/webhook'
-import {
-  agentStopIntentKey,
-  beginAgentHandoff,
-  type AgentStopIntent,
-  isAgentExecutionStopped,
-  isAllowedAgentStopUser,
-  stopAgentSession,
-  suppressStoppedExecution
-} from './agent-stop'
 import {
   assertSlackOk,
   callSlackApi,
@@ -325,7 +315,6 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     logger
   })
   const state = options.state ?? createDefaultState(options, logger)
-  options = { ...options, state }
   const chat = new Chat<{ slack: typeof slack }, SlackbotV2ThreadState>({
     userName,
     adapters: { slack },
@@ -521,50 +510,6 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
         outcome = 'ignored'
         return new globalThis.Response('ok', { status: 200 })
       }
-      if (eventType === 'agent_session_stopped') {
-        // The SDK acknowledges and deduplicates before handlers finish, and
-        // swallows handler errors. Native Stop must be retryable until its
-        // durable interrupt handoff succeeds, using the SDK's same verifier.
-        try {
-          await verifySlackSignature(rawBody, c.req.raw.headers, {
-            signingSecret: options.signingSecret
-          })
-        } catch {
-          outcome = 'error'
-          return c.text('Invalid Slack signature', 401)
-        }
-        if (!options.agentViewEnabled) return c.text('ok')
-        const payload = parseSlackWebhookPayload(rawBody)
-        const event = payload && isJsonObject(payload.event) ? payload.event : {}
-        const channel = stringValue(event.channel)
-        const threadTs = stringValue(event.thread_ts)
-        const eventTs = stringValue(event.event_ts)
-        const user = stringValue(event.user)
-        if (!channel || !threadTs || !eventTs || !user || !Number.isFinite(Number(eventTs))) {
-          outcome = 'error'
-          return c.text('Invalid agent stop event', 400)
-        }
-        try {
-          if (!(await isAllowedAgentStopUser(user, stringValue(payload?.team_id) ?? '', options))) {
-            outcome = 'ignored'
-            return c.text('ok')
-          }
-          await stateConnected
-          await chat.initialize()
-          const thread = chat.thread(slack.encodeThreadId({ channel, threadTs }))
-          await stopAgentSession(thread, {
-            channel, thread_ts: threadTs, event_ts: eventTs, user
-          }, state, options)
-          await steeringReactions.completeThread(thread.id)
-          return c.text('ok')
-        } catch (error) {
-          outcome = 'error'
-          traceWarn(options, 'slackbotv2_agent_stop_failed', undefined, {
-            error: errorMessage(error), channel_id: channel, thread_ts: threadTs
-          })
-          return c.text('Agent stop handoff failed', 503)
-        }
-      }
       const awaitHandoff = shouldAwaitSlackHandoff(rawBody)
       const handoffTasks: Promise<unknown>[] = []
       const context: SlackbotV2RequestContext = {
@@ -664,7 +609,6 @@ async function handleSlackMessageHandoff(
     subscribe: input.subscribe === true,
     trigger: input.trigger
   })
-  let finishAgentHandoff: (() => Promise<void>) | undefined
   let initialAssistantStatusVisible = false
   let assistantStatus = Promise.resolve(false)
   try {
@@ -675,10 +619,6 @@ async function handleSlackMessageHandoff(
     // active execution must not clear or replace the status owned by that run.
     const assistantStatusRequested =
       input.assistantStatusRequested && ((await thread.state)?.activeExecution !== true)
-    if (input.options.agentViewEnabled && input.mode === 'execute'
-      && (await thread.state)?.activeExecution !== true) {
-      finishAgentHandoff = await beginAgentHandoff(input.state, thread.id, message.id)
-    }
     assistantStatus = assistantStatusRequested
       ? setInitialAssistantStatus(thread, input.options, trace).then(visible => {
           initialAssistantStatusVisible = visible
@@ -723,8 +663,6 @@ async function handleSlackMessageHandoff(
         .catch(() => undefined)
     )
     throw error
-  } finally {
-    await finishAgentHandoff?.()
   }
 }
 
@@ -1148,15 +1086,7 @@ function scheduleHandoffRetry(
   backgroundWaitUntil(
     (async () => {
       await sleep(delayMs)
-      const finishHandoff = input.options.agentViewEnabled && input.mode === 'execute'
-        && (await thread.state)?.activeExecution !== true
-        ? await beginAgentHandoff(input.state, thread.id, message.id)
-        : undefined
-      try {
-        await syncThreadMessageToSession(thread, message, { ...input, retryAttempt: attempt + 1 })
-      } finally {
-        await finishHandoff?.()
-      }
+      await syncThreadMessageToSession(thread, message, { ...input, retryAttempt: attempt + 1 })
     })().catch(async retryError => {
       traceWarn(input.options, 'slackbotv2_handoff_retry_failed', trace, {
         attempt: attempt + 1,
@@ -1535,15 +1465,6 @@ async function syncThreadMessageToSession(
       threadId: thread.id,
       trace
     })
-    const pendingStop = await input.state.get<AgentStopIntent>(agentStopIntentKey(thread.id))
-    if (pendingStop && !pendingStop.completed && !pendingStop.executionId
-      && Number(pendingStop.eventTs) >= Number(serializedMessage.id)) {
-      const target = thread.id.split(':')
-      await stopAgentSession(thread, {
-        channel: target[1]!, thread_ts: target[2]!,
-        event_ts: pendingStop.eventTs, user: pendingStop.userId
-      }, input.state, input.options)
-    }
     traceLog(input.options, 'slackbotv2_forward_execution_committed', trace, {
       execution_id: execution.execution_id,
       executed_message_count: Math.min(latestExecutedMessageIds.size, 1000)
@@ -1670,10 +1591,6 @@ async function syncThreadMessageToSession(
     // obligation (if one was committed) as soon as it scans.
     await renderLease.release?.()
     const latest = (await thread.state) ?? {}
-    if (await isAgentExecutionStopped(input.options, thread.id, forwardInput.executionId)) {
-      finishSteeringReaction(input, trace)
-      return
-    }
     await thread.setState({
       activeExecution: false,
       lastEventId: Math.max(latest.lastEventId ?? 0, lastEventId)
@@ -1802,17 +1719,14 @@ async function renderExecutionAttempt(
   let retry = false
   let fallbackLastEventId = 0
   try {
-    if (await isAgentExecutionStopped(options, thread.id, input.executionId)) return 'complete'
-    const source = clearRejectedStickyModel(thread, input, streamSessionAfterHandoff(options, input), options)
     const streamResult = await renderExecutionStream(
       thread,
-      source,
+      clearRejectedStickyModel(thread, input, streamSessionAfterHandoff(options, input), options),
       message,
       options,
       trace,
       assistantStatusVisible,
-      responseContextBlock,
-      input.executionId
+      responseContextBlock
     )
     rendered = true
     outcome = 'complete'
@@ -1850,10 +1764,6 @@ async function renderExecutionAttempt(
     // Slack network failures can surface as TypeError/AbortError, which would
     // otherwise be misclassified as retryable session API errors and re-render
     // the whole stream instead of posting the durable final answer.
-    if (await isAgentExecutionStopped(options, thread.id, input.executionId)) {
-      outcome = 'stopped'
-      return 'complete'
-    }
     const answerLost = slackAnswerLost(error)
     if (answerLost === undefined && isRetryableSessionApiError(error)) {
       retry = true
@@ -1938,13 +1848,11 @@ async function renderExecutionAttempt(
     throw error
   } finally {
     const latest = (await thread.state) ?? {}
-    if (!(await isAgentExecutionStopped(options, thread.id, input.executionId))) {
-      await thread.setState({
-        activeExecution: retry,
-        lastEventId: Math.max(latest.lastEventId ?? 0, getLastEventId(), fallbackLastEventId),
-        ...(rendered ? { renderObligation: null } : {})
-      })
-    }
+    await thread.setState({
+      activeExecution: retry,
+      lastEventId: Math.max(latest.lastEventId ?? 0, getLastEventId(), fallbackLastEventId),
+      ...(rendered ? { renderObligation: null } : {})
+    })
     if (rendered) await steeringReactions.completeThread(thread.id, trace)
     traceLog(options, 'slackbotv2_render_finalized', trace, {
       obligation_cleared: rendered,
@@ -2054,7 +1962,6 @@ async function renderFallbackFinalAnswer(
   let outcome = 'error'
   let lastEventId = source.afterEventId
   try {
-    if (await isAgentExecutionStopped(options, thread.id, source.executionId)) return { lastEventId }
     let stream: AsyncIterable<SlackbotV2RendererSource> | undefined
     for (let attempt = 0; ; attempt++) {
       try {
@@ -2095,10 +2002,6 @@ async function renderFallbackFinalAnswer(
         phase_ms: elapsedMs(startedAtMs)
       })
       return null
-    }
-    if (await isAgentExecutionStopped(options, thread.id, source.executionId)) {
-      outcome = 'stopped'
-      return { lastEventId }
     }
     const text = fallback.textOrDefault()
     const fallbackText = truncateSlackText(text, SLACK_FALLBACK_TEXT_MAX_CHARS, 'Slack final answer')
@@ -2232,7 +2135,6 @@ async function recoverRenderObligations(
           lastEventId: threadState?.lastEventId ?? 0,
           renderObligation: null
         })
-        await state.delete(agentStopIntentKey(threadId))
         continue
       }
 
@@ -2258,21 +2160,7 @@ async function recoverRenderObligations(
           lastEventId: threadState?.lastEventId ?? 0,
           renderObligation: null
         })
-        await state.delete(agentStopIntentKey(threadId))
         continue
-      }
-
-      const pendingStop = await state.get<AgentStopIntent>(agentStopIntentKey(threadId))
-      if (pendingStop && !pendingStop.completed) {
-        const target = threadId.split(':')
-        const stopped = await stopAgentSession(thread, {
-          channel: target[1]!, thread_ts: target[2]!,
-          event_ts: pendingStop.eventTs, user: pendingStop.userId
-        }, state, options)
-        if (stopped) {
-          resolvedCount += 1
-          continue
-        }
       }
 
       const leaseToken = randomUUID()
@@ -2405,10 +2293,6 @@ async function recoverRenderObligation(
     threadId
   }
   const thread = chat.thread(threadId)
-  if (await isAgentExecutionStopped(options, thread.id, obligation.executionId)) {
-    await thread.setState({ activeExecution: false, renderObligation: null })
-    return false
-  }
   // Replay from the obligation's starting position, not the thread's
   // lastEventId: the failed render may have consumed events (including the
   // terminal result) past which a resumed stream would never see the final
@@ -2443,7 +2327,7 @@ async function recoverRenderObligation(
       recordRenderAttempt('recovery', renderOutcome, renderStartedAtMs)
       return true
     }
-    await renderRecoveredExecutionStream(thread, streamError(error), obligation.message, options, trace, obligation.executionId)
+    await renderRecoveredExecutionStream(thread, streamError(error), obligation.message, options, trace)
     await thread.setState({
       activeExecution: false,
       lastEventId,
@@ -2465,8 +2349,7 @@ async function recoverRenderObligation(
       streamOpenedSession(input, openedStream),
       obligation.message,
       options,
-      trace,
-      obligation.executionId
+      trace
     )
     rendered = true
     renderOutcome = 'complete'
@@ -2496,10 +2379,6 @@ async function recoverRenderObligation(
       divergence_reconciled: divergenceReconciled
     })
   } catch (error) {
-    if (await isAgentExecutionStopped(options, thread.id, obligation.executionId)) {
-      renderOutcome = 'stopped'
-      return false
-    }
     const answerLost = slackAnswerLost(error)
     if (answerLost === false) {
       // The recovered stream broke only after the final answer became
@@ -2559,13 +2438,11 @@ async function recoverRenderObligation(
     }
   } finally {
     const latest = (await thread.state) ?? {}
-    if (!(await isAgentExecutionStopped(options, thread.id, obligation.executionId))) {
-      await thread.setState({
-        activeExecution: false,
-        lastEventId: Math.max(latest.lastEventId ?? 0, lastEventId),
-        ...(rendered ? { renderObligation: null } : {})
-      })
-    }
+    await thread.setState({
+      activeExecution: false,
+      lastEventId: Math.max(latest.lastEventId ?? 0, lastEventId),
+      ...(rendered ? { renderObligation: null } : {})
+    })
     traceLog(options, 'slackbotv2_render_recovery_finalized', trace, {
       obligation_cleared: rendered,
       last_event_id: lastEventId
@@ -2699,14 +2576,13 @@ async function acquireRenderLease(
 }
 
 async function renderExecutionStream(
-  thread: Thread<SlackbotV2ThreadState>,
+  thread: Thread,
   stream: AsyncIterable<SlackbotV2RendererSource>,
   message: SlackbotV2ApiMessage,
   options: SlackbotV2Options,
   trace?: SlackbotV2Trace,
   assistantStatusVisible = false,
-  responseContextBlock?: SlackContextBlock,
-  executionId?: string
+  responseContextBlock?: SlackContextBlock
 ): Promise<{ diverged: boolean; messageId?: string }> {
   const promptText = slackMessagePromptText(message)
   if (isPlainTextOnlyRequest(promptText)) {
@@ -2716,8 +2592,7 @@ async function renderExecutionStream(
       message,
       options,
       trace,
-      assistantStatusVisible,
-      executionId
+      assistantStatusVisible
     )
     return { diverged: false }
   }
@@ -2752,10 +2627,7 @@ async function renderExecutionStream(
     // this matches thread.post(StreamingPlan): updateIntervalMs is a no-op
     // (Slack streams server-side) and the recipient context is the message
     // author.
-    const deliveryStream = executionId
-      ? suppressStoppedExecution(options, thread.id, executionId, visibleStream)
-      : visibleStream
-    const sent = await thread.adapter.stream!(thread.id, deliveryStream, {
+    const sent = await thread.adapter.stream!(thread.id, visibleStream, {
       recipientTeamId: message.teamId,
       recipientUserId: message.author.userId,
       ...(taskDisplayMode === 'none' ? {} : { taskDisplayMode }),
@@ -2763,26 +2635,23 @@ async function renderExecutionStream(
       // chat.stopStream. The Console link is only included on the first assistant
       // message; optional response metadata may be appended on every live response.
       ...(responseContextBlock ? { stopBlocks: [responseContextBlock] } : {})
-    }) ?? await thread.post(deliveryStream)
+    }) ?? await thread.post(visibleStream)
     return { diverged: capture.diverged, messageId: sent?.id }
   } finally {
-    if (!(await isAgentExecutionStopped(options, thread.id, executionId))) {
-      await setAssistantStatus(thread, '', options, trace)
-    }
+    await setAssistantStatus(thread, '', options, trace)
   }
 }
 
 async function renderRecoveredExecutionStream(
-  thread: Thread<SlackbotV2ThreadState>,
+  thread: Thread,
   stream: AsyncIterable<SlackbotV2RendererSource>,
   message: SlackbotV2ApiMessage,
   options: SlackbotV2Options,
-  trace?: SlackbotV2Trace,
-  executionId?: string
+  trace?: SlackbotV2Trace
 ): Promise<{ diverged: boolean; messageId?: string }> {
   const promptText = slackMessagePromptText(message)
   if (isPlainTextOnlyRequest(promptText)) {
-    await renderPlainTextExecutionStream(thread, stream, message, options, trace, false, executionId)
+    await renderPlainTextExecutionStream(thread, stream, message, options, trace)
     return { diverged: false }
   }
   const titleStartedAtMs = nowMs()
@@ -2808,34 +2677,28 @@ async function renderRecoveredExecutionStream(
       )
     )
     if (!visibleStream) return { diverged: false }
-    const deliveryStream = executionId
-      ? suppressStoppedExecution(options, thread.id, executionId, visibleStream)
-      : visibleStream
     const sent = await thread.adapter.stream!(
       thread.id,
-      deliveryStream,
+      visibleStream,
       {
         recipientTeamId: message.teamId,
         recipientUserId: message.author.userId,
         ...(taskDisplayMode === 'none' ? {} : { taskDisplayMode })
       }
-    ) ?? await thread.post(deliveryStream)
+    ) ?? await thread.post(visibleStream)
     return { diverged: capture.diverged, messageId: sent?.id }
   } finally {
-    if (!(await isAgentExecutionStopped(options, thread.id, executionId))) {
-      await setAssistantStatus(thread, '', options, trace)
-    }
+    await setAssistantStatus(thread, '', options, trace)
   }
 }
 
 async function renderPlainTextExecutionStream(
-  thread: Thread<SlackbotV2ThreadState>,
+  thread: Thread,
   stream: AsyncIterable<SlackbotV2RendererSource>,
   message: SlackbotV2ApiMessage,
   options: SlackbotV2Options,
   trace?: SlackbotV2Trace,
-  assistantStatusVisible = false,
-  executionId?: string
+  assistantStatusVisible = false
 ): Promise<void> {
   const fallback = new SlackRenderFallback()
   const titleStartedAtMs = nowMs()
@@ -2856,7 +2719,7 @@ async function renderPlainTextExecutionStream(
     const chatStream = fallback.collectChatSdk(
       slackSafeChatSdkStream(
         harnessToChatSdkStream(
-          fallback.collectSource(suppressStoppedExecution(options, thread.id, executionId, stream)),
+          fallback.collectSource(stream),
           rendererOptions(thread, options, undefined, trace)
         )
       )
@@ -2872,11 +2735,9 @@ async function renderPlainTextExecutionStream(
     traceLog(options, 'slackbotv2_render_plain_text_final', trace, {
       chars: text.length
     })
-    if (!(await isAgentExecutionStopped(options, thread.id, executionId))) await thread.post(text)
+    await thread.post(text)
   } finally {
-    if (!(await isAgentExecutionStopped(options, thread.id, executionId))) {
-      await setAssistantStatus(thread, '', options, trace)
-    }
+    await setAssistantStatus(thread, '', options, trace)
   }
 }
 

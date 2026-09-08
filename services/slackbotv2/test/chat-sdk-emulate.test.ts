@@ -23,7 +23,6 @@ import {
   type SlackbotV2ExecuteSessionRequest,
   type SlackbotV2SessionMessage
 } from '../src/index'
-import { agentStopIntentKey, suppressStoppedExecution } from '../src/agent-stop'
 import { clearRequesterIdentityCacheForTests } from '../src/session-api'
 import { slackbotMetrics } from '../src/metrics'
 import { createOpenAiMessageOverridesStrategy } from '../src/message-overrides-strategy'
@@ -183,409 +182,6 @@ describe('slackbotv2', () => {
       expect(slackApi.calls.some(call => call.method === 'agents.sessions.rename')).toBe(agentViewEnabled)
     })
   }
-
-  for (const interruptFails of [false, true]) {
-    it(`suppresses native Stop output and permits the next turn when interrupt fails: ${interruptFails}`, async () => {
-      const state = createMemoryState()
-      bot = createTestBot({ agentViewEnabled: true, state })
-      codexApi.autoRespond = false
-      codexApi.failNextInterrupt = interruptFails
-      const parent = await postUserMessage(`<@${BOT_USER_ID}> work until stopped`)
-      const waits: Promise<unknown>[] = []
-      const response = await bot.app.request('/api/webhooks/slack', signedSlackEvent({
-        event_id: 'Ev-native-stop-start',
-        event: {
-          type: 'app_mention', channel: CHANNEL_ID, user: USER_ID,
-          ts: parent.ts, text: `<@${BOT_USER_ID}> work until stopped`
-        }
-      }), {}, waitUntilContext(waits))
-      expect(response.status).toBe(200)
-      await waitFor(() => codexApi.streamCount === 1)
-      const stoppedExecutionId = codexApi.eventRequests[0]!.executionId
-      codexApi.emitOutputLine(threadKey(parent.ts), JSON.stringify({
-        type: 'item.started',
-        item: { id: 'cmd-stop', type: 'commandExecution', command: 'sleep 60', status: 'inProgress' }
-      }), stoppedExecutionId)
-      await waitFor(() => slackApi.calls.some(call => call.method === 'chat.startStream'))
-      const streamsBeforeStop = slackApi.calls.filter(call => call.method === 'chat.startStream').length
-      const event = {
-        type: 'agent_session_stopped', channel: CHANNEL_ID, thread_ts: parent.ts,
-        event_ts: String(Number(parent.ts) + 1), user: USER_ID, streaming_message_ts: []
-      }
-      const stopped = await bot.app.request('/api/webhooks/slack', signedSlackEvent({
-        event_id: 'Ev-native-stop', event
-      }))
-      expect(stopped.status).toBe(200)
-      expect(codexApi.interrupts).toEqual([{
-        threadKey: threadKey(parent.ts), body: { reason: `Interrupted from Slack by ${USER_ID}` }
-      }])
-      codexApi.emitOutputLines(threadKey(parent.ts), sampleCodexOutputLines('Late answer after Stop'), stoppedExecutionId)
-      await Promise.all(waits)
-      expect(await bot.chat.thread(threadKey(parent.ts)).state).toEqual(expect.objectContaining({
-        activeExecution: false, renderObligation: null
-      }))
-      expect(await state.get(agentStopIntentKey(threadKey(parent.ts)))).toEqual(
-        expect.objectContaining({ completed: true })
-      )
-      expect(slackApi.calls.filter(call => call.method === 'chat.startStream')).toHaveLength(streamsBeforeStop)
-      expect(await threadText(parent.ts)).not.toContain('Late answer after Stop')
-      const eventRequestsBeforeRestart = codexApi.eventRequests.length
-      bot = createTestBot({ agentViewEnabled: true, state })
-      const duplicate = await bot.app.request('/api/webhooks/slack', signedSlackEvent({
-        event_id: 'Ev-native-stop', event, retry_num: '1'
-      }))
-      expect(duplicate.status).toBe(200)
-      expect(codexApi.interrupts).toHaveLength(1)
-      expect(codexApi.eventRequests).toHaveLength(eventRequestsBeforeRestart)
-      expect(slackApi.calls).toContainEqual(expect.objectContaining({
-        method: 'agents.sessions.setStatus', body: expect.objectContaining({ status: 'active' })
-      }))
-      codexApi.autoRespond = true
-      const next = await postUserMessage(`<@${BOT_USER_ID}> next turn`, parent.ts)
-      const nextWaits: Promise<unknown>[] = []
-      expect((await bot.app.request('/api/webhooks/slack', signedSlackEvent({
-        event_id: 'Ev-after-native-stop', event: {
-          type: 'app_mention', channel: CHANNEL_ID, user: USER_ID,
-          ts: next.ts, thread_ts: parent.ts, text: `<@${BOT_USER_ID}> next turn`
-        }
-      }), {}, waitUntilContext(nextWaits))).status).toBe(200)
-      await Promise.all(nextWaits)
-      expect(codexApi.executes).toHaveLength(2)
-      expect(await threadText(parent.ts)).toContain('Executed request 2.')
-    })
-  }
-
-  it('releases a thread after a non-retryable interrupt failure and acknowledges redelivery', async () => {
-    bot = createTestBot({ agentViewEnabled: true, recoverRenderObligationsOnStart: false })
-    await bot.chat.initialize()
-    const thread = bot.chat.thread(threadKey('1700000000.000001'))
-    await thread.setState({
-      activeExecution: true,
-      renderObligation: {
-        executionId: 'exe-stop-retry', afterEventId: 0,
-        message: apiMessageFromSlackEvent({
-          isMention: true, text: 'run', threadId: thread.id, ts: '1700000000.000001'
-        })
-      }
-    })
-    const event = {
-      type: 'agent_session_stopped', channel: CHANNEL_ID, thread_ts: '1700000000.000001',
-      event_ts: '1700000001.000001', user: USER_ID, streaming_message_ts: []
-    }
-    codexApi.failNextInterrupt = true
-    const failed = await bot.app.request('/api/webhooks/slack', signedSlackEvent({
-      event_id: 'Ev-stop-retry', event
-    }))
-    expect(failed.status).toBe(200)
-    expect((await thread.state)?.activeExecution).toBe(false)
-    expect((await thread.state)?.renderObligation).toBeNull()
-    expect(slackApi.calls).toContainEqual(expect.objectContaining({
-      method: 'agents.sessions.setStatus', body: expect.objectContaining({ status: 'active' })
-    }))
-    const retried = await bot.app.request('/api/webhooks/slack', signedSlackEvent({
-      event_id: 'Ev-stop-retry', event, retry_num: '1'
-    }))
-    expect(retried.status).toBe(200)
-    expect(codexApi.interrupts).toHaveLength(1)
-    expect((await thread.state)?.renderObligation).toBeNull()
-    await thread.setState({
-      activeExecution: true,
-      renderObligation: {
-        executionId: 'exe-after-stop', afterEventId: 0,
-        message: apiMessageFromSlackEvent({
-          isMention: true, text: 'new run', threadId: thread.id, ts: '1700000003.000001'
-        })
-      }
-    })
-    const stale = await bot.app.request('/api/webhooks/slack', signedSlackEvent({
-      event_id: 'Ev-stale-stop', event: { ...event, event_ts: '1700000002.000001' }
-    }))
-    expect(stale.status).toBe(200)
-    expect(codexApi.interrupts).toHaveLength(1)
-    expect((await thread.state)?.activeExecution).toBe(true)
-  })
-
-  it('applies the external workspace allowlist to native Stop actors', async () => {
-    const state = createMemoryState()
-    bot = createTestBot({ agentViewEnabled: true, state, recoverRenderObligationsOnStart: false })
-    await bot.chat.initialize()
-    const thread = bot.chat.thread(threadKey('1700000000.000001'))
-    await thread.setState({
-      activeExecution: true,
-      renderObligation: {
-        executionId: 'exe-shared-stop', afterEventId: 0,
-        message: apiMessageFromSlackEvent({
-          isMention: true, text: 'run', threadId: thread.id, ts: '1700000000.000001'
-        })
-      }
-    })
-    slackApi.setUserProfile(USER_ID, { name: 'external', team_id: 'TEXTERNAL' })
-    const request = () => signedSlackEvent({
-      event_id: 'Ev-shared-stop',
-      event: {
-        type: 'agent_session_stopped', channel: CHANNEL_ID, thread_ts: '1700000000.000001',
-        event_ts: '1700000001.000001', user: USER_ID
-      }
-    })
-    expect((await bot.app.request('/api/webhooks/slack', request())).status).toBe(200)
-    expect(codexApi.interrupts).toHaveLength(0)
-    expect((await thread.state)?.activeExecution).toBe(true)
-    bot = createTestBot({
-      agentViewEnabled: true, state,
-      recoverRenderObligationsOnStart: false
-    })
-    const previousAllowlist = process.env.SLACKBOT_EXTERNAL_ORG_ALLOWLIST
-    process.env.SLACKBOT_EXTERNAL_ORG_ALLOWLIST = 'TOTHER TEXTERNAL\nTTHIRD,TFOURTH'
-    try {
-      expect((await bot.app.request('/api/webhooks/slack', request())).status).toBe(200)
-      expect(codexApi.interrupts).toHaveLength(1)
-    } finally {
-      if (previousAllowlist === undefined) delete process.env.SLACKBOT_EXTERNAL_ORG_ALLOWLIST
-      else process.env.SLACKBOT_EXTERNAL_ORG_ALLOWLIST = previousAllowlist
-    }
-  })
-
-  it('rejects unsigned native Stop and ignores it when agent view is disabled', async () => {
-    const event = {
-      type: 'agent_session_stopped', channel: CHANNEL_ID, thread_ts: '1700000000.000001',
-      event_ts: '1700000001.000001', user: USER_ID
-    }
-    bot = createTestBot({ agentViewEnabled: true })
-    const unsigned = await bot.app.request('/api/webhooks/slack', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ type: 'event_callback', event })
-    })
-    expect(unsigned.status).toBe(401)
-    bot = createTestBot()
-    const disabled = await bot.app.request('/api/webhooks/slack', signedSlackEvent({
-      event_id: 'Ev-stop-disabled', event
-    }))
-    expect(disabled.status).toBe(200)
-    expect(codexApi.interrupts).toHaveLength(0)
-    expect(slackApi.calls).toHaveLength(0)
-  })
-
-  it('recovers a pending native Stop after restart without replaying the answer', async () => {
-    const state = createMemoryState()
-    await state.connect()
-    const key = threadKey('1700000000.000001')
-    await state.set(`thread-state:${key}`, {
-      activeExecution: true,
-      renderObligation: {
-        executionId: 'exe-pending-stop', afterEventId: 0,
-        message: apiMessageFromSlackEvent({ isMention: true, text: 'run', threadId: key, ts: '1700000000.000001' })
-      }
-    })
-    await state.set(agentStopIntentKey(key), {
-      executionId: 'exe-pending-stop', eventTs: '1700000001.000001', userId: USER_ID, completed: false
-    })
-    await state.appendToList('slackbotv2:render:index', key)
-    bot = createTestBot({ agentViewEnabled: true, state })
-    await waitFor(async () => (await bot.chat.thread(key).state)?.renderObligation === null)
-    expect(codexApi.interrupts).toHaveLength(1)
-    expect(codexApi.eventRequests).toHaveLength(0)
-    expect(slackApi.calls.filter(call => call.method === 'chat.startStream')).toHaveLength(0)
-  })
-
-  for (const interruptFails of [false, true]) {
-    it(`honors native Stop during handoff when interrupt fails: ${interruptFails}`, async () => {
-      bot = createTestBot({ agentViewEnabled: true })
-      const parent = await postUserMessage(`<@${BOT_USER_ID}> work until stopped`)
-      codexApi.failNextInterrupt = interruptFails
-      const release = codexApi.holdNextExecute()
-      const waits: Promise<unknown>[] = []
-      const handoff = bot.app.request('/api/webhooks/slack', signedSlackEvent({
-        event_id: 'Ev-early-stop-start',
-        event: {
-          type: 'app_mention', channel: CHANNEL_ID, user: USER_ID,
-          ts: parent.ts, text: `<@${BOT_USER_ID}> work until stopped`
-        }
-      }), {}, waitUntilContext(waits))
-      try {
-        await waitFor(() => codexApi.executes.length === 1)
-        const stopped = await bot.app.request('/api/webhooks/slack', signedSlackEvent({
-          event_id: 'Ev-early-stop',
-          event: {
-            type: 'agent_session_stopped', channel: CHANNEL_ID, thread_ts: parent.ts,
-            event_ts: String(Number(parent.ts) + 1), user: USER_ID
-          }
-        }))
-        expect(stopped.status).toBe(503)
-      } finally {
-        release()
-      }
-      expect((await handoff).status).toBe(200)
-      await Promise.all(waits)
-      expect(codexApi.interrupts).toHaveLength(1)
-      expect((await bot.chat.thread(threadKey(parent.ts)).state)?.renderObligation).toBeNull()
-      expect(slackApi.calls.filter(call => call.method === 'chat.startStream')).toHaveLength(0)
-    })
-
-  }
-
-  it('acknowledges native Stop on an idle thread without retrying an interrupt', async () => {
-    bot = createTestBot({ agentViewEnabled: true })
-    for (let retry = 0; retry < 4; retry++) {
-      expect((await bot.app.request('/api/webhooks/slack', signedSlackEvent({
-        event_id: 'Ev-idle-stop', retry_num: String(retry), event: {
-          type: 'agent_session_stopped', channel: CHANNEL_ID, thread_ts: '1700000000.000001',
-          event_ts: '1700000001.000001', user: USER_ID
-        }
-      }))).status).toBe(200)
-    }
-    expect(codexApi.interrupts).toHaveLength(0)
-    expect(await bot.chat.getState().get(agentStopIntentKey(threadKey('1700000000.000001')))).toBeNull()
-  })
-
-  it('acknowledges native Stop during a failed handoff retry delay', async () => {
-    bot = createTestBot({ agentViewEnabled: true, handoffRetryDelaysMs: [250] })
-    codexApi.failNextExecute = true
-    const parent = await postUserMessage(`<@${BOT_USER_ID}> retry this`)
-    const waits: Promise<unknown>[] = []
-    expect((await bot.app.request('/api/webhooks/slack', signedSlackEvent({
-      event_id: 'Ev-retry-window', event: {
-        type: 'app_mention', channel: CHANNEL_ID, user: USER_ID,
-        ts: parent.ts, text: `<@${BOT_USER_ID}> retry this`
-      }
-    }), {}, waitUntilContext(waits))).status).toBe(200)
-    expect((await bot.app.request('/api/webhooks/slack', signedSlackEvent({
-      event_id: 'Ev-stop-retry-window', event: {
-        type: 'agent_session_stopped', channel: CHANNEL_ID, thread_ts: parent.ts,
-        event_ts: String(Number(parent.ts) + 1), user: USER_ID
-      }
-    }))).status).toBe(200)
-    expect(codexApi.interrupts).toHaveLength(0)
-    await Promise.all(waits)
-    await waitFor(async () => (await bot.chat.thread(threadKey(parent.ts)).state)?.activeExecution === false)
-    expect(await threadText(parent.ts)).toContain('Executed request')
-  })
-
-  it('keeps stop intent across a concurrent execution obligation write', async () => {
-    const state = createMemoryState()
-    const set = state.set.bind(state)
-    let commitReached = false
-    let releaseCommit!: () => void
-    const holdCommit = new Promise<void>(resolve => { releaseCommit = resolve })
-    state.set = async (key, value, ttl) => {
-      if (key.startsWith('thread-state:') && (value as { renderObligation?: unknown }).renderObligation) {
-        commitReached = true
-        await holdCommit
-      }
-      await set(key, value, ttl)
-    }
-    bot = createTestBot({ agentViewEnabled: true, state })
-    const parent = await postUserMessage(`<@${BOT_USER_ID}> concurrent commit`)
-    const waits: Promise<unknown>[] = []
-    const handoff = bot.app.request('/api/webhooks/slack', signedSlackEvent({
-      event_id: 'Ev-commit-race', event: {
-        type: 'app_mention', channel: CHANNEL_ID, user: USER_ID,
-        ts: parent.ts, text: `<@${BOT_USER_ID}> concurrent commit`
-      }
-    }), {}, waitUntilContext(waits))
-    try {
-      await waitFor(() => commitReached)
-      expect((await bot.app.request('/api/webhooks/slack', signedSlackEvent({
-        event_id: 'Ev-stop-commit-race', event: {
-          type: 'agent_session_stopped', channel: CHANNEL_ID, thread_ts: parent.ts,
-          event_ts: String(Number(parent.ts) + 1), user: USER_ID
-        }
-      }))).status).toBe(503)
-    } finally {
-      releaseCommit()
-    }
-    expect((await handoff).status).toBe(200)
-    await Promise.all(waits)
-    expect(codexApi.interrupts).toHaveLength(1)
-    expect((await bot.chat.thread(threadKey(parent.ts)).state)?.renderObligation).toBeNull()
-    expect(await threadText(parent.ts)).not.toContain('Executed request')
-  })
-
-  for (const staleAge of [false, true]) {
-    it(`clears obsolete native Stop records during recovery, stale age: ${staleAge}`, async () => {
-      const state = createMemoryState()
-      await state.connect()
-      const parent = await postUserMessage('Recovery context')
-      const key = threadKey(parent.ts)
-      const message = apiMessageFromSlackEvent({
-        isMention: true, text: 'recover this', threadId: key, ts: parent.ts
-      })
-      if (staleAge) message.timestamp = new Date(Date.now() - 7_200_000).toISOString()
-      await state.set(`thread-state:${key}`, {
-        activeExecution: true,
-        renderObligation: { executionId: 'exe-current', afterEventId: 0, message }
-      })
-      await state.set(agentStopIntentKey(key), {
-        executionId: staleAge ? 'exe-current' : 'exe-obsolete',
-        eventTs: String(Number(parent.ts) + 1), userId: USER_ID, completed: false
-      })
-      await state.appendToList('slackbotv2:render:index', key)
-      codexApi.emitOutputLines(key, sampleCodexOutputLines('Recovered current execution'))
-      bot = createTestBot({ agentViewEnabled: true, state, renderRecoveryMaxObligationAgeMs: 3_600_000 })
-      await waitFor(async () => (await bot.chat.thread(key).state)?.renderObligation === null)
-      expect(codexApi.interrupts).toHaveLength(0)
-      expect(await state.get(agentStopIntentKey(key))).toBeNull()
-      if (!staleAge) expect(await threadText(parent.ts)).toContain('Recovered current execution')
-    })
-  }
-
-  it('abandons a native Stop that repeatedly fails in boot recovery', async () => {
-    const state = createMemoryState()
-    await state.connect()
-    const key = threadKey('1700000000.000001')
-    await state.set(`thread-state:${key}`, {
-      activeExecution: true,
-      renderObligation: {
-        executionId: 'exe-failed-stop', afterEventId: 0,
-        message: apiMessageFromSlackEvent({ isMention: true, text: 'run', threadId: key, ts: '1700000000.000001' })
-      }
-    })
-    await state.set(agentStopIntentKey(key), {
-      executionId: 'exe-failed-stop', eventTs: '1700000001.000001', userId: USER_ID, completed: false
-    })
-    await state.appendToList('slackbotv2:render:index', key)
-    const set = state.set.bind(state)
-    let attempts = 0
-    state.set = async (storageKey, value, ttl) => {
-      if (storageKey === agentStopIntentKey(key)) {
-        attempts++
-        throw new Error('Stop intent storage unavailable')
-      }
-      await set(storageKey, value, ttl)
-    }
-    bot = createTestBot({ agentViewEnabled: true, state })
-    await waitFor(async () => (await bot.chat.thread(key).state)?.renderObligation === null, 12_000)
-    expect(attempts).toBe(5)
-    expect((await bot.chat.thread(key).state)?.activeExecution).toBe(false)
-    expect(await state.get(agentStopIntentKey(key))).toBeNull()
-  }, 15_000)
-
-  it('drains busy streams without a storage round trip per event and observes remote stops', async () => {
-    const state = createMemoryState()
-    await state.connect()
-    const get = state.get.bind(state)
-    let reads = 0
-    state.get = async <T>(key: string) => { reads++; return get<T>(key) }
-    const options = { agentViewEnabled: true, state, apiUrl: codexApi.url,
-      botToken: BOT_TOKEN, signingSecret: SIGNING_SECRET }
-    async function* busySource() { for (let i = 0; i < 10_000; i++) yield i }
-    let total = 0
-    for await (const item of suppressStoppedExecution(options, 'slack:C:T', 'exe-busy', busySource())) total += item
-    expect(total).toBe(49_995_000)
-    expect(reads).toBeLessThan(20)
-    async function* remoteStop() {
-      yield 'before'
-      await state.set('slackbotv2:agent-stop:execution:slack:C:T:exe-remote', true)
-      await Bun.sleep(300)
-      yield 'after'
-    }
-    const delivered: string[] = []
-    await expect((async () => {
-      for await (const item of suppressStoppedExecution(options, 'slack:C:T', 'exe-remote', remoteStop())) {
-        delivered.push(item)
-      }
-    })()).rejects.toThrow('Agent execution stopped')
-    expect(delivered).toEqual(['before'])
-  })
 
   it('accepts Slack events on the legacy route', async () => {
     const parent = await postUserMessage('Legacy route context.')
@@ -6562,8 +6158,6 @@ type MockWorkflowEventRequest = {
 }
 
 type MockSessionApi = {
-  interrupts: MockSessionRequest<{ reason: string }>[]
-  failNextInterrupt: boolean
   appends: MockSessionRequest<SlackbotV2AppendMessagesRequest>[]
   autoRespond: boolean
   close(): Promise<void>
@@ -6586,8 +6180,6 @@ type MockSessionApi = {
 }
 
 async function startMockCodexApi(): Promise<MockSessionApi> {
-  const interrupts: MockSessionRequest<{ reason: string }>[] = []
-  let failNextInterrupt = false
   const appends: MockSessionRequest<SlackbotV2AppendMessagesRequest>[] = []
   const createResponses: Array<{ body: Record<string, unknown>; status: number }> = []
   const creates: MockSessionRequest<SlackbotV2CreateSessionRequest>[] = []
@@ -6611,9 +6203,6 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
   }
   const server = createServer((req, res) => {
     void handleMockCodexRequest(req, res, {
-      interrupts,
-      get failNextInterrupt() { return failNextInterrupt },
-      setFailNextInterrupt(value) { failNextInterrupt = value },
       appends,
       createResponses,
       creates,
@@ -6660,16 +6249,11 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
   await listen(server, port)
 
   const api: MockSessionApi = {
-    interrupts,
-    get failNextInterrupt() { return failNextInterrupt },
-    set failNextInterrupt(value: boolean) { failNextInterrupt = value },
     appends,
     creates,
     eventRequests,
     executes,
     reset() {
-      interrupts.length = 0
-      failNextInterrupt = false
       appends.length = 0
       createResponses.length = 0
       creates.length = 0
@@ -6771,9 +6355,6 @@ async function handleMockCodexRequest(
   res: ServerResponse,
   input: {
     appends: MockSessionRequest<SlackbotV2AppendMessagesRequest>[]
-    interrupts: MockSessionRequest<{ reason: string }>[]
-    failNextInterrupt: boolean
-    setFailNextInterrupt(value: boolean): void
     autoRespond: boolean
     createResponses: Array<{ body: Record<string, unknown>; status: number }>
     creates: MockSessionRequest<SlackbotV2CreateSessionRequest>[]
@@ -6801,7 +6382,7 @@ async function handleMockCodexRequest(
     await sendWebResponse(res, Response.json({ ok: true }))
     return
   }
-  const match = /^\/api\/session\/([^/]+)(?:\/(messages|execute|events|interrupt))?$/.exec(url.pathname)
+  const match = /^\/api\/session\/([^/]+)(?:\/(messages|execute|events))?$/.exec(url.pathname)
   if (!match?.[1]) {
     await sendWebResponse(res, new Response('not found', { status: 404 }))
     return
@@ -6867,17 +6448,6 @@ async function handleMockCodexRequest(
   }
 
   const request = await nodeRequestToWebRequest(req, url)
-  if (endpoint === 'interrupt') {
-    const body = await request.json() as { reason: string }
-    input.interrupts.push({ threadKey, body })
-    if (input.failNextInterrupt) {
-      input.setFailNextInterrupt(false)
-      await sendWebResponse(res, new Response('sandbox is gone', { status: 400 }))
-      return
-    }
-    await sendWebResponse(res, Response.json({ interrupted: true, execution_id: 'exe-stopped' }))
-    return
-  }
   if (endpoint === 'messages') {
     const body = (await request.json()) as SlackbotV2AppendMessagesRequest
     input.appends.push({ threadKey, body })
@@ -7227,7 +6797,6 @@ async function handlePatchedSlackRequest(
           ok: true,
           user: {
             id: userId,
-            team_id: profile.team_id ?? TEAM_ID,
             name: profile.name,
             real_name: profile.real_name,
             profile

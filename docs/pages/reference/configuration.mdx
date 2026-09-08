@@ -170,7 +170,7 @@ Execution tuning:
 | `SLACK_FEEDBACK_COMMANDS`, `SLACK_FEEDBACK_ALLOWED_CHANNELS` | `slackbot.extraEnv`. | Feedback slash commands and optional channel allowlist. |
 | `SLACK_FEEDBACK_LINEAR_TEAM_ID`, `SLACK_FEEDBACK_LINEAR_PROJECT_ID` | `slackbot.extraEnv`. | Linear destination for feedback issues. |
 | `SLACKBOT_EXTERNAL_ORG_ALLOWLIST` | `slackbot.extraEnv`. | Slack team ids allowed for external org handoff. |
-| `SLACKBOTV2_AGENT_VIEW_ENABLED` | `slackbotv2.agentViewEnabled`. | Enables Slack agent view, threaded DM sessions, native status and titles, and the Stop button. Defaults to `false`. Requires the Slack app migration and `agent_session_stopped` subscription described in [Quickstart](/quickstart). |
+| `SLACKBOTV2_AGENT_VIEW_ENABLED` | `slackbotv2.agentViewEnabled`. | Enables Slack agent view, threaded DM sessions, and native status and titles. Defaults to `false`. Requires the Slack app migration described in [Quickstart](/quickstart). Native Stop support is deferred. |
 | `SLACKBOTV2_AUTO_JOIN_CREATED_CHANNELS` | `slackbotv2.autoJoinCreatedChannels`. | Joins newly-created public channels after subscribed `channel_created` events. Requires `channels:read` and `channels:join`. Defaults to `false`. |
 | `SLACKBOTV2_STEERING_REACTION_ENABLED` | `slackbotv2.steeringReactionEnabled`. | Reacts to mentioned follow-up messages while an execution is active, then removes their reactions after the assistant response is posted. Requires `reactions:write`. Defaults to `false` and disables itself for the running process if Slack reports the scope is missing. |
 | `SLACKBOTV2_STEERING_REACTION` | `slackbotv2.steeringReaction`. | Slack emoji name used for steering acknowledgements. Defaults to `hourglass_flowing_sand`. |

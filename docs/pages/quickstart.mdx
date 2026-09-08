@@ -212,7 +212,6 @@ settings:
       - app_mention
       - message.im
       - app_home_opened
-      - agent_session_stopped
 ```
 
 This is a fragment to merge into your app manifest. Reinstall the app if its
@@ -226,15 +225,15 @@ that thread's session without a mention. Channel replies still require a
 mention. Existing DM thread replies retain their thread identity. Older
 conversation-wide DM subscriptions do not override Agent mode's thread roots.
 
-Native Stop interrupts the backend execution and suppresses further rendering
-of its answer. A Stop received during an active handoff returns a retryable
-response until the execution is known. Pending stop intents survive service
-restarts. If the backend interrupt fails, Centaur logs the failure and releases
-the thread so another request can run. Stopping an idle thread is acknowledged
-without retrying. Streaming progress and titles continue
-through the existing renderer. Suggested prompts can be configured statically
-in the manifest; context-aware prompts and synchronization of user-edited Slack
-session titles are separate integrations.
+Streaming progress and titles continue through the existing renderer. Native
+Stop support is deferred. Do not subscribe to `agent_session_stopped` yet;
+remove it if you previously added it. Without that subscription, Slack shows
+a loading indicator without a Stop button. The existing mentioned `stop`
+command remains available.
+
+Suggested prompts can be configured statically in the manifest. Context-aware
+prompts and synchronization of user-edited Slack session titles are separate
+integrations.
 
 See Slack's [migration guide](https://docs.slack.dev/ai/migrating-to-agent-messaging/)
 for the app-side rollout requirements.

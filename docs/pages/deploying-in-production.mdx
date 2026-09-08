@@ -338,9 +338,9 @@ Use the app page to install the bot, copy the Bot User OAuth Token for
    `message.channels`, `message.groups`, and `message.im`. To automatically join
    newly-created public channels, set `slackbotv2.autoJoinCreatedChannels` to
    `true` and subscribe to `channel_created`. For Slack agent view, complete the
-   [Slack app migration](/quickstart), set `slackbotv2.agentViewEnabled` to `true`,
-   and subscribe to `agent_session_stopped` so the native Stop button interrupts
-   execution. The toggle defaults to `false`.
+   [Slack app migration](/quickstart) and set `slackbotv2.agentViewEnabled` to
+   `true`. The toggle defaults to `false`. Leave `agent_session_stopped`
+   unsubscribed until native Stop handling is implemented.
 8. Enable Interactivity and set its Request URL to the same
    `https://<your-host>/api/webhooks/slack` URL. Block Kit actions are emitted
    to the workflow engine as `slack.block_action.<action_id>` events.
