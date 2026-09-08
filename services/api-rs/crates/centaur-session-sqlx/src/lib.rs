@@ -27,6 +27,17 @@ const DEFAULT_MAX_CONNECTIONS: u32 = 500;
 /// api-rs replicas.
 const OUTPUT_LINE_RETENTION_LOCK: &str = "centaur:session-output-line-retention";
 
+async fn try_lock_output_line_retention(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<bool, SessionStoreError> {
+    Ok(
+        sqlx::query_scalar("select pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(OUTPUT_LINE_RETENTION_LOCK)
+            .fetch_one(&mut **tx)
+            .await?,
+    )
+}
+
 #[derive(Clone, Debug)]
 pub struct CreateExecutionResult {
     pub execution: SessionExecution,
@@ -53,7 +64,7 @@ pub struct ReleasedExecution {
 /// One batch of [`PgSessionStore::delete_expired_output_line_events`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ExpiredOutputLineBatch {
-    /// Output-line events examined, expired or not.
+    /// Rows read from the page, of every event type.
     pub scanned: u64,
     /// Output-line events deleted.
     pub deleted: u64,
@@ -1242,19 +1253,22 @@ impl PgSessionStore {
     ///
     /// `event_id` is an identity column and `created_at` defaults to `now()`,
     /// so the two are monotonic together and the oldest rows are always the
-    /// lowest ids. Walking the primary key means each batch is a bounded index
-    /// range read: no `created_at` index, no sort, and no seq scan when the
-    /// backlog is drained. The caller resumes the next batch from
-    /// `next_after_event_id`; `reached_retained_events` says the walk hit rows
+    /// lowest ids. Each batch reads the next `page_limit` rows by primary key,
+    /// whatever their type, and deletes the expired output lines among them.
+    /// That bounds the read as well as the delete: no `created_at` index, no
+    /// sort, and no repeated pass over retained rows, because the cursor
+    /// advances across every row read. The caller resumes from
+    /// `next_after_event_id`; `reached_retained_events` says the page held rows
     /// still inside the window, after which nothing older remains.
     ///
     /// Only output lines are deleted. Lifecycle events (`session.sandbox_paused`
     /// drives capacity admission), execution outcomes (the assistant's reply
     /// lives in `session.execution_completed`) and everything else are kept.
-    /// Output lines of a `queued` or `running` execution are also kept, whatever
-    /// their age, because a reconnecting client replays them; the cursor passes
-    /// over them so a stuck execution cannot stall retention, and they are
-    /// picked up by the next walk from the head of the table.
+    /// Output lines of a `queued` or `running` execution are kept until it
+    /// finishes, because a reconnecting client replays them. The cursor still
+    /// passes over them so a stuck execution cannot stall retention;
+    /// [`Self::delete_expired_output_lines_of_finished_long_executions`]
+    /// collects them afterwards.
     ///
     /// Batches are serialized across processes with a transaction-scoped
     /// advisory lock. `None` means another sweeper held it.
@@ -1262,57 +1276,59 @@ impl PgSessionStore {
         &self,
         after_event_id: i64,
         retention: Duration,
-        batch_limit: i64,
+        page_limit: i64,
     ) -> Result<Option<ExpiredOutputLineBatch>, SessionStoreError> {
         let mut tx = self.pool.begin().await?;
-        let locked: bool =
-            sqlx::query_scalar("select pg_try_advisory_xact_lock(hashtextextended($1, 0))")
-                .bind(OUTPUT_LINE_RETENTION_LOCK)
-                .fetch_one(&mut *tx)
-                .await?;
-        if !locked {
+        if !try_lock_output_line_retention(&mut tx).await? {
             tx.rollback().await?;
             return Ok(None);
         }
         let row = sqlx::query_as::<_, ExpiredOutputLineBatchRow>(
             r#"
-            with candidates as (
+            with page as (
                 select
                     e.event_id,
-                    e.created_at < now() - ($2::float8 * interval '1 second') as expired,
+                    e.event_type,
+                    e.execution_id,
+                    e.created_at < now() - ($2::float8 * interval '1 second') as expired
+                from session_events e
+                where e.event_id > $1
+                order by e.event_id
+                limit $3
+            ),
+            candidates as (
+                select
+                    p.event_id,
                     exists (
                         select 1
                         from session_executions active
-                        where active.execution_id = e.execution_id
+                        where active.execution_id = p.execution_id
                           and active.status in ('queued', 'running')
                     ) as active
-                from session_events e
-                where e.event_id > $1
-                  and e.event_type = 'session.output.line'
-                order by e.event_id
-                limit $3
+                from page p
+                where p.expired
+                  and p.event_type = 'session.output.line'
             ),
             deleted as (
                 delete from session_events e
                 using candidates c
                 where e.event_id = c.event_id
-                  and c.expired
                   and not c.active
                 returning e.event_id
             )
             select
-                (select count(*) from candidates) as scanned,
+                (select count(*) from page) as scanned,
                 (select count(*) from deleted) as deleted,
                 coalesce(
-                    (select min(event_id) - 1 from candidates where not expired),
-                    (select max(event_id) from candidates)
+                    (select min(event_id) - 1 from page where not expired),
+                    (select max(event_id) from page)
                 ) as next_after_event_id,
-                exists (select 1 from candidates where not expired) as reached_retained_events
+                exists (select 1 from page where not expired) as reached_retained_events
             "#,
         )
         .bind(after_event_id)
         .bind(retention.as_secs_f64())
-        .bind(batch_limit)
+        .bind(page_limit)
         .fetch_one(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -1322,6 +1338,58 @@ impl PgSessionStore {
             next_after_event_id: row.next_after_event_id.unwrap_or(after_event_id),
             reached_retained_events: row.reached_retained_events,
         }))
+    }
+
+    /// Delete expired output lines of executions that ran longer than the
+    /// retention window and have since finished.
+    ///
+    /// The primary-key walk skips output lines whose execution is still
+    /// `queued` or `running` when they age out, and its cursor does not come
+    /// back. An execution can only have been active while its lines aged out
+    /// if it ran for longer than the window, so `completed_at - created_at >=
+    /// retention` identifies exactly the executions with skipped lines. Each is
+    /// rechecked while its completion lies within the window, which covers a
+    /// restart between the skip and the recheck. Their lines are found through
+    /// the `(execution_id, event_type)` index; the executions themselves come
+    /// from a pass over `session_executions`, one row per turn, as the
+    /// idle-sandbox sweep already does. Returns the rows deleted, up to
+    /// `batch_limit`, or `None` when another sweeper held the lock.
+    pub async fn delete_expired_output_lines_of_finished_long_executions(
+        &self,
+        retention: Duration,
+        batch_limit: i64,
+    ) -> Result<Option<u64>, SessionStoreError> {
+        let mut tx = self.pool.begin().await?;
+        if !try_lock_output_line_retention(&mut tx).await? {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+        let result = sqlx::query(
+            r#"
+            with doomed as (
+                select e.event_id
+                from session_executions x
+                join session_events e
+                  on e.execution_id = x.execution_id
+                 and e.event_type = 'session.output.line'
+                where x.status in ('completed', 'failed', 'cancelled')
+                  and x.completed_at >= now() - ($1::float8 * interval '1 second')
+                  and x.completed_at - x.created_at >= ($1::float8 * interval '1 second')
+                  and e.created_at < now() - ($1::float8 * interval '1 second')
+                order by e.event_id
+                limit $2
+            )
+            delete from session_events e
+            using doomed d
+            where e.event_id = d.event_id
+            "#,
+        )
+        .bind(retention.as_secs_f64())
+        .bind(batch_limit)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(Some(result.rows_affected()))
     }
 
     pub async fn list_sandbox_capacity_candidates(
@@ -2879,7 +2947,7 @@ mod tests {
             .expect("mark execution running");
 
         // One statement so the ids are contiguous: rows other tests insert
-        // concurrently cannot land between ours and change the batch shape.
+        // concurrently cannot land between ours and change the page shape.
         let mut ids: Vec<i64> = sqlx::query_scalar(
             r#"
             insert into session_events
@@ -2908,14 +2976,14 @@ mod tests {
             _old_c,
             running_old,
             terminal_old,
-            _unscoped_old,
+            unscoped_old,
             fresh,
         ]: [i64; 7] = ids.try_into().expect("seven event ids");
         let retention = std::time::Duration::from_secs(7 * 24 * 60 * 60);
         let sweep = |after: i64| store.delete_expired_output_line_events(after, retention, 2);
 
-        // Batch one: two expired lines of a completed execution.
-        let batch = sweep(old_a - 1).await.expect("batch one").expect("lock");
+        // Page one: two expired lines of a completed execution.
+        let batch = sweep(old_a - 1).await.expect("page one").expect("lock");
         assert_eq!(
             batch,
             ExpiredOutputLineBatch {
@@ -2926,11 +2994,11 @@ mod tests {
             }
         );
 
-        // Batch two: an expired line of a running execution is kept, but the
+        // Page two: an expired line of a running execution is kept, but the
         // cursor passes it so a stuck execution cannot stall the sweep.
         let batch = sweep(batch.next_after_event_id)
             .await
-            .expect("batch two")
+            .expect("page two")
             .expect("lock");
         assert_eq!(
             batch,
@@ -2942,40 +3010,84 @@ mod tests {
             }
         );
 
-        // Batch three: the terminal event is not a candidate at all, the
-        // execution-less line is deleted, and the fresh line marks the frontier.
-        // The cursor stops just before the first retained row.
+        // Page three: a retained lifecycle row costs a slot in the page and
+        // moves the cursor, and the execution-less line is deleted.
         let batch = sweep(batch.next_after_event_id)
             .await
-            .expect("batch three")
+            .expect("page three")
             .expect("lock");
         assert_eq!(
             batch,
             ExpiredOutputLineBatch {
                 scanned: 2,
                 deleted: 1,
-                next_after_event_id: fresh - 1,
-                reached_retained_events: true,
+                next_after_event_id: unscoped_old,
+                reached_retained_events: false,
             }
         );
 
-        // Resuming at the frontier deletes nothing and reports it again.
+        // Page four: the fresh line marks the frontier. The cursor stops just
+        // before the first retained row, and resuming there deletes nothing.
         let batch = sweep(batch.next_after_event_id)
             .await
-            .expect("batch four")
+            .expect("page four")
+            .expect("lock");
+        assert_eq!(batch.deleted, 0);
+        assert!(batch.reached_retained_events);
+        assert_eq!(batch.next_after_event_id, fresh - 1);
+        let batch = sweep(batch.next_after_event_id)
+            .await
+            .expect("page five")
             .expect("lock");
         assert_eq!(batch.deleted, 0);
         assert!(batch.reached_retained_events);
         assert_eq!(batch.next_after_event_id, fresh - 1);
 
-        let remaining: Vec<i64> = sqlx::query_scalar(
-            "select event_id from session_events where thread_key = $1 order by event_id",
+        let remaining = |thread_key: &ThreadKey| {
+            sqlx::query_scalar::<_, i64>(
+                "select event_id from session_events where thread_key = $1 order by event_id",
+            )
+            .bind(thread_key.as_str().to_owned())
+            .fetch_all(store.pool())
+        };
+        assert_eq!(
+            remaining(&thread_key).await.expect("list remaining events"),
+            vec![running_old, terminal_old, fresh]
+        );
+
+        // The skipped line is not revisited by the walk. Once its execution
+        // finishes, having run longer than the window, the recovery pass
+        // collects it.
+        sqlx::query(
+            "update session_executions set created_at = now() - interval '30 days' \
+             where execution_id = $1",
         )
-        .bind(thread_key.as_str())
-        .fetch_all(store.pool())
+        .bind(&running)
+        .execute(store.pool())
         .await
-        .expect("list remaining events");
-        assert_eq!(remaining, vec![running_old, terminal_old, fresh]);
+        .expect("age running execution");
+        assert_eq!(
+            store
+                .delete_expired_output_lines_of_finished_long_executions(retention, 10)
+                .await
+                .expect("recovery while still running"),
+            Some(0)
+        );
+        store
+            .complete_execution(&running)
+            .await
+            .expect("complete long execution");
+        assert_eq!(
+            store
+                .delete_expired_output_lines_of_finished_long_executions(retention, 10)
+                .await
+                .expect("recovery after completion"),
+            Some(1)
+        );
+        assert_eq!(
+            remaining(&thread_key).await.expect("list remaining events"),
+            vec![terminal_old, fresh]
+        );
 
         sqlx::query("delete from sessions where thread_key = $1")
             .bind(thread_key.as_str())
@@ -3004,6 +3116,13 @@ mod tests {
                 .delete_expired_output_line_events(i64::MAX - 1, retention, 1)
                 .await
                 .expect("sweep while locked"),
+            None
+        );
+        assert_eq!(
+            store
+                .delete_expired_output_lines_of_finished_long_executions(retention, 1)
+                .await
+                .expect("recovery while locked"),
             None
         );
 

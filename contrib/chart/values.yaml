@@ -534,7 +534,7 @@ apiRs:
   # 450MB/day on a modest single node, against the 20Gi default Postgres volume
   # below. Only output lines are deleted: lifecycle events, execution outcomes
   # and assistant replies are kept, so console transcripts stay intact. Output
-  # lines of a queued or running execution are also kept, whatever their age.
+  # lines of a queued or running execution are kept until it finishes.
   # Sweeps are bounded per pass, so a large first backlog drains over several.
   # Retention caps growth; it does not shrink a volume that is already full,
   # because Postgres reuses freed pages for new rows rather than returning them.

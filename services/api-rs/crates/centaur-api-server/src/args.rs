@@ -205,7 +205,7 @@ struct SessionOutputLineRetentionArgs {
     /// Delete `session.output.line` events older than this many days. 0
     /// disables retention, which is the default. Only harness stdout lines are
     /// deleted: lifecycle events, execution outcomes and assistant replies are
-    /// kept, as are output lines of a queued or running execution.
+    /// kept. Lines of a running execution are kept until it finishes.
     #[arg(
         long = "session-output-line-retention-days",
         env = "SESSION_OUTPUT_LINE_RETENTION_DAYS",
