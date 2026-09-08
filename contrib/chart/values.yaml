@@ -262,7 +262,7 @@ overlay:
 # toolServer.extraSources are mapped into this shape for compatibility.
 #
 # Subdirs default to the conventional layout: toolsSubdir: tools,
-# workflowsSubdir: workflows, migrationsSubdir: migrations, and
+# workflowsSubdir: workflows, migrationsDir: migrations, and
 # skillsSubdir: .agents/skills. Most sources only need `repo`; set `ref` to
 # a branch, tag, or commit when you do not want
 # the repo's default branch. Directories missing from a repo are skipped at

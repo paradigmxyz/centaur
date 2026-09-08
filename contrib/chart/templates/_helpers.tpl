@@ -104,10 +104,10 @@ so the defaults are safe for repos that only carry some surfaces.
 {{- else -}}
 {{- $_ := set $source "workflowsSubdir" "workflows" -}}
 {{- end -}}
-{{- if hasKey . "migrationsSubdir" -}}
-{{- with .migrationsSubdir }}{{- $_ := set $source "migrationsSubdir" . -}}{{- end -}}
+{{- if hasKey . "migrationsDir" -}}
+{{- with .migrationsDir }}{{- $_ := set $source "migrationsDir" . -}}{{- end -}}
 {{- else -}}
-{{- $_ := set $source "migrationsSubdir" "migrations" -}}
+{{- $_ := set $source "migrationsDir" "migrations" -}}
 {{- end -}}
 {{- if hasKey . "skillsSubdir" -}}
 {{- with .skillsSubdir }}{{- $_ := set $source "skillsSubdir" . -}}{{- end -}}
@@ -121,13 +121,13 @@ so the defaults are safe for repos that only carry some surfaces.
 {{- end -}}
 {{- else -}}
 {{- if and .Values.toolServer.enabled .Values.toolServer.repo -}}
-{{- $source := dict "repo" .Values.toolServer.repo "toolsSubdir" (default "tools" .Values.toolServer.subdir) "workflowsSubdir" "workflows" "migrationsSubdir" "migrations" "skillsSubdir" ".agents/skills" -}}
+{{- $source := dict "repo" .Values.toolServer.repo "toolsSubdir" (default "tools" .Values.toolServer.subdir) "workflowsSubdir" "workflows" "migrationsDir" "migrations" "skillsSubdir" ".agents/skills" -}}
 {{- with .Values.toolServer.ref }}{{- $_ := set $source "ref" . -}}{{- end -}}
 {{- $_ := set $source "visibility" (include "centaur.repositoryVisibility" .Values.toolServer.visibility) -}}
 {{- $sources = append $sources $source -}}
 {{- range .Values.toolServer.extraSources -}}
 {{- if .repo -}}
-{{- $source := dict "repo" .repo "toolsSubdir" (default "tools" .subdir) "workflowsSubdir" (default "workflows" .workflowsSubdir) "migrationsSubdir" (default "migrations" .migrationsSubdir) "skillsSubdir" (default ".agents/skills" .skillsSubdir) -}}
+{{- $source := dict "repo" .repo "toolsSubdir" (default "tools" .subdir) "workflowsSubdir" (default "workflows" .workflowsSubdir) "migrationsDir" (default "migrations" .migrationsDir) "skillsSubdir" (default ".agents/skills" .skillsSubdir) -}}
 {{- with .ref }}{{- $_ := set $source "ref" . -}}{{- end -}}
 {{- $_ := set $source "visibility" (include "centaur.repositoryVisibility" .visibility) -}}
 {{- $sources = append $sources $source -}}

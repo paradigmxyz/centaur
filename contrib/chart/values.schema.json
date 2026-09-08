@@ -201,7 +201,7 @@
               "visibility": { "type": "string" },
               "toolsSubdir": { "type": "string" },
               "workflowsSubdir": { "type": "string" },
-              "migrationsSubdir": { "type": "string" },
+              "migrationsDir": { "type": "string" },
               "skillsSubdir": { "type": "string" },
               "promptPath": { "type": "string" },
               "personasSubdir": { "type": "string" }

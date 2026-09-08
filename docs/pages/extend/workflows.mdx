@@ -118,7 +118,7 @@ Workflow routes return HTTP 503 until initialization succeeds. A migration
 failure keeps workflows unavailable and writes the error to API logs without
 stopping the session API. Fix the migration and restart to retry.
 
-The chart discovers `migrations/` in each overlay. Set `migrationsSubdir` to
+The chart discovers `migrations/` in each overlay. Set `migrationsDir` to
 relocate it or to `""` to disable it for a source. An overlay without that
 directory is allowed; an unavailable parent checkout fails initialization.
 For local development, set `USER_MIGRATION_DIRS` to a colon-separated list of

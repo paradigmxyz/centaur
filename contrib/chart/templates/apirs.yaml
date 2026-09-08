@@ -29,7 +29,7 @@
 {{- $publicToolSources = append $publicToolSources $toolSource -}}
 {{- end -}}
 {{- end -}}
-{{- with (get $source "migrationsSubdir") -}}
+{{- with (get $source "migrationsDir") -}}
 {{- $userMigrationDirList = append $userMigrationDirList (printf "%s/%s/%s" $.Values.repoCache.hostPath $repo .) -}}
 {{- end -}}
 {{- with (get $source "workflowsSubdir") -}}

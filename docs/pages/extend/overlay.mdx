@@ -70,7 +70,7 @@ contents are safe to expose to principals configured with
 `sandbox_repo_cache=public`; invalid or missing values are treated as `private`.
 
 Each source defaults to the conventional layout: `toolsSubdir: tools`,
-`workflowsSubdir: workflows`, `migrationsSubdir: migrations`, and
+`workflowsSubdir: workflows`, `migrationsDir: migrations`, and
 `skillsSubdir: .agents/skills`. Directories a
 repo does not contain are skipped at runtime, so a skills-only overlay needs no
 extra configuration. Set a subdir to a non-default path to relocate it, or to
@@ -101,7 +101,7 @@ and workflows, migration files never shadow each other. SQL files explicitly
 create and reference application schemas. See [Workflow Databases](./workflows#workflow-databases)
 for an example and retry behavior.
 
-Set `migrationsSubdir` to customize the directory or to `""` to disable it.
+Set `migrationsDir` to customize the directory or to `""` to disable it.
 Pin overlay revisions for deployments that change the database, and restart
 the API to apply new migrations. A repo-cache refresh does not rerun them.
 
