@@ -6,6 +6,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(
     0,
     str(Path(__file__).resolve().parents[2] / "services" / "workflow-python"),
@@ -314,3 +316,34 @@ def test_handler_does_not_requeue_a_partial_batch(monkeypatch):
         "model": "text-embedding-3-small",
         "requeued": False,
     }
+
+
+def test_embedding_dimensions_defaults_when_unset(monkeypatch):
+    module = _load()
+    monkeypatch.delenv(module.EMBEDDING_DIMENSIONS_ENV, raising=False)
+    assert module._embedding_dimensions() == module.DEFAULT_EMBEDDING_DIMENSIONS
+
+
+def test_embedding_dimensions_reads_the_configured_width(monkeypatch):
+    module = _load()
+    # 2000 is the widest pgvector will index, so it is the widest worth
+    # configuring; text-embedding-3-large's native 3072 has to be reduced.
+    monkeypatch.setenv(module.EMBEDDING_DIMENSIONS_ENV, "2000")
+    assert module._embedding_dimensions() == 2000
+
+
+def test_embedding_dimensions_rejects_a_non_integer(monkeypatch):
+    module = _load()
+    monkeypatch.setenv(module.EMBEDDING_DIMENSIONS_ENV, "wide")
+    with pytest.raises(ValueError, match="must be an integer"):
+        module._embedding_dimensions()
+
+
+# pgvector stores a wider vector but cannot build an HNSW or IVFFlat index on
+# it, so accepting one would leave the search this workflow feeds unindexed.
+@pytest.mark.parametrize("value", ["0", "-1", "2001"])
+def test_embedding_dimensions_rejects_unindexable_widths(monkeypatch, value):
+    module = _load()
+    monkeypatch.setenv(module.EMBEDDING_DIMENSIONS_ENV, value)
+    with pytest.raises(ValueError, match="must be between 1 and 2000"):
+        module._embedding_dimensions()

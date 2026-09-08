@@ -429,7 +429,8 @@
                   "minimum": 1,
                   "maximum": 8192
                 },
-                "model": { "type": "string", "minLength": 1 }
+                "model": { "type": "string", "minLength": 1 },
+                "dimensions": { "type": "integer", "minimum": 1, "maximum": 2000 }
               }
             }
           }
