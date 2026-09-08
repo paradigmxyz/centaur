@@ -1,11 +1,9 @@
 # syntax=docker/dockerfile:1.7
 
-FROM rust:1-bookworm AS workflow-migrator-builder
-WORKDIR /build
-COPY services/api-rs/ ./
+FROM rust:1-bookworm AS sqlx-cli-builder
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    cargo build --locked --release -p centaur-workflow-migrate
+    cargo install sqlx-cli --version 0.8.6 --locked --no-default-features --features rustls,postgres
 
 FROM ubuntu:24.04 AS toolchain
 
@@ -298,7 +296,7 @@ COPY --link --chmod=644 services/sandbox/claude-credentials.json /etc/centaur/cl
 COPY --link --chmod=755 services/sandbox/md2docx.py /usr/local/bin/md2docx
 COPY --link --chmod=755 services/workflow-python/workflow_host.py /usr/local/bin/workflow-host
 COPY --link services/workflow-python/api/ /usr/local/bin/api/
-COPY --link --from=workflow-migrator-builder /build/target/release/centaur-workflow-migrate /usr/local/bin/centaur-workflow-migrate
+COPY --link --from=sqlx-cli-builder /usr/local/cargo/bin/sqlx /usr/local/bin/sqlx
 COPY --link --chmod=755 services/sandbox/git-branch.sh /usr/local/bin/git-branch
 COPY --link --chmod=755 services/sandbox/install_tool_shims.py /usr/local/bin/install-tool-shims
 COPY --link --chmod=755 services/sandbox/seed_hermes_codex_auth.py /usr/local/bin/seed-hermes-codex-auth

@@ -103,32 +103,32 @@ WORKFLOW_NAME = "sample_indexer"
 
 
 async def handler(inp, ctx):
-    applied = await ctx.db.migrate("./sample_indexer_migrations", schema="sample_index")
+    await ctx.db.migrate("./sample_indexer_migrations", schema="sample_index")
     row = await ctx.db.fetchrow(
         "SELECT cursor FROM sample_index.checkpoints WHERE source_id = $1",
         inp["source_id"],
     )
-    return {"applied": applied, "cursor": row["cursor"] if row else None}
+    return {"cursor": row["cursor"] if row else None}
 ```
 
 Relative migration paths resolve from the workflow module. The Python helper
-invokes the bundled `centaur-workflow-migrate` binary, which uses the same SQLx
-migration engine as the Rust control plane. The runner creates the requested
-schema if needed and sets its dedicated connection's `search_path` to that
-schema only. SQLx stores history in that schema's `_sqlx_migrations` table.
-The control plane's migration history is separate.
+creates the requested schema if needed, then invokes the bundled `sqlx` CLI
+with `migrate run --ignore-missing`. It configures the CLI connection's
+`search_path` to contain only the requested schema. SQLx stores history in
+that schema's `_sqlx_migrations` table. The control plane's migration history
+is separate.
 
 Moving or renaming a workflow does not reset its history. Workflows sharing a
 schema must share one authoritative migration directory. The method returns
-the numeric versions applied by that call, or an empty list when nothing is
-pending. Application queries still use the host's existing pool and should
-qualify table names with the schema.
+`None` on success and raises `MigrationError` if the CLI fails. Application
+queries still use the host's existing pool and should qualify table names
+with the schema.
 
 Use SQLx migration files named `<version>_<description>.sql`. SQLx owns file
 loading, numeric ordering, checksums, transactions, and history. Files that do
 not match its migration naming convention are ignored. Applied files must not
 be edited: SQLx rejects changed checksums. Add a new migration for each change.
-The runner only applies forward migrations; it does not automatically downgrade.
+The CLI only applies forward migrations; it does not automatically downgrade.
 Applied versions absent from a workflow bundle are allowed so older executions
 can run against a newer schema. Keep database changes compatible with those
 older executions.
@@ -140,14 +140,19 @@ successful migrations stay applied. SQLx also supports its standard
 on failure. Do not put transaction-control statements or changes to
 `search_path`, advisory locks, or migration history into migration SQL.
 
-The runner uses SQLx's database-wide advisory lock, including during schema
-creation. Migrations for different schemas serialize while they run. Waiting
-for this lock times out after 60 seconds by default; pass `lock_timeout` in
-seconds to change it. This timeout does not limit the migration SQL itself.
-Cancellation terminates the runner, and the runner exits if its host pipe
-closes. The runner requires PostgreSQL 14 or newer and enables one-second
-connection checks to detect a disconnected runner during a long query.
-Closing its dedicated database connection releases migration locks.
+The helper holds a PostgreSQL advisory lock while the CLI runs because the
+CLI does not lock concurrent migration runs. Calls for the same schema
+serialize. Different schemas can migrate independently. `lock_timeout`
+defaults to 60 seconds and limits each lock wait, including locks acquired by
+migration SQL. It does not limit total execution time. Direct CLI invocations
+do not participate in the helper's lock; avoid running them concurrently with
+workflow migrations for the same schema.
+
+Cancellation terminates the CLI. The helper requires PostgreSQL 14 or newer
+and enables one-second connection checks so PostgreSQL detects a disconnected
+CLI during a long query. An abrupt host exit can leave the CLI running after
+the helper's lock is released. Stop any remaining migration process before
+retrying that workflow after a host crash.
 
 Call `migrate()` on every handler invocation, outside `ctx.step()`. SQLx's
 history supplies retry safety. Ordinary `ctx.db` queries are not automatically
@@ -169,15 +174,19 @@ async with ctx.db.acquire() as connection:
         )
 ```
 
-Both the runner and application pool use the host's `DATABASE_URL`. The role
+Both the CLI and application pool use the host's `DATABASE_URL`. The role
 needs permission to create the schema, or an existing schema with permission
 to create and alter its objects. Schemas do not automatically grant or restrict
 access. Existing `ctx._pool` calls remain supported, and workflows without
 database operations do not need a connection.
 
-Both runtime images include the runner. For local development, build it with
-`cargo build --manifest-path services/api-rs/Cargo.toml -p centaur-workflow-migrate`
-and set `WORKFLOW_MIGRATOR_PATH` to the resulting executable, or put it on `PATH`.
+Both runtime images include SQLx CLI 0.8.6, matching the control plane's SQLx
+version. For local development, install it and put `sqlx` on `PATH`:
+
+```bash
+cargo install sqlx-cli --version 0.8.6 --locked --no-default-features --features rustls,postgres
+```
+
 To run the database integration tests, also set `WORKFLOW_DATABASE_TEST_URL`
 to a disposable PostgreSQL database:
 

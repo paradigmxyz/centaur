@@ -73,13 +73,14 @@ class WorkflowDatabaseTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_upgrade_preserves_data_and_replay_skips_applied_files(self):
         self.initial_migration()
-        self.assertEqual(await self.migrate(), [1])
-        self.assertEqual(await self.migrate(), [])
+        self.assertIsNone(await self.migrate())
+        await self.migrate()
+        self.assertEqual(await self.history(), [1])
         self.write(
             "002_label.sql",
             f"ALTER TABLE {self.schema}.checkpoints ADD COLUMN label text;",
         )
-        self.assertEqual(await self.migrate(), [2])
+        await self.migrate()
         row = await self.db.fetchrow(f"SELECT * FROM {self.schema}.checkpoints")
         self.assertEqual(dict(row), {"id": "source", "cursor": 42, "label": None})
         async with self.db.acquire() as connection, connection.transaction():
@@ -97,10 +98,11 @@ class WorkflowDatabaseTests(unittest.IsolatedAsyncioTestCase):
         )
         # A renamed/moved workflow retains history because identity is the schema.
         moved = WorkflowDatabase(self.pool, source_path=self.directory / "renamed.py")
-        self.assertEqual(await moved.migrate(self.migrations, schema=self.schema), [])
+        await moved.migrate(self.migrations, schema=self.schema)
         # An older deployed bundle can still use a forward-compatible schema.
         (self.migrations / "002_label.sql").unlink()
-        self.assertEqual(await self.migrate(), [])
+        await self.migrate()
+        self.assertEqual(await self.history(), [1, 2])
 
     async def test_sqlx_rejects_changed_applied_migration(self):
         self.initial_migration()
@@ -116,10 +118,7 @@ class WorkflowDatabaseTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_concurrent_first_runs_apply_each_file_once(self):
         self.initial_migration()
-        results = await asyncio.wait_for(
-            asyncio.gather(*(self.migrate() for _ in range(6))), 10
-        )
-        self.assertEqual(sum(len(result) for result in results), 1)
+        await asyncio.wait_for(asyncio.gather(*(self.migrate() for _ in range(6))), 10)
         self.assertEqual(await self.history(), [1])
         self.assertEqual(
             await self.pool.fetchval(f"SELECT count(*) FROM {self.schema}.checkpoints"),
@@ -129,7 +128,7 @@ class WorkflowDatabaseTests(unittest.IsolatedAsyncioTestCase):
     async def test_versions_sort_numerically(self):
         self.write("2_create.sql", f"CREATE TABLE {self.schema}.items (id int);")
         self.write("10_insert.sql", f"INSERT INTO {self.schema}.items VALUES (7);")
-        self.assertEqual(await self.migrate(), [2, 10])
+        await self.migrate()
         self.assertEqual(
             await self.db.fetchval(f"SELECT id FROM {self.schema}.items"), 7
         )
@@ -145,7 +144,7 @@ class WorkflowDatabaseTests(unittest.IsolatedAsyncioTestCase):
             "001_items.sql",
             "CREATE TABLE items (id int); INSERT INTO items VALUES (7);",
         )
-        self.assertEqual(await self.migrate(), [1])
+        await self.migrate()
         self.assertEqual(
             await self.db.fetchval(f"SELECT id FROM {self.schema}.items"), 7
         )
@@ -181,7 +180,7 @@ class WorkflowDatabaseTests(unittest.IsolatedAsyncioTestCase):
         query["options"] = f"-c role={role}"
         restricted_url = urlunsplit(parts._replace(query=urlencode(query)))
         with patch.dict(os.environ, {"DATABASE_URL": restricted_url}):
-            self.assertEqual(await db.migrate(self.migrations, schema=self.schema), [1])
+            await db.migrate(self.migrations, schema=self.schema)
         self.assertEqual(
             await db.fetchval(f"SELECT cursor FROM {self.schema}.checkpoints"), 42
         )
@@ -199,10 +198,11 @@ class WorkflowDatabaseTests(unittest.IsolatedAsyncioTestCase):
             await self.pool.fetchval("SELECT to_regclass($1)", f"{self.schema}.pending")
         )
         self.write("002_broken.sql", f"CREATE TABLE {self.schema}.pending (id int);")
-        self.assertEqual(await self.migrate(), [2])
+        await self.migrate()
+        self.assertEqual(await self.history(), [1, 2])
 
     async def test_sql_functions_comments_and_quoted_schema_names(self):
-        schema = self.schema + '"odd'
+        schema = self.schema + '" \\ café'
         self.addAsyncCleanup(self.drop_schema, schema)
         quoted = '"' + schema.replace('"', '""') + '"'
         self.write(
@@ -253,7 +253,8 @@ class WorkflowDatabaseTests(unittest.IsolatedAsyncioTestCase):
             await task
         self.assertEqual(await self.history(), [])
         self.write("001_wait.sql", f"CREATE TABLE {self.schema}.pending (id int);")
-        self.assertEqual(await asyncio.wait_for(self.migrate(), 5), [1])
+        await asyncio.wait_for(self.migrate(), 5)
+        self.assertEqual(await self.history(), [1])
 
     async def test_lost_database_connection_rolls_back_and_retry_recovers(self):
         task, pid = await self.start_sleeping_migration()
@@ -264,9 +265,10 @@ class WorkflowDatabaseTests(unittest.IsolatedAsyncioTestCase):
             await task
         self.assertEqual(await self.history(), [])
         self.write("001_wait.sql", f"CREATE TABLE {self.schema}.pending (id int);")
-        self.assertEqual(await asyncio.wait_for(self.migrate(), 5), [1])
+        await asyncio.wait_for(self.migrate(), 5)
+        self.assertEqual(await self.history(), [1])
 
-    async def test_sqlx_lock_serializes_schemas_and_times_out(self):
+    async def test_migration_lock_serializes_same_schema_and_times_out(self):
         task, _ = await self.start_sleeping_migration()
         with self.assertRaisesRegex(MigrationError, "timed out"):
             await self.migrate(lock_timeout=0.05)
@@ -275,14 +277,35 @@ class WorkflowDatabaseTests(unittest.IsolatedAsyncioTestCase):
         directory = self.directory / "other"
         directory.mkdir()
         (directory / "001_wait.sql").write_text(f"CREATE TABLE {other}.items(id int);")
-        with self.assertRaisesRegex(MigrationError, "timed out"):
-            await self.db.migrate(directory, schema=other, lock_timeout=0.05)
+        await self.db.migrate(directory, schema=other, lock_timeout=0.05)
+        self.assertEqual(
+            await self.db.fetchval(f"SELECT count(*) FROM {other}.items"), 0
+        )
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
             await task
-        self.assertEqual(await self.db.migrate(directory, schema=other), [1])
         self.write("001_wait.sql", f"CREATE TABLE {self.schema}.pending (id int);")
-        self.assertEqual(await asyncio.wait_for(self.migrate(), 5), [1])
+        await asyncio.wait_for(self.migrate(), 5)
+        self.assertEqual(await self.history(), [1])
+
+    async def test_migration_sql_lock_timeout_rolls_back_and_allows_retry(self):
+        self.initial_migration()
+        await self.migrate()
+        self.write(
+            "002_label.sql",
+            f"ALTER TABLE {self.schema}.checkpoints ADD COLUMN label text;",
+        )
+        async with self.pool.acquire() as connection, connection.transaction():
+            await connection.execute(
+                f"LOCK TABLE {self.schema}.checkpoints IN ACCESS EXCLUSIVE MODE"
+            )
+            with self.assertRaisesRegex(MigrationError, "lock timeout"):
+                await self.migrate(lock_timeout=0.05)
+        self.assertEqual(await self.history(), [1])
+        await self.migrate()
+        self.assertEqual(await self.history(), [1, 2])
+        row = await self.db.fetchrow(f"SELECT * FROM {self.schema}.checkpoints")
+        self.assertEqual(dict(row), {"id": "source", "cursor": 42, "label": None})
 
     async def start_host(self):
         host = Path(__file__).resolve().parents[1] / "workflow_host.py"
@@ -327,30 +350,6 @@ class WorkflowDatabaseTests(unittest.IsolatedAsyncioTestCase):
         # Parsing the whole stdout also proves migration output did not corrupt NDJSON.
         return json.loads(stdout)
 
-    async def test_abrupt_host_exit_stops_runner_and_allows_retry(self):
-        self.write(
-            "001_wait.sql",
-            f"CREATE TABLE {self.schema}.pending (id int); SELECT pg_sleep(30);",
-        )
-        (self.directory / "workflow.py").write_text(
-            'WORKFLOW_NAME = "database_test"\n'
-            "async def handler(inp, ctx):\n"
-            f'    await ctx.db.migrate("./migrations", schema="{self.schema}")\n'
-        )
-        process = await self.start_host()
-        try:
-            process.stdin.write(
-                b'{"type":"workflow.start","workflow_name":"database_test"}\n'
-            )
-            await process.stdin.drain()
-            await self.wait_for_sleeping_migration()
-        finally:
-            if process.returncode is None:
-                process.kill()
-            await process.communicate()
-        self.write("001_wait.sql", f"CREATE TABLE {self.schema}.pending (id int);")
-        self.assertEqual(await asyncio.wait_for(self.migrate(), 5), [1])
-
     async def test_real_host_resolves_paths_and_reports_results_and_migration_failure(
         self,
     ):
@@ -358,15 +357,15 @@ class WorkflowDatabaseTests(unittest.IsolatedAsyncioTestCase):
         (self.directory / "workflow.py").write_text(
             'WORKFLOW_NAME = "database_test"\n'
             "async def handler(inp, ctx):\n"
-            f'    applied = await ctx.db.migrate("./migrations", schema="{self.schema}")\n'
+            f'    await ctx.db.migrate("./migrations", schema="{self.schema}")\n'
             f'    cursor = await ctx.db.fetchval("SELECT cursor FROM {self.schema}.checkpoints")\n'
-            '    return {"applied": applied, "cursor": cursor}\n'
+            '    return {"cursor": cursor}\n'
         )
         first = await self.run_host()
         self.assertEqual(first["type"], "workflow.result")
-        self.assertEqual(first["result"], {"applied": [1], "cursor": 42})
+        self.assertEqual(first["result"], {"cursor": 42})
         second = await self.run_host()
-        self.assertEqual(second["result"], {"applied": [], "cursor": 42})
+        self.assertEqual(second["result"], {"cursor": 42})
         self.write("002_broken.sql", "SELECT 1/0;")
         failure = await self.run_host()
         self.assertEqual(failure["type"], "workflow.error")

@@ -84,8 +84,6 @@ jobs:
             '^\.github/workflows/ci\.yml$'
           set_output workflow_python_tests \
             '^services/workflow-python/' \
-            '^services/api-rs/crates/centaur-workflow-migrate/' \
-            '^services/api-rs/Cargo\.(toml|lock)$' \
             '^workflows/' \
             '^\.github/workflows/ci\.yml$'
           set_output tool_tests \
@@ -349,17 +347,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          workspaces: services/api-rs
-          key: workflow-migrator
+          key: workflow-sqlx-cli
 
-      - name: Build SQLx workflow migration runner
-        working-directory: services/api-rs
-        run: cargo build --locked -p centaur-workflow-migrate
+      - name: Install SQLx CLI
+        run: cargo install sqlx-cli --version 0.8.6 --locked --no-default-features --features rustls,postgres
 
       - name: Workflow host tests
         env:
           WORKFLOW_DATABASE_TEST_URL: postgresql://postgres@127.0.0.1:5432/postgres
-          WORKFLOW_MIGRATOR_PATH: ${{ github.workspace }}/services/api-rs/target/debug/centaur-workflow-migrate
         run: >-
           uv run --project services/workflow-python
           python -m unittest discover
