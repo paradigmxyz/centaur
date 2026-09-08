@@ -198,85 +198,82 @@ curl -s "$CENTAUR_API_URL/api/workflows/runs?workflow_name=nightly_report&limit=
   -H "Authorization: Bearer $CENTAUR_API_TOKEN" | jq
 ```
 
-## Run Actions From Slack Buttons
+## Start Workflows From Slack Buttons
 
-Use `ctx.slack_actions` to post buttons and run a Python callback when an
-authorized user clicks one. The workflow suspends durably while waiting.
-Callbacks execute inside the same workflow and can call tools, run agents,
-start child workflows, or return a value.
+Use `ctx.slack_buttons` to post a message whose buttons start a named workflow.
+The posting workflow receives the Slack message response and continues immediately.
 
 ```python
-from api.workflow_engine import Button
-
-async def handler(inp, ctx):
-    async def approve(click):
-        return await ctx.start_workflow(
-            "echo",
-            {"approved_by": click.user_id},
-            idempotency_key=f"approval:{click.id}",
-        )
-
-    async def reject(click):
-        return {"rejected_by": click.user_id}
-
-    result = await ctx.slack_actions(
-        "review-request",
-        channel=inp["channel"],
-        team_id=inp["team_id"],
-        text="Proceed with this request?",
-        allowed_users=inp["approver_ids"],
-        buttons={
-            "approve": Button("Approve", approve, style="primary"),
-            "reject": Button("Reject", reject, style="danger"),
-        },
-        timeout=86400,
-        thread_ts=inp.get("thread_ts"),
-    )
-    return {"outcome": result.outcome, "value": result.value}
+await ctx.slack_buttons(
+    "release-review",
+    channel="C123",
+    text="Approve this release?",
+    workflow="review_release",
+    input={"release_id": "release-42"},
+    buttons={"approve": "Approve", "reject": "Reject"},
+)
 ```
 
-Each group is single-use. The first permitted click selects one callback.
-Subsequent clicks cannot select another callback. For repeated interactions,
-create another group with a different step name. Groups support one to five
-buttons, explicit Slack user IDs, and timeouts from one second to 30 days.
-The timeout starts when the group is first created and does not reset on replay.
-The team and channel must match the posted message. Button IDs use letters,
-digits, underscores, or hyphens. Labels contain at most 75 characters.
+Each click starts `review_release` with the supplied input and a `click` field.
+Slackbot fills `click` from the verified Slack interaction, overriding any
+`click` field in the button's input. It contains `id` (the button group ID),
+`action`, `user_id`, `team_id`, `channel_id`, `message_ts`, and `action_ts`.
+A workflow using a dataclass `Input` can type this field as `ButtonClick` from
+`api.workflow_engine`.
 
-The result contains `outcome`, `click`, and `value`. A selected button returns
-`outcome="clicked"`, verified click context, and the callback's return value.
-An expired request returns `outcome="expired"` without calling a callback.
-Cancelling the workflow prevents further button actions, but may leave buttons
-visible in Slack. Click context includes
-`id`, `action`, `user_id`, `team_id`, `channel_id`, `message_ts`, and `action_ts`.
+The receiving workflow owns authorization, the message update, and the action:
 
-Keep group names stable and unique within the workflow. The API persists each
-group's configuration, audience, deadline, and winning click. Replaying with
-different configuration fails explicitly. Callbacks follow ordinary workflow
-replay rules: keep their meaning compatible for outstanding requests, use
-durable steps, and make external side effects idempotent. A callback can retry
-after failure; a recorded click does not make an external API call exactly once.
-The callback result is checkpointed. When starting a child workflow, pass a
-stable `idempotency_key`, such as `f"approval:{click.id}"`, so a retry cannot
-enqueue another child. Use a different key for each distinct child start.
-Callback return values must be JSON-compatible.
+```python
+WORKFLOW_NAME = "review_release"
 
-Slack posting and message updates use the owning workflow's checkpoints and
-retry policy. After a click or timeout, the workflow updates the message before
-running the selected callback or returning the expired result. A Slack failure
-can delay callback execution. There is no background message cleanup after a
-workflow is cancelled or exhausts its retries. Further clicks are rejected.
-An ambiguous Slack posting timeout can produce duplicate messages; all copies
-reference the same single-use group. Feedback says the selection was recorded,
-not that the callback's work has finished.
+async def handler(inp, ctx):
+    click = inp["click"]
+    if click["user_id"] != "U123" or click["action"] not in {"approve", "reject"}:
+        return
+
+    await ctx.step(
+        "update-message",
+        lambda: ctx.update_slack(
+            click["channel_id"], click["message_ts"],
+            text=f"Release {inp['release_id']}: {click['action']} selected.",
+            blocks=[],
+        ),
+    )
+    if click["action"] == "approve":
+        await ctx.start_workflow(
+            "deploy_release",
+            {"release_id": inp["release_id"]},
+            idempotency_key=f"deploy:{inp['release_id']}",
+        )
+```
+
+Check team and channel as well when your authorization policy requires them.
+An unauthorized click can return without updating the message, leaving its
+buttons available to an authorized user. The receiving workflow must update
+or remove buttons explicitly. There is no automatic expiration or cancellation
+cleanup after posting.
+
+Slack redelivery of the same click reuses the workflow execution through the
+engine's existing idempotency support. Distinct clicks start distinct executions,
+including clicks on different buttons in the same group. If only one operation
+should take effect, enforce that in the action, such as the stable child-workflow
+idempotency key above. External side effects inside steps must also be idempotent.
+Removing buttons does not cancel clicks that are already in flight.
+
+Keep posting step names stable and unique. Posting uses an ordinary checkpoint
+and a stable Slack `client_msg_id`; an ambiguous Slack failure can still produce
+duplicate messages. All copies carry the same workflow target and group ID.
+Groups support one to five buttons. Action keys use letters, digits, underscores,
+or hyphens and contain at most 64 characters. Labels contain at most 75 characters.
+The serialized workflow name and input must fit within 2000 bytes. Pass record
+IDs rather than large or sensitive data because this input is stored in Slack.
 
 This uses the existing Slackbot interactivity endpoint and API Slack bot token.
-Slackbot needs its dedicated `SLACKBOT_API_KEY`; a sandbox principal cannot
-submit another user's click. Existing custom Slack action IDs continue to emit
-raw workflow events. The `centaur.workflow.action:` namespace is reserved for
-these buttons. Internal action wakeups cannot be emitted through the public
-workflow event API. `SLACK_API_URL` can target a local Slack emulator in both
-the API and Slackbot during development.
+Slackbot needs its dedicated `SLACKBOT_API_KEY` to start workflows through the
+button endpoint. Workflow-start permissions still govern ordinary API callers.
+Existing custom Slack action IDs continue to emit raw workflow events.
+The `centaur.workflow.action:` namespace is reserved for workflow buttons.
+`SLACK_API_URL` can target a local Slack emulator in the API and Slackbot.
 
 ## Schedule a workflow
 

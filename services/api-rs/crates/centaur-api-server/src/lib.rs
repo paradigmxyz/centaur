@@ -453,7 +453,7 @@ mod tests {
                     .uri("/api/workflows/actions/invoke")
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"action_id":"centaur.workflow.action:00000000-0000-0000-0000-000000000001:approve","team_id":"T1","channel_id":"C1","user_id":"U1","message_ts":"1.0","action_ts":"2.0"}"#)).unwrap())
+                    .body(Body::from(r#"{"workflow_name":"review_release","idempotency_key":"click-1","input":{"release_id":"release-1","click":{"user_id":"U1","action":"approve"}}}"#)).unwrap())
                 .await.unwrap();
             assert_eq!(response.status(), expected);
         }

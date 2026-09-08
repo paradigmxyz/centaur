@@ -745,62 +745,79 @@ class WorkflowHostTests(unittest.TestCase):
         self.assertEqual(discovered, {})
         self.assertFalse(marker.exists())
 
-    def test_button_callback_runs_in_owner_workflow_and_replays_its_result(self) -> None:
+    def test_slack_buttons_post_workflow_target_and_replay_message(self) -> None:
         source = '''
-from api.workflow_engine import Button
 WORKFLOW_NAME = "buttons"
 async def handler(inp, ctx):
-    async def approve(click):
-        return await ctx.start_workflow("echo", {"actor": click.user_id}, idempotency_key=f"approval:{click.id}")
-    async def reject(click):
-        return {"rejected_by": click.user_id}
-    result = await ctx.slack_actions(
-        "review", channel="C1", team_id="T1", text="Proceed?",
-        allowed_users=["U1"], buttons={
-            "approve": Button("Approve", approve), "reject": Button("Reject", reject),
-        },
+    return await ctx.slack_buttons(
+        "review", channel="C1", text="Proceed?", workflow="review_release",
+        input={"release_id": "release-1"},
+        buttons={"approve": "Approve", "reject": "Reject"},
     )
-    return {"outcome": result.outcome, "value": result.value}
 '''
-        click = {
-            "id": "action-1", "outcome": "clicked", "action": "approve", "user_id": "U1",
-            "team_id": "T1", "channel_id": "C1", "message_ts": "1.0", "action_ts": "2.0",
-        }
-        for outcome, replay in [("approve", False), ("approve", True), ("reject", False), ("expired", False)]:
-            with self.subTest(outcome=outcome, replay=replay), self.workflow_host(source) as proc:
+        message = {"ok": True, "channel": "C1", "ts": "1.0"}
+        group_ids = []
+        for replay in [False, True, False]:
+            with self.subTest(replay=replay), self.workflow_host(source) as proc:
                 self.send_host_message(proc, {
                     "type": "workflow.start", "workflow_name": "buttons",
                     "task_id": "task-1", "run_id": "run-1", "input": {},
                 })
-                child_starts = 0
-                callback_result = {"task_id": "child-1"} if outcome == "approve" else {"rejected_by": "U1"}
+                posts = 0
                 while True:
                     request = self.read_host_message(proc)
                     kind = request["type"]
                     if kind == "workflow.result":
-                        expected = {"outcome": "expired", "value": None} if outcome == "expired" else {"outcome": "clicked", "value": callback_result}
-                        self.assertEqual(request["result"], expected)
+                        self.assertEqual(request["result"], message)
                         break
-                    if kind == "ctx.actions":
-                        self.assertEqual(request["config"]["allowed_users"], ["U1"])
-                        self.assertEqual([button["id"] for button in request["config"]["buttons"]], ["approve", "reject"])
-                        value = {"id": "action-1", "outcome": "expired"} if outcome == "expired" else {**click, "action": outcome}
-                    elif kind == "ctx.step.get":
-                        value = {"done": replay, "value": callback_result, "checkpoint_name": "callback"}
-                    elif kind == "ctx.workflow.start":
-                        child_starts += 1
-                        self.assertEqual(request["input"], {"actor": "U1"})
-                        self.assertEqual(request["idempotency_key"], "approval:action-1")
-                        value = callback_result
+                    if kind == "ctx.step.get":
+                        self.assertEqual(request["step"], "review.post")
+                        value = {"done": replay, "value": message if replay else None, "checkpoint_name": "review.post"}
+                    elif kind == "ctx.post_to_slack":
+                        posts += 1
+                        elements = request["args"]["blocks"][1]["elements"]
+                        group_id = request["args"]["client_msg_id"]
+                        group_ids.append(group_id)
+                        self.assertEqual([b["action_id"] for b in elements], [
+                            f"centaur.workflow.action:{group_id}:approve",
+                            f"centaur.workflow.action:{group_id}:reject",
+                        ])
+                        self.assertEqual([b["text"]["text"] for b in elements], ["Approve", "Reject"])
+                        for button in elements:
+                            self.assertEqual(json.loads(button["value"]), {
+                                "workflow_name": "review_release", "input": {"release_id": "release-1"},
+                            })
+                        value = message
                     elif kind == "ctx.step.put":
-                        self.assertEqual(request["value"], callback_result)
+                        self.assertEqual(request["value"], message)
                         value = None
                     else:
                         self.fail(f"unexpected host output: {request}")
                     self.send_host_message(proc, {"type": "ctx.response", "request_id": request["request_id"], "ok": True, "value": value})
-                self.assertEqual(child_starts, int(outcome == "approve" and not replay))
+                self.assertEqual(posts, int(not replay))
                 proc.wait(timeout=2)
                 self.assertEqual(proc.returncode, 0)
+        self.assertEqual(group_ids[0], group_ids[1])
+
+    def test_button_configuration_is_validated_before_posting(self) -> None:
+        source = """
+WORKFLOW_NAME = "buttons"
+async def handler(inp, ctx):
+    return await ctx.slack_buttons(
+        "review", channel="C1", workflow="review_release",
+        text=inp.get("text", "Proceed?"), input=inp.get("data", {}),
+        buttons=inp.get("buttons", {"approve": "Approve"}),
+    )
+"""
+        for inp in [{"buttons": {}}, {"text": "x" * 3001}, {"data": {"large": "x" * 2000}},
+                    {"buttons": {"bad:action": "Bad"}}, {"buttons": {"approve": "x" * 76}}]:
+            with self.subTest(input=inp), self.workflow_host(source) as proc:
+                self.send_host_message(proc, {
+                    "type": "workflow.start", "workflow_name": "buttons",
+                    "task_id": "task-1", "run_id": "run-1", "input": inp,
+                })
+                self.assertEqual(self.read_host_message(proc)["type"], "workflow.error")
+                proc.wait(timeout=2)
 
     def test_failed_workflow_host_exits_with_stdin_open(self) -> None:
         source = (

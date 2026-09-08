@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { RustSessionStreamEvent } from '@centaur/harness-events'
 import { isRetryableCodexErrorNotification } from '@centaur/rendering'
 import type { Attachment, LinkPreview, Message } from 'chat'
@@ -560,8 +561,35 @@ export async function dispatchSlackBlockAction(
 ): Promise<JsonObject | undefined> {
   const action = `dispatch Slack block action ${payload.action_id}`
   const workflowAction = payload.action_id.startsWith(WORKFLOW_ACTION_PREFIX)
+  let body: JsonObject = { event_name: `slack.block_action.${payload.action_id}`, payload }
+  if (workflowAction) {
+    const match = payload.action_id.slice(WORKFLOW_ACTION_PREFIX.length)
+      .match(/^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}):([a-zA-Z0-9_-]{1,64})$/)
+    const target: unknown = JSON.parse(payload.value ?? '')
+    if (!match || !isJsonObject(target) || typeof target.workflow_name !== 'string'
+      || !target.workflow_name.trim() || !isJsonObject(target.input)
+      || !payload.user_id || !payload.team_id || !payload.channel_id
+      || !payload.message_ts || !payload.action_ts) {
+      throw new Error('Invalid workflow button or click identity')
+    }
+    body = {
+      workflow_name: target.workflow_name,
+      idempotency_key: 'slack.button:' + createHash('sha256').update(JSON.stringify([
+        payload.team_id, payload.channel_id, payload.user_id,
+        payload.message_ts, payload.action_ts, payload.action_id
+      ])).digest('hex'),
+      input: {
+        ...target.input,
+        click: {
+          id: match[1]!, action: match[2]!, action_ts: payload.action_ts,
+          channel_id: payload.channel_id, message_ts: payload.message_ts,
+          team_id: payload.team_id, user_id: payload.user_id
+        }
+      }
+    }
+  }
   const response = await recordSessionApiOperation(
-    workflowAction ? 'invoke_workflow_action' : 'emit_workflow_event',
+    workflowAction ? 'start_workflow_from_button' : 'emit_workflow_event',
     () =>
       fetchWithTimeout(
         options.fetch ?? globalThis.fetch,
@@ -570,17 +598,7 @@ export async function dispatchSlackBlockAction(
           ensureTrailingSlash(options.apiUrl)
         ),
         {
-          body: JSON.stringify(workflowAction ? {
-            action_id: payload.action_id,
-            action_ts: payload.action_ts,
-            channel_id: payload.channel_id,
-            message_ts: payload.message_ts,
-            team_id: payload.team_id,
-            user_id: payload.user_id
-          } : {
-            event_name: `slack.block_action.${payload.action_id}`,
-            payload
-          }),
+          body: JSON.stringify(body),
           headers: apiHeaders(options),
           method: 'POST'
         },
@@ -593,10 +611,10 @@ export async function dispatchSlackBlockAction(
   await ensureApiOk(response, action)
   if (workflowAction) {
     const result: unknown = await response.json()
-    if (!isJsonObject(result) || typeof result.outcome !== 'string') {
-      throw new Error('Workflow action API returned an invalid result')
+    if (!isJsonObject(result) || typeof result.created !== 'boolean' || typeof result.run_id !== 'string') {
+      throw new Error('Workflow start API returned an invalid result')
     }
-    return result
+    return { ...result, outcome: result.created ? 'accepted' : 'duplicate' }
   }
 }
 

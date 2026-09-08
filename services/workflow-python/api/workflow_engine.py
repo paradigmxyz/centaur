@@ -3,7 +3,9 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import inspect
-from collections.abc import Callable
+import json
+import re
+import uuid
 from typing import Any
 
 from api.app import WorkflowToolManager, WorkflowTools, bind_context_rpc, reset_context_rpc
@@ -19,7 +21,7 @@ class Delivery:
 
 @dataclasses.dataclass(frozen=True)
 class ButtonClick:
-    """Verified click context. ``id`` is stable across workflow retries."""
+    """Slack click identity supplied by the verified ingress. `id` identifies the button group."""
 
     id: str
     action: str
@@ -28,20 +30,6 @@ class ButtonClick:
     channel_id: str
     message_ts: str
     action_ts: str
-
-
-@dataclasses.dataclass(frozen=True)
-class Button:
-    label: str
-    on_click: Callable[[ButtonClick], Any]
-    style: str | None = None
-
-
-@dataclasses.dataclass(frozen=True)
-class ButtonResult:
-    outcome: str
-    click: ButtonClick | None = None
-    value: Any = None
 
 
 class WorkflowContext:
@@ -208,66 +196,44 @@ class WorkflowContext:
             request["idempotency_key"] = idempotency_key
         return await self._rpc.request(request)
 
-    async def slack_actions(
-        self,
-        name: str,
-        *,
-        channel: str,
-        text: str,
-        team_id: str,
-        allowed_users: list[str],
-        buttons: dict[str, Button],
-        timeout: dt.timedelta | int | float = 86400,
+    async def slack_buttons(
+        self, name: str, *, channel: str, text: str, workflow: str,
+        buttons: dict[str, str], input: dict[str, Any] | None = None,
         thread_ts: str | None = None,
-    ) -> ButtonResult:
-        """Post buttons, suspend durably, then execute the winning callback.
-
-        The group is single-use: the first permitted click wins. Callbacks run
-        in this workflow and can use its ordinary durable context operations.
-        Use stable child idempotency keys and idempotent external writes in callbacks,
-        just as in any checkpointed step. Expiry returns without a callback.
-        """
-        if not buttons or any(
-            not isinstance(button, Button) or not callable(button.on_click)
-            for button in buttons.values()
+    ) -> dict[str, Any]:
+        """Post buttons that start a workflow per click; return the Slack message."""
+        if (
+            not name.strip() or len(name) > 200 or name in self._action_names
+            or not channel.strip() or not workflow.strip() or not text.strip() or len(text) > 3000
+            or not 1 <= len(buttons) <= 5
+            or any(not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", action)
+                   or not label.strip() or len(label) > 75 for action, label in buttons.items())
+            or (input is not None and not isinstance(input, dict))
         ):
-            raise ValueError("buttons must contain Button instances with callable on_click handlers")
-        if not name or name in self._action_names:
-            raise ValueError("each button group needs a unique non-empty step name")
+            raise ValueError("invalid Slack button configuration or duplicate step name")
+        value = json.dumps({"workflow_name": workflow, "input": input or {}}, separators=(",", ":"))
+        if len(value.encode("utf-8")) > 2000:
+            raise ValueError("Slack button workflow and input must fit within 2000 bytes")
         self._action_names.add(name)
-        seconds = duration_seconds(timeout)
-        if not 1 <= seconds <= 2592000 or seconds != int(seconds):
-            raise ValueError("button timeout must be a whole number of seconds between 1 and 2592000")
-        result = await self._rpc.request(
-            {
-                "type": "ctx.actions",
-                "step": name,
-                "config": {
-                    "channel": channel,
-                    "text": text,
-                    "team_id": team_id,
-                    "allowed_users": sorted(set(allowed_users)),
-                    "buttons": [
-                        {"id": action, "label": button.label, "style": button.style}
-                        for action, button in buttons.items()
-                    ],
-                    "timeout_seconds": int(seconds),
-                    "thread_ts": thread_ts,
-                },
-            }
+        group_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{self.task_id}:{name}"))
+        blocks = [
+            {"type": "section", "text": {"type": "mrkdwn", "text": text}},
+            {"type": "actions", "elements": [
+                {"type": "button", "text": {"type": "plain_text", "text": label},
+                 "action_id": f"centaur.workflow.action:{group_id}:{action}", "value": value}
+                for action, label in buttons.items()
+            ]},
+        ]
+        return await self.step(
+            f"{name}.post",
+            lambda: self.post_to_slack(channel, text, blocks=blocks, client_msg_id=group_id, thread_ts=thread_ts),
         )
-        if result["outcome"] != "clicked":
-            return ButtonResult(outcome=result["outcome"])
-        click = ButtonClick(
-            **{field.name: result[field.name] for field in dataclasses.fields(ButtonClick)}
-        )
-        if click.action not in buttons:
-            raise RuntimeError("recorded button action is no longer defined in this workflow")
-        value = await self.step(
-            f"{name}.callback.{click.action}",
-            lambda: buttons[click.action].on_click(click),
-        )
-        return ButtonResult(outcome="clicked", click=click, value=value)
+
+    async def update_slack(self, channel: str, message_ts: str, text: str, **kwargs: Any) -> Any:
+        return await self._rpc.request({
+            "type": "ctx.update_slack",
+            "message": {**kwargs, "channel": channel, "ts": message_ts, "text": text},
+        })
 
     async def call_tool(self, tool: str, method: str, args: dict[str, Any] | None = None) -> Any:
         return await WorkflowToolManager(self._rpc).call_tool_raw(tool, method, args or {})

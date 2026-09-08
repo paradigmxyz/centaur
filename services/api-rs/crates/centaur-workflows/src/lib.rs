@@ -36,8 +36,6 @@ use tokio::{
 };
 use tracing::{info, warn};
 
-pub mod actions;
-
 pub const WORKFLOW_QUEUE: &str = "centaur_workflows";
 pub const WORKFLOW_SLACK_LIVE_QUEUE: &str = "centaur_workflows_slack_live";
 pub const WORKFLOW_ETL_QUEUE: &str = "centaur_workflows_etl";
@@ -1002,11 +1000,6 @@ impl WorkflowRuntime {
         event_name: &str,
         payload: Value,
     ) -> Result<(), WorkflowRuntimeError> {
-        if actions::is_internal_event(event_name) {
-            return Err(WorkflowRuntimeError::BadRequest(
-                "internal workflow action events cannot be emitted through the public API".into(),
-            ));
-        }
         self.inner
             .client
             .emit_event(event_name, payload.clone(), Some(WORKFLOW_QUEUE))
@@ -1024,13 +1017,6 @@ impl WorkflowRuntime {
             .emit_event(event_name, payload, Some(WORKFLOW_ETL_BACKFILL_QUEUE))
             .await?;
         Ok(())
-    }
-
-    pub async fn invoke_action(
-        &self,
-        invocation: actions::ActionInvocation,
-    ) -> Result<Value, WorkflowRuntimeError> {
-        actions::invoke(self.inner.client.pool(), invocation).await
     }
 
     pub fn get_webhook(&self, slug: &str) -> Option<RegisteredWorkflowWebhook> {
@@ -3461,23 +3447,6 @@ async fn handle_python_context_request(
                 Err(error) => Err(error.to_string()),
             }
         }
-        Some("ctx.actions") => {
-            let step = required_python_string(message, "step", "ctx.actions")?;
-            let config =
-                serde_json::from_value(message.get("config").cloned().unwrap_or(Value::Null))?;
-            match actions::run(
-                workflow_clients.standard.pool(),
-                ctx,
-                &input.workflow_name,
-                step,
-                config,
-            )
-            .await
-            {
-                Err(WorkflowRuntimeError::Suspend) => return Err(WorkflowRuntimeError::Suspend),
-                result => result.map_err(|error| error.to_string()),
-            }
-        }
         Some("ctx.workflow.start") => {
             match start_python_child_workflow(message, input, workflow_clients).await {
                 Ok(value) => Ok(value),
@@ -3488,6 +3457,9 @@ async fn handle_python_context_request(
             Ok(value) => Ok(value),
             Err(error) => Err(error.to_string()),
         },
+        Some("ctx.update_slack") => send_slack_request("chat.update", message["message"].clone())
+            .await
+            .map_err(|error| error.to_string()),
         Some("ctx.post_to_slack") => {
             match post_python_slack_message(message, ctx, &request_id).await {
                 Ok(value) => Ok(value),

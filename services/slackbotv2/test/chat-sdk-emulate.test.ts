@@ -448,7 +448,7 @@ describe('slackbotv2', () => {
           await held
           return fail
             ? Response.json({ error: 'temporarily unavailable' }, { status: 503 })
-            : Response.json({ outcome: 'accepted' })
+            : Response.json({ ok: true, run_id: 'run-click-1', task_id: 'task-click-1', created: true, status: 'queued' })
         }
         return globalThis.fetch(input, init)
       }
@@ -459,7 +459,8 @@ describe('slackbotv2', () => {
       channel: { id: CHANNEL_ID }, message: { ts: '1700000003.000200' },
       actions: [{
         action_id: 'centaur.workflow.action:00000000-0000-0000-0000-000000000001:approve',
-        action_ts: '1700000004.000200', type: 'button', value: 'untrusted-input'
+        action_ts: '1700000004.000200', type: 'button',
+        value: JSON.stringify({ workflow_name: 'review_release', input: { release_id: 'release-1', click: { user_id: 'FORGED' } } })
       }]
     }
     const waits: Promise<unknown>[] = []
@@ -476,10 +477,18 @@ describe('slackbotv2', () => {
     await Promise.all(waits)
     expect(requests).toHaveLength(2)
     expect(requests[0]).toEqual({
-      action_id: payload.actions[0]?.action_id, action_ts: payload.actions[0]?.action_ts,
-      channel_id: CHANNEL_ID, message_ts: payload.message.ts,
-      team_id: TEAM_ID, user_id: USER_ID
+      workflow_name: 'review_release',
+      idempotency_key: expect.stringMatching(/^slack\.button:[0-9a-f]{64}$/),
+      input: {
+        release_id: 'release-1',
+        click: {
+          id: '00000000-0000-0000-0000-000000000001', action: 'approve',
+          action_ts: payload.actions[0]?.action_ts, channel_id: CHANNEL_ID,
+          message_ts: payload.message.ts, team_id: TEAM_ID, user_id: USER_ID
+        }
+      }
     })
+    expect(requests[1]).toEqual(requests[0])
     expect(codexApi.workflowEvents).toHaveLength(0)
   })
 

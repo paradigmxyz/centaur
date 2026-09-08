@@ -333,8 +333,8 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   chat.onAction(async event => {
     const payload = slackBlockActionPayload(event)
     const workflowAction = payload.action_id.startsWith(WORKFLOW_ACTION_PREFIX)
-    // Workflow-owned actions deduplicate in the same database transaction as
-    // their outcome. A temporary ingress lease must never acknowledge a lost click.
+    // Workflow starts deduplicate durably using the Slack click identity.
+    // A temporary ingress lease must never acknowledge a lost click.
     const dedupeKey = workflowAction ? undefined : slackBlockActionDedupeKey(payload)
     const leaseToken = randomUUID()
     if (
@@ -354,9 +354,8 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
       const result = await dispatchSlackBlockAction(options, payload)
       if (result && payload.channel_id) {
         const messages: Record<string, string> = {
-          accepted: 'Your selection was recorded.',
-          already_resolved: 'This request has already been resolved.',
-          forbidden: 'You are not permitted to act on this request.',
+          accepted: 'Your click was received.',
+          duplicate: 'Your click was already received.',
           unavailable: 'This request is no longer available.'
         }
         backgroundWaitUntil(
