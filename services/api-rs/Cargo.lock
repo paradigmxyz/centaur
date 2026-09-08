@@ -1121,6 +1121,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "centaur-workflow-migrate"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "centaur-workflows"
 version = "0.1.0"
 dependencies = [

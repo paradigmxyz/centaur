@@ -78,22 +78,21 @@ disabled.
 
 ## Workflow Databases
 
-Workflows can own PostgreSQL schemas and run their own SQL migrations. Call
-`ctx.db.migrate()` when the handler needs its tables. Migration execution is
-explicit: discovery and host startup do not apply migrations.
+Workflows can own PostgreSQL schemas and explicitly run SQLx migrations through
+`ctx.db.migrate()`. Discovery and host startup do not apply migrations. Both
+single-file workflows and workflow packages are supported.
 
 ```text
 workflows/
-  sample_indexer/
-    workflow.py
-    migrations/
-      001_checkpoints.sql
-      002_last_success.sql
+  sample_indexer.py
+  sample_indexer_migrations/
+    001_checkpoints.sql
+    002_last_success.sql
 ```
 
 ```sql
--- migrations/001_checkpoints.sql
-CREATE TABLE sample_index.checkpoints (
+-- sample_indexer_migrations/001_checkpoints.sql
+CREATE TABLE checkpoints (
     source_id text PRIMARY KEY,
     cursor text NOT NULL
 );
@@ -104,7 +103,7 @@ WORKFLOW_NAME = "sample_indexer"
 
 
 async def handler(inp, ctx):
-    applied = await ctx.db.migrate("./migrations", schema="sample_index")
+    applied = await ctx.db.migrate("./sample_indexer_migrations", schema="sample_index")
     row = await ctx.db.fetchrow(
         "SELECT cursor FROM sample_index.checkpoints WHERE source_id = $1",
         inp["source_id"],
@@ -112,47 +111,51 @@ async def handler(inp, ctx):
     return {"applied": applied, "cursor": row["cursor"] if row else None}
 ```
 
-Relative migration paths resolve from the workflow module. The helper creates
-the schema and a reserved `_workflow_migrations` table inside it. The schema
-name identifies the migration history, so moving or renaming a workflow does
-not reset its history. Workflows sharing a schema must share one authoritative
-migration directory.
+Relative migration paths resolve from the workflow module. The Python helper
+invokes the bundled `centaur-workflow-migrate` binary, which uses the same SQLx
+migration engine as the Rust control plane. The runner creates the requested
+schema if needed and sets its dedicated connection's `search_path` to that
+schema only. SQLx stores history in that schema's `_sqlx_migrations` table.
+The control plane's migration history is separate.
 
-Migration files are UTF-8 SQL named `<positive_version>_<description>.sql`.
-Versions sort numerically and need not be consecutive. The helper returns the
-filenames applied by that call, or an empty list when nothing is pending. An
-empty or missing migration directory is an error. The history records the
-version, filename, and application time. Applied versions are skipped even if
-their SQL content changes. Add a new numbered migration to make a change. Do
-not rename applied files or insert new files before an already-applied version.
+Moving or renaming a workflow does not reset its history. Workflows sharing a
+schema must share one authoritative migration directory. The method returns
+the numeric versions applied by that call, or an empty list when nothing is
+pending. Application queries still use the host's existing pool and should
+qualify table names with the schema.
 
-Each file runs in a transaction together with its history entry. Failure rolls
-back that file and fails the workflow execution; earlier successful files stay
-applied. Retrying resumes with the pending files. A database advisory lock
-serializes migrations for the same schema. Other schemas can migrate
-independently. Lock acquisition times out after 60 seconds by default; pass
-`lock_timeout` in seconds to change it. Cancellation and connection loss
-release the lock through connection cleanup.
+Use SQLx migration files named `<version>_<description>.sql`. SQLx owns file
+loading, numeric ordering, checksums, transactions, and history. Files that do
+not match its migration naming convention are ignored. Applied files must not
+be edited: SQLx rejects changed checksums. Add a new migration for each change.
+The runner only applies forward migrations; it does not automatically downgrade.
+Applied versions absent from a workflow bundle are allowed so older executions
+can run against a newer schema. Keep database changes compatible with those
+older executions.
 
-Use ordinary SQL with schema-qualified table names. The migrator does not
-change `search_path`. PostgreSQL executes each file through a PL/pgSQL `DO`
-block with dynamic SQL, which supports multiple statements and function
-definitions but rejects transaction-control statements. Do not include
-`BEGIN`, `COMMIT`, `ROLLBACK`, psql commands, or operations that require running
-outside a transaction, such as `CREATE INDEX CONCURRENTLY`. Keep migration SQL
-focused on database changes, and do not change the migration ledger or advisory
-locks from a migration.
+By default, each migration and its history entry run in one transaction.
+Failure rolls back that migration and fails the workflow execution; earlier
+successful migrations stay applied. SQLx also supports its standard
+`-- no-transaction` directive, but those migrations can leave partial changes
+on failure. Do not put transaction-control statements or changes to
+`search_path`, advisory locks, or migration history into migration SQL.
 
-Call `migrate()` on every handler invocation, outside `ctx.step()`. Its database
-history supplies retry safety. Older workflow bundles may run against a newer
-database when their migration versions and filenames match the recorded
-history. Keep changes compatible with executions using older code. Missing files within a
-bundle's version range are errors; newer applied versions beyond that range
-are left in place. There is no automatic downgrade.
+The runner uses SQLx's database-wide advisory lock, including during schema
+creation. Migrations for different schemas serialize while they run. Waiting
+for this lock times out after 60 seconds by default; pass `lock_timeout` in
+seconds to change it. This timeout does not limit the migration SQL itself.
+Cancellation terminates the runner, and the runner exits if its host pipe
+closes. On PostgreSQL 14 or newer, the runner enables one-second connection
+checks so the server can detect a disconnected runner during a long query.
+Closing its dedicated database connection releases migration locks.
 
-`ctx.db` also exposes `execute`, `fetch`, `fetchrow`, `fetchval`, and `acquire`
-using the existing asyncpg pool. Queries are ordinary database operations and
-are not automatically checkpointed. For multiple queries in one transaction:
+Call `migrate()` on every handler invocation, outside `ctx.step()`. SQLx's
+history supplies retry safety. Ordinary `ctx.db` queries are not automatically
+checkpointed. Use durable steps and idempotent writes for application side
+effects, and advance an indexer's cursor only after processing succeeds.
+
+`ctx.db` exposes `execute`, `fetch`, `fetchrow`, `fetchval`, and `acquire` using
+the existing asyncpg pool. For multiple queries in one transaction:
 
 ```python
 async with ctx.db.acquire() as connection:
@@ -166,22 +169,21 @@ async with ctx.db.acquire() as connection:
         )
 ```
 
-Use durable steps and idempotent application writes where retries can repeat
-side effects. Advance an indexer's cursor only after processing succeeds.
+Both the runner and application pool use the host's `DATABASE_URL`. The role
+needs permission to create the schema, or an existing schema with permission
+to create and alter its objects. Schemas do not automatically grant or restrict
+access. Existing `ctx._pool` calls remain supported, and workflows without
+database operations do not need a connection.
 
-Database access uses the host's configured `DATABASE_URL` and that role's
-existing privileges. Schemas do not automatically grant or restrict access.
-The role needs permission to create the target schema, or an existing schema
-with permission to create and alter its objects. Workflows without database
-operations do not need a database connection. Existing `ctx._pool` calls remain
-supported.
-
-To run database-backed host tests, point `WORKFLOW_DATABASE_TEST_URL` at a
-disposable local PostgreSQL database, then run:
+Both runtime images include the runner. For local development, build it with
+`cargo build --manifest-path services/api-rs/Cargo.toml -p centaur-workflow-migrate`
+and set `WORKFLOW_MIGRATOR_PATH` to the resulting executable, or put it on `PATH`.
+To run the database integration tests, also set `WORKFLOW_DATABASE_TEST_URL`
+to a disposable PostgreSQL database:
 
 ```bash
 uv run --project services/workflow-python python -m unittest discover \
-  -s services/workflow-python/tests -p 'test_*.py'
+  -s services/workflow-python/tests -p 'test_workflow_db.py'
 ```
 
 ## Durable primitives

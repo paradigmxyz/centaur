@@ -17,6 +17,7 @@ members = [
     "crates/centaur-session-sqlx",
     "crates/centaur-telemetry",
     "crates/centaur-workflows",
+    "crates/centaur-workflow-migrate",
 ]
 resolver = "3"
 
